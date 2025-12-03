@@ -18,8 +18,8 @@ pub enum MavapayError {
 impl std::fmt::Display for MavapayError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            Self::Http(Some(code), msg) => write!(f, "HTTP error [{}]: {}", code, msg),
-            Self::Http(None, msg) => write!(f, "HTTP error: {}", msg),
+            Self::Http(Some(code), msg) => write!(f, "[{}]: {}", code, msg),
+            Self::Http(None, msg) => write!(f, "{}", msg),
             Self::InvalidResponse(msg) => write!(f, "Invalid response: {}", msg),
             Self::ApiError(msg) => write!(f, "Api Error: {}", msg),
             Self::QuoteExpired => write!(f, "Quote has expired"),

@@ -6,25 +6,6 @@ use crate::services::{coincube::*, mavapay::*};
 
 #[derive(Debug)]
 pub enum MavapayFlowStep {
-    Register {
-        legal_name: String,
-        password1: String,
-        password2: String,
-        email: String,
-    },
-    VerifyEmail {
-        email: String,
-        password: String,
-        checking: bool,
-    },
-    Login {
-        email: String,
-        password: String,
-    },
-    PasswordReset {
-        email: String,
-        sent: bool,
-    },
     Transaction {
         buy_or_sell: BuyOrSell,
         country: Country,
@@ -33,32 +14,32 @@ pub enum MavapayFlowStep {
         banks: Option<MavapayBanks>,
         selected_bank: Option<usize>,
         current_price: Option<GetPriceResponse>,
-
         // TODO: Should be displayed on a custom `Checkout` UI
-        current_quote: Option<GetQuoteResponse>,
+    },
+    Checkout {
+        beneficiary: Beneficiary,
+        current_quote: GetQuoteResponse,
     },
 }
 
 pub struct MavapayState {
     pub step: MavapayFlowStep,
     pub mavapay_client: MavapayClient,
-
-    // mavapay session information
-    pub current_user: Option<User>,
-    pub auth_token: Option<String>,
 }
 
 impl MavapayState {
-    pub fn new() -> Self {
+    pub fn new(buy_or_sell: BuyOrSell, country: Country) -> Self {
         Self {
-            step: MavapayFlowStep::Login {
-                email: String::new(),
-                password: String::new(),
+            step: MavapayFlowStep::Transaction {
+                buy_or_sell,
+                country,
+                amount: 60,
+                beneficiary: None,
+                banks: None,
+                selected_bank: None,
+                current_price: None,
             },
             mavapay_client: MavapayClient::new(),
-
-            current_user: None,
-            auth_token: None,
         }
     }
 }

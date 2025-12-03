@@ -160,17 +160,50 @@ pub enum BuySellMessage {
     SelectBuyOrSell(bool), // true = buy, false = sell
     StartSession,
 
+    // automatic user login
+    SubmitLogin {
+        skip_email_verification: bool,
+    },
+    LoginSuccess {
+        login: crate::services::coincube::LoginResponse,
+        email_verified: bool,
+    },
+
+    // ip geolocation
+    CountryDetected(Result<crate::services::coincube::Country, String>),
+
     // recipient address generation
     CreateNewAddress,
     AddressCreated(super::buysell::panel::LabelledAddress),
-
-    // Geolocation detection
-    CountryDetected(Result<crate::services::coincube::Country, String>),
 
     // webview logic
     WebviewOpenUrl(String),
     WryMessage(iced_wry::IcedWryMessage),
     StartWryWebviewWithUrl(iced_wry::ExtractedWindowId, String),
+
+    // user Registration
+    LegalNameChanged(String),
+    EmailChanged(String),
+    Password1Changed(String),
+    Password2Changed(String),
+    SubmitRegistration,
+    RegistrationSuccess,
+
+    // email Verification
+    SendVerificationEmail,
+    CheckEmailVerificationStatus,
+    EmailVerificationFailed,
+
+    // login to coincube account
+    LoginUsernameChanged(String),
+    LoginPasswordChanged(String),
+    CreateNewAccount,
+    ResetPassword,
+
+    // Password Reset
+    SendPasswordResetEmail,
+    PasswordResetEmailSent(String),
+    ReturnToLogin,
 
     // Mavapay specific messages
     Mavapay(MavapayMessage),
@@ -179,34 +212,7 @@ pub enum BuySellMessage {
 #[cfg(feature = "buysell")]
 #[derive(Debug, Clone)]
 pub enum MavapayMessage {
-    LoginSuccess {
-        login: crate::services::coincube::LoginResponse,
-        email_verified: bool,
-    },
-    // User Registration
-    LegalNameChanged(String),
-    EmailChanged(String),
-    Password1Changed(String),
-    Password2Changed(String),
-    SubmitRegistration,
-    RegistrationSuccess,
-    // Email Verification
-    SendVerificationEmail,
-    CheckEmailVerificationStatus,
-    EmailVerificationFailed,
-    // Login to coincube account
-    LoginUsernameChanged(String),
-    LoginPasswordChanged(String),
-    SubmitLogin {
-        skip_email_verification: bool,
-    },
-    CreateNewAccount,
-    ResetPassword,
-    // Password Reset
-    SendPasswordResetEmail,
-    PasswordResetEmailSent(String),
-    ReturnToLogin,
-    // Active Flow
+    // transactions
     AmountChanged(u64),
     PaymentMethodChanged(crate::services::mavapay::MavapayPaymentMethod),
     BankAccountNumberChanged(String),
@@ -218,6 +224,7 @@ pub enum MavapayMessage {
     PriceReceived(GetPriceResponse),
     GetBanks,
     BanksReceived(MavapayBanks),
+    // checkout
 }
 
 #[derive(Debug, Clone)]
