@@ -73,7 +73,10 @@ pub enum BuySellFlowState {
     /// Nigeria, Kenya and South Africa, ie Mavapay supported countries
     Mavapay(super::mavapay::MavapayState),
     /// A webview is currently active, and is rendered instead of a buysell UI
-    WebviewRenderer { active: iced_wry::IcedWebview },
+    WebviewRenderer {
+        active: iced_wry::IcedWebview,
+        manager: iced_wry::IcedWebviewManager,
+    },
 }
 
 impl BuySellFlowState {
@@ -102,8 +105,6 @@ pub struct BuySellPanel {
     // services used by several buysell providers
     pub coincube_client: crate::services::coincube::CoincubeClient,
     pub detected_country: Option<crate::services::coincube::Country>,
-    // TODO: Move to webview renderer?
-    pub webview_manager: iced_wry::IcedWebviewManager,
 
     // coincube session information, restored from OS keyring
     pub current_user: Option<User>,
@@ -127,7 +128,6 @@ impl BuySellPanel {
             // API state
             coincube_client: crate::services::coincube::CoincubeClient::new(),
             detected_country: None,
-            webview_manager: iced_wry::IcedWebviewManager::new(),
             auth_token: None,
             current_user: None,
         }
@@ -514,7 +514,7 @@ impl BuySellPanel {
     }
 
     fn webview_ux<'a>(self: &'a BuySellPanel) -> iced::Element<'a, ViewMessage, theme::Theme> {
-        let BuySellFlowState::WebviewRenderer { active } = &self.step else {
+        let BuySellFlowState::WebviewRenderer { active, .. } = &self.step else {
             unreachable!()
         };
 

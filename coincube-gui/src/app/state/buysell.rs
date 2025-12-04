@@ -382,7 +382,6 @@ impl State for BuySellPanel {
             }
 
             // webview logic
-            BuySellMessage::WryMessage(msg) => self.webview_manager.update(msg),
             BuySellMessage::WebviewOpenUrl(url) => {
                 // extract the main window's raw_window_handle
                 return iced_wry::IcedWebviewManager::extract_window_id(None).map(move |w| {
@@ -391,8 +390,14 @@ impl State for BuySellPanel {
                     ))
                 });
             }
+            BuySellMessage::WryMessage(msg) => {
+                if let BuySellFlowState::WebviewRenderer { manager, .. } = &mut self.step {
+                    manager.update(msg)
+                }
+            }
             BuySellMessage::StartWryWebviewWithUrl(id, url) => {
-                let webview = self.webview_manager.new_webview(
+                let mut manager = iced_wry::IcedWebviewManager::new();
+                let webview = manager.new_webview(
                     iced_wry::wry::WebViewAttributes {
                         url: Some(url),
                         devtools: cfg!(debug_assertions),
@@ -403,7 +408,10 @@ impl State for BuySellPanel {
                 );
 
                 if let Some(wv) = webview {
-                    self.step = BuySellFlowState::WebviewRenderer { active: wv }
+                    self.step = BuySellFlowState::WebviewRenderer {
+                        active: wv,
+                        manager,
+                    }
                 } else {
                     tracing::error!("Unable to instantiate wry webview")
                 }
@@ -779,8 +787,11 @@ impl State for BuySellPanel {
     }
 
     fn subscription(&self) -> iced::Subscription<Message> {
-        self.webview_manager
-            .subscription(std::time::Duration::from_millis(25))
-            .map(|m| Message::View(ViewMessage::BuySell(BuySellMessage::WryMessage(m))))
+        match &self.step {
+            BuySellFlowState::WebviewRenderer { manager, .. } => manager
+                .subscription(std::time::Duration::from_millis(25))
+                .map(|m| Message::View(ViewMessage::BuySell(BuySellMessage::WryMessage(m)))),
+            _ => iced::Subscription::none(),
+        }
     }
 }
