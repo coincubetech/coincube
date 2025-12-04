@@ -71,7 +71,7 @@ pub enum BuySellFlowState {
         buy_or_sell: Option<BuyOrSell>, // `buy` mode always has an address included for deposit
     },
     /// Nigeria, Kenya and South Africa, ie Mavapay supported countries
-    Mavapay(super::flow_state::MavapayState),
+    Mavapay(super::mavapay::MavapayState),
     /// A webview is currently active, and is rendered instead of a buysell UI
     WebviewRenderer { active: iced_wry::IcedWebview },
 }
@@ -174,7 +174,7 @@ impl BuySellPanel {
                         BuySellFlowState::Initialization { .. } => self.initialization_ux(),
                         BuySellFlowState::WebviewRenderer { .. } => self.webview_ux(),
 
-                        BuySellFlowState::Mavapay(state) => super::mavapay_ui::form(state),
+                        BuySellFlowState::Mavapay(state) => super::mavapay::ui::form(state),
                     }
                 });
 

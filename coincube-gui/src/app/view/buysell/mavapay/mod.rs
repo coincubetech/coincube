@@ -1,3 +1,5 @@
+pub mod ui;
+
 use iced::Task;
 
 use crate::app::view::buysell::panel::BuyOrSell;

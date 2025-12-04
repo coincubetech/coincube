@@ -6,23 +6,25 @@ use crate::app::view::{
 use iced::{widget::*, Alignment, Length};
 
 use coincube_ui::component::{button, text};
-use coincube_ui::{color, theme, widget::Column};
+use coincube_ui::{color, icon::*, theme, widget::Column};
 
 // TODO: Use labels instead of placeholders for all input forms
 pub fn form<'a>(state: &'a MavapayState) -> iced::Element<'a, ViewMessage, theme::Theme> {
     let form = match &state.step {
         MavapayFlowStep::Transaction { .. } => transactions_form,
         // TODO: Implement checkout UI, and subscription for SSE events
-        MavapayFlowStep::Checkout { .. } => unimplemented!("Checkout UI"),
+        MavapayFlowStep::Checkout { .. } => checkout_form,
     };
 
     let element: iced::Element<'a, BuySellMessage, theme::Theme> = form(state).into();
     element.map(|b| ViewMessage::BuySell(b))
 }
 
-fn transactions_form<'a>(state: &'a MavapayState) -> Column<'a, BuySellMessage> {
-    use coincube_ui::icon::bitcoin_icon;
+fn checkout_form<'a>(_state: &'a MavapayState) -> Column<'a, BuySellMessage> {
+    unimplemented!("Checkout UI is currently blocked by the SSE implementation on the backend")
+}
 
+fn transactions_form<'a>(state: &'a MavapayState) -> Column<'a, BuySellMessage> {
     let MavapayFlowStep::Transaction {
         amount,
         current_price,
