@@ -35,6 +35,7 @@ fn transactions_form<'a>(state: &'a MavapayState) -> Column<'a, BuySellMessage> 
         unreachable!()
     };
 
+    // TODO: Header should provide information if we are in buy or sell
     let header = iced::widget::row![
         Space::with_width(Length::Fill),
         text::h4_bold("Bitcoin ↔ Fiat Exchange").color(color::WHITE),
@@ -92,7 +93,7 @@ fn transactions_form<'a>(state: &'a MavapayState) -> Column<'a, BuySellMessage> 
                 Space::with_height(0)
             }
             BuyOrSell::Sell => {
-                // TODO: display onchain bitcoin address for deposit, and beneficiary input forms
+                // TODO: display bitcoin address or lightning invoice for deposit, and beneficiary input forms
                 // TODO: If country uses BankTransfer, render banks selector dropdown
                 Space::with_height(0)
             }

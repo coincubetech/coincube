@@ -16,9 +16,9 @@ pub enum MavapayFlowStep {
         banks: Option<MavapayBanks>,
         selected_bank: Option<usize>,
         current_price: Option<GetPriceResponse>,
-        // TODO: Should be displayed on a custom `Checkout` UI
     },
     Checkout {
+        amount: u64, // Amount in BTCSAT
         beneficiary: Beneficiary,
         current_quote: GetQuoteResponse,
     },
@@ -120,11 +120,11 @@ impl MavapayState {
                 amount: amount.clone(),
                 source_currency: local_currency,
                 target_currency: MavapayUnitCurrency::BitcoinSatoshi,
+                // TODO: Currently, Kenyan beneficiaries are not supported by Mavapay, as only BankTransfer is currently supported by `onchain` buy
                 payment_method: MavapayPaymentMethod::BankTransfer,
                 payment_currency: MavapayUnitCurrency::BitcoinSatoshi,
                 autopayout: true,
                 customer_internal_fee: None,
-                // TODO: Currently, Kenyan beneficiaries are not supported by Mavapay, as only BankTransfer is currently supported by `onchain` buy
                 beneficiary: Some(Beneficiary::Onchain {
                     on_chain_address: address.address.to_string(),
                 }),

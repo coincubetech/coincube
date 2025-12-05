@@ -358,6 +358,7 @@ impl BuySellPanel {
             unreachable!();
         };
 
+        // TODO: include form validation messages
         let col = iced::widget::column![
             // Top bar with previous
             Button::new(
@@ -403,13 +404,12 @@ impl BuySellPanel {
             .size(16)
             .padding(15)
             .secure(true),
-            // TODO: include password check messages
             text_input("Confirm Password", password2).on_input(|v| {
                 BuySellMessage::Password2Changed(v)
             })
             .size(16)
             .padding(15)
-            .secure(true),
+            .secure(false),
             Space::with_height(Length::Fixed(20.0)),
             button::primary(None, "Create Account")
                 .on_press_maybe(
@@ -474,12 +474,17 @@ impl BuySellPanel {
 
         // Action buttons
         let action_buttons = match checking {
-            true => Row::new()
-                .push(
-                    text::p1_italic("You'll be automatically logged in after verifying your email")
+            true => {
+                // TODO: Add some animation, probably make this UI nicer
+                Row::new()
+                    .push(
+                        text::p1_italic(
+                            "You'll be automatically logged in after verifying your email",
+                        )
                         .width(Length::Fill),
-                )
-                .spacing(10),
+                    )
+                    .spacing(10)
+            }
             false => Row::new()
                 .push(
                     button::secondary(Some(reload_icon()), "Check Status")
