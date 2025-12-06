@@ -47,6 +47,7 @@ pub enum Message {
     ExportPsbt,
     ImportPsbt,
     OpenUrl(String),
+    ActiveSend(ActiveSendMessage),
     Home(HomeMessage),
 }
 
@@ -211,6 +212,13 @@ pub enum FiatMessage {
     Enable(bool),
     SourceEdited(PriceSource),
     CurrencyEdited(Currency),
+}
+
+#[derive(Debug, Clone)]
+pub enum ActiveSendMessage {
+    InvoiceEdited(String),
+    Send,
+    ViewHistory,
 }
 
 impl From<FiatMessage> for Message {
