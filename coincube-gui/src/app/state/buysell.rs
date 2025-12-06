@@ -97,21 +97,21 @@ impl State for BuySellPanel {
                 if self.detected_country.is_some() {
                     if self.login.is_none() {
                         // attempt automatic refresh from os-keyring
-                        match keyring::Entry::new("io.coincube.Vault", &self.wallet.name) {
-                            Ok(entry) => {
-                                if let Ok(user_data) = entry.get_secret() {
-                                    match serde_json::from_slice::<LoginResponse>(&user_data) {
-                                        Ok(login) => self.login = Some(login),
-                                        Err(er) => {
-                                            log::error!("Unable to parse user information found in OS keyring: {:?}", er)
-                                        }
-                                    };
-                                };
-                            }
-                            Err(e) => {
-                                log::error!("Unable to restore login state from OS keyring: {e}");
-                            }
-                        };
+                        // match keyring::Entry::new("io.coincube.Vault", &self.wallet.name) {
+                        //     Ok(entry) => {
+                        //         if let Ok(user_data) = entry.get_secret() {
+                        //             match serde_json::from_slice::<LoginResponse>(&user_data) {
+                        //                 Ok(login) => self.login = Some(login),
+                        //                 Err(er) => {
+                        //                     log::error!("Unable to parse user information found in OS keyring: {:?}", er)
+                        //                 }
+                        //             };
+                        //         };
+                        //     }
+                        //     Err(e) => {
+                        //         log::error!("Unable to restore login state from OS keyring: {e}");
+                        //     }
+                        // };
                     }
 
                     match self.login.as_ref() {
@@ -671,20 +671,20 @@ impl State for BuySellPanel {
                         log::info!("Successfully logged in user: {}", &login.user.email);
 
                         // store token in OS keyring
-                        if let Ok(entry) =
-                            keyring::Entry::new("io.coincube.Vault", &self.wallet.name)
-                        {
-                            if let Err(e) = entry.delete_credential() {
-                                log::warn!("Unable to clear previous entry from keyring: {e}");
-                            };
-
-                            let bytes = serde_json::to_vec(&login).unwrap();
-                            if let Err(e) = entry.set_secret(&bytes) {
-                                log::error!("Unable to store user data in keyring: {e}");
-                            };
-                        } else {
-                            self.error = Some("Unable to access OS keyring".to_string());
-                        };
+                        // if let Ok(entry) =
+                        //     keyring::Entry::new("io.coincube.Vault", &self.wallet.name)
+                        // {
+                        //     if let Err(e) = entry.delete_credential() {
+                        //         log::warn!("Unable to clear previous entry from keyring: {e}");
+                        //     };
+                        //
+                        //     let bytes = serde_json::to_vec(&login).unwrap();
+                        //     if let Err(e) = entry.set_secret(&bytes) {
+                        //         log::error!("Unable to store user data in keyring: {e}");
+                        //     };
+                        // } else {
+                        //     self.error = Some("Unable to access OS keyring".to_string());
+                        // };
 
                         // persist login information in state
                         self.login = Some(login);
