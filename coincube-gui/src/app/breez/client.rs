@@ -131,23 +131,51 @@ impl HotSignerAdapter {
 }
 
 impl breez::Signer for HotSignerAdapter {
-    fn sign_ecdsa(&self, msg: &[u8], derivation_path: &str) -> breez::SignerResult<Vec<u8>> {
-        // Delegate to HotSigner's signing implementation
-        // This will need to be implemented based on HotSigner's API
-        let _signer = self.signer.lock().unwrap();
-        // TODO: Implement actual signing using HotSigner
-        // For now, return an error until we implement the signing logic
-        Err(breez::SignerError::Generic {
-            err: "ECDSA signing not yet implemented".to_string(),
-        })
+    fn sign_ecdsa(&self, msg: Vec<u8>, derivation_path: String) -> Result<Vec<u8>, breez::SignerError> {
+        let signer = self.signer.lock().unwrap();
+
+        // Parse the derivation path
+        let path = DerivationPath::from_str(&derivation_path)
+            .map_err(|e| breez::SignerError::Generic {
+                err: format!("Invalid derivation path: {}", e),
+            })?;
+
+        // Get private key at this derivation path
+        let xpriv = signer.xpriv_at(&path, &self.secp);
+        let privkey = xpriv.to_priv();
+
+        // Sign the message hash (ECDSA)
+        let msg_hash = coincube_core::miniscript::bitcoin::secp256k1::Message::from_digest_slice(&msg)
+            .map_err(|e| breez::SignerError::Generic {
+                err: format!("Invalid message hash: {}", e),
+            })?;
+
+        let sig = self.secp.sign_ecdsa(&msg_hash, &privkey.inner);
+        Ok(sig.serialize_compact().to_vec())
     }
 
-    fn sign_ecdsa_recoverable(&self, msg: &[u8]) -> breez::SignerResult<Vec<u8>> {
-        let _signer = self.signer.lock().unwrap();
-        // TODO: Implement recoverable ECDSA signing
-        Err(breez::SignerError::Generic {
-            err: "Recoverable ECDSA signing not yet implemented".to_string(),
-        })
+    fn sign_ecdsa_recoverable(&self, msg: Vec<u8>) -> Result<Vec<u8>, breez::SignerError> {
+        let signer = self.signer.lock().unwrap();
+
+        // Use master key for recoverable signature (common in Lightning)
+        let master_path = DerivationPath::master();
+        let xpriv = signer.xpriv_at(&master_path, &self.secp);
+        let privkey = xpriv.to_priv();
+
+        // Sign the message hash (recoverable ECDSA)
+        let msg_hash = coincube_core::miniscript::bitcoin::secp256k1::Message::from_digest_slice(&msg)
+            .map_err(|e| breez::SignerError::Generic {
+                err: format!("Invalid message hash: {}", e),
+            })?;
+
+        let sig = self.secp.sign_ecdsa_recoverable(&msg_hash, &privkey.inner);
+        let (recovery_id, sig_bytes) = sig.serialize_compact();
+
+        // Format: recovery_id (1 byte) + signature (64 bytes)
+        let mut result = Vec::with_capacity(65);
+        result.push(recovery_id.to_i32() as u8);
+        result.extend_from_slice(&sig_bytes);
+        Ok(result)
     }
 
     fn derive_xpub(&self, derivation_path: &str) -> breez::SignerResult<Vec<u8>> {
@@ -187,13 +215,28 @@ impl breez::Signer for HotSignerAdapter {
         })
     }
 
-    fn hmac_sha256(&self, msg: &[u8], derivation_path: &str) -> breez::SignerResult<Vec<u8>> {
-        let _signer = self.signer.lock().unwrap();
-        // TODO: Implement HMAC-SHA256
-        let _ = (msg, derivation_path);
-        Err(breez::SignerError::Generic {
-            err: "HMAC-SHA256 not yet implemented".to_string(),
-        })
+    fn hmac_sha256(&self, msg: Vec<u8>, derivation_path: String) -> Result<Vec<u8>, breez::SignerError> {
+        use coincube_core::miniscript::bitcoin::hashes::{Hash, HashEngine, Hmac, HmacEngine};
+        use coincube_core::miniscript::bitcoin::hashes::sha256::Hash as Sha256Hash;
+
+        let signer = self.signer.lock().unwrap();
+
+        // Parse the derivation path
+        let path = DerivationPath::from_str(&derivation_path)
+            .map_err(|e| breez::SignerError::Generic {
+                err: format!("Invalid derivation path: {}", e),
+            })?;
+
+        // Get private key at this derivation path
+        let xpriv = signer.xpriv_at(&path, &self.secp);
+        let privkey = xpriv.to_priv();
+
+        // Compute HMAC-SHA256 using the private key as the key
+        let mut hmac_engine: HmacEngine<Sha256Hash> = HmacEngine::new(&privkey.inner.secret_bytes());
+        hmac_engine.input(&msg);
+        let hmac_result = Hmac::from_engine(hmac_engine);
+
+        Ok(hmac_result.to_byte_array().to_vec())
     }
 
     fn ecies_encrypt(&self, msg: &[u8]) -> breez::SignerResult<Vec<u8>> {
