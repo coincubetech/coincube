@@ -225,6 +225,7 @@ pub enum ActiveSendMessage {
 #[derive(Debug, Clone)]
 pub enum ActiveSettingsMessage {
     BackupWallet(BackupWalletMessage),
+    SettingsUpdated,
 }
 
 #[derive(Debug, Clone)]
