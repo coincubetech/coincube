@@ -49,6 +49,7 @@ pub enum Message {
     OpenUrl(String),
     ActiveSend(ActiveSendMessage),
     Home(HomeMessage),
+    ActiveSettings(BackupWalletMessage),
 }
 
 impl Close for Message {
@@ -219,6 +220,19 @@ pub enum ActiveSendMessage {
     InvoiceEdited(String),
     Send,
     ViewHistory,
+}
+
+#[derive(Debug, Clone)]
+pub enum BackupWalletMessage {
+    ToggleBackupIntroCheck,
+    Start,
+    NextStep,
+    PreviousStep,
+    VerifyPhrase,
+    Complete,
+    Word2Input(String),
+    Word5Input(String),
+    Word9Input(String),
 }
 
 impl From<FiatMessage> for Message {
