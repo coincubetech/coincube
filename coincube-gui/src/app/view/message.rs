@@ -48,8 +48,8 @@ pub enum Message {
     ImportPsbt,
     OpenUrl(String),
     ActiveSend(ActiveSendMessage),
+    ActiveSettings(ActiveSettingsMessage),
     Home(HomeMessage),
-    ActiveSettings(BackupWalletMessage),
 }
 
 impl Close for Message {
@@ -220,6 +220,11 @@ pub enum ActiveSendMessage {
     InvoiceEdited(String),
     Send,
     ViewHistory,
+}
+
+#[derive(Debug, Clone)]
+pub enum ActiveSettingsMessage {
+    BackupWallet(BackupWalletMessage),
 }
 
 #[derive(Debug, Clone)]
