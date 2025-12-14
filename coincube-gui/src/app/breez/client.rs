@@ -1,4 +1,4 @@
-use breez_sdk_liquid::prelude as breez;
+use breez_sdk_liquid::{bitcoin::Network, prelude as breez};
 use coincube_core::{
     miniscript::bitcoin::{
         bip32::DerivationPath,
@@ -169,6 +169,7 @@ impl breez::Signer for HotSignerAdapter {
 pub struct BreezClient {
     sdk: Arc<breez::LiquidSdk>,
     signer: Arc<Mutex<HotSigner>>,
+    network: Network,
 }
 
 impl std::fmt::Debug for BreezClient {
@@ -181,7 +182,32 @@ impl std::fmt::Debug for BreezClient {
 }
 
 impl BreezClient {
-    /// Connect to Breez SDK using an external signer (HotSigner)
+    /// Connects to the Breez Liquid SDK using an external HotSigner and returns a configured client.
+    ///
+    /// The provided `signer` is wrapped and used as the SDK's signer adapter; the `cfg` supplies the
+    /// SDK configuration and network selection. On success returns a `BreezClient` containing the
+    /// connected SDK instance and the given signer handle.
+    ///
+    /// # Parameters
+    ///
+    /// - `cfg`: Breez configuration used to build the SDK connection request.
+    /// - `signer`: Thread-safe handle to an external `HotSigner` used for signing operations.
+    ///
+    /// # Returns
+    ///
+    /// A `BreezClient` configured with the connected SDK and the provided signer on success,
+    /// a `BreezError` on failure.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use std::sync::{Arc, Mutex};
+    /// # use coincube_gui::app::breez::{BreezClient, BreezConfig, HotSigner};
+    /// # async fn example(cfg: BreezConfig, signer: Arc<Mutex<HotSigner>>) {
+    /// let client = BreezClient::connect_with_signer(cfg, signer).await.unwrap();
+    /// // use `client`...
+    /// # }
+    /// ```
     pub async fn connect_with_signer(
         cfg: BreezConfig,
         signer: Arc<Mutex<HotSigner>>,
@@ -196,9 +222,26 @@ impl BreezClient {
             .await
             .map_err(|e| BreezError::Connection(e.to_string()))?;
 
-        Ok(Self { sdk, signer })
+        Ok(Self {
+            sdk,
+            signer,
+            network: cfg.network,
+        })
     }
 
+    /// Fetches general node and wallet information from the connected Breez Liquid SDK.
+    ///
+    /// Returns the SDK's `GetInfoResponse` on success, or `BreezError::Sdk` if the SDK call fails.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn example(client: &BreezClient) -> Result<(), BreezError> {
+    /// let info = client.info().await?;
+    /// println!("block height: {}", info.block_height);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn info(&self) -> Result<breez::GetInfoResponse, BreezError> {
         self.sdk
             .get_info()
@@ -233,6 +276,31 @@ impl BreezClient {
             .map_err(|e| BreezError::Sdk(e.to_string()))
     }
 
+    /// Pays a Lightning invoice, optionally specifying an on-chain amount in satoshis to include.
+    ///
+    /// The function prepares a payment for the provided `invoice` (Bolt11/Lightning invoice string),
+    /// optionally using `amount_sat` as the Bitcoin receiver amount, then sends the prepared payment
+    /// through the SDK and returns the SDK's send-payment response. SDK errors are mapped to
+    /// `BreezError::Sdk`.
+    ///
+    /// # Parameters
+    ///
+    /// - `invoice`: Lightning invoice string identifying the payment destination.
+    /// - `amount_sat`: Optional receiver amount in satoshis to include with the payment.
+    ///
+    /// # Returns
+    ///
+    /// `breez::SendPaymentResponse` on success.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # async fn example(client: &coincube_gui::app::breez::client::BreezClient) {
+    /// let invoice = "lnbc1...".to_string();
+    /// let resp = client.pay_invoice(invoice, None).await.unwrap();
+    /// // inspect response fields as needed
+    /// # }
+    /// ```
     pub async fn pay_invoice(
         &self,
         invoice: String,
@@ -257,5 +325,38 @@ impl BreezClient {
             })
             .await
             .map_err(|e| BreezError::Sdk(e.to_string()))
+    }
+
+    /// Return a cloned handle to the client's active HotSigner.
+    ///
+    /// The returned value is an `Arc<Mutex<HotSigner>>` that references the same underlying signer;
+    /// cloning the `Arc` allows callers to hold a thread-safe reference without taking ownership.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // assuming `client` is a `BreezClient`
+    /// let signer_handle = client.active_signer();
+    /// ```
+    pub fn active_signer(&self) -> std::sync::Arc<std::sync::Mutex<HotSigner>> {
+        self.signer.clone()
+    }
+
+    /// Returns the BreezClient's configured network.
+    ///
+    /// # Returns
+    ///
+    /// The `Network` value the client was initialized with.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use breez_sdk_liquid::Network;
+    /// // Construct a client with a known network (fields elided).
+    /// let client = BreezClient { sdk: /* ... */, signer: /* ... */, network: Network::Testnet };
+    /// assert_eq!(client.network(), Network::Testnet);
+    /// ```
+    pub fn network(&self) -> Network {
+        self.network
     }
 }

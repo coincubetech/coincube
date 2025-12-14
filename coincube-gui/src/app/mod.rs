@@ -44,7 +44,7 @@ use crate::{
         settings::WalletId,
         wallet::Wallet,
     },
-    daemon::{embedded::EmbeddedDaemon, Daemon, DaemonBackend},
+    daemon::{dummy::DummyDaemon, embedded::EmbeddedDaemon, Daemon, DaemonBackend},
     dir::CoincubeDirectory,
     node::{bitcoind::Bitcoind, NodeType},
 };
@@ -791,6 +791,27 @@ impl App {
         Task::batch(tasks)
     }
 
+    /// Process an incoming `Message`, update the application's state accordingly, and produce any follow-up tasks.
+    ///
+    /// This method applies the effects of the provided message to the `App` (for example: updating cached data,
+    /// rebuilding or updating panels when a wallet is added, toggling UI state, forwarding messages to the
+    /// active panel, or initiating daemon configuration changes) and returns a `Task<Message>` representing
+    /// any asynchronous or deferred actions that should be executed as a result.
+    ///
+    /// # Returns
+    ///
+    /// A `Task<Message>` representing follow-up work or messages to be processed; returns `Task::none()` when
+    /// no further action is required.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use coincube_gui::app::{App, Message};
+    ///
+    /// // Constructing a full App is application-specific; this example shows the intended call pattern.
+    /// // let mut app = /* create or obtain an App instance */;
+    /// // let task = app.update(Message::CacheUpdated);
+    /// ```
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Fiat(FiatMessage::GetPriceResult(fiat_price)) => {
@@ -921,6 +942,8 @@ impl App {
                     (self.daemon.clone(), self.panels.current_mut())
                 {
                     return panel.update(daemon, &self.cache, msg);
+                } else if let Some(panel) = self.panels.current_mut() {
+                    return panel.update(std::sync::Arc::new(DummyDaemon), &self.cache, msg);
                 }
             }
         };

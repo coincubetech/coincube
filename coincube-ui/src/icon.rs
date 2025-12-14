@@ -251,6 +251,76 @@ pub fn cube_icon() -> Text<'static> {
     bootstrap_icon('\u{F1C8}')
 }
 
+/// Creates a Text widget for the "receipt" bootstrap icon.
+///
+/// # Examples
+///
+/// ```
+/// // Construct the icon widget
+/// let _icon = crate::receipt_icon();
+/// ```
 pub fn receipt_icon() -> Text<'static> {
     bootstrap_icon('\u{F50F}')
+}
+
+/// Creates a Text widget displaying the Bootstrap "lock" icon.
+///
+/// The returned `Text` is configured to use the `bootstrap-icons` font and the module's
+/// standard icon sizing and alignment.
+///
+/// # Examples
+///
+/// ```
+/// let icon = lock_icon();
+/// // Render `icon` in a GUI layout that accepts `iced::widget::Text`.
+/// ```
+pub fn lock_icon() -> Text<'static> {
+    bootstrap_icon('\u{F47B}')
+}
+
+/// Creates a Text widget containing the Bootstrap "file-earmark" icon.
+///
+/// The returned `Text<'static>` is configured to use the `bootstrap-icons` font and the module's
+/// standard icon sizing and alignment.
+///
+/// # Examples
+///
+/// ```
+/// let _ = file_earmark();
+/// ```
+pub fn file_earmark() -> Text<'static> {
+    bootstrap_icon('\u{F373}')
+}
+
+/// Creates a left-pointing chevron icon using the bootstrap-icons font.
+///
+/// # Examples
+///
+/// ```
+/// let icon = chevron_left();
+/// ```
+pub fn chevron_left() -> Text<'static> {
+    bootstrap_icon('\u{F284}')
+}
+
+/// Creates a `Text` element for the Bootstrap "check-circle" icon.
+///
+/// # Examples
+///
+/// ```
+/// let _icon = check_circle();
+/// ```
+pub fn check_circle() -> Text<'static> {
+    bootstrap_icon('\u{F26B}')
+}
+
+/// Creates a phone icon `Text` using the bootstrap-icons font.
+///
+/// # Examples
+///
+/// ```
+/// let _icon = phone();
+/// ```
+pub fn phone() -> Text<'static> {
+    bootstrap_icon('\u{F4E7}')
 }

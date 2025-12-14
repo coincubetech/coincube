@@ -48,6 +48,7 @@ pub enum Message {
     ImportPsbt,
     OpenUrl(String),
     ActiveSend(ActiveSendMessage),
+    ActiveSettings(ActiveSettingsMessage),
 }
 
 impl Close for Message {
@@ -235,7 +236,34 @@ pub enum ActiveSendMessage {
     ViewHistory,
 }
 
+#[derive(Debug, Clone)]
+pub enum ActiveSettingsMessage {
+    BackupWallet(BackupWalletMessage),
+}
+
+#[derive(Debug, Clone)]
+pub enum BackupWalletMessage {
+    ToggleBackupIntroCheck,
+    Start,
+    NextStep,
+    PreviousStep,
+    VerifyPhrase,
+    Complete,
+    Word2Input(String),
+    Word5Input(String),
+    Word9Input(String),
+}
+
 impl From<FiatMessage> for Message {
+    /// Wrap a `FiatMessage` into a top-level `Message::Settings(SettingsMessage::Fiat(...))`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let fiat = FiatMessage::Enable(true);
+    /// let msg: Message = fiat.into();
+    /// assert!(matches!(msg, Message::Settings(SettingsMessage::Fiat(_))));
+    /// ```
     fn from(msg: FiatMessage) -> Self {
         Message::Settings(SettingsMessage::Fiat(msg))
     }

@@ -123,6 +123,8 @@ pub struct CubeSettings {
     pub id: String,
     pub name: String,
     pub network: Network,
+    pub backed_up: bool,
+    pub mfa_done: bool,
     pub created_at: i64,
     /// The Vault wallet for this Cube (optional - may not be set up yet)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -135,6 +137,20 @@ pub struct CubeSettings {
 }
 
 impl CubeSettings {
+    /// Create a new `CubeSettings` with a generated id and current timestamp.
+    ///
+    /// The returned settings use the provided `name` and `network`, set optional fields
+    /// (`vault_wallet_id`, `security_pin_hash`, `active_wallet_signer_fingerprint`) to `None`,
+    /// and initialize `backed_up` and `mfa_done` to `false`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let cs = CubeSettings::new("My Cube".to_string(), Network::Regtest);
+    /// assert_eq!(cs.name, "My Cube");
+    /// assert!(!cs.backed_up && !cs.mfa_done);
+    /// assert!(cs.id.len() > 0);
+    /// ```
     pub fn new(name: String, network: Network) -> Self {
         Self {
             id: uuid::Uuid::new_v4().to_string(),
@@ -144,6 +160,8 @@ impl CubeSettings {
             vault_wallet_id: None,
             security_pin_hash: None,
             active_wallet_signer_fingerprint: None,
+            backed_up: false,
+            mfa_done: false,
         }
     }
 
