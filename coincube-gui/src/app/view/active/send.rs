@@ -64,7 +64,7 @@ pub fn active_send_view<'a>(
                         .push(p1_bold(&tx.description))
                         .push(p2_regular(&tx.time_ago).style(theme::text::secondary)),
                 )
-                .push(Space::with_width(Length::Fill))
+                .push(Space::new().width(Length::Fill))
                 .push(
                     Column::new()
                         .spacing(5)
@@ -100,7 +100,7 @@ pub fn active_send_view<'a>(
 
     content = content.push(Container::new(history_button).width(Length::Fill));
 
-    content = content.push(Space::with_height(Length::Fixed(40.0)));
+    content = content.push(Space::new().height(Length::Fixed(40.0)));
 
     // Input Section
     let input_section = Column::new()

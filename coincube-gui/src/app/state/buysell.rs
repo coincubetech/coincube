@@ -142,11 +142,11 @@ impl State for BuySellPanel {
                 self.detected_country = None;
 
                 // clear keyring credentials
-                if let Ok(entry) = keyring::Entry::new("io.coincube.Vault", &self.wallet.name) {
-                    if let Err(e) = entry.delete_credential() {
-                        log::error!("[BUYSELL] Unable to delete credentials from OS keyring: {e:?}")
-                    };
-                }
+                // if let Ok(entry) = keyring::Entry::new("io.coincube.Vault", &self.wallet.name) {
+                //     if let Err(e) = entry.delete_credential() {
+                //         log::error!("[BUYSELL] Unable to delete credentials from OS keyring: {e:?}")
+                //     };
+                // }
 
                 return Task::done(Message::View(ViewMessage::BuySell(
                     BuySellMessage::ResetWidget,
