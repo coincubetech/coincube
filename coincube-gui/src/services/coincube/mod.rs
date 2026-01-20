@@ -41,7 +41,7 @@ impl From<reqwest_sse::error::EventSourceError> for CoincubeError {
 impl std::fmt::Display for CoincubeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            CoincubeError::Network(msg) => write!(f, "Network error: {:?}", msg),
+            CoincubeError::Network(msg) => write!(f, "Network error: {}", msg),
             CoincubeError::Unsuccessful(e) => write!(f, "{}", e.text),
             CoincubeError::Api(msg) => write!(f, "API error: {}", msg),
             CoincubeError::Parse(msg) => write!(f, "Parse error: {}", msg),

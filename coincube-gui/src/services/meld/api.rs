@@ -70,11 +70,11 @@ pub struct Quote {
     pub transaction_type: TransactionType,
 
     pub wallet_address: Option<String>,
-    pub source_amount: f32,
-    pub destination_amount: f32,
+    pub source_amount: f64,
+    pub destination_amount: f64,
 
-    pub exchange_rate: Option<f32>,
-    pub total_fee: f32,
+    pub exchange_rate: Option<f64>,
+    pub total_fee: f64,
 
     pub source_currency_code: String,
     pub destination_currency_code: String,
@@ -82,7 +82,7 @@ pub struct Quote {
     // TODO: Use enums instead
     pub payment_method_type: String,
     pub service_provider: String,
-    pub customer_score: f32,
+    pub customer_score: f64,
 
     #[serde(flatten)]
     pub extras: std::collections::HashMap<String, serde_json::Value>,
@@ -101,7 +101,7 @@ pub struct GetQuoteResponse {
 #[serde(rename_all = "camelCase")]
 pub struct CreateSessionRequest<'a> {
     pub quote_provider: &'a str,
-    pub source_amount: f32,
+    pub source_amount: f64,
     pub source_currency: &'a str,
     pub destination_currency: &'a str,
     pub country_code: &'a str,

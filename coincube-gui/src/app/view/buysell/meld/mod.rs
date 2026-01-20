@@ -175,8 +175,8 @@ impl MeldState {
                     }
                 };
 
-                // TODO: Ideally, should be unified into global error interface
                 log::error!("[MELD] ({}): {}", desc, err);
+                return iced::Task::done(view::Message::ShowError(err));
             }
             // initialization
             MeldMessage::CountryNotSupported => self.steps.push(MeldFlowStep::CountryNotSupported),
