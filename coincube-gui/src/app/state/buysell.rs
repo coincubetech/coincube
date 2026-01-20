@@ -542,8 +542,8 @@ impl State for BuySellPanel {
 
                                     // Set up SSE stream for transaction status updates
                                     if let Some(order_id) = quote.order_id.clone() {
-                                        // switch to checkout
-                                        *state = MavapayFlowStep::Checkout {
+                                        // switch to checkout - assign to self.step directly since state was consumed by pattern
+                                        self.step = BuySellFlowState::Mavapay(MavapayFlowStep::Checkout {
                                             sat_amount: *sat_amount,
                                             buy_or_sell: buy_or_sell.clone(),
                                             beneficiary: beneficiary.clone(),
@@ -551,7 +551,7 @@ impl State for BuySellPanel {
                                             fulfilled_order: None,
                                             country: country.clone(),
                                             stream_order_id: Some(order_id),
-                                        };
+                                        });
                                     } else {
                                         *sending_quote = false;
                                         self.error = Some("Unable to process payment, Mavapay Quote created without `order-id`".to_string())
@@ -621,8 +621,7 @@ impl State for BuySellPanel {
                                 MavapayMessage::BanksReceived(b) => *banks = Some(b),
 
                                 msg => log::warn!(
-                                    "Current {:?} has ignored message: {:?}",
-                                    state,
+                                    "MavapayFlowStep::Transaction ignored message: {:?}",
                                     msg
                                 ),
                             }
@@ -757,7 +756,7 @@ impl State for BuySellPanel {
                             }
 
                             msg => {
-                                log::warn!("Current {:?} has ignored message: {:?}", state, msg)
+                                log::warn!("MavapayFlowStep::Checkout ignored message: {:?}", msg)
                             }
                         },
                         (
@@ -804,11 +803,11 @@ impl State for BuySellPanel {
                             }
                             MavapayMessage::SelectTransaction(transaction) => {
                                 let order_id = transaction.order_id.clone();
-                                *state = MavapayFlowStep::OrderDetail {
+                                self.step = BuySellFlowState::Mavapay(MavapayFlowStep::OrderDetail {
                                     transaction,
                                     order: None,
                                     loading: true,
-                                };
+                                });
 
                                 let client = self.coincube_client.clone();
                                 return Task::perform(
@@ -831,7 +830,7 @@ impl State for BuySellPanel {
                                 .map(|b| Message::View(ViewMessage::BuySell(b)));
                             }
                             msg => {
-                                log::warn!("Current {:?} has ignored message: {:?}", state, msg)
+                                log::warn!("MavapayFlowStep::History ignored message: {:?}", msg)
                             }
                         },
                         (MavapayFlowStep::OrderDetail { order, loading, .. }, msg) => match msg {
@@ -840,17 +839,17 @@ impl State for BuySellPanel {
                                 *loading = false;
                             }
                             MavapayMessage::BackToHistory => {
-                                *state = MavapayFlowStep::History {
+                                self.step = BuySellFlowState::Mavapay(MavapayFlowStep::History {
                                     transactions: None,
                                     loading: true,
                                     error: None,
-                                };
+                                });
                                 return Task::done(Message::View(ViewMessage::BuySell(
                                     BuySellMessage::Mavapay(MavapayMessage::FetchTransactions),
                                 )));
                             }
                             msg => {
-                                log::warn!("Current {:?} has ignored message: {:?}", state, msg)
+                                log::warn!("MavapayFlowStep::OrderDetail ignored message: {:?}", msg)
                             }
                         },
                     }
