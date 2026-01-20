@@ -148,7 +148,7 @@ impl MavapayCurrency {
 }
 
 impl MavapayCurrency {
-    pub fn from_str(string: &str) -> Option<Self> {
+    pub fn parse(string: &str) -> Option<Self> {
         match string {
             "BTC" => Some(MavapayCurrency::Bitcoin),
             "KES" => Some(MavapayCurrency::KenyanShilling),

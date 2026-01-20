@@ -47,37 +47,37 @@ impl State for BuySellPanel {
             // modal for any generated address
             Message::View(ViewMessage::Select(_)) => {
                 if let BuySellFlowState::Initialization {
-                    buy_or_sell, modal, ..
+                    buy_or_sell: Some(panel::BuyOrSell::Buy { address }),
+                    modal,
+                    ..
                 } = &mut self.step
                 {
-                    if let Some(panel::BuyOrSell::Buy { address }) = buy_or_sell {
-                        *modal = super::vault::receive::Modal::VerifyAddress(
-                            super::vault::receive::VerifyAddressModal::new(
-                                cache.datadir_path.clone(),
-                                self.wallet.clone(),
-                                cache.network,
-                                address.address.clone(),
-                                address.index,
-                            ),
-                        );
-                    };
+                    *modal = super::vault::receive::Modal::VerifyAddress(
+                        super::vault::receive::VerifyAddressModal::new(
+                            cache.datadir_path.clone(),
+                            self.wallet.clone(),
+                            cache.network,
+                            address.address.clone(),
+                            address.index,
+                        ),
+                    );
                 }
 
                 return Task::none();
             }
             Message::View(ViewMessage::ShowQrCode(_)) => {
                 if let BuySellFlowState::Initialization {
-                    buy_or_sell, modal, ..
+                    buy_or_sell: Some(panel::BuyOrSell::Buy { address }),
+                    modal,
+                    ..
                 } = &mut self.step
                 {
-                    if let Some(panel::BuyOrSell::Buy { address }) = buy_or_sell {
-                        if let Some(new) = super::vault::receive::ShowQrCodeModal::new(
-                            &address.address,
-                            address.index,
-                        ) {
-                            *modal = super::vault::receive::Modal::ShowQrCode(new);
-                        }
-                    };
+                    if let Some(new) = super::vault::receive::ShowQrCodeModal::new(
+                        &address.address,
+                        address.index,
+                    ) {
+                        *modal = super::vault::receive::Modal::ShowQrCode(new);
+                    }
                 }
 
                 return Task::none();
@@ -427,7 +427,7 @@ impl State for BuySellPanel {
                         ) => {
                             match msg {
                                 MavapayMessage::NormalizeAmounts => {
-                                    *sat_amount = (*sat_amount).max(6000).min(2_100_000_000_000_000)
+                                    *sat_amount = (*sat_amount).clamp(6000, 2_100_000_000_000_000)
                                 }
                                 MavapayMessage::SatAmountChanged(sats) => {
                                     *sat_amount = sats.round() as _
@@ -459,7 +459,7 @@ impl State for BuySellPanel {
 
                                     let request = match buy_or_sell {
                                         panel::BuyOrSell::Sell => GetQuoteRequest {
-                                            amount: sat_amount.clone(),
+                                            amount: *sat_amount,
                                             source_currency: MavapayUnitCurrency::BitcoinSatoshi,
                                             target_currency: local_currency,
                                             // TODO: Mavapay only supports lightning transactions for selling BTC, meaning we are currently blocked by the breeze integration
@@ -473,7 +473,7 @@ impl State for BuySellPanel {
                                         },
                                         panel::BuyOrSell::Buy { address } => {
                                             GetQuoteRequest {
-                                                amount: sat_amount.clone(),
+                                                amount: *sat_amount,
                                                 source_currency: local_currency,
                                                 target_currency:
                                                     MavapayUnitCurrency::BitcoinSatoshi,
@@ -1069,7 +1069,7 @@ impl State for BuySellPanel {
                                             }
                                         }
 
-                                        count = count - 1;
+                                        count -= 1;
                                         tokio::time::sleep(std::time::Duration::from_secs(10))
                                             .await;
                                     }

@@ -206,13 +206,13 @@ impl BuySellPanel {
                 Space::new().height(Length::Fixed(35.0)),
                 // input fields
                 text_input("Email", email)
-                    .on_input(|e| BuySellMessage::LoginUsernameChanged(e))
+                    .on_input(BuySellMessage::LoginUsernameChanged)
                     .size(16)
                     .padding(15),
                 Space::new().height(Length::Fixed(5.0)),
                 text_input("Password", password)
                     .secure(true)
-                    .on_input(|p| BuySellMessage::LoginPasswordChanged(p))
+                    .on_input(BuySellMessage::LoginPasswordChanged)
                     .on_submit_maybe(
                         (email.contains('.') && email.contains('@') && !password.is_empty())
                             .then_some(BuySellMessage::SubmitLogin {
@@ -255,7 +255,7 @@ impl BuySellPanel {
             .width(Length::Fill);
 
         let elem: iced::Element<BuySellMessage, theme::Theme> = col.into();
-        elem.map(|b| ViewMessage::BuySell(b))
+        elem.map(ViewMessage::BuySell)
     }
 
     fn password_reset_ux<'a>(
@@ -302,7 +302,7 @@ impl BuySellPanel {
                                 style.border.width = 0.0;
                                 style
                             })
-                            .on_input(|s| BuySellMessage::EmailChanged(s))
+                            .on_input(BuySellMessage::EmailChanged)
                             .on_submit(BuySellMessage::SendPasswordResetEmail)
                             .into(),
                     };
@@ -355,7 +355,7 @@ impl BuySellPanel {
         .width(Length::Fill);
 
         let elem: iced::Element<BuySellMessage, theme::Theme> = col.into();
-        elem.map(|b| ViewMessage::BuySell(b))
+        elem.map(ViewMessage::BuySell)
     }
 
     fn registration_ux<'a>(self: &'a BuySellPanel) -> iced::Element<'a, ViewMessage, theme::Theme> {
@@ -398,27 +398,21 @@ impl BuySellPanel {
             .align_x(Alignment::Center),
             Space::new().height(Length::Fixed(20.0)),
             // Name Input
-            text_input("Full Legal Name: ", legal_name).on_input(|v| BuySellMessage::LegalNameChanged(v))
+            text_input("Full Legal Name: ", legal_name).on_input(BuySellMessage::LegalNameChanged)
                 .width(Length::Fill)
                 .size(16)
                 .padding(15),
             // Email Input
-            text_input("Email Address", email).on_input(|v| {
-                BuySellMessage::EmailChanged(v)
-            })
+            text_input("Email Address", email).on_input(BuySellMessage::EmailChanged)
             .size(16)
             .padding(15),
             Space::new().height(Length::Fixed(10.0)),
             // Password Inputs
-            text_input("Password", password1).on_input(|v| {
-                BuySellMessage::Password1Changed(v)
-            })
+            text_input("Password", password1).on_input(BuySellMessage::Password1Changed)
             .size(16)
             .padding(15)
             .secure(true),
-            text_input("Confirm Password", password2).on_input(|v| {
-                BuySellMessage::Password2Changed(v)
-            })
+            text_input("Confirm Password", password2).on_input(BuySellMessage::Password2Changed)
             .on_submit_maybe(
                 (!legal_name.is_empty() && email.contains('.') &&  email.contains('@')  && !password1.is_empty() && (password1 == password2))
                     .then_some(BuySellMessage::SubmitRegistration),
@@ -440,7 +434,7 @@ impl BuySellPanel {
         .width(Length::Fill);
 
         let elem: iced::Element<BuySellMessage, theme::Theme> = col.into();
-        elem.map(|b| ViewMessage::BuySell(b))
+        elem.map(ViewMessage::BuySell)
     }
 
     fn email_verification_ux<'a>(
@@ -533,7 +527,7 @@ impl BuySellPanel {
         .width(Length::Fill);
 
         let elem: iced::Element<BuySellMessage, theme::Theme> = col.into();
-        elem.map(|b| ViewMessage::BuySell(b))
+        elem.map(ViewMessage::BuySell)
     }
 
     fn initialization_ux<'a>(&'a self) -> iced::Element<'a, ViewMessage, theme::Theme> {
@@ -710,7 +704,7 @@ impl BuySellPanel {
                         self.detected_country,
                         |c| {
                             let static_country = crate::services::coincube::get_countries()
-                                .into_iter()
+                                .iter()
                                 .find(|cs| cs.code == c.code)
                                 .unwrap();
                             BuySellMessage::CountryDetected(Ok(static_country))
@@ -733,6 +727,6 @@ impl BuySellPanel {
         };
 
         let elem: iced::Element<BuySellMessage, theme::Theme> = col.into();
-        elem.map(|b| ViewMessage::BuySell(b))
+        elem.map(ViewMessage::BuySell)
     }
 }
