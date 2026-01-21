@@ -543,15 +543,16 @@ impl State for BuySellPanel {
                                     // Set up SSE stream for transaction status updates
                                     if let Some(order_id) = quote.order_id.clone() {
                                         // switch to checkout - assign to self.step directly since state was consumed by pattern
-                                        self.step = BuySellFlowState::Mavapay(MavapayFlowStep::Checkout {
-                                            sat_amount: *sat_amount,
-                                            buy_or_sell: buy_or_sell.clone(),
-                                            beneficiary: beneficiary.clone(),
-                                            quote,
-                                            fulfilled_order: None,
-                                            country: country.clone(),
-                                            stream_order_id: Some(order_id),
-                                        });
+                                        self.step =
+                                            BuySellFlowState::Mavapay(MavapayFlowStep::Checkout {
+                                                sat_amount: *sat_amount,
+                                                buy_or_sell: buy_or_sell.clone(),
+                                                beneficiary: beneficiary.clone(),
+                                                quote,
+                                                fulfilled_order: None,
+                                                country: country.clone(),
+                                                stream_order_id: Some(order_id),
+                                            });
                                     } else {
                                         *sending_quote = false;
                                         self.error = Some("Unable to process payment, Mavapay Quote created without `order-id`".to_string())
@@ -803,11 +804,12 @@ impl State for BuySellPanel {
                             }
                             MavapayMessage::SelectTransaction(transaction) => {
                                 let order_id = transaction.order_id.clone();
-                                self.step = BuySellFlowState::Mavapay(MavapayFlowStep::OrderDetail {
-                                    transaction,
-                                    order: None,
-                                    loading: true,
-                                });
+                                self.step =
+                                    BuySellFlowState::Mavapay(MavapayFlowStep::OrderDetail {
+                                        transaction,
+                                        order: None,
+                                        loading: true,
+                                    });
 
                                 let client = self.coincube_client.clone();
                                 return Task::perform(
@@ -849,7 +851,10 @@ impl State for BuySellPanel {
                                 )));
                             }
                             msg => {
-                                log::warn!("MavapayFlowStep::OrderDetail ignored message: {:?}", msg)
+                                log::warn!(
+                                    "MavapayFlowStep::OrderDetail ignored message: {:?}",
+                                    msg
+                                )
                             }
                         },
                     }
