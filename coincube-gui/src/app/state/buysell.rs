@@ -72,10 +72,9 @@ impl State for BuySellPanel {
                     ..
                 } = &mut self.step
                 {
-                    if let Some(new) = super::vault::receive::ShowQrCodeModal::new(
-                        &address.address,
-                        address.index,
-                    ) {
+                    if let Some(new) =
+                        super::vault::receive::ShowQrCodeModal::new(&address.address, address.index)
+                    {
                         *modal = super::vault::receive::Modal::ShowQrCode(new);
                     }
                 }
@@ -406,7 +405,6 @@ impl State for BuySellPanel {
                 }
             }
 
-
             // mavapay session logic - delegate to MavapayState::update
             BuySellMessage::Mavapay(msg) => {
                 if let BuySellFlowState::Mavapay(state) = &mut self.step {
@@ -417,7 +415,6 @@ impl State for BuySellPanel {
                     log::warn!("Ignoring MavapayMessage: {:?}, BuySell Panel is currently not in Mavapay state", msg);
                 }
             }
-
 
             // state specific messages
             msg => {
