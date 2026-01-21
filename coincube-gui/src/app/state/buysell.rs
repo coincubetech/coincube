@@ -7,7 +7,7 @@ use crate::{
         menu::Menu,
         message::Message,
         state::{self, State},
-        view::{self, buysell::*, BuySellMessage, Message as ViewMessage},
+        view::{self, buysell::*},
     },
     daemon::Daemon,
     services::{coincube::*, mavapay::*},
@@ -18,7 +18,7 @@ impl State for BuySellPanel {
         &'a self,
         menu: &'a Menu,
         cache: &'a Cache,
-    ) -> coincube_ui::widget::Element<'a, ViewMessage> {
+    ) -> coincube_ui::widget::Element<'a, view::Message> {
         let inner = view::dashboard(menu, cache, None, self.view());
 
         if let BuySellFlowState::Initialization { modal, .. } = &self.step {
@@ -29,7 +29,7 @@ impl State for BuySellPanel {
             };
 
             coincube_ui::widget::modal::Modal::new(inner, overlay)
-                .on_blur(Some(ViewMessage::Close))
+                .on_blur(Some(view::Message::Close))
                 .into()
         } else {
             inner
@@ -43,9 +43,9 @@ impl State for BuySellPanel {
         message: Message,
     ) -> Task<Message> {
         let message = match message {
-            Message::View(ViewMessage::BuySell(message)) => message,
+            Message::View(view::Message::BuySell(message)) => message,
             // modal for any generated address
-            Message::View(ViewMessage::Select(_)) => {
+            Message::View(view::Message::Select(_)) => {
                 if let BuySellFlowState::Initialization {
                     buy_or_sell, modal, ..
                 } = &mut self.step
@@ -65,7 +65,7 @@ impl State for BuySellPanel {
 
                 return Task::none();
             }
-            Message::View(ViewMessage::ShowQrCode(_)) => {
+            Message::View(view::Message::ShowQrCode(_)) => {
                 if let BuySellFlowState::Initialization {
                     buy_or_sell, modal, ..
                 } = &mut self.step
@@ -82,7 +82,7 @@ impl State for BuySellPanel {
 
                 return Task::none();
             }
-            Message::View(ViewMessage::Close) => {
+            Message::View(view::Message::Close) => {
                 if let BuySellFlowState::Initialization { modal, .. } = &mut self.step {
                     *modal = super::vault::receive::Modal::None;
                 }
@@ -93,7 +93,7 @@ impl State for BuySellPanel {
         };
 
         match message {
-            BuySellMessage::ResetWidget => {
+            view::BuySellMessage::ResetWidget => {
                 self.error = None;
 
                 // attempt automatic refresh from os-keyring
@@ -129,8 +129,8 @@ impl State for BuySellPanel {
                         }
                         Some(login) => {
                             // check if token is valid
-                            return iced::Task::done(Message::View(ViewMessage::BuySell(
-                                BuySellMessage::RefreshLocalLogin(login),
+                            return iced::Task::done(Message::View(view::Message::BuySell(
+                                view::BuySellMessage::RefreshLocalLogin(login),
                             )));
                         }
                     }
@@ -141,7 +141,7 @@ impl State for BuySellPanel {
             }
 
             // login states
-            BuySellMessage::RefreshLocalLogin(login) => {
+            view::BuySellMessage::RefreshLocalLogin(login) => {
                 let client = self.coincube_client.clone();
 
                 return Task::perform(
@@ -149,20 +149,20 @@ impl State for BuySellPanel {
                     |res| match res {
                         Ok(l) => {
                             log::info!("Refresh token still valid, login token regenerated");
-                            BuySellMessage::SetLoginState(l)
+                            view::BuySellMessage::SetLoginState(l)
                         }
                         Err(err) => {
                             log::info!(
                                 "Refresh token is outdated, forcing user to re-login: {}",
                                 err
                             );
-                            BuySellMessage::LogOut
+                            view::BuySellMessage::LogOut
                         }
                     },
                 )
-                .map(|msg| Message::View(ViewMessage::BuySell(msg)));
+                .map(|msg| Message::View(view::Message::BuySell(msg)));
             }
-            BuySellMessage::SetLoginState(login) => {
+            view::BuySellMessage::SetLoginState(login) => {
                 // update token in OS keyring
                 if let Ok(entry) = keyring::Entry::new("io.coincube.Vault", &self.wallet.name) {
                     if let Err(e) = entry.delete_credential() {
@@ -187,7 +187,7 @@ impl State for BuySellPanel {
                     buy_or_sell: None,
                 };
             }
-            BuySellMessage::LogOut => {
+            view::BuySellMessage::LogOut => {
                 self.login = None;
 
                 // clear keyring credentials
@@ -205,12 +205,12 @@ impl State for BuySellPanel {
             }
 
             // Forward clipboard action to parent message handler
-            BuySellMessage::Clipboard(text) => {
-                return Task::done(Message::View(ViewMessage::Clipboard(text)));
+            view::BuySellMessage::Clipboard(text) => {
+                return Task::done(Message::View(view::Message::Clipboard(text)));
             }
 
             // initialization flow: for creating a new address and setting panel mode (buy or sell)
-            BuySellMessage::SelectBuyOrSell(bs) => {
+            view::BuySellMessage::SelectBuyOrSell(bs) => {
                 if let BuySellFlowState::Initialization {
                     buy_or_sell_selected,
                     ..
@@ -224,34 +224,36 @@ impl State for BuySellPanel {
                     }
                 }
             }
-            BuySellMessage::CreateNewAddress => {
+            view::BuySellMessage::CreateNewAddress => {
                 return Task::perform(
                     async move { daemon.get_new_address().await },
                     |res| match res {
-                        Ok(out) => Message::View(ViewMessage::BuySell(
-                            BuySellMessage::AddressCreated(view::buysell::panel::LabelledAddress {
-                                address: out.address,
-                                index: out.derivation_index,
-                                label: None,
-                            }),
+                        Ok(out) => Message::View(view::Message::BuySell(
+                            view::BuySellMessage::AddressCreated(
+                                view::buysell::panel::LabelledAddress {
+                                    address: out.address,
+                                    index: out.derivation_index,
+                                    label: None,
+                                },
+                            ),
                         )),
-                        Err(e) => {
-                            Message::View(ViewMessage::BuySell(BuySellMessage::SessionError(
+                        Err(e) => Message::View(view::Message::BuySell(
+                            view::BuySellMessage::SessionError(
                                 "Unable to create a new address",
                                 e.to_string(),
-                            )))
-                        }
+                            ),
+                        )),
                     },
                 )
             }
-            BuySellMessage::AddressCreated(address) => {
+            view::BuySellMessage::AddressCreated(address) => {
                 if let BuySellFlowState::Initialization { buy_or_sell, .. } = &mut self.step {
                     *buy_or_sell = Some(panel::BuyOrSell::Buy { address })
                 }
             }
 
             // ip-geolocation logic
-            BuySellMessage::CountryDetected(result) => {
+            view::BuySellMessage::CountryDetected(result) => {
                 // TODO: state/region detection for select countries
 
                 let country = match result {
@@ -265,8 +267,8 @@ impl State for BuySellPanel {
                         self.step = BuySellFlowState::DetectingLocation(true);
                         self.detected_country = None;
 
-                        return Task::done(Message::View(ViewMessage::BuySell(
-                            BuySellMessage::SessionError(
+                        return Task::done(Message::View(view::Message::BuySell(
+                            view::BuySellMessage::SessionError(
                                 "Unable to automatically determine location",
                                 "please select manually below".to_string(),
                             ),
@@ -278,13 +280,13 @@ impl State for BuySellPanel {
                 log::info!("Country = {}, ISO = {}", country.name, country.code);
                 self.detected_country = Some(country);
 
-                return Task::done(Message::View(ViewMessage::BuySell(
-                    BuySellMessage::ResetWidget,
+                return Task::done(Message::View(view::Message::BuySell(
+                    view::BuySellMessage::ResetWidget,
                 )));
             }
 
             // session management
-            BuySellMessage::StartSession => {
+            view::BuySellMessage::StartSession => {
                 let BuySellFlowState::Initialization { buy_or_sell, .. } = &mut self.step else {
                     log::error!("`StartSession` must be always called during the Initialization Flow Stage, skipping...");
                     return Task::none();
@@ -303,7 +305,7 @@ impl State for BuySellPanel {
                         log::info!("[BUYSELL] Starting under Mavapay for {}", country);
 
                         // initialize buysell under Mavapay
-                        self.step = BuySellFlowState::Mavapay(MavapayFlowStep::Transaction {
+                        self.step = BuySellFlowState::Mavapay(MavapayState::Transaction {
                             buy_or_sell,
                             country: country.clone(),
                             sat_amount: 6000,
@@ -318,15 +320,15 @@ impl State for BuySellPanel {
                         if country.code != "KE" {
                             return Task::batch([
                                 Task::done(Message::View(view::Message::BuySell(
-                                    BuySellMessage::Mavapay(MavapayMessage::GetBanks),
+                                    view::BuySellMessage::Mavapay(MavapayMessage::GetBanks),
                                 ))),
                                 Task::done(Message::View(view::Message::BuySell(
-                                    BuySellMessage::Mavapay(MavapayMessage::GetPrice),
+                                    view::BuySellMessage::Mavapay(MavapayMessage::GetPrice),
                                 ))),
                             ]);
                         } else {
                             return Task::done(Message::View(view::Message::BuySell(
-                                BuySellMessage::Mavapay(MavapayMessage::GetPrice),
+                                view::BuySellMessage::Mavapay(MavapayMessage::GetPrice),
                             )));
                         };
                     }
@@ -349,7 +351,7 @@ impl State for BuySellPanel {
                     }
                 }
             }
-            BuySellMessage::ViewHistory => {
+            view::BuySellMessage::ViewHistory => {
                 let Some(country) = self.detected_country.as_ref() else {
                     unreachable!(
                         "Unable to view history, country detection|selection was unsuccessful"
@@ -360,14 +362,14 @@ impl State for BuySellPanel {
                     true => {
                         log::info!("Starting history view under Mavapay");
 
-                        self.step = BuySellFlowState::Mavapay(MavapayFlowStep::History {
+                        self.step = BuySellFlowState::Mavapay(MavapayState::History {
                             loading: true,
                             error: None,
                             transactions: None,
                         });
 
                         return Task::done(Message::View(view::Message::BuySell(
-                            BuySellMessage::Mavapay(MavapayMessage::FetchTransactions),
+                            view::BuySellMessage::Mavapay(MavapayMessage::FetchTransactions),
                         )));
                     }
                     false => {
@@ -376,17 +378,17 @@ impl State for BuySellPanel {
                     }
                 }
             }
-            BuySellMessage::SessionError(description, error) => {
+            view::BuySellMessage::SessionError(description, error) => {
                 let error_message = format!("{} ({})", description, error);
                 self.error = Some(error_message.clone());
 
                 // unblock UI retry buttons in step-specific flows
                 if let BuySellFlowState::Mavapay(m) = &mut self.step {
                     match m {
-                        MavapayFlowStep::Transaction { sending_quote, .. } => {
+                        MavapayState::Transaction { sending_quote, .. } => {
                             *sending_quote = false;
                         }
-                        MavapayFlowStep::History {
+                        MavapayState::History {
                             loading,
                             error: step_error,
                             ..
@@ -394,7 +396,7 @@ impl State for BuySellPanel {
                             *loading = false;
                             *step_error = Some(error_message);
                         }
-                        MavapayFlowStep::OrderDetail { loading, .. } => {
+                        MavapayState::OrderDetail { loading, .. } => {
                             *loading = false;
                         }
                         _ => {}
@@ -872,7 +874,7 @@ impl State for BuySellPanel {
                             email, password, ..
                         }
                         | BuySellFlowState::Login { email, password },
-                        BuySellMessage::SubmitLogin {
+                        view::BuySellMessage::SubmitLogin {
                             skip_email_verification,
                         },
                     ) => {
@@ -898,17 +900,17 @@ impl State for BuySellPanel {
                                 login.map(|l| (l, verified))
                             },
                             |res| match res {
-                                Ok((login, email_verified)) => BuySellMessage::LoginSuccess {
+                                Ok((login, email_verified)) => view::BuySellMessage::LoginSuccess {
                                     email_verified,
                                     login,
                                 },
-                                Err(e) => BuySellMessage::SessionError(
+                                Err(e) => view::BuySellMessage::SessionError(
                                     "Failed to submit login",
                                     e.to_string(),
                                 ),
                             },
                         )
-                        .map(|m| Message::View(ViewMessage::BuySell(m)));
+                        .map(|m| Message::View(view::Message::BuySell(m)));
                     }
                     (
                         BuySellFlowState::VerifyEmail {
@@ -917,7 +919,7 @@ impl State for BuySellPanel {
                         | BuySellFlowState::Login {
                             email, password, ..
                         },
-                        BuySellMessage::LoginSuccess {
+                        view::BuySellMessage::LoginSuccess {
                             email_verified,
                             login,
                         },
@@ -940,8 +942,8 @@ impl State for BuySellPanel {
                             buy_or_sell: None,
                         };
 
-                        return Task::done(Message::View(ViewMessage::BuySell(
-                            BuySellMessage::SetLoginState(login),
+                        return Task::done(Message::View(view::Message::BuySell(
+                            view::BuySellMessage::SetLoginState(login),
                         )));
                     }
                     // user registration form
@@ -954,12 +956,12 @@ impl State for BuySellPanel {
                         },
                         msg,
                     ) => match msg {
-                        BuySellMessage::LegalNameChanged(n) => *legal_name = n,
-                        BuySellMessage::EmailChanged(e) => *email = e,
-                        BuySellMessage::Password1Changed(p) => *password1 = p,
-                        BuySellMessage::Password2Changed(p) => *password2 = p,
+                        view::BuySellMessage::LegalNameChanged(n) => *legal_name = n,
+                        view::BuySellMessage::EmailChanged(e) => *email = e,
+                        view::BuySellMessage::Password1Changed(p) => *password1 = p,
+                        view::BuySellMessage::Password2Changed(p) => *password2 = p,
 
-                        BuySellMessage::SubmitRegistration => {
+                        view::BuySellMessage::SubmitRegistration => {
                             let client = self.coincube_client.clone();
                             let request = crate::services::coincube::SignUpRequest {
                                 account_type: crate::services::coincube::AccountType::Individual,
@@ -974,11 +976,11 @@ impl State for BuySellPanel {
                             return Task::perform(
                                 async move { client.sign_up(request).await },
                                 |result| match result {
-                                    Ok(_response) => Message::View(ViewMessage::BuySell(
-                                        BuySellMessage::RegistrationSuccess,
+                                    Ok(_response) => Message::View(view::Message::BuySell(
+                                        view::BuySellMessage::RegistrationSuccess,
                                     )),
-                                    Err(e) => Message::View(ViewMessage::BuySell(
-                                        BuySellMessage::SessionError(
+                                    Err(e) => Message::View(view::Message::BuySell(
+                                        view::BuySellMessage::SessionError(
                                             "Couldn't process signup request",
                                             e.to_string(),
                                         ),
@@ -986,7 +988,7 @@ impl State for BuySellPanel {
                                 },
                             );
                         }
-                        BuySellMessage::RegistrationSuccess => {
+                        view::BuySellMessage::RegistrationSuccess => {
                             self.error = None;
                             self.step = BuySellFlowState::VerifyEmail {
                                 email: email.clone(),
@@ -1009,7 +1011,7 @@ impl State for BuySellPanel {
                         },
                         msg,
                     ) => match msg {
-                        BuySellMessage::SendVerificationEmail => {
+                        view::BuySellMessage::SendVerificationEmail => {
                             match email.get(..8) {
                                 Some(e) => {
                                     log::info!("[COINCUBE] Sending verification email to: {}..", e)
@@ -1023,11 +1025,11 @@ impl State for BuySellPanel {
                             return Task::perform(
                                 async move { client.send_verification_email(&email).await },
                                 |result| match result {
-                                    Ok(_) => Message::View(ViewMessage::BuySell(
-                                        BuySellMessage::CheckEmailVerificationStatus,
+                                    Ok(_) => Message::View(view::Message::BuySell(
+                                        view::BuySellMessage::CheckEmailVerificationStatus,
                                     )),
-                                    Err(e) => Message::View(ViewMessage::BuySell(
-                                        BuySellMessage::SessionError(
+                                    Err(e) => Message::View(view::Message::BuySell(
+                                        view::BuySellMessage::SessionError(
                                             "Unable to send verification email",
                                             e.to_string(),
                                         ),
@@ -1035,7 +1037,7 @@ impl State for BuySellPanel {
                                 },
                             );
                         }
-                        BuySellMessage::CheckEmailVerificationStatus => {
+                        view::BuySellMessage::CheckEmailVerificationStatus => {
                             if *checking {
                                 log::info!(
                                     "Already polling API for Email verification status for {email}"
@@ -1080,18 +1082,18 @@ impl State for BuySellPanel {
                                     }
                                 },
                                 |r| match r {
-                                    Ok(_) => Message::View(ViewMessage::BuySell(
-                                        BuySellMessage::SubmitLogin {
+                                    Ok(_) => Message::View(view::Message::BuySell(
+                                        view::BuySellMessage::SubmitLogin {
                                             skip_email_verification: true,
                                         },
                                     )),
-                                    Err(_) => Message::View(ViewMessage::BuySell(
-                                        BuySellMessage::EmailVerificationFailed,
+                                    Err(_) => Message::View(view::Message::BuySell(
+                                        view::BuySellMessage::EmailVerificationFailed,
                                     )),
                                 },
                             );
                         }
-                        BuySellMessage::EmailVerificationFailed => {
+                        view::BuySellMessage::EmailVerificationFailed => {
                             *checking = false;
                             self.error = Some(
                                 "Timeout attempting automatic login after email verification"
@@ -1108,9 +1110,9 @@ impl State for BuySellPanel {
                     },
                     // login to existing coincube account
                     (BuySellFlowState::Login { email, password }, msg) => match msg {
-                        BuySellMessage::LoginUsernameChanged(username) => *email = username,
-                        BuySellMessage::LoginPasswordChanged(pswd) => *password = pswd,
-                        BuySellMessage::CreateNewAccount => {
+                        view::BuySellMessage::LoginUsernameChanged(username) => *email = username,
+                        view::BuySellMessage::LoginPasswordChanged(pswd) => *password = pswd,
+                        view::BuySellMessage::CreateNewAccount => {
                             self.step = BuySellFlowState::Register {
                                 legal_name: Default::default(),
                                 password1: Default::default(),
@@ -1118,7 +1120,7 @@ impl State for BuySellPanel {
                                 email: Default::default(),
                             };
                         }
-                        BuySellMessage::ResetPassword => {
+                        view::BuySellMessage::ResetPassword => {
                             self.step = BuySellFlowState::PasswordReset {
                                 email: email.clone(),
                                 sent: false,
@@ -1135,11 +1137,11 @@ impl State for BuySellPanel {
                     },
                     // password reset form
                     (BuySellFlowState::PasswordReset { email, sent }, msg) => match msg {
-                        BuySellMessage::EmailChanged(e) => {
+                        view::BuySellMessage::EmailChanged(e) => {
                             *sent = false;
                             *email = e;
                         }
-                        BuySellMessage::SendPasswordResetEmail => {
+                        view::BuySellMessage::SendPasswordResetEmail => {
                             let email = email.clone();
                             let client = self.coincube_client.clone();
 
@@ -1147,10 +1149,10 @@ impl State for BuySellPanel {
                                 async move { client.send_password_reset_email(&email).await },
                                 |res| match res {
                                     Ok(sent) => Message::View(view::Message::BuySell(
-                                        BuySellMessage::PasswordResetEmailSent(sent.message),
+                                        view::BuySellMessage::PasswordResetEmailSent(sent.message),
                                     )),
                                     Err(e) => Message::View(view::Message::BuySell(
-                                        BuySellMessage::SessionError(
+                                        view::BuySellMessage::SessionError(
                                             "Unable to send password reset email",
                                             e.to_string(),
                                         ),
@@ -1158,11 +1160,11 @@ impl State for BuySellPanel {
                                 },
                             );
                         }
-                        BuySellMessage::PasswordResetEmailSent(msg) => {
+                        view::BuySellMessage::PasswordResetEmailSent(msg) => {
                             log::info!("[PASSWORD RESET] {}", msg);
                             *sent = true;
                         }
-                        BuySellMessage::ReturnToLogin => {
+                        view::BuySellMessage::ReturnToLogin => {
                             self.step = BuySellFlowState::Login {
                                 email: email.clone(),
                                 password: "".to_string(),
@@ -1176,12 +1178,18 @@ impl State for BuySellPanel {
                             )
                         }
                     },
-                    #[cfg(feature = "meld")]
-                    (BuySellFlowState::Meld(meld), BuySellMessage::Meld(msg)) => {
-                        return meld
-                            .update(msg, cache, &self.coincube_client)
-                            .map(Message::View)
+                    (BuySellFlowState::Mavapay(state), view::BuySellMessage::Mavapay(msg)) => {
+                        if let Some(task) = state.update(msg, &self.coincube_client) {
+                            return task.map(Message::View);
+                        };
                     }
+                    #[cfg(feature = "meld")]
+                    (BuySellFlowState::Meld(state), view::BuySellMessage::Meld(msg)) => {
+                        if let Some(task) = state.update(msg, cache, &self.coincube_client) {
+                            return task.map(Message::View);
+                        }
+                    }
+
                     (step, msg) => {
                         log::warn!("Current {:?} has ignored message: {:?}", step.name(), msg)
                     }
@@ -1203,9 +1211,9 @@ impl State for BuySellPanel {
                 let client = self.coincube_client.clone();
 
                 Task::perform(async move { client.locate().await }, |result| {
-                    Message::View(ViewMessage::BuySell(BuySellMessage::CountryDetected(
-                        result.map_err(|e| e.to_string()),
-                    )))
+                    Message::View(view::Message::BuySell(
+                        view::BuySellMessage::CountryDetected(result.map_err(|e| e.to_string())),
+                    ))
                 })
             }
         }
@@ -1234,43 +1242,45 @@ impl State for BuySellPanel {
             BuySellFlowState::Meld(meld) => {
                 let mut subs = vec![];
 
-                // SSE subscription
-                if let Some(l) = &self.login {
-                    subs.push(
-                        crate::services::meld::MeldClient::transactions_subscription(
-                            l.token.clone(),
-                        )
-                        .map(|meld| {
-                            Message::View(ViewMessage::BuySell(BuySellMessage::Meld(meld)))
-                        }),
-                    );
-                }
-
-                // webview subscription
                 if let Some(meld::MeldFlowStep::ActiveSession { .. }) = meld.steps.last() {
+                    // webview subscription
                     subs.push(
                         meld.webview_manager
                             .subscription(std::time::Duration::from_millis(25))
                             .map(|m| {
-                                Message::View(ViewMessage::BuySell(BuySellMessage::Meld(
+                                Message::View(view::Message::BuySell(view::BuySellMessage::Meld(
                                     meld::MeldMessage::WebviewManagerUpdate(m),
                                 )))
                             }),
                     );
+
+                    // sse subscription
+                    if let Some(l) = &self.login {
+                        subs.push(
+                            crate::services::meld::MeldClient::transactions_subscription(
+                                l.token.clone(),
+                            )
+                            .map(|meld| {
+                                Message::View(view::Message::BuySell(view::BuySellMessage::Meld(
+                                    meld,
+                                )))
+                            }),
+                        );
+                    }
                 };
 
                 iced::Subscription::batch(subs)
             }
             // periodically re-fetch the price of BTC
-            BuySellFlowState::Mavapay(MavapayFlowStep::Transaction { .. }) => {
+            BuySellFlowState::Mavapay(MavapayState::Transaction { .. }) => {
                 iced::time::every(std::time::Duration::from_secs(30)).map(|_| {
-                    Message::View(ViewMessage::BuySell(BuySellMessage::Mavapay(
+                    Message::View(view::Message::BuySell(view::BuySellMessage::Mavapay(
                         MavapayMessage::GetPrice,
                     )))
                 })
             }
             // SSE stream for transaction status updates during checkout
-            BuySellFlowState::Mavapay(MavapayFlowStep::Checkout {
+            BuySellFlowState::Mavapay(MavapayState::Checkout {
                 stream_order_id: Some(order_id),
                 ..
             }) => {
@@ -1278,7 +1288,9 @@ impl State for BuySellPanel {
                     MavapayClient(&self.coincube_client)
                         .transaction_subscription(order_id.clone(), login.token.clone())
                         .map(|msg| {
-                            Message::View(ViewMessage::BuySell(BuySellMessage::Mavapay(msg)))
+                            Message::View(view::Message::BuySell(view::BuySellMessage::Mavapay(
+                                msg,
+                            )))
                         })
                 } else {
                     iced::Subscription::none()
