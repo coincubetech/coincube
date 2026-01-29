@@ -939,6 +939,26 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
         is_tx_signed,
     } = config;
 
+    if !has_vault {
+        return Container::new(
+            Column::new()
+                .spacing(16)
+                .align_x(Alignment::Center)
+                .push(text("Transfer unavailable").bold().size(H2_SIZE))
+                .push(
+                    text("Please set up a Vault before you can move funds.")
+                        .style(theme::text::secondary)
+                )
+                .push(
+                    button::primary(None, "Create Vault")
+                        .on_press(Message::SetupVault)
+                ),
+        )
+        .width(Length::Fill)
+        .center_x(Length::Fill)
+        .into();
+    }
+
     match current_view.step {
         1 => {
             return select_transfer_direction_view(transfer_direction);
