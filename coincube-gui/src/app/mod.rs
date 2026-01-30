@@ -1074,8 +1074,10 @@ impl App {
                 }
             }
             Message::View(view::Message::Menu(menu)) => {
-                if matches!(menu, Menu::Liquid(LiquidSubMenu::Send) | Menu::Vault(VaultSubMenu::Send))
-                    && !self.cache.has_vault
+                if matches!(
+                    menu,
+                    Menu::Liquid(LiquidSubMenu::Send) | Menu::Vault(VaultSubMenu::Send)
+                ) && !self.cache.has_vault
                 {
                     return Task::done(Message::View(view::Message::ShowError(
                         "Please set up a Vault before transferring funds.".into(),
