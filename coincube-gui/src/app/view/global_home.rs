@@ -939,6 +939,8 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
         is_tx_signed,
     } = config;
 
+ 
+
     match current_view.step {
         1 => {
             return select_transfer_direction_view(transfer_direction);

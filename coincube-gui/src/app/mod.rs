@@ -37,7 +37,7 @@ use crate::{
         breez::BreezClient,
         cache::{Cache, DaemonCache},
         error::Error,
-        menu::Menu,
+        menu::{LiquidSubMenu, Menu, VaultSubMenu},
         message::FiatMessage,
         settings::WalletId,
         wallet::Wallet,
@@ -1074,6 +1074,13 @@ impl App {
                 }
             }
             Message::View(view::Message::Menu(menu)) => {
+                if matches!(menu, Menu::Liquid(LiquidSubMenu::Send) | Menu::Vault(VaultSubMenu::Send))
+                    && !self.cache.has_vault
+                {
+                    return Task::done(Message::View(view::Message::ShowError(
+                        "Please set up a Vault before transferring funds.".into(),
+                    )));
+                }
                 if let Some(panel) = self.panels.current_mut() {
                     return Task::batch([panel.close(), self.set_current_panel(menu)]);
                 }
