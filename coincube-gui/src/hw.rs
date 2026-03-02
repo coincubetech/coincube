@@ -7,6 +7,7 @@ use std::{
 use crate::{
     app::{settings, wallet::Wallet},
     dir::CoincubeDirectory,
+    trezor::TrezorDevice,
 };
 use async_hwi::{
     bitbox::{api::runtime, BitBox02, PairingBitbox02},
@@ -18,6 +19,51 @@ use coincube_core::miniscript::bitcoin::{bip32::Fingerprint, hashes::hex::FromHe
 use iced::futures::{SinkExt, Stream};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
+
+/// Local device-kind enum that extends `async_hwi::DeviceKind` with `Trezor`.
+///
+/// `async_hwi` 0.0.29 does not include a Trezor variant, so we maintain our own
+/// enum and provide conversions to/from `DeviceKind`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HWKind {
+    BitBox02,
+    Coldcard,
+    Specter,
+    SpecterSimulator,
+    Ledger,
+    LedgerSimulator,
+    Jade,
+    Trezor,
+}
+
+impl std::fmt::Display for HWKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HWKind::BitBox02 => write!(f, "bitbox02"),
+            HWKind::Coldcard => write!(f, "coldcard"),
+            HWKind::Specter => write!(f, "specter"),
+            HWKind::SpecterSimulator => write!(f, "specter-simulator"),
+            HWKind::Ledger => write!(f, "ledger"),
+            HWKind::LedgerSimulator => write!(f, "ledger-simulator"),
+            HWKind::Jade => write!(f, "jade"),
+            HWKind::Trezor => write!(f, "trezor"),
+        }
+    }
+}
+
+impl From<DeviceKind> for HWKind {
+    fn from(k: DeviceKind) -> Self {
+        match k {
+            DeviceKind::BitBox02 => HWKind::BitBox02,
+            DeviceKind::Coldcard => HWKind::Coldcard,
+            DeviceKind::Specter => HWKind::Specter,
+            DeviceKind::SpecterSimulator => HWKind::SpecterSimulator,
+            DeviceKind::Ledger => HWKind::Ledger,
+            DeviceKind::LedgerSimulator => HWKind::LedgerSimulator,
+            DeviceKind::Jade => HWKind::Jade,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum UnsupportedReason {
@@ -35,7 +81,7 @@ pub enum UnsupportedReason {
 pub enum HardwareWallet {
     Unsupported {
         id: String,
-        kind: DeviceKind,
+        kind: HWKind,
         version: Option<Version>,
         reason: UnsupportedReason,
     },
@@ -44,12 +90,12 @@ pub enum HardwareWallet {
         // None if the device is currently unlocking in a command.
         device: Arc<Mutex<Option<LockedDevice>>>,
         pairing_code: Option<String>,
-        kind: DeviceKind,
+        kind: HWKind,
     },
     Supported {
         id: String,
         device: Arc<dyn HWI + Sync + Send>,
-        kind: DeviceKind,
+        kind: HWKind,
         fingerprint: Fingerprint,
         version: Option<Version>,
         registered: Option<bool>,
@@ -74,7 +120,7 @@ impl HardwareWallet {
         device: Arc<dyn HWI + Send + Sync>,
         aliases: Option<&HashMap<Fingerprint, String>>,
     ) -> Result<Self, HWIError> {
-        let kind = device.device_kind();
+        let kind = HWKind::from(device.device_kind());
         let fingerprint = device.get_master_fingerprint().await?;
         let version = device.get_version().await.ok();
         Ok(Self::Supported {
@@ -96,7 +142,7 @@ impl HardwareWallet {
         }
     }
 
-    pub fn kind(&self) -> &DeviceKind {
+    pub fn kind(&self) -> &HWKind {
         match self {
             Self::Locked { kind, .. } => kind,
             Self::Unsupported { kind, .. } => kind,
@@ -125,7 +171,7 @@ pub struct HardwareWalletConfig {
 }
 
 impl HardwareWalletConfig {
-    pub fn new(kind: &async_hwi::DeviceKind, fingerprint: Fingerprint, token: &[u8; 32]) -> Self {
+    pub fn new(kind: &HWKind, fingerprint: Fingerprint, token: &[u8; 32]) -> Self {
         Self {
             kind: kind.to_string(),
             fingerprint,
@@ -344,7 +390,7 @@ async fn unlock_bitbox(
         if wallet.descriptor_keys().contains(&fingerprint) {
             Ok(HardwareWallet::Supported {
                 id: id.clone(),
-                kind: DeviceKind::BitBox02,
+                kind: HWKind::BitBox02,
                 fingerprint,
                 device: bitbox2.into(),
                 version,
@@ -354,7 +400,7 @@ async fn unlock_bitbox(
         } else {
             Ok(HardwareWallet::Unsupported {
                 id: id.clone(),
-                kind: DeviceKind::BitBox02,
+                kind: HWKind::BitBox02,
                 version,
                 reason: UnsupportedReason::NotPartOfWallet(fingerprint),
             })
@@ -362,7 +408,7 @@ async fn unlock_bitbox(
     } else {
         Ok(HardwareWallet::Supported {
             id: id.clone(),
-            kind: DeviceKind::BitBox02,
+            kind: HWKind::BitBox02,
             fingerprint,
             device: bitbox2.into(),
             version,
@@ -587,7 +633,7 @@ fn refresh(mut state: State) -> impl Stream<Item = HardwareWalletMessage> {
                     {
                         hws.push(HardwareWallet::Locked {
                             id,
-                            kind: DeviceKind::BitBox02,
+                            kind: HWKind::BitBox02,
                             pairing_code: device.pairing_code().map(|s| s.replace('\n', " ")),
                             device: Arc::new(Mutex::new(Some(LockedDevice::BitBox02(Box::new(
                                 device,
@@ -637,7 +683,7 @@ fn refresh(mut state: State) -> impl Stream<Item = HardwareWalletMessage> {
                                     hws.push(HardwareWallet::Supported {
                                         id,
                                         device,
-                                        kind: DeviceKind::Coldcard,
+                                        kind: HWKind::Coldcard,
                                         fingerprint,
                                         version: Some(version),
                                         registered: None,
@@ -646,7 +692,7 @@ fn refresh(mut state: State) -> impl Stream<Item = HardwareWalletMessage> {
                                 } else {
                                     hws.push(HardwareWallet::Unsupported {
                                         id,
-                                        kind: device.device_kind(),
+                                        kind: HWKind::from(device.device_kind()),
                                         version: Some(version),
                                         reason: UnsupportedReason::Version {
                                             minimal_supported_version: "Edge firmware v6.2.1",
@@ -692,6 +738,33 @@ fn refresh(mut state: State) -> impl Stream<Item = HardwareWalletMessage> {
                 Err(e) => {
                     debug!("{}", e);
                 }
+            }
+        }
+
+        let trezor_usb_devices = trezor_client::transport::webusb::WebUsbTransport::find_devices(false)
+            .unwrap_or_default();
+        for available in trezor_usb_devices {
+            let id = format!("trezor-{}", available);
+            if state.connected_supported_hws.contains(&id) {
+                still.push(id);
+                continue;
+            }
+            match available.connect() {
+                Ok(trezor) => {
+                    match handle_trezor_device(
+                        id,
+                        trezor,
+                        state.network,
+                        state.wallet.as_ref().map(|w| w.as_ref()),
+                        &state.keys_aliases,
+                    )
+                    .await
+                    {
+                        Ok(hw) => hws.push(hw),
+                        Err(e) => warn!("Trezor connect error: {:?}", e),
+                    }
+                }
+                Err(e) => warn!("Could not open Trezor device: {}", e),
             }
         }
 
@@ -763,7 +836,7 @@ async fn handle_ledger_device<'a, T: async_hwi::ledger::Transport + Sync + Send 
                 }
                 Ok(HardwareWallet::Supported {
                     id,
-                    kind: device.device_kind(),
+                    kind: HWKind::from(device.device_kind()),
                     fingerprint,
                     device: Arc::new(device),
                     version: Some(version),
@@ -773,7 +846,7 @@ async fn handle_ledger_device<'a, T: async_hwi::ledger::Transport + Sync + Send 
             } else {
                 Ok(HardwareWallet::Unsupported {
                     id,
-                    kind: device.device_kind(),
+                    kind: HWKind::from(device.device_kind()),
                     version: Some(version),
                     reason: UnsupportedReason::Version {
                         minimal_supported_version: "2.1.0",
@@ -783,7 +856,7 @@ async fn handle_ledger_device<'a, T: async_hwi::ledger::Transport + Sync + Send 
         }
         (_, _) => Ok(HardwareWallet::Unsupported {
             id,
-            kind: device.device_kind(),
+            kind: HWKind::from(device.device_kind()),
             version: None,
             reason: UnsupportedReason::AppIsNotOpen,
         }),
@@ -799,7 +872,6 @@ async fn handle_jade_device(
 ) -> Result<HardwareWallet, HWIError> {
     let info = device.get_info().await?;
     let version = async_hwi::parse_version(&info.jade_version).ok();
-    // Jade may not be setup for the current network
     if (network == Network::Bitcoin
         && info.jade_networks != jade::api::JadeNetworks::Main
         && info.jade_networks != jade::api::JadeNetworks::All)
@@ -807,7 +879,7 @@ async fn handle_jade_device(
     {
         Ok(HardwareWallet::Unsupported {
             id,
-            kind: device.device_kind(),
+            kind: HWKind::Jade,
             version,
             reason: UnsupportedReason::WrongNetwork,
         })
@@ -818,18 +890,18 @@ async fn handle_jade_device(
             | jade::api::JadeState::Uninit
             | jade::api::JadeState::Unsaved => Ok(HardwareWallet::Locked {
                 id,
-                kind: DeviceKind::Jade,
+                kind: HWKind::Jade,
                 pairing_code: None,
                 device: Arc::new(Mutex::new(Some(LockedDevice::Jade(device)))),
             }),
             jade::api::JadeState::Ready => {
-                let kind = device.device_kind();
+                let kind = HWKind::Jade;
                 let version = device.get_version().await.ok();
                 let fingerprint = match device.get_master_fingerprint().await {
                     Err(HWIError::NetworkMismatch) => {
                         return Ok(HardwareWallet::Unsupported {
                             id: id.clone(),
-                            kind,
+                            kind: HWKind::Jade,
                             version,
                             reason: UnsupportedReason::WrongNetwork,
                         });
@@ -888,6 +960,50 @@ impl<'a, T> AsRef<T> for AsRefWrap<'a, T> {
     }
 }
 
+async fn handle_trezor_device(
+    id: String,
+    trezor: trezor_client::Trezor,
+    network: Network,
+    wallet: Option<&Wallet>,
+    keys_aliases: &HashMap<Fingerprint, String>,
+) -> Result<HardwareWallet, HWIError> {
+    let device = TrezorDevice::new(trezor, network)?;
+    let version = device.get_version().await.ok();
+    let fingerprint = device.get_master_fingerprint().await?;
+    let device: Arc<dyn HWI + Sync + Send> = Arc::new(device);
+    let alias = keys_aliases.get(&fingerprint).cloned();
+    if let Some(wallet) = wallet {
+        if wallet.descriptor_keys().contains(&fingerprint) {
+            Ok(HardwareWallet::Supported {
+                id,
+                kind: HWKind::Trezor,
+                fingerprint,
+                device,
+                version,
+                registered: Some(true),
+                alias,
+            })
+        } else {
+            Ok(HardwareWallet::Unsupported {
+                id,
+                kind: HWKind::Trezor,
+                version,
+                reason: UnsupportedReason::NotPartOfWallet(fingerprint),
+            })
+        }
+    } else {
+        Ok(HardwareWallet::Supported {
+            id,
+            kind: HWKind::Trezor,
+            fingerprint,
+            device,
+            version,
+            registered: Some(true),
+            alias,
+        })
+    }
+}
+
 fn ledger_version_supported(version: &Version) -> bool {
     if version.major >= 2 {
         if version.major == 2 {
@@ -901,10 +1017,19 @@ fn ledger_version_supported(version: &Version) -> bool {
 }
 
 // Kind and minimal version of devices supporting tapminiscript.
-// We cannot use a lazy_static HashMap yet, because DeviceKind does not implement Hash.
-const DEVICES_COMPATIBLE_WITH_TAPMINISCRIPT: [(DeviceKind, Option<Version>); 5] = [
+// We cannot use a lazy_static HashMap yet, because HWKind does not implement Hash.
+//
+// NOTE: Trezor is intentionally NOT listed here.  Trezor firmware 2.6.0 added
+// P2WSH (SegWit v0) Miniscript support, but NOT Taproot (P2TR) script-path signing.
+// The sign_tx protocol's sign_taproot_input computes a key-path-only BIP341 sighash
+// (hash341 has no leaf-hash parameter), and input_derive_script for SPENDTAPROOT
+// always derives a BIP86 key-path address — it completely ignores script_pubkey.
+// Coincube wallets use a NUMS internal key, meaning every spend is a script-path
+// tapscript spend that the firmware cannot sign.  Allowing Trezor here would let
+// users create Taproot wallets they can fund but never spend.
+const DEVICES_COMPATIBLE_WITH_TAPMINISCRIPT: [(HWKind, Option<Version>); 5] = [
     (
-        DeviceKind::Ledger,
+        HWKind::Ledger,
         Some(Version {
             major: 2,
             minor: 2,
@@ -912,10 +1037,10 @@ const DEVICES_COMPATIBLE_WITH_TAPMINISCRIPT: [(DeviceKind, Option<Version>); 5] 
             prerelease: None,
         }),
     ),
-    (DeviceKind::Specter, None),
-    (DeviceKind::SpecterSimulator, None),
+    (HWKind::Specter, None),
+    (HWKind::SpecterSimulator, None),
     (
-        DeviceKind::Coldcard,
+        HWKind::Coldcard,
         Some(Version {
             major: 6,
             minor: 3,
@@ -924,7 +1049,7 @@ const DEVICES_COMPATIBLE_WITH_TAPMINISCRIPT: [(DeviceKind, Option<Version>); 5] 
         }),
     ),
     (
-        DeviceKind::BitBox02,
+        HWKind::BitBox02,
         Some(Version {
             major: 9,
             minor: 21,
@@ -935,7 +1060,7 @@ const DEVICES_COMPATIBLE_WITH_TAPMINISCRIPT: [(DeviceKind, Option<Version>); 5] 
 ];
 
 pub fn is_compatible_with_tapminiscript(
-    device_kind: &DeviceKind,
+    device_kind: &HWKind,
     version: Option<&Version>,
 ) -> bool {
     DEVICES_COMPATIBLE_WITH_TAPMINISCRIPT

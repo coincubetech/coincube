@@ -10,7 +10,6 @@ use crate::{
     services::connect::client::backend::{BackendClient, BackendWalletClient},
     signer::Signer,
 };
-use async_hwi::DeviceKind;
 use coincube_core::{descriptors::CoincubeDescriptor, miniscript::bitcoin};
 use coincubed::config::{BitcoinBackend, BitcoinConfig};
 
@@ -59,7 +58,7 @@ pub struct Context {
     pub descriptor_template: DescriptorTemplate,
     pub descriptor: Option<CoincubeDescriptor>,
     pub keys: HashMap<bitcoin::bip32::Fingerprint, KeySetting>,
-    pub hws: Vec<(DeviceKind, bitcoin::bip32::Fingerprint, Option<[u8; 32]>)>,
+    pub hws: Vec<(crate::hw::HWKind, bitcoin::bip32::Fingerprint, Option<[u8; 32]>)>,
     pub coincube_directory: CoincubeDirectory,
     pub network: bitcoin::Network,
     pub hw_is_used: bool,

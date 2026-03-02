@@ -5,7 +5,8 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use async_hwi::{DeviceKind, Version};
+use async_hwi::Version;
+use crate::hw::HWKind;
 use coincube_core::miniscript::{
     bitcoin::{
         bip32::{ChildNumber, DerivationPath, Fingerprint, Xpub},
@@ -344,7 +345,7 @@ impl SelectKeySource {
     fn fetch_xpub(
         hw: std::sync::Arc<dyn async_hwi::HWI + Send + Sync>,
         device_version: Option<Version>,
-        device_kind: DeviceKind,
+        device_kind: HWKind,
         fingerprint: Fingerprint,
         network: Network,
         account: ChildNumber,

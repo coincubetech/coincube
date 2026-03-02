@@ -19,6 +19,9 @@ path = "src/main.rs"
 [dependencies]
 async-trait = "0.1"
 async-hwi = "0.0.29"
+bitcoin = "0.32"
+trezor-client = { version = "0.1.5", default-features = false, features = ["bitcoin"] }
+protobuf = "=3.7.2"
 breez-sdk-liquid = { git = "https://github.com/breez/breez-sdk-liquid" }
 coincube-core = { path = "../coincube-core" }
 coincubed = { path = "../coincubed", default-features = false, features = [

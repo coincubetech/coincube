@@ -13,7 +13,7 @@ use iced::{Subscription, Task};
 
 use coincube_ui::{component::form, widget::Element};
 
-use async_hwi::DeviceKind;
+use crate::hw::HWKind;
 
 use crate::{
     app::{settings::KeySetting, state::vault::export::VaultExportModal, wallet::wallet_name},
@@ -250,7 +250,7 @@ pub struct RegisterDescriptor {
     descriptor: Option<CoincubeDescriptor>,
     processing: bool,
     chosen_hw: Option<usize>,
-    hmacs: Vec<(Fingerprint, DeviceKind, Option<[u8; 32]>)>,
+    hmacs: Vec<(Fingerprint, HWKind, Option<[u8; 32]>)>,
     registered: HashSet<Fingerprint>,
     error: Option<Error>,
     done: bool,

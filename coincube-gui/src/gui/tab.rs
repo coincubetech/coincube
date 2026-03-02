@@ -643,6 +643,31 @@ impl Tab {
                             }
                         }
                     }
+                    Err(app::breez::BreezError::NetworkNotSupported(_)) => {
+                        tracing::info!("Breez SDK not supported on network {}, using disconnected client", network);
+                        let breez = Arc::new(app::breez::BreezClient::disconnected(network));
+                        match create_app_with_remote_backend(
+                            wallet_settings,
+                            backend_client,
+                            wallet,
+                            coins,
+                            datadir.clone(),
+                            network,
+                            config,
+                            breez,
+                        ) {
+                            Ok((app, command)) => {
+                                self.state = State::App(app);
+                                command.map(Message::Run)
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to create app with remote backend: {}", e);
+                                let (launcher, command) = Launcher::new(datadir, Some(network));
+                                self.state = State::Launcher(launcher);
+                                command.map(Message::Launch)
+                            }
+                        }
+                    }
                     Err(e) => {
                         // Failed to load BreezClient - return to launcher with error
                         tracing::error!("Failed to load BreezClient for remote backend: {}", e);
@@ -696,6 +721,40 @@ impl Tab {
                             }
                         } else {
                             // No Vault - create App directly with BreezClient
+                            let (app, command) =
+                                App::new_without_wallet(breez, config, datadir, network, cube);
+                            self.state = State::App(app);
+                            command.map(Message::Run)
+                        }
+                    }
+                    Err(app::breez::BreezError::NetworkNotSupported(_)) => {
+                        tracing::info!("Breez SDK not supported on network {}, continuing without Liquid", network);
+                        let breez = Arc::new(app::breez::BreezClient::disconnected(network));
+                        if let Some(wallet_settings) = wallet_settings {
+                            if wallet_settings.remote_backend_auth.is_some() {
+                                let (login, command) = login::CoincubeLiteLogin::new(
+                                    datadir.clone(),
+                                    network,
+                                    wallet_settings.clone(),
+                                    Some(breez),
+                                );
+                                self.state = State::Login(login);
+                                command.map(Message::Login)
+                            } else {
+                                let (loader, command) = Loader::new(
+                                    datadir.clone(),
+                                    config.clone(),
+                                    network,
+                                    internal_bitcoind.clone(),
+                                    backup.clone(),
+                                    Some(wallet_settings.clone()),
+                                    cube,
+                                    Some(breez),
+                                );
+                                self.state = State::Loader(loader);
+                                command.map(Message::Load)
+                            }
+                        } else {
                             let (app, command) =
                                 App::new_without_wallet(breez, config, datadir, network, cube);
                             self.state = State::App(app);

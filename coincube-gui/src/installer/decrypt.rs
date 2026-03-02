@@ -5,7 +5,8 @@ use std::{
     sync::Arc,
 };
 
-use async_hwi::{bitbox::api::btc::Fingerprint, DeviceKind, Version, HWI};
+use async_hwi::{bitbox::api::btc::Fingerprint, Version, HWI};
+use crate::hw::HWKind;
 use coincube_core::{
     bip39::Mnemonic,
     descriptors::CoincubeDescriptor,
@@ -349,7 +350,7 @@ impl DecryptModal {
         &mut self,
         devices: &mut HardwareWallets,
     ) -> Option<Task<installer::Message>> {
-        fn name(kind: DeviceKind, version: Option<Version>) -> String {
+        fn name(kind: HWKind, version: Option<Version>) -> String {
             // FIXME: Capitalize first letter
             if let Some(v) = version {
                 format!("{kind} {v}")

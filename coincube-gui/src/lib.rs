@@ -9,6 +9,7 @@ pub mod gui;
 pub mod help;
 pub mod hw;
 pub mod installer;
+pub mod trezor;
 pub mod launcher;
 pub mod loader;
 pub mod loading;

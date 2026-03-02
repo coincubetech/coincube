@@ -1,4 +1,5 @@
-use async_hwi::{DeviceKind, Version};
+use async_hwi::Version;
+use crate::hw::HWKind;
 use coincube_core::miniscript::{
     bitcoin::bip32::{ChildNumber, Fingerprint},
     descriptor::DescriptorPublicKey,
@@ -15,7 +16,7 @@ const ENABLE_COSIGNER_KEYS: bool = false;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeySource {
     /// A hardware signing device with the given kind and version.
-    Device(DeviceKind, Option<Version>),
+    Device(HWKind, Option<Version>),
     /// A hot signer on the user's computer.
     HotSigner,
     /// A manually inserted xpub.
@@ -25,7 +26,7 @@ pub enum KeySource {
 }
 
 impl KeySource {
-    pub fn device_kind(&self) -> Option<&DeviceKind> {
+    pub fn device_kind(&self) -> Option<&HWKind> {
         if let KeySource::Device(ref device_kind, _) = self {
             Some(device_kind)
         } else {
@@ -42,8 +43,8 @@ impl KeySource {
     }
 
     pub fn is_compatible_taproot(&self) -> bool {
-        if let KeySource::Device(ref device_kind, ref version) = self {
-            is_compatible_with_tapminiscript(device_kind, version.as_ref())
+        if let KeySource::Device(ref hw_kind, ref version) = self {
+            is_compatible_with_tapminiscript(hw_kind, version.as_ref())
         } else {
             true
         }

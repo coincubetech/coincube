@@ -18,6 +18,7 @@ pub enum BreezError {
     Sdk(String),
     SignerNotFound(Fingerprint),
     SignerError(String),
+    NetworkNotSupported(Network),
 }
 
 impl std::fmt::Display for BreezError {
@@ -29,11 +30,19 @@ impl std::fmt::Display for BreezError {
                 write!(f, "Liquid wallet signer not found for fingerprint: {}", fp)
             }
             BreezError::SignerError(msg) => write!(f, "Signer error: {}", msg),
+            BreezError::NetworkNotSupported(network) => {
+                write!(f, "Liquid/Breez SDK is not supported on network: {}", network)
+            }
         }
     }
 }
 
 impl std::error::Error for BreezError {}
+
+/// Returns true if the given network is supported by the Breez/Liquid SDK.
+pub fn is_breez_supported_network(network: Network) -> bool {
+    matches!(network, Network::Bitcoin)
+}
 
 /// Load BreezClient from datadir using the Liquid wallet signer fingerprint
 pub async fn load_breez_client(
@@ -42,6 +51,10 @@ pub async fn load_breez_client(
     liquid_signer_fingerprint: Fingerprint,
     password: &str,
 ) -> Result<Arc<BreezClient>, BreezError> {
+    if !is_breez_supported_network(network) {
+        return Err(BreezError::NetworkNotSupported(network));
+    }
+
     // Load only the specific signer by fingerprint (more efficient and secure)
     let liquid_signer = HotSigner::from_datadir_by_fingerprint(
         datadir,

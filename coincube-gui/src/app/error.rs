@@ -61,6 +61,12 @@ impl std::fmt::Display for Error {
                 DaemonError::NotImplemented => write!(f, "{}", e),
             },
             Self::Unexpected(e) => write!(f, "Unexpected error: {}", e),
+            Self::HardwareWallet(async_hwi::Error::UnimplementedMethod) => write!(
+                f,
+                "This operation is not yet supported for Trezor with Taproot multisig wallets. \
+                 Trezor signing requires Taproot Miniscript support which is not available in the \
+                 current signing protocol.",
+            ),
             Self::HardwareWallet(e) => write!(f, "error: {}\nPlease check if the device is still connected and unlocked with the correct firmware open for the current network and no other application is accessing the device.", e),
             Self::Desc(e) => write!(f, "Coincube descriptor error: {}", e),
             Self::ImportExport(e) => write!(f, "{e}"),

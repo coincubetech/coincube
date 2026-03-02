@@ -101,12 +101,10 @@ impl State for LiquidSettings {
                             LiquidSettingsFlowState::BackupWallet(
                                 BackupWalletState::RecoveryPhrase,
                             ) => {
-                                let mnemonic = self
-                                    .breez_client
-                                    .liquid_signer()
-                                    .lock()
-                                    .expect("Mutex Lock Poisoned")
-                                    .words();
+                                let mnemonic = match self.breez_client.liquid_signer() {
+                                    Some(s) => s.lock().expect("Mutex Lock Poisoned").words(),
+                                    None => return Task::none(),
+                                };
 
                                 match generate_random_word_indices(mnemonic.len()) {
                                     Some(word_indices) => LiquidSettingsFlowState::BackupWallet(
@@ -191,12 +189,10 @@ impl State for LiquidSettings {
                         ) = &self.flow_state
                         {
                             // Get the actual mnemonic words
-                            let mnemonic = self
-                                .breez_client
-                                .liquid_signer()
-                                .lock()
-                                .expect("Mutex Lock Poisoned")
-                                .words();
+                            let mnemonic = match self.breez_client.liquid_signer() {
+                                Some(s) => s.lock().expect("Mutex Lock Poisoned").words(),
+                                None => return Task::none(),
+                            };
 
                             // Verify each word matches the correct position in the mnemonic
                             // word_indices are 1-based, mnemonic array is 0-based
@@ -235,8 +231,10 @@ impl State for LiquidSettings {
                             async move {
                                 let secp =
                                     coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::new();
-                                let fingerprint = breez_client
-                                    .liquid_signer()
+                                let signer = breez_client.liquid_signer().ok_or_else(|| {
+                                    "Liquid wallet not available on this network".to_string()
+                                })?;
+                                let fingerprint = signer
                                     .lock()
                                     .expect("Mutex Lock Poisoned")
                                     .fingerprint(&secp);
@@ -301,8 +299,11 @@ fn fetch_main_menu_state(breez_client: Arc<BreezClient>) -> bool {
     tokio::task::block_in_place(|| {
         let mut backed_up = false;
         let secp = coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::new();
-        let fingerprint = breez_client
-            .liquid_signer()
+        let signer = match breez_client.liquid_signer() {
+            Some(s) => s,
+            None => return backed_up,
+        };
+        let fingerprint = signer
             .lock()
             .expect("Mutex Lock Poisoned")
             .fingerprint(&secp);

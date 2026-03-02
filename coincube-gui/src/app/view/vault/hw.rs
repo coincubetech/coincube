@@ -6,7 +6,7 @@ use crate::{
     app::view::message::*,
     hw::{HardwareWallet, UnsupportedReason},
 };
-use async_hwi::DeviceKind;
+use crate::hw::HWKind;
 
 pub fn hw_list_view(
     i: usize,
@@ -170,7 +170,7 @@ pub fn hw_list_view_verify_address(
                 )
             } else {
                 match kind {
-                    DeviceKind::Specter | DeviceKind::SpecterSimulator => {
+                    HWKind::Specter | HWKind::SpecterSimulator => {
                         (hw::unimplemented_method_hardware_wallet(
                             kind.to_string(),
                             version.as_ref(),
