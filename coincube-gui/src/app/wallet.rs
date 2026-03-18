@@ -40,6 +40,7 @@ pub struct Wallet {
     pub keys_aliases: HashMap<Fingerprint, String>,
     pub provider_keys: HashMap<Fingerprint, settings::ProviderKey>,
     pub border_wallet_fingerprints: HashSet<Fingerprint>,
+    pub key_settings: HashMap<Fingerprint, settings::KeySetting>,
     pub hardware_wallets: Vec<HardwareWalletConfig>,
     pub signer: Option<Arc<Signer>>,
 }
@@ -60,6 +61,7 @@ impl Wallet {
             keys_aliases: HashMap::new(),
             provider_keys: HashMap::new(),
             border_wallet_fingerprints: HashSet::new(),
+            key_settings: HashMap::new(),
             hardware_wallets: Vec::new(),
             signer: None,
         }
@@ -95,6 +97,14 @@ impl Wallet {
         provider_keys: HashMap<Fingerprint, settings::ProviderKey>,
     ) -> Self {
         self.provider_keys = provider_keys;
+        self
+    }
+
+    pub fn with_key_settings(
+        mut self,
+        settings: HashMap<Fingerprint, settings::KeySetting>,
+    ) -> Self {
+        self.key_settings = settings;
         self
     }
 
@@ -138,6 +148,13 @@ impl Wallet {
                 .with_key_aliases(wallet_settings.keys_aliases())
                 .with_provider_keys(wallet_settings.provider_keys())
                 .with_border_wallet_fingerprints(wallet_settings.border_wallet_fingerprints())
+                .with_key_settings(
+                    wallet_settings
+                        .keys
+                        .iter()
+                        .map(|k| (k.master_fingerprint, k.clone()))
+                        .collect(),
+                )
                 .with_alias(wallet_settings.alias)
                 .with_name(wallet_settings.name)
                 .with_pinned_at(wallet_settings.pinned_at)
@@ -178,26 +195,7 @@ impl Wallet {
     }
 
     pub fn keys(&self) -> HashMap<Fingerprint, settings::KeySetting> {
-        let mut map = HashMap::new();
-        self.keys_aliases.iter().for_each(|(fg, alias)| {
-            map.insert(
-                *fg,
-                settings::KeySetting {
-                    name: alias.clone(),
-                    master_fingerprint: *fg,
-                    provider_key: None,
-                    is_border_wallet: self.border_wallet_fingerprints.contains(fg),
-                },
-            );
-        });
-
-        self.provider_keys.iter().for_each(|(fg, key)| {
-            if let Some(entry) = map.get_mut(fg) {
-                entry.provider_key = Some(key.clone())
-            }
-        });
-
-        map
+        self.key_settings.clone()
     }
 }
 

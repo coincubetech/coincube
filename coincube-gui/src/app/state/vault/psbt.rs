@@ -484,7 +484,7 @@ pub struct BorderWalletReconstructionState {
     pub step: ReconStep,
 
     // Recovery phrase (12 words) — zeroized on drop.
-    pub phrase_words: Vec<form::Value<String>>,
+    pub phrase_words: Vec<form::Value<Zeroizing<String>>>,
     pub phrase_valid: bool,
 
     // Grid + pattern
@@ -503,7 +503,14 @@ impl BorderWalletReconstructionState {
             target_fingerprint,
             network,
             step: ReconStep::RecoveryPhrase,
-            phrase_words: vec![form::Value::default(); 12],
+            phrase_words: vec![
+                form::Value {
+                    value: Zeroizing::new(String::new()),
+                    warning: None,
+                    valid: false,
+                };
+                12
+            ],
             phrase_valid: false,
             grid: None,
             pattern: OrderedPattern::new(),
@@ -534,7 +541,7 @@ impl BorderWalletReconstructionState {
         match msg {
             BorderWalletReconMessage::PhraseWordEdited(index, word) => {
                 if index < 12 {
-                    self.phrase_words[index].value = word;
+                    *self.phrase_words[index].value = word;
                     self.phrase_words[index].valid = true;
                     self.phrase_words[index].warning = None;
                 }
@@ -678,6 +685,19 @@ impl SignModal {
     pub fn is_signing(&self) -> bool {
         !self.signing.is_empty()
     }
+
+    fn clear_border_wallet_recon(&mut self) {
+        if let Some(mut recon) = self.border_wallet_recon.take() {
+            recon.pattern.clear();
+            recon.checksum_word.zeroize();
+        }
+    }
+}
+
+impl Drop for SignModal {
+    fn drop(&mut self) {
+        self.clear_border_wallet_recon();
+    }
 }
 
 impl Modal for SignModal {
@@ -729,7 +749,7 @@ impl Modal for SignModal {
                         .is_some_and(|r| r.step == ReconStep::RecoveryPhrase);
 
                 if is_cancel || is_previous_on_phrase {
-                    self.border_wallet_recon = None;
+                    self.clear_border_wallet_recon();
                     return Task::none();
                 }
 
@@ -738,7 +758,7 @@ impl Modal for SignModal {
                         let network = recon.network;
                         let psbt = tx.psbt.clone();
                         // Clear reconstruction state (zeroizes phrase words via Drop).
-                        self.border_wallet_recon = None;
+                        self.clear_border_wallet_recon();
                         self.display_modal = false;
                         self.signing.insert(fingerprint);
                         return Task::perform(

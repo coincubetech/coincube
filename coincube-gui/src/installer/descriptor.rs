@@ -187,17 +187,15 @@ pub enum PathKind {
 }
 
 impl PathKind {
-    /// Whether a key with the given `KeySourceKind` can be chosen for this `PathKind`.
     pub fn can_choose_key_source_kind(&self, source_kind: &KeySourceKind) -> bool {
         match (self, source_kind) {
             // Safety net path allows safety net token keys and Border Wallet keys.
             (Self::SafetyNet, KeySourceKind::Token(KeyKind::SafetyNet)) => true,
             (Self::SafetyNet, KeySourceKind::BorderWallet) => true,
-            (Self::SafetyNet, _) => false,
+            // Prevent Border Wallet keys outside the safety net.
+            (_, KeySourceKind::BorderWallet) => false,
             // Safety net token keys cannot be used in non-safety-net paths.
             (_, KeySourceKind::Token(KeyKind::SafetyNet)) => false,
-            // Border Wallet keys can be used on any path.
-            (_, KeySourceKind::BorderWallet) => true,
             // Enable/disable cosigner keys.
             (_, KeySourceKind::Token(KeyKind::Cosigner)) => ENABLE_COSIGNER_KEYS,
             _ => true,

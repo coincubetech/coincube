@@ -38,6 +38,19 @@ use crate::{
 
 use key::{new_multixkey_from_xpub, EditKeyAlias, PathData, SelectKeySource};
 
+fn count_border_wallet_keys(paths: &[Path]) -> usize {
+    paths
+        .iter()
+        .flat_map(|path| path.keys.iter())
+        .filter(|maybe_key| {
+            maybe_key
+                .as_ref()
+                .map(|key| matches!(key.source.kind(), KeySourceKind::BorderWallet))
+                .unwrap_or(false)
+        })
+        .count()
+}
+
 pub trait DescriptorEditModal {
     fn processing(&self) -> bool {
         false
@@ -259,7 +272,17 @@ impl Step for DefineDescriptor {
                                 tracing::error!("Key {fingerprint} does not exists");
                                 return Task::none();
                             }
+                            let is_border_wallet =
+                                matches!(existing_key.source.kind(), KeySourceKind::BorderWallet);
                             for coordinate in coordinates {
+                                let path_kind = self.paths[coordinate.0].kind();
+                                if is_border_wallet && path_kind != PathKind::SafetyNet {
+                                    self.error = Some(
+                                        "Border Wallet keys can only occupy the Safety Net slot"
+                                            .into(),
+                                    );
+                                    return Task::none();
+                                }
                                 if !self.paths[coordinate.0]
                                     .keys
                                     .contains(&Some(existing_key.clone()))
@@ -285,6 +308,17 @@ impl Step for DefineDescriptor {
                         }
                         if self.keys.contains_key(&key.fingerprint) {
                             tracing::error!("Key {} already exists", key.fingerprint);
+                        }
+                        let is_border_wallet =
+                            matches!(key.source.kind(), KeySourceKind::BorderWallet);
+                        for coordinate in &coordinates {
+                            let path_kind = self.paths[coordinate.0].kind();
+                            if is_border_wallet && path_kind != PathKind::SafetyNet {
+                                self.error = Some(
+                                    "Border Wallet keys can only occupy the Safety Net slot".into(),
+                                );
+                                return Task::none();
+                            }
                         }
                         self.keys.insert(key.fingerprint, *key.clone());
                         for coordinate in coordinates {
@@ -470,6 +504,24 @@ impl Step for DefineDescriptor {
 
     fn apply(&mut self, ctx: &mut Context) -> bool {
         if self.paths.len() < 2 {
+            return false;
+        }
+
+        if count_border_wallet_keys(&self.paths) > 1 {
+            self.error = Some("Only one Border Wallet key is allowed per wallet".into());
+            return false;
+        }
+
+        if self.paths.iter().any(|path| {
+            path.kind() != PathKind::SafetyNet
+                && path.keys.iter().any(|maybe_key| {
+                    maybe_key
+                        .as_ref()
+                        .map(|key| matches!(key.source.kind(), KeySourceKind::BorderWallet))
+                        .unwrap_or(false)
+                })
+        }) {
+            self.error = Some("Border Wallet keys must be placed on the Safety Net path".into());
             return false;
         }
 

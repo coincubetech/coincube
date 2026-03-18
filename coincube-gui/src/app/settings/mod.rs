@@ -15,6 +15,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use coincube_core::miniscript::bitcoin::bip32::Fingerprint;
 use coincube_ui::component::form;
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 use crate::{
     backup::{Key, KeyRole, KeyType},
@@ -47,10 +48,21 @@ impl Settings {
                 _ => SettingsError::ReadingFile(format!("Reading settings file: {}", e)),
             })
             .and_then(|file_content| {
-                serde_json::from_slice::<Settings>(&file_content).map_err(|e| {
-                    SettingsError::ReadingFile(format!("Parsing settings file: {}", e))
-                })
+                let mut settings =
+                    serde_json::from_slice::<Settings>(&file_content).map_err(|e| {
+                        SettingsError::ReadingFile(format!("Parsing settings file: {}", e))
+                    })?;
+                settings.normalize_border_wallet_flags();
+                Ok(settings)
             })
+    }
+}
+
+impl Settings {
+    fn normalize_border_wallet_flags(&mut self) {
+        for wallet in &mut self.wallets {
+            wallet.normalize_border_wallet_flags();
+        }
     }
 }
 
@@ -315,6 +327,12 @@ impl WalletSettings {
         Settings::from_file(network_dir).map(|cache| cache.wallets.into_iter().find(selecter))
     }
 
+    pub fn normalize_border_wallet_flags(&mut self) {
+        for key in &mut self.keys {
+            key.normalize_border_wallet_flag();
+        }
+    }
+
     pub fn keys_aliases(&self) -> HashMap<Fingerprint, String> {
         let mut map = HashMap::new();
         for key in self.keys.iter().filter(|k| !k.name.is_empty()) {
@@ -339,9 +357,10 @@ impl WalletSettings {
         self.keys
             .iter()
             .filter(|k| {
-                k.is_border_wallet
-                    || k.name == "Border Wallet"
-                    || k.name == "Border Wallet Safety Net"
+                k.provider_key.is_none()
+                    && (k.is_border_wallet
+                        || k.name == "Border Wallet"
+                        || k.name == "Border Wallet Safety Net")
             })
             .map(|k| k.master_fingerprint)
             .collect()
@@ -486,8 +505,12 @@ impl KeySetting {
             key: self.master_fingerprint,
             alias: Some(self.name.clone()),
             role: None,
-            key_type: None,
-            proprietary,
+            key_type: self.provider_key.as_ref().map(|_| KeyType::ThirdParty),
+            proprietary: self
+                .provider_key
+                .as_ref()
+                .map(|pk| serde_json::to_value(pk).unwrap_or(proprietary.clone()))
+                .unwrap_or(proprietary),
         }
     }
 
@@ -498,25 +521,33 @@ impl KeySetting {
         key_type: Option<KeyType>,
         metadata: serde_json::Value,
     ) -> Option<Self> {
-        if let Some(KeyType::ThirdParty) = key_type {
-            let provider_key = serde_json::from_value(metadata).ok();
-            Some(Self {
-                name,
-                master_fingerprint: fg,
-                provider_key,
-                is_border_wallet: false,
-            })
+        let provider_key = if key_type == Some(KeyType::ThirdParty) {
+            serde_json::from_value(metadata.clone()).ok()
         } else {
-            let is_border_wallet = metadata
-                .get("is_border_wallet")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            Some(Self {
-                name,
-                master_fingerprint: fg,
-                provider_key: None,
-                is_border_wallet,
-            })
+            None
+        };
+        let is_border_wallet = metadata
+            .get("is_border_wallet")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let mut key = Self {
+            name,
+            master_fingerprint: fg,
+            provider_key,
+            is_border_wallet,
+        };
+        key.normalize_border_wallet_flag();
+        Some(key)
+    }
+
+    fn normalize_border_wallet_flag(&mut self) {
+        if self.is_border_wallet && self.provider_key.is_some() {
+            warn!(
+                fingerprint = %self.master_fingerprint,
+                alias = %self.name,
+                "Ignoring Border Wallet flag on hardware/provider-managed key"
+            );
+            self.is_border_wallet = false;
         }
     }
 
