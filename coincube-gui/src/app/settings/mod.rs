@@ -356,12 +356,7 @@ impl WalletSettings {
     pub fn border_wallet_fingerprints(&self) -> HashSet<Fingerprint> {
         self.keys
             .iter()
-            .filter(|k| {
-                k.provider_key.is_none()
-                    && (k.is_border_wallet
-                        || k.name == "Border Wallet"
-                        || k.name == "Border Wallet Safety Net")
-            })
+            .filter(|k| k.provider_key.is_none() && k.is_border_wallet)
             .map(|k| k.master_fingerprint)
             .collect()
     }
@@ -548,6 +543,14 @@ impl KeySetting {
                 "Ignoring Border Wallet flag on hardware/provider-managed key"
             );
             self.is_border_wallet = false;
+        } else if !self.is_border_wallet
+            && self.provider_key.is_none()
+            && matches!(
+                self.name.as_str(),
+                "Border Wallet" | "Border Wallet Safety Net"
+            )
+        {
+            self.is_border_wallet = true;
         }
     }
 
