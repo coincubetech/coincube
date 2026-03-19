@@ -109,6 +109,180 @@ pub struct HotSigner {
     master_xpriv: bip32::Xpriv,
 }
 
+fn derive_xpriv_at(
+    master_xpriv: &bip32::Xpriv,
+    der_path: &bip32::DerivationPath,
+    secp: &secp256k1::Secp256k1<impl secp256k1::Signing>,
+) -> bip32::Xpriv {
+    master_xpriv
+        .derive_priv(secp, der_path)
+        .expect("Never fails")
+}
+
+fn sign_p2wsh_with_master(
+    master_xpriv: &bip32::Xpriv,
+    secp: &secp256k1::Secp256k1<impl secp256k1::Signing>,
+    sighash_cache: &mut sighash::SighashCache<&bitcoin::Transaction>,
+    master_fingerprint: bip32::Fingerprint,
+    psbt_in: &mut PsbtIn,
+    input_index: usize,
+) -> Result<(), SignerError> {
+    let witscript = psbt_in
+        .witness_script
+        .as_ref()
+        .ok_or(SignerError::IncompletePsbt)?;
+    let value = psbt_in
+        .witness_utxo
+        .as_ref()
+        .ok_or(SignerError::IncompletePsbt)?
+        .value;
+    let sighash_type = sighash::EcdsaSighashType::All;
+    let sighash = sighash_cache
+        .p2wsh_signature_hash(input_index, witscript, value, sighash_type)
+        .map_err(|_| SignerError::InsanePsbt)?;
+    let sighash = secp256k1::Message::from_digest_slice(sighash.as_byte_array())
+        .expect("Sighash is always 32 bytes.");
+
+    for (curr_pubkey, (fingerprint, der_path)) in psbt_in.bip32_derivation.iter() {
+        if *fingerprint != master_fingerprint {
+            continue;
+        }
+        let privkey = derive_xpriv_at(master_xpriv, der_path, secp).to_priv();
+        let pubkey = privkey.public_key(secp);
+        if pubkey.inner != *curr_pubkey {
+            return Err(SignerError::InsanePsbt);
+        }
+        let signature = secp.sign_ecdsa_low_r(&sighash, &privkey.inner);
+        psbt_in.partial_sigs.insert(
+            pubkey,
+            ecdsa::Signature {
+                signature,
+                sighash_type,
+            },
+        );
+    }
+
+    Ok(())
+}
+
+fn sign_taproot_with_master(
+    master_xpriv: &bip32::Xpriv,
+    secp: &secp256k1::Secp256k1<secp256k1::All>,
+    sighash_cache: &mut sighash::SighashCache<&bitcoin::Transaction>,
+    master_fingerprint: bip32::Fingerprint,
+    prevouts: &[bitcoin::TxOut],
+    psbt_in: &mut PsbtIn,
+    input_index: usize,
+) -> Result<(), SignerError> {
+    let sighash_type = sighash::TapSighashType::Default;
+    let prevouts = sighash::Prevouts::All(prevouts);
+
+    if let Some(ref int_key) = psbt_in.tap_internal_key {
+        if let Some((_, (fg, der_path))) = psbt_in.tap_key_origins.get(int_key) {
+            if *fg == master_fingerprint {
+                let privkey = derive_xpriv_at(master_xpriv, der_path, secp).to_priv();
+                let keypair = secp256k1::Keypair::from_secret_key(secp, &privkey.inner);
+                if keypair.x_only_public_key().0 != *int_key {
+                    return Err(SignerError::InsanePsbt);
+                }
+                let keypair = keypair
+                    .tap_tweak(secp, psbt_in.tap_merkle_root)
+                    .to_keypair();
+                let sighash = sighash_cache
+                    .taproot_key_spend_signature_hash(input_index, &prevouts, sighash_type)
+                    .map_err(|_| SignerError::InsanePsbt)?;
+                let sighash = secp256k1::Message::from_digest_slice(sighash.as_byte_array())
+                    .expect("Sighash is always 32 bytes.");
+                let signature = secp.sign_schnorr_no_aux_rand(&sighash, &keypair);
+                let sig = bitcoin::taproot::Signature {
+                    signature,
+                    sighash_type,
+                };
+                psbt_in.tap_key_sig = Some(sig);
+            }
+        }
+    }
+
+    for (pubkey, (leaf_hashes, (fg, der_path))) in &psbt_in.tap_key_origins {
+        if *fg != master_fingerprint {
+            continue;
+        }
+
+        for leaf_hash in leaf_hashes {
+            let privkey = derive_xpriv_at(master_xpriv, der_path, secp).to_priv();
+            let keypair = secp256k1::Keypair::from_secret_key(secp, &privkey.inner);
+            let sighash = sighash_cache
+                .taproot_script_spend_signature_hash(
+                    input_index,
+                    &prevouts,
+                    *leaf_hash,
+                    sighash_type,
+                )
+                .map_err(|_| SignerError::InsanePsbt)?;
+            let sighash = secp256k1::Message::from_digest_slice(sighash.as_byte_array())
+                .expect("Sighash is always 32 bytes.");
+            let signature = secp.sign_schnorr_no_aux_rand(&sighash, &keypair);
+            let sig = bitcoin::taproot::Signature {
+                signature,
+                sighash_type,
+            };
+            psbt_in.tap_script_sigs.insert((*pubkey, *leaf_hash), sig);
+        }
+    }
+
+    Ok(())
+}
+
+pub(crate) fn fingerprint_from_master_xpriv(
+    master_xpriv: &bip32::Xpriv,
+    secp: &secp256k1::Secp256k1<impl secp256k1::Signing>,
+) -> bip32::Fingerprint {
+    master_xpriv.fingerprint(secp)
+}
+
+pub(crate) fn sign_psbt_with_master_xpriv(
+    master_xpriv: &bip32::Xpriv,
+    mut psbt: Psbt,
+    secp: &secp256k1::Secp256k1<secp256k1::All>,
+) -> Result<Psbt, SignerError> {
+    let master_fingerprint = fingerprint_from_master_xpriv(master_xpriv, secp);
+    let mut sighash_cache = sighash::SighashCache::new(&psbt.unsigned_tx);
+
+    let prevouts: Vec<_> = psbt
+        .inputs
+        .iter()
+        .filter_map(|psbt_in| psbt_in.witness_utxo.clone())
+        .collect();
+    if prevouts.len() != psbt.inputs.len() {
+        return Err(SignerError::IncompletePsbt);
+    }
+
+    for i in 0..psbt.inputs.len() {
+        if psbt.inputs[i].witness_script.is_some() {
+            sign_p2wsh_with_master(
+                master_xpriv,
+                secp,
+                &mut sighash_cache,
+                master_fingerprint,
+                &mut psbt.inputs[i],
+                i,
+            )?;
+        } else {
+            sign_taproot_with_master(
+                master_xpriv,
+                secp,
+                &mut sighash_cache,
+                master_fingerprint,
+                &prevouts,
+                &mut psbt.inputs[i],
+                i,
+            )?;
+        }
+    }
+
+    Ok(psbt)
+}
+
 // TODO: instead of copying them here we could have a util module with those helpers.
 // Create a directory with no permission for group and other users.
 fn create_dir(path: &path::Path) -> io::Result<()> {
@@ -567,173 +741,15 @@ impl HotSigner {
         bip32::Xpub::from_priv(secp, &xpriv)
     }
 
-    // Provide an ECDSA signature for this transaction input from the PSBT input information.
-    fn sign_p2wsh(
-        &self,
-        secp: &secp256k1::Secp256k1<impl secp256k1::Signing>,
-        sighash_cache: &mut sighash::SighashCache<&bitcoin::Transaction>,
-        master_fingerprint: bip32::Fingerprint,
-        psbt_in: &mut PsbtIn,
-        input_index: usize,
-    ) -> Result<(), SignerError> {
-        // First of all compute the sighash for this input. We assume P2WSH spend: the sighash
-        // script code is always the witness script.
-        let witscript = psbt_in
-            .witness_script
-            .as_ref()
-            .ok_or(SignerError::IncompletePsbt)?;
-        let value = psbt_in
-            .witness_utxo
-            .as_ref()
-            .ok_or(SignerError::IncompletePsbt)?
-            .value;
-        let sighash_type = sighash::EcdsaSighashType::All;
-        let sighash = sighash_cache
-            .p2wsh_signature_hash(input_index, witscript, value, sighash_type)
-            .map_err(|_| SignerError::InsanePsbt)?;
-        let sighash = secp256k1::Message::from_digest_slice(sighash.as_byte_array())
-            .expect("Sighash is always 32 bytes.");
-
-        // Then provide a signature for all the keys they asked for.
-        for (curr_pubkey, (fingerprint, der_path)) in psbt_in.bip32_derivation.iter() {
-            if *fingerprint != master_fingerprint {
-                continue;
-            }
-            let privkey = self.xpriv_at(der_path, secp).to_priv();
-            let pubkey = privkey.public_key(secp);
-            if pubkey.inner != *curr_pubkey {
-                return Err(SignerError::InsanePsbt);
-            }
-            let signature = secp.sign_ecdsa_low_r(&sighash, &privkey.inner);
-            psbt_in.partial_sigs.insert(
-                pubkey,
-                ecdsa::Signature {
-                    signature,
-                    sighash_type,
-                },
-            );
-        }
-
-        Ok(())
-    }
-
-    // Provide a BIP340 signature for this transaction input from the PSBT input information.
-    fn sign_taproot(
-        &self,
-        secp: &secp256k1::Secp256k1<secp256k1::All>,
-        sighash_cache: &mut sighash::SighashCache<&bitcoin::Transaction>,
-        master_fingerprint: bip32::Fingerprint,
-        prevouts: &[bitcoin::TxOut],
-        psbt_in: &mut PsbtIn,
-        input_index: usize,
-    ) -> Result<(), SignerError> {
-        let sighash_type = sighash::TapSighashType::Default;
-        let prevouts = sighash::Prevouts::All(prevouts);
-
-        // If the details of the internal key are filled, provide a keypath signature.
-        if let Some(ref int_key) = psbt_in.tap_internal_key {
-            // NB: we don't check for empty leaf hashes on purpose, in case the internal key also
-            // appears in a leaf.
-            if let Some((_, (fg, der_path))) = psbt_in.tap_key_origins.get(int_key) {
-                if *fg == master_fingerprint {
-                    let privkey = self.xpriv_at(der_path, secp).to_priv();
-                    let keypair = secp256k1::Keypair::from_secret_key(secp, &privkey.inner);
-                    if keypair.x_only_public_key().0 != *int_key {
-                        return Err(SignerError::InsanePsbt);
-                    }
-                    let keypair = keypair
-                        .tap_tweak(secp, psbt_in.tap_merkle_root)
-                        .to_keypair();
-                    let sighash = sighash_cache
-                        .taproot_key_spend_signature_hash(input_index, &prevouts, sighash_type)
-                        .map_err(|_| SignerError::InsanePsbt)?;
-                    let sighash = secp256k1::Message::from_digest_slice(sighash.as_byte_array())
-                        .expect("Sighash is always 32 bytes.");
-                    let signature = secp.sign_schnorr_no_aux_rand(&sighash, &keypair);
-                    let sig = bitcoin::taproot::Signature {
-                        signature,
-                        sighash_type,
-                    };
-                    psbt_in.tap_key_sig = Some(sig);
-                }
-            }
-        }
-
-        // Now sign for all the public keys derived from our master secret, in all the leaves where
-        // they are present.
-        for (pubkey, (leaf_hashes, (fg, der_path))) in &psbt_in.tap_key_origins {
-            if *fg != master_fingerprint {
-                continue;
-            }
-
-            for leaf_hash in leaf_hashes {
-                let privkey = self.xpriv_at(der_path, secp).to_priv();
-                let keypair = secp256k1::Keypair::from_secret_key(secp, &privkey.inner);
-                let sighash = sighash_cache
-                    .taproot_script_spend_signature_hash(
-                        input_index,
-                        &prevouts,
-                        *leaf_hash,
-                        sighash_type,
-                    )
-                    .map_err(|_| SignerError::InsanePsbt)?;
-                let sighash = secp256k1::Message::from_digest_slice(sighash.as_byte_array())
-                    .expect("Sighash is always 32 bytes.");
-                let signature = secp.sign_schnorr_no_aux_rand(&sighash, &keypair);
-                let sig = bitcoin::taproot::Signature {
-                    signature,
-                    sighash_type,
-                };
-                psbt_in.tap_script_sigs.insert((*pubkey, *leaf_hash), sig);
-            }
-        }
-
-        Ok(())
-    }
-
     /// Sign all inputs of the given PSBT.
     ///
     /// **This does not perform any check. It will blindly sign anything that's passed.**
     pub fn sign_psbt(
         &self,
-        mut psbt: Psbt,
+        psbt: Psbt,
         secp: &secp256k1::Secp256k1<secp256k1::All>,
     ) -> Result<Psbt, SignerError> {
-        let master_fingerprint = self.fingerprint(secp);
-        let mut sighash_cache = sighash::SighashCache::new(&psbt.unsigned_tx);
-
-        let prevouts: Vec<_> = psbt
-            .inputs
-            .iter()
-            .filter_map(|psbt_in| psbt_in.witness_utxo.clone())
-            .collect();
-        if prevouts.len() != psbt.inputs.len() {
-            return Err(SignerError::IncompletePsbt);
-        }
-
-        // Sign each input in the PSBT.
-        for i in 0..psbt.inputs.len() {
-            if psbt.inputs[i].witness_script.is_some() {
-                self.sign_p2wsh(
-                    secp,
-                    &mut sighash_cache,
-                    master_fingerprint,
-                    &mut psbt.inputs[i],
-                    i,
-                )?;
-            } else {
-                self.sign_taproot(
-                    secp,
-                    &mut sighash_cache,
-                    master_fingerprint,
-                    &prevouts,
-                    &mut psbt.inputs[i],
-                    i,
-                )?;
-            }
-        }
-
-        Ok(psbt)
+        sign_psbt_with_master_xpriv(&self.master_xpriv, psbt, secp)
     }
 
     /// Change the network of generated extended keys. Note this value only has to do with the

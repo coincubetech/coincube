@@ -38,7 +38,7 @@ use miniscript::bitcoin::{
 };
 use zeroize::Zeroizing;
 
-use crate::signer::HotSigner;
+use crate::signer::{fingerprint_from_master_xpriv, sign_psbt_with_master_xpriv};
 
 /// A secret-bearing grid recovery phrase.
 ///
@@ -153,10 +153,10 @@ pub fn derive_enrollment(
 /// Sign a PSBT using a transiently reconstructed Border Wallet key.
 ///
 /// This function:
-/// 1. Creates a transient `HotSigner` from the reconstructed mnemonic
+/// 1. Derives a master xpriv from the reconstructed mnemonic using a zeroized seed
 /// 2. Verifies the fingerprint matches the expected enrollment fingerprint
-/// 3. Signs the PSBT
-/// 4. All secret material is dropped when this function returns
+/// 3. Signs the PSBT using short-lived master key material
+/// 4. Drops the mnemonic and seed immediately after use
 ///
 /// Returns the fingerprint and signed PSBT on success.
 pub fn sign_psbt_with_border_wallet(
@@ -167,10 +167,14 @@ pub fn sign_psbt_with_border_wallet(
 ) -> Result<(Fingerprint, Psbt), BorderWalletError> {
     let secp = secp256k1::Secp256k1::new();
 
-    let signer = HotSigner::from_mnemonic(network, mnemonic)
+    let seed = Zeroizing::new(mnemonic.to_seed(""));
+    // Explicitly drop mnemonic to avoid keeping it in memory any longer than necessary.
+    drop(mnemonic);
+
+    let master_xpriv = bip32::Xpriv::new_master(network, &*seed)
         .map_err(|e| BorderWalletError::KeyDerivation(e.to_string()))?;
 
-    let actual_fingerprint = signer.fingerprint(&secp);
+    let actual_fingerprint = fingerprint_from_master_xpriv(&master_xpriv, &secp);
     if actual_fingerprint != expected_fingerprint {
         return Err(BorderWalletError::FingerprintMismatch {
             expected: expected_fingerprint,
@@ -178,8 +182,7 @@ pub fn sign_psbt_with_border_wallet(
         });
     }
 
-    let signed_psbt = signer
-        .sign_psbt(psbt, &secp)
+    let signed_psbt = sign_psbt_with_master_xpriv(&master_xpriv, psbt, &secp)
         .map_err(|e| BorderWalletError::SigningFailed(e.to_string()))?;
 
     Ok((actual_fingerprint, signed_psbt))
