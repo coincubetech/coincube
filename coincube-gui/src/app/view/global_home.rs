@@ -1,7 +1,7 @@
 use breez_sdk_liquid::{bitcoin::Denomination, model::PreparePayOnchainResponse};
 use coincube_ui::{
     color,
-    component::{amount::*, button, form, text::*},
+    component::{amount::*, button, form, text::{self, *}},
     icon::{
         arrow_down_up_icon, arrow_right, check_circle_icon, eye_outline_icon, eye_slash_icon,
         lightning_icon, usd_icon, vault_icon, warning_icon,
@@ -317,8 +317,8 @@ fn wallet_card<'a>(
                                 Row::new()
                                     .spacing(10)
                                     .align_y(Alignment::Center)
-                                    .push(text(format_usdt_display(usdt_bal)).size(H2_SIZE).bold())
-                                    .push(text("USDt").size(H2_SIZE).color(color::GREY_3))
+                                    .push(mono_regular(format_usdt_display(usdt_bal)).size(H2_SIZE))
+                                    .push(mono_regular("USDt").size(H2_SIZE).color(color::GREY_3))
                             })
                             .push(
                                 text("Liquid Network")
@@ -337,7 +337,7 @@ fn wallet_card<'a>(
                                                     .style(theme::text::secondary),
                                             )
                                             .push(
-                                                text(format!(
+                                                mono_regular(format!(
                                                     "-{} USDt pending",
                                                     format_usdt_display(pending_send_sats)
                                                 ))
@@ -359,7 +359,7 @@ fn wallet_card<'a>(
                                                     .style(theme::text::secondary),
                                             )
                                             .push(
-                                                text(format!(
+                                                mono_regular(format!(
                                                     "+{} USDt pending",
                                                     format_usdt_display(pending_receive_sats)
                                                 ))
@@ -453,7 +453,13 @@ fn wallet_card<'a>(
                                 Some(text("********").size(P1_SIZE))
                             } else {
                                 fiat_balance.map(|fiat| {
-                                    fiat.to_text().size(P1_SIZE).style(theme::text::secondary)
+                                    mono_regular(format!(
+                                        "~{} {}",
+                                        fiat.to_formatted_string(),
+                                        fiat.currency()
+                                    ))
+                                    .size(P1_SIZE)
+                                    .style(theme::text::secondary)
                                 })
                             })
                             .push_maybe((!balance_masked && pending_send_sats > 0).then(|| {
@@ -722,8 +728,15 @@ fn balance_summary_card<'a>(
                     .spacing(4)
                     .push(amount_with_size_and_unit(balance, H2_SIZE, bitcoin_unit))
                     .push_maybe(
-                        fiat_balance
-                            .map(|fiat| fiat.to_text().size(P1_SIZE).style(theme::text::secondary)),
+                        fiat_balance.map(|fiat| {
+                            mono_regular(format!(
+                                "~{} {}",
+                                fiat.to_formatted_string(),
+                                fiat.currency()
+                            ))
+                            .size(P1_SIZE)
+                            .style(theme::text::secondary)
+                        }),
                     ),
             ),
         );

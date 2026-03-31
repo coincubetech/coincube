@@ -47,8 +47,8 @@ pub fn usdt_overview_view<'a>(
             Row::new()
                 .spacing(10)
                 .align_y(Alignment::Center)
-                .push(text(format_usdt_display(usdt_balance)).size(H2_SIZE).bold())
-                .push(text("USDt").size(H2_SIZE).color(color::GREY_3)),
+                .push(mono_regular(format_usdt_display(usdt_balance)).size(H2_SIZE))
+                .push(mono_regular("USDt").size(H2_SIZE).color(color::GREY_3)),
         )
         .push(
             text("Liquid Network")
@@ -62,7 +62,7 @@ pub fn usdt_overview_view<'a>(
                     .align_y(Alignment::Center)
                     .push(icon::warning_icon().size(12).style(theme::text::secondary))
                     .push(
-                        text(format!(
+                        mono_regular(format!(
                             "-{} USDt pending",
                             format_usdt_display(pending_outgoing_sats)
                         ))
@@ -80,7 +80,7 @@ pub fn usdt_overview_view<'a>(
                     .align_y(Alignment::Center)
                     .push(icon::warning_icon().size(12).style(theme::text::secondary))
                     .push(
-                        text(format!(
+                        mono_regular(format!(
                             "+{} USDt pending",
                             format_usdt_display(pending_incoming_sats)
                         ))

@@ -646,7 +646,7 @@ fn lightning_address_ux<'a>(state: &'a ConnectCubePanel) -> Element<'a, ConnectC
                 .push(
                     container(
                         Row::new()
-                            .push(text::h3(address.clone()).color(color::ORANGE))
+                            .push(text::mono_regular(address.clone()).color(color::ORANGE))
                             .push(iced::widget::Space::new().width(Length::Fill))
                             .push(
                                 button::secondary(Some(clipboard_icon()), "Copy")
@@ -743,7 +743,7 @@ fn lightning_address_ux<'a>(state: &'a ConnectCubePanel) -> Element<'a, ConnectC
                                 .padding(15),
                         )
                         .push(
-                            container(text::p1_regular(LN_ADDRESS_DOMAIN).color(color::GREY_3))
+                            container(text::mono_regular(LN_ADDRESS_DOMAIN).color(color::GREY_3))
                                 .padding(15)
                                 .center_y(Length::Fixed(50.0)),
                         )

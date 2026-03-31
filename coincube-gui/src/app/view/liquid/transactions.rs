@@ -455,9 +455,13 @@ pub fn transaction_detail_view<'a>(
                             if is_receive { btc_amount } else { total_amount };
                         let fiat = converter.convert(amount_for_conversion);
                         Row::new().align_y(Alignment::Center).push(
-                            fiat.to_text()
-                                .size(H2_SIZE)
-                                .color(coincube_ui::color::GREY_2),
+                            mono_regular(format!(
+                                "~{} {}",
+                                fiat.to_rounded_string(),
+                                fiat.currency()
+                            ))
+                            .size(H2_SIZE)
+                            .color(coincube_ui::color::GREY_2),
                         )
                     })),
             ),
@@ -525,7 +529,7 @@ pub fn transaction_detail_view<'a>(
                         .push(
                             Column::new()
                                 .width(Length::FillPortion(2))
-                                .push(text(btc_amount.to_formatted_string_with_unit(bitcoin_unit))),
+                                .push(mono_regular(btc_amount.to_formatted_string_with_unit(bitcoin_unit))),
                         )
                         .spacing(20),
                 )
@@ -539,7 +543,7 @@ pub fn transaction_detail_view<'a>(
                         .push(
                             Column::new()
                                 .width(Length::FillPortion(2))
-                                .push(text(fees_sat.to_formatted_string_with_unit(bitcoin_unit))),
+                                .push(mono_regular(fees_sat.to_formatted_string_with_unit(bitcoin_unit))),
                         )
                         .spacing(20),
                 )
@@ -588,9 +592,13 @@ pub fn refundable_detail_view<'a>(
                     .push_maybe(fiat_converter.map(|converter| {
                         let fiat = converter.convert(btc_amount);
                         Row::new().align_y(Alignment::Center).push(
-                            fiat.to_text()
-                                .size(H2_SIZE)
-                                .color(coincube_ui::color::GREY_2),
+                            mono_regular(format!(
+                                "~{} {}",
+                                fiat.to_rounded_string(),
+                                fiat.currency()
+                            ))
+                            .size(H2_SIZE)
+                            .color(coincube_ui::color::GREY_2),
                         )
                     })),
             ),

@@ -355,7 +355,7 @@ pub fn transaction_detail_view<'a>(
                                 .push(amount_with_size_and_unit(&fee_amount, H3_SIZE, bitcoin_unit))
                                 .push(text(" ").size(H3_SIZE))
                                 .push(
-                                    text(format!(
+                                    mono_regular(format!(
                                         "({} sats/vbyte)",
                                         fee_amount.to_sat() / tx.tx.vsize() as u64
                                     ))

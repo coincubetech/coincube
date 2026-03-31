@@ -57,8 +57,7 @@ pub fn address_card<'a>(
                                 Column::new()
                                     .push(Space::new().height(Length::Fixed(10.0)))
                                     .push(
-                                        p2_regular(address.to_string())
-                                            .small()
+                                        mono_regular(address.to_string())
                                             .style(theme::text::secondary),
                                     )
                                     // Space between the address and the scrollbar
@@ -185,7 +184,7 @@ pub fn receive<'a>(
                                         let addr = address.to_string();
                                         let addr_len = addr.chars().count();
                                         Container::new(
-                                            p2_regular(if addr_len > 2 * NUM_ADDR_CHARS {
+                                            mono_regular(if addr_len > 2 * NUM_ADDR_CHARS {
                                                 format!(
                                                     "{}...{}",
                                                     addr.chars()
@@ -198,7 +197,6 @@ pub fn receive<'a>(
                                             } else {
                                                 addr
                                             })
-                                            .small()
                                             .style(theme::text::secondary),
                                         )
                                     }
@@ -211,13 +209,12 @@ pub fn receive<'a>(
                                             Column::new()
                                                 .push(Space::new().height(Length::Fixed(10.0)))
                                                 .push(
-                                                    text(
+                                                    mono_regular(
                                                         prev_labels
                                                             .get(&address.to_string())
                                                             .cloned()
                                                             .unwrap_or_default(),
                                                     )
-                                                    .small()
                                                     .style(theme::text::secondary),
                                                 )
                                                 // Space between the label and the scrollbar
@@ -300,7 +297,7 @@ pub fn verify_address_modal<'a>(
                                     .push(
                                         Row::new()
                                             .align_y(Alignment::Center)
-                                            .push(Container::new(text(address.to_string()).small()))
+                                            .push(Container::new(mono_regular(address.to_string())))
                                             .push(
                                                 Button::new(icon::clipboard_icon())
                                                     .on_press(Message::VaultReceive(
@@ -322,7 +319,7 @@ pub fn verify_address_modal<'a>(
                                             .width(Length::Fill),
                                     )
                                     .push(
-                                        Container::new(text(derivation_index.to_string()).small())
+                                        Container::new(mono_regular(derivation_index.to_string()).small())
                                             .width(Length::Shrink),
                                     ),
                             )
@@ -368,7 +365,7 @@ pub fn qr_modal<'a>(qr: &'a qr_code::Data, address: &'a String) -> Element<'a, M
                 .push(Space::new().width(Length::Fill)),
         )
         .push(Space::new().height(Length::Fixed(15.0)))
-        .push(Container::new(text(address).size(15)).center_x(Length::Fill))
+        .push(Container::new(mono_regular(address).size(15)).center_x(Length::Fill))
         .width(Length::Fill)
         .max_width(400)
         .into()

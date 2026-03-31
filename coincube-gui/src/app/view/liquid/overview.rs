@@ -51,7 +51,7 @@ pub fn liquid_overview_view<'a>(
             bitcoin_unit,
         ))
         .push_maybe(btc_fiat.map(|fiat| -> Element<'_, LiquidOverviewMessage> {
-            text(format!("~{} {}", fiat.to_rounded_string(), fiat.currency()))
+            mono_regular(format!("~{} {}", fiat.to_rounded_string(), fiat.currency()))
                 .size(P1_SIZE)
                 .style(theme::text::secondary)
                 .into()

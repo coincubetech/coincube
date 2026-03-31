@@ -181,8 +181,8 @@ pub fn liquid_send_view<'a>(
                 Row::new()
                     .spacing(10)
                     .align_y(Alignment::Center)
-                    .push(text(format_usdt_display(usdt_balance)).size(H2_SIZE).bold())
-                    .push(text("USDt").size(H2_SIZE).color(color::GREY_3)),
+                    .push(mono_regular(format_usdt_display(usdt_balance)).size(H2_SIZE))
+                    .push(mono_regular("USDt").size(H2_SIZE).color(color::GREY_3)),
             )
             .push(
                 text("Liquid Network")
@@ -197,7 +197,15 @@ pub fn liquid_send_view<'a>(
                 bitcoin_unit,
             ));
             if let Some(fiat) = fiat_balance {
-                col = col.push(fiat.to_text().size(P1_SIZE).style(theme::text::secondary));
+                col = col.push(
+                    mono_regular(format!(
+                        "~{} {}",
+                        fiat.to_formatted_string(),
+                        fiat.currency()
+                    ))
+                    .size(P1_SIZE)
+                    .style(theme::text::secondary)
+                );
             }
             col
         }
@@ -944,7 +952,7 @@ pub fn final_check_page<'a>(
 
     if let Some(desc) = description {
         content = content.push(
-            Container::new(text(desc.to_string()).size(22).bold())
+            Container::new(mono_regular(desc.to_string()).size(22).bold())
                 .width(Length::Fill)
                 .align_x(Alignment::Center),
         );
@@ -996,9 +1004,8 @@ pub fn final_check_page<'a>(
         // USDt send: show USDt amount prominently, L-BTC fees separately
         content = content.push(
             Container::new(
-                text(format!("{} USDt", usdt_send_amount))
+                mono_regular(format!("{} USDt", usdt_send_amount))
                     .size(38)
-                    .bold()
                     .color(color::ORANGE),
             )
             .width(Length::Fill)
@@ -1013,7 +1020,7 @@ pub fn final_check_page<'a>(
             Row::new()
                 .push(text("Send amount:").size(16))
                 .push(Space::new().width(Length::Fill))
-                .push(text(format!("{} USDt", usdt_send_amount)).size(16).bold())
+                .push(mono_regular(format!("{} USDt", usdt_send_amount)).size(16))
                 .width(Length::Fill)
                 .align_y(Alignment::Center),
         );
@@ -1133,7 +1140,15 @@ pub fn final_check_page<'a>(
     if let Some(converter) = fiat_converter {
         let fiat_amount = converter.convert(amount);
         content = content.push(
-            Container::new(fiat_amount.to_text().size(18).color(color::GREY_3))
+            Container::new(
+                mono_regular(format!(
+                    "~{} {}",
+                    fiat_amount.to_formatted_string(),
+                    fiat_amount.currency()
+                ))
+                .size(18)
+                .color(color::GREY_3)
+            )
                 .width(Length::Fill)
                 .align_x(Alignment::Center),
         );

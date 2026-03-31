@@ -210,17 +210,17 @@ fn render_amount<'a, T: 'a>(
         },
     };
 
-    let mut child_after = text(after).size(size).bold();
+    let mut child_after = mono_medium(after).size(size);
     if let Some(color_after) = color_after {
         child_after = child_after.color(color_after);
     }
     let row = Row::new()
-        .push(text(before).size(size).color(color_before))
+        .push(mono_regular(before).size(size).color(color_before))
         .push(child_after);
 
     Row::with_children(vec![
         row.into(),
-        text(unit_text).size(size).color(color_before).into(),
+        mono_regular(unit_text).size(size).color(color_before).into(),
     ])
     .spacing(spacing)
     .align_y(iced::Alignment::Center)
@@ -239,8 +239,8 @@ fn render_unconfirmed_amount<'a, T: 'a>(
     };
 
     Row::with_children(vec![
-        text(amount).size(size).color(color::GREY_3).into(),
-        text(unit_text).size(size).color(color::GREY_3).into(),
+        mono_regular(amount).size(size).color(color::GREY_3).into(),
+        mono_regular(unit_text).size(size).color(color::GREY_3).into(),
     ])
     .spacing(spacing)
     .align_y(iced::Alignment::Center)

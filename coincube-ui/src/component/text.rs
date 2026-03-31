@@ -154,6 +154,52 @@ pub fn text<'a>(
     p1_regular(content)
 }
 
+// Monospace text functions for addresses, amounts, and transaction IDs
+pub fn mono_regular<'a>(
+    content: impl iced::widget::text::IntoFragment<'a>,
+) -> iced::widget::Text<'a, Theme> {
+    iced::widget::text(content)
+        .shaping(Shaping::Advanced)
+        .font(font::JETBRAINS_MONO_REGULAR)
+        .size(P1_SIZE)
+}
+
+pub fn mono_medium<'a>(
+    content: impl iced::widget::text::IntoFragment<'a>,
+) -> iced::widget::Text<'a, Theme> {
+    iced::widget::text(content)
+        .shaping(Shaping::Advanced)
+        .font(font::JETBRAINS_MONO_MEDIUM)
+        .size(P1_SIZE)
+}
+
+pub fn mono_bold<'a>(
+    content: impl iced::widget::text::IntoFragment<'a>,
+) -> iced::widget::Text<'a, Theme> {
+    iced::widget::text(content)
+        .shaping(Shaping::Advanced)
+        .font(font::JETBRAINS_MONO_BOLD)
+        .size(P1_SIZE)
+}
+
+pub fn mono_p2_regular<'a>(
+    content: impl iced::widget::text::IntoFragment<'a>,
+) -> iced::widget::Text<'a, Theme> {
+    iced::widget::text(content)
+        .shaping(Shaping::Advanced)
+        .font(font::JETBRAINS_MONO_REGULAR)
+        .size(P2_SIZE)
+}
+
+pub fn mono_caption<'a>(
+    content: impl iced::widget::text::IntoFragment<'a>,
+) -> iced::widget::Text<'a, Theme> {
+    iced::widget::text(content)
+        .shaping(Shaping::Advanced)
+        .font(font::JETBRAINS_MONO_REGULAR)
+        .size(CAPTION_SIZE)
+}
+
 pub trait Text {
     fn bold(self) -> Self;
     fn small(self) -> Self;

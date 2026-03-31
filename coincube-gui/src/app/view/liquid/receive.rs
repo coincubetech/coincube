@@ -2,7 +2,7 @@ use coincube_core::miniscript::bitcoin::{Amount, Denomination};
 
 use coincube_ui::{
     color,
-    component::{amount::DisplayAmount, button, form, text::*},
+    component::{amount::DisplayAmount, button, form, text::{self, *}},
     icon, theme,
     widget::*,
 };
@@ -94,7 +94,7 @@ pub fn liquid_receive_view<'a>(
                 )
                 .push(
                     Container::new(
-                        text(display_addr)
+                        text::mono_regular(display_addr)
                             .size(12)
                             .style(theme::text::secondary)
                             .wrapping(Wrapping::Glyph),
@@ -650,7 +650,7 @@ pub fn usdt_only_receive_view<'a>(
                 )
                 .push(
                     Container::new(
-                        text(addr)
+                        mono_regular(addr)
                             .size(12)
                             .style(theme::text::secondary)
                             .wrapping(iced::widget::text::Wrapping::Glyph),

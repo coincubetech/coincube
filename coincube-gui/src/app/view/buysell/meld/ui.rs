@@ -317,7 +317,8 @@ pub(crate) fn address_selection_ux<'a>(
                                 widget::column![
                                     label_text
                                         .map(|l| { text::p2_regular(l).color(color::GREY_2) }),
-                                    text::p2_regular(addr_str).width(Length::Fill)
+                                    text::mono_p2_regular(addr_str).width(Length::Fill)
+
                                 ]
                                 .spacing(2),
                             )

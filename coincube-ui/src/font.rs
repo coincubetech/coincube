@@ -34,11 +34,36 @@ pub const SPACE_GROTESK_BOLD: Font = Font {
     stretch: Stretch::Normal,
 };
 
+pub const JETBRAINS_MONO_REGULAR: Font = Font {
+    family: Family::Name("JetBrains Mono"),
+    weight: Weight::Normal,
+    style: iced::font::Style::Normal,
+    stretch: Stretch::Normal,
+};
+
+pub const JETBRAINS_MONO_MEDIUM: Font = Font {
+    family: Family::Name("JetBrains Mono"),
+    weight: Weight::Medium,
+    style: iced::font::Style::Normal,
+    stretch: Stretch::Normal,
+};
+
+pub const JETBRAINS_MONO_BOLD: Font = Font {
+    family: Family::Name("JetBrains Mono"),
+    weight: Weight::Bold,
+    style: iced::font::Style::Normal,
+    stretch: Stretch::Normal,
+};
+
 pub const BOLD_BYTES: &[u8] = include_bytes!("../static/fonts/IBMPlexSans-Bold.ttf");
 pub const MEDIUM_BYTES: &[u8] = include_bytes!("../static/fonts/IBMPlexSans-Medium.ttf");
 pub const REGULAR_BYTES: &[u8] = include_bytes!("../static/fonts/IBMPlexSans-Regular.ttf");
 
 pub const SPACE_GROTESK_BOLD_BYTES: &[u8] = include_bytes!("../static/fonts/SpaceGrotesk-Bold.ttf");
+
+pub const JETBRAINS_MONO_REGULAR_BYTES: &[u8] = include_bytes!("../static/fonts/JetBrainsMono-Regular.ttf");
+pub const JETBRAINS_MONO_MEDIUM_BYTES: &[u8] = include_bytes!("../static/fonts/JetBrainsMono-Medium.ttf");
+pub const JETBRAINS_MONO_BOLD_BYTES: &[u8] = include_bytes!("../static/fonts/JetBrainsMono-Bold.ttf");
 
 pub const BOOTSTRAP_ICONS_BYTE: &[u8] = include_bytes!("../static/icons/bootstrap-icons.ttf");
 
@@ -48,6 +73,9 @@ pub fn load() -> Vec<Cow<'static, [u8]>> {
         MEDIUM_BYTES.into(),
         REGULAR_BYTES.into(),
         SPACE_GROTESK_BOLD_BYTES.into(),
+        JETBRAINS_MONO_REGULAR_BYTES.into(),
+        JETBRAINS_MONO_MEDIUM_BYTES.into(),
+        JETBRAINS_MONO_BOLD_BYTES.into(),
         BOOTSTRAP_ICONS_BYTE.into(),
     ]
 }

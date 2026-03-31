@@ -209,7 +209,8 @@ pub fn create_spend_tx<'a>(
                                 .spacing(5)
                                 .push(amount_with_size_and_unit(balance, H2_SIZE, bitcoin_unit))
                                 .push_maybe(fiat_balance.map(|fiat| {
-                                    fiat.to_text().size(P2_SIZE).style(theme::text::secondary)
+                                    // fiat.to_text().size(P2_SIZE).style(theme::text::secondary)
+                                    mono_regular(format!("~{} {}", fiat.to_rounded_string(), fiat.currency())).style(theme::text::secondary)
                                 }))
                         } else {
                             Column::new().push(Row::new().push(spinner::Carousel::new(

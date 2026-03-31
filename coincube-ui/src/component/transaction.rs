@@ -205,7 +205,7 @@ impl<'a, T> TransactionListItem<'a, T> {
                     Row::new()
                         .spacing(5)
                         .push(text::p1_regular(amount_sign).color(sign_color))
-                        .push(text::p1_regular(override_str.clone()).color(sign_color))
+                        .push(text::mono_regular(override_str.clone()).color(sign_color))
                         .align_y(Alignment::Center),
                 );
             } else {
@@ -221,7 +221,7 @@ impl<'a, T> TransactionListItem<'a, T> {
 
         if let Some(fiat) = self.fiat_amount {
             amount_column =
-                amount_column.push(text::p2_regular(fiat).style(theme::text::secondary));
+                amount_column.push(text::mono_regular(fiat).style(theme::text::secondary));
         }
 
         content_row = content_row.push(amount_column);
