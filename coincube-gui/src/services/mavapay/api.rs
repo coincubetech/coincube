@@ -16,12 +16,17 @@ pub enum MavapayApiResult<T> {
 
 impl<T> From<coincube::CoincubeError> for MavapayApiResult<T> {
     fn from(e: coincube::CoincubeError) -> Self {
+        #[derive(serde::Deserialize)]
+        struct ErrorMessageExtractor<'a> {
+            message: &'a str,
+        }
+
         let message = match &e {
             coincube::CoincubeError::Unsuccessful(info) => {
-                serde_json::from_str::<serde_json::Value>(&info.text)
-                    .ok()
-                    .and_then(|v| v.get("message")?.as_str().map(String::from))
-                    .unwrap_or_else(|| info.text.clone())
+                serde_json::from_str::<ErrorMessageExtractor>(&info.text)
+                    .map(|v| v.message)
+                    .unwrap_or(&info.text)
+                    .to_string()
             }
             coincube::CoincubeError::Network(e) => format!("Network error: {e}"),
             coincube::CoincubeError::Api(msg) => msg.clone(),
