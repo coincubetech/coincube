@@ -618,7 +618,7 @@ impl MeldState {
                         log::warn!("[MELD] Ignoring `GetQuotes` message, not in a valid state",);
                         return None;
                     }
-                };
+                }
 
                 log::trace!("[MELD] Successfully received quotes: {}", quotes.len(),);
 

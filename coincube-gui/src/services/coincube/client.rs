@@ -1,13 +1,13 @@
 use super::{
-    ApiErrorResponse, ApiResponse, AvatarGenerateData, AvatarGenerateRequest,
+    get_countries, ApiErrorResponse, ApiResponse, AvatarGenerateData, AvatarGenerateRequest,
     AvatarSelectData, AvatarSelectRequest, BillingHistoryEntry, ChargeStatusResponse,
-    CheckoutRequest, CheckoutResponse, CheckUsernameResponse, ClaimLightningAddressRequest,
+    CheckUsernameResponse, CheckoutRequest, CheckoutResponse, ClaimLightningAddressRequest,
     CoincubeError, ConnectPlan, Contact, ContactCube, Country, CreateInviteRequest,
-    CubeLimitsResponse, CubeResponse, DownloadStats, FeaturesResponse, GetAvatarData,
-    Invite, LightningAddress, LoginActivity, LoginResponse, OtpRequest, OtpVerifyRequest,
-    PublicAvatarData, RefreshTokenRequest, RegisterCubeRequest, RegenerationData,
-    SaveQuoteRequest, SaveQuoteResponse, StatsPeriod, TimeseriesResponse, TodayStats,
-    UpdateCubeRequest, User, VerifiedDevice, get_countries,
+    CubeLimitsResponse, CubeResponse, DownloadStats, FeaturesResponse, GetAvatarData, Invite,
+    LightningAddress, LoginActivity, LoginResponse, OtpRequest, OtpVerifyRequest, PublicAvatarData,
+    RefreshTokenRequest, RegenerationData, RegisterCubeRequest, SaveQuoteRequest,
+    SaveQuoteResponse, StatsPeriod, TimeseriesResponse, TodayStats, UpdateCubeRequest, User,
+    VerifiedDevice,
 };
 use reqwest::{Client, Method};
 use serde::Deserialize;
@@ -24,7 +24,7 @@ const _: () = {
 #[derive(Debug, Clone)]
 pub struct CoincubeClient {
     pub client: Client,
-    pub base_url: &'static str,
+    pub base_url: String,
     token: Option<String>,
 }
 
@@ -36,10 +36,7 @@ impl Default for CoincubeClient {
 
 impl CoincubeClient {
     pub fn new() -> Self {
-        #[cfg(debug_assertions)]
-        let base_url = option_env!("COINCUBE_API_URL").unwrap_or("https://dev-api.coincube.io");
-        #[cfg(not(debug_assertions))]
-        let base_url = env!("COINCUBE_API_URL");
+        let base_url = crate::services::coincube_api_base_url();
 
         log::info!(
             "Coincube Base URL: {}, Release = {}",
@@ -217,7 +214,8 @@ impl CoincubeClient {
         let url = format!("{}/api/v1/connect/plan", self.base_url);
         let res = self.client.get(&url).send().await?;
         let res = res.check_success().await?;
-        Ok(res.json().await?)
+        let resp: ApiResponse<ConnectPlan> = res.json().await?;
+        Ok(resp.data)
     }
 
     /// GET /api/v1/connect/features (public — no auth required)
@@ -225,7 +223,8 @@ impl CoincubeClient {
         let url = format!("{}/api/v1/connect/features", self.base_url);
         let res = self.client.get(&url).send().await?;
         let res = res.check_success().await?;
-        Ok(res.json().await?)
+        let resp: ApiResponse<FeaturesResponse> = res.json().await?;
+        Ok(resp.data)
     }
 
     /// POST /api/v1/connect/checkout (authenticated)
@@ -236,7 +235,8 @@ impl CoincubeClient {
         let url = format!("{}/api/v1/connect/checkout", self.base_url);
         let res = self.client.post(&url).json(&req).send().await?;
         let res = res.check_success().await?;
-        Ok(res.json().await?)
+        let resp: ApiResponse<CheckoutResponse> = res.json().await?;
+        Ok(resp.data)
     }
 
     /// GET /api/v1/connect/checkout/{chargeId} (authenticated)
@@ -247,17 +247,17 @@ impl CoincubeClient {
         let url = format!("{}/api/v1/connect/checkout/{}", self.base_url, charge_id);
         let res = self.client.get(&url).send().await?;
         let res = res.check_success().await?;
-        Ok(res.json().await?)
+        let resp: ApiResponse<ChargeStatusResponse> = res.json().await?;
+        Ok(resp.data)
     }
 
     /// GET /api/v1/connect/billing/history (authenticated)
-    pub async fn get_billing_history(
-        &self,
-    ) -> Result<Vec<BillingHistoryEntry>, CoincubeError> {
+    pub async fn get_billing_history(&self) -> Result<Vec<BillingHistoryEntry>, CoincubeError> {
         let url = format!("{}/api/v1/connect/billing/history", self.base_url);
         let res = self.client.get(&url).send().await?;
         let res = res.check_success().await?;
-        Ok(res.json().await?)
+        let resp: ApiResponse<Vec<BillingHistoryEntry>> = res.json().await?;
+        Ok(resp.data)
     }
 
     pub async fn get_verified_devices(&self) -> Result<Vec<VerifiedDevice>, CoincubeError> {
@@ -370,8 +370,7 @@ impl CoincubeClient {
         let body = res.text().await.map_err(CoincubeError::Network)?;
 
         if status.is_success() {
-            let resp: ApiResponse<CheckUsernameResponse> =
-                serde_json::from_str(&body)?;
+            let resp: ApiResponse<CheckUsernameResponse> = serde_json::from_str(&body)?;
             Ok(resp.data)
         } else if status.is_client_error() && !matches!(status.as_u16(), 401 | 403) {
             // Validation errors (400, 409, 422, etc.) — treat as "not available"
@@ -578,10 +577,7 @@ impl CoincubeClient {
     }
 
     /// POST /api/v1/connect/invites
-    pub async fn create_invite(
-        &self,
-        req: CreateInviteRequest,
-    ) -> Result<(), CoincubeError> {
+    pub async fn create_invite(&self, req: CreateInviteRequest) -> Result<(), CoincubeError> {
         let url = format!("{}/api/v1/connect/invites", self.base_url);
         let res = self.client.post(&url).json(&req).send().await?;
         res.check_success().await?;

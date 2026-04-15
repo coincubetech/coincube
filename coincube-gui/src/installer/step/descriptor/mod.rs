@@ -352,7 +352,7 @@ impl Step for RegisterDescriptor {
                 self.done = done;
             }
             _ => {}
-        };
+        }
         Task::none()
     }
     fn skip(&self, ctx: &Context) -> bool {

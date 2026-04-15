@@ -85,7 +85,7 @@ impl State for BuySellPanel {
                                     Err(er) => {
                                         log::error!("Unable to parse user information found in OS keyring: {:?}", er)
                                     }
-                                }
+                                };
                             };
                         }
                         Err(e) => {
