@@ -721,7 +721,7 @@ pub async fn create_remote_wallet(
         tracing::error!("Failed to update Liana-Connect cache: {}", e);
     } else {
         info!("Liana-Connect cache updated");
-    };
+    }
 
     Ok(wallet_settings)
 }
@@ -815,7 +815,7 @@ pub async fn import_remote_wallet(
         tracing::error!("Failed to update Liana-Connect cache: {}", e);
     } else {
         info!("Liana-Connect cache updated");
-    };
+    }
 
     Ok(wallet_settings)
 }

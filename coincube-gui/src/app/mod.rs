@@ -1888,7 +1888,7 @@ impl App {
                     return panel.update(None, &self.cache, msg);
                 }
             }
-        };
+        }
 
         Task::none()
     }

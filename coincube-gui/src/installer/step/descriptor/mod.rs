@@ -443,7 +443,7 @@ impl Step for BackupDescriptor {
                 if let Some(modal) = self.modal.as_mut() {
                     let task: Task<Message> = modal.update(m);
                     return task;
-                };
+                }
             }
             Message::BackupDescriptor => {
                 if let (None, Some(ctx)) = (&self.modal, self.context.as_ref()) {

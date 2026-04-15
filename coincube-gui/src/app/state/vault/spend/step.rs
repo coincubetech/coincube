@@ -866,7 +866,7 @@ impl Step for DefineSpend {
                 }
             },
             _ => {}
-        };
+        }
         Task::none()
     }
 
@@ -1359,7 +1359,7 @@ impl Step for SelectRecoveryPath {
                 }
             }
             _ => {}
-        };
+        }
         Task::none()
     }
 

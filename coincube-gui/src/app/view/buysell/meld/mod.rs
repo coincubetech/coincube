@@ -227,7 +227,7 @@ impl MeldState {
                 if let Ok(ErrorExtractor { message }) = serde_json::from_str::<ErrorExtractor>(&err)
                 {
                     err = message;
-                };
+                }
 
                 let msg = match description {
                     "QUOTE_ACQUISITION_FAILED" => {
@@ -446,7 +446,7 @@ impl MeldState {
                                 )));
                             } else {
                                 *e = Some(addresses)
-                            };
+                            }
                         }
                     }
                 }
@@ -590,10 +590,10 @@ impl MeldState {
                                     "[MELD] Encountered an issue while getting quotes: {}",
                                     e
                                 )
-                            };
+                            }
                             if let Some(msg) = message {
                                 log::info!("[MELD] {}", msg)
-                            };
+                            }
 
                             MeldMessage::ReceivedQuotes(quotes)
                         }
@@ -865,7 +865,7 @@ impl MeldState {
                     }
                 }
             }
-        };
+        }
 
         None
     }
