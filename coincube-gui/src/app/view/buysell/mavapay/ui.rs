@@ -788,7 +788,6 @@ fn history_view<'a>(state: &'a MavapayState) -> widget::Column<'a, BuySellMessag
 
 fn pretty_timestamp(ts: &str) -> String {
     ts.parse::<chrono::DateTime<chrono::Utc>>()
-        .ok()
         .map(|dt| {
             let local = dt
                 .with_timezone(&chrono::Local)
@@ -796,7 +795,7 @@ fn pretty_timestamp(ts: &str) -> String {
                 .to_string();
             local
         })
-        .unwrap_or_else(|| "unknown".into())
+        .unwrap_or_else(|_| "unknown".into())
 }
 
 fn transaction_row<'a>(
