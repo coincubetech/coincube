@@ -113,7 +113,7 @@ pub struct CoincubeLiteLogin {
     pub datadir: CoincubeDirectory,
     pub network: Network,
     pub settings: WalletSettings,
-    pub breez_client: Option<std::sync::Arc<crate::app::breez::BreezClient>>,
+    pub breez_client: Option<std::sync::Arc<crate::app::breez_liquid::BreezClient>>,
 
     wallet_id: String,
     email: String,
@@ -143,7 +143,7 @@ impl CoincubeLiteLogin {
         datadir: CoincubeDirectory,
         network: Network,
         settings: WalletSettings,
-        breez_client: Option<std::sync::Arc<crate::app::breez::BreezClient>>,
+        breez_client: Option<std::sync::Arc<crate::app::breez_liquid::BreezClient>>,
     ) -> (Self, Task<Message>) {
         let auth = settings.remote_backend_auth.clone().unwrap();
         (

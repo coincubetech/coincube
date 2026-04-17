@@ -23,9 +23,9 @@ pub enum FeeratePriority {
     High,
 }
 
-use breez_sdk_liquid::prelude::{
-    InputType, Payment, PreparePayOnchainResponse, PrepareSendResponse,
-};
+use breez_sdk_liquid::prelude::{InputType, PreparePayOnchainResponse, PrepareSendResponse};
+
+use crate::app::wallets::DomainPayment;
 use coincube_core::miniscript::bitcoin::Amount;
 use coincube_core::miniscript::bitcoin::{bip32::Fingerprint, Address, OutPoint};
 use coincube_core::spend::SpendCreationError;
@@ -59,6 +59,7 @@ pub enum Message {
     Clipboard(String),
     Menu(Menu),
     ToggleVault,
+    ToggleSpark,
     ToggleLiquid,
     ToggleMarketplace,
     ToggleMarketplaceP2P,
@@ -93,11 +94,16 @@ pub enum Message {
     OpenUrl(String),
     Home(HomeMessage),
     LiquidOverview(LiquidOverviewMessage),
+    SparkOverview(crate::app::view::spark::SparkOverviewMessage),
+    SparkTransactions(crate::app::view::spark::SparkTransactionsMessage),
+    SparkSettings(crate::app::view::spark::SparkSettingsMessage),
+    SparkSend(crate::app::view::spark::SparkSendMessage),
+    SparkReceive(crate::app::view::spark::SparkReceiveMessage),
     LiquidReceive(LiquidReceiveMessage),
     VaultReceive(VaultReceiveMessage),
     LiquidSend(LiquidSendMessage),
     LiquidSettings(LiquidSettingsMessage),
-    PreselectPayment(Payment),
+    PreselectPayment(DomainPayment),
     SetAssetFilter(crate::app::state::liquid::transactions::AssetFilter),
     ShowError(String),
     ShowSuccess(String),
@@ -220,6 +226,12 @@ pub enum SettingsMessage {
     WalletAliasEdited(String),
     Save,
     GeneralSection,
+    /// Navigate to the app-level Lightning preferences page.
+    LightningSection,
+    /// User picked a new default Lightning backend on the
+    /// Settings → Lightning page. The state panel persists the
+    /// choice and re-reads it on `SettingsSaved`.
+    DefaultLightningBackendChanged(crate::app::wallets::WalletKind),
     DisplayUnitChanged(BitcoinDisplayUnit),
     Fiat(FiatMessage),
     NodeSettings(NodeSettingsMessage),
@@ -407,7 +419,7 @@ pub enum LiquidOverviewMessage {
     DataLoaded {
         balance: Amount,
         usdt_balance: u64,
-        recent_payment: Vec<Payment>,
+        recent_payment: Vec<DomainPayment>,
     },
     Error(String),
     RefreshRequested,
@@ -425,7 +437,7 @@ pub enum LiquidSendMessage {
     DataLoaded {
         balance: Amount,
         usdt_balance: u64,
-        recent_payment: Vec<Payment>,
+        recent_payment: Vec<DomainPayment>,
     },
     Error(String),
     ClearError,
@@ -516,7 +528,7 @@ pub enum LiquidReceiveMessage {
     DataLoaded {
         btc_balance: coincube_core::miniscript::bitcoin::Amount,
         usdt_balance: u64,
-        recent_payment: Vec<breez_sdk_liquid::prelude::Payment>,
+        recent_payment: Vec<DomainPayment>,
     },
     /// User tapped a recent transaction row.
     SelectTransaction(usize),
@@ -790,10 +802,17 @@ pub enum AvatarMessage {
 
 #[derive(Debug, Clone)]
 pub enum HomeMessage {
-    /// Navigate to Send with asset preset.
+    /// Navigate to Liquid Send with asset preset.
     SendAsset(crate::app::state::liquid::send::SendAsset),
-    /// Navigate to Receive with asset preset.
+    /// Navigate to Liquid Receive with asset preset.
     ReceiveAsset(crate::app::state::liquid::send::SendAsset),
+    /// Navigate to Spark Send.
+    SendSparkBtc,
+    /// Navigate to Spark Receive.
+    ReceiveSparkBtc,
+    /// Bridge returned a fresh Spark balance (used by the Home
+    /// page's periodic balance refresh).
+    SparkBalanceUpdated(Amount),
     ToggleBalanceMask,
     SelectTransferDirection(TransferDirection),
     AmountEdited(String),

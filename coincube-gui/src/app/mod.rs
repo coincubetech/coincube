@@ -1,4 +1,5 @@
-pub mod breez;
+pub mod breez_liquid;
+pub mod breez_spark;
 pub mod cache;
 pub mod config;
 pub mod error;
@@ -8,6 +9,7 @@ pub mod settings;
 pub mod state;
 pub mod view;
 pub mod wallet;
+pub mod wallets;
 
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -37,13 +39,14 @@ use wallet::{sync_status, SyncStatus};
 
 use crate::{
     app::{
-        breez::BreezClient,
+        breez_liquid::BreezClient,
         cache::{Cache, DaemonCache},
         error::Error,
         menu::{MarketplaceSubMenu, Menu},
         message::FiatMessage,
         settings::WalletId,
         wallet::Wallet,
+        wallets::LiquidBackend,
     },
     daemon::{embedded::EmbeddedDaemon, Daemon, DaemonBackend, DaemonError},
     dir::CoincubeDirectory,
@@ -59,6 +62,7 @@ use self::state::vault::settings::SettingsState as VaultSettingsState;
 struct Panels {
     current: Menu,
     vault_expanded: bool,
+    spark_expanded: bool,
     liquid_expanded: bool,
     marketplace_expanded: bool,
     marketplace_p2p_expanded: bool,
@@ -70,6 +74,23 @@ struct Panels {
     liquid_receive: LiquidReceive,
     liquid_transactions: LiquidTransactions,
     liquid_settings: LiquidSettings,
+    /// Spark wallet Overview — Phase 3 placeholder. Always present so
+    /// `current()` / `current_mut()` have a target; internally the
+    /// panel checks whether the [`SparkBackend`] is wired and shows an
+    /// "unavailable" stub when it isn't.
+    spark_overview: state::SparkOverview,
+    /// Phase 4c ships real Send and Receive panels backed by the
+    /// bridge's new write-path RPCs (`prepare_send_payment`,
+    /// `send_payment`, `receive_payment`). LNURL-pay, Lightning Address
+    /// management, and the on-chain `claim_deposit` lifecycle are the
+    /// Phase 4d follow-ups.
+    spark_send: state::SparkSend,
+    spark_receive: state::SparkReceive,
+    /// Phase 4b ships real Transactions + Settings panels — they use
+    /// `list_payments` / `get_info` which the bridge already exposes, so
+    /// they ship ahead of the write-path flows.
+    spark_transactions: state::SparkTransactions,
+    spark_settings: state::SparkSettings,
     global_settings: GeneralSettingsState,
     // Vault-only panels - None when no vault exists
     vault_overview: Option<VaultOverview>,
@@ -105,8 +126,10 @@ impl Panels {
             })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn new_without_vault(
         breez_client: Arc<BreezClient>,
+        spark_backend: Option<Arc<crate::app::wallets::SparkBackend>>,
         wallet: Option<Arc<Wallet>>,
         datadir: &CoincubeDirectory,
         network: bitcoin::Network,
@@ -118,36 +141,45 @@ impl Panels {
         // The UI layer prevents navigation to vault panels when has_vault=false
 
         let default_fiat_currency = Self::default_fiat_currency(datadir, network, &cube_id);
+        let liquid_backend = Arc::new(LiquidBackend::new(breez_client.clone()));
 
         Self {
             current: Menu::Home,
             vault_expanded: false,
+            spark_expanded: false,
             liquid_expanded: false,
             marketplace_expanded: false,
             marketplace_p2p_expanded: false,
             connect_expanded: false,
-            // Liquid panels always available (use BreezClient, not Vault wallet)
+            // Liquid panels always available (use LiquidBackend, not Vault wallet)
             global_home: if let Some(w) = &wallet {
                 GlobalHome::new(
                     w.clone(),
-                    breez_client.clone(),
+                    liquid_backend.clone(),
+                    spark_backend.clone(),
                     datadir.clone(),
                     network,
                     cube_id.clone(),
                 )
             } else {
                 GlobalHome::new_without_wallet(
-                    breez_client.clone(),
+                    liquid_backend.clone(),
+                    spark_backend.clone(),
                     datadir.clone(),
                     network,
                     cube_id.clone(),
                 )
             },
-            liquid_overview: LiquidOverview::new(breez_client.clone()),
-            liquid_send: LiquidSend::new(breez_client.clone()),
-            liquid_receive: LiquidReceive::new(breez_client.clone()),
-            liquid_transactions: LiquidTransactions::new(breez_client.clone()),
-            liquid_settings: LiquidSettings::new(breez_client.clone()),
+            liquid_overview: LiquidOverview::new(liquid_backend.clone()),
+            liquid_send: LiquidSend::new(liquid_backend.clone()),
+            liquid_receive: LiquidReceive::new(liquid_backend.clone()),
+            liquid_transactions: LiquidTransactions::new(liquid_backend.clone()),
+            liquid_settings: LiquidSettings::new(liquid_backend.clone()),
+            spark_overview: state::SparkOverview::new(spark_backend.clone()),
+            spark_send: state::SparkSend::new(spark_backend.clone()),
+            spark_receive: state::SparkReceive::new(spark_backend.clone()),
+            spark_transactions: state::SparkTransactions::new(spark_backend.clone()),
+            spark_settings: state::SparkSettings::new(spark_backend.clone()),
             global_settings: {
                 let network_dir = datadir.network_directory(network);
                 let settings_file = settings::Settings::from_file(&network_dir).ok();
@@ -198,6 +230,7 @@ impl Panels {
     #[allow(clippy::too_many_arguments)]
     fn new(
         breez_client: Arc<BreezClient>,
+        spark_backend: Option<Arc<crate::app::wallets::SparkBackend>>,
         cache: &Cache,
         wallet: Arc<Wallet>,
         data_dir: CoincubeDirectory,
@@ -218,17 +251,20 @@ impl Panels {
                 .unwrap_or(true);
 
         let default_fiat_currency = Self::default_fiat_currency(&data_dir, cache.network, &cube_id);
+        let liquid_backend = Arc::new(LiquidBackend::new(breez_client.clone()));
 
         Self {
             current: Menu::Home,
             vault_expanded: false,
+            spark_expanded: false,
             liquid_expanded: false,
             marketplace_expanded: false,
             marketplace_p2p_expanded: false,
             connect_expanded: false,
             global_home: GlobalHome::new(
                 wallet.clone(),
-                breez_client.clone(),
+                liquid_backend.clone(),
+                spark_backend.clone(),
                 data_dir.clone(),
                 cache.network,
                 cube_id.clone(),
@@ -246,11 +282,16 @@ impl Panels {
                 cache.blockheight(),
                 show_rescan_warning,
             )),
-            liquid_overview: LiquidOverview::new(breez_client.clone()),
-            liquid_send: LiquidSend::new(breez_client.clone()),
-            liquid_receive: LiquidReceive::new(breez_client.clone()),
-            liquid_transactions: LiquidTransactions::new(breez_client.clone()),
-            liquid_settings: LiquidSettings::new(breez_client.clone()),
+            liquid_overview: LiquidOverview::new(liquid_backend.clone()),
+            liquid_send: LiquidSend::new(liquid_backend.clone()),
+            liquid_receive: LiquidReceive::new(liquid_backend.clone()),
+            liquid_transactions: LiquidTransactions::new(liquid_backend.clone()),
+            liquid_settings: LiquidSettings::new(liquid_backend.clone()),
+            spark_overview: state::SparkOverview::new(spark_backend.clone()),
+            spark_send: state::SparkSend::new(spark_backend.clone()),
+            spark_receive: state::SparkReceive::new(spark_backend.clone()),
+            spark_transactions: state::SparkTransactions::new(spark_backend.clone()),
+            spark_settings: state::SparkSettings::new(spark_backend.clone()),
             global_settings: {
                 let network_dir = data_dir.network_directory(cache.network);
                 let settings_file = settings::Settings::from_file(&network_dir).ok();
@@ -436,6 +477,22 @@ impl Panels {
                 crate::app::menu::LiquidSubMenu::Transactions(_) => Some(&self.liquid_transactions),
                 crate::app::menu::LiquidSubMenu::Settings(_) => Some(&self.liquid_settings),
             },
+            // Phase 4c ships all five real Spark panels. Send/Receive
+            // use the bridge write-path RPCs added in this phase;
+            // Overview/Transactions/Settings are unchanged from 4b.
+            Menu::Spark(submenu) => match submenu {
+                crate::app::menu::SparkSubMenu::Overview => {
+                    Some(&self.spark_overview as &dyn State)
+                }
+                crate::app::menu::SparkSubMenu::Send => Some(&self.spark_send as &dyn State),
+                crate::app::menu::SparkSubMenu::Receive => Some(&self.spark_receive as &dyn State),
+                crate::app::menu::SparkSubMenu::Transactions(_) => {
+                    Some(&self.spark_transactions as &dyn State)
+                }
+                crate::app::menu::SparkSubMenu::Settings(_) => {
+                    Some(&self.spark_settings as &dyn State)
+                }
+            },
             Menu::Vault(submenu) => match submenu {
                 crate::app::menu::VaultSubMenu::Overview => {
                     self.vault_overview.as_ref().map(|v| v as &dyn State)
@@ -484,6 +541,23 @@ impl Panels {
                     Some(&mut self.liquid_transactions)
                 }
                 crate::app::menu::LiquidSubMenu::Settings(_) => Some(&mut self.liquid_settings),
+            },
+            Menu::Spark(submenu) => match submenu {
+                crate::app::menu::SparkSubMenu::Overview => {
+                    Some(&mut self.spark_overview as &mut dyn State)
+                }
+                crate::app::menu::SparkSubMenu::Send => {
+                    Some(&mut self.spark_send as &mut dyn State)
+                }
+                crate::app::menu::SparkSubMenu::Receive => {
+                    Some(&mut self.spark_receive as &mut dyn State)
+                }
+                crate::app::menu::SparkSubMenu::Transactions(_) => {
+                    Some(&mut self.spark_transactions as &mut dyn State)
+                }
+                crate::app::menu::SparkSubMenu::Settings(_) => {
+                    Some(&mut self.spark_settings as &mut dyn State)
+                }
             },
             Menu::Vault(submenu) => match submenu {
                 crate::app::menu::VaultSubMenu::Overview => {
@@ -555,6 +629,14 @@ pub struct App {
     cache: Cache,
     wallet: Option<Arc<Wallet>>,
     breez_client: Arc<BreezClient>,
+    /// Wallet registry — owns the concrete wallet backends and exposes
+    /// routing hooks. Holds a [`LiquidBackend`] and an optional
+    /// [`SparkBackend`] (present when the cube has a Spark signer and
+    /// the bridge subprocess came up). Phase 5 reads
+    /// [`WalletRegistry::spark`] from the LNURL subscription hand-off
+    /// so incoming Lightning Address invoices route through Spark
+    /// when the cube's `default_lightning_backend` prefers it.
+    wallet_registry: crate::app::wallets::WalletRegistry,
     daemon: Option<Arc<dyn Daemon + Sync + Send>>,
     internal_bitcoind: Option<Bitcoind>,
     cube_settings: settings::CubeSettings,
@@ -563,6 +645,10 @@ pub struct App {
     panels: Panels,
     errors: Vec<(usize, std::time::Instant, log::Level, String)>,
     current_error_id: usize,
+    /// True while a `list_refundables()` poll is in flight.
+    refundables_fetch_in_flight: bool,
+    /// Timestamp of the last successful refundables poll (for debouncing).
+    last_refundables_fetch: Option<std::time::Instant>,
     /// True while a check_bitcoind_sync_progress probe is in flight; prevents
     /// multiple concurrent RPC calls from piling up across subscription ticks.
     bitcoind_sync_probe_in_progress: bool,
@@ -641,6 +727,7 @@ impl App {
         cache: Cache,
         wallet: Arc<Wallet>,
         breez_client: Arc<BreezClient>,
+        spark_backend: Option<Arc<crate::app::wallets::SparkBackend>>,
         config: Config,
         daemon: Arc<dyn Daemon + Sync + Send>,
         data_dir: CoincubeDirectory,
@@ -649,9 +736,15 @@ impl App {
         cube_settings: settings::CubeSettings,
     ) -> (App, Task<Message>) {
         let config_arc = Arc::new(config);
+        let liquid_backend = Arc::new(LiquidBackend::new(breez_client.clone()));
+        let wallet_registry = crate::app::wallets::WalletRegistry::with_spark(
+            liquid_backend.clone(),
+            spark_backend.clone(),
+        );
 
         let mut panels = Panels::new(
             breez_client.clone(),
+            spark_backend.clone(),
             &cache,
             wallet.clone(),
             data_dir.clone(),
@@ -685,12 +778,15 @@ impl App {
                 daemon: Some(daemon),
                 wallet: Some(wallet),
                 breez_client,
+                wallet_registry,
                 internal_bitcoind,
                 cube_settings,
                 config: config_arc,
                 datadir: data_dir,
                 errors: Vec::with_capacity(8),
                 current_error_id: 256,
+                refundables_fetch_in_flight: false,
+                last_refundables_fetch: None,
                 bitcoind_sync_probe_in_progress: false,
                 lnurl_sse_retries: 0,
             },
@@ -700,12 +796,18 @@ impl App {
 
     pub fn new_without_wallet(
         breez_client: Arc<BreezClient>,
+        spark_backend: Option<Arc<crate::app::wallets::SparkBackend>>,
         config: Config,
         datadir: CoincubeDirectory,
         network: coincube_core::miniscript::bitcoin::Network,
         cube_settings: settings::CubeSettings,
     ) -> (App, Task<Message>) {
         let config_arc = Arc::new(config);
+        let liquid_backend = Arc::new(LiquidBackend::new(breez_client.clone()));
+        let wallet_registry = crate::app::wallets::WalletRegistry::with_spark(
+            liquid_backend.clone(),
+            spark_backend.clone(),
+        );
         // Load bitcoin_unit from cube settings if available
         let bitcoin_unit = {
             let network_dir = datadir.network_directory(network);
@@ -725,11 +827,14 @@ impl App {
             has_vault: false,
             bitcoin_unit,
             cube_name: cube_settings.name.clone(),
+            cube_id: cube_settings.id.clone(),
+            default_lightning_backend: cube_settings.default_lightning_backend,
             ..Default::default()
         };
 
         let mut panels = Panels::new_without_vault(
             breez_client.clone(),
+            spark_backend.clone(),
             None,
             &datadir,
             network,
@@ -749,12 +854,15 @@ impl App {
                 daemon: None,
                 wallet: None,
                 breez_client,
+                wallet_registry,
                 internal_bitcoind: None,
                 cube_settings,
                 config: config_arc,
                 datadir,
                 errors: Vec::with_capacity(8),
                 current_error_id: 256,
+                refundables_fetch_in_flight: false,
+                last_refundables_fetch: None,
                 bitcoind_sync_probe_in_progress: false,
                 lnurl_sse_retries: 0,
             },
@@ -780,6 +888,10 @@ impl App {
 
     pub fn breez_client(&self) -> Arc<BreezClient> {
         self.breez_client.clone()
+    }
+
+    pub fn spark_backend(&self) -> Option<Arc<crate::app::wallets::SparkBackend>> {
+        self.wallet_registry.spark().cloned()
     }
 
     pub fn wallet(&self) -> Option<&Wallet> {
@@ -1008,6 +1120,17 @@ impl App {
         // Always subscribe to Breez events (handles fee acceptance globally)
         subscriptions.push(self.breez_client.subscription().map(Message::BreezEvent));
 
+        // Subscribe to Spark bridge events when a Spark backend is
+        // active. The backend is optional (cubes without a Spark signer
+        // run with `wallet_registry.spark() == None`), so we only wire
+        // the subscription when there's actually a bridge to listen to.
+        // The subscription identity is keyed on the `Arc<SparkClient>`
+        // pointer inside the backend, so reconnecting produces a fresh
+        // subscription instead of stale wiring.
+        if let Some(spark_backend) = self.wallet_registry.spark() {
+            subscriptions.push(spark_backend.event_subscription().map(Message::SparkEvent));
+        }
+
         // Only create tick subscription if we have a vault (daemon exists)
         if self.daemon.is_some() {
             subscriptions.push(
@@ -1054,6 +1177,8 @@ impl App {
                             token.to_string(),
                             self.lnurl_sse_retries,
                             self.breez_client.clone(),
+                            self.wallet_registry.spark().cloned(),
+                            self.cube_settings.default_lightning_backend,
                         )
                         .map(Message::Lnurl),
                     );
@@ -1217,6 +1342,47 @@ impl App {
         Task::batch(tasks)
     }
 
+    /// Kick off a background `list_refundables()` poll, debounced so that
+    /// SDK events (which can fire several times a second during sync) don't
+    /// hammer the SDK. Result comes back as `Message::RefundablesPolled` —
+    /// a variant distinct from `RefundablesLoaded` (which manual panel
+    /// reloads produce) so that only poll responses touch the App's
+    /// debounce and in-flight fields.
+    ///
+    /// The Transactions panel itself fetches refundables on every reload()
+    /// too — this debounced helper covers the case where the user is sitting
+    /// on a non-Transactions screen while a swap becomes refundable, so they
+    /// still see it the next time they navigate or glance at the app.
+    fn refresh_refundables_task(&mut self) -> Task<Message> {
+        const DEBOUNCE: std::time::Duration = std::time::Duration::from_secs(30);
+        // Skip if a previous fetch is still in flight — otherwise a burst of
+        // BreezEvents would launch several concurrent `list_refundables()`
+        // calls before any of them returned.
+        if self.refundables_fetch_in_flight {
+            return Task::none();
+        }
+        // Debounce against the timestamp of the last *successful* fetch. On
+        // failure we leave `last_refundables_fetch` unchanged so the next
+        // event can retry immediately instead of being suppressed for 30s.
+        if let Some(prev) = self.last_refundables_fetch {
+            if std::time::Instant::now().duration_since(prev) < DEBOUNCE {
+                return Task::none();
+            }
+        }
+        self.refundables_fetch_in_flight = true;
+        let client = self.breez_client.clone();
+        Task::perform(
+            async move {
+                client.list_refundables().await.map(|v| {
+                    v.into_iter()
+                        .map(crate::app::wallets::DomainRefundableSwap::from)
+                        .collect()
+                })
+            },
+            Message::RefundablesPolled,
+        )
+    }
+
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::View(view::Message::DismissToast(id)) => {
@@ -1377,6 +1543,9 @@ impl App {
                     {
                         self.cache.bitcoin_unit = cube.unit_setting.display_unit;
                         self.cube_settings.fiat_price = cube.fiat_price.clone();
+                        self.cube_settings.default_lightning_backend =
+                            cube.default_lightning_backend;
+                        self.cache.default_lightning_backend = cube.default_lightning_backend;
 
                         // Clear cached fiat display price if disabled.
                         // Note: btc_usd_price is NOT cleared — it's needed for
@@ -1603,6 +1772,25 @@ impl App {
                 self.cache.vault_expanded = self.panels.vault_expanded;
 
                 if self.panels.vault_expanded {
+                    self.panels.spark_expanded = false;
+                    self.cache.spark_expanded = false;
+                    self.panels.liquid_expanded = false;
+                    self.cache.liquid_expanded = false;
+                    self.panels.connect_expanded = false;
+                    self.cache.connect_expanded = false;
+                    self.panels.marketplace_expanded = false;
+                    self.cache.marketplace_expanded = false;
+                    self.panels.marketplace_p2p_expanded = false;
+                    self.cache.marketplace_p2p_expanded = false;
+                }
+            }
+            Message::View(view::Message::ToggleSpark) => {
+                self.panels.spark_expanded = !self.panels.spark_expanded;
+                self.cache.spark_expanded = self.panels.spark_expanded;
+
+                if self.panels.spark_expanded {
+                    self.panels.vault_expanded = false;
+                    self.cache.vault_expanded = false;
                     self.panels.liquid_expanded = false;
                     self.cache.liquid_expanded = false;
                     self.panels.connect_expanded = false;
@@ -1620,6 +1808,8 @@ impl App {
                 if self.panels.liquid_expanded {
                     self.panels.vault_expanded = false;
                     self.cache.vault_expanded = false;
+                    self.panels.spark_expanded = false;
+                    self.cache.spark_expanded = false;
                     self.panels.connect_expanded = false;
                     self.cache.connect_expanded = false;
                     self.panels.marketplace_expanded = false;
@@ -1635,6 +1825,8 @@ impl App {
                 if self.panels.marketplace_expanded {
                     self.panels.vault_expanded = false;
                     self.cache.vault_expanded = false;
+                    self.panels.spark_expanded = false;
+                    self.cache.spark_expanded = false;
                     self.panels.liquid_expanded = false;
                     self.cache.liquid_expanded = false;
                     self.panels.connect_expanded = false;
@@ -1655,6 +1847,8 @@ impl App {
                 if self.panels.connect_expanded {
                     self.panels.vault_expanded = false;
                     self.cache.vault_expanded = false;
+                    self.panels.spark_expanded = false;
+                    self.cache.spark_expanded = false;
                     self.panels.liquid_expanded = false;
                     self.cache.liquid_expanded = false;
                     self.panels.marketplace_expanded = false;
@@ -1718,6 +1912,60 @@ impl App {
                     .panels
                     .global_home
                     .update(self.daemon.clone(), &self.cache, msg);
+            }
+
+            Message::SparkEvent(client_event) => {
+                use coincube_spark_protocol::Event as SparkEvent;
+                let crate::app::breez_spark::SparkClientEvent(event) = client_event;
+                log::info!("App received Spark event: {:?}", event);
+
+                let mut tasks: Vec<Task<Message>> = Vec::new();
+
+                // Refresh Spark Overview on every event — balance
+                // moves on any payment state change, and `Synced`
+                // ticks are the SDK's "you're up to date, re-read
+                // state" signal. Deposits being claimed counts as a
+                // balance change too.
+                tasks.push(self.panels.spark_overview.reload(None, None));
+
+                // Payment-related events reload the Transactions list
+                // so newly surfaced rows appear without the user
+                // manually navigating / pressing refresh. `Synced`
+                // and `DepositsChanged` alone don't imply new
+                // payment-list rows.
+                if matches!(
+                    event,
+                    SparkEvent::PaymentSucceeded { .. }
+                        | SparkEvent::PaymentPending { .. }
+                        | SparkEvent::PaymentFailed { .. }
+                ) {
+                    tasks.push(self.panels.spark_transactions.reload(None, None));
+                }
+
+                match event {
+                    SparkEvent::PaymentSucceeded {
+                        amount_sat, bolt11, ..
+                    } => {
+                        // Phase 4f: forward the BOLT11 field so the
+                        // Receive panel can correlate against its
+                        // currently displayed invoice.
+                        tasks.push(Task::done(Message::View(view::Message::SparkReceive(
+                            view::SparkReceiveMessage::PaymentReceived { amount_sat, bolt11 },
+                        ))));
+                    }
+                    SparkEvent::DepositsChanged => {
+                        // Phase 4f: refresh the Receive panel's
+                        // pending deposits card. The panel handles
+                        // the actual `list_unclaimed_deposits` RPC
+                        // dispatch.
+                        tasks.push(Task::done(Message::View(view::Message::SparkReceive(
+                            view::SparkReceiveMessage::DepositsChanged,
+                        ))));
+                    }
+                    _ => {}
+                }
+
+                return Task::batch(tasks);
             }
 
             Message::BreezEvent(event) => {
