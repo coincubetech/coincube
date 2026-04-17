@@ -1,4 +1,4 @@
-use crate::{icon, theme, widget::Container};
+use crate::{icon, theme, widget::*};
 
 pub fn tooltip<'a, T: 'a>(help: &'a str) -> Container<'a, T> {
     Container::new(

@@ -1,5 +1,4 @@
-use crate::component::text::P1_SIZE;
-use crate::widget::Text;
+use crate::{component::text::P1_SIZE, widget::*};
 use iced::{alignment, Font, Length};
 
 const BOOTSTRAP_ICONS: Font = Font::with_name("bootstrap-icons");

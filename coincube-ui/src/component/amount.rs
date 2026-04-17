@@ -2,9 +2,7 @@ pub use bitcoin::Amount;
 use iced::Color;
 use serde::{Deserialize, Serialize};
 
-use crate::color;
-use crate::component::text::{text, Text, P1_SIZE};
-use crate::widget::Row;
+use crate::{color, component::text::*, widget::*};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum BitcoinDisplayUnit {

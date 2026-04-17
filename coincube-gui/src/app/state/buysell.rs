@@ -86,7 +86,7 @@ impl State for BuySellPanel {
                                         log::error!("Unable to parse user information found in OS keyring: {:?}", er)
                                     }
                                 }
-                            }
+                            };
                         }
                         Err(e) => {
                             log::error!("Unable to restore login state from OS keyring: {e}");

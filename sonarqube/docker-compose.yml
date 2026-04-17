@@ -11,6 +11,32 @@ services:
     volumes:
       - sonarqube_data:/opt/sonarqube/data
       - ${HOME}/sonarqube/plugins:/opt/sonarqube/extensions/plugins
+    networks:
+      - sonarqube-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/api/system/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
+  sonarqube-mcp:
+    image: mcp/sonarqube:latest
+    container_name: sonarqube-mcp
+    environment:
+      SONARQUBE_URL: http://sonarqube:9000
+      SONARQUBE_TOKEN: ${SONARQUBE_TOKEN}
+    command: ["java", "-jar", "/app/mcp-server.jar", "--stdio"]
+    depends_on:
+      sonarqube:
+        condition: service_healthy
+    networks:
+      - sonarqube-network
+    restart: unless-stopped
 
 volumes:
   sonarqube_data:
+
+networks:
+  sonarqube-network:
+    driver: bridge

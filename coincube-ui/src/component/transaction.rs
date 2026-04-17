@@ -1,7 +1,7 @@
 use crate::{
     component::{amount, amount::BitcoinDisplayUnit, badge, text},
     theme,
-    widget::{Column, Container, Element, Row},
+    widget::*,
 };
 use bitcoin::Amount;
 use iced::{widget::button, Alignment, Length};

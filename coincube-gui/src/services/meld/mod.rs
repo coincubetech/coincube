@@ -121,7 +121,10 @@ fn create_subscription(
     use futures::SinkExt;
     use reqwest_sse::EventSource;
 
-    let base_url = crate::services::coincube_api_base_url();
+    #[cfg(debug_assertions)]
+    let base_url = "https://dev-events.coincube.io";
+    #[cfg(not(debug_assertions))]
+    let base_url = env!("EVENTS_API_URL");
 
     let (token, retries) = data;
 

@@ -77,19 +77,7 @@ pub fn liquid_receive_view<'a>(
         _ => {
             // Liquid / OnChain: only show generate button if no address is displayed
             if address.is_none() && !loading {
-                // For the BTC onchain swap-receive tab, wait until the dynamic
-                // min/max swap limits have been fetched from the SDK before
-                // letting the user generate an address — the warning box below
-                // depends on them and we don't want to show a receive address
-                // without the user first seeing the constraints.
-                if *receive_method == ReceiveMethod::OnChain && onchain_limits.is_none() {
-                    content = content.push(onchain_warning_box(onchain_limits, bitcoin_unit));
-                    content = content.push(crate::loading::loading_indicator(Some(
-                        "Fetching swap limits",
-                    )));
-                } else {
-                    content = content.push(generate_button());
-                }
+                content = content.push(generate_button());
             }
         }
     }
@@ -426,7 +414,7 @@ fn method_toggle(current_method: &ReceiveMethod) -> Element<LiquidReceiveMessage
                 }),
             });
 
-        let label = text("Bitcoin")
+        let label = text("On-chain")
             .size(16)
             .style(move |_theme: &theme::Theme| iced::widget::text::Style {
                 color: Some(if onchain_liquid {
@@ -800,11 +788,14 @@ fn onchain_warning_box<'a>(
         Row::new()
             .spacing(8)
             .push(icon::warning_icon().size(16).color(color::ORANGE))
-            .push(text("Bitcoin onchain → L-BTC swap").size(14).bold().style(
-                |_theme: &theme::Theme| iced::widget::text::Style {
-                    color: Some(color::ORANGE),
-                },
-            )),
+            .push(
+                text("Important")
+                    .size(14)
+                    .bold()
+                    .style(|_theme: &theme::Theme| iced::widget::text::Style {
+                        color: Some(color::ORANGE),
+                    }),
+            ),
     );
 
     if let Some((min_sat, max_sat)) = onchain_limits {
@@ -812,7 +803,7 @@ fn onchain_warning_box<'a>(
         let max_btc = Amount::from_sat(max_sat);
         warning_content = warning_content.push(
             text(format!(
-                "- Send between {} and {} — outside this range the swap cannot settle.",
+                "- Receive amount must be between {} and {}",
                 min_btc.to_formatted_string_with_unit(bitcoin_unit),
                 max_btc.to_formatted_string_with_unit(bitcoin_unit),
             ))
@@ -821,7 +812,7 @@ fn onchain_warning_box<'a>(
         );
     } else {
         warning_content = warning_content.push(
-            text("- Fetching current swap limits…")
+            text("- Receive amount must be within the specified limits")
                 .size(14)
                 .style(theme::text::secondary),
         );
@@ -829,17 +820,14 @@ fn onchain_warning_box<'a>(
 
     warning_content = warning_content
         .push(
-            text("- Use this address for ONE deposit only.")
+            text("- Use this address for ONE transaction only")
                 .size(14)
                 .style(theme::text::secondary),
         )
         .push(
-            text(
-                "- If your deposit is outside the range or the swap fails, \
-                 funds are recoverable via Refund in the Transactions tab.",
-            )
-            .size(14)
-            .style(theme::text::secondary),
+            text("- For multiple transactions, generate new addresses")
+                .size(14)
+                .style(theme::text::secondary),
         );
 
     Container::new(warning_content)

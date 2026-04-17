@@ -23,7 +23,10 @@ pub struct TransactionUpdate {
 pub fn transaction_stream(
     data: &(String, String),
 ) -> impl iced::futures::Stream<Item = MavapayMessage> + 'static {
-    let base_url = crate::services::coincube_api_base_url();
+    #[cfg(debug_assertions)]
+    let base_url = "https://dev-events.coincube.io";
+    #[cfg(not(debug_assertions))]
+    let base_url = env!("EVENTS_API_URL");
 
     let (order_id, user_jwt) = data;
     let auth = format!("Bearer {}", user_jwt);
