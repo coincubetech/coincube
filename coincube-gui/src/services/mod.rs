@@ -51,3 +51,39 @@ fn default_base_url() -> String {
         env!("COINCUBE_API_URL").to_string()
     }
 }
+
+/// Resolves the LNURL domain the bridge binds Lightning Addresses
+/// against. Mirrors the bridge's `COINCUBE_LNURL_DOMAIN` lookup in
+/// `coincube-spark-bridge/src/sdk_adapter.rs`: the env var wins
+/// when set to a non-empty value, otherwise the default matches
+/// the bridge's `DEFAULT_LNURL_DOMAIN` constant.
+///
+/// Used by the fallback formatters that append `@<domain>` to a
+/// bare username when the stored record doesn't include one.
+/// Keeping this lookup in a single place means the UI and the SDK
+/// advertise the same domain under every environment override —
+/// a mismatch would show the user an address that doesn't resolve.
+///
+/// Cached after first resolution (env vars don't change at
+/// runtime and this is called from render paths).
+pub fn lnurl_domain() -> &'static str {
+    static DOMAIN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    DOMAIN
+        .get_or_init(|| {
+            std::env::var("COINCUBE_LNURL_DOMAIN")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "pay.coincube.io".to_string())
+        })
+        .as_str()
+}
+
+/// `@<domain>` form of [`lnurl_domain`] for formatters that append
+/// it to a bare username. Cached.
+pub fn lnurl_at_suffix() -> &'static str {
+    static SUFFIX: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    SUFFIX
+        .get_or_init(|| format!("@{}", lnurl_domain()))
+        .as_str()
+}

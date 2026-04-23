@@ -29,13 +29,8 @@ use crate::{
     },
 };
 
-/// Domain suffix displayed in the Lightning Address claim form.
-/// Must match the bridge's `DEFAULT_LNURL_DOMAIN` (and thus the
-/// Cloudflare CNAME + Breez allowlist) or the displayed address
-/// won't resolve.
-const LN_ADDRESS_DOMAIN: &str = "@pay.coincube.io";
-
 use crate::app::view::Message as ViewMessage;
+use crate::services::lnurl_at_suffix;
 
 pub fn connect_panel<'a>(state: &'a ConnectPanel) -> Element<'a, ViewMessage> {
     let acct = &state.account;
@@ -1069,7 +1064,7 @@ fn lightning_address_ux<'a>(state: &'a ConnectCubePanel) -> Element<'a, ConnectC
             .and_then(|la| la.lightning_address.clone())
             .unwrap_or_default();
         if !address.contains('@') {
-            address.push_str(LN_ADDRESS_DOMAIN);
+            address.push_str(lnurl_at_suffix());
         }
 
         container(
@@ -1102,8 +1097,18 @@ fn lightning_address_ux<'a>(state: &'a ConnectCubePanel) -> Element<'a, ConnectC
                 .push_maybe(state.ln_reconcile_needs_reregister.as_deref().map(|err| {
                     // API↔SDK divergence — the DB confirms the
                     // address but the Spark SDK couldn't bind it on
-                    // this device. Surface to the user so they
-                    // know manual action may be needed.
+                    // this device. Surface to the user and expose a
+                    // "Re-register" action that re-runs the same
+                    // reconcile path as startup.
+                    let button_label = if state.ln_reconcile_in_progress {
+                        "Re-registering…"
+                    } else {
+                        "Re-register"
+                    };
+                    let retry_btn = button::primary(None, button_label)
+                        .on_press_maybe((!state.ln_reconcile_in_progress).then_some(
+                            ConnectCubeMessage::RetryLightningAddressReconcile,
+                        ));
                     Column::new()
                         .push(iced::widget::Space::new().height(Length::Fixed(12.0)))
                         .push(
@@ -1112,6 +1117,8 @@ fn lightning_address_ux<'a>(state: &'a ConnectCubePanel) -> Element<'a, ConnectC
                         )
                         .push(iced::widget::Space::new().height(Length::Fixed(4.0)))
                         .push(text::p2_regular(err).color(color::GREY_3))
+                        .push(iced::widget::Space::new().height(Length::Fixed(12.0)))
+                        .push(retry_btn)
                 }))
                 .padding(20)
                 .spacing(2),
@@ -1190,7 +1197,7 @@ fn lightning_address_ux<'a>(state: &'a ConnectCubePanel) -> Element<'a, ConnectC
                                 .padding(15),
                         )
                         .push(
-                            container(text::p1_regular(LN_ADDRESS_DOMAIN).color(color::GREY_3))
+                            container(text::p1_regular(lnurl_at_suffix()).color(color::GREY_3))
                                 .padding(15)
                                 .center_y(Length::Fixed(50.0)),
                         )

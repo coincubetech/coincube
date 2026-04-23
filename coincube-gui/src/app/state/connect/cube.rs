@@ -19,40 +19,45 @@ use crate::{
 /// Phase 4g claim-flow rollback helper.
 ///
 /// Tears down whichever of (SDK registration, API reservation)
-/// actually succeeded, logging each delete failure with cube id +
-/// username so manual cleanup has enough context. Returns the
-/// suffix to splice onto the user-facing error: `""` on clean
+/// actually took effect, logging each delete failure with the
+/// cube id and the underlying error. Usernames / Lightning
+/// Addresses are intentionally NOT logged — they're
+/// user-identifying; the cube id is enough to correlate the
+/// failure with the affected record in support tooling. Returns
+/// the suffix to splice onto the user-facing error: `""` on clean
 /// rollback, the bracketed "partial rollback failure" note when
 /// at least one delete call errored.
 ///
-/// Pass `spark = None` at rollback sites where the SDK register
-/// hadn't succeeded yet (i.e. rolling back only the API
-/// reservation).
+/// The SDK delete is called even on the register-fail path. The
+/// SDK's `register_lightning_address` is internally two steps —
+/// remote Breez server call, then local cache save — and if the
+/// second step fails the caller sees `Err` but a live remote
+/// binding may still exist. Best-effort: issue the delete anyway.
+/// Note the SDK's `delete_lightning_address` reads the username
+/// from its local cache, so if that cache write never completed
+/// it silently no-ops; fully cleaning up such an orphan would
+/// require an SDK-level `unregister_by_username` which isn't
+/// exposed today.
 async fn rollback_partial_claim(
     client: &CoincubeClient,
-    spark: Option<&SparkClient>,
+    spark: &SparkClient,
     cube_id: &str,
-    username: &str,
 ) -> &'static str {
     let mut partial = false;
-    if let Some(spark) = spark {
-        if let Err(e) = spark.delete_lightning_address().await {
-            log::error!(
-                "[CONNECT-CUBE] rollback of Spark lightning-address registration \
-                 failed (cube={}, username={}): {}",
-                cube_id,
-                username,
-                e
-            );
-            partial = true;
-        }
+    if let Err(e) = spark.delete_lightning_address().await {
+        log::error!(
+            "[CONNECT-CUBE] rollback of Spark lightning-address registration \
+             failed (cube={}): {}",
+            cube_id,
+            e
+        );
+        partial = true;
     }
     if let Err(e) = client.delete_lightning_address(cube_id).await {
         log::error!(
             "[CONNECT-CUBE] rollback of API lightning-address reservation failed \
-             (cube={}, username={}): {}",
+             (cube={}): {}",
             cube_id,
-            username,
             e
         );
         partial = true;
@@ -132,6 +137,11 @@ pub struct ConnectCubePanel {
     /// forever on its own. Cleared whenever the SDK next reports a
     /// bound address.
     pub ln_reconcile_needs_reregister: Option<String>,
+    /// `true` while a reconcile task (startup, event-driven, or
+    /// user-initiated via the banner's "Re-register" button) is
+    /// in flight. Gates the button so we don't stack duplicate
+    /// reconcile tasks against the Breez server.
+    pub ln_reconcile_in_progress: bool,
     /// API client with JWT set — obtained from ConnectAccountPanel after login.
     pub client: Option<CoincubeClient>,
     // Avatar
@@ -169,6 +179,7 @@ impl ConnectCubePanel {
             ln_check_abort: None,
             spark_client,
             ln_reconcile_needs_reregister: None,
+            ln_reconcile_in_progress: false,
             client: None,
             avatar_step: AvatarFlowStep::Idle,
             avatar_data: None,
@@ -202,6 +213,7 @@ impl ConnectCubePanel {
             handle.abort();
         }
         self.ln_reconcile_needs_reregister = None;
+        self.ln_reconcile_in_progress = false;
         self.avatar_step = AvatarFlowStep::Idle;
         self.avatar_data = None;
         self.avatar_generating = false;
@@ -230,7 +242,7 @@ impl ConnectCubePanel {
     /// API shouldn't persist these) and skipped — reconcile can't
     /// do anything with a row the user would have to clean up
     /// manually anyway.
-    pub fn reconcile_spark_lightning_address(&self) -> Option<iced::Task<Message>> {
+    pub fn reconcile_spark_lightning_address(&mut self) -> Option<iced::Task<Message>> {
         let spark = self.spark_client.clone()?;
         let db_addr = self
             .lightning_address
@@ -250,31 +262,35 @@ impl ConnectCubePanel {
             return None;
         }
         let db_username = db_username.to_string();
+        let db_full_addr = db_addr.clone();
+        self.ln_reconcile_in_progress = true;
         Some(iced::Task::perform(
             async move {
                 match spark.get_lightning_address().await {
                     Ok(Some(info)) => {
                         // Only treat as "in sync" when the SDK's
-                        // bound username matches the DB-confirmed
-                        // reservation. A mismatch means the SDK
-                        // holds a stale or foreign binding (prior
-                        // cube, cross-device swap, etc.) and we
-                        // must surface the divergence — silently
-                        // accepting it would display the wrong
-                        // address to the user.
-                        if info.username == db_username {
+                        // full bound address matches the DB-confirmed
+                        // reservation. Comparing just the username
+                        // would miss a domain drift (e.g. the
+                        // `coincube.io` → `pay.coincube.io` flip) and
+                        // silently accept a stale binding; comparing
+                        // the full `user@domain` catches both foreign
+                        // usernames and foreign domains.
+                        if info.lightning_address == db_full_addr {
                             ReconcileOutcome::AlreadyBound(info)
                         } else {
                             ReconcileOutcome::NeedsReRegistration(format!(
                                 "Spark SDK is bound to '{}' but the confirmed \
                                  reservation is '{}'",
-                                info.username, db_username
+                                info.lightning_address, db_full_addr
                             ))
                         }
                     }
                     Ok(None) => {
                         // SDK has no record — try to bind the
-                        // DB-confirmed username on this device.
+                        // DB-confirmed username on this device. The
+                        // SDK appends the configured `lnurl_domain`
+                        // server-side, so we pass just the username.
                         match spark.register_lightning_address(db_username, None).await {
                             Ok(info) => ReconcileOutcome::ReRegistered(info),
                             Err(e) => ReconcileOutcome::NeedsReRegistration(e.to_string()),
@@ -469,15 +485,19 @@ impl ConnectCubePanel {
                             .map_err(|e| format!("Reserve failed: {}", e))?;
 
                         // Step 2: register against the Breez-hosted LNURL
-                        // server via the Spark bridge. On failure, release
-                        // the reservation (SDK side never succeeded, so
-                        // only roll back the API reservation).
+                        // server via the Spark bridge. On failure we
+                        // attempt both the API reservation rollback
+                        // and a best-effort Spark-side delete — the
+                        // SDK's register is internally (remote call,
+                        // local cache save), and an Err after the
+                        // remote call succeeded would leave a live
+                        // Breez binding that the SDK's delete may
+                        // still reach.
                         let register_result = spark
                             .register_lightning_address(username.clone(), None)
                             .await;
                         if let Err(e) = register_result {
-                            let rb_note =
-                                rollback_partial_claim(&client, None, &cube_id, &username).await;
+                            let rb_note = rollback_partial_claim(&client, &spark, &cube_id).await;
                             return Err(format!("Register failed: {}{}", e, rb_note));
                         }
 
@@ -490,13 +510,8 @@ impl ConnectCubePanel {
                         match client.confirm_lightning_address(&cube_id).await {
                             Ok(ln_addr) => Ok(ln_addr),
                             Err(e) => {
-                                let rb_note = rollback_partial_claim(
-                                    &client,
-                                    Some(&spark),
-                                    &cube_id,
-                                    &username,
-                                )
-                                .await;
+                                let rb_note =
+                                    rollback_partial_claim(&client, &spark, &cube_id).await;
                                 Err(format!("Confirm failed: {}{}", e, rb_note))
                             }
                         }
@@ -572,37 +587,52 @@ impl ConnectCubePanel {
                 }
             }
 
-            ConnectCubeMessage::LightningAddressReconciled(outcome) => match outcome {
-                ReconcileOutcome::AlreadyBound(info) => {
-                    log::info!(
-                        "[CONNECT-CUBE] Spark reports lightning address {}",
-                        info.lightning_address
-                    );
-                    self.ln_reconcile_needs_reregister = None;
+            ConnectCubeMessage::LightningAddressReconciled(outcome) => {
+                self.ln_reconcile_in_progress = false;
+                match outcome {
+                    ReconcileOutcome::AlreadyBound(info) => {
+                        log::info!(
+                            "[CONNECT-CUBE] Spark reports lightning address {}",
+                            info.lightning_address
+                        );
+                        self.ln_reconcile_needs_reregister = None;
+                    }
+                    ReconcileOutcome::ReRegistered(info) => {
+                        log::info!(
+                            "[CONNECT-CUBE] Spark re-registered lightning address {}",
+                            info.lightning_address
+                        );
+                        self.ln_reconcile_needs_reregister = None;
+                    }
+                    ReconcileOutcome::QueryFailed(e) => {
+                        log::warn!(
+                            "[CONNECT-CUBE] Spark lightning-address query failed \
+                             (transient, will retry on next trigger): {}",
+                            e
+                        );
+                    }
+                    ReconcileOutcome::NeedsReRegistration(e) => {
+                        log::error!(
+                            "[CONNECT-CUBE] Spark register failed during reconcile — \
+                             API and SDK are out of sync until the user re-claims: {}",
+                            e
+                        );
+                        self.ln_reconcile_needs_reregister = Some(e);
+                    }
                 }
-                ReconcileOutcome::ReRegistered(info) => {
-                    log::info!(
-                        "[CONNECT-CUBE] Spark re-registered lightning address {}",
-                        info.lightning_address
-                    );
-                    self.ln_reconcile_needs_reregister = None;
+            }
+
+            ConnectCubeMessage::RetryLightningAddressReconcile => {
+                // Guard against concurrent presses — the button is
+                // gated on this flag in the view layer too, but the
+                // flag wins if a stale message somehow slips through.
+                if self.ln_reconcile_in_progress {
+                    return iced::Task::none();
                 }
-                ReconcileOutcome::QueryFailed(e) => {
-                    log::warn!(
-                        "[CONNECT-CUBE] Spark lightning-address query failed \
-                         (transient, will retry on next trigger): {}",
-                        e
-                    );
+                if let Some(task) = self.reconcile_spark_lightning_address() {
+                    return task;
                 }
-                ReconcileOutcome::NeedsReRegistration(e) => {
-                    log::error!(
-                        "[CONNECT-CUBE] Spark register failed during reconcile — \
-                         API and SDK are out of sync until the user re-claims: {}",
-                        e
-                    );
-                    self.ln_reconcile_needs_reregister = Some(e);
-                }
-            },
+            }
 
             ConnectCubeMessage::RetryRegistration => {
                 self.registration_error = None;

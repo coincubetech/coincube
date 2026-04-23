@@ -156,7 +156,7 @@ fn identity_block<'a>(ctx: &NavContext<'a>) -> Element<'a, Message> {
         let display_addr = if addr.contains('@') {
             addr.to_string()
         } else {
-            format!("{}@pay.coincube.io", addr)
+            format!("{}{}", addr, crate::services::lnurl_at_suffix())
         };
         let r: Row<Message> = row![
             text::caption(display_addr.clone()).color(color::GREY_3),

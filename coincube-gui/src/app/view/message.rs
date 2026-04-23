@@ -862,6 +862,10 @@ pub enum ConnectCubeMessage {
     /// transient query failure and from a persistent API↔SDK
     /// divergence that needs the user's attention.
     LightningAddressReconciled(crate::app::state::connect::cube::ReconcileOutcome),
+    /// Phase 4g: user pressed the "Re-register" button on the
+    /// divergence banner. Invokes the same reconcile path as
+    /// startup / `SparkLightningAddressChanged(None)`.
+    RetryLightningAddressReconcile,
     /// Result of registering the cube with the backend (POST /connect/cubes).
     CubeRegistered(Result<crate::services::coincube::CubeResponse, String>),
     /// Retry a previously failed cube registration.

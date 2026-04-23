@@ -1872,7 +1872,7 @@ impl App {
                             if addr.contains('@') {
                                 addr.clone()
                             } else {
-                                format!("{}@pay.coincube.io", addr)
+                                format!("{}{}", addr, crate::services::lnurl_at_suffix())
                             }
                         })
                     });
