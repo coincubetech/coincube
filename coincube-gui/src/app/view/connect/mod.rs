@@ -30,8 +30,10 @@ use crate::{
 };
 
 /// Domain suffix displayed in the Lightning Address claim form.
-/// Must match the backend's `lightningAddressDomain` / `bip353Domain`.
-const LN_ADDRESS_DOMAIN: &str = "@coincube.io";
+/// Must match the bridge's `DEFAULT_LNURL_DOMAIN` (and thus the
+/// Cloudflare CNAME + Breez allowlist) or the displayed address
+/// won't resolve.
+const LN_ADDRESS_DOMAIN: &str = "@pay.coincube.io";
 
 use crate::app::view::Message as ViewMessage;
 

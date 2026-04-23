@@ -1016,8 +1016,7 @@ mod cube_member_tests {
                         "uuid": "abc-123",
                         "name": "My Cube",
                         "network": "bitcoin",
-                        "lightningAddress": "me@coincube.io",
-                        "bolt12Offer": null,
+                        "lightningAddress": "me@pay.coincube.io",
                         "status": "active",
                         "members": [
                             {

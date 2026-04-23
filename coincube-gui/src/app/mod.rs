@@ -1872,7 +1872,7 @@ impl App {
                             if addr.contains('@') {
                                 addr.clone()
                             } else {
-                                format!("{}{}", addr, "@coincube.io")
+                                format!("{}@pay.coincube.io", addr)
                             }
                         })
                     });

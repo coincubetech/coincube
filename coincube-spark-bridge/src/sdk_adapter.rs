@@ -29,10 +29,14 @@ const USDB_MAINNET_TOKEN_IDENTIFIER: &str =
 pub const STABLE_BALANCE_LABEL: &str = "USDB";
 
 /// Default LNURL domain for production builds. The Breez-hosted LNURL
-/// server issues Lightning Addresses of the form `<username>@<this>`.
-/// Override at launch time via `COINCUBE_LNURL_DOMAIN` when pointing
-/// staging builds at an alternate allowlisted domain.
-const DEFAULT_LNURL_DOMAIN: &str = "coincube.io";
+/// server issues Lightning Addresses of the form `<username>@<this>`,
+/// and `pay.coincube.io` CNAMEs to `breez.tips` so Breez can serve
+/// LUD-16 responses directly. Must match the Cloudflare DNS record
+/// and the entry on the Breez allowlist — a mismatch makes addresses
+/// unpayable. Override at launch time via `COINCUBE_LNURL_DOMAIN`
+/// when pointing staging builds at an alternate allowlisted
+/// subdomain (e.g. `pay.dev.coincube.io`).
+const DEFAULT_LNURL_DOMAIN: &str = "pay.coincube.io";
 
 /// Cloneable SDK handle. The inner [`BreezSdk`] is `Send + Sync`, so the
 /// bridge can freely share it across async tasks serving different
