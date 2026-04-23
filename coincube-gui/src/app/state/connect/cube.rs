@@ -237,12 +237,22 @@ impl ConnectCubePanel {
     /// reinstall, SDK storage wipe, multi-device identity swap).
     ///
     /// Returns `None` when there's nothing to do — no Spark backend,
-    /// or no DB-confirmed address. A DB `lightning_address` that
-    /// can't be split on `@` is logged as a malformed record (the
-    /// API shouldn't persist these) and skipped — reconcile can't
-    /// do anything with a row the user would have to clean up
-    /// manually anyway.
+    /// no DB-confirmed address, or a reconcile task is already in
+    /// flight. A DB `lightning_address` that can't be split on `@`
+    /// is logged as a malformed record (the API shouldn't persist
+    /// these) and skipped — reconcile can't do anything with a row
+    /// the user would have to clean up manually anyway.
+    ///
+    /// The in-flight guard is centralised here so every trigger
+    /// (startup, event-driven, user-initiated) gets the same
+    /// exclusion. Without it, rapid SDK events (e.g. cross-device
+    /// realtime-sync replays) could spawn overlapping reconciles
+    /// that race on `register_lightning_address` and let a stale
+    /// late completion clobber a fresh successful result.
     pub fn reconcile_spark_lightning_address(&mut self) -> Option<iced::Task<Message>> {
+        if self.ln_reconcile_in_progress {
+            return None;
+        }
         let spark = self.spark_client.clone()?;
         let db_addr = self
             .lightning_address
@@ -623,12 +633,9 @@ impl ConnectCubePanel {
             }
 
             ConnectCubeMessage::RetryLightningAddressReconcile => {
-                // Guard against concurrent presses — the button is
-                // gated on this flag in the view layer too, but the
-                // flag wins if a stale message somehow slips through.
-                if self.ln_reconcile_in_progress {
-                    return iced::Task::none();
-                }
+                // Concurrent-press protection lives inside
+                // `reconcile_spark_lightning_address`; it returns
+                // `None` when a task is already in flight.
                 if let Some(task) = self.reconcile_spark_lightning_address() {
                     return task;
                 }
