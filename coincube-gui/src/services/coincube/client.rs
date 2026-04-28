@@ -6,9 +6,9 @@ use super::{
     CubeKeyRaw, CubeLimitsResponse, CubeResponse, DownloadStats, FeaturesResponse, GetAvatarData,
     Invite, LightningAddress, LoginActivity, LoginResponse, OtpRequest, OtpVerifyRequest,
     PublicAvatarData, RecoveryKit, RecoveryKitStatus, RefreshTokenRequest, RegenerationData,
-    RegisterCubeRequest, ReserveLightningAddressRequest, SaveQuoteRequest, SaveQuoteResponse, StatsPeriod,
-    TimeseriesResponse, TodayStats, UpdateCubeRequest, UpsertRecoveryKitRequest, User, VaultMemberResponse,
-    VerifiedDevice,
+    RegisterCubeRequest, ReserveLightningAddressRequest, SaveQuoteRequest, SaveQuoteResponse,
+    StatsPeriod, TimeseriesResponse, TodayStats, UpdateCubeRequest, UpsertRecoveryKitRequest, User,
+    VaultMemberResponse, VerifiedDevice,
 };
 use reqwest::{Client, Method};
 use serde::Deserialize;
