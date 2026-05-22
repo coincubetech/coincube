@@ -420,6 +420,38 @@ impl Loader {
         }
     }
 
+    pub fn stop_task(&mut self) -> Task<Message> {
+        info!("Close requested");
+        let daemon = match &mut self.step {
+            Step::Syncing { daemon, .. } if daemon.backend().is_embedded() => Some(daemon.clone()),
+            _ => None,
+        };
+
+        let bitcoind = self.internal_bitcoind.take();
+
+        if daemon.is_none() && bitcoind.is_none() {
+            return Task::none();
+        }
+
+        Task::perform(
+            async move {
+                if let Some(daemon) = daemon {
+                    info!("Stopping internal daemon...");
+                    if let Err(e) = daemon.stop().await {
+                        warn!("Internal daemon failed to stop: {}", e);
+                    } else {
+                        info!("Internal daemon stopped");
+                    }
+                }
+
+                if let Some(bitcoind) = bitcoind {
+                    bitcoind.stop();
+                }
+            },
+            |_| Message::None,
+        )
+    }
+
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::View(ViewMessage::Retry) => {

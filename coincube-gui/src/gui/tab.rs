@@ -1131,6 +1131,17 @@ impl Tab {
             State::PinEntry(_) => {}
         }
     }
+
+    pub fn stop_task(&mut self) -> Task<Message> {
+        match &mut self.state {
+            State::Loader(s) => s.stop_task().map(Message::Load),
+            State::App(s) => s.stop_task().map(Message::Run),
+            _ => {
+                self.stop();
+                Task::none()
+            }
+        }
+    }
 }
 
 async fn save_cube_settings(

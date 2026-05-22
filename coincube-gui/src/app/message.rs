@@ -31,6 +31,7 @@ use crate::{
 
 #[derive(Debug)]
 pub enum Message {
+    Noop,
     Tick,
     UpdateDaemonCache(Result<DaemonCache, Error>),
     CacheUpdated,

@@ -74,10 +74,12 @@ impl Pane {
         task.map(move |msg| Message::Tab(id, msg))
     }
 
-    pub fn close_tab(&mut self, i: usize) {
+    pub fn close_tab(&mut self, i: usize) -> Task<Message> {
         if let Some(mut tab) = self.remove_tab(i) {
-            tab.stop();
+            let id = tab.id;
+            return tab.stop_task().map(move |msg| Message::Tab(id, msg));
         }
+        Task::none()
     }
 
     pub fn remove_tab(&mut self, i: usize) -> Option<tab::Tab> {
@@ -113,11 +115,30 @@ impl Pane {
         }
     }
 
-    pub fn on_tick(&mut self) -> Task<Message> {
-        Task::batch(self.tabs.iter_mut().map(|t| {
-            let id = t.id;
-            t.on_tick().map(move |msg| Message::Tab(id, msg))
+    pub fn on_tick(&mut self, pane_active: bool) -> Task<Message> {
+        let focused = self.focused_tab;
+        Task::batch(self.tabs.iter_mut().enumerate().filter_map(|(i, t)| {
+            if (pane_active && i == focused) || !matches!(t.state, tab::State::App(_)) {
+                let id = t.id;
+                Some(t.on_tick().map(move |msg| Message::Tab(id, msg)))
+            } else {
+                None
+            }
         }))
+    }
+
+    fn kick_focused_app(&mut self, pane_active: bool) -> Task<Message> {
+        if !pane_active {
+            return Task::none();
+        }
+
+        if let Some(t) = self.tabs.get_mut(self.focused_tab) {
+            if matches!(t.state, tab::State::App(_)) {
+                let id = t.id;
+                return t.on_tick().map(move |msg| Message::Tab(id, msg));
+            }
+        }
+        Task::none()
     }
 
     /// Helper to update a tab with an app message.
@@ -127,10 +148,14 @@ impl Pane {
         app_msg: impl Into<app::Message>,
         cfg: &Config,
     ) -> Task<Message> {
-        self.update(Message::Tab(tab_id, tab::Message::Run(app_msg.into())), cfg)
+        self.update(
+            Message::Tab(tab_id, tab::Message::Run(app_msg.into())),
+            cfg,
+            true,
+        )
     }
 
-    pub fn update(&mut self, message: Message, cfg: &Config) -> Task<Message> {
+    pub fn update(&mut self, message: Message, cfg: &Config, pane_active: bool) -> Task<Message> {
         match message {
             Message::Tab(id, msg) => {
                 return self
@@ -151,11 +176,17 @@ impl Pane {
             Message::View(ViewMessage::FocusTab(i)) => {
                 if i < self.tabs.len() {
                     self.focused_tab = i;
+                    return self.kick_focused_app(pane_active);
                 }
             }
             Message::View(ViewMessage::AddTab) => return self.add_tab(cfg),
             Message::View(ViewMessage::CloseTab(i)) => {
-                self.close_tab(i);
+                let focus_may_have_changed = i <= self.focused_tab;
+                let stop_task = self.close_tab(i);
+                if focus_may_have_changed {
+                    return Task::batch([stop_task, self.kick_focused_app(pane_active)]);
+                }
+                return stop_task;
             }
             // handle by the pane grid update.
             Message::View(ViewMessage::SplitTab(_)) => {}
@@ -166,11 +197,16 @@ impl Pane {
         Task::none()
     }
 
-    pub fn subscription(&self) -> Subscription<Message> {
+    pub fn subscription(&self, pane_active: bool) -> Subscription<Message> {
+        let focused = self.focused_tab;
         let subs: Vec<Subscription<Message>> = self
             .tabs
             .iter()
-            .map(|t| {
+            .enumerate()
+            .filter(|(i, t)| {
+                (pane_active && *i == focused) || !matches!(t.state, tab::State::App(_))
+            })
+            .map(|(_, t)| {
                 t.subscription()
                     .with(t.id)
                     .map(|(id, msg)| Message::Tab(id, msg))

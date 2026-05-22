@@ -111,6 +111,16 @@ async fn ctrl_c() -> Result<(), ()> {
 }
 
 impl GUI {
+    fn active_pane(&self) -> Option<pane_grid::Pane> {
+        if let Some(pane) = self.focus {
+            if self.panes.get(pane).is_some() {
+                return Some(pane);
+            }
+        }
+
+        self.panes.iter().next().map(|(&id, _)| id)
+    }
+
     pub fn title(&self) -> String {
         match cfg!(debug_assertions) {
             true => format!("COINCUBE v{} (development)", env!("CARGO_PKG_VERSION")),
@@ -320,13 +330,17 @@ impl GUI {
                 Task::none()
             }
             Message::Pane(pane_id, pane::Message::View(pane::ViewMessage::CloseTab(i))) => {
+                let mut tasks = Vec::new();
+                let pane_active = self.active_pane() == Some(pane_id);
                 if let Some(pane) = self.panes.get_mut(pane_id) {
-                    let _ = pane
-                        .update(
+                    tasks.push(
+                        pane.update(
                             pane::Message::View(pane::ViewMessage::CloseTab(i)),
                             &self.config,
+                            pane_active,
                         )
-                        .map(move |msg| Message::Pane(pane_id, msg));
+                        .map(move |msg| Message::Pane(pane_id, msg)),
+                    );
                     if pane.tabs.is_empty() {
                         self.panes.close(pane_id);
                         if self.focus == Some(pane_id) {
@@ -335,9 +349,9 @@ impl GUI {
                     }
                 }
                 if !self.panes.iter().any(|(_, p)| !p.tabs.is_empty()) {
-                    return iced::window::latest().and_then(iced::window::close);
+                    tasks.push(iced::window::latest().and_then(iced::window::close));
                 }
-                Task::none()
+                Task::batch(tasks)
             }
             // In case of cube deletion, remove any tab where the cube/wallet is currently running.
             Message::Pane(p, pane::Message::Tab(t, tab::Message::Launch(msg))) => {
@@ -357,7 +371,9 @@ impl GUI {
                                 pane.tabs[i].state,
                                 tab::State::App(_) | tab::State::Loader(_)
                             ) {
-                                pane.close_tab(i);
+                                let pane_id = *id;
+                                let close_task = pane.close_tab(i);
+                                tasks.push(close_task.map(move |msg| Message::Pane(pane_id, msg)));
                             }
                         }
                         if pane.tabs.is_empty() {
@@ -382,11 +398,13 @@ impl GUI {
                     }
                 }
 
+                let pane_active = self.active_pane() == Some(p);
                 if let Some(pane) = self.panes.get_mut(p) {
                     tasks.push(
                         pane.update(
                             pane::Message::Tab(t, tab::Message::Launch(msg)),
                             &self.config,
+                            pane_active,
                         )
                         .map(move |msg| Message::Pane(p, msg)),
                     );
@@ -441,9 +459,10 @@ impl GUI {
                         }
                     }
                     _ => {
+                        let pane_active = self.active_pane() == Some(i);
                         if let Some(pane) = self.panes.get_mut(i) {
                             return pane
-                                .update(msg, &self.config)
+                                .update(msg, &self.config, pane_active)
                                 .map(move |msg| Message::Pane(i, msg));
                         }
                     }
@@ -590,11 +609,12 @@ impl GUI {
                         );
                     }
                 }
-                tasks.extend(
-                    self.panes
-                        .iter_mut()
-                        .map(|(&id, p)| p.on_tick().map(move |msg| Message::Pane(id, msg))),
-                );
+                let active_pane = self.active_pane();
+                tasks.extend(self.panes.iter_mut().map(|(&id, p)| {
+                    let pane_active = active_pane == Some(id);
+                    p.on_tick(pane_active)
+                        .map(move |msg| Message::Pane(id, msg))
+                }));
 
                 Task::batch(tasks)
             }
@@ -624,9 +644,11 @@ impl GUI {
                 _ => None,
             }),
         ];
+        let active_pane = self.active_pane();
         for (id, pane) in self.panes.iter() {
+            let pane_active = active_pane == Some(*id);
             vec.push(
-                pane.subscription()
+                pane.subscription(pane_active)
                     .with(*id)
                     .map(|(id, msg)| Message::Pane(id, msg)),
             );

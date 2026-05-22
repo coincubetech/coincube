@@ -1603,6 +1603,32 @@ impl App {
         }
     }
 
+    pub fn stop_task(&mut self) -> Task<Message> {
+        info!("Close requested");
+        if !self.daemon_backend().is_embedded() {
+            return Task::none();
+        }
+
+        let daemon = self.daemon.clone();
+        let bitcoind = self.internal_bitcoind.take();
+
+        Task::perform(
+            async move {
+                if let Some(daemon) = daemon {
+                    if let Err(e) = daemon.stop().await {
+                        error!("{}", e);
+                    } else {
+                        info!("Internal daemon stopped");
+                    }
+                }
+                if let Some(bitcoind) = bitcoind {
+                    bitcoind.stop();
+                }
+            },
+            |_| Message::Noop,
+        )
+    }
+
     pub fn on_tick(&mut self) -> Task<Message> {
         // Skip tick processing if no vault is configured
         if self.daemon.is_none() {
@@ -1843,6 +1869,7 @@ impl App {
 
     fn update_dispatch(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::Noop => {}
             Message::View(view::Message::DismissToast(id)) => {
                 self.errors.retain(|(i, ..)| *i != id);
             }
