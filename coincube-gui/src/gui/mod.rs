@@ -342,9 +342,9 @@ impl GUI {
                         .map(move |msg| Message::Pane(pane_id, msg)),
                     );
                     if pane.tabs.is_empty() {
-                        self.panes.close(pane_id);
+                        `self.panes.close(pane_id);
                         if self.focus == Some(pane_id) {
-                            self.focus = None;
+                            self.focus = self.panes.iter().next().map(|(&id, _)| id);
                         }
                     }
                 }
@@ -644,11 +644,9 @@ impl GUI {
                 _ => None,
             }),
         ];
-        let active_pane = self.active_pane();
         for (id, pane) in self.panes.iter() {
-            let pane_active = active_pane == Some(*id);
             vec.push(
-                pane.subscription(pane_active)
+                pane.subscription()
                     .with(*id)
                     .map(|(id, msg)| Message::Pane(id, msg)),
             );

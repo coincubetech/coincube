@@ -197,16 +197,11 @@ impl Pane {
         Task::none()
     }
 
-    pub fn subscription(&self, pane_active: bool) -> Subscription<Message> {
-        let focused = self.focused_tab;
+    pub fn subscription(&self) -> Subscription<Message> {
         let subs: Vec<Subscription<Message>> = self
             .tabs
             .iter()
-            .enumerate()
-            .filter(|(i, t)| {
-                (pane_active && *i == focused) || !matches!(t.state, tab::State::App(_))
-            })
-            .map(|(_, t)| {
+            .map(|t| {
                 t.subscription()
                     .with(t.id)
                     .map(|(id, msg)| Message::Tab(id, msg))
