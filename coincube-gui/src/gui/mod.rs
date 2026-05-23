@@ -342,7 +342,7 @@ impl GUI {
                         .map(move |msg| Message::Pane(pane_id, msg)),
                     );
                     if pane.tabs.is_empty() {
-                        `self.panes.close(pane_id);
+                        self.panes.close(pane_id);
                         if self.focus == Some(pane_id) {
                             self.focus = self.panes.iter().next().map(|(&id, _)| id);
                         }
