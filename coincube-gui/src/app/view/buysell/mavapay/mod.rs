@@ -408,10 +408,6 @@ impl MavapayState {
                     ("ZAR.bank_name", Beneficiary::ZAR { bank_name, .. }) => *bank_name = data,
                     // KE
                     (
-                        "KES.account_name",
-                        Beneficiary::KES(KenyanBeneficiary::PayToPhone { account_name, .. }),
-                    ) => *account_name = data,
-                    (
                         "KES.phone_number",
                         Beneficiary::KES(KenyanBeneficiary::PayToPhone { phone_number, .. }),
                     ) => *phone_number = data,

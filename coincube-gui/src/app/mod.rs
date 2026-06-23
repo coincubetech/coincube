@@ -1936,14 +1936,16 @@ impl App {
 
     pub fn stop(&mut self) {
         info!("Close requested");
+
         if self.daemon_backend().is_embedded() {
             if let Some(daemon) = &self.daemon {
                 if let Err(e) = Handle::current().block_on(async { daemon.stop().await }) {
                     error!("{}", e);
                 } else {
-                    info!("Internal daemon stopped");
+                    info!("Internal app daemon stopped");
                 }
             }
+
             if let Some(bitcoind) = self.internal_bitcoind.take() {
                 bitcoind.stop();
             }

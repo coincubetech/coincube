@@ -276,7 +276,6 @@ impl Beneficiary {
 #[serde(tag = "identifierType", content = "identifiers")]
 pub enum KenyanBeneficiary {
     PayToPhone {
-        account_name: String,
         phone_number: String,
     },
     PayToBill {

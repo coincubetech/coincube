@@ -322,13 +322,8 @@ fn sell_input_form<'a>(
                 .spacing(0),
             ]
         }
-        Beneficiary::KES(KenyanBeneficiary::PayToPhone {
-            account_name,
-            phone_number,
-        }) => {
-            if account_name.is_empty() {
-                validation_message = Some("Set the recipient's legal name");
-            } else if phone_number.is_empty() {
+        Beneficiary::KES(KenyanBeneficiary::PayToPhone { phone_number }) => {
+            if phone_number.is_empty() {
                 validation_message = Some("Set the recipient's phone number");
             }
 
@@ -338,11 +333,6 @@ fn sell_input_form<'a>(
                     .style(theme::card::border),
                 widget::space().width(iced::Length::Fill),
                 sat_amount_input(state.sat_amount, state.btc_price),
-                input_field(
-                    account_name,
-                    "Enter Recipient Account Name",
-                    "KES.account_name"
-                ),
                 input_field(
                     phone_number,
                     "Enter Recipient Phone Number",

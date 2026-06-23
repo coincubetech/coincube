@@ -71,13 +71,12 @@ pub fn balance_header_card<'a, Msg: 'a>(content: impl Into<Element<'a, Msg>>) ->
 pub fn backup_warning_banner<'a>() -> Element<'a, Message> {
     let body = container(
         row![
-            coincube_ui::icon::warning_icon().color(color::BLACK),
+            coincube_ui::icon::warning_icon().color(color::BLACK).size(18),
             text::p2_regular(
-                "Your master seed phrase is not backed up. Back it up to avoid \
-                 losing access to your Cube."
+                "Your master seed phrase is not backed up.\nBack it up to avoid losing access to your Cube."
             )
             .color(color::BLACK),
-            Space::new().width(Length::Fill),
+            Space::new().width(15),
             button::secondary(None, "Back Up Now")
                 .padding([6, 14])
                 .width(Length::Fixed(140.0))
@@ -89,7 +88,8 @@ pub fn backup_warning_banner<'a>() -> Element<'a, Message> {
             iced::widget::Button::new(
                 cross_icon()
                     .align_x(Alignment::Center)
-                    .align_y(Alignment::Center),
+                    .align_y(Alignment::Center)
+                    .size(18),
             )
             .padding([8, 10])
             .style(theme::button::secondary)
@@ -99,7 +99,6 @@ pub fn backup_warning_banner<'a>() -> Element<'a, Message> {
         .align_y(Alignment::Center),
     )
     .padding([8, 16])
-    .width(Length::Fill)
     .style(theme::notification::warning);
 
     // Constrain to the same FillPortion(1/8/1) layout used by the
@@ -108,6 +107,7 @@ pub fn backup_warning_banner<'a>() -> Element<'a, Message> {
         Space::new().width(Length::FillPortion(1)),
         container(body)
             .width(Length::FillPortion(8))
+            .align_x(iced::Alignment::Center)
             .max_width(1500),
         Space::new().width(Length::FillPortion(1)),
     ])

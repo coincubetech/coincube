@@ -269,7 +269,6 @@ impl State for BuySellPanel {
                                     // initialize default beneficiary
                                     let beneficiary = match country.code {
                                         "KE" => Beneficiary::KES(KenyanBeneficiary::PayToPhone {
-                                            account_name: "".to_string(),
                                             phone_number: "+254700000000".to_string(),
                                         }),
                                         "ZA" => Beneficiary::ZAR {

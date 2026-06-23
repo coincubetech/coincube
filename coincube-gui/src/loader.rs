@@ -437,7 +437,7 @@ impl Loader {
                 if let Err(e) = Handle::current().block_on(async { daemon.stop().await }) {
                     warn!("Internal daemon failed to stop: {}", e);
                 } else {
-                    info!("Internal daemon stopped");
+                    info!("Loader daemon stopped");
                 }
             }
         }

@@ -227,15 +227,19 @@ impl GUI {
             }
             Message::CtrlC
             | Message::Event(iced::Event::Window(iced::window::Event::CloseRequested)) => {
+                tracing::info!("Close requested, stopping all panes and exiting");
+
                 for (_, pane) in self.panes.iter_mut() {
                     pane.stop();
                 }
+
                 if let Some(window_config) = &self.window_config {
                     let path = GlobalSettings::path(&self.config.coincube_directory);
                     if let Err(e) = GlobalSettings::update_window_config(&path, window_config) {
                         tracing::error!("Failed to update the window config: {e}");
                     }
                 }
+
                 iced::window::latest().and_then(iced::window::close)
             }
             Message::KeyPressed(Key::Tab(shift)) => {
