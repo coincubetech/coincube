@@ -59,7 +59,7 @@ impl State for BuySellPanel {
                             .and_then(|b| serde_json::from_slice::<LoginResponse>(&b).ok());
 
                     if let Some(l) = connect_session {
-                        log::trace!("[BUYSELL] Found shared Connect session in keyring");
+                        log::trace!("Found shared Connect session in keyring");
                         return iced::Task::done(Message::View(view::Message::BuySell(
                             view::BuySellMessage::RefreshLogin {
                                 refresh_token: l.refresh_token,
@@ -134,10 +134,10 @@ impl State for BuySellPanel {
                     Ok(entry) => {
                         let _ = entry.delete_credential();
                         if let Err(e) = entry.set_secret(&bytes) {
-                            log::error!("[BUYSELL] Unable to write shared Connect keyring: {e}");
+                            log::error!("Unable to write shared Connect keyring: {e}");
                         }
                     }
-                    Err(e) => log::error!("[BUYSELL] Connect keyring inaccessible: {e}"),
+                    Err(e) => log::error!("Connect keyring inaccessible: {e}"),
                 }
 
                 // also write to the legacy wallet-scoped keyring
@@ -150,7 +150,7 @@ impl State for BuySellPanel {
                     }
                     Err(err) => {
                         log::error!(
-                            "[BUYSELL] Unable to persist login state, keyring inaccessible: {}",
+                            "Unable to persist login state, keyring inaccessible: {}",
                             err
                         )
                     }
@@ -176,7 +176,7 @@ impl State for BuySellPanel {
                 // clear legacy wallet-scoped keyring
                 if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE_NAME, &self.wallet.name) {
                     if let Err(e) = entry.delete_credential() {
-                        log::error!("[BUYSELL] Unable to delete credentials from OS keyring: {e:?}")
+                        log::error!("Unable to delete credentials from OS keyring: {e:?}")
                     }
                 }
 
@@ -259,7 +259,7 @@ impl State for BuySellPanel {
 
                 match mavapay_supported(country.code) {
                     true => {
-                        log::info!("[BUYSELL] Starting under Mavapay for {}", country);
+                        log::info!("Starting under Mavapay for {}", country);
 
                         // initialize buysell under Mavapay
                         self.step = BuySellFlowState::Mavapay(MavapayState::new(
@@ -326,7 +326,7 @@ impl State for BuySellPanel {
                         };
                     }
                     false => {
-                        log::info!("[BUYSELL] Starting under Meld for {}", country);
+                        log::info!("Starting under Meld for {}", country);
 
                         // initialize buysell under meld
                         let (meld, task) = meld::MeldState::new(

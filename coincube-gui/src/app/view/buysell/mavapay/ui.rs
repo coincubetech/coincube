@@ -182,8 +182,8 @@ fn sell_input_form<'a>(
                     widget::text("≈"),
                     widget::text(format!(
                         "{} {}",
+                        (sat_amount as f64 * (p / 100_000_000.0)).round(),
                         state.country.currency.symbol,
-                        (sat_amount as f64 * (p / 100_000_000.0)).round()
                     ))
                     .center()
                     .font(iced::Font::MONOSPACE),
