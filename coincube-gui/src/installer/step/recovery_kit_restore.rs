@@ -800,11 +800,17 @@ impl Step for RecoveryKitRestoreStep {
         // trying to advance before the decrypt resolved — keep them
         // where they are.
         let Phase::Ready {
-            seed, descriptor, ..
+            selected,
+            seed,
+            descriptor,
         } = &self.phase
         else {
             return false;
         };
+        // Clone the original Cube's identity out before staging so we can
+        // revive it below (see the `ctx.cube_id` write after Stage 3).
+        let restored_cube_uuid = selected.uuid.clone();
+        let restored_cube_name = selected.name.clone();
 
         // Stage 1+2 — parse the descriptor and derive the seed signer (Full
         // only) into locals via the shared [`stage_restore`] seam. All-or-
@@ -835,6 +841,19 @@ impl Step for RecoveryKitRestoreStep {
             ctx.recovered_signer = Some(Arc::new(s));
         }
 
+        // Revive the original Cube identity instead of letting finalization
+        // mint a fresh one. `ctx.cube_id` feeds both the idempotent backend
+        // registration in the Final step (`step/mod.rs` copies it into
+        // `cube_uuid`) and `gui::tab::find_or_create_cube` (via
+        // `i.context.cube_id`), so the restored Cube reuses its old UUID rather
+        // than registering as a duplicate. Full scope only — DescriptorOnly
+        // (W14/W15) restores into an already-existing local Cube whose identity
+        // must not be overwritten.
+        if matches!(self.scope, RestoreScope::Full) {
+            ctx.cube_id = Some(restored_cube_uuid);
+            ctx.cube_name = Some(restored_cube_name);
+        }
+
         // Thread the JWT we captured during the OTP step into the
         // context so the downstream `CoincubeConnectStep` can skip
         // re-authentication. Without this, the user has to type their
@@ -862,6 +881,10 @@ impl Step for RecoveryKitRestoreStep {
         // user can re-do the restore cleanly.
         if matches!(self.scope, RestoreScope::Full) {
             ctx.recovered_signer = None;
+            // Drop the revived Cube identity we staged in `apply` so a
+            // back-then-forward pass re-derives it from the (re)selected cube.
+            ctx.cube_id = None;
+            ctx.cube_name = None;
         }
         // Always clear descriptor — if the user navigates back from a
         // later step through this one, keeping a stale descriptor would

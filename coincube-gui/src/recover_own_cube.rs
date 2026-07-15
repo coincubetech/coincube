@@ -37,6 +37,10 @@ const SIGNED_OUT_PROMPT: &str =
 #[derive(Debug, Clone)]
 pub struct RecoverableOwnCube {
     pub cube_id: u64,
+    /// Cube UUID (the string id shared with local `CubeSettings` and the
+    /// backend). Threaded into the restore flow so recovery revives the
+    /// original Cube identity instead of minting a duplicate.
+    pub uuid: String,
     pub name: String,
     pub network: String,
     /// Full-Cube (seed + descriptor escrowed) vs Vault-only (descriptor only).
@@ -82,7 +86,14 @@ pub enum RecoverOwnCubeMessage {
     /// **Home intercepts this** and emits
     /// `home::Message::Install(UserFlow::RecoverOwnCubeWithPhone { .. })`; it is a
     /// no-op inside this panel.
-    Launch { cube_id: u64, full_cube: bool },
+    Launch {
+        cube_id: u64,
+        /// Original Cube UUID + name, carried so the restore revives the
+        /// original identity instead of duplicating it.
+        cube_uuid: String,
+        cube_name: String,
+        full_cube: bool,
+    },
 }
 
 impl RecoverOwnCubePanel {
@@ -129,8 +140,7 @@ impl RecoverOwnCubePanel {
                 Task::none()
             }
             // Home intercepts `Launch` before delegating here.
-            RecoverOwnCubeMessage::Launch { cube_id, full_cube } => {
-                let _ = full_cube;
+            RecoverOwnCubeMessage::Launch { cube_id, .. } => {
                 self.active = Some((cube_id, RecoverStatus::Launching));
                 Task::none()
             }
@@ -176,6 +186,7 @@ async fn fetch_recoverable_own_cubes(
                     if has_envelope {
                         out.push(RecoverableOwnCube {
                             cube_id: cube.id,
+                            uuid: cube.uuid,
                             name: cube.name,
                             network: cube.network,
                             full_cube,
@@ -296,6 +307,8 @@ fn cube_row<'a>(
         _ => btn::primary(None, recover_button_label(c.full_cube))
             .on_press(RecoverOwnCubeMessage::Launch {
                 cube_id: c.cube_id,
+                cube_uuid: c.uuid.clone(),
+                cube_name: c.name.clone(),
                 full_cube: c.full_cube,
             })
             .into(),
@@ -319,6 +332,7 @@ mod tests {
     fn cube(name: &str, full_cube: bool) -> RecoverableOwnCube {
         RecoverableOwnCube {
             cube_id: 1,
+            uuid: "test-uuid".to_string(),
             name: name.to_string(),
             network: "mainnet".to_string(),
             full_cube,

@@ -68,16 +68,22 @@ pub struct OwnerKeychainRestoreStep {
     scope: RestoreScope,
     /// Connect (server) cube id of the Cube being recovered.
     cube_id: u64,
+    /// Original Cube UUID + name, staged into `Context` so the restored Cube
+    /// revives the original identity rather than duplicating it (Full only).
+    cube_uuid: String,
+    cube_name: String,
     /// Authenticated Connect REST client, pulled from `Context` on first load.
     client: Option<CoincubeClient>,
     phase: Phase,
 }
 
 impl OwnerKeychainRestoreStep {
-    pub fn new(scope: RestoreScope, cube_id: u64) -> Self {
+    pub fn new(scope: RestoreScope, cube_id: u64, cube_uuid: String, cube_name: String) -> Self {
         Self {
             scope,
             cube_id,
+            cube_uuid,
+            cube_name,
             client: None,
             phase: Phase::Decrypting,
         }
@@ -200,6 +206,16 @@ impl Step for OwnerKeychainRestoreStep {
         if let Some(s) = staged.signer {
             ctx.recovered_signer = Some(Arc::new(s));
         }
+        // Revive the original Cube identity rather than minting a fresh one:
+        // `ctx.cube_id` feeds both the idempotent backend registration (Final)
+        // and `gui::tab::find_or_create_cube`, so the restored Cube reuses its
+        // old UUID instead of registering as a duplicate. Full scope only —
+        // DescriptorOnly restores into an already-existing local Cube whose
+        // identity must not be overwritten.
+        if matches!(self.scope, RestoreScope::Full) {
+            ctx.cube_id = Some(self.cube_uuid.clone());
+            ctx.cube_name = Some(self.cube_name.clone());
+        }
         // Thread the owner's Connect session into the context so the downstream
         // `CoincubeConnectStep` skips a redundant re-auth and `Final` re-registers
         // the recovered Cube under the owner's account — mirrors the owner CRK
@@ -214,6 +230,9 @@ impl Step for OwnerKeychainRestoreStep {
     fn revert(&self, ctx: &mut Context) {
         if matches!(self.scope, RestoreScope::Full) {
             ctx.recovered_signer = None;
+            // Drop the revived Cube identity staged in `apply`.
+            ctx.cube_id = None;
+            ctx.cube_name = None;
         }
         ctx.descriptor = None;
         ctx.connect_jwt = None;

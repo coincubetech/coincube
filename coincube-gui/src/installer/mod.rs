@@ -200,6 +200,10 @@ pub enum UserFlow {
     /// PIN-setup step) vs descriptor-only (watch-only Vault recovery).
     RecoverOwnCubeWithPhone {
         cube_id: u64,
+        /// Original Cube UUID + name, threaded through so the restore revives
+        /// the owner's original Cube identity instead of minting a duplicate.
+        cube_uuid: String,
+        cube_name: String,
         full_cube: bool,
     },
 }
@@ -480,13 +484,24 @@ impl Installer {
                     // `OwnerKeychainRestoreStep` (owner's own envelope set +
                     // Keychain relay) is the decrypt source instead of the heir
                     // release. No recovery password.
-                    UserFlow::RecoverOwnCubeWithPhone { cube_id, full_cube } => {
+                    UserFlow::RecoverOwnCubeWithPhone {
+                        cube_id,
+                        cube_uuid,
+                        cube_name,
+                        full_cube,
+                    } => {
                         if full_cube {
                             // Full-Cube: seed + descriptor → a real Cube. Mirror
                             // RestoreFromRecoveryKit (incl. PIN setup for the
                             // restored seed).
                             vec![
-                                OwnerKeychainRestoreStep::new(RestoreScope::Full, cube_id).into(),
+                                OwnerKeychainRestoreStep::new(
+                                    RestoreScope::Full,
+                                    cube_id,
+                                    cube_uuid,
+                                    cube_name,
+                                )
+                                .into(),
                                 RestorePinSetupStep::new().into(),
                                 CoincubeConnectStep::new().into(),
                                 SelectBitcoindTypeStep::new().into(),
@@ -503,6 +518,8 @@ impl Installer {
                                 OwnerKeychainRestoreStep::new(
                                     RestoreScope::DescriptorOnly,
                                     cube_id,
+                                    cube_uuid,
+                                    cube_name,
                                 )
                                 .into(),
                                 RegisterDescriptor::new_import_wallet().into(),

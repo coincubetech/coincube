@@ -1522,6 +1522,8 @@ impl Home {
             // threaded into the installer Context for the decrypt step.
             Message::View(ViewMessage::RecoverOwnCube(RecoverOwnCubeMessage::Launch {
                 cube_id,
+                cube_uuid,
+                cube_name,
                 full_cube,
             })) => {
                 let datadir_path = self.datadir_path.clone();
@@ -1533,7 +1535,12 @@ impl Home {
                         Message::Install(
                             d,
                             n,
-                            UserFlow::RecoverOwnCubeWithPhone { cube_id, full_cube },
+                            UserFlow::RecoverOwnCubeWithPhone {
+                                cube_id,
+                                cube_uuid: cube_uuid.clone(),
+                                cube_name: cube_name.clone(),
+                                full_cube,
+                            },
                             c,
                         )
                     },

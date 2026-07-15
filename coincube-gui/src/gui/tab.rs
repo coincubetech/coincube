@@ -641,6 +641,11 @@ impl Tab {
                     let wallet_alias = settings.alias.clone();
                     let network = i.network;
                     let originating_cube_id = i.cube_settings.as_ref().map(|c| c.id.clone());
+                    // Restore flows populate `ctx.cube_id` with the original
+                    // Cube's UUID; thread it to `find_or_create_cube` so the
+                    // revived local Cube reuses that id instead of a fresh v4
+                    // (which would duplicate rather than restore).
+                    let restore_cube_uuid = i.context.cube_id.clone();
 
                     // Capture restore-flow state up-front. Cloning the
                     // `Zeroizing<String>` here means the PIN copy
@@ -667,6 +672,7 @@ impl Tab {
                                 network,
                                 originating_cube_id,
                                 restore_seed.as_ref(),
+                                restore_cube_uuid,
                             )
                             .await?;
 
@@ -1700,7 +1706,24 @@ async fn find_or_create_cube(
     network: bitcoin::Network,
     originating_cube_id: Option<String>,
     restore_seed: Option<&RestoreCubeSeed>,
+    restore_cube_uuid: Option<String>,
 ) -> Result<app::settings::CubeSettings, String> {
+    // Restore paths pass the original Cube's UUID so a revived Cube keeps its
+    // identity (local id == server uuid) instead of getting a fresh v4, which
+    // would register as a duplicate on the backend. Parse once up-front; a
+    // malformed value simply falls back to a random id rather than aborting the
+    // restore.
+    let restore_uuid = restore_cube_uuid
+        .as_deref()
+        .and_then(|s| uuid::Uuid::parse_str(s).ok());
+    // Helper: mint a fresh CubeSettings, preserving `restore_uuid` when present
+    // so the "new cube" branches below revive rather than duplicate.
+    let mint = |name: String| -> app::settings::CubeSettings {
+        match restore_uuid {
+            Some(id) => app::settings::CubeSettings::new_with_id(id, name, network),
+            None => app::settings::CubeSettings::new(name, network),
+        }
+    };
     // Helper: decorate a freshly-minted CubeSettings with
     // PIN + master-signer-fingerprint when we're on the restore path.
     // Pulled out so the three "new cube" branches share one code path.
@@ -1801,12 +1824,9 @@ async fn find_or_create_cube(
 
             // Third, create a new cube for this wallet
             let cube = decorate_new(
-                app::settings::CubeSettings::new(
-                    wallet_alias
-                        .clone()
-                        .unwrap_or_else(|| format!("My {} Cube", network)),
-                    network,
-                )
+                mint(wallet_alias
+                    .clone()
+                    .unwrap_or_else(|| format!("My {} Cube", network)))
                 .with_vault(wallet_id.clone()),
             )?;
             let cube_name = cube.name.clone();
@@ -1822,12 +1842,9 @@ async fn find_or_create_cube(
         Err(_) => {
             // No settings file yet, create first cube
             let cube = decorate_new(
-                app::settings::CubeSettings::new(
-                    wallet_alias
-                        .clone()
-                        .unwrap_or_else(|| format!("My {} Cube", network)),
-                    network,
-                )
+                mint(wallet_alias
+                    .clone()
+                    .unwrap_or_else(|| format!("My {} Cube", network)))
                 .with_vault(wallet_id.clone()),
             )?;
             let cube_name = cube.name.clone();
@@ -2123,6 +2140,82 @@ mod duress_wipe_target_tests {
             "onion-service key must be wiped"
         );
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod find_or_create_cube_tests {
+    use super::find_or_create_cube;
+    use crate::{app::settings::WalletId, dir::NetworkDirectory};
+    use coincube_core::miniscript::bitcoin::Network;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+
+    /// Fresh, empty network directory so `find_or_create_cube` takes a
+    /// create-new branch (no existing settings file / no matching cube) —
+    /// exactly the state after a Cube is deleted and then recovered.
+    fn temp_network_dir() -> (std::path::PathBuf, NetworkDirectory) {
+        let seq = SEQ.fetch_add(1, Ordering::SeqCst);
+        let root = std::env::temp_dir().join(format!(
+            "coincube-focc-{}-{}",
+            std::process::id(),
+            seq
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        (root.clone(), NetworkDirectory::new(root))
+    }
+
+    fn wallet_id() -> WalletId {
+        WalletId::new("deadbeef".to_string(), Some(1_700_000_000))
+    }
+
+    #[tokio::test]
+    async fn restore_reuses_original_uuid_instead_of_duplicating() {
+        let (root, dir) = temp_network_dir();
+        // Stand-in for the deleted Cube's id that the restore path threads in.
+        let original = uuid::Uuid::new_v4().to_string();
+        let cube = find_or_create_cube(
+            &dir,
+            &wallet_id(),
+            &Some("My Testnet4 wallet".to_string()),
+            Network::Testnet,
+            None,
+            None,
+            Some(original.clone()),
+        )
+        .await
+        .expect("create with restore uuid should succeed");
+
+        assert_eq!(
+            cube.id, original,
+            "restored Cube must keep its original UUID so it revives rather than duplicating"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn fresh_install_without_restore_uuid_mints_random_id() {
+        let (root, dir) = temp_network_dir();
+        let cube = find_or_create_cube(
+            &dir,
+            &wallet_id(),
+            &Some("Fresh".to_string()),
+            Network::Testnet,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("fresh create should succeed");
+
+        // No restore uuid supplied → a parseable random id, unaffected by the fix.
+        assert!(
+            uuid::Uuid::parse_str(&cube.id).is_ok(),
+            "fresh install must still mint a valid random UUID"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }
