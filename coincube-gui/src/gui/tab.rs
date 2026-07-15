@@ -641,11 +641,13 @@ impl Tab {
                     let wallet_alias = settings.alias.clone();
                     let network = i.network;
                     let originating_cube_id = i.cube_settings.as_ref().map(|c| c.id.clone());
-                    // Restore flows populate `ctx.cube_id` with the original
-                    // Cube's UUID; thread it to `find_or_create_cube` so the
-                    // revived local Cube reuses that id instead of a fresh v4
-                    // (which would duplicate rather than restore).
+                    // Restore flows populate `ctx.cube_id` / `ctx.cube_name`
+                    // with the original Cube's identity; thread them to
+                    // `find_or_create_cube` so the revived local Cube reuses the
+                    // same id (else it duplicates) and keeps its original name
+                    // (else it inherits the vault alias default).
                     let restore_cube_uuid = i.context.cube_id.clone();
+                    let restore_cube_name = i.context.cube_name.clone();
 
                     // Capture restore-flow state up-front. Cloning the
                     // `Zeroizing<String>` here means the PIN copy
@@ -673,6 +675,7 @@ impl Tab {
                                 originating_cube_id,
                                 restore_seed.as_ref(),
                                 restore_cube_uuid,
+                                restore_cube_name,
                             )
                             .await?;
 
@@ -1707,6 +1710,7 @@ async fn find_or_create_cube(
     originating_cube_id: Option<String>,
     restore_seed: Option<&RestoreCubeSeed>,
     restore_cube_uuid: Option<String>,
+    restore_cube_name: Option<String>,
 ) -> Result<app::settings::CubeSettings, String> {
     // Restore paths pass the original Cube's UUID so a revived Cube keeps its
     // identity (local id == server uuid) instead of getting a fresh v4, which
@@ -1716,6 +1720,13 @@ async fn find_or_create_cube(
     let restore_uuid = restore_cube_uuid
         .as_deref()
         .and_then(|s| uuid::Uuid::parse_str(s).ok());
+    // Restore also preserves the original Cube *name*; otherwise fall back to
+    // the wallet alias (a fresh install has no dedicated cube-name input on this
+    // path), then a network-derived default. Computed once — only the
+    // create-new branches use it; existing/originating cubes keep their name.
+    let new_cube_name: String = restore_cube_name
+        .or_else(|| wallet_alias.clone())
+        .unwrap_or_else(|| format!("My {} Cube", network));
     // Helper: mint a fresh CubeSettings, preserving `restore_uuid` when present
     // so the "new cube" branches below revive rather than duplicate.
     let mint = |name: String| -> app::settings::CubeSettings {
@@ -1823,12 +1834,7 @@ async fn find_or_create_cube(
             }
 
             // Third, create a new cube for this wallet
-            let cube = decorate_new(
-                mint(wallet_alias
-                    .clone()
-                    .unwrap_or_else(|| format!("My {} Cube", network)))
-                .with_vault(wallet_id.clone()),
-            )?;
+            let cube = decorate_new(mint(new_cube_name.clone()).with_vault(wallet_id.clone()))?;
             let cube_name = cube.name.clone();
 
             info!(
@@ -1841,12 +1847,7 @@ async fn find_or_create_cube(
         }
         Err(_) => {
             // No settings file yet, create first cube
-            let cube = decorate_new(
-                mint(wallet_alias
-                    .clone()
-                    .unwrap_or_else(|| format!("My {} Cube", network)))
-                .with_vault(wallet_id.clone()),
-            )?;
+            let cube = decorate_new(mint(new_cube_name.clone()).with_vault(wallet_id.clone()))?;
             let cube_name = cube.name.clone();
 
             info!(
@@ -2173,18 +2174,20 @@ mod find_or_create_cube_tests {
     }
 
     #[tokio::test]
-    async fn restore_reuses_original_uuid_instead_of_duplicating() {
+    async fn restore_reuses_original_uuid_and_name_instead_of_duplicating() {
         let (root, dir) = temp_network_dir();
-        // Stand-in for the deleted Cube's id that the restore path threads in.
+        // Stand-in for the deleted Cube's id + name that the restore threads in.
         let original = uuid::Uuid::new_v4().to_string();
         let cube = find_or_create_cube(
             &dir,
             &wallet_id(),
+            // Vault alias default — must NOT win over the original cube name.
             &Some("My Testnet4 wallet".to_string()),
             Network::Testnet,
             None,
             None,
             Some(original.clone()),
+            Some("new".to_string()),
         )
         .await
         .expect("create with restore uuid should succeed");
@@ -2193,17 +2196,22 @@ mod find_or_create_cube_tests {
             cube.id, original,
             "restored Cube must keep its original UUID so it revives rather than duplicating"
         );
+        assert_eq!(
+            cube.name, "new",
+            "restored Cube must keep its original name, not the vault alias default"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
     #[tokio::test]
-    async fn fresh_install_without_restore_uuid_mints_random_id() {
+    async fn fresh_install_without_restore_uuid_mints_random_id_and_uses_alias() {
         let (root, dir) = temp_network_dir();
         let cube = find_or_create_cube(
             &dir,
             &wallet_id(),
             &Some("Fresh".to_string()),
             Network::Testnet,
+            None,
             None,
             None,
             None,
@@ -2216,6 +2224,8 @@ mod find_or_create_cube_tests {
             uuid::Uuid::parse_str(&cube.id).is_ok(),
             "fresh install must still mint a valid random UUID"
         );
+        // No restore name → falls back to the wallet alias.
+        assert_eq!(cube.name, "Fresh", "fresh install falls back to the wallet alias");
         let _ = std::fs::remove_dir_all(&root);
     }
 }
