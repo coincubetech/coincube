@@ -646,8 +646,10 @@ impl Tab {
                     // `find_or_create_cube` so the revived local Cube reuses the
                     // same id (else it duplicates) and keeps its original name
                     // (else it inherits the vault alias default).
-                    let restore_cube_uuid = i.context.cube_id.clone();
-                    let restore_cube_name = i.context.cube_name.clone();
+                    let restore_identity = RestoreCubeIdentity {
+                        uuid: i.context.cube_id.clone(),
+                        name: i.context.cube_name.clone(),
+                    };
 
                     // Capture restore-flow state up-front. Cloning the
                     // `Zeroizing<String>` here means the PIN copy
@@ -674,8 +676,7 @@ impl Tab {
                                 network,
                                 originating_cube_id,
                                 restore_seed.as_ref(),
-                                restore_cube_uuid,
-                                restore_cube_name,
+                                restore_identity,
                             )
                             .await?;
 
@@ -1717,6 +1718,17 @@ struct RestoreCubeSeed {
     master_signer_fingerprint: bitcoin::bip32::Fingerprint,
 }
 
+/// The original Cube's identity, threaded from `ctx.cube_id` / `ctx.cube_name`
+/// on a restore. Lets the revived local Cube reuse the same id (else it
+/// registers as a server-side duplicate) and keep its original name (else it
+/// inherits the vault-alias default). Bundled into one struct — rather than
+/// two more loose params on `find_or_create_cube` — to keep the argument
+/// count in check.
+struct RestoreCubeIdentity {
+    uuid: Option<String>,
+    name: Option<String>,
+}
+
 async fn find_or_create_cube(
     network_dir: &NetworkDirectory,
     wallet_id: &WalletId,
@@ -1724,22 +1736,23 @@ async fn find_or_create_cube(
     network: bitcoin::Network,
     originating_cube_id: Option<String>,
     restore_seed: Option<&RestoreCubeSeed>,
-    restore_cube_uuid: Option<String>,
-    restore_cube_name: Option<String>,
+    restore_identity: RestoreCubeIdentity,
 ) -> Result<app::settings::CubeSettings, String> {
     // Restore paths pass the original Cube's UUID so a revived Cube keeps its
     // identity (local id == server uuid) instead of getting a fresh v4, which
     // would register as a duplicate on the backend. Parse once up-front; a
     // malformed value simply falls back to a random id rather than aborting the
     // restore.
-    let restore_uuid = restore_cube_uuid
+    let restore_uuid = restore_identity
+        .uuid
         .as_deref()
         .and_then(|s| uuid::Uuid::parse_str(s).ok());
     // Restore also preserves the original Cube *name*; otherwise fall back to
     // the wallet alias (a fresh install has no dedicated cube-name input on this
     // path), then a network-derived default. Computed once — only the
     // create-new branches use it; existing/originating cubes keep their name.
-    let new_cube_name: String = restore_cube_name
+    let new_cube_name: String = restore_identity
+        .name
         .or_else(|| wallet_alias.clone())
         .unwrap_or_else(|| format!("My {} Cube", network));
     // Helper: mint a fresh CubeSettings, preserving `restore_uuid` when present
@@ -2166,7 +2179,7 @@ mod duress_wipe_target_tests {
 
 #[cfg(test)]
 mod find_or_create_cube_tests {
-    use super::find_or_create_cube;
+    use super::{find_or_create_cube, RestoreCubeIdentity};
     use crate::{app::settings::WalletId, dir::NetworkDirectory};
     use coincube_core::miniscript::bitcoin::Network;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -2205,8 +2218,10 @@ mod find_or_create_cube_tests {
             Network::Testnet,
             None,
             None,
-            Some(original.clone()),
-            Some("new".to_string()),
+            RestoreCubeIdentity {
+                uuid: Some(original.clone()),
+                name: Some("new".to_string()),
+            },
         )
         .await
         .expect("create with restore uuid should succeed");
@@ -2232,8 +2247,10 @@ mod find_or_create_cube_tests {
             Network::Testnet,
             None,
             None,
-            None,
-            None,
+            RestoreCubeIdentity {
+                uuid: None,
+                name: None,
+            },
         )
         .await
         .expect("fresh create should succeed");
