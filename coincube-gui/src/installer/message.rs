@@ -426,6 +426,16 @@ pub enum InternalBitcoindMsg {
     /// begin the download/install/start flow (gated behind this so the user
     /// picks Core vs Knots first).
     ConfirmFlavor,
+    /// Toggle the node-resources advanced disclosure on the flavour screen.
+    ToggleAdvanced,
+    /// Edit the custom prune-target field (raw MB string).
+    PruneEdited(String),
+    /// Edit the custom mempool-cap field (raw MB string; empty = default).
+    MaxMempoolEdited(String),
+    /// One-click "Small computer" preset: 550 MB prune + 100 MB mempool.
+    SmallComputerPreset,
+    /// One-click "Regular computer" preset: 15 GB prune + default mempool.
+    RegularComputerPreset,
     DefineConfig,
     Download,
     DownloadProgressed(super::step::DownloadUpdate),

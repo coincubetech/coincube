@@ -5,11 +5,13 @@
 //! (None when the cube has no Spark signer or the bridge subprocess
 //! failed to spawn) and renders an "unavailable" stub in that case.
 
+pub mod cross_chain;
 pub mod esplora;
 pub mod overview;
 pub mod receive;
 pub mod send;
 pub mod settings;
+pub mod sideshift_receive;
 pub mod transactions;
 
 pub use overview::SparkOverview;
@@ -20,9 +22,10 @@ pub use transactions::SparkTransactions;
 
 use std::sync::Arc;
 
-use coincube_spark_protocol::PaymentSummary;
+use coincube_spark_protocol::{PaymentSummary, StableBalanceSnapshot};
 use iced::Task;
 
+use crate::app::cache::Cache;
 use crate::app::message::Message;
 use crate::app::wallets::SparkBackend;
 
@@ -46,4 +49,59 @@ pub(crate) fn fetch_payments_task(
             Err(e) => on_failed(e.to_string()),
         },
     )
+}
+
+/// Fetch the Spark wallet balance via `get_info`, for the two-card
+/// "YOU SEND / YOU RECEIVE" balance line: the BTC balance plus the Stable
+/// Balance snapshot, which the caller folds into a unified sats total with
+/// [`unified_spark_balance_sats`]. Best-effort UI polish — an error resolves to
+/// `None` so the caller keeps its last value rather than surfacing a failure.
+pub(crate) fn fetch_balance_task(
+    backend: Option<Arc<SparkBackend>>,
+    on_result: impl FnOnce(Option<(u64, Option<StableBalanceSnapshot>)>) -> Message + Send + 'static,
+) -> Task<Message> {
+    let Some(backend) = backend else {
+        return Task::none();
+    };
+    Task::perform(async move { backend.get_info().await }, move |result| {
+        on_result(
+            result
+                .ok()
+                .map(|info| (info.balance_sats, info.stable_balance)),
+        )
+    })
+}
+
+/// The unified Spark balance in sats: the BTC balance plus any Stable Balance
+/// (USDB) holding, converted at the cache's BTC/USD reference price. Shared by
+/// the Home card and the Send/Receive card subtitles so every screen shows the
+/// same figure — Stable Balance auto-sweeps BTC into USDB, so a BTC-only
+/// reading would understate a funded wallet.
+pub(crate) fn unified_spark_balance_sats(
+    btc_sats: u64,
+    stable: Option<&StableBalanceSnapshot>,
+    cache: &Cache,
+) -> u64 {
+    let reference_price = reference_btc_usd_price(cache);
+    let usdb_as_sats = stable
+        .map(|sb| {
+            crate::app::breez_spark::assets::stable_token_as_sats(
+                sb.balance,
+                sb.decimals,
+                reference_price,
+            )
+        })
+        .unwrap_or(0);
+    btc_sats.saturating_add(usdb_as_sats)
+}
+
+/// The BTC/USD price used to value USD-pegged tokens (USDB / USDT / USDC) in
+/// sats. The app always fetches a USD price for exactly this, regardless of the
+/// user's display fiat (see the `gui` loop's "Always fetch BTC/USD" path), so
+/// this just reads `cache.btc_usd_price`. `None` only in the brief window before
+/// that price lands (or if it fails); callers then show the token amount without
+/// a sats figure rather than valuing it at a non-USD rate — the user-fiat price
+/// (BTC/EUR, …) is *not* BTC/USD and would misprice a USD-pegged token.
+pub(crate) fn reference_btc_usd_price(cache: &Cache) -> Option<f64> {
+    cache.btc_usd_price
 }
