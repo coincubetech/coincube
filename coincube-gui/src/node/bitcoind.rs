@@ -1218,17 +1218,32 @@ impl Bitcoind {
 
         // PLAN-blockslop-mitigation: If the user swaps node flavors, we must
         // force a reindex to validate inherited chainstate under the new rules.
+        let current_flavor_str = match configured_flavor {
+            NodeFlavor::Core => "Core",
+            NodeFlavor::Knots => "Knots",
+        };
         let marker_path = bitcoind_datadir.join(".coincube_last_flavor");
-        if let Ok(marker_bytes) = std::fs::read(&marker_path) {
-            if let Ok(last_flavor_str) = String::from_utf8(marker_bytes) {
-                let current_flavor_str = match configured_flavor {
-                    NodeFlavor::Core => "Core",
-                    NodeFlavor::Knots => "Knots",
-                };
-                if last_flavor_str != current_flavor_str && (last_flavor_str == "Core" || last_flavor_str == "Knots") {
-                    info!("Flavor switch detected ({} -> {}), injecting -reindex-chainstate", last_flavor_str, current_flavor_str);
-                    args.push("-reindex-chainstate=1".to_string());
+        match std::fs::read(&marker_path) {
+            Ok(marker_bytes) => {
+                match String::from_utf8(marker_bytes) {
+                    Ok(last_flavor_str) if last_flavor_str == "Core" || last_flavor_str == "Knots" => {
+                        if last_flavor_str != current_flavor_str {
+                            info!("Flavor switch detected ({} -> {}), injecting -reindex-chainstate", last_flavor_str, current_flavor_str);
+                            args.push("-reindex-chainstate=1".to_string());
+                        }
+                    }
+                    _ => {
+                        warn!("Flavor marker unreadable or malformed, conservatively injecting -reindex-chainstate");
+                        args.push("-reindex-chainstate=1".to_string());
+                    }
                 }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // First-run case: marker is missing, assume no swap occurred.
+            }
+            Err(e) => {
+                warn!("Failed to read flavor marker ({}), conservatively injecting -reindex-chainstate", e);
+                args.push("-reindex-chainstate=1".to_string());
             }
         }
         // Build a fresh bitcoind command each spawn attempt (we may respawn if
