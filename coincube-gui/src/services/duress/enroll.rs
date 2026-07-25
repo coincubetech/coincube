@@ -52,6 +52,7 @@ const DURESS_CODE_BITS: usize = 128;
 /// default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DuressDelay {
+    M2,
     #[default]
     H24,
     H48,
@@ -62,7 +63,8 @@ pub enum DuressDelay {
 
 impl DuressDelay {
     /// All choices in display order; the first is the default (24h).
-    pub const ALL: [DuressDelay; 5] = [
+    pub const ALL: [DuressDelay; 6] = [
+        DuressDelay::M2,
         DuressDelay::H24,
         DuressDelay::H48,
         DuressDelay::D7,
@@ -74,6 +76,7 @@ impl DuressDelay {
     /// `unlock_delay_minutes`.
     pub fn minutes(self) -> u32 {
         match self {
+            DuressDelay::M2 => 2,
             DuressDelay::H24 => 24 * 60,
             DuressDelay::H48 => 48 * 60,
             DuressDelay::D7 => 7 * 24 * 60,
@@ -84,6 +87,7 @@ impl DuressDelay {
 
     pub fn label(self) -> &'static str {
         match self {
+            DuressDelay::M2 => "2m",
             DuressDelay::H24 => "24h",
             DuressDelay::H48 => "48h",
             DuressDelay::D7 => "7d",
@@ -270,7 +274,7 @@ mod tests {
         assert_eq!(DuressDelay::H24.minutes(), 1440);
         assert_eq!(DuressDelay::D90.minutes(), 129_600);
         assert_eq!(DuressDelay::default(), DuressDelay::H24);
-        assert_eq!(DuressDelay::ALL.len(), 5);
+        assert_eq!(DuressDelay::ALL.len(), 6);
     }
 
     #[test]
