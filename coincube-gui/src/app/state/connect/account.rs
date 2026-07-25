@@ -342,6 +342,43 @@ pub fn duress_tier1_gate_blocked(cubes: Option<&[DuressCube]>) -> bool {
     cubes.is_none_or(duress_gate_blocked)
 }
 
+/// Validation check for local backups of ALL local Cubes. Before allowing a user
+/// to enable Duress Mode (which arms a duress PIN on every Cube on this device),
+/// we must ensure that all Cubes have proper backups.
+pub fn validate_local_backups_for_duress() -> Result<(), String> {
+    let dir = crate::dir::CoincubeDirectory::active()
+        .map_err(|e| format!("Failed to read active directory: {}", e))?;
+    // Duress only protects mainnet cubes; testnet backups are irrelevant.
+    let net_dir = dir.network_directory(crate::daemon::model::Network::Bitcoin);
+    let settings = crate::app::settings::Settings::from_file(&net_dir)
+        .map_err(|e| format!("Failed to read settings: {}", e))?;
+
+    for cube in settings.cubes {
+        let is_passkey = cube.is_passkey_cube();
+        let has_vault = cube.vault_wallet_id.is_some();
+
+        if is_passkey && !has_vault {
+            continue; // Nothing to back up
+        }
+
+        if !is_passkey && !cube.backed_up {
+            return Err(format!(
+                "The Seed Phrase for your Cube '{}' must be backed up before enabling Duress Mode.",
+                cube.name
+            ));
+        }
+
+        if has_vault && !cube.has_recovery_kit() {
+            return Err(format!(
+                "The Vault Wallet Descriptor for your Cube '{}' must be backed up before enabling Duress Mode.",
+                cube.name
+            ));
+        }
+    }
+    Ok(())
+}
+
+
 /// State for the Contacts section within ConnectAccountPanel.
 pub struct ContactsState {
     pub step: ContactsStep,
@@ -2716,6 +2753,12 @@ impl ConnectAccountPanel {
 
             // ── Enrollment wizard (Phases 2 & 8) ──
             DuressMessage::StartEnrollment => {
+                if let Err(msg) = validate_local_backups_for_duress() {
+                    self.error = Some(msg);
+                    return iced::Task::none();
+                }
+                self.error = None;
+
                 let entitled = self
                     .plan
                     .as_ref()
@@ -2761,6 +2804,12 @@ impl ConnectAccountPanel {
                 return self.reload_duress_cubes();
             }
             DuressMessage::StartEnrollmentWithoutCrk => {
+                if let Err(msg) = validate_local_backups_for_duress() {
+                    self.error = Some(msg);
+                    return iced::Task::none();
+                }
+                self.error = None;
+
                 // Tier 2 — Connect, no recovery kit: same as Tier 1 minus the
                 // CRK-password step (see `enroll_steps`), and always behind the
                 // backup-acknowledgement gate (no recovery kit by definition).
