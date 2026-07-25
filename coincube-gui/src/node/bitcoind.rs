@@ -1211,10 +1211,26 @@ impl Bitcoind {
         #[cfg(target_os = "windows")]
         let datadir_path_str = datadir_path_str.replace("\\\\?\\", "").replace("\\\\?", "");
 
-        let args = vec![
+        let mut args = vec![
             format!("-chain={}", network.to_core_arg()),
             format!("-datadir={}", datadir_path_str),
         ];
+
+        // PLAN-blockslop-mitigation: If the user swaps node flavors, we must
+        // force a reindex to validate inherited chainstate under the new rules.
+        let marker_path = bitcoind_datadir.join(".coincube_last_flavor");
+        if let Ok(marker_bytes) = std::fs::read(&marker_path) {
+            if let Ok(last_flavor_str) = String::from_utf8(marker_bytes) {
+                let current_flavor_str = match configured_flavor {
+                    NodeFlavor::Core => "Core",
+                    NodeFlavor::Knots => "Knots",
+                };
+                if last_flavor_str != current_flavor_str && (last_flavor_str == "Core" || last_flavor_str == "Knots") {
+                    info!("Flavor switch detected ({} -> {}), injecting -reindex-chainstate", last_flavor_str, current_flavor_str);
+                    args.push("-reindex-chainstate=1".to_string());
+                }
+            }
+        }
         // Build a fresh bitcoind command each spawn attempt (we may respawn if
         // the datadir lock isn't free yet — see the retry below).
         let spawn_bitcoind = || -> Result<std::process::Child, StartInternalBitcoindError> {
@@ -1226,6 +1242,13 @@ impl Bitcoind {
 
             // Detach the child so closing the app doesn't take the node down.
             crate::node::detach_spawned_process(&mut command);
+
+            // Persist the current flavor so subsequent restarts don't reindex needlessly.
+            let current_flavor_str = match configured_flavor {
+                NodeFlavor::Core => "Core",
+                NodeFlavor::Knots => "Knots",
+            };
+            let _ = std::fs::write(&marker_path, current_flavor_str);
 
             command
                 .spawn()
