@@ -2922,6 +2922,10 @@ impl ConnectAccountPanel {
                 if e.submitting {
                     return iced::Task::none();
                 }
+                if let Err(msg) = validate_local_backups_for_duress() {
+                    e.error = Some(msg);
+                    return iced::Task::none();
+                }
                 if let Err(msg) = validate_enroll_step(e) {
                     e.error = Some(msg);
                     return iced::Task::none();
