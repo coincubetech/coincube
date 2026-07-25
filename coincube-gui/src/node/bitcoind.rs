@@ -1258,13 +1258,6 @@ impl Bitcoind {
             // Detach the child so closing the app doesn't take the node down.
             crate::node::detach_spawned_process(&mut command);
 
-            // Persist the current flavor so subsequent restarts don't reindex needlessly.
-            let current_flavor_str = match configured_flavor {
-                NodeFlavor::Core => "Core",
-                NodeFlavor::Knots => "Knots",
-            };
-            let _ = std::fs::write(&marker_path, current_flavor_str);
-
             command
                 .spawn()
                 .map_err(|e| StartInternalBitcoindError::CommandError(e.to_string()))
@@ -1308,6 +1301,13 @@ impl Bitcoind {
             match coincubed::BitcoinD::new(&config, "internal_bitcoind_start".to_string()) {
                 Ok(_) => {
                     log::info!("Bitcoind seems to have successfully started.");
+
+                    // Persist the current flavor only after successful startup so that 
+                    // an early exit/failure doesn't falsely validate the chainstate.
+                    if let Err(e) = std::fs::write(&marker_path, current_flavor_str) {
+                        log::error!("Failed to persist flavor marker: {}", e);
+                    }
+
                     return Ok(Self {
                         config,
                         lock: LockFile::create(coincube_datadir.bitcoind_directory(), network)
