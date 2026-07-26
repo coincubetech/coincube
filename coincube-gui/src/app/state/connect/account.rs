@@ -378,7 +378,6 @@ pub fn validate_local_backups_for_duress() -> Result<(), String> {
     Ok(())
 }
 
-
 /// State for the Contacts section within ConnectAccountPanel.
 pub struct ContactsState {
     pub step: ContactsStep,
