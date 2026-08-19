@@ -201,13 +201,28 @@ pub struct Context {
     /// point it would have had to write a seed. That is deliberate: the
     /// alternative this replaces was writing the seed in the clear.
     pub cube_pin: Option<zeroize::Zeroizing<String>>,
+    /// Whether this Cube uses passkey unlock and therefore has no PIN-backed seed
+    /// file at all. Passkey Cubes must never reach the seed-encryption path.
+    pub passkey_cube: bool,
 }
 
 impl Context {
     /// The PIN to encrypt seed material under, preferring the restore PIN the
     /// user just chose over a session PIN inherited from another Cube.
+    ///
+    /// Passkey Cubes intentionally return `None`: they re-derive their seed from
+    /// the WebAuthn assertion at unlock and never store one on disk.
     pub fn seed_password(&self) -> Option<&zeroize::Zeroizing<String>> {
+        if self.passkey_cube {
+            return None;
+        }
         self.restore_pin.as_ref().or(self.cube_pin.as_ref())
+    }
+
+    /// Convenience check for passkey-derived Cubes; the installer must skip
+    /// seed persistence and all other PIN-backed write paths for them.
+    pub fn is_passkey_cube(&self) -> bool {
+        self.passkey_cube
     }
 
     /// The Cube id to bind seed files to. `""` when the Cube has not been
@@ -279,6 +294,9 @@ impl Context {
             // Filled in by `Installer::new` from the live session when the
             // installer is launched from inside an open Cube.
             cube_pin: None,
+            passkey_cube: cube_settings
+                .map(|cs| cs.is_passkey_cube())
+                .unwrap_or(false),
         }
     }
 }
