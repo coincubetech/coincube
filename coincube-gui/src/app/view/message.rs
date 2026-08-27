@@ -157,6 +157,8 @@ pub enum Message {
     /// address (clearing the pending id) before the Vault lookup returned,
     /// or clicked the button twice. `Ok` = address, `Err` = error message.
     VaultRefundAddressResolved(u64, Result<String, String>),
+    /// Dismiss the "pick a date to rescan from" prompt for this session.
+    HideRescanPrompt,
     SelectPayment(OutPoint),
     Label(Vec<String>, LabelMessage),
     NextReceiveAddress,
@@ -173,7 +175,6 @@ pub enum Message {
     CreateRbf(CreateRbfMessage),
     ShowQrCode(usize),
     ImportExport(ImportExportMessage),
-    HideRescanWarning,
     ExportPsbt,
     ImportPsbt,
     OpenUrl(String),

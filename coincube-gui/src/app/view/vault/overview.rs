@@ -40,9 +40,9 @@ use crate::{
     daemon::model::{HistoryTransaction, Payment, PaymentKind, TransactionKind},
 };
 
-const RESCAN_WARNING: &str = "As this wallet was restored from a backup, you may need to rescan the blockchain to see past transactions.";
+const RESCAN_DATE_PROMPT: &str = "This Vault was restored from a Recovery Kit that doesn't record when the wallet was created, so its past transactions can't be found without a start date. Pick one to scan the blockchain from.";
 
-fn rescan_warning<'a>() -> Element<'a, Message> {
+fn rescan_date_prompt<'a>() -> Element<'a, Message> {
     Container::new(
         Column::new()
             .spacing(10)
@@ -50,7 +50,7 @@ fn rescan_warning<'a>() -> Element<'a, Message> {
                 Row::new()
                     .spacing(5)
                     .push(icon::warning_icon().style(theme::text::warning))
-                    .push(text(RESCAN_WARNING).style(theme::text::warning))
+                    .push(text(RESCAN_DATE_PROMPT).style(theme::text::warning))
                     .align_y(Center),
             )
             .push(
@@ -58,7 +58,7 @@ fn rescan_warning<'a>() -> Element<'a, Message> {
                     .spacing(5)
                     .push(Space::new().width(Length::Fill))
                     .push(
-                        button::secondary(None, "Go to rescan").on_press(Message::Menu(
+                        button::secondary(None, "Pick a date").on_press(Message::Menu(
                             Menu::Vault(menu::VaultSubMenu::Settings(Some(
                                 menu::SettingsOption::Node,
                             ))),
@@ -66,7 +66,7 @@ fn rescan_warning<'a>() -> Element<'a, Message> {
                     )
                     .push(
                         button::secondary(Some(cross_icon()), "Dismiss")
-                            .on_press(Message::HideRescanWarning),
+                            .on_press(Message::HideRescanPrompt),
                     ),
             ),
     )
@@ -87,7 +87,7 @@ pub fn vault_overview_view<'a>(
     processing: bool,
     loading: bool,
     sync_status: &SyncStatus,
-    show_rescan_warning: bool,
+    show_rescan_prompt: bool,
     bitcoin_unit: BitcoinDisplayUnit,
     node_bitcoind_sync_progress: Option<f64>,
     node_bitcoind_ibd: Option<bool>,
@@ -170,7 +170,7 @@ pub fn vault_overview_view<'a>(
                 )
                 .push(vault_btc_row),
         ))
-        .push(show_rescan_warning.then_some(rescan_warning()))
+        .push(show_rescan_prompt.then_some(rescan_date_prompt()))
         .push(match (node_bitcoind_ibd, node_bitcoind_sync_progress) {
             (Some(true), Some(progress)) => Some(
                 Container::new(
@@ -255,6 +255,9 @@ pub fn vault_overview_view<'a>(
                     loading_placeholder(icon::receipt_icon().size(48), "Loading transactions")
                 }))
                 .push(events.iter().fold(Column::new().spacing(10), |col, event| {
+                    // Change outputs are skipped — their transaction is already
+                    // listed as the outgoing payment. A self-transfer has no
+                    // such counterpart row, so it stays.
                     if event.kind != PaymentKind::SendToSelf {
                         col.push(event_list_view(
                             event,
@@ -357,10 +360,10 @@ fn event_list_view(
     fiat_converter: Option<FiatAmountConverter>,
     show_direction_badges: bool,
 ) -> Element<'_, Message> {
-    let direction = if event.kind == PaymentKind::Incoming {
-        TransactionDirection::Incoming
-    } else {
-        TransactionDirection::Outgoing
+    let direction = match event.kind {
+        PaymentKind::Incoming => TransactionDirection::Incoming,
+        PaymentKind::SelfTransfer | PaymentKind::SendToSelf => TransactionDirection::SelfTransfer,
+        PaymentKind::Outgoing => TransactionDirection::Outgoing,
     };
 
     let label = if let Some(label) = &event.label {

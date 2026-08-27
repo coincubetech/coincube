@@ -279,18 +279,12 @@ impl Panels {
         daemon_backend: DaemonBackend,
         internal_bitcoind: Option<&Bitcoind>,
         config: Arc<Config>,
-        restored_from_backup: bool,
         cube_id: String,
         cube_name: String,
         cube_network: String,
     ) -> Panels {
-        let show_rescan_warning = restored_from_backup
-            && daemon_backend.is_coincubed()
-            && daemon_backend
-                .node_type()
-                .map(|nt| nt == NodeType::Bitcoind)
-                // We don't know the node type for external coincubed so assume it's bitcoind.
-                .unwrap_or(true);
+        let needs_rescan_date =
+            needs_rescan_date(&data_dir, cache.network, &wallet, &daemon_backend);
 
         let default_fiat_currency = Self::default_fiat_currency(&data_dir, cache.network, &cube_id);
         let liquid_backend = Arc::new(LiquidBackend::new(breez_client.clone()));
@@ -320,7 +314,7 @@ impl Panels {
                     cache.last_poll_at_startup,
                 ),
                 cache.blockheight(),
-                show_rescan_warning,
+                needs_rescan_date,
             )),
             liquid_overview: LiquidOverview::new(liquid_backend.clone(), swaps_path.clone()),
             liquid_send: LiquidSend::new(liquid_backend.clone()),
@@ -457,7 +451,7 @@ impl Panels {
                 cache.last_poll_at_startup,
             ),
             cache.blockheight(),
-            false, // show_rescan_warning: false when adding vault dynamically
+            needs_rescan_date(&data_dir, cache.network, &wallet, &daemon_backend),
         ));
         self.coins = Some(CoinsPanel::new(
             cache.coins(),
@@ -2046,6 +2040,33 @@ fn pending_rescan(
     .and_then(|s| s.pending_rescan)
 }
 
+/// Whether this Vault needs the user to supply a date before its rescan can run.
+///
+/// Only [`settings::PendingRescan::DateUnknown`] does. Every other restore
+/// records a birthday, and [`settle_rescan_obligation`] scans from it unattended
+/// at launch — nothing to prompt about. An older Recovery Kit records nothing
+/// that dates the wallet, so its obligation sits there doing nothing until a
+/// date arrives, and the only place that can come from is the user.
+///
+/// Gated on a local bitcoind as well, since that is the only backend that can be
+/// told to rescan at all.
+fn needs_rescan_date(
+    data_dir: &CoincubeDirectory,
+    network: bitcoin::Network,
+    wallet: &Wallet,
+    daemon_backend: &DaemonBackend,
+) -> bool {
+    matches!(
+        pending_rescan(data_dir, network, wallet),
+        Some(settings::PendingRescan::DateUnknown)
+    ) && daemon_backend.is_coincubed()
+        && daemon_backend
+            .node_type()
+            .map(|nt| nt == NodeType::Bitcoind)
+            // We don't know the node type for external coincubed so assume it's bitcoind.
+            .unwrap_or(true)
+}
+
 /// `settings` with this Vault's pending-rescan marker cleared, and everything
 /// else untouched.
 ///
@@ -2229,7 +2250,6 @@ impl App {
         daemon: Arc<dyn Daemon + Sync + Send>,
         data_dir: CoincubeDirectory,
         internal_bitcoind: Option<Bitcoind>,
-        restored_from_backup: bool,
         cube_settings: settings::CubeSettings,
         connect_auth: Option<(
             Arc<tokio::sync::RwLock<crate::services::connect::client::auth::AccessTokenResponse>>,
@@ -2269,7 +2289,6 @@ impl App {
             daemon.backend(),
             internal_bitcoind.as_ref(),
             config_arc.clone(),
-            restored_from_backup || pending_rescan.is_some(),
             cube_settings.id.clone(),
             cube_settings.name.clone(),
             settings::network_to_api_string(cache.network),
@@ -3031,6 +3050,16 @@ impl App {
                                 ),
                                 self.cache.bitcoin_unit,
                             ));
+                            // A refresh is a self-send spend, so show the
+                            // panel we just built. Falling through would
+                            // leave `current` on `Coins(..)`, which routes
+                            // back to the coins list — the accordion would
+                            // just collapse and nothing else would happen.
+                            self.panels.current = Menu::Vault(menu::VaultSubMenu::Send);
+                            if let Some(panel) = self.panels.current_mut() {
+                                return panel.reload(self.daemon.clone(), self.wallet.clone());
+                            }
+                            return Task::none();
                         }
                         menu::VaultSubMenu::Send => {
                             // redo the process of spending only if user want to start a new one.

@@ -141,10 +141,15 @@ impl<'a, T> TransactionListItem<'a, T> {
         // An unconfirmed payment has no timestamp, so surface its badge here —
         // left-justified in the slot where the date normally sits — rather than
         // over on the right next to the amount, which reads as more intuitive.
+        // The self-transfer pill joins it there, leaving the amount slot free
+        // to show what was actually moved.
         let has_unconfirmed = self.badges.contains(&TransactionBadge::Unconfirmed);
+        let is_self_transfer = self.direction == TransactionDirection::SelfTransfer;
 
+        let mut status_row = Row::new().spacing(8).align_y(Alignment::Center);
+        let mut has_status = false;
         if let Some(timestamp) = self.timestamp {
-            info_column = info_column.push(
+            status_row = status_row.push(
                 text::p2_regular(
                     timestamp
                         .with_timezone(&Local)
@@ -153,15 +158,24 @@ impl<'a, T> TransactionListItem<'a, T> {
                 )
                 .style(theme::text::secondary),
             );
+            has_status = true;
         } else if let Some(time_ago) = self.time_ago {
-            let mut time_row = Row::new().spacing(8);
-            time_row = time_row.push(text::p2_regular(time_ago).style(theme::text::secondary));
-            if let Some(status) = self.custom_status {
-                time_row = time_row.push(status);
-            }
-            info_column = info_column.push(time_row);
+            status_row = status_row.push(text::p2_regular(time_ago).style(theme::text::secondary));
+            has_status = true;
         } else if has_unconfirmed {
-            info_column = info_column.push(badge::unconfirmed());
+            status_row = status_row.push(badge::unconfirmed());
+            has_status = true;
+        }
+        if let Some(status) = self.custom_status {
+            status_row = status_row.push(status);
+            has_status = true;
+        }
+        if is_self_transfer {
+            status_row = status_row.push(badge::self_transfer());
+            has_status = true;
+        }
+        if has_status {
+            info_column = info_column.push(status_row);
         }
 
         let mut left_side = Row::new().spacing(10).align_y(Alignment::Center);
@@ -198,35 +212,25 @@ impl<'a, T> TransactionListItem<'a, T> {
 
         let mut amount_column = Column::new().align_x(Alignment::End).spacing(5);
 
-        if self.direction == TransactionDirection::SelfTransfer {
-            amount_column = amount_column.push(text::p1_regular("Self-transfer"));
-        } else {
-            let (amount_sign, sign_style): (&str, fn(&theme::Theme) -> iced::widget::text::Style) =
-                match self.direction {
-                    TransactionDirection::Incoming => ("+", theme::text::incoming),
-                    TransactionDirection::Outgoing => ("-", theme::text::outgoing),
-                    TransactionDirection::SelfTransfer => ("", theme::text::default),
-                };
+        // A self-transfer moves value without gaining or losing any, so it
+        // carries no sign — just the amount that was moved.
+        let (amount_sign, sign_style): (&str, fn(&theme::Theme) -> iced::widget::text::Style) =
+            match self.direction {
+                TransactionDirection::Incoming => ("+", theme::text::incoming),
+                TransactionDirection::Outgoing => ("-", theme::text::outgoing),
+                TransactionDirection::SelfTransfer => ("", theme::text::default),
+            };
 
-            if let Some(ref override_str) = self.amount_override {
-                // Only color the sign (+/-), not the amount text — consistent with BTC rendering
-                amount_column = amount_column.push(
-                    Row::new()
-                        .spacing(5)
-                        .push(text::p1_regular(amount_sign).style(sign_style))
-                        .push(text::p1_bold(override_str.clone()))
-                        .align_y(Alignment::Center),
-                );
-            } else {
-                amount_column = amount_column.push(
-                    Row::new()
-                        .spacing(5)
-                        .push(text::p1_regular(amount_sign).style(sign_style))
-                        .push(amount::amount_with_unit(self.amount, self.bitcoin_unit))
-                        .align_y(Alignment::Center),
-                );
-            }
+        let mut amount_row = Row::new().spacing(5).align_y(Alignment::Center);
+        if !amount_sign.is_empty() {
+            // Only color the sign (+/-), not the amount text — consistent with BTC rendering
+            amount_row = amount_row.push(text::p1_regular(amount_sign).style(sign_style));
         }
+        amount_column = amount_column.push(if let Some(ref override_str) = self.amount_override {
+            amount_row.push(text::p1_bold(override_str.clone()))
+        } else {
+            amount_row.push(amount::amount_with_unit(self.amount, self.bitcoin_unit))
+        });
 
         if let Some(fiat) = self.fiat_amount {
             amount_column =

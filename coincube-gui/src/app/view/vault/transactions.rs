@@ -131,7 +131,10 @@ fn tx_list_view(
         TransactionDirection::Outgoing
     };
 
-    let amount = if tx.is_external() {
+    // A self-transfer has no outgoing amount by definition — everything it
+    // sends lands back in this wallet — so show what it moved (inputs less
+    // the fee) rather than a flat zero.
+    let amount = if tx.is_external() || tx.is_send_to_self() {
         &tx.incoming_amount
     } else {
         &tx.outgoing_amount

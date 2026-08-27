@@ -52,7 +52,9 @@ pub struct VaultOverview {
     labels_edited: LabelsEdited,
 
     warning: Option<Error>,
-    show_rescan_warning: bool,
+    /// Set when the restore recorded a rescan it has no date for; the only
+    /// case the user has to act on (see `App::needs_rescan_date`).
+    show_rescan_prompt: bool,
     show_received_celebration: bool,
     received_amount_display: String,
     received_quote: coincube_ui::component::quote_display::Quote,
@@ -65,7 +67,7 @@ impl VaultOverview {
         coins: &[Coin],
         sync_status: SyncStatus,
         tip_height: i32,
-        show_rescan_warning: bool,
+        show_rescan_prompt: bool,
     ) -> Self {
         let (balance, unconfirmed_balance, expiring_coins, remaining_seq) = coins_summary(
             coins,
@@ -85,7 +87,7 @@ impl VaultOverview {
             labels_edited: LabelsEdited::default(),
             warning: None,
             processing: false,
-            show_rescan_warning,
+            show_rescan_prompt,
             last_reload: Instant::now(),
             show_received_celebration: false,
             received_amount_display: String::new(),
@@ -140,7 +142,7 @@ impl State for VaultOverview {
                         && self.payments.loaded_page_count == 0
                         && self.warning.is_none(),
                     &self.sync_status,
-                    self.show_rescan_warning,
+                    self.show_rescan_prompt,
                     cache.bitcoin_unit,
                     cache.node_bitcoind_sync_progress,
                     cache.node_bitcoind_ibd,
@@ -291,8 +293,8 @@ impl State for VaultOverview {
                     return Task::done(Message::View(view::Message::ShowError(err_msg)));
                 }
             },
-            Message::View(view::Message::HideRescanWarning) => {
-                self.show_rescan_warning = false;
+            Message::View(view::Message::HideRescanPrompt) => {
+                self.show_rescan_prompt = false;
             }
             Message::View(view::Message::SelectPayment(outpoint)) => {
                 return Task::perform(

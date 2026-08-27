@@ -438,9 +438,14 @@ pub struct Payment {
 pub enum PaymentKind {
     Outgoing,
     Incoming,
-    /// A payment to self, which could be either from a self-transfer
-    /// or a change output from an outgoing transaction.
+    /// A change output of an outgoing transaction. The payment it belongs to
+    /// is already listed as [`PaymentKind::Outgoing`], so surfacing this one
+    /// too would double-count it.
     SendToSelf,
+    /// An output of a transaction that pays only this wallet — a refresh of
+    /// coins ahead of their timelock, typically. Nothing else represents it
+    /// in the list, so it is shown on its own.
+    SelfTransfer,
 }
 
 impl Payment {
@@ -506,9 +511,10 @@ pub fn payments_from_tx(history_tx: HistoryTransaction) -> Vec<Payment> {
                 outpoint,
                 time,
                 amount: output.value,
-                kind: if history_tx.is_send_to_self()
-                    || (history_tx.is_outgoing()
-                        && history_tx.change_indexes.contains(&output_index))
+                kind: if history_tx.is_send_to_self() {
+                    PaymentKind::SelfTransfer
+                } else if history_tx.is_outgoing()
+                    && history_tx.change_indexes.contains(&output_index)
                 {
                     PaymentKind::SendToSelf
                 } else if history_tx.is_external() {
