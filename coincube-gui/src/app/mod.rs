@@ -3018,6 +3018,16 @@ impl App {
                                 ),
                                 self.cache.bitcoin_unit,
                             ));
+                            // A refresh is a self-send spend, so show the
+                            // panel we just built. Falling through would
+                            // leave `current` on `Coins(..)`, which routes
+                            // back to the coins list — the accordion would
+                            // just collapse and nothing else would happen.
+                            self.panels.current = Menu::Vault(menu::VaultSubMenu::Send);
+                            if let Some(panel) = self.panels.current_mut() {
+                                return panel.reload(self.daemon.clone(), self.wallet.clone());
+                            }
+                            return Task::none();
                         }
                         menu::VaultSubMenu::Send => {
                             // redo the process of spending only if user want to start a new one.

@@ -71,6 +71,13 @@ pub fn unconfirmed<'a, T: 'a>() -> Container<'a, T> {
     )
 }
 
+pub fn self_transfer<'a, T: 'a>() -> Container<'a, T> {
+    badge_pill(
+        "  Self-transfer  ",
+        "This transaction sends the coins back to this wallet",
+    )
+}
+
 pub fn batch<'a, T: 'a>() -> Container<'a, T> {
     badge_pill("  Batch  ", "This transaction contains multiple payments")
 }

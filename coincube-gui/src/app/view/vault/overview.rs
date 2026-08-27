@@ -218,6 +218,9 @@ pub fn vault_overview_view<'a>(
                     loading_placeholder(icon::receipt_icon().size(48), "Loading transactions")
                 }))
                 .push(events.iter().fold(Column::new().spacing(10), |col, event| {
+                    // Change outputs are skipped — their transaction is already
+                    // listed as the outgoing payment. A self-transfer has no
+                    // such counterpart row, so it stays.
                     if event.kind != PaymentKind::SendToSelf {
                         col.push(event_list_view(
                             event,
@@ -320,10 +323,10 @@ fn event_list_view(
     fiat_converter: Option<FiatAmountConverter>,
     show_direction_badges: bool,
 ) -> Element<'_, Message> {
-    let direction = if event.kind == PaymentKind::Incoming {
-        TransactionDirection::Incoming
-    } else {
-        TransactionDirection::Outgoing
+    let direction = match event.kind {
+        PaymentKind::Incoming => TransactionDirection::Incoming,
+        PaymentKind::SelfTransfer | PaymentKind::SendToSelf => TransactionDirection::SelfTransfer,
+        PaymentKind::Outgoing => TransactionDirection::Outgoing,
     };
 
     let label = if let Some(label) = &event.label {
