@@ -4,7 +4,7 @@ use std::{collections::HashMap, time::Duration, vec};
 use iced::{
     alignment,
     widget::{Container, Row, Space},
-    Alignment,
+    Alignment::{self, Center},
     Length,
 };
 
@@ -17,7 +17,7 @@ use coincube_ui::{
         text::*,
         transaction::{TransactionBadge, TransactionDirection, TransactionListItem},
     },
-    icon,
+    icon::{self, cross_icon},
     theme,
     widget::{Button, Column, ColumnExt, Element},
 };
@@ -25,7 +25,7 @@ use coincube_ui::{
 use crate::{
     app::{
         cache::Cache,
-        menu::{Menu, VaultSubMenu},
+        menu::{self, Menu, VaultSubMenu},
         settings::display::DisplayMode,
         view::{
             balance_header_card, dashboard, loading_placeholder,
@@ -40,6 +40,41 @@ use crate::{
     daemon::model::{HistoryTransaction, Payment, PaymentKind, TransactionKind},
 };
 
+const RESCAN_DATE_PROMPT: &str = "This Vault was restored from a Recovery Kit that doesn't record when the wallet was created, so its past transactions can't be found without a start date. Pick one to scan the blockchain from.";
+
+fn rescan_date_prompt<'a>() -> Element<'a, Message> {
+    Container::new(
+        Column::new()
+            .spacing(10)
+            .push(
+                Row::new()
+                    .spacing(5)
+                    .push(icon::warning_icon().style(theme::text::warning))
+                    .push(text(RESCAN_DATE_PROMPT).style(theme::text::warning))
+                    .align_y(Center),
+            )
+            .push(
+                Row::new()
+                    .spacing(5)
+                    .push(Space::new().width(Length::Fill))
+                    .push(
+                        button::secondary(None, "Pick a date").on_press(Message::Menu(
+                            Menu::Vault(menu::VaultSubMenu::Settings(Some(
+                                menu::SettingsOption::Node,
+                            ))),
+                        )),
+                    )
+                    .push(
+                        button::secondary(Some(cross_icon()), "Dismiss")
+                            .on_press(Message::HideRescanPrompt),
+                    ),
+            ),
+    )
+    .padding(25)
+    .style(theme::card::border)
+    .into()
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn vault_overview_view<'a>(
     balance: &'a bitcoin::Amount,
@@ -52,6 +87,7 @@ pub fn vault_overview_view<'a>(
     processing: bool,
     loading: bool,
     sync_status: &SyncStatus,
+    show_rescan_prompt: bool,
     bitcoin_unit: BitcoinDisplayUnit,
     node_bitcoind_sync_progress: Option<f64>,
     node_bitcoind_ibd: Option<bool>,
@@ -134,6 +170,7 @@ pub fn vault_overview_view<'a>(
                 )
                 .push(vault_btc_row),
         ))
+        .push(show_rescan_prompt.then_some(rescan_date_prompt()))
         .push(match (node_bitcoind_ibd, node_bitcoind_sync_progress) {
             (Some(true), Some(progress)) => Some(
                 Container::new(

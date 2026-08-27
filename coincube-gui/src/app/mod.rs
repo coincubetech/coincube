@@ -283,6 +283,9 @@ impl Panels {
         cube_name: String,
         cube_network: String,
     ) -> Panels {
+        let needs_rescan_date =
+            needs_rescan_date(&data_dir, cache.network, &wallet, &daemon_backend);
+
         let default_fiat_currency = Self::default_fiat_currency(&data_dir, cache.network, &cube_id);
         let liquid_backend = Arc::new(LiquidBackend::new(breez_client.clone()));
         let swaps_path = Self::swaps_path(&data_dir, cache.network, &cube_id);
@@ -311,6 +314,7 @@ impl Panels {
                     cache.last_poll_at_startup,
                 ),
                 cache.blockheight(),
+                needs_rescan_date,
             )),
             liquid_overview: LiquidOverview::new(liquid_backend.clone(), swaps_path.clone()),
             liquid_send: LiquidSend::new(liquid_backend.clone()),
@@ -447,6 +451,7 @@ impl Panels {
                 cache.last_poll_at_startup,
             ),
             cache.blockheight(),
+            needs_rescan_date(&data_dir, cache.network, &wallet, &daemon_backend),
         ));
         self.coins = Some(CoinsPanel::new(
             cache.coins(),
@@ -2033,6 +2038,33 @@ fn pending_rescan(
     .ok()
     .flatten()
     .and_then(|s| s.pending_rescan)
+}
+
+/// Whether this Vault needs the user to supply a date before its rescan can run.
+///
+/// Only [`settings::PendingRescan::DateUnknown`] does. Every other restore
+/// records a birthday, and [`settle_rescan_obligation`] scans from it unattended
+/// at launch — nothing to prompt about. An older Recovery Kit records nothing
+/// that dates the wallet, so its obligation sits there doing nothing until a
+/// date arrives, and the only place that can come from is the user.
+///
+/// Gated on a local bitcoind as well, since that is the only backend that can be
+/// told to rescan at all.
+fn needs_rescan_date(
+    data_dir: &CoincubeDirectory,
+    network: bitcoin::Network,
+    wallet: &Wallet,
+    daemon_backend: &DaemonBackend,
+) -> bool {
+    matches!(
+        pending_rescan(data_dir, network, wallet),
+        Some(settings::PendingRescan::DateUnknown)
+    ) && daemon_backend.is_coincubed()
+        && daemon_backend
+            .node_type()
+            .map(|nt| nt == NodeType::Bitcoind)
+            // We don't know the node type for external coincubed so assume it's bitcoind.
+            .unwrap_or(true)
 }
 
 /// `settings` with this Vault's pending-rescan marker cleared, and everything

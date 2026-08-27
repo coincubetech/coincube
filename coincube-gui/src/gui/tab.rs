@@ -1446,13 +1446,13 @@ impl Tab {
                     // ERROR: BreezClient should have been pre-loaded after PIN entry
                     // With mandatory PINs, this path should never execute
                     error!("Loader App missing pre-loaded BreezClient - architectural bug");
-                    Task::done(Message::Load(loader::Message::App(
-                        Err(loader::Error::Unexpected(
+                    Task::done(Message::Load(loader::Message::App(Err(
+                        loader::Error::Unexpected(
                             "BreezClient missing - should have been pre-loaded after PIN entry. \
                              Liquid wallet is encrypted and cannot be loaded without PIN."
                                 .to_string(),
-                        )),
-                    )))
+                        ),
+                    ))))
                 }
                 loader::Message::BreezLoaded {
                     breez,
