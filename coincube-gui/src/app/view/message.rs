@@ -1945,6 +1945,10 @@ pub enum ConnectCubeMessage {
     /// call failed and will be retried next launch — background hygiene, never
     /// surfaced to the user.
     VaultFingerprintAsserted(bool),
+    /// Outcome of the COIN-373 Vault-membership reconcile at Cube open
+    /// (`crate::services::coincube::vault_reconcile`). Carries the number of
+    /// member rows attached — background hygiene, never surfaced to the user.
+    VaultMembersReconciled(usize),
     CopyToClipboard(String),
     Error(String),
     Avatar(AvatarMessage),

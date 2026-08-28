@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use coincube_core::descriptors::CoincubeDescriptor;
 use coincube_spark_protocol::LightningAddressInfo;
 use iced::task::Handle as TaskHandle;
 
@@ -11,8 +12,9 @@ use crate::{
         view::{self, ConnectCubeMessage},
     },
     services::coincube::{
-        AvatarGenerateRequest, AvatarSelectRequest, AvatarUserTraits, CoincubeClient,
-        LightningAddress, PatchConnectVaultRequest, RegisterCubeRequest, UpdateCubeRequest,
+        vault_reconcile, AvatarGenerateRequest, AvatarSelectRequest, AvatarUserTraits,
+        CoincubeClient, LightningAddress, PatchConnectVaultRequest, RegisterCubeRequest,
+        UpdateCubeRequest,
     },
 };
 
@@ -149,6 +151,19 @@ pub struct ConnectCubePanel {
     /// Connect. The endpoint no-ops an unchanged value, so this only avoids a
     /// redundant round-trip per launch — correctness doesn't depend on it.
     pub(super) vault_fingerprint_asserted: bool,
+    /// This Cube's Vault descriptor, seeded from the loaded wallet by
+    /// `App::vault_fingerprint_backfill_task`. The COIN-373 reconcile needs the
+    /// descriptor itself, not just its fingerprint — it decides which registered
+    /// cube keys this Vault actually commits to — and it is held here for the
+    /// same reason [`Self::vault_fingerprint`] is: the reconcile's trigger has
+    /// to survive until the `server_cube_id` it waits on exists. `None` when
+    /// this device holds no Vault for the Cube.
+    pub(super) vault_descriptor: Option<CoincubeDescriptor>,
+    /// True once this session has run the COIN-373 membership reconcile for
+    /// this Cube's Vault. One pass per launch is enough: the fan-out that can
+    /// drop a member row only runs in the installer, and a Vault built
+    /// mid-session re-enters through the same triggers.
+    pub(super) vault_members_reconciled: bool,
     /// The server-side numeric ID — set after registering with the backend.
     /// Used in API paths: /connect/cubes/{server_cube_id}/...
     pub server_cube_id: Option<u64>,
@@ -224,6 +239,8 @@ impl ConnectCubePanel {
             enc_pubkey_registered: false,
             vault_fingerprint: None,
             vault_fingerprint_asserted: false,
+            vault_descriptor: None,
+            vault_members_reconciled: false,
             server_cube_id: None,
             registration_error: None,
             lightning_address: None,
@@ -302,6 +319,9 @@ impl ConnectCubePanel {
         // until relaunch. Re-opening it costs at most one redundant PATCH, which
         // the server no-ops.
         self.vault_fingerprint_asserted = false;
+        // Same reasoning as the fingerprint latch: it means "already
+        // reconciled against *this* server cube row", which dies with the id.
+        self.vault_members_reconciled = false;
         self.registration_error = None;
         self.lightning_address = None;
         self.ln_username_input.clear();
@@ -594,6 +614,67 @@ impl ConnectCubePanel {
         )
     }
 
+    /// Run the COIN-373 membership reconcile for this Cube's Vault (see
+    /// [`crate::services::coincube::vault_reconcile`]).
+    ///
+    /// The sign-time pass inside the Keychain sign modal was the only trigger
+    /// before this one, which meant a Vault whose member fan-out dropped a row
+    /// stayed broken *on the phone* — where the Keychain app resolves a key's
+    /// vault purely from those rows — until somebody happened to start a
+    /// desktop sign. Firing it at Cube open converges the two without the user
+    /// having to do anything, and the same trigger covers a Vault built
+    /// mid-session (`App::vault_fingerprint_backfill_task` runs in both).
+    ///
+    /// No-ops without a live client or a server cube id, and self-latching for
+    /// the session. Entirely best-effort: it only ever adds routing metadata
+    /// for a key the descriptor already commits to, and every failure inside
+    /// is logged and skipped.
+    pub fn reconcile_vault_members(&mut self) -> iced::Task<Message> {
+        if self.vault_members_reconciled {
+            return iced::Task::none();
+        }
+        // Every precondition is checked before the latch closes, so a pass that
+        // could not run yet leaves it open for the next trigger. This matters
+        // more here than for the fingerprint PATCH: the first trigger fires from
+        // `App::new`, where `server_cube_id` is still `None` — it is only set
+        // when the `CubeRegistered` response lands — so the launch-time call is
+        // *expected* to no-op and the registration-time call is the one that
+        // usually does the work.
+        let (Some(client), Some(server_id), Some(descriptor)) = (
+            self.client.clone(),
+            self.server_cube_id,
+            self.vault_descriptor.clone(),
+        ) else {
+            return iced::Task::none();
+        };
+        self.vault_members_reconciled = true;
+        let cube_uuid = self.cube_uuid.clone();
+        iced::Task::perform(
+            async move {
+                let added = vault_reconcile::reconcile_cube_vault_members(
+                    &client,
+                    server_id,
+                    &cube_uuid,
+                    &descriptor,
+                )
+                .await;
+                if added > 0 {
+                    log::info!(
+                        "[CONNECT-CUBE] reconciled {} missing Vault member row(s) for cube {}",
+                        added,
+                        server_id
+                    );
+                }
+                added
+            },
+            |added| {
+                Message::View(view::Message::ConnectCube(
+                    ConnectCubeMessage::VaultMembersReconciled(added),
+                ))
+            },
+        )
+    }
+
     /// Re-report this Cube's Vault presence to the server when a Vault is
     /// created mid-session on an already-registered Cube, so its `hasVault`
     /// flips without waiting for a fresh registration (the duress vault gate;
@@ -669,7 +750,14 @@ impl ConnectCubePanel {
                             self.vault_fingerprint_asserted = true;
                         }
                         let vault_fp_task = self.assert_vault_fingerprint();
-                        let mut tasks = vec![enc_key_task, vault_fp_task];
+                        // Third thing waiting on the server cube id: the
+                        // COIN-373 membership reconcile. This is its main
+                        // trigger — the backfill fires it at `App::new`, before
+                        // this response has landed, so without this a Vault
+                        // missing a member row would stay broken on the phone
+                        // until someone started a desktop sign.
+                        let reconcile_members_task = self.reconcile_vault_members();
+                        let mut tasks = vec![enc_key_task, vault_fp_task, reconcile_members_task];
                         tasks.extend(reconcile_task);
                         tasks.extend(avatar_task);
                         return iced::Task::batch(tasks);
@@ -688,6 +776,14 @@ impl ConnectCubePanel {
                 if !ok {
                     self.enc_pubkey_registered = false;
                 }
+            }
+
+            ConnectCubeMessage::VaultMembersReconciled(_added) => {
+                // Nothing to render: the reconcile is background hygiene and
+                // the useful detail is already in the log. Unlike the latches
+                // above there is no failure retry here — a Vault that still
+                // has a missing row gets another pass at the next Cube open,
+                // and the sign-time pass remains the backstop.
             }
 
             ConnectCubeMessage::VaultFingerprintAsserted(ok) => {
@@ -1692,6 +1788,11 @@ mod tests {
         },
     };
 
+    use std::str::FromStr;
+
+    // Primary signer `f5acc2fd`, CSV recovery signer `8a64f2a9`.
+    const RECONCILE_DESC: &str = "wsh(or_d(pk([f5acc2fd]tpubD6NzVbkrYhZ4YgUx2ZLNt2rLYAMTdYysCRzKoLu2BeSHKvzqPaBDvf17GeBPnExUVPkuBpx4kniP964e2MxyzzazcXLptxLXModSVCVEV1T/<0;1>/*),and_v(v:pkh([8a64f2a9]tpubD6NzVbkrYhZ4WmzFjvQrp7sDa4ECUxTi9oby8K4FZkd3XCBtEdKwUiQyYJaxiJo5y42gyDWEczrFpozEjeLxMPxjf2WtkfcbpUdfvNnozWF/<0;1>/*),older(10))))#d72le4dr";
+
     fn panel() -> ConnectCubePanel {
         ConnectCubePanel::new(
             None,
@@ -1801,6 +1902,69 @@ mod tests {
                 background: "background".to_string(),
                 archetype_flavor: "flavor".to_string(),
             },
+        }
+    }
+
+    /// COIN-373 latch semantics. The reconcile's first trigger is the App's
+    /// backfill at `App::new`, which runs before the `CubeRegistered` response
+    /// has set `server_cube_id` — so that pass must NOT consume the latch, or
+    /// the whole cube-open reconcile becomes dead code and a Vault missing a
+    /// member row stays broken on the phone until someone starts a desktop sign.
+    #[test]
+    fn reconcile_waits_for_the_server_cube_id_before_latching() {
+        let mut panel = panel();
+        panel.set_client(CoincubeClient::for_test("http://127.0.0.1:1"));
+        panel.vault_descriptor = Some(CoincubeDescriptor::from_str(RECONCILE_DESC).unwrap());
+
+        // Launch-time pass: registered? not yet.
+        let _ = panel.reconcile_vault_members();
+        assert!(
+            !panel.vault_members_reconciled,
+            "a pass with no server cube id must leave the latch open"
+        );
+
+        panel.server_cube_id = Some(42);
+        let _ = panel.reconcile_vault_members();
+        assert!(
+            panel.vault_members_reconciled,
+            "with client, cube id and descriptor in hand the pass must run"
+        );
+    }
+
+    /// ...and the trigger that supplies that server cube id must carry the
+    /// reconcile with it. Dropping this call is what makes the launch-time pass
+    /// the only one, which is to say none at all.
+    #[test]
+    fn cube_registered_fires_the_membership_reconcile() {
+        let mut panel = panel();
+        panel.set_client(CoincubeClient::for_test("http://127.0.0.1:1"));
+        panel.vault_descriptor = Some(CoincubeDescriptor::from_str(RECONCILE_DESC).unwrap());
+        assert_eq!(panel.server_cube_id, None);
+
+        let _ = panel.update_message(ConnectCubeMessage::CubeRegistered(Ok(registered_cube())));
+
+        assert_eq!(panel.server_cube_id, Some(42));
+        assert!(
+            panel.vault_members_reconciled,
+            "registration is the reconcile's real trigger — the App-level pass \
+             already ran and no-opped before this response landed"
+        );
+    }
+
+    fn registered_cube() -> crate::services::coincube::CubeResponse {
+        crate::services::coincube::CubeResponse {
+            id: 42,
+            uuid: "cube-uuid".to_string(),
+            name: "Family Vault".to_string(),
+            network: "bitcoin".to_string(),
+            lightning_address: None,
+            status: "active".to_string(),
+            has_recovery_kit: false,
+            has_vault: Some(true),
+            encryption_pubkey: None,
+            members: vec![],
+            pending_invites: vec![],
+            vault: None,
         }
     }
 

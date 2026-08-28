@@ -2883,6 +2883,9 @@ mod cube_member_tests {
                     // response — from a server that predates the field —
                     // must still deserialise.
                     fingerprint: None,
+                    // Empty stays off the wire entirely, so this request is
+                    // byte-identical to what a pre-atomic-create build sent.
+                    members: vec![],
                 },
             )
             .await
@@ -2937,6 +2940,7 @@ mod cube_member_tests {
                 CreateConnectVaultRequest {
                     timelock_days: 180,
                     fingerprint: Some("8099ee80".to_string()),
+                    members: vec![],
                 },
             )
             .await
