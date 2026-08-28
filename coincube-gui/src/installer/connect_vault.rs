@@ -19,6 +19,19 @@
 //!   retry can't help (the sealed descriptor still holds the recovery
 //!   key, so it must be rebuilt first). Other errors leave the partial
 //!   vault in place and surface a retry-able warning.
+//! - **Transient failures are retried in place** ([`MEMBER_ATTACH_ATTEMPTS`]).
+//!   A vault left one member row short is not a cosmetic problem: that row is
+//!   what the Keychain app resolves a key's vault from, so a dropped call
+//!   makes the phone report "no vault" for a key the descriptor genuinely
+//!   commits to. A few hundred milliseconds of retry inside a step the user is
+//!   already waiting on is cheap next to that.
+//! - **The partial state is recoverable, not terminal.** Anything that still
+//!   fails here is healed by the COIN-373 reconcile
+//!   ([`crate::services::coincube::vault_reconcile`]), which re-attaches
+//!   missing rows at Cube open and before Keychain signing. That is why the
+//!   generic branch does *not* roll the vault back: deleting it would remove
+//!   the only thing the repair can attach to, and nothing outside this
+//!   installer can create a Connect vault.
 
 use crate::services::coincube::{
     AddVaultMemberRequest, CoincubeClient, ConnectVaultResponse, CreateConnectVaultRequest,
@@ -26,6 +39,17 @@ use crate::services::coincube::{
 };
 
 use super::context::ConnectVaultMemberPayload;
+
+/// How many times a single `add_vault_member` call is attempted before the
+/// fan-out gives up. Only failures [`CoincubeError::is_transient`] accepts are
+/// retried — a 409 conflict is answered on the first response, never re-sent.
+const MEMBER_ATTACH_ATTEMPTS: u32 = 3;
+
+/// Backoff before retrying a member attach, multiplied by the attempt number
+/// (400ms, then 800ms). Deliberately short: this runs inside the installer's
+/// final step with the user watching a spinner, and the failures worth
+/// retrying here are the ones that clear in well under a second.
+const MEMBER_ATTACH_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(400);
 
 /// Successful outcome of the vault-create fan-out.
 #[derive(Debug, Clone)]
@@ -148,61 +172,83 @@ pub async fn create_connect_vault(
         .await
         .map_err(|e| ConnectVaultError::Other(format!("Failed to create Connect vault: {}", e)))?;
 
-    // 3. Fan out member rows. On the W9 or I2 409, roll back and bail.
+    // 3. Fan out member rows. On the W9 or I2 409, roll back and bail;
+    //    on a transient failure, retry the same member before giving up.
     let mut members_added = 0usize;
-    for payload in &members {
-        let req = AddVaultMemberRequest {
-            contact_id: payload.contact_id,
-            key_id: Some(payload.key_id),
-            role: VaultMemberRole::Keyholder,
-        };
-        match client.add_vault_member(cube.id, req).await {
-            Ok(_) => {
-                members_added += 1;
-            }
-            Err(e) if e.is_key_already_used_in_vault() => {
-                // Roll back the vault we just created so the user can
-                // restart the Vault Builder with a clean slate. The
-                // delete is best-effort — a failure to roll back just
-                // means the user will see a "vault already exists" on
-                // their next attempt and the backend's `delete_connect_vault`
-                // can be retried.
-                if let Err(rollback_err) = client.delete_connect_vault(cube.id).await {
-                    tracing::warn!(
-                        "W9 rollback failed to delete vault {}: {}",
-                        vault.id,
-                        rollback_err
-                    );
+    'members: for payload in &members {
+        let mut attempt = 1u32;
+        loop {
+            let req = AddVaultMemberRequest {
+                contact_id: payload.contact_id,
+                key_id: Some(payload.key_id),
+                role: VaultMemberRole::Keyholder,
+            };
+            match client.add_vault_member(cube.id, req).await {
+                Ok(_) => {
+                    members_added += 1;
+                    continue 'members;
                 }
-                return Err(ConnectVaultError::KeyAlreadyUsedInVault {
-                    key_id: payload.key_id,
-                });
-            }
-            Err(e) if e.is_key_is_recovery_recipient() => {
-                // I2 backstop: the descriptor was sealed with a recovery
-                // key, which can never fan out into a signer. Unlike W9,
-                // retrying is hopeless — the sealed descriptor still
-                // contains the recovery key — so we roll the partial
-                // vault back (same best-effort delete as W9) and surface a
-                // distinct "rebuild the descriptor" error. PR 2 should make
-                // this unreachable from a current build, but stale desktops
-                // and future pickers keep it worth having.
-                if let Err(rollback_err) = client.delete_connect_vault(cube.id).await {
-                    tracing::warn!(
-                        "I2 rollback failed to delete vault {}: {}",
-                        vault.id,
-                        rollback_err
-                    );
+                Err(e) if e.is_key_already_used_in_vault() => {
+                    // Roll back the vault we just created so the user can
+                    // restart the Vault Builder with a clean slate. The
+                    // delete is best-effort — a failure to roll back just
+                    // means the user will see a "vault already exists" on
+                    // their next attempt and the backend's `delete_connect_vault`
+                    // can be retried.
+                    if let Err(rollback_err) = client.delete_connect_vault(cube.id).await {
+                        tracing::warn!(
+                            "W9 rollback failed to delete vault {}: {}",
+                            vault.id,
+                            rollback_err
+                        );
+                    }
+                    return Err(ConnectVaultError::KeyAlreadyUsedInVault {
+                        key_id: payload.key_id,
+                    });
                 }
-                return Err(ConnectVaultError::KeyIsRecoveryRecipient {
-                    key_id: payload.key_id,
-                });
-            }
-            Err(e) => {
-                return Err(ConnectVaultError::Other(format!(
-                    "Failed to add vault member (key {}): {}",
-                    payload.key_id, e
-                )));
+                Err(e) if e.is_key_is_recovery_recipient() => {
+                    // I2 backstop: the descriptor was sealed with a recovery
+                    // key, which can never fan out into a signer. Unlike W9,
+                    // retrying is hopeless — the sealed descriptor still
+                    // contains the recovery key — so we roll the partial
+                    // vault back (same best-effort delete as W9) and surface a
+                    // distinct "rebuild the descriptor" error. PR 2 should make
+                    // this unreachable from a current build, but stale desktops
+                    // and future pickers keep it worth having.
+                    if let Err(rollback_err) = client.delete_connect_vault(cube.id).await {
+                        tracing::warn!(
+                            "I2 rollback failed to delete vault {}: {}",
+                            vault.id,
+                            rollback_err
+                        );
+                    }
+                    return Err(ConnectVaultError::KeyIsRecoveryRecipient {
+                        key_id: payload.key_id,
+                    });
+                }
+                Err(e) if e.is_transient() && attempt < MEMBER_ATTACH_ATTEMPTS => {
+                    // A dropped connection or a 5xx here is the exact failure that
+                    // strands a Vault one member row short — and that row is what
+                    // the Keychain app resolves a key's vault from, so the phone
+                    // then reports "no vault" for a key the descriptor genuinely
+                    // commits to. Retrying the same request costs a few hundred
+                    // milliseconds inside a step the user is already waiting on.
+                    tracing::warn!(
+                        "add_vault_member (key {}) attempt {}/{} failed, retrying: {}",
+                        payload.key_id,
+                        attempt,
+                        MEMBER_ATTACH_ATTEMPTS,
+                        e
+                    );
+                    tokio::time::sleep(MEMBER_ATTACH_RETRY_BACKOFF * attempt).await;
+                    attempt += 1;
+                }
+                Err(e) => {
+                    return Err(ConnectVaultError::Other(format!(
+                        "Failed to add vault member (key {}): {}",
+                        payload.key_id, e
+                    )));
+                }
             }
         }
     }
@@ -542,6 +588,150 @@ mod tests {
                 ConnectVaultError::KeyIsRecoveryRecipient { key_id: 99 }
             ),
             "expected I2 error with key_id=99, got: {:?}",
+            err
+        );
+    }
+
+    /// Shared fixtures for the retry tests: cube registration + vault create
+    /// both succeed, leaving the member fan-out as the only variable.
+    fn register_and_create_mocks(server: &MockServer) -> (httpmock::Mock, httpmock::Mock) {
+        let register = server.mock(|when, then| {
+            when.method(Method::POST).path("/api/v1/connect/cubes");
+            then.status(200)
+                .header("content-type", "application/json")
+                .json_body(json!({
+                    "success": true,
+                    "data": {
+                        "id": 42,
+                        "uuid": "abc-uuid",
+                        "name": "My Cube",
+                        "network": "mainnet",
+                        "lightningAddress": null,
+                        "bolt12Offer": null,
+                        "status": "active"
+                    }
+                }));
+        });
+        let create_vault = server.mock(|when, then| {
+            when.method(Method::POST)
+                .path("/api/v1/connect/cubes/42/vault");
+            then.status(201)
+                .header("content-type", "application/json")
+                .json_body(json!({
+                    "success": true,
+                    "data": {
+                        "id": 5,
+                        "cubeId": 42,
+                        "timelockDays": 180,
+                        "timelockExpiresAt": "2026-10-15T00:00:00Z",
+                        "lastResetAt": "2026-04-18T00:00:00Z",
+                        "status": "active",
+                        "members": [],
+                        "createdAt": "2026-04-18T00:00:00Z",
+                        "updatedAt": "2026-04-18T00:00:00Z"
+                    }
+                }));
+        });
+        (register, create_vault)
+    }
+
+    #[tokio::test]
+    async fn transient_member_failure_is_retried_before_giving_up() {
+        let server = MockServer::start();
+        let (register, create_vault) = register_and_create_mocks(&server);
+
+        // A 5xx on every attempt: the fan-out should exhaust its budget rather
+        // than strand the vault a member short on the first blip.
+        let add_member = server.mock(|when, then| {
+            when.method(Method::POST)
+                .path("/api/v1/connect/cubes/42/vault/members");
+            then.status(503)
+                .header("content-type", "application/json")
+                .json_body(json!({
+                    "success": false,
+                    "error": { "code": "UNAVAILABLE", "message": "upstream unavailable" }
+                }));
+        });
+
+        let client = CoincubeClient::for_test(server.base_url());
+        let err = create_connect_vault(
+            Some(client),
+            Some("abc-uuid".to_string()),
+            Some("My Cube".to_string()),
+            "mainnet".to_string(),
+            vec![sample_member("deadbeef", 99, None)],
+            Some(180),
+            Some("8099ee80".to_string()),
+        )
+        .await
+        .expect_err("expected the exhausted-retry error");
+
+        register.assert();
+        create_vault.assert();
+        assert_eq!(
+            add_member.hits(),
+            MEMBER_ATTACH_ATTEMPTS as usize,
+            "a transient failure should be retried up to the attempt budget"
+        );
+        assert!(
+            matches!(err, ConnectVaultError::Other(_)),
+            "expected Other after exhausting retries, got: {:?}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn conflict_responses_are_not_retried() {
+        let server = MockServer::start();
+        let (register, create_vault) = register_and_create_mocks(&server);
+
+        // W9 is a decision, not a blip. Re-sending it would only delay the
+        // dialog the user needs.
+        let add_member = server.mock(|when, then| {
+            when.method(Method::POST)
+                .path("/api/v1/connect/cubes/42/vault/members");
+            then.status(409)
+                .header("content-type", "application/json")
+                .json_body(json!({
+                    "success": false,
+                    "error": {
+                        "code": "KEY_ALREADY_USED_IN_VAULT",
+                        "message": "Key has already been used in another vault"
+                    }
+                }));
+        });
+        let rollback = server.mock(|when, then| {
+            when.method(Method::DELETE)
+                .path("/api/v1/connect/cubes/42/vault");
+            then.status(200)
+                .header("content-type", "application/json")
+                .json_body(json!({ "success": true, "data": { "deleted": true } }));
+        });
+
+        let client = CoincubeClient::for_test(server.base_url());
+        let err = create_connect_vault(
+            Some(client),
+            Some("abc-uuid".to_string()),
+            Some("My Cube".to_string()),
+            "mainnet".to_string(),
+            vec![sample_member("deadbeef", 99, None)],
+            Some(180),
+            Some("8099ee80".to_string()),
+        )
+        .await
+        .expect_err("expected W9 409 error");
+
+        register.assert();
+        create_vault.assert();
+        rollback.assert();
+        assert_eq!(
+            add_member.hits(),
+            1,
+            "a 409 conflict must be answered on the first response"
+        );
+        assert!(
+            matches!(err, ConnectVaultError::KeyAlreadyUsedInVault { key_id: 99 }),
+            "expected W9 error with key_id=99, got: {:?}",
             err
         );
     }

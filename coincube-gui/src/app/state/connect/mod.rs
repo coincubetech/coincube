@@ -263,6 +263,21 @@ impl ConnectPanel {
         self.cube.assert_vault_fingerprint()
     }
 
+    /// Run the COIN-373 Vault-membership reconcile, syncing the API client
+    /// first. Called from the same backfill wave as
+    /// [`Self::assert_vault_fingerprint`], because it needs the same two
+    /// things: a registered Cube and the loaded Vault's descriptor.
+    ///
+    /// Self-latching and best-effort — see
+    /// [`ConnectCubePanel::reconcile_vault_members`].
+    pub fn reconcile_vault_members(
+        &mut self,
+        descriptor: coincube_core::descriptors::CoincubeDescriptor,
+    ) -> iced::Task<Message> {
+        self.sync_client();
+        self.cube.reconcile_vault_members(descriptor)
+    }
+
     /// React to a mid-session Vault creation (PLAN-duress-vault-gate PR 3):
     ///
     /// 1. Re-report the Cube's Vault presence so the server's `hasVault` flips

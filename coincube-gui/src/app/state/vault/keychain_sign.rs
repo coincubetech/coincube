@@ -23,10 +23,9 @@
 //! confidentiality from TLS but the API can technically inspect the
 //! transaction. The Final-step PR description should call this out.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use coincube_core::descriptors::CoincubeDescriptor;
 use coincube_core::miniscript::bitcoin::{bip32::Fingerprint, psbt::Psbt};
 use iced::{Subscription, Task};
 use tokio::sync::RwLock;
@@ -54,8 +53,8 @@ use crate::{
     daemon::{model::SpendTx, Daemon},
     services::{
         coincube::{
-            classify_cube_key_ownership, AddVaultMemberRequest, CoincubeClient,
-            ConnectVaultResponse, CubeKeyOwnership, CubeKeyRaw, User, VaultMemberRole,
+            vault_reconcile::reconcile_vault_members, CoincubeClient, ConnectVaultResponse,
+            CubeKeyRaw, User,
         },
         connect::{
             client::auth::AccessTokenResponse,
@@ -689,7 +688,8 @@ impl KeychainSignModal {
                     &wallet.main_descriptor,
                     self_user_id,
                 )
-                .await;
+                .await
+                .vault;
                 let index: KeychainSignerIndex =
                     build_keychain_index(&vault.members, &cube_keys, self_user_id);
                 let required =
@@ -2056,137 +2056,6 @@ impl Modal for KeychainSignModal {
 /// the generic "Other" path — the user still sees the original
 /// message, they just don't get the "session expired" closed-modal
 /// path.
-/// Every signer fingerprint the descriptor uses, across the primary path
-/// and all recovery paths. Used by the COIN-373 reconcile to decide which
-/// registered cube keys are actually part of this wallet.
-fn descriptor_fingerprints(descriptor: &CoincubeDescriptor) -> HashSet<Fingerprint> {
-    let policy = descriptor.policy();
-    let mut fps: HashSet<Fingerprint> = policy
-        .primary_path()
-        .thresh_origins()
-        .1
-        .into_keys()
-        .collect();
-    for path in policy.recovery_paths().values() {
-        fps.extend(path.thresh_origins().1.into_keys());
-    }
-    fps
-}
-
-/// Best-effort reconcile of vault membership before classification
-/// (COIN-373). A Vault Builder run whose `add_vault_member` fan-out failed
-/// can leave the backend vault with missing keyholder members, which makes
-/// `build_keychain_index` blind to a descriptor signer and dead-ends the
-/// Keychain sign flow ("no Keychain signers required") with no recovery.
-///
-/// Here we attach any cube key that (a) is a signer in this wallet's
-/// descriptor and (b) isn't already a vault member, resolving the owner to a
-/// `contact_id` for keyholder-contact keys (or `None` for the user's own
-/// keys). Returns the vault re-fetched when at least one member was added.
-/// Failures (including an owner we can't map to a keyholder contact) are
-/// logged and skipped — classification then proceeds with whatever members
-/// exist, exactly as before.
-async fn reconcile_vault_members(
-    client: &CoincubeClient,
-    cube_server_id: u64,
-    vault: ConnectVaultResponse,
-    cube_keys: &[CubeKeyRaw],
-    descriptor: &CoincubeDescriptor,
-    self_user_id: u64,
-) -> ConnectVaultResponse {
-    let descriptor_fps = descriptor_fingerprints(descriptor);
-    let existing_key_ids: HashSet<u64> = vault.members.iter().filter_map(|m| m.key_id).collect();
-
-    // Registered cube keys this wallet uses that aren't yet attached.
-    let candidates: Vec<&CubeKeyRaw> = cube_keys
-        .iter()
-        .filter(|k| !existing_key_ids.contains(&k.id))
-        .filter(|k| {
-            k.fingerprint
-                .parse::<Fingerprint>()
-                .map(|fp| descriptor_fps.contains(&fp))
-                .unwrap_or(false)
-        })
-        .collect();
-    if candidates.is_empty() {
-        return vault;
-    }
-
-    // Needed to resolve a contact-owned key's `contact_id`. If this fails we
-    // can still attach self-owned keys (which need no contact_id).
-    let contacts = client.get_contacts().await.unwrap_or_default();
-
-    let mut added = 0usize;
-    for key in candidates {
-        // Same identity-only classification the Vault Builder picker uses
-        // (never on `ContactRole`); see [`classify_cube_key_ownership`].
-        let contact_id = match classify_cube_key_ownership(key, &contacts, self_user_id) {
-            CubeKeyOwnership::SelfOwned { .. } => None,
-            CubeKeyOwnership::ContactOwned { contact, .. } => Some(contact.id),
-            CubeKeyOwnership::Unresolved { owner_id } => {
-                // Owner isn't a contact we can address — sending this without a
-                // contact_id would 400 ("Key does not belong to the specified
-                // user"), so skip and let classification surface it as Local.
-                tracing::warn!(
-                    target: "coincube_gui::signing",
-                    key_id = key.id,
-                    owner_user_id = owner_id,
-                    "Reconcile: descriptor cube key owner is not a contact — skipping attach",
-                );
-                continue;
-            }
-        };
-        match client
-            .add_vault_member(
-                cube_server_id,
-                AddVaultMemberRequest {
-                    contact_id,
-                    key_id: Some(key.id),
-                    role: VaultMemberRole::Keyholder,
-                },
-            )
-            .await
-        {
-            Ok(_) => {
-                added += 1;
-                tracing::info!(
-                    target: "coincube_gui::signing",
-                    key_id = key.id,
-                    contact_id = ?contact_id,
-                    "Reconcile: attached missing keychain key to vault (COIN-373)",
-                );
-            }
-            Err(e) => {
-                // Best-effort: a failure here just means this signer stays
-                // unattached and classification falls back to Local, the prior
-                // behavior. Don't fail the whole sign flow.
-                tracing::warn!(
-                    target: "coincube_gui::signing",
-                    key_id = key.id,
-                    "Reconcile: failed to attach keychain key to vault: {}",
-                    e,
-                );
-            }
-        }
-    }
-
-    if added == 0 {
-        return vault;
-    }
-    // Re-fetch so the returned member list reflects the attachments.
-    match client.get_connect_vault(cube_server_id).await {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::warn!(
-                target: "coincube_gui::signing",
-                "Reconcile: re-fetch of vault after attaching members failed: {}",
-                e,
-            );
-            vault
-        }
-    }
-}
-
 fn is_rest_auth_failure(msg: &str) -> bool {
     let lower = msg.to_ascii_lowercase();
     lower.contains("401")
@@ -2317,6 +2186,7 @@ fn event_type_from_i32(v: i32) -> crate::services::connect::grpc::connect_v1::Ev
 mod tests {
     use super::*;
     use crate::app::state::vault::test_support::{empty_psbt, tokens};
+    use coincube_core::descriptors::CoincubeDescriptor;
     use std::str::FromStr;
 
     // Primary signer `f5acc2fd`; recovery signer `8a64f2a9` behind a CSV.
@@ -2565,18 +2435,6 @@ mod tests {
                 request_id
             )
             .is_err());
-    }
-
-    #[test]
-    fn descriptor_fingerprints_covers_primary_and_recovery() {
-        let desc = CoincubeDescriptor::from_str(RECOVERY_DESC).unwrap();
-        let fps = descriptor_fingerprints(&desc);
-        // The recovery signer must be included — dropping recovery-path
-        // fingerprints would make the COIN-373 reconcile blind to exactly
-        // the contact-owned recovery keys it exists to attach.
-        assert!(fps.contains(&Fingerprint::from_str("f5acc2fd").unwrap()));
-        assert!(fps.contains(&Fingerprint::from_str("8a64f2a9").unwrap()));
-        assert_eq!(fps.len(), 2);
     }
 
     #[test]

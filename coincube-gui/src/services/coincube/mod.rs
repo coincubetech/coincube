@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 pub mod client;
+pub mod vault_reconcile;
 pub use client::CoincubeClient;
 
 #[derive(Debug)]
@@ -84,6 +85,37 @@ impl std::fmt::Display for CoincubeError {
 impl std::error::Error for CoincubeError {}
 
 impl CoincubeError {
+    /// Returns `true` when re-sending the *same* request unchanged could
+    /// plausibly succeed: a transport failure, a 5xx, a timeout, or a
+    /// rate-limit.
+    ///
+    /// Everything else is a decision the server has already made — a 4xx
+    /// (including the W9/I2/W16 conflicts and auth rejections), a malformed
+    /// body, or an API-level error — and retrying it just burns time before
+    /// surfacing the same failure. Callers that retry (see
+    /// `installer::connect_vault`) pick their own attempt count and backoff;
+    /// this only classifies.
+    ///
+    /// A `RateLimited` retry deliberately does **not** honour the server's
+    /// `Retry-After` here: the one caller runs inside the installer's
+    /// post-install step, where blocking for a minute is worse than failing
+    /// with a retryable warning. Its short backoff will simply exhaust the
+    /// attempts if the limit is still in force.
+    pub fn is_transient(&self) -> bool {
+        match self {
+            CoincubeError::Network(_) => true,
+            CoincubeError::RateLimited { .. } => true,
+            CoincubeError::Unsuccessful(info) => {
+                info.status_code >= 500 || info.status_code == 408 || info.status_code == 429
+            }
+            CoincubeError::Api(_)
+            | CoincubeError::Parse(_)
+            | CoincubeError::SseError(_)
+            | CoincubeError::VaultKeyholderLocked { .. }
+            | CoincubeError::NotFound => false,
+        }
+    }
+
     /// Returns `true` when the error indicates that the credentials (token) are
     /// definitively rejected by the server (401 Unauthorized / 403 Forbidden).
     pub fn is_auth_error(&self) -> bool {
@@ -2211,6 +2243,46 @@ impl DuressCheckOutcome {
             _ if e.is_auth_error() => Self::Unauthorized,
             _ => Self::Unreachable,
         }
+    }
+}
+
+#[cfg(test)]
+mod is_transient_tests {
+    use super::*;
+    use crate::services::http::NotSuccessResponseInfo;
+
+    fn unsuccessful(status_code: u16) -> CoincubeError {
+        CoincubeError::Unsuccessful(NotSuccessResponseInfo {
+            status_code,
+            text: String::new(),
+        })
+    }
+
+    #[test]
+    fn server_side_and_transport_failures_are_worth_another_attempt() {
+        assert!(unsuccessful(500).is_transient());
+        assert!(unsuccessful(502).is_transient());
+        assert!(unsuccessful(503).is_transient());
+        assert!(unsuccessful(408).is_transient());
+        assert!(unsuccessful(429).is_transient());
+        assert!(CoincubeError::RateLimited {
+            retry_after: std::time::Duration::from_secs(60)
+        }
+        .is_transient());
+    }
+
+    #[test]
+    fn decisions_the_server_already_made_are_not_retried() {
+        // The vault fan-out's conflicts in particular: re-sending a W9/I2/W16
+        // 409 only delays the dialog that tells the user what to do.
+        assert!(!unsuccessful(409).is_transient());
+        assert!(!unsuccessful(400).is_transient());
+        assert!(!unsuccessful(404).is_transient());
+        assert!(!unsuccessful(401).is_transient());
+        assert!(!unsuccessful(403).is_transient());
+        assert!(!CoincubeError::VaultKeyholderLocked { vault_id: 5 }.is_transient());
+        assert!(!CoincubeError::NotFound.is_transient());
+        assert!(!CoincubeError::Api("bad".to_string()).is_transient());
     }
 }
 
