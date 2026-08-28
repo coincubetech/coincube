@@ -13,12 +13,9 @@
 //!   only matters for those.
 //! - **Role** defaults to `Keyholder` for every member. Refinement into
 //!   Beneficiary/Observer is a follow-up.
-//! - **Failure UX**: the W9 409 (`KEY_ALREADY_USED_IN_VAULT`) and the
-//!   I2 409 (`KEY_IS_RECOVERY_RECIPIENT`) both roll back the just-created
-//!   vault — W9 so the user can restart with a clean slate, I2 because a
-//!   retry can't help (the sealed descriptor still holds the recovery
-//!   key, so it must be rebuilt first). Other errors leave the partial
-//!   vault in place and surface a retry-able warning.
+//! - **Failure UX**: Any member-attach failure rolls back the just-created
+//!   vault. W9 and I2 surface dedicated errors; other failures surface a
+//!   retry-able warning without leaving an active partial vault behind.
 
 use crate::services::coincube::{
     AddVaultMemberRequest, CoincubeClient, ConnectVaultResponse, CreateConnectVaultRequest,
@@ -199,6 +196,16 @@ pub async fn create_connect_vault(
                 });
             }
             Err(e) => {
+                // Do not leave an active vault with only a partial signer set.
+                // The local wallet is already installed, so rollback is the
+                // least surprising recovery path for transient failures too.
+                if let Err(rollback_err) = client.delete_connect_vault(cube.id).await {
+                    tracing::warn!(
+                        "member-attach rollback failed to delete vault {}: {}",
+                        vault.id,
+                        rollback_err
+                    );
+                }
                 return Err(ConnectVaultError::Other(format!(
                     "Failed to add vault member (key {}): {}",
                     payload.key_id, e
