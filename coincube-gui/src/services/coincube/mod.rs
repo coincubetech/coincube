@@ -118,6 +118,26 @@ impl CoincubeError {
             .and_then(|env| env.error.key_id)
     }
 
+    /// True when a 409 says the member being added is already on the vault.
+    ///
+    /// For `add_vault_member` this is a **success in disguise**: the row the
+    /// caller wanted exists. It is what a retry sees when the first attempt's
+    /// write landed but its response didn't (a timeout, a dropped connection),
+    /// and what a fan-out sees if it re-sends a member the server already has.
+    /// Treating it as a failure would turn a complete vault into a user-visible
+    /// error.
+    pub fn is_duplicate_member(&self) -> bool {
+        let CoincubeError::Unsuccessful(info) = self else {
+            return false;
+        };
+        if info.status_code != 409 {
+            return false;
+        }
+        serde_json::from_str::<ApiErrorResponse>(&info.text)
+            .map(|env| env.error.code == ERR_DUPLICATE_RESOURCE)
+            .unwrap_or(false)
+    }
+
     /// Returns `true` when re-sending the *same* request unchanged could
     /// plausibly succeed: a transport failure, a 5xx, a timeout, or a
     /// rate-limit.
@@ -1970,6 +1990,11 @@ pub const ERR_KEY_ALREADY_USED_IN_VAULT: &str = "KEY_ALREADY_USED_IN_VAULT";
 /// sealed descriptor must be rebuilt without the recovery key — so the caller
 /// rolls the just-created vault back (see `installer/connect_vault.rs`).
 pub const ERR_KEY_IS_RECOVERY_RECIPIENT: &str = "KEY_IS_RECOVERY_RECIPIENT";
+
+/// Error code the backend returns for a member that is already on the vault
+/// (`MemberExists` in `AddMember`, which runs *before* the W9 check — so a
+/// re-send of an identical member is this code, not `KEY_ALREADY_USED_IN_VAULT`).
+pub const ERR_DUPLICATE_RESOURCE: &str = "DUPLICATE_RESOURCE";
 
 /// Error code returned by the backend's W16 guard (see
 /// `coincube-api` PR 8): 409 from

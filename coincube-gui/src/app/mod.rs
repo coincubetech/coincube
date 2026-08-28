@@ -2783,7 +2783,8 @@ impl App {
         // Cube whose Keychain app reports "no vault" for one of its own keys
         // converges at open rather than waiting for someone to start a desktop
         // sign (COIN-373; `services::coincube::vault_reconcile`).
-        let reconcile_task = self.panels.connect.reconcile_vault_members(descriptor);
+        self.panels.connect.set_vault_descriptor(Some(descriptor));
+        let reconcile_task = self.panels.connect.reconcile_vault_members();
         if !self.cube_settings.adopt_vault_fingerprint(&fingerprint) {
             return Task::batch([assert_task, reconcile_task]);
         }

@@ -244,19 +244,36 @@ pub async fn create_connect_vault(
         });
     }
     tracing::info!(
-        "Connect vault {} came back with {}/{} members — server predates atomic \
-         create, falling back to the member fan-out",
+        "Connect vault {} came back with {}/{} members — falling back to the \
+         member fan-out for the missing rows",
         vault.id,
         vault.members.len(),
         members.len()
     );
 
+    // Attach only what the response is actually missing. Usually that is
+    // everything (a server predating `members` ignores the field and returns a
+    // member-less vault), but it need not be: the server commits the members and
+    // then re-reads the vault to preload them, and treats a failed re-read as a
+    // successful create — so a complete vault can come back reporting no
+    // members. Re-sending those would answer 409 DUPLICATE_RESOURCE per member
+    // and turn a correct vault into a user-visible failure.
+    let already_attached: std::collections::HashSet<u64> =
+        vault.members.iter().filter_map(|m| m.key_id).collect();
+    let members_added_at_create = members
+        .iter()
+        .filter(|p| already_attached.contains(&p.key_id))
+        .count();
+
     // 3. Legacy fan-out: create-then-attach, one call per member. Reachable
     //    only against a server without atomic create. On the W9 or I2 409, roll
     //    back and bail; on a transient failure, retry the same member before
     //    giving up.
-    let mut members_added = 0usize;
+    let mut members_added = members_added_at_create;
     'members: for payload in &members {
+        if already_attached.contains(&payload.key_id) {
+            continue;
+        }
         let mut attempt = 1u32;
         loop {
             let req = AddVaultMemberRequest {
@@ -266,6 +283,20 @@ pub async fn create_connect_vault(
             };
             match client.add_vault_member(cube.id, req).await {
                 Ok(_) => {
+                    members_added += 1;
+                    continue 'members;
+                }
+                // The row exists, which is all the caller wanted. Reachable
+                // from the retry below: an attempt whose write landed but whose
+                // response was lost comes back here on the next try, and
+                // failing the whole install over a member that IS attached
+                // would be the retry causing the outage it exists to prevent.
+                Err(e) if e.is_duplicate_member() => {
+                    tracing::info!(
+                        "add_vault_member (key {}) reports the member already exists — \
+                         counting it as attached",
+                        payload.key_id
+                    );
                     members_added += 1;
                     continue 'members;
                 }
@@ -952,6 +983,145 @@ mod tests {
         register.assert();
         create_vault.assert();
         assert_eq!(add_member.hits(), 1, "the fan-out should have run");
+        assert_eq!(outcome.members_added, 1);
+    }
+
+    #[tokio::test]
+    async fn a_partial_create_response_only_attaches_the_missing_rows() {
+        let server = MockServer::start();
+        let register = register_mock(&server);
+
+        // The server committed both members, then failed to re-read the vault
+        // and answered with what it had — a complete vault reporting one member.
+        // Re-sending the one it already has would 409 and fail the install.
+        let create_vault = server.mock(|when, then| {
+            when.method(Method::POST)
+                .path("/api/v1/connect/cubes/42/vault");
+            then.status(201)
+                .header("content-type", "application/json")
+                .json_body(json!({
+                    "success": true,
+                    "data": {
+                        "id": 5,
+                        "cubeId": 42,
+                        "timelockDays": 180,
+                        "timelockExpiresAt": "2026-10-15T00:00:00Z",
+                        "lastResetAt": "2026-04-18T00:00:00Z",
+                        "status": "active",
+                        "members": [{
+                            "id": 7,
+                            "keyId": 11,
+                            "role": "keyholder",
+                            "createdAt": "2026-04-18T00:00:00Z"
+                        }],
+                        "createdAt": "2026-04-18T00:00:00Z",
+                        "updatedAt": "2026-04-18T00:00:00Z"
+                    }
+                }));
+        });
+
+        // Pinned to key 22: a request for key 11 must never be sent.
+        let add_member = server.mock(|when, then| {
+            when.method(Method::POST)
+                .path("/api/v1/connect/cubes/42/vault/members")
+                .json_body(json!({ "keyId": 22, "role": "keyholder" }));
+            then.status(201)
+                .header("content-type", "application/json")
+                .json_body(json!({
+                    "success": true,
+                    "data": {
+                        "id": 8,
+                        "keyId": 22,
+                        "role": "keyholder",
+                        "createdAt": "2026-04-18T00:00:00Z"
+                    }
+                }));
+        });
+        let rollback = server.mock(|when, then| {
+            when.method(Method::DELETE)
+                .path("/api/v1/connect/cubes/42/vault");
+            then.status(200)
+                .header("content-type", "application/json")
+                .json_body(json!({ "success": true, "data": { "deleted": true } }));
+        });
+
+        let client = CoincubeClient::for_test(server.base_url());
+        let outcome = create_connect_vault(
+            Some(client),
+            Some("abc-uuid".to_string()),
+            Some("My Cube".to_string()),
+            "mainnet".to_string(),
+            vec![
+                sample_member("deadbeef", 11, None),
+                sample_member("f5acc2fd", 22, None),
+            ],
+            Some(180),
+            Some("8099ee80".to_string()),
+        )
+        .await
+        .expect("a vault missing one row should be completed, not failed");
+
+        register.assert();
+        create_vault.assert();
+        assert_eq!(
+            add_member.hits(),
+            1,
+            "only the missing row should be posted"
+        );
+        assert_eq!(
+            rollback.hits(),
+            0,
+            "a correct vault must never be rolled back"
+        );
+        assert_eq!(outcome.members_added, 2, "both rows are on the vault");
+    }
+
+    #[tokio::test]
+    async fn a_duplicate_member_response_counts_as_attached() {
+        let server = MockServer::start();
+        let (register, create_vault) = register_and_create_mocks(&server);
+
+        // What a retry sees when the first attempt's write landed but its
+        // response was lost. The row exists; failing here would make the retry
+        // cause the failure it exists to prevent.
+        let add_member = server.mock(|when, then| {
+            when.method(Method::POST)
+                .path("/api/v1/connect/cubes/42/vault/members");
+            then.status(409)
+                .header("content-type", "application/json")
+                .json_body(json!({
+                    "success": false,
+                    "error": {
+                        "code": "DUPLICATE_RESOURCE",
+                        "message": "This member already exists on the vault"
+                    }
+                }));
+        });
+        let rollback = server.mock(|when, then| {
+            when.method(Method::DELETE)
+                .path("/api/v1/connect/cubes/42/vault");
+            then.status(200)
+                .header("content-type", "application/json")
+                .json_body(json!({ "success": true, "data": { "deleted": true } }));
+        });
+
+        let client = CoincubeClient::for_test(server.base_url());
+        let outcome = create_connect_vault(
+            Some(client),
+            Some("abc-uuid".to_string()),
+            Some("My Cube".to_string()),
+            "mainnet".to_string(),
+            vec![sample_member("deadbeef", 99, None)],
+            Some(180),
+            Some("8099ee80".to_string()),
+        )
+        .await
+        .expect("an already-attached member is not an install failure");
+
+        register.assert();
+        create_vault.assert();
+        assert_eq!(add_member.hits(), 1, "a duplicate must not be retried");
+        assert_eq!(rollback.hits(), 0);
         assert_eq!(outcome.members_added, 1);
     }
 }
