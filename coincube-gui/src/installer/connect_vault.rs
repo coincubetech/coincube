@@ -1,5 +1,19 @@
-//! Orchestrates creation of the backend `ConnectVault` shell and its
+//! Orchestrates creation of the backend `ConnectVault` and its
 //! `ConnectVaultMember` rows after the local wallet install completes.
+//!
+//! **Shape of the call** (`plans/PLAN-atomic-vault-create.md`): the vault and
+//! its members go up in one `POST .../vault`, which the server commits in a
+//! single transaction. The vault either exists complete or does not exist at
+//! all. What this replaced — create the shell, then `POST .../vault/members`
+//! once per keyholder — committed the shell first with status `active`, so any
+//! failure partway through stranded a vault with an incomplete member set; and
+//! those rows are the only thing the Keychain app resolves a key's vault from,
+//! so a keyholder whose row never landed reported `vaultId: null` and could not
+//! sign from the phone. That is a shipped incident, not a hypothetical.
+//!
+//! The fan-out below survives as the fallback for a server that predates the
+//! `members` field, detected from the create response rather than a version
+//! check. Everything in the "Failure UX" and retry notes applies to that path.
 //!
 //! Design decisions (2026-04-18, `PLAN-cube-membership-desktop.md`):
 //! - **Timelock days** = `ceil(max_recovery_blocks / 144)` (≈ blocks per
@@ -14,11 +28,13 @@
 //! - **Role** defaults to `Keyholder` for every member. Refinement into
 //!   Beneficiary/Observer is a follow-up.
 //! - **Failure UX**: the W9 409 (`KEY_ALREADY_USED_IN_VAULT`) and the
-//!   I2 409 (`KEY_IS_RECOVERY_RECIPIENT`) both roll back the just-created
-//!   vault — W9 so the user can restart with a clean slate, I2 because a
-//!   retry can't help (the sealed descriptor still holds the recovery
-//!   key, so it must be rebuilt first). Other errors leave the partial
-//!   vault in place and surface a retry-able warning.
+//!   I2 409 (`KEY_IS_RECOVERY_RECIPIENT`) name the offending key either way —
+//!   from the error body on the atomic create, from the loop variable on the
+//!   fan-out. On the atomic path there is nothing to roll back. On the fan-out
+//!   path both roll back the just-created vault: W9 so the user can restart
+//!   with a clean slate, I2 because a retry can't help (the sealed descriptor
+//!   still holds the recovery key, so it must be rebuilt first). Other errors
+//!   leave the partial vault in place and surface a retry-able warning.
 //! - **Transient failures are retried in place** ([`MEMBER_ATTACH_ATTEMPTS`]).
 //!   A vault left one member row short is not a cosmetic problem: that row is
 //!   what the Keychain app resolves a key's vault from, so a dropped call
@@ -110,6 +126,36 @@ impl std::fmt::Display for ConnectVaultError {
     }
 }
 
+/// Map a failed atomic create onto the error the Final step renders.
+///
+/// The server names the offending member inside the error body
+/// (`plans/PLAN-atomic-vault-create.md` requirement 4), which is what lets one
+/// call keep the per-key dialogs the fan-out drove from its loop variable. When
+/// the body carries no `keyId` — a contact-only member, or an older server's
+/// plain envelope — a single-member request can still attribute the rejection
+/// locally; anything else falls back to the generic message rather than naming
+/// the wrong key.
+fn classify_create_error(
+    e: crate::services::coincube::CoincubeError,
+    members: &[ConnectVaultMemberPayload],
+) -> ConnectVaultError {
+    let key_id = e
+        .rejected_member_key_id()
+        .or_else(|| (members.len() == 1).then(|| members[0].key_id));
+    match key_id {
+        Some(key_id) if e.is_key_already_used_in_vault() => {
+            // Nothing was created, so unlike the fan-out path there is no vault
+            // to roll back — the user can restart the Vault Builder straight
+            // away with a different key.
+            ConnectVaultError::KeyAlreadyUsedInVault { key_id }
+        }
+        Some(key_id) if e.is_key_is_recovery_recipient() => {
+            ConnectVaultError::KeyIsRecoveryRecipient { key_id }
+        }
+        _ => ConnectVaultError::Other(format!("Failed to create Connect vault: {}", e)),
+    }
+}
+
 /// Run the full vault-create + member-attach flow. Safe to call when
 /// Connect isn't authenticated — returns `NotApplicable` in that case.
 ///
@@ -160,20 +206,55 @@ pub async fn create_connect_vault(
         .await
         .map_err(|e| ConnectVaultError::Other(format!("Failed to register cube: {}", e)))?;
 
-    // 2. Create the vault shell.
+    // 2. Create the vault and its members in one call. The server writes them
+    //    in a single transaction, so the vault either exists complete or does
+    //    not exist at all — nothing to roll back, and no window in which a
+    //    keyholder row can go missing.
+    let member_reqs: Vec<AddVaultMemberRequest> = members
+        .iter()
+        .map(|payload| AddVaultMemberRequest {
+            contact_id: payload.contact_id,
+            key_id: Some(payload.key_id),
+            role: VaultMemberRole::Keyholder,
+        })
+        .collect();
     let vault: ConnectVaultResponse = client
         .create_connect_vault(
             cube.id,
             CreateConnectVaultRequest {
                 timelock_days,
                 fingerprint,
+                members: member_reqs,
             },
         )
         .await
-        .map_err(|e| ConnectVaultError::Other(format!("Failed to create Connect vault: {}", e)))?;
+        .map_err(|e| classify_create_error(e, &members))?;
 
-    // 3. Fan out member rows. On the W9 or I2 409, roll back and bail;
-    //    on a transient failure, retry the same member before giving up.
+    // The atomic create returns the vault with its members preloaded. A server
+    // that predates `members` ignores the field and hands back a member-less
+    // vault instead — detect that by the response, not by a version check, and
+    // fall back to the per-member fan-out below.
+    if vault.members.len() >= members.len() {
+        return Ok(ConnectVaultOutcome {
+            vault_id: vault.id,
+            cube_server_id: cube.id,
+            timelock_days: vault.timelock_days,
+            members_added: vault.members.len(),
+            members_skipped_non_keychain: 0, // already filtered upstream
+        });
+    }
+    tracing::info!(
+        "Connect vault {} came back with {}/{} members — server predates atomic \
+         create, falling back to the member fan-out",
+        vault.id,
+        vault.members.len(),
+        members.len()
+    );
+
+    // 3. Legacy fan-out: create-then-attach, one call per member. Reachable
+    //    only against a server without atomic create. On the W9 or I2 409, roll
+    //    back and bail; on a transient failure, retry the same member before
+    //    giving up.
     let mut members_added = 0usize;
     'members: for payload in &members {
         let mut attempt = 1u32;
@@ -315,7 +396,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn happy_path_registers_creates_and_adds_members() {
+    async fn happy_path_creates_vault_and_members_in_one_call() {
         let server = MockServer::start();
 
         let register = server.mock(|when, then| {
@@ -344,7 +425,14 @@ mod tests {
                 // route match rather than silently registering an
                 // identity-less vault
                 // (`plans/PLAN-vault-identity-unification.md` D3).
-                .json_body(json!({ "timelockDays": 180, "fingerprint": "8099ee80" }));
+                // ...and so does the quorum: members ride along with the
+                // create so the server can commit them in one transaction
+                // (`plans/PLAN-atomic-vault-create.md`).
+                .json_body(json!({
+                    "timelockDays": 180,
+                    "fingerprint": "8099ee80",
+                    "members": [{ "keyId": 99, "role": "keyholder" }]
+                }));
             then.status(201)
                 .header("content-type", "application/json")
                 .json_body(json!({
@@ -356,7 +444,12 @@ mod tests {
                         "timelockExpiresAt": "2026-10-15T00:00:00Z",
                         "lastResetAt": "2026-04-18T00:00:00Z",
                         "status": "active",
-                        "members": [],
+                        "members": [{
+                            "id": 7,
+                            "keyId": 99,
+                            "role": "keyholder",
+                            "createdAt": "2026-04-18T00:00:00Z"
+                        }],
                         "fingerprint": "8099ee80",
                         "createdAt": "2026-04-18T00:00:00Z",
                         "updatedAt": "2026-04-18T00:00:00Z"
@@ -364,20 +457,13 @@ mod tests {
                 }));
         });
 
+        // Must never be reached: the fan-out is the legacy fallback only.
         let add_member = server.mock(|when, then| {
             when.method(Method::POST)
                 .path("/api/v1/connect/cubes/42/vault/members");
             then.status(201)
                 .header("content-type", "application/json")
-                .json_body(json!({
-                    "success": true,
-                    "data": {
-                        "id": 7,
-                        "keyId": 99,
-                        "role": "keyholder",
-                        "createdAt": "2026-04-18T00:00:00Z"
-                    }
-                }));
+                .json_body(json!({ "success": true, "data": {} }));
         });
 
         let client = CoincubeClient::for_test(server.base_url());
@@ -395,7 +481,11 @@ mod tests {
 
         register.assert();
         create_vault.assert();
-        add_member.assert();
+        assert_eq!(
+            add_member.hits(),
+            0,
+            "the atomic create must not be followed by a fan-out"
+        );
         assert_eq!(outcome.vault_id, 5);
         assert_eq!(outcome.cube_server_id, 42);
         assert_eq!(outcome.timelock_days, 180);
@@ -403,7 +493,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn w9_409_rolls_back_vault_and_surfaces_key_id() {
+    async fn fallback_w9_409_rolls_back_vault_and_surfaces_key_id() {
         let server = MockServer::start();
 
         let register = server.mock(|when, then| {
@@ -495,7 +585,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn i2_409_recovery_recipient_rolls_back_vault_and_surfaces_key_id() {
+    async fn fallback_i2_409_recovery_recipient_rolls_back_vault_and_surfaces_key_id() {
         let server = MockServer::start();
 
         let register = server.mock(|when, then| {
@@ -595,23 +685,7 @@ mod tests {
     /// Shared fixtures for the retry tests: cube registration + vault create
     /// both succeed, leaving the member fan-out as the only variable.
     fn register_and_create_mocks(server: &MockServer) -> (httpmock::Mock, httpmock::Mock) {
-        let register = server.mock(|when, then| {
-            when.method(Method::POST).path("/api/v1/connect/cubes");
-            then.status(200)
-                .header("content-type", "application/json")
-                .json_body(json!({
-                    "success": true,
-                    "data": {
-                        "id": 42,
-                        "uuid": "abc-uuid",
-                        "name": "My Cube",
-                        "network": "mainnet",
-                        "lightningAddress": null,
-                        "bolt12Offer": null,
-                        "status": "active"
-                    }
-                }));
-        });
+        let register = register_mock(server);
         let create_vault = server.mock(|when, then| {
             when.method(Method::POST)
                 .path("/api/v1/connect/cubes/42/vault");
@@ -635,8 +709,29 @@ mod tests {
         (register, create_vault)
     }
 
+    /// Cube registration only, for the tests that answer the create themselves.
+    fn register_mock(server: &MockServer) -> httpmock::Mock {
+        server.mock(|when, then| {
+            when.method(Method::POST).path("/api/v1/connect/cubes");
+            then.status(200)
+                .header("content-type", "application/json")
+                .json_body(json!({
+                    "success": true,
+                    "data": {
+                        "id": 42,
+                        "uuid": "abc-uuid",
+                        "name": "My Cube",
+                        "network": "mainnet",
+                        "lightningAddress": null,
+                        "bolt12Offer": null,
+                        "status": "active"
+                    }
+                }));
+        })
+    }
+
     #[tokio::test]
-    async fn transient_member_failure_is_retried_before_giving_up() {
+    async fn fallback_transient_member_failure_is_retried_before_giving_up() {
         let server = MockServer::start();
         let (register, create_vault) = register_and_create_mocks(&server);
 
@@ -681,7 +776,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn conflict_responses_are_not_retried() {
+    async fn fallback_conflict_responses_are_not_retried() {
         let server = MockServer::start();
         let (register, create_vault) = register_and_create_mocks(&server);
 
@@ -734,5 +829,129 @@ mod tests {
             "expected W9 error with key_id=99, got: {:?}",
             err
         );
+    }
+
+    /// Two members, so a key id in the outcome can only have come from the
+    /// server's error body — not from the single-member local fallback.
+    async fn atomic_create_rejection(code: &str, key_id: u64) -> ConnectVaultError {
+        let server = MockServer::start();
+        let register = register_mock(&server);
+
+        let create_vault = server.mock(|when, then| {
+            when.method(Method::POST)
+                .path("/api/v1/connect/cubes/42/vault");
+            then.status(409)
+                .header("content-type", "application/json")
+                .json_body(json!({
+                    "success": false,
+                    "error": {
+                        "code": code,
+                        "message": "rejected",
+                        "memberIndex": 1,
+                        "keyId": key_id
+                    }
+                }));
+        });
+        // Nothing was created, so nothing may be deleted.
+        let rollback = server.mock(|when, then| {
+            when.method(Method::DELETE)
+                .path("/api/v1/connect/cubes/42/vault");
+            then.status(200)
+                .header("content-type", "application/json")
+                .json_body(json!({ "success": true, "data": { "deleted": true } }));
+        });
+
+        let client = CoincubeClient::for_test(server.base_url());
+        let err = create_connect_vault(
+            Some(client),
+            Some("abc-uuid".to_string()),
+            Some("My Cube".to_string()),
+            "mainnet".to_string(),
+            vec![
+                sample_member("deadbeef", 11, None),
+                sample_member("f5acc2fd", key_id, None),
+            ],
+            Some(180),
+            Some("8099ee80".to_string()),
+        )
+        .await
+        .expect_err("expected the create to be rejected");
+
+        register.assert();
+        create_vault.assert();
+        assert_eq!(
+            rollback.hits(),
+            0,
+            "an atomic create that failed left nothing to roll back"
+        );
+        err
+    }
+
+    #[tokio::test]
+    async fn atomic_w9_names_the_key_from_the_error_body() {
+        let err = atomic_create_rejection("KEY_ALREADY_USED_IN_VAULT", 77).await;
+        assert!(
+            matches!(err, ConnectVaultError::KeyAlreadyUsedInVault { key_id: 77 }),
+            "expected W9 naming key 77, got: {:?}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn atomic_i2_names_the_key_from_the_error_body() {
+        let err = atomic_create_rejection("KEY_IS_RECOVERY_RECIPIENT", 88).await;
+        assert!(
+            matches!(
+                err,
+                ConnectVaultError::KeyIsRecoveryRecipient { key_id: 88 }
+            ),
+            "expected I2 naming key 88, got: {:?}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn server_that_ignores_members_falls_back_to_the_fan_out() {
+        let server = MockServer::start();
+        let (register, create_vault) = register_and_create_mocks(&server);
+
+        // `register_and_create_mocks` answers with `members: []` — exactly what
+        // a server predating the `members` field returns, since it ignores the
+        // field rather than rejecting it. The desktop must notice and attach
+        // the members itself instead of reporting a complete vault.
+        let add_member = server.mock(|when, then| {
+            when.method(Method::POST)
+                .path("/api/v1/connect/cubes/42/vault/members")
+                .json_body(json!({ "keyId": 99, "role": "keyholder" }));
+            then.status(201)
+                .header("content-type", "application/json")
+                .json_body(json!({
+                    "success": true,
+                    "data": {
+                        "id": 7,
+                        "keyId": 99,
+                        "role": "keyholder",
+                        "createdAt": "2026-04-18T00:00:00Z"
+                    }
+                }));
+        });
+
+        let client = CoincubeClient::for_test(server.base_url());
+        let outcome = create_connect_vault(
+            Some(client),
+            Some("abc-uuid".to_string()),
+            Some("My Cube".to_string()),
+            "mainnet".to_string(),
+            vec![sample_member("deadbeef", 99, None)],
+            Some(180),
+            Some("8099ee80".to_string()),
+        )
+        .await
+        .expect("the fallback should still produce a complete vault");
+
+        register.assert();
+        create_vault.assert();
+        assert_eq!(add_member.hits(), 1, "the fan-out should have run");
+        assert_eq!(outcome.members_added, 1);
     }
 }

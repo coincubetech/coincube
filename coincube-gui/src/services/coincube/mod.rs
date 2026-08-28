@@ -84,7 +84,40 @@ impl std::fmt::Display for CoincubeError {
 
 impl std::error::Error for CoincubeError {}
 
+/// Body shape of an atomic-create member rejection: the offending member is
+/// named inside the `error` object (`memberIndex`, and `keyId` when the entry
+/// carried one) so a single create call can still drive the per-key dialogs the
+/// fan-out drove from its loop variable
+/// (`plans/PLAN-atomic-vault-create.md` requirement 4).
+///
+/// Note this differs from `add_vault_member`'s W9 body, which puts `keyId` at
+/// the top level — that endpoint is unchanged, so the two are parsed
+/// separately rather than sharing a shape.
+#[derive(Debug, Deserialize)]
+struct CreateVaultMemberErrorBody {
+    #[serde(rename = "keyId", default)]
+    key_id: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateVaultMemberErrorEnvelope {
+    error: CreateVaultMemberErrorBody,
+}
+
 impl CoincubeError {
+    /// The `keyId` an atomic-create rejection names, when the response carries
+    /// one. `None` for any other error, or for a rejection on a member that had
+    /// no key (contact-only), in which case the caller falls back to whatever
+    /// it can attribute locally.
+    pub fn rejected_member_key_id(&self) -> Option<u64> {
+        let CoincubeError::Unsuccessful(info) = self else {
+            return None;
+        };
+        serde_json::from_str::<CreateVaultMemberErrorEnvelope>(&info.text)
+            .ok()
+            .and_then(|env| env.error.key_id)
+    }
+
     /// Returns `true` when re-sending the *same* request unchanged could
     /// plausibly succeed: a transport failure, a 5xx, a timeout, or a
     /// rate-limit.
@@ -1506,6 +1539,23 @@ pub struct CreateConnectVaultRequest {
     /// [`PatchConnectVaultRequest`] supplies one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fingerprint: Option<String>,
+    /// The vault's initial quorum, written in the **same transaction** as the
+    /// vault row (`plans/PLAN-atomic-vault-create.md`). This is what makes the
+    /// vault either exist complete or not exist at all, instead of the old
+    /// create-then-fan-out that could strand an `active` vault with a missing
+    /// member row — and a missing row is what makes the Keychain app report
+    /// `vaultId: null` for a key the descriptor genuinely commits to.
+    ///
+    /// Skipped when empty, which is also the compatibility contract: a server
+    /// that predates this field ignores it and returns a member-less vault, so
+    /// [`crate::installer::connect_vault`] checks the response and falls back
+    /// to the per-member fan-out when the members didn't land.
+    ///
+    /// The server models this as its own `CreateVaultMemberInput` type, but the
+    /// wire shape is deliberately identical to [`AddVaultMemberRequest`] so the
+    /// desktop can send the vector it already assembles.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<AddVaultMemberRequest>,
 }
 
 /// `PATCH /connect/cubes/{cubeId}/vault`. An absent field leaves the stored
