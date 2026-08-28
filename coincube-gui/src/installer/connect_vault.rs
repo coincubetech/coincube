@@ -15,11 +15,14 @@
 //!   Beneficiary/Observer is a follow-up.
 //! - **Failure UX**: W9 409 (`KEY_ALREADY_USED_IN_VAULT`), I2 409
 //!   (`KEY_IS_RECOVERY_RECIPIENT`), and other member-attachment failures
-//!   roll back the just-created vault — W9 so the user can restart
-//!   with a clean slate, I2 because a retry can't help (the sealed descriptor still holds the
-//!   recovery key, so it must be rebuilt first), other failures are surfaced as retryable
-//!   warnings. This prevents an active vault from remaining without all
-//!   required member rows, which would affect transaction signing.
+//!   attempt a best-effort rollback of the just-created vault. The rollback
+//!   may itself fail, in which case the vault can remain present and must be
+//!   cleaned up before retrying. W9 lets the user restart with a clean slate,
+//!   I2 cannot be fixed by retrying (the sealed descriptor still holds the
+//!   recovery key, so it must be rebuilt first), and other failures are
+//!   surfaced as retryable warnings. This prevents an active vault from
+//!   remaining without all required member rows, which would affect
+//!   transaction signing.
 
 use crate::services::coincube::{
     AddVaultMemberRequest, CoincubeClient, ConnectVaultResponse, CreateConnectVaultRequest,
