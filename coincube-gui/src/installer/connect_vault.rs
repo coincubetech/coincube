@@ -13,9 +13,13 @@
 //!   only matters for those.
 //! - **Role** defaults to `Keyholder` for every member. Refinement into
 //!   Beneficiary/Observer is a follow-up.
-//! - **Failure UX**: Any member-attach failure rolls back the just-created
-//!   vault. W9 and I2 surface dedicated errors; other failures surface a
-//!   retry-able warning without leaving an active partial vault behind.
+//! - **Failure UX**: W9 409 (`KEY_ALREADY_USED_IN_VAULT`), I2 409
+//!   (`KEY_IS_RECOVERY_RECIPIENT`), and other member-attachment failures
+//!   roll back the just-created vault — W9 so the user can restart
+//!   with a clean slate, I2 because a retry can't help (the sealed descriptor still holds the
+//!   recovery key, so it must be rebuilt first), other failures are surfaced as retryable
+//!   warnings. This prevents an active vault from remaining without all
+//!   required member rows, which would affect transaction signing.
 
 use crate::services::coincube::{
     AddVaultMemberRequest, CoincubeClient, ConnectVaultResponse, CreateConnectVaultRequest,
