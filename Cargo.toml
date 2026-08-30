@@ -48,3 +48,11 @@ lto = "thin"
 strip = true
 codegen-units = 1
 panic = "abort"
+
+# Local dev builds only; does not affect release/minimal or CI artifacts.
+# Full debuginfo across ~1200 dep crates was the bulk of target/debug.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false

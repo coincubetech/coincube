@@ -68,3 +68,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1.0"
 clap = { version = "4", features = ["derive"] }
 uuid = { version = "1", features = ["v4"] }
+
+# See root Cargo.toml: keeps target/debug small in this separate workspace too.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false

@@ -65,7 +65,47 @@ Options:
     Ok(res)
 }
 
+// winit's X11 backend dlopen's libxkbcommon-x11 for keyboard handling and
+// panics at window creation if it's missing. It's not installed by default
+// on stock GNOME desktops (only pulled in transitively by Qt/KDE apps and
+// tiling WMs), so we must confirm it's actually loadable before committing
+// to the X11 path below.
+#[cfg(target_os = "linux")]
+fn xwayland_input_lib_available() -> bool {
+    use std::ffi::CString;
+    ["libxkbcommon-x11.so.0", "libxkbcommon-x11.so"].iter().any(|name| {
+        let cname = CString::new(*name).expect("static name has no interior nul");
+        unsafe {
+            let handle = libc::dlopen(cname.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL);
+            if handle.is_null() {
+                false
+            } else {
+                libc::dlclose(handle);
+                true
+            }
+        }
+    })
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
+    // winit has no libdecor support: on Wayland it asks the compositor for
+    // server-side decorations and, failing that (GNOME/mutter never grants
+    // it), falls back to its own sctk-adwaita client-side title bar, which
+    // has known drag/move bugs on GNOME. Prefer XWayland instead, which gets
+    // decorations drawn by the window manager itself — the same path every
+    // other app on the desktop already relies on. Only do this when an X11
+    // display and the libraries winit's X11 backend needs are both actually
+    // available, so Wayland-only systems (no XWayland) and systems missing
+    // libxkbcommon-x11 keep today's working (if undecorated) native-Wayland
+    // path instead of crashing at startup.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WAYLAND_DISPLAY").is_some()
+        && std::env::var_os("DISPLAY").is_some()
+        && xwayland_input_lib_available()
+    {
+        std::env::remove_var("WAYLAND_DISPLAY");
+    }
+
     // Load .env for runtime env var overrides (COINCUBE_API_URL, etc.) so developers
     // can point at local services without rebuilding. Release builds started from
     // elsewhere won't find a .env and fall back to compile-time values.
