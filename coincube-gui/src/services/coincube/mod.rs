@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 pub mod client;
+pub mod vault_reconcile;
 pub use client::CoincubeClient;
 
 #[derive(Debug)]
@@ -83,7 +84,91 @@ impl std::fmt::Display for CoincubeError {
 
 impl std::error::Error for CoincubeError {}
 
+/// Body shape of an atomic-create member rejection: the offending member is
+/// named inside the `error` object (`memberIndex`, and `keyId` when the entry
+/// carried one) so a single create call can still drive the per-key dialogs the
+/// fan-out drove from its loop variable
+/// (`plans/PLAN-atomic-vault-create.md` requirement 4).
+///
+/// Note this differs from `add_vault_member`'s W9 body, which puts `keyId` at
+/// the top level — that endpoint is unchanged, so the two are parsed
+/// separately rather than sharing a shape.
+#[derive(Debug, Deserialize)]
+struct CreateVaultMemberErrorBody {
+    #[serde(rename = "keyId", default)]
+    key_id: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateVaultMemberErrorEnvelope {
+    error: CreateVaultMemberErrorBody,
+}
+
 impl CoincubeError {
+    /// The `keyId` an atomic-create rejection names, when the response carries
+    /// one. `None` for any other error, or for a rejection on a member that had
+    /// no key (contact-only), in which case the caller falls back to whatever
+    /// it can attribute locally.
+    pub fn rejected_member_key_id(&self) -> Option<u64> {
+        let CoincubeError::Unsuccessful(info) = self else {
+            return None;
+        };
+        serde_json::from_str::<CreateVaultMemberErrorEnvelope>(&info.text)
+            .ok()
+            .and_then(|env| env.error.key_id)
+    }
+
+    /// True when a 409 says the member being added is already on the vault.
+    ///
+    /// For `add_vault_member` this is a **success in disguise**: the row the
+    /// caller wanted exists. It is what a retry sees when the first attempt's
+    /// write landed but its response didn't (a timeout, a dropped connection),
+    /// and what a fan-out sees if it re-sends a member the server already has.
+    /// Treating it as a failure would turn a complete vault into a user-visible
+    /// error.
+    pub fn is_duplicate_member(&self) -> bool {
+        let CoincubeError::Unsuccessful(info) = self else {
+            return false;
+        };
+        if info.status_code != 409 {
+            return false;
+        }
+        serde_json::from_str::<ApiErrorResponse>(&info.text)
+            .map(|env| env.error.code == ERR_DUPLICATE_RESOURCE)
+            .unwrap_or(false)
+    }
+
+    /// Returns `true` when re-sending the *same* request unchanged could
+    /// plausibly succeed: a transport failure, a 5xx, a timeout, or a
+    /// rate-limit.
+    ///
+    /// Everything else is a decision the server has already made — a 4xx
+    /// (including the W9/I2/W16 conflicts and auth rejections), a malformed
+    /// body, or an API-level error — and retrying it just burns time before
+    /// surfacing the same failure. Callers that retry (see
+    /// `installer::connect_vault`) pick their own attempt count and backoff;
+    /// this only classifies.
+    ///
+    /// A `RateLimited` retry deliberately does **not** honour the server's
+    /// `Retry-After` here: the one caller runs inside the installer's
+    /// post-install step, where blocking for a minute is worse than failing
+    /// with a retryable warning. Its short backoff will simply exhaust the
+    /// attempts if the limit is still in force.
+    pub fn is_transient(&self) -> bool {
+        match self {
+            CoincubeError::Network(_) => true,
+            CoincubeError::RateLimited { .. } => true,
+            CoincubeError::Unsuccessful(info) => {
+                info.status_code >= 500 || info.status_code == 408 || info.status_code == 429
+            }
+            CoincubeError::Api(_)
+            | CoincubeError::Parse(_)
+            | CoincubeError::SseError(_)
+            | CoincubeError::VaultKeyholderLocked { .. }
+            | CoincubeError::NotFound => false,
+        }
+    }
+
     /// Returns `true` when the error indicates that the credentials (token) are
     /// definitively rejected by the server (401 Unauthorized / 403 Forbidden).
     pub fn is_auth_error(&self) -> bool {
@@ -1474,6 +1559,23 @@ pub struct CreateConnectVaultRequest {
     /// [`PatchConnectVaultRequest`] supplies one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fingerprint: Option<String>,
+    /// The vault's initial quorum, written in the **same transaction** as the
+    /// vault row (`plans/PLAN-atomic-vault-create.md`). This is what makes the
+    /// vault either exist complete or not exist at all, instead of the old
+    /// create-then-fan-out that could strand an `active` vault with a missing
+    /// member row — and a missing row is what makes the Keychain app report
+    /// `vaultId: null` for a key the descriptor genuinely commits to.
+    ///
+    /// Skipped when empty, which is also the compatibility contract: a server
+    /// that predates this field ignores it and returns a member-less vault, so
+    /// [`crate::installer::connect_vault`] checks the response and falls back
+    /// to the per-member fan-out when the members didn't land.
+    ///
+    /// The server models this as its own `CreateVaultMemberInput` type, but the
+    /// wire shape is deliberately identical to [`AddVaultMemberRequest`] so the
+    /// desktop can send the vector it already assembles.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<AddVaultMemberRequest>,
 }
 
 /// `PATCH /connect/cubes/{cubeId}/vault`. An absent field leaves the stored
@@ -1889,6 +1991,11 @@ pub const ERR_KEY_ALREADY_USED_IN_VAULT: &str = "KEY_ALREADY_USED_IN_VAULT";
 /// rolls the just-created vault back (see `installer/connect_vault.rs`).
 pub const ERR_KEY_IS_RECOVERY_RECIPIENT: &str = "KEY_IS_RECOVERY_RECIPIENT";
 
+/// Error code the backend returns for a member that is already on the vault
+/// (`MemberExists` in `AddMember`, which runs *before* the W9 check — so a
+/// re-send of an identical member is this code, not `KEY_ALREADY_USED_IN_VAULT`).
+pub const ERR_DUPLICATE_RESOURCE: &str = "DUPLICATE_RESOURCE";
+
 /// Error code returned by the backend's W16 guard (see
 /// `coincube-api` PR 8): 409 from
 /// `POST /connect/cubes/{cubeId}/vault/members` when `role=keyholder`
@@ -2211,6 +2318,46 @@ impl DuressCheckOutcome {
             _ if e.is_auth_error() => Self::Unauthorized,
             _ => Self::Unreachable,
         }
+    }
+}
+
+#[cfg(test)]
+mod is_transient_tests {
+    use super::*;
+    use crate::services::http::NotSuccessResponseInfo;
+
+    fn unsuccessful(status_code: u16) -> CoincubeError {
+        CoincubeError::Unsuccessful(NotSuccessResponseInfo {
+            status_code,
+            text: String::new(),
+        })
+    }
+
+    #[test]
+    fn server_side_and_transport_failures_are_worth_another_attempt() {
+        assert!(unsuccessful(500).is_transient());
+        assert!(unsuccessful(502).is_transient());
+        assert!(unsuccessful(503).is_transient());
+        assert!(unsuccessful(408).is_transient());
+        assert!(unsuccessful(429).is_transient());
+        assert!(CoincubeError::RateLimited {
+            retry_after: std::time::Duration::from_secs(60)
+        }
+        .is_transient());
+    }
+
+    #[test]
+    fn decisions_the_server_already_made_are_not_retried() {
+        // The vault fan-out's conflicts in particular: re-sending a W9/I2/W16
+        // 409 only delays the dialog that tells the user what to do.
+        assert!(!unsuccessful(409).is_transient());
+        assert!(!unsuccessful(400).is_transient());
+        assert!(!unsuccessful(404).is_transient());
+        assert!(!unsuccessful(401).is_transient());
+        assert!(!unsuccessful(403).is_transient());
+        assert!(!CoincubeError::VaultKeyholderLocked { vault_id: 5 }.is_transient());
+        assert!(!CoincubeError::NotFound.is_transient());
+        assert!(!CoincubeError::Api("bad".to_string()).is_transient());
     }
 }
 

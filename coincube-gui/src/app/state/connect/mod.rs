@@ -214,6 +214,11 @@ impl ConnectPanel {
             return iced::Task::batch([
                 self.cube.register_encryption_pubkey(),
                 self.cube.assert_vault_fingerprint(),
+                // Same shape as the two above — self-latching, idempotent, and
+                // waiting on the same `server_cube_id`. Covers the Cube that was
+                // already registered when this ran, whose `CubeRegistered` has
+                // therefore already fired.
+                self.cube.reconcile_vault_members(),
             ]);
         }
         self.cube.register_cube()
@@ -261,6 +266,35 @@ impl ConnectPanel {
     pub fn assert_vault_fingerprint(&mut self) -> iced::Task<Message> {
         self.sync_client();
         self.cube.assert_vault_fingerprint()
+    }
+
+    /// Run the COIN-373 Vault-membership reconcile, syncing the API client
+    /// first. Called from the same backfill wave as
+    /// [`Self::assert_vault_fingerprint`], because it needs the same two
+    /// things: a registered Cube and the loaded Vault's descriptor.
+    ///
+    /// Self-latching and best-effort — see
+    /// [`ConnectCubePanel::reconcile_vault_members`].
+    pub fn reconcile_vault_members(&mut self) -> iced::Task<Message> {
+        self.sync_client();
+        self.cube.reconcile_vault_members()
+    }
+
+    /// Seeds the Vault's descriptor from the loaded wallet, so the COIN-373
+    /// reconcile has something to work with once the server cube id resolves.
+    ///
+    /// Mirrors [`Self::set_vault_fingerprint`], including the latch reset: a
+    /// descriptor that *changes* mid-session (a Vault built or rebuilt after
+    /// launch) has a membership set nobody has reconciled yet, so a latch closed
+    /// by an earlier pass must re-open rather than swallow it.
+    pub fn set_vault_descriptor(
+        &mut self,
+        descriptor: Option<coincube_core::descriptors::CoincubeDescriptor>,
+    ) {
+        if self.cube.vault_descriptor != descriptor {
+            self.cube.vault_members_reconciled = false;
+        }
+        self.cube.vault_descriptor = descriptor;
     }
 
     /// React to a mid-session Vault creation (PLAN-duress-vault-gate PR 3):
@@ -391,6 +425,13 @@ impl State for ConnectPanel {
 #[cfg(test)]
 mod tests {
     use super::ConnectPanel;
+    use std::str::FromStr;
+
+    // Two distinct Vaults, for the reconcile latch tests. Primary signer
+    // `f5acc2fd` with a CSV recovery path — the same fixture shape the signer
+    // classification tests use.
+    const RECONCILE_DESC: &str = "wsh(or_d(pk([f5acc2fd]tpubD6NzVbkrYhZ4YgUx2ZLNt2rLYAMTdYysCRzKoLu2BeSHKvzqPaBDvf17GeBPnExUVPkuBpx4kniP964e2MxyzzazcXLptxLXModSVCVEV1T/<0;1>/*),and_v(v:pkh([8a64f2a9]tpubD6NzVbkrYhZ4WmzFjvQrp7sDa4ECUxTi9oby8K4FZkd3XCBtEdKwUiQyYJaxiJo5y42gyDWEczrFpozEjeLxMPxjf2WtkfcbpUdfvNnozWF/<0;1>/*),older(10))))#d72le4dr";
+    const RECONCILE_DESC_2: &str = "wsh(or_d(pk([f5acc2fd]tpubD6NzVbkrYhZ4YgUx2ZLNt2rLYAMTdYysCRzKoLu2BeSHKvzqPaBDvf17GeBPnExUVPkuBpx4kniP964e2MxyzzazcXLptxLXModSVCVEV1T/<0;1>/*),and_v(v:pkh([8a64f2a9]tpubD6NzVbkrYhZ4WmzFjvQrp7sDa4ECUxTi9oby8K4FZkd3XCBtEdKwUiQyYJaxiJo5y42gyDWEczrFpozEjeLxMPxjf2WtkfcbpUdfvNnozWF/<0;1>/*),older(20))))";
 
     #[test]
     fn new_propagates_active_cube_context_to_both_panels() {
@@ -474,6 +515,37 @@ mod tests {
         // Unauthenticated → still a no-op (no client to call with).
         let _ = panel.ensure_cube_registered();
         assert!(!panel.cube.enc_pubkey_registered);
+    }
+
+    /// A Vault built or rebuilt mid-session has a membership nobody has
+    /// reconciled. A latch closed by an earlier pass must re-open, or the fresh
+    /// Vault never gets one.
+    #[test]
+    fn a_changed_descriptor_reopens_the_reconcile_latch() {
+        let mut panel = ConnectPanel::new(
+            None,
+            "cube-uuid".to_string(),
+            "Family Vault".to_string(),
+            "regtest".to_string(),
+            false,
+        );
+        let desc =
+            coincube_core::descriptors::CoincubeDescriptor::from_str(RECONCILE_DESC).unwrap();
+        panel.set_vault_descriptor(Some(desc.clone()));
+        panel.cube.vault_members_reconciled = true;
+
+        // Re-seeding the same descriptor leaves the latch closed.
+        panel.set_vault_descriptor(Some(desc));
+        assert!(panel.cube.vault_members_reconciled);
+
+        // A different Vault must be reconciled on its own terms.
+        panel.set_vault_descriptor(Some(
+            coincube_core::descriptors::CoincubeDescriptor::from_str(RECONCILE_DESC_2).unwrap(),
+        ));
+        assert!(
+            !panel.cube.vault_members_reconciled,
+            "a rebuilt Vault must be reconciled, not swallowed by the latch"
+        );
     }
 
     /// D4: the backfill's server half. A fingerprint the panel can't send yet

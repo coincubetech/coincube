@@ -2761,6 +2761,10 @@ impl App {
             return Task::none();
         };
         let fingerprint = wallet.id_fingerprint().to_string();
+        // Cloned before the panels are borrowed mutably below. The reconcile
+        // needs the descriptor itself, not just its fingerprint: it decides
+        // which registered cube keys this Vault actually commits to.
+        let descriptor = wallet.main_descriptor.clone();
         // Seed *and* fire the assertion wave regardless of whether the local
         // settings already agree: the server half converges independently of
         // the disk half, and a Cube can have been persisted here but never
@@ -2774,8 +2778,15 @@ impl App {
             .connect
             .set_vault_fingerprint(Some(fingerprint.clone()));
         let assert_task = self.panels.connect.assert_vault_fingerprint();
+        // Same wave, same preconditions (registered Cube + loaded Vault): heal
+        // any Vault member row the installer's fan-out failed to write, so a
+        // Cube whose Keychain app reports "no vault" for one of its own keys
+        // converges at open rather than waiting for someone to start a desktop
+        // sign (COIN-373; `services::coincube::vault_reconcile`).
+        self.panels.connect.set_vault_descriptor(Some(descriptor));
+        let reconcile_task = self.panels.connect.reconcile_vault_members();
         if !self.cube_settings.adopt_vault_fingerprint(&fingerprint) {
-            return assert_task;
+            return Task::batch([assert_task, reconcile_task]);
         }
         let network_dir = self
             .cache
@@ -2804,7 +2815,7 @@ impl App {
                 }
             },
         );
-        Task::batch([persist_task, assert_task])
+        Task::batch([persist_task, assert_task, reconcile_task])
     }
 
     /// Persist this Cube's "answered the consent prompt" flag to the settings
