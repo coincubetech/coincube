@@ -1,5 +1,6 @@
 pub mod app;
 pub mod backup;
+pub mod browser;
 pub mod daemon;
 pub mod delete;
 pub mod dir;
@@ -12,6 +13,8 @@ pub mod home;
 pub mod hw;
 pub mod hw_advisory;
 pub mod installer;
+#[cfg(target_os = "linux")]
+pub mod linux_backend;
 pub mod loader;
 pub mod loading;
 pub mod logger;

@@ -674,7 +674,7 @@ impl Installer {
             }
             Message::Clipboard(s) => clipboard::write(s),
             Message::OpenUrl(url) => {
-                if let Err(e) = open::that_detached(&url) {
+                if let Err(e) = crate::browser::open_url(&url) {
                     tracing::error!("Error opening '{}': {}", url, e);
                 }
                 Task::none()
