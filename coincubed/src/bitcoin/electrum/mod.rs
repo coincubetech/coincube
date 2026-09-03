@@ -118,16 +118,6 @@ impl Electrum {
         self.bdk_wallet.is_in_chain(tip)
     }
 
-    /// The nearest block of the wallet's chain strictly below `height`.
-    ///
-    /// The chain is sparse — checkpoints for the blocks it fetched and the ones anchoring
-    /// our transactions — so this can be far below `height`. Every checkpoint is a block
-    /// the backend gave us, which is the property the caller relies on.
-    pub fn block_before_height(&self, height: i32) -> Option<BlockChainTip> {
-        self.bdk_wallet
-            .find_block_before_height(utils::height_u32_from_i32(height))
-    }
-
     /// Whether we'll perform a full scan at the next poll.
     pub fn is_rescanning(&self) -> bool {
         self.full_scan || self.local_chain().tip().height() == 0
