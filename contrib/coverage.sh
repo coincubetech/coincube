@@ -10,24 +10,21 @@ set -euo pipefail
 #   HTML=1 ./contrib/coverage.sh
 #   FAIL_UNDER_LINES=45 ./contrib/coverage.sh
 #   COVERAGE_TARGET_LINES=50 FAIL_UNDER_LINES=45 ./contrib/coverage.sh
-#   COVERAGE_DOCTESTS=1 COVERAGE_DOCTEST_TOOLCHAIN=nightly ./contrib/coverage.sh
+#   CARGO_TOOLCHAIN=nightly COVERAGE_DOCTESTS=1 ./contrib/coverage.sh
 
 OUTPUT_DIR="${OUTPUT_DIR:-target/coverage}"
 LCOV_PATH="${LCOV_PATH:-${OUTPUT_DIR}/lcov.info}"
 SUMMARY_PATH="${SUMMARY_PATH:-${OUTPUT_DIR}/summary.json}"
 HTML="${HTML:-0}"
 COVERAGE_CLEAN="${COVERAGE_CLEAN:-1}"
-# Toolchain for the main --lib/--bins/--tests build. Empty means "whatever
-# rust-toolchain.toml pins" (the stable version we actually ship). The main
-# build must stay on stable: the transitive `lightning 0.0.118` dep relies on
-# the old `()` never-type fallback and fails to compile on nightlies that
-# carry the type-inference change tracked in rust-lang/rust#148922.
+# Single toolchain for every pass. Empty means "whatever rust-toolchain.toml
+# pins". Enabling COVERAGE_DOCTESTS requires nightly (doctest coverage is
+# nightly-only), so CI sets this to one nightly and runs the lib/bins/tests and
+# --doc passes under it, keeping their profraw in one set for the merged report.
+# That nightly must predate rust-lang/rust#148922, which changed the never-type
+# fallback from `()` to `!` and breaks the transitive `lightning 0.0.118`.
 CARGO_TOOLCHAIN="${CARGO_TOOLCHAIN:-}"
 COVERAGE_DOCTESTS="${COVERAGE_DOCTESTS:-0}"
-# Doctest coverage instrumentation requires nightly, so the --doc pass gets its
-# own toolchain. It compiles the whole workspace too, so this nightly must also
-# predate the #148922 fallback change. Falls back to CARGO_TOOLCHAIN when unset.
-COVERAGE_DOCTEST_TOOLCHAIN="${COVERAGE_DOCTEST_TOOLCHAIN:-${CARGO_TOOLCHAIN}}"
 COVERAGE_TARGET_LINES="${COVERAGE_TARGET_LINES:-}"
 
 # The GUI embeds this value at compile time. Unit and integration tests do not
@@ -46,27 +43,11 @@ fi
 
 mkdir -p "${OUTPUT_DIR}"
 
-# Main build/test/report toolchain (stable, per the note above).
 cargo_llvm_cov=(cargo)
 if [[ -n "${CARGO_TOOLCHAIN}" ]]; then
   cargo_llvm_cov+=("+${CARGO_TOOLCHAIN}")
 fi
 cargo_llvm_cov+=(llvm-cov)
-
-# Doctest-only toolchain (nightly). Used solely for the --doc pass, and for the
-# merged report/clean when doctests run, since it instruments the last profraw.
-doctest_llvm_cov=(cargo)
-if [[ -n "${COVERAGE_DOCTEST_TOOLCHAIN}" ]]; then
-  doctest_llvm_cov+=("+${COVERAGE_DOCTEST_TOOLCHAIN}")
-fi
-doctest_llvm_cov+=(llvm-cov)
-
-# The report and clean steps read/merge profraw from both passes. When doctests
-# run they must use the doctest toolchain's llvm-tools; otherwise stable's.
-report_llvm_cov=("${cargo_llvm_cov[@]}")
-if [[ "${COVERAGE_DOCTESTS}" == "1" ]]; then
-  report_llvm_cov=("${doctest_llvm_cov[@]}")
-fi
 
 test_args=(
   --workspace
@@ -101,7 +82,7 @@ if [[ -n "${FAIL_UNDER_REGIONS:-}" ]]; then
 fi
 
 if [[ "${COVERAGE_CLEAN}" == "1" ]]; then
-  "${report_llvm_cov[@]}" clean --workspace
+  "${cargo_llvm_cov[@]}" clean --workspace
 fi
 
 set +e
@@ -110,7 +91,7 @@ run_status=$?
 
 doctest_status=0
 if [[ "${COVERAGE_DOCTESTS}" == "1" ]]; then
-  "${doctest_llvm_cov[@]}" \
+  "${cargo_llvm_cov[@]}" \
     --workspace \
     --exclude coincube-fuzz \
     --doc \
@@ -118,13 +99,13 @@ if [[ "${COVERAGE_DOCTESTS}" == "1" ]]; then
   doctest_status=$?
 fi
 
-"${report_llvm_cov[@]}" report \
+"${cargo_llvm_cov[@]}" report \
   "${report_args[@]}" \
   --lcov \
   --output-path "${LCOV_PATH}"
 lcov_status=$?
 
-"${report_llvm_cov[@]}" report \
+"${cargo_llvm_cov[@]}" report \
   "${report_args[@]}" \
   --summary-only \
   --json \
@@ -133,7 +114,7 @@ summary_status=$?
 
 html_status=0
 if [[ "${HTML}" == "1" ]]; then
-  "${report_llvm_cov[@]}" report \
+  "${cargo_llvm_cov[@]}" report \
     "${report_args[@]}" \
     --html \
     --output-dir "${OUTPUT_DIR}/html"
