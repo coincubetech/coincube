@@ -169,6 +169,21 @@ pub struct ConnectCubePanel {
     pub server_cube_id: Option<u64>,
     /// Set when the last cube registration attempt failed.
     pub registration_error: Option<String>,
+    /// True while a `register_cube` round-trip is in flight.
+    ///
+    /// The re-entry guard for [`ConnectCubePanel::register_cube`]. Without it,
+    /// `ConnectPanel::update` re-fires a registration on *every*
+    /// `ConnectAccountMessage` that arrives while `server_cube_id` is still
+    /// `None` — and it stays `None` for as long as the server keeps refusing
+    /// (an account at its per-network Cube limit refuses indefinitely). A
+    /// single session check therefore fanned out into three concurrent
+    /// POST /connect/cubes, and every later account message did it again.
+    ///
+    /// Cleared on *both* arms of `CubeRegistered`, so a failure re-arms the
+    /// next legitimate trigger rather than latching the Cube out of ever
+    /// registering. The client's 20s request timeout is what guarantees the
+    /// response — and so the clear — always arrives.
+    pub(super) registering: bool,
     // Lightning Address
     pub lightning_address: Option<LightningAddress>,
     pub ln_username_input: String,
@@ -243,6 +258,7 @@ impl ConnectCubePanel {
             vault_members_reconciled: false,
             server_cube_id: None,
             registration_error: None,
+            registering: false,
             lightning_address: None,
             ln_username_input: String::new(),
             ln_username_available: None,
@@ -478,10 +494,20 @@ impl ConnectCubePanel {
 
     /// Register this cube with the backend. Called after login.
     /// Returns a task that sends CubeRegistered on completion.
-    pub fn register_cube(&self) -> iced::Task<Message> {
+    ///
+    /// A no-op while a previous attempt is still in flight — see
+    /// [`Self::registering`]. Every caller here is a *trigger*, not a user
+    /// action ("the session changed, make sure this Cube is registered"), and
+    /// several of them fire from the same batch of messages; without the guard
+    /// they each spawn their own POST.
+    pub fn register_cube(&mut self) -> iced::Task<Message> {
         let Some(client) = self.client.clone() else {
             return iced::Task::none();
         };
+        if self.registering {
+            return iced::Task::none();
+        }
+        self.registering = true;
         let req = RegisterCubeRequest {
             uuid: self.cube_uuid.clone(),
             name: self.cube_name.clone(),
@@ -705,6 +731,10 @@ impl ConnectCubePanel {
     pub fn update_message(&mut self, msg: ConnectCubeMessage) -> iced::Task<Message> {
         match msg {
             ConnectCubeMessage::CubeRegistered(result) => {
+                // Re-arm the trigger regardless of outcome: on success nothing
+                // will call `register_cube` again (`server_cube_id` is set), and
+                // on failure the next trigger is entitled to a fresh attempt.
+                self.registering = false;
                 match result {
                     Ok(cube_resp) => {
                         log::info!(
@@ -1999,6 +2029,41 @@ mod tests {
             Some("No consecutive special characters allowed")
         );
         assert!(validate_ln_username("abc-123_def.xyz").is_none());
+    }
+
+    /// `ConnectPanel::update` calls `register_cube` on every account message
+    /// that arrives while `server_cube_id` is `None`, and it stays `None` for as
+    /// long as the server refuses (an account at its Cube limit refuses
+    /// forever). Without the in-flight guard one session check fanned out into
+    /// three concurrent POST /connect/cubes, and every later account message did
+    /// it again.
+    #[test]
+    fn a_registration_in_flight_is_not_duplicated() {
+        let mut panel = panel();
+        panel.set_client(CoincubeClient::new());
+
+        let first = panel.register_cube();
+        assert!(panel.registering);
+        assert!(
+            iced_runtime::task::into_stream(first).is_some(),
+            "the first trigger must actually issue the request"
+        );
+
+        assert!(
+            iced_runtime::task::into_stream(panel.register_cube()).is_none(),
+            "a trigger arriving while the request is in flight must be dropped"
+        );
+
+        // A refusal has to re-arm the guard, not latch the Cube out of ever
+        // registering: the reason may well be transient (a slot frees up).
+        let _ = panel.update_message(ConnectCubeMessage::CubeRegistered(Err(
+            "Cube limit reached for this network".to_string(),
+        )));
+        assert!(!panel.registering);
+        assert!(
+            iced_runtime::task::into_stream(panel.register_cube()).is_some(),
+            "the next trigger after a failure must be allowed to retry"
+        );
     }
 
     #[test]
