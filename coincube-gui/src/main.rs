@@ -66,22 +66,26 @@ Options:
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    // Steer winit onto XWayland so the window manager draws a movable frame,
-    // when that is possible and the user has not asked otherwise. Must run
-    // before anything spawns a thread: it edits the environment. See
-    // `coincube_gui::linux_backend` for the whole rationale and the
-    // COINCUBE_LINUX_BACKEND escape hatch.
-    #[cfg(target_os = "linux")]
-    coincube_gui::linux_backend::prefer_x11_over_wayland();
-
     // Load .env for runtime env var overrides (COINCUBE_API_URL, etc.) so developers
     // can point at local services without rebuilding. Release builds started from
     // elsewhere won't find a .env and fall back to compile-time values.
+    // Comes first so everything below reads one settled environment — notably
+    // COINCUBE_LINUX_BACKEND. Real session variables still win: dotenvy only
+    // fills in names that are not already set.
     if let Err(e) = dotenvy::dotenv() {
         if !e.not_found() {
             eprintln!("DOTENV LOAD ERROR: {}", e);
         }
     }
+
+    // Steer winit onto XWayland so the window manager draws a movable frame,
+    // when that is possible and the user has not asked otherwise. Must run
+    // before anything spawns a thread: it edits the environment, and neither
+    // `dotenvy` above nor `parse_args` below starts one. See
+    // `coincube_gui::linux_backend` for the whole rationale and the
+    // COINCUBE_LINUX_BACKEND escape hatch.
+    #[cfg(target_os = "linux")]
+    coincube_gui::linux_backend::prefer_x11_over_wayland();
 
     let args = parse_args(std::env::args().collect())?;
     let config = match args.as_slice() {
