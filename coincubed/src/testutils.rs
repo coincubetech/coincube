@@ -43,9 +43,9 @@ pub struct DummyBitcoind {
     /// backend. Set to `false` to model Electrum/Esplora, which report reorgs from
     /// `sync_wallet` and cannot be asked for a fork point afterwards.
     pub walks_ancestors: bool,
-    /// How many times `recover_from_divergence` has been called, so a test can assert the
-    /// poller asks for a rebuild once per divergence episode rather than every poll.
-    pub divergence_recoveries: usize,
+    /// What `divergence_rollback_target` offers: the nearest block of this backend's
+    /// chain below our tip. `None` models a sparse chain with nothing to retreat to.
+    pub rollback_target: Option<BlockChainTip>,
 }
 
 /// The endpoint [`DummyBitcoind`] reports by default.
@@ -76,7 +76,7 @@ impl DummyBitcoind {
             also_in_chain: Vec::new(),
             backend_id: Some(dummy_backend_id(DUMMY_RPC_ADDR, DUMMY_CREDENTIALS)),
             walks_ancestors: true,
-            divergence_recoveries: 0,
+            rollback_target: None,
         }
     }
 }
@@ -166,8 +166,10 @@ impl BitcoinInterface for DummyBitcoind {
         self.walks_ancestors
     }
 
-    fn recover_from_divergence(&mut self) {
-        self.divergence_recoveries += 1;
+    fn divergence_rollback_target(&self, our_tip: &BlockChainTip) -> Option<BlockChainTip> {
+        // Mirror the real backends: only ever a block strictly below our tip.
+        self.rollback_target
+            .filter(|target| target.height < our_tip.height)
     }
 
     fn broadcast_tx(&self, _: &bitcoin::Transaction) -> Result<(), String> {

@@ -419,26 +419,32 @@ pub trait BitcoinInterface: Send {
         true
     }
 
-    /// Try to get back onto the backend's chain after a divergence we cannot walk out of.
+    /// A block of this backend's chain we can retreat our tip to, when that tip has
+    /// diverged and there is no fork point to be had.
     ///
-    /// Called once per divergence episode, when our tip is off the backend's chain and
-    /// [`Self::walks_common_ancestor`] is `false`, so there is no fork point to roll back
-    /// to. The default does nothing: bitcoind never reaches that state, because it can
-    /// always be asked where the chains parted.
+    /// Asked only when our tip is off the backend's chain and
+    /// [`Self::walks_common_ancestor`] is `false`. The default is `None`: bitcoind never
+    /// reaches that state, because it can always be asked where the chains parted.
     ///
-    /// It matters for the others because their reorg signal is *edge-triggered*. Electrum
-    /// and Esplora report a reorg from [`Self::sync_wallet`] only when that one sync's
-    /// changeset contradicts a block the wallet already held. Miss that edge — the block
+    /// The others need it because their reorg signal is *edge-triggered*. Electrum and
+    /// Esplora report a reorg from [`Self::sync_wallet`] only when that one sync's
+    /// changeset contradicts a block their wallet still held. Miss that edge — the block
     /// was never in their sparse local chain, or the invalidation landed across two syncs
-    /// — and the signal is gone for good: every later sync compares against an
-    /// already-updated chain, finds nothing to report, and lands back here. Holding state
-    /// and waiting does not help either, because after a real reorg our tip sits on an
-    /// abandoned branch that the backend's chain will never contain again.
+    /// — and the signal is gone for good: their chain has already moved on, so every
+    /// later sync compares against the *new* chain, finds nothing to report, and leaves
+    /// our tip stranded on an abandoned branch. Waiting cannot fix that; nor can a full
+    /// scan, which rescans scripts from a `FullScanRequest::from_chain_tip` on the chain
+    /// the wallet already holds rather than rebuilding it.
     ///
-    /// Rebuilding the wallet's chain from genesis is the way out. The rebuild contradicts
-    /// the stale blocks we still hold, so the *next* `sync_wallet` reports the fork point
-    /// and the poller rolls back through its ordinary path.
-    fn recover_from_divergence(&mut self) {}
+    /// What does fix it is retreating to a block the backend demonstrably has. These
+    /// backends keep a *sparse* chain, so the block returned is the nearest checkpoint
+    /// below our tip, which may be far deeper than the true fork point: correct but
+    /// conservative, costing a longer rescan and no more. The caller is responsible for
+    /// bounding the retreat by `MAX_REORG_DEPTH`, exactly as it bounds a walked one — a
+    /// sparse chain can easily offer nothing nearer than genesis.
+    fn divergence_rollback_target(&self, _our_tip: &BlockChainTip) -> Option<BlockChainTip> {
+        None
+    }
 
     /// Broadcast this transaction to the Bitcoin P2P network
     fn broadcast_tx(&self, tx: &bitcoin::Transaction) -> Result<(), String>;
@@ -940,15 +946,10 @@ impl BitcoinInterface for electrum::Electrum {
         false
     }
 
-    /// Schedule a full scan, so the next poll rebuilds the local chain from genesis and
-    /// reconnects unconditionally. Same escape hatch the `CannotConnect` path already
-    /// uses; see the trait method for why nothing less gets us out of a divergence.
-    fn recover_from_divergence(&mut self) {
-        log::info!(
-            "Diverged from the backend with no fork point to roll back to. Scheduling a full \
-             scan so the next poll rebuilds our chain from genesis."
-        );
-        self.trigger_rescan();
+    /// The nearest checkpoint of the wallet's own chain below our tip. Being a
+    /// checkpoint, it is by construction a block this backend has.
+    fn divergence_rollback_target(&self, our_tip: &BlockChainTip) -> Option<BlockChainTip> {
+        self.block_before_height(our_tip.height)
     }
 
     /// The common ancestor is returned by `sync_wallet()`; this backend keeps no view
@@ -1086,15 +1087,10 @@ impl BitcoinInterface for esplora::Esplora {
         false
     }
 
-    /// Schedule a full scan, so the next poll rebuilds the local chain from genesis and
-    /// reconnects unconditionally. Same escape hatch the `CannotConnect` path already
-    /// uses; see the trait method for why nothing less gets us out of a divergence.
-    fn recover_from_divergence(&mut self) {
-        log::info!(
-            "Diverged from the backend with no fork point to roll back to. Scheduling a full \
-             scan so the next poll rebuilds our chain from genesis."
-        );
-        self.trigger_rescan();
+    /// The nearest checkpoint of the wallet's own chain below our tip. Being a
+    /// checkpoint, it is by construction a block this backend has.
+    fn divergence_rollback_target(&self, our_tip: &BlockChainTip) -> Option<BlockChainTip> {
+        self.block_before_height(our_tip.height)
     }
 
     /// The common ancestor is returned by `sync_wallet()`; this backend keeps no view
@@ -1242,8 +1238,8 @@ impl BitcoinInterface for sync::Arc<sync::Mutex<dyn BitcoinInterface + 'static>>
         self.lock().unwrap().request_eager_sync();
     }
 
-    fn recover_from_divergence(&mut self) {
-        self.lock().unwrap().recover_from_divergence();
+    fn divergence_rollback_target(&self, our_tip: &BlockChainTip) -> Option<BlockChainTip> {
+        self.lock().unwrap().divergence_rollback_target(our_tip)
     }
 
     fn start_rescan(

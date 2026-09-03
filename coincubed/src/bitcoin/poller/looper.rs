@@ -1,7 +1,6 @@
 use crate::{
     bitcoin::{
-        AncestorSearch, BitcoinInterface, BlockChainTip, ChainAlert, ReorgAlertCache, UTxO,
-        UTxOAddress,
+        AncestorSearch, BitcoinInterface, BlockChainTip, ReorgAlertCache, UTxO, UTxOAddress,
     },
     database::{Coin, DatabaseConnection, DatabaseInterface},
 };
@@ -489,15 +488,47 @@ fn updates(
                     return;
                 }
                 TipUpdate::Diverged { backend_tip } => {
-                    // Only on the poll that *enters* divergence. The recovery is a full
-                    // scan from genesis; repeating it every poll while the chains stay
-                    // apart would rescan the whole wallet on a 30-second loop. The alert
-                    // is cleared by any poll that completes normally, so a later
-                    // divergence gets its own attempt.
-                    let newly_diverged = reorg_alert.load() != ChainAlert::Diverged;
-                    report_divergence(reorg_alert, &current_tip, &backend_tip);
-                    if newly_diverged {
-                        bit.recover_from_divergence();
+                    // Our tip is on a branch this backend cannot walk back from. Waiting
+                    // it out does not work: after a real reorg that branch is abandoned,
+                    // so the backend's chain will never contain our tip again and every
+                    // later poll lands right back here. Retreat to a block the backend
+                    // does have instead, and let the ordinary path resume from there.
+                    match bit.divergence_rollback_target(&current_tip) {
+                        // Bounded exactly like a walked reorg, and for the same reason: a
+                        // sparse chain routinely offers nothing nearer than genesis, and
+                        // rolling back that far would clear every coin's confirmation
+                        // state and hard-delete deposits no longer in the mempool. Refuse
+                        // and hold, rather than destroy state on that scale.
+                        Some(target)
+                            if current_tip.height.saturating_sub(target.height)
+                                > MAX_REORG_DEPTH =>
+                        {
+                            refuse_deep_reorg(
+                                reorg_alert,
+                                &current_tip,
+                                RefusedDepth::Exact(
+                                    current_tip.height.saturating_sub(target.height),
+                                ),
+                            );
+                        }
+                        Some(target) => {
+                            log::info!(
+                                "Diverged from '{}' with no fork point to walk to. Retreating \
+                                 our tip to '{}', the nearest block the backend still has.",
+                                backend_tip,
+                                target
+                            );
+                            db_conn.rollback_tip(&target);
+                            // Deliberately no recursive re-poll here, unlike the reorg
+                            // path above. Each retreat is bounded against the tip it
+                            // starts from, so chaining several within one poll could walk
+                            // arbitrarily far below the limit that bounds any one of them.
+                            // The next poll picks it up from the tip we just landed on.
+                        }
+                        // Nothing below our tip to retreat to. Hold state and report it;
+                        // this is the pre-existing behaviour, now the last resort rather
+                        // than the only one.
+                        None => report_divergence(reorg_alert, &current_tip, &backend_tip),
                     }
                     return;
                 }
@@ -1246,11 +1277,11 @@ mod tests {
     /// The liveness bug behind the intermittent `test_reorg_exclusion` failures on the
     /// electrs legs: holding state and waiting does not resolve a divergence. Electrum and
     /// Esplora report a reorg once, as an edge on a single `sync_wallet` changeset; miss
-    /// that edge and every later poll diverges again with nothing left to report, while
-    /// our tip sits on a branch the backend's chain will never contain. The poller has to
-    /// ask the backend to rebuild, or it waits forever.
+    /// that edge and their chain has already moved on, so every later poll diverges again
+    /// with nothing left to report while our tip sits on an abandoned branch. The poller
+    /// has to retreat to a block the backend still has, or it waits forever.
     #[test]
-    fn divergence_asks_the_backend_to_rebuild() {
+    fn divergence_retreats_to_a_block_the_backend_has() {
         let _disarmed = Sanction::none();
         let our_tip = tip(146_244, 0xaa);
         let (db, _outpoint) = wallet_with_one_coin(&our_tip);
@@ -1259,26 +1290,81 @@ mod tests {
         let alert = ReorgAlertCache::default();
         let mut db_conn = db.connection();
 
+        // The nearest checkpoint the backend can offer, well inside the limit.
+        let target = tip(146_240, 0xcc);
         let mut bit = diverged_backend(&our_tip, our_tip.height);
+        bit.rollback_target = Some(target);
+
         updates(&mut db_conn, &mut bit, &descs, &secp, &alert);
 
         assert_eq!(
-            bit.divergence_recoveries, 1,
-            "a backend with no fork point to give must be asked to rebuild its chain, \
-             otherwise the divergence is never resolved and sync is paused for good"
+            db.rollbacks(),
+            vec![target],
+            "a diverged tip must be retreated to a block the backend still has, otherwise \
+             sync is paused for good"
+        );
+        assert_eq!(
+            db_conn.chain_tip(),
+            Some(target),
+            "and our tip must actually land there"
+        );
+    }
+
+    /// The retreat is bounded exactly like a walked reorg. A sparse chain routinely offers
+    /// nothing nearer than genesis, and rolling back that far clears every coin's
+    /// confirmation state and hard-deletes deposits no longer in the mempool. Recovering
+    /// liveness must not cost that.
+    #[test]
+    fn an_implausibly_deep_retreat_is_refused() {
+        let _disarmed = Sanction::none();
+        let our_tip = tip(146_244, 0xaa);
+        let (db, outpoint) = wallet_with_one_coin(&our_tip);
+        let descs = test_descs();
+        let secp = secp256k1::Secp256k1::verification_only();
+        let alert = ReorgAlertCache::default();
+        let mut db_conn = db.connection();
+
+        // All a sparse chain has below us is genesis: far past the limit.
+        let mut bit = diverged_backend(&our_tip, our_tip.height);
+        bit.rollback_target = Some(tip(0, 0xcc));
+
+        updates(&mut db_conn, &mut bit, &descs, &secp, &alert);
+
+        assert!(
+            db.rollbacks().is_empty(),
+            "a retreat past MAX_REORG_DEPTH must be refused, not applied"
         );
         assert_eq!(
             db_conn.chain_tip(),
             Some(our_tip),
-            "asking for a rebuild must not itself move our tip"
+            "our tip must be left where it was"
+        );
+        assert_eq!(
+            db.coin_outpoints(),
+            vec![outpoint],
+            "and no coin may be destroyed by it"
+        );
+        assert_eq!(
+            alert.load(),
+            ChainAlert::RefusedReorg(our_tip.height),
+            "the refusal must be published with the depth it declined"
         );
     }
 
-    /// The rebuild is a full scan from genesis, so it must be asked for once per
-    /// divergence episode and not on every poll that finds the chains still apart —
-    /// otherwise a persistent divergence rescans the whole wallet every poll interval.
+    /// A backend with nothing below our tip to offer keeps the old behaviour: hold state
+    /// and publish the divergence. That is now the last resort rather than the only one.
     #[test]
-    fn repeated_divergence_does_not_rebuild_every_poll() {
+    fn divergence_with_nothing_to_retreat_to_is_still_reported() {
+        let our_tip = tip(146_244, 0xaa);
+        // `diverged_backend` leaves `rollback_target` at its `None` default.
+        assert_divergence_reported(our_tip, diverged_backend(&our_tip, our_tip.height));
+    }
+
+    /// One retreat per poll. Each is bounded against the tip it starts from, so chaining
+    /// several within a single poll could walk arbitrarily far below the limit that bounds
+    /// any one of them — the guard would be checked every step and still never trip.
+    #[test]
+    fn a_retreat_does_not_chain_within_one_poll() {
         let _disarmed = Sanction::none();
         let our_tip = tip(146_244, 0xaa);
         let (db, _outpoint) = wallet_with_one_coin(&our_tip);
@@ -1287,53 +1373,18 @@ mod tests {
         let alert = ReorgAlertCache::default();
         let mut db_conn = db.connection();
 
+        // Still diverged after the retreat, and still offering a lower block: a recursive
+        // implementation would keep taking it until it ran out of chain.
         let mut bit = diverged_backend(&our_tip, our_tip.height);
-        for _ in 0..5 {
-            updates(&mut db_conn, &mut bit, &descs, &secp, &alert);
-        }
+        bit.rollback_target = Some(tip(146_240, 0xcc));
 
-        assert_eq!(
-            bit.divergence_recoveries, 1,
-            "the rebuild is expensive; a divergence that stays unresolved must not \
-             re-trigger it on every poll"
-        );
-    }
-
-    /// A poll that completes normally clears the alert, so a *later* divergence is a new
-    /// episode and gets its own rebuild. Without this the one-shot guard would silently
-    /// become one-shot for the lifetime of the process.
-    #[test]
-    fn a_later_divergence_gets_its_own_rebuild() {
-        let _disarmed = Sanction::none();
-        let our_tip = tip(146_244, 0xaa);
-        let (db, _outpoint) = wallet_with_one_coin(&our_tip);
-        let descs = test_descs();
-        let secp = secp256k1::Secp256k1::verification_only();
-        let alert = ReorgAlertCache::default();
-        let mut db_conn = db.connection();
-
-        let mut bit = diverged_backend(&our_tip, our_tip.height);
-        updates(&mut db_conn, &mut bit, &descs, &secp, &alert);
-        assert_eq!(bit.divergence_recoveries, 1);
-
-        // The rebuild worked: the backend's chain contains our tip again and simply
-        // extends it, so this poll takes the ordinary forward-progress path and clears
-        // the alert.
-        bit.in_chain = true;
-        bit.tip = tip(our_tip.height + 1, 0xaa);
-        updates(&mut db_conn, &mut bit, &descs, &secp, &alert);
-        assert_eq!(alert.load(), ChainAlert::None, "a normal poll clears it");
-
-        // And now the chains part again.
-        let recovered_tip = db_conn.chain_tip().expect("set above");
-        bit.in_chain = false;
-        bit.tip = tip(recovered_tip.height, 0xbb);
         updates(&mut db_conn, &mut bit, &descs, &secp, &alert);
 
         assert_eq!(
-            bit.divergence_recoveries, 2,
-            "a divergence after a recovered poll is a fresh episode and must be able to \
-             ask for a rebuild of its own"
+            db.rollbacks().len(),
+            1,
+            "a poll must retreat at most once; the next poll continues from where this \
+             one landed, with the depth guard measured afresh"
         );
     }
 
