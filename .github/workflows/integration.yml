@@ -44,6 +44,10 @@ jobs:
       USE_TAPROOT: ${{ matrix.USE_TAPROOT }}
       BITCOIN_BACKEND_TYPE: ${{ matrix.BITCOIN_BACKEND_TYPE }}
       USE_KNOTS: ${{ matrix.USE_KNOTS }}
+      # The framework leaves a failing test's datadirs behind (see the `directory`
+      # fixture in tests/fixtures.py). Default is /tmp, which upload-artifact cannot
+      # reach; put it in the workspace so a failure can actually be diagnosed.
+      TEST_DIR: ${{ github.workspace }}/test-datadirs
 
     steps:
       - uses: actions/checkout@v5
@@ -84,6 +88,7 @@ jobs:
       - name: Prepare and run functional tests
         run: |
           set -xe
+          mkdir -p "$TEST_DIR"
           if [ "$USE_KNOTS" = "TRUE" ]; then
             # Bitcoin Knots, verified the way the desktop installer does: the
             # archive's checksum must appear in the release SHA256SUMS, and
@@ -164,3 +169,33 @@ jobs:
           else
             pytest tests/ -vvv -n 8
           fi
+
+      # A failed functional test is close to undiagnosable from the pytest output
+      # alone: the interesting evidence is the daemon's own log, which the framework
+      # writes into the datadir it leaves behind. Without this the reorg flakes on the
+      # electrs legs could only be reasoned about from the source.
+      - name: Collect logs from failed tests
+        if: failure()
+        run: |
+          set -x
+          # Logs only. The datadirs also hold regtest block files and the electrs
+          # index, which run to hundreds of megabytes.
+          dest="$GITHUB_WORKSPACE/failure-logs"
+          mkdir -p "$dest"
+          cd "$TEST_DIR" || exit 0
+          find . -type f \( -name 'log' -o -name 'debug.log' \) -size -50M |
+            while read -r f; do
+              mkdir -p "$dest/$(dirname "$f")"
+              cp "$f" "$dest/$f"
+            done
+          du -sh "$dest"
+
+      - name: Upload logs from failed tests
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          # Unique per matrix leg: upload-artifact@v4 rejects duplicate names.
+          name: failure-logs-${{ matrix.BITCOIN_BACKEND_TYPE }}-taproot${{ matrix.USE_TAPROOT }}-knots${{ matrix.USE_KNOTS || 'FALSE' }}-minbtc${{ matrix.USE_MIN_BITCOIN_VERSION || 'FALSE' }}
+          path: failure-logs
+          retention-days: 14
+          if-no-files-found: warn
