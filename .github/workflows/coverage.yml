@@ -18,8 +18,13 @@ jobs:
     timeout-minutes: 45
     env:
       BREEZ_API_KEY: DUMMY_BREEZ_API_KEY
-      CARGO_TOOLCHAIN: nightly-2026-06-17
+      # Main build runs on the pinned stable toolchain (empty CARGO_TOOLCHAIN =>
+      # rust-toolchain.toml). It must: `lightning 0.0.118` (transitive, via
+      # lightning-invoice/sdk-common) relies on the old `()` never-type fallback
+      # and fails to compile on nightlies carrying rust-lang/rust#148922. Only
+      # the doctest pass needs nightly, and it gets a pre-#148922 one below.
       COVERAGE_DOCTESTS: 1
+      COVERAGE_DOCTEST_TOOLCHAIN: nightly-2026-05-15
       # Current full-workspace baseline is ~26.8%. Keep the gate non-breaking
       # while focused tests ratchet this toward COVERAGE_TARGET_LINES.
       COVERAGE_TARGET_LINES: 50
@@ -29,10 +34,20 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Rust toolchain
+      # Stable is what the main coverage build runs on (see the env note); it
+      # matches rust-toolchain.toml so a bare `cargo` resolves here.
+      - name: Install Rust toolchain (stable, main build)
+        uses: dtolnay/rust-toolchain@5b842231ba77f5c045dba54ac5560fed2db780e2 # stable
+        with:
+          toolchain: "1.97.1"
+          components: llvm-tools-preview
+
+      # Nightly is used only for the doctest coverage pass and the merged report.
+      # Pinned before rust-lang/rust#148922 so `lightning 0.0.118` still builds.
+      - name: Install Rust toolchain (nightly, doctest coverage)
         uses: dtolnay/rust-toolchain@5b842231ba77f5c045dba54ac5560fed2db780e2 # nightly
         with:
-          toolchain: nightly-2026-06-17
+          toolchain: nightly-2026-05-15
           components: llvm-tools-preview
 
       - name: Install system dependencies
@@ -83,7 +98,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
-      CARGO_TOOLCHAIN: nightly-2026-06-17
+      # Runs on the pinned stable toolchain (no CARGO_TOOLCHAIN). The bridge does
+      # not collect doctest coverage, and its only lightning dep is 0.1.8, which
+      # builds fine on stable — so it never needed nightly.
       # Current bridge baseline is ~10.9%. The bridge is covered separately
       # because it is intentionally not part of the root Cargo workspace.
       COVERAGE_TARGET_LINES: 50
@@ -94,9 +111,9 @@ jobs:
           persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@5b842231ba77f5c045dba54ac5560fed2db780e2 # nightly
+        uses: dtolnay/rust-toolchain@5b842231ba77f5c045dba54ac5560fed2db780e2 # stable
         with:
-          toolchain: nightly-2026-06-17
+          toolchain: "1.97.1"
           components: llvm-tools-preview
 
       - name: Install system dependencies
