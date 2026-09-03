@@ -1,6 +1,7 @@
 use crate::{
     bitcoin::{
-        AncestorSearch, BitcoinInterface, BlockChainTip, ReorgAlertCache, UTxO, UTxOAddress,
+        AncestorSearch, BitcoinInterface, BlockChainTip, ChainAlert, ReorgAlertCache, UTxO,
+        UTxOAddress,
     },
     database::{Coin, DatabaseConnection, DatabaseInterface},
 };
@@ -488,7 +489,16 @@ fn updates(
                     return;
                 }
                 TipUpdate::Diverged { backend_tip } => {
+                    // Only on the poll that *enters* divergence. The recovery is a full
+                    // scan from genesis; repeating it every poll while the chains stay
+                    // apart would rescan the whole wallet on a 30-second loop. The alert
+                    // is cleared by any poll that completes normally, so a later
+                    // divergence gets its own attempt.
+                    let newly_diverged = reorg_alert.load() != ChainAlert::Diverged;
                     report_divergence(reorg_alert, &current_tip, &backend_tip);
+                    if newly_diverged {
+                        bit.recover_from_divergence();
+                    }
                     return;
                 }
                 TipUpdate::Unavailable => return,
@@ -1231,6 +1241,100 @@ mod tests {
     fn diverged_backend_above_our_tip_is_reported() {
         let our_tip = tip(146_244, 0xaa);
         assert_divergence_reported(our_tip, diverged_backend(&our_tip, our_tip.height + 10));
+    }
+
+    /// The liveness bug behind the intermittent `test_reorg_exclusion` failures on the
+    /// electrs legs: holding state and waiting does not resolve a divergence. Electrum and
+    /// Esplora report a reorg once, as an edge on a single `sync_wallet` changeset; miss
+    /// that edge and every later poll diverges again with nothing left to report, while
+    /// our tip sits on a branch the backend's chain will never contain. The poller has to
+    /// ask the backend to rebuild, or it waits forever.
+    #[test]
+    fn divergence_asks_the_backend_to_rebuild() {
+        let _disarmed = Sanction::none();
+        let our_tip = tip(146_244, 0xaa);
+        let (db, _outpoint) = wallet_with_one_coin(&our_tip);
+        let descs = test_descs();
+        let secp = secp256k1::Secp256k1::verification_only();
+        let alert = ReorgAlertCache::default();
+        let mut db_conn = db.connection();
+
+        let mut bit = diverged_backend(&our_tip, our_tip.height);
+        updates(&mut db_conn, &mut bit, &descs, &secp, &alert);
+
+        assert_eq!(
+            bit.divergence_recoveries, 1,
+            "a backend with no fork point to give must be asked to rebuild its chain, \
+             otherwise the divergence is never resolved and sync is paused for good"
+        );
+        assert_eq!(
+            db_conn.chain_tip(),
+            Some(our_tip),
+            "asking for a rebuild must not itself move our tip"
+        );
+    }
+
+    /// The rebuild is a full scan from genesis, so it must be asked for once per
+    /// divergence episode and not on every poll that finds the chains still apart —
+    /// otherwise a persistent divergence rescans the whole wallet every poll interval.
+    #[test]
+    fn repeated_divergence_does_not_rebuild_every_poll() {
+        let _disarmed = Sanction::none();
+        let our_tip = tip(146_244, 0xaa);
+        let (db, _outpoint) = wallet_with_one_coin(&our_tip);
+        let descs = test_descs();
+        let secp = secp256k1::Secp256k1::verification_only();
+        let alert = ReorgAlertCache::default();
+        let mut db_conn = db.connection();
+
+        let mut bit = diverged_backend(&our_tip, our_tip.height);
+        for _ in 0..5 {
+            updates(&mut db_conn, &mut bit, &descs, &secp, &alert);
+        }
+
+        assert_eq!(
+            bit.divergence_recoveries, 1,
+            "the rebuild is expensive; a divergence that stays unresolved must not \
+             re-trigger it on every poll"
+        );
+    }
+
+    /// A poll that completes normally clears the alert, so a *later* divergence is a new
+    /// episode and gets its own rebuild. Without this the one-shot guard would silently
+    /// become one-shot for the lifetime of the process.
+    #[test]
+    fn a_later_divergence_gets_its_own_rebuild() {
+        let _disarmed = Sanction::none();
+        let our_tip = tip(146_244, 0xaa);
+        let (db, _outpoint) = wallet_with_one_coin(&our_tip);
+        let descs = test_descs();
+        let secp = secp256k1::Secp256k1::verification_only();
+        let alert = ReorgAlertCache::default();
+        let mut db_conn = db.connection();
+
+        let mut bit = diverged_backend(&our_tip, our_tip.height);
+        updates(&mut db_conn, &mut bit, &descs, &secp, &alert);
+        assert_eq!(bit.divergence_recoveries, 1);
+
+        // The rebuild worked: the backend's chain contains our tip again and simply
+        // extends it, so this poll takes the ordinary forward-progress path and clears
+        // the alert.
+        bit.in_chain = true;
+        bit.tip = tip(our_tip.height + 1, 0xaa);
+        updates(&mut db_conn, &mut bit, &descs, &secp, &alert);
+        assert_eq!(alert.load(), ChainAlert::None, "a normal poll clears it");
+
+        // And now the chains part again.
+        let recovered_tip = db_conn.chain_tip().expect("set above");
+        bit.in_chain = false;
+        bit.tip = tip(recovered_tip.height, 0xbb);
+        updates(&mut db_conn, &mut bit, &descs, &secp, &alert);
+
+        assert_eq!(
+            bit.divergence_recoveries, 2,
+            "a divergence after a recovered poll is a fresh episode and must be able to \
+             ask for a rebuild of its own"
+        );
     }
 
     /// A daemon restart drops the in-memory alert. The next poll must re-derive the

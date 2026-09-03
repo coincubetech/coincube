@@ -43,6 +43,9 @@ pub struct DummyBitcoind {
     /// backend. Set to `false` to model Electrum/Esplora, which report reorgs from
     /// `sync_wallet` and cannot be asked for a fork point afterwards.
     pub walks_ancestors: bool,
+    /// How many times `recover_from_divergence` has been called, so a test can assert the
+    /// poller asks for a rebuild once per divergence episode rather than every poll.
+    pub divergence_recoveries: usize,
 }
 
 /// The endpoint [`DummyBitcoind`] reports by default.
@@ -73,6 +76,7 @@ impl DummyBitcoind {
             also_in_chain: Vec::new(),
             backend_id: Some(dummy_backend_id(DUMMY_RPC_ADDR, DUMMY_CREDENTIALS)),
             walks_ancestors: true,
+            divergence_recoveries: 0,
         }
     }
 }
@@ -160,6 +164,10 @@ impl BitcoinInterface for DummyBitcoind {
 
     fn walks_common_ancestor(&self) -> bool {
         self.walks_ancestors
+    }
+
+    fn recover_from_divergence(&mut self) {
+        self.divergence_recoveries += 1;
     }
 
     fn broadcast_tx(&self, _: &bitcoin::Transaction) -> Result<(), String> {
