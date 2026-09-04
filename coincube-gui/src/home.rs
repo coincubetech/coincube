@@ -315,6 +315,22 @@ pub struct Home {
     /// Server-authoritative cube limit per network, if fetched from the API.
     /// Takes precedence over `account_tier.cube_limit()` when set.
     server_cube_limit: Option<usize>,
+    /// Why a local Cube is still unsynced, keyed by cube id — the server's own
+    /// reason for refusing its registration.
+    ///
+    /// The client-side limit check in `CreateCube` is advisory, not
+    /// authoritative: it counts local Cubes plus the `remote_cubes` this device
+    /// has fetched, which undercounts whenever that fetch is stale, partial, or
+    /// (running against a fresh datadir) has barely started. The server counts
+    /// every Cube on the account for that network and is the one that decides.
+    /// So a Cube can be created locally and then refused registration, and
+    /// before this map the only trace was a log line: the Cubes list went on
+    /// promising "it will sync automatically in a moment" forever.
+    ///
+    /// Written by every path that registers a Cube (creation, catch-up sync) on
+    /// both outcomes, so an entry means "the last attempt failed, for this
+    /// reason" and its absence means "no attempt has failed".
+    cube_sync_errors: std::collections::HashMap<String, String>,
     /// Rename cube modal: (cube index, new name input)
     rename_cube_modal: Option<(usize, String)>,
     /// Pending remote rename: stashed after local rename succeeds so the
@@ -411,6 +427,7 @@ impl Home {
                 native_passkey_ceremony: None,
                 has_stored_session: false, // Will be checked when cube UUID is set
                 server_cube_limit: None,
+                cube_sync_errors: std::collections::HashMap::new(),
                 rename_cube_modal: None,
                 pending_remote_rename: None,
                 remote_cubes: Vec::new(),
@@ -592,6 +609,38 @@ impl Home {
             .filter(|rc| rc.network == network_str)
             .count();
         local_count + remote_count
+    }
+
+    /// The server's reason for refusing this Cube's registration, as user copy —
+    /// `None` when no attempt has failed, which is the "still mid-sync" case.
+    ///
+    /// The limit refusal gets expanded into the same wording the Create Cube
+    /// form uses, because "Cube limit reached for this network" alone doesn't
+    /// tell the user how many they have, on what plan, or what to do about it.
+    /// Anything else is shown verbatim: an unrecognised reason is still far more
+    /// use than a promise to sync that we know will not be kept.
+    fn cube_sync_hint(&self, cube: &CubeSettings) -> Option<String> {
+        let reason = self.cube_sync_errors.get(&cube.id)?;
+        // Matched on the message rather than the error code because the client
+        // keeps only `error.message` from the API envelope (see
+        // `NotSuccessResponseInfo::message`). Paired with
+        // `responses.ErrCubeLimitReached` / "Cube limit reached for this
+        // network" in the API's cube handler — change both together.
+        if reason.contains("Cube limit reached") {
+            return Some(format!(
+                "Out of Cube slots — this Cube is saved on this device only.\n\n\
+                 You're using {}/{} Cubes on the {} plan for this network. \
+                 Upgrade your Connect account, or delete a Cube you no longer \
+                 need, and this one will sync automatically.",
+                self.total_cube_count(),
+                self.cube_limit(),
+                self.account_tier.display_name(),
+            ));
+        }
+        Some(format!(
+            "Connect refused to register this Cube, so it is saved on this \
+             device only.\n\n{reason}"
+        ))
     }
 
     /// Whether this screen has any Cubes to list — local ones, or remote ones
@@ -1183,6 +1232,7 @@ impl Home {
                         resp.uuid,
                         resp.id
                     );
+                    self.cube_sync_errors.remove(&cube_id);
                     let network_dir = self.datadir_path.network_directory(network);
                     Task::perform(
                         async move {
@@ -1199,9 +1249,42 @@ impl Home {
                         cube_id,
                         e
                     );
+                    // Keep the reason: this is the only signal the Cubes list
+                    // has that the Cube is not merely mid-sync.
+                    self.cube_sync_errors.insert(cube_id, e);
                     Task::none()
                 }
             },
+            Message::CatchUpSyncFinished(Err(())) => {
+                // The round never ran, so it has no verdict to give. Keep the
+                // reasons already on record: wiping them here would drop a
+                // Cube back to "it will sync automatically in a moment" — the
+                // false promise this whole map exists to replace — on nothing
+                // more than a flaky `list_cubes` during a sign-in.
+                Task::none()
+            }
+            Message::CatchUpSyncFinished(Ok(outcomes)) => {
+                // Apply per Cube rather than replacing the map. A Cube the
+                // round synced loses its reason (a slot freed up, a rename went
+                // through); one it could not sync gains the current one. A Cube
+                // the round never examined — created after it snapshotted the
+                // unsynced set, and refused in the meantime — keeps what
+                // `CubeRemoteRegistered` recorded, which a blanket clear would
+                // have erased.
+                for (cube_id, outcome) in outcomes {
+                    match outcome {
+                        Some(reason) => {
+                            self.cube_sync_errors.insert(cube_id, reason);
+                        }
+                        None => {
+                            self.cube_sync_errors.remove(&cube_id);
+                        }
+                    }
+                }
+                // Successes wrote `remote_synced` to disk; reload so the list
+                // reflects them.
+                self.reload()
+            }
             Message::CubeLimitsLoaded(result) => {
                 match result {
                     Ok(limits) => {
@@ -2229,6 +2312,16 @@ impl Home {
                     self.has_stored_session = now_authenticated;
                     if !now_authenticated {
                         self.server_cube_limit = None;
+                        // Refusal reasons are account-scoped: they say what
+                        // *that* account's server said about a Cube. The local
+                        // Cube outlives the sign-out, so leaving them keyed by
+                        // its id would show the previous account's refusal —
+                        // rendered with the new account's tier and limits — to
+                        // someone who may have slots to spare. Nothing else
+                        // clears them promptly: the next catch-up sync only
+                        // replaces them if it completes, and an aborted round
+                        // deliberately keeps what it already has.
+                        self.cube_sync_errors.clear();
                         self.remote_cubes.clear();
                         // Clearing alone isn't enough: a fetch issued for the
                         // account we just left is still in flight and would
@@ -2340,6 +2433,12 @@ impl Home {
                         if !unsynced.is_empty() {
                             tasks.push(Task::perform(
                                 async move {
+                                    // One entry per Cube this round examines,
+                                    // so the handler can say *why* a Cube is
+                                    // still unsynced instead of promising a
+                                    // sync that will never land — and can leave
+                                    // Cubes outside this round alone.
+                                    let mut outcomes: Vec<(String, Option<String>)> = Vec::new();
                                     // Fetch all server cubes once — bail if this
                                     // fails so we don't re-register everything.
                                     let server_cubes = match client.list_cubes().await {
@@ -2350,14 +2449,20 @@ impl Home {
                                                  failed to list server cubes: {}",
                                                 e
                                             );
-                                            return;
+                                            // Aborting says nothing about any
+                                            // individual Cube — reported as a
+                                            // distinct outcome so the handler
+                                            // keeps what it already knows
+                                            // instead of reading an empty list
+                                            // as "all clear".
+                                            return Err(());
                                         }
                                     };
 
                                     for cube in &unsynced {
                                         let server_match =
                                             server_cubes.iter().find(|sc| sc.uuid == cube.id);
-                                        let ok = match server_match {
+                                        let outcome = match server_match {
                                             Some(sc) => {
                                                 // Already registered — re-sync if the name differs
                                                 // or this device can *upgrade* the Vault flag
@@ -2385,9 +2490,10 @@ impl Home {
                                                     client
                                                         .update_cube(&sc.id.to_string(), req)
                                                         .await
-                                                        .is_ok()
+                                                        .map(|_| ())
+                                                        .map_err(|e| e.to_string())
                                                 } else {
-                                                    true
+                                                    Ok(())
                                                 }
                                             }
                                             None => {
@@ -2402,16 +2508,34 @@ impl Home {
                                                         .is_some()
                                                         .then_some(true),
                                                 };
-                                                client.register_cube(req).await.is_ok()
+                                                client
+                                                    .register_cube(req)
+                                                    .await
+                                                    .map(|_| ())
+                                                    .map_err(|e| e.to_string())
                                             }
                                         };
-                                        if ok {
-                                            let nd = datadir.network_directory(cube.network);
-                                            let _ = settings::mark_cube_synced(&nd, &cube.id).await;
+                                        match outcome {
+                                            Ok(()) => {
+                                                let nd = datadir.network_directory(cube.network);
+                                                let _ =
+                                                    settings::mark_cube_synced(&nd, &cube.id).await;
+                                                outcomes.push((cube.id.clone(), None));
+                                            }
+                                            Err(e) => {
+                                                log::warn!(
+                                                    "[LAUNCHER] Catch-up sync failed for cube \
+                                                     {}: {}",
+                                                    cube.id,
+                                                    e
+                                                );
+                                                outcomes.push((cube.id.clone(), Some(e)));
+                                            }
                                         }
                                     }
+                                    Ok(outcomes)
                                 },
-                                |_| Message::View(ViewMessage::Check),
+                                Message::CatchUpSyncFinished,
                             ));
                         }
                     }
@@ -3397,7 +3521,12 @@ impl Home {
                                             cubes.iter().enumerate().fold(
                                                 Column::new().spacing(20),
                                                 |col, (i, cube)| {
-                                                    col.push(cubes_list_item(cube, i, signed_in))
+                                                    col.push(cubes_list_item(
+                                                        cube,
+                                                        i,
+                                                        signed_in,
+                                                        self.cube_sync_hint(cube),
+                                                    ))
                                                 },
                                             );
                                         // Show remote-only cubes (on server but not local)
@@ -4191,34 +4320,43 @@ fn cubes_list_item<'a>(
     cube: &'a CubeSettings,
     i: usize,
     signed_in: bool,
+    sync_error: Option<String>,
 ) -> Element<'a, ViewMessage> {
     // Single tri-state cube icon (Phase 1, duress mode): the Cube's
     // relationship to Connect — Sovereign (outline) → Registered (filled,
     // half-tone) → Backed up (filled, full colour) — so users can tell at a
     // glance whether a Cube has a recovery kit before they're told what a
     // duress wipe costs. The signed-in-but-not-yet-synced case keeps its
-    // distinct "mid-sync" wording (catch-up sync registers it on reload).
-    let (sync_icon, sync_hint): (Element<'a, ViewMessage>, &'static str) =
-        match cube.connect_state() {
-            CubeConnectState::BackedUp => (
-                icon::cube_icon().style(theme::text::success).into(),
-                "Backed up to Connect — recovery kit ready",
+    // distinct "mid-sync" wording (catch-up sync registers it on reload) —
+    // unless the server has already refused it, in which case `sync_error`
+    // carries the reason and the icon turns warning-coloured, because no
+    // amount of waiting is going to sync this Cube.
+    let (sync_icon, sync_hint): (Element<'a, ViewMessage>, String) = match cube.connect_state() {
+        CubeConnectState::BackedUp => (
+            icon::cube_icon().style(theme::text::success).into(),
+            "Backed up to Connect — recovery kit ready".to_string(),
+        ),
+        CubeConnectState::Registered => (
+            icon::cube_icon().style(theme::text::secondary).into(),
+            "Registered to Connect — no recovery kit".to_string(),
+        ),
+        CubeConnectState::Sovereign if signed_in => match sync_error {
+            Some(reason) => (
+                icon::cube_outline_icon().style(theme::text::warning).into(),
+                reason,
             ),
-            CubeConnectState::Registered => (
-                icon::cube_icon().style(theme::text::secondary).into(),
-                "Registered to Connect — no recovery kit",
-            ),
-            CubeConnectState::Sovereign if signed_in => (
+            None => (
                 icon::cube_outline_icon()
                     .style(theme::text::secondary)
                     .into(),
-                "Not yet synced to Connect. It will sync automatically in a moment.",
+                "Not yet synced to Connect. It will sync automatically in a moment.".to_string(),
             ),
-            CubeConnectState::Sovereign => (
-                icon::cube_outline_icon().style(theme::text::warning).into(),
-                "Sovereign — local only",
-            ),
-        };
+        },
+        CubeConnectState::Sovereign => (
+            icon::cube_outline_icon().style(theme::text::warning).into(),
+            "Sovereign — local only".to_string(),
+        ),
+    };
     let sync_indicator = iced_tooltip::Tooltip::new(
         sync_icon,
         Container::new(p2_regular(sync_hint))
@@ -4916,6 +5054,19 @@ pub enum Message {
         network: Network,
         result: Result<CubeResponse, String>,
     },
+    /// Catch-up sync finished.
+    ///
+    /// `Ok` carries one `(cube_id, outcome)` entry per Cube the round actually
+    /// examined — `None` where it synced, `Some(reason)` where the server
+    /// refused it. It deliberately speaks for *only* those Cubes: the round
+    /// works from a snapshot of the unsynced set taken when it started, so a
+    /// Cube created and refused while it was running is not in it and must keep
+    /// the reason `CubeRemoteRegistered` recorded.
+    ///
+    /// `Err` means the round never got that far (the initial `list_cubes`
+    /// failed), so it says nothing about any Cube at all and must not be read
+    /// as "nothing is wrong".
+    CatchUpSyncFinished(Result<Vec<(String, Option<String>)>, ()>),
     /// Result of fetching cube limits from the Connect API.
     CubeLimitsLoaded(Result<CubeLimitsResponse, String>),
     /// Result of updating a cube on the remote Connect API.
@@ -6247,6 +6398,38 @@ mod tests {
         );
     }
 
+    /// A refusal reason describes what *one account's* server said. The local
+    /// Cube outlives the sign-out, so a reason left behind would be shown under
+    /// the next account — rendered with that account's tier and limits — to
+    /// someone who may have slots to spare.
+    #[test]
+    fn a_refusal_reason_does_not_follow_the_local_cube_into_the_next_account() {
+        use crate::app::view::ConnectAccountMessage;
+
+        let mut home = signed_in_home();
+        let local = cube("local-a", "Local A", Network::Bitcoin);
+        home.state = State::Cubes {
+            cubes: vec![local.clone()],
+            create_cube: false,
+        };
+        home.cube_sync_errors.insert(
+            local.id.clone(),
+            "Cube limit reached for this network".to_string(),
+        );
+
+        // Real logout path — the branch that already clears the rest of the
+        // account-scoped state.
+        let _ = home.update(Message::View(ViewMessage::ConnectAccount(
+            ConnectAccountMessage::LogOut,
+        )));
+        assert!(!home.connect_account.is_authenticated());
+
+        assert!(
+            home.cube_sync_hint(&local).is_none(),
+            "the previous account's refusal must not describe this Cube under the next one"
+        );
+    }
+
     #[test]
     fn rename_modal_edits_and_cancels_without_touching_disk() {
         let mut home = home();
@@ -6428,16 +6611,177 @@ mod tests {
         );
     }
 
+    fn registered_cube_response(uuid: &str) -> CubeResponse {
+        CubeResponse {
+            id: 193,
+            uuid: uuid.to_string(),
+            name: "Local A".to_string(),
+            network: "bitcoin".to_string(),
+            lightning_address: None,
+            status: "active".to_string(),
+            has_recovery_kit: false,
+            has_vault: None,
+            encryption_pubkey: None,
+            members: Vec::new(),
+            pending_invites: Vec::new(),
+            vault: None,
+        }
+    }
+
+    /// The client-side limit check is advisory; the server is authoritative and
+    /// can refuse a Cube that was already created locally. When it does, the
+    /// Cubes list must stop promising a sync that will never happen.
+    #[test]
+    fn a_refused_cube_reports_the_servers_reason_not_a_promise_to_sync() {
+        let mut home = signed_in_home();
+        let local = cube("local-a", "Local A", Network::Bitcoin);
+        home.state = State::Cubes {
+            cubes: vec![local.clone()],
+            create_cube: false,
+        };
+        home.remote_cubes = vec![remote_cube("remote-a", "Remote A", Network::Bitcoin)];
+        home.server_cube_limit = Some(2);
+
+        // Nothing has failed yet, so the Cube genuinely is mid-sync.
+        assert!(home.cube_sync_hint(&local).is_none());
+
+        // The limit refusal is expanded into copy that says where the user
+        // stands and what to do about it — the bare server string does not.
+        home.cube_sync_errors.insert(
+            local.id.clone(),
+            "Cube limit reached for this network".to_string(),
+        );
+        let hint = home
+            .cube_sync_hint(&local)
+            .expect("a refusal must be shown");
+        assert!(hint.contains("Out of Cube slots"), "{}", hint);
+        assert!(hint.contains("2/2"), "{}", hint);
+        assert!(hint.contains("Upgrade"), "{}", hint);
+
+        // Any other refusal is surfaced verbatim rather than mislabelled.
+        home.cube_sync_errors
+            .insert(local.id.clone(), "Network unreachable".to_string());
+        let hint = home
+            .cube_sync_hint(&local)
+            .expect("a refusal must be shown");
+        assert!(hint.contains("Network unreachable"), "{}", hint);
+        assert!(!hint.contains("Out of Cube slots"), "{}", hint);
+    }
+
+    /// The catch-up sync speaks for the Cubes it examined, and only those: a
+    /// Cube it synced loses its reason, one it could not sync gains the current
+    /// one, and a Cube outside the round is left alone. That last part matters
+    /// because the round works from a snapshot taken when it started — a Cube
+    /// created and refused while it was running is not in it, and a blanket
+    /// replace would erase what `CubeRemoteRegistered` had just recorded.
+    #[test]
+    fn catch_up_sync_results_apply_only_to_the_cubes_it_examined() {
+        let mut home = signed_in_home();
+        home.cube_sync_errors
+            .insert("went-through".to_string(), "Cube limit reached".to_string());
+        home.cube_sync_errors.insert(
+            "refused-mid-round".to_string(),
+            "Cube limit reached for this network".to_string(),
+        );
+
+        let _ = home.update(Message::CatchUpSyncFinished(Ok(vec![
+            ("went-through".to_string(), None),
+            (
+                "still-stuck".to_string(),
+                Some("Cube limit reached for this network".to_string()),
+            ),
+        ])));
+
+        assert!(
+            !home.cube_sync_errors.contains_key("went-through"),
+            "a Cube the round synced must lose its stale reason"
+        );
+        assert_eq!(
+            home.cube_sync_errors.get("still-stuck").map(String::as_str),
+            Some("Cube limit reached for this network"),
+        );
+        assert_eq!(
+            home.cube_sync_errors
+                .get("refused-mid-round")
+                .map(String::as_str),
+            Some("Cube limit reached for this network"),
+            "a Cube created after the round snapshotted the unsynced set must \
+             keep the reason its own registration recorded",
+        );
+    }
+
+    /// A sync that never ran has no verdict to give. Wiping the recorded
+    /// reasons on an aborted round would drop a refused Cube back to "it will
+    /// sync automatically in a moment" — the false promise the map replaces —
+    /// on nothing more than a flaky `list_cubes` during sign-in.
+    #[test]
+    fn an_aborted_catch_up_sync_keeps_what_is_already_known() {
+        let mut home = signed_in_home();
+        home.cube_sync_errors.insert(
+            "refused".to_string(),
+            "Cube limit reached for this network".to_string(),
+        );
+
+        let _ = home.update(Message::CatchUpSyncFinished(Err(())));
+
+        assert_eq!(
+            home.cube_sync_errors.get("refused").map(String::as_str),
+            Some("Cube limit reached for this network"),
+            "an aborted round must not be read as \"nothing is wrong\"",
+        );
+
+        // A round that *did* examine it still gets the last word.
+        let _ = home.update(Message::CatchUpSyncFinished(Ok(vec![(
+            "refused".to_string(),
+            None,
+        )])));
+        assert!(
+            home.cube_sync_errors.is_empty(),
+            "a completed round that synced the Cube must clear its reason"
+        );
+    }
+
+    /// A successful registration clears the reason; a failed one records it.
+    #[test]
+    fn remote_registration_outcomes_track_the_sync_reason() {
+        let dir = tmp_datadir("sync-reason");
+        let mut home = signed_in_home_with_datadir(&dir);
+
+        let _ = home.update(Message::CubeRemoteRegistered {
+            cube_id: "c1".to_string(),
+            network: Network::Bitcoin,
+            result: Err("Cube limit reached for this network".to_string()),
+        });
+        assert_eq!(
+            home.cube_sync_errors.get("c1").map(String::as_str),
+            Some("Cube limit reached for this network"),
+        );
+
+        let _ = home.update(Message::CubeRemoteRegistered {
+            cube_id: "c1".to_string(),
+            network: Network::Bitcoin,
+            result: Ok(registered_cube_response("c1")),
+        });
+        assert!(
+            !home.cube_sync_errors.contains_key("c1"),
+            "a Cube that registered must not keep showing a warning"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn pure_home_view_helpers_build_for_local_remote_and_form_variants() {
         let mut local = cube("local-a", "Local A", Network::Bitcoin);
-        let _ = cubes_list_item(&local, 0, false);
+        let _ = cubes_list_item(&local, 0, false, None);
+        // Sovereign + signed in, with the server's refusal recorded: the
+        // warning variant of the sync tooltip.
+        let _ = cubes_list_item(&local, 0, true, Some("Out of Cube slots".to_string()));
 
         local.remote_synced = true;
-        let _ = cubes_list_item(&local, 1, true);
+        let _ = cubes_list_item(&local, 1, true, None);
 
         local.recovery_kit_last_backed_up_descriptor_fingerprint = Some("hash".to_string());
-        let _ = cubes_list_item(&local, 2, true);
+        let _ = cubes_list_item(&local, 2, true, None);
 
         let mut remote = remote_cube("remote-a", "Remote A", Network::Bitcoin);
         let _ = remote_cube_list_item(&remote);

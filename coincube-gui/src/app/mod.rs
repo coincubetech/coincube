@@ -3990,7 +3990,9 @@ impl App {
                     Task::none()
                 } else if self.panels.connect.account.is_authenticated() {
                     self.panels.connect.ensure_cube_registered()
-                } else {
+                } else if let Some(generation) =
+                    self.panels.connect.cube.begin_external_registration()
+                {
                     let datadir = datadir.clone();
                     let net_str = settings::network_to_api_string(network);
                     let cube_name = self.cube_settings.name.clone();
@@ -4034,12 +4036,21 @@ impl App {
                                 .await
                                 .map_err(|e| e.to_string())
                         },
-                        |r| {
+                        move |r| {
                             Message::View(view::Message::ConnectCube(
-                                view::ConnectCubeMessage::CubeRegistered(r),
+                                view::ConnectCubeMessage::CubeRegistered {
+                                    generation,
+                                    result: r,
+                                },
                             ))
                         },
                     )
+                } else {
+                    // A registration is already in flight — claimed either by
+                    // this branch on an earlier press or by the panel. Skip the
+                    // duplicate; the bootstrap below still runs, which is the
+                    // part a second press is actually asking for.
+                    Task::none()
                 };
                 let bootstrap = Task::perform(
                     async move {

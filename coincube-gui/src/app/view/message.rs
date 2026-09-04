@@ -1931,7 +1931,13 @@ pub enum ConnectCubeMessage {
     /// divergence that needs the user's attention.
     LightningAddressReconciled(crate::app::state::connect::cube::ReconcileOutcome),
     /// Result of registering the cube with the backend (POST /connect/cubes).
-    CubeRegistered(Result<crate::services::coincube::CubeResponse, String>),
+    /// `generation` stamps the authenticated session the attempt was issued
+    /// under, so a reply that outlives a sign-out can be discarded rather than
+    /// applied to the next account (see `ConnectCubePanel::session_generation`).
+    CubeRegistered {
+        generation: u64,
+        result: Result<crate::services::coincube::CubeResponse, String>,
+    },
     /// Retry a previously failed cube registration.
     RetryRegistration,
     /// Outcome of publishing the Cube's Connect-blinding encryption pubkey
