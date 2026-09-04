@@ -3990,7 +3990,9 @@ impl App {
                     Task::none()
                 } else if self.panels.connect.account.is_authenticated() {
                     self.panels.connect.ensure_cube_registered()
-                } else {
+                } else if let Some(generation) =
+                    self.panels.connect.cube.begin_external_registration()
+                {
                     let datadir = datadir.clone();
                     let net_str = settings::network_to_api_string(network);
                     let cube_name = self.cube_settings.name.clone();
@@ -4004,10 +4006,6 @@ impl App {
                         self.cube_settings.vault_wallet_id.is_some().then_some(true);
                     let cube_uuid = cube_uuid.clone();
                     let registration_email = expected_email.clone();
-                    // Stamp it with the panel's current session so a reply that
-                    // outlives a sign-out is discarded, exactly as the panel's
-                    // own registrations are.
-                    let generation = self.panels.connect.cube.session_generation();
                     Task::perform(
                         async move {
                             use crate::services::coincube::{CoincubeClient, RegisterCubeRequest};
@@ -4047,6 +4045,12 @@ impl App {
                             ))
                         },
                     )
+                } else {
+                    // A registration is already in flight — claimed either by
+                    // this branch on an earlier press or by the panel. Skip the
+                    // duplicate; the bootstrap below still runs, which is the
+                    // part a second press is actually asking for.
+                    Task::none()
                 };
                 let bootstrap = Task::perform(
                     async move {

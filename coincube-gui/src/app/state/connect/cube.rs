@@ -394,6 +394,29 @@ impl ConnectCubePanel {
         self.session_generation
     }
 
+    /// Claim the in-flight registration guard on behalf of a caller that issues
+    /// the request itself, returning the generation to stamp it with — or
+    /// `None` when an attempt is already running and this one should be
+    /// dropped.
+    ///
+    /// `App::EnsureConnectReady` registers directly from restored `connect.json`
+    /// tokens when this panel has no client of its own, so it cannot go through
+    /// [`Self::register_cube`] and would otherwise bypass its guard. Its trigger
+    /// is a modal button that reappears while the bootstrap is still running, so
+    /// a second press lands mid-flight: both POSTs carry the same Cube UUID, and
+    /// the server answers the loser with an error that would overwrite the
+    /// winner's success with a `registration_error` on screen.
+    ///
+    /// The reply clears the guard through the normal `CubeRegistered` path, on
+    /// either arm, exactly as a panel-issued registration does.
+    pub fn begin_external_registration(&mut self) -> Option<u64> {
+        if self.registering {
+            return None;
+        }
+        self.registering = true;
+        Some(self.session_generation)
+    }
+
     /// Returns the server-side cube ID as a string for API paths.
     fn api_cube_id(&self) -> Option<String> {
         self.server_cube_id.map(|id| id.to_string())
@@ -2170,6 +2193,41 @@ mod tests {
         });
         assert_eq!(panel.server_cube_id, Some(42));
         assert!(!panel.registering);
+    }
+
+    /// `App::EnsureConnectReady` issues its own registration when this panel has
+    /// no client, so it claims the same guard rather than running alongside a
+    /// panel-issued attempt: both POSTs carry one Cube UUID, and the server
+    /// answers the loser with an error that would overwrite the winner's
+    /// success on screen.
+    #[test]
+    fn an_externally_issued_registration_shares_the_in_flight_guard() {
+        let mut panel = panel();
+
+        // The out-of-panel caller claims it first: a panel trigger arriving
+        // while that request is in flight is dropped.
+        let generation = panel
+            .begin_external_registration()
+            .expect("nothing in flight yet");
+        assert_eq!(generation, panel.session_generation());
+        panel.set_client(CoincubeClient::new());
+        assert!(
+            iced_runtime::task::into_stream(panel.register_cube()).is_none(),
+            "the panel must not register alongside an externally issued attempt"
+        );
+
+        // ... and a second external attempt is dropped too.
+        assert!(
+            panel.begin_external_registration().is_none(),
+            "a second press must not fire a duplicate registration"
+        );
+
+        // The reply releases the guard through the normal path, on either arm.
+        let _ = panel.update_message(ConnectCubeMessage::CubeRegistered {
+            generation,
+            result: Err("register failed".to_string()),
+        });
+        assert!(panel.begin_external_registration().is_some());
     }
 
     #[test]
