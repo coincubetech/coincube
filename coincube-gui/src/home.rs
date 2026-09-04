@@ -1255,13 +1255,32 @@ impl Home {
                     Task::none()
                 }
             },
-            Message::CatchUpSyncFinished(failures) => {
-                // The sync just spoke for every unsynced Cube it looked at, so
-                // clear the whole map before recording this round's failures —
-                // otherwise a Cube that has since succeeded (a slot freed up, a
-                // rename went through) would keep showing a stale reason.
-                self.cube_sync_errors.clear();
-                self.cube_sync_errors.extend(failures);
+            Message::CatchUpSyncFinished(Err(())) => {
+                // The round never ran, so it has no verdict to give. Keep the
+                // reasons already on record: wiping them here would drop a
+                // Cube back to "it will sync automatically in a moment" — the
+                // false promise this whole map exists to replace — on nothing
+                // more than a flaky `list_cubes` during a sign-in.
+                Task::none()
+            }
+            Message::CatchUpSyncFinished(Ok(outcomes)) => {
+                // Apply per Cube rather than replacing the map. A Cube the
+                // round synced loses its reason (a slot freed up, a rename went
+                // through); one it could not sync gains the current one. A Cube
+                // the round never examined — created after it snapshotted the
+                // unsynced set, and refused in the meantime — keeps what
+                // `CubeRemoteRegistered` recorded, which a blanket clear would
+                // have erased.
+                for (cube_id, outcome) in outcomes {
+                    match outcome {
+                        Some(reason) => {
+                            self.cube_sync_errors.insert(cube_id, reason);
+                        }
+                        None => {
+                            self.cube_sync_errors.remove(&cube_id);
+                        }
+                    }
+                }
                 // Successes wrote `remote_synced` to disk; reload so the list
                 // reflects them.
                 self.reload()
@@ -2293,6 +2312,16 @@ impl Home {
                     self.has_stored_session = now_authenticated;
                     if !now_authenticated {
                         self.server_cube_limit = None;
+                        // Refusal reasons are account-scoped: they say what
+                        // *that* account's server said about a Cube. The local
+                        // Cube outlives the sign-out, so leaving them keyed by
+                        // its id would show the previous account's refusal —
+                        // rendered with the new account's tier and limits — to
+                        // someone who may have slots to spare. Nothing else
+                        // clears them promptly: the next catch-up sync only
+                        // replaces them if it completes, and an aborted round
+                        // deliberately keeps what it already has.
+                        self.cube_sync_errors.clear();
                         self.remote_cubes.clear();
                         // Clearing alone isn't enough: a fetch issued for the
                         // account we just left is still in flight and would
@@ -2404,13 +2433,14 @@ impl Home {
                         if !unsynced.is_empty() {
                             tasks.push(Task::perform(
                                 async move {
+                                    // One entry per Cube this round examines,
+                                    // so the handler can say *why* a Cube is
+                                    // still unsynced instead of promising a
+                                    // sync that will never land — and can leave
+                                    // Cubes outside this round alone.
+                                    let mut outcomes: Vec<(String, Option<String>)> = Vec::new();
                                     // Fetch all server cubes once — bail if this
                                     // fails so we don't re-register everything.
-                                    // Per-Cube failures, reported back so the
-                                    // Cubes list can say *why* a Cube is still
-                                    // unsynced instead of promising a sync that
-                                    // will never land.
-                                    let mut failures: Vec<(String, String)> = Vec::new();
                                     let server_cubes = match client.list_cubes().await {
                                         Ok(cubes) => cubes,
                                         Err(e) => {
@@ -2420,10 +2450,12 @@ impl Home {
                                                 e
                                             );
                                             // Aborting says nothing about any
-                                            // individual Cube, so report no
-                                            // failures rather than blaming all
-                                            // of them for one list call.
-                                            return failures;
+                                            // individual Cube — reported as a
+                                            // distinct outcome so the handler
+                                            // keeps what it already knows
+                                            // instead of reading an empty list
+                                            // as "all clear".
+                                            return Err(());
                                         }
                                     };
 
@@ -2488,6 +2520,7 @@ impl Home {
                                                 let nd = datadir.network_directory(cube.network);
                                                 let _ =
                                                     settings::mark_cube_synced(&nd, &cube.id).await;
+                                                outcomes.push((cube.id.clone(), None));
                                             }
                                             Err(e) => {
                                                 log::warn!(
@@ -2496,11 +2529,11 @@ impl Home {
                                                     cube.id,
                                                     e
                                                 );
-                                                failures.push((cube.id.clone(), e));
+                                                outcomes.push((cube.id.clone(), Some(e)));
                                             }
                                         }
                                     }
-                                    failures
+                                    Ok(outcomes)
                                 },
                                 Message::CatchUpSyncFinished,
                             ));
@@ -5021,9 +5054,19 @@ pub enum Message {
         network: Network,
         result: Result<CubeResponse, String>,
     },
-    /// Catch-up sync finished: `(cube_id, reason)` for each Cube the server
-    /// refused. An empty vec means every unsynced Cube went through.
-    CatchUpSyncFinished(Vec<(String, String)>),
+    /// Catch-up sync finished.
+    ///
+    /// `Ok` carries one `(cube_id, outcome)` entry per Cube the round actually
+    /// examined — `None` where it synced, `Some(reason)` where the server
+    /// refused it. It deliberately speaks for *only* those Cubes: the round
+    /// works from a snapshot of the unsynced set taken when it started, so a
+    /// Cube created and refused while it was running is not in it and must keep
+    /// the reason `CubeRemoteRegistered` recorded.
+    ///
+    /// `Err` means the round never got that far (the initial `list_cubes`
+    /// failed), so it says nothing about any Cube at all and must not be read
+    /// as "nothing is wrong".
+    CatchUpSyncFinished(Result<Vec<(String, Option<String>)>, ()>),
     /// Result of fetching cube limits from the Connect API.
     CubeLimitsLoaded(Result<CubeLimitsResponse, String>),
     /// Result of updating a cube on the remote Connect API.
@@ -6355,6 +6398,38 @@ mod tests {
         );
     }
 
+    /// A refusal reason describes what *one account's* server said. The local
+    /// Cube outlives the sign-out, so a reason left behind would be shown under
+    /// the next account — rendered with that account's tier and limits — to
+    /// someone who may have slots to spare.
+    #[test]
+    fn a_refusal_reason_does_not_follow_the_local_cube_into_the_next_account() {
+        use crate::app::view::ConnectAccountMessage;
+
+        let mut home = signed_in_home();
+        let local = cube("local-a", "Local A", Network::Bitcoin);
+        home.state = State::Cubes {
+            cubes: vec![local.clone()],
+            create_cube: false,
+        };
+        home.cube_sync_errors.insert(
+            local.id.clone(),
+            "Cube limit reached for this network".to_string(),
+        );
+
+        // Real logout path — the branch that already clears the rest of the
+        // account-scoped state.
+        let _ = home.update(Message::View(ViewMessage::ConnectAccount(
+            ConnectAccountMessage::LogOut,
+        )));
+        assert!(!home.connect_account.is_authenticated());
+
+        assert!(
+            home.cube_sync_hint(&local).is_none(),
+            "the previous account's refusal must not describe this Cube under the next one"
+        );
+    }
+
     #[test]
     fn rename_modal_edits_and_cancels_without_touching_disk() {
         let mut home = home();
@@ -6593,27 +6668,76 @@ mod tests {
         assert!(!hint.contains("Out of Cube slots"), "{}", hint);
     }
 
-    /// The catch-up sync speaks for every unsynced Cube it examined, so its
-    /// result replaces the recorded reasons rather than adding to them —
-    /// otherwise a Cube that has since gone through keeps a stale warning.
+    /// The catch-up sync speaks for the Cubes it examined, and only those: a
+    /// Cube it synced loses its reason, one it could not sync gains the current
+    /// one, and a Cube outside the round is left alone. That last part matters
+    /// because the round works from a snapshot taken when it started — a Cube
+    /// created and refused while it was running is not in it, and a blanket
+    /// replace would erase what `CubeRemoteRegistered` had just recorded.
     #[test]
-    fn catch_up_sync_results_replace_the_recorded_reasons() {
+    fn catch_up_sync_results_apply_only_to_the_cubes_it_examined() {
         let mut home = signed_in_home();
         home.cube_sync_errors
-            .insert("gone".to_string(), "Cube limit reached".to_string());
-
-        let _ = home.update(Message::CatchUpSyncFinished(vec![(
-            "still-stuck".to_string(),
+            .insert("went-through".to_string(), "Cube limit reached".to_string());
+        home.cube_sync_errors.insert(
+            "refused-mid-round".to_string(),
             "Cube limit reached for this network".to_string(),
-        )]));
+        );
+
+        let _ = home.update(Message::CatchUpSyncFinished(Ok(vec![
+            ("went-through".to_string(), None),
+            (
+                "still-stuck".to_string(),
+                Some("Cube limit reached for this network".to_string()),
+            ),
+        ])));
 
         assert!(
-            !home.cube_sync_errors.contains_key("gone"),
-            "a Cube the sync no longer reports must lose its stale reason"
+            !home.cube_sync_errors.contains_key("went-through"),
+            "a Cube the round synced must lose its stale reason"
         );
         assert_eq!(
             home.cube_sync_errors.get("still-stuck").map(String::as_str),
             Some("Cube limit reached for this network"),
+        );
+        assert_eq!(
+            home.cube_sync_errors
+                .get("refused-mid-round")
+                .map(String::as_str),
+            Some("Cube limit reached for this network"),
+            "a Cube created after the round snapshotted the unsynced set must \
+             keep the reason its own registration recorded",
+        );
+    }
+
+    /// A sync that never ran has no verdict to give. Wiping the recorded
+    /// reasons on an aborted round would drop a refused Cube back to "it will
+    /// sync automatically in a moment" — the false promise the map replaces —
+    /// on nothing more than a flaky `list_cubes` during sign-in.
+    #[test]
+    fn an_aborted_catch_up_sync_keeps_what_is_already_known() {
+        let mut home = signed_in_home();
+        home.cube_sync_errors.insert(
+            "refused".to_string(),
+            "Cube limit reached for this network".to_string(),
+        );
+
+        let _ = home.update(Message::CatchUpSyncFinished(Err(())));
+
+        assert_eq!(
+            home.cube_sync_errors.get("refused").map(String::as_str),
+            Some("Cube limit reached for this network"),
+            "an aborted round must not be read as \"nothing is wrong\"",
+        );
+
+        // A round that *did* examine it still gets the last word.
+        let _ = home.update(Message::CatchUpSyncFinished(Ok(vec![(
+            "refused".to_string(),
+            None,
+        )])));
+        assert!(
+            home.cube_sync_errors.is_empty(),
+            "a completed round that synced the Cube must clear its reason"
         );
     }
 

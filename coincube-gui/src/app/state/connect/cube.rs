@@ -184,6 +184,21 @@ pub struct ConnectCubePanel {
     /// registering. The client's 20s request timeout is what guarantees the
     /// response — and so the clear — always arrives.
     pub(super) registering: bool,
+    /// Which authenticated session the in-flight registration belongs to.
+    /// Bumped by [`ConnectCubePanel::clear_client`], i.e. on every sign-out or
+    /// account switch.
+    ///
+    /// A registration issued under one account can land after the user has
+    /// signed into another — nothing aborts the request, and the reply is a
+    /// plain message. Adopting its `server_cube_id` would name a row in the
+    /// *previous* account: every follow-up it triggers (encryption pubkey,
+    /// vault fingerprint, member reconcile, avatar) would then be aimed at a
+    /// row this session's token cannot touch, and, worse,
+    /// `ensure_cube_registered`'s `server_cube_id.is_some()` short-circuit
+    /// would stop the new account's Cube from ever registering — stuck until
+    /// relaunch. So the completion handler drops any result whose generation
+    /// no longer matches.
+    pub(super) session_generation: u64,
     // Lightning Address
     pub lightning_address: Option<LightningAddress>,
     pub ln_username_input: String,
@@ -259,6 +274,7 @@ impl ConnectCubePanel {
             server_cube_id: None,
             registration_error: None,
             registering: false,
+            session_generation: 0,
             lightning_address: None,
             ln_username_input: String::new(),
             ln_username_available: None,
@@ -339,6 +355,13 @@ impl ConnectCubePanel {
         // reconciled against *this* server cube row", which dies with the id.
         self.vault_members_reconciled = false;
         self.registration_error = None;
+        // Retire any attempt issued under the session that just ended: its
+        // reply, when it lands, must not be mistaken for this one's. Clearing
+        // the latch here (rather than waiting for that reply) is what lets the
+        // next account register immediately instead of being silently skipped
+        // for up to the client's 20s request timeout.
+        self.registering = false;
+        self.session_generation = self.session_generation.wrapping_add(1);
         self.lightning_address = None;
         self.ln_username_input.clear();
         self.ln_username_available = None;
@@ -362,6 +385,13 @@ impl ConnectCubePanel {
         self.avatar_image_cache.clear();
         self.avatar_draft = AvatarUserTraits::default();
         self.members.clear();
+    }
+
+    /// The current session's registration generation, for callers that issue a
+    /// registration outside this panel and feed the reply back through
+    /// `CubeRegistered` (see `App::EnsureConnectReady`).
+    pub fn session_generation(&self) -> u64 {
+        self.session_generation
     }
 
     /// Returns the server-side cube ID as a string for API paths.
@@ -508,6 +538,7 @@ impl ConnectCubePanel {
             return iced::Task::none();
         }
         self.registering = true;
+        let generation = self.session_generation;
         let req = RegisterCubeRequest {
             uuid: self.cube_uuid.clone(),
             name: self.cube_name.clone(),
@@ -517,9 +548,12 @@ impl ConnectCubePanel {
             // reported elsewhere (PLAN-duress-vault-gate PR 3).
             has_vault: self.cube_has_vault.then_some(true),
         };
-        iced::Task::perform(async move { client.register_cube(req).await }, |res| {
+        iced::Task::perform(async move { client.register_cube(req).await }, move |res| {
             Message::View(view::Message::ConnectCube(
-                ConnectCubeMessage::CubeRegistered(res.map_err(|e| e.to_string())),
+                ConnectCubeMessage::CubeRegistered {
+                    generation,
+                    result: res.map_err(|e| e.to_string()),
+                },
             ))
         })
     }
@@ -730,7 +764,21 @@ impl ConnectCubePanel {
 
     pub fn update_message(&mut self, msg: ConnectCubeMessage) -> iced::Task<Message> {
         match msg {
-            ConnectCubeMessage::CubeRegistered(result) => {
+            ConnectCubeMessage::CubeRegistered { generation, result } => {
+                // Belongs to a session that has since ended — see
+                // `session_generation`. Drop it whole: it must not populate
+                // `server_cube_id`, and it must not clear a latch it no longer
+                // owns (the current session may have an attempt of its own in
+                // flight).
+                if generation != self.session_generation {
+                    log::debug!(
+                        "[CONNECT-CUBE] discarding a registration result from a \
+                         previous session (generation {}, now {})",
+                        generation,
+                        self.session_generation,
+                    );
+                    return iced::Task::none();
+                }
                 // Re-arm the trigger regardless of outcome: on success nothing
                 // will call `register_cube` again (`server_cube_id` is set), and
                 // on failure the next trigger is entitled to a fresh attempt.
@@ -1971,7 +2019,10 @@ mod tests {
         panel.vault_descriptor = Some(CoincubeDescriptor::from_str(RECONCILE_DESC).unwrap());
         assert_eq!(panel.server_cube_id, None);
 
-        let _ = panel.update_message(ConnectCubeMessage::CubeRegistered(Ok(registered_cube())));
+        let _ = panel.update_message(ConnectCubeMessage::CubeRegistered {
+            generation: panel.session_generation(),
+            result: Ok(registered_cube()),
+        });
 
         assert_eq!(panel.server_cube_id, Some(42));
         assert!(
@@ -2056,14 +2107,69 @@ mod tests {
 
         // A refusal has to re-arm the guard, not latch the Cube out of ever
         // registering: the reason may well be transient (a slot frees up).
-        let _ = panel.update_message(ConnectCubeMessage::CubeRegistered(Err(
-            "Cube limit reached for this network".to_string(),
-        )));
+        let _ = panel.update_message(ConnectCubeMessage::CubeRegistered {
+            generation: panel.session_generation(),
+            result: Err("Cube limit reached for this network".to_string()),
+        });
         assert!(!panel.registering);
         assert!(
             iced_runtime::task::into_stream(panel.register_cube()).is_some(),
             "the next trigger after a failure must be allowed to retry"
         );
+    }
+
+    /// Signing out mid-registration must not strand the next account. Nothing
+    /// aborts the in-flight request, so its reply arrives after the switch —
+    /// and if it were applied, `server_cube_id` would name a row in the
+    /// *previous* account, which `ensure_cube_registered` then treats as "this
+    /// Cube is already registered" forever.
+    #[test]
+    fn a_registration_does_not_outlive_the_session_that_issued_it() {
+        let mut panel = panel();
+        panel.set_client(CoincubeClient::new());
+
+        let stale = panel.session_generation();
+        let _ = panel.register_cube();
+        assert!(panel.registering);
+
+        // Sign out mid-flight, then sign in as someone else.
+        panel.clear_client();
+        assert!(
+            !panel.registering,
+            "sign-out must release the latch rather than leaving the next \
+             account waiting on a reply it will never accept"
+        );
+        panel.set_client(CoincubeClient::new());
+
+        // The new account registers immediately — it is not blocked by the
+        // attempt the previous session left in flight.
+        assert!(
+            iced_runtime::task::into_stream(panel.register_cube()).is_some(),
+            "the new session must be able to register straight away"
+        );
+
+        // The previous session's reply now lands. It must be discarded whole:
+        // no server cube id, and no clearing of the latch it does not own.
+        let _ = panel.update_message(ConnectCubeMessage::CubeRegistered {
+            generation: stale,
+            result: Ok(registered_cube()),
+        });
+        assert_eq!(
+            panel.server_cube_id, None,
+            "a previous account's cube row must never be adopted by this session"
+        );
+        assert!(
+            panel.registering,
+            "the stale reply must not clear the current attempt's latch"
+        );
+
+        // This session's own reply is applied as normal.
+        let _ = panel.update_message(ConnectCubeMessage::CubeRegistered {
+            generation: panel.session_generation(),
+            result: Ok(registered_cube()),
+        });
+        assert_eq!(panel.server_cube_id, Some(42));
+        assert!(!panel.registering);
     }
 
     #[test]
@@ -2122,9 +2228,10 @@ mod tests {
     fn lightning_address_state_machine_handles_non_network_branches() {
         let mut panel = panel();
 
-        let _ = panel.update_message(ConnectCubeMessage::CubeRegistered(Ok(cube_response(Some(
-            "founder@example.com",
-        )))));
+        let _ = panel.update_message(ConnectCubeMessage::CubeRegistered {
+            generation: panel.session_generation(),
+            result: Ok(cube_response(Some("founder@example.com"))),
+        });
         assert_eq!(panel.server_cube_id, Some(42));
         assert_eq!(
             panel
@@ -2134,9 +2241,10 @@ mod tests {
             Some("founder@example.com")
         );
 
-        let _ = panel.update_message(ConnectCubeMessage::CubeRegistered(Err(
-            "register failed".to_string()
-        )));
+        let _ = panel.update_message(ConnectCubeMessage::CubeRegistered {
+            generation: panel.session_generation(),
+            result: Err("register failed".to_string()),
+        });
         assert_eq!(panel.registration_error.as_deref(), Some("register failed"));
 
         let _ = panel.update_message(ConnectCubeMessage::LnUsernameChanged("Bad$".to_string()));

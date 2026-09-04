@@ -4004,6 +4004,10 @@ impl App {
                         self.cube_settings.vault_wallet_id.is_some().then_some(true);
                     let cube_uuid = cube_uuid.clone();
                     let registration_email = expected_email.clone();
+                    // Stamp it with the panel's current session so a reply that
+                    // outlives a sign-out is discarded, exactly as the panel's
+                    // own registrations are.
+                    let generation = self.panels.connect.cube.session_generation();
                     Task::perform(
                         async move {
                             use crate::services::coincube::{CoincubeClient, RegisterCubeRequest};
@@ -4034,9 +4038,12 @@ impl App {
                                 .await
                                 .map_err(|e| e.to_string())
                         },
-                        |r| {
+                        move |r| {
                             Message::View(view::Message::ConnectCube(
-                                view::ConnectCubeMessage::CubeRegistered(r),
+                                view::ConnectCubeMessage::CubeRegistered {
+                                    generation,
+                                    result: r,
+                                },
                             ))
                         },
                     )
