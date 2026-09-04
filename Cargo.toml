@@ -48,3 +48,14 @@ lto = "thin"
 strip = true
 codegen-units = 1
 panic = "abort"
+
+# Debuginfo for everything built with the dev profile: local `cargo build`, and
+# CI's clippy and test jobs. Full debuginfo across ~1200 dep crates was the bulk
+# of target/debug. Release artifacts go through `--profile minimal` and are
+# untouched. The cost is that panic backtraces lose line numbers inside
+# dependencies; workspace crates keep theirs via `line-tables-only`.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false

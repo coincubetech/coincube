@@ -2578,7 +2578,7 @@ impl Home {
             }
 
             Message::View(ViewMessage::OpenUrl(url)) => {
-                if let Err(e) = open::that_detached(&url) {
+                if let Err(e) = crate::browser::open_url(&url) {
                     log::error!("[LAUNCHER] Error opening '{}': {}", url, e);
                 }
                 Task::none()

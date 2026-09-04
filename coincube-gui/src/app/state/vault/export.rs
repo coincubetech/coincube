@@ -298,7 +298,7 @@ impl VaultExportModal {
             // rather than handed up, because the modal's message type is
             // generic and has no route to the app's `OpenUrl`.
             ImportExportMessage::OpenAdvisoryUrl(url) => {
-                if let Err(e) = open::that_detached(&url) {
+                if let Err(e) = crate::browser::open_url(&url) {
                     tracing::error!("Error opening '{}': {}", url, e);
                 }
             }
