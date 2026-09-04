@@ -501,7 +501,11 @@ impl State for GlobalHome {
         // with coins on every `UpdateDaemonCache`, so any non-zero
         // value is a reliable "daemon has spoken" signal.
         let has_spark = self.spark_backend.is_some();
-        let has_liquid = cache.liquid_gate.show();
+        // Sunset gate AND a Liquid backend on this network: on a testnet cube
+        // the SDK never connects, so a card with live Send/Receive buttons
+        // would be a wallet the user can't actually use.
+        let has_liquid =
+            crate::app::features::liquid_wallet_usable(cache.network, cache.liquid_gate);
         let spark_pending = has_spark && !self.spark_balance_loaded;
         // A gated-off Liquid wallet never loads, so it must not gate the Total
         // Balance placeholder either — otherwise the aggregate would spin
