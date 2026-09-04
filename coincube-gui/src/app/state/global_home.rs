@@ -83,6 +83,33 @@ use crate::app::view::global_home::{
     WalletKind,
 };
 
+/// The (from, to) pair the Transfer flow opens on, given which wallets this
+/// cube actually has. `None` when fewer than two exist — the view's
+/// `transfer_available` already hides the button in that case, so this is a
+/// backstop rather than a reachable state.
+///
+/// Preference order Liquid → Vault → Spark: the historical default was
+/// Liquid→Vault, and taking the first two available preserves that wherever
+/// Liquid is usable while never defaulting a side to a wallet the picker
+/// won't list (Liquid is gated by the sunset flag and has no backend off
+/// mainnet; Spark is mainnet/regtest only).
+pub(crate) fn default_transfer_pair(
+    has_liquid: bool,
+    has_vault: bool,
+    has_spark: bool,
+) -> Option<(WalletKind, WalletKind)> {
+    let available: Vec<WalletKind> = [
+        has_liquid.then_some(WalletKind::Liquid),
+        has_vault.then_some(WalletKind::Vault),
+        has_spark.then_some(WalletKind::Spark),
+    ]
+    .iter()
+    .flatten()
+    .copied()
+    .collect();
+    Some((*available.first()?, *available.get(1)?))
+}
+
 /// Returns `(effective_min_sat, max_sat_opt)` for a given direction.
 ///
 /// Swap-involving legs compose the Transfer-flow floor with Breez's own
@@ -501,7 +528,11 @@ impl State for GlobalHome {
         // with coins on every `UpdateDaemonCache`, so any non-zero
         // value is a reliable "daemon has spoken" signal.
         let has_spark = self.spark_backend.is_some();
-        let has_liquid = cache.liquid_gate.show();
+        // Sunset gate AND a Liquid backend on this network: on a testnet cube
+        // the SDK never connects, so a card with live Send/Receive buttons
+        // would be a wallet the user can't actually use.
+        let has_liquid =
+            crate::app::features::liquid_wallet_usable(cache.network, cache.liquid_gate);
         let spark_pending = has_spark && !self.spark_balance_loaded;
         // A gated-off Liquid wallet never loads, so it must not gate the Total
         // Balance placeholder either — otherwise the aggregate would spin
@@ -713,23 +744,28 @@ impl State for GlobalHome {
                         // required only by the LiquidToVault / SparkToVault
                         // branches of step 1 → 2, which unwrap inline.
                         if self.current_view.step == 0 {
-                            // Liquid is always present. Default the destination to
-                            // Vault when available, otherwise Spark. `transfer_available`
-                            // in the view already gates the button so at least one of
-                            // the two non-Liquid wallets exists here.
-                            let default_to = if cache.has_vault {
-                                WalletKind::Vault
-                            } else if self.spark_backend.is_some() {
-                                WalletKind::Spark
-                            } else {
-                                // Button shouldn't be reachable; bail rather than
-                                // advancing the step machine.
+                            // Default both sides to wallets this cube actually
+                            // has — Liquid is no longer unconditional, so
+                            // defaulting the source to it would open the flow
+                            // on a wallet the picker doesn't even list.
+                            let has_liquid = crate::app::features::liquid_wallet_usable(
+                                cache.network,
+                                cache.liquid_gate,
+                            );
+                            // `transfer_available` in the view already gates the
+                            // button on two wallets existing; if we got here
+                            // anyway, bail rather than advancing the step machine.
+                            let Some((default_from, default_to)) = default_transfer_pair(
+                                has_liquid,
+                                cache.has_vault,
+                                self.spark_backend.is_some(),
+                            ) else {
                                 return Task::none();
                             };
-                            self.transfer_from = Some(WalletKind::Liquid);
+                            self.transfer_from = Some(default_from);
                             self.transfer_to = Some(default_to);
                             self.transfer_direction =
-                                TransferDirection::try_from_pair(WalletKind::Liquid, default_to);
+                                TransferDirection::try_from_pair(default_from, default_to);
                             self.wallet_picker = None;
                             self.entered_amount = form::Value::default();
                             // Fresh flow: reset the Vault-sourced feerate
@@ -738,6 +774,13 @@ impl State for GlobalHome {
                             self.transfer_feerate = default_transfer_feerate();
                             self.transfer_feerate_loading = None;
                             self.current_view.next();
+                            // Breez's swap limits bound only the Liquid legs
+                            // (see `effective_transfer_min_sat`). Without a
+                            // usable Liquid wallet the SDK isn't connected, so
+                            // the fetch would do nothing but raise an error.
+                            if !has_liquid {
+                                return Task::none();
+                            }
                             let breez_client = self.breez_client.clone();
                             return Task::perform(
                                 async move { breez_client.fetch_onchain_limits().await },
@@ -2885,6 +2928,15 @@ impl GlobalHome {
     }
 
     fn restore_pending_liquid_to_vault_transfer(&self) -> Task<Message> {
+        // Same guard as the balance/pending loaders above: without a connected
+        // SDK (`features::liquid` is mainnet-only, so testnet/signet/regtest all
+        // get a disconnected client) `list_payments` can only fail. The failure
+        // is silent — `.ok()` swallows it and the swap falls through as
+        // `Initiated` — so an unguarded restore would resurrect a stale settings
+        // entry as a pending-transfer banner that can never progress.
+        if !self.breez_client.is_supported() {
+            return Task::none();
+        }
         let network_dir = self.datadir_path.network_directory(self.network);
         let cube_id = self.cube_id.clone();
         let breez_client = self.breez_client.clone();
@@ -2980,6 +3032,35 @@ mod tests {
     use std::str::FromStr;
 
     const MAINNET_ADDR: &str = "bc1qvrl2849aggm6qry9ea7xqp2kk39j8vaa8r3cwg";
+
+    #[test]
+    fn transfer_defaults_never_open_on_an_absent_wallet() {
+        use WalletKind::{Liquid, Spark, Vault};
+        // Liquid present: the historical Liquid→Vault (or Liquid→Spark) default.
+        assert_eq!(
+            default_transfer_pair(true, true, true),
+            Some((Liquid, Vault))
+        );
+        assert_eq!(
+            default_transfer_pair(true, false, true),
+            Some((Liquid, Spark))
+        );
+        assert_eq!(
+            default_transfer_pair(true, true, false),
+            Some((Liquid, Vault))
+        );
+        // Liquid gated off or unbacked (testnet/regtest cube): the flow opens
+        // on the two wallets that do exist, never on Liquid.
+        assert_eq!(
+            default_transfer_pair(false, true, true),
+            Some((Vault, Spark))
+        );
+        // Fewer than two wallets — the Transfer button is hidden; bail.
+        assert_eq!(default_transfer_pair(false, true, false), None);
+        assert_eq!(default_transfer_pair(false, false, true), None);
+        assert_eq!(default_transfer_pair(true, false, false), None);
+        assert_eq!(default_transfer_pair(false, false, false), None);
+    }
 
     fn address() -> Address {
         Address::from_str(MAINNET_ADDR).unwrap().assume_checked()

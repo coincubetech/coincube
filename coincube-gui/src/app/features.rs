@@ -144,6 +144,19 @@ impl LiquidGate {
     }
 }
 
+/// Whether the Liquid wallet is usable *right now*: granted by the sunset
+/// gate **and** backed on the current network. The sunset gate on its own only
+/// answers "does this account have Liquid at all" — on a testnet/signet cube
+/// there is no Liquid backend, so a granted wallet still has nothing behind it.
+///
+/// The nav rail deliberately renders that state greyed-with-a-reason, but
+/// surfaces that would otherwise offer live actions (the Cube home wallet card,
+/// the transfer picker) hide Liquid entirely instead — an inert Send/Receive
+/// pair reads as a wallet that's merely empty, not one that can't work here.
+pub fn liquid_wallet_usable(net: Network, gate: LiquidGate) -> bool {
+    gate.show() && liquid(net).is_available()
+}
+
 /// Reason shown for a Liquid route reached while the wallet is gated off —
 /// a restored or deep-linked route, since the nav hides Liquid entirely in
 /// this state. Not a per-network message: Liquid is sunset for new wallets.
@@ -572,6 +585,21 @@ mod tests {
             .reason(),
             Some("The Liquid wallet isn't available on this account.")
         );
+    }
+
+    #[test]
+    fn wallet_card_hides_liquid_off_mainnet_even_when_granted() {
+        // The nav greys Liquid out on a testnet cube; the Cube-home card and
+        // the transfer picker hide it outright, so a user never gets live
+        // Send/Receive buttons for a wallet with no backend behind it.
+        assert!(liquid_wallet_usable(Network::Bitcoin, LIQUID_GRANTED));
+        assert!(liquid_wallet_usable(Network::Bitcoin, LIQUID_LOCAL_ONLY));
+        assert!(!liquid_wallet_usable(Network::Testnet, LIQUID_GRANTED));
+        assert!(!liquid_wallet_usable(Network::Testnet4, LIQUID_LOCAL_ONLY));
+        assert!(!liquid_wallet_usable(Network::Signet, LIQUID_GRANTED));
+        assert!(!liquid_wallet_usable(Network::Regtest, LIQUID_GRANTED));
+        // Sunset gate still wins on mainnet.
+        assert!(!liquid_wallet_usable(Network::Bitcoin, LiquidGate::HIDDEN));
     }
 
     fn avail_liquid(net: Network, gate: LiquidGate) -> bool {

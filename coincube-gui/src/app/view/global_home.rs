@@ -1406,10 +1406,12 @@ pub struct GlobalViewConfig<'a> {
     /// `spark_backend.is_some()` in the state layer. Drives the Spark card
     /// visibility and feeds [`transfer_available`].
     pub has_spark: bool,
-    /// Whether the Liquid wallet is shown at all — the sunset gate
-    /// (`cache.liquid_gate.show()`). Drives the Liquid card, the Liquid row in
-    /// the wallet picker, and Liquid's contribution to the Total Balance.
-    /// Liquid used to be unconditional on every cube; it no longer is.
+    /// Whether the Liquid wallet is shown at all — the sunset gate AND a
+    /// Liquid backend on the current network
+    /// ([`features::liquid_wallet_usable`](crate::app::features::liquid_wallet_usable)).
+    /// Drives the Liquid card, the Liquid row in the wallet picker, and
+    /// Liquid's contribution to the Total Balance. Liquid used to be
+    /// unconditional on every cube; it no longer is.
     pub has_liquid: bool,
     pub current_view: HomeView,
     pub transfer_direction: Option<TransferDirection>,
