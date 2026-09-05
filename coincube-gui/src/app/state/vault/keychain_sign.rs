@@ -1472,9 +1472,24 @@ impl KeychainSignModal {
         let transport_key = self.transport_key.clone();
         let open_signature = |sig: &crate::services::connect::grpc::connect_v1::SubmittedSignature| -> Result<Vec<u8>, String> {
             let Some(env) = sig.signature_envelope.as_ref() else {
-                // Plaintext session (pre-E2E signer, or an old server). Nothing
-                // to open.
-                return Ok(sig.signed_psbt.clone());
+                // No plaintext fallback. This branch used to return
+                // `sig.signed_psbt` verbatim, which meant a session this
+                // desktop created as ECIES_V1 could still complete in
+                // plaintext if the peer or server returned no envelope —
+                // decided by envelope *shape*, never by `payload_scheme`. That
+                // is a silent downgrade, and `merge_signatures` below performs
+                // no validation and overwrites `tap_key_sig`, so the merged
+                // result would be trusted unconditionally.
+                //
+                // Connect now refuses to advance a plaintext session at all
+                // (`SubmitPartialSignature` returns `FailedPrecondition`), so
+                // an envelope-less signature on a live session no longer has a
+                // legitimate origin. Fail closed.
+                return Err(
+                    "This Keychain returned an unencrypted signature for an encrypted \
+                     request. Update the Keychain app, then start the signature again."
+                        .to_string(),
+                );
             };
             let key = transport_key
                 .as_ref()
