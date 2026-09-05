@@ -3320,6 +3320,8 @@ mod tests {
         assert_eq!(picker.step, Step::Details);
     }
 
+    /// Verifies that a blinded personal key (marked `is_own_key`) decrypts and
+    /// builds a valid descriptor key with the unblinded xpub.
     #[test]
     fn blinded_personal_key_builds_a_descriptor_key() {
         let mut picker = blinded_picker();

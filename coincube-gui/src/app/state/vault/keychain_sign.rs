@@ -2251,6 +2251,9 @@ mod tests {
         )
     }
 
+    /// Verifies that `seal_signing_payloads` produces distinct ephemeral keys
+    /// for PSBT and descriptor envelopes, both decrypt correctly with the
+    /// request-bound AAD, and reject tampering or AAD mismatch.
     #[test]
     fn signing_descriptor_is_sealed_intact_and_bound_to_request() {
         let target = test_transport_key();
