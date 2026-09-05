@@ -137,6 +137,7 @@ message SigningSession {
   string request_id = 2;
   string user_id = 3;
   string vault_id = 4;
+  // Opaque vault fingerprint; never the plaintext descriptor.
   string descriptor_id = 5;
   // psbt carries the real PSBT on a PLAINTEXT session, and is EMPTY on an
   // ECIES_V1 session (see psbt_envelopes).
@@ -178,11 +179,15 @@ message SigningSession {
   // something it cannot return (the server refuses to create one, so an empty
   // value here should only ever appear on a PLAINTEXT session).
   bytes creator_transport_pubkey = 19;
+  // Full descriptor sealed per target, with request_id-bound transport AAD.
+  // The signer MUST decrypt its entry and verify its own xpub membership.
+  repeated PayloadEnvelope descriptor_envelopes = 20;
 }
 
 message CreateSigningSessionRequest {
   string request_id = 1;
   string vault_id = 2;
+  // Opaque vault fingerprint; never the plaintext descriptor.
   string descriptor_id = 3;
   bytes psbt = 4;
   repeated SignerTarget targets = 5;
@@ -202,6 +207,9 @@ message CreateSigningSessionRequest {
   // per declared target; `psbt` must then be empty. The reverse holds for
   // PLAINTEXT. Mixing the two is rejected at create — there is no downgrade.
   repeated PayloadEnvelope psbt_envelopes = 11;
+  // Required for ECIES_V1: one full descriptor envelope per target, sealed
+  // to its transport_pubkey with the same request_id-bound AAD as the PSBT.
+  repeated PayloadEnvelope descriptor_envelopes = 12;
 }
 
 message CreateSigningSessionResponse {

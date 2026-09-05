@@ -187,6 +187,7 @@ impl HWI for PhoneSigner {
             // there is no creator key for a signer to seal anything back to.
             payload_scheme: cv1::PayloadScheme::Plaintext as i32,
             psbt_envelopes: Vec::new(),
+            descriptor_envelopes: Vec::new(),
             creator_transport_pubkey: Vec::new(),
             status: cv1::SessionStatus::Pending as i32,
             created_at: None,
