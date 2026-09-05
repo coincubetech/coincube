@@ -157,7 +157,8 @@ message SigningSession {
   //
   // Vectors, including the checksum-stripped and key-swapped negatives:
   // grpc/descriptor_fingerprint_vectors.json in the desktop repo (coincube),
-  // authoritative for desktop, Keychain and this API.
+  // authoritative for desktop, Keychain and this API. `make pull-vectors`
+  // fetches a local, uncommitted copy to the same path here.
   string descriptor_id = 5;
   // psbt carries the real PSBT on a PLAINTEXT session, and is EMPTY on an
   // ECIES_V1 session (see psbt_envelopes).

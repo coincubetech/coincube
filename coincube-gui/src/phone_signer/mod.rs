@@ -206,10 +206,17 @@ impl HWI for PhoneSigner {
                     .to_string(),
             )
         })?;
-        if self.paired_phone.transport_pubkey.is_empty() {
+        // Same predicate the pairing gate uses. A stored key can still be
+        // unusable here: a row written before that gate existed (empty), or one
+        // persisted by an older build that accepted an uncompressed point. Both
+        // must produce the actionable re-pair message rather than falling
+        // through to a generic "could not encrypt" from `seal_to_device`.
+        if !crate::services::connect::crypto::is_sealable_transport_pubkey(
+            &self.paired_phone.transport_pubkey,
+        ) {
             return Err(HwiError::Device(
-                "This Keychain was paired before encrypted signing. Pair it again to \
-                 sign over the local network."
+                "This Keychain's encryption key is missing or unusable. Pair it again \
+                 to sign over the local network."
                     .to_string(),
             ));
         }
@@ -224,10 +231,16 @@ impl HWI for PhoneSigner {
             )
         };
         let psbt_envelope = seal(&psbt_bytes).map_err(|e| {
-            HwiError::Device(format!("could not encrypt the transaction for this Keychain: {}", e))
+            HwiError::Device(format!(
+                "could not encrypt the transaction for this Keychain: {}",
+                e
+            ))
         })?;
         let descriptor_envelope = seal(self.descriptor.as_bytes()).map_err(|e| {
-            HwiError::Device(format!("could not encrypt the descriptor for this Keychain: {}", e))
+            HwiError::Device(format!(
+                "could not encrypt the descriptor for this Keychain: {}",
+                e
+            ))
         })?;
         let to_proto = |sealed: crate::services::connect::crypto::transport::SealedPayload| {
             cv1::PayloadEnvelope {

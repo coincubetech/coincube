@@ -27,8 +27,6 @@ use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 
 use coincube_gui::dir::NetworkDirectory;
-use coincube_gui::services::connect::crypto::{seal_to_device, DeviceTransportKey};
-use coincube_gui::services::connect::grpc::connect_v1 as cv1;
 use coincube_gui::phone_signer::{
     identity::{pin_hex8, DesktopIdentity},
     pairing_store::PairedPhone,
@@ -37,6 +35,8 @@ use coincube_gui::phone_signer::{
     transport::PairedTransport,
     PhoneSigner,
 };
+use coincube_gui::services::connect::crypto::{seal_to_device, DeviceTransportKey};
+use coincube_gui::services::connect::grpc::connect_v1 as cv1;
 
 /// Self-signed Ed25519 cert + key, returned as the rustls-pki-types
 /// `Der` newtypes the runtime expects.
@@ -154,7 +154,12 @@ async fn fake_phone(
             );
             let pe = s.psbt_envelopes.first().expect("psbt envelope").clone();
             let psbt = phone_transport
-                .open(&pe.ephemeral_pubkey, &pe.nonce, &pe.ciphertext, &s.request_id)
+                .open(
+                    &pe.ephemeral_pubkey,
+                    &pe.nonce,
+                    &pe.ciphertext,
+                    &s.request_id,
+                )
                 .expect("open sealed PSBT");
             (
                 s.session_id,

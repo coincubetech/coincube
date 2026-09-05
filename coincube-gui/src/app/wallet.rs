@@ -751,7 +751,6 @@ mod tests {
 
     const DESC: &str = "wsh(or_d(multi(2,[ffd63c8d/48'/1'/0'/2']tpubDExA3EC3iAsPxPhFn4j6gMiVup6V2eH3qKyk69RcTc9TTNRfFYVPad8bJD5FCHVQxyBT4izKsvr7Btd2R4xmQ1hZkvsqGBaeE82J71uTK4N/<0;1>/*,[de6eb005/48'/1'/0'/2']tpubDFGuYfS2JwiUSEXiQuNGdT3R7WTDhbaE6jbUhgYSSdhmfQcSx7ZntMPPv7nrkvAqjpj3jX9wbhSGMeKVao4qAzhbNyBi7iQmv5xxQk6H6jz/<0;1>/*),and_v(v:pkh([ffd63c8d/48'/1'/0'/2']tpubDExA3EC3iAsPxPhFn4j6gMiVup6V2eH3qKyk69RcTc9TTNRfFYVPad8bJD5FCHVQxyBT4izKsvr7Btd2R4xmQ1hZkvsqGBaeE82J71uTK4N/<2;3>/*),older(3))))#p9ax3xxp";
 
-
     /// The canonicalisation contract for [`descriptor_id_fingerprint`], pinned
     /// against `grpc/descriptor_fingerprint_vectors.json` — the file Keychain
     /// and coincube-api are pointed at.
@@ -860,7 +859,10 @@ mod tests {
             .expect("VaultIdentity::generate always derives a fingerprint");
 
         assert_eq!(signing_rail, vault_id, "vault id vs signing rail");
-        assert_eq!(signing_rail, registered, "registered vault fingerprint vs signing rail");
+        assert_eq!(
+            signing_rail, registered,
+            "registered vault fingerprint vs signing rail"
+        );
 
         // The shape both surfaces agree on: 8 lowercase hex.
         assert_eq!(signing_rail.len(), 8);

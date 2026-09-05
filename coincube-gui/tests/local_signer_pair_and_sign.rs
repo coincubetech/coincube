@@ -34,8 +34,6 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 
 use coincube_gui::dir::{CoincubeDirectory, NetworkDirectory};
-use coincube_gui::services::connect::crypto::{seal_to_device, DeviceTransportKey};
-use coincube_gui::services::connect::grpc::connect_v1 as cv1;
 use coincube_gui::phone_signer::{
     identity::DesktopIdentity,
     mdns::DiscoveredPhone,
@@ -47,6 +45,8 @@ use coincube_gui::phone_signer::{
     transport::PairedTransport,
     PhoneSigner,
 };
+use coincube_gui::services::connect::crypto::{seal_to_device, DeviceTransportKey};
+use coincube_gui::services::connect::grpc::connect_v1 as cv1;
 
 /// A real ECIES transport keypair, minted in a throwaway directory.
 ///
@@ -230,10 +230,20 @@ async fn fake_phone_pair_then_sign(
                 );
 
                 let psbt = phone_transport
-                    .open(&pe.ephemeral_pubkey, &pe.nonce, &pe.ciphertext, &s.request_id)
+                    .open(
+                        &pe.ephemeral_pubkey,
+                        &pe.nonce,
+                        &pe.ciphertext,
+                        &s.request_id,
+                    )
                     .expect("open the sealed PSBT");
                 let descriptor = phone_transport
-                    .open(&de.ephemeral_pubkey, &de.nonce, &de.ciphertext, &s.request_id)
+                    .open(
+                        &de.ephemeral_pubkey,
+                        &de.nonce,
+                        &de.ciphertext,
+                        &s.request_id,
+                    )
                     .expect("open the sealed descriptor");
 
                 // The check the real Keychain runs: recompute the fingerprint

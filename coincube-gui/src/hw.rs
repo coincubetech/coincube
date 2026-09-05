@@ -765,9 +765,8 @@ fn refresh(mut state: State) -> impl Stream<Item = HardwareWalletMessage> {
                         .as_ref()
                         .map(|w| w.main_descriptor.to_string())
                         .unwrap_or_default();
-                    let lan_descriptor_id = active_vault_id
-                        .map(|fp| fp.to_string())
-                        .unwrap_or_default();
+                    let lan_descriptor_id =
+                        active_vault_id.map(|fp| fp.to_string()).unwrap_or_default();
                     // A phone can still be listed and dialled without this —
                     // it just can't be sent a session. `sign_tx` turns the
                     // absence into an actionable error rather than a silent

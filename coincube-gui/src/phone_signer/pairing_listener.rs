@@ -300,12 +300,14 @@ async fn try_pair_once(
     // sign so a phone we could never seal to fails pairing loudly, instead of
     // pairing cleanly and then failing every signing attempt — and, more to
     // the point, instead of leaving a plaintext LAN path as the only way it
-    // could ever sign. `PublicKey::from_slice` rejects both a wrong length and
-    // a well-formed-but-off-curve point.
+    // could ever sign.
+    //
+    // The gate must match what `seal_to_device` will accept, not merely what
+    // parses: `PublicKey::from_slice` also admits a 65-byte UNCOMPRESSED point,
+    // which would pair cleanly here and then fail the 33-byte length check at
+    // every sign. `is_sealable_transport_pubkey` checks length *and* curve.
     let transport_pubkey = complete.transport_pubkey.clone();
-    if coincube_core::miniscript::bitcoin::secp256k1::PublicKey::from_slice(&transport_pubkey)
-        .is_err()
-    {
+    if !crate::services::connect::crypto::is_sealable_transport_pubkey(&transport_pubkey) {
         tracing::warn!(
             target: "phone_signer::pairing",
             len = transport_pubkey.len(),

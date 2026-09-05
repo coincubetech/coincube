@@ -755,10 +755,22 @@ async fn run_pairing_refuses_a_phone_with_no_transport_key() {
         v.extend_from_slice(&[0xff; 32]);
         v
     };
+    // A real point in the UNCOMPRESSED encoding. `PublicKey::from_slice`
+    // accepts it, so a parse-only gate would pair this phone and then fail
+    // every sign against the 33-byte requirement in `seal_to_device`.
+    let uncompressed = {
+        use coincube_core::miniscript::bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
+        let secp = Secp256k1::new();
+        let sk = SecretKey::from_slice(&[0x11; 32]).expect("static secret");
+        PublicKey::from_secret_key(&secp, &sk)
+            .serialize_uncompressed()
+            .to_vec()
+    };
     for bad_key in [
         Vec::new(),     // pre-blinding Keychain: field absent
         vec![0x02; 10], // truncated
         off_curve,
+        uncompressed,
     ] {
         let (phone_cert, phone_key) = mint_ed25519_cert("Coincube Phone (test)");
         let phone_pin = tls::fingerprint_of(&phone_cert);
