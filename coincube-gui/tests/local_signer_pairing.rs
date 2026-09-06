@@ -49,6 +49,9 @@ use coincube_gui::phone_signer::{
 /// desktop will pin its cert. Mirrors what the keychain-app does after
 /// scanning the QR. See
 /// `coincube_gui::phone_signer::pairing::pairing_proof`.
+fn proof_for(offer: &PairingOffer, phone_cert_fp_hex: &str) -> String {
+    pairing::pairing_proof(&offer.psk_b64, &offer.cert_fp, phone_cert_fp_hex).expect("proof")
+}
 
 /// A valid compressed secp256k1 point for `PairingComplete.transport_pubkey`.
 ///
@@ -58,10 +61,6 @@ use coincube_gui::phone_signer::{
 fn valid_transport_pubkey() -> Vec<u8> {
     hex::decode("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
         .expect("static generator point")
-}
-
-fn proof_for(offer: &PairingOffer, phone_cert_fp_hex: &str) -> String {
-    pairing::pairing_proof(&offer.psk_b64, &offer.cert_fp, phone_cert_fp_hex).expect("proof")
 }
 
 fn mint_ed25519_cert(common_name: &str) -> (CertificateDer<'static>, PrivateKeyDer<'static>) {
