@@ -151,6 +151,7 @@ message SigningSession {
   //     expanded into separate receive/change descriptors;
   //   - keys are hashed as written. Nothing is sorted; sortedmulti is refused
   //     at parse upstream rather than canonicalised here.
+  //
   // Hardened markers ('h' -> "'") and origin-fingerprint case are already
   // normalised by the desktop's Display before sealing, so both spellings of an
   // input reach the wire as one string.

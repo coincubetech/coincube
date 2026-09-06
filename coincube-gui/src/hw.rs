@@ -756,17 +756,16 @@ fn refresh(mut state: State) -> impl Stream<Item = HardwareWalletMessage> {
                     // tick rather than per phone: `load_or_create` touches the
                     // sidecar, and a tick can dial several phones.
                     //
-                    // The descriptor and its id come from the same `Wallet`
-                    // that scopes the dial below, so the LAN rail's
-                    // `descriptor_id` is the same digest of the same string as
-                    // the Cubes list by construction, not by coincidence.
+                    // The descriptor comes from the same `Wallet` that scopes
+                    // the dial below, and `PhoneSigner::new` derives the
+                    // session's `descriptor_id` from it, so the LAN rail and
+                    // the Cubes list are the same digest of the same string by
+                    // construction, not by coincidence.
                     let lan_descriptor = state
                         .wallet
                         .as_ref()
                         .map(|w| w.main_descriptor.to_string())
                         .unwrap_or_default();
-                    let lan_descriptor_id =
-                        active_vault_id.map(|fp| fp.to_string()).unwrap_or_default();
                     // A phone can still be listed and dialled without this —
                     // it just can't be sent a session. `sign_tx` turns the
                     // absence into an actionable error rather than a silent
@@ -896,7 +895,6 @@ fn refresh(mut state: State) -> impl Stream<Item = HardwareWalletMessage> {
                                     None,
                                     paired.clone(),
                                     lan_descriptor.clone(),
-                                    lan_descriptor_id.clone(),
                                     lan_transport_key.clone(),
                                 ));
                                 // Stash a clone so the next refresh

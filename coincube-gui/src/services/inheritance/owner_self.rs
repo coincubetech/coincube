@@ -261,7 +261,9 @@ mod tests {
                     err,
                     OwnerSelfError::Escrow(EscrowError::BadKeyholderDerivation { .. })
                 ),
-                "{bad:?} gave {err:?}",
+                "{:?} gave {:?}",
+                bad,
+                err,
             );
         }
 

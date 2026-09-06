@@ -499,7 +499,9 @@ mod tests {
                 .expect_err(&format!("{bad:?} must be refused before sealing"));
             assert!(
                 matches!(err, EscrowError::BadKeyholderDerivation { key_id: 10, .. }),
-                "{bad:?} gave {err:?}",
+                "{:?} gave {:?}",
+                bad,
+                err,
             );
         }
 

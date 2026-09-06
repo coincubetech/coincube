@@ -381,14 +381,16 @@ async fn full_pair_then_sign_flow_via_offer_trust_path() {
     };
     // A real descriptor, so the fake phone's fingerprint check is meaningful.
     const DESC: &str = "wsh(or_d(pk([8a550171/48'/1'/0'/2']tpubDFnCs5ZaCqopaNhgLCiXAwbkaBdcnuMt1VFoPsRpUrpidyvzG67MYjkfxw6HnTBhHqeU3xw2ioNBVcWY3jXwGhSyppEQvtn38GsL7RH1eef/<0;1>/*),and_v(v:pkh([8a550171/48'/1'/0'/2']tpubDFnCs5ZaCqopaNhgLCiXAwbkaBdcnuMt1VFoPsRpUrpidyvzG67MYjkfxw6HnTBhHqeU3xw2ioNBVcWY3jXwGhSyppEQvtn38GsL7RH1eef/<2;3>/*),older(52596))))#jz5sm0xn";
-    let descriptor_id = hex::encode(&Sha256::digest(DESC.as_bytes())[..4]);
+    // No id passed: `PhoneSigner::new` derives it from DESC. The fake phone
+    // recomputes the same digest over the descriptor it decrypts and asserts it
+    // matches `session.descriptor_id`, so that check now covers the derivation
+    // end to end rather than a value the test handed in.
     let signer = PhoneSigner::new(
         transport,
         wallet_fp,
         None,
         paired_clone,
         DESC.to_string(),
-        descriptor_id,
         Some(Arc::new(fresh_transport_key("desktop"))),
     );
 

@@ -85,9 +85,12 @@ pub struct PhoneSigner {
     pub(crate) descriptor: String,
 
     /// `descriptor_id_fingerprint` of [`Self::descriptor`], 8 lowercase hex.
-    /// Precomputed at construction from `Wallet::id_fingerprint`, so the LAN
-    /// rail and the Cubes list are the same digest of the same string by
-    /// construction rather than by coincidence.
+    ///
+    /// Derived in [`PhoneSigner::new`] from that exact field rather than passed
+    /// in beside it, so the id and the descriptor it names cannot disagree.
+    /// That makes the LAN rail's `descriptor_id` the same digest of the same
+    /// string as the Cubes list by construction rather than by coincidence —
+    /// both reduce to `app::wallet::descriptor_id_fingerprint_of_bytes`.
     pub(crate) descriptor_id: String,
 
     /// This desktop's Connect transport key. The phone seals its partial
@@ -106,18 +109,27 @@ impl std::fmt::Debug for PhoneSigner {
 }
 
 impl PhoneSigner {
-    #[allow(clippy::too_many_arguments)]
+    /// `descriptor` is the vault's canonical descriptor — exactly
+    /// `CoincubeDescriptor::to_string()`, checksum included. It is both what
+    /// gets sealed into `descriptor_envelopes` and the preimage of the
+    /// session's `descriptor_id`, which is why the id is **derived here rather
+    /// than taken as a parameter**: the two are one value, and accepting them
+    /// separately let a caller supply a pair that disagree. The phone
+    /// recomputes the same digest over the bytes it decrypts and refuses to
+    /// sign on a mismatch, so a disagreement is not a cosmetic bug.
     pub fn new(
         transport: PairedTransport,
         fingerprint: Fingerprint,
         version: Option<Version>,
         paired_phone: PairedPhone,
         descriptor: String,
-        descriptor_id: String,
         transport_key: Option<Arc<crate::services::connect::crypto::DeviceTransportKey>>,
     ) -> Self {
         let (reader, writer) = transport.split();
         let correlator = Arc::new(Correlator::spawn(reader));
+        let descriptor_id =
+            crate::app::wallet::descriptor_id_fingerprint_of_bytes(descriptor.as_bytes())
+                .to_string();
         Self {
             writer: Arc::new(Mutex::new(writer)),
             correlator,

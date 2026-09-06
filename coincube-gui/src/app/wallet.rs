@@ -82,8 +82,27 @@ pub fn wallet_name(main_descriptor: &CoincubeDescriptor) -> String {
 /// [`tests::descriptor_id_fingerprint_matches_committed_vectors`]. Changing any
 /// id there breaks signing for every already-paired Keychain.
 pub fn descriptor_id_fingerprint(main_descriptor: &CoincubeDescriptor) -> Fingerprint {
+    descriptor_id_fingerprint_of_bytes(main_descriptor.to_string().as_bytes())
+}
+
+/// The signer-side form of [`descriptor_id_fingerprint`]: hash descriptor bytes
+/// directly, without parsing them first.
+///
+/// This is the operation a *signer* performs. It holds the descriptor as the
+/// bytes it just decrypted out of `descriptor_envelopes`, and the contract is
+/// to hash exactly those bytes verbatim — never to re-parse or re-serialise
+/// first. The desktop's sealing path holds a parsed `CoincubeDescriptor` and
+/// goes through [`descriptor_id_fingerprint`]; the LAN rail holds only the
+/// string it is about to seal and comes here.
+///
+/// Both reduce to this one function, so the two entry points cannot drift
+/// apart. See the canonicalisation contract on [`descriptor_id_fingerprint`],
+/// and the vectors in `grpc/descriptor_fingerprint_vectors.json`, which
+/// [`tests::descriptor_id_fingerprint_matches_committed_vectors`] asserts
+/// against *both* forms.
+pub fn descriptor_id_fingerprint_of_bytes(descriptor_bytes: &[u8]) -> Fingerprint {
     use sha2::Digest;
-    let digest = sha2::Sha256::digest(main_descriptor.to_string().as_bytes());
+    let digest = sha2::Sha256::digest(descriptor_bytes);
     let mut bytes = [0u8; 4];
     bytes.copy_from_slice(&digest[..4]);
     Fingerprint::from(bytes)
@@ -812,6 +831,15 @@ mod tests {
                 id,
                 &sha[..8],
                 "vector {}: id is the first 4 digest bytes",
+                name,
+            );
+
+            // The signer-side entry point hashes the same bytes and must agree;
+            // this is what the LAN rail derives its `descriptor_id` through.
+            assert_eq!(
+                descriptor_id_fingerprint_of_bytes(canonical.as_bytes()).to_string(),
+                id,
+                "vector {}: bytes form must match the parsed form",
                 name,
             );
         }

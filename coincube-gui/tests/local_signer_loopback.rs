@@ -296,7 +296,6 @@ async fn sign_tx_round_trips_through_fake_phone() {
         None,
         paired,
         TEST_DESCRIPTOR.to_string(),
-        "00000000".to_string(),
         Some(Arc::new(fresh_transport_key("desktop"))),
     );
     let mut psbt = empty_psbt();
@@ -374,7 +373,6 @@ async fn signer_against_response(
         None,
         paired,
         TEST_DESCRIPTOR.to_string(),
-        "00000000".to_string(),
         Some(Arc::new(fresh_transport_key("desktop"))),
     );
     (signer, handle)
