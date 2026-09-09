@@ -94,6 +94,16 @@ pub enum ConnectVaultError {
     /// the descriptor itself must be rebuilt without the recovery key.
     /// Carries the offending `key_id` for the dialog.
     KeyIsRecoveryRecipient { key_id: u64 },
+    /// 403 `PLAN_ESTATE_REQUIRED` from the vault create. The account's plan
+    /// doesn't cover Connect vaults, so no vault exists and Keychain signing
+    /// is unavailable for this Cube.
+    ///
+    /// Kept out of [`Self::Other`] because the two want opposite copy: `Other`
+    /// promises the vault "can be retried later", which is exactly wrong here
+    /// — every retry fails identically until the plan changes. A user who
+    /// builds a Vault whose only immediate spending path is a Keychain key
+    /// needs to know that now, not at their first send.
+    PlanEstateRequired,
     /// Any other failure (network, backend 5xx, partial success). The
     /// caller gets a message suitable for display.
     Other(String),
@@ -119,6 +129,13 @@ impl std::fmt::Display for ConnectVaultError {
                      Rebuild the Vault descriptor without the recovery key, \
                      then try again.",
                     key_id
+                )
+            }
+            Self::PlanEstateRequired => {
+                write!(
+                    f,
+                    "This account's plan doesn't include Connect vaults, so the \
+                     Keychain keys in this Vault can't be reached for signing."
                 )
             }
             Self::Other(msg) => write!(f, "{}", msg),
@@ -152,6 +169,10 @@ fn classify_create_error(
         Some(key_id) if e.is_key_is_recovery_recipient() => {
             ConnectVaultError::KeyIsRecoveryRecipient { key_id }
         }
+        // Checked after the per-key conflicts (which name a specific key and
+        // have their own remedies) but before the generic fallback, so the
+        // plan gate never hides behind "retry later".
+        _ if e.is_plan_estate_required() => ConnectVaultError::PlanEstateRequired,
         _ => ConnectVaultError::Other(format!("Failed to create Connect vault: {}", e)),
     }
 }

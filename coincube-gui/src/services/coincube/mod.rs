@@ -1983,6 +1983,17 @@ mod recovery_recipients_tests {
 /// can match on it when routing 409s.
 pub const ERR_KEY_ALREADY_USED_IN_VAULT: &str = "KEY_ALREADY_USED_IN_VAULT";
 
+/// Error code the backend returns when a route is gated behind the Estate
+/// plan and the caller's account isn't on it (403). Observed on the Connect
+/// vault's mutating routes; `GET` is ungated, which is why an account can read
+/// a vault it is no longer allowed to modify.
+///
+/// Worth a typed check rather than a substring match on the message: the
+/// desktop routes this to "your plan doesn't include this" copy, which is
+/// actionable, instead of the generic "transient failure, retry later" that
+/// every other 4xx gets.
+pub const ERR_PLAN_ESTATE_REQUIRED: &str = "PLAN_ESTATE_REQUIRED";
+
 /// Error code returned by the backend's I2 guard: 409 from
 /// `POST /connect/cubes/{cubeId}/vault/members` when the key is registered as a
 /// recovery recipient and therefore may never be a Vault signer. Mirrors the
@@ -2041,6 +2052,46 @@ impl CoincubeError {
     /// Returns `true` if this error is a W9 "key already used in another
     /// vault" conflict from `POST /connect/cubes/{id}/vault/members`.
     /// Drives the Vault Builder's key-conflict dialog.
+    /// The HTTP status behind this error, when it came from a non-2xx
+    /// response. `None` for transport, parse and typed variants.
+    pub fn status_code(&self) -> Option<u16> {
+        match self {
+            CoincubeError::Unsuccessful(info) => Some(info.status_code),
+            CoincubeError::NotFound => Some(404),
+            CoincubeError::RateLimited { .. } => Some(429),
+            _ => None,
+        }
+    }
+
+    /// True when the server said the resource does not exist, whichever
+    /// representation the endpoint used.
+    ///
+    /// [`Self::is_not_found`] only matches the typed `NotFound` variant, which
+    /// just the recovery-kit methods emit; every other endpoint routes its 404
+    /// through `Unsuccessful`. Callers that mean "absent, and that may be
+    /// normal" — a Cube with no Connect vault, say — want this one.
+    pub fn is_http_not_found(&self) -> bool {
+        self.status_code() == Some(404)
+    }
+
+    /// True when the request was refused because the account's plan doesn't
+    /// include the feature (403 `PLAN_ESTATE_REQUIRED`).
+    ///
+    /// Distinguishing this from a transient failure matters: no amount of
+    /// retrying clears it, so the caller should say so rather than promising a
+    /// later retry that will fail identically.
+    pub fn is_plan_estate_required(&self) -> bool {
+        let CoincubeError::Unsuccessful(info) = self else {
+            return false;
+        };
+        if info.status_code != 403 {
+            return false;
+        }
+        serde_json::from_str::<ApiErrorResponse>(&info.text)
+            .map(|env| env.error.code == ERR_PLAN_ESTATE_REQUIRED)
+            .unwrap_or(false)
+    }
+
     pub fn is_key_already_used_in_vault(&self) -> bool {
         let CoincubeError::Unsuccessful(info) = self else {
             return false;

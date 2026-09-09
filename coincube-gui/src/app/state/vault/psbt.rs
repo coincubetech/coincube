@@ -1507,6 +1507,21 @@ impl SignModal {
                 St::Disabled("Looking up Keychain signers…".to_string()),
             );
         }
+        // The Keychain lookup ran and failed. We still don't know whether this
+        // key is a Keychain signer — that is exactly what failed — so the
+        // "connect this signing device" fallback below would be a guess, and
+        // the wrong one for the case that matters: a key that lives on a phone
+        // reads as a device the user is supposed to plug in, and they go
+        // looking for hardware that was never part of this Vault. Point at the
+        // banner instead, which carries the actual reason.
+        if self.keychain.as_ref().is_some_and(|k| k.error().is_some()) {
+            return (
+                Kind::Unknown,
+                St::Disabled(
+                    "Couldn't reach Keychain signers — see the message above.".to_string(),
+                ),
+            );
+        }
         // Unidentified: an external key whose device isn't connected and which
         // Connect hasn't resolved. Shown disabled — never guessed as Keychain.
         // When Keychain is possible here but Connect is signed out, offer a

@@ -289,6 +289,20 @@ impl Step for Final {
                     ));
                     return Task::perform(async move {}, |_| Message::RedeemNextKey);
                 }
+                Err(ConnectVaultError::PlanEstateRequired) => {
+                    // Not transient — the retry `Other` promises would fail
+                    // identically. Say what is actually lost, because the
+                    // local wallet still installs and the consequence only
+                    // shows up at the first send.
+                    self.warning = Some(
+                        "Your plan doesn't include Connect vaults, so the Keychain keys in \
+                         this Vault can't be asked to sign. Your local wallet is installed, \
+                         but any spend that needs a phone key will be unavailable until your \
+                         plan covers Connect vaults."
+                            .to_string(),
+                    );
+                    return Task::perform(async move {}, |_| Message::RedeemNextKey);
+                }
                 Err(ConnectVaultError::Other(msg)) => {
                     // Transient / unexpected failure. Warn but continue
                     // — the local wallet is already persisted, and the

@@ -639,21 +639,28 @@ impl KeychainSignModal {
                 // `update` path never needs a blocking lock read.
                 let access_token = tokens.read().await.access_token.clone();
                 client.set_token(&access_token);
-                let vault: ConnectVaultResponse = client
-                    .get_connect_vault(cube_server_id)
-                    .await
-                    .map_err(|e| {
-                        // CoincubeError formats include the underlying
-                        // HTTP status — we surface 401 / 403 as auth
-                        // failures so the modal can route to a "sign
-                        // in again" path rather than offering retry.
-                        let msg = e.to_string();
-                        let auth = is_rest_auth_failure(&msg);
-                        OpError {
-                            message: format!("Failed to fetch vault: {}", msg),
-                            auth,
+                // A 404 here is not fatal on its own: the Cube may simply
+                // never have had its vault created (see
+                // `vault_reconcile::create_missing_vault`). Hold the absence
+                // and decide below, once the cube keys say whether this
+                // descriptor has any Keychain signer to route to.
+                let existing_vault: Option<ConnectVaultResponse> =
+                    match client.get_connect_vault(cube_server_id).await {
+                        Ok(v) => Some(v),
+                        Err(e) if e.is_http_not_found() => None,
+                        Err(e) => {
+                            // CoincubeError formats include the underlying
+                            // HTTP status — we surface 401 / 403 as auth
+                            // failures so the modal can route to a "sign
+                            // in again" path rather than offering retry.
+                            let msg = e.to_string();
+                            let auth = is_rest_auth_failure(&msg);
+                            return Err(OpError {
+                                message: format!("Failed to fetch vault: {}", msg),
+                                auth,
+                            });
                         }
-                    })?;
+                    };
                 let cube_keys: Vec<CubeKeyRaw> =
                     client.get_cube_keys(&cube_uuid).await.map_err(|e| {
                         let msg = e.to_string();
@@ -680,16 +687,61 @@ impl KeychainSignModal {
                 // member, then continue with the refreshed member list. Without
                 // this, such a vault permanently reports "no Keychain signers
                 // required" with no in-app recovery.
-                let vault = reconcile_vault_members(
-                    &client,
-                    cube_server_id,
-                    vault,
-                    &cube_keys,
-                    &wallet.main_descriptor,
-                    self_user_id,
-                )
-                .await
-                .vault;
+                let vault = match existing_vault {
+                    Some(vault) => {
+                        reconcile_vault_members(
+                            &client,
+                            cube_server_id,
+                            vault,
+                            &cube_keys,
+                            &wallet.main_descriptor,
+                            self_user_id,
+                        )
+                        .await
+                        .vault
+                    }
+                    // No vault row. If the descriptor commits to registered
+                    // Keychain keys, this Cube's post-install create never
+                    // landed — make it now rather than dead-ending the sign the
+                    // user just started. When there is nothing to create, the
+                    // error names the real problem instead of the bare 404 the
+                    // picker used to turn into "connect this signing device".
+                    None => {
+                        use crate::services::coincube::vault_reconcile::VaultCreation;
+                        match crate::services::coincube::vault_reconcile::create_missing_vault(
+                            &client,
+                            cube_server_id,
+                            &cube_keys,
+                            &wallet.main_descriptor,
+                            self_user_id,
+                        )
+                        .await
+                        {
+                            VaultCreation::Created(vault) => *vault,
+                            // The server refused the create. Say why it refused
+                            // — never the "rebuild your Vault" advice below,
+                            // which would send the user to redo a descriptor
+                            // that was never the problem.
+                            VaultCreation::Refused(reason) => {
+                                return Err(OpError::new(reason));
+                            }
+                            // Nothing to create: no key in this descriptor is a
+                            // registered Keychain key. If the user believes one
+                            // of them lives on a phone, it entered the
+                            // descriptor as a plain xpub, which records no vault
+                            // member and leaves the phone unreachable.
+                            VaultCreation::NotNeeded => {
+                                return Err(OpError::new(
+                                    "No key in this Vault is a Keychain key on this Cube, so \
+                                     there's no phone to ask. If one of these keys is on your \
+                                     phone, it was added as a plain xpub — rebuild the Vault \
+                                     picking it from Keychain Keys."
+                                        .to_string(),
+                                ));
+                            }
+                        }
+                    }
+                };
                 let index: KeychainSignerIndex =
                     build_keychain_index(&vault.members, &cube_keys, self_user_id);
                 let required =
@@ -1750,6 +1802,19 @@ impl KeychainSignModal {
             Message::KeychainSign(KeychainSignMessage::Classified(res)) => match res {
                 Ok(c) => return self.on_classified(c),
                 Err(e) => {
+                    // Log before storing. Every other phase of this flow logs
+                    // to `coincube_gui::signing`, and a run that dies here used
+                    // to leave no trace at all: the banner is the only surface,
+                    // and the picker still renders every unresolved signer as a
+                    // device to plug in. A support log has to show the reason.
+                    tracing::warn!(
+                        target: "coincube_gui::signing",
+                        vault_id = self.vault_id.unwrap_or(0),
+                        phase = "classify",
+                        auth = e.auth,
+                        "Keychain classification failed: {}",
+                        e.message,
+                    );
                     self.error = Some(e.message);
                     self.phase = Phase::AllDone;
                 }
@@ -1757,6 +1822,14 @@ impl KeychainSignModal {
             Message::KeychainSign(KeychainSignMessage::SignersResolved(res)) => match res {
                 Ok(r) => return self.on_signers_resolved(r),
                 Err(e) => {
+                    tracing::warn!(
+                        target: "coincube_gui::signing",
+                        vault_id = self.vault_id.unwrap_or(0),
+                        phase = "resolve",
+                        auth = e.auth,
+                        "ResolveSigners failed: {}",
+                        e.message,
+                    );
                     self.error = if e.auth {
                         Some(e.message)
                     } else {
