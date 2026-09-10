@@ -2189,261 +2189,128 @@ pub fn avatar_ux<'a>(state: &'a ConnectCubePanel) -> Element<'a, ConnectCubeMess
         .into()
 }
 
+fn avatar_trait_label<'a>(label: &'static str) -> iced::widget::Text<'a, theme::Theme> {
+    text::p2_regular(label)
+        .color(color::GREY_3)
+        .width(Length::Fixed(110.0))
+}
+
+/// One selectable trait option. Selected options use the orange
+/// outline style so they stay visually distinct from the solid-orange
+/// "Generate Avatar" CTA below the picker.
+fn avatar_trait_option<'a>(
+    label: &'static str,
+    selected: bool,
+) -> iced::widget::Button<'a, ConnectCubeMessage, theme::Theme> {
+    if selected {
+        button::orange_outline(None, label)
+    } else {
+        button::secondary(None, label)
+    }
+    .width(Length::Fill)
+}
+
+/// A labelled row of mutually exclusive trait options.
+fn avatar_trait_row<'a, V: PartialEq + Copy + 'a>(
+    label: &'static str,
+    current: V,
+    options: &[(&'static str, V)],
+    to_msg: fn(V) -> AvatarMessage,
+) -> Row<'a, ConnectCubeMessage> {
+    options
+        .iter()
+        .enumerate()
+        .fold(
+            Row::new().push(avatar_trait_label(label)),
+            |row, (i, (name, value))| {
+                let row = if i > 0 {
+                    row.push(iced::widget::Space::new().width(Length::Fixed(8.0)))
+                } else {
+                    row
+                };
+                row.push(
+                    avatar_trait_option(name, *value == current)
+                        .on_press(ConnectCubeMessage::Avatar(to_msg(*value))),
+                )
+            },
+        )
+        .align_y(Alignment::Center)
+}
+
 fn avatar_questionnaire_ux<'a>(state: &'a ConnectCubePanel) -> Element<'a, ConnectCubeMessage> {
     let draft = &state.avatar_draft;
 
-    let gender_row = Row::new()
-        .push(
-            text::p2_regular("Gender")
-                .color(color::GREY_3)
-                .width(Length::Fixed(110.0)),
-        )
-        .push(
-            if draft.gender == AvatarGender::Man {
-                button::primary(None, "Man")
-            } else {
-                button::secondary(None, "Man")
-            }
-            .on_press(ConnectCubeMessage::Avatar(AvatarMessage::GenderChanged(
-                AvatarGender::Man,
-            ))),
-        )
-        .push(iced::widget::Space::new().width(Length::Fixed(8.0)))
-        .push(
-            if draft.gender == AvatarGender::Woman {
-                button::primary(None, "Woman")
-            } else {
-                button::secondary(None, "Woman")
-            }
-            .on_press(ConnectCubeMessage::Avatar(AvatarMessage::GenderChanged(
-                AvatarGender::Woman,
-            ))),
-        )
-        .align_y(Alignment::Center);
+    let gender_row = avatar_trait_row(
+        "Gender",
+        draft.gender,
+        &[("Man", AvatarGender::Man), ("Woman", AvatarGender::Woman)],
+        AvatarMessage::GenderChanged,
+    );
 
-    let archetype_row = Row::new()
-        .push(
-            text::p2_regular("Archetype")
-                .color(color::GREY_3)
-                .width(Length::Fixed(110.0)),
-        )
-        .push(
-            if draft.archetype == AvatarArchetype::Ronin {
-                button::primary(None, "Ronin")
-            } else {
-                button::secondary(None, "Ronin")
-            }
-            .on_press(ConnectCubeMessage::Avatar(AvatarMessage::ArchetypeChanged(
-                AvatarArchetype::Ronin,
-            ))),
-        )
-        .push(iced::widget::Space::new().width(Length::Fixed(8.0)))
-        .push(
-            if draft.archetype == AvatarArchetype::Samurai {
-                button::primary(None, "Samurai")
-            } else {
-                button::secondary(None, "Samurai")
-            }
-            .on_press(ConnectCubeMessage::Avatar(AvatarMessage::ArchetypeChanged(
-                AvatarArchetype::Samurai,
-            ))),
-        )
-        .push(iced::widget::Space::new().width(Length::Fixed(8.0)))
-        .push(
-            if draft.archetype == AvatarArchetype::Shogun {
-                button::primary(None, "Shogun")
-            } else {
-                button::secondary(None, "Shogun")
-            }
-            .on_press(ConnectCubeMessage::Avatar(AvatarMessage::ArchetypeChanged(
-                AvatarArchetype::Shogun,
-            ))),
-        )
-        .align_y(Alignment::Center);
+    let archetype_row = avatar_trait_row(
+        "Archetype",
+        draft.archetype,
+        &[
+            ("Ronin", AvatarArchetype::Ronin),
+            ("Samurai", AvatarArchetype::Samurai),
+            ("Shogun", AvatarArchetype::Shogun),
+        ],
+        AvatarMessage::ArchetypeChanged,
+    );
 
-    let age_row = Row::new()
-        .push(
-            text::p2_regular("Age Feel")
-                .color(color::GREY_3)
-                .width(Length::Fixed(110.0)),
-        )
-        .push(
-            if draft.age_feel == AvatarAgeFeel::Young {
-                button::primary(None, "Young")
-            } else {
-                button::secondary(None, "Young")
-            }
-            .on_press(ConnectCubeMessage::Avatar(AvatarMessage::AgeFeelChanged(
-                AvatarAgeFeel::Young,
-            ))),
-        )
-        .push(iced::widget::Space::new().width(Length::Fixed(8.0)))
-        .push(
-            if draft.age_feel == AvatarAgeFeel::Mature {
-                button::primary(None, "Mature")
-            } else {
-                button::secondary(None, "Mature")
-            }
-            .on_press(ConnectCubeMessage::Avatar(AvatarMessage::AgeFeelChanged(
-                AvatarAgeFeel::Mature,
-            ))),
-        )
-        .push(iced::widget::Space::new().width(Length::Fixed(8.0)))
-        .push(
-            if draft.age_feel == AvatarAgeFeel::Elder {
-                button::primary(None, "Elder")
-            } else {
-                button::secondary(None, "Elder")
-            }
-            .on_press(ConnectCubeMessage::Avatar(AvatarMessage::AgeFeelChanged(
-                AvatarAgeFeel::Elder,
-            ))),
-        )
-        .align_y(Alignment::Center);
+    let age_row = avatar_trait_row(
+        "Age Feel",
+        draft.age_feel,
+        &[
+            ("Young", AvatarAgeFeel::Young),
+            ("Mature", AvatarAgeFeel::Mature),
+            ("Elder", AvatarAgeFeel::Elder),
+        ],
+        AvatarMessage::AgeFeelChanged,
+    );
 
-    let demeanor_row = Row::new()
-        .push(
-            text::p2_regular("Demeanor")
-                .color(color::GREY_3)
-                .width(Length::Fixed(110.0)),
-        )
-        .push(
-            if draft.demeanor == AvatarDemeanor::Calm {
-                button::primary(None, "Calm")
-            } else {
-                button::secondary(None, "Calm")
-            }
-            .on_press(ConnectCubeMessage::Avatar(AvatarMessage::DemeanorChanged(
-                AvatarDemeanor::Calm,
-            ))),
-        )
-        .push(iced::widget::Space::new().width(Length::Fixed(8.0)))
-        .push(
-            if draft.demeanor == AvatarDemeanor::Fierce {
-                button::primary(None, "Fierce")
-            } else {
-                button::secondary(None, "Fierce")
-            }
-            .on_press(ConnectCubeMessage::Avatar(AvatarMessage::DemeanorChanged(
-                AvatarDemeanor::Fierce,
-            ))),
-        )
-        .push(iced::widget::Space::new().width(Length::Fixed(8.0)))
-        .push(
-            if draft.demeanor == AvatarDemeanor::Mysterious {
-                button::primary(None, "Mysterious")
-            } else {
-                button::secondary(None, "Mysterious")
-            }
-            .on_press(ConnectCubeMessage::Avatar(AvatarMessage::DemeanorChanged(
-                AvatarDemeanor::Mysterious,
-            ))),
-        )
-        .align_y(Alignment::Center);
+    let demeanor_row = avatar_trait_row(
+        "Demeanor",
+        draft.demeanor,
+        &[
+            ("Calm", AvatarDemeanor::Calm),
+            ("Fierce", AvatarDemeanor::Fierce),
+            ("Mysterious", AvatarDemeanor::Mysterious),
+        ],
+        AvatarMessage::DemeanorChanged,
+    );
 
-    let armor_row = Row::new()
-        .push(
-            text::p2_regular("Armor")
-                .color(color::GREY_3)
-                .width(Length::Fixed(110.0)),
-        )
-        .push(
-            if draft.armor_style == AvatarArmorStyle::Light {
-                button::primary(None, "Light")
-            } else {
-                button::secondary(None, "Light")
-            }
-            .on_press(ConnectCubeMessage::Avatar(
-                AvatarMessage::ArmorStyleChanged(AvatarArmorStyle::Light),
-            )),
-        )
-        .push(iced::widget::Space::new().width(Length::Fixed(8.0)))
-        .push(
-            if draft.armor_style == AvatarArmorStyle::Standard {
-                button::primary(None, "Standard")
-            } else {
-                button::secondary(None, "Standard")
-            }
-            .on_press(ConnectCubeMessage::Avatar(
-                AvatarMessage::ArmorStyleChanged(AvatarArmorStyle::Standard),
-            )),
-        )
-        .push(iced::widget::Space::new().width(Length::Fixed(8.0)))
-        .push(
-            if draft.armor_style == AvatarArmorStyle::Heavy {
-                button::primary(None, "Heavy")
-            } else {
-                button::secondary(None, "Heavy")
-            }
-            .on_press(ConnectCubeMessage::Avatar(
-                AvatarMessage::ArmorStyleChanged(AvatarArmorStyle::Heavy),
-            )),
-        )
-        .align_y(Alignment::Center);
+    let armor_row = avatar_trait_row(
+        "Armor",
+        draft.armor_style,
+        &[
+            ("Light", AvatarArmorStyle::Light),
+            ("Standard", AvatarArmorStyle::Standard),
+            ("Heavy", AvatarArmorStyle::Heavy),
+        ],
+        AvatarMessage::ArmorStyleChanged,
+    );
 
-    let motif_row = Row::new()
-        .push(
-            text::p2_regular("Accent")
-                .color(color::GREY_3)
-                .width(Length::Fixed(110.0)),
-        )
-        .push(
-            if draft.accent_motif == AvatarAccentMotif::OrangeSun {
-                button::primary(None, "Sun")
-            } else {
-                button::secondary(None, "Sun")
-            }
-            .on_press(ConnectCubeMessage::Avatar(
-                AvatarMessage::AccentMotifChanged(AvatarAccentMotif::OrangeSun),
-            )),
-        )
-        .push(iced::widget::Space::new().width(Length::Fixed(8.0)))
-        .push(
-            if draft.accent_motif == AvatarAccentMotif::Splatter {
-                button::primary(None, "Splatter")
-            } else {
-                button::secondary(None, "Splatter")
-            }
-            .on_press(ConnectCubeMessage::Avatar(
-                AvatarMessage::AccentMotifChanged(AvatarAccentMotif::Splatter),
-            )),
-        )
-        .push(iced::widget::Space::new().width(Length::Fixed(8.0)))
-        .push(
-            if draft.accent_motif == AvatarAccentMotif::Seal {
-                button::primary(None, "Seal")
-            } else {
-                button::secondary(None, "Seal")
-            }
-            .on_press(ConnectCubeMessage::Avatar(
-                AvatarMessage::AccentMotifChanged(AvatarAccentMotif::Seal),
-            )),
-        )
-        .push(iced::widget::Space::new().width(Length::Fixed(8.0)))
-        .push(
-            if draft.accent_motif == AvatarAccentMotif::Calligraphy {
-                button::primary(None, "Calligraphy")
-            } else {
-                button::secondary(None, "Calligraphy")
-            }
-            .on_press(ConnectCubeMessage::Avatar(
-                AvatarMessage::AccentMotifChanged(AvatarAccentMotif::Calligraphy),
-            )),
-        )
-        .align_y(Alignment::Center);
+    let motif_row = avatar_trait_row(
+        "Accent",
+        draft.accent_motif,
+        &[
+            ("Sun", AvatarAccentMotif::OrangeSun),
+            ("Splatter", AvatarAccentMotif::Splatter),
+            ("Seal", AvatarAccentMotif::Seal),
+            ("Calligraphy", AvatarAccentMotif::Calligraphy),
+        ],
+        AvatarMessage::AccentMotifChanged,
+    );
 
+    // Laser eyes is a single toggle, so it reads as "selected" when on.
     let laser_row = Row::new()
+        .push(avatar_trait_label("Laser Eyes"))
         .push(
-            text::p2_regular("Laser Eyes")
-                .color(color::GREY_3)
-                .width(Length::Fixed(110.0)),
-        )
-        .push(
-            if draft.laser_eyes {
-                button::primary(None, "On")
-            } else {
-                button::secondary(None, "Off")
-            }
+            avatar_trait_option(
+                if draft.laser_eyes { "On" } else { "Off" },
+                draft.laser_eyes,
+            )
             .on_press(ConnectCubeMessage::Avatar(AvatarMessage::LaserEyesToggled(
                 !draft.laser_eyes,
             ))),
