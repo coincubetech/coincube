@@ -1176,7 +1176,7 @@ dependencies = [
 [[package]]
 name = "breez-sdk-common"
 version = "0.1.0"
-source = "git+https://github.com/breez/spark-sdk?tag=0.19.0#a484ac157b65790117ea7c4bdc8104533b4e42ad"
+source = "git+https://github.com/coincubetech/spark-sdk?rev=83b800c32a00a5a6a555e287a97ae2be0c814fd8#83b800c32a00a5a6a555e287a97ae2be0c814fd8"
 dependencies = [
  "aes",
  "anyhow",
@@ -1190,8 +1190,8 @@ dependencies = [
  "hex",
  "http",
  "lightning",
- "macros 0.1.0 (git+https://github.com/breez/spark-sdk?tag=0.19.0)",
- "platform-utils 0.1.0 (git+https://github.com/breez/spark-sdk?tag=0.19.0)",
+ "macros 0.1.0 (git+https://github.com/coincubetech/spark-sdk?rev=83b800c32a00a5a6a555e287a97ae2be0c814fd8)",
+ "platform-utils 0.1.0 (git+https://github.com/coincubetech/spark-sdk?rev=83b800c32a00a5a6a555e287a97ae2be0c814fd8)",
  "prost",
  "regex-lite",
  "reqwest",
@@ -1212,7 +1212,7 @@ dependencies = [
 [[package]]
 name = "breez-sdk-spark"
 version = "0.1.0"
-source = "git+https://github.com/breez/spark-sdk?tag=0.19.0#a484ac157b65790117ea7c4bdc8104533b4e42ad"
+source = "git+https://github.com/coincubetech/spark-sdk?rev=83b800c32a00a5a6a555e287a97ae2be0c814fd8#83b800c32a00a5a6a555e287a97ae2be0c814fd8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1230,8 +1230,8 @@ dependencies = [
  "hex",
  "k256",
  "lnurl-models",
- "macros 0.1.0 (git+https://github.com/breez/spark-sdk?tag=0.19.0)",
- "platform-utils 0.1.0 (git+https://github.com/breez/spark-sdk?tag=0.19.0)",
+ "macros 0.1.0 (git+https://github.com/coincubetech/spark-sdk?rev=83b800c32a00a5a6a555e287a97ae2be0c814fd8)",
+ "platform-utils 0.1.0 (git+https://github.com/coincubetech/spark-sdk?rev=83b800c32a00a5a6a555e287a97ae2be0c814fd8)",
  "rusqlite",
  "rusqlite_migration",
  "serde",
@@ -2057,15 +2057,15 @@ checksum = "b7ac824320a75a52197e8f2d787f6a38b6718bb6897a35142d749af3c0e8f4fe"
 [[package]]
 name = "flashnet"
 version = "0.1.0"
-source = "git+https://github.com/breez/spark-sdk?tag=0.19.0#a484ac157b65790117ea7c4bdc8104533b4e42ad"
+source = "git+https://github.com/coincubetech/spark-sdk?rev=83b800c32a00a5a6a555e287a97ae2be0c814fd8#83b800c32a00a5a6a555e287a97ae2be0c814fd8"
 dependencies = [
  "async-trait",
  "base64",
  "bitcoin",
  "getrandom 0.2.17",
  "hex",
- "macros 0.1.0 (git+https://github.com/breez/spark-sdk?tag=0.19.0)",
- "platform-utils 0.1.0 (git+https://github.com/breez/spark-sdk?tag=0.19.0)",
+ "macros 0.1.0 (git+https://github.com/coincubetech/spark-sdk?rev=83b800c32a00a5a6a555e287a97ae2be0c814fd8)",
+ "platform-utils 0.1.0 (git+https://github.com/coincubetech/spark-sdk?rev=83b800c32a00a5a6a555e287a97ae2be0c814fd8)",
  "rand 0.8.5",
  "serde",
  "serde_json",
@@ -3117,7 +3117,7 @@ checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 [[package]]
 name = "lnurl-models"
 version = "0.1.0"
-source = "git+https://github.com/breez/spark-sdk?tag=0.19.0#a484ac157b65790117ea7c4bdc8104533b4e42ad"
+source = "git+https://github.com/coincubetech/spark-sdk?rev=83b800c32a00a5a6a555e287a97ae2be0c814fd8#83b800c32a00a5a6a555e287a97ae2be0c814fd8"
 dependencies = [
  "serde",
 ]
@@ -3157,7 +3157,7 @@ dependencies = [
 [[package]]
 name = "macros"
 version = "0.1.0"
-source = "git+https://github.com/breez/spark-sdk?tag=0.19.0#a484ac157b65790117ea7c4bdc8104533b4e42ad"
+source = "git+https://github.com/coincubetech/spark-sdk?rev=83b800c32a00a5a6a555e287a97ae2be0c814fd8#83b800c32a00a5a6a555e287a97ae2be0c814fd8"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3425,11 +3425,11 @@ checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
 [[package]]
 name = "platform-utils"
 version = "0.1.0"
-source = "git+https://github.com/breez/spark-sdk?tag=0.19.0#a484ac157b65790117ea7c4bdc8104533b4e42ad"
+source = "git+https://github.com/coincubetech/spark-sdk?rev=83b800c32a00a5a6a555e287a97ae2be0c814fd8#83b800c32a00a5a6a555e287a97ae2be0c814fd8"
 dependencies = [
  "async-trait",
  "base64",
- "macros 0.1.0 (git+https://github.com/breez/spark-sdk?tag=0.19.0)",
+ "macros 0.1.0 (git+https://github.com/coincubetech/spark-sdk?rev=83b800c32a00a5a6a555e287a97ae2be0c814fd8)",
  "reqwest",
  "serde",
  "serde_json",
@@ -4554,7 +4554,7 @@ dependencies = [
 [[package]]
 name = "spark"
 version = "0.1.0"
-source = "git+https://github.com/breez/spark-sdk?tag=0.19.0#a484ac157b65790117ea7c4bdc8104533b4e42ad"
+source = "git+https://github.com/coincubetech/spark-sdk?rev=83b800c32a00a5a6a555e287a97ae2be0c814fd8#83b800c32a00a5a6a555e287a97ae2be0c814fd8"
 dependencies = [
  "async-trait",
  "base64",
@@ -4572,8 +4572,8 @@ dependencies = [
  "http-body-util",
  "k256",
  "lightning-invoice 0.33.2",
- "macros 0.1.0 (git+https://github.com/breez/spark-sdk?tag=0.19.0)",
- "platform-utils 0.1.0 (git+https://github.com/breez/spark-sdk?tag=0.19.0)",
+ "macros 0.1.0 (git+https://github.com/coincubetech/spark-sdk?rev=83b800c32a00a5a6a555e287a97ae2be0c814fd8)",
+ "platform-utils 0.1.0 (git+https://github.com/coincubetech/spark-sdk?rev=83b800c32a00a5a6a555e287a97ae2be0c814fd8)",
  "prost",
  "prost-types",
  "rand 0.8.5",
@@ -4611,13 +4611,13 @@ dependencies = [
 [[package]]
 name = "spark-wallet"
 version = "0.1.0"
-source = "git+https://github.com/breez/spark-sdk?tag=0.19.0#a484ac157b65790117ea7c4bdc8104533b4e42ad"
+source = "git+https://github.com/coincubetech/spark-sdk?rev=83b800c32a00a5a6a555e287a97ae2be0c814fd8#83b800c32a00a5a6a555e287a97ae2be0c814fd8"
 dependencies = [
  "bitcoin",
  "frost-secp256k1-tr",
  "futures",
  "hex",
- "platform-utils 0.1.0 (git+https://github.com/breez/spark-sdk?tag=0.19.0)",
+ "platform-utils 0.1.0 (git+https://github.com/coincubetech/spark-sdk?rev=83b800c32a00a5a6a555e287a97ae2be0c814fd8)",
  "serde",
  "spark",
  "thiserror 2.0.18",
@@ -5400,7 +5400,7 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 [[package]]
 name = "utils"
 version = "0.1.0"
-source = "git+https://github.com/breez/spark-sdk?tag=0.19.0#a484ac157b65790117ea7c4bdc8104533b4e42ad"
+source = "git+https://github.com/coincubetech/spark-sdk?rev=83b800c32a00a5a6a555e287a97ae2be0c814fd8#83b800c32a00a5a6a555e287a97ae2be0c814fd8"
 dependencies = [
  "aes-gcm",
  "getrandom 0.2.17",
