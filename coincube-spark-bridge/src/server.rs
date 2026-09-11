@@ -735,7 +735,7 @@ async fn unfundable_conversion_error(
 async fn usdb_shortfall_conversion(
     sdk: &SdkHandle,
     needed_sats: u64,
-) -> Result<Option<ConversionOptions>, breez_sdk_spark::SdkError> {
+) -> Result<Option<UsdbShortfall>, breez_sdk_spark::SdkError> {
     let info = sdk
         .sdk
         .get_info(GetInfoRequest {
@@ -753,23 +753,36 @@ async fn usdb_shortfall_conversion(
     ))
 }
 
+/// A send the bitcoin balance can't cover, with the USDB conversion that
+/// would cover it. `balance_sats` is kept for the error copy if the
+/// conversion itself then fails — the user needs to know what *is*
+/// spendable without it.
+#[derive(Debug, Clone, PartialEq)]
+struct UsdbShortfall {
+    balance_sats: u64,
+    conversion: ConversionOptions,
+}
+
 /// The decision half of [`usdb_shortfall_conversion`], split out so the
 /// rule is testable without an SDK.
 fn conversion_for_shortfall(
     balance_sats: u64,
     held_usdb: u128,
     needed_sats: u64,
-) -> Option<ConversionOptions> {
+) -> Option<UsdbShortfall> {
     if balance_sats >= needed_sats || held_usdb == 0 {
         return None;
     }
-    Some(ConversionOptions {
-        conversion_type: ConversionType::ToBitcoin {
-            from_token_identifier: sdk_adapter::USDB_MAINNET_TOKEN_IDENTIFIER.to_string(),
+    Some(UsdbShortfall {
+        balance_sats,
+        conversion: ConversionOptions {
+            conversion_type: ConversionType::ToBitcoin {
+                from_token_identifier: sdk_adapter::USDB_MAINNET_TOKEN_IDENTIFIER.to_string(),
+            },
+            // SDK defaults: 10 bps slippage, 30 s to see the converted sats.
+            max_slippage_bps: None,
+            completion_timeout_secs: None,
         },
-        // SDK defaults: 10 bps slippage, 30 s to see the converted sats.
-        max_slippage_bps: None,
-        completion_timeout_secs: None,
     })
 }
 
@@ -781,6 +794,76 @@ fn conversion_for_shortfall(
 /// inside the fee quote.
 fn is_insufficient_funds(e: &breez_sdk_spark::SdkError) -> bool {
     e.to_string().to_lowercase().contains("insufficient funds")
+}
+
+/// How [`prepare_with_usdb_fallback`] failed.
+#[derive(Debug)]
+enum PrepareError {
+    /// The plain prepare failed and USDB was no help (not a funds problem,
+    /// no USDB held, or no amount to size a conversion from). Reported as
+    /// the SDK's own error, as before.
+    Sdk(breez_sdk_spark::SdkError),
+    /// The bitcoin balance was short, USDB was there to cover it, and the
+    /// prepare *with* the conversion failed — in practice the AMM refusing
+    /// the swap. `balance_sats` is what the wallet can still send without
+    /// a conversion.
+    UsdbConversion {
+        balance_sats: u64,
+        source: breez_sdk_spark::SdkError,
+    },
+}
+
+impl PrepareError {
+    /// Turn the failure into a bridge response. A conversion failure gets a
+    /// sentence the user can act on; the SDK's text is a Flashnet JSON blob
+    /// (`{"errorCode":"FSAG-4201",...,"message":"AMM has insufficient
+    /// liquidity/reserves: ..."}`) and is reduced to its `message`.
+    fn into_response(self, id: u64, what: &str) -> Response {
+        match self {
+            PrepareError::Sdk(e) => {
+                Response::err(id, ErrorKind::Sdk, format!("{what} failed: {e}"))
+            }
+            PrepareError::UsdbConversion {
+                balance_sats,
+                source,
+            } => Response::err(
+                id,
+                ErrorKind::BadRequest,
+                format!(
+                    "This send needs more bitcoin than the Spark wallet holds ({available} sats \
+                     available), and converting USDB to bitcoin to cover it failed: {}. Send up \
+                     to {available} sats, or try again later.",
+                    conversion_failure_reason(&source.to_string()),
+                    available = with_thousands(balance_sats),
+                ),
+            ),
+        }
+    }
+}
+
+/// `11254` → `11,254`, for error copy the user reads.
+fn with_thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// The human part of a conversion error. Flashnet errors reach us as
+/// `Error: {json}`; pull the JSON's `message` out. Anything else is passed
+/// through trimmed.
+fn conversion_failure_reason(text: &str) -> String {
+    let json = text
+        .find('{')
+        .and_then(|start| text.rfind('}').map(|end| &text[start..=end]));
+    json.and_then(|j| serde_json::from_str::<serde_json::Value>(j).ok())
+        .and_then(|v| v.get("message")?.as_str().map(str::to_string))
+        .unwrap_or_else(|| text.trim().to_string())
 }
 
 /// Run a plain sats prepare, then re-run it with a USDB→BTC conversion
@@ -804,36 +887,43 @@ async fn prepare_with_usdb_fallback<P, F, Fut, S, SFut>(
     shortfall_conversion: S,
     needed_sats: impl Fn(&P) -> u64,
     has_conversion: impl Fn(&P) -> bool,
-) -> Result<P, breez_sdk_spark::SdkError>
+) -> Result<P, PrepareError>
 where
     F: Fn(Option<ConversionOptions>) -> Fut,
     Fut: std::future::Future<Output = Result<P, breez_sdk_spark::SdkError>>,
     S: Fn(u64) -> SFut,
-    SFut:
-        std::future::Future<Output = Result<Option<ConversionOptions>, breez_sdk_spark::SdkError>>,
+    SFut: std::future::Future<Output = Result<Option<UsdbShortfall>, breez_sdk_spark::SdkError>>,
 {
     // What the plain prepare tells us the send needs, and what to answer
     // if USDB turns out not to help.
-    let (needed, fallback): (u64, Result<P, breez_sdk_spark::SdkError>) = match prepare(None).await
-    {
+    let (needed, fallback): (u64, Result<P, PrepareError>) = match prepare(None).await {
         Ok(plain) if has_conversion(&plain) => return Ok(plain),
         Ok(plain) => {
             let needed = needed_sats(&plain);
             (needed, Ok(plain))
         }
         Err(e) if is_insufficient_funds(&e) => match known_amount_sat {
-            Some(amount) => (amount, Err(e)),
-            None => return Err(e),
+            Some(amount) => (amount, Err(PrepareError::Sdk(e))),
+            None => return Err(PrepareError::Sdk(e)),
         },
-        Err(e) => return Err(e),
+        Err(e) => return Err(PrepareError::Sdk(e)),
     };
 
     match shortfall_conversion(needed).await {
-        Ok(Some(conversion)) => {
+        Ok(Some(UsdbShortfall {
+            balance_sats,
+            conversion,
+        })) => {
             tracing::info!(
-                "bitcoin balance short of {needed} sats; re-preparing with a USDB conversion"
+                "bitcoin balance {balance_sats} sats short of {needed}; re-preparing with a USDB \
+                 conversion"
             );
-            prepare(Some(conversion)).await
+            prepare(Some(conversion))
+                .await
+                .map_err(|source| PrepareError::UsdbConversion {
+                    balance_sats,
+                    source,
+                })
         }
         Ok(None) => fallback,
         Err(e) => {
@@ -938,7 +1028,7 @@ async fn handle_prepare_send(
                 }),
             )
         }
-        Err(e) => Response::err(id, ErrorKind::Sdk, format!("prepare_send failed: {e}")),
+        Err(e) => e.into_response(id, "prepare_send"),
     }
 }
 
@@ -1856,7 +1946,7 @@ async fn handle_prepare_lnurl_pay(
                 }),
             )
         }
-        Err(e) => Response::err(id, ErrorKind::Sdk, format!("prepare_lnurl_pay failed: {e}")),
+        Err(e) => e.into_response(id, "prepare_lnurl_pay"),
     }
 }
 
@@ -2426,16 +2516,17 @@ mod usdb_fallback_tests {
         assert!(conversion_for_shortfall(11_254, 0, 2_000_100).is_none());
         // Short and USDB held: convert from USDB. Slippage / timeout are
         // left to the SDK's defaults.
-        let conversion = conversion_for_shortfall(11_254, 5_000_000, 2_000_100)
+        let shortfall = conversion_for_shortfall(11_254, 5_000_000, 2_000_100)
             .expect("usdb should fund the shortfall");
+        assert_eq!(shortfall.balance_sats, 11_254);
         assert_eq!(
-            conversion.conversion_type,
+            shortfall.conversion.conversion_type,
             ConversionType::ToBitcoin {
                 from_token_identifier: sdk_adapter::USDB_MAINNET_TOKEN_IDENTIFIER.to_string(),
             }
         );
-        assert_eq!(conversion.max_slippage_bps, None);
-        assert_eq!(conversion.completion_timeout_secs, None);
+        assert_eq!(shortfall.conversion.max_slippage_bps, None);
+        assert_eq!(shortfall.conversion.completion_timeout_secs, None);
     }
 
     #[test]
@@ -2478,8 +2569,8 @@ mod usdb_fallback_tests {
         }
     }
 
-    fn usdb() -> ConversionOptions {
-        conversion_for_shortfall(0, 1, 1).expect("short with usdb converts")
+    fn usdb() -> UsdbShortfall {
+        conversion_for_shortfall(11_254, 1, 200_000).expect("short with usdb converts")
     }
 
     #[tokio::test]
@@ -2595,7 +2686,10 @@ mod usdb_fallback_tests {
             |p| p.0,
         )
         .await;
-        assert!(matches!(result, Err(SdkError::InsufficientFunds)));
+        assert!(matches!(
+            result,
+            Err(PrepareError::Sdk(SdkError::InsufficientFunds))
+        ));
         assert_eq!(fake.calls.get(), 1);
 
         // Amount unknown (amountless prepare that failed): nothing to size
@@ -2617,7 +2711,10 @@ mod usdb_fallback_tests {
             |p| p.0,
         )
         .await;
-        assert!(matches!(result, Err(SdkError::InsufficientFunds)));
+        assert!(matches!(
+            result,
+            Err(PrepareError::Sdk(SdkError::InsufficientFunds))
+        ));
         assert!(!checked.get());
         assert_eq!(fake.calls.get(), 1);
     }
@@ -2638,7 +2735,10 @@ mod usdb_fallback_tests {
             |p| p.0,
         )
         .await;
-        assert!(matches!(result, Err(SdkError::InvalidInput(_))));
+        assert!(matches!(
+            result,
+            Err(PrepareError::Sdk(SdkError::InvalidInput(_)))
+        ));
         assert_eq!(fake.calls.get(), 1);
 
         // Balance read failing: the plain prepare is still the answer.
@@ -2657,6 +2757,98 @@ mod usdb_fallback_tests {
         .await;
         assert_eq!(result.unwrap(), (false, 5_000));
         assert_eq!(fake.calls.get(), 1);
+    }
+}
+
+#[cfg(test)]
+mod usdb_fallback_error_tests {
+    use super::*;
+    use breez_sdk_spark::SdkError;
+    use std::cell::Cell;
+
+    const FLASHNET_ERROR: &str = r#"Error: {"errorCode":"FSAG-4201","errorCategory":"BUSINESS_LOGIC","message":"FSAG-4201: AMM has insufficient liquidity/reserves: Insufficient liquidity in pool","details":{"liquidity_error":"Insufficient liquidity in pool"},"requestId":"01A08F33-D5CB-7901-BDC6-4E3629D9CAFC","timestamp":"2026-09-11T06:42:14.092591956Z","service":"flashnet-amm-gateway","severity":"Error"}"#;
+
+    #[test]
+    fn conversion_failure_reason_pulls_the_message_out_of_flashnet_json() {
+        assert_eq!(
+            conversion_failure_reason(FLASHNET_ERROR),
+            "FSAG-4201: AMM has insufficient liquidity/reserves: Insufficient liquidity in pool"
+        );
+        // Not JSON: passed through.
+        assert_eq!(conversion_failure_reason("  Timeout  "), "Timeout");
+        // JSON without a message: passed through rather than blanked.
+        assert_eq!(conversion_failure_reason(r#"{"code":1}"#), r#"{"code":1}"#);
+    }
+
+    #[tokio::test]
+    async fn a_failed_usdb_conversion_prepare_names_the_bitcoin_balance_and_the_reason() {
+        // On-chain path: the plain prepare fails on funds, USDB is there,
+        // and the AMM refuses the conversion.
+        let calls = Cell::new(0);
+        let prepare = |conversion: Option<ConversionOptions>| {
+            calls.set(calls.get() + 1);
+            let out = if conversion.is_some() {
+                Err(SdkError::Generic(
+                    FLASHNET_ERROR.trim_start_matches("Error: ").to_string(),
+                ))
+            } else {
+                Err(SdkError::SparkError(
+                    "Tree service error: insufficient funds".to_string(),
+                ))
+            };
+            async move { out }
+        };
+        let result: Result<u64, PrepareError> = prepare_with_usdb_fallback(
+            Some(200_000),
+            prepare,
+            |_| async { Ok(conversion_for_shortfall(11_254, 15_177_980_000, 200_000)) },
+            |_| 0,
+            |_| false,
+        )
+        .await;
+        assert_eq!(calls.get(), 2);
+        let Err(err @ PrepareError::UsdbConversion { balance_sats, .. }) = result else {
+            panic!("expected a usdb conversion failure");
+        };
+        assert_eq!(balance_sats, 11_254);
+
+        let response = err.into_response(7, "prepare_send");
+        let value = serde_json::to_value(&response).expect("serialize");
+        let message = value["err"]["message"].as_str().expect("message");
+        assert!(
+            message.contains("11,254 sats available"),
+            "must name what is still spendable: {message}"
+        );
+        assert!(
+            message.contains("AMM has insufficient liquidity/reserves"),
+            "must carry the AMM's reason: {message}"
+        );
+        assert!(
+            !message.contains("errorCode"),
+            "must not leak the raw JSON blob: {message}"
+        );
+        assert_eq!(value["err"]["kind"], serde_json::json!("bad_request"));
+    }
+
+    #[test]
+    fn with_thousands_groups_digits() {
+        assert_eq!(with_thousands(0), "0");
+        assert_eq!(with_thousands(999), "999");
+        assert_eq!(with_thousands(1_000), "1,000");
+        assert_eq!(with_thousands(11_254), "11,254");
+        assert_eq!(with_thousands(19_718_473), "19,718,473");
+    }
+
+    #[test]
+    fn plain_sdk_errors_keep_their_original_shape() {
+        let response = PrepareError::Sdk(SdkError::InvalidInput("Amount is required".to_string()))
+            .into_response(7, "prepare_send");
+        let value = serde_json::to_value(&response).expect("serialize");
+        assert_eq!(
+            value["err"]["message"],
+            serde_json::json!("prepare_send failed: Invalid input: Amount is required")
+        );
+        assert_eq!(value["err"]["kind"], serde_json::json!("sdk"));
     }
 }
 

@@ -401,13 +401,16 @@ pub struct SparkSend {
     /// on the YOU SEND card. Refreshed on reload via `get_info`; `0` until the
     /// first fetch.
     balance_sats: u64,
-    /// How much of `balance_sats` is USDB rather than bitcoin, as a caption
-    /// under the balance ("incl. 8.66 USDB ≈ 11,254 sats"). `None` when the
-    /// wallet holds no USDB. The whole balance *is* spendable — the bridge
-    /// converts USDB→BTC on the way out when bitcoin alone can't cover a send
-    /// — but a send funded that way goes through the AMM, so the split is
-    /// worth knowing.
-    stable_balance_note: Option<String>,
+    /// The bitcoin-only part of `balance_sats`. A send above it is funded by
+    /// converting USDB→BTC on the way out (the bridge attaches the
+    /// conversion), which goes through the AMM — so the Amount field says so
+    /// when the entered amount crosses this line
+    /// ([`usdb_conversion_hint`]).
+    btc_balance_sats: u64,
+    /// The USDB holding, formatted ("15,177.98 USDB"), for that hint. `None`
+    /// when the wallet holds no USDB — then there is nothing to convert and
+    /// the send simply fails on funds.
+    usdb_holding: Option<String>,
     /// Free-text destination input (BOLT11 / BIP21 / on-chain address).
     pub destination_input: String,
     /// Amount override for amountless invoices / on-chain sends, in sats.
@@ -487,7 +490,8 @@ impl SparkSend {
         Self {
             backend,
             balance_sats: 0,
-            stable_balance_note: None,
+            btc_balance_sats: 0,
+            usdb_holding: None,
             destination_input: String::new(),
             amount_input: String::new(),
             invoice_amount_sat: None,
@@ -788,7 +792,14 @@ impl State for SparkSend {
                 sent_image_handle: &self.sent_image_handle,
                 recent_transactions: &self.recent_transactions,
                 balance_sats: self.balance_sats,
-                stable_balance_note: self.stable_balance_note.as_deref(),
+                usdb_conversion_hint: usdb_conversion_hint(
+                    self.invoice_amount_sat.or_else(|| {
+                        parse_amount_to_sats(&self.amount_input, cache.bitcoin_unit).ok()
+                    }),
+                    self.btc_balance_sats,
+                    self.usdb_holding.as_deref(),
+                    cache.bitcoin_unit,
+                ),
                 bitcoin_unit: cache.bitcoin_unit,
                 reference_btc_usd_price: super::reference_btc_usd_price(cache),
                 show_direction_badges: cache.show_direction_badges,
@@ -1302,11 +1313,15 @@ impl State for SparkSend {
                 if let Some((btc_sats, stable)) = balance {
                     self.balance_sats =
                         super::unified_spark_balance_sats(btc_sats, stable.as_ref(), cache);
-                    self.stable_balance_note = stable.as_ref().and_then(|sb| {
-                        stable_balance_note(
-                            sb,
-                            super::reference_btc_usd_price(cache),
-                            cache.bitcoin_unit,
+                    self.btc_balance_sats = btc_sats;
+                    self.usdb_holding = stable.as_ref().filter(|sb| sb.balance > 0).map(|sb| {
+                        format!(
+                            "{} {}",
+                            crate::app::breez_spark::assets::format_token_display(
+                                sb.balance,
+                                sb.decimals
+                            ),
+                            sb.ticker
                         )
                     });
                 }
@@ -1461,38 +1476,33 @@ fn format_amount_for_input(sats: u64, unit: BitcoinDisplayUnit) -> String {
     }
 }
 
-/// The YOU SEND card's caption for a USDB holding: the token amount and,
-/// when a BTC/USD price is known, what it counts for in the unified balance
-/// — "incl. 8.66 USDB ≈ 11,254 sats". `None` when there is no holding.
-fn stable_balance_note(
-    stable: &coincube_spark_protocol::StableBalanceSnapshot,
-    reference_btc_usd_price: Option<f64>,
+/// The line under the Amount field when the entered amount can't be met
+/// from bitcoin alone and USDB is there to cover it: names the bitcoin
+/// balance so the user knows how much is a plain send and how much goes
+/// through a USDB→BTC conversion. `None` while the amount is unset, fits
+/// in bitcoin, or there is no USDB (the send then fails on funds as usual).
+fn usdb_conversion_hint(
+    amount_sat: Option<u64>,
+    btc_balance_sats: u64,
+    usdb_holding: Option<&str>,
     unit: BitcoinDisplayUnit,
 ) -> Option<String> {
-    use crate::app::breez_spark::assets::{format_token_display, stable_token_as_sats};
     use coincube_core::miniscript::bitcoin::Amount;
     use coincube_ui::component::amount::DisplayAmount;
 
-    if stable.balance == 0 {
+    let amount = amount_sat?;
+    let usdb = usdb_holding?;
+    if amount <= btc_balance_sats {
         return None;
-    }
-    let token = format!(
-        "{} {}",
-        format_token_display(stable.balance, stable.decimals),
-        stable.ticker
-    );
-    let as_sats = stable_token_as_sats(stable.balance, stable.decimals, reference_btc_usd_price);
-    if as_sats == 0 {
-        // No price yet — the unified balance doesn't count it either.
-        return Some(format!("plus {token}"));
     }
     let unit_label = match unit {
         BitcoinDisplayUnit::BTC => "BTC",
         BitcoinDisplayUnit::Sats => "sats",
     };
     Some(format!(
-        "incl. {token} ≈ {} {unit_label}",
-        Amount::from_sat(as_sats).to_formatted_string_with_unit(unit)
+        "Your bitcoin balance is {} {unit_label}; the rest is converted from your {usdb} \
+         at the time of sending.",
+        Amount::from_sat(btc_balance_sats).to_formatted_string_with_unit(unit),
     ))
 }
 
@@ -1691,33 +1701,37 @@ mod tests {
     }
 
     #[test]
-    fn stable_balance_note_names_the_usdb_share_of_the_balance() {
-        let usdb = |balance: u64| coincube_spark_protocol::StableBalanceSnapshot {
-            balance,
-            decimals: 6,
-            ticker: "USDB".to_string(),
-        };
-        // No holding: no caption.
+    fn usdb_conversion_hint_appears_only_when_the_amount_exceeds_bitcoin_and_usdb_is_held() {
+        let usdb = Some("15,177.98 USDB");
+        // No amount yet, or one bitcoin can cover: nothing to say.
         assert_eq!(
-            stable_balance_note(&usdb(0), Some(76_900.0), BitcoinDisplayUnit::Sats),
+            usdb_conversion_hint(None, 11_254, usdb, BitcoinDisplayUnit::Sats),
             None
         );
-        // $8.66 at $76,900/BTC ≈ 11,261 sats.
         assert_eq!(
-            stable_balance_note(&usdb(8_660_000), Some(76_900.0), BitcoinDisplayUnit::Sats)
-                .as_deref(),
-            Some("incl. 8.66 USDB ≈ 11,261 sats")
+            usdb_conversion_hint(Some(11_254), 11_254, usdb, BitcoinDisplayUnit::Sats),
+            None
+        );
+        // Over the bitcoin balance with no USDB: the send will fail on funds;
+        // no hint pretending otherwise.
+        assert_eq!(
+            usdb_conversion_hint(Some(200_000), 11_254, None, BitcoinDisplayUnit::Sats),
+            None
+        );
+        // Over the bitcoin balance with USDB held: say what converts.
+        assert_eq!(
+            usdb_conversion_hint(Some(200_000), 11_254, usdb, BitcoinDisplayUnit::Sats).as_deref(),
+            Some(
+                "Your bitcoin balance is 11,254 sats; the rest is converted from your \
+                 15,177.98 USDB at the time of sending."
+            )
         );
         assert_eq!(
-            stable_balance_note(&usdb(8_660_000), Some(76_900.0), BitcoinDisplayUnit::BTC)
-                .as_deref(),
-            Some("incl. 8.66 USDB ≈ 0.00 011 261 BTC")
-        );
-        // No price yet: the unified balance doesn't count it, so say so
-        // without a sats figure.
-        assert_eq!(
-            stable_balance_note(&usdb(8_660_000), None, BitcoinDisplayUnit::Sats).as_deref(),
-            Some("plus 8.66 USDB")
+            usdb_conversion_hint(Some(200_000), 11_254, usdb, BitcoinDisplayUnit::BTC).as_deref(),
+            Some(
+                "Your bitcoin balance is 0.00 011 254 BTC; the rest is converted from your \
+                 15,177.98 USDB at the time of sending."
+            )
         );
     }
 

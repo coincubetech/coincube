@@ -48,9 +48,10 @@ pub struct SparkSendView<'a> {
     pub recent_transactions: &'a [SparkRecentTransaction],
     /// Unified balance (sats: BTC + Stable Balance), shown on the YOU SEND card.
     pub balance_sats: u64,
-    /// Caption under the balance naming the USDB share of it, when any —
-    /// see `SparkSend::stable_balance_note`.
-    pub stable_balance_note: Option<&'a str>,
+    /// Line under the Amount field when the entered amount exceeds the
+    /// bitcoin balance and USDB will cover the rest — see
+    /// `state::spark::send::usdb_conversion_hint`.
+    pub usdb_conversion_hint: Option<String>,
     pub bitcoin_unit: BitcoinDisplayUnit,
     /// BTC/USD reference price for the cross-chain conversion-fee sats estimate.
     /// `None` when no price is known — the fee then shows in the asset only.
@@ -109,7 +110,6 @@ impl<'a> SparkSendView<'a> {
         content = content.push(spark_send_cards(
             self.receive_target,
             self.balance_sats,
-            self.stable_balance_note,
             self.bitcoin_unit,
         ));
 
@@ -160,7 +160,12 @@ impl<'a> SparkSendView<'a> {
                 .push(amount)
                 .push_maybe(self.amount_set_by_invoice.then(|| {
                     p2_regular("This invoice sets its own amount.").style(theme::text::secondary)
-                })),
+                }))
+                .push_maybe(
+                    self.usdb_conversion_hint
+                        .clone()
+                        .map(|hint| p2_regular(hint).style(theme::text::secondary)),
+                ),
         )
         .padding(16)
         .style(theme::card::simple);
@@ -754,7 +759,6 @@ fn card_button_style(
 fn spark_send_cards<'a>(
     target: SparkSendTarget,
     balance_sats: u64,
-    stable_balance_note: Option<&'a str>,
     bitcoin_unit: BitcoinDisplayUnit,
 ) -> Element<'a, Message> {
     let you_send = Container::new(
@@ -785,10 +789,6 @@ fn spark_send_cards<'a>(
                 ))
                 .size(P2_SIZE)
                 .style(theme::text::secondary),
-            )
-            .push_maybe(
-                stable_balance_note
-                    .map(|note| text(note).size(CAPTION_SIZE).style(theme::text::secondary)),
             )
             .push(orange_badge("SPARK")),
     )
