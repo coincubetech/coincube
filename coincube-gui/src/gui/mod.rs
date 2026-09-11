@@ -150,6 +150,9 @@ impl GUI {
         let (mut panes, focused_pane) = pane_grid::State::new(pane);
         cmds.push(cmd.map(move |msg| Message::Pane(focused_pane, msg)));
         let global_settings_path = GlobalSettings::path(&config.coincube_directory);
+        crate::services::branta::set_enabled(GlobalSettings::load_recipient_identity_checks(
+            &global_settings_path,
+        ));
         let window_config = GlobalSettings::load_window_config(&global_settings_path);
         let window_init = window_config.is_some().then_some(true);
         let theme_mode = GlobalSettings::load_theme_mode(&global_settings_path);

@@ -1,0 +1,39 @@
+[package]
+name = "branta"
+version = "3.2.1"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT"
+description = "Rust SDK for the Branta V2 API — payment destination lookup and registration with zero-knowledge encryption support"
+repository = "https://github.com/BrantaOps/branta-rust"
+homepage = "https://branta.pro"
+readme = "README.md"
+keywords = ["bitcoin", "lightning", "payments", "branta", "crypto"]
+categories = ["cryptography", "api-bindings", "asynchronous"]
+exclude = ["CLAUDE.md"]
+
+[dependencies]
+aes-gcm = "0.11.0"
+async-trait = "0.1.91"
+base64 = "0.23.0"
+hex = "0.4.3"
+hmac = "0.13.0"
+indexmap = "2.11.4"
+percent-encoding = "2.3.2"
+reqwest = { version = "0.12.18", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sha2 = "0.11.0"
+thiserror = "2.0.19"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "time"] }
+url = "2.5.8"
+uuid = { version = "1.24.0", features = ["v4"] }
+
+[dev-dependencies]
+mockall = "0.13.1"
+tokio-test = "0.4.5"
+wiremock = "0.6.5"
+
+[[example]]
+name = "branta_example"
+path = "examples/branta_example.rs"

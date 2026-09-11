@@ -17,6 +17,11 @@ name = "coincube"
 path = "src/main.rs"
 
 [dependencies]
+# Official SDK source at ba5e510a; manifest-only reqwest adjustment avoids the
+# existing Breez iOS build-dependency pin conflict. Drop the adaptation when
+# upstream relaxes that pin or provides compatible HTTP/TLS configuration.
+# See vendor/branta/TENSHU_PROVENANCE.md and its enforced source hashes.
+branta = { path = "../vendor/branta", version = "=3.2.1", default-features = false }
 async-trait = "0.1"
 async-hwi = "0.0.32"
 breez-sdk-liquid = { git = "https://github.com/breez/breez-sdk-liquid", tag = "0.12.2" }

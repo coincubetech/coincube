@@ -120,6 +120,8 @@ pub enum VaultReceiveMessage {
 
 #[derive(Debug, Clone)]
 pub enum Message {
+    /// Open the Branta identity at `(output_index, identity_index)` in the reviewed PSBT.
+    OpenVaultRecipientIdentity(usize, usize),
     Scroll(f32),
     Reload,
     Clipboard(String),
@@ -414,6 +416,7 @@ pub enum SettingsMessage {
     InstallStatsSection,
     InstallStats(InstallStatsViewMessage),
     ToggleDirectionBadges(bool),
+    ToggleRecipientIdentityChecks(bool),
     /// Master seed backup flow (moved from Liquid Settings to Cube/General Settings).
     BackupMasterSeed(BackupWalletMessage),
     BackupMasterSeedUpdated,

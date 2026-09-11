@@ -4,20 +4,27 @@ use std::{
     convert::TryInto,
     iter::FromIterator,
     str::FromStr,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU64, Ordering as AtomicOrdering},
+        Arc,
+    },
 };
 
+use crate::services::branta::{self, LookupRequest, LookupResult, LookupTicket};
 use coincube_core::{
     miniscript::bitcoin::{
         address,
         bip32::{DerivationPath, Fingerprint},
         psbt::Psbt,
-        secp256k1, Address, Amount, Denomination, Network, OutPoint,
+        secp256k1, Address, Amount, Denomination, Network, OutPoint, ScriptBuf,
     },
     spend::{SpendCreationError, DUST_OUTPUT_SATS, MAX_FEERATE},
 };
 use coincubed::commands::ListCoinsEntry;
 use iced::{Subscription, Task};
+
+static PREPARATION_ID: AtomicU64 = AtomicU64::new(1);
+const TAMPER_WARNING: &str = "This payment request’s address does not match its verification data. Do not send. Return and replace the payment request.";
 
 use coincube_ui::{
     component::{
@@ -55,6 +62,7 @@ pub struct TransactionDraft {
     inputs: Vec<Coin>,
     recipients: Vec<Recipient>,
     generated: Option<(Psbt, Vec<String>)>,
+    recipient_identities: Option<psbt::RecipientIdentities>,
     batch_label: Option<String>,
     labels: HashMap<String, String>,
     /// The timelock of the recovery path to use for spending.
@@ -72,6 +80,7 @@ impl TransactionDraft {
             inputs: Vec::new(),
             recipients: Vec::new(),
             generated: None,
+            recipient_identities: None,
             batch_label: None,
             labels: HashMap::new(),
             recovery_timelock,
@@ -92,6 +101,9 @@ pub trait Step {
         message: Message,
     ) -> Task<Message>;
     fn apply(&self, _draft: &mut TransactionDraft) {}
+    fn can_advance(&self) -> bool {
+        true
+    }
     fn interrupt(&mut self) {}
     fn load(&mut self, _coins: &[Coin], _tip_height: i32, _draft: &TransactionDraft) {}
     fn reload_wallet(&mut self, _wallet: Arc<Wallet>) {}
@@ -191,6 +203,11 @@ pub struct DefineSpend {
     /// every time a redraft is scheduled so that stale debounce ticks and
     /// in-flight coin-selection results can be discarded.
     redraft_seq: u64,
+    preparation_id: u64,
+    lookup_ticket: Option<LookupTicket>,
+    recipient_identities: Option<psbt::RecipientIdentities>,
+    tampered: bool,
+    tampered_destinations: HashSet<ScriptBuf>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -243,7 +260,20 @@ impl DefineSpend {
             sync_status,
             bitcoin_unit,
             redraft_seq: 0,
+            preparation_id: PREPARATION_ID.fetch_add(1, AtomicOrdering::Relaxed),
+            lookup_ticket: None,
+            recipient_identities: None,
+            tampered: false,
+            tampered_destinations: HashSet::new(),
         }
+    }
+
+    fn invalidate_preparation(&mut self) {
+        self.preparation_id = PREPARATION_ID.fetch_add(1, AtomicOrdering::Relaxed);
+        self.generating = false;
+        self.generated = None;
+        self.lookup_ticket = None;
+        self.recipient_identities = None;
     }
 
     pub fn with_preselected_coins(mut self, preselected_coins: &[OutPoint]) -> Self {
@@ -303,21 +333,17 @@ impl DefineSpend {
     }
 
     fn exists_duplicate(&self) -> bool {
-        for (i, recipient) in self.recipients.iter().enumerate() {
-            if !recipient.address.value.is_empty()
-                && self.recipients[..i]
-                    .iter()
-                    .any(|r| r.address.value == recipient.address.value)
-            {
-                return true;
-            }
-        }
-        false
+        let mut destinations = HashSet::new();
+        self.recipients
+            .iter()
+            .filter_map(|recipient| recipient.destination().ok())
+            .any(|destination| !destinations.insert(destination))
     }
 
     fn check_valid(&mut self) {
-        self.is_valid =
-            self.form_values_are_valid(false) && self.coins.iter().any(|(_, selected)| *selected);
+        self.is_valid = !self.tampered
+            && self.form_values_are_valid(false)
+            && self.coins.iter().any(|(_, selected)| *selected);
         self.is_duplicate = self.exists_duplicate();
     }
     /// Schedule a debounced redraft. Bumps the generation token and returns a
@@ -389,7 +415,7 @@ impl DefineSpend {
                     None
                 } else {
                     Some((
-                        Address::from_str(&recipient.address.value).expect("Checked before"),
+                        recipient.destination().expect("Checked before"),
                         recipient.amount().expect("Checked before"),
                     ))
                 }
@@ -455,7 +481,8 @@ impl DefineSpend {
         // Otherwise, for a primary path spend, use a fixed change address from the user's
         // own wallet so that we don't increment the change index.
         let max_address = if let Some(i) = recipient_with_max {
-            Address::from_str(&self.recipients[i].address.value)
+            self.recipients[i]
+                .destination()
                 .expect("Checked before")
                 .as_unchecked()
                 .clone()
@@ -706,7 +733,13 @@ impl Step for DefineSpend {
                 self.unconfirmed_balance = unconfirmed_balance;
                 self.bitcoin_unit = cache.bitcoin_unit;
             }
+            Message::View(view::Message::Previous) => {
+                self.invalidate_preparation();
+            }
             Message::View(view::Message::CreateSpend(msg)) => {
+                if !matches!(msg, view::CreateSpendMessage::Generate) {
+                    self.invalidate_preparation();
+                }
                 match msg {
                     view::CreateSpendMessage::BatchLabelEdited(label) => {
                         self.batch_label.valid = label.len() <= 100;
@@ -820,84 +853,62 @@ impl Step for DefineSpend {
                         );
                     }
                     view::CreateSpendMessage::Generate => {
-                        // Single-flight: ignore extra clicks while a spend is
-                        // being built so we don't fire duplicate round-trips.
-                        if self.generating {
+                        if self.generating || self.tampered || !self.form_values_are_valid(false)
+                            || self.exists_duplicate() {
                             return Task::none();
                         }
-                        let inputs: Vec<OutPoint> = self
-                            .coins
-                            .iter()
-                            .filter_map(
-                                |(coin, selected)| {
-                                    if *selected {
-                                        Some(coin.outpoint)
-                                    } else {
-                                        None
-                                    }
-                                },
-                            )
-                            .collect();
-                        let mut outputs: HashMap<Address<address::NetworkUnchecked>, u64> =
-                            HashMap::new();
+                        let inputs: Vec<OutPoint> = self.coins.iter()
+                            .filter_map(|(coin, selected)| selected.then_some(coin.outpoint)).collect();
+                        let outputs: HashMap<_, _> = self.recipients.iter().map(|recipient|
+                            (recipient.destination().expect("validated destination"), recipient.amount().expect("validated amount"))
+                        ).collect();
                         let feerate_vb = self.feerate.value.parse::<u64>().unwrap_or(0);
                         self.warning = None;
                         self.generating = true;
-                        if let Some(reco_tl) = self.recovery_timelock {
-                            let recovery_address = Address::from_str(
-                                &self
-                                    .recipients
-                                    .first()
-                                    .expect("recovery spend has a recipient")
-                                    .address
-                                    .value,
-                            )
-                            .expect("Checked before");
-                            return Task::perform(
-                                async move {
-                                    daemon
-                                        .create_recovery(
-                                            recovery_address,
-                                            &inputs,
-                                            feerate_vb,
-                                            Some(reco_tl),
-                                        )
-                                        .await
-                                        .map_err(|e| e.into())
-                                        .map(|psbt| (psbt, vec![]))
-                                },
-                                Message::Psbt,
-                            );
-                        } else {
-                            for recipient in &self.recipients {
-                                let address = Address::from_str(&recipient.address.value)
-                                    .expect("Checked before");
-                                outputs
-                                    .insert(address, recipient.amount().expect("Checked before"));
-                            }
-                            return Task::perform(
-                                async move {
-                                    daemon
-                                        .create_spend_tx(&inputs, &outputs, feerate_vb, None)
-                                        .await
-                                        .map_err(|e| e.into())
-                                        .and_then(|res| match res {
-                                            CreateSpendResult::Success { psbt, warnings } => {
-                                                Ok((psbt, warnings))
-                                            }
-                                            CreateSpendResult::InsufficientFunds { missing } => {
-                                                Err(SpendCreationError::CoinSelection(
-                                                    coincube_core::spend::InsufficientFunds {
-                                                        missing,
-                                                    },
-                                                )
-                                                .into())
-                                            }
+                        self.preparation_id = PREPARATION_ID.fetch_add(1, AtomicOrdering::Relaxed);
+                        let generation = self.preparation_id;
+                        self.lookup_ticket = if self.recipients.is_empty() { None } else { branta::begin(self.network) };
+                        let ticket = self.lookup_ticket.clone();
+                        let recipients = self.recipients.clone();
+                        let descriptor = self.wallet.main_descriptor.clone();
+                        let requests: Vec<_> = self.recipients.iter().enumerate().filter_map(|(row, recipient)| {
+                            let address = recipient.destination().ok()?.require_network(self.network).ok()?;
+                            LookupRequest::bitcoin(&recipient.address.value, &address).map(|request| (row, request))
+                        }).collect();
+                        let recovery = self.recovery_timelock.map(|timelock|
+                            (timelock, self.recipients[0].destination().expect("validated recovery address")));
+                        return Task::perform(async move {
+                            let prepare = async {
+                                if let Some((timelock, address)) = recovery {
+                                    daemon.create_recovery(address, &inputs, feerate_vb, Some(timelock)).await
+                                        .map(|psbt| (psbt, vec![])).map_err(Error::from)
+                                } else {
+                                    daemon.create_spend_tx(&inputs, &outputs, feerate_vb, None).await
+                                        .map_err(Error::from).and_then(|result| match result {
+                                            CreateSpendResult::Success { psbt, warnings } => Ok((psbt, warnings)),
+                                            CreateSpendResult::InsufficientFunds { missing } => Err(SpendCreationError::CoinSelection(
+                                                coincube_core::spend::InsufficientFunds { missing }).into()),
                                         })
-                                },
-                                Message::Psbt,
-                            );
-                        }
+                                }
+                            };
+                            let result = prepare.await.and_then(|(psbt, warnings)| {
+                                validate_requested_amounts(&recipients, &psbt)?;
+                                Ok((psbt, warnings))
+                            });
+                            let identities = if let (Ok((psbt, _)), Some(ticket)) = (&result, ticket) {
+                                let Some(association) = associate_recipients(&recipients, psbt) else {
+                                    // Identity metadata is optional. A recovery/send-max output
+                                    // can legitimately differ from the earlier redraft snapshot.
+                                    return (result, Vec::new());
+                                };
+                                let owned: HashSet<_> = descriptor.change_indexes(psbt, &secp256k1::Secp256k1::verification_only())
+                                    .into_iter().map(|output| output.index()).collect();
+                                let requests = requests.into_iter().filter(|(row, _)|
+                                    association.get(*row).is_some_and(|output| !owned.contains(output))).collect();
+                                ticket.lookup_many(requests).await
+                            } else { Vec::new() };
+                            (result, identities)
+                        }, move |(result, identities)| Message::VaultSpendPrepared { generation, result, identities });
                     }
                     view::CreateSpendMessage::SelectCoin(i) => {
                         if let Some(coin) = self.coins.get_mut(i) {
@@ -927,23 +938,56 @@ impl Step for DefineSpend {
                 // `create_spend_tx` is async and potentially a network
                 // round-trip, so we schedule it debounced and off the UI
                 // thread rather than blocking on every keystroke.
+                self.tampered = self.recipients.iter()
+                    .filter_map(|recipient| destination_binding(&recipient.address.value))
+                    .any(|destination| self.tampered_destinations.contains(&destination));
+                if !self.tampered && self.warning.as_ref().is_some_and(|warning| warning.to_string().contains(TAMPER_WARNING)) {
+                    self.warning = None;
+                }
                 let redraft_task = self.schedule_redraft();
                 self.check_valid();
                 return redraft_task;
             }
-            Message::Psbt(res) => {
-                // Ignore late replies when no generate request is in flight
-                // (e.g. the user hit Clear after pressing Generate). Clear
-                // resets `generating` to false via `Self::new`, so a stale
-                // response must not set `generated` or emit `Next`.
-                if !self.generating {
+            Message::VaultSpendPrepared { generation, result, identities } => {
+                if !self.generating || generation != self.preparation_id {
                     return Task::none();
                 }
                 self.generating = false;
-                match res {
-                    Ok(psbt) => {
-                        self.generated = Some(psbt);
-                        return Task::perform(async {}, |_| Message::View(view::Message::Next));
+                let identities = if self.lookup_ticket.as_ref().is_some_and(LookupTicket::is_current) {
+                    identities
+                } else { Vec::new() };
+                if identities.iter().any(|(_, result)| matches!(result, LookupResult::Tampered)) {
+                    self.tampered = true;
+                    for (row, result) in &identities {
+                        if matches!(result, LookupResult::Tampered) {
+                            if let Some(recipient) = self.recipients.get(*row) {
+                                if let Some(destination) = destination_binding(&recipient.address.value) {
+                                    self.tampered_destinations.insert(destination);
+                                }
+                            }
+                        }
+                    }
+                    self.generated = None;
+                    self.warning = Some(Error::Unexpected(TAMPER_WARNING.to_string()));
+                    self.check_valid();
+                    return Task::none();
+                }
+                match result {
+                    Ok((psbt, warnings)) => {
+                        // Explicit BIP21 amounts are payment instructions, independent of
+                        // optional identity association and the privacy preference.
+                        if let Err(error) = validate_requested_amounts(&self.recipients, &psbt) {
+                            self.warning = Some(error);
+                            return Task::none();
+                        }
+                        let association = associate_recipients(&self.recipients, &psbt).unwrap_or_default();
+                        let bound = identities.into_iter().filter_map(|(row, result)|
+                            association.get(row).map(|vout| (*vout, result))).collect();
+                        self.recipient_identities = self.lookup_ticket.clone().map(|ticket| psbt::RecipientIdentities {
+                            ticket, transaction_id: psbt.unsigned_tx.compute_txid(), results: bound,
+                        });
+                        self.generated = Some((psbt, warnings));
+                        return Task::done(Message::View(view::Message::Next));
                     }
                     Err(e) => {
                         let err_msg = e.to_string();
@@ -1012,7 +1056,7 @@ impl Step for DefineSpend {
                 result,
             }
                 // Ignore a stale result the user has already typed past.
-                if seq == self.redraft_seq => {
+                if seq == self.redraft_seq && !self.generating => {
                     self.apply_redraft_result(
                         max_address,
                         recipient_with_max,
@@ -1026,7 +1070,16 @@ impl Step for DefineSpend {
         Task::none()
     }
 
+    fn can_advance(&self) -> bool {
+        self.generated.is_some() && !self.tampered
+    }
+
+    fn interrupt(&mut self) {
+        self.invalidate_preparation();
+    }
+
     fn apply(&self, draft: &mut TransactionDraft) {
+        draft.recipient_identities = self.recipient_identities.clone();
         draft.inputs = self
             .coins
             .iter()
@@ -1041,7 +1094,8 @@ impl Step for DefineSpend {
                     .iter()
                     .find(|recipient| {
                         !recipient.label.value.is_empty()
-                            && Address::from_str(&recipient.address.value)
+                            && recipient
+                                .destination()
                                 .unwrap()
                                 .assume_checked()
                                 .matches_script_pubkey(&output.script_pubkey)
@@ -1111,7 +1165,11 @@ impl Step for DefineSpend {
             &self.coins_labels,
             &self.batch_label,
             self.amount_left_to_select.as_ref(),
-            self.warning.as_ref().map(|e| e.to_string()),
+            if self.tampered {
+                Some(TAMPER_WARNING.to_string())
+            } else {
+                self.warning.as_ref().map(|e| e.to_string())
+            },
             &self.feerate,
             self.fee_amount.as_ref(),
             &self.sync_status,
@@ -1129,7 +1187,103 @@ impl Step for DefineSpend {
     }
 }
 
-#[derive(Debug, Default, Clone)]
+/// A known mismatch remains blocked for this destination for the lifetime of
+/// the form. Changing/removing verification fields or disabling checks must not
+/// become a bypass. Bind only the Bitcoin script, so query decoding, duplicate
+/// keys, address casing and URI presentation cannot change the latch. No raw
+/// request or verification secrets are retained here.
+fn destination_binding(raw: &str) -> Option<ScriptBuf> {
+    parse_payment_request(raw)
+        .ok()
+        .map(|(address, _)| address.assume_checked().script_pubkey())
+}
+
+/// Preserve row identity even when equal addresses/amounts appear more than once.
+/// Bind to the transaction actually shown and signed, independent of response order.
+/// A missing association suppresses identity metadata; it never rejects a spend.
+fn associate_recipients(recipients: &[Recipient], psbt: &Psbt) -> Option<Vec<usize>> {
+    let mut used = HashSet::new();
+    recipients
+        .iter()
+        .map(|recipient| {
+            let address = recipient.destination().ok()?.assume_checked();
+            let amount = recipient.amount().ok()?;
+            let output = psbt
+                .unsigned_tx
+                .output
+                .iter()
+                .enumerate()
+                .find(|(index, output)| {
+                    !used.contains(index)
+                        && output.value.to_sat() == amount
+                        && address.matches_script_pubkey(&output.script_pubkey)
+                })
+                .map(|(index, _)| index)?;
+            used.insert(output);
+            Some(output)
+        })
+        .collect()
+}
+
+/// Unlike optional identity metadata, an explicit BIP21 amount constrains the
+/// payment itself. Check the actual prepared outputs even when Branta is disabled
+/// or a recovery/send-max amount changed after the form's earlier redraft.
+fn validate_requested_amounts(recipients: &[Recipient], psbt: &Psbt) -> Result<(), Error> {
+    let mut used = HashSet::new();
+    for recipient in recipients {
+        let Ok((address, Some(amount))) = parse_payment_request(&recipient.address.value) else {
+            continue;
+        };
+        let address = address.assume_checked();
+        let output = psbt.unsigned_tx.output.iter().enumerate().find(|(index, output)|
+            !used.contains(index) && output.value == amount && address.matches_script_pubkey(&output.script_pubkey))
+            .map(|(index, _)| index).ok_or_else(|| Error::Unexpected(
+                "The prepared amount does not match the Bitcoin payment request. Return and resolve the amount before sending.".to_string()))?;
+        used.insert(output);
+    }
+    Ok(())
+}
+
+/// Parse locally, retaining the original URI in the form for the SDK. Unknown
+/// required BIP21 fields and ambiguous duplicate amounts fail closed.
+fn parse_payment_request(
+    raw: &str,
+) -> Result<(Address<address::NetworkUnchecked>, Option<Amount>), Error> {
+    let invalid = || Error::Unexpected("Invalid Bitcoin payment request".to_string());
+    let raw = raw.trim();
+    if raw
+        .get(..8)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("bitcoin:"))
+    {
+        let uri = reqwest::Url::parse(raw).map_err(|_| invalid())?;
+        if uri.host_str().is_some() || uri.fragment().is_some() {
+            return Err(invalid());
+        }
+        let address = Address::from_str(uri.path()).map_err(|_| invalid())?;
+        let mut amount = None;
+        for (key, value) in uri.query_pairs() {
+            if key.starts_with("req-") {
+                return Err(invalid());
+            }
+            if key == "amount" {
+                if amount.is_some() {
+                    return Err(invalid());
+                }
+                let parsed =
+                    Amount::from_str_in(&value, Denomination::Bitcoin).map_err(|_| invalid())?;
+                if parsed == Amount::ZERO {
+                    return Err(invalid());
+                }
+                amount = Some(parsed);
+            }
+        }
+        Ok((address, amount))
+    } else {
+        Ok((Address::from_str(raw).map_err(|_| invalid())?, None))
+    }
+}
+
+#[derive(Default, Clone)]
 struct Recipient {
     label: form::Value<String>,
     address: form::Value<String>,
@@ -1152,6 +1306,10 @@ impl Recipient {
             is_recovery,
             ..Default::default()
         }
+    }
+
+    fn destination(&self) -> Result<Address<address::NetworkUnchecked>, Error> {
+        parse_payment_request(&self.address.value).map(|(address, _)| address)
     }
 
     fn amount(&self) -> Result<u64, Error> {
@@ -1183,7 +1341,7 @@ impl Recipient {
             return Err(Error::Unexpected("Amount should be non-zero".to_string()));
         }
 
-        if let Ok(address) = Address::from_str(&self.address.value) {
+        if let Ok(address) = self.destination() {
             if amount <= address.assume_checked().script_pubkey().minimal_non_dust() {
                 return Err(Error::Unexpected(
                     "Amount must be superior to script dust value".to_string(),
@@ -1191,6 +1349,13 @@ impl Recipient {
             }
         }
 
+        if let Ok((_, Some(requested))) = parse_payment_request(&self.address.value) {
+            if requested != amount {
+                return Err(Error::Unexpected(
+                    "Amount must match the Bitcoin payment request".to_string(),
+                ));
+            }
+        }
         Ok(amount.to_sat())
     }
 
@@ -1214,7 +1379,16 @@ impl Recipient {
         match message {
             view::CreateSpendMessage::RecipientEdited(_, "address", address) => {
                 self.address.value = address;
-                if let Ok(address) = Address::from_str(&self.address.value) {
+                if self.amount.value.is_empty() {
+                    if let Ok((_, Some(amount))) = parse_payment_request(&self.address.value) {
+                        self.bitcoin_unit = bitcoin_unit;
+                        self.amount.value = match bitcoin_unit {
+                            BitcoinDisplayUnit::BTC => amount.to_btc().to_string(),
+                            BitcoinDisplayUnit::Sats => amount.to_sat().to_string(),
+                        };
+                    }
+                }
+                if let Ok(address) = self.destination() {
                     self.address.valid = address.is_valid_for_network(network);
                     if !self.amount.value.is_empty() {
                         self.amount.valid = self.amount().is_ok();
@@ -1314,6 +1488,12 @@ impl Recipient {
             }
             _ => {}
         }
+        if let Ok((_, Some(_))) = parse_payment_request(&self.address.value) {
+            if !self.amount.value.is_empty() && self.amount().is_err() {
+                self.amount.valid = false;
+                self.amount.warning = Some("Amount must match the Bitcoin payment request");
+            }
+        }
     }
 
     fn view(
@@ -1404,7 +1584,8 @@ impl Step for SaveSpend {
         }
 
         self.spend = Some((
-            psbt::PsbtState::new(self.wallet.clone(), tx, false),
+            psbt::PsbtState::new(self.wallet.clone(), tx, false)
+                .with_recipient_identities(draft.recipient_identities.clone()),
             warnings,
         ));
     }
@@ -1458,6 +1639,7 @@ impl Step for SaveSpend {
                 false
             },
             cache.bitcoin_unit,
+            psbt_state.recipient_identities(),
         );
         if let Some(modal) = &psbt_state.modal {
             modal.as_ref().view(content)
@@ -1987,5 +2169,516 @@ mod tests {
             )),
         );
         assert_eq!(selector.selected_path, None);
+    }
+    fn branta_form() -> DefineSpend {
+        let mut state = DefineSpend::new(
+            Network::Bitcoin,
+            wallet(),
+            &[coin(1, 50_000, Some(90))],
+            100,
+            None,
+            true,
+            Amount::from_sat(50_000),
+            Amount::ZERO,
+            SyncStatus::Synced,
+            BitcoinDisplayUnit::Sats,
+        );
+        state.recipients[0] = bip21_recipient(1_000);
+        state.feerate.value = "2".into();
+        state.feerate.valid = true;
+        state.coins[0].1 = true;
+        state.check_valid();
+        assert!(state.form_values_are_valid(false));
+        assert!(state.is_valid);
+        assert!(!state.is_duplicate);
+        state
+    }
+
+    fn bip21_recipient(sats: u64) -> Recipient {
+        let mut recipient = Recipient::default();
+        recipient.update(
+            Network::Bitcoin,
+            BitcoinDisplayUnit::Sats,
+            view::CreateSpendMessage::RecipientEdited(
+                0,
+                "address",
+                format!(
+                    "bitcoin:{MAINNET_ADDR}?amount={}&branta_id=example&branta_secret=secret",
+                    Amount::from_sat(sats).to_btc()
+                ),
+            ),
+        );
+        recipient
+    }
+
+    fn prepared_outputs(amounts: &[u64]) -> Psbt {
+        use coincube_core::miniscript::bitcoin::{absolute, transaction, Transaction, TxOut};
+        Psbt::from_unsigned_tx(Transaction {
+            version: transaction::Version::TWO,
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![],
+            output: amounts
+                .iter()
+                .map(|sats| TxOut {
+                    value: Amount::from_sat(*sats),
+                    script_pubkey: address().script_pubkey(),
+                })
+                .collect(),
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn bip21_preserves_original_populates_amount_and_checks_network() {
+        let mut recipient = bip21_recipient(1_234);
+        assert!(recipient.address.value.contains("branta_secret=secret"));
+        assert_eq!(
+            recipient.destination().unwrap(),
+            Address::from_str(MAINNET_ADDR).unwrap()
+        );
+        assert_eq!(recipient.amount().unwrap(), 1_234);
+        assert!(recipient.valid());
+        recipient.update(
+            Network::Testnet,
+            BitcoinDisplayUnit::Sats,
+            view::CreateSpendMessage::RecipientEdited(
+                0,
+                "address",
+                recipient.address.value.clone(),
+            ),
+        );
+        assert!(!recipient.address_valid());
+    }
+
+    #[test]
+    fn bip21_amount_mismatch_cannot_be_ignored_or_overwritten_by_max() {
+        let mut recipient = bip21_recipient(1_000);
+        assert!(recipient.valid());
+        recipient.update(
+            Network::Bitcoin,
+            BitcoinDisplayUnit::Sats,
+            view::CreateSpendMessage::RecipientEdited(0, "amount", "2000".into()),
+        );
+        assert!(!recipient.valid());
+        assert!(recipient.amount().is_err());
+        assert_eq!(
+            recipient.amount.warning,
+            Some("Amount must match the Bitcoin payment request")
+        );
+        let mut state = branta_form();
+        state.recipients[0] = recipient;
+        state.send_max_to_recipient = Some(0);
+        assert!(!state.form_values_are_valid(false));
+    }
+
+    #[test]
+    fn bip21_rejects_ambiguous_amounts_required_fields_and_foreign_schemes() {
+        for suffix in [
+            "amount=0.001&amount=0.002",
+            "amount=-1",
+            "amount=0",
+            "req-unknown=x",
+            "amount=0.000000001",
+            "amount=oops",
+        ] {
+            assert!(parse_payment_request(&format!("bitcoin:{MAINNET_ADDR}?{suffix}")).is_err());
+        }
+        assert!(parse_payment_request(&format!("liquidnetwork:{MAINNET_ADDR}")).is_err());
+        assert!(parse_payment_request(&format!("bitcoin://{MAINNET_ADDR}")).is_err());
+    }
+
+    #[test]
+    fn duplicate_address_policy_applies_to_bip21_and_plain_address() {
+        let mut state = branta_form();
+        let mut plain = bip21_recipient(2_000);
+        plain.update(
+            Network::Bitcoin,
+            BitcoinDisplayUnit::Sats,
+            view::CreateSpendMessage::RecipientEdited(1, "address", MAINNET_ADDR.into()),
+        );
+        state.recipients.push(plain);
+        assert!(state.exists_duplicate());
+    }
+
+    #[test]
+    fn recipient_output_association_preserves_rows_and_duplicate_destinations() {
+        let recipients = vec![
+            bip21_recipient(1_000),
+            bip21_recipient(2_000),
+            bip21_recipient(1_000),
+        ];
+        let psbt = prepared_outputs(&[2_000, 1_000, 1_000]);
+        assert_eq!(
+            associate_recipients(&recipients, &psbt).unwrap(),
+            vec![1, 0, 2]
+        );
+        assert!(associate_recipients(&recipients, &prepared_outputs(&[1_000, 2_000])).is_none());
+        assert!(associate_recipients(&[bip21_recipient(1_001)], &psbt).is_none());
+        assert!(associate_recipients(&[], &psbt).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn authenticated_mismatch_blocks_transition_until_request_replacement() {
+        let daemon = Arc::new(crate::daemon::client::Coincubed::new(
+            crate::utils::mock::Daemon::new(vec![]).run(),
+        ));
+        let mut state = branta_form();
+        let ticket = branta::test_ticket(true);
+        state.lookup_ticket = Some(ticket.clone());
+        state.generating = true;
+        let _ = state.update(
+            daemon.clone(),
+            &Cache::default(),
+            Message::VaultSpendPrepared {
+                generation: state.preparation_id,
+                result: Ok((prepared_outputs(&[1_000]), vec![])),
+                identities: vec![(0, LookupResult::Tampered)],
+            },
+        );
+        assert!(state.tampered);
+        assert!(!state.can_advance());
+        assert!(state.generated.is_none());
+        ticket.set_test_enabled(false);
+        state.recipients.push(bip21_recipient(2_000));
+        let _ = state.update(
+            daemon.clone(),
+            &Cache::default(),
+            Message::View(view::Message::CreateSpend(
+                view::CreateSpendMessage::RecipientEdited(
+                    1,
+                    "address",
+                    "1BoatSLRHtKNngkdXEeobR76b53LETtpyT".into(),
+                ),
+            )),
+        );
+        assert!(
+            state.tampered,
+            "editing a different row must not bypass a mismatch"
+        );
+        let original = state.recipients[0].address.value.clone();
+        let _ = state.update(
+            daemon.clone(),
+            &Cache::default(),
+            Message::View(view::Message::CreateSpend(
+                view::CreateSpendMessage::RecipientEdited(0, "address", original),
+            )),
+        );
+        assert!(
+            state.tampered,
+            "re-pasting the same request must remain blocked"
+        );
+        let _ = state.update(
+            daemon.clone(),
+            &Cache::default(),
+            Message::View(view::Message::CreateSpend(
+                view::CreateSpendMessage::FeerateEdited("3".into()),
+            )),
+        );
+        assert!(state.tampered);
+        assert!(!state.can_advance());
+        let _ = state.update(
+            daemon,
+            &Cache::default(),
+            Message::View(view::Message::CreateSpend(
+                view::CreateSpendMessage::RecipientEdited(
+                    0,
+                    "address",
+                    "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa".into(),
+                ),
+            )),
+        );
+        assert!(!state.tampered);
+        assert!(!state.can_advance());
+    }
+
+    #[tokio::test]
+    async fn stale_preparation_cannot_replace_newer_review_or_restore_edited_identity() {
+        let daemon = Arc::new(crate::daemon::client::Coincubed::new(
+            crate::utils::mock::Daemon::new(vec![]).run(),
+        ));
+        let mut state = branta_form();
+        let old = state.preparation_id;
+        state.invalidate_preparation();
+        state.generating = true;
+        let current = state.preparation_id;
+        let _ = state.update(
+            daemon.clone(),
+            &Cache::default(),
+            Message::VaultSpendPrepared {
+                generation: old,
+                result: Ok((prepared_outputs(&[1_000]), vec![])),
+                identities: vec![(0, LookupResult::Tampered)],
+            },
+        );
+        assert!(state.generating);
+        assert!(state.generated.is_none());
+        assert!(!state.tampered);
+        let _ = state.update(
+            daemon.clone(),
+            &Cache::default(),
+            Message::VaultSpendPrepared {
+                generation: current,
+                result: Ok((prepared_outputs(&[1_000]), vec![])),
+                identities: vec![],
+            },
+        );
+        assert!(state.can_advance());
+        let _ = state.update(
+            daemon.clone(),
+            &Cache::default(),
+            Message::View(view::Message::CreateSpend(
+                view::CreateSpendMessage::RecipientEdited(0, "address", MAINNET_ADDR.into()),
+            )),
+        );
+        assert!(!state.can_advance());
+        let _ = state.update(
+            daemon,
+            &Cache::default(),
+            Message::VaultSpendPrepared {
+                generation: current,
+                result: Ok((prepared_outputs(&[1_000]), vec![])),
+                identities: vec![],
+            },
+        );
+        assert!(state.generated.is_none());
+    }
+
+    #[tokio::test]
+    async fn disabled_inflight_result_is_silent_and_cannot_reappear_after_reenable() {
+        let daemon = Arc::new(crate::daemon::client::Coincubed::new(
+            crate::utils::mock::Daemon::new(vec![]).run(),
+        ));
+        let mut state = branta_form();
+        let ticket = branta::test_ticket(true);
+        let identity = branta::test_identity(&ticket, "Example merchant");
+        state.lookup_ticket = Some(ticket.clone());
+        state.generating = true;
+        ticket.set_test_enabled(false);
+        ticket.set_test_enabled(true);
+        let _ = state.update(
+            daemon,
+            &Cache::default(),
+            Message::VaultSpendPrepared {
+                generation: state.preparation_id,
+                result: Ok((prepared_outputs(&[1_000]), vec![])),
+                identities: vec![(0, LookupResult::Identified(vec![identity]))],
+            },
+        );
+        assert!(state.can_advance());
+        assert!(state
+            .recipient_identities
+            .as_ref()
+            .unwrap()
+            .results
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn out_of_order_results_are_attached_to_exact_prepared_outputs() {
+        let daemon = Arc::new(crate::daemon::client::Coincubed::new(
+            crate::utils::mock::Daemon::new(vec![]).run(),
+        ));
+        let mut state = branta_form();
+        state.recipients.push(bip21_recipient(2_000));
+        let ticket = branta::test_ticket(true);
+        let identity = branta::test_identity(&ticket, "Second recipient");
+        state.lookup_ticket = Some(ticket);
+        state.generating = true;
+        let psbt = prepared_outputs(&[2_000, 1_000]);
+        let txid = psbt.unsigned_tx.compute_txid();
+        let _ = state.update(
+            daemon,
+            &Cache::default(),
+            Message::VaultSpendPrepared {
+                generation: state.preparation_id,
+                result: Ok((psbt, vec![])),
+                identities: vec![
+                    (1, LookupResult::Identified(vec![identity])),
+                    (0, LookupResult::Silent),
+                ],
+            },
+        );
+        let review = state.recipient_identities.as_ref().unwrap();
+        assert_eq!(review.transaction_id, txid);
+        assert_eq!(review.results[0].0, 0);
+        assert_eq!(review.results[1].0, 1);
+        assert!(matches!(review.results[0].1, LookupResult::Identified(_)));
+    }
+    #[test]
+    fn mismatch_binding_survives_query_order_amount_label_and_address_case_edits() {
+        let original = format!("bitcoin:{MAINNET_ADDR}?branta_id=x&branta_secret=y&amount=0.001");
+        let reordered = format!(
+            "bitcoin:{}?label=shop&amount=0.002&branta_secret=y&branta_id=x",
+            MAINNET_ADDR.to_ascii_uppercase()
+        );
+        assert_eq!(
+            destination_binding(&original),
+            destination_binding(&reordered)
+        );
+        assert_eq!(
+            destination_binding(&original),
+            destination_binding(MAINNET_ADDR)
+        );
+    }
+    #[tokio::test]
+    async fn disabling_checks_and_rewriting_verification_fields_cannot_bypass_known_mismatch() {
+        let daemon = Arc::new(crate::daemon::client::Coincubed::new(
+            crate::utils::mock::Daemon::new(vec![]).run(),
+        ));
+        let mut state = branta_form();
+        let original = format!("bitcoin:{MAINNET_ADDR}?branta_id=abc+def=&branta_secret=1234");
+        state.recipients[0].address.value = original.clone();
+        let ticket = branta::test_ticket(true);
+        state.lookup_ticket = Some(ticket.clone());
+        state.generating = true;
+        let _ = state.update(
+            daemon.clone(),
+            &Cache::default(),
+            Message::VaultSpendPrepared {
+                generation: state.preparation_id,
+                result: Ok((prepared_outputs(&[1_000]), vec![])),
+                identities: vec![(0, LookupResult::Tampered)],
+            },
+        );
+        ticket.set_test_enabled(false);
+        for request in [
+            format!("bitcoin:{MAINNET_ADDR}?branta_id=abc%2Bdef%3D&branta_secret=1234"),
+            format!("bitcoin:{MAINNET_ADDR}?branta_id=ignored&%62RANTA_ID=abc%2Bdef%3D&branta_secret=1234"),
+            format!("{original}&branta_id=abc+def="),
+            format!("{original}&branta_extra=unrelated"),
+            format!("bitcoin:{MAINNET_ADDR}"),
+            MAINNET_ADDR.to_string(),
+        ] {
+            let _ = state.update(daemon.clone(), &Cache::default(), Message::View(view::Message::CreateSpend(
+                view::CreateSpendMessage::RecipientEdited(0, "address", request),
+            )));
+            assert!(state.form_values_are_valid(false));
+            assert!(!state.exists_duplicate());
+            assert!(state.tampered);
+            assert!(!state.can_advance());
+            let _ = state.update(daemon.clone(), &Cache::default(), Message::View(view::Message::CreateSpend(
+                view::CreateSpendMessage::Generate,
+            )));
+            assert!(!state.generating);
+            assert!(state.generated.is_none());
+        }
+        let _ = state.update(
+            daemon.clone(),
+            &Cache::default(),
+            Message::View(view::Message::CreateSpend(
+                view::CreateSpendMessage::RecipientEdited(
+                    0,
+                    "address",
+                    "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa".into(),
+                ),
+            )),
+        );
+        assert!(!state.tampered);
+        let _ = state.update(
+            daemon,
+            &Cache::default(),
+            Message::View(view::Message::CreateSpend(
+                view::CreateSpendMessage::RecipientEdited(0, "address", original),
+            )),
+        );
+        assert!(
+            state.tampered,
+            "reintroducing a blocked destination must restore the block"
+        );
+    }
+    #[test]
+    fn invalid_destinations_are_not_treated_as_duplicates() {
+        let mut state = branta_form();
+        state.recipients[0].address.value = "invalid first address".into();
+        let mut second = bip21_recipient(2_000);
+        second.address.value = "invalid second address".into();
+        state.recipients.push(second);
+        assert!(!state.exists_duplicate());
+        state.recipients[1].address.value = "invalid first address".into();
+        assert!(!state.exists_duplicate());
+        state.recipients[0].address.value = MAINNET_ADDR.into();
+        assert!(!state.exists_duplicate());
+        state.recipients[1].address.value = format!("bitcoin:{MAINNET_ADDR}");
+        assert!(state.exists_duplicate());
+    }
+
+    #[tokio::test]
+    async fn recovery_and_send_max_accept_changed_snapshot_without_identity_metadata() {
+        let daemon = Arc::new(crate::daemon::client::Coincubed::new(
+            crate::utils::mock::Daemon::new(vec![]).run(),
+        ));
+        for recovery in [false, true] {
+            for enabled in [false, true] {
+                let mut state = branta_form();
+                state.send_max_to_recipient = Some(0);
+                state.recovery_timelock = recovery.then_some(10);
+                // This request has no explicit amount. The form's 1,000-sat
+                // redraft snapshot must not constrain the daemon's final maximum.
+                state.recipients[0].address.value =
+                    format!("bitcoin:{MAINNET_ADDR}?branta_id=example&branta_secret=secret");
+                let ticket = branta::test_ticket(enabled);
+                let identity = branta::test_identity(&ticket, "Example recipient");
+                state.lookup_ticket = enabled.then_some(ticket);
+                state.generating = true;
+                let psbt = prepared_outputs(&[2_000]);
+                assert!(associate_recipients(&state.recipients, &psbt).is_none());
+                assert!(validate_requested_amounts(&state.recipients, &psbt).is_ok());
+                let _ = state.update(
+                    daemon.clone(),
+                    &Cache::default(),
+                    Message::VaultSpendPrepared {
+                        generation: state.preparation_id,
+                        result: Ok((psbt, vec![])),
+                        identities: vec![(0, LookupResult::Identified(vec![identity]))],
+                    },
+                );
+                assert!(state.can_advance());
+                assert!(state.warning.is_none());
+                assert_eq!(
+                    state.generated.as_ref().unwrap().0.unsigned_tx.output[0]
+                        .value
+                        .to_sat(),
+                    2_000
+                );
+                assert!(state
+                    .recipient_identities
+                    .as_ref()
+                    .is_none_or(|review| review.results.is_empty()));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_bip21_amount_constrains_actual_recovery_and_max_outputs_even_when_disabled() {
+        let daemon = Arc::new(crate::daemon::client::Coincubed::new(
+            crate::utils::mock::Daemon::new(vec![]).run(),
+        ));
+        for recovery in [false, true] {
+            for enabled in [false, true] {
+                let mut state = branta_form();
+                state.send_max_to_recipient = Some(0);
+                state.recovery_timelock = recovery.then_some(10);
+                state.lookup_ticket = enabled.then(|| branta::test_ticket(true));
+                state.generating = true;
+                let psbt = prepared_outputs(&[2_000]);
+                assert!(validate_requested_amounts(&state.recipients, &psbt).is_err());
+                let _ = state.update(
+                    daemon.clone(),
+                    &Cache::default(),
+                    Message::VaultSpendPrepared {
+                        generation: state.preparation_id,
+                        result: Ok((psbt, vec![])),
+                        identities: vec![],
+                    },
+                );
+                assert!(!state.can_advance());
+                assert!(state.generated.is_none());
+                assert!(state.warning.is_some());
+                assert!(
+                    !state.tampered,
+                    "amount disagreement is distinct from authenticated tampering"
+                );
+            }
+        }
     }
 }
