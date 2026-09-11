@@ -33,6 +33,7 @@ jobs:
   check:
     name: Check for new commits
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     if: github.repository == 'coincubetech/coincube'
     outputs:
       should_run: ${{ steps.check.outputs.should_run }}
@@ -54,6 +55,8 @@ jobs:
     needs: check
     if: needs.check.outputs.should_run == 'true'
     runs-on: ${{ matrix.os }}
+    # LTO release build; a healthy leg is well under this. Default cap is 6h.
+    timeout-minutes: 120
 
     strategy:
       fail-fast: false
@@ -75,11 +78,11 @@ jobs:
             platform: macos
             arch: arm64
 
-          # macOS Intel
-          - os: macos-latest
-            target: x86_64-apple-darwin
-            platform: macos
-            arch: x64
+          # No macOS Intel leg here (removed 2026-09-11): a second macOS
+          # runner (10x Linux price) every night for a shrinking Intel
+          # audience. The x86_64-apple-darwin build still ships with every
+          # tagged release via releases.yml, which is where Intel users get
+          # their builds; nightlies are arm64-only.
 
     steps:
       - name: Checkout

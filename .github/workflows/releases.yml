@@ -39,6 +39,8 @@ jobs:
     name: Build & Release
     if: github.repository == 'coincubetech/coincube'
     runs-on: ${{ matrix.os }}
+    # LTO release build + codesign/notarize; a healthy leg is well under this.
+    timeout-minutes: 150
 
     strategy:
       matrix:
@@ -516,6 +518,7 @@ jobs:
     name: Generate & Sign Checksums
     needs: release
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     if: github.repository == 'coincubetech/coincube'
 
     steps:
