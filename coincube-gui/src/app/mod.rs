@@ -737,6 +737,10 @@ pub struct App {
     /// this Cube; cleared on accept/decline. The durable "answered" record lives
     /// in `CubeSettings::recovery_alerts_prompt_answered`.
     show_recovery_alerts_prompt: bool,
+    /// Set once the session's Stable Balance reconcile has been kicked off
+    /// (on the first Spark `Synced`), so later sync ticks don't repeat it.
+    /// See [`reconcile_stable_balance`] for what the reconcile decides.
+    spark_stable_balance_reconciled: bool,
     received_celebration_amount: String,
     received_celebration_context: String,
     received_celebration_quote: coincube_ui::component::quote_display::Quote,
@@ -2305,6 +2309,11 @@ impl App {
         panels
             .connect
             .set_vault_fingerprint(cube_settings.vault_fingerprint.clone());
+        // This device's Spark Stable Balance decision rides the registration
+        // request so the Cube's server record — the cross-device copy — has it.
+        panels
+            .connect
+            .set_spark_stable_balance(cube_settings.spark_stable_balance);
         let mut tasks = vec![];
         if let Some(pending) = pending_rescan {
             tasks.push(settle_rescan_obligation(
@@ -2396,6 +2405,7 @@ impl App {
             auto_switch_suppressed: false,
             show_received_celebration: false,
             show_recovery_alerts_prompt: false,
+            spark_stable_balance_reconciled: false,
             received_celebration_amount: String::new(),
             received_celebration_context: "transaction-received".to_string(),
             received_celebration_quote: coincube_ui::component::quote_display::random_quote(
@@ -2487,6 +2497,9 @@ impl App {
         panels
             .connect
             .set_vault_fingerprint(cube_settings.vault_fingerprint.clone());
+        panels
+            .connect
+            .set_spark_stable_balance(cube_settings.spark_stable_balance);
         let mut cache = cache;
         cache.cube_encryption_key = derive_cube_encryption_key(&breez_client, network);
         cache.connect_transport_key =
@@ -2529,6 +2542,7 @@ impl App {
                 auto_switch_suppressed: false,
                 show_received_celebration: false,
                 show_recovery_alerts_prompt: false,
+                spark_stable_balance_reconciled: false,
                 received_celebration_amount: String::new(),
                 received_celebration_context: "transaction-received".to_string(),
                 received_celebration_quote: coincube_ui::component::quote_display::random_quote(
@@ -2841,6 +2855,81 @@ impl App {
             |res: Result<(), String>| match res {
                 Ok(()) => Message::SettingsSaved,
                 Err(e) => Message::View(view::Message::ShowError(e)),
+            },
+        )
+    }
+
+    /// Record the user's Stable Balance decision for this Cube — in memory,
+    /// in the settings file, and on the Cube's Connect record so the owner's
+    /// other desktops pick it up. See `CubeSettings::spark_stable_balance`
+    /// for when this is called. Any Stable Balance banner is cleared: a
+    /// decision supersedes the prompt.
+    fn record_spark_stable_balance(&mut self, enabled: bool) -> Task<Message> {
+        Task::batch([
+            self.record_spark_stable_balance_locally(enabled),
+            self.panels
+                .connect
+                .cube
+                .report_spark_stable_balance(enabled),
+        ])
+    }
+
+    /// The local half of [`Self::record_spark_stable_balance`]: memory,
+    /// settings file, banner. Used on its own when the decision *came from*
+    /// Connect, where pushing it back would be a pointless round trip.
+    fn record_spark_stable_balance_locally(&mut self, enabled: bool) -> Task<Message> {
+        self.cube_settings.spark_stable_balance = Some(enabled);
+        self.cache.spark_notice = None;
+        let network_dir = self
+            .cache
+            .datadir_path
+            .network_directory(self.cache.network);
+        let cube_id = self.cube_settings.id.clone();
+        Task::perform(
+            async move {
+                settings::update_settings_file(&network_dir, |mut s| {
+                    if let Some(cube) = s.cubes.iter_mut().find(|c| c.id == cube_id) {
+                        cube.spark_stable_balance = Some(enabled);
+                    }
+                    Some(s)
+                })
+                .await
+                .map_err(|e| e.to_string())
+            },
+            |res: Result<(), String>| {
+                if let Err(e) = res {
+                    // Not a user-facing error: the SDK holds the live
+                    // setting; this copy only matters at the next launch.
+                    log::warn!("failed to persist Spark Stable Balance preference: {e}");
+                }
+                Message::SettingsSaved
+            },
+        )
+    }
+
+    /// One-shot read of the Spark SDK's Stable Balance state and USDB
+    /// holding, for [`reconcile_stable_balance`]. Runs after the session's
+    /// first `Synced` so the holding is current.
+    fn spark_stable_balance_state_task(&self) -> Task<Message> {
+        let Some(backend) = self.spark_backend() else {
+            return Task::none();
+        };
+        Task::perform(
+            async move {
+                let settings = backend.get_user_settings().await?;
+                let info = backend.get_info().await?;
+                let holds_usdb = info.stable_balance.is_some_and(|sb| sb.balance > 0);
+                Ok::<_, crate::app::breez_spark::SparkClientError>((
+                    settings.stable_balance_active,
+                    holds_usdb,
+                ))
+            },
+            |res| match res {
+                Ok(state) => Message::SparkStableBalanceState(Some(state)),
+                Err(e) => {
+                    log::warn!("skipping Spark Stable Balance reconcile: {e}");
+                    Message::SparkStableBalanceState(None)
+                }
             },
         )
     }
@@ -4004,6 +4093,9 @@ impl App {
                     // async move.
                     let cube_has_vault =
                         self.cube_settings.vault_wallet_id.is_some().then_some(true);
+                    // Same for this device's Spark Stable Balance decision:
+                    // `None` is omitted, so it never clobbers another device's.
+                    let cube_spark_stable_balance = self.cube_settings.spark_stable_balance;
                     let cube_uuid = cube_uuid.clone();
                     let registration_email = expected_email.clone();
                     Task::perform(
@@ -4032,6 +4124,7 @@ impl App {
                                     name: cube_name,
                                     network: net_str,
                                     has_vault: cube_has_vault,
+                                    spark_stable_balance: cube_spark_stable_balance,
                                 }) // upgrade-only Option<bool>
                                 .await
                                 .map_err(|e| e.to_string())
@@ -5023,6 +5116,114 @@ impl App {
             Message::View(view::Message::DismissBackupWarning) => {
                 self.cache.backup_warning_dismissed = true;
             }
+            Message::View(view::Message::DismissSparkNotice) => {
+                // Dismissing "USDB held but off" is an answer — keep it off
+                // and don't ask again on this device. The paused banner is
+                // just informational; closing it changes nothing.
+                if self.cache.spark_notice == Some(cache::SparkNotice::StableBalanceOffWithHolding)
+                {
+                    return self.record_spark_stable_balance(false);
+                }
+                self.cache.spark_notice = None;
+            }
+            Message::CubeSparkStableBalanceReported => {}
+            Message::SparkStableBalanceFromConnect(server) => {
+                // Adopt the server's record only when this device has none:
+                // the registration request already carried a local decision,
+                // so a response that disagrees with one is a stale answer to
+                // an earlier request (the user toggled while it was in
+                // flight), not newer information. With no local decision the
+                // server's is the only one there is — adopt it, then re-check
+                // the SDK against it. `None` on both sides is the fresh-Cube
+                // case; a local decision with no server record was pushed by
+                // the registration itself.
+                match (self.cube_settings.spark_stable_balance, server) {
+                    (None, Some(enabled)) => {
+                        log::info!(
+                            "Spark Stable Balance decision from Connect: {}",
+                            if enabled { "on" } else { "off" }
+                        );
+                        return Task::batch([
+                            self.record_spark_stable_balance_locally(enabled),
+                            self.spark_stable_balance_state_task(),
+                        ]);
+                    }
+                    (Some(local), Some(remote)) if local != remote => {
+                        log::debug!(
+                            "Connect reports Spark Stable Balance {remote} but this device \
+                             decided {local}; keeping the local decision"
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            Message::SparkStableBalanceState(None) => {}
+            Message::SparkStableBalanceState(Some((sdk_active, holds_usdb))) => {
+                let preference = self.cube_settings.spark_stable_balance;
+                match reconcile_stable_balance(preference, sdk_active, holds_usdb) {
+                    StableBalanceReconcile::InSync => {}
+                    StableBalanceReconcile::Apply(enabled) => {
+                        let Some(backend) = self.spark_backend() else {
+                            return Task::none();
+                        };
+                        log::info!(
+                            "Spark Stable Balance is {} on the SDK but the Cube wants it {}; \
+                             re-applying",
+                            if sdk_active { "on" } else { "off" },
+                            if enabled { "on" } else { "off" },
+                        );
+                        return Task::perform(
+                            async move { backend.set_stable_balance(enabled).await },
+                            move |res| {
+                                Message::SparkStableBalanceApplied(
+                                    res.map(|()| enabled).map_err(|e| e.to_string()),
+                                )
+                            },
+                        );
+                    }
+                    StableBalanceReconcile::Adopt => {
+                        return self.record_spark_stable_balance(true);
+                    }
+                    StableBalanceReconcile::PromptHolding => {
+                        self.cache.spark_notice =
+                            Some(cache::SparkNotice::StableBalanceOffWithHolding);
+                    }
+                }
+            }
+            Message::SparkStableBalanceApplied(Ok(enabled)) => {
+                log::info!(
+                    "Spark Stable Balance preference re-applied: {}",
+                    if enabled { "on" } else { "off" }
+                );
+                // The Settings toggle and Overview badge read the SDK on
+                // reload; refresh both so they don't show the stale state.
+                return Task::batch([
+                    self.panels.spark_settings.reload(None, None),
+                    self.panels.spark_overview.reload(None, None),
+                ]);
+            }
+            Message::SparkStableBalanceApplied(Err(e)) => {
+                log::warn!("could not re-apply Spark Stable Balance preference: {e}");
+            }
+
+            // The user changed the Stable Balance toggle and the bridge
+            // accepted it: record the decision before the panel updates its
+            // own state, then let it through. Routed to the settings panel
+            // directly (not `current_mut()`) so navigating away mid-save
+            // can't lose the reconcile.
+            Message::View(view::Message::SparkSettings(
+                view::SparkSettingsMessage::StableBalanceSaved(Ok(enabled)),
+            )) => {
+                let record = self.record_spark_stable_balance(enabled);
+                let panel = self.panels.spark_settings.update(
+                    self.daemon.clone(),
+                    &self.cache,
+                    Message::View(view::Message::SparkSettings(
+                        view::SparkSettingsMessage::StableBalanceSaved(Ok(enabled)),
+                    )),
+                );
+                return Task::batch([record, panel]);
+            }
             Message::View(view::Message::FlipDisplayMode) => {
                 let new_mode = self.cache.display_mode.flipped();
                 self.cache.display_mode = new_mode;
@@ -5141,6 +5342,14 @@ impl App {
                     tasks.push(Task::done(Message::View(view::Message::Home(
                         view::HomeMessage::SparkSyncedObserved,
                     ))));
+                    // First sync of the session: check the SDK's Stable
+                    // Balance toggle against the Cube's recorded decision
+                    // (and its USDB holding). Once per session — the
+                    // outcome is durable, and later ticks have nothing new.
+                    if !self.spark_stable_balance_reconciled {
+                        self.spark_stable_balance_reconciled = true;
+                        tasks.push(self.spark_stable_balance_state_task());
+                    }
                 }
                 tasks.push(Task::done(Message::View(view::Message::Home(
                     view::HomeMessage::RefreshSparkBalance,
@@ -5170,6 +5379,18 @@ impl App {
                         tasks.push(Task::done(Message::View(view::Message::SparkReceive(
                             view::SparkReceiveMessage::PaymentReceived { amount_sat, bolt11 },
                         ))));
+                        // An auto-claim accepted before maturity settles
+                        // through this event; Home needs the settled amount
+                        // to complete its indicator and fire the splash.
+                        if let Ok(amount_sat) =
+                            <u64 as std::convert::TryFrom<i64>>::try_from(amount_sat)
+                        {
+                            if amount_sat > 0 {
+                                tasks.push(Task::done(Message::View(view::Message::Home(
+                                    view::HomeMessage::SparkPaymentSucceeded { amount_sat },
+                                ))));
+                            }
+                        }
                     }
                     SparkEvent::DepositsChanged => {
                         // Phase 4f: refresh the Receive panel's
@@ -5195,6 +5416,22 @@ impl App {
                         tasks.push(Task::done(Message::View(view::Message::ConnectCube(
                             view::ConnectCubeMessage::SparkLightningAddressChanged(info),
                         ))));
+                    }
+                    SparkEvent::StableBalancePaused { reason, failures } => {
+                        log::error!(
+                            "Spark bridge paused Stable Balance after {failures} failed \
+                             auto-conversions: {reason}"
+                        );
+                        // The bridge already flipped the SDK setting off;
+                        // the Settings toggle and Overview badge re-read it
+                        // on reload. Record "off" as the Cube's decision so
+                        // the next launch's reconcile doesn't re-arm the
+                        // loop, then show the banner — after the record,
+                        // which clears any banner it finds.
+                        tasks.push(self.record_spark_stable_balance(false));
+                        self.cache.spark_notice =
+                            Some(cache::SparkNotice::StableBalancePaused { reason });
+                        tasks.push(self.panels.spark_settings.reload(None, None));
                     }
                     _ => {}
                 }
@@ -5942,6 +6179,44 @@ impl App {
     }
 }
 
+/// What to do about Spark Stable Balance once the SDK's state is known for
+/// the session. See `CubeSettings::spark_stable_balance` for why the app
+/// keeps its own copy of the toggle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StableBalanceReconcile {
+    /// The SDK already matches what the user wanted.
+    InSync,
+    /// The SDK disagrees with the recorded preference: re-apply it. The
+    /// SDK's copy is a local cache that can be lost (fresh install,
+    /// recovered Cube), so the app's record wins.
+    Apply(bool),
+    /// Stable Balance is on but the app never recorded a decision — a
+    /// Cube from before the preference existed. Adopt the SDK's state as
+    /// the record.
+    Adopt,
+    /// Off, no decision recorded, and the wallet holds USDB: the
+    /// recovered-on-a-new-machine case. Ask the user via the banner.
+    PromptHolding,
+}
+
+/// Pure decision for the session's Stable Balance reconcile, separated
+/// from the `App` handlers so it's unit-testable. `preference` is the
+/// Cube's recorded decision, `sdk_active` the SDK's live toggle, and
+/// `holds_usdb` whether the wallet's USDB balance is non-zero.
+fn reconcile_stable_balance(
+    preference: Option<bool>,
+    sdk_active: bool,
+    holds_usdb: bool,
+) -> StableBalanceReconcile {
+    match (preference, sdk_active, holds_usdb) {
+        (Some(wanted), active, _) if wanted == active => StableBalanceReconcile::InSync,
+        (Some(wanted), _, _) => StableBalanceReconcile::Apply(wanted),
+        (None, true, _) => StableBalanceReconcile::Adopt,
+        (None, false, true) => StableBalanceReconcile::PromptHolding,
+        (None, false, false) => StableBalanceReconcile::InSync,
+    }
+}
+
 /// Pure gating rules for the one-time recovery-alerts consent prompt (PR 3),
 /// separated from `App::maybe_show_recovery_alerts_prompt` so they're unit-
 /// testable without a full `App`. The prompt shows exactly when: this device
@@ -6337,6 +6612,67 @@ mod tests {
         assert!(!should_show_recovery_alerts_prompt(
             false, false, true, true, true, true, false, false
         ));
+    }
+
+    #[test]
+    fn spark_stable_balance_preference_defaults_none_and_round_trips() {
+        // Old settings.json without the field parses as "never decided".
+        let cube: CubeSettings = serde_json::from_value(serde_json::json!({
+            "id": "cube-1",
+            "name": "Vault",
+            "network": "bitcoin",
+            "created_at": 0
+        }))
+        .unwrap();
+        assert_eq!(cube.spark_stable_balance, None);
+        // ...and is not written back while undecided.
+        let json = serde_json::to_value(&cube).unwrap();
+        assert!(json.get("spark_stable_balance").is_none());
+
+        for decision in [true, false] {
+            let mut decided = cube.clone();
+            decided.spark_stable_balance = Some(decision);
+            let json = serde_json::to_string(&decided).unwrap();
+            let back: CubeSettings = serde_json::from_str(&json).unwrap();
+            assert_eq!(back.spark_stable_balance, Some(decision));
+        }
+    }
+
+    #[test]
+    fn stable_balance_reconcile_reapplies_the_recorded_decision() {
+        use StableBalanceReconcile::*;
+        // Recorded decision wins over the SDK's local cache, whatever the
+        // holding says.
+        for holds_usdb in [false, true] {
+            assert_eq!(
+                reconcile_stable_balance(Some(true), true, holds_usdb),
+                InSync
+            );
+            assert_eq!(
+                reconcile_stable_balance(Some(false), false, holds_usdb),
+                InSync
+            );
+            assert_eq!(
+                reconcile_stable_balance(Some(true), false, holds_usdb),
+                Apply(true)
+            );
+            assert_eq!(
+                reconcile_stable_balance(Some(false), true, holds_usdb),
+                Apply(false)
+            );
+        }
+    }
+
+    #[test]
+    fn stable_balance_reconcile_without_a_decision_follows_the_evidence() {
+        use StableBalanceReconcile::*;
+        // SDK on, nothing recorded: a pre-preference Cube — adopt it.
+        assert_eq!(reconcile_stable_balance(None, true, false), Adopt);
+        assert_eq!(reconcile_stable_balance(None, true, true), Adopt);
+        // SDK off and USDB held: the recovered-elsewhere case — ask.
+        assert_eq!(reconcile_stable_balance(None, false, true), PromptHolding);
+        // SDK off, no USDB: nothing to say.
+        assert_eq!(reconcile_stable_balance(None, false, false), InSync);
     }
 
     #[test]

@@ -666,6 +666,31 @@ pub struct CubeSettings {
     /// exist and alerts are off) is derived from live state, independent of this.
     #[serde(default)]
     pub recovery_alerts_prompt_answered: bool,
+    /// The user's Spark Stable Balance decision for this Cube: `Some(true)`
+    /// = keep it on, `Some(false)` = keep it off, `None` = never decided on
+    /// this device.
+    ///
+    /// The Spark SDK keeps the toggle in its own local cache, so it is lost
+    /// whenever that cache is — a recovered Cube on a new machine comes up
+    /// with Stable Balance off while still holding the USDB an earlier
+    /// session swept into it. This copy is the app's own record of what the
+    /// user wanted. It is written on every toggle, on a bridge-initiated
+    /// pause (as `false`, so the paused loop can't be re-armed at the next
+    /// launch), and when the user dismisses the "USDB held but off" banner
+    /// (also `false` — a decision, not a snooze). It is reconciled against
+    /// the SDK's state after the first sync of each session
+    /// ([`crate::app::App`] `reconcile_spark_stable_balance`): the app's
+    /// copy wins.
+    ///
+    /// Also mirrored to the Cube's Connect record (`sparkStableBalance`,
+    /// `CubeResponse::spark_stable_balance`) so the owner's other desktops
+    /// pick it up: every write here is pushed, the registration request
+    /// carries it, and a device with `None` adopts the server's value when
+    /// its registration answers. A fresh install without Connect has `None`
+    /// and falls back to the wallet's on-chain evidence (a USDB holding) to
+    /// prompt the user.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spark_stable_balance: Option<bool>,
     /// Set when the user finished Cube creation **without** demonstrating a
     /// backup, by explicitly accepting
     /// [`crate::services::unlock::creation_gate::BYPASS_ACKNOWLEDGEMENT`].
@@ -764,6 +789,7 @@ impl CubeSettings {
             recovery_kit_last_backed_up_keychain_descriptor_fingerprint: None,
             recovery_kit_password_backed_up: false,
             recovery_alerts_prompt_answered: false,
+            spark_stable_balance: None,
             creation_backup_bypass: None,
             creation_recovery_kit: None,
             // Set explicitly by the creation flow; `new_*` is also used to

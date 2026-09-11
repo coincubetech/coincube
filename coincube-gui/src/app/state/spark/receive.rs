@@ -683,7 +683,7 @@ impl State for SparkReceive {
             SparkReceiveMessage::ClaimDepositSucceeded(ok) => {
                 self.claiming = None;
                 self.claim_error = None;
-                Task::batch(vec![
+                let mut tasks = vec![
                     // Drop the claimed row from the pending-deposits list.
                     fetch_deposits_task(self.backend.clone()),
                     // Refresh "Last transactions" so the just-claimed deposit
@@ -691,13 +691,19 @@ impl State for SparkReceive {
                     // `DepositsChanged`, not a payment event, so nothing else
                     // repopulates the payments list here.
                     fetch_payments_task(self.backend.clone()),
-                    // The bitcoin just landed in the spendable balance — fire the
-                    // global "received" splash, same as an auto-claimed swap.
-                    Task::done(Message::ShowReceivedCelebration {
+                ];
+                // The bitcoin just landed in the spendable balance — fire the
+                // global "received" splash, same as an auto-claimed swap. A
+                // pre-maturity claim (SDK 0.25.0+) settles asynchronously and
+                // carries no amount yet; its `PaymentSucceeded` fires the
+                // splash when the transfer lands instead.
+                if let Some(amount_sat) = ok.amount_sat {
+                    tasks.push(Task::done(Message::ShowReceivedCelebration {
                         context: "spark-receive".to_string(),
-                        amount_sat: ok.amount_sat,
-                    }),
-                ])
+                        amount_sat,
+                    }));
+                }
+                Task::batch(tasks)
             }
             SparkReceiveMessage::ClaimDepositFailed(err) => {
                 self.claiming = None;
@@ -1303,8 +1309,8 @@ mod tests {
         update(
             &mut panel,
             SparkReceiveMessage::ClaimDepositSucceeded(coincube_spark_protocol::ClaimDepositOk {
-                payment_id: "payment".to_string(),
-                amount_sat: 5_000,
+                payment_id: Some("payment".to_string()),
+                amount_sat: Some(5_000),
             }),
         );
         assert!(panel.claiming.is_none());

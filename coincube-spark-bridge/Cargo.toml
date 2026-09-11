@@ -48,7 +48,24 @@ coincube-spark-protocol = { path = "../coincube-spark-protocol" }
 # `SdkBuilder::with_default_storage` doesn't exist and the bridge has nowhere
 # to persist. This is the `rusqlite`/`libsqlite3-sys` edge that makes this crate
 # a separate workspace — see the `[workspace]` note above.
-breez-sdk-spark = { git = "https://github.com/breez/spark-sdk", tag = "0.19.0", features = [
+#
+# 0.22.0+ is required: earlier releases quote a V3 concentrated Flashnet pool
+# from its self-reported price with no reserve check, so an empty pool with an
+# absurd tick beats the real one and every USDB conversion fails at the AMM
+# (mainnet BTC/USDB, 2026-09-07; see docs/SPARK_WALLET.md, "Stable Balance").
+# Upstream commit 7ba9363a ("Flashnet: validate pool data and swap responses")
+# fixed it; never pin below that.
+#
+# Pinned to the coincubetech fork: upstream tag 0.25.0 plus the
+# `coincube/0.25.0-stable-balance-hardening` series (proposed to Breez). The
+# one that can't wait for upstream: 0.25.0 fails the whole pool listing when
+# any pool has a field its model can't take (`"hostName": null` appeared on
+# mainnet BTC/USDB on 2026-09-11), so every conversion reports
+# `NoPoolsAvailable`. The others: back off failed conversions, report them
+# as an event, persist a pending deactivation, and drop pools priced far
+# from the market. Drop back to an upstream tag once a release carries them.
+# Keep `rev` pinned — the fork branch is not otherwise frozen.
+breez-sdk-spark = { git = "https://github.com/coincubetech/spark-sdk", rev = "a38117dcc3c920703e5002b4206955213fe49eb7", features = [
     "sqlite",
 ] }
 async-trait = "0.1"

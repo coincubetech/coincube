@@ -244,6 +244,13 @@ impl ConnectPanel {
     /// from the loaded wallet on a Cube whose settings predate the field —
     /// clearing the in-session latch so the freshly-known value is actually
     /// sent rather than swallowed by an earlier no-op.
+    /// Seed the cube panel with this device's recorded Spark Stable Balance
+    /// decision so the registration request carries it
+    /// (`CubeSettings::spark_stable_balance`).
+    pub fn set_spark_stable_balance(&mut self, decision: Option<bool>) {
+        self.cube.spark_stable_balance = decision;
+    }
+
     pub fn set_vault_fingerprint(&mut self, fingerprint: Option<String>) {
         if self.cube.vault_fingerprint != fingerprint {
             self.cube.vault_fingerprint_asserted = false;

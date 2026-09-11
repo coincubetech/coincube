@@ -908,11 +908,19 @@ pub struct ListUnclaimedDepositsOk {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClaimDepositOk {
-    /// Payment id of the resulting Spark wallet transfer.
-    pub payment_id: String,
-    /// Amount claimed in sats. Mirrors the deposit's `amount_sat`
-    /// minus any internal fees the SDK deducted.
-    pub amount_sat: u64,
+    /// Payment id of the resulting Spark wallet transfer. `None` when the
+    /// deposit was claimed before maturity (SDK 0.25.0+): that transfer
+    /// settles asynchronously, and the gui sees it land through
+    /// `PaymentSucceeded` / `DepositsChanged` like any other incoming
+    /// transfer. Which case applies follows from the deposit's maturity and
+    /// the fee ceiling, not from anything the caller asked for.
+    #[serde(default)]
+    pub payment_id: Option<String>,
+    /// Amount claimed in sats — the deposit's `amount_sat` minus any
+    /// internal fees the SDK deducted. `None` in the asynchronous case
+    /// above; the caller still knows the deposit's own amount.
+    #[serde(default)]
+    pub amount_sat: Option<u64>,
 }
 
 /// Phase 6: boolean-flattened view of the SDK's `UserSettings`. The
@@ -1066,7 +1074,28 @@ pub enum Event {
     /// response; a `None` state it didn't initiate triggers
     /// auto-re-register from the DB-reserved username.
     LightningAddressChanged { info: Option<LightningAddressInfo> },
+    /// The bridge switched Stable Balance off on its own because the
+    /// SDK's auto-conversion worker kept failing. The SDK has no
+    /// backoff on a failed `AutoConvert`: each failed BTC→USDB swap is
+    /// refunded as an incoming Spark transfer, the refund is a sats
+    /// receive, and that re-queues the same conversion — one attempt
+    /// every few seconds, forever, filling the payment history with
+    /// ±N-sat pairs. The bridge counts consecutive failures and after
+    /// [`STABLE_BALANCE_PAUSE_THRESHOLD`] of them deactivates the
+    /// feature, which is the only lever that stops the loop. `reason`
+    /// is the SDK's own error text (e.g. `Pool has no liquidity`) for
+    /// the gui to show; `failures` is how many attempts were seen.
+    StableBalancePaused { reason: String, failures: u32 },
 }
+
+/// How many consecutive `Auto-conversion failed` warnings the bridge
+/// tolerates before it pauses Stable Balance and emits
+/// [`Event::StableBalancePaused`]. The loop fires roughly every six
+/// seconds, so three failures is under half a minute of churn — long
+/// enough to skip a one-off AMM hiccup, short enough that the history
+/// doesn't fill up. Lives in the protocol crate so the gui can name the
+/// same number in its copy.
+pub const STABLE_BALANCE_PAUSE_THRESHOLD: u32 = 3;
 
 /// The top-level message envelope written/read on the wire. We use a single
 /// outer discriminator so one `serde_json::from_str` call works for all
@@ -1309,6 +1338,31 @@ mod tests {
                 "event": "deposits_changed"
             })
         );
+    }
+
+    #[test]
+    fn stable_balance_paused_event_round_trips() {
+        let frame = Frame::Event(Event::StableBalancePaused {
+            reason: "Pool has no liquidity".to_string(),
+            failures: STABLE_BALANCE_PAUSE_THRESHOLD,
+        });
+        let value = serde_json::to_value(&frame).expect("serialize");
+        assert_eq!(
+            value,
+            json!({
+                "type": "event",
+                "event": "stable_balance_paused",
+                "payload": { "reason": "Pool has no liquidity", "failures": 3 }
+            })
+        );
+
+        let Frame::Event(Event::StableBalancePaused { reason, failures }) =
+            serde_json::from_value(value).expect("deserialize")
+        else {
+            panic!("expected stable balance paused event");
+        };
+        assert_eq!(reason, "Pool has no liquidity");
+        assert_eq!(failures, 3);
     }
 
     #[test]

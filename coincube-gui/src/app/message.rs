@@ -47,6 +47,15 @@ pub enum Message {
     /// PLAN-duress-vault-gate PR 3). The result is logged inside the task and
     /// discarded here — it must never block or affect the UI.
     CubeVaultReported,
+    /// Terminal no-op for the fire-and-forget push of a Spark Stable Balance
+    /// decision to the Cube's Connect record
+    /// (`ConnectCubePanel::report_spark_stable_balance`). Logged inside the
+    /// task; the local record is already durable.
+    CubeSparkStableBalanceReported,
+    /// The Cube's Connect registration answered with the server's Spark
+    /// Stable Balance record (`CubeResponse::spark_stable_balance`). `None`
+    /// when no desktop has recorded one (or the API predates the field).
+    SparkStableBalanceFromConnect(Option<bool>),
     Fiat(FiatMessage),
     UpdatePanelCache(/* is current panel */ bool),
     View(view::Message),
@@ -183,6 +192,14 @@ pub enum Message {
     },
     SettingsSaved,
     SettingsSaveFailed(Error),
+    /// The session's first post-sync read of the Spark SDK's Stable
+    /// Balance state: `(sdk_active, holds_usdb)`. `None` when the bridge
+    /// couldn't answer (already logged) — the reconcile is skipped for the
+    /// session rather than acting on a guess.
+    SparkStableBalanceState(Option<(bool, bool)>),
+    /// The reconcile re-applied the Cube's recorded Stable Balance
+    /// preference on the bridge. `Ok(enabled)` is the value applied.
+    SparkStableBalanceApplied(Result<bool, String>),
     /// Store the Bitcoind handle produced by configure_and_start_internal_bitcoind so
     /// that its LockFile is kept alive for the lifetime of the App.
     SetInternalBitcoind(Bitcoind),

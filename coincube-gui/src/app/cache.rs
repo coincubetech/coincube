@@ -37,6 +37,21 @@ pub struct NodeNetStats {
     pub subversion: Option<String>,
 }
 
+/// A Spark Stable Balance condition worth a banner. See
+/// [`Cache::spark_notice`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SparkNotice {
+    /// The bridge switched Stable Balance off because the SDK's
+    /// auto-conversion kept failing (`Event::StableBalancePaused`).
+    /// `reason` is the SDK's error text, e.g. "Pool has no liquidity".
+    StableBalancePaused { reason: String },
+    /// This wallet holds USDB but Stable Balance is off on this device —
+    /// the state a Cube recovered on a new machine lands in, because the
+    /// toggle lives in the SDK's local cache and doesn't travel with the
+    /// seed. Shown once per device, until the user decides either way.
+    StableBalanceOffWithHolding,
+}
+
 #[derive(Debug, Clone)]
 pub struct Cache {
     pub datadir_path: CoincubeDirectory,
@@ -105,6 +120,13 @@ pub struct Cache {
     /// app restart — the reminder keeps surfacing until the user
     /// actually backs up.
     pub backup_warning_dismissed: bool,
+    /// A Spark Stable Balance condition the user should know about,
+    /// rendered as a banner at the top of every page by the `dashboard`
+    /// wrapper. `None` when there is nothing to say or the user dismissed
+    /// it for the session. Set by the App from bridge events and from
+    /// the post-sync reconcile; cleared by dismissal or by the user
+    /// changing the toggle.
+    pub spark_notice: Option<SparkNotice>,
     /// Whether the P2P panel is available (requires a valid mnemonic)
     pub has_p2p: bool,
     /// Resolved P2P test-coordinator gate for [`Self::network`]: a
@@ -266,6 +288,7 @@ impl std::default::Default for Cache {
             cube_name: String::new(),
             current_cube_backed_up: false,
             backup_warning_dismissed: false,
+            spark_notice: None,
             has_p2p: false,
             p2p_test_coordinator: false,
             marketplace_flags: crate::app::features::MarketplaceServerFlags::OFF,

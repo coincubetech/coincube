@@ -1158,6 +1158,7 @@ impl Home {
                                 // via the vault-creation re-report
                                 // (PLAN-duress-vault-gate PR 3).
                                 has_vault: cube.vault_wallet_id.is_some().then_some(true),
+                                spark_stable_balance: cube.spark_stable_balance,
                             };
                             let register_task = Task::perform(
                                 async move {
@@ -1511,8 +1512,9 @@ impl Home {
                                 name: Some(pending.new_name),
                                 status: None,
                                 // Name-only rename: leave server Vault presence
-                                // untouched.
+                                // and the Spark Stable Balance record untouched.
                                 has_vault: None,
+                                spark_stable_balance: None,
                             };
                             let cube_uuid = pending.cube_id.clone();
                             let cube_id = pending.cube_id;
@@ -2480,12 +2482,24 @@ impl Home {
                                                     cube.vault_wallet_id.is_some(),
                                                     sc.has_vault,
                                                 );
+                                                // Seed the server's Spark Stable Balance record
+                                                // from this device's decision only while the
+                                                // server has none: once it does, the live
+                                                // App reconciles against it and pushes changes
+                                                // as they're made, so catch-up never overrides.
+                                                let stable_report = cube
+                                                    .spark_stable_balance
+                                                    .filter(|_| sc.spark_stable_balance.is_none());
                                                 let name_drift = sc.name != cube.name;
-                                                if name_drift || vault_report.is_some() {
+                                                if name_drift
+                                                    || vault_report.is_some()
+                                                    || stable_report.is_some()
+                                                {
                                                     let req = UpdateCubeRequest {
                                                         name: name_drift.then(|| cube.name.clone()),
                                                         status: None,
                                                         has_vault: vault_report,
+                                                        spark_stable_balance: stable_report,
                                                     };
                                                     client
                                                         .update_cube(&sc.id.to_string(), req)
@@ -2507,6 +2521,7 @@ impl Home {
                                                         .vault_wallet_id
                                                         .is_some()
                                                         .then_some(true),
+                                                    spark_stable_balance: cube.spark_stable_balance,
                                                 };
                                                 client
                                                     .register_cube(req)
@@ -2982,8 +2997,9 @@ impl Home {
                         name: cube_name.clone(),
                         network: api_network.clone(),
                         // A Cube being created has no Vault yet; the flag is
-                        // monotonic and flips later.
+                        // monotonic and flips later. No Spark decision yet either.
                         has_vault: None,
+                        spark_stable_balance: None,
                     })
                     .await
                 {
@@ -6621,6 +6637,7 @@ mod tests {
             status: "active".to_string(),
             has_recovery_kit: false,
             has_vault: None,
+            spark_stable_balance: None,
             encryption_pubkey: None,
             members: Vec::new(),
             pending_invites: Vec::new(),

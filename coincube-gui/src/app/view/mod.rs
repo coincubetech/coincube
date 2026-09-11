@@ -40,7 +40,10 @@ use coincube_ui::{
     widget::*,
 };
 
-use crate::app::{cache::Cache, menu::Menu};
+use crate::app::{
+    cache::{Cache, SparkNotice},
+    menu::Menu,
+};
 
 /// Simple toast notification for clipboard copy and other success messages
 pub fn simple_toast(message: &str) -> Container<Message> {
@@ -77,8 +80,9 @@ pub fn backup_warning_banner<'a>() -> Element<'a, Message> {
                 "Your master seed phrase is not backed up. Back it up to avoid \
                  losing access to your Cube."
             )
-            .color(color::BLACK),
-            Space::new().width(Length::Fill),
+            .color(color::BLACK)
+            // See `spark_notice_banner` for why this is `Fill`.
+            .width(Length::Fill),
             button::secondary(None, "Back Up Now")
                 .padding([6, 14])
                 .width(Length::Fixed(140.0))
@@ -105,6 +109,73 @@ pub fn backup_warning_banner<'a>() -> Element<'a, Message> {
 
     // Constrain to the same FillPortion(1/8/1) layout used by the
     // dashboard content column so the banner lines up horizontally.
+    container(row![
+        Space::new().width(Length::FillPortion(1)),
+        container(body)
+            .width(Length::FillPortion(8))
+            .max_width(1500),
+        Space::new().width(Length::FillPortion(1)),
+    ])
+    .padding([8, 0])
+    .width(Length::Fill)
+    .into()
+}
+
+/// The user-facing sentence for a [`SparkNotice`]. Split out so the copy
+/// is testable without rendering.
+pub fn spark_notice_text(notice: &SparkNotice) -> String {
+    match notice {
+        SparkNotice::StableBalancePaused { reason } => format!(
+            "Stable Balance was paused: converting bitcoin to USDB failed {} times in a row \
+             ({reason}). Your funds are unchanged. You can turn it back on in Spark settings \
+             once the issue clears.",
+            coincube_spark_protocol::STABLE_BALANCE_PAUSE_THRESHOLD
+        ),
+        SparkNotice::StableBalanceOffWithHolding => "This Spark wallet holds USDB from when \
+             Stable Balance was on, but the setting is off on this device — it doesn't travel \
+             with your seed. Review it in Spark settings."
+            .to_string(),
+    }
+}
+
+/// A warning strip for a Spark Stable Balance condition, rendered by the
+/// `dashboard` wrapper under the backup banner when
+/// `cache.spark_notice` is set. Same width and style as
+/// [`backup_warning_banner`]. "Spark Settings" routes to the page with the
+/// toggle; × dismisses for the session.
+pub fn spark_notice_banner(notice: &SparkNotice) -> Element<'_, Message> {
+    let body = container(
+        row![
+            coincube_ui::icon::warning_icon().color(color::BLACK),
+            // `Fill`, not the default `Shrink`: a shrink text is laid out
+            // first with the whole row available, wraps into all of it, and
+            // pushes the buttons off the edge. A fill child is sized after
+            // the fixed ones, so it wraps within what's actually left.
+            text::p2_regular(spark_notice_text(notice))
+                .color(color::BLACK)
+                .width(Length::Fill),
+            button::secondary(None, "Spark Settings")
+                .padding([6, 14])
+                .width(Length::Fixed(140.0))
+                .on_press(Message::Menu(Menu::Spark(
+                    crate::app::menu::SparkSubMenu::Settings(None),
+                ))),
+            iced::widget::Button::new(
+                cross_icon()
+                    .align_x(Alignment::Center)
+                    .align_y(Alignment::Center),
+            )
+            .padding([8, 10])
+            .style(theme::button::secondary)
+            .on_press(Message::DismissSparkNotice),
+        ]
+        .spacing(10)
+        .align_y(Alignment::Center),
+    )
+    .padding([8, 16])
+    .width(Length::Fill)
+    .style(theme::notification::warning);
+
     container(row![
         Space::new().width(Length::FillPortion(1)),
         container(body)
@@ -164,6 +235,7 @@ pub fn dashboard_with_info<'a, T: Into<Element<'a, Message>>>(
     let content_column: Element<'_, Message> = Column::new()
         .push(warn(None))
         .push_maybe(show_backup_warning.then(backup_warning_banner))
+        .push_maybe(cache.spark_notice.as_ref().map(spark_notice_banner))
         .push(
             Container::new(
                 scrollable(row!(

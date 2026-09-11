@@ -21,14 +21,15 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use breez_sdk_spark::{
-    CheckLightningAddressRequest, ClaimDepositRequest, ConversionEstimate, ConversionType,
-    CrossChainAddressDetails, CrossChainAddressFamily, CrossChainRouteFilter, CrossChainRoutePair,
-    EventListener, GetInfoRequest, InputType, LightningAddressInfo as SdkLightningAddressInfo,
-    ListPaymentsRequest, ListUnclaimedDepositsRequest, LnurlPayRequest, MaxFee,
-    OnchainConfirmationSpeed, PaymentDetails, PaymentRequest, PrepareLnurlPayRequest,
-    PrepareLnurlPayResponse, PrepareSendPaymentRequest, PrepareSendPaymentResponse,
-    ReceivePaymentMethod, ReceivePaymentRequest, RegisterLightningAddressRequest, SdkEvent,
-    SendOnchainFeeQuote, SendPaymentMethod, SendPaymentOptions, SendPaymentRequest, SourceAsset,
+    CheckLightningAddressRequest, ClaimDepositRequest, ConversionEstimate, ConversionOptions,
+    ConversionType, CrossChainAddressDetails, CrossChainAddressFamily, CrossChainRouteFilter,
+    CrossChainRoutePair, EventListener, GetInfoRequest, InputType,
+    LightningAddressInfo as SdkLightningAddressInfo, ListPaymentsRequest,
+    ListUnclaimedDepositsRequest, LnurlPayRequest, MaxFee, OnchainConfirmationSpeed,
+    PaymentDetails, PaymentRequest, PrepareLnurlPayRequest, PrepareLnurlPayResponse,
+    PrepareSendPaymentRequest, PrepareSendPaymentResponse, ReceivePaymentMethod,
+    ReceivePaymentRequest, RegisterLightningAddressRequest, SdkEvent, SendOnchainFeeQuote,
+    SendPaymentMethod, SendPaymentOptions, SendPaymentRequest, SparkAsset,
     StableBalanceActiveLabel, UpdateUserSettingsRequest,
 };
 use coincube_spark_protocol::{
@@ -44,6 +45,7 @@ use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
 use crate::sdk_adapter::{self, SdkHandle};
+use crate::stable_balance_watch::{ConversionOutcome, FailureTracker, Verdict};
 
 /// How long a pending prepare lives before the background sweep evicts
 /// it. Picked at 5 minutes — long enough to cover human dwell time on
@@ -58,7 +60,13 @@ const PREPARE_TTL: Duration = Duration::from_secs(300);
 const PREPARE_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Run the stdin/stdout server until EOF on stdin or a `shutdown` RPC.
-pub async fn run() -> anyhow::Result<()> {
+///
+/// `conversion_outcomes` delivers one message per SDK auto-conversion
+/// outcome (failure or success), from the `tracing` layer installed in
+/// `main` — see [`crate::stable_balance_watch`].
+pub async fn run(
+    conversion_outcomes: tokio::sync::mpsc::UnboundedReceiver<ConversionOutcome>,
+) -> anyhow::Result<()> {
     // Single writer task: serializes all stdout writes so responses and
     // events never interleave mid-line. We talk to it over an unbounded
     // channel so request handlers never block on IO.
@@ -67,6 +75,12 @@ pub async fn run() -> anyhow::Result<()> {
     // listener registered in `handle_init` can push `Frame::Event`s
     // onto the same stdout stream the response handlers use.
     let state = Arc::new(ServerState::new(tx.clone()));
+
+    // Stable Balance circuit breaker. Weak for the same reason as the
+    // prepare sweep below: this task must not keep the state (and its
+    // stdout sender) alive past the read loop.
+    let breaker_weak = Arc::downgrade(&state);
+    tokio::spawn(watch_conversion_failures(conversion_outcomes, breaker_weak));
 
     // Phase 4f: background sweep that evicts pending-prepare entries
     // older than `PREPARE_TTL`. Uses a Weak reference so the sweep
@@ -188,6 +202,11 @@ struct ServerState {
     /// pushes `Frame::Event`s on this channel the same way request
     /// handlers push `Frame::Response`s, so stdout stays interleave-safe.
     event_tx: tokio::sync::mpsc::UnboundedSender<Frame>,
+    /// Consecutive Stable Balance auto-conversion failures, fed by
+    /// [`watch_conversion_failures`] (which also clears it on a successful
+    /// conversion) and cleared when the user turns the feature on again
+    /// ([`handle_set_stable_balance`]).
+    conversion_failures: Mutex<FailureTracker>,
 }
 
 impl ServerState {
@@ -198,8 +217,88 @@ impl ServerState {
             pending_prepares: Mutex::new(HashMap::new()),
             pending_lnurl_prepares: Mutex::new(HashMap::new()),
             event_tx,
+            conversion_failures: Mutex::new(FailureTracker::default()),
         }
     }
+}
+
+/// Stable Balance circuit breaker: count the SDK's consecutive
+/// auto-conversion failures — a success in between clears the run — and,
+/// at the threshold, switch the feature off and tell the gui. Runs for
+/// the process lifetime; exits when the tracing layer's sender or the
+/// server state is gone.
+///
+/// Deactivating is done through the same `update_user_settings` call the
+/// user's toggle uses, so the SDK persists "off" locally and the loop does
+/// not resume on the next launch either. The gui additionally records the
+/// pause in the Cube's settings on receipt of the event.
+async fn watch_conversion_failures(
+    mut outcomes: tokio::sync::mpsc::UnboundedReceiver<ConversionOutcome>,
+    state: std::sync::Weak<ServerState>,
+) {
+    while let Some(outcome) = outcomes.recv().await {
+        let Some(state) = state.upgrade() else {
+            break;
+        };
+        let reason = match outcome {
+            ConversionOutcome::Failed(reason) => reason,
+            ConversionOutcome::Succeeded => {
+                let forgotten = state.conversion_failures.lock().await.record_success();
+                if forgotten > 0 {
+                    tracing::info!(
+                        "Stable Balance auto-conversion succeeded; forgetting {forgotten} \
+                         earlier failure(s)"
+                    );
+                }
+                continue;
+            }
+        };
+        let verdict = state.conversion_failures.lock().await.record_failure();
+        let failures = match verdict {
+            Verdict::Tolerate { failures } => {
+                tracing::warn!(
+                    "Stable Balance auto-conversion failed ({failures} in a row): {reason}"
+                );
+                continue;
+            }
+            Verdict::Pause { failures } => failures,
+        };
+
+        let Some(sdk) = state.sdk.read().await.clone() else {
+            // Can't happen in practice — the SDK is what logged the
+            // failure — but there is nothing to deactivate without it.
+            continue;
+        };
+        match deactivate_stable_balance(&sdk).await {
+            Ok(()) => {
+                tracing::error!(
+                    "Stable Balance paused after {failures} consecutive auto-conversion \
+                     failures: {reason}"
+                );
+                let _ = state
+                    .event_tx
+                    .send(Frame::Event(ProtocolEvent::StableBalancePaused {
+                        reason,
+                        failures,
+                    }));
+            }
+            Err(e) => {
+                // The counter was reset by `Pause`; the next run of
+                // failures trips the breaker again.
+                tracing::error!("could not pause Stable Balance after repeated failures: {e}");
+            }
+        }
+    }
+}
+
+async fn deactivate_stable_balance(sdk: &SdkHandle) -> Result<(), breez_sdk_spark::SdkError> {
+    sdk.sdk
+        .update_user_settings(UpdateUserSettingsRequest {
+            spark_private_mode_enabled: None,
+            stable_balance_active_label: Some(StableBalanceActiveLabel::Unset),
+            spark_master_identity_public_key: None,
+        })
+        .await
 }
 
 async fn handle_request(request: Request, state: Arc<ServerState>) -> Response {
@@ -338,6 +437,27 @@ impl EventListener for BridgeEventListener {
             // Optimization events stay swallowed until a panel
             // needs them. (0.19.0 renamed this from `Optimization`.)
             SdkEvent::AutoOptimization { .. } => None,
+            // 0.25.0: progress of a unilateral exit (the user leaving Spark
+            // without the operators' cooperation). Nothing in the gui drives
+            // one, so there is nothing to show yet.
+            SdkEvent::UnilateralExitStateChanged => None,
+            // Fork-only (proposed upstream): a failed Stable Balance sweep or
+            // deactivation, with the SDK's own retry schedule. The circuit
+            // breaker still counts these off the SDK's `Auto-conversion
+            // failed` warning so it behaves the same against an upstream
+            // build that lacks the event; once upstream carries it, switch
+            // the breaker to this and drop the log-scraping layer.
+            SdkEvent::StableBalanceConversionFailed {
+                conversion,
+                error,
+                retry_in_secs,
+            } => {
+                tracing::info!(
+                    "SDK reports {conversion:?} conversion failed, retrying in {retry_in_secs}s: \
+                     {error}"
+                );
+                None
+            }
         };
 
         if let Some(ev) = protocol_event {
@@ -550,17 +670,19 @@ fn payment_to_summary(p: breez_sdk_spark::Payment) -> PaymentSummary {
 /// cannot actually fund. `None` means the prepare is fine to hand to the gui.
 ///
 /// **Why a plain sats send can grow a conversion leg at all.** Both
-/// [`handle_prepare_send`] and [`handle_prepare_lnurl_pay`] pass
-/// `conversion_options: None` and `token_identifier: None`, so any conversion on
-/// the response was auto-attached by the SDK. Stable Balance does that: when it
-/// is active and the sat balance is below `amount + fee`,
+/// [`handle_prepare_send`] and [`handle_prepare_lnurl_pay`] first prepare with
+/// `conversion_options: None` and `token_identifier: None`. A conversion on the
+/// response then came from one of two places. With Stable Balance active, the
+/// SDK auto-attaches one: when the sat balance is below `amount + fee`,
 /// `stable_balance::get_conversion_options` silently fills in a
 /// `ToBitcoin { <stable token> }` conversion so the shortfall can be covered by
 /// swapping Stable Balance back to bitcoin (SDK 0.19.0,
-/// `crates/breez-sdk/core/src/stable_balance/mod.rs`). That is a *feature*, and
-/// this function deliberately lets it through when it can work.
+/// `crates/breez-sdk/core/src/stable_balance/mod.rs`). With it inactive, the
+/// bridge attaches the same conversion itself when the wallet holds USDB —
+/// see [`usdb_shortfall_conversion`]. Either way it is a *feature*, and this
+/// function deliberately lets it through when it can work.
 ///
-/// **Why it needs a guard.** The SDK validates that auto-attached conversion
+/// **Why it needs a guard.** The SDK validates that conversion
 /// against the AMM pool, not against the wallet's own token balance. A wallet
 /// with Stable Balance on and no stable token prepares cleanly, shows a fee, and
 /// then dies inside Flashnet at send time with
@@ -624,11 +746,238 @@ async fn unfundable_conversion_error(
         id,
         ErrorKind::BadRequest,
         "Not enough bitcoin in this Spark wallet to cover the amount and its fee. \
-         Stable Balance is on, so the wallet tried to make up the difference by \
-         converting Stable Balance back to bitcoin — but the Stable Balance holding \
-         is too small to cover it. Send a smaller amount, top up the Spark bitcoin \
-         balance, or turn Stable Balance off in Spark settings.",
+         The wallet tried to make up the difference by converting USDB back to \
+         bitcoin, but the USDB holding is too small to cover it. Send a smaller \
+         amount or top up the Spark bitcoin balance.",
     ))
+}
+
+/// A USDB→BTC conversion to attach to a sats send the bitcoin balance alone
+/// can't cover, when the wallet holds USDB to cover it with. `None` when the
+/// bitcoin balance is enough, or there is no USDB to draw on.
+///
+/// This is what makes USDB spendable to any destination regardless of the
+/// Stable Balance toggle. The SDK does the same thing on its own — but only
+/// while Stable Balance is *active* (`stable_balance::get_conversion_options`);
+/// the toggle really means "auto-sweep received bitcoin into USDB", and it
+/// lives in the SDK's local cache, so a Cube recovered on another machine has
+/// it off. Without this the holding shows in the balance and can't be spent.
+/// With it, the two prepare paths ask for the conversion explicitly, which the
+/// SDK honours whether or not the sweep is on.
+///
+/// `needed_sats` is `amount + fee` (the SDK's own rule for when to attach).
+/// The balance read is the cached one: this runs on every prepare, and a
+/// stale answer costs at most one re-prepare, not a wrong send — the SDK
+/// re-checks funding when the payment executes.
+async fn usdb_shortfall_conversion(
+    sdk: &SdkHandle,
+    needed_sats: u64,
+) -> Result<Option<UsdbShortfall>, breez_sdk_spark::SdkError> {
+    let info = sdk
+        .sdk
+        .get_info(GetInfoRequest {
+            ensure_synced: None,
+        })
+        .await?;
+    let held_usdb = info
+        .token_balances
+        .get(sdk_adapter::USDB_MAINNET_TOKEN_IDENTIFIER)
+        .map_or(0u128, |tb| tb.balance);
+    Ok(conversion_for_shortfall(
+        info.balance_sats,
+        held_usdb,
+        needed_sats,
+    ))
+}
+
+/// A send the bitcoin balance can't cover, with the USDB conversion that
+/// would cover it. `balance_sats` is kept for the error copy if the
+/// conversion itself then fails — the user needs to know what *is*
+/// spendable without it.
+#[derive(Debug, Clone, PartialEq)]
+struct UsdbShortfall {
+    balance_sats: u64,
+    conversion: ConversionOptions,
+}
+
+/// The decision half of [`usdb_shortfall_conversion`], split out so the
+/// rule is testable without an SDK.
+fn conversion_for_shortfall(
+    balance_sats: u64,
+    held_usdb: u128,
+    needed_sats: u64,
+) -> Option<UsdbShortfall> {
+    if balance_sats >= needed_sats || held_usdb == 0 {
+        return None;
+    }
+    Some(UsdbShortfall {
+        balance_sats,
+        conversion: ConversionOptions {
+            conversion_type: ConversionType::ToBitcoin {
+                from_token_identifier: sdk_adapter::USDB_MAINNET_TOKEN_IDENTIFIER.to_string(),
+            },
+            // SDK defaults: 10 bps slippage, 30 s to see the converted sats.
+            max_slippage_bps: None,
+            completion_timeout_secs: None,
+        },
+    })
+}
+
+/// Whether an SDK prepare error is the wallet saying the *bitcoin* balance
+/// can't cover the send. Two shapes: `SdkError::InsufficientFunds` from the
+/// Lightning and Spark paths — since 0.25.0 it names a token when the
+/// shortfall is in one, and that case is not ours to fix with more
+/// conversion — and `SdkError::SparkError("... Tree service error:
+/// insufficient funds")` from the on-chain path, whose leaf selection runs
+/// inside the fee quote and only ever means sats.
+fn is_insufficient_funds(e: &breez_sdk_spark::SdkError) -> bool {
+    match e {
+        breez_sdk_spark::SdkError::InsufficientFunds { token_identifier } => {
+            token_identifier.is_none()
+        }
+        other => other
+            .to_string()
+            .to_lowercase()
+            .contains("insufficient funds"),
+    }
+}
+
+/// How [`prepare_with_usdb_fallback`] failed.
+#[derive(Debug)]
+enum PrepareError {
+    /// The plain prepare failed and USDB was no help (not a funds problem,
+    /// no USDB held, or no amount to size a conversion from). Reported as
+    /// the SDK's own error, as before.
+    Sdk(breez_sdk_spark::SdkError),
+    /// The bitcoin balance was short, USDB was there to cover it, and the
+    /// prepare *with* the conversion failed — in practice the AMM refusing
+    /// the swap. `balance_sats` is what the wallet can still send without
+    /// a conversion.
+    UsdbConversion {
+        balance_sats: u64,
+        source: breez_sdk_spark::SdkError,
+    },
+}
+
+impl PrepareError {
+    /// Turn the failure into a bridge response. A conversion failure gets a
+    /// sentence the user can act on; the SDK's text is a Flashnet JSON blob
+    /// (`{"errorCode":"FSAG-4201",...,"message":"AMM has insufficient
+    /// liquidity/reserves: ..."}`) and is reduced to its `message`.
+    fn into_response(self, id: u64, what: &str) -> Response {
+        match self {
+            PrepareError::Sdk(e) => {
+                Response::err(id, ErrorKind::Sdk, format!("{what} failed: {e}"))
+            }
+            PrepareError::UsdbConversion {
+                balance_sats,
+                source,
+            } => Response::err(
+                id,
+                ErrorKind::BadRequest,
+                format!(
+                    "This send needs more bitcoin than the Spark wallet holds ({available} sats \
+                     available), and converting USDB to bitcoin to cover it failed: {}. Send \
+                     less than {available} sats, leaving room for the fee, or try again later.",
+                    conversion_failure_reason(&source.to_string()),
+                    available = with_thousands(balance_sats),
+                ),
+            ),
+        }
+    }
+}
+
+/// `11254` → `11,254`, for error copy the user reads.
+fn with_thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// The human part of a conversion error. Flashnet errors reach us as
+/// `Error: {json}`; pull the JSON's `message` out. Anything else is passed
+/// through trimmed.
+fn conversion_failure_reason(text: &str) -> String {
+    let json = text
+        .find('{')
+        .and_then(|start| text.rfind('}').map(|end| &text[start..=end]));
+    json.and_then(|j| serde_json::from_str::<serde_json::Value>(j).ok())
+        .and_then(|v| v.get("message")?.as_str().map(str::to_string))
+        .unwrap_or_else(|| text.trim().to_string())
+}
+
+/// Run a plain sats prepare, then re-run it with a USDB→BTC conversion
+/// attached when the bitcoin balance falls short and USDB can make up the
+/// difference — see [`usdb_shortfall_conversion`].
+///
+/// `prepare` performs one SDK prepare with the given conversion options;
+/// `shortfall_conversion` is [`usdb_shortfall_conversion`] for a given
+/// `needed_sats` (a parameter so the sequencing is testable without an
+/// SDK); `needed_sats` reads `amount + fee` off a successful plain prepare.
+/// `known_amount_sat` is the requested amount when the caller has it, used
+/// for the on-chain path, whose plain prepare fails outright (leaf selection
+/// for the exact amount happens inside the fee quote) instead of returning
+/// a response to read the shortfall from.
+///
+/// A prepare that already carries a conversion (Stable Balance active — the
+/// SDK attached its own) is returned as is.
+async fn prepare_with_usdb_fallback<P, F, Fut, S, SFut>(
+    known_amount_sat: Option<u64>,
+    prepare: F,
+    shortfall_conversion: S,
+    needed_sats: impl Fn(&P) -> u64,
+    has_conversion: impl Fn(&P) -> bool,
+) -> Result<P, PrepareError>
+where
+    F: Fn(Option<ConversionOptions>) -> Fut,
+    Fut: std::future::Future<Output = Result<P, breez_sdk_spark::SdkError>>,
+    S: Fn(u64) -> SFut,
+    SFut: std::future::Future<Output = Result<Option<UsdbShortfall>, breez_sdk_spark::SdkError>>,
+{
+    // What the plain prepare tells us the send needs, and what to answer
+    // if USDB turns out not to help.
+    let (needed, fallback): (u64, Result<P, PrepareError>) = match prepare(None).await {
+        Ok(plain) if has_conversion(&plain) => return Ok(plain),
+        Ok(plain) => {
+            let needed = needed_sats(&plain);
+            (needed, Ok(plain))
+        }
+        Err(e) if is_insufficient_funds(&e) => match known_amount_sat {
+            Some(amount) => (amount, Err(PrepareError::Sdk(e))),
+            None => return Err(PrepareError::Sdk(e)),
+        },
+        Err(e) => return Err(PrepareError::Sdk(e)),
+    };
+
+    match shortfall_conversion(needed).await {
+        Ok(Some(UsdbShortfall {
+            balance_sats,
+            conversion,
+        })) => {
+            tracing::info!(
+                "bitcoin balance {balance_sats} sats short of {needed}; re-preparing with a USDB \
+                 conversion"
+            );
+            prepare(Some(conversion))
+                .await
+                .map_err(|source| PrepareError::UsdbConversion {
+                    balance_sats,
+                    source,
+                })
+        }
+        Ok(None) => fallback,
+        Err(e) => {
+            // Can't tell whether USDB would help; the plain outcome stands.
+            tracing::warn!("could not read balances to check for a USDB shortfall: {e}");
+            fallback
+        }
+    }
 }
 
 async fn handle_prepare_send(
@@ -651,21 +1000,36 @@ async fn handle_prepare_send(
     // regular send path now has to say explicitly that it's handing over raw
     // user input for the SDK to classify (bolt11 / spark address / BIP-21 / …).
     // The cross-chain path uses the other variant — see `prepare_cross_chain`.
-    let request = PrepareSendPaymentRequest {
-        payment_request: PaymentRequest::Input {
-            input: params.input,
+    let input = params.input;
+    let amount = params.amount_sat.map(|a| a as u128);
+    let speed = selected_onchain_speed();
+    let prepared = prepare_with_usdb_fallback(
+        params.amount_sat,
+        |conversion_options| {
+            sdk.sdk.prepare_send_payment(PrepareSendPaymentRequest {
+                payment_request: PaymentRequest::Input {
+                    input: input.clone(),
+                },
+                amount,
+                token_identifier: None,
+                conversion_options,
+                fee_policy: None,
+            })
         },
-        amount: params.amount_sat.map(|a| a as u128),
-        token_identifier: None,
-        conversion_options: None,
-        fee_policy: None,
-    };
+        |needed| usdb_shortfall_conversion(&sdk, needed),
+        |p: &PrepareSendPaymentResponse| {
+            clamp_u128_to_u64(p.amount).saturating_add(fee_and_method(&p.payment_method, &speed).0)
+        },
+        |p: &PrepareSendPaymentResponse| p.conversion_estimate.is_some(),
+    )
+    .await;
 
-    match sdk.sdk.prepare_send_payment(request).await {
+    match prepared {
         Ok(prepare) => {
-            // Stable Balance can auto-attach a token→BTC conversion here even
-            // though we asked for none. Fail now, in the user's terms, if the
-            // wallet can't fund it — see `unfundable_conversion_error`.
+            // A token→BTC conversion may be attached here — by the SDK
+            // (Stable Balance active) or by the fallback above. Fail now,
+            // in the user's terms, if the wallet can't fund it — see
+            // `unfundable_conversion_error`.
             if let Some(response) =
                 unfundable_conversion_error(id, &sdk, prepare.conversion_estimate.as_ref()).await
             {
@@ -710,7 +1074,7 @@ async fn handle_prepare_send(
                 }),
             )
         }
-        Err(e) => Response::err(id, ErrorKind::Sdk, format!("prepare_send failed: {e}")),
+        Err(e) => e.into_response(id, "prepare_send"),
     }
 }
 
@@ -721,10 +1085,14 @@ async fn handle_prepare_send(
 /// sending *from* Stable Balance is deferred. This is also what makes the v1
 /// path retry-safe — see [`route_is_retry_safe`].
 fn route_accepts_btc(route: &CrossChainRoutePair) -> bool {
+    // 0.25.0 renamed `supported_sources: Vec<SourceAsset>` to
+    // `accepted_assets: Vec<SparkAsset>` and added `delivery_methods` (the
+    // rail — Spark / Lightning / Bitcoin) alongside it. The rail is the
+    // SDK's concern; funding is what decides retry safety here.
     route
-        .supported_sources
+        .accepted_assets
         .iter()
-        .any(|s| matches!(s, SourceAsset::Bitcoin))
+        .any(|s| matches!(s, SparkAsset::Bitcoin))
 }
 
 /// Whether a failed send along this route can be blind-retried.
@@ -1329,6 +1697,9 @@ async fn handle_receive_bolt11(
             amount_sats: params.amount_sat,
             expiry_secs: params.expiry_secs,
             payment_hash: None,
+            // 0.25.0: invoices can be issued for another Spark identity.
+            // Ours always pay this wallet.
+            receiver_identity_public_key: None,
         },
     };
 
@@ -1565,20 +1936,31 @@ async fn handle_prepare_lnurl_pay(
         }
     };
 
-    let request = PrepareLnurlPayRequest {
-        amount: params.amount_sat as u128,
-        pay_request,
-        comment: params.comment,
-        validate_success_action_url: None,
-        token_identifier: None,
-        conversion_options: None,
-        fee_policy: None,
-    };
+    let comment = params.comment;
+    let prepared = prepare_with_usdb_fallback(
+        Some(params.amount_sat),
+        |conversion_options| {
+            sdk.sdk.prepare_lnurl_pay(PrepareLnurlPayRequest {
+                amount: params.amount_sat as u128,
+                pay_request: pay_request.clone(),
+                comment: comment.clone(),
+                validate_success_action_url: None,
+                token_identifier: None,
+                conversion_options,
+                fee_policy: None,
+            })
+        },
+        |needed| usdb_shortfall_conversion(&sdk, needed),
+        |p: &PrepareLnurlPayResponse| p.amount_sats.saturating_add(p.fee_sats),
+        |p: &PrepareLnurlPayResponse| p.conversion_estimate.is_some(),
+    )
+    .await;
 
-    match sdk.sdk.prepare_lnurl_pay(request).await {
+    match prepared {
         Ok(prepare) => {
-            // Same Stable Balance auto-attach as the regular send path, and the
-            // same refusal when the holding can't fund it. This path has a
+            // Same conversion attach as the regular send path (SDK's own with
+            // Stable Balance active, the bridge's USDB fallback otherwise), and
+            // the same refusal when the holding can't fund it. This path has a
             // second failure mode the check also heads off: `execute_lnurl_send`
             // forwards the idempotency key, and the SDK rejects a key on a
             // payment with a token leg outright.
@@ -1617,7 +1999,7 @@ async fn handle_prepare_lnurl_pay(
                 }),
             )
         }
-        Err(e) => Response::err(id, ErrorKind::Sdk, format!("prepare_lnurl_pay failed: {e}")),
+        Err(e) => e.into_response(id, "prepare_lnurl_pay"),
     }
 }
 
@@ -1704,14 +2086,21 @@ async fn handle_claim_deposit(
 
     match sdk.sdk.claim_deposit(request).await {
         Ok(resp) => {
-            // The SDK's claim returns a Payment whose `amount` reflects
-            // the post-fee deposited value. Surface that to the gui so
-            // the success toast can show the actual claimed amount.
-            let amount_sat = clamp_u128_to_u64(resp.payment.amount);
+            // A deposit claimed at maturity settles synchronously and comes
+            // back with the Payment, whose `amount` is the post-fee value.
+            // Since 0.25.0 a deposit can also be claimed *before* maturity
+            // (when the provider's spread fits under `max_fee`); that
+            // transfer settles asynchronously and there is no Payment yet —
+            // the gui hears about it through `PaymentSucceeded` /
+            // `DepositsChanged` like any other incoming transfer.
+            let (payment_id, amount_sat) = match resp.payment {
+                Some(payment) => (Some(payment.id), Some(clamp_u128_to_u64(payment.amount))),
+                None => (None, None),
+            };
             Response::ok(
                 id,
                 OkPayload::ClaimDeposit(ClaimDepositOk {
-                    payment_id: resp.payment.id,
+                    payment_id,
                     amount_sat,
                 }),
             )
@@ -1763,17 +2152,28 @@ async fn handle_set_stable_balance(
         }
     };
 
-    let active_label = if params.enabled {
-        StableBalanceActiveLabel::Set {
-            label: crate::sdk_adapter::STABLE_BALANCE_LABEL.to_string(),
-        }
-    } else {
-        StableBalanceActiveLabel::Unset
-    };
+    if !params.enabled {
+        return match deactivate_stable_balance(&sdk).await {
+            Ok(()) => Response::ok(id, OkPayload::SetStableBalance {}),
+            Err(e) => Response::err(
+                id,
+                ErrorKind::Sdk,
+                format!("update_user_settings failed: {e}"),
+            ),
+        };
+    }
 
+    // Turning it on is a fresh start for the circuit breaker: the
+    // failures it counted belong to the session that got paused.
+    state.conversion_failures.lock().await.reset();
     let request = UpdateUserSettingsRequest {
         spark_private_mode_enabled: None,
-        stable_balance_active_label: Some(active_label),
+        stable_balance_active_label: Some(StableBalanceActiveLabel::Set {
+            label: crate::sdk_adapter::STABLE_BALANCE_LABEL.to_string(),
+        }),
+        // 0.25.0: a second read-only identity for private mode. Not a
+        // feature we expose; `None` leaves it untouched.
+        spark_master_identity_public_key: None,
     };
 
     match sdk.sdk.update_user_settings(request).await {
@@ -2002,6 +2402,7 @@ mod fee_tier_tests {
             speed_fast: tier(3_000, 300),
             speed_medium: tier(200, 20),
             speed_slow: tier(90, 10),
+            is_estimate: false,
         }
     }
 
@@ -2131,6 +2532,7 @@ mod fee_tier_tests {
                 user_fee_sat: 0,
                 l1_broadcast_fee_sat: 0,
             },
+            is_estimate: false,
         };
         assert_eq!(
             onchain_fee_for_speed(&quote, &OnchainConfirmationSpeed::Medium),
@@ -2165,11 +2567,377 @@ mod fee_tier_tests {
 }
 
 #[cfg(test)]
+mod usdb_fallback_tests {
+    use super::*;
+    use breez_sdk_spark::SdkError;
+    use std::cell::Cell;
+
+    #[test]
+    fn shortfall_conversion_only_when_bitcoin_is_short_and_usdb_is_held() {
+        // Enough bitcoin: no conversion, whatever the USDB holding.
+        assert!(conversion_for_shortfall(2_000_100, 5_000_000, 2_000_100).is_none());
+        assert!(conversion_for_shortfall(3_000_000, 0, 2_000_100).is_none());
+        // Short, but nothing to convert from.
+        assert!(conversion_for_shortfall(11_254, 0, 2_000_100).is_none());
+        // Short and USDB held: convert from USDB. Slippage / timeout are
+        // left to the SDK's defaults.
+        let shortfall = conversion_for_shortfall(11_254, 5_000_000, 2_000_100)
+            .expect("usdb should fund the shortfall");
+        assert_eq!(shortfall.balance_sats, 11_254);
+        assert_eq!(
+            shortfall.conversion.conversion_type,
+            ConversionType::ToBitcoin {
+                from_token_identifier: sdk_adapter::USDB_MAINNET_TOKEN_IDENTIFIER.to_string(),
+            }
+        );
+        assert_eq!(shortfall.conversion.max_slippage_bps, None);
+        assert_eq!(shortfall.conversion.completion_timeout_secs, None);
+    }
+
+    #[test]
+    fn insufficient_funds_is_recognised_in_both_sdk_error_shapes() {
+        // Lightning / Spark-address paths.
+        assert!(is_insufficient_funds(&SdkError::InsufficientFunds {
+            token_identifier: None
+        }));
+        // A *token* shortfall is a different problem; more USDB conversion
+        // is not the answer to "not enough USDB".
+        assert!(!is_insufficient_funds(&SdkError::InsufficientFunds {
+            token_identifier: Some(sdk_adapter::USDB_MAINNET_TOKEN_IDENTIFIER.to_string())
+        }));
+        // On-chain path: the tree service error surfaces as a string.
+        assert!(is_insufficient_funds(&SdkError::SparkError(
+            "Tree service error: insufficient funds".to_string()
+        )));
+        assert!(!is_insufficient_funds(&SdkError::InvalidInput(
+            "Amount is required".to_string()
+        )));
+        assert!(!is_insufficient_funds(&SdkError::SparkError(
+            "Service error: generic error: Token outputs not found".to_string()
+        )));
+    }
+
+    /// A stand-in prepare: `(had_conversion, amount)`. The plain call
+    /// returns `plain`; a call with a conversion returns `converted`.
+    /// Records every conversion it was handed.
+    struct FakePrepare {
+        plain: Result<(bool, u64), SdkError>,
+        converted: Result<(bool, u64), SdkError>,
+        calls: Cell<u32>,
+    }
+
+    impl FakePrepare {
+        fn call(
+            &self,
+            conversion: Option<ConversionOptions>,
+        ) -> impl std::future::Future<Output = Result<(bool, u64), SdkError>> + '_ {
+            self.calls.set(self.calls.get() + 1);
+            let out = if conversion.is_some() {
+                self.converted.clone()
+            } else {
+                self.plain.clone()
+            };
+            async move { out }
+        }
+    }
+
+    fn usdb() -> UsdbShortfall {
+        conversion_for_shortfall(11_254, 1, 200_000).expect("short with usdb converts")
+    }
+
+    #[tokio::test]
+    async fn prepare_already_carrying_a_conversion_is_returned_untouched() {
+        let fake = FakePrepare {
+            plain: Ok((true, 5_000)),
+            converted: Ok((true, 999)),
+            calls: Cell::new(0),
+        };
+        let shortfall_checked = Cell::new(false);
+        let result = prepare_with_usdb_fallback(
+            Some(5_000),
+            |c| fake.call(c),
+            |_| {
+                shortfall_checked.set(true);
+                async { Ok(Some(usdb())) }
+            },
+            |p| p.1,
+            |p| p.0,
+        )
+        .await;
+        assert_eq!(result.unwrap(), (true, 5_000));
+        assert_eq!(fake.calls.get(), 1, "no re-prepare");
+        assert!(!shortfall_checked.get(), "balances are not even read");
+    }
+
+    #[tokio::test]
+    async fn plain_prepare_is_kept_when_bitcoin_covers_it() {
+        let fake = FakePrepare {
+            plain: Ok((false, 5_000)),
+            converted: Ok((true, 999)),
+            calls: Cell::new(0),
+        };
+        let asked = Cell::new(0);
+        let result = prepare_with_usdb_fallback(
+            None,
+            |c| fake.call(c),
+            |needed| {
+                asked.set(needed);
+                async { Ok(None) }
+            },
+            |p| p.1,
+            |p| p.0,
+        )
+        .await;
+        assert_eq!(result.unwrap(), (false, 5_000));
+        assert_eq!(
+            asked.get(),
+            5_000,
+            "shortfall is checked against amount + fee"
+        );
+        assert_eq!(fake.calls.get(), 1);
+    }
+
+    #[tokio::test]
+    async fn plain_prepare_is_re_run_with_usdb_when_bitcoin_is_short() {
+        let fake = FakePrepare {
+            plain: Ok((false, 5_000)),
+            converted: Ok((true, 5_000)),
+            calls: Cell::new(0),
+        };
+        let result = prepare_with_usdb_fallback(
+            None,
+            |c| fake.call(c),
+            |_| async { Ok(Some(usdb())) },
+            |p| p.1,
+            |p| p.0,
+        )
+        .await;
+        assert_eq!(result.unwrap(), (true, 5_000));
+        assert_eq!(fake.calls.get(), 2, "plain, then with the conversion");
+    }
+
+    #[tokio::test]
+    async fn insufficient_funds_error_is_retried_with_usdb_using_the_known_amount() {
+        let fake = FakePrepare {
+            plain: Err(SdkError::SparkError(
+                "Tree service error: insufficient funds".to_string(),
+            )),
+            converted: Ok((true, 2_000_000)),
+            calls: Cell::new(0),
+        };
+        let asked = Cell::new(0);
+        let result = prepare_with_usdb_fallback(
+            Some(2_000_000),
+            |c| fake.call(c),
+            |needed| {
+                asked.set(needed);
+                async { Ok(Some(usdb())) }
+            },
+            |p| p.1,
+            |p| p.0,
+        )
+        .await;
+        assert_eq!(result.unwrap(), (true, 2_000_000));
+        assert_eq!(asked.get(), 2_000_000);
+        assert_eq!(fake.calls.get(), 2);
+    }
+
+    #[tokio::test]
+    async fn insufficient_funds_error_stands_without_usdb_or_a_known_amount() {
+        // No USDB to draw on: the original error comes back.
+        let fake = FakePrepare {
+            plain: Err(SdkError::InsufficientFunds {
+                token_identifier: None,
+            }),
+            converted: Ok((true, 1)),
+            calls: Cell::new(0),
+        };
+        let result = prepare_with_usdb_fallback(
+            Some(1),
+            |c| fake.call(c),
+            |_| async { Ok(None) },
+            |p| p.1,
+            |p| p.0,
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(PrepareError::Sdk(SdkError::InsufficientFunds {
+                token_identifier: None
+            }))
+        ));
+        assert_eq!(fake.calls.get(), 1);
+
+        // Amount unknown (amountless prepare that failed): nothing to size
+        // the conversion from, so no retry.
+        let fake = FakePrepare {
+            plain: Err(SdkError::InsufficientFunds {
+                token_identifier: None,
+            }),
+            converted: Ok((true, 1)),
+            calls: Cell::new(0),
+        };
+        let checked = Cell::new(false);
+        let result = prepare_with_usdb_fallback(
+            None,
+            |c| fake.call(c),
+            |_| {
+                checked.set(true);
+                async { Ok(Some(usdb())) }
+            },
+            |p| p.1,
+            |p| p.0,
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(PrepareError::Sdk(SdkError::InsufficientFunds {
+                token_identifier: None
+            }))
+        ));
+        assert!(!checked.get());
+        assert_eq!(fake.calls.get(), 1);
+    }
+
+    #[tokio::test]
+    async fn other_prepare_errors_and_balance_read_failures_leave_the_plain_outcome() {
+        // A non-funds error is never retried.
+        let fake = FakePrepare {
+            plain: Err(SdkError::InvalidInput("Amount is required".to_string())),
+            converted: Ok((true, 1)),
+            calls: Cell::new(0),
+        };
+        let result = prepare_with_usdb_fallback(
+            Some(1),
+            |c| fake.call(c),
+            |_| async { Ok(Some(usdb())) },
+            |p| p.1,
+            |p| p.0,
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(PrepareError::Sdk(SdkError::InvalidInput(_)))
+        ));
+        assert_eq!(fake.calls.get(), 1);
+
+        // Balance read failing: the plain prepare is still the answer.
+        let fake = FakePrepare {
+            plain: Ok((false, 5_000)),
+            converted: Ok((true, 5_000)),
+            calls: Cell::new(0),
+        };
+        let result = prepare_with_usdb_fallback(
+            None,
+            |c| fake.call(c),
+            |_| async { Err(SdkError::SparkError("offline".to_string())) },
+            |p| p.1,
+            |p| p.0,
+        )
+        .await;
+        assert_eq!(result.unwrap(), (false, 5_000));
+        assert_eq!(fake.calls.get(), 1);
+    }
+}
+
+#[cfg(test)]
+mod usdb_fallback_error_tests {
+    use super::*;
+    use breez_sdk_spark::SdkError;
+    use std::cell::Cell;
+
+    const FLASHNET_ERROR: &str = r#"Error: {"errorCode":"FSAG-4201","errorCategory":"BUSINESS_LOGIC","message":"FSAG-4201: AMM has insufficient liquidity/reserves: Insufficient liquidity in pool","details":{"liquidity_error":"Insufficient liquidity in pool"},"requestId":"01A08F33-D5CB-7901-BDC6-4E3629D9CAFC","timestamp":"2026-09-11T06:42:14.092591956Z","service":"flashnet-amm-gateway","severity":"Error"}"#;
+
+    #[test]
+    fn conversion_failure_reason_pulls_the_message_out_of_flashnet_json() {
+        assert_eq!(
+            conversion_failure_reason(FLASHNET_ERROR),
+            "FSAG-4201: AMM has insufficient liquidity/reserves: Insufficient liquidity in pool"
+        );
+        // Not JSON: passed through.
+        assert_eq!(conversion_failure_reason("  Timeout  "), "Timeout");
+        // JSON without a message: passed through rather than blanked.
+        assert_eq!(conversion_failure_reason(r#"{"code":1}"#), r#"{"code":1}"#);
+    }
+
+    #[tokio::test]
+    async fn a_failed_usdb_conversion_prepare_names_the_bitcoin_balance_and_the_reason() {
+        // On-chain path: the plain prepare fails on funds, USDB is there,
+        // and the AMM refuses the conversion.
+        let calls = Cell::new(0);
+        let prepare = |conversion: Option<ConversionOptions>| {
+            calls.set(calls.get() + 1);
+            let out = if conversion.is_some() {
+                Err(SdkError::Generic(
+                    FLASHNET_ERROR.trim_start_matches("Error: ").to_string(),
+                ))
+            } else {
+                Err(SdkError::SparkError(
+                    "Tree service error: insufficient funds".to_string(),
+                ))
+            };
+            async move { out }
+        };
+        let result: Result<u64, PrepareError> = prepare_with_usdb_fallback(
+            Some(200_000),
+            prepare,
+            |_| async { Ok(conversion_for_shortfall(11_254, 15_177_980_000, 200_000)) },
+            |_| 0,
+            |_| false,
+        )
+        .await;
+        assert_eq!(calls.get(), 2);
+        let Err(err @ PrepareError::UsdbConversion { balance_sats, .. }) = result else {
+            panic!("expected a usdb conversion failure");
+        };
+        assert_eq!(balance_sats, 11_254);
+
+        let response = err.into_response(7, "prepare_send");
+        let value = serde_json::to_value(&response).expect("serialize");
+        let message = value["err"]["message"].as_str().expect("message");
+        assert!(
+            message.contains("11,254 sats available"),
+            "must name what is still spendable: {message}"
+        );
+        assert!(
+            message.contains("AMM has insufficient liquidity/reserves"),
+            "must carry the AMM's reason: {message}"
+        );
+        assert!(
+            !message.contains("errorCode"),
+            "must not leak the raw JSON blob: {message}"
+        );
+        assert_eq!(value["err"]["kind"], serde_json::json!("bad_request"));
+    }
+
+    #[test]
+    fn with_thousands_groups_digits() {
+        assert_eq!(with_thousands(0), "0");
+        assert_eq!(with_thousands(999), "999");
+        assert_eq!(with_thousands(1_000), "1,000");
+        assert_eq!(with_thousands(11_254), "11,254");
+        assert_eq!(with_thousands(19_718_473), "19,718,473");
+    }
+
+    #[test]
+    fn plain_sdk_errors_keep_their_original_shape() {
+        let response = PrepareError::Sdk(SdkError::InvalidInput("Amount is required".to_string()))
+            .into_response(7, "prepare_send");
+        let value = serde_json::to_value(&response).expect("serialize");
+        assert_eq!(
+            value["err"]["message"],
+            serde_json::json!("prepare_send failed: Invalid input: Amount is required")
+        );
+        assert_eq!(value["err"]["kind"], serde_json::json!("sdk"));
+    }
+}
+
+#[cfg(test)]
 mod cross_chain_tests {
     use super::*;
     use breez_sdk_spark::CrossChainProvider;
 
-    fn route(provider: CrossChainProvider, sources: Vec<SourceAsset>) -> CrossChainRoutePair {
+    fn route(provider: CrossChainProvider, sources: Vec<SparkAsset>) -> CrossChainRoutePair {
         CrossChainRoutePair {
             provider,
             chain: "base".to_string(),
@@ -2178,7 +2946,8 @@ mod cross_chain_tests {
             contract_address: Some("0xabc".to_string()),
             decimals: 6,
             exact_out_eligible: true,
-            supported_sources: sources,
+            accepted_assets: sources,
+            delivery_methods: vec![breez_sdk_spark::DeliveryMethod::Spark],
         }
     }
 
@@ -2193,7 +2962,7 @@ mod cross_chain_tests {
 
     #[test]
     fn a_btc_fundable_route_is_offered_and_marked_retry_safe() {
-        let r = route(CrossChainProvider::Orchestra, vec![SourceAsset::Bitcoin]);
+        let r = route(CrossChainProvider::Orchestra, vec![SparkAsset::Bitcoin]);
         assert!(route_accepts_btc(&r));
         assert!(route_is_retry_safe(&r));
         let wire = sdk_route_to_protocol(&r);
@@ -2205,7 +2974,7 @@ mod cross_chain_tests {
 
     #[test]
     fn boltz_routes_map_to_their_own_provider_string() {
-        let r = route(CrossChainProvider::Boltz, vec![SourceAsset::Bitcoin]);
+        let r = route(CrossChainProvider::Boltz, vec![SparkAsset::Bitcoin]);
         assert_eq!(sdk_route_to_protocol(&r).provider, "boltz");
     }
 
@@ -2216,7 +2985,7 @@ mod cross_chain_tests {
         // must never be reported to the gui as safe to blind-retry.
         let r = route(
             CrossChainProvider::Orchestra,
-            vec![SourceAsset::Token {
+            vec![SparkAsset::Token {
                 token_identifier: "btkn1xyz".to_string(),
             }],
         );
@@ -2296,10 +3065,10 @@ mod cross_chain_tests {
         let r = route(
             CrossChainProvider::Orchestra,
             vec![
-                SourceAsset::Token {
+                SparkAsset::Token {
                     token_identifier: "btkn1xyz".to_string(),
                 },
-                SourceAsset::Bitcoin,
+                SparkAsset::Bitcoin,
             ],
         );
         assert!(route_accepts_btc(&r));

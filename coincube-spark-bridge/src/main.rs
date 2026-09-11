@@ -16,8 +16,10 @@
 
 mod sdk_adapter;
 mod server;
+mod stable_balance_watch;
 
 use clap::Parser;
+use tracing_subscriber::prelude::*;
 use tracing_subscriber::EnvFilter;
 
 /// CLI options for the bridge binary.
@@ -40,19 +42,28 @@ struct Cli {
 async fn main() -> anyhow::Result<()> {
     // Send all tracing output to stderr so the stdout channel stays clean
     // for JSON frames.
-    tracing_subscriber::fmt()
-        .with_env_filter(
+    //
+    // The env filter sits on the `fmt` layer only. The failure watch has
+    // to see the SDK's `stable_balance` WARN regardless of what
+    // `RUST_LOG` says, so it is a sibling layer with no filter of its
+    // own — it does its own cheap level/target check.
+    let (failure_tx, failure_rx) = tokio::sync::mpsc::unbounded_channel();
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_writer(std::io::stderr)
+        .with_filter(
             EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| EnvFilter::new("info,breez_sdk_spark=warn")),
-        )
-        .with_writer(std::io::stderr)
+        );
+    tracing_subscriber::registry()
+        .with(fmt_layer)
+        .with(stable_balance_watch::FailureWatchLayer::new(failure_tx))
         .init();
 
     let cli = Cli::parse();
     if cli.smoke_test {
         smoke_test::run().await
     } else {
-        server::run().await
+        server::run(failure_rx).await
     }
 }
 

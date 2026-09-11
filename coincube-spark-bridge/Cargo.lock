@@ -1120,7 +1120,7 @@ dependencies = [
 [[package]]
 name = "boltz-client"
 version = "0.1.0"
-source = "git+https://github.com/breez/boltz-client?rev=b5f4683aba10efd875d674f2bb9a5800b047a879#b5f4683aba10efd875d674f2bb9a5800b047a879"
+source = "git+https://github.com/breez/boltz-client?rev=aea35af1628d1fb259ebf85266f96215cfdabcb5#aea35af1628d1fb259ebf85266f96215cfdabcb5"
 dependencies = [
  "alloy-primitives",
  "alloy-signer",
@@ -1135,14 +1135,16 @@ dependencies = [
  "hex",
  "k256",
  "lightning-invoice 0.34.1",
- "macros 0.1.0 (git+https://github.com/breez/boltz-client?rev=b5f4683aba10efd875d674f2bb9a5800b047a879)",
- "platform-utils 0.1.0 (git+https://github.com/breez/boltz-client?rev=b5f4683aba10efd875d674f2bb9a5800b047a879)",
+ "macros 0.1.0 (git+https://github.com/breez/boltz-client?rev=aea35af1628d1fb259ebf85266f96215cfdabcb5)",
+ "platform-utils 0.1.0 (git+https://github.com/breez/boltz-client?rev=aea35af1628d1fb259ebf85266f96215cfdabcb5)",
  "serde",
  "serde_json",
  "sha2",
  "thiserror 2.0.18",
  "tiny-keccak",
  "tokio",
+ "tokio-socks",
+ "tokio-tungstenite",
  "tokio-tungstenite-wasm",
  "tracing",
  "url",
@@ -1176,7 +1178,7 @@ dependencies = [
 [[package]]
 name = "breez-sdk-common"
 version = "0.1.0"
-source = "git+https://github.com/breez/spark-sdk?tag=0.19.0#a484ac157b65790117ea7c4bdc8104533b4e42ad"
+source = "git+https://github.com/coincubetech/spark-sdk?rev=a38117dcc3c920703e5002b4206955213fe49eb7#a38117dcc3c920703e5002b4206955213fe49eb7"
 dependencies = [
  "aes",
  "anyhow",
@@ -1190,8 +1192,8 @@ dependencies = [
  "hex",
  "http",
  "lightning",
- "macros 0.1.0 (git+https://github.com/breez/spark-sdk?tag=0.19.0)",
- "platform-utils 0.1.0 (git+https://github.com/breez/spark-sdk?tag=0.19.0)",
+ "macros 0.1.0 (git+https://github.com/coincubetech/spark-sdk?rev=a38117dcc3c920703e5002b4206955213fe49eb7)",
+ "platform-utils 0.1.0 (git+https://github.com/coincubetech/spark-sdk?rev=a38117dcc3c920703e5002b4206955213fe49eb7)",
  "prost",
  "regex-lite",
  "reqwest",
@@ -1212,7 +1214,7 @@ dependencies = [
 [[package]]
 name = "breez-sdk-spark"
 version = "0.1.0"
-source = "git+https://github.com/breez/spark-sdk?tag=0.19.0#a484ac157b65790117ea7c4bdc8104533b4e42ad"
+source = "git+https://github.com/coincubetech/spark-sdk?rev=a38117dcc3c920703e5002b4206955213fe49eb7#a38117dcc3c920703e5002b4206955213fe49eb7"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1230,17 +1232,19 @@ dependencies = [
  "hex",
  "k256",
  "lnurl-models",
- "macros 0.1.0 (git+https://github.com/breez/spark-sdk?tag=0.19.0)",
- "platform-utils 0.1.0 (git+https://github.com/breez/spark-sdk?tag=0.19.0)",
+ "macros 0.1.0 (git+https://github.com/coincubetech/spark-sdk?rev=a38117dcc3c920703e5002b4206955213fe49eb7)",
+ "platform-utils 0.1.0 (git+https://github.com/coincubetech/spark-sdk?rev=a38117dcc3c920703e5002b4206955213fe49eb7)",
  "rusqlite",
  "rusqlite_migration",
  "serde",
  "serde_json",
+ "spark-sqlite",
  "spark-wallet",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "url",
  "utils",
  "uuid",
  "x509-cert",
@@ -2057,15 +2061,15 @@ checksum = "b7ac824320a75a52197e8f2d787f6a38b6718bb6897a35142d749af3c0e8f4fe"
 [[package]]
 name = "flashnet"
 version = "0.1.0"
-source = "git+https://github.com/breez/spark-sdk?tag=0.19.0#a484ac157b65790117ea7c4bdc8104533b4e42ad"
+source = "git+https://github.com/coincubetech/spark-sdk?rev=a38117dcc3c920703e5002b4206955213fe49eb7#a38117dcc3c920703e5002b4206955213fe49eb7"
 dependencies = [
  "async-trait",
  "base64",
  "bitcoin",
  "getrandom 0.2.17",
  "hex",
- "macros 0.1.0 (git+https://github.com/breez/spark-sdk?tag=0.19.0)",
- "platform-utils 0.1.0 (git+https://github.com/breez/spark-sdk?tag=0.19.0)",
+ "macros 0.1.0 (git+https://github.com/coincubetech/spark-sdk?rev=a38117dcc3c920703e5002b4206955213fe49eb7)",
+ "platform-utils 0.1.0 (git+https://github.com/coincubetech/spark-sdk?rev=a38117dcc3c920703e5002b4206955213fe49eb7)",
  "rand 0.8.5",
  "serde",
  "serde_json",
@@ -3117,9 +3121,10 @@ checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 [[package]]
 name = "lnurl-models"
 version = "0.1.0"
-source = "git+https://github.com/breez/spark-sdk?tag=0.19.0#a484ac157b65790117ea7c4bdc8104533b4e42ad"
+source = "git+https://github.com/coincubetech/spark-sdk?rev=a38117dcc3c920703e5002b4206955213fe49eb7#a38117dcc3c920703e5002b4206955213fe49eb7"
 dependencies = [
  "serde",
+ "sha2",
 ]
 
 [[package]]
@@ -3157,7 +3162,7 @@ dependencies = [
 [[package]]
 name = "macros"
 version = "0.1.0"
-source = "git+https://github.com/breez/spark-sdk?tag=0.19.0#a484ac157b65790117ea7c4bdc8104533b4e42ad"
+source = "git+https://github.com/coincubetech/spark-sdk?rev=a38117dcc3c920703e5002b4206955213fe49eb7#a38117dcc3c920703e5002b4206955213fe49eb7"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3167,7 +3172,7 @@ dependencies = [
 [[package]]
 name = "macros"
 version = "0.1.0"
-source = "git+https://github.com/breez/boltz-client?rev=b5f4683aba10efd875d674f2bb9a5800b047a879#b5f4683aba10efd875d674f2bb9a5800b047a879"
+source = "git+https://github.com/breez/boltz-client?rev=aea35af1628d1fb259ebf85266f96215cfdabcb5#aea35af1628d1fb259ebf85266f96215cfdabcb5"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3425,29 +3430,40 @@ checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
 [[package]]
 name = "platform-utils"
 version = "0.1.0"
-source = "git+https://github.com/breez/spark-sdk?tag=0.19.0#a484ac157b65790117ea7c4bdc8104533b4e42ad"
+source = "git+https://github.com/coincubetech/spark-sdk?rev=a38117dcc3c920703e5002b4206955213fe49eb7#a38117dcc3c920703e5002b4206955213fe49eb7"
 dependencies = [
  "async-trait",
  "base64",
- "macros 0.1.0 (git+https://github.com/breez/spark-sdk?tag=0.19.0)",
+ "encoding_rs",
+ "futures",
+ "http",
+ "hyper-util",
+ "macros 0.1.0 (git+https://github.com/coincubetech/spark-sdk?rev=a38117dcc3c920703e5002b4206955213fe49eb7)",
+ "mime",
  "reqwest",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-socks",
  "tokio_with_wasm",
+ "tower-service",
  "tracing",
+ "url",
  "web-time",
 ]
 
 [[package]]
 name = "platform-utils"
 version = "0.1.0"
-source = "git+https://github.com/breez/boltz-client?rev=b5f4683aba10efd875d674f2bb9a5800b047a879#b5f4683aba10efd875d674f2bb9a5800b047a879"
+source = "git+https://github.com/breez/boltz-client?rev=aea35af1628d1fb259ebf85266f96215cfdabcb5#aea35af1628d1fb259ebf85266f96215cfdabcb5"
 dependencies = [
  "async-trait",
  "base64",
- "macros 0.1.0 (git+https://github.com/breez/boltz-client?rev=b5f4683aba10efd875d674f2bb9a5800b047a879)",
+ "encoding_rs",
+ "futures",
+ "macros 0.1.0 (git+https://github.com/breez/boltz-client?rev=aea35af1628d1fb259ebf85266f96215cfdabcb5)",
+ "mime",
  "reqwest",
  "serde",
  "serde_json",
@@ -3908,6 +3924,7 @@ dependencies = [
  "bytes",
  "encoding_rs",
  "futures-core",
+ "futures-util",
  "h2",
  "http",
  "http-body",
@@ -3929,12 +3946,14 @@ dependencies = [
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
+ "tokio-util",
  "tower 0.5.3",
  "tower-http",
  "tower-service",
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "wasm-streams",
  "web-sys",
  "webpki-roots 1.0.6",
 ]
@@ -4554,7 +4573,7 @@ dependencies = [
 [[package]]
 name = "spark"
 version = "0.1.0"
-source = "git+https://github.com/breez/spark-sdk?tag=0.19.0#a484ac157b65790117ea7c4bdc8104533b4e42ad"
+source = "git+https://github.com/coincubetech/spark-sdk?rev=a38117dcc3c920703e5002b4206955213fe49eb7#a38117dcc3c920703e5002b4206955213fe49eb7"
 dependencies = [
  "async-trait",
  "base64",
@@ -4572,8 +4591,8 @@ dependencies = [
  "http-body-util",
  "k256",
  "lightning-invoice 0.33.2",
- "macros 0.1.0 (git+https://github.com/breez/spark-sdk?tag=0.19.0)",
- "platform-utils 0.1.0 (git+https://github.com/breez/spark-sdk?tag=0.19.0)",
+ "macros 0.1.0 (git+https://github.com/coincubetech/spark-sdk?rev=a38117dcc3c920703e5002b4206955213fe49eb7)",
+ "platform-utils 0.1.0 (git+https://github.com/coincubetech/spark-sdk?rev=a38117dcc3c920703e5002b4206955213fe49eb7)",
  "prost",
  "prost-types",
  "rand 0.8.5",
@@ -4590,6 +4609,21 @@ dependencies = [
  "tracing",
  "unicode-normalization",
  "utils",
+ "uuid",
+]
+
+[[package]]
+name = "spark-sqlite"
+version = "0.1.0"
+source = "git+https://github.com/coincubetech/spark-sdk?rev=a38117dcc3c920703e5002b4206955213fe49eb7#a38117dcc3c920703e5002b4206955213fe49eb7"
+dependencies = [
+ "async-trait",
+ "macros 0.1.0 (git+https://github.com/coincubetech/spark-sdk?rev=a38117dcc3c920703e5002b4206955213fe49eb7)",
+ "platform-utils 0.1.0 (git+https://github.com/coincubetech/spark-sdk?rev=a38117dcc3c920703e5002b4206955213fe49eb7)",
+ "rusqlite",
+ "serde_json",
+ "spark-wallet",
+ "tracing",
  "uuid",
 ]
 
@@ -4611,13 +4645,13 @@ dependencies = [
 [[package]]
 name = "spark-wallet"
 version = "0.1.0"
-source = "git+https://github.com/breez/spark-sdk?tag=0.19.0#a484ac157b65790117ea7c4bdc8104533b4e42ad"
+source = "git+https://github.com/coincubetech/spark-sdk?rev=a38117dcc3c920703e5002b4206955213fe49eb7#a38117dcc3c920703e5002b4206955213fe49eb7"
 dependencies = [
  "bitcoin",
  "frost-secp256k1-tr",
  "futures",
  "hex",
- "platform-utils 0.1.0 (git+https://github.com/breez/spark-sdk?tag=0.19.0)",
+ "platform-utils 0.1.0 (git+https://github.com/coincubetech/spark-sdk?rev=a38117dcc3c920703e5002b4206955213fe49eb7)",
  "serde",
  "spark",
  "thiserror 2.0.18",
@@ -4942,6 +4976,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1729aa945f29d91ba541258c8df89027d5792d85a8841fb65e8bf0f4ede4ef61"
 dependencies = [
  "rustls",
+ "tokio",
+]
+
+[[package]]
+name = "tokio-socks"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7e2948f60dbe26b35f2c7fb74ac2854c1fddded0fe9d7548fcc674a246f7615"
+dependencies = [
+ "either",
+ "futures-util",
+ "thiserror 1.0.69",
  "tokio",
 ]
 
@@ -5400,7 +5446,7 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 [[package]]
 name = "utils"
 version = "0.1.0"
-source = "git+https://github.com/breez/spark-sdk?tag=0.19.0#a484ac157b65790117ea7c4bdc8104533b4e42ad"
+source = "git+https://github.com/coincubetech/spark-sdk?rev=a38117dcc3c920703e5002b4206955213fe49eb7#a38117dcc3c920703e5002b4206955213fe49eb7"
 dependencies = [
  "aes-gcm",
  "getrandom 0.2.17",

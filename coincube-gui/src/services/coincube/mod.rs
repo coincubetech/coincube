@@ -684,6 +684,13 @@ pub struct RegisterCubeRequest {
     /// never wrongly unblocks). Vault *removal* is out of scope (v1).
     #[serde(rename = "hasVault", skip_serializing_if = "Option::is_none")]
     pub has_vault: Option<bool>,
+    /// This device's recorded Spark Stable Balance decision
+    /// (`CubeSettings::spark_stable_balance`), so the Cube's server record
+    /// picks it up on first registration. Omitted when this device has no
+    /// decision — the server keeps whatever another device recorded (same
+    /// absent-means-unchanged rule as `has_vault`).
+    #[serde(rename = "sparkStableBalance", skip_serializing_if = "Option::is_none")]
+    pub spark_stable_balance: Option<bool>,
 }
 
 /// Request body for PUT /api/v1/connect/cubes/{id}
@@ -699,6 +706,10 @@ pub struct UpdateCubeRequest {
     /// leaves the server value untouched (e.g. a name-only rename).
     #[serde(rename = "hasVault", skip_serializing_if = "Option::is_none")]
     pub has_vault: Option<bool>,
+    /// Push a new Spark Stable Balance decision (toggle, bridge pause, banner
+    /// dismissal) to the Cube's server record. `None` leaves it untouched.
+    #[serde(rename = "sparkStableBalance", skip_serializing_if = "Option::is_none")]
+    pub spark_stable_balance: Option<bool>,
 }
 
 /// Request body for `PUT /api/v1/connect/cubes/{cubeId}/encryption-pubkey` —
@@ -763,6 +774,13 @@ pub struct CubeResponse {
     /// local `settings.json`, which wins over this value).
     #[serde(default)]
     pub has_vault: Option<bool>,
+    /// The Cube's cross-device Spark Stable Balance decision: the last one
+    /// any of the owner's desktops recorded, `None` when none has (or on an
+    /// API that predates the field). The App adopts it over the local
+    /// record — it is the shared, most recently written one — and
+    /// reconciles the SDK to it; see `CubeSettings::spark_stable_balance`.
+    #[serde(default)]
+    pub spark_stable_balance: Option<bool>,
     /// The Cube's registered Connect-blinding encryption pubkey (33-byte
     /// compressed secp256k1, lowercase hex) when one has been registered.
     /// `None` on an API that predates the field, or on a Cube whose owner
@@ -3530,9 +3548,11 @@ mod cube_has_vault_tests {
             name: "Cube".to_string(),
             network: "mainnet".to_string(),
             has_vault: Some(true),
+            spark_stable_balance: Some(false),
         };
         let v = serde_json::to_value(&with_vault).unwrap();
         assert_eq!(v["hasVault"], json!(true));
+        assert_eq!(v["sparkStableBalance"], json!(false));
         assert_eq!(v["uuid"], json!("u1"));
         assert_eq!(v["network"], json!("mainnet"));
 
@@ -3543,9 +3563,13 @@ mod cube_has_vault_tests {
             name: "Cube".to_string(),
             network: "mainnet".to_string(),
             has_vault: None,
+            spark_stable_balance: None,
         };
         let v = serde_json::to_value(&no_vault).unwrap();
         assert!(v.get("hasVault").is_none());
+        // Same rule for the Spark decision: no local decision → omitted, so
+        // another device's record is left alone.
+        assert!(v.get("sparkStableBalance").is_none());
     }
 
     #[test]
@@ -3555,18 +3579,62 @@ mod cube_has_vault_tests {
             name: Some("New".to_string()),
             status: None,
             has_vault: None,
+            spark_stable_balance: None,
         };
         let v = serde_json::to_value(&rename).unwrap();
         assert!(v.get("hasVault").is_none());
+        assert!(v.get("sparkStableBalance").is_none());
 
         // A vault-creation re-report carries the flag as `hasVault`.
         let report = UpdateCubeRequest {
             name: None,
             status: None,
             has_vault: Some(true),
+            spark_stable_balance: None,
         };
         let v = serde_json::to_value(&report).unwrap();
         assert_eq!(v["hasVault"], json!(true));
+
+        // A Stable Balance decision rides as `sparkStableBalance` on its own.
+        let decision = UpdateCubeRequest {
+            name: None,
+            status: None,
+            has_vault: None,
+            spark_stable_balance: Some(true),
+        };
+        let v = serde_json::to_value(&decision).unwrap();
+        assert_eq!(v["sparkStableBalance"], json!(true));
+        assert!(v.get("hasVault").is_none());
+    }
+
+    #[test]
+    fn response_spark_stable_balance_parses_null_and_absent_as_none() {
+        let base = |extra: serde_json::Value| {
+            let mut v = json!({
+                "id": 1,
+                "uuid": "u1",
+                "name": "Cube",
+                "network": "mainnet",
+                "status": "active"
+            });
+            if let Some(map) = extra.as_object() {
+                for (k, val) in map {
+                    v[k] = val.clone();
+                }
+            }
+            v
+        };
+        // Older API without the field.
+        let resp: CubeResponse = serde_json::from_value(base(json!({}))).unwrap();
+        assert_eq!(resp.spark_stable_balance, None);
+        // Never asserted → the API emits null.
+        let resp: CubeResponse =
+            serde_json::from_value(base(json!({ "sparkStableBalance": null }))).unwrap();
+        assert_eq!(resp.spark_stable_balance, None);
+        // Recorded on some device.
+        let resp: CubeResponse =
+            serde_json::from_value(base(json!({ "sparkStableBalance": true }))).unwrap();
+        assert_eq!(resp.spark_stable_balance, Some(true));
     }
 
     #[test]
