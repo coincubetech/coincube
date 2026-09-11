@@ -80,8 +80,9 @@ pub fn backup_warning_banner<'a>() -> Element<'a, Message> {
                 "Your master seed phrase is not backed up. Back it up to avoid \
                  losing access to your Cube."
             )
-            .color(color::BLACK),
-            Space::new().width(Length::Fill),
+            .color(color::BLACK)
+            // See `spark_notice_banner` for why this is `Fill`.
+            .width(Length::Fill),
             button::secondary(None, "Back Up Now")
                 .padding([6, 14])
                 .width(Length::Fixed(140.0))
@@ -130,9 +131,9 @@ pub fn spark_notice_text(notice: &SparkNotice) -> String {
              once the issue clears.",
             coincube_spark_protocol::STABLE_BALANCE_PAUSE_THRESHOLD
         ),
-        SparkNotice::StableBalanceOffWithHolding => "This Spark wallet holds USDB, but Stable \
-             Balance is off on this device — the setting doesn't travel with your seed. Turn it \
-             on in Spark settings to keep sweeping bitcoin into USDB."
+        SparkNotice::StableBalanceOffWithHolding => "This Spark wallet holds USDB from when \
+             Stable Balance was on, but the setting is off on this device — it doesn't travel \
+             with your seed. Review it in Spark settings."
             .to_string(),
     }
 }
@@ -146,8 +147,13 @@ pub fn spark_notice_banner(notice: &SparkNotice) -> Element<'_, Message> {
     let body = container(
         row![
             coincube_ui::icon::warning_icon().color(color::BLACK),
-            text::p2_regular(spark_notice_text(notice)).color(color::BLACK),
-            Space::new().width(Length::Fill),
+            // `Fill`, not the default `Shrink`: a shrink text is laid out
+            // first with the whole row available, wraps into all of it, and
+            // pushes the buttons off the edge. A fill child is sized after
+            // the fixed ones, so it wraps within what's actually left.
+            text::p2_regular(spark_notice_text(notice))
+                .color(color::BLACK)
+                .width(Length::Fill),
             button::secondary(None, "Spark Settings")
                 .padding([6, 14])
                 .width(Length::Fixed(140.0))
