@@ -426,6 +426,23 @@ impl EventListener for BridgeEventListener {
             // without the operators' cooperation). Nothing in the gui drives
             // one, so there is nothing to show yet.
             SdkEvent::UnilateralExitStateChanged => None,
+            // Fork-only (proposed upstream): a failed Stable Balance sweep or
+            // deactivation, with the SDK's own retry schedule. The circuit
+            // breaker still counts these off the SDK's `Auto-conversion
+            // failed` warning so it behaves the same against an upstream
+            // build that lacks the event; once upstream carries it, switch
+            // the breaker to this and drop the log-scraping layer.
+            SdkEvent::StableBalanceConversionFailed {
+                conversion,
+                error,
+                retry_in_secs,
+            } => {
+                tracing::info!(
+                    "SDK reports {conversion:?} conversion failed, retrying in {retry_in_secs}s: \
+                     {error}"
+                );
+                None
+            }
         };
 
         if let Some(ev) = protocol_event {
