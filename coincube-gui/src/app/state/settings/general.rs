@@ -1585,6 +1585,22 @@ impl State for GeneralSettingsState {
                 );
             }
             Message::View(view::Message::Settings(
+                view::SettingsMessage::ToggleRecipientIdentityChecks(enabled),
+            )) => {
+                // Enforce privacy before touching disk. Keep writes ordered with
+                // user actions so rapid toggles cannot persist an older choice.
+                crate::services::branta::set_enabled(enabled);
+                use crate::app::settings::global::GlobalSettings;
+                match GlobalSettings::update_recipient_identity_checks(
+                    &GlobalSettings::path(&cache.datadir_path), enabled,
+                ) {
+                    Ok(()) => Task::none(),
+                    Err(_) => Task::done(Message::View(view::Message::ShowError(
+                        "Couldn't save your privacy preference. Your choice applies for this session; please try again before restarting.".into(),
+                    ))),
+                }
+            }
+            Message::View(view::Message::Settings(
                 view::SettingsMessage::ToggleDirectionBadges(show),
             )) => {
                 self.show_direction_badges = show;

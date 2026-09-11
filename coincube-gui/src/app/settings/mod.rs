@@ -1510,7 +1510,7 @@ pub mod global {
         }
     }
 
-    #[derive(Debug, Deserialize, Serialize, Default)]
+    #[derive(Debug, Deserialize, Serialize)]
     pub struct GlobalSettings {
         pub bitbox: Option<BitboxSettings>,
         pub window_config: Option<WindowConfig>,
@@ -1522,6 +1522,9 @@ pub mod global {
         pub theme_mode: coincube_ui::theme::palette::ThemeMode,
         #[serde(default = "default_true")]
         pub show_direction_badges: bool,
+        /// Local installation privacy preference; never part of a Cube/account record.
+        #[serde(default = "default_true")]
+        pub recipient_identity_checks: bool,
         /// Hardware-advisory badges the user has collapsed, as
         /// `"<fingerprint>:<advisory id>"` (see
         /// [`crate::hw_advisory::dismissals`]). Dismissal only collapses the
@@ -1536,6 +1539,23 @@ pub mod global {
 
     fn default_true() -> bool {
         true
+    }
+
+    impl Default for GlobalSettings {
+        fn default() -> Self {
+            Self {
+                bitbox: None,
+                window_config: None,
+                developer_mode: false,
+                account_tier: AccountTier::default(),
+                theme_mode: coincube_ui::theme::palette::ThemeMode::default(),
+                // Preserve the pre-existing Rust Default for this unrelated field.
+                show_direction_badges: false,
+                recipient_identity_checks: true,
+                dismissed_hw_advisories: Vec::new(),
+                seen_advisory_notices: Vec::new(),
+            }
+        }
     }
 
     impl GlobalSettings {
@@ -1613,6 +1633,21 @@ pub mod global {
             show: bool,
         ) -> Result<(), super::SettingsError> {
             Self::update(path, |s| s.show_direction_badges = show, true)
+        }
+
+        /// Missing files and older settings default to enabled. Reading does not
+        /// initialise Branta or emit any preference/check telemetry.
+        pub fn load_recipient_identity_checks(path: &PathBuf) -> bool {
+            let mut enabled = true;
+            let _ = Self::update(path, |s| enabled = s.recipient_identity_checks, false);
+            enabled
+        }
+
+        pub fn update_recipient_identity_checks(
+            path: &PathBuf,
+            enabled: bool,
+        ) -> Result<(), super::SettingsError> {
+            Self::update(path, |s| s.recipient_identity_checks = enabled, true)
         }
 
         pub fn load_theme_mode(path: &PathBuf) -> coincube_ui::theme::palette::ThemeMode {
@@ -1749,6 +1784,7 @@ pub mod global {
                 && global_settings.theme_mode == coincube_ui::theme::palette::ThemeMode::default()
                 && global_settings.dismissed_hw_advisories.is_empty()
                 && global_settings.seen_advisory_notices.is_empty()
+                && global_settings.recipient_identity_checks
             {
                 write = false;
             }
@@ -1988,6 +2024,63 @@ mod test {
             "height": 688.0
           }
         }"#;
+
+    #[test]
+    fn recipient_identity_checks_default_on_for_new_and_older_settings() {
+        assert!(GlobalSettings::default().recipient_identity_checks);
+        let old: GlobalSettings = serde_json::from_str(RAW_GLOBAL_SETTINGS).unwrap();
+        assert!(old.recipient_identity_checks);
+        let minimal: GlobalSettings = serde_json::from_str("{}").unwrap();
+        assert!(minimal.recipient_identity_checks);
+    }
+
+    #[test]
+    fn recipient_identity_checks_disabled_survives_first_write_and_reload() {
+        let dir = env::temp_dir().join(format!(
+            "coincube-recipient-settings-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("global_settings.json");
+        assert!(GlobalSettings::load_recipient_identity_checks(&path));
+        assert!(!path.exists(), "loading defaults must not create settings");
+        GlobalSettings::update_recipient_identity_checks(&path, false).unwrap();
+        assert!(
+            path.exists(),
+            "the first disabled preference must be written"
+        );
+        assert!(!GlobalSettings::load_recipient_identity_checks(&path));
+        let reloaded: GlobalSettings =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(!reloaded.recipient_identity_checks);
+        GlobalSettings::update_recipient_identity_checks(&path, true).unwrap();
+        assert!(GlobalSettings::load_recipient_identity_checks(&path));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn recipient_identity_preference_preserves_existing_global_settings() {
+        let dir = env::temp_dir().join(format!(
+            "coincube-recipient-migration-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("global_settings.json");
+        std::fs::write(&path, RAW_GLOBAL_SETTINGS).unwrap();
+        GlobalSettings::update_recipient_identity_checks(&path, false).unwrap();
+        let reloaded: GlobalSettings =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(!reloaded.recipient_identity_checks);
+        assert!(reloaded.bitbox.is_some());
+        assert_eq!(
+            reloaded.window_config.unwrap(),
+            WindowConfig {
+                width: 1248.0,
+                height: 688.0
+            }
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn test_parse_global_config() {

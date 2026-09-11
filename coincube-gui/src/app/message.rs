@@ -34,6 +34,11 @@ use crate::{
 
 #[derive(Debug)]
 pub enum Message {
+    VaultSpendPrepared {
+        generation: u64,
+        result: Result<(Psbt, Vec<String>), Error>,
+        identities: Vec<(usize, crate::services::branta::LookupResult)>,
+    },
     Tick,
     UpdateDaemonCache(Result<DaemonCache, Error>),
     CacheUpdated,

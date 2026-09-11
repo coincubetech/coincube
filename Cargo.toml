@@ -15,7 +15,7 @@ members = [
 # workspace (with its own Cargo.lock) gives it an isolated dep graph and
 # lets it coexist with the Liquid-linked gui at runtime via stdin/stdout
 # IPC. See coincube-spark-bridge/Cargo.toml for its own [workspace] block.
-exclude = ["coincube-spark-bridge"]
+exclude = ["coincube-spark-bridge", "vendor/branta"]
 default-members = [
     "coincube-core",
     "coincubed",

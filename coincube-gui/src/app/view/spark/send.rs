@@ -41,6 +41,9 @@ pub struct SparkSendView<'a> {
     /// choice the payer doesn't have.
     pub amount_set_by_invoice: bool,
     pub phase: &'a SparkSendPhase,
+    pub recipient_identities: &'a [crate::services::branta::RecipientIdentity],
+    pub recipient_mismatch: bool,
+    pub theme_mode: theme::palette::ThemeMode,
     pub sent_amount_display: &'a str,
     pub sent_celebration_context: &'a str,
     pub sent_quote: &'a coincube_ui::component::quote_display::Quote,
@@ -172,15 +175,7 @@ impl<'a> SparkSendView<'a> {
         content = content.push(input_card);
 
         // ── Phase-specific body ───────────────────────────────────────
-        content = content.push(phase_body(
-            self.phase,
-            self.cross_chain_ctx,
-            self.slippage_input,
-            &self.advanced_open,
-            self.quote_countdown.clone(),
-            self.reference_btc_usd_price,
-            self.bitcoin_unit,
-        ));
+        content = content.push(phase_body(&self));
 
         // ── Last transactions ─────────────────────────────────────────
         content = content.push(last_transactions_section(
@@ -195,17 +190,34 @@ impl<'a> SparkSendView<'a> {
     }
 }
 
-fn phase_body<'a>(
-    phase: &SparkSendPhase,
-    cross_chain_ctx: Option<&CrossChainContext>,
-    slippage_input: &str,
-    advanced_open: &bool,
-    quote_countdown: Option<cross_chain::QuoteCountdown>,
-    reference_btc_usd_price: Option<f64>,
-    bitcoin_unit: BitcoinDisplayUnit,
-) -> Element<'a, Message> {
+fn phase_body<'a>(view: &SparkSendView<'a>) -> Element<'a, Message> {
+    let phase = view.phase;
+    let cross_chain_ctx = view.cross_chain_ctx;
+    let slippage_input = view.slippage_input;
+    let advanced_open = &view.advanced_open;
+    let quote_countdown = view.quote_countdown.clone();
+    let reference_btc_usd_price = view.reference_btc_usd_price;
+    let bitcoin_unit = view.bitcoin_unit;
+    let recipient_identities = view.recipient_identities;
+    let recipient_mismatch = view.recipient_mismatch;
+    let theme_mode = view.theme_mode;
     use crate::app::view::SparkSendMessage;
     use coincube_ui::component::amount::format_u64_as_string;
+
+    if recipient_mismatch {
+        return Container::new(
+            Column::new()
+                .spacing(12)
+                .push(p1_regular(crate::services::branta::MISMATCH_MESSAGE))
+                .push(
+                    button::primary(None, "Replace payment request")
+                        .on_press(Message::SparkSend(SparkSendMessage::Reset)),
+                ),
+        )
+        .padding(16)
+        .style(theme::card::simple)
+        .into();
+    }
 
     match phase {
         SparkSendPhase::Idle => Container::new(
@@ -441,6 +453,22 @@ fn phase_body<'a>(
                     .into();
             }
 
+            let identities = Column::with_children(recipient_identities.iter().enumerate().map(
+                |(index, identity)| {
+                    crate::app::view::shared::recipient_identity::card(
+                        identity,
+                        Message::SparkSend(SparkSendMessage::OpenRecipientIdentity(index)),
+                        theme_mode,
+                    )
+                },
+            ))
+            .spacing(8);
+            let confirm = button::primary(None, "Confirm and send")
+                .on_press_maybe(
+                    (!recipient_mismatch)
+                        .then_some(Message::SparkSend(SparkSendMessage::ConfirmRequested)),
+                )
+                .width(Length::Fixed(200.0));
             Container::new(
                 Column::new()
                     .spacing(14)
@@ -457,17 +485,15 @@ fn phase_body<'a>(
                             "Spark transfer — instant, lower fee than Lightning or on-chain.",
                         )
                     }))
+                    .push(identities)
+                    .push_maybe(recipient_mismatch.then(|| p1_regular(
+                        "This payment request’s address does not match its verification data. Do not send. Return and replace the payment request."
+                    )))
                     .push(Space::new().height(Length::Fixed(8.0)))
                     .push(
                         Row::new()
                             .spacing(10)
-                            .push(
-                                button::primary(None, "Confirm and send")
-                                    .on_press(Message::SparkSend(
-                                        SparkSendMessage::ConfirmRequested,
-                                    ))
-                                    .width(Length::Fixed(200.0)),
-                            )
+                            .push(confirm)
                             .push(
                                 button::transparent_border(None, "Cancel")
                                     .on_press(Message::SparkSend(SparkSendMessage::Reset))

@@ -25,7 +25,10 @@
 //! `Prepared` drops the handle (the SDK's prepare is single-use).
 
 use std::convert::TryInto;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 
 use coincube_core::miniscript::bitcoin::bech32;
 use coincube_spark_protocol::{
@@ -45,6 +48,15 @@ use crate::app::view::spark::SparkRecentTransaction;
 use crate::app::view::spark::SparkSendView;
 use crate::app::view::FiatAmountConverter;
 use crate::app::wallets::SparkBackend;
+use crate::services::branta::{self, LookupRequest, LookupResult, LookupTicket, RecipientIdentity};
+
+// Messages can outlive a panel instance. A process-wide ID prevents an old
+// panel's first prepare from matching a replacement panel's first prepare.
+static PREPARATION_ID: AtomicU64 = AtomicU64::new(1);
+
+fn next_preparation_generation() -> u64 {
+    PREPARATION_ID.fetch_add(1, Ordering::Relaxed)
+}
 
 /// Shape of the Send panel at any instant.
 #[derive(Debug, Clone)]
@@ -397,6 +409,10 @@ impl SparkSendTarget {
 /// Real Spark Send panel.
 pub struct SparkSend {
     backend: Option<Arc<SparkBackend>>,
+    preparation_generation: u64,
+    recipient_receipt: Option<(String, LookupTicket, LookupResult)>,
+    // A known authenticated mismatch cannot be bypassed by disabling checks.
+    tampered_request: Option<String>,
     /// The Spark wallet's unified balance in sats (BTC + Stable Balance), shown
     /// on the YOU SEND card. Refreshed on reload via `get_info`; `0` until the
     /// first fetch.
@@ -489,6 +505,9 @@ impl SparkSend {
     pub fn new(backend: Option<Arc<SparkBackend>>) -> Self {
         Self {
             backend,
+            preparation_generation: next_preparation_generation(),
+            recipient_receipt: None,
+            tampered_request: None,
             balance_sats: 0,
             btc_balance_sats: 0,
             usdb_holding: None,
@@ -520,6 +539,43 @@ impl SparkSend {
         &self.phase
     }
 
+    /// Navigation and privacy changes retire responses, without changing a dispatched send.
+    pub fn invalidate_recipient_identity(&mut self) {
+        self.preparation_generation = next_preparation_generation();
+        self.recipient_receipt = None;
+        if matches!(
+            self.phase,
+            SparkSendPhase::Preparing | SparkSendPhase::Prepared(_)
+        ) {
+            self.phase = SparkSendPhase::Idle;
+        }
+    }
+
+    fn recipient_identities(&self) -> &[RecipientIdentity] {
+        let SparkSendPhase::Prepared(prepared) = &self.phase else {
+            return &[];
+        };
+        match &self.recipient_receipt {
+            Some((handle, ticket, LookupResult::Identified(identities)))
+                if handle == &prepared.handle && ticket.is_current() =>
+            {
+                identities
+            }
+            _ => &[],
+        }
+    }
+
+    fn recipient_mismatch(&self) -> bool {
+        self.tampered_request.as_deref() == Some(self.destination_input.trim())
+    }
+
+    fn begin_preparation(&mut self) -> u64 {
+        self.preparation_generation = next_preparation_generation();
+        self.recipient_receipt = None;
+        self.phase = SparkSendPhase::Preparing;
+        self.preparation_generation
+    }
+
     /// The cross-chain destination + routes for the current send, if any.
     pub fn cross_chain(&self) -> Option<&CrossChainContext> {
         self.cross_chain.as_ref()
@@ -538,6 +594,9 @@ impl SparkSend {
     /// blocked once its quote expires — sending against a dead quote means
     /// sending against a rate the provider no longer honours.
     pub fn can_confirm(&self, now: chrono::DateTime<chrono::Utc>) -> bool {
+        if self.recipient_mismatch() {
+            return false;
+        }
         match &self.phase {
             SparkSendPhase::Prepared(ok) => match &ok.cross_chain {
                 None => true,
@@ -560,6 +619,7 @@ impl SparkSend {
     /// the panel reports success. A silently dropped payment is worse than a
     /// visible failure, so the key dies with the intent that minted it.
     fn abandon_payment_intent(&mut self) {
+        self.invalidate_recipient_identity();
         self.send_idempotency_key = None;
         self.pending_send = None;
         self.cross_chain_prepare = None;
@@ -619,7 +679,7 @@ impl SparkSend {
         // `contract_address` / `chain_id` are what let the bridge re-resolve the
         // route against exactly the destination these routes were offered for.
         let destination = ctx.address.clone();
-        self.phase = SparkSendPhase::Preparing;
+        let generation = self.begin_preparation();
         Task::perform(
             async move {
                 backend
@@ -627,13 +687,14 @@ impl SparkSend {
                     .await
                     .map_err(|e| format!("Couldn't quote this send: {e}"))
             },
-            |result| match result {
-                Ok(ok) => Message::View(crate::app::view::Message::SparkSend(
-                    crate::app::view::SparkSendMessage::PrepareSucceeded(ok),
-                )),
-                Err(e) => Message::View(crate::app::view::Message::SparkSend(
-                    crate::app::view::SparkSendMessage::PrepareFailed(e),
-                )),
+            move |result| {
+                Message::View(crate::app::view::Message::SparkSend(
+                    crate::app::view::SparkSendMessage::PreparationFinished {
+                        generation,
+                        result,
+                        recipient: None,
+                    },
+                ))
             },
         )
     }
@@ -771,6 +832,9 @@ impl SparkSend {
 }
 
 impl State for SparkSend {
+    fn interrupt(&mut self) {
+        self.invalidate_recipient_identity();
+    }
     fn view<'a>(
         &'a self,
         menu: &'a Menu,
@@ -786,6 +850,8 @@ impl State for SparkSend {
                 amount_input: &self.amount_input,
                 amount_set_by_invoice: self.invoice_amount_sat.is_some(),
                 phase: &self.phase,
+                recipient_identities: self.recipient_identities(),
+                recipient_mismatch: self.recipient_mismatch(),
                 sent_amount_display: &self.sent_amount_display,
                 sent_celebration_context: &self.sent_celebration_context,
                 sent_quote: &self.sent_quote,
@@ -818,6 +884,7 @@ impl State for SparkSend {
                 quote_countdown: self.quote_countdown.clone(),
                 receive_target: self.receive_target,
                 network: cache.network,
+                theme_mode: cache.theme_mode,
             }
             .render(),
         );
@@ -874,8 +941,26 @@ impl State for SparkSend {
         };
 
         use crate::app::view::SparkSendMessage;
+        // Editing while dispatch is unresolved would detach the visible intent
+        // from the actual payment. Ignore stale input events in these phases.
+        if matches!(
+            self.phase,
+            SparkSendPhase::Sending | SparkSendPhase::OutcomeUnknown { .. }
+        ) && matches!(
+            &msg,
+            SparkSendMessage::DestinationInputChanged(_)
+                | SparkSendMessage::AmountInputChanged(_)
+                | SparkSendMessage::SetReceiveTarget(_)
+                | SparkSendMessage::PrepareRequested
+                | SparkSendMessage::Reset
+        ) {
+            return Task::none();
+        }
         match msg {
             SparkSendMessage::DestinationInputChanged(value) => {
+                if value.trim() != self.destination_input.trim() {
+                    self.tampered_request = None;
+                }
                 self.destination_input = value;
                 // A BOLT11 invoice that names its own amount fills the amount
                 // field in, so the user sees what the invoice asks for rather
@@ -918,6 +1003,7 @@ impl State for SparkSend {
                 // clear the destination/amount and any in-flight prepare.
                 self.receive_picker_open = false;
                 self.receive_target = target;
+                self.tampered_request = None;
                 self.phase = SparkSendPhase::Idle;
                 self.destination_input.clear();
                 self.amount_input.clear();
@@ -927,6 +1013,9 @@ impl State for SparkSend {
                 Task::none()
             }
             SparkSendMessage::PrepareRequested => {
+                if self.recipient_mismatch() {
+                    return Task::none();
+                }
                 let Some(backend) = self.backend.clone() else {
                     self.phase =
                         SparkSendPhase::Error("Spark backend is not available.".to_string());
@@ -954,7 +1043,7 @@ impl State for SparkSend {
                         }
                     };
                 let input = self.destination_input.trim().to_string();
-                self.phase = SparkSendPhase::Preparing;
+                let generation = self.begin_preparation();
 
                 // The THEY RECEIVE selection decides the path. A stablecoin
                 // target is a BTC-funded cross-chain send: ask the bridge for
@@ -974,13 +1063,10 @@ impl State for SparkSend {
                                 .await
                                 .map_err(|e| format!("Couldn't check this destination: {e}"))
                         },
-                        |result| match result {
-                            Ok(found) => Message::View(crate::app::view::Message::SparkSend(
-                                SparkSendMessage::CrossChainRoutesLoaded(found),
-                            )),
-                            Err(e) => Message::View(crate::app::view::Message::SparkSend(
-                                SparkSendMessage::PrepareFailed(e),
-                            )),
+                        move |result| {
+                            Message::View(crate::app::view::Message::SparkSend(
+                                SparkSendMessage::CrossChainRoutesLoaded(generation, result),
+                            ))
                         },
                     );
                 }
@@ -990,34 +1076,84 @@ impl State for SparkSend {
                 // `prepare_lnurl_pay`) in one task, so the user sees a single
                 // "Preparing…" regardless of the underlying rail.
                 let target = self.receive_target;
+                let recipient = recipient_lookup_request(target, &input).and_then(|request| {
+                    branta::begin(cache.network).map(|ticket| (ticket, request))
+                });
                 Task::perform(
-                    async move { resolve_and_prepare(backend, input, amount_sat, target).await },
-                    |result| match result {
-                        Ok(ok) => Message::View(crate::app::view::Message::SparkSend(
-                            SparkSendMessage::PrepareSucceeded(ok),
-                        )),
-                        Err(e) => Message::View(crate::app::view::Message::SparkSend(
-                            SparkSendMessage::PrepareFailed(e),
-                        )),
+                    async move {
+                        // Review waits for both: a bounded lookup cannot arrive
+                        // after confirmation and turn a sent payment into a mismatch.
+                        let (result, recipient) = tokio::join!(
+                            resolve_and_prepare(backend, input, amount_sat, target),
+                            async move {
+                                match recipient {
+                                    Some((ticket, request)) => {
+                                        let outcome = ticket.lookup(request).await;
+                                        Some((ticket, outcome))
+                                    }
+                                    None => None,
+                                }
+                            }
+                        );
+                        (result, recipient)
+                    },
+                    move |(result, recipient)| {
+                        Message::View(crate::app::view::Message::SparkSend(
+                            SparkSendMessage::PreparationFinished {
+                                generation,
+                                result,
+                                recipient,
+                            },
+                        ))
                     },
                 )
             }
-            SparkSendMessage::PrepareSucceeded(ok) => {
-                self.last_send_method = ok.method.clone();
-                self.phase = SparkSendPhase::Prepared(ok);
-                // Measure the quote's life *now*, not on the first tick a second
-                // from now. Waiting made a just-arrived quote render as expired
-                // — and after a re-quote it was worse than that, because the
-                // stale `0` from the previous, genuinely-expired quote carried
-                // over and condemned the new one.
-                self.refresh_quote_countdown();
+            SparkSendMessage::PreparationFinished {
+                generation,
+                result,
+                recipient,
+            } => {
+                if generation != self.preparation_generation
+                    || !matches!(self.phase, SparkSendPhase::Preparing)
+                {
+                    return Task::none();
+                }
+                let recipient = recipient.filter(|(ticket, _)| ticket.is_current());
+                if matches!(&recipient, Some((_, LookupResult::Tampered))) {
+                    self.tampered_request = Some(self.destination_input.trim().to_string());
+                }
+                match result {
+                    Ok(ok) => {
+                        if let Some((ticket, outcome)) = recipient {
+                            self.recipient_receipt = Some((ok.handle.clone(), ticket, outcome));
+                        }
+                        self.last_send_method = ok.method.clone();
+                        self.phase = SparkSendPhase::Prepared(ok);
+                        self.refresh_quote_countdown();
+                    }
+                    Err(err) => self.phase = SparkSendPhase::Error(err),
+                }
                 Task::none()
             }
-            SparkSendMessage::PrepareFailed(err) => {
-                self.phase = SparkSendPhase::Error(err);
+            SparkSendMessage::OpenRecipientIdentity(index) => {
+                if let Some(identity) = self.recipient_identities().get(index) {
+                    identity.open();
+                }
                 Task::none()
             }
-            SparkSendMessage::CrossChainRoutesLoaded(found) => {
+            SparkSendMessage::CrossChainRoutesLoaded(generation, result) => {
+                if generation != self.preparation_generation
+                    || !matches!(self.phase, SparkSendPhase::Preparing)
+                {
+                    return Task::none();
+                }
+                let found = match result {
+                    Ok(found) => found,
+                    Err(err) => {
+                        self.phase = SparkSendPhase::Error(err);
+                        return Task::none();
+                    }
+                };
                 let Some(address) = found.address else {
                     // The picked target is a stablecoin, but the pasted string
                     // isn't a recognised cross-chain address. Say so rather than
@@ -1125,6 +1261,9 @@ impl State for SparkSend {
                     return Task::none();
                 };
                 let prepare = prepare.clone();
+                if self.recipient_mismatch() {
+                    return Task::none();
+                }
                 // A cross-chain quote that has run out must not be sent. The
                 // rate is no longer one the provider honours, so confirming
                 // would either fail or fill at a price the user never saw.
@@ -1304,6 +1443,8 @@ impl State for SparkSend {
                 )))
             }
             SparkSendMessage::Reset => {
+                self.invalidate_recipient_identity();
+                self.tampered_request = None;
                 self.destination_input.clear();
                 self.amount_input.clear();
                 self.invoice_amount_sat = None;
@@ -1374,6 +1515,16 @@ impl State for SparkSend {
 }
 
 /// The word for the amount field's unit, for error messages.
+// Internal wallet transfers use global_home's transfer flow, never this
+// external-send panel. Restrict this panel further to original BOLT11 requests.
+fn recipient_lookup_request(target: SparkSendTarget, input: &str) -> Option<LookupRequest> {
+    if target == SparkSendTarget::Lightning {
+        LookupRequest::bolt11(input)
+    } else {
+        None
+    }
+}
+
 fn amount_unit_word(unit: BitcoinDisplayUnit) -> &'static str {
     match unit {
         BitcoinDisplayUnit::BTC => "BTC",
@@ -2262,16 +2413,16 @@ mod tests {
         let mut panel = SparkSend::new(None);
         panel.receive_target = SparkSendTarget::Usdt;
 
-        let _ = send(
+        finish_routes(
             &mut panel,
-            SparkSendMessage::CrossChainRoutesLoaded(coincube_spark_protocol::CrossChainRoutesOk {
+            coincube_spark_protocol::CrossChainRoutesOk {
                 address: Some(cross_chain_address("tron")),
                 routes: vec![
                     route_with_asset("USDC"),
                     route_with_asset("USDT"),
                     route_with_asset("usdt"),
                 ],
-            }),
+            },
         );
 
         assert!(matches!(panel.phase, SparkSendPhase::CrossChainRoutes));
@@ -2290,24 +2441,24 @@ mod tests {
         let mut panel = SparkSend::new(None);
         panel.receive_target = SparkSendTarget::Usdc;
 
-        let _ = send(
+        finish_routes(
             &mut panel,
-            SparkSendMessage::CrossChainRoutesLoaded(coincube_spark_protocol::CrossChainRoutesOk {
+            coincube_spark_protocol::CrossChainRoutesOk {
                 address: None,
                 routes: vec![],
-            }),
+            },
         );
         assert!(matches!(
             &panel.phase,
             SparkSendPhase::Error(msg) if msg.contains("doesn't look like a USDC address")
         ));
 
-        let _ = send(
+        finish_routes(
             &mut panel,
-            SparkSendMessage::CrossChainRoutesLoaded(coincube_spark_protocol::CrossChainRoutesOk {
+            coincube_spark_protocol::CrossChainRoutesOk {
                 address: Some(cross_chain_address("solana")),
                 routes: vec![route_with_asset("USDT")],
-            }),
+            },
         );
         assert!(matches!(
             &panel.phase,
@@ -2334,6 +2485,309 @@ mod tests {
         }
     }
 
+    fn finish_prepare(panel: &mut SparkSend, ok: PrepareSendOk) {
+        let generation = panel.begin_preparation();
+        let _ = send(
+            panel,
+            SparkSendMessage::PreparationFinished {
+                generation,
+                result: Ok(ok),
+                recipient: None,
+            },
+        );
+    }
+
+    fn finish_routes(panel: &mut SparkSend, routes: coincube_spark_protocol::CrossChainRoutesOk) {
+        let generation = panel.begin_preparation();
+        let _ = send(
+            panel,
+            SparkSendMessage::CrossChainRoutesLoaded(generation, Ok(routes)),
+        );
+    }
+
+    fn plain_prepare(handle: &str) -> PrepareSendOk {
+        PrepareSendOk {
+            handle: handle.into(),
+            amount_sat: 1_000,
+            fee_sat: 10,
+            method: "Bolt11Invoice".into(),
+            cross_chain: None,
+            has_token_leg: Some(false),
+        }
+    }
+
+    #[test]
+    fn a_replaced_panel_rejects_the_previous_instances_preparation() {
+        let old_generation = {
+            let mut old_panel = SparkSend::new(None);
+            old_panel.begin_preparation()
+        };
+        let mut replacement = SparkSend::new(None);
+        let current_generation = replacement.begin_preparation();
+        assert_ne!(old_generation, current_generation);
+        let ticket = branta::test_ticket(true);
+        let identity = branta::test_identity(&ticket, "Old recipient");
+        let _ = send(
+            &mut replacement,
+            SparkSendMessage::PreparationFinished {
+                generation: old_generation,
+                result: Ok(plain_prepare("old-panel-handle")),
+                recipient: Some((ticket, LookupResult::Identified(vec![identity]))),
+            },
+        );
+        assert!(matches!(replacement.phase, SparkSendPhase::Preparing));
+        assert!(replacement.recipient_receipt.is_none());
+        let _ = send(
+            &mut replacement,
+            SparkSendMessage::PreparationFinished {
+                generation: current_generation,
+                result: Ok(plain_prepare("new-panel-handle")),
+                recipient: None,
+            },
+        );
+        assert!(matches!(&replacement.phase, SparkSendPhase::Prepared(ok)
+            if ok.handle == "new-panel-handle"));
+        assert!(replacement.recipient_identities().is_empty());
+    }
+
+    #[test]
+    fn recipient_preparation_ignores_stale_and_out_of_order_results() {
+        let mut panel = SparkSend::new(None);
+        let old = panel.begin_preparation();
+        let current = panel.begin_preparation();
+        let _ = send(
+            &mut panel,
+            SparkSendMessage::PreparationFinished {
+                generation: old,
+                result: Ok(plain_prepare("old")),
+                recipient: None,
+            },
+        );
+        assert!(matches!(panel.phase, SparkSendPhase::Preparing));
+        let _ = send(
+            &mut panel,
+            SparkSendMessage::PreparationFinished {
+                generation: current,
+                result: Ok(plain_prepare("current")),
+                recipient: None,
+            },
+        );
+        let _ = send(
+            &mut panel,
+            SparkSendMessage::PreparationFinished {
+                generation: old,
+                result: Err("stale error".into()),
+                recipient: None,
+            },
+        );
+        assert!(matches!(&panel.phase, SparkSendPhase::Prepared(ok) if ok.handle == "current"));
+    }
+
+    #[test]
+    fn recipient_preparation_is_retired_on_edit_reset_and_navigation() {
+        for action in [
+            SparkSendMessage::DestinationInputChanged("new".into()),
+            SparkSendMessage::AmountInputChanged("2".into()),
+            SparkSendMessage::Reset,
+        ] {
+            let mut panel = SparkSend::new(None);
+            let generation = panel.begin_preparation();
+            let _ = send(&mut panel, action);
+            let _ = send(
+                &mut panel,
+                SparkSendMessage::PreparationFinished {
+                    generation,
+                    result: Ok(plain_prepare("old")),
+                    recipient: None,
+                },
+            );
+            assert!(matches!(panel.phase, SparkSendPhase::Idle));
+            let generation = panel.begin_preparation();
+            panel.interrupt();
+            let _ = send(
+                &mut panel,
+                SparkSendMessage::PreparationFinished {
+                    generation,
+                    result: Ok(plain_prepare("old")),
+                    recipient: None,
+                },
+            );
+            assert!(matches!(panel.phase, SparkSendPhase::Idle));
+        }
+    }
+
+    #[test]
+    fn late_preparation_cannot_replace_a_dispatched_payment() {
+        let mut panel = SparkSend::new(None);
+        let generation = panel.begin_preparation();
+        panel.phase = SparkSendPhase::Sending;
+        let _ = send(
+            &mut panel,
+            SparkSendMessage::PreparationFinished {
+                generation,
+                result: Ok(plain_prepare("late")),
+                recipient: None,
+            },
+        );
+        let _ = send(
+            &mut panel,
+            SparkSendMessage::DestinationInputChanged("edited".into()),
+        );
+        assert!(matches!(panel.phase, SparkSendPhase::Sending));
+    }
+
+    #[test]
+    fn authenticated_mismatch_requires_replacing_the_request() {
+        let mut panel = SparkSend::new(None);
+        panel.destination_input = "lnbc-original".into();
+        panel.tampered_request = Some(panel.destination_input.clone());
+        panel.phase = SparkSendPhase::Prepared(plain_prepare("blocked"));
+        assert!(!panel.can_confirm(chrono::Utc::now()));
+        let _ = send(&mut panel, SparkSendMessage::ConfirmRequested);
+        assert!(matches!(panel.phase, SparkSendPhase::Prepared(_)));
+        panel.invalidate_recipient_identity();
+        let _ = send(&mut panel, SparkSendMessage::PrepareRequested);
+        assert!(panel.recipient_mismatch());
+        let _ = send(
+            &mut panel,
+            SparkSendMessage::DestinationInputChanged("lnbc-replacement".into()),
+        );
+        assert!(!panel.recipient_mismatch());
+    }
+
+    #[test]
+    fn recipient_checks_only_accept_external_bolt11_rail_inputs() {
+        for target in SparkSendTarget::all() {
+            assert_eq!(
+                recipient_lookup_request(target, "lightning:lnbc1test").is_some(),
+                target == SparkSendTarget::Lightning
+            );
+        }
+        for input in [
+            "spark1destination",
+            "sp1request",
+            "lno1offer",
+            "alice@example.org",
+            "bitcoin:bc1qaddress",
+            "liquidnetwork:abc",
+            "ethereum:0x123",
+        ] {
+            assert!(recipient_lookup_request(SparkSendTarget::Lightning, input).is_none());
+        }
+    }
+
+    #[test]
+    fn positive_recipient_is_bound_to_the_exact_prepared_handle() {
+        let mut panel = SparkSend::new(None);
+        let generation = panel.begin_preparation();
+        let ticket = branta::test_ticket(true);
+        let identity = branta::test_identity(&ticket, "Merchant");
+        let _ = send(
+            &mut panel,
+            SparkSendMessage::PreparationFinished {
+                generation,
+                result: Ok(plain_prepare("reviewed")),
+                recipient: Some((ticket, LookupResult::Identified(vec![identity]))),
+            },
+        );
+        assert_eq!(panel.recipient_identities()[0].platform, "Merchant");
+        assert!(panel.can_confirm(chrono::Utc::now()));
+        // Even an accidentally reused receipt cannot decorate another handle.
+        panel.phase = SparkSendPhase::Prepared(plain_prepare("different"));
+        assert!(panel.recipient_identities().is_empty());
+        panel.phase = SparkSendPhase::Sending;
+        assert!(panel.recipient_identities().is_empty());
+    }
+
+    #[test]
+    fn disabled_and_reenabled_checks_do_not_restore_an_old_identity() {
+        let mut panel = SparkSend::new(None);
+        let ticket = branta::test_ticket(true);
+        let generation = panel.begin_preparation();
+        let identity = branta::test_identity(&ticket, "Merchant");
+        let _ = send(
+            &mut panel,
+            SparkSendMessage::PreparationFinished {
+                generation,
+                result: Ok(plain_prepare("reviewed")),
+                recipient: Some((ticket.clone(), LookupResult::Identified(vec![identity]))),
+            },
+        );
+        assert_eq!(panel.recipient_identities().len(), 1);
+        ticket.set_test_enabled(false);
+        assert!(panel.recipient_identities().is_empty());
+        assert!(panel.can_confirm(chrono::Utc::now()));
+        ticket.set_test_enabled(true);
+        assert!(panel.recipient_identities().is_empty());
+    }
+
+    #[test]
+    fn turning_off_while_preparing_discards_the_inflight_identity() {
+        let mut panel = SparkSend::new(None);
+        let ticket = branta::test_ticket(true);
+        let identity = branta::test_identity(&ticket, "Late merchant");
+        let generation = panel.begin_preparation();
+        ticket.set_test_enabled(false);
+        let _ = send(
+            &mut panel,
+            SparkSendMessage::PreparationFinished {
+                generation,
+                result: Ok(plain_prepare("reviewed")),
+                recipient: Some((ticket, LookupResult::Identified(vec![identity]))),
+            },
+        );
+        assert!(panel.recipient_identities().is_empty());
+        assert!(panel.recipient_receipt.is_none());
+        assert!(panel.can_confirm(chrono::Utc::now()));
+    }
+
+    #[test]
+    fn empty_error_and_timeout_service_outcomes_are_silent_and_nonblocking() {
+        // The service maps all ordinary failures and timeouts to Silent.
+        let mut panel = SparkSend::new(None);
+        let generation = panel.begin_preparation();
+        let _ = send(
+            &mut panel,
+            SparkSendMessage::PreparationFinished {
+                generation,
+                result: Ok(plain_prepare("reviewed")),
+                recipient: Some((branta::test_ticket(true), LookupResult::Silent)),
+            },
+        );
+        assert!(panel.recipient_identities().is_empty());
+        assert!(panel.can_confirm(chrono::Utc::now()));
+    }
+
+    #[test]
+    fn authenticated_tampering_blocks_but_stale_tampering_does_not() {
+        let mut panel = SparkSend::new(None);
+        panel.destination_input = "lnbc1original".into();
+        let stale = panel.begin_preparation();
+        let generation = panel.begin_preparation();
+        let ticket = branta::test_ticket(true);
+        let _ = send(
+            &mut panel,
+            SparkSendMessage::PreparationFinished {
+                generation: stale,
+                result: Ok(plain_prepare("old")),
+                recipient: Some((ticket.clone(), LookupResult::Tampered)),
+            },
+        );
+        assert!(!panel.recipient_mismatch());
+        let _ = send(
+            &mut panel,
+            SparkSendMessage::PreparationFinished {
+                generation,
+                result: Ok(plain_prepare("current")),
+                recipient: Some((ticket.clone(), LookupResult::Tampered)),
+            },
+        );
+        assert!(panel.recipient_mismatch());
+        assert!(!panel.can_confirm(chrono::Utc::now()));
+        ticket.set_test_enabled(false);
+        assert!(!panel.can_confirm(chrono::Utc::now()));
+    }
+
     /// Regression: the countdown was only ever written on the 1s tick, so a
     /// just-arrived quote had `None` — which the view read as "expired" and
     /// rendered a re-quote CTA over a perfectly good quote for up to a second.
@@ -2341,10 +2795,7 @@ mod tests {
     fn a_freshly_arrived_quote_is_measured_immediately_not_on_the_next_tick() {
         let mut panel = SparkSend::new(None);
         let soon = (chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339();
-        let _ = send(
-            &mut panel,
-            SparkSendMessage::PrepareSucceeded(prepared_with_quote(&soon)),
-        );
+        finish_prepare(&mut panel, prepared_with_quote(&soon));
 
         // Measured on arrival — no tick has fired.
         assert!(
@@ -2366,10 +2817,7 @@ mod tests {
 
         // A quote that is already dead on arrival.
         let past = (chrono::Utc::now() - chrono::Duration::seconds(5)).to_rfc3339();
-        let _ = send(
-            &mut panel,
-            SparkSendMessage::PrepareSucceeded(prepared_with_quote(&past)),
-        );
+        finish_prepare(&mut panel, prepared_with_quote(&past));
         assert_eq!(
             panel.quote_countdown,
             Some(cross_chain::QuoteCountdown::Expired)
@@ -2377,10 +2825,7 @@ mod tests {
 
         // Now a fresh one lands. It must be judged on its own expiry.
         let soon = (chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339();
-        let _ = send(
-            &mut panel,
-            SparkSendMessage::PrepareSucceeded(prepared_with_quote(&soon)),
-        );
+        finish_prepare(&mut panel, prepared_with_quote(&soon));
         assert!(
             matches!(
                 panel.quote_countdown,
@@ -2400,10 +2845,7 @@ mod tests {
         // A non-cross-chain prepare has no quote at all, and must not leave a
         // stale countdown behind from an earlier cross-chain attempt.
         let past = (chrono::Utc::now() - chrono::Duration::seconds(5)).to_rfc3339();
-        let _ = send(
-            &mut panel,
-            SparkSendMessage::PrepareSucceeded(prepared_with_quote(&past)),
-        );
+        finish_prepare(&mut panel, prepared_with_quote(&past));
         assert_eq!(
             panel.quote_countdown,
             Some(cross_chain::QuoteCountdown::Expired)
@@ -2412,7 +2854,7 @@ mod tests {
         let mut plain = prepared_with_quote(&past);
         plain.cross_chain = None;
         plain.method = "Bolt11Invoice".to_string();
-        let _ = send(&mut panel, SparkSendMessage::PrepareSucceeded(plain));
+        finish_prepare(&mut panel, plain);
         assert_eq!(
             panel.quote_countdown, None,
             "an ordinary send has no quote, and must clear the previous one"

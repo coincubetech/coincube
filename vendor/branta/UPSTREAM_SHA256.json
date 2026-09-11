@@ -1,0 +1,27 @@
+{
+  "commit": "ba5e510a3189f32d11cb57e10267284b7109cb39",
+  "tree": "578d9d2943ddab9f2ab52c06a886e3b9d5cd7781",
+  "crate_checksum": "77720f45707c27d8c5e00b4428d72086711bb58362af5f1efc3dd2cf55f31b5a",
+  "manifest_delta": "reqwest 0.13.4 json,rustls -> 0.12.18 json,rustls-tls; original manifest hash recorded separately",
+  "upstream_manifest_sha256": "ebc5512afff931e59cd515c77892a670b023935d9a66bb7dc95871b87c018df4",
+  "files": {
+    "CHANGELOG.md": "6ad09c204127b1fdfb0643996efc9d86c17acab998802a08787f1b25402888b9",
+    "LICENSE": "b2af7f6161eeadab7e77515855e2515359c1b1967de20c23528a9034a1b25f5c",
+    "README.md": "9e6b351fe0a006381ceba52f58c296a73185a7a4667799a7c65c57b197a86773",
+    "examples/branta_example.rs": "9b946ddc02ddfed09ce2969e18005e82dd5e81e12c1ddb4ad658d91c08e422a4",
+    "src/enums.rs": "6129a6b4390b6e4f37d93daabb7686803e581354d98cb4e29012f5018faf0c79",
+    "src/error.rs": "ceaef9880267d92692f8eb9a84ad119646100db4f6fad57562e94372fecf1e1a",
+    "src/extensions.rs": "911542aaf36d56a1ee8b19e8d61df4dc8e7a9350ae215f20400b5a40071def26",
+    "src/lib.rs": "3d60ec8b1c4dffe82c0a506cc59b063b590baf89242e282292682d0dbf7f91da",
+    "src/models.rs": "bbefccc693652fc6fd56bef4739ce12d9cb0dc7ee804a8497673c3a67ca3732e",
+    "src/options.rs": "10644e568ea9fd6a00e391f537e892bbda253b9822e745c02c868361a6fae772",
+    "src/v2/builder.rs": "bd7540c3750b32c9b78311d9400b1ca09f63b38fb62738fb94e51778e9301f9e",
+    "src/v2/client.rs": "f9c8e58ac7967017b8da8f313b5d045fbbaa1d675ac6ea42c858d2e200f2a99e",
+    "src/v2/encryption.rs": "be8a36f5b9cb0c107a661161d6c4ce808d4fffdd4ac6699c5a0cf1d6357efd5e",
+    "src/v2/mod.rs": "fa7a42b1c57f267593dc60e200c8bc25eff76c1467dfe6eacb7f9a6fb01a706f",
+    "src/v2/parser.rs": "907ba1359166ab5f80b9a0a48659a6f0fe7d7ff7c4e1221f3eaa449fd6693526",
+    "src/v2/secret_generator.rs": "026426541079991168475b703bf89408276df972338302e9c3c52e9d63f0fa06",
+    "src/v2/service.rs": "bb9e91023482e14424c93ddba1862ef3b38106ec601ebb6e94aa97a90a8271c0"
+  },
+  "adapted_manifest_sha256": "586bc37d59e660b19a2f864cf151c633470c45553bba4a7462c1fbec2d4d63bf"
+}

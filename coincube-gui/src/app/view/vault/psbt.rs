@@ -27,7 +27,7 @@ use coincube_ui::{
         text::{self, *},
     },
     icon, theme,
-    widget::{Button, Column, Container, Element, Row, RowExt, TextInput},
+    widget::{Button, Column, ColumnExt, Container, Element, Row, RowExt, TextInput},
 };
 
 use crate::{
@@ -170,6 +170,7 @@ pub fn save_action<'a>(saved: bool) -> Element<'a, Message> {
 /// In that window the button swaps to a disabled "Broadcasting…" label so the
 /// user can see their click registered and isn't tempted to click again.
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub fn broadcast_action<'a>(
     conflicting_txids: &HashSet<Txid>,
     saved: bool,
@@ -179,6 +180,31 @@ pub fn broadcast_action<'a>(
     sent_quote: &'a coincube_ui::component::quote_display::Quote,
     sent_image_handle: &'a iced::widget::image::Handle,
     is_self_transfer: bool,
+) -> Element<'a, Message> {
+    broadcast_action_with_identity_review(
+        conflicting_txids,
+        saved,
+        broadcasting,
+        error,
+        spend_amount_display,
+        sent_quote,
+        sent_image_handle,
+        is_self_transfer,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn broadcast_action_with_identity_review<'a>(
+    conflicting_txids: &HashSet<Txid>,
+    saved: bool,
+    broadcasting: bool,
+    error: Option<String>,
+    spend_amount_display: &'a str,
+    sent_quote: &'a coincube_ui::component::quote_display::Quote,
+    sent_image_handle: &'a iced::widget::image::Handle,
+    is_self_transfer: bool,
+    identity_review: Option<Element<'a, Message>>,
 ) -> Element<'a, Message> {
     if saved {
         let verb_suffix = if is_self_transfer {
@@ -253,6 +279,7 @@ pub fn broadcast_action<'a>(
                         ),
                     )
                 })
+                .push_maybe(identity_review)
                 .push(Row::new().push(Column::new().width(Length::Fill)).push(
                     // Disabled "Broadcasting…" state mirrors the
                     // "Processing…" pattern used by the PSBT
@@ -274,6 +301,46 @@ pub fn broadcast_action<'a>(
         }))
         .into()
     }
+}
+
+/// Repeat the output association next to the irreversible broadcast action.
+/// The ordinary PSBT review remains visible behind the modal.
+pub fn broadcast_recipient_identities<'a>(
+    identities: &'a [(usize, crate::services::branta::LookupResult)],
+    outputs: &'a [TxOut],
+    network: Network,
+    bitcoin_unit: BitcoinDisplayUnit,
+    theme_mode: coincube_ui::theme::palette::ThemeMode,
+) -> Element<'a, Message> {
+    let content = identities
+        .iter()
+        .fold(Column::new().spacing(10), |column, (vout, result)| {
+            let crate::services::branta::LookupResult::Identified(matches) = result else {
+                return column;
+            };
+            let Some(output) = outputs.get(*vout) else {
+                return column;
+            };
+            let Ok(address) = Address::from_script(&output.script_pubkey, network) else {
+                return column;
+            };
+            let column = column
+                .push(text(address.to_string()).size(12))
+                .push(amount_with_unit(&output.value, bitcoin_unit));
+            matches
+                .iter()
+                .enumerate()
+                .fold(column, |column, (index, identity)| {
+                    column.push(crate::app::view::shared::recipient_identity::card(
+                        identity,
+                        Message::OpenVaultRecipientIdentity(*vout, index),
+                        theme_mode,
+                    ))
+                })
+        });
+    Container::new(scrollable(content).height(Length::Shrink))
+        .max_height(280)
+        .into()
 }
 
 pub fn delete_action<'a>(deleted: bool) -> Element<'a, Message> {
@@ -814,6 +881,33 @@ pub fn outputs_view<'a>(
     is_single_payment: bool,
     is_external: bool,
 ) -> Element<'a, Message> {
+    outputs_view_with_identities(
+        tx,
+        network,
+        change_indexes,
+        labels,
+        labels_editing,
+        bitcoin_unit,
+        is_single_payment,
+        is_external,
+        &[],
+        coincube_ui::theme::palette::ThemeMode::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn outputs_view_with_identities<'a>(
+    tx: &'a Transaction,
+    network: Network,
+    change_indexes: &'a [usize],
+    labels: &'a HashMap<String, String>,
+    labels_editing: &'a HashMap<String, form::Value<String>>,
+    bitcoin_unit: BitcoinDisplayUnit,
+    is_single_payment: bool,
+    is_external: bool,
+    identities: &'a [(usize, crate::services::branta::LookupResult)],
+    theme_mode: coincube_ui::theme::palette::ThemeMode,
+) -> Element<'a, Message> {
     Column::new()
         .spacing(20)
         .push({
@@ -859,7 +953,7 @@ pub fn outputs_view<'a>(
                                         if is_external && !change_indexes.contains(&i) {
                                             is_editable = false;
                                         }
-                                        col.spacing(10).push(payment_view(
+                                        let col = col.spacing(10).push(payment_view(
                                             i,
                                             tx.compute_txid(),
                                             output,
@@ -869,7 +963,13 @@ pub fn outputs_view<'a>(
                                             bitcoin_unit,
                                             is_single_payment,
                                             is_editable,
-                                        ))
+                                        ));
+                                        if let Some((_, crate::services::branta::LookupResult::Identified(matches))) = identities.iter().find(|(vout, _)| *vout == i) {
+                                            matches.iter().enumerate().fold(col, |col, (identity_index, identity)| {
+                                                col.push(crate::app::view::shared::recipient_identity::card(identity,
+                                                    Message::OpenVaultRecipientIdentity(i, identity_index), theme_mode))
+                                            })
+                                        } else { col }
                                     },
                                 ),
                         ),

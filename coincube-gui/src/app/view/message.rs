@@ -120,6 +120,7 @@ pub enum VaultReceiveMessage {
 
 #[derive(Debug, Clone)]
 pub enum Message {
+    OpenVaultRecipientIdentity(usize, usize),
     Scroll(f32),
     Reload,
     Clipboard(String),
@@ -414,6 +415,7 @@ pub enum SettingsMessage {
     InstallStatsSection,
     InstallStats(InstallStatsViewMessage),
     ToggleDirectionBadges(bool),
+    ToggleRecipientIdentityChecks(bool),
     /// Master seed backup flow (moved from Liquid Settings to Cube/General Settings).
     BackupMasterSeed(BackupWalletMessage),
     BackupMasterSeedUpdated,

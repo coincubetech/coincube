@@ -114,8 +114,15 @@ pub enum SparkSendMessage {
     /// Pick what the recipient receives (a bitcoin rail or a stablecoin).
     SetReceiveTarget(crate::app::state::spark::send::SparkSendTarget),
     PrepareRequested,
-    PrepareSucceeded(coincube_spark_protocol::PrepareSendOk),
-    PrepareFailed(String),
+    PreparationFinished {
+        generation: u64,
+        result: Result<coincube_spark_protocol::PrepareSendOk, String>,
+        recipient: Option<(
+            crate::services::branta::LookupTicket,
+            crate::services::branta::LookupResult,
+        )>,
+    },
+    OpenRecipientIdentity(usize),
     ConfirmRequested,
     SendSucceeded(coincube_spark_protocol::SendPaymentOk),
     SendFailed(String),
@@ -141,7 +148,10 @@ pub enum SparkSendMessage {
     /// The destination parsed as a cross-chain address and the bridge
     /// returned the routes that can reach it. Moves the panel into
     /// `CrossChainRoutes`, where the user confirms the chain and asset.
-    CrossChainRoutesLoaded(coincube_spark_protocol::CrossChainRoutesOk),
+    CrossChainRoutesLoaded(
+        u64,
+        Result<coincube_spark_protocol::CrossChainRoutesOk, String>,
+    ),
     /// User picked one of the offered routes (index into the phase's list).
     CrossChainRouteSelected(usize),
     /// User edited the slippage field (basis points).

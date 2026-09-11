@@ -106,6 +106,14 @@ impl<'a> AsMut<dyn Modal + 'a> for PsbtModal {
     }
 }
 
+/// Ephemeral identity metadata; never serialized with a PSBT or synchronized.
+#[derive(Clone)]
+pub struct RecipientIdentities {
+    pub ticket: crate::services::branta::LookupTicket,
+    pub transaction_id: Txid,
+    pub results: Vec<(usize, crate::services::branta::LookupResult)>,
+}
+
 pub struct PsbtState {
     pub wallet: Arc<Wallet>,
     pub desc_policy: CoincubePolicy,
@@ -113,6 +121,7 @@ pub struct PsbtState {
     pub saved: bool,
     pub warning: Option<Error>,
     pub labels_edited: LabelsEdited,
+    recipient_identities: Option<RecipientIdentities>,
     pub modal: Option<PsbtModal>,
 }
 
@@ -122,11 +131,28 @@ impl PsbtState {
             desc_policy: wallet.main_descriptor.policy(),
             wallet,
             labels_edited: LabelsEdited::default(),
+            recipient_identities: None,
             warning: None,
             modal: None,
             tx,
             saved,
         }
+    }
+
+    pub fn with_recipient_identities(mut self, identities: Option<RecipientIdentities>) -> Self {
+        self.recipient_identities = identities;
+        self
+    }
+
+    pub fn recipient_identities(&self) -> &[(usize, crate::services::branta::LookupResult)] {
+        self.recipient_identities
+            .as_ref()
+            .filter(|review| {
+                review.ticket.is_current()
+                    && review.transaction_id == self.tx.psbt.unsigned_tx.compute_txid()
+            })
+            .map(|review| review.results.as_slice())
+            .unwrap_or(&[])
     }
 
     pub fn interrupt(&mut self) {
@@ -201,6 +227,27 @@ impl PsbtState {
         cache: &Cache,
         message: Message,
     ) -> Task<Message> {
+        if self
+            .recipient_identities
+            .as_ref()
+            .is_some_and(|review| !review.ticket.is_current())
+        {
+            self.recipient_identities = None;
+        }
+        if let Message::View(view::Message::OpenVaultRecipientIdentity(output, identity_index)) =
+            &message
+        {
+            if let Some((_, crate::services::branta::LookupResult::Identified(identities))) = self
+                .recipient_identities()
+                .iter()
+                .find(|(vout, _)| vout == output)
+            {
+                if let Some(identity) = identities.get(*identity_index) {
+                    identity.open();
+                }
+            }
+            return Task::none();
+        }
         match message {
             Message::View(view::Message::ExportPsbt) => {
                 if self.modal.is_none() {
@@ -483,6 +530,14 @@ impl PsbtState {
                         spend_amount_display: amount_display,
                         is_self_transfer,
                         wallet: self.wallet.clone(),
+                        recipient_identities: self.recipient_identities.clone().filter(|review| {
+                            review.ticket.is_current()
+                                && review.transaction_id == self.tx.psbt.unsigned_tx.compute_txid()
+                        }),
+                        recipient_outputs: self.tx.psbt.unsigned_tx.output.clone(),
+                        network: cache.network,
+                        bitcoin_unit: cache.bitcoin_unit,
+                        theme_mode: cache.theme_mode,
                     }));
                 }
                 Err(e) => {
@@ -607,6 +662,11 @@ pub struct BroadcastModal {
     /// Overview balance, Send) can optimistically reflect the spend
     /// before the daemon's mempool poller catches up.
     wallet: Arc<Wallet>,
+    recipient_identities: Option<RecipientIdentities>,
+    recipient_outputs: Vec<coincube_core::miniscript::bitcoin::TxOut>,
+    network: Network,
+    bitcoin_unit: coincube_ui::component::amount::BitcoinDisplayUnit,
+    theme_mode: coincube_ui::theme::palette::ThemeMode,
 }
 
 impl Modal for BroadcastModal {
@@ -692,9 +752,23 @@ impl Modal for BroadcastModal {
         } else {
             Some(view::Message::Spend(view::SpendTxMessage::Cancel))
         };
+        let identity_review = self
+            .recipient_identities
+            .as_ref()
+            .filter(|review| review.ticket.is_current() && review.results.iter().any(|(_, result)|
+                matches!(result, crate::services::branta::LookupResult::Identified(identities) if !identities.is_empty())))
+            .map(|review| {
+                view::vault::psbt::broadcast_recipient_identities(
+                    &review.results,
+                    &self.recipient_outputs,
+                    self.network,
+                    self.bitcoin_unit,
+                    self.theme_mode,
+                )
+            });
         modal::Modal::new(
             content,
-            view::vault::psbt::broadcast_action(
+            view::vault::psbt::broadcast_action_with_identity_review(
                 &self.conflicting_txids,
                 self.broadcast,
                 self.broadcasting,
@@ -703,6 +777,7 @@ impl Modal for BroadcastModal {
                 &self.sent_quote,
                 &self.sent_image_handle,
                 self.is_self_transfer,
+                identity_review,
             ),
         )
         .on_blur(on_blur)

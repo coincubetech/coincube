@@ -76,6 +76,7 @@ fn general_section<'a>(
         .push(bitcoin_display_unit(new_unit_setting))
         .push(display_mode_toggle(cache.display_mode))
         .push(direction_badges_toggle(show_direction_badges))
+        .push(recipient_identity_checks_toggle())
         .push(fiat_price(new_price_setting, currencies_list));
 
     dashboard(menu, cache, col)
@@ -1128,6 +1129,21 @@ fn direction_badges_toggle<'a>(show: bool) -> Element<'a, Message> {
     )
     .width(Length::Fill)
     .into()
+}
+
+fn recipient_identity_checks_toggle<'a>() -> Element<'a, Message> {
+    card::simple(
+        Column::new().spacing(10)
+            .push(Row::new().spacing(20).align_y(Alignment::Center)
+                .push(text("Recipient identity checks").bold())
+                .push(Space::new().width(Length::Fill))
+                .push(Toggler::new(crate::services::branta::enabled())
+                    .on_toggle(|enabled| SettingsMessage::ToggleRecipientIdentityChecks(enabled).into())
+                    .width(50).style(theme::toggler::orange)))
+            .push(p2_regular("Check supported payment requests with Branta before sending. Strict mode does not share the plaintext destination or payment amount, but Branta can still observe lookup timing and your network connection."))
+            .push(button::transparent(None, "Branta privacy information")
+                .on_press(Message::OpenUrl("https://branta.pro/your-data".into()))),
+    ).width(Length::Fill).into()
 }
 
 fn display_mode_toggle<'a>(current: DisplayMode) -> Element<'a, Message> {

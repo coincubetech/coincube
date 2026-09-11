@@ -46,6 +46,7 @@ pub fn spend_view<'a>(
     network: Network,
     currently_signing: bool,
     bitcoin_unit: BitcoinDisplayUnit,
+    identities: &'a [(usize, crate::services::branta::LookupResult)],
 ) -> Element<'a, Message> {
     let is_recovery = tx
         .psbt
@@ -95,7 +96,7 @@ pub fn spend_view<'a>(
                         labels_editing,
                         bitcoin_unit,
                     ))
-                    .push(psbt::outputs_view(
+                    .push(psbt::outputs_view_with_identities(
                         &tx.psbt.unsigned_tx,
                         network,
                         &tx.change_indexes,
@@ -104,6 +105,8 @@ pub fn spend_view<'a>(
                         bitcoin_unit,
                         tx.is_single_payment().is_some(),
                         false,
+                        identities,
+                        cache.theme_mode,
                     )),
             )
             .push(if saved {

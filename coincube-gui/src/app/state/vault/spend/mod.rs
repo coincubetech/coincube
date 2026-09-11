@@ -209,6 +209,9 @@ impl State for CreateSpendPanel {
 
         if matches!(message, Message::View(view::Message::Next)) {
             if let Some(step) = self.steps.get(self.current) {
+                if !step.can_advance() {
+                    return Task::none();
+                }
                 step.apply(&mut self.draft);
             }
 
@@ -219,6 +222,7 @@ impl State for CreateSpendPanel {
         }
 
         if matches!(message, Message::View(view::Message::Previous)) {
+            self.steps[self.current].interrupt();
             let previous = self.current.saturating_sub(1);
             if let Some(step) = self.steps.get_mut(previous) {
                 self.current = previous;
