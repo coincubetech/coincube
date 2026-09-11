@@ -401,6 +401,13 @@ pub struct SparkSend {
     /// on the YOU SEND card. Refreshed on reload via `get_info`; `0` until the
     /// first fetch.
     balance_sats: u64,
+    /// How much of `balance_sats` is USDB rather than bitcoin, as a caption
+    /// under the balance ("incl. 8.66 USDB ≈ 11,254 sats"). `None` when the
+    /// wallet holds no USDB. The whole balance *is* spendable — the bridge
+    /// converts USDB→BTC on the way out when bitcoin alone can't cover a send
+    /// — but a send funded that way goes through the AMM, so the split is
+    /// worth knowing.
+    stable_balance_note: Option<String>,
     /// Free-text destination input (BOLT11 / BIP21 / on-chain address).
     pub destination_input: String,
     /// Amount override for amountless invoices / on-chain sends, in sats.
@@ -480,6 +487,7 @@ impl SparkSend {
         Self {
             backend,
             balance_sats: 0,
+            stable_balance_note: None,
             destination_input: String::new(),
             amount_input: String::new(),
             invoice_amount_sat: None,
@@ -780,6 +788,7 @@ impl State for SparkSend {
                 sent_image_handle: &self.sent_image_handle,
                 recent_transactions: &self.recent_transactions,
                 balance_sats: self.balance_sats,
+                stable_balance_note: self.stable_balance_note.as_deref(),
                 bitcoin_unit: cache.bitcoin_unit,
                 reference_btc_usd_price: super::reference_btc_usd_price(cache),
                 show_direction_badges: cache.show_direction_badges,
@@ -1293,6 +1302,13 @@ impl State for SparkSend {
                 if let Some((btc_sats, stable)) = balance {
                     self.balance_sats =
                         super::unified_spark_balance_sats(btc_sats, stable.as_ref(), cache);
+                    self.stable_balance_note = stable.as_ref().and_then(|sb| {
+                        stable_balance_note(
+                            sb,
+                            super::reference_btc_usd_price(cache),
+                            cache.bitcoin_unit,
+                        )
+                    });
                 }
                 Task::none()
             }
@@ -1443,6 +1459,41 @@ fn format_amount_for_input(sats: u64, unit: BitcoinDisplayUnit) -> String {
             .to_btc()
             .to_string(),
     }
+}
+
+/// The YOU SEND card's caption for a USDB holding: the token amount and,
+/// when a BTC/USD price is known, what it counts for in the unified balance
+/// — "incl. 8.66 USDB ≈ 11,254 sats". `None` when there is no holding.
+fn stable_balance_note(
+    stable: &coincube_spark_protocol::StableBalanceSnapshot,
+    reference_btc_usd_price: Option<f64>,
+    unit: BitcoinDisplayUnit,
+) -> Option<String> {
+    use crate::app::breez_spark::assets::{format_token_display, stable_token_as_sats};
+    use coincube_core::miniscript::bitcoin::Amount;
+    use coincube_ui::component::amount::DisplayAmount;
+
+    if stable.balance == 0 {
+        return None;
+    }
+    let token = format!(
+        "{} {}",
+        format_token_display(stable.balance, stable.decimals),
+        stable.ticker
+    );
+    let as_sats = stable_token_as_sats(stable.balance, stable.decimals, reference_btc_usd_price);
+    if as_sats == 0 {
+        // No price yet — the unified balance doesn't count it either.
+        return Some(format!("plus {token}"));
+    }
+    let unit_label = match unit {
+        BitcoinDisplayUnit::BTC => "BTC",
+        BitcoinDisplayUnit::Sats => "sats",
+    };
+    Some(format!(
+        "incl. {token} ≈ {} {unit_label}",
+        Amount::from_sat(as_sats).to_formatted_string_with_unit(unit)
+    ))
 }
 
 /// Parse the amount field — entered in the wallet's display unit — into sats.
@@ -1637,6 +1688,37 @@ mod tests {
         // More than 8 decimal places is sub-sat precision — rejected.
         assert!(parse_amount_to_sats("0.000000001", BitcoinDisplayUnit::BTC).is_err());
         assert!(parse_amount_to_sats("abc", BitcoinDisplayUnit::BTC).is_err());
+    }
+
+    #[test]
+    fn stable_balance_note_names_the_usdb_share_of_the_balance() {
+        let usdb = |balance: u64| coincube_spark_protocol::StableBalanceSnapshot {
+            balance,
+            decimals: 6,
+            ticker: "USDB".to_string(),
+        };
+        // No holding: no caption.
+        assert_eq!(
+            stable_balance_note(&usdb(0), Some(76_900.0), BitcoinDisplayUnit::Sats),
+            None
+        );
+        // $8.66 at $76,900/BTC ≈ 11,261 sats.
+        assert_eq!(
+            stable_balance_note(&usdb(8_660_000), Some(76_900.0), BitcoinDisplayUnit::Sats)
+                .as_deref(),
+            Some("incl. 8.66 USDB ≈ 11,261 sats")
+        );
+        assert_eq!(
+            stable_balance_note(&usdb(8_660_000), Some(76_900.0), BitcoinDisplayUnit::BTC)
+                .as_deref(),
+            Some("incl. 8.66 USDB ≈ 0.00 011 261 BTC")
+        );
+        // No price yet: the unified balance doesn't count it, so say so
+        // without a sats figure.
+        assert_eq!(
+            stable_balance_note(&usdb(8_660_000), None, BitcoinDisplayUnit::Sats).as_deref(),
+            Some("plus 8.66 USDB")
+        );
     }
 
     #[test]

@@ -48,6 +48,9 @@ pub struct SparkSendView<'a> {
     pub recent_transactions: &'a [SparkRecentTransaction],
     /// Unified balance (sats: BTC + Stable Balance), shown on the YOU SEND card.
     pub balance_sats: u64,
+    /// Caption under the balance naming the USDB share of it, when any —
+    /// see `SparkSend::stable_balance_note`.
+    pub stable_balance_note: Option<&'a str>,
     pub bitcoin_unit: BitcoinDisplayUnit,
     /// BTC/USD reference price for the cross-chain conversion-fee sats estimate.
     /// `None` when no price is known — the fee then shows in the asset only.
@@ -106,6 +109,7 @@ impl<'a> SparkSendView<'a> {
         content = content.push(spark_send_cards(
             self.receive_target,
             self.balance_sats,
+            self.stable_balance_note,
             self.bitcoin_unit,
         ));
 
@@ -750,6 +754,7 @@ fn card_button_style(
 fn spark_send_cards<'a>(
     target: SparkSendTarget,
     balance_sats: u64,
+    stable_balance_note: Option<&'a str>,
     bitcoin_unit: BitcoinDisplayUnit,
 ) -> Element<'a, Message> {
     let you_send = Container::new(
@@ -780,6 +785,10 @@ fn spark_send_cards<'a>(
                 ))
                 .size(P2_SIZE)
                 .style(theme::text::secondary),
+            )
+            .push_maybe(
+                stable_balance_note
+                    .map(|note| text(note).size(CAPTION_SIZE).style(theme::text::secondary)),
             )
             .push(orange_badge("SPARK")),
     )
