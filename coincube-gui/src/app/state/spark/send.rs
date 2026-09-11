@@ -1076,9 +1076,8 @@ impl State for SparkSend {
                 // `prepare_lnurl_pay`) in one task, so the user sees a single
                 // "Preparing…" regardless of the underlying rail.
                 let target = self.receive_target;
-                let recipient = recipient_lookup_request(target, &input).and_then(|request| {
-                    branta::begin(cache.network).map(|ticket| (ticket, request))
-                });
+                let recipient =
+                    branta::begin(cache.network).zip(recipient_lookup_request(target, &input));
                 Task::perform(
                     async move {
                         // Review waits for both: a bounded lookup cannot arrive

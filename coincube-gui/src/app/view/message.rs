@@ -120,6 +120,7 @@ pub enum VaultReceiveMessage {
 
 #[derive(Debug, Clone)]
 pub enum Message {
+    /// Open the Branta identity at `(output_index, identity_index)` in the reviewed PSBT.
     OpenVaultRecipientIdentity(usize, usize),
     Scroll(f32),
     Reload,

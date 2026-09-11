@@ -2185,7 +2185,12 @@ mod tests {
         );
         state.recipients[0] = bip21_recipient(1_000);
         state.feerate.value = "2".into();
+        state.feerate.valid = true;
         state.coins[0].1 = true;
+        state.check_valid();
+        assert!(state.form_values_are_valid(false));
+        assert!(state.is_valid);
+        assert!(!state.is_duplicate);
         state
     }
 
@@ -2248,6 +2253,7 @@ mod tests {
     #[test]
     fn bip21_amount_mismatch_cannot_be_ignored_or_overwritten_by_max() {
         let mut recipient = bip21_recipient(1_000);
+        assert!(recipient.valid());
         recipient.update(
             Network::Bitcoin,
             BitcoinDisplayUnit::Sats,
@@ -2546,6 +2552,8 @@ mod tests {
             let _ = state.update(daemon.clone(), &Cache::default(), Message::View(view::Message::CreateSpend(
                 view::CreateSpendMessage::RecipientEdited(0, "address", request),
             )));
+            assert!(state.form_values_are_valid(false));
+            assert!(!state.exists_duplicate());
             assert!(state.tampered);
             assert!(!state.can_advance());
             let _ = state.update(daemon.clone(), &Cache::default(), Message::View(view::Message::CreateSpend(

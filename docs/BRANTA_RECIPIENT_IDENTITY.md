@@ -67,6 +67,12 @@ The sole upstream manifest adjustment reuses reqwest `0.12.18` with `rustls-tls`
 No SDK Rust source was changed. See [provenance](../vendor/branta/TENSHU_PROVENANCE.md)
 and enforced source hashes in `vendor/branta/UPSTREAM_SHA256.json`.
 
+The vendored README has an upstream inconsistency about plain on-chain copy/paste
+lookups: `get_payments(address, None, ...)` in Strict mode returns
+`PrivacyModeViolation`; the raw-QR unsupported-input path returns an empty result.
+Tenshu excludes plain on-chain lookups before either call and treats ordinary SDK
+errors silently. The vendored README is preserved as part of the pinned artifact.
+
 Upstream reqwest 0.13 uses platform-verifier, whose Apple dependency conflicts
 with Breez's exact iOS build-dependency pin even on desktop because Cargo resolves
 across targets. No Liquid file or dependency pin was changed. The adjustment uses

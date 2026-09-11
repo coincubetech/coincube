@@ -60,23 +60,27 @@ mod tests {
     fn renders_both_themes_and_disabled_without_exposing_url() {
         let ticket = crate::services::branta::test_ticket(true);
         let identity = crate::services::branta::test_identity(&ticket, "Merchant");
-        let _ = card(
+        let empty: Element<'_, Message> = Space::new().into();
+        let dark = card(
             &identity,
             Message::OpenVaultRecipientIdentity(0, 0),
             ThemeMode::Dark,
         );
-        let _ = card(
+        let light = card(
             &identity,
             Message::OpenVaultRecipientIdentity(0, 0),
             ThemeMode::Light,
         );
+        assert_ne!(dark.as_widget().size(), empty.as_widget().size());
+        assert_ne!(light.as_widget().size(), empty.as_widget().size());
         assert!(!format!("{identity:?}").contains("https://"));
         ticket.set_test_enabled(false);
-        let _ = card(
+        let disabled = card(
             &identity,
             Message::OpenVaultRecipientIdentity(0, 0),
             ThemeMode::Dark,
         );
         assert!(!identity.is_current());
+        assert_eq!(disabled.as_widget().size(), empty.as_widget().size());
     }
 }
