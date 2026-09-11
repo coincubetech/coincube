@@ -1024,8 +1024,19 @@ def test_start_rescan(coincubed, bitcoind):
     # without change, single or multiple inputs, sending externally or to self).
     for _ in range(5):
         addr = coincubed.rpc.getnewaddress()["address"]
-        amount = random.randint(1, COIN * 10) / COIN
+        # Deposit strictly more than the `avail` threshold below, so this coin
+        # is always eligible even if it is the only one left.
+        amount = random.randint(1_001, COIN * 10) / COIN
         txid = bitcoind.rpc.sendtoaddress(addr, amount)
+        # spend_coins sends everything externally with no change, so a previous
+        # iteration may have drained the wallet. Make sure the poller has seen
+        # this new deposit before sampling, or `avail` can come up empty.
+        wait_for(
+            lambda txid=txid: any(
+                c["outpoint"].startswith(txid) and c["amount"] > 1_000
+                for c in unspent_coins()
+            )
+        )
         # Only spend coins comfortably above spend_coins' flat per-input fee so
         # the output can't fall below the dust limit — this also skips the small
         # change coins that multi-input spends leave behind (matches upstream).
