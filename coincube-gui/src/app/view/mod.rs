@@ -40,7 +40,10 @@ use coincube_ui::{
     widget::*,
 };
 
-use crate::app::{cache::Cache, menu::Menu};
+use crate::app::{
+    cache::{Cache, SparkNotice},
+    menu::Menu,
+};
 
 /// Simple toast notification for clipboard copy and other success messages
 pub fn simple_toast(message: &str) -> Container<Message> {
@@ -117,6 +120,68 @@ pub fn backup_warning_banner<'a>() -> Element<'a, Message> {
     .into()
 }
 
+/// The user-facing sentence for a [`SparkNotice`]. Split out so the copy
+/// is testable without rendering.
+pub fn spark_notice_text(notice: &SparkNotice) -> String {
+    match notice {
+        SparkNotice::StableBalancePaused { reason } => format!(
+            "Stable Balance was paused: converting bitcoin to USDB failed {} times in a row \
+             ({reason}). Your funds are unchanged. You can turn it back on in Spark settings \
+             once the issue clears.",
+            coincube_spark_protocol::STABLE_BALANCE_PAUSE_THRESHOLD
+        ),
+        SparkNotice::StableBalanceOffWithHolding => "This Spark wallet holds USDB, but Stable \
+             Balance is off on this device — the setting doesn't travel with your seed. Turn it \
+             on in Spark settings to keep sweeping bitcoin into USDB."
+            .to_string(),
+    }
+}
+
+/// A warning strip for a Spark Stable Balance condition, rendered by the
+/// `dashboard` wrapper under the backup banner when
+/// `cache.spark_notice` is set. Same width and style as
+/// [`backup_warning_banner`]. "Spark Settings" routes to the page with the
+/// toggle; × dismisses for the session.
+pub fn spark_notice_banner(notice: &SparkNotice) -> Element<'_, Message> {
+    let body = container(
+        row![
+            coincube_ui::icon::warning_icon().color(color::BLACK),
+            text::p2_regular(spark_notice_text(notice)).color(color::BLACK),
+            Space::new().width(Length::Fill),
+            button::secondary(None, "Spark Settings")
+                .padding([6, 14])
+                .width(Length::Fixed(140.0))
+                .on_press(Message::Menu(Menu::Spark(
+                    crate::app::menu::SparkSubMenu::Settings(None),
+                ))),
+            iced::widget::Button::new(
+                cross_icon()
+                    .align_x(Alignment::Center)
+                    .align_y(Alignment::Center),
+            )
+            .padding([8, 10])
+            .style(theme::button::secondary)
+            .on_press(Message::DismissSparkNotice),
+        ]
+        .spacing(10)
+        .align_y(Alignment::Center),
+    )
+    .padding([8, 16])
+    .width(Length::Fill)
+    .style(theme::notification::warning);
+
+    container(row![
+        Space::new().width(Length::FillPortion(1)),
+        container(body)
+            .width(Length::FillPortion(8))
+            .max_width(1500),
+        Space::new().width(Length::FillPortion(1)),
+    ])
+    .padding([8, 0])
+    .width(Length::Fill)
+    .into()
+}
+
 pub fn dashboard<'a, T: Into<Element<'a, Message>>>(
     menu: &'a Menu,
     cache: &'a Cache,
@@ -164,6 +229,7 @@ pub fn dashboard_with_info<'a, T: Into<Element<'a, Message>>>(
     let content_column: Element<'_, Message> = Column::new()
         .push(warn(None))
         .push_maybe(show_backup_warning.then(backup_warning_banner))
+        .push_maybe(cache.spark_notice.as_ref().map(spark_notice_banner))
         .push(
             Container::new(
                 scrollable(row!(

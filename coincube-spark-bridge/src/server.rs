@@ -44,6 +44,7 @@ use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
 use crate::sdk_adapter::{self, SdkHandle};
+use crate::stable_balance_watch::{FailureTracker, Verdict};
 
 /// How long a pending prepare lives before the background sweep evicts
 /// it. Picked at 5 minutes — long enough to cover human dwell time on
@@ -58,7 +59,13 @@ const PREPARE_TTL: Duration = Duration::from_secs(300);
 const PREPARE_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Run the stdin/stdout server until EOF on stdin or a `shutdown` RPC.
-pub async fn run() -> anyhow::Result<()> {
+///
+/// `conversion_failures` delivers one message per SDK auto-conversion
+/// failure, from the `tracing` layer installed in `main` — see
+/// [`crate::stable_balance_watch`].
+pub async fn run(
+    conversion_failures: tokio::sync::mpsc::UnboundedReceiver<String>,
+) -> anyhow::Result<()> {
     // Single writer task: serializes all stdout writes so responses and
     // events never interleave mid-line. We talk to it over an unbounded
     // channel so request handlers never block on IO.
@@ -67,6 +74,12 @@ pub async fn run() -> anyhow::Result<()> {
     // listener registered in `handle_init` can push `Frame::Event`s
     // onto the same stdout stream the response handlers use.
     let state = Arc::new(ServerState::new(tx.clone()));
+
+    // Stable Balance circuit breaker. Weak for the same reason as the
+    // prepare sweep below: this task must not keep the state (and its
+    // stdout sender) alive past the read loop.
+    let breaker_weak = Arc::downgrade(&state);
+    tokio::spawn(watch_conversion_failures(conversion_failures, breaker_weak));
 
     // Phase 4f: background sweep that evicts pending-prepare entries
     // older than `PREPARE_TTL`. Uses a Weak reference so the sweep
@@ -188,6 +201,10 @@ struct ServerState {
     /// pushes `Frame::Event`s on this channel the same way request
     /// handlers push `Frame::Response`s, so stdout stays interleave-safe.
     event_tx: tokio::sync::mpsc::UnboundedSender<Frame>,
+    /// Consecutive Stable Balance auto-conversion failures, fed by
+    /// [`watch_conversion_failures`] and cleared when the user turns the
+    /// feature on again ([`handle_set_stable_balance`]).
+    conversion_failures: Mutex<FailureTracker>,
 }
 
 impl ServerState {
@@ -198,8 +215,73 @@ impl ServerState {
             pending_prepares: Mutex::new(HashMap::new()),
             pending_lnurl_prepares: Mutex::new(HashMap::new()),
             event_tx,
+            conversion_failures: Mutex::new(FailureTracker::default()),
         }
     }
+}
+
+/// Stable Balance circuit breaker: count the SDK's auto-conversion
+/// failures and, at the threshold, switch the feature off and tell the
+/// gui. Runs for the process lifetime; exits when the tracing layer's
+/// sender or the server state is gone.
+///
+/// Deactivating is done through the same `update_user_settings` call the
+/// user's toggle uses, so the SDK persists "off" locally and the loop does
+/// not resume on the next launch either. The gui additionally records the
+/// pause in the Cube's settings on receipt of the event.
+async fn watch_conversion_failures(
+    mut failures: tokio::sync::mpsc::UnboundedReceiver<String>,
+    state: std::sync::Weak<ServerState>,
+) {
+    while let Some(reason) = failures.recv().await {
+        let Some(state) = state.upgrade() else {
+            break;
+        };
+        let verdict = state.conversion_failures.lock().await.record_failure();
+        let failures = match verdict {
+            Verdict::Tolerate { failures } => {
+                tracing::warn!(
+                    "Stable Balance auto-conversion failed ({failures} in a row): {reason}"
+                );
+                continue;
+            }
+            Verdict::Pause { failures } => failures,
+        };
+
+        let Some(sdk) = state.sdk.read().await.clone() else {
+            // Can't happen in practice — the SDK is what logged the
+            // failure — but there is nothing to deactivate without it.
+            continue;
+        };
+        match deactivate_stable_balance(&sdk).await {
+            Ok(()) => {
+                tracing::error!(
+                    "Stable Balance paused after {failures} consecutive auto-conversion \
+                     failures: {reason}"
+                );
+                let _ = state
+                    .event_tx
+                    .send(Frame::Event(ProtocolEvent::StableBalancePaused {
+                        reason,
+                        failures,
+                    }));
+            }
+            Err(e) => {
+                // The counter was reset by `Pause`; the next run of
+                // failures trips the breaker again.
+                tracing::error!("could not pause Stable Balance after repeated failures: {e}");
+            }
+        }
+    }
+}
+
+async fn deactivate_stable_balance(sdk: &SdkHandle) -> Result<(), breez_sdk_spark::SdkError> {
+    sdk.sdk
+        .update_user_settings(UpdateUserSettingsRequest {
+            spark_private_mode_enabled: None,
+            stable_balance_active_label: Some(StableBalanceActiveLabel::Unset),
+        })
+        .await
 }
 
 async fn handle_request(request: Request, state: Arc<ServerState>) -> Response {
@@ -1763,17 +1845,25 @@ async fn handle_set_stable_balance(
         }
     };
 
-    let active_label = if params.enabled {
-        StableBalanceActiveLabel::Set {
-            label: crate::sdk_adapter::STABLE_BALANCE_LABEL.to_string(),
-        }
-    } else {
-        StableBalanceActiveLabel::Unset
-    };
+    if !params.enabled {
+        return match deactivate_stable_balance(&sdk).await {
+            Ok(()) => Response::ok(id, OkPayload::SetStableBalance {}),
+            Err(e) => Response::err(
+                id,
+                ErrorKind::Sdk,
+                format!("update_user_settings failed: {e}"),
+            ),
+        };
+    }
 
+    // Turning it on is a fresh start for the circuit breaker: the
+    // failures it counted belong to the session that got paused.
+    state.conversion_failures.lock().await.reset();
     let request = UpdateUserSettingsRequest {
         spark_private_mode_enabled: None,
-        stable_balance_active_label: Some(active_label),
+        stable_balance_active_label: Some(StableBalanceActiveLabel::Set {
+            label: crate::sdk_adapter::STABLE_BALANCE_LABEL.to_string(),
+        }),
     };
 
     match sdk.sdk.update_user_settings(request).await {

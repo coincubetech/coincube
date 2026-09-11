@@ -5023,6 +5023,9 @@ impl App {
             Message::View(view::Message::DismissBackupWarning) => {
                 self.cache.backup_warning_dismissed = true;
             }
+            Message::View(view::Message::DismissSparkNotice) => {
+                self.cache.spark_notice = None;
+            }
             Message::View(view::Message::FlipDisplayMode) => {
                 let new_mode = self.cache.display_mode.flipped();
                 self.cache.display_mode = new_mode;
@@ -5195,6 +5198,18 @@ impl App {
                         tasks.push(Task::done(Message::View(view::Message::ConnectCube(
                             view::ConnectCubeMessage::SparkLightningAddressChanged(info),
                         ))));
+                    }
+                    SparkEvent::StableBalancePaused { reason, failures } => {
+                        log::error!(
+                            "Spark bridge paused Stable Balance after {failures} failed \
+                             auto-conversions: {reason}"
+                        );
+                        // The bridge already flipped the SDK setting off;
+                        // the Settings toggle and Overview badge re-read it
+                        // on reload. The banner is what tells the user.
+                        self.cache.spark_notice =
+                            Some(cache::SparkNotice::StableBalancePaused { reason });
+                        tasks.push(self.panels.spark_settings.reload(None, None));
                     }
                     _ => {}
                 }

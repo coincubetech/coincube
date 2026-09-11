@@ -673,6 +673,7 @@ pub async fn load_application(
         cube_name: config.cube_settings.name.clone(),
         current_cube_backed_up: config.cube_settings.backed_up,
         backup_warning_dismissed: false,
+        spark_notice: None,
         has_p2p: false, // Set later by App::new based on mnemonic availability
         theme_mode: coincube_ui::theme::palette::ThemeMode::default(),
         btc_usd_price: None,

@@ -243,6 +243,9 @@ pub enum Message {
     /// per-cube so the prompt never re-fires.
     RecoveryAlertsConsent(bool),
     DismissBackupWarning,
+    /// Close the Spark Stable Balance banner for this session
+    /// (`Cache::spark_notice`). Handled at the App level.
+    DismissSparkNotice,
     /// Flip the global fiat-native ↔ bitcoin-native display preference
     /// and persist it. Emitted by the click-to-swap mouse_area on any
     /// primary balance value, and by the Settings toggle.

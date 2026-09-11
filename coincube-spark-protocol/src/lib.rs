@@ -1066,7 +1066,28 @@ pub enum Event {
     /// response; a `None` state it didn't initiate triggers
     /// auto-re-register from the DB-reserved username.
     LightningAddressChanged { info: Option<LightningAddressInfo> },
+    /// The bridge switched Stable Balance off on its own because the
+    /// SDK's auto-conversion worker kept failing. The SDK has no
+    /// backoff on a failed `AutoConvert`: each failed BTC→USDB swap is
+    /// refunded as an incoming Spark transfer, the refund is a sats
+    /// receive, and that re-queues the same conversion — one attempt
+    /// every few seconds, forever, filling the payment history with
+    /// ±N-sat pairs. The bridge counts consecutive failures and after
+    /// [`STABLE_BALANCE_PAUSE_THRESHOLD`] of them deactivates the
+    /// feature, which is the only lever that stops the loop. `reason`
+    /// is the SDK's own error text (e.g. `Pool has no liquidity`) for
+    /// the gui to show; `failures` is how many attempts were seen.
+    StableBalancePaused { reason: String, failures: u32 },
 }
+
+/// How many consecutive `Auto-conversion failed` warnings the bridge
+/// tolerates before it pauses Stable Balance and emits
+/// [`Event::StableBalancePaused`]. The loop fires roughly every six
+/// seconds, so three failures is under half a minute of churn — long
+/// enough to skip a one-off AMM hiccup, short enough that the history
+/// doesn't fill up. Lives in the protocol crate so the gui can name the
+/// same number in its copy.
+pub const STABLE_BALANCE_PAUSE_THRESHOLD: u32 = 3;
 
 /// The top-level message envelope written/read on the wire. We use a single
 /// outer discriminator so one `serde_json::from_str` call works for all
@@ -1309,6 +1330,31 @@ mod tests {
                 "event": "deposits_changed"
             })
         );
+    }
+
+    #[test]
+    fn stable_balance_paused_event_round_trips() {
+        let frame = Frame::Event(Event::StableBalancePaused {
+            reason: "Pool has no liquidity".to_string(),
+            failures: STABLE_BALANCE_PAUSE_THRESHOLD,
+        });
+        let value = serde_json::to_value(&frame).expect("serialize");
+        assert_eq!(
+            value,
+            json!({
+                "type": "event",
+                "event": "stable_balance_paused",
+                "payload": { "reason": "Pool has no liquidity", "failures": 3 }
+            })
+        );
+
+        let Frame::Event(Event::StableBalancePaused { reason, failures }) =
+            serde_json::from_value(value).expect("deserialize")
+        else {
+            panic!("expected stable balance paused event");
+        };
+        assert_eq!(reason, "Pool has no liquidity");
+        assert_eq!(failures, 3);
     }
 
     #[test]
