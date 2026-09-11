@@ -255,7 +255,7 @@ jobs:
           path: target/wix/tenshu-${{ env.COINCUBE_VERSION }}-${{ matrix.target }}.msi
 
       # --------------------------------------------------
-      # macOS (arm64 + x64)
+      # macOS (arm64; the x64 leg ships from releases.yml only)
       # --------------------------------------------------
 
       - name: Install macOS dependencies
