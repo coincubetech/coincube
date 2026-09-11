@@ -30,15 +30,40 @@ const SDK_TARGET_PREFIX: &str = "breez_sdk_spark::stable_balance";
 /// (`warn!("Auto-conversion failed: {e:?}")`).
 const FAILURE_PREFIX: &str = "Auto-conversion failed";
 
-/// Decide whether one log record is the SDK's auto-conversion failure.
-/// Returns the reason text (the part after the prefix, cleaned up for
-/// display) when it is.
-pub fn classify(target: &str, level: Level, message: &str) -> Option<String> {
-    if level != Level::WARN || !target.starts_with(SDK_TARGET_PREFIX) {
+/// The SDK's success lines, verbatim (`info!("Auto-conversion completed:
+/// converted ...")` in the worker, and the per-receive variant that runs
+/// the same AMM swap for a single incoming payment). Either one proves the
+/// swap works again, which is what clears the failure run.
+const SUCCESS_PREFIXES: [&str; 2] = [
+    "Auto-conversion completed",
+    "Per-receive conversion completed",
+];
+
+/// One conversion attempt the SDK reported through its logs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConversionOutcome {
+    /// The swap failed; carries the reason text, cleaned up for display.
+    Failed(String),
+    /// The swap went through.
+    Succeeded,
+}
+
+/// Decide whether one log record is the SDK reporting a conversion
+/// outcome — the failure warning, or one of the success lines.
+pub fn classify(target: &str, level: Level, message: &str) -> Option<ConversionOutcome> {
+    if !target.starts_with(SDK_TARGET_PREFIX) {
         return None;
     }
-    let rest = message.strip_prefix(FAILURE_PREFIX)?;
-    Some(display_reason(rest))
+    match level {
+        Level::WARN => message
+            .strip_prefix(FAILURE_PREFIX)
+            .map(|rest| ConversionOutcome::Failed(display_reason(rest))),
+        Level::INFO => SUCCESS_PREFIXES
+            .iter()
+            .any(|prefix| message.starts_with(prefix))
+            .then_some(ConversionOutcome::Succeeded),
+        _ => None,
+    }
 }
 
 /// Trim the Rust `Debug` scaffolding off the SDK's error so the gui can
@@ -64,15 +89,15 @@ fn display_reason(rest: &str) -> String {
     }
 }
 
-/// A `tracing` layer that reports each SDK auto-conversion failure over
-/// `tx`. Installed alongside the `fmt` layer in `main`, so the warning
-/// still reaches stderr as before.
+/// A `tracing` layer that reports each SDK conversion outcome over `tx`.
+/// Installed alongside the `fmt` layer in `main`, so the lines still
+/// reach stderr as before.
 pub struct FailureWatchLayer {
-    tx: UnboundedSender<String>,
+    tx: UnboundedSender<ConversionOutcome>,
 }
 
 impl FailureWatchLayer {
-    pub fn new(tx: UnboundedSender<String>) -> Self {
+    pub fn new(tx: UnboundedSender<ConversionOutcome>) -> Self {
         Self { tx }
     }
 }
@@ -82,14 +107,17 @@ impl<S: Subscriber> Layer<S> for FailureWatchLayer {
         let meta = event.metadata();
         // Cheap pre-filter before visiting fields: the SDK logs at high
         // volume and this runs on every record.
-        if *meta.level() != Level::WARN || !meta.target().starts_with(SDK_TARGET_PREFIX) {
+        let level = *meta.level();
+        if (level != Level::WARN && level != Level::INFO)
+            || !meta.target().starts_with(SDK_TARGET_PREFIX)
+        {
             return;
         }
         let mut visitor = MessageVisitor::default();
         event.record(&mut visitor);
-        if let Some(reason) = classify(meta.target(), *meta.level(), &visitor.message) {
+        if let Some(outcome) = classify(meta.target(), level, &visitor.message) {
             // A closed receiver means the server loop is gone; nothing to do.
-            let _ = self.tx.send(reason);
+            let _ = self.tx.send(outcome);
         }
     }
 }
@@ -115,6 +143,8 @@ impl Visit for MessageVisitor {
 }
 
 /// Counts consecutive auto-conversion failures and says when to pause.
+/// A successful conversion ([`Self::record_success`]) clears the run, so
+/// only failures with no success in between count toward the threshold.
 #[derive(Debug, Default)]
 pub struct FailureTracker {
     consecutive: u32,
@@ -149,6 +179,12 @@ impl FailureTracker {
     pub fn reset(&mut self) {
         self.consecutive = 0;
     }
+
+    /// A conversion went through: the run of failures is over. Returns the
+    /// number of failures that were forgotten, for the log line.
+    pub fn record_success(&mut self) -> u32 {
+        std::mem::take(&mut self.consecutive)
+    }
 }
 
 #[cfg(test)]
@@ -166,9 +202,39 @@ mod tests {
                 "breez_sdk_spark::stable_balance::queue",
                 Level::WARN,
                 SDK_MESSAGE
-            )
-            .as_deref(),
-            Some("Pool has no liquidity")
+            ),
+            Some(ConversionOutcome::Failed("Pool has no liquidity".into()))
+        );
+    }
+
+    #[test]
+    fn classify_recognises_the_sdk_success_lines() {
+        let target = "breez_sdk_spark::stable_balance::conversions";
+        assert_eq!(
+            classify(
+                target,
+                Level::INFO,
+                "Auto-conversion completed: converted 1000 sats (sent_payment_id=a, \
+                 received_payment_id=b)"
+            ),
+            Some(ConversionOutcome::Succeeded)
+        );
+        assert_eq!(
+            classify(
+                target,
+                Level::INFO,
+                "Per-receive conversion completed: converted 10 sats for p (sent=a, received=b)"
+            ),
+            Some(ConversionOutcome::Succeeded)
+        );
+        // Triggered is not completed.
+        assert_eq!(
+            classify(
+                target,
+                Level::INFO,
+                "Auto-conversion triggered: converting 1000 sats to USDB"
+            ),
+            None
         );
     }
 
@@ -177,7 +243,19 @@ mod tests {
         let target = "breez_sdk_spark::stable_balance::queue";
         assert_eq!(classify(target, Level::INFO, SDK_MESSAGE), None);
         assert_eq!(
+            classify(target, Level::DEBUG, "Auto-conversion completed: x"),
+            None
+        );
+        assert_eq!(
             classify("breez_sdk_spark::sdk", Level::WARN, SDK_MESSAGE),
+            None
+        );
+        assert_eq!(
+            classify(
+                "breez_sdk_spark::sdk",
+                Level::INFO,
+                "Auto-conversion completed: x"
+            ),
             None
         );
         assert_eq!(
@@ -193,18 +271,16 @@ mod tests {
                 "breez_sdk_spark::stable_balance::queue",
                 Level::WARN,
                 "Auto-conversion failed: Timeout"
-            )
-            .as_deref(),
-            Some("Timeout")
+            ),
+            Some(ConversionOutcome::Failed("Timeout".into()))
         );
         assert_eq!(
             classify(
                 "breez_sdk_spark::stable_balance::queue",
                 Level::WARN,
                 "Auto-conversion failed"
-            )
-            .as_deref(),
-            Some("unknown error")
+            ),
+            Some(ConversionOutcome::Failed("unknown error".into()))
         );
     }
 
@@ -237,7 +313,19 @@ mod tests {
     }
 
     #[test]
-    fn layer_forwards_only_the_sdk_failure_warning() {
+    fn tracker_success_clears_the_run_so_only_consecutive_failures_count() {
+        let mut tracker = FailureTracker::default();
+        for _ in 1..STABLE_BALANCE_PAUSE_THRESHOLD {
+            tracker.record_failure();
+        }
+        assert_eq!(tracker.record_success(), STABLE_BALANCE_PAUSE_THRESHOLD - 1);
+        assert_eq!(tracker.record_success(), 0);
+        // One more failure after a success is a fresh run, not the pause.
+        assert_eq!(tracker.record_failure(), Verdict::Tolerate { failures: 1 });
+    }
+
+    #[test]
+    fn layer_forwards_only_the_sdk_conversion_outcomes() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let subscriber = tracing_subscriber::registry().with(FailureWatchLayer::new(tx));
 
@@ -249,12 +337,25 @@ mod tests {
                 target: "breez_sdk_spark::stable_balance::queue",
                 "Deactivation conversion failed: Timeout"
             );
+            tracing::info!(
+                target: "breez_sdk_spark::stable_balance::conversions",
+                "Auto-conversion completed: converted 1000 sats (sent_payment_id=a, \
+                 received_payment_id=b)"
+            );
+            tracing::debug!(
+                target: "breez_sdk_spark::stable_balance::queue",
+                "Conversion worker: auto-convert done (converted=true)"
+            );
         });
 
-        assert_eq!(rx.try_recv().ok().as_deref(), Some("Pool has no liquidity"));
+        assert_eq!(
+            rx.try_recv().ok(),
+            Some(ConversionOutcome::Failed("Pool has no liquidity".into()))
+        );
+        assert_eq!(rx.try_recv().ok(), Some(ConversionOutcome::Succeeded));
         assert!(
             rx.try_recv().is_err(),
-            "only the failure warning is forwarded"
+            "only the failure warning and the success lines are forwarded"
         );
     }
 }

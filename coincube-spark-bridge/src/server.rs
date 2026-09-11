@@ -45,7 +45,7 @@ use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
 use crate::sdk_adapter::{self, SdkHandle};
-use crate::stable_balance_watch::{FailureTracker, Verdict};
+use crate::stable_balance_watch::{ConversionOutcome, FailureTracker, Verdict};
 
 /// How long a pending prepare lives before the background sweep evicts
 /// it. Picked at 5 minutes — long enough to cover human dwell time on
@@ -61,11 +61,11 @@ const PREPARE_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Run the stdin/stdout server until EOF on stdin or a `shutdown` RPC.
 ///
-/// `conversion_failures` delivers one message per SDK auto-conversion
-/// failure, from the `tracing` layer installed in `main` — see
-/// [`crate::stable_balance_watch`].
+/// `conversion_outcomes` delivers one message per SDK auto-conversion
+/// outcome (failure or success), from the `tracing` layer installed in
+/// `main` — see [`crate::stable_balance_watch`].
 pub async fn run(
-    conversion_failures: tokio::sync::mpsc::UnboundedReceiver<String>,
+    conversion_outcomes: tokio::sync::mpsc::UnboundedReceiver<ConversionOutcome>,
 ) -> anyhow::Result<()> {
     // Single writer task: serializes all stdout writes so responses and
     // events never interleave mid-line. We talk to it over an unbounded
@@ -80,7 +80,7 @@ pub async fn run(
     // prepare sweep below: this task must not keep the state (and its
     // stdout sender) alive past the read loop.
     let breaker_weak = Arc::downgrade(&state);
-    tokio::spawn(watch_conversion_failures(conversion_failures, breaker_weak));
+    tokio::spawn(watch_conversion_failures(conversion_outcomes, breaker_weak));
 
     // Phase 4f: background sweep that evicts pending-prepare entries
     // older than `PREPARE_TTL`. Uses a Weak reference so the sweep
@@ -203,8 +203,9 @@ struct ServerState {
     /// handlers push `Frame::Response`s, so stdout stays interleave-safe.
     event_tx: tokio::sync::mpsc::UnboundedSender<Frame>,
     /// Consecutive Stable Balance auto-conversion failures, fed by
-    /// [`watch_conversion_failures`] and cleared when the user turns the
-    /// feature on again ([`handle_set_stable_balance`]).
+    /// [`watch_conversion_failures`] (which also clears it on a successful
+    /// conversion) and cleared when the user turns the feature on again
+    /// ([`handle_set_stable_balance`]).
     conversion_failures: Mutex<FailureTracker>,
 }
 
@@ -221,22 +222,36 @@ impl ServerState {
     }
 }
 
-/// Stable Balance circuit breaker: count the SDK's auto-conversion
-/// failures and, at the threshold, switch the feature off and tell the
-/// gui. Runs for the process lifetime; exits when the tracing layer's
-/// sender or the server state is gone.
+/// Stable Balance circuit breaker: count the SDK's consecutive
+/// auto-conversion failures — a success in between clears the run — and,
+/// at the threshold, switch the feature off and tell the gui. Runs for
+/// the process lifetime; exits when the tracing layer's sender or the
+/// server state is gone.
 ///
 /// Deactivating is done through the same `update_user_settings` call the
 /// user's toggle uses, so the SDK persists "off" locally and the loop does
 /// not resume on the next launch either. The gui additionally records the
 /// pause in the Cube's settings on receipt of the event.
 async fn watch_conversion_failures(
-    mut failures: tokio::sync::mpsc::UnboundedReceiver<String>,
+    mut outcomes: tokio::sync::mpsc::UnboundedReceiver<ConversionOutcome>,
     state: std::sync::Weak<ServerState>,
 ) {
-    while let Some(reason) = failures.recv().await {
+    while let Some(outcome) = outcomes.recv().await {
         let Some(state) = state.upgrade() else {
             break;
+        };
+        let reason = match outcome {
+            ConversionOutcome::Failed(reason) => reason,
+            ConversionOutcome::Succeeded => {
+                let forgotten = state.conversion_failures.lock().await.record_success();
+                if forgotten > 0 {
+                    tracing::info!(
+                        "Stable Balance auto-conversion succeeded; forgetting {forgotten} \
+                         earlier failure(s)"
+                    );
+                }
+                continue;
+            }
         };
         let verdict = state.conversion_failures.lock().await.record_failure();
         let failures = match verdict {

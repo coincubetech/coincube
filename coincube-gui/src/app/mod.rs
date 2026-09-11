@@ -5379,6 +5379,18 @@ impl App {
                         tasks.push(Task::done(Message::View(view::Message::SparkReceive(
                             view::SparkReceiveMessage::PaymentReceived { amount_sat, bolt11 },
                         ))));
+                        // An auto-claim accepted before maturity settles
+                        // through this event; Home needs the settled amount
+                        // to complete its indicator and fire the splash.
+                        if let Ok(amount_sat) =
+                            <u64 as std::convert::TryFrom<i64>>::try_from(amount_sat)
+                        {
+                            if amount_sat > 0 {
+                                tasks.push(Task::done(Message::View(view::Message::Home(
+                                    view::HomeMessage::SparkPaymentSucceeded { amount_sat },
+                                ))));
+                            }
+                        }
                     }
                     SparkEvent::DepositsChanged => {
                         // Phase 4f: refresh the Receive panel's

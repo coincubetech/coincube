@@ -2198,10 +2198,20 @@ pub enum HomeMessage {
     SparkDepositsLoaded(Vec<coincube_spark_protocol::DepositInfo>),
     /// Completion signal for the auto-claim call. On success, another
     /// `DepositsChanged` event will fire and the watcher re-runs.
+    ///
+    /// `Ok(None)` is a claim the SDK accepted before maturity (0.25.0+): the
+    /// transfer settles asynchronously and its settled amount is unknown
+    /// until [`Self::SparkPaymentSucceeded`] reports it.
     AutoClaimSparkResult {
         txid: String,
         vout: u32,
-        result: Result<u64, String>,
+        result: Result<Option<u64>, String>,
+    },
+    /// The Spark bridge reported `PaymentSucceeded` for an incoming transfer
+    /// of `amount_sat`. Home only acts on it while an auto-claim is waiting
+    /// for its asynchronous settlement (see [`Self::AutoClaimSparkResult`]).
+    SparkPaymentSucceeded {
+        amount_sat: u64,
     },
     /// Fired when a Breez peg-in swap completes (BTC on-chain → L-BTC).
     /// The state handler decrements `pending_liquid_receive_sats` and re-runs

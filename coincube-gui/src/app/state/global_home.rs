@@ -332,6 +332,11 @@ pub struct GlobalHome {
     /// `SparkDepositsChanged` watcher from re-firing a second `claim_deposit`
     /// for the same deposit while the first one is still in flight.
     auto_claiming_spark_deposit: Option<(String, u32)>,
+    /// An auto-claim was accepted before maturity (SDK 0.25.0+) and its
+    /// transfer is settling asynchronously: the settled amount is unknown
+    /// until the bridge's `PaymentSucceeded` reports it, so Completed and
+    /// the "received" splash wait for `SparkPaymentSucceeded`.
+    spark_claim_awaiting_settlement: bool,
     pending_liquid_send_sats: u64,
     pending_usdt_send_sats: u64,
     pending_liquid_receive_sats: u64,
@@ -400,6 +405,7 @@ impl GlobalHome {
             spark_send_handle: None,
             spark_send_fee_sat: None,
             auto_claiming_spark_deposit: None,
+            spark_claim_awaiting_settlement: false,
             pending_liquid_send_sats: 0,
             pending_usdt_send_sats: 0,
             pending_liquid_receive_sats: 0,
@@ -466,6 +472,7 @@ impl GlobalHome {
             spark_send_handle: None,
             spark_send_fee_sat: None,
             auto_claiming_spark_deposit: None,
+            spark_claim_awaiting_settlement: false,
             pending_liquid_send_sats: 0,
             pending_usdt_send_sats: 0,
             pending_liquid_receive_sats: 0,
@@ -1272,6 +1279,7 @@ impl State for GlobalHome {
                                 // `AutoClaimSparkResult` handler also gates on
                                 // this field for defense in depth.
                                 self.auto_claiming_spark_deposit = None;
+                                self.spark_claim_awaiting_settlement = false;
                             }
                         }
                         self.current_view.next();
@@ -1836,6 +1844,7 @@ impl State for GlobalHome {
                             self.pending_spark_deposit_seen = false;
                             self.pending_spark_incoming_is_swap = false;
                             self.auto_claiming_spark_deposit = None;
+                            self.spark_claim_awaiting_settlement = false;
                             if was_swap {
                                 return Task::done(Message::View(
                                     view::Message::SparkSideshiftReceive(
@@ -1873,10 +1882,6 @@ impl State for GlobalHome {
                         };
                         let txid = candidate.txid.clone();
                         let vout = candidate.vout;
-                        // What the deposit is worth before fees — the figure
-                        // to show if the claim settles asynchronously and
-                        // returns no Payment (SDK 0.25.0+ pre-maturity claim).
-                        let deposit_amount_sat = candidate.amount_sat;
                         self.auto_claiming_spark_deposit = Some((txid.clone(), vout));
                         let txid_for_msg = txid.clone();
                         Task::perform(
@@ -1886,10 +1891,13 @@ impl State for GlobalHome {
                                     HomeMessage::AutoClaimSparkResult {
                                         txid: txid_for_msg.clone(),
                                         vout,
+                                        // `amount_sat` is `None` for a pre-maturity
+                                        // claim (SDK 0.25.0+): the transfer settles
+                                        // asynchronously and only `PaymentSucceeded`
+                                        // knows what actually landed. Keep it unknown
+                                        // rather than showing the pre-fee deposit.
                                         result: match result {
-                                            Ok(ok) => {
-                                                Ok(ok.amount_sat.unwrap_or(deposit_amount_sat))
-                                            }
+                                            Ok(ok) => Ok(ok.amount_sat),
                                             Err(e) => Err(e.to_string()),
                                         },
                                     },
@@ -1915,33 +1923,29 @@ impl State for GlobalHome {
                         // the user can retry from the Receive panel.
                         self.auto_claiming_spark_deposit = None;
                         match result {
-                            Ok(amount) => {
-                                // Capture before the block below may clear it.
-                                let celebrate_swap = self.pending_spark_incoming_is_swap;
-                                if let Some(mut pending) = self.pending_spark_incoming {
-                                    pending.stage = TransferStage::Completed;
-                                    self.pending_spark_incoming = Some(pending);
-                                }
-                                if celebrate_swap {
-                                    // The swap's bitcoin has landed in the Spark
-                                    // wallet — fire the global "received" splash.
-                                    // Reset the flag first so the follow-up
-                                    // DepositsChanged (which clears
-                                    // pending_spark_incoming) can't re-fire it.
-                                    self.pending_spark_incoming_is_swap = false;
-                                    return Task::done(Message::ShowReceivedCelebration {
-                                        context: "spark-receive".to_string(),
-                                        amount_sat: amount,
-                                    });
-                                }
+                            Ok(None) => {
+                                // Accepted before maturity: nothing has landed
+                                // yet and the settled amount is unknown. Leave
+                                // the indicator pending and let
+                                // `SparkPaymentSucceeded` finish the job.
+                                self.spark_claim_awaiting_settlement = true;
                                 Task::none()
                             }
+                            Ok(Some(amount)) => self.complete_spark_auto_claim(amount),
                             Err(e) => {
                                 log::warn!("Auto-claim of Spark deposit failed: {e}");
                                 Task::none()
                             }
                         }
                     }
+                    HomeMessage::SparkPaymentSucceeded { amount_sat } => {
+                        if !self.spark_claim_awaiting_settlement {
+                            return Task::none();
+                        }
+                        self.spark_claim_awaiting_settlement = false;
+                        self.complete_spark_auto_claim(amount_sat)
+                    }
+
                     HomeMessage::LiquidPeginCompleted { amount_sat } => {
                         // Decrement the pending-receive counter instantly so the
                         // Liquid card drops its "pending" badge without waiting for
@@ -2601,6 +2605,30 @@ impl GlobalHome {
             (Some(_), None) => false,
             _ => false,
         }
+    }
+
+    /// The auto-claimed deposit has landed for `amount_sat`: mark the
+    /// indicator Completed so the view hides it immediately and `BackToHome`
+    /// can reap it symmetric to `pending_vault_incoming` (the bridge's
+    /// follow-up `DepositsChanged` will still clear the field outright), and
+    /// fire the global "received" splash if this was a swap.
+    fn complete_spark_auto_claim(&mut self, amount_sat: u64) -> Task<Message> {
+        // Capture before the block below may clear it.
+        let celebrate_swap = self.pending_spark_incoming_is_swap;
+        if let Some(mut pending) = self.pending_spark_incoming {
+            pending.stage = TransferStage::Completed;
+            self.pending_spark_incoming = Some(pending);
+        }
+        if celebrate_swap {
+            // Reset the flag first so the follow-up DepositsChanged (which
+            // clears pending_spark_incoming) can't re-fire it.
+            self.pending_spark_incoming_is_swap = false;
+            return Task::done(Message::ShowReceivedCelebration {
+                context: "spark-receive".to_string(),
+                amount_sat,
+            });
+        }
+        Task::none()
     }
 
     fn is_matching_pending_spark_swap(&self, incoming_swap_id: Option<&str>) -> bool {
