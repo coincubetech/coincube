@@ -2309,6 +2309,11 @@ impl App {
         panels
             .connect
             .set_vault_fingerprint(cube_settings.vault_fingerprint.clone());
+        // This device's Spark Stable Balance decision rides the registration
+        // request so the Cube's server record — the cross-device copy — has it.
+        panels
+            .connect
+            .set_spark_stable_balance(cube_settings.spark_stable_balance);
         let mut tasks = vec![];
         if let Some(pending) = pending_rescan {
             tasks.push(settle_rescan_obligation(
@@ -2492,6 +2497,9 @@ impl App {
         panels
             .connect
             .set_vault_fingerprint(cube_settings.vault_fingerprint.clone());
+        panels
+            .connect
+            .set_spark_stable_balance(cube_settings.spark_stable_balance);
         let mut cache = cache;
         cache.cube_encryption_key = derive_cube_encryption_key(&breez_client, network);
         cache.connect_transport_key =
@@ -2851,11 +2859,25 @@ impl App {
         )
     }
 
-    /// Record the user's Stable Balance decision for this Cube — in memory
-    /// and in the settings file. See `CubeSettings::spark_stable_balance`
+    /// Record the user's Stable Balance decision for this Cube — in memory,
+    /// in the settings file, and on the Cube's Connect record so the owner's
+    /// other desktops pick it up. See `CubeSettings::spark_stable_balance`
     /// for when this is called. Any Stable Balance banner is cleared: a
     /// decision supersedes the prompt.
     fn record_spark_stable_balance(&mut self, enabled: bool) -> Task<Message> {
+        Task::batch([
+            self.record_spark_stable_balance_locally(enabled),
+            self.panels
+                .connect
+                .cube
+                .report_spark_stable_balance(enabled),
+        ])
+    }
+
+    /// The local half of [`Self::record_spark_stable_balance`]: memory,
+    /// settings file, banner. Used on its own when the decision *came from*
+    /// Connect, where pushing it back would be a pointless round trip.
+    fn record_spark_stable_balance_locally(&mut self, enabled: bool) -> Task<Message> {
         self.cube_settings.spark_stable_balance = Some(enabled);
         self.cache.spark_notice = None;
         let network_dir = self
@@ -4071,6 +4093,9 @@ impl App {
                     // async move.
                     let cube_has_vault =
                         self.cube_settings.vault_wallet_id.is_some().then_some(true);
+                    // Same for this device's Spark Stable Balance decision:
+                    // `None` is omitted, so it never clobbers another device's.
+                    let cube_spark_stable_balance = self.cube_settings.spark_stable_balance;
                     let cube_uuid = cube_uuid.clone();
                     let registration_email = expected_email.clone();
                     Task::perform(
@@ -4099,6 +4124,7 @@ impl App {
                                     name: cube_name,
                                     network: net_str,
                                     has_vault: cube_has_vault,
+                                    spark_stable_balance: cube_spark_stable_balance,
                                 }) // upgrade-only Option<bool>
                                 .await
                                 .map_err(|e| e.to_string())
@@ -5099,6 +5125,37 @@ impl App {
                     return self.record_spark_stable_balance(false);
                 }
                 self.cache.spark_notice = None;
+            }
+            Message::CubeSparkStableBalanceReported => {}
+            Message::SparkStableBalanceFromConnect(server) => {
+                // Adopt the server's record only when this device has none:
+                // the registration request already carried a local decision,
+                // so a response that disagrees with one is a stale answer to
+                // an earlier request (the user toggled while it was in
+                // flight), not newer information. With no local decision the
+                // server's is the only one there is — adopt it, then re-check
+                // the SDK against it. `None` on both sides is the fresh-Cube
+                // case; a local decision with no server record was pushed by
+                // the registration itself.
+                match (self.cube_settings.spark_stable_balance, server) {
+                    (None, Some(enabled)) => {
+                        log::info!(
+                            "Spark Stable Balance decision from Connect: {}",
+                            if enabled { "on" } else { "off" }
+                        );
+                        return Task::batch([
+                            self.record_spark_stable_balance_locally(enabled),
+                            self.spark_stable_balance_state_task(),
+                        ]);
+                    }
+                    (Some(local), Some(remote)) if local != remote => {
+                        log::debug!(
+                            "Connect reports Spark Stable Balance {remote} but this device \
+                             decided {local}; keeping the local decision"
+                        );
+                    }
+                    _ => {}
+                }
             }
             Message::SparkStableBalanceState(None) => {}
             Message::SparkStableBalanceState(Some((sdk_active, holds_usdb))) => {

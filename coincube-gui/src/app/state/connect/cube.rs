@@ -131,6 +131,13 @@ pub struct ConnectCubePanel {
     /// (PLAN-duress-vault-gate PR 3). Flipped to `true` in-session when a
     /// Vault is created (see `App::WalletUpdated`).
     pub cube_has_vault: bool,
+    /// This device's recorded Spark Stable Balance decision
+    /// (`CubeSettings::spark_stable_balance`), seeded by the App and updated
+    /// through [`Self::report_spark_stable_balance`]. Sent on registration so
+    /// the Cube's server record — the cross-device copy — picks it up; `None`
+    /// is omitted from the request so a device with no decision never
+    /// clobbers another device's.
+    pub spark_stable_balance: Option<bool>,
     /// This Cube's Connect-blinding encryption **public** key (33-byte
     /// compressed secp256k1, lowercase hex), read from
     /// `CubeSettings::connect_encryption_pubkey`. `None` for a Cube whose seed
@@ -265,6 +272,7 @@ impl ConnectCubePanel {
             cube_name,
             cube_network,
             cube_has_vault,
+            spark_stable_balance: None,
             cube_encryption_pubkey: None,
             enc_pubkey_registered: false,
             vault_fingerprint: None,
@@ -570,6 +578,7 @@ impl ConnectCubePanel {
             // holds it, else omit so a re-register never clobbers a `true`
             // reported elsewhere (PLAN-duress-vault-gate PR 3).
             has_vault: self.cube_has_vault.then_some(true),
+            spark_stable_balance: self.spark_stable_balance,
         };
         iced::Task::perform(async move { client.register_cube(req).await }, move |res| {
             Message::View(view::Message::ConnectCube(
@@ -774,6 +783,7 @@ impl ConnectCubePanel {
             name: None,
             status: None,
             has_vault: Some(true),
+            spark_stable_balance: None,
         };
         iced::Task::perform(
             async move {
@@ -782,6 +792,34 @@ impl ConnectCubePanel {
                 }
             },
             |()| Message::CubeVaultReported,
+        )
+    }
+
+    /// Push a Spark Stable Balance decision to the Cube's server record so
+    /// the owner's other desktops pick it up (the toggle, a bridge pause, or
+    /// dismissing the "USDB held" banner — see
+    /// `CubeSettings::spark_stable_balance`). Remembers the value either way;
+    /// when the Cube isn't registered yet or there is no live client, the next
+    /// `register_cube` carries it instead. Background hygiene: a failed PUT is
+    /// logged, and the value rides the next registration.
+    pub fn report_spark_stable_balance(&mut self, enabled: bool) -> iced::Task<Message> {
+        self.spark_stable_balance = Some(enabled);
+        let (Some(client), Some(server_id)) = (self.client.clone(), self.server_cube_id) else {
+            return iced::Task::none();
+        };
+        let req = UpdateCubeRequest {
+            name: None,
+            status: None,
+            has_vault: None,
+            spark_stable_balance: Some(enabled),
+        };
+        iced::Task::perform(
+            async move {
+                if let Err(e) = client.update_cube(&server_id.to_string(), req).await {
+                    log::warn!("[CONNECT-CUBE] report spark_stable_balance={enabled}: {e}");
+                }
+            },
+            |()| Message::CubeSparkStableBalanceReported,
         )
     }
 
@@ -858,7 +896,20 @@ impl ConnectCubePanel {
                         // missing a member row would stay broken on the phone
                         // until someone started a desktop sign.
                         let reconcile_members_task = self.reconcile_vault_members();
-                        let mut tasks = vec![enc_key_task, vault_fp_task, reconcile_members_task];
+                        // The server's Spark Stable Balance record is the
+                        // cross-device one; hand it to the App, which owns
+                        // the local record and the SDK reconcile. Sent even
+                        // when `None` so the App can push this device's
+                        // decision up if the server has none.
+                        let stable_balance_task = iced::Task::done(
+                            Message::SparkStableBalanceFromConnect(cube_resp.spark_stable_balance),
+                        );
+                        let mut tasks = vec![
+                            enc_key_task,
+                            vault_fp_task,
+                            reconcile_members_task,
+                            stable_balance_task,
+                        ];
                         tasks.extend(reconcile_task);
                         tasks.extend(avatar_task);
                         return iced::Task::batch(tasks);
@@ -1932,6 +1983,7 @@ mod tests {
             status: "active".to_string(),
             has_recovery_kit: false,
             has_vault: Some(true),
+            spark_stable_balance: None,
             members: Vec::new(),
             pending_invites: Vec::new(),
             vault: None,
@@ -2065,6 +2117,7 @@ mod tests {
             status: "active".to_string(),
             has_recovery_kit: false,
             has_vault: Some(true),
+            spark_stable_balance: None,
             encryption_pubkey: None,
             members: vec![],
             pending_invites: vec![],
@@ -2228,6 +2281,33 @@ mod tests {
             result: Err("register failed".to_string()),
         });
         assert!(panel.begin_external_registration().is_some());
+    }
+
+    /// A Stable Balance decision made before the Cube is registered (or
+    /// while signed out) can't be PUT anywhere yet — but it must not be
+    /// lost: the panel keeps it so the next registration carries it.
+    #[test]
+    fn spark_stable_balance_report_is_kept_for_registration_when_it_cannot_be_sent() {
+        let mut panel = panel();
+        assert_eq!(panel.spark_stable_balance, None);
+
+        // No client, no server id: nothing to send, value remembered.
+        assert!(
+            iced_runtime::task::into_stream(panel.report_spark_stable_balance(false)).is_none()
+        );
+        assert_eq!(panel.spark_stable_balance, Some(false));
+
+        // Client but no server id (registration hasn't answered): same.
+        panel.set_client(CoincubeClient::new());
+        assert!(iced_runtime::task::into_stream(panel.report_spark_stable_balance(true)).is_none());
+        assert_eq!(panel.spark_stable_balance, Some(true));
+
+        // Once registered, the report becomes a real PUT.
+        panel.server_cube_id = Some(7);
+        assert!(
+            iced_runtime::task::into_stream(panel.report_spark_stable_balance(false)).is_some()
+        );
+        assert_eq!(panel.spark_stable_balance, Some(false));
     }
 
     #[test]

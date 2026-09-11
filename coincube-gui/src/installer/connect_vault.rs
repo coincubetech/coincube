@@ -202,6 +202,8 @@ pub async fn create_connect_vault(
             // about to be created for this Cube), so report Vault presence
             // (PLAN-duress-vault-gate PR 3). Upgrade-only `Some(true)`.
             has_vault: Some(true),
+            // No Spark decision is known in the installer; leave the server's.
+            spark_stable_balance: None,
         })
         .await
         .map_err(|e| ConnectVaultError::Other(format!("Failed to register cube: {}", e)))?;

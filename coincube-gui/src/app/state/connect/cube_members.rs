@@ -360,6 +360,7 @@ mod tests {
             status: "active".to_string(),
             has_recovery_kit: false,
             has_vault: None,
+            spark_stable_balance: None,
             members,
             pending_invites,
             vault: None,

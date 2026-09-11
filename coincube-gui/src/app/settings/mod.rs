@@ -682,8 +682,13 @@ pub struct CubeSettings {
     /// ([`crate::app::App`] `reconcile_spark_stable_balance`): the app's
     /// copy wins.
     ///
-    /// Local to this datadir. A fresh install has `None` and falls back to
-    /// the wallet's on-chain evidence (a USDB holding) to prompt the user.
+    /// Also mirrored to the Cube's Connect record (`sparkStableBalance`,
+    /// `CubeResponse::spark_stable_balance`) so the owner's other desktops
+    /// pick it up: every write here is pushed, the registration request
+    /// carries it, and a device with `None` adopts the server's value when
+    /// its registration answers. A fresh install without Connect has `None`
+    /// and falls back to the wallet's on-chain evidence (a USDB holding) to
+    /// prompt the user.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spark_stable_balance: Option<bool>,
     /// Set when the user finished Cube creation **without** demonstrating a
