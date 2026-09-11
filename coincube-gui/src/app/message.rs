@@ -183,6 +183,14 @@ pub enum Message {
     },
     SettingsSaved,
     SettingsSaveFailed(Error),
+    /// The session's first post-sync read of the Spark SDK's Stable
+    /// Balance state: `(sdk_active, holds_usdb)`. `None` when the bridge
+    /// couldn't answer (already logged) — the reconcile is skipped for the
+    /// session rather than acting on a guess.
+    SparkStableBalanceState(Option<(bool, bool)>),
+    /// The reconcile re-applied the Cube's recorded Stable Balance
+    /// preference on the bridge. `Ok(enabled)` is the value applied.
+    SparkStableBalanceApplied(Result<bool, String>),
     /// Store the Bitcoind handle produced by configure_and_start_internal_bitcoind so
     /// that its LockFile is kept alive for the lifetime of the App.
     SetInternalBitcoind(Bitcoind),
