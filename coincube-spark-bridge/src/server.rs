@@ -29,7 +29,7 @@ use breez_sdk_spark::{
     PaymentDetails, PaymentRequest, PrepareLnurlPayRequest, PrepareLnurlPayResponse,
     PrepareSendPaymentRequest, PrepareSendPaymentResponse, ReceivePaymentMethod,
     ReceivePaymentRequest, RegisterLightningAddressRequest, SdkEvent, SendOnchainFeeQuote,
-    SendPaymentMethod, SendPaymentOptions, SendPaymentRequest, SourceAsset,
+    SendPaymentMethod, SendPaymentOptions, SendPaymentRequest, SparkAsset,
     StableBalanceActiveLabel, UpdateUserSettingsRequest,
 };
 use coincube_spark_protocol::{
@@ -281,6 +281,7 @@ async fn deactivate_stable_balance(sdk: &SdkHandle) -> Result<(), breez_sdk_spar
         .update_user_settings(UpdateUserSettingsRequest {
             spark_private_mode_enabled: None,
             stable_balance_active_label: Some(StableBalanceActiveLabel::Unset),
+            spark_master_identity_public_key: None,
         })
         .await
 }
@@ -421,6 +422,10 @@ impl EventListener for BridgeEventListener {
             // Optimization events stay swallowed until a panel
             // needs them. (0.19.0 renamed this from `Optimization`.)
             SdkEvent::AutoOptimization { .. } => None,
+            // 0.25.0: progress of a unilateral exit (the user leaving Spark
+            // without the operators' cooperation). Nothing in the gui drives
+            // one, so there is nothing to show yet.
+            SdkEvent::UnilateralExitStateChanged => None,
         };
 
         if let Some(ev) = protocol_event {
@@ -786,14 +791,23 @@ fn conversion_for_shortfall(
     })
 }
 
-/// Whether an SDK prepare error is the wallet saying the bitcoin balance
-/// can't cover the send. Matched on text because it arrives in two shapes:
-/// `SdkError::InsufficientFunds` ("Insufficient funds") from the Lightning
-/// and Spark paths, and `SdkError::SparkError("... Tree service error:
+/// Whether an SDK prepare error is the wallet saying the *bitcoin* balance
+/// can't cover the send. Two shapes: `SdkError::InsufficientFunds` from the
+/// Lightning and Spark paths — since 0.25.0 it names a token when the
+/// shortfall is in one, and that case is not ours to fix with more
+/// conversion — and `SdkError::SparkError("... Tree service error:
 /// insufficient funds")` from the on-chain path, whose leaf selection runs
-/// inside the fee quote.
+/// inside the fee quote and only ever means sats.
 fn is_insufficient_funds(e: &breez_sdk_spark::SdkError) -> bool {
-    e.to_string().to_lowercase().contains("insufficient funds")
+    match e {
+        breez_sdk_spark::SdkError::InsufficientFunds { token_identifier } => {
+            token_identifier.is_none()
+        }
+        other => other
+            .to_string()
+            .to_lowercase()
+            .contains("insufficient funds"),
+    }
 }
 
 /// How [`prepare_with_usdb_fallback`] failed.
@@ -1039,10 +1053,14 @@ async fn handle_prepare_send(
 /// sending *from* Stable Balance is deferred. This is also what makes the v1
 /// path retry-safe — see [`route_is_retry_safe`].
 fn route_accepts_btc(route: &CrossChainRoutePair) -> bool {
+    // 0.25.0 renamed `supported_sources: Vec<SourceAsset>` to
+    // `accepted_assets: Vec<SparkAsset>` and added `delivery_methods` (the
+    // rail — Spark / Lightning / Bitcoin) alongside it. The rail is the
+    // SDK's concern; funding is what decides retry safety here.
     route
-        .supported_sources
+        .accepted_assets
         .iter()
-        .any(|s| matches!(s, SourceAsset::Bitcoin))
+        .any(|s| matches!(s, SparkAsset::Bitcoin))
 }
 
 /// Whether a failed send along this route can be blind-retried.
@@ -1647,6 +1665,9 @@ async fn handle_receive_bolt11(
             amount_sats: params.amount_sat,
             expiry_secs: params.expiry_secs,
             payment_hash: None,
+            // 0.25.0: invoices can be issued for another Spark identity.
+            // Ours always pay this wallet.
+            receiver_identity_public_key: None,
         },
     };
 
@@ -2033,14 +2054,21 @@ async fn handle_claim_deposit(
 
     match sdk.sdk.claim_deposit(request).await {
         Ok(resp) => {
-            // The SDK's claim returns a Payment whose `amount` reflects
-            // the post-fee deposited value. Surface that to the gui so
-            // the success toast can show the actual claimed amount.
-            let amount_sat = clamp_u128_to_u64(resp.payment.amount);
+            // A deposit claimed at maturity settles synchronously and comes
+            // back with the Payment, whose `amount` is the post-fee value.
+            // Since 0.25.0 a deposit can also be claimed *before* maturity
+            // (when the provider's spread fits under `max_fee`); that
+            // transfer settles asynchronously and there is no Payment yet —
+            // the gui hears about it through `PaymentSucceeded` /
+            // `DepositsChanged` like any other incoming transfer.
+            let (payment_id, amount_sat) = match resp.payment {
+                Some(payment) => (Some(payment.id), Some(clamp_u128_to_u64(payment.amount))),
+                None => (None, None),
+            };
             Response::ok(
                 id,
                 OkPayload::ClaimDeposit(ClaimDepositOk {
-                    payment_id: resp.payment.id,
+                    payment_id,
                     amount_sat,
                 }),
             )
@@ -2111,6 +2139,9 @@ async fn handle_set_stable_balance(
         stable_balance_active_label: Some(StableBalanceActiveLabel::Set {
             label: crate::sdk_adapter::STABLE_BALANCE_LABEL.to_string(),
         }),
+        // 0.25.0: a second read-only identity for private mode. Not a
+        // feature we expose; `None` leaves it untouched.
+        spark_master_identity_public_key: None,
     };
 
     match sdk.sdk.update_user_settings(request).await {
@@ -2339,6 +2370,7 @@ mod fee_tier_tests {
             speed_fast: tier(3_000, 300),
             speed_medium: tier(200, 20),
             speed_slow: tier(90, 10),
+            is_estimate: false,
         }
     }
 
@@ -2468,6 +2500,7 @@ mod fee_tier_tests {
                 user_fee_sat: 0,
                 l1_broadcast_fee_sat: 0,
             },
+            is_estimate: false,
         };
         assert_eq!(
             onchain_fee_for_speed(&quote, &OnchainConfirmationSpeed::Medium),
@@ -2532,7 +2565,14 @@ mod usdb_fallback_tests {
     #[test]
     fn insufficient_funds_is_recognised_in_both_sdk_error_shapes() {
         // Lightning / Spark-address paths.
-        assert!(is_insufficient_funds(&SdkError::InsufficientFunds));
+        assert!(is_insufficient_funds(&SdkError::InsufficientFunds {
+            token_identifier: None
+        }));
+        // A *token* shortfall is a different problem; more USDB conversion
+        // is not the answer to "not enough USDB".
+        assert!(!is_insufficient_funds(&SdkError::InsufficientFunds {
+            token_identifier: Some(sdk_adapter::USDB_MAINNET_TOKEN_IDENTIFIER.to_string())
+        }));
         // On-chain path: the tree service error surfaces as a string.
         assert!(is_insufficient_funds(&SdkError::SparkError(
             "Tree service error: insufficient funds".to_string()
@@ -2674,7 +2714,9 @@ mod usdb_fallback_tests {
     async fn insufficient_funds_error_stands_without_usdb_or_a_known_amount() {
         // No USDB to draw on: the original error comes back.
         let fake = FakePrepare {
-            plain: Err(SdkError::InsufficientFunds),
+            plain: Err(SdkError::InsufficientFunds {
+                token_identifier: None,
+            }),
             converted: Ok((true, 1)),
             calls: Cell::new(0),
         };
@@ -2688,14 +2730,18 @@ mod usdb_fallback_tests {
         .await;
         assert!(matches!(
             result,
-            Err(PrepareError::Sdk(SdkError::InsufficientFunds))
+            Err(PrepareError::Sdk(SdkError::InsufficientFunds {
+                token_identifier: None
+            }))
         ));
         assert_eq!(fake.calls.get(), 1);
 
         // Amount unknown (amountless prepare that failed): nothing to size
         // the conversion from, so no retry.
         let fake = FakePrepare {
-            plain: Err(SdkError::InsufficientFunds),
+            plain: Err(SdkError::InsufficientFunds {
+                token_identifier: None,
+            }),
             converted: Ok((true, 1)),
             calls: Cell::new(0),
         };
@@ -2713,7 +2759,9 @@ mod usdb_fallback_tests {
         .await;
         assert!(matches!(
             result,
-            Err(PrepareError::Sdk(SdkError::InsufficientFunds))
+            Err(PrepareError::Sdk(SdkError::InsufficientFunds {
+                token_identifier: None
+            }))
         ));
         assert!(!checked.get());
         assert_eq!(fake.calls.get(), 1);
@@ -2857,7 +2905,7 @@ mod cross_chain_tests {
     use super::*;
     use breez_sdk_spark::CrossChainProvider;
 
-    fn route(provider: CrossChainProvider, sources: Vec<SourceAsset>) -> CrossChainRoutePair {
+    fn route(provider: CrossChainProvider, sources: Vec<SparkAsset>) -> CrossChainRoutePair {
         CrossChainRoutePair {
             provider,
             chain: "base".to_string(),
@@ -2866,7 +2914,8 @@ mod cross_chain_tests {
             contract_address: Some("0xabc".to_string()),
             decimals: 6,
             exact_out_eligible: true,
-            supported_sources: sources,
+            accepted_assets: sources,
+            delivery_methods: vec![breez_sdk_spark::DeliveryMethod::Spark],
         }
     }
 
@@ -2881,7 +2930,7 @@ mod cross_chain_tests {
 
     #[test]
     fn a_btc_fundable_route_is_offered_and_marked_retry_safe() {
-        let r = route(CrossChainProvider::Orchestra, vec![SourceAsset::Bitcoin]);
+        let r = route(CrossChainProvider::Orchestra, vec![SparkAsset::Bitcoin]);
         assert!(route_accepts_btc(&r));
         assert!(route_is_retry_safe(&r));
         let wire = sdk_route_to_protocol(&r);
@@ -2893,7 +2942,7 @@ mod cross_chain_tests {
 
     #[test]
     fn boltz_routes_map_to_their_own_provider_string() {
-        let r = route(CrossChainProvider::Boltz, vec![SourceAsset::Bitcoin]);
+        let r = route(CrossChainProvider::Boltz, vec![SparkAsset::Bitcoin]);
         assert_eq!(sdk_route_to_protocol(&r).provider, "boltz");
     }
 
@@ -2904,7 +2953,7 @@ mod cross_chain_tests {
         // must never be reported to the gui as safe to blind-retry.
         let r = route(
             CrossChainProvider::Orchestra,
-            vec![SourceAsset::Token {
+            vec![SparkAsset::Token {
                 token_identifier: "btkn1xyz".to_string(),
             }],
         );
@@ -2984,10 +3033,10 @@ mod cross_chain_tests {
         let r = route(
             CrossChainProvider::Orchestra,
             vec![
-                SourceAsset::Token {
+                SparkAsset::Token {
                     token_identifier: "btkn1xyz".to_string(),
                 },
-                SourceAsset::Bitcoin,
+                SparkAsset::Bitcoin,
             ],
         );
         assert!(route_accepts_btc(&r));

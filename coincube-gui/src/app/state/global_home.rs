@@ -1873,6 +1873,10 @@ impl State for GlobalHome {
                         };
                         let txid = candidate.txid.clone();
                         let vout = candidate.vout;
+                        // What the deposit is worth before fees — the figure
+                        // to show if the claim settles asynchronously and
+                        // returns no Payment (SDK 0.25.0+ pre-maturity claim).
+                        let deposit_amount_sat = candidate.amount_sat;
                         self.auto_claiming_spark_deposit = Some((txid.clone(), vout));
                         let txid_for_msg = txid.clone();
                         Task::perform(
@@ -1883,7 +1887,9 @@ impl State for GlobalHome {
                                         txid: txid_for_msg.clone(),
                                         vout,
                                         result: match result {
-                                            Ok(ok) => Ok(ok.amount_sat),
+                                            Ok(ok) => {
+                                                Ok(ok.amount_sat.unwrap_or(deposit_amount_sat))
+                                            }
                                             Err(e) => Err(e.to_string()),
                                         },
                                     },

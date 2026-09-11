@@ -49,15 +49,13 @@ coincube-spark-protocol = { path = "../coincube-spark-protocol" }
 # to persist. This is the `rusqlite`/`libsqlite3-sys` edge that makes this crate
 # a separate workspace — see the `[workspace]` note above.
 #
-# Pinned to the coincubetech fork of upstream tag 0.19.0 (a484ac1), which
-# carries one commit on top: `flashnet: never select a pool that cannot fill
-# the swap`. Upstream's pool selection quotes V3 concentrated pools from their
-# self-reported price alone, so an empty pool with an absurd tick beats the
-# real one and every USDB conversion fails at the AMM (seen on mainnet
-# BTC/USDB from 2026-09-07; see docs/SPARK_WALLET.md, "Stable Balance").
-# Reported to Breez; drop back to the upstream tag once a release carries the
-# fix. Keep `rev` pinned — the fork branch is not otherwise frozen.
-breez-sdk-spark = { git = "https://github.com/coincubetech/spark-sdk", rev = "83b800c32a00a5a6a555e287a97ae2be0c814fd8", features = [
+# 0.22.0+ is required: earlier releases quote a V3 concentrated Flashnet pool
+# from its self-reported price with no reserve check, so an empty pool with an
+# absurd tick beats the real one and every USDB conversion fails at the AMM
+# (mainnet BTC/USDB, 2026-09-07; see docs/SPARK_WALLET.md, "Stable Balance").
+# Upstream commit 7ba9363a ("Flashnet: validate pool data and swap responses")
+# fixed it; never pin below that.
+breez-sdk-spark = { git = "https://github.com/breez/spark-sdk", tag = "0.25.0", features = [
     "sqlite",
 ] }
 async-trait = "0.1"

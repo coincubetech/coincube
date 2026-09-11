@@ -908,11 +908,19 @@ pub struct ListUnclaimedDepositsOk {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClaimDepositOk {
-    /// Payment id of the resulting Spark wallet transfer.
-    pub payment_id: String,
-    /// Amount claimed in sats. Mirrors the deposit's `amount_sat`
-    /// minus any internal fees the SDK deducted.
-    pub amount_sat: u64,
+    /// Payment id of the resulting Spark wallet transfer. `None` when the
+    /// deposit was claimed before maturity (SDK 0.25.0+): that transfer
+    /// settles asynchronously, and the gui sees it land through
+    /// `PaymentSucceeded` / `DepositsChanged` like any other incoming
+    /// transfer. Which case applies follows from the deposit's maturity and
+    /// the fee ceiling, not from anything the caller asked for.
+    #[serde(default)]
+    pub payment_id: Option<String>,
+    /// Amount claimed in sats — the deposit's `amount_sat` minus any
+    /// internal fees the SDK deducted. `None` in the asynchronous case
+    /// above; the caller still knows the deposit's own amount.
+    #[serde(default)]
+    pub amount_sat: Option<u64>,
 }
 
 /// Phase 6: boolean-flattened view of the SDK's `UserSettings`. The
