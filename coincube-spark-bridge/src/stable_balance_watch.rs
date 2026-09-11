@@ -50,7 +50,7 @@ fn display_reason(rest: &str) -> String {
     let raw = rest.trim_start_matches(':').trim();
     let inner = raw
         .find('(')
-        .and_then(|open| raw.rfind(')').map(|close| (open, close)))
+        .zip(raw.rfind(')'))
         .filter(|(open, close)| open < close)
         .map(|(open, close)| raw[open + 1..close].trim_matches('"'))
         .unwrap_or(raw);

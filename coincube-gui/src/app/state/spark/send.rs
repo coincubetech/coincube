@@ -796,6 +796,15 @@ impl State for SparkSend {
                     self.invoice_amount_sat.or_else(|| {
                         parse_amount_to_sats(&self.amount_input, cache.bitcoin_unit).ok()
                     }),
+                    // Cross-chain fees are quoted in the destination asset, not
+                    // sats (see `PrepareSendOk::cross_chain`), so only a plain
+                    // prepare's fee can be added to the sats comparison.
+                    match &self.phase {
+                        SparkSendPhase::Prepared(ok) if ok.cross_chain.is_none() => {
+                            Some(ok.fee_sat)
+                        }
+                        _ => None,
+                    },
                     self.btc_balance_sats,
                     self.usdb_holding.as_deref(),
                     cache.bitcoin_unit,
@@ -1476,13 +1485,21 @@ fn format_amount_for_input(sats: u64, unit: BitcoinDisplayUnit) -> String {
     }
 }
 
-/// The line under the Amount field when the entered amount can't be met
-/// from bitcoin alone and USDB is there to cover it: names the bitcoin
-/// balance so the user knows how much is a plain send and how much goes
-/// through a USDB→BTC conversion. `None` while the amount is unset, fits
-/// in bitcoin, or there is no USDB (the send then fails on funds as usual).
+/// The line under the Amount field when the entered amount (plus the fee,
+/// once a prepare has quoted one) can't be met from bitcoin alone and USDB
+/// is there to cover it: names the bitcoin balance so the user knows how
+/// much is a plain send and how much goes through a USDB→BTC conversion.
+/// `None` while the amount is unset, amount + fee fits in bitcoin, or there
+/// is no USDB (the send then fails on funds as usual).
+///
+/// `fee_sat` is `None` before the prepare answers — the fee is unknown then,
+/// so only the amount is compared. An amount that exactly equals the bitcoin
+/// balance is silent at that point but gains a hint once the quoted fee
+/// pushes the total over: Stable Balance covers the fee, and the AMM
+/// conversion that implies shouldn't come as a surprise on the preview.
 fn usdb_conversion_hint(
     amount_sat: Option<u64>,
+    fee_sat: Option<u64>,
     btc_balance_sats: u64,
     usdb_holding: Option<&str>,
     unit: BitcoinDisplayUnit,
@@ -1492,17 +1509,25 @@ fn usdb_conversion_hint(
 
     let amount = amount_sat?;
     let usdb = usdb_holding?;
-    if amount <= btc_balance_sats {
+    let total = amount.saturating_add(fee_sat.unwrap_or(0));
+    if total <= btc_balance_sats {
         return None;
     }
     let unit_label = match unit {
         BitcoinDisplayUnit::BTC => "BTC",
         BitcoinDisplayUnit::Sats => "sats",
     };
+    let balance = Amount::from_sat(btc_balance_sats).to_formatted_string_with_unit(unit);
+    if amount <= btc_balance_sats {
+        // Only the fee spills over: the amount itself is a plain bitcoin send.
+        return Some(format!(
+            "Your bitcoin balance is {balance} {unit_label}, which covers the amount but not \
+             the fee; the fee is converted from your {usdb} at the time of sending."
+        ));
+    }
     Some(format!(
-        "Your bitcoin balance is {} {unit_label}; the rest is converted from your {usdb} \
-         at the time of sending.",
-        Amount::from_sat(btc_balance_sats).to_formatted_string_with_unit(unit),
+        "Your bitcoin balance is {balance} {unit_label}; the rest is converted from your {usdb} \
+         at the time of sending."
     ))
 }
 
@@ -1705,29 +1730,70 @@ mod tests {
         let usdb = Some("15,177.98 USDB");
         // No amount yet, or one bitcoin can cover: nothing to say.
         assert_eq!(
-            usdb_conversion_hint(None, 11_254, usdb, BitcoinDisplayUnit::Sats),
+            usdb_conversion_hint(None, None, 11_254, usdb, BitcoinDisplayUnit::Sats),
+            None
+        );
+        // Exactly the bitcoin balance with no fee quoted yet: silent — the
+        // fee is unknown, and the amount alone fits.
+        assert_eq!(
+            usdb_conversion_hint(Some(11_254), None, 11_254, usdb, BitcoinDisplayUnit::Sats),
             None
         );
         assert_eq!(
-            usdb_conversion_hint(Some(11_254), 11_254, usdb, BitcoinDisplayUnit::Sats),
+            usdb_conversion_hint(
+                Some(11_254),
+                Some(0),
+                11_254,
+                usdb,
+                BitcoinDisplayUnit::Sats
+            ),
+            None
+        );
+        // Exactly the bitcoin balance, and the prepared fee pushes the total
+        // over: the fee is what converts, and the hint says so.
+        assert_eq!(
+            usdb_conversion_hint(
+                Some(11_254),
+                Some(3),
+                11_254,
+                usdb,
+                BitcoinDisplayUnit::Sats
+            )
+            .as_deref(),
+            Some(
+                "Your bitcoin balance is 11,254 sats, which covers the amount but not the fee; \
+                 the fee is converted from your 15,177.98 USDB at the time of sending."
+            )
+        );
+        // Under the balance with a fee that still fits: nothing to say.
+        assert_eq!(
+            usdb_conversion_hint(
+                Some(11_000),
+                Some(3),
+                11_254,
+                usdb,
+                BitcoinDisplayUnit::Sats
+            ),
             None
         );
         // Over the bitcoin balance with no USDB: the send will fail on funds;
         // no hint pretending otherwise.
         assert_eq!(
-            usdb_conversion_hint(Some(200_000), 11_254, None, BitcoinDisplayUnit::Sats),
+            usdb_conversion_hint(Some(200_000), None, 11_254, None, BitcoinDisplayUnit::Sats),
             None
         );
         // Over the bitcoin balance with USDB held: say what converts.
         assert_eq!(
-            usdb_conversion_hint(Some(200_000), 11_254, usdb, BitcoinDisplayUnit::Sats).as_deref(),
+            usdb_conversion_hint(Some(200_000), None, 11_254, usdb, BitcoinDisplayUnit::Sats)
+                .as_deref(),
             Some(
                 "Your bitcoin balance is 11,254 sats; the rest is converted from your \
                  15,177.98 USDB at the time of sending."
             )
         );
         assert_eq!(
-            usdb_conversion_hint(Some(200_000), 11_254, usdb, BitcoinDisplayUnit::BTC).as_deref(),
+            usdb_conversion_hint(Some(200_000), None, 11_254, usdb, BitcoinDisplayUnit::BTC)
+                .as_deref(),
             Some(
                 "Your bitcoin balance is 0.00 011 254 BTC; the rest is converted from your \
                  15,177.98 USDB at the time of sending."
