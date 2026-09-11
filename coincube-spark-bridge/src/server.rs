@@ -845,8 +845,8 @@ impl PrepareError {
                 ErrorKind::BadRequest,
                 format!(
                     "This send needs more bitcoin than the Spark wallet holds ({available} sats \
-                     available), and converting USDB to bitcoin to cover it failed: {}. Send up \
-                     to {available} sats, or try again later.",
+                     available), and converting USDB to bitcoin to cover it failed: {}. Send \
+                     less than {available} sats, leaving room for the fee, or try again later.",
                     conversion_failure_reason(&source.to_string()),
                     available = with_thousands(balance_sats),
                 ),
