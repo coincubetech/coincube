@@ -6,6 +6,13 @@ on:
       - master
   pull_request:
 
+# A newer push to the same branch/PR supersedes the run in flight. Without
+# this a burst of pushes queues one full matrix — macOS and Windows legs
+# included — per commit, and only the last result is ever looked at.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 # Build-time passkey flags, same repo-level Actions variables the release
 # workflow uses. CI has to compile the *shipping* configuration: without these,
 # every job here builds `PASSKEY_ENABLED = false` while releases ship `true`,
@@ -21,6 +28,7 @@ env:
 jobs:
   linter:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       BREEZ_API_KEY: ${{ github.event_name == 'push' && secrets.BREEZ_API_KEY || 'DUMMY_BREEZ_API_KEY' }}
     steps:
@@ -46,6 +54,7 @@ jobs:
   bridge_tests:
     needs: linter
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     env:
       BREEZ_API_KEY: ${{ github.event_name == 'push' && secrets.BREEZ_API_KEY || 'DUMMY_BREEZ_API_KEY' }}
     steps:
@@ -70,8 +79,42 @@ jobs:
       - name: Test
         run: cargo test --manifest-path coincube-spark-bridge/Cargo.toml
 
-  unit_tests:
+  # Picks the unit_tests matrix for this event. Cost gate (2026-09-11): macOS
+  # runners bill at 10x and Windows at 2x the Linux per-minute price, and every
+  # merged PR paid for them twice — once on the PR and again on the push to
+  # master. The Linux legs (pinned, stable, nightly) still run on every PR; the
+  # macOS and Windows legs run only on the push to master, so a platform-
+  # specific regression is caught at merge rather than on every iteration of a
+  # branch.
+  #
+  # A helper job rather than a job-level `if` on unit_tests: `matrix` is not
+  # in scope when `jobs.<id>.if` is evaluated (only github, needs, vars and
+  # inputs are), so `if: matrix.os == ... || ...` is silently false on every
+  # PR and skips the Linux legs too. `strategy.matrix` does see `needs`.
+  unit_tests_matrix:
+    name: Select unit_tests matrix
     needs: linter
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      include: ${{ steps.pick.outputs.include }}
+    steps:
+      - id: pick
+        env:
+          IS_PUSH: ${{ github.event_name == 'push' }}
+        run: |
+          linux='[{"os":"ubuntu-latest","toolchain":"pinned"},{"os":"ubuntu-latest","toolchain":"stable"},{"os":"ubuntu-latest","toolchain":"nightly"}]'
+          desktop='[{"os":"macOS-latest","toolchain":"pinned"},{"os":"windows-latest","toolchain":"pinned"}]'
+          if [ "$IS_PUSH" = "true" ]; then
+            include=$(jq -c -n --argjson a "$linux" --argjson b "$desktop" '$a + $b')
+          else
+            include=$linux
+          fi
+          echo "selected matrix: $include"
+          echo "include=$include" >> "$GITHUB_OUTPUT"
+
+  unit_tests:
+    needs: [linter, unit_tests_matrix]
     strategy:
       # Don't cancel the whole matrix when one leg fails: a flaky Windows job
       # was masking otherwise-green macOS/ubuntu results and forcing full
@@ -88,13 +131,12 @@ jobs:
       # and each OS was tested twice over. Overriding the file needs
       # RUSTUP_TOOLCHAIN (env beats rust-toolchain.toml in rustup's precedence
       # order), not `rustup default`.
+      #
+      # The legs themselves are listed in `unit_tests_matrix` above: all three
+      # ubuntu legs on every event, plus macOS-latest and windows-latest
+      # (pinned) on push to master.
       matrix:
-        include:
-          - { os: ubuntu-latest, toolchain: pinned }
-          - { os: macOS-latest, toolchain: pinned }
-          - { os: windows-latest, toolchain: pinned }
-          - { os: ubuntu-latest, toolchain: stable }
-          - { os: ubuntu-latest, toolchain: nightly }
+        include: ${{ fromJSON(needs.unit_tests_matrix.outputs.include) }}
     runs-on: ${{ matrix.os }}
     # A green leg finishes in well under an hour; the default cap is 6 hours.
     # A single hung test (`server_sanity_check` waited forever on a socket path
@@ -203,7 +245,12 @@ jobs:
   # Explicit package/filter: default workspace members must not determine this
   # security boundary's coverage. No OS credentials or repository secrets.
   lan_signature_verifier:
+    # macOS-only by design (it is the security boundary the shipped Apple
+    # binary crosses), so it is billed at 10x. Push to master only, same
+    # reasoning as the macOS unit_tests leg above.
+    if: github.event_name == 'push'
     runs-on: macos-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
         with:
