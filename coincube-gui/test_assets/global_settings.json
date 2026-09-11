@@ -81,6 +81,7 @@
   "account_tier": "free",
   "theme_mode": "dark",
   "show_direction_badges": true,
+  "recipient_identity_checks": true,
   "dismissed_hw_advisories": [],
   "seen_advisory_notices": []
 }
