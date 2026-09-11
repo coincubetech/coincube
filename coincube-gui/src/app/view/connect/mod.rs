@@ -1045,9 +1045,15 @@ fn plan_selection_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectA
         .push(cycle_toggle)
         .push(iced::widget::Space::new().height(Length::Fixed(15.0)));
 
-    // Plan cards sit side by side; each fills the row's height so the
-    // three columns stay flush regardless of bullet count.
-    let mut cards_row = Row::new().spacing(12).width(Length::Fill);
+    // Plan cards sit side by side, top-aligned. They must NOT be given
+    // `Length::Fill` height: the row shrinks to its content, and iced's flex
+    // layout resolves a fill-height child of a shrink-height row to zero
+    // height (the cross size is only accumulated from non-fill children).
+    // That zero-height row collapsed the whole page on Windows.
+    let mut cards_row = Row::new()
+        .spacing(12)
+        .width(Length::Fill)
+        .align_y(Alignment::Start);
 
     let price_suffix = match cycle {
         BillingCycle::Monthly => "/month",
@@ -1199,8 +1205,7 @@ fn plan_selection_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectA
                     },
                     ..Default::default()
                 })
-                .width(Length::FillPortion(1))
-                .height(Length::Fill),
+                .width(Length::FillPortion(1)),
         );
     }
 
