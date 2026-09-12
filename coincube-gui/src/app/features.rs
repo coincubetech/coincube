@@ -11,7 +11,7 @@
 //! matrix lives in exactly one place. See `plans/PLAN-network-feature-gating.md`.
 
 use crate::app::menu::{MarketplaceSubMenu, Menu, P2PSubMenu};
-use coincube_core::miniscript::bitcoin::Network;
+use crate::chain::{ChainId, RuntimeSupport};
 
 /// Whether a feature is usable on the current network, plus the human
 /// reason to show when it isn't.
@@ -153,8 +153,8 @@ impl LiquidGate {
 /// surfaces that would otherwise offer live actions (the Cube home wallet card,
 /// the transfer picker) hide Liquid entirely instead — an inert Send/Receive
 /// pair reads as a wallet that's merely empty, not one that can't work here.
-pub fn liquid_wallet_usable(net: Network, gate: LiquidGate) -> bool {
-    gate.show() && liquid(net).is_available()
+pub fn liquid_wallet_usable<C: Into<ChainId>>(chain: C, gate: LiquidGate) -> bool {
+    gate.show() && liquid(chain).is_available()
 }
 
 /// Reason shown for a Liquid route reached while the wallet is gated off —
@@ -222,24 +222,29 @@ impl DuressGate {
     }
 }
 
-/// Display name for a network. Shared by popover text and the settings
+/// Display name for a chain. Shared by popover text and the settings
 /// "Network:" row — deliberately exhaustive so a new variant is a compile
-/// error rather than a silently wrong label.
-pub(crate) fn net_label(n: Network) -> &'static str {
-    match n {
-        Network::Bitcoin => "Mainnet",
-        Network::Testnet => "Testnet",
-        Network::Testnet4 => "Testnet4",
-        Network::Signet => "Signet",
-        Network::Regtest => "Regtest",
+/// error rather than a silently wrong label. Keyed on the chain's identity:
+/// Bitcoin Blake2b encodes like mainnet but is not "Mainnet".
+pub(crate) fn net_label<C: Into<ChainId>>(chain: C) -> &'static str {
+    match chain.into() {
+        ChainId::Bitcoin => "Mainnet",
+        ChainId::Testnet => "Testnet",
+        ChainId::Testnet4 => "Testnet4",
+        ChainId::Signet => "Signet",
+        ChainId::Regtest => "Regtest",
+        ChainId::BitcoinBlake2b => "Bitcoin Blake2b",
+        ChainId::BitcoinBlake2bTestnet4 => "Bitcoin Blake2b Testnet4",
     }
 }
 
 /// Spark wallet. Backed only on mainnet and regtest — matches the SDK,
 /// which rejects every other network (`breez_spark::config::SparkConfig`).
-pub fn spark(net: Network) -> Availability {
-    match net {
-        Network::Bitcoin | Network::Regtest => Availability::Available,
+/// Never on Bitcoin Blake2b: the SDK would treat it as mainnet and settle
+/// against the wrong chain.
+pub fn spark<C: Into<ChainId>>(chain: C) -> Availability {
+    match chain.into() {
+        ChainId::Bitcoin | ChainId::Regtest => Availability::Available,
         other => unavailable("Spark", other),
     }
 }
@@ -250,17 +255,18 @@ pub fn spark(net: Network) -> Availability {
 /// testnet *and* signet map to. Regtest would point Breez at a localhost
 /// Esplora normal users don't run. So mainnet is the only network with a
 /// usable Liquid backend.
-pub fn liquid(net: Network) -> Availability {
-    match net {
-        Network::Bitcoin => Availability::Available,
+pub fn liquid<C: Into<ChainId>>(chain: C) -> Availability {
+    match chain.into() {
+        ChainId::Bitcoin => Availability::Available,
         other => unavailable("Liquid", other),
     }
 }
 
-/// Buy/Sell (fiat on/off-ramp). Real fiat ↔ real BTC, so mainnet only.
-pub fn buy_sell(net: Network) -> Availability {
-    match net {
-        Network::Bitcoin => Availability::Available,
+/// Buy/Sell (fiat on/off-ramp). Real fiat ↔ real BTC, so mainnet only —
+/// and BTC only: a Bitcoin Blake2b Cube holds BTCB2, which no on-ramp sells.
+pub fn buy_sell<C: Into<ChainId>>(chain: C) -> Availability {
+    match chain.into() {
+        ChainId::Bitcoin => Availability::Available,
         other => unavailable("Buy/Sell", other),
     }
 }
@@ -269,9 +275,12 @@ pub fn buy_sell(net: Network) -> Availability {
 /// a test Mostro coordinator is configured with a usable escrow rail (see
 /// `view::p2p::config::MostroConfig::has_test_coordinator`, which resolves
 /// the `has_test_coordinator` flag passed here).
-pub fn p2p(net: Network, has_test_coordinator: bool) -> Availability {
-    match net {
-        Network::Bitcoin => Availability::Available,
+pub fn p2p<C: Into<ChainId>>(chain: C, has_test_coordinator: bool) -> Availability {
+    match chain.into() {
+        ChainId::Bitcoin => Availability::Available,
+        // No test coordinator lifts the gate on a Bitcoin Blake2b chain: the
+        // escrow rail is a Spark wallet, and Spark is not offered there.
+        other if other.is_blake2b() => unavailable("P2P trading", other),
         _ if has_test_coordinator => Availability::Available,
         // `has_test_coordinator` collapses two requirements (a configured test
         // coordinator *and* a connected Spark escrow wallet), so state both
@@ -291,13 +300,14 @@ pub fn p2p(net: Network, has_test_coordinator: bool) -> Availability {
 /// feature renders the shared "unavailable" placeholder instead of a live
 /// panel (the rail items themselves are already greyed and inert). Routes
 /// not tied to a gated feature are always available.
-pub fn route_availability(
+pub fn route_availability<C: Into<ChainId>>(
     menu: &Menu,
-    net: Network,
+    chain: C,
     p2p_test_coordinator: bool,
     flags: MarketplaceServerFlags,
     liquid_gate: LiquidGate,
 ) -> Availability {
+    let net = chain.into();
     match menu {
         Menu::Spark(_) => spark(net),
         // Sunset gate first, then the per-network gate — a gated-off Liquid
@@ -342,15 +352,66 @@ pub fn route_availability(
     }
 }
 
-fn unavailable(feature: &str, net: Network) -> Availability {
+fn unavailable(feature: &str, net: ChainId) -> Availability {
     Availability::Unavailable {
         reason: format!("{} isn't available on {}.", feature, net_label(net)),
+    }
+}
+
+/// The server's Bitcoin Blake2b launch flag (`bitcoinBlake2bEnabled` on
+/// `GET /connect/features`, wire name agreed with Connect PR 1).
+///
+/// This is a **capability signal from the server, not an availability
+/// verdict**. It says Connect will accept BTCB2 keychains, keys and Cubes for
+/// this account; it says nothing about whether *this build* can run one. The
+/// verdict is [`bitcoin_blake2b`], which AND's this with
+/// [`ChainId::runtime_support`] and stays unavailable while the runtime is
+/// dormant — whatever the flag says.
+///
+/// Fails **closed**, like the Marketplace flags: absent, unloaded or an
+/// unreachable API all read as `false`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct BitcoinBlake2bServerFlag {
+    pub server_enabled: bool,
+}
+
+impl BitcoinBlake2bServerFlag {
+    /// The value before `/connect/features` has answered, and when it can't.
+    pub const OFF: Self = Self {
+        server_enabled: false,
+    };
+}
+
+/// Whether a Bitcoin Blake2b Cube may be created, opened or signed with in
+/// this build for this account. The only place that question is answered.
+///
+/// Both inputs are necessary and neither is sufficient: the runtime must be
+/// [`RuntimeSupport::Supported`] *and* the server flag on. In this build the
+/// runtime is dormant, so the answer is `Unavailable` with the dormant reason
+/// even when the server has already enabled the account — a partly working
+/// Cube is worse than none.
+pub fn bitcoin_blake2b(flag: BitcoinBlake2bServerFlag) -> Availability {
+    bitcoin_blake2b_with(ChainId::BitcoinBlake2b.runtime_support(), flag)
+}
+
+/// [`bitcoin_blake2b`] with the runtime support injected, so the full matrix
+/// is testable while the build's own answer is fixed at dormant.
+fn bitcoin_blake2b_with(support: RuntimeSupport, flag: BitcoinBlake2bServerFlag) -> Availability {
+    match support {
+        RuntimeSupport::Dormant { reason } => Availability::Unavailable {
+            reason: reason.to_string(),
+        },
+        RuntimeSupport::Supported if !flag.server_enabled => Availability::Unavailable {
+            reason: "Bitcoin Blake2b isn't enabled for this account.".to_string(),
+        },
+        RuntimeSupport::Supported => Availability::Available,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use coincube_core::miniscript::bitcoin::Network;
 
     const NETWORKS: [Network; 5] = [
         Network::Bitcoin,
@@ -423,7 +484,7 @@ mod tests {
 
     /// Marketplace/Spark route checks; Liquid is granted here so these stay
     /// about the flag under test. Liquid's own gate has its own tests below.
-    fn avail(menu: &Menu, net: Network, flags: MarketplaceServerFlags) -> bool {
+    fn avail<C: Into<ChainId>>(menu: &Menu, net: C, flags: MarketplaceServerFlags) -> bool {
         route_availability(menu, net, false, flags, LIQUID_GRANTED).is_available()
     }
 
@@ -602,7 +663,7 @@ mod tests {
         assert!(!liquid_wallet_usable(Network::Bitcoin, LiquidGate::HIDDEN));
     }
 
-    fn avail_liquid(net: Network, gate: LiquidGate) -> bool {
+    fn avail_liquid<C: Into<ChainId>>(net: C, gate: LiquidGate) -> bool {
         route_availability(
             &Menu::Liquid(crate::app::menu::LiquidSubMenu::Overview),
             net,
@@ -696,5 +757,89 @@ mod tests {
                 net
             );
         }
+    }
+    // ── Bitcoin Blake2b (BTCB2 plan PR 2, dormant slice) ───────────────────
+
+    #[test]
+    fn every_network_feature_is_unavailable_on_both_blake2b_chains() {
+        for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
+            assert!(!spark(chain).is_available(), "{:?}", chain);
+            assert!(!liquid(chain).is_available(), "{:?}", chain);
+            assert!(!buy_sell(chain).is_available(), "{:?}", chain);
+            // Even a configured test coordinator does not lift P2P here.
+            assert!(!p2p(chain, true).is_available(), "{:?}", chain);
+            assert!(!p2p(chain, false).is_available(), "{:?}", chain);
+            assert!(!liquid_wallet_usable(chain, LIQUID_GRANTED), "{:?}", chain);
+            assert!(
+                !liquid_wallet_usable(chain, LIQUID_LOCAL_ONLY),
+                "{:?}",
+                chain
+            );
+            // The reasons name the chain, not "Mainnet".
+            for reason in [
+                spark(chain).reason().unwrap().to_string(),
+                liquid(chain).reason().unwrap().to_string(),
+                buy_sell(chain).reason().unwrap().to_string(),
+                p2p(chain, true).reason().unwrap().to_string(),
+            ] {
+                assert!(reason.contains("Bitcoin Blake2b"), "{}", reason);
+                assert!(!reason.contains("Mainnet"), "{}", reason);
+            }
+        }
+        // …and the encoding twin is untouched by the new arms.
+        assert!(spark(ChainId::Bitcoin).is_available());
+        assert!(liquid(ChainId::Bitcoin).is_available());
+        assert!(buy_sell(ChainId::Bitcoin).is_available());
+    }
+
+    #[test]
+    fn blake2b_routes_are_gated_even_with_every_server_switch_on() {
+        for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
+            let spark_route = Menu::Spark(crate::app::menu::SparkSubMenu::Overview);
+            assert!(!avail(&spark_route, chain, ALL_ON), "{:?}", chain);
+            assert!(!avail(&buy_sell_route(), chain, ALL_ON), "{:?}", chain);
+            assert!(!avail(&p2p_route(), chain, ALL_ON), "{:?}", chain);
+            assert!(!avail_liquid(chain, LIQUID_GRANTED), "{:?}", chain);
+        }
+    }
+
+    #[test]
+    fn net_label_names_the_blake2b_chains_without_calling_them_mainnet() {
+        assert_eq!(net_label(ChainId::BitcoinBlake2b), "Bitcoin Blake2b");
+        assert_eq!(
+            net_label(ChainId::BitcoinBlake2bTestnet4),
+            "Bitcoin Blake2b Testnet4"
+        );
+        assert_eq!(net_label(ChainId::Bitcoin), "Mainnet");
+        assert_eq!(net_label(Network::Bitcoin), "Mainnet");
+    }
+
+    #[test]
+    fn the_server_flag_is_a_capability_signal_not_an_availability_verdict() {
+        const ON: BitcoinBlake2bServerFlag = BitcoinBlake2bServerFlag {
+            server_enabled: true,
+        };
+        // This build: dormant. The flag being on changes nothing — the answer
+        // is the dormant reason, so the UI never offers a partly working Cube.
+        let verdict = bitcoin_blake2b(ON);
+        assert!(!verdict.is_available());
+        assert_eq!(verdict.reason(), Some(crate::chain::BTCB2_DORMANT_REASON));
+        assert!(!bitcoin_blake2b(BitcoinBlake2bServerFlag::OFF).is_available());
+        assert!(!bitcoin_blake2b(BitcoinBlake2bServerFlag::default()).is_available());
+
+        // The full matrix, with the runtime injected: only Supported AND flag
+        // on is Available; a supported runtime with the flag off is refused
+        // with the account reason, not the dormant one.
+        let dormant = RuntimeSupport::Dormant {
+            reason: crate::chain::BTCB2_DORMANT_REASON,
+        };
+        assert!(!bitcoin_blake2b_with(dormant, ON).is_available());
+        assert!(!bitcoin_blake2b_with(dormant, BitcoinBlake2bServerFlag::OFF).is_available());
+        let off = bitcoin_blake2b_with(RuntimeSupport::Supported, BitcoinBlake2bServerFlag::OFF);
+        assert_eq!(
+            off.reason(),
+            Some("Bitcoin Blake2b isn't enabled for this account.")
+        );
+        assert!(bitcoin_blake2b_with(RuntimeSupport::Supported, ON).is_available());
     }
 }

@@ -761,7 +761,41 @@ impl Tab {
                     self.state = State::Installer(install);
                     command.map(Message::Install)
                 }
-                home::Message::Run(datadir_path, cfg, network, cube) => {
+                home::Message::Run(datadir_path, cfg, chain, cube) => {
+                    // Chain gate — first, before anything below can touch a
+                    // seed file, an SDK, the daemon or a node. Two checks:
+                    //
+                    // 1. The directory this Cube was read from must be the one
+                    //    its own settings name. `Home` loaded it from
+                    //    `<datadir>/<chain.dir_name()>/settings.json`; a record
+                    //    claiming another chain is either a hand-edited file
+                    //    or a copy that landed in the wrong directory, and
+                    //    either way its seed folder, Connect string and
+                    //    provider would disagree with each other from here on.
+                    // 2. This build must be able to *run* the chain. Both
+                    //    Bitcoin Blake2b identities are dormant: their settings
+                    //    are kept intact and distinct, and that is all this
+                    //    version does with them.
+                    //
+                    // Only after both pass is the identity projected onto the
+                    // `bitcoin::Network` the unlock and load paths encode with.
+                    if cube.network != chain {
+                        l.set_error(format!(
+                            "This Cube's settings say it lives on {}, but it was found in \
+                             the {} folder. Tenshu won't open it until the two agree.",
+                            cube.network.label(),
+                            chain.label(),
+                        ));
+                        return Task::none();
+                    }
+                    if let crate::chain::RuntimeSupport::Dormant { reason } =
+                        cube.network.runtime_support()
+                    {
+                        l.set_error(reason);
+                        return Task::none();
+                    }
+                    let network = chain.bitcoin_network();
+
                     // Mandatory-backup gate (PLAN-cube-unlock-hardening PR 7).
                     // A Cube created under the gate is not usable until its
                     // backup is demonstrated or explicitly bypassed: its seed is
@@ -2121,8 +2155,11 @@ impl Tab {
                     }
                 }
                 crate::pin_entry::Message::Back => {
-                    // Go back to home
-                    let network = pin_entry.cube().network;
+                    // Go back to home. `Home` speaks `bitcoin::Network` (it
+                    // only ever lists the Bitcoin family), and a Cube on the
+                    // PIN screen is one that passed the open gate, so the
+                    // projection is lossless here.
+                    let network = pin_entry.cube().network.bitcoin_network();
                     let (home, command) = Home::new(
                         match &pin_entry.on_success {
                             crate::pin_entry::PinEntrySuccess::LoadApp { datadir, .. } => {
@@ -2147,7 +2184,7 @@ impl Tab {
                     // its neutral loading screen, so no Cube data is visible
                     // during the brief gap; we lock into the cryptic screen the
                     // instant activation returns (the wipe completes within it).
-                    let network = pin_entry.cube().network;
+                    let network = pin_entry.cube().network.bitcoin_network();
                     let datadir = match &pin_entry.on_success {
                         crate::pin_entry::PinEntrySuccess::LoadApp { datadir, .. } => {
                             datadir.clone()
@@ -2383,7 +2420,7 @@ impl Tab {
                 crate::passkey_unlock::Message::Back => {
                     // Dropping the screen drops any in-flight ceremony, which
                     // cancels the system prompt.
-                    let network = unlock.cube().network;
+                    let network = unlock.cube().network.bitcoin_network();
                     let crate::pin_entry::PinEntrySuccess::LoadApp { datadir, .. } =
                         &unlock.on_success;
                     let (home, command) = Home::new(datadir.clone(), Some(network));
@@ -3409,6 +3446,110 @@ mod migration_warning_tests {
         Tab::new(1, State::Home(home))
     }
 
+    // ── The Cube open gate (BTCB2 plan PR 2, dormant slice) ─────────────────
+
+    /// Drive `home::Message::Run` for `cube` found under `found_in` and report
+    /// where the tab ended up plus the home error, if it stayed home.
+    fn open_from_home(
+        cube: app::settings::CubeSettings,
+        found_in: crate::chain::ChainId,
+    ) -> (&'static str, Option<String>) {
+        let mut tab = non_app_tab();
+        let datadir = match &tab.state {
+            State::Home(home) => home.datadir_path.clone(),
+            _ => unreachable!(),
+        };
+        let _ = tab.update(Message::Launch(home::Message::Run(
+            datadir,
+            app::config::Config::new(false),
+            found_in,
+            cube,
+        )));
+        match &tab.state {
+            State::Home(home) => ("Home", home.error().map(|e| e.to_string())),
+            State::PinEntry(_) => ("PinEntry", None),
+            State::PasskeyUnlock(_) => ("PasskeyUnlock", None),
+            State::Loader(_) => ("Loader", None),
+            State::App(_) => ("App", None),
+            _ => ("other", None),
+        }
+    }
+
+    fn cube_on(chain: crate::chain::ChainId) -> app::settings::CubeSettings {
+        let mut cube = app::settings::CubeSettings::new("Cube".to_string(), chain);
+        // Predates the creation-backup gate, so that gate never interferes
+        // with what these tests are about.
+        cube.created_at = 0;
+        cube
+    }
+
+    /// A persisted Bitcoin Blake2b Cube is refused at the open gate: the tab
+    /// stays on Home with the dormant reason, and no unlock screen — the step
+    /// that loads the Liquid SDK and reads seed files — is ever built.
+    #[test]
+    fn a_blake2b_cube_is_refused_before_any_unlock_screen() {
+        for chain in [
+            crate::chain::ChainId::BitcoinBlake2b,
+            crate::chain::ChainId::BitcoinBlake2bTestnet4,
+        ] {
+            let (state, error) = open_from_home(cube_on(chain), chain);
+            assert_eq!(state, "Home", "{:?}", chain);
+            assert_eq!(
+                error.as_deref(),
+                Some(crate::chain::BTCB2_DORMANT_REASON),
+                "{:?}",
+                chain
+            );
+        }
+    }
+
+    /// The gate is not "is this Bitcoin": a Bitcoin-family Cube still goes to
+    /// its unlock screen (the PIN keypad here — the fixture has no seed file,
+    /// which is a later, different refusal).
+    #[test]
+    fn a_bitcoin_family_cube_still_reaches_its_unlock_screen() {
+        let (state, error) = open_from_home(
+            cube_on(crate::chain::ChainId::Signet),
+            crate::chain::ChainId::Signet,
+        );
+        assert_eq!(state, "PinEntry");
+        assert_eq!(error, None);
+    }
+
+    /// Directory identity must agree with the persisted settings before any
+    /// projection to `bitcoin::Network`: a Cube whose file says BTCB2 but was
+    /// read from `bitcoin/` (or the reverse) is refused — not opened as
+    /// whichever of the two the caller happened to hold.
+    #[test]
+    fn a_cube_found_in_the_wrong_chain_directory_is_refused() {
+        let cases = [
+            (
+                crate::chain::ChainId::BitcoinBlake2b,
+                crate::chain::ChainId::Bitcoin,
+            ),
+            (
+                crate::chain::ChainId::Bitcoin,
+                crate::chain::ChainId::BitcoinBlake2b,
+            ),
+            (
+                crate::chain::ChainId::Testnet4,
+                crate::chain::ChainId::BitcoinBlake2bTestnet4,
+            ),
+            (
+                crate::chain::ChainId::Signet,
+                crate::chain::ChainId::Testnet,
+            ),
+        ];
+        for (persisted, found_in) in cases {
+            let (state, error) = open_from_home(cube_on(persisted), found_in);
+            assert_eq!(state, "Home", "{:?} in {:?}", persisted, found_in);
+            let error = error.expect("an error is shown");
+            assert!(error.contains(persisted.label()), "{}", error);
+            assert!(error.contains(found_in.label()), "{}", error);
+            assert!(!error.contains(crate::chain::BTCB2_DORMANT_REASON));
+        }
+    }
+
     /// Flushing while the tab is still loading would hand the toast to a state
     /// that drops `Message::Run` on the floor, which is how "your seed files
     /// were not upgraded" went silent for every Cube that routed through
@@ -3980,7 +4121,7 @@ mod find_or_create_cube_tests {
         .expect("first cube should be created");
 
         assert_eq!(cube.name, "My signet Cube");
-        assert_eq!(cube.network, bitcoin::Network::Signet);
+        assert_eq!(cube.network, crate::chain::ChainId::Signet);
         assert_eq!(cube.vault_wallet_id.as_ref(), Some(&wid));
         let reloaded = reload(&nd);
         assert_eq!(reloaded.cubes.len(), 1);

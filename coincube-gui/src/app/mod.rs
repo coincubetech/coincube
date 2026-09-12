@@ -980,7 +980,7 @@ struct ArmedMarker {
     root: std::path::PathBuf,
     cube_id: String,
     cube_name: String,
-    network: bitcoin::Network,
+    network: crate::chain::ChainId,
     /// The marker's file name. Random, so rollback cannot recompute it — it
     /// has to be carried from the write that minted it.
     file_name: String,
@@ -6933,11 +6933,11 @@ mod tests {
         use coincube_core::miniscript::bitcoin::secp256k1::Secp256k1;
         use coincube_core::signer::{MasterSigner, MASTER_SEED_LABEL};
         let secp = Secp256k1::signing_only();
-        let signer = MasterSigner::generate(cube.network).unwrap();
+        let signer = MasterSigner::generate(cube.network.bitcoin_network()).unwrap();
         signer
             .store_encrypted(
                 root,
-                cube.network,
+                cube.network.bitcoin_network(),
                 &secp,
                 Some((
                     format!("{}{}", MASTER_SEED_LABEL, cube.created_at),
@@ -6953,8 +6953,8 @@ mod tests {
                     cube.id,
                     cube.network,
                     e,
-                    MasterSigner::mnemonics_folder(root, cube.network),
-                    MasterSigner::mnemonics_folder(root, cube.network).exists(),
+                    MasterSigner::mnemonics_folder(root, cube.network.bitcoin_network()),
+                    MasterSigner::mnemonics_folder(root, cube.network.bitcoin_network()).exists(),
                     describe_tree(root),
                 )
             });
@@ -7195,7 +7195,7 @@ mod tests {
             root: root.path().to_path_buf(),
             cube_id: cube.id.clone(),
             cube_name: cube.name.clone(),
-            network: Network::Bitcoin,
+            network: crate::chain::ChainId::Bitcoin,
             file_name: marker_name.clone(),
             reused_slot: false,
         }];
@@ -7255,7 +7255,7 @@ mod tests {
             root: std::path::PathBuf::from("/nonexistent"),
             cube_id: format!("id-{name}"),
             cube_name: name.to_string(),
-            network: Network::Bitcoin,
+            network: crate::chain::ChainId::Bitcoin,
             file_name: "slot".to_string(),
             reused_slot: reused,
         };

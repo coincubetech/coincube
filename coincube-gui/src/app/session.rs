@@ -293,7 +293,7 @@ pub fn seed_file_password(cube: &CubeSettings) -> Option<Zeroizing<String>> {
     let signer = unlocked_signer(&cube.id, cube.master_signer_fingerprint?)?;
     Some(crate::services::passkey::seed_password::derive(
         &signer,
-        cube.network,
+        cube.network.bitcoin_network(),
     ))
 }
 

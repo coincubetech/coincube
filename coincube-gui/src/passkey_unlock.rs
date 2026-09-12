@@ -302,7 +302,10 @@ impl PasskeyUnlock {
                 // does not need the blocking pool the way an Argon2id pass
                 // does — and keeping it inline is what keeps the seed out of
                 // the message queue.
-                let signer = match MasterSigner::from_prf_output(self.cube.network, &prf_output) {
+                let signer = match MasterSigner::from_prf_output(
+                    self.cube.network.bitcoin_network(),
+                    &prf_output,
+                ) {
                     Ok(signer) => signer,
                     Err(e) => {
                         tracing::error!(

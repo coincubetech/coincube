@@ -153,7 +153,7 @@ pub fn begin(
             }
         };
 
-        let signer = MasterSigner::from_prf_output(network, &prf_output).map_err(|e| {
+        let signer = MasterSigner::from_prf_output(network.bitcoin_network(), &prf_output).map_err(|e| {
             tracing::error!(%cube_id, error = %e, "passkey re-auth PRF output would not derive");
             PasskeyError::InvalidPrfOutput
         })?;

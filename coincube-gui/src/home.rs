@@ -244,7 +244,7 @@ pub enum HomeSection {
 /// Context stashed for firing a remote cube update after local rename succeeds.
 struct PendingRemoteRename {
     cube_id: String,
-    cube_network: Network,
+    cube_network: crate::chain::ChainId,
     new_name: String,
 }
 
@@ -694,6 +694,11 @@ impl Home {
     /// they detect while handling home-originated messages.
     pub fn set_error(&mut self, msg: impl Into<String>) {
         self.error = Some(msg.into());
+    }
+
+    /// The top-level error currently shown on the home screen, if any.
+    pub fn error(&self) -> Option<&str> {
+        self.error.as_deref()
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
@@ -5041,10 +5046,15 @@ pub enum Message {
     /// then falls back to its own auth form.
     Install(CoincubeDirectory, Network, UserFlow, Option<CoincubeClient>),
     Checked(Result<State, String>),
+    /// Open a Cube: the datadir, the GUI config read from the Cube's chain
+    /// directory, the chain that directory belongs to, and the Cube. The tab
+    /// checks that the Cube's own `network` agrees with the directory it was
+    /// found in and that this build can run that chain before anything is
+    /// unlocked or started.
     Run(
         CoincubeDirectory,
         app::config::Config,
-        Network,
+        crate::chain::ChainId,
         CubeSettings,
     ),
     StartRecovery,
@@ -5067,7 +5077,7 @@ pub enum Message {
     /// Result of registering a cube with the remote Connect API.
     CubeRemoteRegistered {
         cube_id: String,
-        network: Network,
+        network: crate::chain::ChainId,
         result: Result<CubeResponse, String>,
     },
     /// Catch-up sync finished.
@@ -5088,7 +5098,7 @@ pub enum Message {
     /// Result of updating a cube on the remote Connect API.
     CubeRemoteUpdated {
         cube_id: String,
-        network: Network,
+        network: crate::chain::ChainId,
         result: Result<CubeResponse, String>,
     },
     /// Result of deleting a local cube's Connect backup.
@@ -5630,11 +5640,15 @@ impl DeleteCubeModal {
     }
 }
 
-pub async fn check_membership(
-    network: Network,
+pub async fn check_membership<C: Into<crate::chain::ChainId>>(
+    chain: C,
     network_dir: &NetworkDirectory,
     auth: &AuthConfig,
 ) -> Result<Option<UserRole>, DeleteError> {
+    // The legacy remote backend is a Bitcoin-family service; a chain this
+    // build cannot run never reaches here (the delete modal only lists Cubes
+    // the launcher can open), so the projection is lossless.
+    let network = chain.into().bitcoin_network();
     let service_config = get_service_config(network)
         .await
         .map_err(|e| DeleteError::Connect(e.to_string()))?;
@@ -6580,6 +6594,7 @@ mod tests {
             buy_sell_enabled: None,
             p2p_enabled: None,
             duress_enabled: Some(false),
+            bitcoin_blake2b_enabled: None,
         }
     }
 
@@ -6766,7 +6781,7 @@ mod tests {
 
         let _ = home.update(Message::CubeRemoteRegistered {
             cube_id: "c1".to_string(),
-            network: Network::Bitcoin,
+            network: crate::chain::ChainId::Bitcoin,
             result: Err("Cube limit reached for this network".to_string()),
         });
         assert_eq!(
@@ -6776,7 +6791,7 @@ mod tests {
 
         let _ = home.update(Message::CubeRemoteRegistered {
             cube_id: "c1".to_string(),
-            network: Network::Bitcoin,
+            network: crate::chain::ChainId::Bitcoin,
             result: Ok(registered_cube_response("c1")),
         });
         assert!(
