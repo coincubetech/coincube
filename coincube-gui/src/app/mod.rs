@@ -890,6 +890,95 @@ fn duress_enroll_network_dirs(
     Ok(dirs)
 }
 
+/// One chain directory under the datadir, with the Cubes it holds — after the
+/// whole set has passed [`duress_cube_inventory`]'s identity and runtime
+/// checks.
+#[derive(Debug)]
+pub(crate) struct DuressCubeDir {
+    pub dir: crate::dir::NetworkDirectory,
+    /// The chain the directory belongs to (from its name). Every record in
+    /// `settings` agrees with it, and this build can run it.
+    pub chain: crate::chain::ChainId,
+    pub settings: crate::app::settings::Settings,
+}
+
+/// User-facing message when a duress operation is refused because this device
+/// holds a Cube on a chain this build only knows the identity of. Arming or
+/// disarming would write into that Cube's seed folder — storage this version
+/// must leave untouched — so the whole operation is refused before any Cube is
+/// changed.
+pub(crate) const DURESS_DORMANT_CHAIN_MSG: &str =
+    "Duress mode can't be changed on this device while it holds a Bitcoin Blake2b Cube, \
+     which this version of Tenshu can't open. Nothing was changed. Update Tenshu to a \
+     version with Bitcoin Blake2b support, or move that Cube's folder off this device.";
+
+/// Enumerate and validate every Cube a duress operation would touch, **before
+/// anything is written** — the whole-operation preflight for
+/// [`persist_duress_enrollment`], [`clear_duress_enrollment`] and the wizard's
+/// [`duress_pin_collision_check_blocking`].
+///
+/// Duress arms and disarms *every* Cube under the datadir, and each of those
+/// writes goes into the Cube's chain-keyed seed folder. Two things must hold
+/// for every record first:
+///
+/// 1. **Directory identity.** A chain directory is named after its chain
+///    (`ChainId::dir_name`), and each record in its `settings.json` must name
+///    that same chain. A directory whose name is no chain this build knows, or
+///    a record claiming another chain than the folder it sits in (a copied or
+///    hand-edited file), is refused: its seed folder, marker path and identity
+///    would otherwise disagree with each other.
+/// 2. **Runtime support.** Both Bitcoin Blake2b identities are dormant in this
+///    build ([`crate::chain::RuntimeSupport`]): their settings are kept intact
+///    and nothing is written under them. A single such Cube refuses the whole
+///    operation — a device half-armed or half-disarmed is worse than one that
+///    says why it can't change.
+///
+/// Errors are returned before the caller has mutated anything, so a refused
+/// operation leaves every marker, every settings file and the local duress
+/// state exactly as they were.
+pub(crate) fn duress_cube_inventory(root: &std::path::Path) -> Result<Vec<DuressCubeDir>, String> {
+    use crate::chain::{ChainId, RuntimeSupport};
+    let mut out = Vec::new();
+    for dir in duress_enroll_network_dirs(root)? {
+        let name = dir
+            .path()
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_string();
+        let Some(chain) = ChainId::from_dir_name(&name) else {
+            return Err(format!(
+                "The '{name}' folder in your data directory holds Cube settings but isn't a \
+                 chain this version of Tenshu knows, so duress mode can't be changed safely. \
+                 Nothing was changed."
+            ));
+        };
+        let settings = crate::app::settings::Settings::from_file(&dir)
+            .map_err(|e| format!("Couldn't read your Cube settings to change duress mode: {e}"))?;
+        for cube in &settings.cubes {
+            if cube.network != chain {
+                return Err(format!(
+                    "Cube '{}' says it lives on {}, but its settings were found in the {} \
+                     folder. Duress mode can't be changed until the two agree. Nothing was \
+                     changed.",
+                    cube.name,
+                    cube.network.label(),
+                    chain.label(),
+                ));
+            }
+            if let RuntimeSupport::Dormant { .. } = cube.network.runtime_support() {
+                return Err(DURESS_DORMANT_CHAIN_MSG.to_string());
+            }
+        }
+        out.push(DuressCubeDir {
+            dir,
+            chain,
+            settings,
+        });
+    }
+    Ok(out)
+}
+
 /// User-facing message when the candidate duress PIN equals a Cube's real
 /// unlock PIN. A shared constant so the pre-flight wizard check and
 /// `persist_duress_enrollment` can't drift apart.
@@ -934,15 +1023,16 @@ pub(crate) fn duress_pin_collision_check_blocking(
 ) -> Result<(), String> {
     use crate::services::unlock::{self, PinOutcome};
 
-    let network_dirs = duress_enroll_network_dirs(root)?;
-    if network_dirs.is_empty() {
+    // Identity and runtime preflight over every Cube first: a dormant-chain
+    // Cube must refuse here, before the wizard enrolls anything server-side,
+    // with copy that says why — not as an opaque unlock error below.
+    let inventory = duress_cube_inventory(root)?;
+    if inventory.is_empty() {
         return Err(DURESS_NO_CUBES_MSG.to_string());
     }
     let mut total_cubes = 0usize;
-    for network_dir in &network_dirs {
-        let settings = crate::app::settings::Settings::from_file(network_dir)
-            .map_err(|e| format!("Couldn't read your Cube settings to verify your PIN: {e}"))?;
-        for cube in &settings.cubes {
+    for entry in &inventory {
+        for cube in &entry.settings.cubes {
             total_cubes += 1;
             let loc = unlock::CubeLocation::new(root, cube);
             match unlock::unlock_blocking(&loc, duress_pin) {
@@ -1129,11 +1219,13 @@ pub(crate) async fn persist_duress_enrollment(
     // duress PIN must trip from any of them — set it (and verify against it) on
     // all per-network settings, not just the active one.
     let root = datadir.path().to_path_buf();
-    let network_dirs = duress_enroll_network_dirs(&root)?;
-    // No per-network settings.json found — there are no Cubes to arm (or the
-    // data directory couldn't be read). Fail loud instead of marking duress
-    // "enabled" with no duress PIN written anywhere.
-    if network_dirs.is_empty() {
+    // Whole-operation preflight: every directory's identity and every Cube's
+    // chain are validated before a single byte is written (see
+    // `duress_cube_inventory`). No per-network settings.json found — there are
+    // no Cubes to arm (or the data directory couldn't be read). Fail loud
+    // instead of marking duress "enabled" with no duress PIN written anywhere.
+    let inventory = duress_cube_inventory(&root)?;
+    if inventory.is_empty() {
         return Err(DURESS_NO_CUBES_MSG.to_string());
     }
 
@@ -1144,18 +1236,12 @@ pub(crate) async fn persist_duress_enrollment(
     //    set that changed since the pre-flight.
     duress_pin_collision_check_blocking(&root, &duress_pin)?;
 
-    // Snapshot the pre-write state of every network so a later step can roll
-    // back. (The collision / no-Cubes guards above already validated the set.)
-    let mut prior_settings: Vec<crate::app::settings::Settings> =
-        Vec::with_capacity(network_dirs.len());
-    for network_dir in &network_dirs {
-        // We enumerated this dir because it HAS a settings.json. If it now
-        // can't be read (corrupt/parse/IO, or a race), fail loud rather than
-        // arm an unverified duress PIN anyway.
-        let settings = crate::app::settings::Settings::from_file(network_dir)
-            .map_err(|e| format!("Couldn't read your Cube settings to verify your PIN: {e}"))?;
-        prior_settings.push(settings);
-    }
+    // The pre-write state of every network, so a later step can roll back —
+    // read once by the preflight, which also validated the set.
+    let network_dirs: Vec<crate::dir::NetworkDirectory> =
+        inventory.iter().map(|e| e.dir.clone()).collect();
+    let prior_settings: Vec<crate::app::settings::Settings> =
+        inventory.into_iter().map(|e| e.settings).collect();
 
     // 1. A duress marker → every Cube on every network.
     //
@@ -1526,14 +1612,20 @@ pub(crate) fn verify_regular_cube_pin_blocking(
 pub(crate) async fn clear_duress_enrollment(datadir: CoincubeDirectory) -> Result<(), String> {
     let root = datadir.path().to_path_buf();
 
+    // 0. Whole-operation preflight (`duress_cube_inventory`): every directory
+    //    must be a chain this build knows, every record must name the chain of
+    //    the folder it sits in, and every chain must be one this build can
+    //    run. Refused *before* step 1 so a device with a dormant-chain Cube is
+    //    left exactly as it was — no decoy written into that Cube's folder, no
+    //    local state reset — rather than half-disarmed.
+    let inventory = duress_cube_inventory(&root)?;
+
     // 1. Clear the duress PIN hash on every Cube on every network — ALWAYS,
     //    whatever DuressLocalState records. Setting it to None is idempotent;
     //    stop at the first failure so a retry re-clears the rest.
-    let network_dirs = duress_enroll_network_dirs(&root)?;
-    for network_dir in &network_dirs {
-        let settings = crate::app::settings::Settings::from_file(network_dir)
-            .map_err(|e| format!("Couldn't read your Cube settings to disarm duress: {e}"))?;
-        for cube in &settings.cubes {
+    for entry in &inventory {
+        let network_dir = &entry.dir;
+        for cube in &entry.settings.cubes {
             // Overwrite the slot with a decoy — never delete it. Deleting
             // would take the Cube from two blobs to one, which is both a
             // regression of the 6b shape and a durable record that duress was
@@ -1552,9 +1644,12 @@ pub(crate) async fn clear_duress_enrollment(datadir: CoincubeDirectory) -> Resul
                         cube.name
                     )
                 })?;
+            // Keyed on the *directory's* chain — which the preflight proved
+            // equal to the record's own — so the decoy lands in the folder the
+            // Cube was actually found in.
             crate::services::unlock::marker::write_decoy(
                 &root,
-                cube.network,
+                entry.chain,
                 &cube.id,
                 slot,
                 secret.as_ref(),
@@ -7405,5 +7500,352 @@ mod tests {
             DuressLocalState::load(root.path()).expect("load cleared state"),
             DuressLocalState::default()
         );
+    }
+}
+
+#[cfg(test)]
+mod duress_chain_identity_tests {
+    //! Duress arm/disarm across a datadir that holds a Cube on a chain this
+    //! build cannot run (BTCB2 plan PR 2; CodeRabbit finding on coincube#370).
+    //!
+    //! Both operations write into every Cube's chain-keyed seed folder. A
+    //! dormant-chain Cube's folder is storage this version must leave
+    //! untouched, so the *whole* operation is refused up front — no decoy or
+    //! marker written anywhere, no local state reset — and an ordinary
+    //! Bitcoin-family device keeps disarming exactly as before.
+
+    use super::*;
+    use crate::app::settings::{CubeSettings, Settings, SETTINGS_FILE_NAME};
+    use crate::chain::ChainId;
+    use crate::dir::CoincubeDirectory;
+    use crate::services::duress::DuressLocalState;
+    use std::path::{Path, PathBuf};
+
+    fn temp_root(tag: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "coincube-duress-chain-{}-{}-{}",
+            tag,
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::SeqCst)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_settings(root: &Path, dir_name: &str, cubes: Vec<CubeSettings>) {
+        let dir = root.join(dir_name);
+        std::fs::create_dir_all(&dir).unwrap();
+        let settings = Settings {
+            cubes,
+            ..Settings::default()
+        };
+        std::fs::write(
+            dir.join(SETTINGS_FILE_NAME),
+            serde_json::to_vec_pretty(&settings).unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// A Cube record on `chain`, armed exactly as enrollment arms one: a real
+    /// marker for `duress_pin` under a recorded slot name, written into the
+    /// chain's own seed folder.
+    fn armed_cube(root: &Path, id: &str, chain: ChainId, duress_pin: &str) -> CubeSettings {
+        let mut cube = CubeSettings::new_with_raw_id(id.to_string(), id.to_string(), chain);
+        cube.created_at = 1_700_000_000;
+        let slot = crate::services::unlock::marker::new_file_name(cube.created_at);
+        crate::services::unlock::marker::write(root, chain, &cube.id, &slot, duress_pin, None)
+            .expect("arm");
+        cube.duress_slot_file = Some(slot);
+        cube
+    }
+
+    /// Every file under `root` with its bytes — the "nothing changed" oracle.
+    fn snapshot(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+        fn walk(p: &Path, out: &mut Vec<(PathBuf, Vec<u8>)>) {
+            if let Ok(rd) = std::fs::read_dir(p) {
+                for e in rd.flatten() {
+                    let path = e.path();
+                    if path.is_dir() {
+                        walk(&path, out);
+                    } else {
+                        out.push((path.clone(), std::fs::read(&path).unwrap_or_default()));
+                    }
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(root, &mut out);
+        out.sort();
+        out
+    }
+
+    fn enrolled_state(root: &Path) {
+        DuressLocalState {
+            enrolled: true,
+            active: false,
+            account_id: Some("acct-1".to_string()),
+            duress_code: Some("ciphertext".to_string()),
+            ..DuressLocalState::default()
+        }
+        .save(root)
+        .expect("save local state");
+    }
+
+    fn block_on<F: std::future::Future>(f: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(f)
+    }
+
+    /// The reviewer's case: a Bitcoin Cube armed in `bitcoin/`, and a Cube on a
+    /// dormant chain in its own folder, also holding a marker (as a build that
+    /// can run that chain would have left it). Disarm must refuse as a whole:
+    /// the Bitcoin marker still opens for the duress PIN, the BTCB2 folder is
+    /// byte-identical, and the local state still says enrolled.
+    #[test]
+    fn disarm_is_refused_as_a_whole_when_a_dormant_chain_cube_is_present() {
+        for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
+            let root = temp_root("clear");
+            let bitcoin = armed_cube(&root, "btc", ChainId::Bitcoin, "8765");
+            let fork = armed_cube(&root, "fork", chain, "8765");
+            write_settings(&root, "bitcoin", vec![bitcoin.clone()]);
+            write_settings(&root, chain.dir_name(), vec![fork.clone()]);
+            enrolled_state(&root);
+            let before = snapshot(&root);
+
+            let err = block_on(clear_duress_enrollment(CoincubeDirectory::new(
+                root.clone(),
+            )))
+            .expect_err("disarm must refuse");
+            assert_eq!(err, DURESS_DORMANT_CHAIN_MSG, "{:?}", chain);
+
+            assert_eq!(
+                snapshot(&root),
+                before,
+                "{:?}: something was written",
+                chain
+            );
+            // The Bitcoin marker is untouched: the duress PIN still opens it.
+            assert!(crate::services::unlock::marker::verify(
+                &root,
+                ChainId::Bitcoin,
+                &bitcoin.id,
+                bitcoin.duress_slot_file.as_deref(),
+                "8765",
+                None,
+            ));
+            assert!(crate::services::unlock::marker::verify(
+                &root,
+                chain,
+                &fork.id,
+                fork.duress_slot_file.as_deref(),
+                "8765",
+                None,
+            ));
+            assert!(DuressLocalState::load(&root).unwrap().enrolled);
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    /// A record claiming a dormant chain but sitting in `bitcoin/settings.json`
+    /// (a copied or edited file) is refused too — in either record order — and
+    /// the reason names the folder disagreement, not the dormant runtime.
+    #[test]
+    fn a_dormant_record_in_the_bitcoin_folder_is_refused_in_either_order() {
+        for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
+            for fork_first in [true, false] {
+                let root = temp_root("mixed");
+                let bitcoin = armed_cube(&root, "btc", ChainId::Bitcoin, "8765");
+                let mut claimant = CubeSettings::new_with_raw_id(
+                    "claimant".to_string(),
+                    "claimant".to_string(),
+                    chain,
+                );
+                claimant.duress_slot_file = Some("slot-from-nowhere".to_string());
+                let cubes = if fork_first {
+                    vec![claimant, bitcoin.clone()]
+                } else {
+                    vec![bitcoin.clone(), claimant]
+                };
+                write_settings(&root, "bitcoin", cubes);
+                enrolled_state(&root);
+                let before = snapshot(&root);
+
+                let err = block_on(clear_duress_enrollment(CoincubeDirectory::new(
+                    root.clone(),
+                )))
+                .expect_err("disarm must refuse");
+                assert!(
+                    err.contains(chain.label()) && err.contains("Bitcoin folder"),
+                    "{}",
+                    err
+                );
+                assert!(err.contains("Nothing was changed"), "{}", err);
+                assert_eq!(
+                    snapshot(&root),
+                    before,
+                    "{:?} fork_first={}",
+                    chain,
+                    fork_first
+                );
+                assert!(
+                    !root.join(chain.dir_name()).exists(),
+                    "a folder was created for the claim"
+                );
+                let _ = std::fs::remove_dir_all(&root);
+            }
+        }
+    }
+
+    /// Arming refuses at the same boundary, before the `arming` breadcrumb and
+    /// before any marker: the wizard's pre-flight check and the persist step
+    /// both say why, and the device is left exactly as it was.
+    #[test]
+    fn arming_is_refused_before_any_breadcrumb_or_marker_when_a_dormant_cube_is_present() {
+        let root = temp_root("arm");
+        let mut bitcoin =
+            CubeSettings::new_with_raw_id("btc".to_string(), "btc".to_string(), ChainId::Bitcoin);
+        bitcoin.created_at = 1_700_000_000;
+        let mut fork = CubeSettings::new_with_raw_id(
+            "fork".to_string(),
+            "fork".to_string(),
+            ChainId::BitcoinBlake2b,
+        );
+        fork.created_at = 1_700_000_000;
+        write_settings(&root, "bitcoin", vec![bitcoin]);
+        write_settings(&root, "bitcoin-blake2b", vec![fork]);
+        let before = snapshot(&root);
+
+        assert_eq!(
+            duress_pin_collision_check_blocking(&root, "4321").unwrap_err(),
+            DURESS_DORMANT_CHAIN_MSG
+        );
+        let err = block_on(persist_duress_enrollment(
+            CoincubeDirectory::new(root.clone()),
+            zeroize::Zeroizing::new("4321".to_string()),
+            zeroize::Zeroizing::new("code".to_string()),
+            None,
+        ))
+        .expect_err("arming must refuse");
+        assert_eq!(err, DURESS_DORMANT_CHAIN_MSG);
+        assert_eq!(snapshot(&root), before, "arming wrote something");
+        // No breadcrumb, no state file at all.
+        assert_eq!(
+            DuressLocalState::load(&root).unwrap(),
+            DuressLocalState::default()
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The launch-time reconcilers reach `clear_duress_enrollment` through the
+    /// same preflight: they surface the refusal and mutate nothing.
+    #[test]
+    fn the_reconcile_callers_refuse_without_side_effects() {
+        let root = temp_root("reconcile");
+        let bitcoin = armed_cube(&root, "btc", ChainId::Bitcoin, "8765");
+        let fork = armed_cube(&root, "fork", ChainId::BitcoinBlake2b, "8765");
+        write_settings(&root, "bitcoin", vec![bitcoin]);
+        write_settings(&root, "bitcoin-blake2b", vec![fork]);
+        // An orphan: armed while the local state never recorded the enrollment.
+        DuressLocalState {
+            arming: true,
+            ..DuressLocalState::default()
+        }
+        .save(&root)
+        .unwrap();
+        let before = snapshot(&root);
+
+        let err = block_on(reconcile_duress_orphan(CoincubeDirectory::new(
+            root.clone(),
+        )))
+        .expect_err("orphan reconcile must refuse");
+        assert_eq!(err, DURESS_DORMANT_CHAIN_MSG);
+        assert_eq!(snapshot(&root), before);
+
+        // A Connect enrollment the server no longer reports.
+        DuressLocalState {
+            enrolled: true,
+            account_id: Some("acct-1".to_string()),
+            ..DuressLocalState::default()
+        }
+        .save(&root)
+        .unwrap();
+        let before = snapshot(&root);
+        let err = block_on(reconcile_duress_disarm(
+            CoincubeDirectory::new(root.clone()),
+            "acct-1".to_string(),
+        ))
+        .expect_err("disarm reconcile must refuse");
+        assert_eq!(err, DURESS_DORMANT_CHAIN_MSG);
+        assert_eq!(snapshot(&root), before);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Control: a device with only Bitcoin-family Cubes, across two chain
+    /// folders, still disarms completely — decoys land in each Cube's own
+    /// folder, the local state resets.
+    #[test]
+    fn an_ordinary_bitcoin_family_device_still_disarms() {
+        let root = temp_root("control");
+        let main = armed_cube(&root, "main", ChainId::Bitcoin, "8765");
+        let sig = armed_cube(&root, "sig", ChainId::Signet, "8765");
+        write_settings(&root, "bitcoin", vec![main.clone()]);
+        write_settings(&root, "signet", vec![sig.clone()]);
+        enrolled_state(&root);
+
+        block_on(clear_duress_enrollment(CoincubeDirectory::new(
+            root.clone(),
+        )))
+        .expect("ordinary disarm");
+
+        for (cube, chain) in [(&main, ChainId::Bitcoin), (&sig, ChainId::Signet)] {
+            assert!(cube.has_duress_slot(&root), "slot kept for {}", cube.id);
+            assert!(
+                !crate::services::unlock::marker::verify(
+                    &root,
+                    chain,
+                    &cube.id,
+                    cube.duress_slot_file.as_deref(),
+                    "8765",
+                    None,
+                ),
+                "duress PIN still opens {}",
+                cube.id
+            );
+        }
+        assert_eq!(
+            DuressLocalState::load(&root).unwrap(),
+            DuressLocalState::default()
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The preflight itself: a directory that is no chain this build knows is
+    /// refused; a clean Bitcoin-family inventory reports each folder's chain.
+    #[test]
+    fn the_inventory_rejects_unknown_folders_and_reports_chains() {
+        let root = temp_root("inventory");
+        write_settings(&root, "bitcoin", vec![]);
+        write_settings(&root, "testnet4", vec![]);
+        let mut inv = duress_cube_inventory(&root).unwrap();
+        inv.sort_by_key(|e| e.chain.dir_name());
+        assert_eq!(
+            inv.iter().map(|e| e.chain).collect::<Vec<_>>(),
+            vec![ChainId::Bitcoin, ChainId::Testnet4]
+        );
+
+        write_settings(&root, "not-a-chain", vec![]);
+        let err = duress_cube_inventory(&root).unwrap_err();
+        assert!(
+            err.contains("not-a-chain") && err.contains("Nothing was changed"),
+            "{}",
+            err
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
