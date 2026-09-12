@@ -1,6 +1,7 @@
 pub mod app;
 pub mod backup;
 pub mod browser;
+pub mod chain;
 pub mod daemon;
 pub mod delete;
 pub mod dir;
