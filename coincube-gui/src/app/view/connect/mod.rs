@@ -2681,6 +2681,7 @@ mod renewal_banner_tests {
             buy_sell_enabled: None,
             p2p_enabled: None,
             duress_enabled: None,
+            bitcoin_blake2b_enabled: None,
         }
     }
 
@@ -2730,6 +2731,7 @@ mod renewal_banner_tests {
             buy_sell_enabled: Some(true),
             p2p_enabled: Some(false),
             duress_enabled: Some(true),
+            bitcoin_blake2b_enabled: None,
         }
     }
 

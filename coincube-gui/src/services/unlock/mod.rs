@@ -85,6 +85,7 @@ use coincube_core::signer::{MasterSigner, SignerError, MASTER_SEED_LABEL};
 use zeroize::Zeroizing;
 
 use crate::app::settings::CubeSettings;
+use crate::chain::{ChainId, RuntimeSupport};
 
 /// Classification of a submitted PIN at Cube unlock.
 pub enum PinOutcome {
@@ -137,6 +138,10 @@ pub enum UnlockError {
     /// `true` from `verify_pin` when no PIN was configured, and three call
     /// sites had to bolt on `has_pin()` guards to compensate for it.
     NoPinConfigured,
+    /// This build only carries the Cube's chain *identity*; it cannot run it
+    /// (see [`ChainId::runtime_support`]). Nothing on disk is read or written
+    /// for such a Cube — its seed files, wherever they are, stay untouched.
+    ChainUnavailable(&'static str),
     Io(String),
 }
 
@@ -167,12 +172,30 @@ impl std::fmt::Display for UnlockError {
                  to unlock. Restore this Cube from its Recovery Kit or its written \
                  seed phrase."
             ),
+            Self::ChainUnavailable(reason) => f.write_str(reason),
             Self::Io(detail) => write!(f, "Couldn't read this Cube's files: {detail}"),
         }
     }
 }
 
 impl std::error::Error for UnlockError {}
+
+/// Where a chain's seed files live: `<datadir>/<ChainId::dir_name>/mnemonics`.
+///
+/// Keyed on the chain's identity. For the Bitcoin family this is exactly
+/// `MasterSigner::mnemonics_folder(root, chain.bitcoin_network())`, so every
+/// existing seed file is where it always was; for a Bitcoin Blake2b Cube it
+/// is a directory of its own, so its seeds can never be looked up in — or
+/// written into — `bitcoin/mnemonics`. `coincube-core` still derives that
+/// folder from a `bitcoin::Network` in its own read/write helpers; those are
+/// only ever reached for a chain whose [`RuntimeSupport`] is `Supported`
+/// (the dormant guards in this module and at every start path make sure of
+/// it), and keying them on `ChainId` is the runtime follow-up's job.
+pub fn seed_folder(datadir_root: &Path, chain: ChainId) -> PathBuf {
+    datadir_root
+        .join(chain.dir_name())
+        .join(coincube_core::signer::MNEMONICS_FOLDER_NAME)
+}
 
 /// Whether this Cube needs a PIN, decided from **ground truth on disk** rather
 /// than from a settings field.
@@ -197,6 +220,12 @@ pub enum PinRequirement {
 /// Everything unlock needs to know about where a Cube's files are.
 pub struct CubeLocation<'a> {
     pub datadir_root: &'a Path,
+    /// The Cube's chain identity: decides the seed folder and whether this
+    /// build may touch it at all (`Dormant` chains are refused by every
+    /// function here before any file is read).
+    pub chain: ChainId,
+    /// The encoding projection of [`Self::chain`], for the `coincube-core`
+    /// signer calls (mnemonic → keys). Never used to derive a path.
     pub network: Network,
     pub cube_id: &'a str,
     pub cube_created_at: i64,
@@ -238,7 +267,8 @@ impl<'a> CubeLocation<'a> {
     pub fn new(datadir_root: &'a Path, cube: &'a CubeSettings) -> Self {
         Self {
             datadir_root,
-            network: cube.network,
+            chain: cube.network,
+            network: cube.network.bitcoin_network(),
             cube_id: &cube.id,
             cube_created_at: cube.created_at,
             master_signer_fingerprint: cube.master_signer_fingerprint,
@@ -254,6 +284,16 @@ impl<'a> CubeLocation<'a> {
             kit_completeness: None,
             creation_bypass: cube.creation_backup_bypass.as_ref(),
             is_passkey: cube.is_passkey_cube(),
+        }
+    }
+
+    /// The reason this Cube cannot be run by this build, if its chain is
+    /// [`RuntimeSupport::Dormant`]. Every entry point below checks this first
+    /// and refuses without touching the disk.
+    pub fn dormant_reason(&self) -> Option<&'static str> {
+        match self.chain.runtime_support() {
+            RuntimeSupport::Supported => None,
+            RuntimeSupport::Dormant { reason } => Some(reason),
         }
     }
 
@@ -295,8 +335,15 @@ pub fn master_seed_path(loc: &CubeLocation) -> Option<PathBuf> {
     if loc.is_passkey {
         return None;
     }
+    // A chain this build cannot run has no seed path *here*: looking one up
+    // would mean reading a folder we must not touch, and — because a BTCB2
+    // Cube encodes like a mainnet one — could even match a mainnet Cube's
+    // file by fingerprint.
+    if loc.dormant_reason().is_some() {
+        return None;
+    }
 
-    let folder = MasterSigner::mnemonics_folder(loc.datadir_root, loc.network);
+    let folder = seed_folder(loc.datadir_root, loc.chain);
     let entries = std::fs::read_dir(&folder).ok()?;
 
     let marker_name = loc.duress_slot_file;
@@ -361,6 +408,12 @@ const MASTER_SEED_CREATION_WINDOW_SECS: i64 = 2;
 
 /// Does this Cube need a PIN? Answered from the seed file, not from settings.
 pub fn pin_requirement(loc: &CubeLocation) -> PinRequirement {
+    // Fail closed for a chain this build cannot run: `Required` demands a PIN
+    // that [`unlock_blocking`] then refuses with the real reason, whereas
+    // `NoLocalSeed` would read as "restore this Cube", which is false.
+    if loc.dormant_reason().is_some() {
+        return PinRequirement::Required;
+    }
     let Some(path) = master_seed_path(loc) else {
         return PinRequirement::NoLocalSeed;
     };
@@ -393,6 +446,12 @@ pub fn seed_file_version(loc: &CubeLocation) -> Option<u8> {
 /// already returns immediately when no marker exists, which is why an unarmed
 /// Cube is cheaper; that one is deliberate and documented there.
 pub fn unlock_blocking(loc: &CubeLocation, pin: &str) -> Result<PinOutcome, UnlockError> {
+    // Before the keystore, before any file: a chain this build cannot run is
+    // refused outright. Nothing below may run for it — not the seed trial
+    // decrypt, not the marker check, and certainly not a returned signer.
+    if let Some(reason) = loc.dormant_reason() {
+        return Err(UnlockError::ChainUnavailable(reason));
+    }
     // The device secret is fetched once and used for both trial decryptions.
     // A v2 Cube has no entry, which is not an error — `load_optional` maps
     // "no entry" to `None`; only an unreachable keystore propagates.
@@ -415,7 +474,7 @@ pub fn unlock_blocking(loc: &CubeLocation, pin: &str) -> Result<PinOutcome, Unlo
     //    take the same time whichever way this goes.
     if marker::verify(
         loc.datadir_root,
-        loc.network,
+        loc.chain,
         loc.cube_id,
         loc.duress_slot_file,
         pin,
@@ -822,7 +881,10 @@ impl MigrationOutcome {
 /// Runs after unlock, so the device secret is resolvable and the decoy lands
 /// at the same wire version as the seed file beside it.
 pub fn ensure_second_slot(loc: &CubeLocation) -> Result<Option<String>, UnlockError> {
-    if marker::exists(loc.datadir_root, loc.network, loc.duress_slot_file) {
+    if let Some(reason) = loc.dormant_reason() {
+        return Err(UnlockError::ChainUnavailable(reason));
+    }
+    if marker::exists(loc.datadir_root, loc.chain, loc.duress_slot_file) {
         return Ok(None);
     }
     // A recorded name whose file is missing is reused rather than replaced:
@@ -834,7 +896,7 @@ pub fn ensure_second_slot(loc: &CubeLocation) -> Result<Option<String>, UnlockEr
         .unwrap_or_else(|| {
             marker::new_file_name(marker::seed_timestamp(
                 loc.datadir_root,
-                loc.network,
+                loc.chain,
                 loc.master_signer_fingerprint,
                 loc.cube_created_at,
             ))
@@ -842,7 +904,7 @@ pub fn ensure_second_slot(loc: &CubeLocation) -> Result<Option<String>, UnlockEr
     let secret = device_secret::load_optional(loc.cube_id)?;
     marker::write_decoy(
         loc.datadir_root,
-        loc.network,
+        loc.chain,
         loc.cube_id,
         &name,
         secret.as_ref(),
@@ -878,13 +940,16 @@ pub fn ensure_second_slot(loc: &CubeLocation) -> Result<Option<String>, UnlockEr
 /// would be a serious harm, and the caller compensates only as far as logging
 /// it and making the local state agree.
 pub fn remove_legacy_duress_marker(loc: &CubeLocation) -> Result<bool, UnlockError> {
+    if let Some(reason) = loc.dormant_reason() {
+        return Err(UnlockError::ChainUnavailable(reason));
+    }
     let legacy = marker::legacy_file_name(loc.cube_id, loc.cube_created_at);
     // A Cube whose recorded slot happens to sit at the legacy name is already
     // migrated (or was minted there by chance) — never delete the live slot.
     if Some(legacy.as_str()) == loc.duress_slot_file {
         return Ok(false);
     }
-    let path = marker::path(loc.datadir_root, loc.network, &legacy);
+    let path = marker::path(loc.datadir_root, loc.chain, &legacy);
     if !path.exists() {
         return Ok(false);
     }
@@ -911,7 +976,10 @@ pub fn remove_legacy_duress_marker(loc: &CubeLocation) -> Result<bool, UnlockErr
 /// entry that is simply *absent* is different and still proceeds: that Cube has
 /// not been provisioned yet.
 pub fn migrate_seed_files(loc: &CubeLocation, pin: &str) -> Result<MigrationOutcome, UnlockError> {
-    let folder = MasterSigner::mnemonics_folder(loc.datadir_root, loc.network);
+    if let Some(reason) = loc.dormant_reason() {
+        return Err(UnlockError::ChainUnavailable(reason));
+    }
+    let folder = seed_folder(loc.datadir_root, loc.chain);
     let Ok(entries) = std::fs::read_dir(&folder) else {
         return Ok(MigrationOutcome::default());
     };
@@ -1055,14 +1123,14 @@ pub fn migrate_seed_files(loc: &CubeLocation, pin: &str) -> Result<MigrationOutc
     // Cube carrying a v2 slot is picked out by its header alone, which undoes
     // what units 6a/6b built.
     if let Some(slot) = marker_name {
-        let slot_path = marker::path(loc.datadir_root, loc.network, slot);
+        let slot_path = marker::path(loc.datadir_root, loc.chain, slot);
         let stale = std::fs::read(&slot_path)
             .map(|b| seed_crypt::format_version(&b) != Some(target_version))
             .unwrap_or(false);
         if stale {
             marker::write_decoy(
                 loc.datadir_root,
-                loc.network,
+                loc.chain,
                 loc.cube_id,
                 slot,
                 secret.as_ref(),
@@ -1269,6 +1337,7 @@ mod tests {
     ) -> CubeLocation<'a> {
         CubeLocation {
             datadir_root: dir,
+            chain: NET.into(),
             network: NET,
             cube_id,
             cube_created_at: created_at,
@@ -1862,6 +1931,7 @@ mod tests {
 
         let l = CubeLocation {
             datadir_root: &dir,
+            chain: REGTEST.into(),
             network: REGTEST,
             cube_id: "cube-a",
             cube_created_at: 1000,
@@ -2912,5 +2982,165 @@ mod tests {
             creation_gate::evaluate(false, None, Some(&bypass)),
             creation_gate::CreationGate::Bypassed
         ));
+    }
+}
+
+#[cfg(test)]
+mod chain_identity_tests {
+    //! The seed layer's own refusal of a chain this build cannot run, and the
+    //! identity-keyed seed folder (BTCB2 plan PR 2, dormant slice).
+
+    use super::*;
+    use crate::chain::ChainId;
+    use coincube_core::miniscript::bitcoin::secp256k1::Secp256k1;
+
+    fn tmp_dir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "coincube-unlock-chain-{}-{}-{:?}",
+            tag,
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn snapshot(root: &Path) -> Vec<PathBuf> {
+        fn walk(p: &Path, out: &mut Vec<PathBuf>) {
+            if let Ok(rd) = std::fs::read_dir(p) {
+                for e in rd.flatten() {
+                    out.push(e.path());
+                    walk(&e.path(), out);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(root, &mut out);
+        out.sort();
+        out
+    }
+
+    /// The GUI's seed folder equals `coincube-core`'s for every chain the
+    /// core can name, so no existing seed file moves; the fork chains get a
+    /// folder of their own, so their seeds can never be looked up in
+    /// `bitcoin/mnemonics` by a fingerprint they share with a mainnet twin.
+    #[test]
+    fn seed_folder_matches_core_for_the_bitcoin_family_and_is_distinct_for_the_fork() {
+        let root = Path::new("/tmp/coincube-seed-folder");
+        for chain in ChainId::LAUNCHER {
+            assert_eq!(
+                seed_folder(root, chain),
+                MasterSigner::mnemonics_folder(root, chain.bitcoin_network()),
+                "{:?}",
+                chain
+            );
+        }
+        assert_eq!(
+            seed_folder(root, ChainId::BitcoinBlake2b),
+            root.join("bitcoin-blake2b").join("mnemonics")
+        );
+        assert_ne!(
+            seed_folder(root, ChainId::BitcoinBlake2b),
+            seed_folder(root, ChainId::Bitcoin)
+        );
+        assert_ne!(
+            seed_folder(root, ChainId::BitcoinBlake2bTestnet4),
+            seed_folder(root, ChainId::Testnet4)
+        );
+        // The marker module keys its paths the same way.
+        assert_eq!(
+            marker::path(root, Network::Bitcoin, "slot"),
+            marker::path(root, ChainId::Bitcoin, "slot")
+        );
+        assert_eq!(
+            marker::path(root, ChainId::BitcoinBlake2b, "slot"),
+            root.join("bitcoin-blake2b").join("mnemonics").join("slot")
+        );
+    }
+
+    /// A BTCB2 `CubeLocation` refuses every operation without touching the
+    /// disk — even when a mainnet seed file with the very same master
+    /// fingerprint sits in `bitcoin/mnemonics`, which is exactly the file a
+    /// projection to `bitcoin::Network` would have opened.
+    #[test]
+    fn a_dormant_chain_is_refused_by_every_entry_point_without_reading_or_writing() {
+        let dir = tmp_dir("dormant");
+        // A real mainnet Cube on disk, sharing the seed a BTCB2 twin would have.
+        let secp = Secp256k1::signing_only();
+        let signer = MasterSigner::generate(Network::Bitcoin).unwrap();
+        let fp = signer.fingerprint(&secp);
+        signer
+            .store_encrypted(
+                &dir,
+                Network::Bitcoin,
+                &secp,
+                Some((format!("{}{}", MASTER_SEED_LABEL, 1000), 1000)),
+                "1234",
+                "cube-twin",
+                None,
+            )
+            .unwrap();
+        let before = snapshot(&dir);
+
+        for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
+            let cube = {
+                let mut c = CubeSettings::new("Fork".to_string(), chain);
+                c.id = "cube-twin".to_string();
+                c.created_at = 1000;
+                c.master_signer_fingerprint = Some(fp);
+                c
+            };
+            let loc = CubeLocation::new(&dir, &cube);
+            assert_eq!(loc.chain, chain);
+            assert_eq!(
+                loc.dormant_reason(),
+                Some(crate::chain::BTCB2_DORMANT_REASON)
+            );
+
+            assert_eq!(master_seed_path(&loc), None, "{:?}", chain);
+            assert_eq!(seed_file_version(&loc), None);
+            assert_eq!(pin_requirement(&loc), PinRequirement::Required);
+            assert!(matches!(
+                unlock_blocking(&loc, "1234"),
+                Err(UnlockError::ChainUnavailable(r)) if r == crate::chain::BTCB2_DORMANT_REASON
+            ));
+            assert!(matches!(
+                migrate_seed_files(&loc, "1234"),
+                Err(UnlockError::ChainUnavailable(_))
+            ));
+            assert!(matches!(
+                ensure_second_slot(&loc),
+                Err(UnlockError::ChainUnavailable(_))
+            ));
+            assert!(matches!(
+                remove_legacy_duress_marker(&loc),
+                Err(UnlockError::ChainUnavailable(_))
+            ));
+            // The user-facing copy is the dormant reason, verbatim.
+            assert_eq!(
+                UnlockError::ChainUnavailable(crate::chain::BTCB2_DORMANT_REASON).to_string(),
+                crate::chain::BTCB2_DORMANT_REASON
+            );
+        }
+
+        // Nothing was created, removed or rewritten — and in particular no
+        // `bitcoin-blake2b/` folder appeared and the mainnet seed is intact.
+        assert_eq!(snapshot(&dir), before);
+        assert!(!dir.join("bitcoin-blake2b").exists());
+
+        // The mainnet Cube itself is unaffected by any of the above.
+        let mainnet = {
+            let mut c = CubeSettings::new("Main".to_string(), ChainId::Bitcoin);
+            c.id = "cube-twin".to_string();
+            c.created_at = 1000;
+            c.master_signer_fingerprint = Some(fp);
+            c
+        };
+        let loc = CubeLocation::new(&dir, &mainnet);
+        assert_eq!(loc.dormant_reason(), None);
+        assert!(master_seed_path(&loc).is_some());
+        assert_eq!(pin_requirement(&loc), PinRequirement::Required);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

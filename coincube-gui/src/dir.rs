@@ -1,5 +1,5 @@
 use crate::app::settings::WalletId;
-use coincube_core::miniscript::bitcoin::Network;
+use crate::chain::ChainId;
 use coincubed::datadir::DataDirectory;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -48,9 +48,16 @@ impl CoincubeDirectory {
         self.0.as_path()
     }
 
-    pub fn network_directory(&self, network: Network) -> NetworkDirectory {
+    /// The per-chain directory: `<datadir>/<ChainId::dir_name>`. Keyed on the
+    /// chain's *identity*, not its encoding, so a Bitcoin Blake2b Cube lives
+    /// in `bitcoin-blake2b/` and never in `bitcoin/` — the two encode alike,
+    /// which is exactly why the directory must not be derived from
+    /// `bitcoin::Network`. Bitcoin-family callers that hold a `Network` still
+    /// resolve to the same paths as before (`From<Network> for ChainId` is
+    /// the identity mapping for that family).
+    pub fn network_directory<C: Into<ChainId>>(&self, chain: C) -> NetworkDirectory {
         let mut path = self.0.clone();
-        path.push(network.to_string());
+        path.push(chain.into().dir_name());
         NetworkDirectory::new(path)
     }
 
@@ -155,4 +162,46 @@ pub(crate) fn create_directory(
         std::fs::create_dir_all(datadir_path)?;
         Ok(())
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use coincube_core::miniscript::bitcoin::Network;
+
+    #[test]
+    fn bitcoin_family_paths_are_unchanged_by_the_chain_id_key() {
+        let root = CoincubeDirectory::new(PathBuf::from("/tmp/coincube-test"));
+        for chain in ChainId::LAUNCHER {
+            let network: Network = chain.bitcoin_network();
+            // What every existing install was written under …
+            let legacy = root.path().join(network.to_string());
+            // … is what both the `Network` and the `ChainId` callers resolve to.
+            assert_eq!(root.network_directory(network).path(), legacy.as_path());
+            assert_eq!(root.network_directory(chain).path(), legacy.as_path());
+        }
+    }
+
+    #[test]
+    fn a_blake2b_identity_gets_its_own_directory_never_bitcoins() {
+        let root = CoincubeDirectory::new(PathBuf::from("/tmp/coincube-test"));
+        let bitcoin = root.network_directory(ChainId::Bitcoin);
+        let btcb2 = root.network_directory(ChainId::BitcoinBlake2b);
+        let btcb2_t4 = root.network_directory(ChainId::BitcoinBlake2bTestnet4);
+        let testnet4 = root.network_directory(ChainId::Testnet4);
+        assert_eq!(btcb2.path(), root.path().join("bitcoin-blake2b"));
+        assert_eq!(
+            btcb2_t4.path(),
+            root.path().join("bitcoin-blake2b-testnet4")
+        );
+        assert_ne!(btcb2.path(), bitcoin.path());
+        assert_ne!(btcb2_t4.path(), testnet4.path());
+        // Projecting to the encoding first would collapse into `bitcoin/`:
+        // that is the mistake the ChainId key exists to make impossible.
+        assert_eq!(
+            root.network_directory(ChainId::BitcoinBlake2b.bitcoin_network())
+                .path(),
+            bitcoin.path()
+        );
+    }
 }

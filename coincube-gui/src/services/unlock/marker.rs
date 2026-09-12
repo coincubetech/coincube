@@ -88,9 +88,11 @@
 
 use std::path::{Path, PathBuf};
 
-use coincube_core::miniscript::bitcoin::{secp256k1::rand::RngCore, Network};
+use coincube_core::miniscript::bitcoin::secp256k1::rand::RngCore;
+
+use crate::chain::ChainId;
 use coincube_core::seed_crypt::{self, DeviceSecret};
-use coincube_core::signer::{MasterSigner, MnemonicFileName, MASTER_SEED_LABEL};
+use coincube_core::signer::{MnemonicFileName, MASTER_SEED_LABEL};
 
 use super::UnlockError;
 
@@ -173,9 +175,9 @@ pub fn legacy_file_name(cube_id: &str, cube_created_at: i64) -> String {
 ///
 /// Falls back to `fallback` (the Cube's `created_at`) when no seed file can be
 /// identified — a Cube whose seed lives on another device, for instance.
-pub fn seed_timestamp(
+pub fn seed_timestamp<C: Into<ChainId>>(
     datadir_root: &Path,
-    network: Network,
+    chain: C,
     master_signer_fingerprint: Option<coincube_core::miniscript::bitcoin::bip32::Fingerprint>,
     fallback: i64,
 ) -> i64 {
@@ -184,7 +186,7 @@ pub fn seed_timestamp(
     let Some(fp) = master_signer_fingerprint else {
         return fallback;
     };
-    let folder = MasterSigner::mnemonics_folder(datadir_root, network);
+    let folder = super::seed_folder(datadir_root, chain.into());
     let Ok(entries) = std::fs::read_dir(&folder) else {
         return fallback;
     };
@@ -208,8 +210,8 @@ pub fn seed_timestamp(
 }
 
 /// Full path to a marker with this file name.
-pub fn path(datadir_root: &Path, network: Network, file_name: &str) -> PathBuf {
-    MasterSigner::mnemonics_folder(datadir_root, network).join(file_name)
+pub fn path<C: Into<ChainId>>(datadir_root: &Path, chain: C, file_name: &str) -> PathBuf {
+    super::seed_folder(datadir_root, chain.into()).join(file_name)
 }
 
 /// Whether this Cube's second slot exists on disk.
@@ -223,8 +225,9 @@ pub fn path(datadir_root: &Path, network: Network, file_name: &str) -> PathBuf {
 ///
 /// It stays useful for the one question it does answer: does this Cube still
 /// need a slot backfilled (migration, restore)?
-pub fn exists(datadir_root: &Path, network: Network, file_name: Option<&str>) -> bool {
-    file_name.is_some_and(|name| path(datadir_root, network, name).exists())
+pub fn exists<C: Into<ChainId>>(datadir_root: &Path, chain: C, file_name: Option<&str>) -> bool {
+    let chain = chain.into();
+    file_name.is_some_and(|name| path(datadir_root, chain, name).exists())
 }
 
 /// Write this Cube's slot as a **decoy** — indistinguishable from a marker,
@@ -243,9 +246,9 @@ pub fn exists(datadir_root: &Path, network: Network, file_name: Option<&str>) ->
 ///
 /// `device_secret` must be the Cube's own — a v3 Cube's decoy must be v3, or
 /// the wire version singles it out.
-pub fn write_decoy(
+pub fn write_decoy<C: Into<ChainId>>(
     datadir_root: &Path,
-    network: Network,
+    chain: C,
     cube_id: &str,
     file_name: &str,
     device_secret: Option<&DeviceSecret>,
@@ -258,7 +261,7 @@ pub fn write_decoy(
         zeroize::Zeroizing::new(key.iter().map(|b| format!("{:02x}", b)).collect::<String>());
     write(
         datadir_root,
-        network,
+        chain.into(),
         cube_id,
         file_name,
         &passphrase,
@@ -271,15 +274,15 @@ pub fn write_decoy(
 ///
 /// `device_secret` must be the same one the Cube's seed file uses, so the two
 /// files are indistinguishable in wire version as well as in parameters.
-pub fn write(
+pub fn write<C: Into<ChainId>>(
     datadir_root: &Path,
-    network: Network,
+    chain: C,
     cube_id: &str,
     file_name: &str,
     duress_pin: &str,
     device_secret: Option<&DeviceSecret>,
 ) -> Result<(), UnlockError> {
-    let folder = MasterSigner::mnemonics_folder(datadir_root, network);
+    let folder = super::seed_folder(datadir_root, chain.into());
     std::fs::create_dir_all(&folder).map_err(|e| UnlockError::Io(e.to_string()))?;
 
     let blob = seed_crypt::encrypt(MARKER_PLAINTEXT, duress_pin, cube_id, device_secret)
@@ -359,15 +362,15 @@ fn match_seed_mtime(folder: &Path, target: &Path) {
 
 /// Disarm duress on this Cube. Idempotent — a missing marker, or a Cube with
 /// no recorded marker name, is success.
-pub fn remove(
+pub fn remove<C: Into<ChainId>>(
     datadir_root: &Path,
-    network: Network,
+    chain: C,
     file_name: Option<&str>,
 ) -> Result<(), UnlockError> {
     let Some(file_name) = file_name else {
         return Ok(());
     };
-    let target = path(datadir_root, network, file_name);
+    let target = path(datadir_root, chain, file_name);
     super::allow_overwrite(&target);
     match std::fs::remove_file(&target) {
         Ok(()) => Ok(()),
@@ -400,9 +403,9 @@ pub fn remove(
 /// here, which marks it out as a Cube that cannot be armed. That lasts until
 /// [`super::ensure_second_slot`] backfills it, which runs on the Cube's next
 /// successful unlock.
-pub fn verify(
+pub fn verify<C: Into<ChainId>>(
     datadir_root: &Path,
-    network: Network,
+    chain: C,
     cube_id: &str,
     file_name: Option<&str>,
     pin: &str,
@@ -411,7 +414,7 @@ pub fn verify(
     let Some(file_name) = file_name else {
         return false;
     };
-    let target = path(datadir_root, network, file_name);
+    let target = path(datadir_root, chain, file_name);
     let Ok(blob) = std::fs::read(&target) else {
         return false;
     };
@@ -439,7 +442,8 @@ mod tests {
         d
     }
 
-    const NET: Network = Network::Bitcoin;
+    const NET: coincube_core::miniscript::bitcoin::Network =
+        coincube_core::miniscript::bitcoin::Network::Bitcoin;
     const TS: i64 = 1_700_000_000;
 
     /// Arm a Cube the way enrollment does, returning the recorded name.

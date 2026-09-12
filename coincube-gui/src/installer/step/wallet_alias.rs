@@ -1,6 +1,5 @@
 use iced::Task;
 
-use coincube_core::miniscript::bitcoin::Network;
 use coincube_ui::{component::form, widget::*};
 
 use crate::{
@@ -37,13 +36,10 @@ impl Step for WalletAlias {
             (true, true) => {
                 self.wallet_alias.value = format!(
                     "My Vault {} wallet",
-                    match ctx.network {
-                        Network::Bitcoin => "Bitcoin",
-                        Network::Signet => "Signet",
-                        Network::Testnet => "Testnet",
-                        Network::Testnet4 => "Testnet4",
-                        Network::Regtest => "Regtest",
-                    }
+                    // Labels come from the chain identity (`ChainId::label`),
+                    // so a Bitcoin Blake2b Vault — when the installer learns
+                    // to make one — is never named "Bitcoin".
+                    crate::chain::ChainId::from(ctx.network).label()
                 );
                 self.wallet_alias.valid = true;
             }

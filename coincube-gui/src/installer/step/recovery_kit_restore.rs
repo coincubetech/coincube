@@ -1024,6 +1024,43 @@ pub fn classify_password(password: &str) -> PasswordStrength {
 mod tests {
     use super::*;
 
+    /// A server-side Bitcoin Blake2b Cube never passes a Bitcoin-family
+    /// network filter, and vice versa: the Connect strings differ on purpose
+    /// (`ChainId::api_str`), so a restore flow installing for mainnet can
+    /// neither list nor auto-select the BTCB2 twin — its identity is not
+    /// collapsed to "mainnet" at this boundary. (BTCB2 plan PR 2.)
+    #[test]
+    fn a_blake2b_server_cube_never_passes_a_bitcoin_family_filter() {
+        use crate::chain::ChainId;
+        for (server, installing) in [
+            (ChainId::BitcoinBlake2b, ChainId::Bitcoin),
+            (ChainId::Bitcoin, ChainId::BitcoinBlake2b),
+            (ChainId::BitcoinBlake2bTestnet4, ChainId::Testnet4),
+            (ChainId::Testnet4, ChainId::BitcoinBlake2bTestnet4),
+        ] {
+            assert!(
+                !cube_passes_filter(server.api_str(), "u", installing.api_str(), None),
+                "{:?} passed a {:?} filter",
+                server,
+                installing
+            );
+            assert!(
+                !cube_passes_filter(server.api_str(), "u", installing.api_str(), Some("u")),
+                "{:?} passed a preselected {:?} filter",
+                server,
+                installing
+            );
+        }
+        // Same chain still matches, so the filter is not simply broken.
+        assert!(cube_passes_filter(
+            "bitcoin-blake2b",
+            "u",
+            "bitcoin-blake2b",
+            Some("u")
+        ));
+        assert!(cube_passes_filter("mainnet", "u", "mainnet", None));
+    }
+
     fn candidate(name: &str, has_kit: bool) -> RestoreCubeCandidate {
         RestoreCubeCandidate {
             id: 1,

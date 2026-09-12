@@ -1485,7 +1485,7 @@ async fn detect_owner_self_recipient(client: CoincubeClient, cube_id: u64) -> Ph
 /// for Bitcoin mainnet). A mismatch would leak into `DescriptorBlob.
 /// cube.network`, the fingerprint hash, and the restore-side
 /// network-filter — and silently break cross-client interop.
-fn network_str(n: Network) -> String {
+fn network_str<C: Into<crate::chain::ChainId>>(n: C) -> String {
     settings::network_to_api_string(n)
 }
 
