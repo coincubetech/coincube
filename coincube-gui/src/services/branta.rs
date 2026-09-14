@@ -21,6 +21,8 @@ use tokio::sync::watch;
 
 const TIMEOUT: Duration = Duration::from_secs(3);
 const MAX_LOGO_BYTES: usize = 256 * 1024;
+const MAX_LOGO_DIMENSION: u32 = 5000;
+const LOGO_THUMBNAIL_DIMENSION: u32 = 64;
 const MAX_REQUEST_BYTES: usize = 16 * 1024;
 const MAX_IDENTITIES: usize = 4;
 pub const MISMATCH_MESSAGE: &str =
@@ -292,11 +294,12 @@ impl LookupTicket {
             return Vec::new();
         }
         let deadline = tokio::time::Instant::now() + TIMEOUT;
-        let mut pending =
-            stream::iter(requests.into_iter().map(|(id, request)| async move {
-                (id, self.lookup_inner(request, deadline).await)
-            }))
-            .buffer_unordered(3);
+        let mut pending = stream::iter(
+            requests
+                .into_iter()
+                .map(|(id, request)| async move { (id, self.identify(request, deadline).await) }),
+        )
+        .buffer_unordered(3);
         let mut results = Vec::new();
         loop {
             tokio::select! {
@@ -305,6 +308,22 @@ impl LookupTicket {
                 next = pending.next() => match next { Some(item) => results.push(item), None => break }
             }
         }
+        // Identify every recipient before optional images can consume the batch budget.
+        let logos = stream::iter(
+            results
+                .into_iter()
+                .map(|(id, (mut result, urls))| async move {
+                    self.load_logos(&mut result, urls, deadline).await;
+                    (id, result)
+                }),
+        )
+        .buffer_unordered(3)
+        .collect::<Vec<_>>();
+        let results = tokio::select! {
+            biased;
+            _ = changes.changed() => return Vec::new(),
+            results = logos => results,
+        };
         if self.is_current() {
             results
         } else {
@@ -316,19 +335,32 @@ impl LookupTicket {
         request: LookupRequest,
         deadline: tokio::time::Instant,
     ) -> LookupResult {
+        let (mut result, urls) = self.identify(request, deadline).await;
+        self.load_logos(&mut result, urls, deadline).await;
+        if self.is_current() {
+            result
+        } else {
+            LookupResult::Silent
+        }
+    }
+    async fn identify(
+        &self,
+        request: LookupRequest,
+        deadline: tokio::time::Instant,
+    ) -> (LookupResult, Vec<(Option<String>, Option<String>)>) {
         if !self.is_current() || tokio::time::Instant::now() >= deadline {
-            return LookupResult::Silent;
+            return (LookupResult::Silent, Vec::new());
         }
         let response =
             match tokio::time::timeout_at(deadline, self.backend.lookup(self.network, &request))
                 .await
             {
                 Ok(Ok(r)) => r,
-                Ok(Err(BrantaError::Tampered)) => return LookupResult::Tampered,
-                _ => return LookupResult::Silent,
+                Ok(Err(BrantaError::Tampered)) => return (LookupResult::Tampered, Vec::new()),
+                _ => return (LookupResult::Silent, Vec::new()),
             };
         if !self.is_current() || !same_origin(self.network, &response.verify_url) {
-            return LookupResult::Silent;
+            return (LookupResult::Silent, Vec::new());
         }
         let mut identities = Vec::new();
         let mut logo_urls = Vec::new();
@@ -350,7 +382,7 @@ impl LookupTicket {
                 continue;
             };
             if !self.is_current() {
-                return LookupResult::Silent;
+                return (LookupResult::Silent, Vec::new());
             }
             logo_urls.push((payment.platform_logo_url, payment.platform_logo_light_url));
             identities.push(RecipientIdentity {
@@ -367,46 +399,51 @@ impl LookupTicket {
                 epoch: self.epoch,
             });
         }
-        // Identity is already bound. Optional logos may use the remaining budget,
-        // but exhausting it must never discard a successful lookup or tamper result.
-        if tokio::time::Instant::now() < deadline {
-            let logos = async {
-                let mut pending = stream::iter(logo_urls.into_iter().enumerate().map(
-                    |(index, (dark, light))| async move {
-                        let (dark, light) = tokio::join!(
-                            self.load_logo(dark.as_deref()),
-                            self.load_logo(light.as_deref()),
-                        );
-                        (index, dark, light)
-                    },
-                ))
-                .buffer_unordered(MAX_IDENTITIES);
-                while let Some((index, dark, light)) = pending.next().await {
-                    identities[index].logo = dark;
-                    identities[index].logo_light = light;
-                }
-            };
-            let _ = tokio::time::timeout_at(deadline, logos).await;
-        }
         if !self.is_current() || identities.is_empty() {
-            LookupResult::Silent
+            (LookupResult::Silent, Vec::new())
         } else {
-            LookupResult::Identified(identities)
+            (LookupResult::Identified(identities), logo_urls)
         }
+    }
+    async fn load_logos(
+        &self,
+        result: &mut LookupResult,
+        urls: Vec<(Option<String>, Option<String>)>,
+        deadline: tokio::time::Instant,
+    ) {
+        let LookupResult::Identified(identities) = result else {
+            return;
+        };
+        if !self.is_current() || tokio::time::Instant::now() >= deadline {
+            return;
+        }
+        let logos = async {
+            let requests = urls
+                .into_iter()
+                .enumerate()
+                .flat_map(|(index, (dark, light))| [(index, false, dark), (index, true, light)]);
+            let mut pending = stream::iter(requests.map(|(index, light, url)| async move {
+                (index, light, self.load_logo(url.as_deref()).await)
+            }))
+            .buffer_unordered(MAX_IDENTITIES * 2);
+            // Preserve each completed variant even if another one misses the deadline.
+            while let Some((index, light, handle)) = pending.next().await {
+                if light {
+                    identities[index].logo_light = handle;
+                } else {
+                    identities[index].logo = handle;
+                }
+            }
+        };
+        let _ = tokio::time::timeout_at(deadline, logos).await;
     }
     async fn load_logo(&self, url: Option<&str>) -> Option<Handle> {
         let url = url?;
         if !self.is_current() || !same_origin(self.network, url) {
             return None;
         }
-        // A failed/slow logo cannot discard a useful identity or delay review.
-        tokio::time::timeout(
-            Duration::from_millis(350),
-            self.backend.logo(self.network, url),
-        )
-        .await
-        .ok()
-        .flatten()
+        // lookup_inner bounds all optional logos by the remaining shared deadline.
+        self.backend.logo(self.network, url).await
     }
 }
 // SDK query parsing uses byte slices for type detection. Reject malformed escapes
@@ -459,20 +496,40 @@ fn same_origin(network: Network, value: &str) -> bool {
 }
 type LogoCache = Mutex<VecDeque<(String, Handle)>>;
 static LOGOS: OnceLock<LogoCache> = OnceLock::new();
-async fn fetch_logo(network: Network, url: &str) -> Option<Handle> {
-    if !same_origin(network, url) {
+static LOGO_DECODER: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+
+fn logo_request_url(network: Network, value: &str) -> Option<reqwest::Url> {
+    if !same_origin(network, value) {
         return None;
     }
+    let mut url = reqwest::Url::parse(value).ok()?;
+    // Branta's Active Storage blob URLs redirect to object storage. Its proxy
+    // route serves the same signed blob without sending the client off-origin.
+    if let Some(blob) = url
+        .path()
+        .strip_prefix("/rails/active_storage/blobs/redirect/")
+    {
+        let path = format!("/rails/active_storage/blobs/proxy/{blob}");
+        url.set_path(&path);
+    }
+    Some(url)
+}
+
+async fn fetch_logo(network: Network, url: &str) -> Option<Handle> {
+    let request_url = logo_request_url(network, url)?;
     let cache = LOGOS.get_or_init(|| Mutex::new(VecDeque::new()));
     if let Some((_, handle)) = cache.lock().ok()?.iter().find(|(key, _)| key == url) {
         return Some(handle.clone());
     }
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_millis(350))
+        .timeout(TIMEOUT)
         .build()
         .ok()?;
-    let mut response = client.get(url).send().await.ok()?.error_for_status().ok()?;
+    let mut response = client.get(request_url).send().await.ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
     let content_type = response
         .headers()
         .get(reqwest::header::CONTENT_TYPE)?
@@ -498,7 +555,16 @@ async fn fetch_logo(network: Network, url: &str) -> Option<Handle> {
         }
         bytes.extend_from_slice(&chunk);
     }
-    let handle = decode_logo(&bytes, format)?;
+    // Large but bounded originals must not block the async runtime or decode in
+    // parallel across recipients. The permit remains held if the lookup expires
+    // while its blocking decode finishes; no network work runs in this closure.
+    let permit = LOGO_DECODER.acquire().await.ok()?;
+    let handle = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        decode_logo(&bytes, format)
+    })
+    .await
+    .ok()??;
     let mut cache = cache.lock().ok()?;
     if cache.len() >= 32 {
         cache.pop_front();
@@ -512,11 +578,15 @@ fn decode_logo(bytes: &[u8], format: image::ImageFormat) -> Option<Handle> {
     }
     let mut reader = image::ImageReader::with_format(Cursor::new(bytes), format);
     let mut limits = image::Limits::default();
-    limits.max_image_width = Some(512);
-    limits.max_image_height = Some(512);
-    limits.max_alloc = Some(4 * 1024 * 1024);
+    limits.max_image_width = Some(MAX_LOGO_DIMENSION);
+    limits.max_image_height = Some(MAX_LOGO_DIMENSION);
+    limits.max_alloc = Some(100 * 1024 * 1024);
     reader.limits(limits);
-    let image = reader.decode().ok()?.into_rgba8();
+    let image = reader
+        .decode()
+        .ok()?
+        .thumbnail(LOGO_THUMBNAIL_DIMENSION, LOGO_THUMBNAIL_DIMENSION)
+        .into_rgba8();
     Some(Handle::from_rgba(
         image.width(),
         image.height(),
@@ -591,17 +661,28 @@ mod tests {
                     description: Some("An order".into()),
                     destinations: vec![dest],
                     platform_logo_url: Some("https://guardrail.branta.pro/logo.png".into()),
-                    platform_logo_light_url: (self.mode == 7)
+                    platform_logo_light_url: (matches!(self.mode, 7 | 9 | 10))
                         .then(|| "https://guardrail.branta.pro/light.png".into()),
                     ..Default::default()
                 }],
                 verify_url: "https://guardrail.branta.pro/v2/verify/example#secret".into(),
             })
         }
-        async fn logo(&self, _: Network, _: &str) -> Option<Handle> {
+        async fn logo(&self, _: Network, url: &str) -> Option<Handle> {
             self.logos.fetch_add(1, Ordering::SeqCst);
             if self.mode == 7 {
                 tokio::time::sleep(Duration::from_secs(10)).await;
+            }
+            if self.mode == 9 || self.mode == 10 {
+                let light = url.ends_with("light.png");
+                if light == (self.mode == 9) {
+                    tokio::time::sleep(Duration::from_secs(10)).await;
+                }
+                return Some(Handle::from_rgba(1, 1, vec![255; 4]));
+            }
+            if self.mode == 8 {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                return Some(Handle::from_rgba(1, 1, vec![255; 4]));
             }
             None
         }
@@ -657,6 +738,29 @@ mod tests {
         assert!(!format!("{:?}", ids[0]).contains("secret"));
     }
     #[tokio::test]
+    async fn logo_can_use_remaining_lookup_budget_and_disable_cancels_it() {
+        let (t, _) = fake_ticket(8);
+        let LookupResult::Identified(ids) = t.lookup(request()).await else {
+            panic!("expected identity with a logo");
+        };
+        assert!(ids[0].logo.is_some());
+
+        let (t, fake) = fake_ticket(7);
+        let other = t.clone();
+        let future = tokio::spawn(async move { other.lookup(request()).await });
+        while fake.logos.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+        t.set_test_enabled(false);
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_millis(100), future)
+                .await
+                .unwrap()
+                .unwrap(),
+            LookupResult::Silent
+        ));
+    }
+    #[tokio::test]
     async fn logo_deadline_preserves_identity_and_same_preference_does_not_cancel() {
         let (t, fake) = fake_ticket(7);
         let other = t.clone();
@@ -682,6 +786,35 @@ mod tests {
         t.set_test_enabled(false);
         assert!(changes.changed().await.is_ok());
         assert!(!ids[0].is_current());
+    }
+    #[tokio::test]
+    async fn completed_logo_variant_survives_other_variant_timeout() {
+        for mode in [9, 10] {
+            let (t, _) = fake_ticket(mode);
+            let LookupResult::Identified(ids) = t
+                .lookup_inner(
+                    request(),
+                    tokio::time::Instant::now() + Duration::from_millis(100),
+                )
+                .await
+            else {
+                panic!("expected identity")
+            };
+            assert_eq!(ids[0].logo.is_some(), mode == 9);
+            assert_eq!(ids[0].logo_light.is_some(), mode == 10);
+        }
+    }
+    #[tokio::test]
+    async fn stalled_logos_do_not_starve_later_recipient_lookups() {
+        let (t, fake) = fake_ticket(7);
+        let results = t
+            .lookup_many((0..4).map(|id| (id, request())).collect())
+            .await;
+        assert_eq!(fake.calls.load(Ordering::SeqCst), 4);
+        assert_eq!(results.len(), 4);
+        assert!(results
+            .iter()
+            .all(|(_, result)| matches!(result, LookupResult::Identified(_))));
     }
     #[tokio::test]
     async fn disabled_makes_zero_lookup_and_logo_requests_and_invalidates_off_on() {
@@ -746,6 +879,71 @@ mod tests {
         assert!(decode_logo(b"not an image", image::ImageFormat::Png).is_none());
         assert_eq!(bounded_text("a\n\u{202e}b", 2), "ab");
         assert_eq!(bounded_text(&"z".repeat(300), 200).len(), 200);
+    }
+    #[test]
+    fn active_storage_logos_use_same_origin_proxy_only() {
+        let input = "https://guardrail.branta.pro/rails/active_storage/blobs/redirect/signed/logo%20dark.png?x=1";
+        assert_eq!(
+            logo_request_url(Network::Bitcoin, input).unwrap().as_str(),
+            "https://guardrail.branta.pro/rails/active_storage/blobs/proxy/signed/logo%20dark.png?x=1"
+        );
+        assert!(logo_request_url(Network::Regtest, input).is_none());
+        assert!(
+            logo_request_url(Network::Bitcoin, "https://object-storage.test/logo.png").is_none()
+        );
+        let staging = input.replace("guardrail.branta.pro", "staging.guardrail.branta.pro");
+        assert_eq!(
+            logo_request_url(Network::Regtest, &staging)
+                .unwrap()
+                .host_str(),
+            Some("staging.guardrail.branta.pro")
+        );
+        let ordinary = "https://guardrail.branta.pro/logo.png";
+        assert_eq!(
+            logo_request_url(Network::Bitcoin, ordinary)
+                .unwrap()
+                .as_str(),
+            ordinary
+        );
+    }
+
+    #[test]
+    fn large_vendor_logo_becomes_bounded_thumbnail_and_oversize_is_refused() {
+        fn png(width: u32, height: u32) -> Vec<u8> {
+            let mut bytes = Cursor::new(Vec::new());
+            use image::ImageEncoder;
+            let image = image::RgbaImage::new(width, height);
+            image::codecs::png::PngEncoder::new_with_quality(
+                &mut bytes,
+                image::codecs::png::CompressionType::Best,
+                image::codecs::png::FilterType::NoFilter,
+            )
+            .write_image(
+                image.as_raw(),
+                width,
+                height,
+                image::ExtendedColorType::Rgba8,
+            )
+            .unwrap();
+            bytes.into_inner()
+        }
+        let bytes = png(4501, 4500);
+        assert!(bytes.len() <= MAX_LOGO_BYTES);
+        let handle = decode_logo(&bytes, image::ImageFormat::Png).unwrap();
+        let Handle::Rgba {
+            width,
+            height,
+            pixels,
+            ..
+        } = handle
+        else {
+            panic!("expected decoded thumbnail")
+        };
+        assert!((1..=64).contains(&width) && (1..=64).contains(&height));
+        assert_eq!(pixels.len(), (width * height * 4) as usize);
+        assert!(decode_logo(&bytes, image::ImageFormat::Jpeg).is_none());
+        assert!(decode_logo(&png(5001, 1), image::ImageFormat::Png).is_none());
+        assert!(decode_logo(&vec![0; MAX_LOGO_BYTES + 1], image::ImageFormat::Png).is_none());
     }
 }
 
