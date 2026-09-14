@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     backup::{Key, KeyRole, KeyType},
+    chain::ChainId,
     dir::NetworkDirectory,
     hw::HardwareWalletConfig,
     services::{self, connect::client::backend},
@@ -513,7 +514,17 @@ pub enum CubeConnectState {
 pub struct CubeSettings {
     pub id: String,
     pub name: String,
-    pub network: Network,
+    /// The chain this Cube lives on — its *identity*, which decides the
+    /// directory it is stored under, the Connect network string, the node
+    /// and provider it may talk to, and whether this build can run it at all
+    /// ([`ChainId::runtime_support`]). Project through
+    /// [`ChainId::bitcoin_network`] only for encoding work.
+    ///
+    /// Serialised as the same strings `bitcoin::Network` used to write
+    /// (`"bitcoin"`, `"testnet4"`, …), so every existing `settings.json`
+    /// parses unchanged; a Bitcoin Blake2b Cube writes `"bitcoin-blake2b"`,
+    /// which older builds refuse rather than misread as mainnet.
+    pub network: ChainId,
     #[serde(default)]
     pub backed_up: bool,
     #[serde(default)]
@@ -760,11 +771,11 @@ impl CubeSettings {
     /// call to reactivate the original Cube instead of minting a duplicate
     /// (parsing + re-formatting would normalize case; a malformed value would
     /// force a lossy fallback).
-    pub fn new_with_raw_id(id: String, name: String, network: Network) -> Self {
+    pub fn new_with_raw_id<C: Into<ChainId>>(id: String, name: String, network: C) -> Self {
         Self {
             id,
             name,
-            network,
+            network: network.into(),
             created_at: chrono::Utc::now().timestamp(),
             vault_wallet_id: None,
             vault_fingerprint: None,
@@ -803,11 +814,11 @@ impl CubeSettings {
     ///
     /// The frontend should generate this UUID before initiating the creation
     /// request so that retries reuse the same identifier (idempotent creation).
-    pub fn new_with_id(id: uuid::Uuid, name: String, network: Network) -> Self {
+    pub fn new_with_id<C: Into<ChainId>>(id: uuid::Uuid, name: String, network: C) -> Self {
         Self::new_with_raw_id(id.to_string(), name, network)
     }
 
-    pub fn new(name: String, network: Network) -> Self {
+    pub fn new<C: Into<ChainId>>(name: String, network: C) -> Self {
         Self::new_with_id(uuid::Uuid::new_v4(), name, network)
     }
 
@@ -978,28 +989,33 @@ impl CubeSettings {
         Ok(Some(cube_settings))
     }
 
-    /// Convert this cube's network to the API network string.
+    /// Convert this cube's chain to the API network string. Keyed on the
+    /// identity: a Bitcoin Blake2b Cube registers as `bitcoin-blake2b`, never
+    /// as `mainnet`.
     pub fn api_network_string(&self) -> String {
-        network_to_api_string(self.network)
+        self.network.api_str().to_string()
+    }
+
+    /// Whether this build can open this Cube. Both Bitcoin Blake2b identities
+    /// are dormant in this build: the Cube's settings are kept intact and
+    /// distinct, but no daemon, node, SDK or signer may be started for it.
+    pub fn runtime_support(&self) -> crate::chain::RuntimeSupport {
+        self.network.runtime_support()
     }
 }
 
-/// Convert a `Network` to the API network string used by the Connect backend.
-/// Borrowing form — prefer it where an owned `String` isn't needed, such as a
-/// comparison inside a predicate the view calls per render.
-pub fn network_to_api_str(network: Network) -> &'static str {
-    match network {
-        Network::Bitcoin => "mainnet",
-        Network::Testnet => "testnet",
-        Network::Testnet4 => "testnet4",
-        Network::Signet => "signet",
-        Network::Regtest => "regtest",
-    }
+/// The API network string used by the Connect backend for a chain. Borrowing
+/// form — prefer it where an owned `String` isn't needed, such as a
+/// comparison inside a predicate the view calls per render. Accepts a
+/// `bitcoin::Network` from Bitcoin-family callers (the identity mapping for
+/// that family) or a [`ChainId`].
+pub fn network_to_api_str<C: Into<ChainId>>(chain: C) -> &'static str {
+    chain.into().api_str()
 }
 
-/// Convert a `Network` to the API network string used by the Connect backend.
-pub fn network_to_api_string(network: Network) -> String {
-    network_to_api_str(network).to_string()
+/// Owned form of [`network_to_api_str`].
+pub fn network_to_api_string<C: Into<ChainId>>(chain: C) -> String {
+    network_to_api_str(chain).to_string()
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -2744,5 +2760,188 @@ mod test {
         assert!(settings.cubes.is_empty());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod chain_identity_tests {
+    //! `CubeSettings.network` as a `ChainId` (BTCB2 plan PR 2, dormant slice):
+    //! old files keep parsing, the fork variants persist distinctly, unknown
+    //! identifiers are rejected, and a BTCB2 Cube's settings live in — and are
+    //! read back from — their own directory.
+
+    use super::*;
+    use crate::chain::ChainId;
+    use crate::dir::CoincubeDirectory;
+    use coincube_core::miniscript::bitcoin::Network;
+
+    fn temp_root(tag: &str) -> CoincubeDirectory {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "coincube-chain-id-{}-{}-{}",
+            tag,
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::SeqCst)
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        CoincubeDirectory::new(path)
+    }
+
+    /// A `settings.json` exactly as every build before this one wrote it.
+    fn legacy_file(network: &str) -> String {
+        format!(
+            r#"{{
+              "cubes": [{{
+                "id": "6c5d5f4a-3a53-4f5c-9d0e-0a1b2c3d4e5f",
+                "name": "Old Cube",
+                "network": "{network}",
+                "backed_up": true,
+                "created_at": 1720000000
+              }}],
+              "wallets": []
+            }}"#
+        )
+    }
+
+    #[test]
+    fn every_legacy_network_string_still_parses_to_the_same_chain() {
+        for network in [
+            Network::Bitcoin,
+            Network::Testnet,
+            Network::Testnet4,
+            Network::Signet,
+            Network::Regtest,
+        ] {
+            let raw = legacy_file(&network.to_string());
+            let parsed: Settings = serde_json::from_str(&raw).unwrap();
+            let cube = &parsed.cubes[0];
+            assert_eq!(cube.network, ChainId::from(network), "{}", network);
+            assert_eq!(cube.network.bitcoin_network(), network);
+            // …and writes back byte-identically for the network field.
+            let out = serde_json::to_string(cube).unwrap();
+            assert!(
+                out.contains(&format!("\"network\":\"{}\"", network)),
+                "{}",
+                out
+            );
+        }
+    }
+
+    #[test]
+    fn a_blake2b_cube_persists_distinctly_and_an_old_build_refuses_it() {
+        for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
+            let cube = CubeSettings::new("Fork Cube".to_string(), chain);
+            let out = serde_json::to_string(&cube).unwrap();
+            let expected = format!("\"network\":\"{}\"", chain.dir_name());
+            assert!(out.contains(&expected), "{}", out);
+            let back: CubeSettings = serde_json::from_str(&out).unwrap();
+            assert_eq!(back.network, chain);
+            assert_eq!(back.api_network_string(), chain.api_str());
+            assert!(!back.runtime_support().is_supported());
+
+            // What a previous build does with this file: its `network` field is
+            // a `bitcoin::Network`, which has no such string. It refuses the
+            // record rather than reading it as mainnet.
+            #[derive(serde::Deserialize)]
+            struct OldCube {
+                #[allow(dead_code)]
+                network: Network,
+            }
+            assert!(
+                serde_json::from_str::<OldCube>(&out).is_err(),
+                "an old build would have accepted {}",
+                out
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_network_identifiers_are_rejected_not_defaulted() {
+        for bad in ["mainnet", "btcb2", "bitcoin_blake2b", "Bitcoin", ""] {
+            let raw = legacy_file(bad);
+            assert!(
+                serde_json::from_str::<Settings>(&raw).is_err(),
+                "{:?} was accepted",
+                bad
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_blake2b_cube_is_written_to_and_read_from_its_own_directory() {
+        let root = temp_root("btcb2-dir");
+        let bitcoin_dir = root.network_directory(ChainId::Bitcoin);
+        let btcb2_dir = root.network_directory(ChainId::BitcoinBlake2b);
+
+        // One Cube on each chain, written through the real settings writer.
+        let bitcoin_cube = CubeSettings::new("Bitcoin".to_string(), ChainId::Bitcoin);
+        let btcb2_cube = CubeSettings::new("Blake2b".to_string(), ChainId::BitcoinBlake2b);
+        let b = bitcoin_cube.clone();
+        update_settings_file(&bitcoin_dir, move |mut s| {
+            s.cubes.push(b);
+            Some(s)
+        })
+        .await
+        .unwrap();
+        let f = btcb2_cube.clone();
+        update_settings_file(&btcb2_dir, move |mut s| {
+            s.cubes.push(f);
+            Some(s)
+        })
+        .await
+        .unwrap();
+
+        // Each directory holds exactly its own chain's Cube.
+        let in_bitcoin = Settings::from_file(&bitcoin_dir).unwrap();
+        let in_btcb2 = Settings::from_file(&btcb2_dir).unwrap();
+        assert_eq!(in_bitcoin.cubes.len(), 1);
+        assert_eq!(in_bitcoin.cubes[0].id, bitcoin_cube.id);
+        assert_eq!(in_bitcoin.cubes[0].network, ChainId::Bitcoin);
+        assert_eq!(in_btcb2.cubes.len(), 1);
+        assert_eq!(in_btcb2.cubes[0].id, btcb2_cube.id);
+        assert_eq!(in_btcb2.cubes[0].network, ChainId::BitcoinBlake2b);
+        assert!(root
+            .path()
+            .join("bitcoin-blake2b")
+            .join(SETTINGS_FILE_NAME)
+            .exists());
+        // The Bitcoin file is untouched by the BTCB2 write, byte for byte.
+        let bitcoin_raw =
+            std::fs::read_to_string(bitcoin_dir.path().join(SETTINGS_FILE_NAME)).unwrap();
+        assert!(!bitcoin_raw.contains("Blake2b"));
+        assert!(!bitcoin_raw.contains("bitcoin-blake2b"));
+
+        // Directory identity and persisted identity agree — the invariant the
+        // open gate checks before any projection to `bitcoin::Network`.
+        for (dir, chain) in [
+            (&bitcoin_dir, ChainId::Bitcoin),
+            (&btcb2_dir, ChainId::BitcoinBlake2b),
+        ] {
+            for cube in Settings::from_file(dir).unwrap().cubes {
+                assert_eq!(cube.network, chain);
+            }
+        }
+        let _ = std::fs::remove_dir_all(root.path());
+    }
+
+    #[test]
+    fn connect_network_strings_come_from_the_identity() {
+        assert_eq!(network_to_api_str(Network::Bitcoin), "mainnet");
+        assert_eq!(network_to_api_str(ChainId::Bitcoin), "mainnet");
+        assert_eq!(network_to_api_str(ChainId::Testnet4), "testnet4");
+        assert_eq!(
+            network_to_api_str(ChainId::BitcoinBlake2b),
+            "bitcoin-blake2b"
+        );
+        assert_eq!(
+            network_to_api_str(ChainId::BitcoinBlake2bTestnet4),
+            "bitcoin-blake2b-testnet4"
+        );
+        // Never "mainnet" for the fork, however it is spelled.
+        assert_ne!(
+            CubeSettings::new("x".to_string(), ChainId::BitcoinBlake2b).api_network_string(),
+            "mainnet"
+        );
     }
 }

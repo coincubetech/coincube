@@ -1,4 +1,3 @@
-use coincube_core::miniscript::bitcoin::Network;
 use std::collections::HashSet;
 
 use crate::{
@@ -105,12 +104,15 @@ pub async fn delete_failed_install(
     Ok(())
 }
 
-pub async fn delete_wallet(
-    network: Network,
+pub async fn delete_wallet<C: Into<crate::chain::ChainId>>(
+    chain: C,
     network_dir: &NetworkDirectory,
     wallet: &WalletSettings,
     delete_liana_connect: bool,
 ) -> Result<(), DeleteError> {
+    // `network` is only used to pick the legacy remote-backend service config
+    // below — a Bitcoin-family service, reached for Cubes the launcher lists.
+    let network = chain.into().bitcoin_network();
     let wallet_id = wallet.wallet_id();
     let coincubed_directory = network_dir.coincubed_data_directory(&wallet_id);
 

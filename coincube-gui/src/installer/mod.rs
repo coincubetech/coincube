@@ -12,13 +12,23 @@ mod view;
 // estimate), reused by the Vault node settings so the two surfaces never drift.
 pub(crate) use view::node_resources_controls;
 
-pub(crate) fn connect_url(network: bitcoin::Network) -> String {
-    let network_path = match network {
-        bitcoin::Network::Bitcoin => "bitcoin/mainnet",
-        bitcoin::Network::Testnet => "bitcoin/testnet",
-        bitcoin::Network::Signet => "bitcoin/signet",
-        bitcoin::Network::Testnet4 => "bitcoin/testnet4",
-        _ => "bitcoin/regtest",
+/// Connect's Esplora proxy for a chain, keyed on the chain's *identity*:
+/// `/api/v1/esplora/bitcoin/<net>` for the Bitcoin family and
+/// `/api/v1/esplora/bitcoin-blake2b/{mainnet,testnet4}` for Bitcoin Blake2b
+/// (the namespace Connect PR 4 serves; coincube-api#281). A BTCB2 Cube must
+/// never be pointed at `bitcoin/mainnet` — the two chains share an address
+/// format, so a BTCB2 spend broadcast there would *be* a replay onto Bitcoin
+/// executed by our own software (audit F3 on coincube-api#276).
+pub(crate) fn connect_url<C: Into<crate::chain::ChainId>>(chain: C) -> String {
+    use crate::chain::ChainId;
+    let network_path = match chain.into() {
+        ChainId::Bitcoin => "bitcoin/mainnet",
+        ChainId::Testnet => "bitcoin/testnet",
+        ChainId::Signet => "bitcoin/signet",
+        ChainId::Testnet4 => "bitcoin/testnet4",
+        ChainId::Regtest => "bitcoin/regtest",
+        ChainId::BitcoinBlake2b => "bitcoin-blake2b/mainnet",
+        ChainId::BitcoinBlake2bTestnet4 => "bitcoin-blake2b/testnet4",
     };
     let base = crate::services::coincube_api_base_url();
     format!("{}/api/v1/esplora/{}", base, network_path)
@@ -78,7 +88,28 @@ pub(crate) fn public_esplora_fallback_url(network: bitcoin::Network) -> Option<S
 /// blockstream.info demoted to fallbacks. Every other network keeps the
 /// public-primary chain (mempool.space → blockstream.info → Connect) so sync
 /// load stays distributed across user IPs.
-pub(crate) fn connect_esplora_config(network: bitcoin::Network, jwt: &str) -> EsploraConfig {
+///
+/// Bitcoin Blake2b gets a chain of exactly one entry: Connect's BTCB2 proxy.
+/// No mempool.space, no blockstream.info — those index Bitcoin, and any
+/// fallback to them would show Bitcoin's balances and broadcast BTCB2 spends
+/// onto Bitcoin. (Prepared here for the runtime slice; in this build a BTCB2
+/// Cube is refused before any `daemon.toml` is written.)
+pub(crate) fn connect_esplora_config<C: Into<crate::chain::ChainId>>(
+    chain: C,
+    jwt: &str,
+) -> EsploraConfig {
+    let chain = chain.into();
+    if chain.is_blake2b() {
+        return EsploraConfig {
+            addr: connect_url(chain),
+            token: Some(jwt.to_owned()),
+            fallback_addr: None,
+            fallback_token: None,
+            secondary_fallback_addr: None,
+            secondary_fallback_token: None,
+        };
+    }
+    let network = chain.bitcoin_network();
     if network == bitcoin::Network::Bitcoin {
         EsploraConfig {
             addr: connect_url(network),
@@ -1991,5 +2022,91 @@ mod seed_only_install_tests {
             ),
             other => panic!("expected Error::Unexpected, got {:?}", other),
         }
+    }
+}
+
+#[cfg(test)]
+mod chain_provider_tests {
+    //! The Esplora provider chain keyed on chain identity (audit F3 on
+    //! coincube-api#276; BTCB2 plan PR 2). A Bitcoin Blake2b Cube must never
+    //! be pointed at a Bitcoin indexer: the two chains share an address
+    //! format, so balances shown would be Bitcoin's and a broadcast there
+    //! would replay the BTCB2 spend onto Bitcoin.
+
+    use super::*;
+    use crate::chain::ChainId;
+
+    const PUBLIC_HOSTS: [&str; 2] = ["mempool.space", "blockstream.info"];
+
+    #[test]
+    fn connect_url_keys_on_the_chain_identity() {
+        let base = crate::services::coincube_api_base_url();
+        assert_eq!(
+            connect_url(ChainId::Bitcoin),
+            format!("{}/api/v1/esplora/bitcoin/mainnet", base)
+        );
+        assert_eq!(
+            connect_url(bitcoin::Network::Bitcoin),
+            connect_url(ChainId::Bitcoin)
+        );
+        assert_eq!(
+            connect_url(ChainId::BitcoinBlake2b),
+            format!("{}/api/v1/esplora/bitcoin-blake2b/mainnet", base)
+        );
+        assert_eq!(
+            connect_url(ChainId::BitcoinBlake2bTestnet4),
+            format!("{}/api/v1/esplora/bitcoin-blake2b/testnet4", base)
+        );
+        // Never the Bitcoin namespace for the fork, however it encodes.
+        assert_ne!(
+            connect_url(ChainId::BitcoinBlake2b),
+            connect_url(ChainId::BitcoinBlake2b.bitcoin_network())
+        );
+    }
+
+    #[test]
+    fn a_blake2b_provider_chain_is_connect_only_with_no_public_fallback() {
+        for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
+            let cfg = connect_esplora_config(chain, "jwt-token");
+            assert_eq!(cfg.addr, connect_url(chain), "{:?}", chain);
+            assert_eq!(cfg.token.as_deref(), Some("jwt-token"));
+            assert_eq!(cfg.fallback_addr, None, "{:?}", chain);
+            assert_eq!(cfg.fallback_token, None);
+            assert_eq!(cfg.secondary_fallback_addr, None, "{:?}", chain);
+            assert_eq!(cfg.secondary_fallback_token, None);
+            // What a `daemon.toml` rendered from this config would contain:
+            // no public host anywhere, and no Bitcoin namespace either.
+            let rendered = format!(
+                "{} {:?} {:?}",
+                cfg.addr, cfg.fallback_addr, cfg.secondary_fallback_addr
+            );
+            for host in PUBLIC_HOSTS {
+                assert!(!rendered.contains(host), "{:?}: {}", chain, rendered);
+            }
+            assert!(!rendered.contains("/esplora/bitcoin/"), "{}", rendered);
+        }
+    }
+
+    #[test]
+    fn the_bitcoin_family_provider_chains_are_unchanged() {
+        // Mainnet: Connect primary, public fallbacks.
+        let main = connect_esplora_config(ChainId::Bitcoin, "jwt");
+        assert_eq!(main.addr, connect_url(ChainId::Bitcoin));
+        assert_eq!(
+            main.fallback_addr.as_deref(),
+            Some("https://mempool.space/api")
+        );
+        assert_eq!(
+            main.secondary_fallback_addr.as_deref(),
+            Some("https://blockstream.info/api")
+        );
+        assert!(connect_esplora_config(bitcoin::Network::Bitcoin, "jwt") == main);
+        // A test network: public primary, Connect backstop.
+        let t4 = connect_esplora_config(ChainId::Testnet4, "jwt");
+        assert_eq!(t4.addr, "https://mempool.space/testnet4/api");
+        assert_eq!(
+            t4.fallback_addr.as_deref(),
+            Some(connect_url(ChainId::Testnet4).as_str())
+        );
     }
 }

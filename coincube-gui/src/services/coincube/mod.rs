@@ -547,6 +547,23 @@ pub struct FeaturesResponse {
     /// grandfather rule).
     #[serde(default, alias = "duressEnabled", alias = "duress_enabled")]
     pub duress_enabled: Option<bool>,
+    /// Per-account launch flag for the Bitcoin Blake2b networks
+    /// (`bitcoinBlake2bEnabled`; wire name agreed with Connect PR 1,
+    /// coincube-api#278/#279). `Some(true)` means Connect will accept BTCB2
+    /// keychains, keys and Cubes for this account.
+    ///
+    /// A **capability signal only** — see
+    /// [`crate::app::features::BitcoinBlake2bServerFlag`]. Whether this build
+    /// can create, open or sign with a BTCB2 Cube is decided by
+    /// [`crate::app::features::bitcoin_blake2b`], which stays unavailable
+    /// while the runtime is dormant whatever this says. Fails **closed**:
+    /// absent, unloaded or unreachable all read as *off*.
+    #[serde(
+        default,
+        alias = "bitcoinBlake2bEnabled",
+        alias = "bitcoin_blake2b_enabled"
+    )]
+    pub bitcoin_blake2b_enabled: Option<bool>,
 }
 
 // ── Checkout / Billing ──────────────────────────────────────────────────────
