@@ -67,3 +67,14 @@ debug = "line-tables-only"
 
 [profile.dev.package."*"]
 debug = false
+
+# Branta vendor logos can have large source dimensions. Keep their bounded
+# decode/thumbnail work within the lookup deadline in debug builds as well.
+[profile.dev.package.image]
+opt-level = 2
+
+[profile.dev.package.png]
+opt-level = 2
+
+[profile.dev.package.fdeflate]
+opt-level = 2

@@ -5600,6 +5600,13 @@ mod duress_enroll_tests {
 
     #[test]
     fn validate_duress_pin_step_requires_non_empty_and_matching_confirm() {
+        // This test reads and writes the process-global session (`open` /
+        // `close` below), so it runs under the same guard every other
+        // session-touching test takes. Without it, a `session.rs` test that
+        // has `cube-a` open under PIN 1234 at the same moment turns the
+        // "no Cube open" assertion below into the distance-rule refusal.
+        let _g = crate::app::session::test_guard();
+        crate::app::session::close();
         // The "distance from your regular PIN" rule is gone — any non-empty
         // PIN entered twice passes the step. Collision with a real Cube PIN is
         // enforced at persist time (`persist_duress_enrollment`), where Cube

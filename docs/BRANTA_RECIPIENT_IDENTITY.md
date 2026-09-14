@@ -27,6 +27,10 @@ user action, not a lookup or prefetch.
 Spark joins its existing payment preparation with a bounded identity lookup;
 responses carry a generation, and identity is attached to the exact prepared
 handle. Edits, cancellation and navigation invalidate the prior generation.
+After the SDK classifies a BOLT11 invoice, Spark preparation receives the bare
+invoice with outer whitespace and one case-insensitive `lightning:` wrapper removed.
+Invoice bytes/case and checksum validation are preserved; Branta keeps the original
+payment request. Other payment routes retain their existing input handling.
 
 VAULT retains BIP21 input separately from the parsed/network-checked address used
 for transaction construction. URI amounts populate an empty amount field;
@@ -42,7 +46,8 @@ outputs are excluded before lookup. Existing output and fee checks remain in the
 signing/broadcast path. Identity appears beside each output in review and again
 inside the final broadcast modal. Identity is not persisted in saved PSBTs.
 
-The three-second lookup deadline includes logos. Logo variants load concurrently;
+The three-second lookup deadline includes logos. Batch identity lookups finish before
+optional logos begin, so slow images cannot prevent later recipient checks. Logo variants load concurrently;
 exhausting their remaining budget preserves the already-bound identity. A VAULT batch shares one deadline
 and has at most three outstanding lookups. Unsupported input, empty response,
 transport/parsing/decryption error or timeout shows nothing and does not block
@@ -98,10 +103,17 @@ Compared with the original lockfile:
 The lookup client's upstream redirect policy and unlimited response-body allocation
 are retained to preserve reviewed source. The wrapper bounds elapsed time. A future
 upstream client configuration option or separately reviewed source patch can disable
-redirects/cap bodies. Logo fetching already rejects redirects, validates HTTPS and
-exact origin for both variants, limits responses to 256 KiB, accepts PNG/JPEG only,
-checks decode format and bounds dimensions/allocation, and caches 32 decoded images
-in memory. All logo errors are silent. SVG and other image formats are not loaded.
+redirects/cap bodies. Logo fetching rejects redirects and validates HTTPS and exact origin for both variants.
+Branta Active Storage blob redirect URLs use its same-origin proxy route, avoiding
+requests to object storage. Responses are limited to 256 KiB and PNG/JPEG only.
+Decoding checks the actual format, caps each dimension at 5000 pixels and decoder
+allocation at 100 MiB, and runs one image at a time off the async runtime. Originals
+are resized to at most 64×64 before caching (32 images). The image, PNG and
+fdeflate dependencies are optimized in development/test builds too; otherwise the
+public 4501×4500 fixture exceeds the deadline just in decode/thumbnail work. A decode already running
+when its lookup expires may finish locally; cancellation starts no additional network
+work and cannot expose a stale identity. Each completed light/dark variant survives
+a timeout of the other variant. All logo errors are silent. SVG and other image formats are not loaded.
 
 ## Validation
 

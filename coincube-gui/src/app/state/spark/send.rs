@@ -32,7 +32,8 @@ use std::sync::{
 
 use coincube_core::miniscript::bitcoin::bech32;
 use coincube_spark_protocol::{
-    CrossChainAddress, CrossChainRoute, ParseInputKind, PrepareSendOk, SendPaymentOk,
+    CrossChainAddress, CrossChainRoute, CrossChainRoutesOk, ParseInputKind, ParseInputOk,
+    PrepareSendOk, SendPaymentOk,
 };
 use coincube_ui::component::amount::{format_u64_as_string, BitcoinDisplayUnit};
 use coincube_ui::widget::Element;
@@ -1524,6 +1525,28 @@ fn recipient_lookup_request(target: SparkSendTarget, input: &str) -> Option<Look
     }
 }
 
+/// Return the destination shape expected by Spark's BOLT11 preparation path.
+///
+/// The SDK's classifier accepts a case-insensitive `lightning:` URI wrapper,
+/// but its later fee and route-hint helpers parse the supplied value directly
+/// as BOLT11. Strip only that wrapper after classification has established the
+/// input kind. The original request remains available to Branta at the caller.
+fn spark_prepare_input(kind: ParseInputKind, input: String) -> String {
+    if kind != ParseInputKind::Bolt11Invoice {
+        return input;
+    }
+
+    let trimmed = input.trim();
+    if trimmed
+        .get(.."lightning:".len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("lightning:"))
+    {
+        trimmed["lightning:".len()..].to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 fn amount_unit_word(unit: BitcoinDisplayUnit) -> &'static str {
     match unit {
         BitcoinDisplayUnit::BTC => "BTC",
@@ -1722,8 +1745,57 @@ fn format_parse_input_error(raw: &str) -> String {
 /// LNURL inputs validate the amount against the server's min/max
 /// range up front so the gui can surface a useful error before
 /// actually hitting the LNURL callback URL.
-async fn resolve_and_prepare(
-    backend: Arc<SparkBackend>,
+trait PrepareBackend {
+    async fn parse_input(&self, input: String) -> Result<ParseInputOk, SparkClientError>;
+    async fn prepare_send(
+        &self,
+        input: String,
+        amount_sat: Option<u64>,
+    ) -> Result<PrepareSendOk, SparkClientError>;
+    async fn prepare_lnurl_pay(
+        &self,
+        input: String,
+        amount_sat: u64,
+        comment: Option<String>,
+    ) -> Result<PrepareSendOk, SparkClientError>;
+    async fn get_cross_chain_routes(
+        &self,
+        input: String,
+    ) -> Result<CrossChainRoutesOk, SparkClientError>;
+}
+
+impl PrepareBackend for SparkBackend {
+    async fn parse_input(&self, input: String) -> Result<ParseInputOk, SparkClientError> {
+        SparkBackend::parse_input(self, input).await
+    }
+
+    async fn prepare_send(
+        &self,
+        input: String,
+        amount_sat: Option<u64>,
+    ) -> Result<PrepareSendOk, SparkClientError> {
+        SparkBackend::prepare_send(self, input, amount_sat).await
+    }
+
+    async fn prepare_lnurl_pay(
+        &self,
+        input: String,
+        amount_sat: u64,
+        comment: Option<String>,
+    ) -> Result<PrepareSendOk, SparkClientError> {
+        SparkBackend::prepare_lnurl_pay(self, input, amount_sat, comment).await
+    }
+
+    async fn get_cross_chain_routes(
+        &self,
+        input: String,
+    ) -> Result<CrossChainRoutesOk, SparkClientError> {
+        SparkBackend::get_cross_chain_routes(self, input).await
+    }
+}
+
+async fn resolve_and_prepare<B: PrepareBackend>(
+    backend: Arc<B>,
     input: String,
     amount_sat: Option<u64>,
     target: SparkSendTarget,
@@ -1796,8 +1868,14 @@ async fn resolve_and_prepare(
                 .await
                 .map_err(|e| format!("prepare_lnurl_pay failed: {e}"))
         }
-        ParseInputKind::Bolt11Invoice
-        | ParseInputKind::BitcoinAddress
+        ParseInputKind::Bolt11Invoice => backend
+            .prepare_send(
+                spark_prepare_input(ParseInputKind::Bolt11Invoice, input),
+                amount_sat,
+            )
+            .await
+            .map_err(|e| format!("prepare_send failed: {e}")),
+        ParseInputKind::BitcoinAddress
         | ParseInputKind::SparkAddress
         | ParseInputKind::SparkInvoice
         | ParseInputKind::Other => backend
@@ -1850,7 +1928,59 @@ fn fetch_balance_task(backend: Option<Arc<SparkBackend>>) -> Task<Message> {
 mod tests {
     use super::*;
     use crate::app::view::{Message as ViewMessage, SparkSendMessage};
-    use coincube_spark_protocol::PaymentSummary;
+    use coincube_spark_protocol::{ErrorKind, PaymentSummary};
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct RecordingPrepareBackend {
+        parsed: Mutex<Vec<String>>,
+        prepared: Mutex<Vec<String>>,
+    }
+
+    impl PrepareBackend for RecordingPrepareBackend {
+        async fn parse_input(&self, input: String) -> Result<ParseInputOk, SparkClientError> {
+            self.parsed.lock().unwrap().push(input.clone());
+            if bolt11_amount_sat(&input).is_none() {
+                return Err(SparkClientError::BridgeError {
+                    kind: ErrorKind::Sdk,
+                    message: "parse_input failed: invalid checksum".to_string(),
+                });
+            }
+            Ok(ParseInputOk {
+                kind: ParseInputKind::Bolt11Invoice,
+                amount_sat: Some(2_500_000),
+                lnurl_min_sendable_sat: None,
+                lnurl_max_sendable_sat: None,
+                lnurl_comment_allowed: 0,
+                lnurl_address: None,
+            })
+        }
+
+        async fn prepare_send(
+            &self,
+            input: String,
+            _amount_sat: Option<u64>,
+        ) -> Result<PrepareSendOk, SparkClientError> {
+            self.prepared.lock().unwrap().push(input);
+            Ok(plain_prepare("prepared-bolt11"))
+        }
+
+        async fn prepare_lnurl_pay(
+            &self,
+            _input: String,
+            _amount_sat: u64,
+            _comment: Option<String>,
+        ) -> Result<PrepareSendOk, SparkClientError> {
+            panic!("BOLT11 must not use LNURL preparation")
+        }
+
+        async fn get_cross_chain_routes(
+            &self,
+            _input: String,
+        ) -> Result<CrossChainRoutesOk, SparkClientError> {
+            panic!("BOLT11 must not probe cross-chain routes")
+        }
+    }
 
     #[test]
     fn amount_parses_in_the_configured_unit() {
@@ -2223,6 +2353,57 @@ mod tests {
                                    zyg3zyg3zyg3zyg3zyg3zygs9q5sqqqqqqqqqqqqqqqpqsq67gye39hfg3zd8r\
                                    gc80k32tvy9xk2xunwm5lzexnvpx6fd77en8qaq424dxgt56cag2dpt359k3ss\
                                    yhetktkpqh24jqnjyw6uqd08sgptq44qu";
+
+    #[tokio::test]
+    async fn bolt11_parse_then_prepare_normalizes_only_the_lightning_scheme() {
+        for input in [
+            SPEC_VECTOR_25M.to_string(),
+            format!("lightning:{SPEC_VECTOR_25M}"),
+            format!("LIGHTNING:{SPEC_VECTOR_25M}"),
+            format!("  lightning:{SPEC_VECTOR_25M}  "),
+        ] {
+            let backend = Arc::new(RecordingPrepareBackend::default());
+            let original = input.clone();
+
+            // The complete request is still eligible for Branta before the
+            // independently owned Spark argument is normalized.
+            assert!(recipient_lookup_request(SparkSendTarget::Lightning, &original).is_some());
+            let prepared = resolve_and_prepare(
+                Arc::clone(&backend),
+                input,
+                None,
+                SparkSendTarget::Lightning,
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(prepared.handle, "prepared-bolt11");
+            assert_eq!(backend.parsed.lock().unwrap().as_slice(), &[original]);
+            assert_eq!(
+                backend.prepared.lock().unwrap().as_slice(),
+                &[SPEC_VECTOR_25M.to_string()]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_bolt11_checksum_is_rejected_before_prepare() {
+        let backend = Arc::new(RecordingPrepareBackend::default());
+        let invalid = format!("lightning:{}", corrupt(SPEC_VECTOR_25M));
+
+        let error = resolve_and_prepare(
+            Arc::clone(&backend),
+            invalid.clone(),
+            None,
+            SparkSendTarget::Lightning,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.contains("invalid checksum"));
+        assert_eq!(backend.parsed.lock().unwrap().as_slice(), &[invalid]);
+        assert!(backend.prepared.lock().unwrap().is_empty());
+    }
 
     #[test]
     fn bolt11_amount_reads_a_real_signed_invoice() {
