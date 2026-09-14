@@ -86,20 +86,24 @@ fn idle_body<'a>(state: &'a LocalSigningState) -> Element<'a, Message> {
     let mut keys = Column::new()
         .spacing(8)
         .push(text("Select the exact vault key held by this phone:"));
-    for (xpub, label) in &state.vault_keys {
-        let selected = state.selected_key.as_ref() == Some(xpub);
-        keys = keys.push(
-            iced::widget::Button::new(text(format!(
-                "{}{}",
-                if selected { "Selected: " } else { "" },
-                label
-            )))
-            .style(theme::button::secondary)
-            .on_press(Message::Settings(SettingsMessage::LocalSigning(
-                LocalSigningMessage::SelectKey(xpub.clone()),
-            ))),
-        );
-    }
+        for (xpub, label) in &state.vault_keys {
+            let selected = state.selected_key.as_ref() == Some(xpub);
+            keys = keys.push(
+                iced::widget::Button::new(
+                    text(format!(
+                        "{}{}",
+                        if selected { "Selected: " } else { "" },
+                        label
+                    ))
+                    .width(Length::Fill),
+                )
+                .width(Length::Fill)
+                .style(theme::button::secondary)
+                .on_press(Message::Settings(SettingsMessage::LocalSigning(
+                    LocalSigningMessage::SelectKey(xpub.clone()),
+                ))),
+            );
+        }
     Column::new()
         .padding(10)
         .spacing(8)
@@ -137,7 +141,7 @@ fn waiting_body<'a>(
         )));
     if let Some(qr) = qr {
         body = body.push(
-            Container::new(QRCode::<coincube_ui::theme::Theme>::new(qr).cell_size(8)).padding(10),
+            Container::new(QRCode::<coincube_ui::theme::Theme>::new(qr).cell_size(4)).padding(10),
         );
     }
     body = body.push(
