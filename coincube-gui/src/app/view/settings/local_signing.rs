@@ -95,7 +95,8 @@ fn idle_body<'a>(state: &'a LocalSigningState) -> Element<'a, Message> {
                     if selected { "Selected: " } else { "" },
                     label
                 ))
-                .width(Length::Fill),
+                .width(Length::Fill)
+                .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
             )
             .width(Length::Fill)
             .style(theme::button::secondary)
