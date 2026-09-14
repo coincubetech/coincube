@@ -142,6 +142,10 @@ pub enum UnifiedPsbtError {
     InvalidPublicKey { input: usize },
     /// A reserved or standard unified entry did not contain strict DER.
     InvalidDerSignature { input: usize },
+    /// The signature namespace appeared in the global map.
+    ReservedNamespaceInGlobal,
+    /// The signature namespace appeared in an output map.
+    ReservedNamespaceInOutput { output: usize },
     /// Unified ECDSA currently accepts only ALL|UNIFIED (`0x21`).
     UnsupportedUnifiedSighash { input: usize, sighash: u8 },
     /// One input/pubkey used both standard and proprietary encodings.
@@ -205,6 +209,13 @@ impl fmt::Display for UnifiedPsbtError {
             Self::InvalidDerSignature { input } => {
                 write!(f, "invalid strict-DER unified signature in input {input}")
             }
+            Self::ReservedNamespaceInGlobal => {
+                write!(f, "unified signature namespace is reserved for input maps, not global")
+            }
+            Self::ReservedNamespaceInOutput { output } => write!(
+                f,
+                "unified signature namespace is reserved for input maps, not output {output}"
+            ),
             Self::UnsupportedUnifiedSighash { input, sighash } => write!(
                 f,
                 "unsupported unified sighash 0x{sighash:02x} in input {input}"
@@ -310,6 +321,15 @@ fn validate_typed_psbt(psbt: &Psbt) -> Result<usize, UnifiedPsbtError> {
     let canonical = Psbt::deserialize(&serialized).map_err(typed_error)?;
     if canonical != *psbt {
         return Err(UnifiedPsbtError::NonCanonicalTypedMap);
+    }
+
+    if psbt.proprietary.keys().any(is_reserved_key) {
+        return Err(UnifiedPsbtError::ReservedNamespaceInGlobal);
+    }
+    for (output, map) in psbt.outputs.iter().enumerate() {
+        if map.proprietary.keys().any(is_reserved_key) {
+            return Err(UnifiedPsbtError::ReservedNamespaceInOutput { output });
+        }
     }
 
     for (input_index, input) in psbt.inputs.iter().enumerate() {

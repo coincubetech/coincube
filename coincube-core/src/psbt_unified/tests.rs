@@ -391,12 +391,63 @@ fn foreign_proprietary_namespaces_are_untouched() {
     psbt.psbt.inputs[0]
         .proprietary
         .insert(foreign.clone(), vec![4, 5]);
+    let foreign_subtype = ProprietaryKey {
+        prefix: PROPRIETARY_PREFIX.to_vec(),
+        subtype: 1,
+        key: vec![6],
+    };
+    psbt.psbt
+        .proprietary
+        .insert(foreign_subtype.clone(), vec![7]);
+    psbt.psbt.outputs[0]
+        .proprietary
+        .insert(foreign_subtype.clone(), vec![8]);
     let imported = import_standard(&export_standard(&psbt).unwrap()).unwrap();
     assert_eq!(
         imported.psbt.inputs[0].proprietary.get(&foreign),
         Some(&vec![4, 5])
     );
+    assert_eq!(
+        imported.psbt.proprietary.get(&foreign_subtype),
+        Some(&vec![7])
+    );
+    assert_eq!(
+        imported.psbt.outputs[0].proprietary.get(&foreign_subtype),
+        Some(&vec![8])
+    );
     assert!(unified_signatures(&imported).unwrap().is_empty());
+}
+
+#[test]
+fn owned_namespace_is_rejected_outside_input_maps_at_every_boundary() {
+    let (public_key, valid_signature) = unified_signature(27);
+    let valid_key = proprietary_key(&public_key);
+    let malformed_key = ProprietaryKey {
+        prefix: PROPRIETARY_PREFIX.to_vec(),
+        subtype: PROPRIETARY_SUBTYPE,
+        key: vec![2, 3],
+    };
+
+    for (key, value) in [
+        (valid_key.clone(), valid_signature.clone()),
+        (malformed_key.clone(), vec![0x30, 0x00, 0x21]),
+    ] {
+        let mut global = base_psbt();
+        global.psbt.proprietary.insert(key, value);
+        assert_wrong_location_rejected(global, UnifiedPsbtError::ReservedNamespaceInGlobal);
+    }
+
+    for (key, value) in [
+        (valid_key, valid_signature),
+        (malformed_key, vec![0x30, 0x00, 0x21]),
+    ] {
+        let mut output = base_psbt();
+        output.psbt.outputs[1].proprietary.insert(key, value);
+        assert_wrong_location_rejected(
+            output,
+            UnifiedPsbtError::ReservedNamespaceInOutput { output: 1 },
+        );
+    }
 }
 
 #[test]
@@ -822,6 +873,35 @@ fn assert_merge_size_boundary(explicit_version: bool, one_input_only: bool) {
         }
         assert_eq!(destination.has_explicit_global_version(), explicit_version);
     }
+}
+
+fn assert_wrong_location_rejected(candidate: UnifiedPsbt, expected: UnifiedPsbtError) {
+    let raw = candidate.psbt.serialize();
+    assert_eq!(validate_internal(&candidate), Err(expected.clone()));
+    assert_eq!(serialize_internal(&candidate), Err(expected.clone()));
+    assert_eq!(export_standard(&candidate), Err(expected.clone()));
+    assert_eq!(unified_signatures(&candidate), Err(expected.clone()));
+    assert_eq!(import_standard(&raw), Err(expected.clone()));
+    assert_eq!(deserialize_internal(&raw), Err(expected.clone()));
+    assert_eq!(
+        UnifiedPsbt::from_psbt(candidate.psbt.clone()),
+        Err(expected.clone())
+    );
+
+    let mut destination = base_psbt();
+    destination.explicit_global_version = true;
+    let before = serialize_internal(&destination).unwrap();
+    assert_eq!(
+        merge_signatures(&mut destination, &candidate),
+        Err(expected.clone())
+    );
+    assert_eq!(serialize_internal(&destination).unwrap(), before);
+
+    assert_eq!(
+        merge_input_signatures(&mut destination, &candidate, 0),
+        Err(expected)
+    );
+    assert_eq!(serialize_internal(&destination).unwrap(), before);
 }
 
 fn merge_size_shape(explicit_global_version: bool) -> UnifiedPsbt {
