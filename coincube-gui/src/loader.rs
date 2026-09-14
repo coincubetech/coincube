@@ -164,7 +164,30 @@ impl Loader {
         breez_client: Option<std::sync::Arc<BreezClient>>,
         spark_backend: Option<std::sync::Arc<app::wallets::SparkBackend>>,
     ) -> (Self, Task<Message>) {
-        let task = if let Some(ref wallet) = wallet_settings {
+        // A chain this build cannot run is refused here, before the daemon
+        // socket is dialled — and its identity must agree with the encoding
+        // the caller wants to load under, or the wallet directory, the
+        // daemon config and the Cube's own settings would disagree with each
+        // other from this point on.
+        let refusal = match cube_settings.network.runtime_support() {
+            crate::chain::RuntimeSupport::Dormant { reason } => {
+                Some(Error::ChainUnavailable(reason))
+            }
+            crate::chain::RuntimeSupport::Supported
+                if cube_settings.network.bitcoin_network() != network =>
+            {
+                Some(Error::Unexpected(format!(
+                    "this Cube is on {} but was asked to load as {}",
+                    cube_settings.network.label(),
+                    network
+                )))
+            }
+            crate::chain::RuntimeSupport::Supported => None,
+        };
+
+        let task = if refusal.is_some() {
+            Task::none()
+        } else if let Some(ref wallet) = wallet_settings {
             let socket_path = datadir_path
                 .network_directory(network)
                 .coincubed_data_directory(&wallet.wallet_id())
@@ -176,7 +199,11 @@ impl Loader {
         };
 
         let mut quote_provider = QuoteProvider::new();
-        let current_quote = quote_provider.select("loading");
+        let current_quote = quote_provider.select(if refusal.is_some() {
+            "error"
+        } else {
+            "loading"
+        });
         let current_image_handle = quote_display::image_handle_for_context("loading");
 
         (
@@ -184,7 +211,10 @@ impl Loader {
                 network,
                 datadir_path,
                 gui_config,
-                step: Step::Connecting,
+                step: match refusal {
+                    Some(e) => Step::Error(Box::new(e)),
+                    None => Step::Connecting,
+                },
                 daemon_started: false,
                 internal_bitcoind,
                 waiting_daemon_bitcoind: false,
@@ -340,7 +370,7 @@ impl Loader {
                         start_bitcoind_and_daemon(
                             self.datadir_path.clone(),
                             self.start_bitcoind(),
-                            self.network,
+                            self.cube_settings.network,
                             wallet_settings,
                         ),
                         Message::Started,
@@ -894,11 +924,18 @@ fn backend_is_internal_bitcoind(config_path: &Path, internal_datadir: &Path) -> 
 pub async fn start_bitcoind_and_daemon(
     coincube_datadir_path: CoincubeDirectory,
     start_internal_bitcoind: bool,
-    network: bitcoin::Network,
+    chain: crate::chain::ChainId,
     settings: WalletSettings,
 ) -> StartedResult {
+    // The last gate before anything runs: no `daemon.toml` is read or
+    // migrated, no node is provisioned and no daemon is started for a chain
+    // this build cannot run. Keyed on the chain's *identity* so the wallet
+    // directory below is the chain's own, never its encoding twin's.
+    if let crate::chain::RuntimeSupport::Dormant { reason } = chain.runtime_support() {
+        return Err(Error::ChainUnavailable(reason));
+    }
     let mut config_path = coincube_datadir_path
-        .network_directory(network)
+        .network_directory(chain)
         .coincubed_data_directory(&settings.wallet_id())
         .path()
         .to_path_buf();
@@ -1011,6 +1048,13 @@ pub enum Error {
     Bitcoind(StartInternalBitcoindError),
     BitcoindLogs(std::io::Error),
     RestoreBackup(RestoreBackupError),
+    /// The Cube's chain is one this build only knows the identity of
+    /// ([`crate::chain::RuntimeSupport::Dormant`]). Raised before any daemon
+    /// socket is dialled, any `daemon.toml` is read or migrated, and any node
+    /// is started. The `gui::tab` open gate normally stops such a Cube earlier;
+    /// this is the loader's own copy of the refusal for any path that reaches
+    /// it directly.
+    ChainUnavailable(&'static str),
     Unexpected(String),
 }
 
@@ -1023,6 +1067,7 @@ impl std::fmt::Display for Error {
             Self::Bitcoind(e) => write!(f, "Bitcoind error: {}", e),
             Self::BitcoindLogs(e) => write!(f, "Bitcoind logs error: {}", e),
             Self::RestoreBackup(e) => write!(f, "Restore backup: {e}"),
+            Self::ChainUnavailable(reason) => f.write_str(reason),
             Self::Unexpected(e) => write!(f, "Unexpected error: {}", e),
         }
     }
@@ -1283,5 +1328,151 @@ mod tests {
             Error::from(DaemonError::NoAnswer),
             Error::Daemon(DaemonError::NoAnswer)
         ));
+    }
+}
+
+#[cfg(test)]
+mod chain_identity_tests {
+    //! The loader's own refusal of a chain this build cannot run (BTCB2 plan
+    //! PR 2, dormant slice). The `gui::tab` open gate normally stops such a
+    //! Cube first; these pin that the loader and the daemon-start path refuse
+    //! on their own, before a socket is dialled or a `daemon.toml` is read.
+
+    use super::*;
+    use crate::chain::{ChainId, BTCB2_DORMANT_REASON};
+    use std::path::PathBuf;
+
+    fn cube(chain: ChainId) -> CubeSettings {
+        CubeSettings::new_with_raw_id("cube-uuid".to_string(), "Fork".to_string(), chain)
+    }
+
+    fn wallet() -> WalletSettings {
+        WalletSettings {
+            name: "Coincube-kt6ht0kt".to_string(),
+            alias: None,
+            descriptor_checksum: "kt6ht0kt".to_string(),
+            pinned_at: Some(1_720_000_000),
+            keys: Vec::new(),
+            hardware_wallets: Vec::new(),
+            remote_backend_auth: None,
+            start_internal_bitcoind: Some(true),
+            pending_rescan: None,
+        }
+    }
+
+    fn temp_root(tag: &str) -> CoincubeDirectory {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "coincube-loader-chain-{}-{}-{}",
+            tag,
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::SeqCst)
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        CoincubeDirectory::new(path)
+    }
+
+    fn tree(root: &std::path::Path) -> Vec<PathBuf> {
+        fn walk(p: &std::path::Path, out: &mut Vec<PathBuf>) {
+            if let Ok(rd) = std::fs::read_dir(p) {
+                for e in rd.flatten() {
+                    out.push(e.path());
+                    walk(&e.path(), out);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(root, &mut out);
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn a_blake2b_cube_lands_in_the_error_step_without_dialling_the_daemon() {
+        for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
+            let (loader, _task) = Loader::new(
+                CoincubeDirectory::new(PathBuf::from("/nonexistent")),
+                GUIConfig::new(true),
+                chain.bitcoin_network(),
+                None,
+                None,
+                Some(wallet()),
+                cube(chain),
+                None,
+                None,
+            );
+            match &loader.step {
+                Step::Error(e) => assert_eq!(e.to_string(), BTCB2_DORMANT_REASON, "{:?}", chain),
+                other => panic!(
+                    "expected the error step for {:?}, got {:?}",
+                    chain,
+                    std::mem::discriminant(other)
+                ),
+            }
+            assert!(!loader.daemon_started);
+            // The error view renders the reason, not a daemon/config error.
+            let _ = loader.view();
+        }
+    }
+
+    #[test]
+    fn a_cube_whose_identity_disagrees_with_the_requested_encoding_is_refused() {
+        // A Signet Cube asked to load as mainnet: the two would then disagree
+        // on every path below, so the loader stops.
+        let (loader, _task) = Loader::new(
+            CoincubeDirectory::new(PathBuf::from("/nonexistent")),
+            GUIConfig::new(false),
+            bitcoin::Network::Bitcoin,
+            None,
+            None,
+            None,
+            cube(ChainId::Signet),
+            None,
+            None,
+        );
+        assert!(matches!(&loader.step, Step::Error(e) if matches!(**e, Error::Unexpected(_))));
+        // The agreeing case is untouched.
+        let (loader, _task) = Loader::new(
+            CoincubeDirectory::new(PathBuf::from("/nonexistent")),
+            GUIConfig::new(false),
+            bitcoin::Network::Signet,
+            None,
+            None,
+            None,
+            cube(ChainId::Signet),
+            None,
+            None,
+        );
+        assert!(matches!(loader.step, Step::Connecting));
+    }
+
+    #[tokio::test]
+    async fn the_daemon_start_path_refuses_a_blake2b_chain_before_touching_daemon_toml() {
+        let root = temp_root("start");
+        let before = tree(root.path());
+        for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
+            let result = start_bitcoind_and_daemon(root.clone(), true, chain, wallet()).await;
+            match result {
+                Err(Error::ChainUnavailable(reason)) => assert_eq!(reason, BTCB2_DORMANT_REASON),
+                Err(other) => panic!("wrong refusal for {:?}: {}", chain, other),
+                Ok(_) => panic!("started a daemon for {:?}", chain),
+            }
+        }
+        // No wallet directory, no daemon.toml, no migration side effect, no
+        // node datadir — the tree is byte-for-byte what it was.
+        assert_eq!(tree(root.path()), before);
+        assert!(!root.path().join("bitcoin-blake2b").exists());
+        assert!(!root.path().join("bitcoin").exists());
+
+        // A supported chain with no daemon.toml fails *later*, on the config
+        // read — proving the dormant refusal is a distinct, earlier gate.
+        let result =
+            start_bitcoind_and_daemon(root.clone(), false, ChainId::Signet, wallet()).await;
+        assert!(
+            matches!(result, Err(Error::Config(_))),
+            "expected a config error"
+        );
+        let _ = std::fs::remove_dir_all(root.path());
     }
 }

@@ -75,6 +75,13 @@ pub enum State {
     Cubes {
         cubes: Vec<CubeSettings>,
         create_cube: bool,
+        /// The chain whose directory these records were read from
+        /// (`<datadir>/<source.dir_name()>/settings.json`). Carried with the
+        /// list, not re-derived from a record, so that opening a Cube can
+        /// check the record's own `network` against where it actually came
+        /// from — a copied or edited file claiming another chain is refused
+        /// instead of being trusted about its own directory.
+        source: crate::chain::ChainId,
     },
     /// No Cube on this device. Carries the same `create_cube` flag as
     /// [`State::Cubes`] because this screen is not always empty: remote Cubes
@@ -244,7 +251,7 @@ pub enum HomeSection {
 /// Context stashed for firing a remote cube update after local rename succeeds.
 struct PendingRemoteRename {
     cube_id: String,
-    cube_network: Network,
+    cube_network: crate::chain::ChainId,
     new_name: String,
 }
 
@@ -444,7 +451,7 @@ impl Home {
             // when a session is already in the keyring — without
             // waiting for the user to navigate to the Connect section.
             Task::batch([
-                Task::perform(check_network_datadir(network_dir), Message::Checked),
+                probe_network_datadir(network, network_dir),
                 Task::done(Message::View(ViewMessage::ConnectAccount(
                     ConnectAccountMessage::Init,
                 ))),
@@ -453,9 +460,9 @@ impl Home {
     }
 
     pub fn reload(&self) -> Task<Message> {
-        Task::perform(
-            check_network_datadir(self.datadir_path.network_directory(self.network)),
-            Message::Checked,
+        probe_network_datadir(
+            self.network,
+            self.datadir_path.network_directory(self.network),
         )
     }
 
@@ -694,6 +701,11 @@ impl Home {
     /// they detect while handling home-originated messages.
     pub fn set_error(&mut self, msg: impl Into<String>) {
         self.error = Some(msg.into());
+    }
+
+    /// The top-level error currently shown on the home screen, if any.
+    pub fn error(&self) -> Option<&str> {
+        self.error.as_deref()
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
@@ -1658,10 +1670,8 @@ impl Home {
                 // Clear stale limit from previous network
                 self.server_cube_limit = None;
                 let network_dir = self.datadir_path.network_directory(self.network);
-                let mut tasks: Vec<Task<Message>> = vec![Task::perform(
-                    check_network_datadir(network_dir),
-                    Message::Checked,
-                )];
+                let mut tasks: Vec<Task<Message>> =
+                    vec![probe_network_datadir(self.network, network_dir)];
                 // Re-fetch limits for the new network if authenticated
                 if let Some(client) = self.connect_account.authenticated_client() {
                     let network_str = settings::network_to_api_string(self.network);
@@ -1691,7 +1701,7 @@ impl Home {
                 if !enabled && self.network != Network::Bitcoin {
                     self.network = Network::Bitcoin;
                     let network_dir = self.datadir_path.network_directory(self.network);
-                    return Task::perform(check_network_datadir(network_dir), Message::Checked);
+                    return probe_network_datadir(self.network, network_dir);
                 }
 
                 Task::none()
@@ -1761,7 +1771,19 @@ impl Home {
                 }
                 Task::none()
             }
-            Message::Checked(res) => match res {
+            Message::Checked { for_chain, res } => match res {
+                // The probe was started for a network the user has since
+                // switched away from: its result describes another
+                // directory. Dropping it keeps `State::Cubes::source` — and
+                // the list it labels — in step with `self.network`.
+                _ if for_chain != crate::chain::ChainId::from(self.network) => {
+                    tracing::debug!(
+                        "Ignoring stale datadir probe for {} (now on {})",
+                        for_chain,
+                        self.network
+                    );
+                    Task::none()
+                }
                 Err(e) => {
                     self.error = Some(e.to_string());
                     Task::none()
@@ -1779,20 +1801,58 @@ impl Home {
                 }
             },
             Message::View(ViewMessage::Run(index)) => {
-                if let State::Cubes { cubes, .. } = &self.state {
+                if let State::Cubes { cubes, source, .. } = &self.state {
                     if let Some(cube) = cubes.get(index) {
+                        let source = *source;
+                        // The record was read from `source`'s directory. Its
+                        // own `network` must say the same, and this build must
+                        // be able to run that chain — both decided here, before
+                        // any file the *record* would point at is read. A
+                        // record that disagrees is a copied or hand-edited
+                        // settings.json; trusting it would open the wrong
+                        // chain's config, seed folder and provider.
+                        if cube.network != source {
+                            self.error = Some(format!(
+                                "This Cube's settings say it lives on {}, but it was found in \
+                                 the {} folder. Tenshu won't open it until the two agree.",
+                                cube.network.label(),
+                                source.label(),
+                            ));
+                            return Task::none();
+                        }
+                        if let crate::chain::RuntimeSupport::Dormant { reason } =
+                            cube.network.runtime_support()
+                        {
+                            self.error = Some(reason.to_string());
+                            return Task::none();
+                        }
+                        // The GUI config of the directory the record came from —
+                        // never the one a record's claim would select.
                         let datadir_path = self.datadir_path.clone();
                         let mut path = self
                             .datadir_path
-                            .network_directory(cube.network)
+                            .network_directory(source)
                             .path()
                             .to_path_buf();
                         path.push(app::config::DEFAULT_FILE_NAME);
-                        let cfg = app::Config::from_file(&path).expect("Already checked");
-                        let network = cube.network;
+                        // `check_network_datadir` created this file if it was
+                        // missing, but the disk is not frozen between that probe
+                        // and this click: surface a read failure, don't panic.
+                        let cfg = match app::Config::from_file(&path) {
+                            Ok(cfg) => cfg,
+                            Err(e) => {
+                                self.error = Some(format!(
+                                    "Couldn't read the {} folder's configuration ({}): {}",
+                                    source.label(),
+                                    path.display(),
+                                    e
+                                ));
+                                return Task::none();
+                            }
+                        };
                         let cube = cube.clone();
                         Task::perform(
-                            async move { (datadir_path.clone(), cfg, network, cube) },
+                            async move { (datadir_path.clone(), cfg, source, cube) },
                             |m| Message::Run(m.0, m.1, m.2, m.3),
                         )
                     } else {
@@ -3223,6 +3283,7 @@ impl Home {
         self.state = State::Cubes {
             cubes,
             create_cube: true,
+            source: self.network.into(),
         };
     }
 
@@ -3517,7 +3578,9 @@ impl Home {
                                     self.creation_kit_error.as_deref(),
                                     self.can_create_recovery_kit(),
                                 ),
-                                State::Cubes { cubes, create_cube } => {
+                                State::Cubes {
+                                    cubes, create_cube, ..
+                                } => {
                                     if *create_cube {
                                         create_cube_form(
                                             &self.create_cube_name,
@@ -5040,11 +5103,22 @@ pub enum Message {
     /// "home had no Connect session" — the relevant installer step
     /// then falls back to its own auth form.
     Install(CoincubeDirectory, Network, UserFlow, Option<CoincubeClient>),
-    Checked(Result<State, String>),
+    /// Result of probing a chain directory. `for_chain` is the chain the probe
+    /// was started for; a result that arrives after the user has switched
+    /// networks is stale and must not replace the current list.
+    Checked {
+        for_chain: crate::chain::ChainId,
+        res: Result<State, String>,
+    },
+    /// Open a Cube: the datadir, the GUI config read from the Cube's chain
+    /// directory, the chain that directory belongs to, and the Cube. The tab
+    /// checks that the Cube's own `network` agrees with the directory it was
+    /// found in and that this build can run that chain before anything is
+    /// unlocked or started.
     Run(
         CoincubeDirectory,
         app::config::Config,
-        Network,
+        crate::chain::ChainId,
         CubeSettings,
     ),
     StartRecovery,
@@ -5067,7 +5141,7 @@ pub enum Message {
     /// Result of registering a cube with the remote Connect API.
     CubeRemoteRegistered {
         cube_id: String,
-        network: Network,
+        network: crate::chain::ChainId,
         result: Result<CubeResponse, String>,
     },
     /// Catch-up sync finished.
@@ -5088,7 +5162,7 @@ pub enum Message {
     /// Result of updating a cube on the remote Connect API.
     CubeRemoteUpdated {
         cube_id: String,
-        network: Network,
+        network: crate::chain::ChainId,
         result: Result<CubeResponse, String>,
     },
     /// Result of deleting a local cube's Connect backup.
@@ -5630,11 +5704,15 @@ impl DeleteCubeModal {
     }
 }
 
-pub async fn check_membership(
-    network: Network,
+pub async fn check_membership<C: Into<crate::chain::ChainId>>(
+    chain: C,
     network_dir: &NetworkDirectory,
     auth: &AuthConfig,
 ) -> Result<Option<UserRole>, DeleteError> {
+    // The legacy remote backend is a Bitcoin-family service; a chain this
+    // build cannot run never reaches here (the delete modal only lists Cubes
+    // the launcher can open), so the projection is lossless.
+    let network = chain.into().bitcoin_network();
     let service_config = get_service_config(network)
         .await
         .map_err(|e| DeleteError::Connect(e.to_string()))?;
@@ -5665,7 +5743,25 @@ pub async fn check_membership(
     }
 }
 
-async fn check_network_datadir(path: NetworkDirectory) -> Result<State, String> {
+/// Probe the selected network's directory and report through
+/// [`Message::Checked`], tagged with the chain it was started for.
+fn probe_network_datadir<C: Into<crate::chain::ChainId>>(
+    network: C,
+    dir: NetworkDirectory,
+) -> Task<Message> {
+    let for_chain = network.into();
+    Task::perform(check_network_datadir(for_chain, dir), move |res| {
+        Message::Checked { for_chain, res }
+    })
+}
+
+/// Probe `path` — the directory of `source` — and load the Cubes stored there.
+/// The returned [`State::Cubes`] carries `source` so nothing downstream has to
+/// trust a record's own `network` field about where it lives.
+async fn check_network_datadir(
+    source: crate::chain::ChainId,
+    path: NetworkDirectory,
+) -> Result<State, String> {
     // Ensure the network directory exists
     if let Err(e) = tokio::fs::create_dir_all(path.path()).await {
         return Err(format!(
@@ -5736,6 +5832,7 @@ async fn check_network_datadir(path: NetworkDirectory) -> Result<State, String> 
                 Ok(State::Cubes {
                     cubes: s.cubes,
                     create_cube: false,
+                    source,
                 })
             }
         }
@@ -5916,6 +6013,7 @@ mod tests {
                 cube("local-b", "Local B", Network::Bitcoin),
             ],
             create_cube: false,
+            source: crate::chain::ChainId::Bitcoin,
         };
         home.remote_cubes = vec![
             remote_cube("remote-mainnet", "Remote Mainnet", Network::Bitcoin),
@@ -5931,6 +6029,7 @@ mod tests {
         home.state = State::Cubes {
             cubes: Vec::new(),
             create_cube: false,
+            source: crate::chain::ChainId::Bitcoin,
         };
 
         let _ = home.update(Message::View(ViewMessage::ShowCreateCube(true)));
@@ -6101,6 +6200,7 @@ mod tests {
         home.state = State::Cubes {
             cubes: Vec::new(),
             create_cube: true,
+            source: crate::chain::ChainId::Bitcoin,
         };
         home.create_cube_name.value = "My Cube".to_string();
         // PIN-path validation: the form defaults to a passkey where one is
@@ -6137,6 +6237,7 @@ mod tests {
                 cube("local-b", "Local B", Network::Bitcoin),
             ],
             create_cube: true,
+            source: crate::chain::ChainId::Bitcoin,
         };
         home.create_cube_pin_confirm.digits = [
             "1".to_string(),
@@ -6261,10 +6362,14 @@ mod tests {
         });
         assert_eq!(home.remote_cubes.len(), 1);
 
-        let _ = home.update(Message::Checked(Ok(State::Cubes {
-            cubes: vec![cube("local-a", "Local A", Network::Bitcoin)],
-            create_cube: false,
-        })));
+        let _ = home.update(Message::Checked {
+            for_chain: crate::chain::ChainId::Bitcoin,
+            res: Ok(State::Cubes {
+                cubes: vec![cube("local-a", "Local A", Network::Bitcoin)],
+                create_cube: false,
+                source: crate::chain::ChainId::Bitcoin,
+            }),
+        });
 
         assert!(home.remote_cubes.is_empty());
         assert!(matches!(home.state, State::Cubes { .. }));
@@ -6427,6 +6532,7 @@ mod tests {
         home.state = State::Cubes {
             cubes: vec![local.clone()],
             create_cube: false,
+            source: crate::chain::ChainId::Bitcoin,
         };
         home.cube_sync_errors.insert(
             local.id.clone(),
@@ -6452,6 +6558,7 @@ mod tests {
         home.state = State::Cubes {
             cubes: vec![cube("local-a", "Local A", Network::Bitcoin)],
             create_cube: false,
+            source: crate::chain::ChainId::Bitcoin,
         };
 
         let _ = home.update(Message::View(ViewMessage::RenameCube(0)));
@@ -6518,6 +6625,7 @@ mod tests {
         home.state = State::Cubes {
             cubes: vec![cube("local-a", "Local A", Network::Bitcoin)],
             create_cube: true,
+            source: crate::chain::ChainId::Bitcoin,
         };
         home.create_cube_name.value = "New Cube".to_string();
         home.create_cube_name.valid = true;
@@ -6540,6 +6648,7 @@ mod tests {
         signed_in.state = State::Cubes {
             cubes: vec![cube("local-a", "Local A", Network::Bitcoin)],
             create_cube: false,
+            source: crate::chain::ChainId::Bitcoin,
         };
         signed_in.remote_cubes = vec![remote_cube("remote-a", "Remote A", Network::Bitcoin)];
         signed_in.view();
@@ -6580,6 +6689,7 @@ mod tests {
             buy_sell_enabled: None,
             p2p_enabled: None,
             duress_enabled: Some(false),
+            bitcoin_blake2b_enabled: None,
         }
     }
 
@@ -6655,6 +6765,7 @@ mod tests {
         home.state = State::Cubes {
             cubes: vec![local.clone()],
             create_cube: false,
+            source: crate::chain::ChainId::Bitcoin,
         };
         home.remote_cubes = vec![remote_cube("remote-a", "Remote A", Network::Bitcoin)];
         home.server_cube_limit = Some(2);
@@ -6766,7 +6877,7 @@ mod tests {
 
         let _ = home.update(Message::CubeRemoteRegistered {
             cube_id: "c1".to_string(),
-            network: Network::Bitcoin,
+            network: crate::chain::ChainId::Bitcoin,
             result: Err("Cube limit reached for this network".to_string()),
         });
         assert_eq!(
@@ -6776,7 +6887,7 @@ mod tests {
 
         let _ = home.update(Message::CubeRemoteRegistered {
             cube_id: "c1".to_string(),
-            network: Network::Bitcoin,
+            network: crate::chain::ChainId::Bitcoin,
             result: Ok(registered_cube_response("c1")),
         });
         assert!(
@@ -6883,6 +6994,7 @@ mod tests {
         home.state = State::Cubes {
             cubes: vec![cube],
             create_cube: false,
+            source: crate::chain::ChainId::Bitcoin,
         };
         home.rename_cube_modal = Some((0, "Renamed Cube".to_string()));
         home.view();
@@ -6914,6 +7026,7 @@ mod tests {
         home.state = State::Cubes {
             cubes: Vec::new(),
             create_cube: true,
+            source: crate::chain::ChainId::Bitcoin,
         };
         home
     }
@@ -7315,6 +7428,7 @@ mod tests {
         home.state = State::Cubes {
             cubes: vec![existing.clone()],
             create_cube: true,
+            source: crate::chain::ChainId::Bitcoin,
         };
 
         enter_backup_step(&mut home, "Second", "1111");
@@ -7322,7 +7436,10 @@ mod tests {
 
         let _ = home.update(Message::View(ViewMessage::CancelCreationBackup));
 
-        let State::Cubes { cubes, create_cube } = &home.state else {
+        let State::Cubes {
+            cubes, create_cube, ..
+        } = &home.state
+        else {
             panic!(
                 "cancelling must return to the Cube list, got {:?}",
                 home.state
@@ -8665,6 +8782,278 @@ mod tests {
 
         assert_eq!(passkey_words, 12);
         assert_eq!(pin_words, 12);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod chain_identity_open_tests {
+    //! Opening a Cube from the launcher, driven from the real datadir probe
+    //! through the real click handler (BTCB2 plan PR 2, review P2 on
+    //! coincube#370).
+    //!
+    //! A settings.json record is not trusted about where it lives: the chain
+    //! whose directory the list was read from travels with the list
+    //! (`State::Cubes::source`), and a click checks the record's own `network`
+    //! against it — and this build's ability to run that chain — *before*
+    //! reading any config the record would point at. No `expect`, no panic.
+
+    use super::*;
+    use crate::chain::{ChainId, BTCB2_DORMANT_REASON};
+
+    fn tmp_datadir(tag: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "coincube-open-gate-{}-{}-{}",
+            tag,
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::SeqCst)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Run a `Task` to completion and collect its messages (same as the main
+    /// test module's helper).
+    fn drain(task: Task<Message>) -> Vec<Message> {
+        use iced_runtime::futures::futures::StreamExt;
+        let Some(stream) = iced_runtime::task::into_stream(task) else {
+            return Vec::new();
+        };
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async move {
+            stream
+                .filter_map(|action| async move {
+                    match action {
+                        iced_runtime::Action::Output(msg) => Some(msg),
+                        _ => None,
+                    }
+                })
+                .collect::<Vec<_>>()
+                .await
+        })
+    }
+
+    fn record(id: &str, chain: ChainId) -> CubeSettings {
+        let mut c = CubeSettings::new_with_raw_id(id.to_string(), id.to_string(), chain);
+        c.created_at = 0; // predates the creation-backup gate
+        c
+    }
+
+    /// A datadir whose `bitcoin/` directory holds a real GUI config and a
+    /// settings.json with the given records — exactly what a copied or edited
+    /// file looks like on disk.
+    fn bitcoin_datadir_with(records: Vec<CubeSettings>) -> std::path::PathBuf {
+        let dir = tmp_datadir("records");
+        let bitcoin = dir.join("bitcoin");
+        std::fs::create_dir_all(&bitcoin).unwrap();
+        app::Config::new(false)
+            .to_file(&bitcoin.join(app::config::DEFAULT_FILE_NAME))
+            .unwrap();
+        let settings = settings::Settings {
+            cubes: records,
+            ..Default::default()
+        };
+        std::fs::write(
+            bitcoin.join(settings::SETTINGS_FILE_NAME),
+            serde_json::to_vec_pretty(&settings).unwrap(),
+        )
+        .unwrap();
+        dir
+    }
+
+    /// `Home` on the Bitcoin network, its list loaded through the real probe
+    /// (`reload` → `check_network_datadir` → `Message::Checked`).
+    fn loaded_home(dir: &std::path::Path) -> Home {
+        let mut home = Home::new(
+            CoincubeDirectory::new(dir.to_path_buf()),
+            Some(Network::Bitcoin),
+        )
+        .0;
+        assert_eq!(home.network, Network::Bitcoin);
+        let msgs = drain(home.reload());
+        assert_eq!(msgs.len(), 1, "one probe result expected");
+        for m in msgs {
+            let _ = home.update(m);
+        }
+        home
+    }
+
+    /// Click record `index`: the messages the click emitted, and the home
+    /// error afterwards. A panic here is the P2 failure mode.
+    fn click(home: &mut Home, index: usize) -> (Vec<Message>, Option<String>) {
+        let msgs = drain(home.update(Message::View(ViewMessage::Run(index))));
+        (msgs, home.error().map(|e| e.to_string()))
+    }
+
+    fn is_run_for(msg: &Message, chain: ChainId, id: &str) -> bool {
+        matches!(msg, Message::Run(_, _, c, cube) if *c == chain && cube.id == id)
+    }
+
+    #[test]
+    fn the_probe_stamps_the_list_with_the_directory_it_was_read_from() {
+        let dir = bitcoin_datadir_with(vec![record("main", ChainId::Bitcoin)]);
+        let home = loaded_home(&dir);
+        match &home.state {
+            State::Cubes { cubes, source, .. } => {
+                assert_eq!(*source, ChainId::Bitcoin);
+                assert_eq!(cubes.len(), 1);
+            }
+            other => panic!("expected the Cube list, got {:?}", other),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_ordinary_bitcoin_cube_still_opens() {
+        let dir = bitcoin_datadir_with(vec![record("main", ChainId::Bitcoin)]);
+        let mut home = loaded_home(&dir);
+        let (msgs, error) = click(&mut home, 0);
+        assert_eq!(error, None);
+        assert!(
+            msgs.iter().any(|m| is_run_for(m, ChainId::Bitcoin, "main")),
+            "expected a Run for the Bitcoin Cube"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The reviewer's reproduction: records in `bitcoin/settings.json`
+    /// claiming another chain. With the claimed chain's config absent this
+    /// used to panic on `expect("Already checked")` before any refusal.
+    #[test]
+    fn a_record_claiming_another_chain_is_refused_not_panicked_when_its_config_is_absent() {
+        for claimed in [
+            ChainId::BitcoinBlake2b,
+            ChainId::BitcoinBlake2bTestnet4,
+            ChainId::Signet,
+        ] {
+            let dir = bitcoin_datadir_with(vec![
+                record("main", ChainId::Bitcoin),
+                record("claimant", claimed),
+            ]);
+            assert!(!dir.join(claimed.dir_name()).exists());
+            let mut home = loaded_home(&dir);
+            // Both records are listed (the probe does not validate them).
+            assert!(matches!(&home.state, State::Cubes { cubes, .. } if cubes.len() == 2));
+
+            let (msgs, error) = click(&mut home, 1);
+            assert!(
+                msgs.is_empty(),
+                "{:?}: a refused click must emit nothing",
+                claimed
+            );
+            let error = error.unwrap_or_else(|| panic!("{:?}: no home error", claimed));
+            assert!(error.contains(claimed.label()), "{}", error);
+            assert!(error.contains(ChainId::Bitcoin.label()), "{}", error);
+            // Refused for *where it was found*, before the dormant question.
+            assert!(!error.contains(BTCB2_DORMANT_REASON));
+            // Nothing was created for the claimed chain either.
+            assert!(!dir.join(claimed.dir_name()).exists());
+
+            // The ordinary Cube beside it is unaffected (the banner from the
+            // refused click is dismissed first — Home keeps it until the next
+            // action clears it, as for every other error).
+            home.error = None;
+            let (msgs, error) = click(&mut home, 0);
+            assert_eq!(error, None);
+            assert!(msgs.iter().any(|m| is_run_for(m, ChainId::Bitcoin, "main")));
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// With the claimed chain's config *present* the record is still refused:
+    /// the decision is about the directory the record came from, not about
+    /// whether the file its claim points at happens to exist.
+    #[test]
+    fn a_record_claiming_another_chain_is_refused_even_when_its_config_exists() {
+        for claimed in [ChainId::BitcoinBlake2b, ChainId::Signet] {
+            let dir = bitcoin_datadir_with(vec![record("claimant", claimed)]);
+            let other = dir.join(claimed.dir_name());
+            std::fs::create_dir_all(&other).unwrap();
+            app::Config::new(true)
+                .to_file(&other.join(app::config::DEFAULT_FILE_NAME))
+                .unwrap();
+            let mut home = loaded_home(&dir);
+            let (msgs, error) = click(&mut home, 0);
+            assert!(msgs.is_empty(), "{:?}", claimed);
+            let error = error.expect("home error");
+            assert!(
+                error.contains(claimed.label()) && error.contains("Bitcoin folder"),
+                "{}",
+                error
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// A list genuinely read from a BTCB2 directory (unreachable through the
+    /// launcher today, which is typed on `bitcoin::Network`, but the handler
+    /// must not depend on that): the record agrees with its directory and is
+    /// refused for the dormant runtime, without reading any config.
+    #[test]
+    fn a_dormant_chain_record_in_its_own_directory_is_refused_for_the_runtime() {
+        let dir = tmp_datadir("dormant");
+        let mut home = Home::new(CoincubeDirectory::new(dir.clone()), Some(Network::Bitcoin)).0;
+        for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
+            home.state = State::Cubes {
+                cubes: vec![record("fork", chain)],
+                create_cube: false,
+                source: chain,
+            };
+            home.error = None;
+            let (msgs, error) = click(&mut home, 0);
+            assert!(msgs.is_empty(), "{:?}", chain);
+            assert_eq!(error.as_deref(), Some(BTCB2_DORMANT_REASON), "{:?}", chain);
+            assert!(
+                !dir.join(chain.dir_name()).exists(),
+                "no config was read or created"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A probe result that arrives for a network the user has already
+    /// switched away from must not replace the current list (its `source`
+    /// would then disagree with `self.network`).
+    #[test]
+    fn a_stale_probe_result_for_another_network_is_dropped() {
+        let dir = bitcoin_datadir_with(vec![record("main", ChainId::Bitcoin)]);
+        let mut home = loaded_home(&dir);
+        let before = format!("{:?}", home.state);
+
+        let _ = home.update(Message::Checked {
+            for_chain: ChainId::Signet,
+            res: Ok(State::Cubes {
+                cubes: vec![record("stale", ChainId::Signet)],
+                create_cube: false,
+                source: ChainId::Signet,
+            }),
+        });
+        assert_eq!(
+            format!("{:?}", home.state),
+            before,
+            "stale result replaced the list"
+        );
+        assert_eq!(home.error(), None);
+
+        // A stale *error* is dropped too.
+        let _ = home.update(Message::Checked {
+            for_chain: ChainId::Signet,
+            res: Err("boom".to_string()),
+        });
+        assert_eq!(home.error(), None);
+
+        // …while a fresh result for the current network is applied.
+        let _ = home.update(Message::Checked {
+            for_chain: ChainId::Bitcoin,
+            res: Ok(State::NoCube { create_cube: false }),
+        });
+        assert!(matches!(home.state, State::NoCube { .. }));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
