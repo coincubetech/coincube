@@ -49,6 +49,49 @@ pub struct UnifiedSignature {
     pub signature: Vec<u8>,
 }
 
+/// A typed internal PSBT together with wire-presence information rust-bitcoin
+/// does not retain for version zero.
+///
+/// The PSBT remains mutable for later signing integrations. Every adapter
+/// boundary validates the current typed value again before returning bytes,
+/// signatures, or applying a merge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnifiedPsbt {
+    psbt: Psbt,
+    explicit_global_version: bool,
+}
+
+impl UnifiedPsbt {
+    /// Wrap a typed version-zero PSBT whose global version field was absent.
+    pub fn from_psbt(psbt: Psbt) -> Result<Self, UnifiedPsbtError> {
+        let result = Self {
+            psbt,
+            explicit_global_version: false,
+        };
+        validate_internal(&result)?;
+        Ok(result)
+    }
+
+    /// Read the underlying rust-bitcoin PSBT.
+    pub fn psbt(&self) -> &Psbt {
+        &self.psbt
+    }
+
+    /// Mutate the underlying rust-bitcoin PSBT.
+    ///
+    /// Mutations are accepted only when a subsequent adapter operation passes
+    /// full canonical validation.
+    pub fn psbt_mut(&mut self) -> &mut Psbt {
+        &mut self.psbt
+    }
+
+    /// Whether the source wire map explicitly contained
+    /// `PSBT_GLOBAL_VERSION = 0`.
+    pub fn has_explicit_global_version(&self) -> bool {
+        self.explicit_global_version
+    }
+}
+
 /// Errors returned by the unified PSBT representation adapter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnifiedPsbtError {
@@ -78,6 +121,12 @@ pub enum UnifiedPsbtError {
     TrailingData,
     /// rust-bitcoin rejected the typed PSBT.
     TypedPsbt(String),
+    /// A typed PSBT contained a raw-key alias for a canonical known field.
+    NonCanonicalTypedMap,
+    /// An unsigned transaction input contained a scriptSig.
+    UnsignedTransactionHasScriptSig { input: usize },
+    /// An unsigned transaction input contained witness data.
+    UnsignedTransactionHasWitness { input: usize },
     /// Only PSBT version 0 is supported by this adapter.
     UnsupportedVersion(u32),
     /// Input or output map counts disagree with the unsigned transaction.
@@ -125,6 +174,17 @@ impl fmt::Display for UnifiedPsbtError {
             Self::MissingMap { map } => write!(f, "PSBT is missing map {map}"),
             Self::TrailingData => write!(f, "trailing data after final PSBT map"),
             Self::TypedPsbt(err) => write!(f, "invalid typed PSBT: {err}"),
+            Self::NonCanonicalTypedMap => {
+                write!(f, "typed PSBT contains a noncanonical raw-key alias")
+            }
+            Self::UnsignedTransactionHasScriptSig { input } => write!(
+                f,
+                "unsigned transaction input {input} contains a scriptSig"
+            ),
+            Self::UnsignedTransactionHasWitness { input } => write!(
+                f,
+                "unsigned transaction input {input} contains witness data"
+            ),
             Self::UnsupportedVersion(version) => {
                 write!(f, "PSBT version {version} is unsupported")
             }
@@ -138,7 +198,7 @@ impl fmt::Display for UnifiedPsbtError {
                 "PSBT maps disagree with transaction: {psbt_inputs}/{tx_inputs} inputs, {psbt_outputs}/{tx_outputs} outputs"
             ),
             Self::InvalidPublicKey { input } => {
-                write!(f, "invalid unified public key in input {input}")
+                write!(f, "invalid partial-signature public key in input {input}")
             }
             Self::InvalidDerSignature { input } => {
                 write!(f, "invalid strict-DER unified signature in input {input}")
@@ -168,36 +228,48 @@ impl error::Error for UnifiedPsbtError {}
 
 /// Import standard PSBT bytes, moving `0x21` ECDSA partial signatures into the
 /// reserved Coincube proprietary namespace.
-pub fn import_standard(bytes: &[u8]) -> Result<Psbt, UnifiedPsbtError> {
+pub fn import_standard(bytes: &[u8]) -> Result<UnifiedPsbt, UnifiedPsbtError> {
     let mut raw = RawPsbt::parse(bytes)?;
+    let explicit_global_version = raw.has_explicit_global_version();
     for (input_index, map) in raw.inputs.iter_mut().enumerate() {
         convert_standard_input_to_internal(map, input_index)?;
     }
     let internal = raw.serialize()?;
     let psbt = Psbt::deserialize(&internal).map_err(typed_error)?;
-    validate_internal(&psbt)?;
-    Ok(psbt)
+    let result = UnifiedPsbt {
+        psbt,
+        explicit_global_version,
+    };
+    validate_internal(&result)?;
+    Ok(result)
 }
 
 /// Deserialize Coincube's internal typed representation with strict raw-map
 /// duplicate, length, map-count, and trailing-data checks.
-pub fn deserialize_internal(bytes: &[u8]) -> Result<Psbt, UnifiedPsbtError> {
-    RawPsbt::parse(bytes)?;
+pub fn deserialize_internal(bytes: &[u8]) -> Result<UnifiedPsbt, UnifiedPsbtError> {
+    let raw = RawPsbt::parse(bytes)?;
+    let explicit_global_version = raw.has_explicit_global_version();
     let psbt = Psbt::deserialize(bytes).map_err(typed_error)?;
-    validate_internal(&psbt)?;
-    Ok(psbt)
+    let result = UnifiedPsbt {
+        psbt,
+        explicit_global_version,
+    };
+    validate_internal(&result)?;
+    Ok(result)
 }
 
 /// Serialize Coincube's internal representation after validating it again.
-pub fn serialize_internal(psbt: &Psbt) -> Result<Vec<u8>, UnifiedPsbtError> {
+pub fn serialize_internal(psbt: &UnifiedPsbt) -> Result<Vec<u8>, UnifiedPsbtError> {
     validate_internal(psbt)?;
-    let bytes = psbt.serialize();
-    RawPsbt::parse(&bytes)?;
-    Ok(bytes)
+    serialize_with_version_presence(psbt)
 }
 
 /// Validate a mutable/public rust-bitcoin PSBT as Coincube's internal form.
-pub fn validate_internal(psbt: &Psbt) -> Result<(), UnifiedPsbtError> {
+pub fn validate_internal(psbt: &UnifiedPsbt) -> Result<(), UnifiedPsbtError> {
+    validate_typed_psbt(&psbt.psbt)
+}
+
+fn validate_typed_psbt(psbt: &Psbt) -> Result<(), UnifiedPsbtError> {
     if psbt.version != 0 {
         return Err(UnifiedPsbtError::UnsupportedVersion(psbt.version));
     }
@@ -212,8 +284,22 @@ pub fn validate_internal(psbt: &Psbt) -> Result<(), UnifiedPsbtError> {
         });
     }
 
+    for (input, txin) in psbt.unsigned_tx.input.iter().enumerate() {
+        if !txin.script_sig.is_empty() {
+            return Err(UnifiedPsbtError::UnsignedTransactionHasScriptSig { input });
+        }
+        if !txin.witness.is_empty() {
+            return Err(UnifiedPsbtError::UnsignedTransactionHasWitness { input });
+        }
+    }
+
     let serialized = psbt.serialize();
     ensure_size(serialized.len())?;
+    RawPsbt::parse(&serialized)?;
+    let canonical = Psbt::deserialize(&serialized).map_err(typed_error)?;
+    if canonical != *psbt {
+        return Err(UnifiedPsbtError::NonCanonicalTypedMap);
+    }
 
     for (input_index, input) in psbt.inputs.iter().enumerate() {
         for (key, value) in &input.proprietary {
@@ -235,9 +321,10 @@ pub fn validate_internal(psbt: &Psbt) -> Result<(), UnifiedPsbtError> {
 
 /// Export internal PSBT state as standard BIP174 bytes with unified signatures
 /// restored to `PSBT_IN_PARTIAL_SIG` entries.
-pub fn export_standard(psbt: &Psbt) -> Result<Vec<u8>, UnifiedPsbtError> {
+pub fn export_standard(psbt: &UnifiedPsbt) -> Result<Vec<u8>, UnifiedPsbtError> {
     validate_internal(psbt)?;
-    let mut raw = RawPsbt::parse(&psbt.serialize())?;
+    let internal = serialize_with_version_presence(psbt)?;
+    let mut raw = RawPsbt::parse(&internal)?;
     for (input_index, map) in raw.inputs.iter_mut().enumerate() {
         convert_internal_input_to_standard(map, input_index)?;
     }
@@ -245,10 +332,10 @@ pub fn export_standard(psbt: &Psbt) -> Result<Vec<u8>, UnifiedPsbtError> {
 }
 
 /// Return all validated unified signatures without changing the PSBT.
-pub fn unified_signatures(psbt: &Psbt) -> Result<Vec<UnifiedSignature>, UnifiedPsbtError> {
+pub fn unified_signatures(psbt: &UnifiedPsbt) -> Result<Vec<UnifiedSignature>, UnifiedPsbtError> {
     validate_internal(psbt)?;
     let mut signatures = Vec::new();
-    for (input_index, input) in psbt.inputs.iter().enumerate() {
+    for (input_index, input) in psbt.psbt.inputs.iter().enumerate() {
         for (key, value) in &input.proprietary {
             if is_reserved_key(key) {
                 signatures.push(UnifiedSignature {
@@ -266,10 +353,13 @@ pub fn unified_signatures(psbt: &Psbt) -> Result<Vec<UnifiedSignature>, UnifiedP
 ///
 /// All validation and conflict checks happen on a clone. `destination` is
 /// assigned only after the complete merge succeeds, so failures are atomic.
-pub fn merge_signatures(destination: &mut Psbt, delta: &Psbt) -> Result<(), UnifiedPsbtError> {
+pub fn merge_signatures(
+    destination: &mut UnifiedPsbt,
+    delta: &UnifiedPsbt,
+) -> Result<(), UnifiedPsbtError> {
     validate_merge_pair(destination, delta)?;
     let mut merged = destination.clone();
-    for input_index in 0..merged.inputs.len() {
+    for input_index in 0..merged.psbt.inputs.len() {
         merge_one_input(&mut merged, delta, input_index)?;
     }
     validate_internal(&merged)?;
@@ -279,15 +369,15 @@ pub fn merge_signatures(destination: &mut Psbt, delta: &Psbt) -> Result<(), Unif
 
 /// Merge only one input's ECDSA partial signatures from `delta`.
 pub fn merge_input_signatures(
-    destination: &mut Psbt,
-    delta: &Psbt,
+    destination: &mut UnifiedPsbt,
+    delta: &UnifiedPsbt,
     input_index: usize,
 ) -> Result<(), UnifiedPsbtError> {
     validate_merge_pair(destination, delta)?;
-    if input_index >= destination.inputs.len() {
+    if input_index >= destination.psbt.inputs.len() {
         return Err(UnifiedPsbtError::InputIndexOutOfBounds {
             index: input_index,
-            inputs: destination.inputs.len(),
+            inputs: destination.psbt.inputs.len(),
         });
     }
     let mut merged = destination.clone();
@@ -297,22 +387,25 @@ pub fn merge_input_signatures(
     Ok(())
 }
 
-fn validate_merge_pair(destination: &Psbt, delta: &Psbt) -> Result<(), UnifiedPsbtError> {
+fn validate_merge_pair(
+    destination: &UnifiedPsbt,
+    delta: &UnifiedPsbt,
+) -> Result<(), UnifiedPsbtError> {
     validate_internal(destination)?;
     validate_internal(delta)?;
-    if destination.unsigned_tx != delta.unsigned_tx {
+    if destination.psbt.unsigned_tx != delta.psbt.unsigned_tx {
         return Err(UnifiedPsbtError::UnsignedTransactionMismatch);
     }
     Ok(())
 }
 
 fn merge_one_input(
-    destination: &mut Psbt,
-    delta: &Psbt,
+    destination: &mut UnifiedPsbt,
+    delta: &UnifiedPsbt,
     input_index: usize,
 ) -> Result<(), UnifiedPsbtError> {
-    let delta_input = &delta.inputs[input_index];
-    let destination_input = &mut destination.inputs[input_index];
+    let delta_input = &delta.psbt.inputs[input_index];
+    let destination_input = &mut destination.psbt.inputs[input_index];
 
     let destination_unified = reserved_signatures(&destination_input.proprietary, input_index)?;
     let delta_unified = reserved_signatures(&delta_input.proprietary, input_index)?;
@@ -531,6 +624,17 @@ fn ensure_size(size: usize) -> Result<(), UnifiedPsbtError> {
     }
 }
 
+fn serialize_with_version_presence(psbt: &UnifiedPsbt) -> Result<Vec<u8>, UnifiedPsbtError> {
+    let mut raw = RawPsbt::parse(&psbt.psbt.serialize())?;
+    if psbt.explicit_global_version {
+        raw.global.pairs.push(RawPair {
+            key: vec![PSBT_GLOBAL_VERSION],
+            value: 0u32.to_le_bytes().to_vec(),
+        });
+    }
+    raw.serialize()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RawPair {
     /// Complete key bytes: type byte followed by key data.
@@ -609,6 +713,13 @@ impl RawPsbt {
         }
         ensure_size(bytes.len())?;
         Ok(bytes)
+    }
+
+    fn has_explicit_global_version(&self) -> bool {
+        self.global
+            .pairs
+            .iter()
+            .any(|pair| pair.key.as_slice() == [PSBT_GLOBAL_VERSION])
     }
 }
 
