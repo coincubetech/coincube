@@ -2521,6 +2521,7 @@ mod test {
     /// avoids a second ~831 ms Argon2id pass.
     #[test]
     fn a_v3_cube_derives_from_the_session_and_is_loud_without_it() {
+        let _guard = crate::app::session::test_guard();
         use super::{derive_connect_encryption_pubkey, ConnectEncryptionKey};
         use coincube_core::miniscript::bitcoin::Network;
         use coincube_core::signer::MasterSigner;
@@ -2602,6 +2603,7 @@ mod test {
     /// session at all — the pre-hardening Cube keeps working.
     #[test]
     fn a_pre_hardening_v2_seed_derives_from_disk() {
+        let _guard = crate::app::session::test_guard();
         use super::{derive_connect_encryption_pubkey, ConnectEncryptionKey};
         use coincube_core::miniscript::bitcoin::Network;
         use coincube_core::signer::MasterSigner;
