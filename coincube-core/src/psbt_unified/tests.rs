@@ -522,6 +522,14 @@ fn input_size_limit_is_enforced_before_parsing() {
 }
 
 #[test]
+fn both_merge_apis_enforce_complete_wrapper_size_atomically() {
+    for explicit_version in [false, true] {
+        assert_merge_size_boundary(explicit_version, false);
+        assert_merge_size_boundary(explicit_version, true);
+    }
+}
+
+#[test]
 fn every_deterministic_truncation_is_rejected_without_panicking() {
     let valid = export_standard(&mixed_internal_psbt()).unwrap();
     for length in 0..valid.len() {
@@ -759,6 +767,107 @@ fn base_psbt() -> UnifiedPsbt {
         },
         explicit_global_version: false,
     }
+}
+
+fn assert_merge_size_boundary(explicit_version: bool, one_input_only: bool) {
+    let shape = merge_size_shape(explicit_version);
+    let mut delta =
+        UnifiedPsbt::from_psbt(Psbt::from_unsigned_tx(shape.psbt.unsigned_tx.clone()).unwrap())
+            .unwrap();
+    let before_signature = delta.psbt.serialize().len();
+    let (public_key, signature) = legacy_signature(28);
+    delta.psbt.inputs[0]
+        .partial_sigs
+        .insert(public_key, signature);
+    let signature_size = delta.psbt.serialize().len() - before_signature;
+    validate_internal(&delta).unwrap();
+
+    for one_byte_over in [false, true] {
+        let expected_merged_size = MAX_PSBT_BYTES + usize::from(one_byte_over);
+        let version_size = if explicit_version {
+            EXPLICIT_GLOBAL_VERSION_SERIALIZED_SIZE
+        } else {
+            0
+        };
+        let destination_typed_size = expected_merged_size - version_size - signature_size;
+        let mut destination = padded_psbt_at_typed_size(shape.clone(), destination_typed_size);
+        let before = serialize_internal(&destination).unwrap();
+        assert_eq!(
+            before.len(),
+            expected_merged_size - signature_size,
+            "initial wrapper size differs"
+        );
+
+        let result = if one_input_only {
+            merge_input_signatures(&mut destination, &delta, 0)
+        } else {
+            merge_signatures(&mut destination, &delta)
+        };
+
+        if one_byte_over {
+            assert_eq!(
+                result,
+                Err(UnifiedPsbtError::InputTooLarge {
+                    actual: MAX_PSBT_BYTES + 1,
+                    maximum: MAX_PSBT_BYTES,
+                })
+            );
+            assert_eq!(serialize_internal(&destination).unwrap(), before);
+        } else {
+            result.unwrap();
+            assert_eq!(
+                serialize_internal(&destination).unwrap().len(),
+                MAX_PSBT_BYTES
+            );
+        }
+        assert_eq!(destination.has_explicit_global_version(), explicit_version);
+    }
+}
+
+fn merge_size_shape(explicit_global_version: bool) -> UnifiedPsbt {
+    let mut psbt = base_psbt();
+    psbt.psbt.unsigned_tx.input.truncate(1);
+    psbt.psbt.inputs.truncate(1);
+    let output = psbt.psbt.unsigned_tx.output[0].clone();
+    psbt.psbt.unsigned_tx.output = vec![output; 8];
+    psbt.psbt.outputs = vec![Output::default(); 8];
+    psbt.explicit_global_version = explicit_global_version;
+    psbt
+}
+
+fn padded_psbt_at_typed_size(mut psbt: UnifiedPsbt, target: usize) -> UnifiedPsbt {
+    const ENTRIES: usize = 16;
+    const LARGE_COMPACT_SIZE_GROWTH: usize = 4;
+
+    for output_index in 0..8 {
+        for entry_index in 0..2 {
+            psbt.psbt.outputs[output_index].unknown.insert(
+                Key {
+                    type_value: 0x70 + entry_index as u8,
+                    key: vec![output_index as u8],
+                },
+                Vec::new(),
+            );
+        }
+    }
+
+    let empty_size = psbt.psbt.serialize().len();
+    let value_bytes = target
+        .checked_sub(empty_size + ENTRIES * LARGE_COMPACT_SIZE_GROWTH)
+        .unwrap();
+    let value_size = value_bytes / ENTRIES;
+    let remainder = value_bytes % ENTRIES;
+    assert!(value_size >= 0x1_0000);
+
+    for (index, output) in psbt.psbt.outputs.iter_mut().enumerate() {
+        for (entry_index, value) in output.unknown.values_mut().enumerate() {
+            let flat_index = index * 2 + entry_index;
+            *value = vec![0x5a; value_size + usize::from(flat_index < remainder)];
+        }
+    }
+    assert_eq!(psbt.psbt.serialize().len(), target);
+    validate_internal(&psbt).unwrap();
+    psbt
 }
 
 fn secret_key(seed: u8) -> SecretKey {

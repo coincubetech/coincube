@@ -37,6 +37,8 @@ const PSBT_PROPRIETARY: u8 = 0xfc;
 const UNIFIED_SIGHASH_ALL: u8 = 0x21;
 const PROPRIETARY_PREFIX: &[u8] = b"coincube";
 const PROPRIETARY_SUBTYPE: u8 = 0;
+// CompactSize(1) + key 0xfb + CompactSize(4) + four-byte version zero.
+const EXPLICIT_GLOBAL_VERSION_SERIALIZED_SIZE: usize = 7;
 
 /// A validated unified ECDSA partial signature stored in a PSBT input.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -266,10 +268,19 @@ pub fn serialize_internal(psbt: &UnifiedPsbt) -> Result<Vec<u8>, UnifiedPsbtErro
 
 /// Validate a mutable/public rust-bitcoin PSBT as Coincube's internal form.
 pub fn validate_internal(psbt: &UnifiedPsbt) -> Result<(), UnifiedPsbtError> {
-    validate_typed_psbt(&psbt.psbt)
+    let typed_size = validate_typed_psbt(&psbt.psbt)?;
+    let version_size = if psbt.explicit_global_version {
+        EXPLICIT_GLOBAL_VERSION_SERIALIZED_SIZE
+    } else {
+        0
+    };
+    let wrapper_size = typed_size
+        .checked_add(version_size)
+        .ok_or(UnifiedPsbtError::LengthOverflow)?;
+    ensure_size(wrapper_size)
 }
 
-fn validate_typed_psbt(psbt: &Psbt) -> Result<(), UnifiedPsbtError> {
+fn validate_typed_psbt(psbt: &Psbt) -> Result<usize, UnifiedPsbtError> {
     if psbt.version != 0 {
         return Err(UnifiedPsbtError::UnsupportedVersion(psbt.version));
     }
@@ -316,7 +327,7 @@ fn validate_typed_psbt(psbt: &Psbt) -> Result<(), UnifiedPsbtError> {
             }
         }
     }
-    Ok(())
+    Ok(serialized.len())
 }
 
 /// Export internal PSBT state as standard BIP174 bytes with unified signatures
