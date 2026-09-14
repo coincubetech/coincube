@@ -1,5 +1,6 @@
 pub mod border_wallet;
 pub mod descriptors;
+pub mod psbt_unified;
 pub mod random;
 pub mod seed_crypt;
 pub mod signer;
