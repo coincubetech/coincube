@@ -79,12 +79,23 @@ read of the family's conf, through the edit (reservation across both
 families, candidate selection, the ledger record the edit chooses to make),
 to the atomic replacement of the file. The writers that go through it:
 
-| Writer | When | On `Busy` / unreadable / not replaced |
-|---|---|---|
-| installer `DefineConfig` | node setup | step error; conf and ledger untouched |
-| settings `write_internal_bitcoind_config` | setup, flavour switch, restart-to-apply, resources apply | `Err` before the ledger; nothing started |
-| `tor::prepare_inbound_tor` (outbound-only reset, then the inbound merge once Tor is up) | every managed start | **start refused** (`StartInternalBitcoindError::ConfigUnavailable`) — the file may still name a Tor that is not running, and a node must not be started from stale privacy configuration |
-| `bitcoind::migrate_legacy_rdts_conf` | every `maybe_start` | skipped this start (retried next start, as before) |
+Two failure classes are worth telling apart. An **early refusal** — the lock
+is `Busy`, the family's own conf exists but cannot be read, the other
+family's conf cannot be read, no acceptable port — happens before the edit
+records anything: conf *and* ledger are untouched. A **write failure**
+(`NotReplaced`) happens after the edit ran: the conf still holds its previous
+bytes, but whatever the edit recorded on its way — for the installer and
+settings writers, the flavour ledger (`record_configured` runs inside the
+edit, deliberately before the write that would erase a legacy marker) —
+stays recorded. The two files are not one transaction and no rollback is
+attempted; the next successful write brings the conf in line with the ledger.
+
+| Writer | When | Early refusal (`Busy` / unreadable / no port) | Write failure (`NotReplaced`) |
+|---|---|---|---|
+| installer `DefineConfig` | node setup | step error; conf and ledger untouched | step error; conf unchanged, ledger may already name the flavour |
+| settings `write_internal_bitcoind_config` | setup, flavour switch, restart-to-apply, resources apply | `Err` before the ledger; nothing started | `Err`; nothing started; conf unchanged, ledger may already name the flavour |
+| `tor::prepare_inbound_tor` (outbound-only reset, then the inbound merge once Tor is up) | every managed start | **start refused** (`StartInternalBitcoindError::ConfigUnavailable`) — the file may still name a Tor that is not running, and a node must not be started from stale privacy configuration | same refusal; it records nothing else |
+| `bitcoind::migrate_legacy_rdts_conf` | every `maybe_start` | skipped this start (retried next start, as before) | logged; ledger already names Knots, the marker line stays until the next start |
 
 Because each rewrite reads under the lock, a section another setup persisted
 a moment earlier is never erased by a stale snapshot. Tor's bootstrap — the
@@ -95,18 +106,21 @@ lock is a leaf: nothing else is acquired while it is held, and it is never
 taken while the marker lock is held.
 
 Replacement is atomic (`write_conf_atomically`): the bytes are staged in a
-uniquely named private sibling (`bitcoin.conf.<pid>.<seq>.tmp`, mode `0600`),
+uniquely named private sibling (`bitcoin.conf.<pid>.<seq>.tmp`, mode `0600`,
+created with `create_new`; a name that already exists belongs to someone else
+and is left untouched while the write moves to the next name, bounded),
 flushed, given the destination's existing permissions if there is one (a
 user's restrictive mode survives; a fresh conf starts private, since it can
 carry `rpcauth`), renamed into place, and on unix the parent directory is
 flushed. A reader sees the previous complete file or the new complete file.
 The two failure classes are reported apart and handled differently: a failure
 **before** the rename (`NotReplaced`) leaves the destination byte-identical
-and removes the staging file; a failure **after** it (`ReplacedNotDurable`)
-leaves the complete new bytes in place with only the directory entry's
-crash-durability unconfirmed — callers proceed and log it. Not every error
-means "nothing was written", and the conf and the flavour ledger are two
-files, not one crash-atomic transaction (the ledger is still recorded first).
+and removes only the staging file this call created; a failure **after** it
+(`ReplacedNotDurable`) leaves the complete new bytes in place with only the
+directory entry's crash-durability unconfirmed — callers proceed and log it.
+Not every error means "nothing was written", and the conf and the flavour
+ledger are two files, not one crash-atomic transaction (the ledger is still
+recorded first; see the table above for what a write failure leaves behind).
 
 What the lock does **not** do: it does not reserve a port against a process
 that never takes it — a third-party program, or an older COINCUBE binary

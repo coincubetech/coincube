@@ -261,7 +261,10 @@ impl std::error::Error for ConfWriteError {}
 ///
 /// Unique rather than a fixed sibling, so two writers of the same file — which
 /// the lock prevents for conf writers of this process, but not for a stray
-/// older binary — can never truncate each other's staging file.
+/// older binary — can never truncate each other's staging file. Uniqueness is
+/// not assumed, only attempted: the name is created with `create_new`, and a
+/// collision (a leftover from a dead process with the same pid, say) moves on
+/// to the next sequence number and never touches the file that is there.
 fn staging_path(path: &Path) -> PathBuf {
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let name = path
@@ -276,6 +279,57 @@ fn staging_path(path: &Path) -> PathBuf {
     ))
 }
 
+/// How many staging names to try before giving up on a directory full of
+/// colliding leftovers. Each attempt is a distinct name; none is ever removed.
+const STAGING_NAME_ATTEMPTS: usize = 16;
+
+/// A staging file this operation created (`create_new` succeeded), and so may
+/// remove. Nothing else in the directory is ever removed: a name that already
+/// existed belongs to someone else — a previous writer of this process, a
+/// stray older binary — whatever it is called.
+struct OwnedStaging {
+    path: PathBuf,
+    file: std::fs::File,
+}
+
+/// Create a fresh, private staging file from the names `next_name` yields,
+/// trying the next one on each `AlreadyExists` and leaving any colliding file
+/// untouched. Production yields [`staging_path`] names; tests inject
+/// collisions.
+fn create_owned_staging(
+    path: &Path,
+    mut next_name: impl FnMut() -> PathBuf,
+) -> io::Result<OwnedStaging> {
+    for _ in 0..STAGING_NAME_ATTEMPTS {
+        let candidate = next_name();
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&candidate) {
+            Ok(file) => {
+                return Ok(OwnedStaging {
+                    path: candidate,
+                    file,
+                })
+            }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        format!(
+            "could not find a free staging name beside {} after {} attempts",
+            path.display(),
+            STAGING_NAME_ATTEMPTS
+        ),
+    ))
+}
+
 /// Replace `path` with `contents` so a reader sees either the old file or the
 /// complete new one, never a torn one.
 ///
@@ -286,10 +340,22 @@ fn staging_path(path: &Path) -> PathBuf {
 /// the parent directory is flushed afterwards so the rename itself survives a
 /// crash; Windows has no equivalent and NTFS journals the rename.
 ///
-/// On a pre-rename failure the staging file is removed and the destination is
-/// untouched ([`ConfWriteError::NotReplaced`]). On a post-rename failure the
-/// destination already holds the new bytes ([`ConfWriteError::ReplacedNotDurable`]).
+/// On a pre-rename failure the staging file *this call created* is removed
+/// and the destination is untouched ([`ConfWriteError::NotReplaced`]); a
+/// staging name that already existed is never removed — the write moves to
+/// another name instead. On a post-rename failure the destination already
+/// holds the new bytes ([`ConfWriteError::ReplacedNotDurable`]).
 pub fn write_conf_atomically(path: &Path, contents: &[u8]) -> Result<(), ConfWriteError> {
+    write_conf_atomically_with(path, contents, || staging_path(path))
+}
+
+/// [`write_conf_atomically`] with the staging-name source injected, so a
+/// collision with a file that is already there can be produced on demand.
+fn write_conf_atomically_with(
+    path: &Path,
+    contents: &[u8],
+    next_name: impl FnMut() -> PathBuf,
+) -> Result<(), ConfWriteError> {
     use std::io::Write;
 
     let parent = path.parent().ok_or_else(|| {
@@ -298,17 +364,14 @@ pub fn write_conf_atomically(path: &Path, contents: &[u8]) -> Result<(), ConfWri
     std::fs::create_dir_all(parent).map_err(ConfWriteError::NotReplaced)?;
     // The mode to restore, read before anything is staged: `None` for a new file.
     let existing_permissions = std::fs::metadata(path).ok().map(|m| m.permissions());
-    let staging = staging_path(path);
+    // Ownership is established here and only here: a failure to create means
+    // there is nothing of ours to clean up.
+    let OwnedStaging {
+        path: staging,
+        mut file,
+    } = create_owned_staging(path, next_name).map_err(ConfWriteError::NotReplaced)?;
 
     let staged = (|| -> io::Result<()> {
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options.open(&staging)?;
         hook(ConfWriteStep::StageWrite, &staging)?;
         file.write_all(contents)?;
         hook(ConfWriteStep::StageSync, &staging)?;
@@ -318,10 +381,13 @@ pub fn write_conf_atomically(path: &Path, contents: &[u8]) -> Result<(), ConfWri
         }
         Ok(())
     })();
+    // Past creation, every failure path removes the one file this call owns.
     if let Err(e) = staged {
+        drop(file);
         let _ = std::fs::remove_file(&staging);
         return Err(ConfWriteError::NotReplaced(e));
     }
+    drop(file);
     if let Err(e) =
         hook(ConfWriteStep::Rename, &staging).and_then(|()| std::fs::rename(&staging, path))
     {
@@ -357,6 +423,8 @@ pub enum ManagedConfError {
     /// nothing was written.
     Edit(ManagedConfEditError),
     /// The conf could not be replaced; it still holds its previous bytes.
+    /// The edit has already run, so anything it recorded on the way (the
+    /// flavour ledger, for the installer and settings writers) stays.
     NotReplaced(io::Error),
 }
 
@@ -476,7 +544,11 @@ impl<'a> ManagedConfTxn<'a> {
 /// persist nothing). Anything durable the edit needs recorded *before* the
 /// conf changes — the flavour ledger, whose entry must exist before a legacy
 /// marker is erased — is the edit's to write, inside the closure, in that
-/// order; the two files are not one transaction.
+/// order; the two files are not one transaction. So: an early refusal
+/// ([`ManagedConfError::Lock`], [`ManagedConfError::Unreadable`], or the
+/// edit's own [`ManagedConfError::Edit`]) leaves both files untouched, while a
+/// write failure ([`ManagedConfError::NotReplaced`]) leaves the conf
+/// byte-identical but keeps whatever the edit already recorded.
 ///
 /// Nothing slow belongs in `edit`: no Tor bootstrap, no node spawn, no RPC.
 /// Callers that need those do them *outside*, then run a second short update
@@ -967,6 +1039,83 @@ mod tests {
         ));
         let after = InternalBitcoindConfig::from_file(&conf_path).unwrap();
         assert!(after.networks.contains_key(&Network::Testnet4));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // A staging name that is already taken belongs to someone else: the write
+    // moves to the next name and the colliding file is left exactly as it
+    // was; only the staging file this call created is ever cleaned up. With
+    // every name taken, the write refuses and still removes nothing.
+    #[test]
+    fn a_staging_collision_preserves_the_existing_file_and_moves_on() {
+        let (base, _datadir) = temp_datadir("collision");
+        let path = base.join("bitcoin.conf");
+        write_conf_atomically(&path, b"old\n").unwrap();
+        let old = std::fs::read(&path).unwrap();
+        // Someone else's staging file, under a name we are about to be handed.
+        let theirs = base.join("bitcoin.conf.12345.0.tmp");
+        std::fs::write(&theirs, b"theirs, in progress\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&theirs, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        let ours = base.join("bitcoin.conf.12345.1.tmp");
+        let names = |seq: Vec<PathBuf>| {
+            let mut seq = seq.into_iter();
+            move || seq.next().expect("ran out of staging names")
+        };
+
+        // Collision first, then a free name: the write succeeds through the
+        // free name, the colliding file is untouched, and our staging file is
+        // gone after the rename.
+        write_conf_atomically_with(&path, b"new\n", names(vec![theirs.clone(), ours.clone()]))
+            .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new\n");
+        assert_eq!(std::fs::read(&theirs).unwrap(), b"theirs, in progress\n");
+        #[cfg(unix)]
+        assert_eq!(
+            mode(&theirs),
+            0o644,
+            "the colliding file's mode is not ours to change"
+        );
+        assert!(!ours.exists());
+
+        // Only collisions on offer: refused as `NotReplaced(AlreadyExists)`,
+        // destination byte-identical, the colliding file still there.
+        write_conf_atomically(&path, &old).unwrap();
+        let result = write_conf_atomically_with(&path, b"newer\n", || theirs.clone());
+        match result {
+            Err(ConfWriteError::NotReplaced(e)) => {
+                assert_eq!(e.kind(), io::ErrorKind::AlreadyExists, "{}", e)
+            }
+            other => panic!("expected NotReplaced, got {:?}", other),
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), old);
+        assert_eq!(std::fs::read(&theirs).unwrap(), b"theirs, in progress\n");
+
+        // Owned-stage cleanup is unchanged: a failure after our own creation
+        // removes our file and, again, nobody else's.
+        let result = with_write_hook(
+            |step, _| {
+                if step == ConfWriteStep::StageSync {
+                    Err(io::Error::other("injected"))
+                } else {
+                    Ok(())
+                }
+            },
+            || {
+                write_conf_atomically_with(
+                    &path,
+                    b"newer\n",
+                    names(vec![theirs.clone(), ours.clone()]),
+                )
+            },
+        );
+        assert!(matches!(result, Err(ConfWriteError::NotReplaced(_))));
+        assert!(!ours.exists(), "our staging file is cleaned up");
+        assert!(theirs.exists(), "theirs is not");
+        assert_eq!(std::fs::read(&path).unwrap(), old);
         let _ = std::fs::remove_dir_all(&base);
     }
 

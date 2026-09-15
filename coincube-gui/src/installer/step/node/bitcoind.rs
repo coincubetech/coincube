@@ -1188,7 +1188,9 @@ impl Step for InternalBitcoindStep {
                     // against what every other setup has persisted by now, and
                     // the write cannot erase a section one of them added
                     // meanwhile. The ledger is recorded inside the same span,
-                    // before the write that would drop a legacy marker.
+                    // before the write that would drop a legacy marker — so a
+                    // failure to replace the conf leaves the ledger recorded
+                    // and the conf as it was (two files, not one transaction).
                     let flavor = self.flavor;
                     let network = self.network;
                     let coincube_datadir = self.coincube_datadir.clone();

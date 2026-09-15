@@ -1431,7 +1431,8 @@ fn write_internal_bitcoind_config(
     // are chosen against everything persisted by now, and the write cannot
     // erase a section another setup added meanwhile. Refusals — lock busy,
     // conf unreadable, no acceptable port, other family's conf unreadable —
-    // happen before the ledger is touched.
+    // happen before the ledger is touched; a failure to *replace* the conf
+    // comes after the ledger was recorded inside the edit, and leaves it so.
     let rpc_port = crate::node::managed_conf::update_managed_conf(
         coincube_datadir,
         flavor.chain_family(),
