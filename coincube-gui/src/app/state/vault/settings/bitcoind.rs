@@ -3426,21 +3426,24 @@ mod tests {
         let (base, datadir) = a_temp_datadir("busy-lock");
         let held = ManagedConfLock::acquire(&datadir).unwrap();
 
-        let err =
+        let err = crate::node::managed_conf::with_quick_lock_bound(|| {
             write_internal_bitcoind_config(&datadir, Network::Bitcoin, NodeFlavor::Knots, None)
                 .map(|_| ())
-                .unwrap_err();
+        })
+        .unwrap_err();
         assert!(err.contains("another setup is updating"), "{}", err);
 
-        let err = configure_and_start_internal_bitcoind(
-            datadir.clone(),
-            Network::Bitcoin,
-            NodeFlavor::Knots,
-            None,
-            true,
-            None,
-        )
-        .map(|_| ())
+        let err = crate::node::managed_conf::with_quick_lock_bound(|| {
+            configure_and_start_internal_bitcoind(
+                datadir.clone(),
+                Network::Bitcoin,
+                NodeFlavor::Knots,
+                None,
+                true,
+                None,
+            )
+            .map(|_| ())
+        })
         .unwrap_err();
         assert!(err.contains("another setup is updating"), "{}", err);
         drop(held);

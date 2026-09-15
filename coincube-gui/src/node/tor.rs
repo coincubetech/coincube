@@ -1002,16 +1002,20 @@ mod tests {
         conf.tor_socks_port = Some(9050);
         conf.to_file(&config_path).unwrap();
 
+        // Handshake, not wall-clock: the writer takes the lock and waits to
+        // be told to persist; while it holds, this thread proves contention
+        // (a quick bounded acquire is `Busy`); then the writer persists its
+        // section and releases; only then does the reset run — on a fresh
+        // read that must include what the writer left behind.
         let (locked_tx, locked_rx) = std::sync::mpsc::channel::<()>();
+        let (persist_tx, persist_rx) = std::sync::mpsc::channel::<()>();
         let writer = {
             let datadir = datadir.clone();
             let config_path = config_path.clone();
             std::thread::spawn(move || {
                 let held = ManagedConfLock::acquire(&datadir).unwrap();
                 locked_tx.send(()).unwrap();
-                // Hold it long enough that the reader is certainly waiting,
-                // but well inside its bounded wait.
-                std::thread::sleep(std::time::Duration::from_millis(80));
+                persist_rx.recv().unwrap();
                 let mut conf = InternalBitcoindConfig::from_file(&config_path).unwrap();
                 conf.networks
                     .insert(Network::Testnet4, section(22222, 22223));
@@ -1020,9 +1024,21 @@ mod tests {
             })
         };
         locked_rx.recv().unwrap();
+        assert!(
+            matches!(
+                ManagedConfLock::acquire_with_bound(
+                    &datadir,
+                    2,
+                    std::time::Duration::from_millis(5)
+                ),
+                Err(crate::node::managed_conf::ManagedConfLockError::Busy { .. })
+            ),
+            "the writer must be holding the lock at this point"
+        );
+        persist_tx.send(()).unwrap();
+        writer.join().unwrap();
         // Signet: outbound-only by policy, so this is purely the reset write.
         let enabled = prepare_inbound_tor(&datadir, Network::Signet).unwrap();
-        writer.join().unwrap();
         assert!(!enabled);
         let reloaded = InternalBitcoindConfig::from_file(&config_path).unwrap();
         assert!(!reloaded.inbound_tor);
@@ -1070,7 +1086,9 @@ mod tests {
         assert!(String::from_utf8_lossy(&before).contains("torcontrol"));
 
         let held = ManagedConfLock::acquire(&datadir).unwrap();
-        let result = prepare_inbound_tor(&datadir, Network::Bitcoin);
+        let result = crate::node::managed_conf::with_quick_lock_bound(|| {
+            prepare_inbound_tor(&datadir, Network::Bitcoin)
+        });
         drop(held);
         match result {
             Err(PrepareInboundTorError(crate::node::managed_conf::ManagedConfError::Lock(

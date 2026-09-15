@@ -1698,7 +1698,12 @@ mod chain_identity_tests {
         // The lock file is created by the holder below, so snapshot after it.
         let held = ManagedConfLock::acquire(&root).unwrap();
         let before = tree(root.path());
-        let result = start_bitcoind_and_daemon(root.clone(), true, chain, wallet.clone()).await;
+        // The start is polled on this thread (current-thread runtime), so the
+        // thread-local quick bound applies to its lock attempt.
+        let result = crate::node::managed_conf::with_quick_lock_bound_async(
+            start_bitcoind_and_daemon(root.clone(), true, chain, wallet.clone()),
+        )
+        .await;
         drop(held);
         match result {
             Err(Error::Bitcoind(StartInternalBitcoindError::ConfigUnavailable(e))) => {

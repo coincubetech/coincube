@@ -4091,22 +4091,26 @@ mod tests {
 
         // Busy for the whole bounded wait: skipped, byte-identical, no ledger.
         let held = ManagedConfLock::acquire(&root).unwrap();
-        migrate_legacy_rdts_conf(&root);
+        crate::node::managed_conf::with_quick_lock_bound(|| migrate_legacy_rdts_conf(&root));
         drop(held);
         assert_eq!(std::fs::read(&conf_path).unwrap(), before);
         assert!(!ManagedNodeState::path(&root).exists());
 
         // Another writer adds a section while holding the lock, then
-        // releases; the migration waits, then strips the line from the file
-        // *with* that section in it.
+        // releases; the migration then strips the line from the file *with*
+        // that section in it. Handshake, not wall-clock: contention is proven
+        // (a quick bounded acquire is `Busy` while the writer holds), the
+        // writer persists and releases on signal, and only then does the
+        // migration run its fresh read.
         let (locked_tx, locked_rx) = std::sync::mpsc::channel::<()>();
+        let (persist_tx, persist_rx) = std::sync::mpsc::channel::<()>();
         let writer = {
             let root = root.clone();
             let conf_path = conf_path.clone();
             std::thread::spawn(move || {
                 let held = ManagedConfLock::acquire(&root).unwrap();
                 locked_tx.send(()).unwrap();
-                std::thread::sleep(std::time::Duration::from_millis(80));
+                persist_rx.recv().unwrap();
                 // Append a section without touching the marker line (an
                 // older writer that knows nothing of the migration).
                 let mut text = std::fs::read_to_string(&conf_path).unwrap();
@@ -4116,8 +4120,16 @@ mod tests {
             })
         };
         locked_rx.recv().unwrap();
-        migrate_legacy_rdts_conf(&root);
+        assert!(
+            matches!(
+                ManagedConfLock::acquire_with_bound(&root, 2, std::time::Duration::from_millis(5)),
+                Err(crate::node::managed_conf::ManagedConfLockError::Busy { .. })
+            ),
+            "the writer must be holding the lock at this point"
+        );
+        persist_tx.send(()).unwrap();
         writer.join().unwrap();
+        migrate_legacy_rdts_conf(&root);
         let after = InternalBitcoindConfig::from_file(&conf_path).unwrap();
         assert!(!after.enforce_rdts);
         assert!(!std::fs::read_to_string(&conf_path)

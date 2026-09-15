@@ -62,15 +62,60 @@ pub fn managed_conf_lock_path(coincube_datadir: &CoincubeDirectory) -> PathBuf {
 ///
 /// The same bound as the node-identity marker lock: real holders finish in
 /// microseconds (a read, an allocation, a rename), so contention is rare and
-/// brief, but a wedged holder must not wedge every start behind it. Short in
-/// tests so the timeout path is exercised without a two-second wait.
+/// brief, but a wedged holder must not wedge every start behind it.
+///
+/// Under test the default is *generous* (a loaded CI runner can take well
+/// over a second to schedule a thread and flush a file), so a test whose
+/// contenders are meant to succeed never fails on wall-clock luck; a test that
+/// wants the `Busy` path sets a short bound for its own thread with
+/// [`with_quick_lock_bound`] instead of waiting the default out.
 fn lock_acquisition_bound() -> (u32, std::time::Duration) {
     #[cfg(not(test))]
     {
         (40, std::time::Duration::from_millis(50))
     }
     #[cfg(test)]
-    (30, std::time::Duration::from_millis(10))
+    {
+        lock_bound_override().unwrap_or((500, std::time::Duration::from_millis(10)))
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A per-thread override of the default test bound (see
+    /// [`lock_acquisition_bound`]). Thread-local on purpose: a contender
+    /// spawned by a test keeps the generous default while the test's own
+    /// thread can ask for the `Busy` path quickly.
+    static LOCK_BOUND_OVERRIDE: std::cell::Cell<Option<(u32, std::time::Duration)>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn lock_bound_override() -> Option<(u32, std::time::Duration)> {
+    LOCK_BOUND_OVERRIDE.with(|b| b.get())
+}
+
+/// Run `body` with this thread's lock acquisition bound set short (3 × 5 ms),
+/// for tests that want to observe `Busy` through the public paths
+/// (`update_managed_conf`, `prepare_inbound_tor`, the loader …) without
+/// waiting the generous default out. Test-only.
+#[cfg(test)]
+pub(crate) fn with_quick_lock_bound<T>(body: impl FnOnce() -> T) -> T {
+    LOCK_BOUND_OVERRIDE.with(|b| b.set(Some((3, std::time::Duration::from_millis(5)))));
+    let out = body();
+    LOCK_BOUND_OVERRIDE.with(|b| b.set(None));
+    out
+}
+
+/// [`with_quick_lock_bound`] for an async body. The override is thread-local,
+/// so this is only meaningful on a current-thread runtime (the `#[tokio::test]`
+/// default), where the future is polled on the calling thread.
+#[cfg(test)]
+pub(crate) async fn with_quick_lock_bound_async<F: std::future::Future>(body: F) -> F::Output {
+    LOCK_BOUND_OVERRIDE.with(|b| b.set(Some((3, std::time::Duration::from_millis(5)))));
+    let out = body.await;
+    LOCK_BOUND_OVERRIDE.with(|b| b.set(None));
+    out
 }
 
 /// Why the lock could not be taken.
@@ -708,12 +753,17 @@ mod tests {
     async fn lock_is_held_until_a_spawn_blocking_worker_returns_not_when_its_handle_is_dropped() {
         let (base, datadir) = temp_datadir("spawn-blocking");
         let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let (returned_tx, returned_rx) = std::sync::mpsc::channel::<()>();
         let d = datadir.clone();
         let handle = tokio::task::spawn_blocking(move || {
-            let _held = ManagedConfLock::acquire(&d).unwrap();
+            let held = ManagedConfLock::acquire(&d).unwrap();
             started_tx.send(()).unwrap();
-            std::thread::sleep(std::time::Duration::from_millis(300));
-            // `_held` dropped here, when the worker returns.
+            // Hold until told to, not for a wall-clock interval: the test
+            // observes `Busy` while this is pending, then releases it.
+            release_rx.recv().unwrap();
+            drop(held);
+            returned_tx.send(()).unwrap();
         });
         started_rx.recv().unwrap();
         // "Cancel" the task: the worker keeps running regardless.
@@ -723,17 +773,11 @@ mod tests {
             ManagedConfLock::acquire_with_bound(&datadir, attempts, retry),
             Err(ManagedConfLockError::Busy { .. })
         ));
-        // Once the worker has actually returned, the lock is free.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            match ManagedConfLock::acquire_with_bound(&datadir, attempts, retry) {
-                Ok(_) => break,
-                Err(ManagedConfLockError::Busy { .. }) if std::time::Instant::now() < deadline => {
-                    std::thread::sleep(std::time::Duration::from_millis(20));
-                }
-                Err(e) => panic!("{}", e),
-            }
-        }
+        // Only once the worker itself has released and returned is the lock
+        // free — and then it is, deterministically.
+        release_tx.send(()).unwrap();
+        returned_rx.recv().unwrap();
+        assert!(ManagedConfLock::acquire_with_bound(&datadir, attempts, retry).is_ok());
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -1269,10 +1313,12 @@ mod tests {
         // Busy: another holder (a separately opened descriptor conflicts
         // exactly as another process would).
         let held = ManagedConfLock::acquire(&datadir).unwrap();
-        let result = update_managed_conf(&datadir, NodeChainFamily::Bitcoin, |txn| {
-            let mut c = txn.conf.clone().unwrap();
-            c.networks.insert(Network::Testnet4, section(41003, 41004));
-            Ok(((), Some(c)))
+        let result = with_quick_lock_bound(|| {
+            update_managed_conf(&datadir, NodeChainFamily::Bitcoin, |txn| {
+                let mut c = txn.conf.clone().unwrap();
+                c.networks.insert(Network::Testnet4, section(41003, 41004));
+                Ok(((), Some(c)))
+            })
         });
         assert!(matches!(
             result,
