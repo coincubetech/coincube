@@ -1742,6 +1742,8 @@ fn format_parse_input_error(raw: &str) -> String {
 /// clause the user can act on. Recognised failures are replaced outright;
 /// anything else keeps its raw text behind the failing operation's name, so an
 /// unexpected SDK error stays diagnosable in a bug report.
+/// Known failures use payment wording because address-based sends can also
+/// fail on an invoice used internally by a conversion leg.
 fn format_prepare_error(operation: &str, raw: &str) -> String {
     let lower = raw.to_lowercase();
     // The SSP has to find a route before it can quote a fee, so an unroutable
@@ -1750,16 +1752,16 @@ fn format_prepare_error(operation: &str, raw: &str) -> String {
     // offline, has no usable channels, or nothing along the way holds enough
     // liquidity for this amount — so the copy names all three.
     if lower.contains("no_path_found") {
-        return "No route to this invoice's destination. Their node may be offline, \
+        return "No route for this payment. The recipient may be offline, \
                 or there may not be enough liquidity along the way to carry this \
-                amount. Ask for a new invoice, or try sending less."
+                amount. Try again later, or try sending less."
             .to_string();
     }
     // Checked before the fee-only case below: this message also ends in
     // "amount and fees", so a looser match would shadow it.
     if lower.contains("token conversion amount too small") {
-        return "Your balance doesn't convert to enough sats to cover this invoice \
-                and its fees. Top up, or ask for an invoice for a smaller amount."
+        return "Your balance doesn't convert to enough sats to cover this payment \
+                and its fees. Top up, or try a smaller amount."
             .to_string();
     }
     if lower.contains("amount too small to cover fees") {
@@ -2181,7 +2183,7 @@ mod tests {
     }
 
     #[test]
-    fn format_prepare_error_explains_an_unroutable_invoice() {
+    fn format_prepare_error_explains_an_unroutable_payment() {
         // Verbatim from the SSP, through every transport layer that wraps it.
         let raw = "Spark bridge returned Sdk: prepare_send failed: SparkSdkError: \
                    Service error: service provider error: graphql error: Unable to \
@@ -2189,7 +2191,8 @@ mod tests {
                    (NO_PATH_FOUND)";
         let message = format_prepare_error("prepare_send", raw);
 
-        assert!(message.starts_with("No route to this invoice's destination."));
+        assert!(message.starts_with("No route for this payment."));
+        assert!(!message.contains("invoice"));
         // None of the transport prefixes survive into the user-facing copy.
         assert!(!message.contains("prepare_send"));
         assert!(!message.contains("NO_PATH_FOUND"));
@@ -2198,15 +2201,16 @@ mod tests {
     #[test]
     fn format_prepare_error_distinguishes_the_two_amount_shortfalls() {
         // The conversion shortfall also ends in "amount and fees", so it must not
-        // fall through to the plain fee message.
+        // fall through to the plain fee message. Its internal invoice wording
+        // must not leak into address-based sends with a conversion leg.
         assert_eq!(
             format_prepare_error(
                 "prepare_send",
                 "Spark bridge returned Sdk: prepare_send failed: Invalid input: \
                  Token conversion amount too small to cover invoice amount and fees"
             ),
-            "Your balance doesn't convert to enough sats to cover this invoice \
-             and its fees. Top up, or ask for an invoice for a smaller amount."
+            "Your balance doesn't convert to enough sats to cover this payment \
+             and its fees. Top up, or try a smaller amount."
         );
         assert_eq!(
             format_prepare_error(
