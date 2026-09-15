@@ -630,6 +630,115 @@ fn uid() -> usize {
     COUNTER.fetch_add(1, sync::atomic::Ordering::Relaxed)
 }
 
+// The schema of database version 8, frozen verbatim from before the v9 chain-identity
+// migration so the v8 fixtures below are genuine (the version-8 `tip` has no `chain`).
+pub const V8_SCHEMA: &str = "\
+CREATE TABLE version (
+version INTEGER NOT NULL
+);
+
+/* About the Bitcoin network. */
+CREATE TABLE tip (
+network TEXT NOT NULL,
+blockheight INTEGER,
+blockhash BLOB
+);
+
+/* This stores metadata about our wallet. We only support single wallet for
+ * now (and the foreseeable future).
+ *
+ * The 'timestamp' field is the creation date of the wallet. We guarantee to have seen all
+ * information related to our descriptor(s) that occurred after this date.
+ * The optional 'rescan_timestamp' field is a the timestamp we need to rescan the chain
+ * for events related to our descriptor(s) from.
+ */
+CREATE TABLE wallets (
+id INTEGER PRIMARY KEY NOT NULL,
+timestamp INTEGER NOT NULL,
+main_descriptor TEXT NOT NULL,
+deposit_derivation_index INTEGER NOT NULL,
+change_derivation_index INTEGER NOT NULL,
+rescan_timestamp INTEGER,
+last_poll_timestamp INTEGER
+);
+
+/* Our (U)TxOs.
+ *
+ * The 'spend_block_height' and 'spend_block.time' are only present if the spending
+ * transaction for this coin exists and was confirmed.
+ *
+ * The 'is_immature' field is for coinbase deposits that are not yet buried under 100
+ * blocks. Note coinbase deposits can't technically be unconfirmed but we keep them
+ * as such until they become mature.
+ *
+ * The `is_from_self` field indicates if the coin is the output of a transaction whose
+ * inputs are all from the same wallet as the coin. For an unconfirmed coin, this also
+ * means that all unconfirmed ancestors, if any, are from self.
+ */
+CREATE TABLE coins (
+id INTEGER PRIMARY KEY NOT NULL,
+wallet_id INTEGER NOT NULL,
+blockheight INTEGER,
+blocktime INTEGER,
+txid BLOB NOT NULL,
+vout INTEGER NOT NULL,
+amount_sat INTEGER NOT NULL,
+derivation_index INTEGER NOT NULL,
+is_change BOOLEAN NOT NULL CHECK (is_change IN (0,1)),
+spend_txid BLOB,
+spend_block_height INTEGER,
+spend_block_time INTEGER,
+is_immature BOOLEAN NOT NULL CHECK (is_immature IN (0,1)),
+is_from_self BOOLEAN NOT NULL DEFAULT 0 CHECK (is_from_self IN (0,1)),
+UNIQUE (txid, vout),
+FOREIGN KEY (wallet_id) REFERENCES wallets (id)
+    ON UPDATE RESTRICT
+    ON DELETE RESTRICT,
+FOREIGN KEY (txid) REFERENCES transactions (txid)
+    ON UPDATE RESTRICT
+    ON DELETE RESTRICT,
+FOREIGN KEY (spend_txid) REFERENCES transactions (txid)
+    ON UPDATE RESTRICT
+    ON DELETE RESTRICT
+);
+
+/* A mapping from descriptor address to derivation index. Necessary until
+ * we can get the derivation index from the parent descriptor from bitcoind.
+ */
+CREATE TABLE addresses (
+receive_address TEXT NOT NULL UNIQUE,
+change_address TEXT NOT NULL UNIQUE,
+derivation_index INTEGER NOT NULL UNIQUE
+);
+
+/* Transactions for all wallets. */
+CREATE TABLE transactions (
+id INTEGER PRIMARY KEY NOT NULL,
+txid BLOB UNIQUE NOT NULL,
+tx BLOB UNIQUE NOT NULL,
+num_inputs INTEGER CHECK (num_inputs IS NULL OR num_inputs > 0),
+num_outputs INTEGER CHECK (num_outputs IS NULL OR num_outputs > 0),
+is_coinbase BOOLEAN NOT NULL DEFAULT 0 CHECK (is_coinbase IN (0,1))
+);
+
+/* Transactions we created that spend some of our coins. */
+CREATE TABLE spend_transactions (
+id INTEGER PRIMARY KEY NOT NULL,
+psbt BLOB UNIQUE NOT NULL,
+txid BLOB UNIQUE NOT NULL,
+updated_at INTEGER
+);
+
+/* Labels applied on addresses (0), outpoints (1), txids (2) */
+CREATE TABLE labels (
+id INTEGER PRIMARY KEY NOT NULL,
+wallet_id INTEGER NOT NULL,
+item_kind INTEGER NOT NULL CHECK (item_kind IN (0,1,2)),
+item TEXT UNIQUE NOT NULL,
+value TEXT NOT NULL
+);
+";
+
 pub fn tmp_dir() -> path::PathBuf {
     env::temp_dir().join(format!(
         "coincubed-{}-{:?}-{}",
@@ -657,10 +766,10 @@ impl DummyCoincube {
         data_directory.push("bitcoin");
 
         let network = bitcoin::Network::Bitcoin;
-        let bitcoin_config = BitcoinConfig {
-            network,
-            poll_interval_secs: time::Duration::from_secs(2),
-        };
+        let bitcoin_config = BitcoinConfig::new(
+            coincube_core::chain::ChainId::from(network),
+            time::Duration::from_secs(2),
+        );
 
         let owner_key = descriptors::PathInfo::Single(descriptor::DescriptorPublicKey::from_str("[aabbccdd]xpub68JJTXc1MWK8KLW4HGLXZBJknja7kDUJuFHnM424LbziEXsfkh1WQCiEjjHw4zLqSUm4rvhgyGkkuRowE9tCJSgt3TQB5J3SKAbZ2SdcKST/<0;1>/*").unwrap());
         let heir_key = descriptors::PathInfo::Single(descriptor::DescriptorPublicKey::from_str("[aabbccdd]xpub68JJTXc1MWK8PEQozKsRatrUHXKFNkD1Cb1BuQU9Xr5moCv87anqGyXLyUd4KpnDyZgo3gz4aN1r3NiaoweFW8UutBsBbgKHzaD5HkTkifK/<0;1>/*").unwrap());
