@@ -31,7 +31,88 @@ pub enum NodeFlavor {
     Core,
     /// Bitcoin Knots, fetched from bitcoinknots.org.
     Knots,
+    /// Bitcoin Knots for the **Bitcoin Blake2b** chain (the BLAKE2b
+    /// proof-of-work hardfork), fetched from bitcoinknots.org — the
+    /// `29.4.1.knots20260508` line, which *is* the enforcing build the Bitcoin
+    /// flavours deliberately avoid. It serves only a
+    /// [`NodeChainFamily::BitcoinBlake2b`] node, from its own directory, and is
+    /// never resolved on a Bitcoin chain (see [`NodeFlavor::check_chain`]).
+    /// Dormant in this build: the provider, its paths and ports are defined
+    /// and tested, but no download or start path reaches it while
+    /// `ChainId::runtime_support` is `Dormant`.
+    KnotsBlake2b,
 }
+
+/// Which chain a managed node serves — the axis that decides *which directory,
+/// ports, binary and repair rules* apply. Two families, because Bitcoin Blake2b
+/// shares Bitcoin's encoding but not its chain, node or datadir.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeChainFamily {
+    /// Bitcoin mainnet and its test networks: `bitcoind/`, Core or Knots.
+    Bitcoin,
+    /// Bitcoin Blake2b mainnet/testnet4: `bitcoind-blake2b/`, KnotsBlake2b only.
+    BitcoinBlake2b,
+}
+
+impl NodeChainFamily {
+    /// Every family, so a per-family invariant can be checked across all of them.
+    pub const ALL: [NodeChainFamily; 2] =
+        [NodeChainFamily::Bitcoin, NodeChainFamily::BitcoinBlake2b];
+
+    pub fn from_chain(chain: crate::chain::ChainId) -> Self {
+        if chain.is_blake2b() {
+            NodeChainFamily::BitcoinBlake2b
+        } else {
+            NodeChainFamily::Bitcoin
+        }
+    }
+
+    /// The managed-node root under the COINCUBE datadir: binaries, the node
+    /// datadir (`bitcoin.conf`, cookie, chainstate), the lock directory and the
+    /// managed-node state ledger all live below it. Distinct per family so the
+    /// two chains never share a byte of node state.
+    pub fn root_dir_name(self) -> &'static str {
+        match self {
+            NodeChainFamily::Bitcoin => "bitcoind",
+            NodeChainFamily::BitcoinBlake2b => "bitcoind-blake2b",
+        }
+    }
+
+    /// Flavours that may serve this family. The Bitcoin family keeps its two
+    /// choices; Bitcoin Blake2b has exactly one, and it is offered nowhere else.
+    pub fn allowed_flavors(self) -> &'static [NodeFlavor] {
+        match self {
+            NodeChainFamily::Bitcoin => &[NodeFlavor::Core, NodeFlavor::Knots],
+            NodeChainFamily::BitcoinBlake2b => &[NodeFlavor::KnotsBlake2b],
+        }
+    }
+}
+
+/// A provider asked to serve a chain it does not belong to. Raised *before*
+/// any download, write or spawn — it is the check every chain-aware entry
+/// point runs first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderChainMismatch {
+    pub flavor: NodeFlavor,
+    pub chain: crate::chain::ChainId,
+}
+
+impl std::fmt::Display for ProviderChainMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} cannot serve {}: it is a {} node provider",
+            self.flavor.display_name(),
+            self.chain.label(),
+            match self.flavor.chain_family() {
+                NodeChainFamily::Bitcoin => "Bitcoin",
+                NodeChainFamily::BitcoinBlake2b => "Bitcoin Blake2b",
+            }
+        )
+    }
+}
+
+impl std::error::Error for ProviderChainMismatch {}
 
 /// Current and previous managed Bitcoin Core versions, in order of descending version.
 pub const CORE_VERSIONS: [&str; 7] = ["29.0", "28.0", "27.1", "26.1", "26.0", "25.1", "25.0"];
@@ -61,6 +142,22 @@ pub const KNOTS_VERSIONS: [&str; 1] = ["29.3.knots20260507"];
 
 /// Current managed Bitcoin Knots version for new installations.
 pub const KNOTS_VERSION: &str = KNOTS_VERSIONS[0];
+
+/// Managed Bitcoin Knots versions for the **Bitcoin Blake2b** chain, descending.
+///
+/// `29.4.1.knots20260508` is the release that carries the BLAKE2b hardfork
+/// (mainnet `Blake2bHeight` 961,640) — the very build family the Bitcoin pin
+/// above stays *below*. Same publisher, same URL scheme and same signed
+/// `SHA256SUMS` manifest (verified against [`KNOTS_SIGNING_KEY_ASC`]); the
+/// filenames and the manifest's signing identity for this release are pinned
+/// by the installer test
+/// `blake2b_release_manifest_verifies_under_the_pinned_knots_key` against a
+/// vendored copy of the upstream manifest. Deliberately disjoint from
+/// [`KNOTS_VERSIONS`]: a version string resolves to exactly one flavour.
+pub const KNOTS_BLAKE2B_VERSIONS: [&str; 1] = ["29.4.1.knots20260508"];
+
+/// Current managed Knots version for a Bitcoin Blake2b node.
+pub const KNOTS_BLAKE2B_VERSION: &str = KNOTS_BLAKE2B_VERSIONS[0];
 
 /// First Knots build date that enforces BIP-110 (RDTS).
 ///
@@ -166,6 +263,7 @@ impl NodeFlavor {
         match self {
             NodeFlavor::Core => CORE_VERSION,
             NodeFlavor::Knots => KNOTS_VERSION,
+            NodeFlavor::KnotsBlake2b => KNOTS_BLAKE2B_VERSION,
         }
     }
 
@@ -175,13 +273,47 @@ impl NodeFlavor {
         match self {
             NodeFlavor::Core => &CORE_VERSIONS,
             NodeFlavor::Knots => &KNOTS_VERSIONS,
+            NodeFlavor::KnotsBlake2b => &KNOTS_BLAKE2B_VERSIONS,
+        }
+    }
+
+    /// The chain family this flavour serves.
+    pub fn chain_family(self) -> NodeChainFamily {
+        match self {
+            NodeFlavor::Core | NodeFlavor::Knots => NodeChainFamily::Bitcoin,
+            NodeFlavor::KnotsBlake2b => NodeChainFamily::BitcoinBlake2b,
+        }
+    }
+
+    /// Whether this flavour may serve `chain`.
+    pub fn supports_chain(self, chain: crate::chain::ChainId) -> bool {
+        self.chain_family() == NodeChainFamily::from_chain(chain)
+    }
+
+    /// Refuse a provider/chain pairing that does not belong together. Every
+    /// chain-aware download, write and start path calls this first, so a
+    /// Bitcoin Blake2b binary is never resolved, fetched or spawned for a
+    /// Bitcoin chain and vice versa.
+    pub fn check_chain(self, chain: crate::chain::ChainId) -> Result<(), ProviderChainMismatch> {
+        if self.supports_chain(chain) {
+            Ok(())
+        } else {
+            Err(ProviderChainMismatch {
+                flavor: self,
+                chain,
+            })
         }
     }
 
     /// Infer the flavour from a managed-binary directory `version` string.
+    /// Bitcoin Blake2b versions are matched exactly against
+    /// [`KNOTS_BLAKE2B_VERSIONS`] first, so `29.4.1.knots20260508` can never be
+    /// mistaken for the Bitcoin Knots flavour by the substring rule below.
     /// Knots version strings embed `knots`; Core's never do.
     pub fn from_version(version: &str) -> Self {
-        if version.contains("knots") {
+        if KNOTS_BLAKE2B_VERSIONS.contains(&version) {
+            NodeFlavor::KnotsBlake2b
+        } else if version.contains("knots") {
             NodeFlavor::Knots
         } else {
             NodeFlavor::Core
@@ -192,6 +324,13 @@ impl NodeFlavor {
     /// (e.g. `/Satoshi:29.3.0/Knots:20260507/`). Knots embeds `Knots`; Core
     /// never does. Used to decide whether a reachable managed node already
     /// matches the configured flavour or must be replaced.
+    ///
+    /// Classifies a running **Bitcoin-chain** node only, and deliberately knows
+    /// just the Bitcoin flavours: a Knots build observed on the Bitcoin chain
+    /// is `Knots` whatever its build date (an enforcing one is then replaced
+    /// by the pinned build — see `maybe_start`). A Bitcoin Blake2b node is
+    /// never classified from a subversion; its identity comes from the chain
+    /// it was started for, and its provider from [`NodeChainFamily`].
     pub fn from_subversion(subversion: &str) -> Self {
         if subversion.to_lowercase().contains("knots") {
             NodeFlavor::Knots
@@ -205,6 +344,7 @@ impl NodeFlavor {
         match self {
             NodeFlavor::Core => "Bitcoin Core",
             NodeFlavor::Knots => "Bitcoin Knots",
+            NodeFlavor::KnotsBlake2b => "Bitcoin Knots (Bitcoin Blake2b)",
         }
     }
 
@@ -228,7 +368,9 @@ impl NodeFlavor {
             }
             (NodeOs::Windows, _) => match self {
                 NodeFlavor::Core => format!("bitcoin-{version}-win64.zip"),
-                NodeFlavor::Knots => format!("bitcoin-{version}-win64-pgpverifiable.zip"),
+                NodeFlavor::Knots | NodeFlavor::KnotsBlake2b => {
+                    format!("bitcoin-{version}-win64-pgpverifiable.zip")
+                }
             },
         }
     }
@@ -240,7 +382,7 @@ impl NodeFlavor {
             NodeFlavor::Core => {
                 format!("https://bitcoincore.org/bin/bitcoin-core-{version}/{filename}")
             }
-            NodeFlavor::Knots => {
+            NodeFlavor::Knots | NodeFlavor::KnotsBlake2b => {
                 // e.g. "29.3.knots20260507" -> major "29" -> ".../29.x/29.3.knots20260507/".
                 let major = version.split('.').next().unwrap_or(version);
                 format!("https://bitcoinknots.org/files/{major}.x/{version}/{filename}")
@@ -264,7 +406,7 @@ impl NodeFlavor {
     pub fn manifest_urls(self) -> Option<(String, String)> {
         match self {
             NodeFlavor::Core => None,
-            NodeFlavor::Knots => {
+            NodeFlavor::Knots | NodeFlavor::KnotsBlake2b => {
                 let version = self.version();
                 let major = version.split('.').next().unwrap_or(version);
                 let base = format!("https://bitcoinknots.org/files/{major}.x/{version}");
@@ -477,7 +619,20 @@ pub fn tor_supported_on_host() -> bool {
 }
 
 pub fn internal_bitcoind_directory(coincube_datadir: &CoincubeDirectory) -> PathBuf {
-    coincube_datadir.bitcoind_directory().path().to_path_buf()
+    internal_bitcoind_directory_for(coincube_datadir, NodeChainFamily::Bitcoin)
+}
+
+/// Managed-node root for a chain family (see
+/// [`CoincubeDirectory::bitcoind_directory_for`]). The Bitcoin form above is
+/// this with [`NodeChainFamily::Bitcoin`], so legacy paths are byte-identical.
+pub fn internal_bitcoind_directory_for(
+    coincube_datadir: &CoincubeDirectory,
+    family: NodeChainFamily,
+) -> PathBuf {
+    coincube_datadir
+        .bitcoind_directory_for(family)
+        .path()
+        .to_path_buf()
 }
 
 /// Directory the managed Tor Expert Bundle for `version` is unpacked into. Sits
@@ -508,7 +663,17 @@ pub fn internal_tor_geoip_dir(coincube_datadir: &CoincubeDirectory, version: &st
 
 /// Data directory used by internal bitcoind.
 pub fn internal_bitcoind_datadir(coincube_datadir: &CoincubeDirectory) -> PathBuf {
-    let mut datadir = internal_bitcoind_directory(coincube_datadir);
+    internal_bitcoind_datadir_for(coincube_datadir, NodeChainFamily::Bitcoin)
+}
+
+/// The node datadir (`bitcoin.conf`, `.cookie`, chainstate) for a chain family:
+/// `<root>/<family root>/datadir`. A Bitcoin Blake2b node's chainstate,
+/// cookie and config therefore never sit next to Bitcoin's.
+pub fn internal_bitcoind_datadir_for(
+    coincube_datadir: &CoincubeDirectory,
+    family: NodeChainFamily,
+) -> PathBuf {
+    let mut datadir = internal_bitcoind_directory_for(coincube_datadir, family);
     datadir.push("datadir");
     datadir
 }
@@ -518,7 +683,19 @@ pub fn internal_bitcoind_exe_path(
     coincube_datadir: &CoincubeDirectory,
     bitcoind_version: &str,
 ) -> PathBuf {
-    internal_bitcoind_directory(coincube_datadir)
+    internal_bitcoind_exe_path_for(coincube_datadir, NodeChainFamily::Bitcoin, bitcoind_version)
+}
+
+/// Managed `bitcoind` executable for `bitcoind_version` under a chain family's
+/// root. Binaries are looked up only under their own family's root, so a
+/// Bitcoin Blake2b build installed under `bitcoind-blake2b/` is invisible to a
+/// Bitcoin chain and vice versa.
+pub fn internal_bitcoind_exe_path_for(
+    coincube_datadir: &CoincubeDirectory,
+    family: NodeChainFamily,
+    bitcoind_version: &str,
+) -> PathBuf {
+    internal_bitcoind_directory_for(coincube_datadir, family)
         .join(format!("bitcoin-{}", bitcoind_version))
         .join("bin")
         .join(if cfg!(target_os = "windows") {
@@ -543,6 +720,41 @@ pub fn internal_bitcoind_cookie_path(bitcoind_datadir: &Path, network: &Network)
     }
     cookie_path.push(".cookie");
     cookie_path
+}
+
+/// Ports already bound by the managed nodes of every *other* chain family, read
+/// from their `bitcoin.conf`s. A new node's ports are allocated around these,
+/// so a Bitcoin node and a Bitcoin Blake2b node on the same machine — each with
+/// a mainnet and a testnet4 section — never share an RPC or P2P port. Upstream
+/// is no help here: the Blake2b build keeps Bitcoin's default ports, which is
+/// also why every managed node runs on OS-allocated ports rather than defaults.
+///
+/// A family with no conf reserves nothing. One whose conf cannot be parsed is
+/// logged and skipped: its ports are unknowable, and the allocator still binds
+/// each candidate port before offering it, which catches a live collision.
+pub fn ports_reserved_by_other_families(
+    coincube_datadir: &CoincubeDirectory,
+    family: NodeChainFamily,
+) -> Vec<u16> {
+    let mut reserved = Vec::new();
+    for other in NodeChainFamily::ALL.iter().copied() {
+        if other == family {
+            continue;
+        }
+        let conf_path =
+            internal_bitcoind_config_path(&internal_bitcoind_datadir_for(coincube_datadir, other));
+        match InternalBitcoindConfig::from_file(&conf_path) {
+            Ok(conf) => reserved.extend(conf.ports_in_use()),
+            Err(InternalBitcoindConfigError::FileNotFound) => {}
+            Err(e) => warn!(
+                "could not read the {} managed node's ports from {}: {}",
+                other.root_dir_name(),
+                conf_path.display(),
+                e
+            ),
+        }
+    }
+    reserved
 }
 
 /// Give the managed node's datadir an identity, unless it already has one.
@@ -1178,6 +1390,14 @@ impl InternalBitcoindConfig {
         }
     }
 
+    /// Every RPC and P2P port this config binds, across all its network sections.
+    pub fn ports_in_use(&self) -> Vec<u16> {
+        self.networks
+            .values()
+            .flat_map(|n| vec![n.rpc_port, n.p2p_port])
+            .collect()
+    }
+
     /// A config for the given managed-node flavour.
     ///
     /// Inbound-over-Tor stays off here: the config-layer default is all-off for
@@ -1450,6 +1670,10 @@ pub enum StartInternalBitcoindError {
     BitcoinDError(String),
     ExecutableNotFound,
     ProcessExited(std::process::ExitStatus),
+    /// The chain has no runtime in this build ([`crate::chain::RuntimeSupport::Dormant`]).
+    ChainUnavailable(&'static str),
+    /// The configured managed-node provider cannot serve the chain being started.
+    ProviderChainMismatch(ProviderChainMismatch),
 }
 
 impl std::fmt::Display for StartInternalBitcoindError {
@@ -1469,6 +1693,8 @@ impl std::fmt::Display for StartInternalBitcoindError {
             Self::ProcessExited(status) => {
                 write!(f, "bitcoind process exited with status '{}'.", status)
             }
+            Self::ChainUnavailable(reason) => write!(f, "{}", reason),
+            Self::ProviderChainMismatch(e) => write!(f, "{}", e),
         }
     }
 }
@@ -1558,14 +1784,20 @@ fn select_managed_bitcoind_exe(
     coincube_datadir: &CoincubeDirectory,
     configured_flavor: NodeFlavor,
 ) -> Option<PathBuf> {
+    // A Bitcoin flavour may fall back to the other Bitcoin flavour's binary
+    // (same chain, same rules); the Bitcoin Blake2b flavour has no fallback and
+    // is searched only under its own family root, so no Bitcoin chain ever
+    // resolves a Blake2b binary and no Blake2b chain resolves a Bitcoin one.
     let (primary, secondary): (&[&str], &[&str]) = match configured_flavor {
         NodeFlavor::Knots => (&KNOTS_VERSIONS, &CORE_VERSIONS),
         NodeFlavor::Core => (&CORE_VERSIONS, &KNOTS_VERSIONS),
+        NodeFlavor::KnotsBlake2b => (&KNOTS_BLAKE2B_VERSIONS, &[]),
     };
+    let family = configured_flavor.chain_family();
     primary
         .iter()
         .chain(secondary.iter())
-        .map(|v| internal_bitcoind_exe_path(coincube_datadir, v))
+        .map(|v| internal_bitcoind_exe_path_for(coincube_datadir, family, v))
         .find(|path| path.exists())
 }
 
@@ -1611,12 +1843,50 @@ pub fn stop_and_wait_managed_bitcoind(config: &BitcoindConfig) {
 }
 
 impl Bitcoind {
+    /// Start the managed node for a chain, by identity.
+    ///
+    /// The chain-aware entry point: a chain this build cannot run is refused
+    /// before anything is read or written, and a Bitcoin chain is handed to
+    /// [`Self::maybe_start`] under its encoding. The Bitcoin Blake2b family has
+    /// no start path in this build — the runtime is dormant — so it is refused
+    /// here too rather than reaching a datadir it would have to create.
+    pub fn maybe_start_for_chain(
+        chain: crate::chain::ChainId,
+        config: BitcoindConfig,
+        coincube_datadir: &CoincubeDirectory,
+    ) -> Result<Self, StartInternalBitcoindError> {
+        if let crate::chain::RuntimeSupport::Dormant { reason } = chain.runtime_support() {
+            return Err(StartInternalBitcoindError::ChainUnavailable(reason));
+        }
+        match NodeChainFamily::from_chain(chain) {
+            NodeChainFamily::Bitcoin => {
+                Self::maybe_start(chain.bitcoin_network(), config, coincube_datadir)
+            }
+            NodeChainFamily::BitcoinBlake2b => Err(StartInternalBitcoindError::ChainUnavailable(
+                crate::chain::BTCB2_DORMANT_REASON,
+            )),
+        }
+    }
+
     /// Start internal bitcoind for the given network.
+    ///
+    /// This is the Bitcoin-family start path: the datadir, ledger and lock it
+    /// touches are all under the `bitcoind/` root. The configured provider is
+    /// checked against the chain first, so a ledger naming a provider of the
+    /// other family fails here — before the identity marker is written, the
+    /// conf migrated or a process spawned — instead of resolving a binary that
+    /// would open a Bitcoin datadir under different consensus rules.
     pub fn maybe_start(
         network: bitcoin::Network,
         config: BitcoindConfig,
         coincube_datadir: &CoincubeDirectory,
     ) -> Result<Self, StartInternalBitcoindError> {
+        let chain = crate::chain::ChainId::from(network);
+        let configured_flavor =
+            configured_managed_flavor(coincube_datadir).unwrap_or(NodeFlavor::Core);
+        configured_flavor
+            .check_chain(chain)
+            .map_err(StartInternalBitcoindError::ProviderChainMismatch)?;
         let bitcoind_datadir = internal_bitcoind_datadir(coincube_datadir);
         // Settle the datadir's identity before the first connection to it, not after.
         // Every managed-node start comes through here — the loader with a config it read
@@ -1637,8 +1907,6 @@ impl Bitcoind {
         // hand any more (it no longer carries a Knots-only key), but the choice
         // is still theirs: a machine with both flavours installed must launch the
         // configured one rather than whichever is found first.
-        let configured_flavor =
-            configured_managed_flavor(coincube_datadir).unwrap_or(NodeFlavor::Core);
         let selected_exe = select_managed_bitcoind_exe(coincube_datadir, configured_flavor);
 
         // Is a managed node already running on this RPC endpoint?
@@ -1685,7 +1953,7 @@ impl Bitcoind {
                     &running,
                     &config,
                     &identity,
-                    network,
+                    crate::chain::ChainId::from(network),
                     ObservedBuild {
                         flavor: running_flavor,
                         enforces_rdts: running_enforces_rdts,
@@ -1805,7 +2073,7 @@ impl Bitcoind {
                         &started,
                         &config,
                         &identity,
-                        network,
+                        crate::chain::ChainId::from(network),
                         observed,
                     );
                     return Ok(Self {
@@ -2980,5 +3248,459 @@ mod tests {
         assert_eq!(configured_managed_flavor(&datadir), Some(NodeFlavor::Knots));
 
         let _ = fs::remove_dir_all(&base);
+    }
+
+    // --- Bitcoin Blake2b provider (dormant) ---------------------------------
+
+    /// A fresh COINCUBE datadir under the OS temp dir, unique per test thread.
+    fn a_temp_coincube_datadir(name: &str) -> (std::path::PathBuf, CoincubeDirectory) {
+        let base = std::env::temp_dir().join(format!(
+            "coincube-btcb2-provider-{name}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).expect("temp datadir");
+        (base.clone(), CoincubeDirectory::new(base))
+    }
+
+    // The pinned Bitcoin Blake2b release resolves to the exact filenames
+    // published for every platform COINCUBE builds for, under the Knots URL
+    // scheme, and is verified against the same signed manifest as Knots. The
+    // filenames were checked against the published `SHA256SUMS` for this
+    // release (vendored in the installer tests) and each URL answered a ranged
+    // GET at the time of writing.
+    #[test]
+    fn blake2b_provider_release_matrix() {
+        assert_eq!(KNOTS_BLAKE2B_VERSION, "29.4.1.knots20260508");
+        let base = "https://bitcoinknots.org/files/29.x/29.4.1.knots20260508";
+        let expected = [
+            (
+                NodeOs::MacOs,
+                NodeArch::Aarch64,
+                "bitcoin-29.4.1.knots20260508-arm64-apple-darwin.tar.gz",
+            ),
+            (
+                NodeOs::MacOs,
+                NodeArch::X86_64,
+                "bitcoin-29.4.1.knots20260508-x86_64-apple-darwin.tar.gz",
+            ),
+            (
+                NodeOs::Linux,
+                NodeArch::X86_64,
+                "bitcoin-29.4.1.knots20260508-x86_64-linux-gnu.tar.gz",
+            ),
+            (
+                NodeOs::Linux,
+                NodeArch::Aarch64,
+                "bitcoin-29.4.1.knots20260508-aarch64-linux-gnu.tar.gz",
+            ),
+            (
+                NodeOs::Windows,
+                NodeArch::X86_64,
+                "bitcoin-29.4.1.knots20260508-win64-pgpverifiable.zip",
+            ),
+        ];
+        for (os, arch, filename) in expected.iter() {
+            assert_eq!(
+                NodeFlavor::KnotsBlake2b.asset_filename(KNOTS_BLAKE2B_VERSION, *os, *arch),
+                *filename
+            );
+            assert_eq!(
+                NodeFlavor::KnotsBlake2b.asset_url(KNOTS_BLAKE2B_VERSION, *os, *arch),
+                format!("{}/{}", base, filename)
+            );
+        }
+        assert_eq!(
+            NodeFlavor::KnotsBlake2b.manifest_urls(),
+            Some((
+                format!("{}/SHA256SUMS", base),
+                format!("{}/SHA256SUMS.asc", base)
+            ))
+        );
+        assert_eq!(
+            NodeFlavor::KnotsBlake2b.display_name(),
+            "Bitcoin Knots (Bitcoin Blake2b)"
+        );
+        // The pin is its own flavour, and the Bitcoin pins are untouched by it.
+        assert_eq!(
+            NodeFlavor::from_version(KNOTS_BLAKE2B_VERSION),
+            NodeFlavor::KnotsBlake2b
+        );
+        assert_eq!(NodeFlavor::from_version(KNOTS_VERSION), NodeFlavor::Knots);
+        assert_eq!(NodeFlavor::from_version(CORE_VERSION), NodeFlavor::Core);
+        assert_eq!(KNOTS_VERSION, "29.3.knots20260507");
+        assert_eq!(CORE_VERSION, "29.0");
+        assert!(!KNOTS_VERSIONS.contains(&KNOTS_BLAKE2B_VERSION));
+        assert!(!CORE_VERSIONS.contains(&KNOTS_BLAKE2B_VERSION));
+        assert_eq!(NodeFlavor::KnotsBlake2b.versions(), &KNOTS_BLAKE2B_VERSIONS);
+    }
+
+    // The provider/chain pairing is refused in both directions, and each
+    // family offers exactly its own providers.
+    #[test]
+    fn provider_chain_mismatch_is_refused_both_ways() {
+        use crate::chain::ChainId;
+        for chain in [
+            ChainId::Bitcoin,
+            ChainId::Testnet4,
+            ChainId::Signet,
+            ChainId::Regtest,
+        ]
+        .iter()
+        .copied()
+        {
+            assert_eq!(NodeFlavor::Core.check_chain(chain), Ok(()));
+            assert_eq!(NodeFlavor::Knots.check_chain(chain), Ok(()));
+            assert_eq!(
+                NodeFlavor::KnotsBlake2b.check_chain(chain),
+                Err(ProviderChainMismatch {
+                    flavor: NodeFlavor::KnotsBlake2b,
+                    chain
+                })
+            );
+            assert!(!NodeFlavor::KnotsBlake2b.supports_chain(chain));
+        }
+        for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4]
+            .iter()
+            .copied()
+        {
+            assert_eq!(NodeFlavor::KnotsBlake2b.check_chain(chain), Ok(()));
+            for flavor in [NodeFlavor::Core, NodeFlavor::Knots].iter().copied() {
+                assert_eq!(
+                    flavor.check_chain(chain),
+                    Err(ProviderChainMismatch { flavor, chain })
+                );
+                assert!(!flavor.supports_chain(chain));
+            }
+            assert_eq!(
+                NodeChainFamily::from_chain(chain),
+                NodeChainFamily::BitcoinBlake2b
+            );
+        }
+        assert_eq!(
+            NodeChainFamily::Bitcoin.allowed_flavors(),
+            &[NodeFlavor::Core, NodeFlavor::Knots]
+        );
+        assert_eq!(
+            NodeChainFamily::BitcoinBlake2b.allowed_flavors(),
+            &[NodeFlavor::KnotsBlake2b]
+        );
+        // The refusal names both sides, so the message is actionable.
+        let e = NodeFlavor::Knots
+            .check_chain(ChainId::BitcoinBlake2b)
+            .unwrap_err();
+        assert_eq!(
+            e.to_string(),
+            "Bitcoin Knots cannot serve Bitcoin Blake2b: it is a Bitcoin node provider"
+        );
+        let e = NodeFlavor::KnotsBlake2b
+            .check_chain(ChainId::Bitcoin)
+            .unwrap_err();
+        assert_eq!(
+            e.to_string(),
+            "Bitcoin Knots (Bitcoin Blake2b) cannot serve Bitcoin: \
+             it is a Bitcoin Blake2b node provider"
+        );
+    }
+
+    // Binary, datadir, config, cookie, ledger and lock locations are all keyed
+    // by family, so a Bitcoin node and a Bitcoin Blake2b node — each on mainnet
+    // and testnet4 — never share a path; and the Bitcoin family's paths are the
+    // historical ones byte for byte.
+    #[test]
+    fn managed_node_paths_are_isolated_per_family_and_network() {
+        use crate::node::revalidate::ManagedNodeState;
+        let root = CoincubeDirectory::new(PathBuf::from("/tmp/coincube-test"));
+        let mut seen: Vec<PathBuf> = Vec::new();
+        let mut distinct = |p: PathBuf| {
+            assert!(!seen.contains(&p), "path shared: {}", p.display());
+            seen.push(p);
+        };
+        for family in NodeChainFamily::ALL.iter().copied() {
+            let node_dir = internal_bitcoind_directory_for(&root, family);
+            let datadir = internal_bitcoind_datadir_for(&root, family);
+            assert_eq!(node_dir, root.path().join(family.root_dir_name()));
+            assert_eq!(datadir, node_dir.join("datadir"));
+            distinct(node_dir.clone());
+            distinct(datadir.clone());
+            distinct(internal_bitcoind_config_path(&datadir));
+            distinct(ManagedNodeState::path_for(&root, family));
+            // The lock directory is the same family root.
+            assert_eq!(root.bitcoind_directory_for(family).path(), node_dir);
+            for network in [Network::Bitcoin, Network::Testnet4].iter() {
+                distinct(internal_bitcoind_cookie_path(&datadir, network));
+            }
+            for version in family
+                .allowed_flavors()
+                .iter()
+                .flat_map(|f| f.versions().iter())
+            {
+                distinct(internal_bitcoind_exe_path_for(&root, family, version));
+            }
+        }
+        // Legacy (family-less) helpers are the Bitcoin family's, unchanged.
+        assert_eq!(
+            internal_bitcoind_directory(&root),
+            root.path().join("bitcoind")
+        );
+        assert_eq!(
+            internal_bitcoind_datadir(&root),
+            root.path().join("bitcoind").join("datadir")
+        );
+        assert_eq!(
+            internal_bitcoind_exe_path(&root, KNOTS_VERSION),
+            internal_bitcoind_exe_path_for(&root, NodeChainFamily::Bitcoin, KNOTS_VERSION)
+        );
+        assert_eq!(
+            ManagedNodeState::path(&root),
+            root.path().join("bitcoind").join("managed_node_state.json")
+        );
+        assert_eq!(
+            internal_bitcoind_exe_path_for(
+                &root,
+                NodeChainFamily::BitcoinBlake2b,
+                KNOTS_BLAKE2B_VERSION
+            ),
+            root.path()
+                .join("bitcoind-blake2b")
+                .join("bitcoin-29.4.1.knots20260508")
+                .join("bin")
+                .join(if cfg!(target_os = "windows") {
+                    "bitcoind.exe"
+                } else {
+                    "bitcoind"
+                })
+        );
+    }
+
+    // A Bitcoin Blake2b config is an ordinary managed-node config: it never
+    // emits `consensusrules`, and its ports are read back so the other family
+    // allocates around them (and vice versa). Ports here stand in for the
+    // OS-allocated ones a real install gets; distinctness between the two
+    // families is what the reader is for, since upstream's defaults collide.
+    #[test]
+    fn concurrent_bitcoin_and_blake2b_configs_keep_ports_and_files_apart() {
+        let (base, root) = a_temp_coincube_datadir("ports");
+        let section = |rpc_port: u16, p2p_port: u16| InternalBitcoindNetworkConfig {
+            rpc_port,
+            p2p_port,
+            prune: PRUNE_DEFAULT,
+            rpc_auth: None,
+        };
+        // Nothing configured yet: nothing reserved either way.
+        assert!(ports_reserved_by_other_families(&root, NodeChainFamily::Bitcoin).is_empty());
+        assert!(
+            ports_reserved_by_other_families(&root, NodeChainFamily::BitcoinBlake2b).is_empty()
+        );
+
+        let mut bitcoin = InternalBitcoindConfig::for_flavor(NodeFlavor::Knots);
+        bitcoin
+            .networks
+            .insert(Network::Bitcoin, section(43345, 42355));
+        bitcoin
+            .networks
+            .insert(Network::Testnet4, section(34067, 45175));
+        let bitcoin_conf = internal_bitcoind_config_path(&internal_bitcoind_datadir_for(
+            &root,
+            NodeChainFamily::Bitcoin,
+        ));
+        std::fs::create_dir_all(bitcoin_conf.parent().unwrap()).unwrap();
+        bitcoin.to_file(&bitcoin_conf).unwrap();
+
+        let mut blake2b = InternalBitcoindConfig::for_flavor(NodeFlavor::KnotsBlake2b);
+        blake2b
+            .networks
+            .insert(Network::Bitcoin, section(51001, 51002));
+        blake2b
+            .networks
+            .insert(Network::Testnet4, section(51003, 51004));
+        let blake2b_conf = internal_bitcoind_config_path(&internal_bitcoind_datadir_for(
+            &root,
+            NodeChainFamily::BitcoinBlake2b,
+        ));
+        assert_ne!(bitcoin_conf, blake2b_conf);
+        std::fs::create_dir_all(blake2b_conf.parent().unwrap()).unwrap();
+        blake2b.to_file(&blake2b_conf).unwrap();
+
+        // Neither file carries a consensus-rules key, whatever the flavour.
+        for conf in [&bitcoin_conf, &blake2b_conf].iter() {
+            let text = std::fs::read_to_string(conf).unwrap();
+            assert!(
+                !text.contains("consensusrules"),
+                "{} must not emit consensusrules:\n{}",
+                conf.display(),
+                text
+            );
+        }
+        assert!(blake2b
+            .to_ini()
+            .general_section()
+            .get("consensusrules")
+            .is_none());
+
+        // Each family sees exactly the other's ports, on both networks.
+        let mut reserved_for_blake2b =
+            ports_reserved_by_other_families(&root, NodeChainFamily::BitcoinBlake2b);
+        reserved_for_blake2b.sort_unstable();
+        assert_eq!(reserved_for_blake2b, vec![34067, 42355, 43345, 45175]);
+        let mut reserved_for_bitcoin =
+            ports_reserved_by_other_families(&root, NodeChainFamily::Bitcoin);
+        reserved_for_bitcoin.sort_unstable();
+        assert_eq!(reserved_for_bitcoin, vec![51001, 51002, 51003, 51004]);
+        // And the two sets are disjoint, so all four (family, network) endpoints
+        // are distinct.
+        assert!(reserved_for_bitcoin
+            .iter()
+            .all(|p| !reserved_for_blake2b.contains(p)));
+
+        // Writing one family's file did not touch the other's.
+        let reread = InternalBitcoindConfig::from_file(&bitcoin_conf).unwrap();
+        assert_eq!(reread.networks, bitcoin.networks);
+        let reread = InternalBitcoindConfig::from_file(&blake2b_conf).unwrap();
+        assert_eq!(reread.networks, blake2b.networks);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // Binary resolution never crosses families: a Bitcoin provider ignores a
+    // Blake2b binary even with nothing else installed, and the Blake2b provider
+    // ignores every Bitcoin binary.
+    #[test]
+    fn binary_resolution_never_crosses_chain_families() {
+        let (base, root) = a_temp_coincube_datadir("exe");
+        let install = |family: NodeChainFamily, version: &str| {
+            let path = internal_bitcoind_exe_path_for(&root, family, version);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"").unwrap();
+            path
+        };
+        // Only the Blake2b binary on disk: no Bitcoin provider resolves it.
+        let blake2b_exe = install(NodeChainFamily::BitcoinBlake2b, KNOTS_BLAKE2B_VERSION);
+        assert_eq!(select_managed_bitcoind_exe(&root, NodeFlavor::Core), None);
+        assert_eq!(select_managed_bitcoind_exe(&root, NodeFlavor::Knots), None);
+        assert_eq!(
+            select_managed_bitcoind_exe(&root, NodeFlavor::KnotsBlake2b),
+            Some(blake2b_exe.clone())
+        );
+        // A Bitcoin Knots binary: Bitcoin providers resolve it (Core by
+        // fallback, as before); the Blake2b provider still does not.
+        let knots_exe = install(NodeChainFamily::Bitcoin, KNOTS_VERSION);
+        assert_eq!(
+            select_managed_bitcoind_exe(&root, NodeFlavor::Knots),
+            Some(knots_exe.clone())
+        );
+        assert_eq!(
+            select_managed_bitcoind_exe(&root, NodeFlavor::Core),
+            Some(knots_exe)
+        );
+        assert_eq!(
+            select_managed_bitcoind_exe(&root, NodeFlavor::KnotsBlake2b),
+            Some(blake2b_exe.clone())
+        );
+        // Remove the Blake2b binary: the Blake2b provider has no fallback.
+        std::fs::remove_file(&blake2b_exe).unwrap();
+        assert_eq!(
+            select_managed_bitcoind_exe(&root, NodeFlavor::KnotsBlake2b),
+            None
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // The start path refuses a chain/provider mismatch before it writes the
+    // identity marker, migrates the conf or resolves a binary — and the
+    // chain-aware entry refuses a dormant chain before it even reads the ledger.
+    #[test]
+    fn start_refuses_mismatch_and_dormant_chains_before_touching_the_datadir() {
+        use crate::chain::{ChainId, BTCB2_DORMANT_REASON};
+        use crate::node::revalidate::ManagedNodeState;
+        let (base, root) = a_temp_coincube_datadir("start");
+        let bitcoin_datadir = internal_bitcoind_datadir(&root);
+        let cookie_path = internal_bitcoind_cookie_path(&bitcoin_datadir, &Network::Bitcoin);
+        let config = BitcoindConfig {
+            rpc_auth: coincubed::config::BitcoindRpcAuth::CookieFile(cookie_path.clone()),
+            addr: std::net::SocketAddr::from(([127, 0, 0, 1], 1)),
+        };
+        let untouched = |root: &CoincubeDirectory| {
+            assert!(
+                !cookie_path.parent().unwrap().exists(),
+                "the Bitcoin node datadir was created"
+            );
+            assert!(
+                !internal_bitcoind_directory_for(root, NodeChainFamily::BitcoinBlake2b).exists(),
+                "the Bitcoin Blake2b root was created"
+            );
+        };
+
+        // A dormant chain: refused with the dormant reason, nothing created.
+        for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4]
+            .iter()
+            .copied()
+        {
+            match Bitcoind::maybe_start_for_chain(chain, config.clone(), &root) {
+                Err(StartInternalBitcoindError::ChainUnavailable(reason)) => {
+                    assert_eq!(reason, BTCB2_DORMANT_REASON)
+                }
+                other => panic!("expected ChainUnavailable, got {:?}", other.map(|_| ())),
+            }
+            untouched(&root);
+        }
+
+        // A Bitcoin chain whose ledger names the Blake2b provider: refused as a
+        // mismatch, before the identity marker's directory exists.
+        let ledger = ManagedNodeState {
+            configured_flavor: Some(NodeFlavor::KnotsBlake2b),
+            ..Default::default()
+        };
+        ledger.save(&root).unwrap();
+        assert_eq!(
+            configured_managed_flavor(&root),
+            Some(NodeFlavor::KnotsBlake2b)
+        );
+        let ledger_bytes = std::fs::read(ManagedNodeState::path(&root)).unwrap();
+        match Bitcoind::maybe_start(Network::Bitcoin, config.clone(), &root) {
+            Err(StartInternalBitcoindError::ProviderChainMismatch(e)) => assert_eq!(
+                e,
+                ProviderChainMismatch {
+                    flavor: NodeFlavor::KnotsBlake2b,
+                    chain: ChainId::Bitcoin
+                }
+            ),
+            other => panic!(
+                "expected ProviderChainMismatch, got {:?}",
+                other.map(|_| ())
+            ),
+        }
+        match Bitcoind::maybe_start_for_chain(ChainId::Bitcoin, config.clone(), &root) {
+            Err(StartInternalBitcoindError::ProviderChainMismatch(_)) => {}
+            other => panic!(
+                "expected ProviderChainMismatch, got {:?}",
+                other.map(|_| ())
+            ),
+        }
+        untouched(&root);
+        assert_eq!(
+            std::fs::read(ManagedNodeState::path(&root)).unwrap(),
+            ledger_bytes,
+            "the ledger was rewritten by a refused start"
+        );
+
+        // The same start with a matching provider gets past the guard: it
+        // establishes the identity and then fails on the (absent) binary, which
+        // is the ordinary Bitcoin path this build ships.
+        ManagedNodeState {
+            configured_flavor: Some(NodeFlavor::Knots),
+            ..Default::default()
+        }
+        .save(&root)
+        .unwrap();
+        match Bitcoind::maybe_start_for_chain(ChainId::Bitcoin, config, &root) {
+            Err(StartInternalBitcoindError::ExecutableNotFound) => {}
+            other => panic!("expected ExecutableNotFound, got {:?}", other.map(|_| ())),
+        }
+        assert!(cookie_path.parent().unwrap().exists());
+        assert!(!internal_bitcoind_directory_for(&root, NodeChainFamily::BitcoinBlake2b).exists());
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

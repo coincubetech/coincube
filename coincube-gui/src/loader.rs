@@ -982,8 +982,8 @@ pub async fn start_bitcoind_and_daemon(
                 crate::node::bitcoind::stop_and_wait_managed_bitcoind(bitcoind_config);
             }
             Some(
-                Bitcoind::maybe_start(
-                    config.bitcoin_config.network,
+                Bitcoind::maybe_start_for_chain(
+                    chain,
                     bitcoind_config.clone(),
                     &coincube_datadir_path,
                 )
@@ -1004,8 +1004,8 @@ pub async fn start_bitcoind_and_daemon(
             };
             if is_internal {
                 Some(
-                    Bitcoind::maybe_start(
-                        config.bitcoin_config.network,
+                    Bitcoind::maybe_start_for_chain(
+                        chain,
                         pending_cfg.clone(),
                         &coincube_datadir_path,
                     )

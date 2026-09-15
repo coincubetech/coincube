@@ -258,7 +258,9 @@ impl DownloadVerification {
     pub fn for_flavor(flavor: NodeFlavor, manifest: Option<(String, String)>) -> Option<Self> {
         match flavor {
             NodeFlavor::Core => Some(Self::PinnedSha256(bitcoind::CORE_SHA256SUM.to_string())),
-            NodeFlavor::Knots => {
+            // Both Knots lines are published by the same signer under the
+            // same manifest scheme; the release *version* selects the file.
+            NodeFlavor::Knots | NodeFlavor::KnotsBlake2b => {
                 let (sha256sums, sha256sums_asc) = manifest?;
                 Some(Self::ReleaseManifest {
                     archive_filename: flavor.download_filename(),
@@ -559,6 +561,14 @@ fn bitcoind_default_address(network: &Network) -> String {
 /// Get available port that is valid for use by internal bitcoind.
 // Modified from https://github.com/RCasatta/bitcoind/blob/f047740d7d0af935ff7360cf77429c5f294cfd59/src/lib.rs#L435
 pub fn get_available_port() -> Result<u16, Error> {
+    get_available_port_excluding(&[])
+}
+
+/// [`get_available_port`], additionally refusing any port in `reserved` — the
+/// ports another chain family's managed node has already been given (see
+/// [`bitcoind::ports_reserved_by_other_families`]), which may not be bound at
+/// the moment of allocation and so would otherwise be handed out twice.
+pub fn get_available_port_excluding(reserved: &[u16]) -> Result<u16, Error> {
     // Perform multiple attempts to get a valid port.
     for _ in 0..10 {
         // Using 0 as port lets the system assign a port available.
@@ -568,7 +578,7 @@ pub fn get_available_port() -> Result<u16, Error> {
             .local_addr()
             .map(|s| s.port())
             .map_err(|e| Error::CannotGetAvailablePort(e.to_string()))?;
-        if port_is_valid(&port) {
+        if port_is_valid(&port) && !reserved.contains(&port) {
             return Ok(port);
         }
     }
@@ -981,6 +991,21 @@ impl InternalBitcoindStep {
         }
     }
 
+    /// Refuse the step's provider if it cannot serve the step's chain, recording
+    /// the reason as the step error. Run before every write, download, unpack
+    /// and start, so a mismatch fails at whichever of those is reached first
+    /// and the datadir under `bitcoind/` is never touched by a Bitcoin Blake2b
+    /// provider (or vice versa).
+    fn provider_mismatch(&mut self) -> bool {
+        match self.flavor.check_chain(self.network.into()) {
+            Ok(()) => false,
+            Err(e) => {
+                self.error = Some(e.to_string());
+                true
+            }
+        }
+    }
+
     /// Set the prune field and refresh its validity (shared with the settings
     /// editor via [`bitcoind::set_prune_form_value`]).
     fn set_prune_field(&mut self, value: String) {
@@ -1098,7 +1123,12 @@ impl Step for InternalBitcoindStep {
                     return self.load();
                 }
                 message::InternalBitcoindMsg::SelectFlavor(flavor) => {
-                    // Only before the user confirms and the flow kicks off.
+                    // Only before the user confirms and the flow kicks off, and
+                    // only a provider of this chain's family.
+                    if let Err(e) = flavor.check_chain(self.network.into()) {
+                        self.error = Some(e.to_string());
+                        return Task::none();
+                    }
                     if !self.flavor_confirmed {
                         self.flavor = flavor;
                         // The binary is (re)resolved for the chosen flavour on
@@ -1142,6 +1172,9 @@ impl Step for InternalBitcoindStep {
                     self.apply_resource_preset(NodeResources::regular_computer());
                 }
                 message::InternalBitcoindMsg::DefineConfig => {
+                    if self.provider_mismatch() {
+                        return Task::none();
+                    }
                     // Validate the node-resource choices before touching files, so
                     // bad input fails fast and re-opens the advanced disclosure.
                     let resources = match self.resource_values() {
@@ -1193,7 +1226,16 @@ impl Step for InternalBitcoindStep {
                     let (rpc_port, p2p_port) = if let Some(network_conf) = network_conf {
                         (network_conf.rpc_port, network_conf.p2p_port)
                     } else {
-                        match (get_available_port(), get_available_port()) {
+                        // Never a port the other chain family's node already
+                        // holds, bound right now or not.
+                        let reserved = bitcoind::ports_reserved_by_other_families(
+                            &self.coincube_datadir,
+                            self.flavor.chain_family(),
+                        );
+                        match (
+                            get_available_port_excluding(&reserved),
+                            get_available_port_excluding(&reserved),
+                        ) {
                             (Ok(rpc_port), Ok(p2p_port)) => {
                                 // In case ports are the same, user will need to click button again for another attempt.
                                 if rpc_port == p2p_port {
@@ -1281,6 +1323,9 @@ impl Step for InternalBitcoindStep {
                     });
                 }
                 message::InternalBitcoindMsg::Download => {
+                    if self.provider_mismatch() {
+                        return Task::none();
+                    }
                     let flavor = self.flavor;
                     if let Some(download) = &mut self.exe_download {
                         if let DownloadState::Idle = download.state {
@@ -1338,6 +1383,9 @@ impl Step for InternalBitcoindStep {
                     }
                 },
                 message::InternalBitcoindMsg::Install => {
+                    if self.provider_mismatch() {
+                        return Task::none();
+                    }
                     let flavor = self.flavor;
                     let verification =
                         match DownloadVerification::for_flavor(flavor, self.manifest.clone()) {
@@ -1900,5 +1948,242 @@ mod tests {
             v,
             Some(DownloadVerification::ReleaseManifest { .. })
         ));
+    }
+
+    // --- Bitcoin Blake2b provider (dormant) ---------------------------------
+
+    // The real published `SHA256SUMS` (+ `.asc`) for the pinned Bitcoin Blake2b
+    // release, fetched from `https://bitcoinknots.org/files/29.x/29.4.1.knots20260508/`.
+    const REAL_BLAKE2B_SUMS: &str = include_str!("test_fixtures/knots_blake2b_sha256sums");
+    const REAL_BLAKE2B_ASC: &str = include_str!("test_fixtures/knots_blake2b_sha256sums.asc");
+
+    // The pinned Bitcoin Blake2b release is verifiable exactly the way Knots is:
+    // its real manifest is signed by the already-pinned Knots key, and every
+    // archive filename the provider derives for our platforms is listed in it.
+    // No new trust root, no new URL scheme — the version alone selects the file.
+    #[test]
+    fn blake2b_release_manifest_verifies_under_the_pinned_knots_key() {
+        use bitcoind::{NodeArch, NodeOs, KNOTS_BLAKE2B_VERSION};
+        // Real signature over the real manifest verifies against the pinned key.
+        assert_eq!(
+            verify_detached_signature(
+                REAL_BLAKE2B_SUMS.as_bytes(),
+                REAL_BLAKE2B_ASC,
+                bitcoind::KNOTS_SIGNING_KEY_ASC,
+                bitcoind::KNOTS_SIGNING_KEY_FINGERPRINT,
+            ),
+            Ok(())
+        );
+        // A flipped byte, or a foreign fingerprint, and it does not.
+        let mut tampered = REAL_BLAKE2B_SUMS.as_bytes().to_vec();
+        tampered[0] ^= 0x01;
+        assert_eq!(
+            verify_detached_signature(
+                &tampered,
+                REAL_BLAKE2B_ASC,
+                bitcoind::KNOTS_SIGNING_KEY_ASC,
+                bitcoind::KNOTS_SIGNING_KEY_FINGERPRINT,
+            ),
+            Err(SignatureError::Invalid)
+        );
+        assert_eq!(
+            verify_detached_signature(
+                REAL_BLAKE2B_SUMS.as_bytes(),
+                REAL_BLAKE2B_ASC,
+                bitcoind::KNOTS_SIGNING_KEY_ASC,
+                "0000000000000000000000000000000000000000",
+            ),
+            Err(SignatureError::Invalid)
+        );
+        // The Knots pin's manifest does not vouch for the Blake2b archives, nor
+        // the other way round: a version selects exactly one signed listing.
+        assert_ne!(REAL_BLAKE2B_SUMS, REAL_SUMS);
+
+        // Every platform archive the provider can ask for is in the listing,
+        // under the exact filename the download URL ends in.
+        let platforms = [
+            (NodeOs::MacOs, NodeArch::Aarch64),
+            (NodeOs::MacOs, NodeArch::X86_64),
+            (NodeOs::Linux, NodeArch::X86_64),
+            (NodeOs::Linux, NodeArch::Aarch64),
+            (NodeOs::Windows, NodeArch::X86_64),
+            (NodeOs::Windows, NodeArch::Aarch64),
+        ];
+        for (os, arch) in platforms.iter().copied() {
+            let filename = NodeFlavor::KnotsBlake2b.asset_filename(KNOTS_BLAKE2B_VERSION, os, arch);
+            let listed = REAL_BLAKE2B_SUMS.lines().any(|line| {
+                let mut fields = line.split_whitespace();
+                matches!(
+                    (fields.next(), fields.next()),
+                    (Some(hash), Some(name)) if name == filename && hash.len() == 64
+                )
+            });
+            assert!(listed, "{} is not in the release manifest", filename);
+            assert!(NodeFlavor::KnotsBlake2b
+                .asset_url(KNOTS_BLAKE2B_VERSION, os, arch)
+                .ends_with(&format!("/29.4.1.knots20260508/{}", filename)),);
+            // And the Knots pin's own archives are a different set of names.
+            assert!(
+                !REAL_BLAKE2B_SUMS.contains(&NodeFlavor::Knots.asset_filename(
+                    bitcoind::KNOTS_VERSION,
+                    os,
+                    arch
+                ))
+            );
+        }
+
+        // The verification the installer would build for this provider is the
+        // Knots one, keyed to the host's Blake2b archive name.
+        match DownloadVerification::for_flavor(
+            NodeFlavor::KnotsBlake2b,
+            Some((REAL_BLAKE2B_SUMS.to_string(), REAL_BLAKE2B_ASC.to_string())),
+        ) {
+            Some(DownloadVerification::ReleaseManifest {
+                archive_filename,
+                signing_key_fingerprint,
+                ..
+            }) => {
+                assert_eq!(
+                    archive_filename,
+                    NodeFlavor::KnotsBlake2b.download_filename()
+                );
+                assert!(archive_filename.contains("29.4.1.knots20260508"));
+                assert_eq!(
+                    signing_key_fingerprint,
+                    bitcoind::KNOTS_SIGNING_KEY_FINGERPRINT
+                );
+            }
+            other => panic!("expected a ReleaseManifest, got {:?}", other.is_some()),
+        }
+        assert!(DownloadVerification::for_flavor(NodeFlavor::KnotsBlake2b, None).is_none());
+        // An archive that is not the real one is refused at the checksum step,
+        // after the signature has been accepted.
+        let verification = DownloadVerification::for_flavor(
+            NodeFlavor::KnotsBlake2b,
+            Some((REAL_BLAKE2B_SUMS.to_string(), REAL_BLAKE2B_ASC.to_string())),
+        )
+        .unwrap();
+        assert_eq!(
+            verify_download(b"not the real archive", &verification),
+            Err(InstallBitcoindError::ChecksumNotInManifest)
+        );
+    }
+
+    // The installer step is a Bitcoin-chain step (its network is a
+    // `bitcoin::Network`), so the Blake2b provider is refused at selection and
+    // at every later stage — config write, download, unpack — leaving the
+    // `bitcoind/` datadir untouched. The Bitcoin providers keep working exactly
+    // as before through the same messages.
+    #[test]
+    fn installer_refuses_the_blake2b_provider_on_a_bitcoin_chain() {
+        use std::fs;
+        let base = std::env::temp_dir().join(format!(
+            "coincube-btcb2-installer-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        let datadir = CoincubeDirectory::new(base.clone());
+        let mut step = InternalBitcoindStep::new(&datadir);
+        let mut hws = crate::hw::HardwareWallets::new(datadir.clone(), Network::Bitcoin);
+        let conf_path = bitcoind::internal_bitcoind_config_path(&step.bitcoind_datadir);
+        let mismatch = "Bitcoin Knots (Bitcoin Blake2b) cannot serve Bitcoin: \
+                        it is a Bitcoin Blake2b node provider";
+
+        // Selection is refused and the flavour stays what it was.
+        let before = step.flavor;
+        assert_ne!(before, NodeFlavor::KnotsBlake2b);
+        let _ = step.update(
+            &mut hws,
+            Message::InternalBitcoind(message::InternalBitcoindMsg::SelectFlavor(
+                NodeFlavor::KnotsBlake2b,
+            )),
+        );
+        assert_eq!(step.flavor, before);
+        assert_eq!(step.error.as_deref(), Some(mismatch));
+        assert!(!step.flavor_confirmed);
+
+        // Even with the provider forced in, no stage gets past the guard.
+        step.error = None;
+        step.flavor = NodeFlavor::KnotsBlake2b;
+        step.exe_download = Some(Download::new());
+        for msg in [
+            message::InternalBitcoindMsg::DefineConfig,
+            message::InternalBitcoindMsg::Download,
+            message::InternalBitcoindMsg::Install,
+        ]
+        .iter()
+        .cloned()
+        {
+            step.error = None;
+            let _ = step.update(&mut hws, Message::InternalBitcoind(msg));
+            assert_eq!(step.error.as_deref(), Some(mismatch));
+        }
+        assert!(
+            !conf_path.exists(),
+            "a config was written for a refused provider"
+        );
+        assert!(step.internal_bitcoind_config.is_none());
+        assert!(step.install_state.is_none());
+        assert!(matches!(
+            step.exe_download.as_ref().map(|d| &d.state),
+            Some(DownloadState::Idle)
+        ));
+        assert!(
+            !crate::node::revalidate::ManagedNodeState::path(&datadir).exists(),
+            "the flavour ledger was written for a refused provider"
+        );
+        assert!(!bitcoind::internal_bitcoind_directory_for(
+            &datadir,
+            bitcoind::NodeChainFamily::BitcoinBlake2b
+        )
+        .exists());
+
+        // The Bitcoin providers are unaffected: Knots is selectable and its
+        // config is written, with the ledger naming it.
+        step.error = None;
+        step.flavor = before;
+        let _ = step.update(
+            &mut hws,
+            Message::InternalBitcoind(message::InternalBitcoindMsg::SelectFlavor(
+                NodeFlavor::Knots,
+            )),
+        );
+        assert_eq!(step.flavor, NodeFlavor::Knots);
+        assert!(step.error.is_none());
+        let conf = define_config(&mut step);
+        assert!(conf.networks.contains_key(&Network::Bitcoin));
+        assert_eq!(step.flavor, NodeFlavor::Knots);
+        // The file cannot say which flavour it is for; the ledger does.
+        assert_eq!(
+            crate::node::revalidate::ManagedNodeState::load(&datadir).configured_flavor,
+            Some(NodeFlavor::Knots)
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    // Port allocation steers around the other family's recorded ports even
+    // when nothing is listening on them, so a Bitcoin node and a Bitcoin
+    // Blake2b node on one machine cannot be handed the same RPC or P2P port.
+    #[test]
+    fn port_allocation_avoids_the_other_familys_ports() {
+        // A reserved port is never handed out, and what is handed out is still
+        // a valid managed-node port. The reservation is a port the OS is known
+        // to offer (it just did), so the exclusion is what keeps it out.
+        for _ in 0..5 {
+            let reserved = [get_available_port().unwrap()];
+            for _ in 0..20 {
+                let got = get_available_port_excluding(&reserved).unwrap();
+                assert!(!reserved.contains(&got));
+                assert!(port_is_valid(&got));
+            }
+        }
+        // With no other family configured there is nothing to steer around,
+        // which is every Bitcoin install this build performs.
+        assert!(bitcoind::ports_reserved_by_other_families(
+            &CoincubeDirectory::new(std::env::temp_dir().join("coincube-btcb2-no-such-dir")),
+            bitcoind::NodeChainFamily::Bitcoin
+        )
+        .is_empty());
     }
 }

@@ -710,6 +710,13 @@ fn flavor_switch_chain_note(target: NodeFlavor) -> &'static str {
              (\"spam\") transactions. Your chain, balances, and transaction history are \
              unaffected."
         }
+        // Never offered on this screen: the Bitcoin Blake2b provider serves its
+        // own chain from its own node directory (`NodeChainFamily`), so a
+        // Bitcoin Vault's node can't be switched to it.
+        NodeFlavor::KnotsBlake2b => {
+            "Bitcoin Knots (Bitcoin Blake2b) runs the Bitcoin Blake2b chain only and \
+             can't serve this Vault's node."
+        }
     }
 }
 

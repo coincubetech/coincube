@@ -50,7 +50,7 @@ use tracing::{info, warn};
 
 use crate::{
     dir::CoincubeDirectory,
-    node::bitcoind::{internal_bitcoind_directory, NodeFlavor, NodeIdentity, ObservedBuild},
+    node::bitcoind::{NodeFlavor, NodeIdentity, ObservedBuild},
 };
 
 /// Name of the BIP-110 / RDTS deployment in `getdeploymentinfo`.
@@ -115,6 +115,19 @@ pub fn rdts_anchor_height(network: Network) -> Option<i32> {
     }
 }
 
+/// [`rdts_anchor_height`] keyed on the chain *identity*. The RDTS repair
+/// planner is a Bitcoin-chain mechanism: on a Bitcoin Blake2b chain the fork
+/// rules are consensus, there is nothing to "repair" a node back onto, and
+/// the Bitcoin anchor would be a wrong-chain height — so both Blake2b
+/// identities have no anchor, whatever they encode as.
+pub fn rdts_anchor_height_for(chain: crate::chain::ChainId) -> Option<i32> {
+    if chain.is_blake2b() {
+        None
+    } else {
+        rdts_anchor_height(chain.bitcoin_network())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Planning
 // ---------------------------------------------------------------------------
@@ -122,6 +135,10 @@ pub fn rdts_anchor_height(network: Network) -> Option<i32> {
 /// Everything the planner needs to decide whether a swap requires remediation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChainFacts {
+    /// The chain the node was started for. Decides, before anything else,
+    /// whether the planner applies at all: it never plans for a Bitcoin
+    /// Blake2b node ([`SkipReason::NotABitcoinChain`]).
+    pub chain: crate::chain::ChainId,
     pub network: Network,
     /// The flavour the node ran as last time we observed it, if we ever did.
     pub previous_flavor: Option<NodeFlavor>,
@@ -165,6 +182,10 @@ pub struct ChainFacts {
 /// Why no remediation is needed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkipReason {
+    /// The node serves a Bitcoin Blake2b chain. The RDTS repair machinery is
+    /// a Bitcoin-chain mechanism and never inspects or touches a Blake2b node's
+    /// state; this is decided before any other fact is consulted.
+    NotABitcoinChain,
     /// RDTS isn't deployed on this network (regtest, signet, …).
     NoDeploymentOnNetwork,
     /// The deployment timed out without activating, so its rules will never be
@@ -230,7 +251,17 @@ impl RevalidationPlan {
 /// Decide what the node's current state requires. Pure — all I/O happens in the
 /// caller, which is what makes every branch below directly testable.
 pub fn plan(facts: ChainFacts) -> RevalidationPlan {
-    let Some(anchor_height) = rdts_anchor_height(facts.network) else {
+    // First, before any fact about heights, flavours or prune state: a Bitcoin
+    // Blake2b node is outside this planner's remit entirely. A Blake2b
+    // provider on a Bitcoin chain (or the reverse) is the same answer — the
+    // pairing is refused upstream by `NodeFlavor::check_chain`, and nothing
+    // here may act on it.
+    if facts.chain.is_blake2b()
+        || facts.current_flavor.chain_family() != crate::node::bitcoind::NodeChainFamily::Bitcoin
+    {
+        return RevalidationPlan::Skip(SkipReason::NotABitcoinChain);
+    }
+    let Some(anchor_height) = rdts_anchor_height_for(facts.chain) else {
         return RevalidationPlan::Skip(SkipReason::NoDeploymentOnNetwork);
     };
     if facts.rdts_abandoned {
@@ -278,6 +309,8 @@ pub fn plan(facts: ChainFacts) -> RevalidationPlan {
         // no reading for; the enforcement claim is the load-bearing one, so honour
         // it and leave the chain alone.
         NodeFlavor::Core => RevalidationPlan::Skip(SkipReason::EnforcingBuild),
+        // Unreachable: refused at the top of `plan` as `NotABitcoinChain`.
+        NodeFlavor::KnotsBlake2b => RevalidationPlan::Skip(SkipReason::NotABitcoinChain),
         NodeFlavor::Knots => {
             // A node running an enforcing build and trailing the most-work chain is
             // not a bug — that is what enforcing RDTS against a non-compliant
@@ -481,7 +514,23 @@ impl ManagedNodeState {
     /// datadir: the managed node is shared by every vault, and vault datadirs are
     /// removed wholesale on delete.
     pub fn path(coincube_datadir: &CoincubeDirectory) -> PathBuf {
-        internal_bitcoind_directory(coincube_datadir).join("managed_node_state.json")
+        Self::path_for(
+            coincube_datadir,
+            crate::node::bitcoind::NodeChainFamily::Bitcoin,
+        )
+    }
+
+    /// Sidecar path for a chain family's managed node:
+    /// `<datadir>/<family root>/managed_node_state.json`. The Bitcoin ledger
+    /// ([`Self::path`]) and a Bitcoin Blake2b node's ledger are different files
+    /// under different roots — the ledger is per node directory, never a
+    /// datadir-wide singleton.
+    pub fn path_for(
+        coincube_datadir: &CoincubeDirectory,
+        family: crate::node::bitcoind::NodeChainFamily,
+    ) -> PathBuf {
+        crate::node::bitcoind::internal_bitcoind_directory_for(coincube_datadir, family)
+            .join("managed_node_state.json")
     }
 
     /// Load the ledger, distinguishing "there is no sidecar yet" from "there is one
@@ -1303,9 +1352,22 @@ pub fn reconcile_after_start(
     bitcoind: &coincubed::BitcoinD,
     config: &coincubed::config::BitcoindConfig,
     identity: &NodeIdentity,
-    network: Network,
+    chain: crate::chain::ChainId,
     observed: ObservedBuild,
 ) {
+    // A Bitcoin Blake2b node is outside the RDTS repair machinery, and — just
+    // as important — the ledger, rewind and marker paths below are the
+    // *Bitcoin* node's (`bitcoind/`). Leave before touching any of them.
+    if chain.is_blake2b()
+        || observed.flavor.chain_family() != crate::node::bitcoind::NodeChainFamily::Bitcoin
+    {
+        tracing::debug!(
+            "skipping the managed-node chain check for {}: not a Bitcoin chain",
+            chain
+        );
+        return;
+    }
+    let network = chain.bitcoin_network();
     let observed_flavor = observed.flavor;
     // Nothing here may run against a provisional identity. Every branch below either
     // records a repair, arms an authorisation, or advances the flavour ledger on the
@@ -1369,7 +1431,7 @@ pub fn reconcile_after_start(
 
     // Networks without an anchor cost us nothing: no RPCs at all. Nothing can be
     // planned there, so the flavour record is safe to advance immediately.
-    if rdts_anchor_height(network).is_none() {
+    if rdts_anchor_height_for(chain).is_none() {
         ManagedNodeState::record_run(coincube_datadir, observed);
         return;
     }
@@ -1397,6 +1459,7 @@ pub fn reconcile_after_start(
     };
 
     let plan = plan(ChainFacts {
+        chain,
         network,
         previous_flavor,
         previous_build_enforced_rdts,
@@ -2676,6 +2739,7 @@ mod tests {
     /// wrapping a test's facts in [`enforcing`].
     fn facts(network: Network, from: NodeFlavor, to: NodeFlavor) -> ChainFacts {
         ChainFacts {
+            chain: network.into(),
             network,
             previous_flavor: Some(from),
             // Every Knots build any earlier release ran enforced, so a remembered
@@ -2755,6 +2819,101 @@ mod tests {
                 anchor_height: RDTS_ANCHOR_MAINNET
             },
         );
+    }
+
+    // A Bitcoin Blake2b node is outside the planner's remit, and is decided
+    // before any height, flavour or prune fact is looked at: the very facts
+    // that make a Bitcoin node repairable — including a rewind already in
+    // flight, and a stale flavour ledger — make a Blake2b node nothing at all.
+    // The Bitcoin ledger under `bitcoind/` is left byte-for-byte alone.
+    #[test]
+    fn a_blake2b_chain_is_skipped_before_any_bitcoin_fact_is_inspected() {
+        use crate::chain::ChainId;
+        use crate::node::bitcoind::NodeChainFamily;
+        let base = std::env::temp_dir().join(format!(
+            "coincube-btcb2-planner-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        let root = CoincubeDirectory::new(base.clone());
+        // A Bitcoin ledger mid-repair: the most "actionable" state there is.
+        let ledger = ManagedNodeState {
+            last_run_flavor: Some(NodeFlavor::Knots),
+            last_run_enforced_rdts: Some(true),
+            configured_flavor: Some(NodeFlavor::Core),
+            repair_notice_pending: false,
+            rewind: Some(RewindInFlight {
+                invalidated_hash: "00".repeat(32),
+                floor_height: RDTS_ANCHOR_MAINNET,
+                target_height: RDTS_ANCHOR_MAINNET + 5_000,
+            }),
+            sanctioned_rollback: None,
+        };
+        ledger.save(&root).unwrap();
+        let before = std::fs::read(ManagedNodeState::path(&root)).unwrap();
+
+        // The same facts on Bitcoin are a repair …
+        let repairable = stranded_by(
+            facts(Network::Bitcoin, NodeFlavor::Knots, NodeFlavor::Core),
+            10,
+        );
+        assert!(matches!(
+            plan(repairable),
+            RevalidationPlan::ClearFailureFlags { .. }
+        ));
+        // … and on a Blake2b chain, with every other fact identical, a skip.
+        for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4]
+            .iter()
+            .copied()
+        {
+            let mut f = repairable;
+            f.chain = chain;
+            assert_eq!(
+                plan(f),
+                RevalidationPlan::Skip(SkipReason::NotABitcoinChain)
+            );
+            // Also when the node reports the Blake2b provider itself, whichever
+            // build-enforcement and height facts come with it.
+            let mut f = enforcing(repairable);
+            f.chain = chain;
+            f.current_flavor = NodeFlavor::KnotsBlake2b;
+            assert_eq!(
+                plan(f),
+                RevalidationPlan::Skip(SkipReason::NotABitcoinChain)
+            );
+        }
+        // A Blake2b provider reported on a Bitcoin chain is refused the same
+        // way rather than planned around.
+        let mut f = repairable;
+        f.current_flavor = NodeFlavor::KnotsBlake2b;
+        assert_eq!(
+            plan(f),
+            RevalidationPlan::Skip(SkipReason::NotABitcoinChain)
+        );
+        // No anchor is defined for the Blake2b chains at all.
+        assert_eq!(rdts_anchor_height_for(ChainId::BitcoinBlake2b), None);
+        assert_eq!(
+            rdts_anchor_height_for(ChainId::BitcoinBlake2bTestnet4),
+            None
+        );
+        assert_eq!(
+            rdts_anchor_height_for(ChainId::Bitcoin),
+            Some(RDTS_ANCHOR_MAINNET)
+        );
+
+        // The Bitcoin ledger is untouched and the Blake2b root does not exist.
+        assert_eq!(
+            std::fs::read(ManagedNodeState::path(&root)).unwrap(),
+            before
+        );
+        assert!(!ManagedNodeState::path_for(&root, NodeChainFamily::BitcoinBlake2b).exists());
+        assert!(!crate::node::bitcoind::internal_bitcoind_directory_for(
+            &root,
+            NodeChainFamily::BitcoinBlake2b
+        )
+        .exists());
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     // As of writing mainnet has not reached 961,632, so this is what every real
