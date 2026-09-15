@@ -196,14 +196,17 @@ pub enum ConfWriteStep {
     DirSync,
 }
 
+/// A test hook: called at each [`ConfWriteStep`] with the staging path.
+#[cfg(test)]
+type ConfWriteHook = Box<dyn Fn(ConfWriteStep, &Path) -> io::Result<()>>;
+
 #[cfg(test)]
 thread_local! {
     /// A hook rather than a set of armed points: the interesting observations
     /// are made *mid-write* (what mode the staging file has while it exists),
     /// which needs the staging path in hand.
-    static CONF_WRITE_HOOK: std::cell::RefCell<
-        Option<Box<dyn Fn(ConfWriteStep, &Path) -> io::Result<()>>>,
-    > = const { std::cell::RefCell::new(None) };
+    static CONF_WRITE_HOOK: std::cell::RefCell<Option<ConfWriteHook>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// Run the test hook for `step` with the staging path, if one is installed.

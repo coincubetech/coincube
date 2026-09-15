@@ -1750,7 +1750,7 @@ impl InternalBitcoindConfig {
     /// An `Err` means the file still holds its previous bytes. A replacement
     /// whose directory entry could not be confirmed durable is logged and
     /// reported as `Ok`: the new contents are in place.
-    pub fn to_file(&self, path: &PathBuf) -> Result<(), InternalBitcoindConfigError> {
+    pub fn to_file(&self, path: &Path) -> Result<(), InternalBitcoindConfigError> {
         use crate::node::managed_conf::{write_conf_atomically, ConfWriteError};
         info!("Writing to file {}", path.to_string_lossy());
         let mut bytes = Vec::new();
