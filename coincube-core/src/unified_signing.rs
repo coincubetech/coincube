@@ -6,6 +6,8 @@
 //! obtain previous transactions from a trusted source for the selected chain:
 //! matching a PSBT outpoint proves transaction linkage, not chain inclusion or
 //! that an output is currently unspent.
+//! Every input must be a supported native P2WSH Vault input, even when this
+//! signer has no matching key for that input.
 //!
 //! Verification here means that every supplied unified signature is valid for
 //! the transaction, authenticated PSBT prevouts, and supported Vault witness
@@ -62,6 +64,11 @@ pub enum UnifiedSigningError {
         input: usize,
         actual: u32,
     },
+    DerivationPathTooDeep {
+        input: usize,
+        public_key: PublicKey,
+        depth: usize,
+    },
     DerivedPublicKeyMismatch {
         input: usize,
         public_key: PublicKey,
@@ -110,6 +117,14 @@ impl fmt::Display for UnifiedSigningError {
                 f,
                 "input {input} requests incompatible sighash 0x{actual:08x}"
             ),
+            Self::DerivationPathTooDeep {
+                input,
+                public_key,
+                depth,
+            } => write!(
+                f,
+                "input {input} derivation path for {public_key} has depth {depth}, exceeding BIP32's maximum of 255"
+            ),
             Self::DerivedPublicKeyMismatch { input, public_key } => write!(
                 f,
                 "input {input} derivation does not produce public key {public_key}"
@@ -155,7 +170,9 @@ struct InputContext {
 /// The input is immutable. All inputs and all existing unified signatures are
 /// validated before a local signature delta is created. The delta is applied
 /// through the adapter's checked merge, and only inputs receiving a signature
-/// have their PSBT sighash request set to raw `0x21`.
+/// have their PSBT sighash request set to raw `0x21`. Every input must be a
+/// supported native P2WSH Vault input, including inputs for which this signer
+/// has no matching key.
 pub fn sign_p2wsh_all_unified(
     signer: &MasterSigner,
     psbt: &UnifiedPsbt,
@@ -173,6 +190,13 @@ pub fn sign_p2wsh_all_unified(
                 continue;
             }
             let public_key = PublicKey::new(*raw_public_key);
+            if path.len() > usize::from(u8::MAX) {
+                return Err(UnifiedSigningError::DerivationPathTooDeep {
+                    input: input_index,
+                    public_key,
+                    depth: path.len(),
+                });
+            }
             let derived = signer.xpriv_at(path, secp).to_priv().public_key(secp);
             if derived != public_key {
                 return Err(UnifiedSigningError::DerivedPublicKeyMismatch {

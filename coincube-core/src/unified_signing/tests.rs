@@ -164,6 +164,81 @@ fn deterministic_primary_and_recovery_keys_sign_and_verify() {
 }
 
 #[test]
+fn produced_signature_matches_shared_unified_digest_contract() {
+    let secp = secp256k1::Secp256k1::new();
+    let fixture = fixture(1);
+    let signed = sign_p2wsh_all_unified(&fixture.signers[0], &fixture.psbt, &secp).unwrap();
+    let record = unified_signatures(&signed).unwrap().remove(0);
+    assert_eq!(record.signature.last(), Some(&UNIFIED_SIGHASH_ALL));
+
+    let contexts = validate_inputs(&signed).unwrap();
+    let spent_outputs: Vec<_> = contexts
+        .iter()
+        .map(|context| context.spent_output.clone())
+        .collect();
+    let cache = UnifiedSighashCache::new(&signed.psbt().unsigned_tx, &spent_outputs).unwrap();
+    let digest = cache
+        .signature_hash(
+            record.input_index,
+            0x21,
+            SCRIPT_TYPE_WITNESS_V0,
+            &contexts[record.input_index].witness_script,
+        )
+        .unwrap();
+    let signature =
+        secp256k1::ecdsa::Signature::from_der(&record.signature[..record.signature.len() - 1])
+            .unwrap();
+    secp.verify_ecdsa(
+        &secp256k1::Message::from_digest(digest),
+        &signature,
+        &record.public_key.inner,
+    )
+    .unwrap();
+}
+
+#[test]
+fn matching_origin_derivation_depth_is_bounded_without_mutation() {
+    let secp = secp256k1::Secp256k1::new();
+    let fixture = fixture(1);
+    let fingerprint = fixture.signers[0].fingerprint(&secp);
+    let public_key = fixture.psbt.psbt().inputs[0]
+        .bip32_derivation
+        .iter()
+        .find(|(_, source)| source.0 == fingerprint)
+        .map(|(key, _)| *key)
+        .unwrap();
+    let child = bip32::ChildNumber::from_normal_idx(0).unwrap();
+
+    let mut at_limit = fixture.psbt.clone();
+    at_limit.psbt_mut().inputs[0].bip32_derivation.insert(
+        public_key,
+        (fingerprint, DerivationPath::from(vec![child; 255])),
+    );
+    let at_limit_before = serialize_internal(&at_limit).unwrap();
+    assert!(matches!(
+        sign_p2wsh_all_unified(&fixture.signers[0], &at_limit, &secp),
+        Err(UnifiedSigningError::DerivedPublicKeyMismatch { input: 0, .. })
+    ));
+    assert_eq!(serialize_internal(&at_limit).unwrap(), at_limit_before);
+
+    let mut over_limit = fixture.psbt.clone();
+    over_limit.psbt_mut().inputs[0].bip32_derivation.insert(
+        public_key,
+        (fingerprint, DerivationPath::from(vec![child; 256])),
+    );
+    let over_limit_before = serialize_internal(&over_limit).unwrap();
+    assert!(matches!(
+        sign_p2wsh_all_unified(&fixture.signers[0], &over_limit, &secp),
+        Err(UnifiedSigningError::DerivationPathTooDeep {
+            input: 0,
+            depth: 256,
+            ..
+        })
+    ));
+    assert_eq!(serialize_internal(&over_limit).unwrap(), over_limit_before);
+}
+
+#[test]
 fn no_matching_key_is_explicitly_valid_and_byte_exact() {
     let secp = secp256k1::Secp256k1::new();
     let fixture = fixture(1);
@@ -191,6 +266,37 @@ fn multiple_inputs_sign_only_matching_derivations_and_preserve_no_key_input() {
         Some(PsbtSighashType::from_u32(UNIFIED_SIGHASH_ALL.into()))
     );
     assert_eq!(signed.psbt().inputs[1], untouched);
+}
+
+#[test]
+fn unified_signature_cannot_be_relocated_between_inputs() {
+    let secp = secp256k1::Secp256k1::new();
+    let fixture = fixture(2);
+    let signed = sign_p2wsh_all_unified(&fixture.signers[0], &fixture.psbt, &secp).unwrap();
+    let records = unified_signatures(&signed).unwrap();
+    assert_eq!(records.len(), 2);
+    assert_eq!(verify_p2wsh_all_unified(&signed, &secp), Ok(2));
+
+    let source = records
+        .iter()
+        .find(|record| record.input_index == 0)
+        .unwrap();
+    let target = records
+        .iter()
+        .find(|record| record.input_index == 1)
+        .unwrap();
+    assert_eq!(source.public_key, target.public_key);
+
+    let key = proprietary_key(&source.public_key);
+    let moved_signature = signed.psbt().inputs[0].proprietary[&key].clone();
+    let mut relocated = signed.clone();
+    relocated.psbt_mut().inputs[1]
+        .proprietary
+        .insert(key, moved_signature);
+    assert!(matches!(
+        verify_p2wsh_all_unified(&relocated, &secp),
+        Err(UnifiedSigningError::InvalidUnifiedSignature { input: 1, .. })
+    ));
 }
 
 #[test]
