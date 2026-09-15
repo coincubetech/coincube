@@ -1,4 +1,5 @@
 pub mod border_wallet;
+pub mod chain;
 pub mod descriptors;
 pub mod psbt_unified;
 pub mod random;

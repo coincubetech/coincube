@@ -15,6 +15,7 @@ use std::time;
 
 use tracing::{info, warn};
 
+use crate::chain::ChainIdExt;
 use crate::dir::{BitcoindDirectory, CoincubeDirectory};
 use crate::utils::now_fallible;
 

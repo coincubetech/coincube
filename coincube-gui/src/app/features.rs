@@ -11,7 +11,7 @@
 //! matrix lives in exactly one place. See `plans/PLAN-network-feature-gating.md`.
 
 use crate::app::menu::{MarketplaceSubMenu, Menu, P2PSubMenu};
-use crate::chain::{ChainId, RuntimeSupport};
+use crate::chain::{ChainId, ChainIdExt, RuntimeSupport};
 
 /// Whether a feature is usable on the current network, plus the human
 /// reason to show when it isn't.
