@@ -61,9 +61,24 @@ impl CoincubeDirectory {
         NetworkDirectory::new(path)
     }
 
+    /// The Bitcoin-family managed-node root, `<datadir>/bitcoind`. Unchanged
+    /// for every existing install; see [`Self::bitcoind_directory_for`] for
+    /// the chain-keyed form.
     pub fn bitcoind_directory(&self) -> BitcoindDirectory {
+        self.bitcoind_directory_for(crate::node::bitcoind::NodeChainFamily::Bitcoin)
+    }
+
+    /// The managed-node root for a chain family: `bitcoind/` for Bitcoin and
+    /// its test networks, `bitcoind-blake2b/` for Bitcoin Blake2b. Binaries,
+    /// the node datadir (config, cookie, chainstate), locks and the managed-node
+    /// state ledger all live below it, so the two chains' nodes never share a
+    /// file.
+    pub fn bitcoind_directory_for(
+        &self,
+        family: crate::node::bitcoind::NodeChainFamily,
+    ) -> BitcoindDirectory {
         let mut path = self.0.clone();
-        path.push("bitcoind");
+        path.push(family.root_dir_name());
         BitcoindDirectory::new(path)
     }
 }
@@ -180,6 +195,25 @@ mod tests {
             assert_eq!(root.network_directory(network).path(), legacy.as_path());
             assert_eq!(root.network_directory(chain).path(), legacy.as_path());
         }
+    }
+
+    #[test]
+    fn managed_node_roots_are_distinct_per_chain_family_and_bitcoins_is_unchanged() {
+        use crate::node::bitcoind::NodeChainFamily;
+        let root = CoincubeDirectory::new(PathBuf::from("/tmp/coincube-test"));
+        assert_eq!(
+            root.bitcoind_directory().path(),
+            root.path().join("bitcoind")
+        );
+        assert_eq!(
+            root.bitcoind_directory_for(NodeChainFamily::Bitcoin).path(),
+            root.bitcoind_directory().path()
+        );
+        assert_eq!(
+            root.bitcoind_directory_for(NodeChainFamily::BitcoinBlake2b)
+                .path(),
+            root.path().join("bitcoind-blake2b")
+        );
     }
 
     #[test]

@@ -1384,6 +1384,12 @@ fn node_flavor_selector<'a>(
         NodeFlavor::Core => {
             "Bitcoin Core — the reference implementation, with its default relay policy."
         }
+        // The installer only ever lists `NodeChainFamily::Bitcoin` flavours;
+        // this arm exists for exhaustiveness and says so if it is ever hit.
+        NodeFlavor::KnotsBlake2b => {
+            "Bitcoin Knots (Bitcoin Blake2b) — serves the Bitcoin Blake2b chain only; \
+             not available for a Bitcoin node."
+        }
     };
     let mut col = Column::new()
         .spacing(10)
