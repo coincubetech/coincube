@@ -54,7 +54,10 @@ bounded policy (`installer::…::allocate_ports_for_new_section` →
 - an existing section keeps its ports; nothing already assigned is rewritten;
 - absent confs reserve nothing, but an other-family conf that **exists and
   cannot be read fails the allocation closed** — its ports are unknown, and
-  live socket probing would not notice a stopped node. The settings path
+  live socket probing would not notice a stopped node. "Absent" means a true
+  `NotFound` from `fs::metadata` (`InternalBitcoindConfig::from_file`); a
+  conf under a directory the process cannot traverse is a read error, never
+  absence, for own-family and other-family reads alike. The settings path
   allocates before it touches the flavour ledger, so a refusal leaves the
   ledger as it was.
 
@@ -91,7 +94,13 @@ families, and it runs before any side effect:
   before the identity marker is written, the conf migrated or a binary
   resolved;
 - `Bitcoind::maybe_start_for_chain` (the loader's entry, keyed on `ChainId`):
-  refuses a `Dormant` chain first, then any non-Bitcoin family.
+  refuses a `Dormant` chain first, then any non-Bitcoin family, then a
+  ledger-named provider that cannot serve the chain — all via the
+  side-effect-free `Bitcoind::preflight_for_chain`, which the loader also
+  runs on its own **before** it provisions Tor, rewrites the managed conf for
+  inbound (`prepare_inbound_tor` rewrites even with Tor off) or stops a
+  running node, so a mismatched persisted provider leaves every file
+  byte-identical.
 
 `select_managed_bitcoind_exe` searches only the provider's own family root, so
 a Bitcoin chain never resolves a Blake2b binary and the Blake2b provider has no

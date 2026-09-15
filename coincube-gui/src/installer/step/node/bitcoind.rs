@@ -2246,4 +2246,82 @@ mod tests {
         assert!(!bitcoin_conf.exists());
         let _ = fs::remove_dir_all(&base);
     }
+
+    // The installer inherits the same classification: a managed conf this
+    // process cannot see — its own family's or the other's — refuses
+    // `DefineConfig` instead of being taken for absent. Unix-only
+    // precondition; skipped when running privileged.
+    #[cfg(unix)]
+    #[test]
+    fn installer_refuses_an_unreadable_managed_conf_instead_of_treating_it_as_absent() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+        let section = |rpc_port: u16, p2p_port: u16| InternalBitcoindNetworkConfig {
+            rpc_port,
+            p2p_port,
+            prune: PRUNE_DEFAULT,
+            rpc_auth: None,
+        };
+        let deny =
+            |dir: &Path| fs::set_permissions(dir, fs::Permissions::from_mode(0o000)).unwrap();
+        let restore = |dir: &Path| {
+            let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o755));
+        };
+        for own_family in [false, true] {
+            let base = std::env::temp_dir().join(format!(
+                "coincube-btcb2-installer-perm-{}-{}-{:?}",
+                own_family,
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            let _ = fs::remove_dir_all(&base);
+            let datadir = CoincubeDirectory::new(base.clone());
+            let mut step = InternalBitcoindStep::new(&datadir);
+            let mut hws = crate::hw::HardwareWallets::new(datadir.clone(), Network::Bitcoin);
+            let family = if own_family {
+                bitcoind::NodeChainFamily::Bitcoin
+            } else {
+                bitcoind::NodeChainFamily::BitcoinBlake2b
+            };
+            let dir = bitcoind::internal_bitcoind_datadir_for(&datadir, family);
+            fs::create_dir_all(&dir).unwrap();
+            let mut conf = InternalBitcoindConfig::for_flavor(family.allowed_flavors()[0]);
+            conf.networks
+                .insert(Network::Bitcoin, section(52001, 52002));
+            let conf_path = bitcoind::internal_bitcoind_config_path(&dir);
+            conf.to_file(&conf_path).unwrap();
+            deny(&dir);
+            let privileged = fs::metadata(&conf_path).is_ok();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = step.update(
+                    &mut hws,
+                    Message::InternalBitcoind(message::InternalBitcoindMsg::DefineConfig),
+                );
+                step.error.clone()
+            }));
+            restore(&dir);
+            let error = result.unwrap();
+            if privileged {
+                eprintln!("skipping the permission fixture: metadata succeeds despite mode 000");
+            } else {
+                let error = error.expect("DefineConfig must refuse");
+                assert!(
+                    error.to_lowercase().contains("permission denied"),
+                    "{}",
+                    error
+                );
+                assert!(step.internal_bitcoind_config.is_none());
+                assert!(!crate::node::revalidate::ManagedNodeState::path(&datadir).exists());
+                // The own-family conf was not replaced by a fresh one, and the
+                // other-family conf is intact.
+                assert_eq!(
+                    InternalBitcoindConfig::from_file(&conf_path)
+                        .unwrap()
+                        .networks,
+                    conf.networks
+                );
+            }
+            let _ = fs::remove_dir_all(&base);
+        }
+    }
 }

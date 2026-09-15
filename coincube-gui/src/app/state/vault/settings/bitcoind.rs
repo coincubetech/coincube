@@ -3305,4 +3305,98 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
         let _ = fs::remove_dir_all(&base2);
     }
+
+    // A conf this process cannot see is not an absent conf: the settings
+    // writer refuses (own family: before the ledger is touched; other family:
+    // the reservation read) instead of starting a fresh file or reserving
+    // nothing. Unix-only precondition; skipped when running privileged.
+    #[cfg(unix)]
+    #[test]
+    fn settings_refuse_an_unreadable_managed_conf_instead_of_treating_it_as_absent() {
+        use crate::node::bitcoind::{internal_bitcoind_datadir_for, NodeChainFamily};
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+        let section = |rpc_port: u16, p2p_port: u16| InternalBitcoindNetworkConfig {
+            rpc_port,
+            p2p_port,
+            prune: PRUNE_DEFAULT,
+            rpc_auth: None,
+        };
+        let restore = |dir: &std::path::Path| {
+            let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o755));
+        };
+        let deny = |dir: &std::path::Path| {
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o000)).unwrap();
+        };
+
+        // Other family's conf under a non-traversable directory.
+        let (base, datadir) = a_temp_datadir("perm-other");
+        let other_dir = internal_bitcoind_datadir_for(&datadir, NodeChainFamily::BitcoinBlake2b);
+        fs::create_dir_all(&other_dir).unwrap();
+        let mut other = InternalBitcoindConfig::for_flavor(NodeFlavor::KnotsBlake2b);
+        other
+            .networks
+            .insert(Network::Bitcoin, section(51001, 51002));
+        let other_conf = internal_bitcoind_config_path(&other_dir);
+        other.to_file(&other_conf).unwrap();
+        deny(&other_dir);
+        let privileged = fs::metadata(&other_conf).is_ok();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            write_internal_bitcoind_config(&datadir, Network::Bitcoin, NodeFlavor::Knots, None)
+                .map(|_| ())
+        }));
+        restore(&other_dir);
+        let result = result.unwrap();
+        if privileged {
+            eprintln!("skipping the permission fixture: metadata succeeds despite mode 000");
+        } else {
+            let err = result.unwrap_err();
+            assert!(err.contains("could not be read"), "{}", err);
+            assert!(err.to_lowercase().contains("permission denied"), "{}", err);
+            assert!(!crate::node::revalidate::ManagedNodeState::path(&datadir).exists());
+            assert!(!internal_bitcoind_config_path(&internal_bitcoind_datadir(&datadir)).exists());
+            // Intact once visible again.
+            assert_eq!(
+                InternalBitcoindConfig::from_file(&other_conf)
+                    .unwrap()
+                    .networks,
+                other.networks
+            );
+        }
+        let _ = fs::remove_dir_all(&base);
+
+        // Own family's conf under a non-traversable directory: the same
+        // refusal, not a fresh config over the top of it.
+        let (base, datadir) = a_temp_datadir("perm-own");
+        let own_dir = internal_bitcoind_datadir(&datadir);
+        fs::create_dir_all(&own_dir).unwrap();
+        let mut own = InternalBitcoindConfig::for_flavor(NodeFlavor::Knots);
+        own.networks.insert(Network::Bitcoin, section(45001, 45002));
+        let own_conf = internal_bitcoind_config_path(&own_dir);
+        own.to_file(&own_conf).unwrap();
+        let ledger_before = crate::node::revalidate::ManagedNodeState::path(&datadir).exists();
+        deny(&own_dir);
+        let privileged = fs::metadata(&own_conf).is_ok();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            write_internal_bitcoind_config(&datadir, Network::Bitcoin, NodeFlavor::Core, None)
+                .map(|_| ())
+        }));
+        restore(&own_dir);
+        let result = result.unwrap();
+        if !privileged {
+            let err = result.unwrap_err();
+            assert!(err.to_lowercase().contains("permission denied"), "{}", err);
+            assert_eq!(
+                crate::node::revalidate::ManagedNodeState::path(&datadir).exists(),
+                ledger_before
+            );
+            assert_eq!(
+                InternalBitcoindConfig::from_file(&own_conf)
+                    .unwrap()
+                    .networks,
+                own.networks
+            );
+        }
+        let _ = fs::remove_dir_all(&base);
+    }
 }

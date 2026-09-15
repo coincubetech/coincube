@@ -1635,9 +1635,23 @@ impl InternalBitcoindConfig {
         })
     }
 
+    /// Read the managed `bitcoin.conf` at `path`.
+    ///
+    /// Only a file that is genuinely absent (`ErrorKind::NotFound`, including a
+    /// missing parent directory) is [`InternalBitcoindConfigError::FileNotFound`].
+    /// Any other failure to stat or read it — a parent directory this process
+    /// cannot traverse, an unreadable file — is
+    /// [`InternalBitcoindConfigError::ReadingFile`], so a caller that treats
+    /// absence as "nothing configured" (a fresh install; the other chain
+    /// family reserving no ports) never mistakes a file it merely cannot see
+    /// for one that does not exist. `Path::exists` would have collapsed the two.
     pub fn from_file(path: &PathBuf) -> Result<Self, InternalBitcoindConfigError> {
-        if !path.exists() {
-            return Err(InternalBitcoindConfigError::FileNotFound);
+        if let Err(e) = std::fs::metadata(path) {
+            return Err(if e.kind() == std::io::ErrorKind::NotFound {
+                InternalBitcoindConfigError::FileNotFound
+            } else {
+                InternalBitcoindConfigError::ReadingFile(e.to_string())
+            });
         }
         let conf_ini = ini::Ini::load_from_file(path)
             .map_err(|e| InternalBitcoindConfigError::ReadingFile(e.to_string()))?;
@@ -1928,17 +1942,38 @@ impl Bitcoind {
         config: BitcoindConfig,
         coincube_datadir: &CoincubeDirectory,
     ) -> Result<Self, StartInternalBitcoindError> {
+        Self::preflight_for_chain(chain, coincube_datadir)?;
+        Self::maybe_start(chain.bitcoin_network(), config, coincube_datadir)
+    }
+
+    /// Everything [`Self::maybe_start_for_chain`] refuses, decided without a
+    /// side effect: the chain must have a runtime, be of the Bitcoin family,
+    /// and the provider the ledger names must serve it. Returns that provider.
+    ///
+    /// For callers that have work of their own to do before the start —
+    /// the loader provisions Tor, rewrites the managed conf for inbound and
+    /// may stop a running node first — so the refusal lands before any of it,
+    /// not only at the start's own boundary (which checks again).
+    pub fn preflight_for_chain(
+        chain: crate::chain::ChainId,
+        coincube_datadir: &CoincubeDirectory,
+    ) -> Result<NodeFlavor, StartInternalBitcoindError> {
         if let crate::chain::RuntimeSupport::Dormant { reason } = chain.runtime_support() {
             return Err(StartInternalBitcoindError::ChainUnavailable(reason));
         }
-        match NodeChainFamily::from_chain(chain) {
-            NodeChainFamily::Bitcoin => {
-                Self::maybe_start(chain.bitcoin_network(), config, coincube_datadir)
-            }
-            NodeChainFamily::BitcoinBlake2b => Err(StartInternalBitcoindError::ChainUnavailable(
+        if NodeChainFamily::from_chain(chain) != NodeChainFamily::Bitcoin {
+            // Unreachable while the Blake2b family is dormant; refusing rather
+            // than panicking keeps the guard above the only thing standing
+            // between a flag and a spawn.
+            return Err(StartInternalBitcoindError::ChainUnavailable(
                 crate::chain::BTCB2_DORMANT_REASON,
-            )),
+            ));
         }
+        let configured = configured_managed_flavor(coincube_datadir).unwrap_or(NodeFlavor::Core);
+        configured
+            .check_chain(chain)
+            .map_err(StartInternalBitcoindError::ProviderChainMismatch)?;
+        Ok(configured)
     }
 
     /// Start internal bitcoind for the given network.
@@ -3872,6 +3907,107 @@ mod tests {
         assert!(cookie_path.parent().unwrap().exists());
         assert!(!internal_bitcoind_directory_for(&root, NodeChainFamily::BitcoinBlake2b).exists());
 
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Makes `dir` non-traversable for the duration and restores it on drop
+    /// (including on a panic), so a failing assertion never leaves a fixture
+    /// behind that `remove_dir_all` cannot delete.
+    #[cfg(unix)]
+    struct Untraversable(PathBuf);
+
+    #[cfg(unix)]
+    impl Untraversable {
+        fn new(dir: &Path) -> Self {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+            Self(dir.to_path_buf())
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for Untraversable {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    // A conf that is genuinely absent is `FileNotFound`; one that exists but
+    // cannot be seen is not. `Path::exists` answers "false" to both, which
+    // would let the reservation reader skip a stopped node's ports because a
+    // directory happened to be non-traversable. Both the reader and the
+    // own-family callers key on the distinction.
+    #[test]
+    fn from_file_distinguishes_absence_from_unreadable_metadata() {
+        let (base, root) = a_temp_coincube_datadir("metadata");
+        // Genuinely absent: no file, and no parent directory either.
+        let missing = root.path().join("nowhere").join("bitcoin.conf");
+        assert_eq!(
+            InternalBitcoindConfig::from_file(&missing).map(|_| ()),
+            Err(InternalBitcoindConfigError::FileNotFound)
+        );
+        let fresh = InternalBitcoindConfig::new();
+        assert_eq!(
+            reserved_managed_ports(&root, NodeChainFamily::Bitcoin, &fresh),
+            Ok(vec![])
+        );
+
+        #[cfg(unix)]
+        {
+            // An other-family conf under a directory this process may not
+            // traverse.
+            let blake2b_datadir =
+                internal_bitcoind_datadir_for(&root, NodeChainFamily::BitcoinBlake2b);
+            let blake2b_conf = internal_bitcoind_config_path(&blake2b_datadir);
+            std::fs::create_dir_all(&blake2b_datadir).unwrap();
+            let mut conf = InternalBitcoindConfig::for_flavor(NodeFlavor::KnotsBlake2b);
+            conf.networks.insert(
+                Network::Bitcoin,
+                InternalBitcoindNetworkConfig {
+                    rpc_port: 51001,
+                    p2p_port: 51002,
+                    prune: PRUNE_DEFAULT,
+                    rpc_auth: None,
+                },
+            );
+            conf.to_file(&blake2b_conf).unwrap();
+            let original = std::fs::read(&blake2b_conf).unwrap();
+            {
+                let _guard = Untraversable::new(&blake2b_datadir);
+                if std::fs::metadata(&blake2b_conf).is_ok() {
+                    // Privileged process: permissions do not apply, so the
+                    // precondition cannot be produced here.
+                    eprintln!(
+                        "skipping the permission fixture: metadata succeeds despite mode 000"
+                    );
+                } else {
+                    // The precondition the reader must not misread.
+                    assert!(!blake2b_conf.exists());
+                    let err = InternalBitcoindConfig::from_file(&blake2b_conf).unwrap_err();
+                    match &err {
+                        InternalBitcoindConfigError::ReadingFile(e) => {
+                            assert!(e.to_lowercase().contains("permission denied"), "{}", e)
+                        }
+                        other => panic!("expected ReadingFile, got {:?}", other),
+                    }
+                    // Not absence: the reader refuses rather than reserving nothing.
+                    match reserved_managed_ports(&root, NodeChainFamily::Bitcoin, &fresh) {
+                        Err(PortAllocationError::UnreadableConfig { path, error }) => {
+                            assert_eq!(path, blake2b_conf);
+                            assert!(error.to_lowercase().contains("permission denied"));
+                        }
+                        other => panic!("expected UnreadableConfig, got {:?}", other),
+                    }
+                }
+            }
+            // Permissions restored: the file is intact and readable again.
+            assert_eq!(std::fs::read(&blake2b_conf).unwrap(), original);
+            assert_eq!(
+                reserved_managed_ports(&root, NodeChainFamily::Bitcoin, &fresh),
+                Ok(vec![51001, 51002])
+            );
+        }
         let _ = std::fs::remove_dir_all(&base);
     }
 }

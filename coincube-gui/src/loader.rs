@@ -958,6 +958,12 @@ pub async fn start_bitcoind_and_daemon(
     let config = Config::from_file(Some(config_path)).map_err(Error::Config)?;
     let bitcoind = match (start_internal_bitcoind, &config.bitcoin_backend) {
         (true, Some(BitcoinBackend::Bitcoind(bitcoind_config))) => {
+            // The provider the ledger names must serve this chain *before* Tor
+            // is provisioned, the managed conf rewritten for inbound, or a
+            // running node stopped below — `maybe_start` refuses again at its
+            // own boundary, but by then those would have run.
+            Bitcoind::preflight_for_chain(chain, &coincube_datadir_path)
+                .map_err(Error::Bitcoind)?;
             // A default-ON node self-provisions the Tor binary on first launch
             // (best-effort; failure just means inbound is unavailable this run).
             crate::node::tor::ensure_tor_installed_if_wanted(&coincube_datadir_path).await;
@@ -1473,6 +1479,140 @@ mod chain_identity_tests {
             matches!(result, Err(Error::Config(_))),
             "expected a config error"
         );
+        let _ = std::fs::remove_dir_all(root.path());
+    }
+
+    // A Bitcoin-family Vault whose managed-node ledger names the Blake2b
+    // provider: the dormant-chain gate passes (the chain is Testnet4), so the
+    // refusal has to come from the provider check — and it has to come before
+    // the loader provisions Tor, rewrites the managed conf for inbound, or
+    // stops a running node, all of which sit ahead of `maybe_start`'s own
+    // guard. No node runs here: the conf is seeded with the inbound/proxy keys
+    // `prepare_inbound_tor` always strips on a non-mainnet chain, so
+    // byte-identical files after the call are the evidence that nothing in
+    // that sequence ran. The matched control below (a Knots ledger) shows the
+    // same call *does* reach and rewrite the conf when the provider is right.
+    #[tokio::test]
+    async fn a_mismatched_persisted_provider_is_refused_before_tor_config_or_stop() {
+        use crate::node::bitcoind::{
+            internal_bitcoind_config_path, internal_bitcoind_cookie_path,
+            internal_bitcoind_datadir, InternalBitcoindConfig, InternalBitcoindNetworkConfig,
+            NodeFlavor, ProviderChainMismatch, StartInternalBitcoindError, PRUNE_DEFAULT,
+        };
+        use crate::node::revalidate::ManagedNodeState;
+        use crate::node::tor::InboundTorPreference;
+        let root = temp_root("provider");
+        let chain = ChainId::Testnet4;
+        let wallet = wallet();
+
+        // The managed Bitcoin node's files: a conf carrying inbound/proxy
+        // state, a ledger naming the Blake2b provider, and Tor switched off.
+        let bitcoind_datadir = internal_bitcoind_datadir(&root);
+        std::fs::create_dir_all(&bitcoind_datadir).unwrap();
+        let conf_path = internal_bitcoind_config_path(&bitcoind_datadir);
+        let mut conf = InternalBitcoindConfig::for_flavor(NodeFlavor::Knots);
+        conf.networks.insert(
+            bitcoin::Network::Testnet4,
+            InternalBitcoindNetworkConfig {
+                rpc_port: 46001,
+                p2p_port: 46002,
+                prune: PRUNE_DEFAULT,
+                rpc_auth: None,
+            },
+        );
+        conf.inbound_tor = true;
+        conf.outbound_via_tor = true;
+        conf.tor_control_port = Some(9051);
+        conf.tor_socks_port = Some(9050);
+        conf.to_file(&conf_path).unwrap();
+        let conf_bytes = std::fs::read(&conf_path).unwrap();
+        assert!(String::from_utf8_lossy(&conf_bytes).contains("listenonion=1"));
+        ManagedNodeState {
+            configured_flavor: Some(NodeFlavor::KnotsBlake2b),
+            ..Default::default()
+        }
+        .save(&root)
+        .unwrap();
+        let ledger_bytes = std::fs::read(ManagedNodeState::path(&root)).unwrap();
+        InboundTorPreference {
+            enabled: false,
+            ..Default::default()
+        }
+        .save(&root)
+        .unwrap();
+
+        // The Vault's daemon.toml on that node.
+        let cookie = internal_bitcoind_cookie_path(&bitcoind_datadir, &bitcoin::Network::Testnet4);
+        let wallet_dir = root
+            .network_directory(chain)
+            .coincubed_data_directory(&wallet.wallet_id())
+            .path()
+            .to_path_buf();
+        std::fs::create_dir_all(&wallet_dir).unwrap();
+        let daemon_toml = wallet_dir.join("daemon.toml");
+        std::fs::write(
+            &daemon_toml,
+            format!(
+                "data_dir = {:?}\nlog_level = \"TRACE\"\nmain_descriptor = \"{}\"\n\n\
+                 [bitcoin_config]\nnetwork = \"testnet4\"\npoll_interval_secs = 18\n\n\
+                 [bitcoind_config]\ncookie_path = {:?}\naddr = \"127.0.0.1:1\"\n",
+                root.path().display().to_string(),
+                "wsh(andor(pk([aabbccdd]tpubDEN9WSToTyy9ZQfaYqSKfmVqmq1VVLNtYfj3Vkqh67et57eJ5sTKZQBkHqSwPUsoSskJeaYnPttHe2VrkCsKA27kUaN9SDc5zhqeLzKa1rr/<0;1>/*),older(10000),pk([aabbccdd]tpubD8LYfn6njiA2inCoxwM7EuN3cuLVcaHAwLYeups13dpevd3nHLRdK9NdQksWXrhLQVxcUZRpnp5CkJ1FhE61WRAsHxDNAkvGkoQkAeWDYjV/<0;1>/*)))#dw4ulnrs",
+                cookie.display().to_string(),
+            ),
+        )
+        .unwrap();
+        let daemon_toml_bytes = std::fs::read(&daemon_toml).unwrap();
+        let before = tree(root.path());
+
+        let result = start_bitcoind_and_daemon(root.clone(), true, chain, wallet.clone()).await;
+        match result {
+            Err(Error::Bitcoind(StartInternalBitcoindError::ProviderChainMismatch(e))) => {
+                assert_eq!(
+                    e,
+                    ProviderChainMismatch {
+                        flavor: NodeFlavor::KnotsBlake2b,
+                        chain,
+                    }
+                )
+            }
+            Err(other) => panic!("wrong refusal: {}", other),
+            Ok(_) => panic!("started for a mismatched provider"),
+        }
+        // Byte-identical conf (still carrying the inbound/proxy keys), ledger
+        // and daemon.toml; no Tor state, no identity marker, no cookie
+        // directory, nothing at all added to the tree.
+        assert_eq!(std::fs::read(&conf_path).unwrap(), conf_bytes);
+        assert_eq!(
+            std::fs::read(ManagedNodeState::path(&root)).unwrap(),
+            ledger_bytes
+        );
+        assert_eq!(std::fs::read(&daemon_toml).unwrap(), daemon_toml_bytes);
+        assert_eq!(tree(root.path()), before);
+
+        // Matched control: with a provider of this chain's family the same
+        // call gets past the guard, `prepare_inbound_tor` rewrites the conf
+        // outbound-only (the keys above are gone), and the start then fails on
+        // the absent binary — the ordinary Bitcoin path this build ships.
+        ManagedNodeState {
+            configured_flavor: Some(NodeFlavor::Knots),
+            ..Default::default()
+        }
+        .save(&root)
+        .unwrap();
+        let result = start_bitcoind_and_daemon(root.clone(), true, chain, wallet).await;
+        assert!(
+            matches!(
+                result,
+                Err(Error::Bitcoind(
+                    StartInternalBitcoindError::ExecutableNotFound
+                ))
+            ),
+            "expected ExecutableNotFound"
+        );
+        let rewritten = std::fs::read(&conf_path).unwrap();
+        assert_ne!(rewritten, conf_bytes);
+        assert!(!String::from_utf8_lossy(&rewritten).contains("listenonion"));
         let _ = std::fs::remove_dir_all(root.path());
     }
 }
