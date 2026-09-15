@@ -561,14 +561,6 @@ fn bitcoind_default_address(network: &Network) -> String {
 /// Get available port that is valid for use by internal bitcoind.
 // Modified from https://github.com/RCasatta/bitcoind/blob/f047740d7d0af935ff7360cf77429c5f294cfd59/src/lib.rs#L435
 pub fn get_available_port() -> Result<u16, Error> {
-    get_available_port_excluding(&[])
-}
-
-/// [`get_available_port`], additionally refusing any port in `reserved` — the
-/// ports another chain family's managed node has already been given (see
-/// [`bitcoind::ports_reserved_by_other_families`]), which may not be bound at
-/// the moment of allocation and so would otherwise be handed out twice.
-pub fn get_available_port_excluding(reserved: &[u16]) -> Result<u16, Error> {
     // Perform multiple attempts to get a valid port.
     for _ in 0..10 {
         // Using 0 as port lets the system assign a port available.
@@ -578,13 +570,29 @@ pub fn get_available_port_excluding(reserved: &[u16]) -> Result<u16, Error> {
             .local_addr()
             .map(|s| s.port())
             .map_err(|e| Error::CannotGetAvailablePort(e.to_string()))?;
-        if port_is_valid(&port) && !reserved.contains(&port) {
+        if port_is_valid(&port) {
             return Ok(port);
         }
     }
     Err(Error::CannotGetAvailablePort(
         "Exhausted attempts".to_string(),
     ))
+}
+
+/// RPC and P2P ports for a *new* network section of the managed `bitcoin.conf`
+/// `conf` (already parsed by the caller; a section that exists keeps its
+/// ports and never comes here). One bounded policy for the installer and the
+/// settings node-setup path: candidates come from the OS, and none may be a
+/// port any other managed-node section already holds — this conf's other
+/// networks, or the other chain family's file — nor a bitcoind default. Refuses
+/// when the other family's conf exists but cannot be read.
+pub fn allocate_ports_for_new_section(
+    coincube_datadir: &CoincubeDirectory,
+    family: bitcoind::NodeChainFamily,
+    conf: &InternalBitcoindConfig,
+) -> Result<(u16, u16), bitcoind::PortAllocationError> {
+    let reserved = bitcoind::reserved_managed_ports(coincube_datadir, family, conf)?;
+    bitcoind::allocate_managed_ports(&reserved, get_available_port)
 }
 
 /// Checks if port is valid for use by internal bitcoind.
@@ -1226,34 +1234,17 @@ impl Step for InternalBitcoindStep {
                     let (rpc_port, p2p_port) = if let Some(network_conf) = network_conf {
                         (network_conf.rpc_port, network_conf.p2p_port)
                     } else {
-                        // Never a port the other chain family's node already
-                        // holds, bound right now or not.
-                        let reserved = bitcoind::ports_reserved_by_other_families(
+                        // Never a port another network section or the other
+                        // chain family's node already holds, bound right now
+                        // or not; refuse outright if that cannot be known.
+                        match allocate_ports_for_new_section(
                             &self.coincube_datadir,
                             self.flavor.chain_family(),
-                        );
-                        match (
-                            get_available_port_excluding(&reserved),
-                            get_available_port_excluding(&reserved),
+                            &conf,
                         ) {
-                            (Ok(rpc_port), Ok(p2p_port)) => {
-                                // In case ports are the same, user will need to click button again for another attempt.
-                                if rpc_port == p2p_port {
-                                    self.error = Some(
-                                        "Could not get distinct ports. Please try again."
-                                            .to_string(),
-                                    );
-                                    return Task::none();
-                                }
-                                (rpc_port, p2p_port)
-                            }
-                            (Ok(_), Err(e)) | (Err(e), Ok(_)) => {
-                                self.error = Some(format!("Could not get available port: {}.", e));
-                                return Task::none();
-                            }
-                            (Err(e1), Err(e2)) => {
-                                self.error =
-                                    Some(format!("Could not get available ports: {}; {}.", e1, e2));
+                            Ok(ports) => ports,
+                            Err(e) => {
+                                self.error = Some(e.to_string());
                                 return Task::none();
                             }
                         }
@@ -2162,28 +2153,97 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
     }
 
-    // Port allocation steers around the other family's recorded ports even
-    // when nothing is listening on them, so a Bitcoin node and a Bitcoin
-    // Blake2b node on one machine cannot be handed the same RPC or P2P port.
+    // The installer allocates a new section's ports through the shared policy:
+    // the OS supplies candidates, and a port the other family's conf records
+    // is refused even though nothing is bound to it; an unreadable
+    // other-family conf refuses the allocation altogether; and a section that
+    // already exists keeps its ports untouched.
     #[test]
-    fn port_allocation_avoids_the_other_familys_ports() {
-        // A reserved port is never handed out, and what is handed out is still
-        // a valid managed-node port. The reservation is a port the OS is known
-        // to offer (it just did), so the exclusion is what keeps it out.
-        for _ in 0..5 {
-            let reserved = [get_available_port().unwrap()];
-            for _ in 0..20 {
-                let got = get_available_port_excluding(&reserved).unwrap();
-                assert!(!reserved.contains(&got));
-                assert!(port_is_valid(&got));
+    fn installer_port_allocation_follows_the_shared_policy() {
+        use std::fs;
+        let base = std::env::temp_dir().join(format!(
+            "coincube-btcb2-installer-ports-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        let datadir = CoincubeDirectory::new(base.clone());
+        let section = |rpc_port: u16, p2p_port: u16| InternalBitcoindNetworkConfig {
+            rpc_port,
+            p2p_port,
+            prune: PRUNE_DEFAULT,
+            rpc_auth: None,
+        };
+        // Record ports for the other family that nothing is listening on:
+        // exactly the case live probing cannot see.
+        let held = get_available_port().unwrap();
+        let held2 = get_available_port().unwrap();
+        let mut blake2b = InternalBitcoindConfig::for_flavor(NodeFlavor::KnotsBlake2b);
+        blake2b
+            .networks
+            .insert(Network::Bitcoin, section(held, held2));
+        let blake2b_conf =
+            bitcoind::internal_bitcoind_config_path(&bitcoind::internal_bitcoind_datadir_for(
+                &datadir,
+                bitcoind::NodeChainFamily::BitcoinBlake2b,
+            ));
+        fs::create_dir_all(blake2b_conf.parent().unwrap()).unwrap();
+        blake2b.to_file(&blake2b_conf).unwrap();
+
+        // Whatever the OS offers, the recorded ports are never returned.
+        let mut bitcoin = InternalBitcoindConfig::for_flavor(NodeFlavor::Knots);
+        bitcoin
+            .networks
+            .insert(Network::Testnet4, section(held2.wrapping_add(7), 40999));
+        for _ in 0..20 {
+            let (rpc, p2p) = allocate_ports_for_new_section(
+                &datadir,
+                bitcoind::NodeChainFamily::Bitcoin,
+                &bitcoin,
+            )
+            .unwrap();
+            assert_ne!(rpc, p2p);
+            for p in [rpc, p2p].iter() {
+                assert!(![held, held2, held2.wrapping_add(7), 40999].contains(p));
+                assert!(port_is_valid(p));
             }
         }
-        // With no other family configured there is nothing to steer around,
-        // which is every Bitcoin install this build performs.
-        assert!(bitcoind::ports_reserved_by_other_families(
-            &CoincubeDirectory::new(std::env::temp_dir().join("coincube-btcb2-no-such-dir")),
-            bitcoind::NodeChainFamily::Bitcoin
-        )
-        .is_empty());
+        // The installer step itself: an existing section is reused as-is and
+        // nothing about the Blake2b file changes.
+        let mut step = InternalBitcoindStep::new(&datadir);
+        let bitcoin_conf = bitcoind::internal_bitcoind_config_path(&step.bitcoind_datadir);
+        fs::create_dir_all(bitcoin_conf.parent().unwrap()).unwrap();
+        bitcoin
+            .networks
+            .insert(Network::Bitcoin, section(41001, 41002));
+        bitcoin.to_file(&bitcoin_conf).unwrap();
+        let conf = define_config(&mut step);
+        let main = conf.networks.get(&Network::Bitcoin).unwrap();
+        assert_eq!((main.rpc_port, main.p2p_port), (41001, 41002));
+        assert_eq!(
+            InternalBitcoindConfig::from_file(&blake2b_conf)
+                .unwrap()
+                .networks,
+            blake2b.networks
+        );
+
+        // An unreadable other-family conf: the step refuses to write a config.
+        fs::write(&blake2b_conf, "[main]\nrpcport=notanumber\nport=1\n").unwrap();
+        let mut step = InternalBitcoindStep::new(&datadir);
+        fs::remove_file(&bitcoin_conf).unwrap();
+        let mut hws = crate::hw::HardwareWallets::new(datadir.clone(), Network::Bitcoin);
+        let _ = step.update(
+            &mut hws,
+            Message::InternalBitcoind(message::InternalBitcoindMsg::DefineConfig),
+        );
+        assert!(
+            step.error
+                .as_deref()
+                .is_some_and(|e| e.contains("could not be read")),
+            "{:?}",
+            step.error
+        );
+        assert!(!bitcoin_conf.exists());
+        let _ = fs::remove_dir_all(&base);
     }
 }

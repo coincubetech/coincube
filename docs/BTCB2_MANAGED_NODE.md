@@ -5,8 +5,9 @@ provider, `NodeFlavor::KnotsBlake2b`, pinned to Bitcoin Knots
 `29.4.1.knots20260508` — the BLAKE2b proof-of-work hardfork build. It is
 **dormant**: every `ChainId` it serves reports `RuntimeSupport::Dormant`, so no
 installer, loader or settings path can download, configure or start it. What
-this slice ships is the isolation that makes activating it later a flag flip
-rather than a rewrite.
+this slice ships is the isolation — directories, ports, provider/chain
+refusals, planner scope — that a later activation builds on. Activation is
+**not** a flag flip: the remaining gates are listed at the end of this note.
 
 ## What is isolated, and where
 
@@ -36,13 +37,35 @@ Upstream gives the Blake2b build **the same default ports as Bitcoin**
 (`src/kernel/chainparams.cpp`: `nDefaultPort = 8333` mainnet, `48333`
 testnet4; `src/chainparamsbase.cpp`: RPC `8332` / `48332`), so "distinct
 ports" cannot come from chain parameters. COINCUBE never uses the defaults for
-a managed node anyway: each network section gets OS-allocated ports at setup
-(`get_available_port`). The isolation added here is that allocation for one
-family **excludes every port recorded in the other family's `bitcoin.conf`**
-(`ports_reserved_by_other_families` → `get_available_port_excluding`), whether
-or not that node is running at the moment. A Bitcoin node and a Blake2b node,
-each with a mainnet and a testnet4 section, therefore never share an RPC or P2P
-port, and Bitcoin's existing port choices are never rewritten.
+a managed node anyway: each network section gets OS-allocated ports at setup.
+
+Both places that create a network section — the installer's `DefineConfig`
+and the settings path's `write_internal_bitcoind_config` — now go through one
+bounded policy (`installer::…::allocate_ports_for_new_section` →
+`node::bitcoind::reserved_managed_ports` + `allocate_managed_ports`):
+
+- candidates come from the OS (`get_available_port`); the policy itself is
+  deterministic and tested with an injected candidate sequence;
+- a candidate is refused if it is a bitcoind default, a repeat, or **already
+  recorded** by any other managed-node section: this conf's other networks
+  (e.g. testnet4 when allocating mainnet) or any section of the other chain
+  family's `bitcoin.conf` — bound right now or not, since a stopped node still
+  owns its ports;
+- an existing section keeps its ports; nothing already assigned is rewritten;
+- absent confs reserve nothing, but an other-family conf that **exists and
+  cannot be read fails the allocation closed** — its ports are unknown, and
+  live socket probing would not notice a stopped node. The settings path
+  allocates before it touches the flavour ledger, so a refusal leaves the
+  ledger as it was.
+
+What the policy does **not** provide is atomicity across concurrent setups:
+two allocations running at the same moment can both pass the reservation
+check before either persists its conf. Today a machine runs one managed
+Bitcoin node; serialising allocate-and-persist across chain families (a lock
+held from reservation through `to_file`) is a prerequisite for activating the
+second family — see the gates below. The disjoint-port test fixtures in this
+slice establish file separation and reservation reading, not concurrent
+allocation.
 
 ### Fail-closed guards
 
@@ -51,6 +74,19 @@ families, and it runs before any side effect:
 
 - installer step: on `SelectFlavor`, `DefineConfig` (before the conf or ledger
   is written), `Download` (before the request) and `Install` (before unpack);
+- Vault settings (`app/state/vault/settings/bitcoind.rs`,
+  `provider_serves_network`): the managed-flavour pick and retry
+  (`start_internal_node_setup`, before the download or binary lookup), the
+  completed-download handler (before the manifest fetch and install), the
+  node-card flavour switch (never armed, and refused on confirm),
+  `RestartNodeToApply` and `NodeResourceApply` (before the node is stopped,
+  Tor touched or the conf rewritten) — and, independently, the helpers behind
+  them: `ensure_tor_and_start_managed` (before Tor is provisioned),
+  `configure_and_start_internal_bitcoind` (before the archive is unpacked)
+  and `write_internal_bitcoind_config` (before the conf, ledger or identity
+  marker is written). The pickers list Core/Knots only; these guards pin the
+  boundary for a provider that reaches the pending setup or the ledger by any
+  other route;
 - `Bitcoind::maybe_start` (every start path: loader, installer, settings):
   before the identity marker is written, the conf migrated or a binary
   resolved;
@@ -146,31 +182,54 @@ testnet4 `CTestNet4Params`, regtest `CRegTestParams`).
 ### Regtest
 
 Regtest schedules nothing unless asked (`src/chainparamsbase.cpp` argument
-help, `src/kernel/chainparams.cpp` regtest options):
+help; `src/chainparams.cpp` `ReadRegTestArgs`; `src/kernel/chainparams.cpp`
+`CRegTestParams`, lines 633–665 at the tag). The two settings are independent
+in what they emit:
 
-- `-testactivationheight=blake2b@<height>` sets `Blake2bHeight`;
-- `-rdtsexpiry=<time>` sets `RdtsExpiryTime` and **requires**
-  `-testactivationheight=blake2b@<height>` — RDTS activates at the BLAKE2b
-  height, only the expiry is separately settable;
-- `-blake2b_headline=<headline>` overrides the consensus-critical headline,
-  also requiring the activation height.
+| Flags | `Blake2bHeight` | `RdtsExpiryTime` | `getdeploymentinfo` |
+|---|---|---|---|
+| none | unset (`INT_MAX`) | unset (`INT64_MIN`) | neither `blake2b` nor `deployments.reduced_data` |
+| `-testactivationheight=blake2b@N` only | `N` | unset | top-level `blake2b: {height: N, active}` **is emitted** (`blockchain.cpp:2029`, gated on height alone); `reduced_data` **absent** (`RdtsFlagDayDescPushBack`, `blockchain.cpp:1951–1952`, needs height *and* expiry) |
+| `-testactivationheight=blake2b@N -rdtsexpiry=T` | `N` | `T` | both: `blake2b` and `reduced_data {type: flagday, height: N, expiry_time: T, active}` |
+| `-rdtsexpiry=T` without the height | — | — | **startup error**: `-rdtsexpiry requires -testactivationheight=blake2b@<height>` (`src/chainparams.cpp:84`); `T <= 1296688602` (regtest genesis time) is likewise rejected (`:91`) |
 
-Without both flags a regtest node reports neither `blake2b` nor
-`reduced_data`, which is what a chain-health probe must treat as "unscheduled",
-not as "failed".
+`-blake2b_headline=<headline>` overrides the consensus-critical headline and
+also requires the activation height (`src/chainparams.cpp:98`). RDTS activates
+at the BLAKE2b height; only its expiry is separately settable
+(`kernel/chainparams.cpp:660–665`).
 
-### What `coincubed` will need before the provider can be un-dormant
+A chain-health probe must therefore read the two objects independently: a
+node with `blake2b` but no `reduced_data` is a scheduled hardfork with RDTS
+unscheduled — not a failed deployment, and not "unscheduled" either.
 
-1. A chain-health reader keyed on the top-level `blake2b.{height,active}`
-   object rather than on `deployments.reduced_data`; the existing
-   `deployment_status("reduced_data")` probe is a Bitcoin-chain RDTS repair
-   input and does not describe the hardfork.
-2. A reading of `reduced_data.active` that understands expiry: `false` after
-   `expiry_time` is the designed end of RDTS enforcement, not a failed
-   deployment.
-3. Any live-node test to run on a **synthetic, temporary regtest datadir** with
-   `-testactivationheight=blake2b@N -rdtsexpiry=T`; nothing in this slice
-   starts a node, and none of its tests do.
+## Gates before the provider can be un-dormant
+
+Flipping `RuntimeSupport` alone would not produce a working Blake2b node. The
+integration work that remains, in the order it is needed:
+
+1. **coincubed chain health** — a reader keyed on the top-level
+   `blake2b.{height,active}` object rather than on `deployments.reduced_data`;
+   the existing `deployment_status("reduced_data")` probe is a Bitcoin-chain
+   RDTS repair input and does not describe the hardfork. And a reading of
+   `reduced_data.active` that understands expiry: `false` after `expiry_time`
+   is the designed end of RDTS enforcement, not a failed deployment (today's
+   `has_failed()` is always `false` on this build, so nothing would even
+   notice).
+2. **Concurrent port allocation** — serialise allocate-and-persist across
+   chain families (see *Ports*); the bounded policy in this slice reserves
+   recorded ports but is not a lock.
+3. **A Blake2b start path** — `Bitcoind::maybe_start` is the Bitcoin family's
+   (its datadir, ledger, lock and `-chain=` argument are Bitcoin's);
+   `maybe_start_for_chain` refuses the Blake2b family outright. A start path
+   that spawns from `bitcoind-blake2b/`, writes that family's ledger and lock,
+   and never runs the RDTS reconciliation is not written.
+4. **Product surfaces** — an installer/settings picker that offers the
+   provider only for a Blake2b Vault (`ChainId`-keyed, never the
+   `bitcoin::Network`-keyed screens that exist today), with the settings
+   screen itself carrying the Vault's `ChainId`.
+5. **Live verification** — a node test on a **synthetic, temporary regtest
+   datadir** with `-testactivationheight=blake2b@N -rdtsexpiry=T`; nothing in
+   this slice starts a node, and none of its tests do.
 
 Until those exist the provider stays `Dormant`, and every entry point above
 refuses it before touching disk.

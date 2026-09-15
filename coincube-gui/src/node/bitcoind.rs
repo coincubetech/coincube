@@ -722,21 +722,64 @@ pub fn internal_bitcoind_cookie_path(bitcoind_datadir: &Path, network: &Network)
     cookie_path
 }
 
-/// Ports already bound by the managed nodes of every *other* chain family, read
-/// from their `bitcoin.conf`s. A new node's ports are allocated around these,
-/// so a Bitcoin node and a Bitcoin Blake2b node on the same machine — each with
-/// a mainnet and a testnet4 section — never share an RPC or P2P port. Upstream
-/// is no help here: the Blake2b build keeps Bitcoin's default ports, which is
-/// also why every managed node runs on OS-allocated ports rather than defaults.
+/// Why a new managed-node network section could not be given ports.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PortAllocationError {
+    /// A managed `bitcoin.conf` exists but could not be read, so the ports it
+    /// holds are unknown. Allocation refuses rather than guess: a stopped node
+    /// whose config we cannot read is exactly the one live socket probing would
+    /// not notice.
+    UnreadableConfig { path: PathBuf, error: String },
+    /// The candidate source (the OS, in production) failed.
+    Source(String),
+    /// Every candidate offered was reserved, a bitcoind default, or a duplicate.
+    Exhausted,
+}
+
+impl fmt::Display for PortAllocationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnreadableConfig { path, error } => write!(
+                f,
+                "cannot allocate node ports: the managed node config at {} could not be read ({})",
+                path.display(),
+                error
+            ),
+            Self::Source(e) => write!(f, "Could not get available port: {}.", e),
+            Self::Exhausted => write!(f, "Could not get distinct ports. Please try again."),
+        }
+    }
+}
+
+impl std::error::Error for PortAllocationError {}
+
+/// How many candidates [`allocate_managed_ports`] will consider before giving up.
+const PORT_ALLOCATION_ATTEMPTS: usize = 20;
+
+/// Every port a new managed-node network section must be allocated around:
+/// the other network sections of `existing` (the conf being edited, already
+/// parsed by the caller), plus every section of every *other* chain family's
+/// `bitcoin.conf` under this COINCUBE datadir. That is what keeps a Bitcoin
+/// node and a Bitcoin Blake2b node — each with a mainnet and a testnet4
+/// section — from ever sharing an RPC or P2P port. Upstream is no help here:
+/// the Blake2b build keeps Bitcoin's default ports, which is also why every
+/// managed node runs on OS-allocated ports rather than defaults.
 ///
-/// A family with no conf reserves nothing. One whose conf cannot be parsed is
-/// logged and skipped: its ports are unknowable, and the allocator still binds
-/// each candidate port before offering it, which catches a live collision.
-pub fn ports_reserved_by_other_families(
+/// Fail-closed: a family with no conf reserves nothing, but one whose conf
+/// exists and cannot be parsed is an error, because its ports are then unknown
+/// and it may simply be stopped. (The caller has already refused on its own
+/// family's conf being unreadable, for the same reason.)
+///
+/// This is a bounded policy, not a lock: two allocations running at the same
+/// moment can still both pass this check before either persists. Serialising
+/// allocate-and-persist across concurrent setups is a prerequisite for
+/// activating a second family, recorded in `docs/BTCB2_MANAGED_NODE.md`.
+pub fn reserved_managed_ports(
     coincube_datadir: &CoincubeDirectory,
     family: NodeChainFamily,
-) -> Vec<u16> {
-    let mut reserved = Vec::new();
+    existing: &InternalBitcoindConfig,
+) -> Result<Vec<u16>, PortAllocationError> {
+    let mut reserved = existing.ports_in_use();
     for other in NodeChainFamily::ALL.iter().copied() {
         if other == family {
             continue;
@@ -746,15 +789,45 @@ pub fn ports_reserved_by_other_families(
         match InternalBitcoindConfig::from_file(&conf_path) {
             Ok(conf) => reserved.extend(conf.ports_in_use()),
             Err(InternalBitcoindConfigError::FileNotFound) => {}
-            Err(e) => warn!(
-                "could not read the {} managed node's ports from {}: {}",
-                other.root_dir_name(),
-                conf_path.display(),
-                e
-            ),
+            Err(e) => {
+                return Err(PortAllocationError::UnreadableConfig {
+                    path: conf_path,
+                    error: e.to_string(),
+                })
+            }
         }
     }
-    reserved
+    Ok(reserved)
+}
+
+/// Pick two distinct ports (RPC, P2P) for a new managed-node network section.
+///
+/// Candidates come from `next_candidate` — the OS in production
+/// (`installer::step::node::bitcoind::get_available_port`), a fixed sequence in
+/// tests — and one is rejected if it is in `reserved` (see
+/// [`reserved_managed_ports`]), is a bitcoind default port, or repeats the port
+/// already chosen. Gives up after [`PORT_ALLOCATION_ATTEMPTS`] candidates so a
+/// source that keeps offering the same port cannot spin forever. The single
+/// policy behind both the installer and the settings node-setup paths.
+pub fn allocate_managed_ports<E: fmt::Display>(
+    reserved: &[u16],
+    mut next_candidate: impl FnMut() -> Result<u16, E>,
+) -> Result<(u16, u16), PortAllocationError> {
+    let mut chosen: Vec<u16> = Vec::with_capacity(2);
+    for _ in 0..PORT_ALLOCATION_ATTEMPTS {
+        let port = next_candidate().map_err(|e| PortAllocationError::Source(e.to_string()))?;
+        if reserved.contains(&port)
+            || crate::installer::step::node::bitcoind::BITCOIND_DEFAULT_PORTS.contains(&port)
+            || chosen.contains(&port)
+        {
+            continue;
+        }
+        chosen.push(port);
+        if chosen.len() == 2 {
+            return Ok((chosen[0], chosen[1]));
+        }
+    }
+    Err(PortAllocationError::Exhausted)
 }
 
 /// Give the managed node's datadir an identity, unless it already has one.
@@ -3475,10 +3548,12 @@ mod tests {
     }
 
     // A Bitcoin Blake2b config is an ordinary managed-node config: it never
-    // emits `consensusrules`, and its ports are read back so the other family
-    // allocates around them (and vice versa). Ports here stand in for the
-    // OS-allocated ones a real install gets; distinctness between the two
-    // families is what the reader is for, since upstream's defaults collide.
+    // emits `consensusrules`, and each family's file is separate from and
+    // invisible to the other's. The ports here are hand-written stand-ins for
+    // OS-allocated ones; what this test establishes is *file separation* and
+    // that the reservation reader sees the other family's sections — not that
+    // two allocations running at once cannot collide (see
+    // `port_allocation_policy_is_bounded_and_fails_closed` and the doc).
     #[test]
     fn concurrent_bitcoin_and_blake2b_configs_keep_ports_and_files_apart() {
         let (base, root) = a_temp_coincube_datadir("ports");
@@ -3488,10 +3563,15 @@ mod tests {
             prune: PRUNE_DEFAULT,
             rpc_auth: None,
         };
+        let fresh = InternalBitcoindConfig::new();
         // Nothing configured yet: nothing reserved either way.
-        assert!(ports_reserved_by_other_families(&root, NodeChainFamily::Bitcoin).is_empty());
-        assert!(
-            ports_reserved_by_other_families(&root, NodeChainFamily::BitcoinBlake2b).is_empty()
+        assert_eq!(
+            reserved_managed_ports(&root, NodeChainFamily::Bitcoin, &fresh),
+            Ok(vec![])
+        );
+        assert_eq!(
+            reserved_managed_ports(&root, NodeChainFamily::BitcoinBlake2b, &fresh),
+            Ok(vec![])
         );
 
         let mut bitcoin = InternalBitcoindConfig::for_flavor(NodeFlavor::Knots);
@@ -3539,17 +3619,28 @@ mod tests {
             .get("consensusrules")
             .is_none());
 
-        // Each family sees exactly the other's ports, on both networks.
+        // Each family sees exactly the other's ports, on both networks (a
+        // fresh conf of its own contributes nothing).
         let mut reserved_for_blake2b =
-            ports_reserved_by_other_families(&root, NodeChainFamily::BitcoinBlake2b);
+            reserved_managed_ports(&root, NodeChainFamily::BitcoinBlake2b, &fresh).unwrap();
         reserved_for_blake2b.sort_unstable();
         assert_eq!(reserved_for_blake2b, vec![34067, 42355, 43345, 45175]);
         let mut reserved_for_bitcoin =
-            ports_reserved_by_other_families(&root, NodeChainFamily::Bitcoin);
+            reserved_managed_ports(&root, NodeChainFamily::Bitcoin, &fresh).unwrap();
         reserved_for_bitcoin.sort_unstable();
         assert_eq!(reserved_for_bitcoin, vec![51001, 51002, 51003, 51004]);
-        // And the two sets are disjoint, so all four (family, network) endpoints
-        // are distinct.
+        // The conf being edited reserves its own other sections too: adding a
+        // third network to the Bitcoin file must avoid its mainnet and
+        // testnet4 ports as well as everything Blake2b holds.
+        let mut reserved_for_new_bitcoin_section =
+            reserved_managed_ports(&root, NodeChainFamily::Bitcoin, &bitcoin).unwrap();
+        reserved_for_new_bitcoin_section.sort_unstable();
+        assert_eq!(
+            reserved_for_new_bitcoin_section,
+            vec![34067, 42355, 43345, 45175, 51001, 51002, 51003, 51004]
+        );
+        // And the two files' sets are disjoint, so all four (family, network)
+        // endpoints are distinct.
         assert!(reserved_for_bitcoin
             .iter()
             .all(|p| !reserved_for_blake2b.contains(p)));
@@ -3560,6 +3651,86 @@ mod tests {
         let reread = InternalBitcoindConfig::from_file(&blake2b_conf).unwrap();
         assert_eq!(reread.networks, blake2b.networks);
 
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // The one allocation policy behind the installer and the settings path,
+    // driven by a deterministic candidate source: a recorded-but-unbound
+    // other-family port is refused, so are this file's other sections,
+    // bitcoind defaults and repeats; the first two acceptable candidates are
+    // taken in order; a source that never offers two acceptable ports is
+    // bounded; and an unreadable other-family conf refuses allocation
+    // outright rather than guessing. What it does *not* claim: that two
+    // allocations racing each other cannot both pass — that synchronisation
+    // is a pre-activation prerequisite, not part of this dormant slice.
+    #[test]
+    fn port_allocation_policy_is_bounded_and_fails_closed() {
+        use std::cell::Cell;
+        let source = |seq: &'static [u16]| {
+            let i = Cell::new(0usize);
+            move || -> Result<u16, String> {
+                let n = i.get();
+                i.set(n + 1);
+                seq.get(n).copied().ok_or_else(|| "source dry".to_string())
+            }
+        };
+        // Reserved (recorded elsewhere, not necessarily bound), a bitcoind
+        // default, and a repeat are all skipped; the next two distinct
+        // acceptable candidates win, in order.
+        assert_eq!(
+            allocate_managed_ports(
+                &[43345, 51001],
+                source(&[43345, 8332, 51001, 40001, 40001, 48333, 40002, 40003])
+            ),
+            Ok((40001, 40002))
+        );
+        // Nothing reserved: first two distinct non-default candidates.
+        assert_eq!(
+            allocate_managed_ports(&[], source(&[40010, 40010, 40011])),
+            Ok((40010, 40011))
+        );
+        // A source that only ever repeats one port is bounded, not looped.
+        let stuck = || -> Result<u16, String> { Ok(40020) };
+        assert_eq!(
+            allocate_managed_ports(&[], stuck),
+            Err(PortAllocationError::Exhausted)
+        );
+        // A source failure is surfaced, not retried past the sequence.
+        assert_eq!(
+            allocate_managed_ports(&[], source(&[40030])),
+            Err(PortAllocationError::Source("source dry".to_string()))
+        );
+
+        // Fail closed: an other-family conf that exists but cannot be parsed
+        // makes the reservation set unknowable, so allocation is refused.
+        let (base, root) = a_temp_coincube_datadir("ports-unreadable");
+        let blake2b_conf = internal_bitcoind_config_path(&internal_bitcoind_datadir_for(
+            &root,
+            NodeChainFamily::BitcoinBlake2b,
+        ));
+        std::fs::create_dir_all(blake2b_conf.parent().unwrap()).unwrap();
+        std::fs::write(&blake2b_conf, "[main]\nrpcport=notanumber\nport=1\n").unwrap();
+        match reserved_managed_ports(
+            &root,
+            NodeChainFamily::Bitcoin,
+            &InternalBitcoindConfig::new(),
+        ) {
+            Err(PortAllocationError::UnreadableConfig { path, .. }) => {
+                assert_eq!(path, blake2b_conf)
+            }
+            other => panic!("expected UnreadableConfig, got {:?}", other),
+        }
+        // The Blake2b family, editing its own (unreadable-to-others) file, is
+        // not blocked by it: only *other* families' confs are read here, and
+        // its own is the caller's to refuse.
+        assert_eq!(
+            reserved_managed_ports(
+                &root,
+                NodeChainFamily::BitcoinBlake2b,
+                &InternalBitcoindConfig::new()
+            ),
+            Ok(vec![])
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 

@@ -28,8 +28,8 @@ use crate::{
     dir::CoincubeDirectory,
     download,
     installer::step::node::bitcoind::{
-        get_available_port, install_bitcoind, internal_bitcoind_address, DownloadVerification,
-        PRUNE_DEFAULT,
+        allocate_ports_for_new_section, install_bitcoind, internal_bitcoind_address,
+        DownloadVerification, PRUNE_DEFAULT,
     },
     node::{
         bitcoind::{
@@ -348,6 +348,14 @@ impl BitcoindSettingsState {
         let flavor = setup.flavor;
         let coincube_datadir = cache.datadir_path.clone();
         let network = cache.network;
+        // A provider of the wrong chain family is refused here, before the
+        // download is dispatched or the installed binary looked for — the
+        // helpers below refuse again, but no task may even start for it.
+        if let Err(e) = provider_serves_network(flavor, network) {
+            setup.internal_stage = InternalSetupStage::Idle;
+            setup.internal_error = Some(e);
+            return Task::none();
+        }
         let exe_exists = internal_bitcoind_exe_path(&coincube_datadir, flavor.version()).exists();
         if exe_exists {
             setup.internal_stage = InternalSetupStage::Installing;
@@ -479,6 +487,12 @@ impl State for BitcoindSettingsState {
                 // reference so `msg` stays available for delegation.
                 if let view::SettingsEditMessage::SwitchManagedFlavor(flavor) = &msg {
                     let flavor = *flavor;
+                    // A provider of the wrong chain family never reaches the
+                    // confirmation, let alone the switch.
+                    if let Err(e) = provider_serves_network(flavor, cache.network) {
+                        self.warning = Some(Error::Unexpected(e));
+                        return Task::none();
+                    }
                     let current = self
                         .bitcoind_settings
                         .as_ref()
@@ -581,11 +595,19 @@ impl State for BitcoindSettingsState {
                         if let Some(ref mut setup) = self.pending_node_setup {
                             match result {
                                 Ok(bytes) => {
+                                    let flavor = setup.flavor;
+                                    // Nothing downloaded for a mismatched
+                                    // provider is installed, and no manifest is
+                                    // fetched for it.
+                                    if let Err(e) = provider_serves_network(flavor, cache.network) {
+                                        setup.internal_stage = InternalSetupStage::Idle;
+                                        setup.internal_error = Some(e);
+                                        return Task::none();
+                                    }
                                     setup.internal_stage = InternalSetupStage::Installing;
                                     setup.download_progress = 100.0;
                                     let coincube_datadir = cache.datadir_path.clone();
                                     let network = cache.network;
-                                    let flavor = setup.flavor;
                                     return Task::perform(
                                         async move {
                                             // Fetch the release SHA256SUMS(+.asc)
@@ -872,6 +894,12 @@ impl State for BitcoindSettingsState {
                         else {
                             return Task::none();
                         };
+                        // A ledger naming a provider of the wrong chain family
+                        // is refused before the node is stopped or Tor touched.
+                        if let Err(e) = provider_serves_network(flavor, cache.network) {
+                            self.warning = Some(Error::Unexpected(e));
+                            return Task::none();
+                        }
                         self.pending_node_setup = Some(PendingNodeSetup {
                             mode: Some(true),
                             addr: form::Value::default(),
@@ -1023,6 +1051,12 @@ impl State for BitcoindSettingsState {
                         else {
                             return Task::none();
                         };
+                        // Same refusal as the restart: nothing is rewritten,
+                        // stopped or started for a mismatched provider.
+                        if let Err(e) = provider_serves_network(flavor, cache.network) {
+                            self.warning = Some(Error::Unexpected(e));
+                            return Task::none();
+                        }
                         // Reuse the setup progress panel + result handler; the
                         // force-restart applies the rewritten conf (same flavour,
                         // so `maybe_start` would otherwise reuse the running node).
@@ -1350,6 +1384,20 @@ impl From<BitcoindSettingsState> for Box<dyn State> {
     }
 }
 
+/// Refuse a managed-node provider that cannot serve this Vault's chain.
+///
+/// The settings screen is keyed on the Vault's `bitcoin::Network`; the chain it
+/// stands for is its identity (`ChainId::from`), which is what the provider's
+/// family is checked against. Every settings path that would download,
+/// unpack, write the Bitcoin node's conf/ledger/identity, provision Tor, or
+/// stop and start the node calls this first, so an out-of-family provider —
+/// however it got into the pending setup or the ledger — changes nothing.
+fn provider_serves_network(flavor: NodeFlavor, network: Network) -> Result<(), String> {
+    flavor
+        .check_chain(crate::chain::ChainId::from(network))
+        .map_err(|e| e.to_string())
+}
+
 /// A managed-node install payload: `(archive bytes, optional fetched
 /// (SHA256SUMS, SHA256SUMS.asc) manifest)`. The manifest is `Some` for Knots
 /// (verified against the manifest) and `None` for Core (verified by code hash).
@@ -1373,6 +1421,10 @@ fn write_internal_bitcoind_config(
     flavor: NodeFlavor,
     resources: Option<NodeResources>,
 ) -> Result<BitcoindConfig, String> {
+    // Everything below is the *Bitcoin* node's: its conf, its ledger, its
+    // identity marker. A provider of another chain family is refused before any
+    // of them is touched.
+    provider_serves_network(flavor, network)?;
     let bitcoind_datadir = internal_bitcoind_datadir(coincube_datadir);
     let config_path = internal_bitcoind_config_path(&bitcoind_datadir);
 
@@ -1382,24 +1434,27 @@ fn write_internal_bitcoind_config(
         Err(e) => return Err(e.to_string()),
     };
     conf.flavor = flavor;
+
+    // Ports first, before anything is recorded: a refusal here (the other
+    // family's conf unreadable, no acceptable port) must leave the ledger as it
+    // was. An existing section keeps its ports untouched.
+    let existing = conf.networks.get(&network).cloned();
+    let (rpc_port, p2p_port) = if let Some(ref nc) = existing {
+        (nc.rpc_port, nc.p2p_port)
+    } else {
+        // The same bounded policy as the installer: never a port this conf's
+        // other networks or the other chain family's node already holds, and
+        // a refusal if the other family's conf cannot be read.
+        allocate_ports_for_new_section(coincube_datadir, flavor.chain_family(), &conf)
+            .map_err(|e| e.to_string())?
+    };
+
     // Nothing in the file records the flavour any more, and rebuilding it from the
     // struct drops any legacy `consensusrules=rdts` a previous release wrote — so
     // the ledger is where the choice has to be kept, and it has to be kept before
     // the write that erases the old marker.
     crate::node::revalidate::ManagedNodeState::record_configured(coincube_datadir, flavor);
     conf.enforce_rdts = false;
-
-    let existing = conf.networks.get(&network).cloned();
-    let (rpc_port, p2p_port) = if let Some(ref nc) = existing {
-        (nc.rpc_port, nc.p2p_port)
-    } else {
-        let rpc = get_available_port().map_err(|e: crate::installer::Error| e.to_string())?;
-        let p2p = get_available_port().map_err(|e: crate::installer::Error| e.to_string())?;
-        if rpc == p2p {
-            return Err("Could not get distinct ports. Please try again.".to_string());
-        }
-        (rpc, p2p)
-    };
 
     let mut network_conf = existing.unwrap_or(InternalBitcoindNetworkConfig {
         rpc_port,
@@ -1485,6 +1540,11 @@ fn configure_and_start_internal_bitcoind(
     // mempool cap; `None` preserves whatever is already on disk untouched.
     resources: Option<NodeResources>,
 ) -> Result<(BitcoindConfig, Bitcoind), String> {
+    // Before the archive is unpacked into the Bitcoin root, the conf/ledger
+    // rewritten, the running node stopped or Tor prepared: the provider must
+    // be one of this chain's. `write_internal_bitcoind_config` and
+    // `maybe_start` check again on their own boundaries.
+    provider_serves_network(flavor, network)?;
     if let Some((bytes, manifest)) = install {
         let verification = DownloadVerification::for_flavor(flavor, manifest)
             .ok_or_else(|| "Missing release SHA256SUMS manifest for verification.".to_string())?;
@@ -1545,6 +1605,9 @@ async fn ensure_tor_and_start_managed(
     force_restart: bool,
     resources: Option<NodeResources>,
 ) -> Result<(BitcoindConfig, Bitcoind), String> {
+    // Tor is provisioned for the Bitcoin node; not for a provider that cannot
+    // serve this chain.
+    provider_serves_network(flavor, network)?;
     crate::node::tor::ensure_tor_installed_if_wanted(&coincube_datadir).await;
     tokio::task::spawn_blocking(move || {
         configure_and_start_internal_bitcoind(
@@ -2911,5 +2974,333 @@ mod tests {
         assert_eq!(after.networks.get(&Network::Bitcoin).unwrap().prune, 15_000);
 
         let _ = fs::remove_dir_all(&base);
+    }
+
+    // ── Bitcoin Blake2b provider: refused at every settings boundary ────
+
+    /// A COINCUBE datadir under the OS temp dir, unique per test thread, and a
+    /// checker that nothing managed-node related was ever created under it.
+    fn a_temp_datadir(name: &str) -> (PathBuf, CoincubeDirectory) {
+        let base = std::env::temp_dir().join(format!(
+            "coincube-settings-btcb2-{name}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        (base.clone(), CoincubeDirectory::new(base))
+    }
+
+    fn assert_nothing_created(datadir: &CoincubeDirectory) {
+        use crate::node::bitcoind::NodeChainFamily;
+        for family in NodeChainFamily::ALL.iter().copied() {
+            let root = crate::node::bitcoind::internal_bitcoind_directory_for(datadir, family);
+            assert!(!root.exists(), "{} was created", root.display());
+        }
+        assert!(!crate::node::tor::InboundTorPreference::path(datadir).exists());
+        assert!(!crate::node::revalidate::ManagedNodeState::path(datadir).exists());
+        let entries: Vec<_> = std::fs::read_dir(datadir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert!(entries.is_empty(), "datadir gained entries: {:?}", entries);
+    }
+
+    const BLAKE2B_ON_BITCOIN: &str = "Bitcoin Knots (Bitcoin Blake2b) cannot serve Bitcoin: \
+                                      it is a Bitcoin Blake2b node provider";
+
+    // Every settings message that can download, install, rewrite the conf,
+    // provision Tor, or stop/start the managed node refuses the Blake2b
+    // provider on a Bitcoin Vault without starting a task or touching disk —
+    // whether the provider arrives through the pending setup, the flavour
+    // switch, or the configured-flavour ledger. The picker never offers it;
+    // this pins the boundary, not a click path.
+    #[test]
+    fn settings_refuse_the_blake2b_provider_before_any_side_effect() {
+        let (base, datadir) = a_temp_datadir("state");
+        let mut cache = Cache::default();
+        cache.datadir_path = datadir.clone();
+        cache.network = Network::Bitcoin;
+        let daemon = daemon(Some(config_with_backend(Some(BitcoinBackend::Esplora(
+            esplora_config(),
+        )))));
+        let mut state = BitcoindSettingsState::new(
+            Some(config_with_backend(Some(BitcoinBackend::Esplora(
+                esplora_config(),
+            )))),
+            &cache,
+            false,
+            false,
+        );
+
+        // Setup panel opened; the provider is forced into the pending setup.
+        let _ = state.update(
+            Some(daemon.clone()),
+            &cache,
+            node_message(view::NodeSettingsMessage::SetupLocalNode),
+        );
+        state.pending_node_setup.as_mut().unwrap().flavor = NodeFlavor::KnotsBlake2b;
+
+        // Picking it (the setup/switch start path) and retrying both refuse
+        // before the download or the installed-binary lookup.
+        for msg in vec![
+            view::NodeSettingsMessage::SetupLocalNodeManagedFlavor(NodeFlavor::KnotsBlake2b),
+            view::NodeSettingsMessage::SetupLocalNodeModeSelected(true),
+        ] {
+            let task = state.update(Some(daemon.clone()), &cache, node_message(msg));
+            assert_eq!(task.units(), 0, "a task was started");
+            let setup = state.pending_node_setup.as_ref().unwrap();
+            assert_eq!(setup.internal_error.as_deref(), Some(BLAKE2B_ON_BITCOIN));
+            assert_eq!(setup.internal_stage, InternalSetupStage::Idle);
+            assert_eq!(setup.flavor, NodeFlavor::KnotsBlake2b);
+        }
+        // A download that somehow completed for it is not installed and no
+        // manifest is fetched.
+        let task = state.update(
+            Some(daemon.clone()),
+            &cache,
+            node_message(view::NodeSettingsMessage::SetupLocalNodeDownloadComplete(
+                Ok(vec![1, 2, 3]),
+            )),
+        );
+        assert_eq!(task.units(), 0);
+        let setup = state.pending_node_setup.as_ref().unwrap();
+        assert_eq!(setup.internal_error.as_deref(), Some(BLAKE2B_ON_BITCOIN));
+        assert_eq!(setup.internal_stage, InternalSetupStage::Idle);
+        assert_ne!(setup.download_progress, 100.0);
+
+        // The node-card flavour switch: never armed for it, and a switch that
+        // was somehow armed is refused when confirmed.
+        state.pending_node_setup = None;
+        state.bitcoind_settings = Some(BitcoindSettings::new(
+            Some(NodeType::Bitcoind),
+            bitcoin_config(Network::Bitcoin),
+            bitcoind_config(BitcoindRpcAuth::CookieFile(PathBuf::from(
+                "/tmp/bitcoin/.cookie",
+            ))),
+            false,
+            true,
+        ));
+        state.bitcoind_settings.as_mut().unwrap().managed_flavor = Some(NodeFlavor::Core);
+        let task = state.update(
+            Some(daemon.clone()),
+            &cache,
+            edit_message(view::SettingsEditMessage::SwitchManagedFlavor(
+                NodeFlavor::KnotsBlake2b,
+            )),
+        );
+        assert_eq!(task.units(), 0);
+        assert_eq!(state.pending_flavor_switch, None);
+        assert!(state
+            .warning
+            .as_ref()
+            .is_some_and(|w| w.to_string().contains(BLAKE2B_ON_BITCOIN)));
+        state.warning = None;
+        state.pending_flavor_switch = Some(NodeFlavor::KnotsBlake2b);
+        let task = state.update(
+            Some(daemon.clone()),
+            &cache,
+            node_message(view::NodeSettingsMessage::ConfirmFlavorSwitch),
+        );
+        assert_eq!(task.units(), 0);
+        assert_eq!(state.pending_flavor_switch, None);
+        assert_eq!(
+            state
+                .pending_node_setup
+                .as_ref()
+                .and_then(|s| s.internal_error.as_deref()),
+            Some(BLAKE2B_ON_BITCOIN)
+        );
+
+        // A ledger naming it as the configured flavour: restart-to-apply and a
+        // node-resources apply both refuse before stopping the node, touching
+        // Tor or rewriting the conf.
+        state.pending_node_setup = None;
+        state.bitcoind_settings.as_mut().unwrap().managed_flavor = Some(NodeFlavor::KnotsBlake2b);
+        for msg in vec![
+            view::NodeSettingsMessage::RestartNodeToApply,
+            view::NodeSettingsMessage::NodeResourceApply,
+        ] {
+            state.warning = None;
+            let task = state.update(Some(daemon.clone()), &cache, node_message(msg));
+            assert_eq!(task.units(), 0, "a task was started");
+            assert!(
+                state.pending_node_setup.is_none(),
+                "a setup panel was opened"
+            );
+            assert!(state
+                .warning
+                .as_ref()
+                .is_some_and(|w| w.to_string().contains(BLAKE2B_ON_BITCOIN)));
+        }
+
+        // Nothing on disk changed through any of it.
+        assert_nothing_created(&datadir);
+
+        // The Bitcoin providers still go through: the switch is armed as before.
+        state.warning = None;
+        state.bitcoind_settings.as_mut().unwrap().managed_flavor = Some(NodeFlavor::Core);
+        let _ = state.update(
+            Some(daemon),
+            &cache,
+            edit_message(view::SettingsEditMessage::SwitchManagedFlavor(
+                NodeFlavor::Knots,
+            )),
+        );
+        assert_eq!(state.pending_flavor_switch, Some(NodeFlavor::Knots));
+        assert!(state.warning.is_none());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // The helpers behind those messages refuse at their own boundaries too —
+    // before the archive is unpacked, before the conf/ledger/identity are
+    // written, before Tor is provisioned — so a caller that skipped the
+    // message-level check still changes nothing.
+    #[tokio::test]
+    async fn settings_helpers_refuse_the_blake2b_provider_before_writing() {
+        let (base, datadir) = a_temp_datadir("helpers");
+
+        assert_eq!(
+            write_internal_bitcoind_config(
+                &datadir,
+                Network::Bitcoin,
+                NodeFlavor::KnotsBlake2b,
+                None
+            )
+            .map(|_| ()),
+            Err(BLAKE2B_ON_BITCOIN.to_string())
+        );
+        assert_nothing_created(&datadir);
+
+        // With an "archive" to install and a forced restart: refused before
+        // the unpack, the stop, or Tor.
+        let result = tokio::task::spawn_blocking({
+            let datadir = datadir.clone();
+            move || {
+                configure_and_start_internal_bitcoind(
+                    datadir,
+                    Network::Bitcoin,
+                    NodeFlavor::KnotsBlake2b,
+                    Some((vec![0u8; 16], None)),
+                    true,
+                    Some(NodeResources::small_computer()),
+                )
+                .map(|_| ())
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(result, Err(BLAKE2B_ON_BITCOIN.to_string()));
+        assert_nothing_created(&datadir);
+
+        let result = ensure_tor_and_start_managed(
+            datadir.clone(),
+            Network::Bitcoin,
+            NodeFlavor::KnotsBlake2b,
+            Some((vec![0u8; 16], None)),
+            true,
+            None,
+        )
+        .await
+        .map(|_| ());
+        assert_eq!(result, Err(BLAKE2B_ON_BITCOIN.to_string()));
+        assert_nothing_created(&datadir);
+
+        // The same helper with a Bitcoin provider gets past the guard and does
+        // its ordinary work (the ledger names it; the conf is written).
+        let cfg =
+            write_internal_bitcoind_config(&datadir, Network::Bitcoin, NodeFlavor::Knots, None)
+                .unwrap();
+        assert!(matches!(cfg.rpc_auth, BitcoindRpcAuth::CookieFile(_)));
+        assert_eq!(
+            crate::node::revalidate::ManagedNodeState::load(&datadir).configured_flavor,
+            Some(NodeFlavor::Knots)
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // The settings path allocates a new section's ports through the same
+    // policy as the installer: a port the other family's conf records — bound
+    // or not — is never handed out, this conf's other network sections are
+    // reserved too, an existing section keeps its ports, and an unreadable
+    // other-family conf refuses the write before the ledger is touched.
+    #[test]
+    fn settings_port_allocation_follows_the_shared_policy() {
+        use crate::node::bitcoind::{internal_bitcoind_datadir_for, NodeChainFamily};
+        use std::fs;
+        let (base, datadir) = a_temp_datadir("ports");
+        let section = |rpc_port: u16, p2p_port: u16| InternalBitcoindNetworkConfig {
+            rpc_port,
+            p2p_port,
+            prune: PRUNE_DEFAULT,
+            rpc_auth: None,
+        };
+        // The other family records ports nothing is listening on.
+        let held = crate::installer::step::node::bitcoind::get_available_port().unwrap();
+        let held2 = crate::installer::step::node::bitcoind::get_available_port().unwrap();
+        let mut blake2b = InternalBitcoindConfig::for_flavor(NodeFlavor::KnotsBlake2b);
+        blake2b
+            .networks
+            .insert(Network::Bitcoin, section(held, held2));
+        let blake2b_conf = internal_bitcoind_config_path(&internal_bitcoind_datadir_for(
+            &datadir,
+            NodeChainFamily::BitcoinBlake2b,
+        ));
+        fs::create_dir_all(blake2b_conf.parent().unwrap()).unwrap();
+        blake2b.to_file(&blake2b_conf).unwrap();
+        // And this file already has a testnet4 section.
+        let config_path = internal_bitcoind_config_path(&internal_bitcoind_datadir(&datadir));
+        let mut seed = InternalBitcoindConfig::for_flavor(NodeFlavor::Knots);
+        seed.networks
+            .insert(Network::Testnet4, section(45011, 45012));
+        fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        seed.to_file(&config_path).unwrap();
+
+        let cfg =
+            write_internal_bitcoind_config(&datadir, Network::Bitcoin, NodeFlavor::Knots, None)
+                .unwrap();
+        let after = InternalBitcoindConfig::from_file(&config_path).unwrap();
+        let main = after.networks.get(&Network::Bitcoin).unwrap();
+        assert_eq!(cfg.addr.port(), main.rpc_port);
+        assert_ne!(main.rpc_port, main.p2p_port);
+        for p in [main.rpc_port, main.p2p_port].iter() {
+            assert!(
+                ![held, held2, 45011, 45012].contains(p),
+                "port {} reused",
+                p
+            );
+        }
+        // The existing section and the other family's file are untouched.
+        let t4 = after.networks.get(&Network::Testnet4).unwrap();
+        assert_eq!((t4.rpc_port, t4.p2p_port), (45011, 45012));
+        assert_eq!(
+            InternalBitcoindConfig::from_file(&blake2b_conf)
+                .unwrap()
+                .networks,
+            blake2b.networks
+        );
+        // A second write keeps the allocated ports.
+        let again =
+            write_internal_bitcoind_config(&datadir, Network::Bitcoin, NodeFlavor::Knots, None)
+                .unwrap();
+        assert_eq!(again.addr.port(), main.rpc_port);
+
+        // Unreadable other-family conf: refused before the ledger is written.
+        let (base2, datadir2) = a_temp_datadir("ports-unreadable");
+        let blake2b_conf2 = internal_bitcoind_config_path(&internal_bitcoind_datadir_for(
+            &datadir2,
+            NodeChainFamily::BitcoinBlake2b,
+        ));
+        fs::create_dir_all(blake2b_conf2.parent().unwrap()).unwrap();
+        fs::write(&blake2b_conf2, "[main]\nrpcport=notanumber\nport=1\n").unwrap();
+        let err =
+            write_internal_bitcoind_config(&datadir2, Network::Bitcoin, NodeFlavor::Knots, None)
+                .unwrap_err();
+        assert!(err.contains("could not be read"), "{}", err);
+        assert!(!internal_bitcoind_config_path(&internal_bitcoind_datadir(&datadir2)).exists());
+        assert!(!crate::node::revalidate::ManagedNodeState::path(&datadir2).exists());
+
+        let _ = fs::remove_dir_all(&base);
+        let _ = fs::remove_dir_all(&base2);
     }
 }
