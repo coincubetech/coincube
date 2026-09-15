@@ -3018,9 +3018,11 @@ mod tests {
     #[test]
     fn settings_refuse_the_blake2b_provider_before_any_side_effect() {
         let (base, datadir) = a_temp_datadir("state");
-        let mut cache = Cache::default();
-        cache.datadir_path = datadir.clone();
-        cache.network = Network::Bitcoin;
+        let cache = Cache {
+            datadir_path: datadir.clone(),
+            network: Network::Bitcoin,
+            ..Cache::default()
+        };
         let daemon = daemon(Some(config_with_backend(Some(BitcoinBackend::Esplora(
             esplora_config(),
         )))));
@@ -3043,7 +3045,7 @@ mod tests {
 
         // Picking it (the setup/switch start path) and retrying both refuse
         // before the download or the installed-binary lookup.
-        for msg in vec![
+        for msg in [
             view::NodeSettingsMessage::SetupLocalNodeManagedFlavor(NodeFlavor::KnotsBlake2b),
             view::NodeSettingsMessage::SetupLocalNodeModeSelected(true),
         ] {
@@ -3117,7 +3119,7 @@ mod tests {
         // Tor or rewriting the conf.
         state.pending_node_setup = None;
         state.bitcoind_settings.as_mut().unwrap().managed_flavor = Some(NodeFlavor::KnotsBlake2b);
-        for msg in vec![
+        for msg in [
             view::NodeSettingsMessage::RestartNodeToApply,
             view::NodeSettingsMessage::NodeResourceApply,
         ] {
