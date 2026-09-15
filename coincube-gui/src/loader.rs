@@ -969,13 +969,23 @@ pub async fn start_bitcoind_and_daemon(
             crate::node::tor::ensure_tor_installed_if_wanted(&coincube_datadir_path).await;
             // Bring up inbound-over-Tor (if the user enabled it) and reconcile
             // bitcoin.conf *before* starting bitcoind, so bitcoind reads the
-            // fresh onion/proxy config. Fail-safe and infallible: any Tor issue
-            // leaves the conf outbound-only, so the node starts exactly as it
-            // does today.
+            // fresh onion/proxy config. Fail-safe on any Tor issue (the conf is
+            // left outbound-only and the node starts exactly as it does today)
+            // but not on a conf issue: if the file could not be read, locked or
+            // replaced it may still name a Tor that is not running, so the
+            // start is refused — retryably — rather than made from stale
+            // privacy configuration.
             let inbound_up = crate::node::tor::prepare_inbound_tor(
                 &coincube_datadir_path,
                 config.bitcoin_config.network,
-            );
+            )
+            .map_err(|e| {
+                Error::Bitcoind(
+                    crate::node::bitcoind::StartInternalBitcoindError::ConfigUnavailable(
+                        e.to_string(),
+                    ),
+                )
+            })?;
             // A fresh tor gets fresh control/SOCKS ports each run, which a
             // *reused* bitcoind (one that survived a previous session) wouldn't
             // pick up — `maybe_start` would just reattach to it. When inbound is
@@ -1613,6 +1623,105 @@ mod chain_identity_tests {
         let rewritten = std::fs::read(&conf_path).unwrap();
         assert_ne!(rewritten, conf_bytes);
         assert!(!String::from_utf8_lossy(&rewritten).contains("listenonion"));
+        let _ = std::fs::remove_dir_all(root.path());
+    }
+
+    // The conf lock is busy for the whole bounded wait while the loader is
+    // reconciling inbound-over-Tor: the start is refused — retryably, as
+    // `ConfigUnavailable` — instead of proceeding from a conf that may still
+    // name a Tor that is not running. Nothing on disk changes and no binary
+    // is looked for.
+    #[tokio::test]
+    async fn a_busy_conf_lock_refuses_the_start_instead_of_using_stale_privacy_config() {
+        use crate::node::bitcoind::{
+            internal_bitcoind_config_path, internal_bitcoind_cookie_path,
+            internal_bitcoind_datadir, InternalBitcoindConfig, InternalBitcoindNetworkConfig,
+            NodeFlavor, StartInternalBitcoindError, PRUNE_DEFAULT,
+        };
+        use crate::node::managed_conf::ManagedConfLock;
+        use crate::node::revalidate::ManagedNodeState;
+        use crate::node::tor::InboundTorPreference;
+        let root = temp_root("busy");
+        let chain = ChainId::Testnet4;
+        let wallet = wallet();
+
+        let bitcoind_datadir = internal_bitcoind_datadir(&root);
+        std::fs::create_dir_all(&bitcoind_datadir).unwrap();
+        let conf_path = internal_bitcoind_config_path(&bitcoind_datadir);
+        let mut conf = InternalBitcoindConfig::for_flavor(NodeFlavor::Knots);
+        conf.networks.insert(
+            bitcoin::Network::Testnet4,
+            InternalBitcoindNetworkConfig {
+                rpc_port: 46001,
+                p2p_port: 46002,
+                prune: PRUNE_DEFAULT,
+                rpc_auth: None,
+            },
+        );
+        // Stale inbound lines from a previous run.
+        conf.inbound_tor = true;
+        conf.tor_control_port = Some(9051);
+        conf.tor_socks_port = Some(9050);
+        conf.to_file(&conf_path).unwrap();
+        let conf_bytes = std::fs::read(&conf_path).unwrap();
+        ManagedNodeState {
+            configured_flavor: Some(NodeFlavor::Knots),
+            ..Default::default()
+        }
+        .save(&root)
+        .unwrap();
+        InboundTorPreference {
+            enabled: false,
+            ..Default::default()
+        }
+        .save(&root)
+        .unwrap();
+        let cookie = internal_bitcoind_cookie_path(&bitcoind_datadir, &bitcoin::Network::Testnet4);
+        let wallet_dir = root
+            .network_directory(chain)
+            .coincubed_data_directory(&wallet.wallet_id())
+            .path()
+            .to_path_buf();
+        std::fs::create_dir_all(&wallet_dir).unwrap();
+        std::fs::write(
+            wallet_dir.join("daemon.toml"),
+            format!(
+                "data_dir = {:?}\nlog_level = \"TRACE\"\nmain_descriptor = \"{}\"\n\n\
+                 [bitcoin_config]\nnetwork = \"testnet4\"\npoll_interval_secs = 18\n\n\
+                 [bitcoind_config]\ncookie_path = {:?}\naddr = \"127.0.0.1:1\"\n",
+                root.path().display().to_string(),
+                "wsh(andor(pk([aabbccdd]tpubDEN9WSToTyy9ZQfaYqSKfmVqmq1VVLNtYfj3Vkqh67et57eJ5sTKZQBkHqSwPUsoSskJeaYnPttHe2VrkCsKA27kUaN9SDc5zhqeLzKa1rr/<0;1>/*),older(10000),pk([aabbccdd]tpubD8LYfn6njiA2inCoxwM7EuN3cuLVcaHAwLYeups13dpevd3nHLRdK9NdQksWXrhLQVxcUZRpnp5CkJ1FhE61WRAsHxDNAkvGkoQkAeWDYjV/<0;1>/*)))#dw4ulnrs",
+                cookie.display().to_string(),
+            ),
+        )
+        .unwrap();
+        // The lock file is created by the holder below, so snapshot after it.
+        let held = ManagedConfLock::acquire(&root).unwrap();
+        let before = tree(root.path());
+        let result = start_bitcoind_and_daemon(root.clone(), true, chain, wallet.clone()).await;
+        drop(held);
+        match result {
+            Err(Error::Bitcoind(StartInternalBitcoindError::ConfigUnavailable(e))) => {
+                assert!(e.contains("another setup is updating"), "{}", e)
+            }
+            Err(other) => panic!("wrong refusal: {}", other),
+            Ok(_) => panic!("started from a conf that could not be reconciled"),
+        }
+        assert_eq!(std::fs::read(&conf_path).unwrap(), conf_bytes);
+        assert_eq!(tree(root.path()), before);
+
+        // With the lock free the same start reconciles the conf (the stale
+        // inbound lines go) and proceeds to the ordinary absent-binary failure.
+        let result = start_bitcoind_and_daemon(root.clone(), true, chain, wallet).await;
+        assert!(matches!(
+            result,
+            Err(Error::Bitcoind(
+                StartInternalBitcoindError::ExecutableNotFound
+            ))
+        ));
+        assert!(
+            !String::from_utf8_lossy(&std::fs::read(&conf_path).unwrap()).contains("torcontrol")
+        );
         let _ = std::fs::remove_dir_all(root.path());
     }
 }

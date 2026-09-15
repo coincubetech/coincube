@@ -40,35 +40,85 @@ ports" cannot come from chain parameters. COINCUBE never uses the defaults for
 a managed node anyway: each network section gets OS-allocated ports at setup.
 
 Both places that create a network section — the installer's `DefineConfig`
-and the settings path's `write_internal_bitcoind_config` — now go through one
-bounded policy (`installer::…::allocate_ports_for_new_section` →
-`node::bitcoind::reserved_managed_ports` + `allocate_managed_ports`):
+and the settings path's `write_internal_bitcoind_config` — go through one
+bounded policy (`node::bitcoind::reserved_managed_ports` +
+`allocate_managed_ports`, reached through the locked transaction's
+`ManagedConfTxn::allocate_ports`):
 
 - candidates come from the OS (`get_available_port`); the policy itself is
   deterministic and tested with an injected candidate sequence;
 - a candidate is refused if it is a bitcoind default, a repeat, or **already
-  recorded** by any other managed-node section: this conf's other networks
-  (e.g. testnet4 when allocating mainnet) or any section of the other chain
-  family's `bitcoin.conf` — bound right now or not, since a stopped node still
-  owns its ports;
+  recorded** by any managed-node conf under the datadir: this conf's other
+  networks (e.g. testnet4 when allocating mainnet), any section of the other
+  chain family's `bitcoin.conf`, and either conf's recorded Tor control/SOCKS
+  ports (`torcontrol`/`proxy`) — bound right now or not, since a stopped node
+  still owns its ports;
 - an existing section keeps its ports; nothing already assigned is rewritten;
 - absent confs reserve nothing, but an other-family conf that **exists and
   cannot be read fails the allocation closed** — its ports are unknown, and
   live socket probing would not notice a stopped node. "Absent" means a true
   `NotFound` from `fs::metadata` (`InternalBitcoindConfig::from_file`); a
   conf under a directory the process cannot traverse is a read error, never
-  absence, for own-family and other-family reads alike. The settings path
-  allocates before it touches the flavour ledger, so a refusal leaves the
-  ledger as it was.
+  absence, for own-family and other-family reads alike. Refusals happen
+  before the flavour ledger is touched.
 
-What the policy does **not** provide is atomicity across concurrent setups:
-two allocations running at the same moment can both pass the reservation
-check before either persists its conf. Today a machine runs one managed
-Bitcoin node; serialising allocate-and-persist across chain families (a lock
-held from reservation through `to_file`) is a prerequisite for activating the
-second family — see the gates below. The disjoint-port test fixtures in this
-slice establish file separation and reservation reading, not concurrent
-allocation.
+### Serialisation and atomic persistence (`node/managed_conf.rs`)
+
+Allocation and every other writer of a managed `bitcoin.conf` are serialised
+by **one datadir-wide, OS-backed exclusive lock**, `<coincube_datadir>/managed-node.lock`
+(`ManagedConfLock`: `fs4` `try_lock_exclusive`, i.e. `flock`/`LockFileEx`).
+It lives outside both family roots because it guards the shared port space
+and both families' files at once. It is never deleted or truncated in normal
+use and carries no state; it is released explicitly on drop (including on a
+panic) and by the OS when the holding process dies, so there is no stale lock
+to break. Acquisition is bounded (40 × 50 ms, the same convention as the
+node-identity marker lock); exhaustion is `Busy`, a retryable refusal.
+
+`update_managed_conf(datadir, family, edit)` holds the lock from a **fresh**
+read of the family's conf, through the edit (reservation across both
+families, candidate selection, the ledger record the edit chooses to make),
+to the atomic replacement of the file. The writers that go through it:
+
+| Writer | When | On `Busy` / unreadable / not replaced |
+|---|---|---|
+| installer `DefineConfig` | node setup | step error; conf and ledger untouched |
+| settings `write_internal_bitcoind_config` | setup, flavour switch, restart-to-apply, resources apply | `Err` before the ledger; nothing started |
+| `tor::prepare_inbound_tor` (outbound-only reset, then the inbound merge once Tor is up) | every managed start | **start refused** (`StartInternalBitcoindError::ConfigUnavailable`) — the file may still name a Tor that is not running, and a node must not be started from stale privacy configuration |
+| `bitcoind::migrate_legacy_rdts_conf` | every `maybe_start` | skipped this start (retried next start, as before) |
+
+Because each rewrite reads under the lock, a section another setup persisted
+a moment earlier is never erased by a stale snapshot. Tor's bootstrap — the
+one slow step — runs **outside** the lock: the conf is reset to outbound-only
+under the lock, Tor is started with ports chosen around everything recorded,
+and only then are the inbound fields merged onto a second fresh read. The
+lock is a leaf: nothing else is acquired while it is held, and it is never
+taken while the marker lock is held.
+
+Replacement is atomic (`write_conf_atomically`): the bytes are staged in a
+uniquely named private sibling (`bitcoin.conf.<pid>.<seq>.tmp`, mode `0600`),
+flushed, given the destination's existing permissions if there is one (a
+user's restrictive mode survives; a fresh conf starts private, since it can
+carry `rpcauth`), renamed into place, and on unix the parent directory is
+flushed. A reader sees the previous complete file or the new complete file.
+The two failure classes are reported apart and handled differently: a failure
+**before** the rename (`NotReplaced`) leaves the destination byte-identical
+and removes the staging file; a failure **after** it (`ReplacedNotDurable`)
+leaves the complete new bytes in place with only the directory entry's
+crash-durability unconfirmed — callers proceed and log it. Not every error
+means "nothing was written", and the conf and the flavour ledger are two
+files, not one crash-atomic transaction (the ledger is still recorded first).
+
+What the lock does **not** do: it does not reserve a port against a process
+that never takes it — a third-party program, or an older COINCUBE binary
+running against the same datadir — and OS bind-and-release remains the
+candidate source, so a port can in principle be taken between our release
+and the node's (or Tor's) own bind; that collision fails the start loudly
+rather than silently. Tor's fresh ports are only persisted once Tor is
+actually up. Cancelling an `iced` task or dropping a `JoinHandle` does not
+abort a `spawn_blocking` worker: the lock is released when that worker
+returns or unwinds, not before. Cross-process behaviour is established by a
+real child-process test (contention, explicit release, and release on the
+child's death), in addition to the in-process thread tests.
 
 ### Fail-closed guards
 
@@ -224,9 +274,10 @@ integration work that remains, in the order it is needed:
    is the designed end of RDTS enforcement, not a failed deployment (today's
    `has_failed()` is always `false` on this build, so nothing would even
    notice).
-2. **Concurrent port allocation** — serialise allocate-and-persist across
-   chain families (see *Ports*); the bounded policy in this slice reserves
-   recorded ports but is not a lock.
+2. **Concurrent port allocation** — done: allocate-and-persist and every
+   conf rewriter are serialised by the datadir-wide lock and persisted
+   atomically (see *Serialisation and atomic persistence*), within the limits
+   stated there (no protection against writers that do not take the lock).
 3. **A Blake2b start path** — `Bitcoind::maybe_start` is the Bitcoin family's
    (its datadir, ledger, lock and `-chain=` argument are Bitcoin's);
    `maybe_start_for_chain` refuses the Blake2b family outright. A start path

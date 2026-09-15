@@ -28,15 +28,14 @@ use crate::{
     dir::CoincubeDirectory,
     download,
     installer::step::node::bitcoind::{
-        allocate_ports_for_new_section, install_bitcoind, internal_bitcoind_address,
-        DownloadVerification, PRUNE_DEFAULT,
+        install_bitcoind, internal_bitcoind_address, DownloadVerification, PRUNE_DEFAULT,
     },
     node::{
         bitcoind::{
             internal_bitcoind_config_path, internal_bitcoind_cookie_path,
             internal_bitcoind_datadir, internal_bitcoind_directory, internal_bitcoind_exe_path,
-            Bitcoind, InternalBitcoindConfig, InternalBitcoindConfigError,
-            InternalBitcoindNetworkConfig, NodeFlavor, NodeResources, RpcAuthType, RpcAuthValues,
+            Bitcoind, InternalBitcoindConfig, InternalBitcoindNetworkConfig, NodeFlavor,
+            NodeResources, RpcAuthType, RpcAuthValues,
         },
         NodeType,
     },
@@ -1426,48 +1425,59 @@ fn write_internal_bitcoind_config(
     // of them is touched.
     provider_serves_network(flavor, network)?;
     let bitcoind_datadir = internal_bitcoind_datadir(coincube_datadir);
-    let config_path = internal_bitcoind_config_path(&bitcoind_datadir);
 
-    let mut conf = match InternalBitcoindConfig::from_file(&config_path) {
-        Ok(c) => c,
-        Err(InternalBitcoindConfigError::FileNotFound) => InternalBitcoindConfig::new(),
-        Err(e) => return Err(e.to_string()),
-    };
-    conf.flavor = flavor;
+    // From the read of the conf to its replacement, under the datadir-wide
+    // managed-conf lock on a fresh read (see `node::managed_conf`): the ports
+    // are chosen against everything persisted by now, and the write cannot
+    // erase a section another setup added meanwhile. Refusals — lock busy,
+    // conf unreadable, no acceptable port, other family's conf unreadable —
+    // happen before the ledger is touched.
+    let rpc_port = crate::node::managed_conf::update_managed_conf(
+        coincube_datadir,
+        flavor.chain_family(),
+        |txn| {
+            let mut conf = txn.conf.clone().unwrap_or_else(InternalBitcoindConfig::new);
+            conf.flavor = flavor;
 
-    // Ports first, before anything is recorded: a refusal here (the other
-    // family's conf unreadable, no acceptable port) must leave the ledger as it
-    // was. An existing section keeps its ports untouched.
-    let existing = conf.networks.get(&network).cloned();
-    let (rpc_port, p2p_port) = if let Some(ref nc) = existing {
-        (nc.rpc_port, nc.p2p_port)
-    } else {
-        // The same bounded policy as the installer: never a port this conf's
-        // other networks or the other chain family's node already holds, and
-        // a refusal if the other family's conf cannot be read.
-        allocate_ports_for_new_section(coincube_datadir, flavor.chain_family(), &conf)
-            .map_err(|e| e.to_string())?
-    };
+            // Ports first, before anything is recorded. An existing section
+            // keeps its ports untouched.
+            let existing = conf.networks.get(&network).cloned();
+            let (rpc_port, p2p_port) = match &existing {
+                Some(nc) => (nc.rpc_port, nc.p2p_port),
+                // The same bounded policy as the installer: never a port this
+                // conf's other networks or the other chain family's node
+                // already holds, and a refusal if the other family's conf
+                // cannot be read.
+                None => txn.allocate_ports(
+                    &conf,
+                    crate::installer::step::node::bitcoind::get_available_port,
+                )?,
+            };
 
-    // Nothing in the file records the flavour any more, and rebuilding it from the
-    // struct drops any legacy `consensusrules=rdts` a previous release wrote — so
-    // the ledger is where the choice has to be kept, and it has to be kept before
-    // the write that erases the old marker.
-    crate::node::revalidate::ManagedNodeState::record_configured(coincube_datadir, flavor);
-    conf.enforce_rdts = false;
+            // Nothing in the file records the flavour any more, and rebuilding
+            // it from the struct drops any legacy `consensusrules=rdts` a
+            // previous release wrote — so the ledger is where the choice has
+            // to be kept, and it has to be kept before the write that erases
+            // the old marker.
+            crate::node::revalidate::ManagedNodeState::record_configured(coincube_datadir, flavor);
+            conf.enforce_rdts = false;
 
-    let mut network_conf = existing.unwrap_or(InternalBitcoindNetworkConfig {
-        rpc_port,
-        p2p_port,
-        prune: resources.map(|r| r.prune_mb).unwrap_or(PRUNE_DEFAULT),
-        rpc_auth: None,
-    });
-    if let Some(r) = resources {
-        network_conf.prune = r.prune_mb;
-        conf.max_mempool_mb = r.max_mempool_mb;
-    }
-    conf.networks.insert(network, network_conf);
-    conf.to_file(&config_path).map_err(|e| e.to_string())?;
+            let mut network_conf = existing.unwrap_or(InternalBitcoindNetworkConfig {
+                rpc_port,
+                p2p_port,
+                prune: resources.map(|r| r.prune_mb).unwrap_or(PRUNE_DEFAULT),
+                rpc_auth: None,
+            });
+            if let Some(r) = resources {
+                network_conf.prune = r.prune_mb;
+                conf.max_mempool_mb = r.max_mempool_mb;
+            }
+            conf.networks.insert(network, network_conf);
+            Ok((rpc_port, Some(conf)))
+        },
+    )
+    .map_err(|e| e.to_string())?
+    .logged("writing the managed bitcoin.conf from settings");
 
     let cookie_path = internal_bitcoind_cookie_path(&bitcoind_datadir, &network);
     // Stamp the datadir with an identity, if it does not already carry one. This is
@@ -1581,10 +1591,15 @@ fn configure_and_start_internal_bitcoind(
 
     // Apply inbound-over-Tor before starting bitcoind: this starts the managed
     // Tor daemon and rewrites bitcoin.conf with the onion/proxy keys (mainnet
-    // only, gated on the user's preference; fail-safe to outbound-only). Doing
-    // it here means a flavour switch or a "restart to apply" picks the inbound
-    // config up, matching the app-launch path in `loader`.
-    crate::node::tor::prepare_inbound_tor(&coincube_datadir, network);
+    // only, gated on the user's preference; fail-safe to outbound-only on any
+    // Tor problem). Doing it here means a flavour switch or a "restart to
+    // apply" picks the inbound config up, matching the app-launch path in
+    // `loader`. A conf that could not be read, locked or replaced is a
+    // refusal, not a start from stale privacy configuration.
+    crate::node::tor::prepare_inbound_tor(&coincube_datadir, network).map_err(|e| {
+        crate::node::bitcoind::StartInternalBitcoindError::ConfigUnavailable(e.to_string())
+            .to_string()
+    })?;
 
     let bitcoind = Bitcoind::maybe_start(network, bitcoind_config.clone(), &coincube_datadir)
         .map_err(|e| e.to_string())?;
@@ -3398,5 +3413,48 @@ mod tests {
             );
         }
         let _ = fs::remove_dir_all(&base);
+    }
+
+    // The settings writer and the configure-and-start helper both take the
+    // datadir-wide conf lock; while it is busy for the whole bounded wait they
+    // refuse before the ledger, the conf or Tor state is touched, and the
+    // refusal reads as the retryable "another setup is updating" message.
+    #[test]
+    fn settings_refuse_on_a_busy_conf_lock_before_any_write() {
+        use crate::node::managed_conf::ManagedConfLock;
+        let (base, datadir) = a_temp_datadir("busy-lock");
+        let held = ManagedConfLock::acquire(&datadir).unwrap();
+
+        let err =
+            write_internal_bitcoind_config(&datadir, Network::Bitcoin, NodeFlavor::Knots, None)
+                .map(|_| ())
+                .unwrap_err();
+        assert!(err.contains("another setup is updating"), "{}", err);
+
+        let err = configure_and_start_internal_bitcoind(
+            datadir.clone(),
+            Network::Bitcoin,
+            NodeFlavor::Knots,
+            None,
+            true,
+            None,
+        )
+        .map(|_| ())
+        .unwrap_err();
+        assert!(err.contains("another setup is updating"), "{}", err);
+        drop(held);
+        // The lock file itself is the only thing under the datadir.
+        assert!(!crate::node::revalidate::ManagedNodeState::path(&datadir).exists());
+        assert!(!internal_bitcoind_config_path(&internal_bitcoind_datadir(&datadir)).exists());
+        assert!(!crate::node::tor::InboundTorPreference::path(&datadir).exists());
+        let entries: Vec<_> = std::fs::read_dir(datadir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            entries,
+            vec![crate::node::managed_conf::MANAGED_CONF_LOCK_FILE]
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
