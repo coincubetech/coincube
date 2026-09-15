@@ -1,3 +1,4 @@
+use std::convert::TryFrom;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -55,6 +56,11 @@ pub enum Error {
     /// while a scan is in flight against a dead/throttled Esplora — otherwise
     /// `stop()` joins a poller stuck for the full request/timeout cycle.
     Aborted,
+    /// The provider answered `GET /blocks` with a body that parsed but does
+    /// not describe a usable tip: an empty list, or a timestamp outside the
+    /// `u32` range every consumer of block times uses. Never defaulted — the
+    /// callers map this to "unknown" (`Option::None`), not to a made-up time.
+    TipMetadata(&'static str),
 }
 
 impl Error {
@@ -99,6 +105,7 @@ impl std::fmt::Display for Error {
                     SCAN_ABORTED_DISPLAY_MARKER
                 )
             }
+            Error::TipMetadata(what) => write!(f, "Esplora tip metadata is unusable: {}.", what),
         }
     }
 }
@@ -454,10 +461,36 @@ impl Client {
     }
 
     /// Get the timestamp of the current tip block.
+    ///
+    /// Read from the JSON block summaries (`GET /blocks`) rather than the raw
+    /// header (`GET /block/<hash>/header`). The raw path decodes the bytes
+    /// through rust-bitcoin's 80-byte `block::Header`, which cannot represent a
+    /// Bitcoin Blake2b post-fork header (164-byte v2 headers from the hardfork
+    /// height on — PLAN-bitcoin-blake2b, audit F5); the JSON summary carries the
+    /// same `timestamp` for either chain, and `esplora-client` 0.8.0 (the
+    /// version `bdk_esplora` pins here) exposes it as
+    /// [`esplora_client::BlockSummary`] via `get_blocks`, with no
+    /// per-hash JSON metadata call available.
+    ///
+    /// One request, one snapshot: the tip's id, height and timestamp come from
+    /// the same JSON object of the same response, so a tip that advances
+    /// between two calls can never pair one block's hash with another block's
+    /// time (the old two-call shape read the hash first and the header
+    /// second). The snapshot's tip is the entry with the greatest height —
+    /// both Esplora and mempool.space document `/blocks` as newest-first, but
+    /// the selection does not rely on order. An empty list or a timestamp
+    /// outside `u32` is an [`Error::TipMetadata`], never a default.
+    ///
+    /// Provider selection, cooldown and shutdown semantics are unchanged: the
+    /// single request goes through [`Self::try_in_order`] like every other call.
     pub fn tip_time(&self) -> Result<u32, Error> {
-        let hash = self.try_in_order(|client| client.get_tip_hash())?;
-        let header = self.try_in_order(|client| client.get_header_by_hash(&hash))?;
-        Ok(header.time)
+        let summaries = self.try_in_order(|client| client.get_blocks(None))?;
+        let tip = summaries
+            .iter()
+            .max_by_key(|summary| summary.time.height)
+            .ok_or(Error::TipMetadata("`/blocks` returned no block summaries"))?;
+        u32::try_from(tip.time.timestamp)
+            .map_err(|_| Error::TipMetadata("tip timestamp does not fit in u32"))
     }
 
     /// Broadcast a transaction to the network.
@@ -887,5 +920,293 @@ mod tests {
             "Display must start with the marker the poller scans for; got: {}",
             msg,
         );
+    }
+
+    // ── tip_time over JSON block summaries (coincube-api#290) ──────────────────
+    //
+    // A dependency-free mock Esplora: a TcpListener on 127.0.0.1 answering the
+    // handful of paths these tests need from a canned table, and recording
+    // every path it was asked for. No live endpoint is ever contacted.
+
+    use std::collections::HashMap as StdHashMap;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    struct MockEsplora {
+        base: String,
+        requests: Arc<Mutex<Vec<String>>>,
+        _thread: std::thread::JoinHandle<()>,
+    }
+
+    /// (status, body) per exact path; unknown paths answer 404.
+    fn mock_esplora(routes: StdHashMap<&'static str, (u16, String)>) -> MockEsplora {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock esplora");
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let requests: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen = requests.clone();
+        let thread = std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = match stream {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                let path = head
+                    .lines()
+                    .next()
+                    .and_then(|l| l.split_whitespace().nth(1))
+                    .unwrap_or("")
+                    .to_string();
+                seen.lock().unwrap().push(path.clone());
+                let (status, body) = routes
+                    .get(path.as_str())
+                    .cloned()
+                    .unwrap_or((404, "not found".to_string()));
+                let reason = match status {
+                    200 => "OK",
+                    429 => "Too Many Requests",
+                    500 => "Internal Server Error",
+                    _ => "Not Found",
+                };
+                let response = format!(
+                    "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    status,
+                    reason,
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        MockEsplora {
+            base,
+            requests,
+            _thread: thread,
+        }
+    }
+
+    impl MockEsplora {
+        fn provider(&self, name: &str) -> Provider {
+            Provider {
+                name: name.into(),
+                client: build_blocking_client(&self.base, None),
+                cooldown_until: Mutex::new(None),
+            }
+        }
+        fn requests(&self) -> Vec<String> {
+            self.requests.lock().unwrap().clone()
+        }
+    }
+
+    const H0: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+    const H1: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+    const H2: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+    const MERKLE: &str = "3333333333333333333333333333333333333333333333333333333333333333";
+
+    /// A `/blocks` entry as a Bitcoin Esplora renders it.
+    fn bitcoin_summary(id: &str, height: u32, timestamp: u64, prev: &str) -> String {
+        format!(
+            r#"{{"id":"{id}","height":{height},"version":536870912,"timestamp":{timestamp},"tx_count":2500,"size":1500000,"weight":3990000,"merkle_root":"{MERKLE}","previousblockhash":"{prev}","mediantime":{mt},"nonce":123456789,"bits":386089497,"difficulty":110000000000000}}"#,
+            id = id,
+            height = height,
+            timestamp = timestamp,
+            prev = prev,
+            mt = timestamp.saturating_sub(600),
+            MERKLE = MERKLE
+        )
+    }
+
+    /// The same entry as a Bitcoin Blake2b indexer (retropex/electrs) would
+    /// plausibly render a post-fork v2 header: every Bitcoin field plus extra
+    /// fork-specific ones. Only `id`/`height`/`timestamp` matter to the reader;
+    /// the extras must be tolerated, not refused.
+    fn blake2b_summary(id: &str, height: u32, timestamp: u64, prev: &str) -> String {
+        let base = bitcoin_summary(id, height, timestamp, prev);
+        format!(
+            r#"{},"header_version":2,"header_size":164,"blake2b":true,"pow_algo":"blake2b","headline":"BTCB2","rdts_active":true}}"#,
+            &base[..base.len() - 1]
+        )
+    }
+
+    fn blocks_json(entries: &[String]) -> String {
+        format!("[{}]", entries.join(","))
+    }
+
+    fn routes(blocks: (u16, String)) -> StdHashMap<&'static str, (u16, String)> {
+        let mut m = StdHashMap::new();
+        m.insert("/blocks", blocks);
+        // Present so a regression back to the raw-header shape is caught by the
+        // request log rather than by a 404.
+        m.insert("/blocks/tip/hash", (200, H2.to_string()));
+        m
+    }
+
+    #[test]
+    fn tip_time_reads_blake2b_json_summaries_without_touching_raw_headers() {
+        let body = blocks_json(&[
+            blake2b_summary(H2, 961_642, 1_756_600_000, H1),
+            blake2b_summary(H1, 961_641, 1_756_599_400, H0),
+            blake2b_summary(H0, 961_640, 1_756_598_800, MERKLE),
+        ]);
+        let mock = mock_esplora(routes((200, body)));
+        let client = client_with(vec![mock.provider("btcb2")]);
+
+        let t = client.tip_time().expect("tip time from JSON summaries");
+        assert_eq!(t, 1_756_600_000);
+
+        let seen = mock.requests();
+        assert_eq!(
+            seen,
+            vec!["/blocks".to_string()],
+            "exactly one snapshot request"
+        );
+        assert!(
+            !seen.iter().any(|p| p.contains("/header")),
+            "raw header endpoint must never be requested: {:?}",
+            seen
+        );
+    }
+
+    #[test]
+    fn tip_time_bitcoin_summaries_pick_the_highest_block_regardless_of_order() {
+        // Oldest-first on purpose: the tip is chosen by height, not position.
+        let body = blocks_json(&[
+            bitcoin_summary(H0, 900_000, 1_700_000_000, MERKLE),
+            bitcoin_summary(H2, 900_002, 1_700_001_200, H1),
+            bitcoin_summary(H1, 900_001, 1_700_000_600, H0),
+        ]);
+        let mock = mock_esplora(routes((200, body)));
+        let client = client_with(vec![mock.provider("bitcoin")]);
+        assert_eq!(client.tip_time().unwrap(), 1_700_001_200);
+        assert_eq!(mock.requests(), vec!["/blocks".to_string()]);
+    }
+
+    #[test]
+    fn tip_time_refuses_empty_or_unusable_metadata_instead_of_defaulting() {
+        // Empty list: no tip to speak of.
+        let mock = mock_esplora(routes((200, "[]".to_string())));
+        let client = client_with(vec![mock.provider("p")]);
+        assert!(matches!(client.tip_time(), Err(Error::TipMetadata(_))));
+
+        // Timestamp outside u32 (the type every consumer uses).
+        let body = blocks_json(&[bitcoin_summary(H1, 1, 4_294_967_296, H0)]);
+        let mock = mock_esplora(routes((200, body)));
+        let client = client_with(vec![mock.provider("p")]);
+        assert!(matches!(
+            client.tip_time(),
+            Err(Error::TipMetadata("tip timestamp does not fit in u32"))
+        ));
+
+        // Missing timestamp / malformed JSON: a client (parse) error, still no value.
+        let missing = format!(
+            r#"[{{"id":"{}","height":5,"merkle_root":"{}"}}]"#,
+            H1, MERKLE
+        );
+        let mock = mock_esplora(routes((200, missing)));
+        let client = client_with(vec![mock.provider("p")]);
+        assert!(matches!(client.tip_time(), Err(Error::Client(_))));
+
+        let mock = mock_esplora(routes((200, "{not json".to_string())));
+        let client = client_with(vec![mock.provider("p")]);
+        assert!(matches!(client.tip_time(), Err(Error::Client(_))));
+
+        // Negative timestamp cannot deserialise into u64 either.
+        let neg = format!(
+            r#"[{{"id":"{}","height":5,"timestamp":-1,"merkle_root":"{}"}}]"#,
+            H1, MERKLE
+        );
+        let mock = mock_esplora(routes((200, neg)));
+        let client = client_with(vec![mock.provider("p")]);
+        assert!(matches!(client.tip_time(), Err(Error::Client(_))));
+    }
+
+    #[test]
+    fn tip_time_snapshot_is_atomic_across_tip_changes() {
+        // Two sequential calls see two different snapshots; each answer is the
+        // timestamp of ITS OWN snapshot's tip. With a single request per call
+        // there is no window in which one block's hash could be paired with
+        // another block's time — this pins that the reader never re-reads the
+        // tip hash separately.
+        let first = blocks_json(&[
+            bitcoin_summary(H1, 100, 1_000_600, H0),
+            bitcoin_summary(H0, 99, 1_000_000, MERKLE),
+        ]);
+        let mock = mock_esplora(routes((200, first)));
+        let client = client_with(vec![mock.provider("p")]);
+        assert_eq!(client.tip_time().unwrap(), 1_000_600);
+
+        let second = blocks_json(&[
+            bitcoin_summary(H2, 101, 1_001_200, H1),
+            bitcoin_summary(H1, 100, 1_000_600, H0),
+        ]);
+        let mock2 = mock_esplora(routes((200, second)));
+        let client2 = client_with(vec![mock2.provider("p")]);
+        assert_eq!(client2.tip_time().unwrap(), 1_001_200);
+        for m in [&mock, &mock2] {
+            assert_eq!(m.requests(), vec!["/blocks".to_string()]);
+        }
+    }
+
+    #[test]
+    fn tip_time_keeps_provider_fallback_and_cooldown_semantics() {
+        // Primary throttled → cooled and skipped; fallback serves the snapshot.
+        let throttled = mock_esplora(routes((429, "slow down".to_string())));
+        let healthy = mock_esplora(routes((
+            200,
+            blocks_json(&[bitcoin_summary(H1, 7, 1_234_567, H0)]),
+        )));
+        let client = client_with(vec![
+            throttled.provider("primary"),
+            healthy.provider("fallback"),
+        ]);
+
+        assert_eq!(client.tip_time().unwrap(), 1_234_567);
+        assert!(client.providers[0].is_cooling(), "429 must enter cooldown");
+        assert!(!client.providers[1].is_cooling());
+
+        // Second call skips the cooled primary entirely.
+        assert_eq!(client.tip_time().unwrap(), 1_234_567);
+        assert_eq!(
+            throttled.requests().len(),
+            1,
+            "cooled primary must not be re-asked"
+        );
+        assert_eq!(healthy.requests().len(), 2);
+
+        // A 5xx falls through without cooling (existing semantics).
+        let flaky = mock_esplora(routes((500, "boom".to_string())));
+        let healthy2 = mock_esplora(routes((
+            200,
+            blocks_json(&[bitcoin_summary(H1, 7, 7_654_321, H0)]),
+        )));
+        let client = client_with(vec![flaky.provider("flaky"), healthy2.provider("ok")]);
+        assert_eq!(client.tip_time().unwrap(), 7_654_321);
+        assert!(
+            !client.providers[0].is_cooling(),
+            "5xx must not cool the provider"
+        );
+
+        // Every provider failing surfaces the last real error, never a value.
+        let down_a = mock_esplora(routes((500, "a".to_string())));
+        let down_b = mock_esplora(routes((500, "b".to_string())));
+        let client = client_with(vec![down_a.provider("a"), down_b.provider("b")]);
+        assert!(matches!(client.tip_time(), Err(Error::Client(_))));
+
+        // Shutdown abort short-circuits before any request.
+        let mock = mock_esplora(routes((200, blocks_json(&[bitcoin_summary(H1, 7, 1, H0)]))));
+        let client = client_with(vec![mock.provider("p")]);
+        client.abort.store(true, Ordering::Relaxed);
+        assert!(matches!(client.tip_time(), Err(Error::Aborted)));
+        assert!(mock.requests().is_empty());
+    }
+
+    #[test]
+    fn tip_metadata_error_displays_its_reason() {
+        let msg = Error::TipMetadata("`/blocks` returned no block summaries").to_string();
+        assert!(msg.contains("no block summaries"), "{}", msg);
+        assert!(!Error::TipMetadata("x").is_all_cooling());
     }
 }
