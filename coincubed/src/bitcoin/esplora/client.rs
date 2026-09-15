@@ -933,13 +933,19 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
-    /// Upper bound on a request head the mock will read; anything larger is
-    /// answered 400 and closed. Real requests here are a few hundred bytes.
+    /// Upper bound on a request head the mock will read; anything larger —
+    /// terminated or not — is answered 400 and closed. Real requests here are
+    /// a few hundred bytes.
     const MOCK_MAX_HEAD: usize = 8 * 1024;
-    /// How long the mock waits for the rest of a request head before giving
-    /// up on that connection (a held-open partial request must not pin the
-    /// server thread — or a test's teardown — indefinitely).
-    const MOCK_READ_TIMEOUT: Duration = Duration::from_millis(300);
+    /// Absolute deadline for reading one request head, measured from accept.
+    /// A peer that trickles bytes cannot extend it: every socket read is capped
+    /// to the time remaining, and the stop flag is observed between reads, so
+    /// neither a held-open nor a dripping partial request can pin the server
+    /// thread — or a test's teardown — beyond this.
+    const MOCK_REQUEST_DEADLINE: Duration = Duration::from_millis(500);
+    /// Longest single socket wait inside the deadline, so the stop flag is
+    /// re-checked at least this often while a peer is silent.
+    const MOCK_READ_SLICE: Duration = Duration::from_millis(100);
 
     struct MockEsplora {
         base: String,
@@ -950,24 +956,51 @@ mod tests {
     }
 
     /// Read one HTTP request head from `stream`: through the `\r\n\r\n`
-    /// terminator, bounded by [`MOCK_MAX_HEAD`] bytes and [`MOCK_READ_TIMEOUT`]
-    /// per read. `None` when the head never completes within those bounds — one
-    /// TCP read is not a message boundary, so this loops until the terminator.
-    fn read_request_head(stream: &mut std::net::TcpStream) -> Option<String> {
-        stream.set_read_timeout(Some(MOCK_READ_TIMEOUT)).ok()?;
-        let mut head = Vec::new();
+    /// terminator, bounded by [`MOCK_MAX_HEAD`] bytes, an absolute
+    /// [`MOCK_REQUEST_DEADLINE`] and the `stop` flag. `None` when the head does
+    /// not complete within those bounds. One TCP read is not a message
+    /// boundary, so this loops until the terminator — but the size bound is
+    /// applied BEFORE a terminator is honoured (a terminated head over the
+    /// limit is still refused), each read is capped to the remaining capacity
+    /// so the limit cannot be overshot, and each socket wait is capped to the
+    /// time remaining so a dripping peer cannot extend the total.
+    fn read_request_head(stream: &mut std::net::TcpStream, stop: &AtomicBool) -> Option<String> {
+        let deadline = Instant::now() + MOCK_REQUEST_DEADLINE;
+        let mut head: Vec<u8> = Vec::new();
         let mut chunk = [0u8; 1024];
         loop {
-            if head.windows(4).any(|w| w == b"\r\n\r\n") {
-                return Some(String::from_utf8_lossy(&head).to_string());
+            if stop.load(Ordering::SeqCst) {
+                return None;
             }
+            // Size first: a terminator beyond the limit is not a valid head.
             if head.len() > MOCK_MAX_HEAD {
                 return None;
             }
-            match stream.read(&mut chunk) {
+            if head.windows(4).any(|w| w == b"\r\n\r\n") {
+                return Some(String::from_utf8_lossy(&head).to_string());
+            }
+            let remaining_time = deadline.checked_duration_since(Instant::now())?;
+            stream
+                .set_read_timeout(Some(remaining_time.min(MOCK_READ_SLICE)))
+                .ok()?;
+            // Never read past the limit: cap the read to what is left (+1 so an
+            // over-limit head is detected as such rather than truncated).
+            let remaining_cap = (MOCK_MAX_HEAD + 1)
+                .saturating_sub(head.len())
+                .min(chunk.len());
+            if remaining_cap == 0 {
+                return None;
+            }
+            match stream.read(&mut chunk[..remaining_cap]) {
                 Ok(0) => return None, // peer closed before completing the head
                 Ok(n) => head.extend_from_slice(&chunk[..n]),
-                Err(_) => return None, // timeout or reset: give up on this connection
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    // Slice elapsed: loop to re-check stop/deadline.
+                }
+                Err(_) => return None, // reset or other failure: give up
             }
         }
     }
@@ -993,8 +1026,8 @@ mod tests {
                     Ok(s) => s,
                     Err(_) => break,
                 };
-                let _ = stream.set_write_timeout(Some(MOCK_READ_TIMEOUT));
-                let Some(head) = read_request_head(&mut stream) else {
+                let _ = stream.set_write_timeout(Some(MOCK_READ_SLICE));
+                let Some(head) = read_request_head(&mut stream, &stopping) else {
                     let _ = stream.write_all(
                         b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
                     );
@@ -1053,7 +1086,9 @@ mod tests {
     impl Drop for MockEsplora {
         /// Explicit, bounded shutdown: flag, wake the blocked `accept` with one
         /// local connection, join. A connection the server is mid-read on
-        /// resolves within [`MOCK_READ_TIMEOUT`], so the join is bounded too.
+        /// observes the flag within [`MOCK_READ_SLICE`] and in any case gives
+        /// up at its absolute [`MOCK_REQUEST_DEADLINE`], so the join is bounded
+        /// by roughly that deadline regardless of what the peer sends.
         fn drop(&mut self) {
             self.stop.store(true, Ordering::SeqCst);
             let _ = std::net::TcpStream::connect_timeout(&self.addr, Duration::from_secs(1));
@@ -1322,6 +1357,114 @@ mod tests {
         let _ = s.read_to_string(&mut resp);
         assert!(resp.starts_with("HTTP/1.1 200"), "{}", resp);
         assert_eq!(mock.requests(), vec!["/blocks".to_string()]);
+    }
+
+    #[test]
+    fn mock_esplora_refuses_a_terminated_head_over_the_limit() {
+        // The terminator arrives, but the head is over the bound: size wins.
+        let mock = mock_esplora(routes((200, "[]".to_string())));
+        let mut s = std::net::TcpStream::connect(mock.addr).unwrap();
+        let filler = vec![b'x'; MOCK_MAX_HEAD];
+        s.write_all(b"GET /blocks HTTP/1.1\r\nX-Fill: ").unwrap();
+        s.write_all(&filler).unwrap();
+        s.write_all(b"\r\n\r\n").unwrap();
+        s.flush().unwrap();
+        let mut resp = String::new();
+        s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let _ = s.read_to_string(&mut resp);
+        assert!(resp.starts_with("HTTP/1.1 400"), "{}", resp);
+        assert!(
+            mock.requests().is_empty(),
+            "an over-limit head must not be routed even when terminated"
+        );
+    }
+
+    #[test]
+    fn mock_esplora_tears_down_while_a_peer_trickles_a_partial_head() {
+        // A peer sending one byte every 50 ms never lets a per-read timeout
+        // expire; the absolute deadline and the stop check must end the read
+        // anyway, so teardown completes well inside the generous outer bound.
+        let keep_dripping = Arc::new(AtomicBool::new(true));
+        let dripper_flag = keep_dripping.clone();
+        completes_within(Duration::from_secs(10), move || {
+            let mock = mock_esplora(routes((200, "[]".to_string())));
+            let addr = mock.addr;
+            let dripper = std::thread::spawn(move || {
+                let mut s = std::net::TcpStream::connect(addr).unwrap();
+                let _ = s.write_all(b"GET /blocks HTTP/1.1\r\nX: ");
+                while dripper_flag.load(Ordering::SeqCst) {
+                    if s.write_all(b"a").is_err() {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            });
+            // Let the server enter the read on the dripping connection.
+            std::thread::sleep(Duration::from_millis(150));
+            let begin = Instant::now();
+            drop(mock);
+            let elapsed = begin.elapsed();
+            assert!(
+                elapsed < MOCK_REQUEST_DEADLINE + Duration::from_secs(2),
+                "teardown took {:?} with a dripping peer",
+                elapsed
+            );
+            keep_dripping.store(false, Ordering::SeqCst);
+            let _ = dripper.join();
+        });
+    }
+
+    /// Helper-level pins (the reviewer's exact reproductions): with a peer
+    /// dripping one byte per 50 ms the read ends at the absolute deadline, and
+    /// raising `stop` ends it within one read slice — neither waits for the
+    /// byte limit. Bounds leave room for scheduler noise but stay far below
+    /// the multi-second occupation the per-read timeout allowed.
+    #[test]
+    fn read_request_head_is_bounded_by_deadline_and_stop_flag() {
+        // Deadline bound under a drip.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let dripper = std::thread::spawn(move || {
+            let mut s = std::net::TcpStream::connect(addr).unwrap();
+            for _ in 0..40 {
+                if s.write_all(b"a").is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        });
+        let (mut stream, _) = listener.accept().unwrap();
+        let stop = AtomicBool::new(false);
+        let begin = Instant::now();
+        let result = read_request_head(&mut stream, &stop);
+        let elapsed = begin.elapsed();
+        assert!(result.is_none());
+        assert!(
+            elapsed < MOCK_REQUEST_DEADLINE + Duration::from_secs(1),
+            "drip occupied the read for {:?}",
+            elapsed
+        );
+        drop(stream);
+        let _ = dripper.join();
+
+        // Stop-flag bound while the peer is silent.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let holder = std::net::TcpStream::connect(addr).unwrap();
+        let (mut stream, _) = listener.accept().unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = stop.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(120));
+            flag.store(true, Ordering::SeqCst);
+        });
+        let begin = Instant::now();
+        assert!(read_request_head(&mut stream, &stop).is_none());
+        assert!(
+            begin.elapsed() < MOCK_REQUEST_DEADLINE,
+            "stop must be observed before the deadline"
+        );
+        drop(holder);
     }
 
     #[test]

@@ -66,14 +66,19 @@ ignored by serde and covered by the mock test.
 Esplora (`std::net::TcpListener`) records every request path and answers from
 a canned table. The mock has a bounded
 lifetime (stop flag + wake-connect + join on `Drop`) and reads a request head
-through its `\r\n\r\n` terminator with a size bound and a per-read timeout,
-answering 400 to an unterminated head. Covered: BTCB2-style summaries with
+through its `\r\n\r\n` terminator under an 8 KiB size bound applied before
+the terminator is honoured, reads capped to the remaining capacity, an
+absolute per-request deadline with socket waits capped to the time remaining,
+and a stop-flag check between reads; an unterminated, oversized or timed-out
+head is answered 400 and closed. Covered: BTCB2-style summaries with
 extra fields → timestamp, exactly one `/blocks` request and no `/header`
 request; Bitcoin summaries in arbitrary order → highest block; empty list /
 `u32` overflow → `TipMetadata`, missing or negative timestamp / non-JSON →
 `Client`, never a value; one request per call, each call returning its own
 snapshot's tip; 429 primary → cooldown and fallback serves, cooled primary
 not re-asked; 5xx falls through without cooldown; all providers down →
-error; shutdown abort → no request; mock teardown completes with no request
-and with a partial request held open; a head split across TCP writes is
-routed; an oversized head is refused.
+error; shutdown abort → no request; mock teardown completes with no request,
+with a partial request held open, and with a peer trickling one byte per
+50 ms; a head split across TCP writes is routed; an oversized head is refused
+whether or not it is terminated; at helper level, a dripping peer ends at the
+deadline and a raised stop flag ends the read within one slice.
