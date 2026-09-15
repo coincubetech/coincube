@@ -1464,11 +1464,18 @@ impl InternalBitcoindConfig {
         }
     }
 
-    /// Every RPC and P2P port this config binds, across all its network sections.
+    /// Every port this config records: RPC and P2P across all its network
+    /// sections, plus the managed Tor control and SOCKS ports when inbound is
+    /// configured (`torcontrol`/`proxy`). The Tor ports are re-derived on each
+    /// start and are held by the running Tor, but a stopped one still owns
+    /// them on paper — reserving them keeps the other family's allocation off
+    /// them for as long as this file names them.
     pub fn ports_in_use(&self) -> Vec<u16> {
         self.networks
             .values()
             .flat_map(|n| vec![n.rpc_port, n.p2p_port])
+            .chain(self.tor_control_port)
+            .chain(self.tor_socks_port)
             .collect()
     }
 
@@ -1734,18 +1741,37 @@ impl InternalBitcoindConfig {
         conf_ini
     }
 
-    pub fn to_file(&self, path: &PathBuf) -> Result<(), InternalBitcoindConfigError> {
-        std::fs::create_dir_all(
-            path.parent()
-                .ok_or_else(|| InternalBitcoindConfigError::Unexpected("No parent".to_string()))?,
-        )
-        .map_err(|e| InternalBitcoindConfigError::Unexpected(e.to_string()))?;
+    /// Replace the file at `path` with this config, atomically: a reader sees
+    /// the previous complete file or the new complete file, never a torn one
+    /// (see [`crate::node::managed_conf::write_conf_atomically`]).
+    ///
+    /// Not serialised against other writers on its own — the locked
+    /// [`crate::node::managed_conf::update_managed_conf`] is the path every
+    /// production writer takes; this remains for that path's use and for tests.
+    /// An `Err` means the file still holds its previous bytes. A replacement
+    /// whose directory entry could not be confirmed durable is logged and
+    /// reported as `Ok`: the new contents are in place.
+    pub fn to_file(&self, path: &Path) -> Result<(), InternalBitcoindConfigError> {
+        use crate::node::managed_conf::{write_conf_atomically, ConfWriteError};
         info!("Writing to file {}", path.to_string_lossy());
+        let mut bytes = Vec::new();
         self.to_ini()
-            .write_to_file(path)
+            .write_to(&mut bytes)
             .map_err(|e| InternalBitcoindConfigError::WritingFile(e.to_string()))?;
-
-        Ok(())
+        match write_conf_atomically(path, &bytes) {
+            Ok(()) => Ok(()),
+            Err(ConfWriteError::ReplacedNotDurable(e)) => {
+                warn!(
+                    "{} was replaced but its directory entry was not confirmed durable: {}",
+                    path.display(),
+                    e
+                );
+                Ok(())
+            }
+            Err(ConfWriteError::NotReplaced(e)) => {
+                Err(InternalBitcoindConfigError::WritingFile(e.to_string()))
+            }
+        }
     }
 }
 
@@ -1760,6 +1786,11 @@ pub enum StartInternalBitcoindError {
     ProcessExited(std::process::ExitStatus),
     /// The chain has no runtime in this build ([`crate::chain::RuntimeSupport::Dormant`]).
     ChainUnavailable(&'static str),
+    /// The managed node's configuration could not be brought to a safe state
+    /// for this start — the datadir-wide conf lock was busy or the conf could
+    /// not be read or replaced — so no node was started from what is on disk.
+    /// Retryable.
+    ConfigUnavailable(String),
     /// The configured managed-node provider cannot serve the chain being started.
     ProviderChainMismatch(ProviderChainMismatch),
 }
@@ -1782,6 +1813,12 @@ impl std::fmt::Display for StartInternalBitcoindError {
                 write!(f, "bitcoind process exited with status '{}'.", status)
             }
             Self::ChainUnavailable(reason) => write!(f, "{}", reason),
+            Self::ConfigUnavailable(e) => write!(
+                f,
+                "The managed node's configuration could not be updated, so the node was not \
+                 started: {}",
+                e
+            ),
             Self::ProviderChainMismatch(e) => write!(f, "{}", e),
         }
     }
@@ -1835,27 +1872,42 @@ pub fn configured_managed_flavor(coincube_datadir: &CoincubeDirectory) -> Option
 /// Best-effort and idempotent — a file we cannot read or write is left alone and
 /// retried on the next start.
 fn migrate_legacy_rdts_conf(coincube_datadir: &CoincubeDirectory) {
-    let conf_path = internal_bitcoind_config_path(&internal_bitcoind_datadir(coincube_datadir));
-    let Ok(mut conf) = InternalBitcoindConfig::from_file(&conf_path) else {
-        return;
-    };
-    if !conf.enforce_rdts {
-        return;
-    }
-    info!(
-        "managed bitcoin.conf still carries `consensusrules=rdts`; recording the node as \
-         Bitcoin Knots and removing the line — no build we ship enforces BIP-110"
-    );
-    // Ledger first: losing the line before its meaning is recorded would leave the
-    // datadir with no flavour at all.
-    crate::node::revalidate::ManagedNodeState::record_configured(
-        coincube_datadir,
-        NodeFlavor::Knots,
-    );
-    conf.flavor = NodeFlavor::Knots;
-    conf.enforce_rdts = false;
-    if let Err(e) = conf.to_file(&conf_path) {
-        warn!("could not strip `consensusrules` from the managed bitcoin.conf: {e}");
+    use crate::node::managed_conf::{update_managed_conf, ManagedConfError};
+    // Under the datadir-wide conf lock, on a fresh read: a rebuild from a
+    // snapshot taken moments earlier would erase a network section another
+    // setup persisted in between.
+    let result = update_managed_conf(coincube_datadir, NodeChainFamily::Bitcoin, |txn| {
+        let Some(mut conf) = txn.conf.clone() else {
+            return Ok((false, None));
+        };
+        if !conf.enforce_rdts {
+            return Ok((false, None));
+        }
+        info!(
+            "managed bitcoin.conf still carries `consensusrules=rdts`; recording the node as \
+             Bitcoin Knots and removing the line — no build we ship enforces BIP-110"
+        );
+        // Ledger first: losing the line before its meaning is recorded would leave the
+        // datadir with no flavour at all.
+        crate::node::revalidate::ManagedNodeState::record_configured(
+            coincube_datadir,
+            NodeFlavor::Knots,
+        );
+        conf.flavor = NodeFlavor::Knots;
+        conf.enforce_rdts = false;
+        Ok((true, Some(conf)))
+    });
+    match result {
+        Ok(outcome) => {
+            outcome.logged("stripping `consensusrules` from the managed bitcoin.conf");
+        }
+        // Busy or unreadable: leave the line for the next start, as before. The
+        // pinned build is handed the file as it is, which is what happened on
+        // every start before the migration existed.
+        Err(ManagedConfError::Lock(e)) => {
+            warn!("not stripping `consensusrules` from the managed bitcoin.conf this start: {e}")
+        }
+        Err(e) => warn!("could not strip `consensusrules` from the managed bitcoin.conf: {e}"),
     }
 }
 
@@ -4009,6 +4061,136 @@ mod tests {
                 Ok(vec![51001, 51002])
             );
         }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // The legacy `consensusrules` migration is a locked read-modify-write on
+    // a fresh read: it strips the line from what is on disk *after* another
+    // writer released the lock, so a section that writer added survives; and
+    // while the lock is busy it skips this start rather than write a stale
+    // snapshot (the line is retried next start, as before).
+    #[test]
+    fn legacy_rdts_migration_runs_under_the_conf_lock() {
+        use crate::node::managed_conf::ManagedConfLock;
+        use crate::node::revalidate::ManagedNodeState;
+        let (base, root) = a_temp_coincube_datadir("legacy-lock");
+        let conf_path = internal_bitcoind_config_path(&internal_bitcoind_datadir(&root));
+        std::fs::create_dir_all(conf_path.parent().unwrap()).unwrap();
+        // A conf as an enforcing release left it: the marker line plus a
+        // mainnet section.
+        std::fs::write(
+            &conf_path,
+            "consensusrules=rdts\n\n[main]\nrpcport=41001\nport=41002\nprune=15000\n",
+        )
+        .unwrap();
+        let before = std::fs::read(&conf_path).unwrap();
+        assert!(
+            InternalBitcoindConfig::from_file(&conf_path)
+                .unwrap()
+                .enforce_rdts
+        );
+
+        // Busy for the whole bounded wait: skipped, byte-identical, no ledger.
+        let held = ManagedConfLock::acquire(&root).unwrap();
+        crate::node::managed_conf::with_quick_lock_bound(|| migrate_legacy_rdts_conf(&root));
+        drop(held);
+        assert_eq!(std::fs::read(&conf_path).unwrap(), before);
+        assert!(!ManagedNodeState::path(&root).exists());
+
+        // Another writer adds a section while holding the lock, then
+        // releases; the migration then strips the line from the file *with*
+        // that section in it. Handshake, not wall-clock: contention is proven
+        // (a quick bounded acquire is `Busy` while the writer holds), the
+        // writer persists and releases on signal, and only then does the
+        // migration run its fresh read.
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel::<()>();
+        let (persist_tx, persist_rx) = std::sync::mpsc::channel::<()>();
+        let writer = {
+            let root = root.clone();
+            let conf_path = conf_path.clone();
+            std::thread::spawn(move || {
+                let held = ManagedConfLock::acquire(&root).unwrap();
+                locked_tx.send(()).unwrap();
+                persist_rx.recv().unwrap();
+                // Append a section without touching the marker line (an
+                // older writer that knows nothing of the migration).
+                let mut text = std::fs::read_to_string(&conf_path).unwrap();
+                text.push_str("\n[testnet4]\nrpcport=41003\nport=41004\nprune=15000\n");
+                std::fs::write(&conf_path, text).unwrap();
+                drop(held);
+            })
+        };
+        locked_rx.recv().unwrap();
+        assert!(
+            matches!(
+                ManagedConfLock::acquire_with_bound(&root, 2, std::time::Duration::from_millis(5)),
+                Err(crate::node::managed_conf::ManagedConfLockError::Busy { .. })
+            ),
+            "the writer must be holding the lock at this point"
+        );
+        persist_tx.send(()).unwrap();
+        writer.join().unwrap();
+        migrate_legacy_rdts_conf(&root);
+        let after = InternalBitcoindConfig::from_file(&conf_path).unwrap();
+        assert!(!after.enforce_rdts);
+        assert!(!std::fs::read_to_string(&conf_path)
+            .unwrap()
+            .contains("consensusrules"));
+        assert_eq!(after.networks.len(), 2, "{:?}", after.networks.keys());
+        assert!(after.networks.contains_key(&Network::Testnet4));
+        assert_eq!(
+            ManagedNodeState::load(&root).configured_flavor,
+            Some(NodeFlavor::Knots),
+            "the ledger was recorded before the marker was erased"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // A conf's Tor control/SOCKS ports are reserved like its node ports, so
+    // the other family's allocation never lands on them.
+    #[test]
+    fn recorded_tor_ports_are_reserved_too() {
+        let (base, root) = a_temp_coincube_datadir("tor-ports");
+        let mut bitcoin = InternalBitcoindConfig::for_flavor(NodeFlavor::Knots);
+        bitcoin.networks.insert(
+            Network::Bitcoin,
+            InternalBitcoindNetworkConfig {
+                rpc_port: 43345,
+                p2p_port: 42355,
+                prune: PRUNE_DEFAULT,
+                rpc_auth: None,
+            },
+        );
+        bitcoin.inbound_tor = true;
+        // `proxy=` (the SOCKS port) is only written when outbound-via-Tor is
+        // on; `torcontrol=` whenever inbound is. Both on, so both round-trip.
+        bitcoin.outbound_via_tor = true;
+        bitcoin.tor_control_port = Some(45001);
+        bitcoin.tor_socks_port = Some(45002);
+        let mut ports = bitcoin.ports_in_use();
+        ports.sort_unstable();
+        assert_eq!(ports, vec![42355, 43345, 45001, 45002]);
+        let bitcoin_conf = internal_bitcoind_config_path(&internal_bitcoind_datadir_for(
+            &root,
+            NodeChainFamily::Bitcoin,
+        ));
+        std::fs::create_dir_all(bitcoin_conf.parent().unwrap()).unwrap();
+        bitcoin.to_file(&bitcoin_conf).unwrap();
+        // Round-trips through the file …
+        let mut reserved = reserved_managed_ports(
+            &root,
+            NodeChainFamily::BitcoinBlake2b,
+            &InternalBitcoindConfig::new(),
+        )
+        .unwrap();
+        reserved.sort_unstable();
+        assert_eq!(reserved, vec![42355, 43345, 45001, 45002]);
+        // … and the allocator skips them.
+        let mut seq = vec![45001u16, 45002, 46001, 46002].into_iter();
+        assert_eq!(
+            allocate_managed_ports(&reserved, || seq.next().ok_or("dry")),
+            Ok((46001, 46002))
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 }
