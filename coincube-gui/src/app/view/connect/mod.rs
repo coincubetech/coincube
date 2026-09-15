@@ -1045,15 +1045,14 @@ fn plan_selection_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectA
         .push(cycle_toggle)
         .push(iced::widget::Space::new().height(Length::Fixed(15.0)));
 
-    // Plan cards sit side by side, top-aligned. They must NOT be given
-    // `Length::Fill` height: the row shrinks to its content, and iced's flex
-    // layout resolves a fill-height child of a shrink-height row to zero
-    // height (the cross size is only accumulated from non-fill children).
-    // That zero-height row collapsed the whole page on Windows.
-    let mut cards_row = Row::new()
-        .spacing(12)
-        .width(Length::Fill)
-        .align_y(Alignment::Start);
+    // Plan cards sit side by side and must all be as tall as the tallest,
+    // whatever bullet counts the server sends. A plain `Row` cannot do that:
+    // `Length::Fill` heights on its children resolve to zero (iced's flex
+    // accumulates the cross size from non-filling children only, and here
+    // there are none), which is what collapsed this whole page on Windows.
+    // `EqualHeightRow` measures the cards first and re-lays them out with the
+    // tallest height as a minimum, so nothing is ever asked to fill.
+    let mut cards_row = EqualHeightRow::new().spacing(12);
 
     let price_suffix = match cycle {
         BillingCycle::Monthly => "/month",
