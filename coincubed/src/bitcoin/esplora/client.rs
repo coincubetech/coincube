@@ -472,14 +472,15 @@ impl Client {
     /// [`esplora_client::BlockSummary`] via `get_blocks`, with no
     /// per-hash JSON metadata call available.
     ///
-    /// One request, one snapshot: the tip's id, height and timestamp come from
-    /// the same JSON object of the same response, so a tip that advances
-    /// between two calls can never pair one block's hash with another block's
-    /// time (the old two-call shape read the hash first and the header
-    /// second). The snapshot's tip is the entry with the greatest height —
-    /// both Esplora and mempool.space document `/blocks` as newest-first, but
-    /// the selection does not rely on order. An empty list or a timestamp
-    /// outside `u32` is an [`Error::TipMetadata`], never a default.
+    /// One request, one snapshot: the tip's id, height and timestamp are read
+    /// from the same JSON object of the same response. (The previous shape —
+    /// tip hash, then the header for that captured hash — was also bound to
+    /// one block; the change is the extended-header compatibility and the
+    /// single request, not a race fix.) The snapshot's tip is the entry with
+    /// the greatest height — both Esplora and mempool.space document `/blocks`
+    /// as newest-first, but the selection does not rely on order. An empty
+    /// list or a timestamp outside `u32` is an [`Error::TipMetadata`], never a
+    /// default.
     ///
     /// Provider selection, cooldown and shutdown semantics are unchanged: the
     /// single request goes through [`Self::try_in_order`] like every other call.
@@ -932,27 +933,73 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
+    /// Upper bound on a request head the mock will read; anything larger is
+    /// answered 400 and closed. Real requests here are a few hundred bytes.
+    const MOCK_MAX_HEAD: usize = 8 * 1024;
+    /// How long the mock waits for the rest of a request head before giving
+    /// up on that connection (a held-open partial request must not pin the
+    /// server thread — or a test's teardown — indefinitely).
+    const MOCK_READ_TIMEOUT: Duration = Duration::from_millis(300);
+
     struct MockEsplora {
         base: String,
+        addr: std::net::SocketAddr,
         requests: Arc<Mutex<Vec<String>>>,
-        _thread: std::thread::JoinHandle<()>,
+        stop: Arc<AtomicBool>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    /// Read one HTTP request head from `stream`: through the `\r\n\r\n`
+    /// terminator, bounded by [`MOCK_MAX_HEAD`] bytes and [`MOCK_READ_TIMEOUT`]
+    /// per read. `None` when the head never completes within those bounds — one
+    /// TCP read is not a message boundary, so this loops until the terminator.
+    fn read_request_head(stream: &mut std::net::TcpStream) -> Option<String> {
+        stream.set_read_timeout(Some(MOCK_READ_TIMEOUT)).ok()?;
+        let mut head = Vec::new();
+        let mut chunk = [0u8; 1024];
+        loop {
+            if head.windows(4).any(|w| w == b"\r\n\r\n") {
+                return Some(String::from_utf8_lossy(&head).to_string());
+            }
+            if head.len() > MOCK_MAX_HEAD {
+                return None;
+            }
+            match stream.read(&mut chunk) {
+                Ok(0) => return None, // peer closed before completing the head
+                Ok(n) => head.extend_from_slice(&chunk[..n]),
+                Err(_) => return None, // timeout or reset: give up on this connection
+            }
+        }
     }
 
     /// (status, body) per exact path; unknown paths answer 404.
     fn mock_esplora(routes: StdHashMap<&'static str, (u16, String)>) -> MockEsplora {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock esplora");
-        let base = format!("http://{}", listener.local_addr().unwrap());
+        let addr = listener.local_addr().unwrap();
+        let base = format!("http://{}", addr);
         let requests: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let stop = Arc::new(AtomicBool::new(false));
         let seen = requests.clone();
+        let stopping = stop.clone();
         let thread = std::thread::spawn(move || {
+            // Bounded accept loop: `Drop` raises `stop` and then connects once
+            // to wake `accept`, so the loop observes the flag and exits; it is
+            // never left running after the test that owns it.
             for stream in listener.incoming() {
+                if stopping.load(Ordering::SeqCst) {
+                    break;
+                }
                 let mut stream = match stream {
                     Ok(s) => s,
                     Err(_) => break,
                 };
-                let mut buf = [0u8; 4096];
-                let n = stream.read(&mut buf).unwrap_or(0);
-                let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                let _ = stream.set_write_timeout(Some(MOCK_READ_TIMEOUT));
+                let Some(head) = read_request_head(&mut stream) else {
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    );
+                    continue;
+                };
                 let path = head
                     .lines()
                     .next()
@@ -983,8 +1030,10 @@ mod tests {
         });
         MockEsplora {
             base,
+            addr,
             requests,
-            _thread: thread,
+            stop,
+            thread: Some(thread),
         }
     }
 
@@ -998,6 +1047,19 @@ mod tests {
         }
         fn requests(&self) -> Vec<String> {
             self.requests.lock().unwrap().clone()
+        }
+    }
+
+    impl Drop for MockEsplora {
+        /// Explicit, bounded shutdown: flag, wake the blocked `accept` with one
+        /// local connection, join. A connection the server is mid-read on
+        /// resolves within [`MOCK_READ_TIMEOUT`], so the join is bounded too.
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::SeqCst);
+            let _ = std::net::TcpStream::connect_timeout(&self.addr, Duration::from_secs(1));
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
         }
     }
 
@@ -1124,12 +1186,10 @@ mod tests {
     }
 
     #[test]
-    fn tip_time_snapshot_is_atomic_across_tip_changes() {
+    fn tip_time_is_one_request_per_call_and_tracks_the_snapshot() {
         // Two sequential calls see two different snapshots; each answer is the
-        // timestamp of ITS OWN snapshot's tip. With a single request per call
-        // there is no window in which one block's hash could be paired with
-        // another block's time — this pins that the reader never re-reads the
-        // tip hash separately.
+        // timestamp of its own snapshot's tip, and each call issues exactly
+        // one `/blocks` request — no separate tip-hash read, no header read.
         let first = blocks_json(&[
             bitcoin_summary(H1, 100, 1_000_600, H0),
             bitcoin_summary(H0, 99, 1_000_000, MERKLE),
@@ -1208,5 +1268,77 @@ mod tests {
         let msg = Error::TipMetadata("`/blocks` returned no block summaries").to_string();
         assert!(msg.contains("no block summaries"), "{}", msg);
         assert!(!Error::TipMetadata("x").is_all_cooling());
+    }
+
+    /// Runs `f` on a helper thread and fails if it has not returned within
+    /// `bound` — the way to make a hung teardown a test failure rather than a
+    /// hung test binary.
+    fn completes_within<F: FnOnce() + Send + 'static>(bound: Duration, f: F) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            f();
+            let _ = tx.send(());
+        });
+        rx.recv_timeout(bound)
+            .unwrap_or_else(|_| panic!("did not complete within {:?}", bound));
+    }
+
+    #[test]
+    fn mock_esplora_tears_down_with_no_request() {
+        completes_within(Duration::from_secs(5), || {
+            let mock = mock_esplora(routes((200, "[]".to_string())));
+            drop(mock);
+        });
+    }
+
+    #[test]
+    fn mock_esplora_tears_down_while_a_partial_request_is_held_open() {
+        completes_within(Duration::from_secs(5), || {
+            let mock = mock_esplora(routes((200, "[]".to_string())));
+            // A client that sends half a request head and then goes quiet.
+            let mut held = std::net::TcpStream::connect(mock.addr).unwrap();
+            held.write_all(b"GET /blocks HTTP/1.1\r\nHost: x").unwrap();
+            held.flush().unwrap();
+            // The server must give up on it (read timeout → 400 + close) and
+            // still honour the stop flag; the held socket stays open meanwhile.
+            drop(mock);
+            drop(held);
+        });
+    }
+
+    #[test]
+    fn mock_esplora_reads_a_head_split_across_writes() {
+        // One TCP read is not a message boundary: a request head delivered in
+        // two segments must still be routed to its path.
+        let mock = mock_esplora(routes((200, "[]".to_string())));
+        let mut s = std::net::TcpStream::connect(mock.addr).unwrap();
+        s.write_all(b"GET /blocks HTTP/1.1\r\nHost: x\r\n").unwrap();
+        s.flush().unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        s.write_all(b"Accept: */*\r\n\r\n").unwrap();
+        s.flush().unwrap();
+        let mut resp = String::new();
+        s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let _ = s.read_to_string(&mut resp);
+        assert!(resp.starts_with("HTTP/1.1 200"), "{}", resp);
+        assert_eq!(mock.requests(), vec!["/blocks".to_string()]);
+    }
+
+    #[test]
+    fn mock_esplora_bounds_oversized_heads() {
+        let mock = mock_esplora(routes((200, "[]".to_string())));
+        let mut s = std::net::TcpStream::connect(mock.addr).unwrap();
+        let junk = vec![b'a'; MOCK_MAX_HEAD + 2048];
+        let _ = s.write_all(b"GET /blocks HTTP/1.1\r\nX: ");
+        let _ = s.write_all(&junk);
+        let _ = s.flush();
+        let mut resp = String::new();
+        s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let _ = s.read_to_string(&mut resp);
+        assert!(resp.starts_with("HTTP/1.1 400"), "{}", resp);
+        assert!(
+            mock.requests().is_empty(),
+            "an unterminated head must not be routed"
+        );
     }
 }
