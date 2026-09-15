@@ -16,8 +16,9 @@ pub use miniscript;
 
 pub use crate::bitcoin::{
     d::{
-        valid_node_instance, BitcoinD, BitcoindError, ChainStatus, ChainTipEntry, DeploymentStatus,
-        PruneState, WalletError, NODE_INSTANCE_FILE, NODE_INSTANCE_LEN,
+        valid_node_instance, BitcoinD, BitcoindError, Blake2bDeploymentInfo, ChainStatus,
+        ChainTipEntry, DeploymentProbeError, DeploymentStatus, ForkActivation, PruneState,
+        RdtsSchedule, WalletError, NODE_INSTANCE_FILE, NODE_INSTANCE_LEN,
     },
     electrum::{Electrum, ElectrumError},
     esplora::{Esplora, EsploraError},
