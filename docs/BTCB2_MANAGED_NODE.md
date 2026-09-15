@@ -100,10 +100,15 @@ attempted; the next successful write brings the conf in line with the ledger.
 Because each rewrite reads under the lock, a section another setup persisted
 a moment earlier is never erased by a stale snapshot. Tor's bootstrap — the
 one slow step — runs **outside** the lock: the conf is reset to outbound-only
-under the lock, Tor is started with ports chosen around everything recorded,
-and only then are the inbound fields merged onto a second fresh read. The
-lock is a leaf: nothing else is acquired while it is held, and it is never
-taken while the marker lock is held.
+under the lock, the previous managed Tor of this process is stopped **only
+after that reset is durably in place**, Tor is started with ports chosen
+around everything recorded, and only then are the inbound fields merged onto
+a second fresh read. A refusal at the reset (lock busy, conf unreadable or
+not replaceable) therefore leaves both the conf and the already running Tor
+exactly as they were — a sibling session's node in the same process keeps
+the Tor its conf still names — while the success and "no conf" paths stop
+it as they always did. The lock is a leaf: nothing else is acquired while it
+is held, and it is never taken while the marker lock is held.
 
 Replacement is atomic (`write_conf_atomically`): the bytes are staged in a
 uniquely named private sibling (`bitcoin.conf.<pid>.<seq>.tmp`, mode `0600`,

@@ -1504,6 +1504,9 @@ mod chain_identity_tests {
     // same call *does* reach and rewrite the conf when the provider is right.
     #[tokio::test]
     async fn a_mismatched_persisted_provider_is_refused_before_tor_config_or_stop() {
+        // The control run reaches `prepare_inbound_tor`, which touches the
+        // process-global Tor registry.
+        let _registry = crate::node::tor::registry_test_guard();
         use crate::node::bitcoind::{
             internal_bitcoind_config_path, internal_bitcoind_cookie_path,
             internal_bitcoind_datadir, InternalBitcoindConfig, InternalBitcoindNetworkConfig,
@@ -1633,6 +1636,8 @@ mod chain_identity_tests {
     // is looked for.
     #[tokio::test]
     async fn a_busy_conf_lock_refuses_the_start_instead_of_using_stale_privacy_config() {
+        // Both starts reach `prepare_inbound_tor` (process-global Tor registry).
+        let _registry = crate::node::tor::registry_test_guard();
         use crate::node::bitcoind::{
             internal_bitcoind_config_path, internal_bitcoind_cookie_path,
             internal_bitcoind_datadir, InternalBitcoindConfig, InternalBitcoindNetworkConfig,
