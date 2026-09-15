@@ -312,10 +312,13 @@ impl Context {
     ) -> Self {
         Self {
             descriptor_template: DescriptorTemplate::default(),
-            bitcoin_config: BitcoinConfig {
-                network,
-                poll_interval_secs: Duration::from_secs(10),
-            },
+            // The installer only creates Bitcoin-family Cubes while Bitcoin Blake2b is
+            // dormant, so the identity is the network's own; the daemon derives the
+            // encoding from it.
+            bitcoin_config: BitcoinConfig::new(
+                crate::chain::ChainId::from(network),
+                Duration::from_secs(10),
+            ),
             hws: Vec::new(),
             keys: HashMap::new(),
             bitcoin_backend: None,

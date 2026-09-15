@@ -7,6 +7,7 @@
 //! We leverage SQLite's `unlock_notify` feature to synchronize writes across connection. More
 //! about it at https://sqlite.org/unlock_notify.html.
 
+pub mod preflight;
 pub mod schema;
 mod utils;
 
@@ -26,6 +27,7 @@ use crate::{
         Coin, CoinStatus, LabelItem,
     },
 };
+use coincube_core::chain::ChainId;
 use coincube_core::descriptors::CoincubeDescriptor;
 
 use std::{
@@ -43,11 +45,19 @@ use miniscript::bitcoin::{
     secp256k1,
 };
 
-const DB_VERSION: i64 = 8;
+/// Current schema version. v9 (BTCB2 plan, coincube-api#292) added the chain identity column
+/// `tip.chain` next to the encoding column `tip.network`. Older binaries refuse a v9 database
+/// with [`SqliteDbError::UnsupportedVersion`] — the same shape as every previous bump, so a
+/// downgrade needs the pre-upgrade `coincubed.sqlite3` backup.
+pub const DB_VERSION: i64 = 9;
 
 /// Last database version for which Bitcoin transactions were not stored in database. In practice
 /// this meant we relied on the bitcoind watchonly wallet to store them for us.
 pub const MAX_DB_VERSION_NO_TX_DB: i64 = 4;
+
+/// Last database version whose `tip` table carried only the encoding (`network`); from v9 on it
+/// also carries the chain identity (`chain`).
+pub(crate) const MAX_DB_VERSION_NO_CHAIN: i64 = 8;
 
 #[derive(Debug)]
 pub enum SqliteDbError {
@@ -55,6 +65,16 @@ pub enum SqliteDbError {
     FileNotFound(path::PathBuf),
     UnsupportedVersion(i64),
     InvalidNetwork(bitcoin::Network),
+    /// The database carries a chain identity other than the configured one.
+    ChainMismatch {
+        expected: ChainId,
+        found: ChainId,
+    },
+    /// A chain identity string this build does not know (never mapped to a default).
+    UnknownChain(String),
+    /// The identity rows are not what a Coincube database must hold (zero/several rows, or an
+    /// identity whose encoding disagrees with its `network` column).
+    MalformedIdentity(String),
     DescriptorMismatch(Box<CoincubeDescriptor>),
     Rusqlite(rusqlite::Error),
 }
@@ -73,6 +93,17 @@ impl std::fmt::Display for SqliteDbError {
             }
             SqliteDbError::InvalidNetwork(net) => {
                 write!(f, "Database was created for network '{}'.", net)
+            }
+            SqliteDbError::ChainMismatch { expected, found } => write!(
+                f,
+                "Database was created for chain '{}' but the configuration is for chain '{}'.",
+                found, expected
+            ),
+            SqliteDbError::UnknownChain(s) => {
+                write!(f, "Database names an unknown chain '{}'.", s)
+            }
+            SqliteDbError::MalformedIdentity(msg) => {
+                write!(f, "Database identity is malformed: {}.", msg)
             }
             SqliteDbError::DescriptorMismatch(desc) => {
                 write!(f, "Database descriptor mismatch: '{}'.", desc)
@@ -116,22 +147,37 @@ impl fmt::Display for FrontwardHexTxid {
 
 #[derive(Debug, Clone)]
 pub struct FreshDbOptions {
-    pub(self) bitcoind_network: bitcoin::Network,
+    /// The chain identity the database is created for; its encoding is derived from it.
+    pub(self) chain: ChainId,
     pub(self) main_descriptor: CoincubeDescriptor,
     pub(self) schema: &'static str,
     pub(self) version: i64,
 }
 
 impl FreshDbOptions {
-    pub fn new(
-        bitcoind_network: bitcoin::Network,
-        main_descriptor: CoincubeDescriptor,
-    ) -> FreshDbOptions {
+    pub fn new(chain: ChainId, main_descriptor: CoincubeDescriptor) -> FreshDbOptions {
         FreshDbOptions {
-            bitcoind_network,
+            chain,
             main_descriptor,
             schema: SCHEMA,
             version: DB_VERSION,
+        }
+    }
+
+    /// Options for a database in an *older* schema, for tests that need a genuine legacy
+    /// fixture (e.g. a version-8 file to migrate or preflight).
+    #[cfg(test)]
+    pub(crate) fn legacy(
+        chain: ChainId,
+        main_descriptor: CoincubeDescriptor,
+        schema: &'static str,
+        version: i64,
+    ) -> FreshDbOptions {
+        FreshDbOptions {
+            chain,
+            main_descriptor,
+            schema,
+            version,
         }
     }
 }
@@ -184,7 +230,7 @@ impl SqliteDb {
     /// Perform startup sanity checks.
     pub fn sanity_check(
         &self,
-        bitcoind_network: bitcoin::Network,
+        chain: ChainId,
         main_descriptor: &CoincubeDescriptor,
     ) -> Result<(), SqliteDbError> {
         let mut conn = self.connection()?;
@@ -195,9 +241,16 @@ impl SqliteDb {
             return Err(SqliteDbError::UnsupportedVersion(db_version));
         }
 
-        // The config and the db should be on the same network.
+        // The config and the db must be on the same chain, and the encoding column must be the
+        // one that chain implies.
         let db_tip = conn.db_tip();
-        if db_tip.network != bitcoind_network {
+        if db_tip.chain != chain {
+            return Err(SqliteDbError::ChainMismatch {
+                expected: chain,
+                found: db_tip.chain,
+            });
+        }
+        if db_tip.network != chain.bitcoin_network() {
             return Err(SqliteDbError::InvalidNetwork(db_tip.network));
         }
 
@@ -1228,7 +1281,7 @@ CREATE TABLE labels (
     fn dummy_options() -> FreshDbOptions {
         let desc_str = "wsh(andor(pk([aabbccdd]tpubDEN9WSToTyy9ZQfaYqSKfmVqmq1VVLNtYfj3Vkqh67et57eJ5sTKZQBkHqSwPUsoSskJeaYnPttHe2VrkCsKA27kUaN9SDc5zhqeLzKa1rr/<0;1>/*),older(10000),pk([aabbccdd]tpubD8LYfn6njiA2inCoxwM7EuN3cuLVcaHAwLYeups13dpevd3nHLRdK9NdQksWXrhLQVxcUZRpnp5CkJ1FhE61WRAsHxDNAkvGkoQkAeWDYjV/<0;1>/*)))#dw4ulnrs";
         let main_descriptor = CoincubeDescriptor::from_str(desc_str).unwrap();
-        FreshDbOptions::new(bitcoin::Network::Bitcoin, main_descriptor)
+        FreshDbOptions::new(ChainId::Bitcoin, main_descriptor)
     }
 
     fn dummy_db() -> (
@@ -1326,15 +1379,23 @@ CREATE TABLE labels (
         let options = dummy_options();
 
         let db = SqliteDb::new(db_path.clone(), Some(options.clone()), &secp).unwrap();
-        db.sanity_check(bitcoin::Network::Testnet, &options.main_descriptor)
+        db.sanity_check(ChainId::Testnet, &options.main_descriptor)
             .unwrap_err()
             .to_string()
-            .contains("Database was created for network");
+            .contains("Database was created for chain");
+        // The encoding twin is a different chain too: a mainnet database is not a BTCB2 one.
+        assert!(matches!(
+            db.sanity_check(ChainId::BitcoinBlake2b, &options.main_descriptor),
+            Err(SqliteDbError::ChainMismatch {
+                expected: ChainId::BitcoinBlake2b,
+                found: ChainId::Bitcoin
+            })
+        ));
         fs::remove_file(&db_path).unwrap();
         let other_desc_str = "wsh(andor(pk([aabbccdd]tpubDExU4YLJkyQ9RRbVScQq2brFxWWha7WmAUByPWyaWYwmcTv3Shx8aHp6mVwuE5n4TeM4z5DTWGf2YhNPmXtfvyr8cUDVvA3txdrFnFgNdF7/<0;1>/*),older(10000),pk([aabbccdd]tpubD8LYfn6njiA2inCoxwM7EuN3cuLVcaHAwLYeups13dpevd3nHLRdK9NdQksWXrhLQVxcUZRpnp5CkJ1FhE61WRAsHxDNAkvGkoQkAeWDYjV/<0;1>/*)))";
         let other_desc = CoincubeDescriptor::from_str(other_desc_str).unwrap();
         let db = SqliteDb::new(db_path.clone(), Some(options.clone()), &secp).unwrap();
-        db.sanity_check(bitcoin::Network::Bitcoin, &other_desc)
+        db.sanity_check(ChainId::Bitcoin, &other_desc)
             .unwrap_err()
             .to_string()
             .contains("Database descriptor mismatch");
@@ -1342,14 +1403,14 @@ CREATE TABLE labels (
         // TODO: version check
 
         let db = SqliteDb::new(db_path.clone(), Some(options.clone()), &secp).unwrap();
-        db.sanity_check(bitcoin::Network::Bitcoin, &options.main_descriptor)
+        db.sanity_check(ChainId::Bitcoin, &options.main_descriptor)
             .unwrap();
         let db = SqliteDb::new(db_path.clone(), None, &secp).unwrap();
-        db.sanity_check(bitcoin::Network::Bitcoin, &options.main_descriptor)
+        db.sanity_check(ChainId::Bitcoin, &options.main_descriptor)
             .unwrap();
         let db = SqliteDb::new(db_path, None, &secp).unwrap();
         db.maybe_apply_migrations(&[]).unwrap();
-        db.sanity_check(bitcoin::Network::Bitcoin, &options.main_descriptor)
+        db.sanity_check(ChainId::Bitcoin, &options.main_descriptor)
             .unwrap();
 
         fs::remove_dir_all(tmp_dir).unwrap();
@@ -1365,7 +1426,8 @@ CREATE TABLE labels (
             assert!(
                 db_tip.block_hash.is_none()
                     && db_tip.block_height.is_none()
-                    && db_tip.network == options.bitcoind_network
+                    && db_tip.network == options.chain.bitcoin_network()
+                    && db_tip.chain == options.chain
             );
             let new_tip = BlockChainTip {
                 height: 746756,
@@ -1967,7 +2029,7 @@ CREATE TABLE labels (
                 .main_descriptor
                 .receive_descriptor()
                 .derive(0.into(), &secp)
-                .address(options.bitcoind_network);
+                .address(options.chain.bitcoin_network());
             let db_addr = conn.db_address(&addr).unwrap();
             assert_eq!(db_addr.derivation_index, 0.into());
 
@@ -1976,7 +2038,7 @@ CREATE TABLE labels (
                 .main_descriptor
                 .change_descriptor()
                 .derive(0.into(), &secp)
-                .address(options.bitcoind_network);
+                .address(options.chain.bitcoin_network());
             let db_addr = conn.db_address(&addr).unwrap();
             assert_eq!(db_addr.derivation_index, 0.into());
 
@@ -1985,7 +2047,7 @@ CREATE TABLE labels (
                 .main_descriptor
                 .receive_descriptor()
                 .derive(199.into(), &secp)
-                .address(options.bitcoind_network);
+                .address(options.chain.bitcoin_network());
             let db_addr = conn.db_address(&addr).unwrap();
             assert_eq!(db_addr.derivation_index, 199.into());
 
@@ -1994,7 +2056,7 @@ CREATE TABLE labels (
                 .main_descriptor
                 .receive_descriptor()
                 .derive(200.into(), &secp)
-                .address(options.bitcoind_network);
+                .address(options.chain.bitcoin_network());
             assert!(conn.db_address(&addr).is_none());
 
             // But if we increment the deposit derivation index, the 200th one will be there.
@@ -2007,7 +2069,7 @@ CREATE TABLE labels (
                 .main_descriptor
                 .change_descriptor()
                 .derive(200.into(), &secp)
-                .address(options.bitcoind_network);
+                .address(options.chain.bitcoin_network());
             let db_addr = conn.db_address(&addr).unwrap();
             assert_eq!(db_addr.derivation_index, 200.into());
 
@@ -2016,7 +2078,7 @@ CREATE TABLE labels (
                 .main_descriptor
                 .change_descriptor()
                 .derive(201.into(), &secp)
-                .address(options.bitcoind_network);
+                .address(options.chain.bitcoin_network());
             assert!(conn.db_address(&addr).is_none());
 
             // If we increment the *change* derivation index to 1, it will still not be there.
@@ -2031,7 +2093,7 @@ CREATE TABLE labels (
                 .main_descriptor
                 .receive_descriptor()
                 .derive(201.into(), &secp)
-                .address(options.bitcoind_network);
+                .address(options.chain.bitcoin_network());
             let db_addr = conn.db_address(&addr).unwrap();
             assert_eq!(db_addr.derivation_index, 201.into());
 
@@ -2043,7 +2105,7 @@ CREATE TABLE labels (
                     .main_descriptor
                     .receive_descriptor()
                     .derive(look_ahead_index.into(), &secp)
-                    .address(options.bitcoind_network);
+                    .address(options.chain.bitcoin_network());
                 let db_addr = conn.db_address(&addr).unwrap();
                 assert_eq!(db_addr.derivation_index, look_ahead_index.into());
             }
@@ -2986,7 +3048,7 @@ CREATE TABLE labels (
     }
 
     #[test]
-    fn v0_to_v8_migration() {
+    fn v0_to_v9_migration() {
         let secp = secp256k1::Secp256k1::verification_only();
 
         // Create a database with version 0, using the old schema.
@@ -3092,7 +3154,7 @@ CREATE TABLE labels (
         {
             let mut conn = db.connection().unwrap();
             let version = conn.db_version();
-            assert_eq!(version, 8);
+            assert_eq!(version, 9);
         }
         // We should now be able to insert another PSBT, to query both, and the first PSBT must
         // have no associated timestamp.
@@ -3167,7 +3229,7 @@ CREATE TABLE labels (
     }
 
     #[test]
-    fn v3_to_v8_migration() {
+    fn v3_to_v9_migration() {
         let secp = secp256k1::Secp256k1::verification_only();
 
         // Create a database with version 3, using the old schema.
@@ -3319,10 +3381,10 @@ CREATE TABLE labels (
 
             // Migrate the DB.
             maybe_apply_migration(&db_path, &bitcoin_txs).unwrap();
-            assert_eq!(conn.db_version(), 8);
+            assert_eq!(conn.db_version(), 9);
             // Migrating twice will be a no-op. No need to pass `bitcoin_txs` second time.
             maybe_apply_migration(&db_path, &[]).unwrap();
-            assert!(conn.db_version() == 8);
+            assert!(conn.db_version() == 9);
 
             // Compare the `DbCoin`s with the expected values.
             let coins_post = conn.coins(&[], &[]);
@@ -3476,5 +3538,651 @@ CREATE TABLE labels (
         }
 
         fs::remove_dir_all(tmp_dir).unwrap();
+    }
+
+    // ── Chain identity: read-only preflight and the v8 -> v9 migration (coincube-api#292) ──
+
+    mod chain_identity {
+        use super::*;
+        use crate::database::sqlite::preflight::{
+            read_stored_identity, read_stored_identity_with, PreflightError, StoredIdentity,
+        };
+        use bitcoin::hashes::{sha256, Hash};
+        use std::io::Write;
+
+        /// The five identities every existing database was created with.
+        const LEGACY: [(ChainId, bitcoin::Network); 5] = [
+            (ChainId::Bitcoin, bitcoin::Network::Bitcoin),
+            (ChainId::Testnet, bitcoin::Network::Testnet),
+            (ChainId::Testnet4, bitcoin::Network::Testnet4),
+            (ChainId::Signet, bitcoin::Network::Signet),
+            (ChainId::Regtest, bitcoin::Network::Regtest),
+        ];
+
+        /// A genuine version-8 database: the frozen v8 schema, the v8 version row and the
+        /// three-column `tip` row an older build wrote for `chain`.
+        fn v8_fixture(chain: ChainId) -> (path::PathBuf, path::PathBuf, FreshDbOptions) {
+            let tmp_dir = tmp_dir();
+            fs::create_dir_all(&tmp_dir).unwrap();
+            let db_path = tmp_dir.join("coincubed.sqlite3");
+            let mut options = dummy_options();
+            options.chain = chain;
+            options.schema = V8_SCHEMA;
+            options.version = 8;
+            let secp = secp256k1::Secp256k1::verification_only();
+            create_fresh_db(&db_path, options.clone(), &secp).unwrap();
+            (tmp_dir, db_path, options)
+        }
+
+        fn v9_fixture(chain: ChainId) -> (path::PathBuf, path::PathBuf, FreshDbOptions) {
+            let tmp_dir = tmp_dir();
+            fs::create_dir_all(&tmp_dir).unwrap();
+            let db_path = tmp_dir.join("coincubed.sqlite3");
+            let mut options = dummy_options();
+            options.chain = chain;
+            let secp = secp256k1::Secp256k1::verification_only();
+            create_fresh_db(&db_path, options.clone(), &secp).unwrap();
+            (tmp_dir, db_path, options)
+        }
+
+        fn sha256_of(path: &path::Path) -> sha256::Hash {
+            sha256::Hash::hash(&fs::read(path).unwrap())
+        }
+
+        /// Every entry of `dir`, sorted, so "nothing new appeared" is a plain equality.
+        fn listing(dir: &path::Path) -> Vec<String> {
+            let mut names: Vec<String> = fs::read_dir(dir)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            names
+        }
+
+        /// Raw SQL against a fixture, the way a test (not the daemon) tampers with it.
+        fn raw(db_path: &path::Path, sql: &str) {
+            rusqlite::Connection::open(db_path)
+                .unwrap()
+                .execute_batch(sql)
+                .unwrap();
+        }
+
+        fn table_info(db_path: &path::Path, table: &str) -> Vec<(String, String, bool)> {
+            let conn = rusqlite::Connection::open(db_path).unwrap();
+            let mut stmt = conn
+                .prepare(&format!("PRAGMA table_info({})", table))
+                .unwrap();
+            stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, bool>(3)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+        }
+
+        fn header_format_bytes(db_path: &path::Path) -> (u8, u8) {
+            let bytes = fs::read(db_path).unwrap();
+            (bytes[18], bytes[19])
+        }
+
+        #[test]
+        fn preflight_reads_every_legacy_network_from_a_genuine_v8_database_untouched() {
+            for (chain, network) in LEGACY {
+                let (tmp_dir, db_path, _) = v8_fixture(chain);
+                let before = (sha256_of(&db_path), listing(&tmp_dir));
+                assert_eq!(header_format_bytes(&db_path), (1, 1), "{:?}", chain);
+
+                let stored = read_stored_identity(&db_path).unwrap();
+                assert_eq!(
+                    stored,
+                    StoredIdentity {
+                        version: 8,
+                        chain,
+                        network,
+                    },
+                    "{:?}",
+                    chain
+                );
+                // Same bytes, same files: no journal, no sidecar, no page written.
+                assert_eq!(
+                    (sha256_of(&db_path), listing(&tmp_dir)),
+                    before,
+                    "{:?}",
+                    chain
+                );
+                assert_eq!(listing(&tmp_dir), vec!["coincubed.sqlite3"]);
+                fs::remove_dir_all(tmp_dir).unwrap();
+            }
+        }
+
+        #[test]
+        fn preflight_reads_a_fresh_v9_database_and_its_identity_survives_a_tip_update() {
+            for (chain, network) in LEGACY {
+                let (tmp_dir, db_path, options) = v9_fixture(chain);
+                assert_eq!(
+                    read_stored_identity(&db_path).unwrap(),
+                    StoredIdentity {
+                        version: 9,
+                        chain,
+                        network
+                    }
+                );
+                // The normal write path keeps the identity intact.
+                let secp = secp256k1::Secp256k1::verification_only();
+                let db = SqliteDb::new(db_path.clone(), None, &secp).unwrap();
+                let mut conn = db.connection().unwrap();
+                conn.update_tip(&BlockChainTip {
+                    height: 42,
+                    hash: BlockHash::all_zeros(),
+                });
+                let tip = conn.db_tip();
+                assert_eq!(
+                    (tip.chain, tip.network, tip.block_height),
+                    (chain, network, Some(42))
+                );
+                db.sanity_check(chain, &options.main_descriptor).unwrap();
+                assert_eq!(read_stored_identity(&db_path).unwrap().chain, chain);
+                fs::remove_dir_all(tmp_dir).unwrap();
+            }
+        }
+
+        #[test]
+        fn v8_to_v9_migration_backfills_the_identity_and_preserves_every_other_row() {
+            let secp = secp256k1::Secp256k1::verification_only();
+            let (_, fresh_v9_path, _) = v9_fixture(ChainId::Bitcoin);
+            let fresh_tip_layout = table_info(&fresh_v9_path, "tip");
+            assert_eq!(
+                fresh_tip_layout
+                    .iter()
+                    .map(|(name, ty, not_null)| (name.as_str(), ty.as_str(), *not_null))
+                    .collect::<Vec<_>>(),
+                vec![
+                    ("network", "TEXT", true),
+                    ("chain", "TEXT", true),
+                    ("blockheight", "INTEGER", false),
+                    ("blockhash", "BLOB", false),
+                ]
+            );
+
+            for (chain, network) in LEGACY {
+                let (tmp_dir, db_path, options) = v8_fixture(chain);
+                // Rows in every other table that the migration must carry over untouched: a
+                // transaction, a coin, a spend draft, a label and a tip height.
+                let tx = bitcoin::Transaction {
+                    version: bitcoin::transaction::Version::TWO,
+                    lock_time: bitcoin::absolute::LockTime::ZERO,
+                    input: vec![TxIn::default()],
+                    output: vec![bitcoin::TxOut::minimal_non_dust(ScriptBuf::default())],
+                };
+                let coin = Coin {
+                    outpoint: bitcoin::OutPoint::new(tx.compute_txid(), 0),
+                    is_immature: false,
+                    block_info: Some(BlockInfo {
+                        height: 100,
+                        time: 1_700_000_000,
+                    }),
+                    amount: bitcoin::Amount::from_sat(12_345),
+                    derivation_index: bip32::ChildNumber::from_normal_idx(3).unwrap(),
+                    is_change: false,
+                    spend_txid: None,
+                    spend_block: None,
+                    is_from_self: false,
+                };
+                let psbt = psbt_from_str("cHNidP8BAIkCAAAAAWi3OFgkj1CqCDT3Swm8kbxZS9lxz4L3i4W2v9KGC7nqAQAAAAD9////AkANAwAAAAAAIgAg27lNc1rog+dOq80ohRuds4Hgg/RcpxVun2XwgpuLSrFYMwwAAAAAACIAIDyWveqaElWmFGkTbFojg1zXWHODtiipSNjfgi2DqBy9AAAAAAABAOoCAAAAAAEBsRWl70USoAFFozxc86pC7Dovttdg4kvja//3WMEJskEBAAAAAP7///8CWKmCIk4GAAAWABRKBWYWkCNS46jgF0r69Ehdnq+7T0BCDwAAAAAAIgAgTt5fs+CiB+FRzNC8lHcgWLH205sNjz1pT59ghXlG5tQCRzBEAiBXK9MF8z3bX/VnY2aefgBBmiAHPL4tyDbUOe7+KpYA4AIgL5kU0DFG8szKd+szRzz/OTUWJ0tZqij41h2eU9rSe1IBIQNBB1hy+jKsg1TihMT0dXw7etpu9TkO3NuvhBDFJlBj1cP2AQABAStAQg8AAAAAACIAIE7eX7PgogfhUczQvJR3IFix9tObDY89aU+fYIV5RubUIgICSKJsNs0zFJN58yd2aYQ+C3vhMbi0x7k0FV3wBhR4THlIMEUCIQCPWWWOhs2lThxOq/G8X2fYBRvM9MXSm7qPH+dRVYQZEwIgfut2vx3RvwZWcgEj4ohQJD5lNJlwOkA4PAiN1fjx6dABIgID3mvj1zerZKohOVhKCiskYk+3qrCum6PIwDhQ16ePACpHMEQCICZNR+0/1hPkrDQwPFmg5VjUHkh6aK9cXUu3kPbM8hirAiAyE/5NUXKfmFKij30isuyysJbq8HrURjivd+S9vdRGKQEBBZNSIQJIomw2zTMUk3nzJ3ZphD4Le+ExuLTHuTQVXfAGFHhMeSEC9OfCXl+sJOrxUFLBuMV4ZUlJYjuzNGZSld5ioY14y8FSrnNkUSED3mvj1zerZKohOVhKCiskYk+3qrCum6PIwDhQ16ePACohA+ECH+HlR+8Sf3pumaXH3IwSsoqSLCH7H1THiBP93z3ZUq9SsmgiBgJIomw2zTMUk3nzJ3ZphD4Le+ExuLTHuTQVXfAGFHhMeRxjat8/MAAAgAEAAIAAAACAAgAAgAAAAAABAAAAIgYC9OfCXl+sJOrxUFLBuMV4ZUlJYjuzNGZSld5ioY14y8Ec/9Y8jTAAAIABAACAAAAAgAIAAIAAAAAAAQAAACIGA95r49c3q2SqITlYSgorJGJPt6qwrpujyMA4UNenjwAqHGNq3z8wAACAAQAAgAEAAIACAACAAAAAAAEAAAAiBgPhAh/h5UfvEn96bpmlx9yMErKKkiwh+x9Ux4gT/d892Rz/1jyNMAAAgAEAAIABAACAAgAAgAAAAAABAAAAACICAlBQ7gGocg7eF3sXrCio+zusAC9+xfoyIV95AeR69DWvHGNq3z8wAACAAQAAgAEAAIACAACAAAAAAAMAAAAiAgMvVy984eg8Kgvj058PBHetFayWbRGb7L0DMnS9KHSJzBxjat8/MAAAgAEAAIAAAACAAgAAgAAAAAADAAAAIgIDSRIG1dn6njdjsDXenHa2lUvQHWGPLKBVrSzbQOhiIxgc/9Y8jTAAAIABAACAAAAAgAIAAIAAAAAAAwAAACICA0/epE59sVEj7Et0I4R9qJQNuX23RNvDZKCRL7eUps9FHP/WPI0wAACAAQAAgAEAAIACAACAAAAAAAMAAAAAIgICgldCOK6iHscv//2NipgaMABLV5TICU/zlP7HlQmlg08cY2rfPzAAAIABAACAAQAAgAIAAIABAAAAAQAAACICApb0p9rfpJshB3J186PGWrvzQdixcwQZWmebOUMdkquZHP/WPI0wAACAAQAAgAAAAIACAACAAQAAAAEAAAAiAgLY5q+unoDxC/HI5BaNiPq12ei1REZIcUAN304JfKXUwxz/1jyNMAAAgAEAAIABAACAAgAAgAEAAAABAAAAIgIDg6cUVCJB79cMcofiURHojxFARWyS4YEhJNRixuOZZRgcY2rfPzAAAIABAACAAAAAgAIAAIABAAAAAQAAAAA=");
+                {
+                    let db = SqliteDb::new(db_path.clone(), None, &secp).unwrap();
+                    let mut conn = db.connection().unwrap();
+                    conn.new_txs(slice::from_ref(&tx));
+                    conn.new_unspent_coins(slice::from_ref(&coin));
+                    conn.store_spend(&psbt);
+                    conn.update_labels(&HashMap::from([(
+                        LabelItem::Txid(tx.compute_txid()),
+                        Some("kept".to_string()),
+                    )]));
+                }
+                raw(
+                    &db_path,
+                    "UPDATE tip SET blockheight = 100, \
+                     blockhash = x'0000000000000000000000000000000000000000000000000000000000000000'",
+                );
+                assert_eq!(read_stored_identity(&db_path).unwrap().version, 8);
+
+                maybe_apply_migration(&db_path, &[]).unwrap();
+
+                // Version, identity and the untouched tip fields.
+                assert_eq!(
+                    read_stored_identity(&db_path).unwrap(),
+                    StoredIdentity {
+                        version: 9,
+                        chain,
+                        network
+                    },
+                    "{:?}",
+                    chain
+                );
+                {
+                    let conn = rusqlite::Connection::open(&db_path).unwrap();
+                    let (net, ch, height): (String, String, i64) = conn
+                        .query_row("SELECT network, chain, blockheight FROM tip", [], |row| {
+                            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                        })
+                        .unwrap();
+                    assert_eq!(
+                        (net.as_str(), ch.as_str(), height),
+                        (network.to_string().as_str(), chain.dir_name(), 100)
+                    );
+                    let rows: i64 = conn
+                        .query_row("SELECT count(*) FROM tip", [], |row| row.get(0))
+                        .unwrap();
+                    assert_eq!(rows, 1);
+                }
+                // The migrated layout is the fresh layout, NOT NULL included.
+                assert_eq!(table_info(&db_path, "tip"), fresh_tip_layout, "{:?}", chain);
+                // Every other row is still there, unchanged.
+                {
+                    let db = SqliteDb::new(db_path.clone(), None, &secp).unwrap();
+                    db.sanity_check(chain, &options.main_descriptor).unwrap();
+                    let mut conn = db.connection().unwrap();
+                    let coins = conn.coins(&[], &[]);
+                    assert_eq!(coins.len(), 1);
+                    assert_eq!(coins[0].outpoint, coin.outpoint);
+                    assert_eq!(coins[0].amount, coin.amount);
+                    assert_eq!(conn.list_spend().len(), 1);
+                    assert_eq!(conn.list_spend()[0].psbt, psbt);
+                    let txs = conn.list_wallet_transactions(&[tx.compute_txid()]);
+                    assert_eq!(txs.len(), 1);
+                    let labels =
+                        conn.db_labels(&HashSet::from([LabelItem::Txid(tx.compute_txid())]));
+                    assert_eq!(labels.len(), 1);
+                    assert_eq!(labels[0].value, "kept");
+                }
+                // Running it again is a no-op down to the bytes.
+                let after_first = sha256_of(&db_path);
+                maybe_apply_migration(&db_path, &[]).unwrap();
+                assert_eq!(sha256_of(&db_path), after_first, "{:?}", chain);
+                fs::remove_dir_all(tmp_dir).unwrap();
+            }
+        }
+
+        #[test]
+        fn a_fork_or_unknown_string_in_a_legacy_row_is_refused_by_preflight_and_migration() {
+            // A legacy row only ever meant a bitcoin::Network. Whatever wrote a fork string
+            // into one, it is not backfilled into a fork identity — and not defaulted either.
+            for bogus in [
+                "bitcoin-blake2b",
+                "bitcoin-blake2b-testnet4",
+                "btcb2",
+                "mainnet",
+                "",
+            ] {
+                let (tmp_dir, db_path, _) = v8_fixture(ChainId::Bitcoin);
+                raw(&db_path, &format!("UPDATE tip SET network = '{}'", bogus));
+                let before = sha256_of(&db_path);
+
+                match read_stored_identity(&db_path) {
+                    Err(PreflightError::UnknownChain(s)) => assert_eq!(s, bogus),
+                    other => panic!("{:?}: expected UnknownChain, got {:?}", bogus, other),
+                }
+                match maybe_apply_migration(&db_path, &[]) {
+                    Err(SqliteDbError::UnknownChain(s)) => assert_eq!(s, bogus),
+                    other => panic!("{:?}: expected UnknownChain, got {:?}", bogus, other),
+                }
+                // Refused before anything was rebuilt: still version 8, same row, same layout.
+                let conn = rusqlite::Connection::open(&db_path).unwrap();
+                let version: i64 = conn
+                    .query_row("SELECT version FROM version", [], |row| row.get(0))
+                    .unwrap();
+                assert_eq!(version, 8);
+                let network: String = conn
+                    .query_row("SELECT network FROM tip", [], |row| row.get(0))
+                    .unwrap();
+                assert_eq!(network, bogus);
+                assert_eq!(table_info(&db_path, "tip").len(), 3);
+                drop(conn);
+                assert_eq!(sha256_of(&db_path), before, "{:?}", bogus);
+                fs::remove_dir_all(tmp_dir).unwrap();
+            }
+        }
+
+        #[test]
+        fn v9_identity_rows_are_validated_strictly() {
+            // A fork identity row (written here by the test, never by the daemon while the
+            // chain is dormant) reads back as what it is …
+            let (tmp_dir, db_path, options) = v9_fixture(ChainId::Bitcoin);
+            raw(&db_path, "UPDATE tip SET chain = 'bitcoin-blake2b'");
+            assert_eq!(
+                read_stored_identity(&db_path).unwrap(),
+                StoredIdentity {
+                    version: 9,
+                    chain: ChainId::BitcoinBlake2b,
+                    network: bitcoin::Network::Bitcoin,
+                }
+            );
+            // … and is a different chain from its encoding twin for the final check too.
+            let secp = secp256k1::Secp256k1::verification_only();
+            let db = SqliteDb::new(db_path.clone(), None, &secp).unwrap();
+            assert!(matches!(
+                db.sanity_check(ChainId::Bitcoin, &options.main_descriptor),
+                Err(SqliteDbError::ChainMismatch {
+                    expected: ChainId::Bitcoin,
+                    found: ChainId::BitcoinBlake2b
+                })
+            ));
+            db.sanity_check(ChainId::BitcoinBlake2b, &options.main_descriptor)
+                .unwrap();
+
+            // An identity whose encoding disagrees with the network column.
+            raw(&db_path, "UPDATE tip SET network = 'signet'");
+            assert!(matches!(
+                read_stored_identity(&db_path),
+                Err(PreflightError::MalformedIdentity(_))
+            ));
+            // An unknown chain string.
+            raw(
+                &db_path,
+                "UPDATE tip SET network = 'bitcoin', chain = 'btcb2'",
+            );
+            match read_stored_identity(&db_path) {
+                Err(PreflightError::UnknownChain(s)) => assert_eq!(s, "btcb2"),
+                other => panic!("expected UnknownChain, got {:?}", other),
+            }
+            // An unknown network string next to a valid chain.
+            raw(
+                &db_path,
+                "UPDATE tip SET network = 'foo', chain = 'bitcoin'",
+            );
+            assert!(matches!(
+                read_stored_identity(&db_path),
+                Err(PreflightError::MalformedIdentity(_))
+            ));
+            fs::remove_dir_all(tmp_dir).unwrap();
+        }
+
+        #[test]
+        fn zero_or_several_identity_rows_are_refused_never_first_row_wins() {
+            // Two version rows.
+            let (tmp_dir, db_path, _) = v8_fixture(ChainId::Bitcoin);
+            raw(&db_path, "INSERT INTO version (version) VALUES (7)");
+            match read_stored_identity(&db_path) {
+                Err(PreflightError::MalformedIdentity(m)) => {
+                    assert!(m.contains("version"), "{}", m)
+                }
+                other => panic!("{:?}", other),
+            }
+            fs::remove_dir_all(tmp_dir).unwrap();
+
+            // No tip row (v8 and v9).
+            for fixture in [v8_fixture(ChainId::Bitcoin), v9_fixture(ChainId::Bitcoin)] {
+                let (tmp_dir, db_path, _) = fixture;
+                raw(&db_path, "DELETE FROM tip");
+                match read_stored_identity(&db_path) {
+                    Err(PreflightError::MalformedIdentity(m)) => {
+                        assert!(m.contains("found 0"), "{}", m)
+                    }
+                    other => panic!("{:?}", other),
+                }
+                fs::remove_dir_all(tmp_dir).unwrap();
+            }
+
+            // A second, contradictory tip row: the preflight refuses, and so does the
+            // migration — which leaves the database exactly as it found it.
+            let (tmp_dir, db_path, _) = v8_fixture(ChainId::Bitcoin);
+            raw(
+                &db_path,
+                "INSERT INTO tip (network, blockheight, blockhash) VALUES ('signet', NULL, NULL)",
+            );
+            let before = sha256_of(&db_path);
+            match read_stored_identity(&db_path) {
+                Err(PreflightError::MalformedIdentity(m)) => {
+                    assert!(m.contains("found 2"), "{}", m)
+                }
+                other => panic!("{:?}", other),
+            }
+            assert!(matches!(
+                maybe_apply_migration(&db_path, &[]),
+                Err(SqliteDbError::MalformedIdentity(_))
+            ));
+            assert_eq!(sha256_of(&db_path), before);
+            assert_eq!(table_info(&db_path, "tip").len(), 3);
+            fs::remove_dir_all(tmp_dir).unwrap();
+        }
+
+        #[test]
+        fn unsupported_versions_and_foreign_files_are_refused_before_any_write() {
+            // Future and negative versions.
+            for version in [10, 9_999, -1] {
+                let (tmp_dir, db_path, _) = v8_fixture(ChainId::Bitcoin);
+                raw(
+                    &db_path,
+                    &format!("UPDATE version SET version = {}", version),
+                );
+                let before = (sha256_of(&db_path), listing(&tmp_dir));
+                assert!(matches!(
+                    read_stored_identity(&db_path),
+                    Err(PreflightError::UnsupportedVersion(v)) if v == version
+                ));
+                assert_eq!((sha256_of(&db_path), listing(&tmp_dir)), before);
+                fs::remove_dir_all(tmp_dir).unwrap();
+            }
+
+            let tmp_dir = tmp_dir();
+            fs::create_dir_all(&tmp_dir).unwrap();
+
+            // Missing: nothing is created.
+            let missing = tmp_dir.join("missing.sqlite3");
+            assert!(matches!(
+                read_stored_identity(&missing),
+                Err(PreflightError::NotFound(p)) if p == missing
+            ));
+            assert!(!missing.exists());
+
+            // An SQLite database that is not ours.
+            let foreign = tmp_dir.join("foreign.sqlite3");
+            raw(
+                &foreign,
+                "CREATE TABLE other (x INTEGER); INSERT INTO other VALUES (1);",
+            );
+            let before = sha256_of(&foreign);
+            assert!(matches!(
+                read_stored_identity(&foreign),
+                Err(PreflightError::NotACoincubeDatabase(_))
+            ));
+            assert_eq!(sha256_of(&foreign), before);
+
+            // Not SQLite at all: empty, one byte short of a header, and random bytes.
+            let (_, real_db, _) = v8_fixture(ChainId::Bitcoin);
+            let real_header = fs::read(&real_db).unwrap();
+            for (name, bytes) in [
+                ("empty", Vec::new()),
+                ("short", real_header[..99].to_vec()),
+                ("garbage", (0u8..200).collect::<Vec<u8>>()),
+                ("magic-then-garbage", {
+                    let mut b = b"SQLite format 3\0".to_vec();
+                    b.extend(std::iter::repeat_n(0xAB, 84));
+                    b
+                }),
+            ] {
+                let path = tmp_dir.join(name);
+                fs::File::create(&path).unwrap().write_all(&bytes).unwrap();
+                let before = listing(&tmp_dir);
+                match read_stored_identity(&path) {
+                    Err(PreflightError::NotSqliteDatabase(_))
+                    | Err(PreflightError::UnknownFileFormat { .. }) => {}
+                    other => panic!("{}: {:?}", name, other),
+                }
+                assert_eq!(fs::read(&path).unwrap(), bytes, "{}", name);
+                assert_eq!(listing(&tmp_dir), before, "{}", name);
+            }
+            fs::remove_dir_all(tmp_dir).unwrap();
+        }
+
+        #[test]
+        fn wal_databases_and_sidecars_are_refused_without_creating_anything() {
+            // A database someone switched to WAL: refused from the header alone, so SQLite
+            // never gets the chance to create the -shm/-wal files a WAL open needs.
+            let (tmp_dir, db_path, _) = v8_fixture(ChainId::Bitcoin);
+            {
+                let conn = rusqlite::Connection::open(&db_path).unwrap();
+                let mode: String = conn
+                    .pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))
+                    .unwrap();
+                assert_eq!(mode, "wal");
+            }
+            assert_eq!(header_format_bytes(&db_path), (2, 2));
+            assert_eq!(
+                listing(&tmp_dir),
+                vec!["coincubed.sqlite3"],
+                "clean close removed sidecars"
+            );
+            let before = sha256_of(&db_path);
+            assert!(matches!(
+                read_stored_identity(&db_path),
+                Err(PreflightError::WalDatabase(p)) if p == db_path
+            ));
+            assert_eq!(sha256_of(&db_path), before);
+            assert_eq!(listing(&tmp_dir), vec!["coincubed.sqlite3"]);
+            fs::remove_dir_all(tmp_dir).unwrap();
+
+            // A rollback-journal database with a stray sidecar next to it.
+            for sidecar in ["coincubed.sqlite3-shm", "coincubed.sqlite3-wal"] {
+                let (tmp_dir, db_path, _) = v8_fixture(ChainId::Bitcoin);
+                fs::File::create(tmp_dir.join(sidecar)).unwrap();
+                let before = (sha256_of(&db_path), listing(&tmp_dir));
+                assert!(matches!(
+                    read_stored_identity(&db_path),
+                    Err(PreflightError::UnexpectedSidecar(p)) if p == tmp_dir.join(sidecar)
+                ));
+                assert_eq!((sha256_of(&db_path), listing(&tmp_dir)), before);
+                fs::remove_dir_all(tmp_dir).unwrap();
+            }
+        }
+
+        #[test]
+        fn a_hot_journal_is_refused_and_left_for_a_deliberate_recovery() {
+            let (tmp_dir, db_path, _) = v8_fixture(ChainId::Bitcoin);
+            let committed = sha256_of(&db_path);
+
+            // A writer in the middle of a transaction: SQLite has written the rollback journal
+            // (header plus the original page) but not the database file. Copying both at this
+            // point is what a crash between the journal sync and the commit leaves behind. With
+            // the default `synchronous`, SQLite zeroes the journal magic until that sync, so a
+            // copy taken now would be a *cold* journal; `synchronous = OFF` writes the magic
+            // up front, which is the on-disk state a crashed, synced writer leaves.
+            let mut writer = rusqlite::Connection::open(&db_path).unwrap();
+            writer.pragma_update(None, "synchronous", "OFF").unwrap();
+            let tx = writer
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .unwrap();
+            tx.execute("UPDATE tip SET blockheight = 7", []).unwrap();
+            let journal_path = tmp_dir.join("coincubed.sqlite3-journal");
+            assert!(journal_path.exists());
+            let crashed_dir = tmp_dir.join("crashed");
+            fs::create_dir_all(&crashed_dir).unwrap();
+            let crashed_db = crashed_dir.join("coincubed.sqlite3");
+            let crashed_journal = crashed_dir.join("coincubed.sqlite3-journal");
+            fs::copy(&db_path, &crashed_db).unwrap();
+            fs::copy(&journal_path, &crashed_journal).unwrap();
+            tx.rollback().unwrap();
+            drop(writer);
+            assert_ne!(
+                fs::read(&crashed_journal).unwrap()[0],
+                0,
+                "journal must be hot"
+            );
+
+            let before = (
+                sha256_of(&crashed_db),
+                sha256_of(&crashed_journal),
+                listing(&crashed_dir),
+            );
+            // Refused, twice: a restart runs into the same journal.
+            for _ in 0..2 {
+                match read_stored_identity(&crashed_db) {
+                    Err(PreflightError::RecoveryRequired(p)) => assert_eq!(p, crashed_db),
+                    other => panic!("expected RecoveryRequired, got {:?}", other),
+                }
+                assert_eq!(
+                    (
+                        sha256_of(&crashed_db),
+                        sha256_of(&crashed_journal),
+                        listing(&crashed_dir)
+                    ),
+                    before
+                );
+            }
+            assert_eq!(sha256_of(&crashed_db), committed, "database file untouched");
+
+            // What a deliberate recovery would do — an ordinary read-write open — is exactly
+            // what the preflight did not do: afterwards the journal is gone, the interrupted
+            // write is rolled back, and the preflight passes.
+            rusqlite::Connection::open(&crashed_db)
+                .unwrap()
+                .query_row("SELECT 1", [], |_| Ok(()))
+                .unwrap();
+            assert!(!crashed_journal.exists());
+            assert_eq!(read_stored_identity(&crashed_db).unwrap().version, 8);
+            let height: Option<i64> = rusqlite::Connection::open(&crashed_db)
+                .unwrap()
+                .query_row("SELECT blockheight FROM tip", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(height, None);
+            fs::remove_dir_all(tmp_dir).unwrap();
+        }
+
+        #[test]
+        fn version_and_identity_are_read_from_one_snapshot() {
+            // While the preflight's read transaction is open, a migration started by another
+            // connection can prepare its writes but cannot commit them: the version the
+            // preflight returns is the version its identity row was read under.
+            let (tmp_dir, db_path, _) = v8_fixture(ChainId::Bitcoin);
+            let attempted = std::cell::Cell::new(false);
+            let stored = read_stored_identity_with(&db_path, || {
+                attempted.set(true);
+                // `maybe_apply_migration` opens its own connection without a busy timeout, so
+                // its COMMIT fails at once instead of waiting for our shared lock.
+                match maybe_apply_migration(&db_path, &[]) {
+                    Err(SqliteDbError::Rusqlite(rusqlite::Error::SqliteFailure(e, _))) => {
+                        assert_eq!(e.code, rusqlite::ErrorCode::DatabaseBusy, "{:?}", e)
+                    }
+                    other => panic!(
+                        "expected the concurrent migration to be refused: {:?}",
+                        other
+                    ),
+                }
+            })
+            .unwrap();
+            assert!(attempted.get());
+            assert_eq!(stored.version, 8);
+            assert_eq!(stored.chain, ChainId::Bitcoin);
+            // Nothing of the refused migration survived, and once our snapshot is released the
+            // same migration goes through.
+            assert_eq!(read_stored_identity(&db_path).unwrap().version, 8);
+            assert_eq!(table_info(&db_path, "tip").len(), 3);
+            maybe_apply_migration(&db_path, &[]).unwrap();
+            assert_eq!(read_stored_identity(&db_path).unwrap().version, 9);
+            fs::remove_dir_all(tmp_dir).unwrap();
+        }
+
+        #[test]
+        fn a_legacy_layout_fixture_cannot_carry_a_fork_identity() {
+            let tmp_dir = tmp_dir();
+            fs::create_dir_all(&tmp_dir).unwrap();
+            let mut options = dummy_options();
+            options.chain = ChainId::BitcoinBlake2b;
+            options.schema = V8_SCHEMA;
+            options.version = 8;
+            let secp = secp256k1::Secp256k1::verification_only();
+            let db_path = tmp_dir.join("coincubed.sqlite3");
+            assert!(matches!(
+                create_fresh_db(&db_path, options, &secp),
+                Err(SqliteDbError::ChainMismatch { .. })
+            ));
+            assert!(!db_path.exists());
+            fs::remove_dir_all(tmp_dir).unwrap();
+        }
     }
 }

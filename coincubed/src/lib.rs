@@ -29,12 +29,15 @@ pub use crate::bitcoin::{
 use crate::jsonrpc::server;
 use crate::{
     bitcoin::{poller, BitcoinInterface},
-    config::Config,
+    config::{Config, ConfigError},
     database::{
-        sqlite::{FreshDbOptions, SqliteDb, SqliteDbError, MAX_DB_VERSION_NO_TX_DB},
+        sqlite::{preflight, FreshDbOptions, SqliteDb, SqliteDbError, MAX_DB_VERSION_NO_TX_DB},
         DatabaseInterface,
     },
 };
+pub use database::sqlite::preflight::{PreflightError, StoredIdentity};
+
+use coincube_core::chain::ChainId;
 
 use std::{
     error, fmt, io, path,
@@ -103,6 +106,20 @@ pub const VERSION: ApiVersion = ApiVersion(env!("CARGO_PKG_VERSION"));
 #[derive(Debug)]
 pub enum StartupError {
     Io(io::Error),
+    /// The in-memory configuration is inconsistent (identity vs. encoding). Checked before any
+    /// filesystem access, because `start` can be handed a `Config` that never went through
+    /// `Config::from_file` and its `check`.
+    Config(ConfigError),
+    /// The configured chain has no runtime in this build. Refused before any I/O.
+    ChainDormant(ChainId),
+    /// The existing database belongs to another chain than the configuration names. Refused
+    /// before the data directory, the watch-only wallet or any migration is touched.
+    ChainMismatch {
+        config: ChainId,
+        stored: ChainId,
+    },
+    /// The existing database could not be identified without modifying it.
+    DbPreflight(PreflightError),
     DefaultDataDirNotFound,
     DatadirCreation(path::PathBuf, io::Error),
     MissingBitcoindConfig,
@@ -120,6 +137,25 @@ impl fmt::Display for StartupError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Self::Io(e) => write!(f, "{}", e),
+            Self::Config(e) => write!(f, "{}", e),
+            Self::ChainDormant(chain) => write!(
+                f,
+                "This build carries the identity of chain '{}' but cannot run a wallet on it yet; \
+                 nothing was created or modified.",
+                chain
+            ),
+            Self::ChainMismatch { config, stored } => write!(
+                f,
+                "The database in this data directory was created for chain '{}' but the \
+                 configuration is for chain '{}'; nothing was created or modified.",
+                stored, config
+            ),
+            Self::DbPreflight(e) => write!(
+                f,
+                "Could not establish which chain the existing database belongs to; nothing was \
+                 created or modified: {}",
+                e
+            ),
             Self::DefaultDataDirNotFound => write!(
                 f,
                 "Not data directory was specified and a default path could not be determined for this platform."
@@ -176,6 +212,52 @@ impl From<BitcoindError> for StartupError {
     }
 }
 
+/// The one runtime-policy decision the daemon makes about a chain: whether this build can run a
+/// wallet on it at all. Both Bitcoin Blake2b identities are dormant — the daemon can name them
+/// (configuration, data directory, database) so that their state stays distinct and intact, but
+/// nothing behind them is wired: no node schedule check, no chain-keyed backend route, no
+/// checkpoint, no post-reorg revalidation, no unified-sighash signing. Until those gates exist
+/// this refuses before any I/O. The GUI keeps its own, user-facing copy of the same decision
+/// (`RuntimeSupport`); this is the daemon's, so a hand-written `daemon.toml` cannot reach a
+/// fork identity through the daemon alone.
+fn chain_runtime_gate(chain: ChainId) -> Result<(), StartupError> {
+    if chain.is_blake2b() {
+        return Err(StartupError::ChainDormant(chain));
+    }
+    Ok(())
+}
+
+/// Establish, without modifying anything, that the database already in `data_dir` belongs to
+/// the configured chain (and its encoding). Runs before the data directory is created, before
+/// the bitcoind watch-only wallet is created or loaded, and before any migration or healing, so
+/// a wrong-chain or unidentifiable database is refused with nothing touched.
+fn preflight_existing_database(
+    config: &Config,
+    db_path: &path::Path,
+) -> Result<StoredIdentity, StartupError> {
+    let stored = preflight::read_stored_identity(db_path).map_err(StartupError::DbPreflight)?;
+    let chain = config.bitcoin_config.chain;
+    if stored.chain != chain {
+        return Err(StartupError::ChainMismatch {
+            config: chain,
+            stored: stored.chain,
+        });
+    }
+    if stored.network != config.bitcoin_config.network {
+        // Unreachable when the config passed `check_chain_encoding` (the stored pair is
+        // consistent by construction of the preflight), kept as a typed refusal anyway.
+        return Err(StartupError::Database(SqliteDbError::InvalidNetwork(
+            stored.network,
+        )));
+    }
+    log::info!(
+        "Existing database is for chain '{}' (schema version {}), matching the configuration.",
+        stored.chain,
+        stored.version
+    );
+    Ok(stored)
+}
+
 // Connect to the SQLite database. Create it if starting fresh, and do some sanity checks.
 // If all went well, returns the interface to the SQLite database.
 fn setup_sqlite(
@@ -188,7 +270,7 @@ fn setup_sqlite(
     let db_path = data_dir.sqlite_db_file_path();
     let options = if fresh_data_dir {
         Some(FreshDbOptions::new(
-            config.bitcoin_config.network,
+            config.bitcoin_config.chain,
             config.main_descriptor.clone(),
         ))
     } else {
@@ -218,7 +300,7 @@ fn setup_sqlite(
         sqlite.maybe_apply_migrations(&wallet_txs)?;
     }
 
-    sqlite.sanity_check(config.bitcoin_config.network, &config.main_descriptor)?;
+    sqlite.sanity_check(config.bitcoin_config.chain, &config.main_descriptor)?;
     log::info!("Database initialized and checked.");
 
     Ok(sqlite)
@@ -703,11 +785,23 @@ impl DaemonHandle {
     ) -> Result<Self, StartupError> {
         let secp = secp256k1::Secp256k1::verification_only();
 
-        // First, check the data directory
+        // Before touching anything: the configuration must be self-consistent, and this build
+        // must be able to run the chain it names. Neither check does any I/O.
+        config
+            .bitcoin_config
+            .check_chain_encoding()
+            .map_err(StartupError::Config)?;
+        chain_runtime_gate(config.bitcoin_config.chain)?;
+
+        // Then check the data directory. An existing database must belong to the configured
+        // chain before we create anything, set up the watch-only wallet or migrate it.
         let data_dir = config
             .data_directory()
             .ok_or(StartupError::DefaultDataDirNotFound)?;
         let fresh_data_dir = !data_dir.exists() || !data_dir.sqlite_db_file_path().exists();
+        if !fresh_data_dir {
+            preflight_existing_database(&config, &data_dir.sqlite_db_file_path())?;
+        }
         if !data_dir.exists() {
             data_dir
                 .init()
@@ -1388,10 +1482,8 @@ mod tests {
             net::SocketAddrV4::new(net::Ipv4Addr::new(127, 0, 0, 1), 0).into();
         let server = net::TcpListener::bind(addr).unwrap();
         let addr = server.local_addr().unwrap();
-        let bitcoin_config = BitcoinConfig {
-            network,
-            poll_interval_secs: time::Duration::from_secs(2),
-        };
+        let bitcoin_config =
+            BitcoinConfig::new(ChainId::from(network), time::Duration::from_secs(2));
         let bitcoind_config = BitcoindConfig {
             addr,
             rpc_auth: BitcoindRpcAuth::CookieFile(cookie),
@@ -1457,5 +1549,358 @@ mod tests {
         finish_daemon_shutdown(&server, t);
 
         fs::remove_dir_all(&tmp_dir).unwrap();
+    }
+
+    // ── Chain identity is settled before anything is touched (coincube-api#292) ─────────
+
+    mod chain_binding {
+        use super::*;
+        use crate::database::sqlite::preflight::PreflightError;
+        use miniscript::bitcoin::hashes::{sha256, Hash};
+
+        const DESC_STR: &str = concat!(
+            "wsh(andor(pk([aabbccdd]xpub68JJTXc1MWK8KLW4HGLXZBJknja7kDUJuFHnM424LbziEXsfkh1WQCiEjjHw4z",
+            "LqSUm4rvhgyGkkuRowE9tCJSgt3TQB5J3SKAbZ2SdcKST/<0;1>/*),older(10000),pk([aabbccdd]xpub68JJT",
+            "Xc1MWK8PEQozKsRatrUHXKFNkD1Cb1BuQU9Xr5moCv87anqGyXLyUd4KpnDyZgo3gz4aN1r3NiaoweFW8Uut",
+            "BsBbgKHzaD5HkTkifK/<0;1>/*)))#3xh8xmhn"
+        );
+
+        /// A scripted-bitcoind listener that nobody has connected to yet, and a way to prove
+        /// it stayed that way.
+        struct SilentNode {
+            server: net::TcpListener,
+            addr: net::SocketAddr,
+        }
+
+        impl SilentNode {
+            fn bind() -> Self {
+                let addr: net::SocketAddr =
+                    net::SocketAddrV4::new(net::Ipv4Addr::new(127, 0, 0, 1), 0).into();
+                let server = net::TcpListener::bind(addr).unwrap();
+                server.set_nonblocking(true).unwrap();
+                let addr = server.local_addr().unwrap();
+                SilentNode { server, addr }
+            }
+
+            /// No RPC reached this node: nothing ever connected.
+            fn assert_untouched(&self) {
+                match self.server.accept() {
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+                    other => panic!("the node received a connection: {:?}", other.map(|_| ())),
+                }
+            }
+        }
+
+        /// A bitcoind-backed daemon config for `chain` whose data directory is `data_directory`.
+        fn config_for(
+            chain: ChainId,
+            tmp_dir: &path::Path,
+            data_directory: path::PathBuf,
+            node: &SilentNode,
+        ) -> Config {
+            let cookie = tmp_dir.join(format!(
+                "dummy_bitcoind_{:?}.cookie",
+                thread::current().id()
+            ));
+            fs::write(&cookie, [0; 32]).unwrap();
+            Config::new(
+                BitcoinConfig::new(chain, time::Duration::from_secs(2)),
+                Some(config::BitcoinBackend::Bitcoind(BitcoindConfig {
+                    addr: node.addr,
+                    rpc_auth: BitcoindRpcAuth::CookieFile(cookie),
+                })),
+                log::LevelFilter::Debug,
+                CoincubeDescriptor::from_str(DESC_STR).unwrap(),
+                DataDirectory::new(data_directory),
+            )
+        }
+
+        /// A genuine version-8 database for `chain` in a fresh data directory.
+        fn v8_database(data_directory: &path::Path, chain: ChainId) -> path::PathBuf {
+            fs::create_dir_all(data_directory).unwrap();
+            let db_path = data_directory.join("coincubed.sqlite3");
+            let secp = secp256k1::Secp256k1::verification_only();
+            let options = FreshDbOptions::legacy(
+                chain,
+                CoincubeDescriptor::from_str(DESC_STR).unwrap(),
+                V8_SCHEMA,
+                8,
+            );
+            SqliteDb::new(db_path.clone(), Some(options), &secp).unwrap();
+            db_path
+        }
+
+        fn sha256_of(path: &path::Path) -> sha256::Hash {
+            sha256::Hash::hash(&fs::read(path).unwrap())
+        }
+
+        fn listing(dir: &path::Path) -> Vec<String> {
+            let mut names: Vec<String> = fs::read_dir(dir)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            names
+        }
+
+        #[test]
+        fn an_inconsistent_config_is_refused_before_any_filesystem_access() {
+            let tmp_dir = tmp_dir();
+            fs::create_dir_all(&tmp_dir).unwrap();
+            let node = SilentNode::bind();
+            let data_directory = tmp_dir.join("never-created").join("bitcoin");
+            let mut config = config_for(ChainId::Bitcoin, &tmp_dir, data_directory.clone(), &node);
+            // Hand-built and never through `Config::check`: identity says Bitcoin, encoding
+            // says signet.
+            config.bitcoin_config.network = bitcoin::Network::Signet;
+
+            match DaemonHandle::start_default(config, false) {
+                Err(StartupError::Config(ConfigError::Unexpected(msg))) => {
+                    assert!(msg.contains("signet"), "{}", msg)
+                }
+                other => panic!("expected a config refusal, got {:?}", other.map(|_| ())),
+            }
+            assert!(!data_directory.exists());
+            assert!(!data_directory.parent().unwrap().exists());
+            node.assert_untouched();
+            fs::remove_dir_all(tmp_dir).unwrap();
+        }
+
+        #[test]
+        fn a_dormant_chain_is_refused_before_any_filesystem_access() {
+            for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
+                let tmp_dir = tmp_dir();
+                fs::create_dir_all(&tmp_dir).unwrap();
+                let node = SilentNode::bind();
+                let data_directory = tmp_dir.join("never-created").join(chain.dir_name());
+                let config = config_for(chain, &tmp_dir, data_directory.clone(), &node);
+                config.bitcoin_config.check_chain_encoding().unwrap();
+
+                match DaemonHandle::start_default(config, false) {
+                    Err(StartupError::ChainDormant(c)) => assert_eq!(c, chain),
+                    other => panic!(
+                        "{:?}: expected ChainDormant, got {:?}",
+                        chain,
+                        other.map(|_| ())
+                    ),
+                }
+                assert!(!data_directory.exists(), "{:?}", chain);
+                assert!(!data_directory.parent().unwrap().exists(), "{:?}", chain);
+                node.assert_untouched();
+                fs::remove_dir_all(tmp_dir).unwrap();
+            }
+        }
+
+        #[test]
+        fn a_wrong_chain_database_is_refused_before_rpc_wallet_or_migration() {
+            // A testnet4 database sitting in the directory a signet config points at.
+            let tmp_dir = tmp_dir();
+            fs::create_dir_all(&tmp_dir).unwrap();
+            let node = SilentNode::bind();
+            let data_directory = tmp_dir.join("signet");
+            let db_path = v8_database(&data_directory, ChainId::Testnet4);
+            let before = (sha256_of(&db_path), listing(&data_directory));
+            let config = config_for(ChainId::Signet, &tmp_dir, data_directory.clone(), &node);
+
+            match DaemonHandle::start_default(config, false) {
+                Err(StartupError::ChainMismatch { config, stored }) => {
+                    assert_eq!((config, stored), (ChainId::Signet, ChainId::Testnet4))
+                }
+                other => panic!("expected ChainMismatch, got {:?}", other.map(|_| ())),
+            }
+            // Same bytes, no journal, no watch-only wallet, still version 8, no RPC.
+            assert_eq!((sha256_of(&db_path), listing(&data_directory)), before);
+            assert_eq!(listing(&data_directory), vec!["coincubed.sqlite3"]);
+            assert!(!data_directory.join("coincubed_watchonly_wallet").exists());
+            let version: i64 = rusqlite::Connection::open(&db_path)
+                .unwrap()
+                .query_row("SELECT version FROM version", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(version, 8);
+            node.assert_untouched();
+            fs::remove_dir_all(tmp_dir).unwrap();
+        }
+
+        #[test]
+        fn a_bitcoin_config_over_a_fork_database_is_refused_the_same_way() {
+            // The encoding twin: a mainnet config must not adopt a Bitcoin Blake2b database.
+            let tmp_dir = tmp_dir();
+            fs::create_dir_all(&tmp_dir).unwrap();
+            let node = SilentNode::bind();
+            let data_directory = tmp_dir.join("bitcoin");
+            fs::create_dir_all(&data_directory).unwrap();
+            let db_path = data_directory.join("coincubed.sqlite3");
+            let secp = secp256k1::Secp256k1::verification_only();
+            let options = FreshDbOptions::new(
+                ChainId::Bitcoin,
+                CoincubeDescriptor::from_str(DESC_STR).unwrap(),
+            );
+            SqliteDb::new(db_path.clone(), Some(options), &secp).unwrap();
+            // Written by the test: the daemon cannot create one while the chain is dormant.
+            rusqlite::Connection::open(&db_path)
+                .unwrap()
+                .execute("UPDATE tip SET chain = 'bitcoin-blake2b'", [])
+                .unwrap();
+            let before = sha256_of(&db_path);
+            let config = config_for(ChainId::Bitcoin, &tmp_dir, data_directory.clone(), &node);
+
+            match DaemonHandle::start_default(config, false) {
+                Err(StartupError::ChainMismatch { config, stored }) => {
+                    assert_eq!(
+                        (config, stored),
+                        (ChainId::Bitcoin, ChainId::BitcoinBlake2b)
+                    )
+                }
+                other => panic!("expected ChainMismatch, got {:?}", other.map(|_| ())),
+            }
+            assert_eq!(sha256_of(&db_path), before);
+            node.assert_untouched();
+            fs::remove_dir_all(tmp_dir).unwrap();
+        }
+
+        #[test]
+        fn an_unidentifiable_database_is_refused_before_rpc_wallet_or_migration() {
+            let tmp_dir = tmp_dir();
+            fs::create_dir_all(&tmp_dir).unwrap();
+            let node = SilentNode::bind();
+
+            // A database from a future build.
+            let data_directory = tmp_dir.join("future");
+            let db_path = v8_database(&data_directory, ChainId::Bitcoin);
+            rusqlite::Connection::open(&db_path)
+                .unwrap()
+                .execute("UPDATE version SET version = 10", [])
+                .unwrap();
+            let before = (sha256_of(&db_path), listing(&data_directory));
+            let config = config_for(ChainId::Bitcoin, &tmp_dir, data_directory.clone(), &node);
+            match DaemonHandle::start_default(config, false) {
+                Err(StartupError::DbPreflight(PreflightError::UnsupportedVersion(10))) => {}
+                other => panic!("expected UnsupportedVersion, got {:?}", other.map(|_| ())),
+            }
+            assert_eq!((sha256_of(&db_path), listing(&data_directory)), before);
+            node.assert_untouched();
+
+            // A crashed writer's hot journal: refused, not repaired, and a second start runs
+            // into exactly the same refusal.
+            let data_directory = tmp_dir.join("crashed");
+            let db_path = v8_database(&data_directory, ChainId::Bitcoin);
+            let mut writer = rusqlite::Connection::open(&db_path).unwrap();
+            writer.pragma_update(None, "synchronous", "OFF").unwrap();
+            let tx = writer
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .unwrap();
+            tx.execute("UPDATE tip SET blockheight = 7", []).unwrap();
+            let staged = tmp_dir.join("crashed-copy");
+            fs::create_dir_all(&staged).unwrap();
+            fs::copy(&db_path, staged.join("coincubed.sqlite3")).unwrap();
+            fs::copy(
+                data_directory.join("coincubed.sqlite3-journal"),
+                staged.join("coincubed.sqlite3-journal"),
+            )
+            .unwrap();
+            tx.rollback().unwrap();
+            drop(writer);
+            let before = (
+                sha256_of(&staged.join("coincubed.sqlite3")),
+                sha256_of(&staged.join("coincubed.sqlite3-journal")),
+                listing(&staged),
+            );
+            for _ in 0..2 {
+                let config = config_for(ChainId::Bitcoin, &tmp_dir, staged.clone(), &node);
+                match DaemonHandle::start_default(config, false) {
+                    Err(StartupError::DbPreflight(PreflightError::RecoveryRequired(_))) => {}
+                    other => panic!("expected RecoveryRequired, got {:?}", other.map(|_| ())),
+                }
+                assert_eq!(
+                    (
+                        sha256_of(&staged.join("coincubed.sqlite3")),
+                        sha256_of(&staged.join("coincubed.sqlite3-journal")),
+                        listing(&staged),
+                    ),
+                    before
+                );
+            }
+            node.assert_untouched();
+            fs::remove_dir_all(tmp_dir).unwrap();
+        }
+
+        /// The compatibility path: an existing Bitcoin-family v8 database starts, is migrated
+        /// to v9 during startup, and the daemon runs against it exactly as it did before.
+        #[test]
+        fn an_existing_v8_bitcoin_database_starts_and_is_migrated() {
+            let worker = thread::spawn(v8_bitcoin_database_starts_inner);
+            let deadline = time::Instant::now() + time::Duration::from_secs(120);
+            while !worker.is_finished() {
+                assert!(time::Instant::now() < deadline, "startup stalled");
+                thread::sleep(time::Duration::from_millis(50));
+            }
+            worker
+                .join()
+                .expect("startup with an existing v8 database panicked");
+        }
+
+        fn v8_bitcoin_database_starts_inner() {
+            let tmp_dir = tmp_dir();
+            fs::create_dir_all(&tmp_dir).unwrap();
+            let data_directory = tmp_dir.join("bitcoin");
+            let db_path = v8_database(&data_directory, ChainId::Bitcoin);
+            let wo_path = data_directory.join("coincubed_watchonly_wallet");
+            let wo_path_str = wo_path.to_str().unwrap().to_string();
+
+            let cookie = tmp_dir.join(format!(
+                "dummy_bitcoind_{:?}.cookie",
+                thread::current().id()
+            ));
+            fs::write(&cookie, [0; 32]).unwrap();
+            let addr: net::SocketAddr =
+                net::SocketAddrV4::new(net::Ipv4Addr::new(127, 0, 0, 1), 0).into();
+            let server = net::TcpListener::bind(addr).unwrap();
+            let addr = server.local_addr().unwrap();
+            let desc = CoincubeDescriptor::from_str(DESC_STR).unwrap();
+            let receive_desc = desc.receive_descriptor().clone();
+            let change_desc = desc.change_descriptor().clone();
+            let config = Config::new(
+                BitcoinConfig::new(ChainId::Bitcoin, time::Duration::from_secs(2)),
+                Some(config::BitcoinBackend::Bitcoind(BitcoindConfig {
+                    addr,
+                    rpc_auth: BitcoindRpcAuth::CookieFile(cookie),
+                })),
+                log::LevelFilter::Debug,
+                desc,
+                DataDirectory::new(data_directory.clone()),
+            );
+
+            // Same scripted exchange as a first start: the wallet does not exist yet, the
+            // database does (at v8).
+            let t = thread::spawn({
+                let config = config.clone();
+                move || {
+                    let handle = DaemonHandle::start_default(config, false).unwrap();
+                    handle.stop().unwrap();
+                }
+            });
+            complete_sanity_check(&server);
+            complete_version_check(&server);
+            complete_network_check(&server);
+            complete_wallet_creation(&server);
+            complete_wallet_loading(&server);
+            complete_wallet_check(&server, &wo_path_str);
+            complete_desc_check(&server, &receive_desc.to_string(), &change_desc.to_string());
+            complete_tip_init(&server);
+            finish_daemon_shutdown(&server, t);
+
+            // Migrated in place: v9, identity backfilled, encoding kept.
+            let stored =
+                crate::database::sqlite::preflight::read_stored_identity(&db_path).unwrap();
+            assert_eq!(
+                stored,
+                StoredIdentity {
+                    version: 9,
+                    chain: ChainId::Bitcoin,
+                    network: bitcoin::Network::Bitcoin,
+                }
+            );
+            fs::remove_dir_all(&tmp_dir).unwrap();
+        }
     }
 }

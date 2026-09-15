@@ -20,7 +20,10 @@ log_level = "debug"
 main_descriptor = "wsh(or_d(pk([0dd8c6f0/48'/1'/0'/2']tpubDFMbZ7U5k5hEfsttnZTKMmwrGMHnqUGxhShsvBjHimXBpmAp5KmxpyGsLx2toCaQgYq5TipBLhTUtA2pRSB9b14m5KwSohTDoCHkk1EnqtZ/<0;1>/*),and_v(v:pkh([d4ab66f1/48'/1'/0'/2']tpubDEXYN145WM4rVKtcWpySBYiVQ229pmrnyAGJT14BBh2QJr7ABJswchDicZfFaauLyXhDad1nCoCZQEwAW87JPotP93ykC9WJvoASnBjYBxW/<0;1>/*),older(65535))))#7nvn6ssc"
 
 # This section is the configuration related to the Bitcoin backend.
-# On what network shall it operate?
+# On what chain shall it operate? One of "bitcoin", "testnet", "testnet4", "signet",
+# "regtest" (the Bitcoin family), or "bitcoin-blake2b" / "bitcoin-blake2b-testnet4"
+# (Bitcoin Blake2b, whose identity this build knows but cannot run yet: the daemon
+# refuses to start on it, and older builds refuse to parse it at all).
 # How often should it poll the Bitcoin backend for updates?
 [bitcoin_config]
 network = "testnet"

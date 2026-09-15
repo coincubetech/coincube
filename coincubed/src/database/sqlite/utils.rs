@@ -1,7 +1,8 @@
-use crate::database::sqlite::{FreshDbOptions, SqliteDbError, DB_VERSION};
+use crate::database::sqlite::{FreshDbOptions, SqliteDbError, DB_VERSION, MAX_DB_VERSION_NO_CHAIN};
 
-use std::{convert::TryInto, fs, path, time};
+use std::{convert::TryInto, fs, path, str::FromStr, time};
 
+use coincube_core::chain::ChainId;
 use miniscript::bitcoin::{self, secp256k1};
 
 pub const LOOK_AHEAD_LIMIT: u32 = 200;
@@ -103,6 +104,15 @@ pub fn create_fresh_db(
     options: FreshDbOptions,
     secp: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
 ) -> Result<(), SqliteDbError> {
+    // A fork identity cannot be expressed in a pre-v9 layout (legacy-schema fixtures are
+    // tests-only); refuse rather than silently write its encoding twin.
+    if options.version <= MAX_DB_VERSION_NO_CHAIN && options.chain.is_blake2b() {
+        return Err(SqliteDbError::ChainMismatch {
+            expected: options.chain,
+            found: ChainId::from(options.chain.bitcoin_network()),
+        });
+    }
+
     create_db_file(db_path)?;
 
     let timestamp = curr_timestamp();
@@ -110,17 +120,19 @@ pub fn create_fresh_db(
     // Fill the initial addresses. On a fresh database, the deposit_derivation_index is
     // necessarily 0.
     let mut query = String::with_capacity(100 * LOOK_AHEAD_LIMIT as usize);
+    // Addresses are an *encoding* matter, so they derive from the chain's network projection.
+    let network = options.chain.bitcoin_network();
     for index in 0..LOOK_AHEAD_LIMIT {
         let receive_address = options
             .main_descriptor
             .receive_descriptor()
             .derive(index.into(), secp)
-            .address(options.bitcoind_network);
+            .address(network);
         let change_address = options
             .main_descriptor
             .change_descriptor()
             .derive(index.into(), secp)
-            .address(options.bitcoind_network);
+            .address(network);
         query += &format!(
             "INSERT INTO addresses (receive_address, change_address, derivation_index) VALUES (\"{}\", \"{}\", {});\n",
             receive_address, change_address, index
@@ -134,10 +146,18 @@ pub fn create_fresh_db(
             "INSERT INTO version (version) VALUES (?1)",
             rusqlite::params![options.version],
         )?;
-        tx.execute(
-            "INSERT INTO tip (network, blockheight, blockhash) VALUES (?1, NULL, NULL)",
-            rusqlite::params![options.bitcoind_network.to_string()],
-        )?;
+        if options.version > MAX_DB_VERSION_NO_CHAIN {
+            tx.execute(
+                "INSERT INTO tip (network, chain, blockheight, blockhash) VALUES (?1, ?2, NULL, NULL)",
+                rusqlite::params![network.to_string(), options.chain.dir_name()],
+            )?;
+        } else {
+            // A legacy-schema fixture (tests only): exactly the row an older build wrote.
+            tx.execute(
+                "INSERT INTO tip (network, blockheight, blockhash) VALUES (?1, NULL, NULL)",
+                rusqlite::params![network.to_string()],
+            )?;
+        }
         tx.execute(
             "INSERT INTO wallets (timestamp, main_descriptor, deposit_derivation_index, change_derivation_index) \
                      VALUES (?1, ?2, ?3, ?4)",
@@ -482,6 +502,71 @@ fn migrate_v7_to_v8(conn: &mut rusqlite::Connection) -> Result<(), SqliteDbError
     Ok(())
 }
 
+/// Read the single identity row of a pre-v9 `tip` table. A legacy database only ever stored a
+/// `bitcoin::Network` here, so that is the only alphabet accepted: the value is parsed as a
+/// `Network` and projected through `From<Network>` — never through `ChainId::from_dir_name`, which
+/// would let a fork string that some other tool wrote into an old row be "backfilled" into a
+/// fork identity. Zero or several rows are refused too: a contradictory identity is not a
+/// first-row-wins matter.
+fn legacy_tip_chain(tx: &rusqlite::Transaction) -> Result<ChainId, SqliteDbError> {
+    let networks = db_tx_query(tx, "SELECT network FROM tip", rusqlite::params![], |row| {
+        row.get::<_, String>(0)
+    })?;
+    let raw = match networks.as_slice() {
+        [raw] => raw,
+        _ => {
+            return Err(SqliteDbError::MalformedIdentity(format!(
+                "expected exactly one tip row, found {}",
+                networks.len()
+            )))
+        }
+    };
+    let network = bitcoin::Network::from_str(raw)
+        .map_err(|_| SqliteDbError::UnknownChain(raw.to_string()))?;
+    Ok(ChainId::from(network))
+}
+
+/// v8 -> v9: the `tip` table gains the chain *identity* (`chain`) next to the *encoding*
+/// (`network`). One database transaction: validate the single legacy identity row, rebuild `tip`
+/// (a rebuild rather than `ALTER TABLE ADD COLUMN`, so the new column is genuinely NOT NULL and
+/// the column order matches a fresh v9 database), backfill `chain` from the parsed network, and
+/// bump the version. Nothing else is touched; a failure at any step leaves the database at v8
+/// with the old `tip` intact.
+fn migrate_v8_to_v9(conn: &mut rusqlite::Connection) -> Result<(), SqliteDbError> {
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let chain = legacy_tip_chain(&tx)?;
+    tx.execute_batch(
+        "
+        CREATE TABLE tip_v9 (
+            network TEXT NOT NULL,
+            chain TEXT NOT NULL,
+            blockheight INTEGER,
+            blockhash BLOB
+        );
+        ",
+    )?;
+    let copied = tx.execute(
+        "INSERT INTO tip_v9 (network, chain, blockheight, blockhash) \
+         SELECT network, ?1, blockheight, blockhash FROM tip",
+        rusqlite::params![chain.dir_name()],
+    )?;
+    if copied != 1 {
+        return Err(SqliteDbError::MalformedIdentity(format!(
+            "expected to carry over exactly one tip row, carried {}",
+            copied
+        )));
+    }
+    tx.execute_batch(
+        "
+        DROP TABLE tip;
+        ALTER TABLE tip_v9 RENAME TO tip;
+        UPDATE version SET version = 9;
+        ",
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
 /// Check the database version and if necessary apply the migrations to upgrade it to the current
 /// one. The `bitcoin_txs` parameter is here for the migration from versions 4 and earlier, which
 /// did not store the Bitcoin transactions in database, to versions 5 and later, which do. For a
@@ -544,6 +629,11 @@ pub fn maybe_apply_migration(
                 log::warn!("Upgrading database from version 7 to version 8.");
                 migrate_v7_to_v8(&mut conn)?;
                 log::warn!("Migration from database version 7 to version 8 successful.");
+            }
+            8 => {
+                log::warn!("Upgrading database from version 8 to version 9.");
+                migrate_v8_to_v9(&mut conn)?;
+                log::warn!("Migration from database version 8 to version 9 successful.");
             }
             _ => return Err(SqliteDbError::UnsupportedVersion(version)),
         }

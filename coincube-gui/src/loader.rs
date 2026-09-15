@@ -957,6 +957,15 @@ pub async fn start_bitcoind_and_daemon(
         );
     }
     let config = Config::from_file(Some(config_path)).map_err(Error::Config)?;
+    // The `daemon.toml` in this Cube's directory must be for this Cube's chain. The daemon
+    // checks an *existing* database against its config; this is the only check for a Cube
+    // whose database does not exist yet, and it runs before any node or daemon is started.
+    if config.bitcoin_config.chain != chain {
+        return Err(Error::ChainMismatch {
+            cube: chain,
+            config: config.bitcoin_config.chain,
+        });
+    }
     let bitcoind = match (start_internal_bitcoind, &config.bitcoin_backend) {
         (true, Some(BitcoinBackend::Bitcoind(bitcoind_config))) => {
             // The provider the ledger names must serve this chain *before* Tor
@@ -1062,6 +1071,13 @@ pub enum Error {
     /// this is the loader's own copy of the refusal for any path that reaches
     /// it directly.
     ChainUnavailable(&'static str),
+    /// The Cube's `daemon.toml` names another chain than the Cube record it sits under
+    /// (a file copied between chain directories, say). Raised before any node or daemon
+    /// is started, whether or not a database exists yet.
+    ChainMismatch {
+        cube: crate::chain::ChainId,
+        config: crate::chain::ChainId,
+    },
     Unexpected(String),
 }
 
@@ -1075,6 +1091,13 @@ impl std::fmt::Display for Error {
             Self::BitcoindLogs(e) => write!(f, "Bitcoind logs error: {}", e),
             Self::RestoreBackup(e) => write!(f, "Restore backup: {e}"),
             Self::ChainUnavailable(reason) => f.write_str(reason),
+            Self::ChainMismatch { cube, config } => write!(
+                f,
+                "This Cube is on {} but its daemon configuration is for {}. Nothing was started \
+                 or modified; the configuration file needs to be fixed or restored.",
+                cube.label(),
+                config.label()
+            ),
             Self::Unexpected(e) => write!(f, "Unexpected error: {}", e),
         }
     }
@@ -1107,7 +1130,7 @@ mod tests {
     // A mainnet descriptor (so `Config::check()`'s xpub-network validation
     // passes against `network = "bitcoin"`), borrowed from coincubed's own
     // config tests.
-    const MAINNET_DESC: &str = "tr([abcdef01]xpub6Eze7yAT3Y1wGrnzedCNVYDXUqa9NmHVWck5emBaTbXtURbe1NWZbK9bsz1TiVE7Cz341PMTfYgFw1KdLWdzcM1UMFTcdQfCYhhXZ2HJvTW/<0;1>/*,and_v(v:pk([abcdef01]xpub688Hn4wScQAAiYJLPg9yH27hUpfZAUnmJejRQBCiwfP5PEDzjWMNW1wChcninxr5gyavFqbbDjdV1aK5USJz8NDVjUy7FRQaaqqXHh5SbXe/<0;1>/*),older(52560)))#0mt7e93c";
+    pub(super) const MAINNET_DESC: &str = "tr([abcdef01]xpub6Eze7yAT3Y1wGrnzedCNVYDXUqa9NmHVWck5emBaTbXtURbe1NWZbK9bsz1TiVE7Cz341PMTfYgFw1KdLWdzcM1UMFTcdQfCYhhXZ2HJvTW/<0;1>/*,and_v(v:pk([abcdef01]xpub688Hn4wScQAAiYJLPg9yH27hUpfZAUnmJejRQBCiwfP5PEDzjWMNW1wChcninxr5gyavFqbbDjdV1aK5USJz8NDVjUy7FRQaaqqXHh5SbXe/<0;1>/*),older(52560)))#0mt7e93c";
 
     static COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -1345,6 +1368,7 @@ mod chain_identity_tests {
     //! Cube first; these pin that the loader and the daemon-start path refuse
     //! on their own, before a socket is dialled or a `daemon.toml` is read.
 
+    use super::tests::MAINNET_DESC;
     use super::*;
     use crate::chain::{ChainId, BTCB2_DORMANT_REASON};
     use std::path::PathBuf;
@@ -1614,6 +1638,81 @@ mod chain_identity_tests {
         let rewritten = std::fs::read(&conf_path).unwrap();
         assert_ne!(rewritten, conf_bytes);
         assert!(!String::from_utf8_lossy(&rewritten).contains("listenonion"));
+        let _ = std::fs::remove_dir_all(root.path());
+    }
+
+    /// A `daemon.toml` for `network` in the Cube's daemon directory, with a bitcoind backend
+    /// pointing nowhere. Returns the directory that would hold the database (absent).
+    fn write_cube_daemon_toml(root: &CoincubeDirectory, chain: ChainId, network: &str) -> PathBuf {
+        // A testnet-family descriptor for every encoding but mainnet, so that
+        // `Config::check`'s xpub-network validation passes and the chain
+        // comparison is the gate under test.
+        const TESTNET_DESC: &str = "wsh(andor(pk([aabbccdd]tpubDEN9WSToTyy9ZQfaYqSKfmVqmq1VVLNtYfj3Vkqh67et57eJ5sTKZQBkHqSwPUsoSskJeaYnPttHe2VrkCsKA27kUaN9SDc5zhqeLzKa1rr/<0;1>/*),older(10000),pk([aabbccdd]tpubD8LYfn6njiA2inCoxwM7EuN3cuLVcaHAwLYeups13dpevd3nHLRdK9NdQksWXrhLQVxcUZRpnp5CkJ1FhE61WRAsHxDNAkvGkoQkAeWDYjV/<0;1>/*)))#dw4ulnrs";
+        let desc = match network {
+            "bitcoin" | "bitcoin-blake2b" => MAINNET_DESC,
+            _ => TESTNET_DESC,
+        };
+        let dir = root
+            .network_directory(chain)
+            .coincubed_data_directory(&wallet().wallet_id())
+            .path()
+            .to_path_buf();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("daemon.toml"),
+            format!(
+                "main_descriptor = \"{desc}\"\n\n\
+                 [bitcoin_config]\nnetwork = \"{network}\"\n\n\
+                 [bitcoind_config]\ncookie_path = '/nonexistent/.cookie'\naddr = \"127.0.0.1:1\"\n"
+            ),
+        )
+        .unwrap();
+        dir
+    }
+
+    // A Bitcoin Cube whose `daemon.toml` names another chain — a file copied between chain
+    // directories, or edited by hand. No database exists yet, so the daemon's own preflight
+    // would have nothing to compare against and would create a database for the *config's*
+    // chain inside the *Cube's* directory. The loader refuses first, and nothing is created.
+    #[tokio::test]
+    async fn a_daemon_toml_for_another_chain_is_refused_before_anything_starts() {
+        for (cube_chain, config_network, config_chain) in [
+            (ChainId::Bitcoin, "signet", ChainId::Signet),
+            (ChainId::Signet, "bitcoin", ChainId::Bitcoin),
+            // The encoding twin, which an older build could not even tell apart.
+            (ChainId::Bitcoin, "bitcoin-blake2b", ChainId::BitcoinBlake2b),
+        ] {
+            let root = temp_root("mismatch");
+            let dir = write_cube_daemon_toml(&root, cube_chain, config_network);
+            let before = tree(root.path());
+            let result = start_bitcoind_and_daemon(root.clone(), false, cube_chain, wallet()).await;
+            match result {
+                Err(Error::ChainMismatch { cube, config }) => {
+                    assert_eq!((cube, config), (cube_chain, config_chain));
+                }
+                Err(other) => panic!("wrong refusal for {:?}: {}", cube_chain, other),
+                Ok(_) => panic!("started a daemon for {:?}", cube_chain),
+            }
+            // No database, no lock, no node datadir: the tree is what it was.
+            assert_eq!(tree(root.path()), before, "{:?}", cube_chain);
+            assert!(!dir.join("coincubed.sqlite3").exists());
+            let _ = std::fs::remove_dir_all(root.path());
+        }
+    }
+
+    // The control: the same Cube with a matching `daemon.toml` gets past the comparison and
+    // fails later, on the (unreachable) node — proving the mismatch refusal is its own gate.
+    #[tokio::test]
+    async fn a_matching_daemon_toml_passes_the_chain_comparison() {
+        let root = temp_root("match");
+        write_cube_daemon_toml(&root, ChainId::Signet, "signet");
+        let result =
+            start_bitcoind_and_daemon(root.clone(), false, ChainId::Signet, wallet()).await;
+        assert!(
+            !matches!(result, Err(Error::ChainMismatch { .. })),
+            "a matching config must not be refused as a mismatch"
+        );
+        assert!(result.is_err(), "there is no node to reach");
         let _ = std::fs::remove_dir_all(root.path());
     }
 }
