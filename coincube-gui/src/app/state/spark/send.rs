@@ -1734,6 +1734,40 @@ fn format_parse_input_error(raw: &str) -> String {
     raw.to_string()
 }
 
+/// Convert raw preparation failures into clear, user-facing error messages.
+///
+/// The SDK's text reaches us under several layers of transport prefix —
+/// `Spark bridge returned Sdk: prepare_send failed: SparkSdkError: Service
+/// error: service provider error: graphql error: …` — which buries the one
+/// clause the user can act on. Recognised failures are replaced outright;
+/// anything else keeps its raw text behind the failing operation's name, so an
+/// unexpected SDK error stays diagnosable in a bug report.
+fn format_prepare_error(operation: &str, raw: &str) -> String {
+    let lower = raw.to_lowercase();
+    // The SSP has to find a route before it can quote a fee, so an unroutable
+    // destination fails during preparation rather than at send time. Its
+    // `NO_PATH_FOUND` covers every reason a path is missing — the payee is
+    // offline, has no usable channels, or nothing along the way holds enough
+    // liquidity for this amount — so the copy names all three.
+    if lower.contains("no_path_found") {
+        return "No route to this invoice's destination. Their node may be offline, \
+                or there may not be enough liquidity along the way to carry this \
+                amount. Ask for a new invoice, or try sending less."
+            .to_string();
+    }
+    // Checked before the fee-only case below: this message also ends in
+    // "amount and fees", so a looser match would shadow it.
+    if lower.contains("token conversion amount too small") {
+        return "Your balance doesn't convert to enough sats to cover this invoice \
+                and its fees. Top up, or ask for an invoice for a smaller amount."
+            .to_string();
+    }
+    if lower.contains("amount too small to cover fees") {
+        return "This amount is too small to cover the network fee. Try sending more.".to_string();
+    }
+    format!("{operation} failed: {raw}")
+}
+
 /// Phase 4e: classify the user-supplied destination via `parse_input`
 /// and dispatch to the right prepare RPC (`prepare_send` for
 /// BOLT11/on-chain/Other, `prepare_lnurl_pay` for LNURL/Lightning
@@ -1866,7 +1900,7 @@ async fn resolve_and_prepare<B: PrepareBackend>(
             backend
                 .prepare_lnurl_pay(input, amount, None)
                 .await
-                .map_err(|e| format!("prepare_lnurl_pay failed: {e}"))
+                .map_err(|e| format_prepare_error("prepare_lnurl_pay", &e.to_string()))
         }
         ParseInputKind::Bolt11Invoice => backend
             .prepare_send(
@@ -1874,14 +1908,14 @@ async fn resolve_and_prepare<B: PrepareBackend>(
                 amount_sat,
             )
             .await
-            .map_err(|e| format!("prepare_send failed: {e}")),
+            .map_err(|e| format_prepare_error("prepare_send", &e.to_string())),
         ParseInputKind::BitcoinAddress
         | ParseInputKind::SparkAddress
         | ParseInputKind::SparkInvoice
         | ParseInputKind::Other => backend
             .prepare_send(input, amount_sat)
             .await
-            .map_err(|e| format!("prepare_send failed: {e}")),
+            .map_err(|e| format_prepare_error("prepare_send", &e.to_string())),
     }
 }
 
@@ -2144,6 +2178,52 @@ mod tests {
         let raw = "Spark bridge returned Sdk: parse_input failed: unexpected SDK error";
 
         assert_eq!(format_parse_input_error(raw), raw);
+    }
+
+    #[test]
+    fn format_prepare_error_explains_an_unroutable_invoice() {
+        // Verbatim from the SSP, through every transport layer that wraps it.
+        let raw = "Spark bridge returned Sdk: prepare_send failed: SparkSdkError: \
+                   Service error: service provider error: graphql error: Unable to \
+                   compute fees for invoice; there is no way to pay this invoice \
+                   (NO_PATH_FOUND)";
+        let message = format_prepare_error("prepare_send", raw);
+
+        assert!(message.starts_with("No route to this invoice's destination."));
+        // None of the transport prefixes survive into the user-facing copy.
+        assert!(!message.contains("prepare_send"));
+        assert!(!message.contains("NO_PATH_FOUND"));
+    }
+
+    #[test]
+    fn format_prepare_error_distinguishes_the_two_amount_shortfalls() {
+        // The conversion shortfall also ends in "amount and fees", so it must not
+        // fall through to the plain fee message.
+        assert_eq!(
+            format_prepare_error(
+                "prepare_send",
+                "Spark bridge returned Sdk: prepare_send failed: Invalid input: \
+                 Token conversion amount too small to cover invoice amount and fees"
+            ),
+            "Your balance doesn't convert to enough sats to cover this invoice \
+             and its fees. Top up, or ask for an invoice for a smaller amount."
+        );
+        assert_eq!(
+            format_prepare_error(
+                "prepare_send",
+                "Spark bridge returned Sdk: prepare_send failed: Invalid input: \
+                 Amount too small to cover fees"
+            ),
+            "This amount is too small to cover the network fee. Try sending more."
+        );
+    }
+
+    #[test]
+    fn format_prepare_error_preserves_an_unrecognised_failure() {
+        assert_eq!(
+            format_prepare_error("prepare_lnurl_pay", "unexpected SDK error"),
+            "prepare_lnurl_pay failed: unexpected SDK error"
+        );
     }
 
     fn route() -> CrossChainRoute {

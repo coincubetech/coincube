@@ -63,6 +63,34 @@ remove the affected destination to continue. Uppercase testnet bech32 URIs are s
 for lookup because the SDK normalizes case only for mainnet bech32; wallet address
 validation continues normally. Non-ASCII or ambiguous SDK payloads are skipped.
 
+## What a hit actually identifies, and how to test one
+
+Branta identifies the **merchant who posted the payment request**, not the wallet
+software that generated it. Its network list (`data.json` in
+[BrantaOps/branta-network](https://github.com/BrantaOps/branta-network)) has two
+sides: `wallets` — send-side consumers that render an identity, which is where
+Blitz, Zeus and COINCUBE all sit — and `btcpay` — the instances that publish
+payment requests. A wallet being "Branta-supporting" says nothing about whether
+the invoices its users generate are registered. A personal invoice from a
+Blitz user was never posted to Branta, so it resolves to nothing. Per Branta's
+wallet docs, a miss is not an error: "a missing record just means the destination
+was never posted to Branta."
+
+Branta's two published Lightning fixtures cover disjoint halves of this pipeline,
+and **neither one can demonstrate a success in the send panel**:
+
+| Fixture | Strict (hash-ZK) lookup | Payable? |
+|---|---|---|
+| zk-lightning | resolves — platform "Peony Lane" | **no** — signed by a node with no channels and no `r` route hints, so the SSP answers `NO_PATH_FOUND` |
+| lightning | 404 — registered **plaintext-only**, findable only by a Loose-mode lookup, and `get_payments` never falls back from Strict | yes |
+
+So the fixture that resolves cannot be prepared, and preparation failure discards
+the identity (identity binds to a prepared handle — see *Payment correctness*).
+Do not read "nothing rendered" from either fixture as a broken integration.
+Covering this path deterministically needs a fake backend whose `prepare_send`
+succeeds; observing it live needs an invoice that is both payable and posted to
+Branta, i.e. one from a `btcpay` list instance.
+
 ## SDK provenance and dependencies
 
 Official Branta 3.2.1 source is vendored from reviewed commit
