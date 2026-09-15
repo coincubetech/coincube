@@ -1597,6 +1597,50 @@ impl BitcoinD {
         })
     }
 
+    /// Opt-in, read-only probe of the Bitcoin Blake2b hardfork schedule and the
+    /// RDTS (BIP-110 `reduced_data`) flag-day schedule per `getdeploymentinfo`,
+    /// as emitted by Knots `v29.4.1.knots20260508` (`src/rpc/blockchain.cpp`:
+    /// top-level `blake2b` at L2029-2037, `RdtsFlagDayDescPushBack` at
+    /// L1948-1963). See `docs/BTCB2_CHAIN_HEALTH.md`.
+    ///
+    /// This is deliberately NOT [`Self::deployment_status`]: that probe folds
+    /// "RPC failed", "no such deployment" and "no `deployments` object" into one
+    /// `None` and defaults a missing `active` to `false`, which is exactly right
+    /// for the Bitcoin-chain RDTS repair input it serves and exactly wrong for
+    /// deciding whether a node is a scheduled BLAKE2b fork. Here the three
+    /// outcomes stay apart:
+    ///
+    /// - `Err(DeploymentProbeError::Rpc(_))` — the request failed; the original
+    ///   [`BitcoindError`] is kept so `is_warming_up` / `is_transient` /
+    ///   `is_unauthorized` still classify it;
+    /// - `Err(DeploymentProbeError::Malformed(_))` — the node answered but the
+    ///   response does not have the tagged schema;
+    /// - `Ok(info)` — every field the node reported, with absence typed
+    ///   explicitly (`fork: None`, `rdts: RdtsSchedule::Absent`).
+    ///
+    /// Nothing is inferred: an absent fork object is "no hardfork height is
+    /// configured on this node", not evidence about the chain; an RDTS entry
+    /// with `active: false` past its `expiry_time` is the node's own report of
+    /// the designed end of enforcement, not a failure; and the local clock is
+    /// never consulted. Whether the reported schedule matches the chain a Cube
+    /// expects is the caller's policy.
+    pub fn deployment_info(&self) -> Result<Blake2bDeploymentInfo, DeploymentProbeError> {
+        Self::deployment_info_from_response(
+            self.make_fallible_node_request("getdeploymentinfo", None),
+        )
+    }
+
+    /// The transport-free half of [`Self::deployment_info`], so the RPC error
+    /// path can be exercised by injecting a [`BitcoindError`].
+    fn deployment_info_from_response(
+        response: Result<Json, BitcoindError>,
+    ) -> Result<Blake2bDeploymentInfo, DeploymentProbeError> {
+        match response {
+            Ok(info) => parse_deployment_info(&info),
+            Err(e) => Err(DeploymentProbeError::Rpc(e)),
+        }
+    }
+
     /// Mark `hash` invalid and disconnect it and everything built on it, rolling
     /// the active chain back to its parent.
     ///
@@ -1944,6 +1988,190 @@ impl DeploymentStatus {
     pub fn has_failed(&self) -> bool {
         !self.active && self.status == "failed"
     }
+}
+
+/// The Bitcoin Blake2b hardfork schedule as a node reports it in the top-level
+/// `blake2b` object of `getdeploymentinfo` (Knots `v29.4.1.knots20260508`,
+/// `src/rpc/blockchain.cpp` L2029-2037): present only when a hardfork height is
+/// configured, i.e. `consensus.Blake2bHeight != INT_MAX`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ForkActivation {
+    /// `blake2b.height`: the height the hardfork activates at.
+    pub height: u64,
+    /// `blake2b.active`: whether the hardfork rules apply to the block AFTER the
+    /// queried one (`DeploymentActiveAfter(blockindex, DEPLOYMENT_BLAKE2B)`).
+    pub active: bool,
+}
+
+/// The RDTS (BIP-110 `reduced_data`) schedule as a node reports it under
+/// `deployments.reduced_data`. On the tagged Knots build this is a flag-day
+/// deployment (`RdtsFlagDayDescPushBack`, L1948-1963); older builds shipped it
+/// as a versionbits (`bip9`) deployment, which this reader reports but does not
+/// interpret.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RdtsSchedule {
+    /// No `deployments.reduced_data` entry. On the tagged build that means the
+    /// node has no RDTS expiry configured (`RdtsExpiryTime == INT64_MIN`) — the
+    /// entry is omitted unless BOTH the hardfork height and the expiry are set —
+    /// or the binary does not know the deployment at all (Bitcoin Core).
+    Absent,
+    /// `{type: "flagday", height, expiry_time, active}`.
+    FlagDay {
+        /// `reduced_data.height`: `RdtsActivationHeight()`. Documented to be the
+        /// BLAKE2b hardfork height, but read independently from
+        /// [`ForkActivation::height`] and never reconciled here.
+        height: u64,
+        /// `reduced_data.expiry_time`: the median-time-past at and after which
+        /// the rules are no longer enforced (a block is past expiry when its
+        /// parent's MTP has reached it).
+        expiry_time: i64,
+        /// `reduced_data.active`: `RdtsActiveAt(height + 1, parent MTP)` for the
+        /// block after the queried one. `false` after expiry is the designed
+        /// end of enforcement and is reported as-is.
+        active: bool,
+    },
+    /// A `reduced_data` entry whose `type` is not `"flagday"` (`"bip9"` or
+    /// `"buried"` per the RPC help). Reported by name so a caller can tell an
+    /// older versionbits build apart from an absent entry; its fields are not
+    /// interpreted and it never claims flag-day status.
+    Unsupported {
+        /// The `type` string as reported.
+        kind: String,
+    },
+}
+
+/// Everything [`BitcoinD::deployment_info`] reads from `getdeploymentinfo`, as
+/// two INDEPENDENT fields: the fork object and the RDTS entry are emitted by
+/// separate code paths on the node and are reported separately here, so an
+/// absent fork never discards a reported RDTS entry and vice versa.
+///
+/// This is a report, not a verdict. It establishes no chain authentication, no
+/// spend safety and no "healthy" state; whether `fork` and `rdts` are mutually
+/// consistent, and whether either matches the chain a Cube expects, is left to
+/// the caller (see `docs/BTCB2_CHAIN_HEALTH.md`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Blake2bDeploymentInfo {
+    /// The top-level `blake2b` object, or `None` when the node reported none.
+    pub fork: Option<ForkActivation>,
+    /// The `deployments.reduced_data` entry, typed.
+    pub rdts: RdtsSchedule,
+}
+
+/// Why [`BitcoinD::deployment_info`] could not produce a
+/// [`Blake2bDeploymentInfo`]. The two variants are kept apart on purpose:
+/// neither means "inactive", "unscheduled" or "healthy".
+#[derive(Debug)]
+pub enum DeploymentProbeError {
+    /// The `getdeploymentinfo` request itself failed. The original error is kept
+    /// so callers can still ask [`BitcoindError::is_warming_up`],
+    /// [`BitcoindError::is_transient`] and [`BitcoindError::is_unauthorized`].
+    Rpc(BitcoindError),
+    /// The node answered, but the response does not have the tagged schema. The
+    /// string names the offending field; it never echoes node data.
+    Malformed(&'static str),
+}
+
+impl std::fmt::Display for DeploymentProbeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            DeploymentProbeError::Rpc(e) => write!(f, "getdeploymentinfo request failed: {}", e),
+            DeploymentProbeError::Malformed(what) => {
+                write!(f, "getdeploymentinfo response is malformed: {}", what)
+            }
+        }
+    }
+}
+
+impl std::error::Error for DeploymentProbeError {}
+
+/// Pure parser behind [`BitcoinD::deployment_info`]: validates a
+/// `getdeploymentinfo` result against the tagged Knots schema and types it.
+///
+/// Strictness is per field the reader USES; unknown fields anywhere are
+/// tolerated so a future node can add to the result without breaking the
+/// probe. A required field that is missing or has the wrong JSON type is
+/// `Malformed`; a boolean is never defaulted.
+fn parse_deployment_info(info: &Json) -> Result<Blake2bDeploymentInfo, DeploymentProbeError> {
+    use DeploymentProbeError::Malformed;
+
+    let root = info
+        .as_object()
+        .ok_or(Malformed("result is not an object"))?;
+
+    // `deployments` is always present (`OBJ_DYN`), on Core and Knots alike.
+    let deployments = root
+        .get("deployments")
+        .ok_or(Malformed("`deployments` is missing"))?
+        .as_object()
+        .ok_or(Malformed("`deployments` is not an object"))?;
+
+    let rdts = match deployments.get("reduced_data") {
+        None => RdtsSchedule::Absent,
+        Some(entry) => {
+            let entry = entry
+                .as_object()
+                .ok_or(Malformed("`deployments.reduced_data` is not an object"))?;
+            let kind = entry
+                .get("type")
+                .ok_or(Malformed("`deployments.reduced_data.type` is missing"))?
+                .as_str()
+                .ok_or(Malformed("`deployments.reduced_data.type` is not a string"))?;
+            if kind == "flagday" {
+                RdtsSchedule::FlagDay {
+                    height: entry
+                        .get("height")
+                        .ok_or(Malformed("`deployments.reduced_data.height` is missing"))?
+                        .as_u64()
+                        .ok_or(Malformed(
+                            "`deployments.reduced_data.height` is not a non-negative integer",
+                        ))?,
+                    expiry_time: entry
+                        .get("expiry_time")
+                        .ok_or(Malformed(
+                            "`deployments.reduced_data.expiry_time` is missing",
+                        ))?
+                        .as_i64()
+                        .ok_or(Malformed(
+                            "`deployments.reduced_data.expiry_time` is not an integer",
+                        ))?,
+                    active: entry
+                        .get("active")
+                        .ok_or(Malformed("`deployments.reduced_data.active` is missing"))?
+                        .as_bool()
+                        .ok_or(Malformed(
+                            "`deployments.reduced_data.active` is not a boolean",
+                        ))?,
+                }
+            } else {
+                RdtsSchedule::Unsupported {
+                    kind: kind.to_string(),
+                }
+            }
+        }
+    };
+
+    let fork = match root.get("blake2b") {
+        None => None,
+        Some(hf) => {
+            let hf = hf
+                .as_object()
+                .ok_or(Malformed("`blake2b` is not an object"))?;
+            Some(ForkActivation {
+                height: hf
+                    .get("height")
+                    .ok_or(Malformed("`blake2b.height` is missing"))?
+                    .as_u64()
+                    .ok_or(Malformed("`blake2b.height` is not a non-negative integer"))?,
+                active: hf
+                    .get("active")
+                    .ok_or(Malformed("`blake2b.active` is missing"))?
+                    .as_bool()
+                    .ok_or(Malformed("`blake2b.active` is not a boolean"))?,
+            })
+        }
+    };
+
+    Ok(Blake2bDeploymentInfo { fork, rdts })
 }
 
 /// Information about the block chain verification progress.
@@ -2383,6 +2611,407 @@ mod tests {
         assert!(!status("locked_in", false).has_failed());
         assert!(!status("active", true).has_failed());
         assert!(status("failed", false).has_failed());
+    }
+
+    // ── BTCB2 typed fork/RDTS schedule probe (coincube-api#288) ─────────────────
+    //
+    // Fixtures follow the Knots v29.4.1.knots20260508 `getdeploymentinfo` result
+    // (src/rpc/blockchain.cpp: `blake2b` L2029-2037, `RdtsFlagDayDescPushBack`
+    // L1948-1963). Only the fields the reader uses are asserted; everything
+    // else is there to prove it is tolerated.
+
+    fn info(json: &str) -> Result<Blake2bDeploymentInfo, DeploymentProbeError> {
+        parse_deployment_info(&serde_json::from_str::<Json>(json).expect("fixture is valid JSON"))
+    }
+
+    fn malformed(json: &str) -> &'static str {
+        match info(json) {
+            Err(DeploymentProbeError::Malformed(what)) => what,
+            other => panic!("expected Malformed, got {:?}", other),
+        }
+    }
+
+    /// The `deployments` object a stock Bitcoin Core 29 node reports: buried
+    /// softforks plus a `bip9` testdummy. No `reduced_data`, no `blake2b`.
+    const CORE_DEPLOYMENTS: &str = r#"
+        "segwit": {"type": "buried", "active": true, "height": 481824},
+        "taproot": {"type": "bip9", "bip9": {"start_time": 1619222400, "timeout": 1628640000,
+                    "min_activation_height": 709632, "status": "active", "since": 709632,
+                    "status_next": "active"}, "height": 709632, "active": true},
+        "testdummy": {"type": "bip9", "bip9": {"bit": 28, "start_time": 0, "timeout": 9223372036854775807,
+                      "min_activation_height": 0, "status": "defined", "since": 0,
+                      "status_next": "defined"}, "active": false}
+    "#;
+
+    fn fixture(deployments_extra: &str, top_level_extra: &str) -> String {
+        format!(
+            r#"{{"hash": "0000000000000000000a1f7f1b6e7e9ac0d1b8b3f8b2c2d6e3a0b4c5d6e7f8a9",
+                "height": 961700,
+                "deployments": {{{CORE_DEPLOYMENTS}{deployments_extra}}}
+                {top_level_extra}}}"#
+        )
+    }
+
+    const FLAGDAY_ACTIVE: &str = r#", "reduced_data": {"type": "flagday", "height": 961640, "expiry_time": 1819756800, "active": true}"#;
+    const FLAGDAY_INACTIVE: &str = r#", "reduced_data": {"type": "flagday", "height": 961640, "expiry_time": 1819756800, "active": false}"#;
+    const FORK_ACTIVE: &str = r#", "blake2b": {"height": 961640, "active": true}"#;
+    const FORK_INACTIVE: &str = r#", "blake2b": {"height": 961640, "active": false}"#;
+
+    #[test]
+    fn stock_bitcoin_node_reports_no_fork_and_no_rdts() {
+        let got = info(&fixture("", "")).unwrap();
+        assert_eq!(
+            got,
+            Blake2bDeploymentInfo {
+                fork: None,
+                rdts: RdtsSchedule::Absent
+            }
+        );
+    }
+
+    // `-testactivationheight=blake2b@N` without `-rdtsexpiry`: the fork object is
+    // emitted on the height alone, the RDTS entry needs the expiry too.
+    #[test]
+    fn configured_fork_without_rdts_is_scheduled_with_absent_rdts() {
+        let got = info(&fixture("", FORK_INACTIVE)).unwrap();
+        assert_eq!(
+            got.fork,
+            Some(ForkActivation {
+                height: 961640,
+                active: false
+            })
+        );
+        assert_eq!(got.rdts, RdtsSchedule::Absent);
+    }
+
+    #[test]
+    fn both_objects_before_activation_report_inactive_without_inference() {
+        let got = info(&fixture(FLAGDAY_INACTIVE, FORK_INACTIVE)).unwrap();
+        assert_eq!(
+            got,
+            Blake2bDeploymentInfo {
+                fork: Some(ForkActivation {
+                    height: 961640,
+                    active: false
+                }),
+                rdts: RdtsSchedule::FlagDay {
+                    height: 961640,
+                    expiry_time: 1819756800,
+                    active: false
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn active_fork_with_active_rdts_is_reported_as_such() {
+        let got = info(&fixture(FLAGDAY_ACTIVE, FORK_ACTIVE)).unwrap();
+        assert_eq!(got.fork.map(|f| f.active), Some(true));
+        assert!(matches!(
+            got.rdts,
+            RdtsSchedule::FlagDay { active: true, .. }
+        ));
+    }
+
+    // After `expiry_time` the node itself reports `active: false`. That is the
+    // designed end of RDTS enforcement, reported verbatim — the fork stays
+    // active, nothing is "failed", and the local clock is never consulted (the
+    // expiry here is in the past and the reader does not care).
+    #[test]
+    fn rdts_inactive_after_expiry_is_a_normal_reported_state() {
+        let expired = r#", "reduced_data": {"type": "flagday", "height": 961640, "expiry_time": 1700000000, "active": false}"#;
+        let got = info(&fixture(expired, FORK_ACTIVE)).unwrap();
+        assert_eq!(
+            got.fork,
+            Some(ForkActivation {
+                height: 961640,
+                active: true
+            })
+        );
+        assert_eq!(
+            got.rdts,
+            RdtsSchedule::FlagDay {
+                height: 961640,
+                expiry_time: 1700000000,
+                active: false
+            }
+        );
+    }
+
+    // An older build that shipped RDTS as a versionbits deployment: reported by
+    // type, never promoted to flag-day, and its `bip9` fields are not read.
+    #[test]
+    fn non_flagday_rdts_entry_is_reported_as_unsupported() {
+        let bip9 = r#", "reduced_data": {"type": "bip9", "bip9": {"bit": 2, "start_time": 1, "timeout": 2,
+                      "min_activation_height": 0, "status": "failed", "since": 0, "status_next": "failed"},
+                      "active": false}"#;
+        let got = info(&fixture(bip9, "")).unwrap();
+        assert_eq!(got.fork, None);
+        assert_eq!(
+            got.rdts,
+            RdtsSchedule::Unsupported {
+                kind: "bip9".to_string()
+            }
+        );
+        // Even a `type` the RPC help does not list is reported, not refused —
+        // the reader only interprets `flagday`.
+        let got = info(&fixture(
+            r#", "reduced_data": {"type": "buried", "height": 1, "active": true}"#,
+            "",
+        ))
+        .unwrap();
+        assert_eq!(
+            got.rdts,
+            RdtsSchedule::Unsupported {
+                kind: "buried".to_string()
+            }
+        );
+    }
+
+    // `reduced_data.height` is `RdtsActivationHeight()`, `blake2b.height` is
+    // `Blake2bHeight`. They are documented to agree; if they do not, both are
+    // preserved and no one here decides which is right.
+    #[test]
+    fn unequal_fork_and_rdts_heights_are_both_preserved() {
+        let rdts = r#", "reduced_data": {"type": "flagday", "height": 961650, "expiry_time": 1819756800, "active": false}"#;
+        let got = info(&fixture(rdts, FORK_INACTIVE)).unwrap();
+        assert_eq!(got.fork.map(|f| f.height), Some(961640));
+        assert!(matches!(
+            got.rdts,
+            RdtsSchedule::FlagDay { height: 961650, .. }
+        ));
+    }
+
+    // The two objects come from separate code paths on the node; an absent
+    // fork object must not discard a reported RDTS entry.
+    #[test]
+    fn rdts_entry_without_fork_object_is_kept() {
+        let got = info(&fixture(FLAGDAY_ACTIVE, "")).unwrap();
+        assert_eq!(got.fork, None);
+        assert_eq!(
+            got.rdts,
+            RdtsSchedule::FlagDay {
+                height: 961640,
+                expiry_time: 1819756800,
+                active: true
+            }
+        );
+    }
+
+    #[test]
+    fn unknown_fields_are_tolerated_everywhere() {
+        let rdts = r#", "reduced_data": {"type": "flagday", "height": 961640, "expiry_time": 1819756800,
+                      "active": true, "height_end": 999999, "future": {"x": 1}}"#;
+        let fork = r#", "blake2b": {"height": 961640, "active": true, "headline": "…", "future": [1,2]},
+                       "something_new": null"#;
+        let got = info(&fixture(rdts, fork)).unwrap();
+        assert!(matches!(
+            got.rdts,
+            RdtsSchedule::FlagDay { active: true, .. }
+        ));
+        assert_eq!(got.fork.map(|f| f.active), Some(true));
+        // Other deployments may have any shape; the reader does not look at them.
+        let odd = r#", "weird": 5, "odder": [null]"#;
+        assert!(info(&fixture(odd, "")).is_ok());
+    }
+
+    #[test]
+    fn malformed_root_and_deployments_are_refused() {
+        assert_eq!(malformed("[]"), "result is not an object");
+        assert_eq!(malformed("\"x\""), "result is not an object");
+        assert_eq!(malformed("null"), "result is not an object");
+        assert_eq!(
+            malformed(r#"{"hash": "h", "height": 1}"#),
+            "`deployments` is missing"
+        );
+        assert_eq!(
+            malformed(r#"{"hash": "h", "height": 1, "deployments": []}"#),
+            "`deployments` is not an object"
+        );
+        assert_eq!(
+            malformed(r#"{"hash": "h", "height": 1, "deployments": "x"}"#),
+            "`deployments` is not an object"
+        );
+    }
+
+    #[test]
+    fn malformed_rdts_entries_are_refused_not_defaulted() {
+        let cases: &[(&str, &str)] = &[
+            (
+                r#", "reduced_data": "flagday""#,
+                "`deployments.reduced_data` is not an object",
+            ),
+            (
+                r#", "reduced_data": null"#,
+                "`deployments.reduced_data` is not an object",
+            ),
+            (
+                r#", "reduced_data": [1]"#,
+                "`deployments.reduced_data` is not an object",
+            ),
+            (
+                r#", "reduced_data": {"height": 1, "expiry_time": 2, "active": true}"#,
+                "`deployments.reduced_data.type` is missing",
+            ),
+            (
+                r#", "reduced_data": {"type": 7, "height": 1, "expiry_time": 2, "active": true}"#,
+                "`deployments.reduced_data.type` is not a string",
+            ),
+            (
+                r#", "reduced_data": {"type": "flagday", "expiry_time": 2, "active": true}"#,
+                "`deployments.reduced_data.height` is missing",
+            ),
+            (
+                r#", "reduced_data": {"type": "flagday", "height": "961640", "expiry_time": 2, "active": true}"#,
+                "`deployments.reduced_data.height` is not a non-negative integer",
+            ),
+            (
+                r#", "reduced_data": {"type": "flagday", "height": -1, "expiry_time": 2, "active": true}"#,
+                "`deployments.reduced_data.height` is not a non-negative integer",
+            ),
+            (
+                r#", "reduced_data": {"type": "flagday", "height": 1.5, "expiry_time": 2, "active": true}"#,
+                "`deployments.reduced_data.height` is not a non-negative integer",
+            ),
+            (
+                r#", "reduced_data": {"type": "flagday", "height": 1, "active": true}"#,
+                "`deployments.reduced_data.expiry_time` is missing",
+            ),
+            (
+                r#", "reduced_data": {"type": "flagday", "height": 1, "expiry_time": "soon", "active": true}"#,
+                "`deployments.reduced_data.expiry_time` is not an integer",
+            ),
+            (
+                r#", "reduced_data": {"type": "flagday", "height": 1, "expiry_time": 1.5, "active": true}"#,
+                "`deployments.reduced_data.expiry_time` is not an integer",
+            ),
+            (
+                r#", "reduced_data": {"type": "flagday", "height": 1, "expiry_time": 2}"#,
+                "`deployments.reduced_data.active` is missing",
+            ),
+            (
+                r#", "reduced_data": {"type": "flagday", "height": 1, "expiry_time": 2, "active": "true"}"#,
+                "`deployments.reduced_data.active` is not a boolean",
+            ),
+            (
+                r#", "reduced_data": {"type": "flagday", "height": 1, "expiry_time": 2, "active": 1}"#,
+                "`deployments.reduced_data.active` is not a boolean",
+            ),
+        ];
+        for (extra, want) in cases {
+            assert_eq!(malformed(&fixture(extra, "")), *want, "fixture {extra}");
+        }
+    }
+
+    #[test]
+    fn malformed_fork_objects_are_refused_not_defaulted() {
+        let cases: &[(&str, &str)] = &[
+            (r#", "blake2b": true"#, "`blake2b` is not an object"),
+            (r#", "blake2b": null"#, "`blake2b` is not an object"),
+            (
+                r#", "blake2b": [961640, true]"#,
+                "`blake2b` is not an object",
+            ),
+            (
+                r#", "blake2b": {"active": true}"#,
+                "`blake2b.height` is missing",
+            ),
+            (
+                r#", "blake2b": {"height": "961640", "active": true}"#,
+                "`blake2b.height` is not a non-negative integer",
+            ),
+            (
+                r#", "blake2b": {"height": -5, "active": true}"#,
+                "`blake2b.height` is not a non-negative integer",
+            ),
+            (
+                r#", "blake2b": {"height": 961640}"#,
+                "`blake2b.active` is missing",
+            ),
+            (
+                r#", "blake2b": {"height": 961640, "active": "true"}"#,
+                "`blake2b.active` is not a boolean",
+            ),
+            (
+                r#", "blake2b": {"height": 961640, "active": 1}"#,
+                "`blake2b.active` is not a boolean",
+            ),
+        ];
+        for (extra, want) in cases {
+            assert_eq!(malformed(&fixture("", extra)), *want, "fixture {extra}");
+        }
+        // A malformed fork object is refused even when the RDTS entry is fine —
+        // the result is all-or-nothing, never a half-typed report.
+        assert_eq!(
+            malformed(&fixture(
+                FLAGDAY_ACTIVE,
+                r#", "blake2b": {"height": 961640}"#
+            )),
+            "`blake2b.active` is missing"
+        );
+    }
+
+    // The RPC error path keeps the original BitcoindError so the existing
+    // classifiers still work on it, and it is never confused with a parse
+    // failure or an absent object.
+    #[test]
+    fn rpc_failures_are_typed_and_keep_their_classification() {
+        let warming = BitcoinD::deployment_info_from_response(Err(rpc_err(-28)));
+        match warming {
+            Err(DeploymentProbeError::Rpc(e)) => assert!(e.is_warming_up()),
+            other => panic!("expected Rpc(warming up), got {:?}", other),
+        }
+
+        let timed_out: BitcoindError = minreq_http::Error::Minreq(minreq::Error::IoError(
+            io::Error::new(io::ErrorKind::TimedOut, "socket timeout"),
+        ))
+        .into();
+        match BitcoinD::deployment_info_from_response(Err(timed_out)) {
+            Err(DeploymentProbeError::Rpc(e)) => {
+                assert!(e.is_transient());
+                assert!(e.is_timeout());
+                assert!(!e.is_unauthorized());
+            }
+            other => panic!("expected Rpc(transient), got {:?}", other),
+        }
+
+        let unauthorized: BitcoindError = minreq_http::Error::Http(minreq_http::HttpError {
+            status_code: 401,
+            body: String::new(),
+        })
+        .into();
+        match BitcoinD::deployment_info_from_response(Err(unauthorized)) {
+            Err(DeploymentProbeError::Rpc(e)) => {
+                assert!(e.is_unauthorized());
+                assert!(!e.is_transient());
+            }
+            other => panic!("expected Rpc(unauthorized), got {:?}", other),
+        }
+
+        // And a successful transport with a good body goes through the parser.
+        let ok = BitcoinD::deployment_info_from_response(Ok(serde_json::from_str(&fixture(
+            FLAGDAY_ACTIVE,
+            FORK_ACTIVE,
+        ))
+        .unwrap()));
+        assert!(ok.is_ok());
+        // A successful transport with a bad body is Malformed, not Rpc.
+        assert!(matches!(
+            BitcoinD::deployment_info_from_response(Ok(Json::Array(vec![]))),
+            Err(DeploymentProbeError::Malformed(_))
+        ));
+    }
+
+    // Errors name the field, never the node's data.
+    #[test]
+    fn malformed_messages_do_not_echo_node_data() {
+        let secretish = r#", "blake2b": {"height": "HOSTNAME-LEAK-123", "active": true}"#;
+        let msg = match info(&fixture("", secretish)) {
+            Err(e) => e.to_string(),
+            Ok(v) => panic!("expected an error, got {:?}", v),
+        };
+        assert!(!msg.contains("HOSTNAME-LEAK"), "{}", msg);
+        assert!(msg.contains("blake2b.height"), "{}", msg);
     }
 
     // A client built while the datadir's marker was still on its way must not keep the
