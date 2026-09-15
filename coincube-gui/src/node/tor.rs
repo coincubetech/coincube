@@ -427,13 +427,24 @@ fn register_managed_tor(tor: Tor) {
 /// process cannot have it stopped by another test's `stop_managed_tor()`
 /// running in parallel. Poison-tolerant: a panicking holder must not take
 /// every later registry test down with it.
+///
+/// Returned as an opaque token rather than the bare `MutexGuard`: the async
+/// loader tests hold it across `.await`, which is fine on their current-thread
+/// runtime (nothing else can run on that thread meanwhile) but is exactly the
+/// shape clippy's `await_holding_lock` warns about for multi-threaded ones.
 #[cfg(test)]
-pub(crate) fn registry_test_guard() -> std::sync::MutexGuard<'static, ()> {
+pub(crate) fn registry_test_guard() -> RegistryTestGuard {
     static GUARD: Mutex<()> = Mutex::new(());
-    GUARD
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+    RegistryTestGuard(
+        GUARD
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+    )
 }
+
+/// The hold returned by [`registry_test_guard`]; released on drop.
+#[cfg(test)]
+pub(crate) struct RegistryTestGuard(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
 
 /// Stop and deregister the managed Tor, if any. Idempotent; call from every app
 /// shutdown path alongside stopping the managed bitcoind.
