@@ -85,7 +85,7 @@ use coincube_core::signer::{MasterSigner, SignerError, MASTER_SEED_LABEL};
 use zeroize::Zeroizing;
 
 use crate::app::settings::CubeSettings;
-use crate::chain::{ChainId, RuntimeSupport};
+use crate::chain::{ChainId, ChainIdExt, RuntimeSupport};
 
 /// Classification of a submitted PIN at Cube unlock.
 pub enum PinOutcome {

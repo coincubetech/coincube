@@ -33,6 +33,7 @@ use crate::app::breez_liquid::BreezClient;
 use crate::app::cache::DaemonCache;
 use crate::app::settings::{CubeSettings, WalletSettings};
 use crate::backup::Backup;
+use crate::chain::ChainIdExt;
 use crate::dir::CoincubeDirectory;
 use crate::export::RestoreBackupError;
 use crate::{

@@ -14,6 +14,7 @@ use coincubed::config::ConfigError;
 use tokio::runtime::Handle;
 
 use crate::app::state::settings::recovery_kit::encrypt_and_upload as recovery_kit_upload;
+use crate::chain::ChainIdExt;
 use crate::feature_flags;
 use crate::pin_input;
 use crate::recover_vault::{self, RecoverVaultMessage, RecoverVaultPanel};

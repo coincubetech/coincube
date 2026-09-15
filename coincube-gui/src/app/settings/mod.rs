@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     backup::{Key, KeyRole, KeyType},
-    chain::ChainId,
+    chain::{ChainId, ChainIdExt},
     dir::NetworkDirectory,
     hw::HardwareWalletConfig,
     services::{self, connect::client::backend},

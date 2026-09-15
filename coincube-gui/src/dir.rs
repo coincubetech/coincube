@@ -182,6 +182,7 @@ pub(crate) fn create_directory(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chain::ChainIdExt;
     use coincube_core::miniscript::bitcoin::Network;
 
     #[test]

@@ -937,7 +937,7 @@ pub(crate) const DURESS_DORMANT_CHAIN_MSG: &str =
 /// operation leaves every marker, every settings file and the local duress
 /// state exactly as they were.
 pub(crate) fn duress_cube_inventory(root: &std::path::Path) -> Result<Vec<DuressCubeDir>, String> {
-    use crate::chain::{ChainId, RuntimeSupport};
+    use crate::chain::{ChainId, ChainIdExt, RuntimeSupport};
     let mut out = Vec::new();
     for dir in duress_enroll_network_dirs(root)? {
         let name = dir
@@ -7516,7 +7516,7 @@ mod duress_chain_identity_tests {
 
     use super::*;
     use crate::app::settings::{CubeSettings, Settings, SETTINGS_FILE_NAME};
-    use crate::chain::ChainId;
+    use crate::chain::{ChainId, ChainIdExt};
     use crate::dir::CoincubeDirectory;
     use crate::services::duress::DuressLocalState;
     use std::path::{Path, PathBuf};

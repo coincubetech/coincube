@@ -17,6 +17,7 @@ use crate::{
         wallet::Wallet,
         App,
     },
+    chain::ChainIdExt,
     dir::{CoincubeDirectory, NetworkDirectory},
     export::import_backup_at_launch,
     home::{self, Home},

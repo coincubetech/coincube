@@ -3,6 +3,7 @@ use iced::Task;
 use coincube_ui::{component::form, widget::*};
 
 use crate::{
+    chain::ChainIdExt,
     hw::HardwareWallets,
     installer::{context::Context, message::Message, step::Step, view},
     services::connect::client::backend::api::WALLET_ALIAS_MAXIMUM_LENGTH,
