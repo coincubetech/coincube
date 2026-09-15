@@ -1,5 +1,6 @@
 mod cursor;
 mod editor;
+pub mod equal_height;
 mod menu;
 pub mod modal;
 pub mod text_input;
@@ -11,6 +12,7 @@ pub type Element<'a, Message> = iced::Element<'a, Message, Theme, Renderer>;
 pub type Container<'a, Message> = iced::widget::Container<'a, Message, Theme, Renderer>;
 pub type Column<'a, Message> = iced::widget::Column<'a, Message, Theme, Renderer>;
 pub type Row<'a, Message> = iced::widget::Row<'a, Message, Theme, Renderer>;
+pub type EqualHeightRow<'a, Message> = equal_height::EqualHeightRow<'a, Message, Theme, Renderer>;
 pub type Button<'a, Message> = iced::widget::Button<'a, Message, Theme, Renderer>;
 pub type CheckBox<'a, Message> = iced::widget::Checkbox<'a, Message, Theme, Renderer>;
 pub type Text<'a> = iced::widget::Text<'a, Theme, Renderer>;
