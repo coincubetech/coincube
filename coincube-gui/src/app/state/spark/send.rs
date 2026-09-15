@@ -1742,8 +1742,8 @@ fn format_parse_input_error(raw: &str) -> String {
 /// clause the user can act on. Recognised failures are replaced outright;
 /// anything else keeps its raw text behind the failing operation's name, so an
 /// unexpected SDK error stays diagnosable in a bug report.
-/// Known failures use payment wording because address-based sends can also
-/// fail on an invoice used internally by a conversion leg.
+/// Known failures use payment wording because this formatter is shared by
+/// destination kinds, including LNURL payments that resolve to an invoice.
 fn format_prepare_error(operation: &str, raw: &str) -> String {
     let lower = raw.to_lowercase();
     // The SSP has to find a route before it can quote a fee, so an unroutable
@@ -2201,8 +2201,8 @@ mod tests {
     #[test]
     fn format_prepare_error_distinguishes_the_two_amount_shortfalls() {
         // The conversion shortfall also ends in "amount and fees", so it must not
-        // fall through to the plain fee message. Its internal invoice wording
-        // must not leak into address-based sends with a conversion leg.
+        // fall through to the plain fee message. The shared formatter replaces
+        // its invoice-specific wording without assuming a destination kind.
         assert_eq!(
             format_prepare_error(
                 "prepare_send",
