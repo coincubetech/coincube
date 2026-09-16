@@ -13,6 +13,11 @@ concurrency:
   group: btcb2-regtest-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+# Checkout, caches and the failure-log artifact need nothing beyond reading
+# the repository.
+permissions:
+  contents: read
+
 env:
   KNOTS_LEGACY_VERSION: 29.3.knots20260507
   KNOTS_BLAKE2B_VERSION: 29.4.1.knots20260508
