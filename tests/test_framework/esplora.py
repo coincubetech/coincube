@@ -12,12 +12,36 @@ runs. Build it with `tests/tools/fetch_electrs_blake2b.sh` and point
 import json
 import logging
 import os
+import random
+import socket
+import urllib.error
 import urllib.request
 
-from ephemeral_port_reserve import reserve
 from test_framework.utils import BitcoinBackend, TailableProc, TIMEOUT, wait_for
 
 ELECTRS_BLAKE2B_PATH = os.getenv("ELECTRS_BLAKE2B_PATH")
+
+# Listener ports for electrs are picked *below* the kernel's ephemeral range
+# (Linux 32768-60999, macOS 49152-65535) rather than with ephemeral_port_reserve.
+# With `--jsonrpc-import` electrs opens hundreds of short-lived RPC connections
+# to bitcoind while indexing, and only binds its REST/Electrum listeners once
+# the initial index is done; a port reserved from the ephemeral range is handed
+# out as a *source* port for one of those connections in the meantime, and the
+# bind then fails with AddrInUse (seen on the ubuntu CI runner).
+_LISTEN_PORT_RANGE = (20000, 32000)
+
+
+def reserve_listen_port():
+    """A currently-free TCP port on 127.0.0.1 below the ephemeral range."""
+    for _ in range(200):
+        port = random.randint(*_LISTEN_PORT_RANGE)
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind(("127.0.0.1", port))
+            except OSError:
+                continue
+            return port
+    raise RuntimeError("no free listener port found for electrs")
 
 
 class EsploraElectrs(BitcoinBackend):
@@ -35,11 +59,11 @@ class EsploraElectrs(BitcoinBackend):
         assert self.electrs_path, "ELECTRS_BLAKE2B_PATH (or electrs_path) is required"
         self.electrs_dir = electrs_dir
         self.bitcoind_dir = bitcoind_dir
-        self.http_port = http_port or reserve()
+        self.http_port = http_port or reserve_listen_port()
         # Electrum RPC and Prometheus can't be disabled; pin them to free ports so
         # two instances (one per chain) coexist.
-        self.electrum_port = reserve()
-        self.monitoring_port = reserve()
+        self.electrum_port = reserve_listen_port()
+        self.monitoring_port = reserve_listen_port()
         self.prefix = os.path.split(electrs_dir)[-1]
 
         self.db_dir = os.path.join(electrs_dir, "db")
@@ -89,9 +113,26 @@ class EsploraElectrs(BitcoinBackend):
         except urllib.error.HTTPError as e:
             return e.code
 
+    def _tip_height_or_none(self):
+        """Tip height, or None while the REST server is not answering yet."""
+        try:
+            return self.rest("/blocks/tip/height", timeout=2)
+        except (urllib.error.URLError, OSError, ValueError):
+            return None
+
     def start(self):
         TailableProc.start(self)
+        # electrs logs "REST server running" *before* it binds the socket, so
+        # the log line alone is not readiness: poll the API until it answers,
+        # and fail fast if the process dies (e.g. a bind panic).
         self.wait_for_log("REST server running on", timeout=TIMEOUT)
+        wait_for(
+            lambda: self._tip_height_or_none() is not None,
+            timeout=TIMEOUT,
+            debug_fn=lambda: f"{self.prefix}: REST API not answering yet",
+        )
+        if not self.running:
+            raise RuntimeError(f"{self.prefix} exited during startup")
         logging.info("Esplora electrs started on %s", self.url)
 
     def startup(self):
@@ -101,12 +142,18 @@ class EsploraElectrs(BitcoinBackend):
             self.stop()
             raise
 
+    def _tip_hash_or_none(self):
+        try:
+            return self.rest("/blocks/tip/hash", timeout=2)
+        except (urllib.error.URLError, OSError):
+            return None
+
     def wait_for_tip(self, block_hash, timeout=TIMEOUT):
         """Block until the indexer's tip is `block_hash`."""
         wait_for(
-            lambda: self.rest("/blocks/tip/hash") == block_hash,
+            lambda: self._tip_hash_or_none() == block_hash,
             timeout=timeout,
-            debug_fn=lambda: f"electrs tip {self.rest('/blocks/tip/hash')} != {block_hash}",
+            debug_fn=lambda: f"{self.prefix} tip {self._tip_hash_or_none()} != {block_hash}",
         )
 
     def stop(self):

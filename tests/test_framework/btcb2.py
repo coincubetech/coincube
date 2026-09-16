@@ -183,7 +183,7 @@ class TwoChainRegtest:
             self.legacy,
             self.blake2b,
         ):
-            if proc is None:
+            if proc is None or getattr(proc, "proc", None) is None:
                 continue
             try:
                 proc.cleanup()
