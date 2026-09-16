@@ -1684,6 +1684,23 @@ mod chain_identity_tests {
         dir
     }
 
+    /// The `data_directory` line every fixture below carries, pinning the daemon to the
+    /// Cube's own temp directory. Without it `Config::data_directory()` falls through to the
+    /// real config folder (`config_folder_path()/<chain>`), and a control that reaches the
+    /// daemon would create — or migrate — a database there. `data_directory` is used
+    /// verbatim (the installer's own key); the legacy `data_dir` would append the chain
+    /// segment. A TOML literal string, so Windows paths pass through unescaped.
+    fn data_directory_line(dir: &std::path::Path) -> String {
+        format!("data_directory = '{}'\n", dir.display())
+    }
+
+    /// The fixture at `dir` resolves its data directory to `dir` itself — never to the real
+    /// config folder. Checked on the parsed file, the way the daemon will resolve it.
+    fn assert_pinned_to(dir: &std::path::Path) {
+        let config = Config::from_file(Some(dir.join("daemon.toml"))).unwrap();
+        assert_eq!(config.data_directory().unwrap().path(), dir);
+    }
+
     /// A `daemon.toml` for `network` in the Cube's daemon directory, with a bitcoind backend
     /// pointing nowhere. Returns the directory that would hold the database (absent).
     fn write_cube_daemon_toml(root: &CoincubeDirectory, chain: ChainId, network: &str) -> PathBuf {
@@ -1691,14 +1708,39 @@ mod chain_identity_tests {
         std::fs::write(
             dir.join("daemon.toml"),
             format!(
-                "main_descriptor = \"{}\"\n\n\
+                "{}main_descriptor = \"{}\"\n\n\
                  [bitcoin_config]\nnetwork = \"{network}\"\n\n\
                  [bitcoind_config]\ncookie_path = '/nonexistent/.cookie'\naddr = \"127.0.0.1:1\"\n",
+                data_directory_line(&dir),
                 desc_for(network)
             ),
         )
         .unwrap();
         dir
+    }
+
+    /// A deterministic, network-free stop for a control that is *meant* to get past the
+    /// loader's chain comparison: a stray SQLite sidecar in the Cube's daemon directory makes
+    /// the daemon refuse at its own preflight (`OrphanSidecar`) — after the loader's compare
+    /// and `daemon.toml` migration, but before `data_dir.init`, any bitcoind RPC, any
+    /// database creation and any Esplora client. So the control proves the comparison passed
+    /// without a node, a database or a socket.
+    fn plant_orphan_sidecar(dir: &std::path::Path) -> PathBuf {
+        let stray = dir.join("coincubed.sqlite3-shm");
+        std::fs::write(&stray, b"remains").unwrap();
+        stray
+    }
+
+    /// The daemon refused at its preflight because of the planted sidecar — the only
+    /// acceptable outcome for a control that got past the loader's comparison.
+    fn assert_stopped_by_planted_sidecar(result: &StartedResult, stray: &std::path::Path) {
+        match result {
+            Err(Error::Daemon(DaemonError::Start(StartupError::DbPreflight(
+                coincubed::PreflightError::OrphanSidecar(p),
+            )))) => assert_eq!(p, stray),
+            Err(other) => panic!("expected the planted sidecar refusal, got: {}", other),
+            Ok(_) => panic!("started a daemon"),
+        }
     }
 
     /// A *legacy* Esplora `daemon.toml` for `network` — Connect as the only `addr`, no
@@ -1714,9 +1756,10 @@ mod chain_identity_tests {
         std::fs::write(
             dir.join("daemon.toml"),
             format!(
-                "main_descriptor = \"{}\"\n\n\
+                "{}main_descriptor = \"{}\"\n\n\
                  [bitcoin_config]\nnetwork = \"{network}\"\npoll_interval_secs = 10\n\n\
                  [esplora_config]\naddr = \"{}\"\ntoken = \"jwt\"\n",
+                data_directory_line(&dir),
                 desc_for(network),
                 crate::installer::connect_url(config_chain)
             ),
@@ -1755,6 +1798,7 @@ mod chain_identity_tests {
         ] {
             let root = temp_root("mismatch");
             let dir = write_cube_daemon_toml(&root, cube_chain, config_network);
+            assert_pinned_to(&dir);
             let before = snapshot(root.path());
             let result = start_bitcoind_and_daemon(root.clone(), false, cube_chain, wallet()).await;
             match result {
@@ -1781,6 +1825,7 @@ mod chain_identity_tests {
         let dir =
             write_legacy_esplora_daemon_toml(&root, ChainId::Bitcoin, "signet", ChainId::Signet);
         let config_path = dir.join("daemon.toml");
+        assert_pinned_to(&dir);
         let before_bytes = std::fs::read(&config_path).unwrap();
         let before = snapshot(root.path());
         // The fixture is one the migration acts on: it carries the Connect URL as `addr`.
@@ -1805,16 +1850,19 @@ mod chain_identity_tests {
         let _ = std::fs::remove_dir_all(root.path());
 
         // Control: the matching chain passes the comparison and the migration then rewrites
-        // the file (Connect demoted to a fallback slot) before the start fails on the
-        // unreachable backend.
+        // the file (Connect demoted to a fallback slot). The daemon is stopped right after,
+        // at its own preflight, by a planted sidecar — so no database is created and no
+        // Esplora client is built.
         let root = temp_root("legacy-match");
         let dir =
             write_legacy_esplora_daemon_toml(&root, ChainId::Signet, "signet", ChainId::Signet);
         let config_path = dir.join("daemon.toml");
         let before_bytes = std::fs::read(&config_path).unwrap();
+        let stray = plant_orphan_sidecar(&dir);
+        assert_pinned_to(&dir);
         let result =
             start_bitcoind_and_daemon(root.clone(), false, ChainId::Signet, wallet()).await;
-        assert!(!matches!(result, Err(Error::ChainMismatch { .. })));
+        assert_stopped_by_planted_sidecar(&result, &stray);
         let after = std::fs::read_to_string(&config_path).unwrap();
         assert_ne!(
             after.as_bytes(),
@@ -1822,22 +1870,26 @@ mod chain_identity_tests {
             "migration did not run"
         );
         assert!(after.contains("fallback_addr"), "{}", after);
+        // The migrated file still pins the daemon to the temp directory.
+        assert_pinned_to(&dir);
+        assert!(!dir.join("coincubed.sqlite3").exists());
         let _ = std::fs::remove_dir_all(root.path());
     }
 
     // The control: the same Cube with a matching `daemon.toml` gets past the comparison and
-    // fails later, on the (unreachable) node — proving the mismatch refusal is its own gate.
+    // is stopped one gate later — at the daemon's own preflight, by a planted sidecar —
+    // proving the mismatch refusal is its own gate, without reaching a node, a database or
+    // a socket.
     #[tokio::test]
     async fn a_matching_daemon_toml_passes_the_chain_comparison() {
         let root = temp_root("match");
-        write_cube_daemon_toml(&root, ChainId::Signet, "signet");
+        let dir = write_cube_daemon_toml(&root, ChainId::Signet, "signet");
+        let stray = plant_orphan_sidecar(&dir);
+        assert_pinned_to(&dir);
         let result =
             start_bitcoind_and_daemon(root.clone(), false, ChainId::Signet, wallet()).await;
-        assert!(
-            !matches!(result, Err(Error::ChainMismatch { .. })),
-            "a matching config must not be refused as a mismatch"
-        );
-        assert!(result.is_err(), "there is no node to reach");
+        assert_stopped_by_planted_sidecar(&result, &stray);
+        assert!(!dir.join("coincubed.sqlite3").exists());
         let _ = std::fs::remove_dir_all(root.path());
     }
 
