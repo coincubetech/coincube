@@ -3,7 +3,7 @@ use crate::{
         menu::Menu,
         settings::unit::BitcoinDisplayUnit,
         view::{
-            global_home::{PickerSide, TransferStage, WalletKind},
+            global_home::{PickerSide, TransferError, TransferStage, WalletKind},
             FiatAmountConverter,
         },
     },
@@ -1560,7 +1560,12 @@ pub enum ConnectAccountMessage {
     Error(UserError),
     /// The Security tab's background loads failed. Separate from [`Self::Error`]
     /// because this one *is* re-runnable from the card.
-    SecurityDataFailed(UserError),
+    ///
+    /// Carries the session generation for the same reason its success siblings
+    /// do: a request that fails after a logout or a re-login must not raise a
+    /// retryable card on the session that replaced it. See
+    /// `ConnectAccountPanel::clear_session`.
+    SecurityDataFailed(UserError, u64),
     /// The error card's "Try again" was pressed.
     Retry(RetryAction),
     // --- Plan & Billing ---
@@ -1586,15 +1591,24 @@ pub enum ConnectAccountMessage {
     /// Navigate to the Plan & Billing picker (e.g. the expired-state renew
     /// CTA, D3).
     OpenPlanBilling,
+    /// Billing history load result, with the session generation it belongs to.
+    ///
+    /// The error is a [`UserError`], converted from the real `CoincubeError` at
+    /// the async boundary, for the same reason [`Self::UserProfileFailed`] is:
+    /// stringifying it first throws away the status, so the handler cannot tell
+    /// a timeout from a plan gate and has to guess at whether retrying could
+    /// possibly help.
     BillingHistoryLoaded(
-        Result<Vec<crate::services::coincube::BillingHistoryEntry>, String>,
+        Result<Vec<crate::services::coincube::BillingHistoryEntry>, UserError>,
         u64,
     ),
     ToggleBillingHistory,
-    /// User profile refreshed (billing history view update)
-    UserProfileLoaded(crate::services::coincube::User),
-    /// User profile refresh failed (non-auth error)
-    UserProfileFailed(UserError),
+    /// User profile refreshed (billing history view update). The `u64` is the
+    /// session generation — see [`Self::SecurityDataFailed`].
+    UserProfileLoaded(crate::services::coincube::User, u64),
+    /// User profile refresh failed (non-auth error), with the session
+    /// generation it belongs to.
+    UserProfileFailed(UserError, u64),
     // --- Campaign code redemption (v2 campaign engine) ---
     /// Settings → Plan code field edited.
     CampaignCodeChanged(String),
@@ -2114,8 +2128,16 @@ pub enum HomeMessage {
     AmountEdited(String),
     NextStep,
     PreviousStep,
-    Error(String),
+    /// A transfer failed. Typed rather than a `String` so the card can say
+    /// which wallet is unwell and whether anything was sent — see
+    /// [`TransferError`].
+    Error(TransferError),
     LiquidBalanceUpdated(Amount),
+    /// A dashboard balance refresh failed. Separate from [`Self::Error`]
+    /// because it is not a transfer: it fires on every home-screen reload, and
+    /// routing it through the transfer copy told users "nothing was sent" when
+    /// they had not tried to send anything.
+    LiquidBalanceFetchFailed(String),
     UsdtBalanceUpdated(u64),
     UsdtBalanceFetchFailed,
     OnChainLimitsFetched {

@@ -62,7 +62,7 @@
 use std::fmt::Display;
 
 use crate::{
-    app::error::Error,
+    app::{error::Error, view::global_home::TransferError},
     daemon::{client::error::RpcErrorCode, DaemonError},
 };
 
@@ -95,6 +95,15 @@ pub const CC_LQD_CONN: &str = "CC-LQD-CONN";
 pub const CC_LQD_SIGNER: &str = "CC-LQD-SIGNER";
 pub const CC_LQD_UNSUPPORTED: &str = "CC-LQD-UNSUPPORTED";
 pub const CC_SPK: &str = "CC-SPK";
+
+// ── Wallet-to-wallet transfers ──────────────────────────────────────────────
+pub const CC_XFER_WALLET: &str = "CC-XFER-WALLET";
+pub const CC_XFER_ADDRESS: &str = "CC-XFER-ADDRESS";
+pub const CC_XFER_FEE: &str = "CC-XFER-FEE";
+pub const CC_XFER_INPUT: &str = "CC-XFER-INPUT";
+pub const CC_XFER_EXPIRED: &str = "CC-XFER-EXPIRED";
+pub const CC_XFER_DEST: &str = "CC-XFER-DEST";
+pub const CC_XFER_BROADCAST: &str = "CC-XFER-BROADCAST";
 
 // ── Wallet / signing / misc ─────────────────────────────────────────────────
 pub const CC_WALLET: &str = "CC-WALLET";
@@ -544,6 +553,111 @@ pub fn report_export(error: &crate::export::Error) -> String {
     UserError::from(error).toast()
 }
 
+/// Maps a wallet-to-wallet transfer failure onto copy a person can act on.
+///
+/// The transfer flow's ~20 failure points used to collapse into one sentence.
+/// They don't deserve one: "your Vault isn't open", "we couldn't work out the
+/// fee" and "the broadcast was refused" call for three different actions, and
+/// only the first two can honestly promise that nothing moved.
+///
+/// So the reassurance is keyed off [`TransferError::failure_point`] rather than written
+/// out per arm — that way a new variant cannot accidentally tell someone their
+/// funds are untouched when a send has already gone out.
+impl From<&TransferError> for UserError {
+    fn from(e: &TransferError) -> UserError {
+        use crate::app::view::global_home::TransferFailurePoint;
+
+        // Said first, because it is the thing a person moving money wants to
+        // read before any instruction.
+        let reassurance = match e.failure_point() {
+            TransferFailurePoint::BeforeSending => {
+                "Nothing was sent and your balances are unchanged."
+            }
+            TransferFailurePoint::WhileSending => "Your funds were not moved.",
+        };
+        let and_then = |next: &str| format!("{reassurance} {next}");
+
+        let (title, guidance, reference, retryable) = match e {
+            // The dashboard offered a transfer involving a wallet that turns
+            // out not to be there. Retrying the same action hits the same
+            // missing wallet, so the card points at opening it instead.
+            TransferError::WalletUnavailable(wallet) => (
+                format!("Your {} wallet isn't available", wallet.label()),
+                and_then(&format!(
+                    "Open the {} wallet from the dashboard, then start the transfer again.",
+                    wallet.label()
+                )),
+                CC_XFER_WALLET,
+                false,
+            ),
+
+            // The receiving side couldn't issue an address. Naming which wallet
+            // is the point: on a Liquid → Spark transfer it is Spark that is
+            // unwell, and the user has a Liquid wallet working perfectly well
+            // in front of them.
+            TransferError::NoDepositAddress { to, .. } => (
+                format!("Couldn't get a deposit address from your {} wallet", to.label()),
+                and_then("Check your internet connection and try again."),
+                CC_XFER_ADDRESS,
+                true,
+            ),
+
+            TransferError::FeeEstimateFailed { .. } => (
+                "Couldn't work out the network fee".to_string(),
+                and_then("Check your internet connection and try again in a moment."),
+                CC_XFER_FEE,
+                true,
+            ),
+
+            // A form bypass, not a transient failure: the same value fails the
+            // same way until it is changed.
+            TransferError::InvalidFeerate => (
+                "That fee rate isn't valid".to_string(),
+                and_then("Enter a whole number of sats per vByte greater than zero."),
+                CC_XFER_INPUT,
+                false,
+            ),
+
+            // "Try again" is precisely the wrong instruction here — the handle
+            // is single-use and already spent. The user has to go back.
+            TransferError::PreparationExpired => (
+                "This transfer is no longer ready to send".to_string(),
+                and_then("Go back to the amount step and set it up again."),
+                CC_XFER_EXPIRED,
+                false,
+            ),
+
+            // Ours to fix, not theirs. Retrying reproduces it exactly.
+            TransferError::DestinationRejected { .. } => (
+                "Couldn't use that destination address".to_string(),
+                and_then(
+                    "Start the transfer again. If it keeps happening, contact support and quote the reference below.",
+                ),
+                CC_XFER_DEST,
+                false,
+            ),
+
+            // The one arm past the "nothing was sent" line.
+            TransferError::BroadcastFailed { from, .. } => (
+                "Your transfer wasn't sent".to_string(),
+                and_then(&format!(
+                    "Check your internet connection and your {} wallet, then try again.",
+                    from.label()
+                )),
+                CC_XFER_BROADCAST,
+                true,
+            ),
+        };
+
+        UserError::logged(title, guidance, reference, retryable, e.detail())
+    }
+}
+
+/// As [`report`], for a transfer failure.
+pub fn report_transfer(error: &TransferError) -> String {
+    UserError::from(error).toast()
+}
+
 /// Copy for a rejected Border Wallet grid selection.
 ///
 /// Both the installer wizard and the PSBT signing screen render this, and both
@@ -765,6 +879,183 @@ mod tests {
             assert!(!field.contains("bad frame"), "detail leaked: {}", field);
         }
         assert_eq!(u.reference, CC_SPK);
+    }
+
+    /// Every transfer failure this flow can produce, so the whole set can be
+    /// eyeballed as copy rather than one arm at a time.
+    fn every_transfer_error() -> Vec<TransferError> {
+        use crate::app::view::global_home::{TransferError as T, WalletKind};
+
+        let wallets = [WalletKind::Vault, WalletKind::Liquid, WalletKind::Spark];
+        let mut all = vec![
+            T::FeeEstimateFailed {
+                detail: "detail".into(),
+            },
+            T::InvalidFeerate,
+            T::PreparationExpired,
+            T::DestinationRejected {
+                detail: "detail".into(),
+            },
+        ];
+        for w in wallets {
+            all.push(T::WalletUnavailable(w));
+            all.push(T::NoDepositAddress {
+                to: w,
+                detail: "detail".into(),
+            });
+            all.push(T::BroadcastFailed {
+                from: w,
+                detail: "detail".into(),
+            });
+        }
+        all
+    }
+
+    /// The defect this replaced: ~20 failure points rendering one sentence.
+    /// Distinct *situations* must read differently, or the typing bought
+    /// nothing.
+    #[test]
+    fn transfer_failures_do_not_all_read_the_same() {
+        let copy: std::collections::HashSet<String> = every_transfer_error()
+            .iter()
+            .map(|e| {
+                let u: UserError = e.into();
+                format!("{} — {}", u.title, u.guidance)
+            })
+            .collect();
+
+        assert!(
+            copy.len() >= 9,
+            "the transfer flow collapsed back into generic copy: {:#?}",
+            copy
+        );
+    }
+
+    /// Which wallet is unwell is the actionable part: on a Liquid → Spark
+    /// transfer it is Spark that failed, and the user has a working Liquid
+    /// wallet in front of them.
+    #[test]
+    fn transfer_copy_names_the_wallet_that_failed() {
+        use crate::app::view::global_home::{TransferError as T, WalletKind};
+
+        let u: UserError = (&T::NoDepositAddress {
+            to: WalletKind::Spark,
+            detail: "x".into(),
+        })
+            .into();
+        assert!(u.title.contains("Spark"), "got {:?}", u.title);
+        assert!(!u.title.contains("Liquid"), "got {:?}", u.title);
+
+        let u: UserError = (&T::WalletUnavailable(WalletKind::Vault)).into();
+        assert!(u.title.contains("Vault"), "got {:?}", u.title);
+    }
+
+    /// The load-bearing invariant. Only failures that never reached a backend
+    /// may promise nothing was sent — a new variant landing on the wrong side
+    /// of that line would tell someone their funds are safe when a send has
+    /// already gone out.
+    #[test]
+    fn only_pre_send_failures_promise_that_nothing_was_sent() {
+        use crate::app::view::global_home::TransferFailurePoint;
+
+        for e in every_transfer_error() {
+            let u: UserError = (&e).into();
+            match e.failure_point() {
+                TransferFailurePoint::BeforeSending => assert!(
+                    u.guidance.starts_with("Nothing was sent"),
+                    "{:?} never reached a backend but doesn't say so: {:?}",
+                    e,
+                    u.guidance
+                ),
+                TransferFailurePoint::WhileSending => assert!(
+                    !u.guidance.contains("Nothing was sent"),
+                    "{:?} was submitted — it must not claim nothing was sent: {:?}",
+                    e,
+                    u.guidance
+                ),
+            }
+        }
+    }
+
+    /// Retrying has to be able to help. A missing wallet, a spent prepare
+    /// handle and a rejected fee-rate all reproduce identically, and offering
+    /// "Try again" on them is the dead-button defect this scheme exists to
+    /// prevent.
+    #[test]
+    fn settled_transfer_failures_offer_no_retry() {
+        use crate::app::view::global_home::{TransferError as T, WalletKind};
+
+        for e in [
+            T::WalletUnavailable(WalletKind::Spark),
+            T::PreparationExpired,
+            T::InvalidFeerate,
+            T::DestinationRejected { detail: "x".into() },
+        ] {
+            let u: UserError = (&e).into();
+            assert!(!u.retryable, "{:?} should not offer a retry", e);
+        }
+
+        for e in [
+            T::FeeEstimateFailed { detail: "x".into() },
+            T::NoDepositAddress {
+                to: WalletKind::Liquid,
+                detail: "x".into(),
+            },
+            T::BroadcastFailed {
+                from: WalletKind::Vault,
+                detail: "x".into(),
+            },
+        ] {
+            let u: UserError = (&e).into();
+            assert!(u.retryable, "{:?} is worth another go", e);
+        }
+    }
+
+    /// A spent Spark handle needs "go back", not "try again" — pressing a
+    /// retry re-submits a handle the backend has already consumed.
+    #[test]
+    fn an_expired_preparation_sends_the_user_back_not_forward() {
+        use crate::app::view::global_home::TransferError as T;
+
+        let u: UserError = (&T::PreparationExpired).into();
+        assert!(u.guidance.contains("Go back"), "got {:?}", u.guidance);
+        assert!(!u.guidance.contains("try again"), "got {:?}", u.guidance);
+    }
+
+    /// The SDK traces these carry are for the log, never the screen.
+    #[test]
+    fn transfer_details_stay_out_of_the_copy() {
+        use crate::app::view::global_home::{TransferError as T, WalletKind};
+
+        let leaky = "graphql error: https://swap.example refused the peg-out";
+        for e in [
+            T::NoDepositAddress {
+                to: WalletKind::Spark,
+                detail: leaky.into(),
+            },
+            T::FeeEstimateFailed {
+                detail: leaky.into(),
+            },
+            T::BroadcastFailed {
+                from: WalletKind::Liquid,
+                detail: leaky.into(),
+            },
+            T::DestinationRejected {
+                detail: leaky.into(),
+            },
+        ] {
+            let u: UserError = (&e).into();
+            for field in [&u.title, &u.guidance, &u.reference] {
+                assert!(
+                    !field.contains("graphql") && !field.contains("swap.example"),
+                    "{:?} leaked its detail into {:?}",
+                    e,
+                    field
+                );
+            }
+            // ...but it does reach the log line, under the same reference.
+            assert!(e.detail().contains("swap.example"));
+        }
     }
 
     #[test]
