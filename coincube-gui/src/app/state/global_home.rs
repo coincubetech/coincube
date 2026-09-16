@@ -2070,18 +2070,39 @@ impl State for GlobalHome {
                         // "we have a number". Without it `liquid_pending` stays
                         // true and the *aggregate* Total Balance spins forever —
                         // taking the Vault and Spark rows down with it, neither
-                        // of which failed. `UsdtBalanceFetchFailed` below is the
-                        // same bargain.
+                        // of which failed. `UsdtBalanceFetchFailed` below makes
+                        // the same bargain.
+                        //
+                        // `loaded` is never reset to false once set, so reading
+                        // it *before* we set it answers the only question that
+                        // matters here: have we ever had a real number?
+                        let had_a_balance = self.liquid_balance_loaded;
                         self.liquid_balance_loaded = true;
-                        // ...and `error` is what stops the row rendering the
-                        // untouched `Amount::ZERO` as though it were a real
-                        // balance. On a first-load failure that is not a stale
-                        // number, it is a wrong one.
-                        self.liquid_balance_error = true;
-                        Task::done(Message::View(view::Message::ShowError(
-                            crate::user_error::UserError::logged(
+                        // First load: there is nothing behind the failure but
+                        // the untouched `Amount::ZERO`, and rendering that as a
+                        // balance would not be stale, it would be wrong.
+                        //
+                        // Later refresh: `liquid_balance` still holds the last
+                        // good value and the Total still counts it, so blanking
+                        // the row to "Balance unavailable" would both lose
+                        // information the user had and disagree with the total
+                        // right above it. A transient blip keeps the number.
+                        self.liquid_balance_error = !had_a_balance;
+                        let (title, guidance) = if had_a_balance {
+                            (
                                 "Couldn't refresh your Liquid balance",
                                 "The amount shown may be out of date. Check your internet connection.",
+                            )
+                        } else {
+                            (
+                                "Couldn't load your Liquid balance",
+                                "Check your internet connection and try again.",
+                            )
+                        };
+                        Task::done(Message::View(view::Message::ShowError(
+                            crate::user_error::UserError::logged(
+                                title,
+                                guidance,
                                 crate::user_error::CC_LQD_CONN,
                                 true,
                                 detail,
@@ -2090,7 +2111,9 @@ impl State for GlobalHome {
                         )))
                     }
                     HomeMessage::UsdtBalanceFetchFailed => {
-                        self.usdt_balance_error = true;
+                        // Same rule as its L-BTC twin above: only blank the row
+                        // when there is no successful value behind the failure.
+                        self.usdt_balance_error = !self.usdt_balance_loaded;
                         self.usdt_balance_loaded = true;
                         Task::none()
                     }
@@ -2632,6 +2655,7 @@ impl State for GlobalHome {
             self.liquid_balance_loaded = true;
             self.liquid_balance_error = false;
             self.usdt_balance_loaded = true;
+            self.usdt_balance_error = false;
             self.pending_liquid_send_sats = 0;
             self.pending_liquid_receive_sats = 0;
             self.pending_usdt_send_sats = 0;
@@ -3197,6 +3221,102 @@ mod tests {
     use std::str::FromStr;
 
     const MAINNET_ADDR: &str = "bc1qvrl2849aggm6qry9ea7xqp2kk39j8vaa8r3cwg";
+
+    /// A `GlobalHome` with no wallet and a disconnected Liquid backend — enough
+    /// to drive the balance-message handlers, which touch nothing else.
+    fn panel() -> GlobalHome {
+        let network = coincube_core::miniscript::bitcoin::Network::Bitcoin;
+        GlobalHome::new_without_wallet(
+            Arc::new(LiquidBackend::new(Arc::new(
+                crate::app::breez_liquid::BreezClient::disconnected(network),
+            ))),
+            None,
+            CoincubeDirectory::new(std::path::PathBuf::from("/nonexistent")),
+            network,
+            "cube".to_string(),
+            false,
+        )
+    }
+
+    /// Drive one home message through the real `State::update`.
+    fn send(home: &mut GlobalHome, msg: HomeMessage) {
+        let _ = home.update(
+            None,
+            &Cache::default(),
+            Message::View(view::Message::Home(msg)),
+        );
+    }
+
+    /// A refresh blip must not throw away a balance the user already has.
+    ///
+    /// The two cases pull in opposite directions and the flag has to tell them
+    /// apart:
+    ///
+    /// - **First load fails.** Nothing sits behind it but the untouched
+    ///   `Amount::ZERO`. Rendering that is not stale, it is wrong — so the row
+    ///   says "Balance unavailable".
+    /// - **A later refresh fails.** `liquid_balance` still holds the last good
+    ///   value and the Total Balance above still counts it. Blanking the row
+    ///   would lose information the user had *and* contradict the total sitting
+    ///   on the same screen.
+    #[test]
+    fn a_refresh_failure_keeps_a_balance_we_already_have() {
+        // First load fails: nothing behind it, so the row must not show a zero.
+        let mut home = panel();
+        send(
+            &mut home,
+            HomeMessage::LiquidBalanceFetchFailed("blip".into()),
+        );
+        assert!(
+            home.liquid_balance_error,
+            "a first-load failure has only the untouched zero behind it"
+        );
+        assert!(
+            home.liquid_balance_loaded,
+            "the aggregate must still be allowed to settle"
+        );
+
+        // A good value arrives.
+        send(
+            &mut home,
+            HomeMessage::LiquidBalanceUpdated(Amount::from_sat(12_345)),
+        );
+        assert!(!home.liquid_balance_error);
+
+        // A later refresh fails: keep the number we have.
+        send(
+            &mut home,
+            HomeMessage::LiquidBalanceFetchFailed("blip".into()),
+        );
+        assert!(
+            !home.liquid_balance_error,
+            "a transient blip must not blank a balance the user already had"
+        );
+        assert_eq!(
+            home.liquid_balance,
+            Amount::from_sat(12_345),
+            "the last good value must survive the failure"
+        );
+    }
+
+    /// The USDt row follows the same rule — it is the twin this was mirrored
+    /// from, and had the same defect.
+    #[test]
+    fn a_usdt_refresh_failure_keeps_a_balance_we_already_have() {
+        let mut home = panel();
+        send(&mut home, HomeMessage::UsdtBalanceFetchFailed);
+        assert!(home.usdt_balance_error, "nothing behind a first failure");
+
+        send(&mut home, HomeMessage::UsdtBalanceUpdated(42));
+        assert!(!home.usdt_balance_error);
+
+        send(&mut home, HomeMessage::UsdtBalanceFetchFailed);
+        assert!(
+            !home.usdt_balance_error,
+            "a blip must not blank a USDt balance the user already had"
+        );
+        assert_eq!(home.usdt_balance, 42);
+    }
 
     /// A wallet whose balance fetch *failed* must stop gating the aggregate.
     ///
