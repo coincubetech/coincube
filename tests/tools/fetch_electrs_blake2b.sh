@@ -35,7 +35,10 @@ if [ -x "$bin" ] && [ -f "$marker" ] && [ "$(cat "$marker")" = "$(sha256_of "$bi
   echo "$bin"
   exit 0
 fi
-rm -f "$marker"
+# Remove the binary as well as the marker: Cargo could otherwise judge the
+# crate fresh, leave a replaced executable in place, and the digest written
+# below would then vouch for the stand-in.
+rm -f "$marker" "$bin"
 
 mkdir -p "$cache_dir"
 if [ ! -d "$src/.git" ]; then
