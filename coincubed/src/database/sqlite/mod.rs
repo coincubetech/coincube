@@ -4196,6 +4196,23 @@ CREATE TABLE labels (
                 }
                 other => panic!("expected the SQLite error preserved, got {:?}", other),
             }
+            // A metadata failure that is *not* "not found" — a symlink loop — is not absence
+            // either: the SQLite error is preserved rather than the file being declared gone.
+            #[cfg(unix)]
+            {
+                let loop_a = tmp_dir.join("loop-a.sqlite3");
+                let loop_b = tmp_dir.join("loop-b.sqlite3");
+                std::os::unix::fs::symlink(&loop_b, &loop_a).unwrap();
+                std::os::unix::fs::symlink(&loop_a, &loop_b).unwrap();
+                let err = fs::metadata(&loop_a).unwrap_err();
+                assert_ne!(err.kind(), std::io::ErrorKind::NotFound, "{:?}", err);
+                match sqlite_error(&loop_a, cantopen()) {
+                    PreflightError::Sqlite(rusqlite::Error::SqliteFailure(e, _)) => {
+                        assert_eq!(e.extended_code, rusqlite::ffi::SQLITE_CANTOPEN)
+                    }
+                    other => panic!("symlink loop treated as absence: {:?}", other),
+                }
+            }
             // And the other classifications are unaffected by the path's existence.
             let notadb = rusqlite::Error::SqliteFailure(
                 rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_NOTADB),
