@@ -858,14 +858,21 @@ pub fn allocate_managed_ports<E: fmt::Display>(
 /// version of this function — is discarded and replaced rather than trusted forever.
 /// How long to keep trying for the marker lock, as (attempts, delay between them).
 ///
-/// Under test the default is *generous* (500 × 10 ms): a waiter whose holder is merely
-/// slow — a loaded CI runner flushing a staged marker to a shared disk can take most of
-/// a second — must wait it out and adopt the installed identity, not give up with
-/// `WouldBlock`. That is margin, not immunity: a test whose holder must finish inside
-/// the waiter's bound still depends on it, and says so. A test that wants the *timeout*
-/// path sets a short bound on the contender's own thread with
-/// [`with_quick_marker_lock_bound`], so the doomed join costs a few milliseconds instead
-/// of the default. The production bound is unchanged.
+/// This is an *attempt count*, not a deadline: its wall-clock cost is the attempts times
+/// whatever one `try_lock_exclusive` plus one `sleep` costs at the time — the nominal
+/// figure where `sleep` tracks nominal, and several times that where it overshoots (the
+/// same macOS host has measured the old 30-attempt bound at both ~0.3 s and ~2.8 s in
+/// different sessions). Every duration quoted here is nominal.
+///
+/// Under test the default is *generous* (500 attempts 10 ms apart, nominally ~5 s): a
+/// waiter whose holder is merely slow — a loaded CI runner flushing a staged marker to a
+/// shared disk can take most of a second — must wait it out and adopt the installed
+/// identity, not give up with `WouldBlock`. That is margin, not immunity: a test whose
+/// holder must finish inside the waiter's bound still depends on it, and says so. A test
+/// that wants the *timeout* path sets a short bound on the contender's own thread with
+/// [`with_quick_marker_lock_bound`], so the doomed join costs milliseconds instead of the
+/// default — nothing in the suite waits the default out. The production bound is
+/// unchanged.
 fn lock_acquisition_bound() -> (u32, std::time::Duration) {
     #[cfg(not(test))]
     {
@@ -2789,11 +2796,12 @@ mod tests {
 
         // It must not get past the lock. If it did, it would be reading the malformed
         // marker right now and preparing to delete whatever replaces it. The waiter is
-        // on the generous default bound (5 s), so this 40 ms wait plus the install below
-        // leave it still waiting rather than giving up — a margin, not a guarantee: this
-        // test still requires the holder's critical section (this wait, the install's
+        // on the generous default bound (500 attempts, nominally ~5 s, longer where
+        // `sleep` overshoots), so this 40 ms wait plus the install below leave it still
+        // waiting rather than giving up — a margin, not a guarantee: this test still
+        // requires the holder's critical section (this wait, the install's
         // stage/flush/link, the unlock) to finish inside the waiter's bound, which the
-        // old 30 × 10 ms bound did not on a loaded runner.
+        // old 30-attempt bound did not on a loaded runner.
         assert!(
             done_rx
                 .recv_timeout(std::time::Duration::from_millis(40))
@@ -2820,12 +2828,22 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // The regression for the nightly failure's shape, with the holder's delay under the
-    // test's control instead of the runner's disk: a holder that keeps the lock for
-    // longer than the *old* 30 × 10 ms test bound while it installs. A waiter on the
-    // default bound must wait it out and adopt the installed identity — never give up
-    // with `WouldBlock`. (Under the old bound this fails every time; that is the
-    // before/after evidence, not a reproduction of the CI runner's own timing.)
+    // The success scenario the nightly failure's shape calls for, with the holder's delay
+    // under the test's control instead of the runner's disk: a holder keeps the lock for
+    // 600 ms while it installs — well past the old 30-attempt bound's *nominal* 300 ms
+    // and far under the default's nominal 5 s — and a waiter on the default bound must
+    // wait it out and adopt the installed identity, never give up with `WouldBlock`.
+    //
+    // What this does and does not demonstrate: the bound is an attempt count, so the
+    // old bound's real wall clock is 30 × (one `try_lock_exclusive` + one 10 ms `sleep`)
+    // — about 300 ms where `sleep` tracks nominal, and several times that where it
+    // overshoots (the same macOS host has measured it at ~0.3 s and at ~2.8 s in
+    // different sessions). Against the old bound this test therefore fails where the old
+    // bound really costs less than 600 ms and passes where it costs more; it does not
+    // distinguish the old bound on every run or platform, and it does not reproduce the
+    // runner's own I/O timing. The invariant it asserts — a default waiter outlasts a
+    // 600 ms holder — is the one the nightly broke, and it holds under the default bound
+    // wherever it has been run.
     #[test]
     fn a_default_waiter_outlasts_a_holder_slower_than_the_old_bound() {
         use fs4::fs_std::FileExt;
@@ -2850,8 +2868,7 @@ mod tests {
             std::thread::spawn(move || ensure_node_instance_marker(&cookie_path))
         };
 
-        // Longer than the old bound (30 × 10 ms ≈ 300 ms) and far under the default
-        // (500 × 10 ms ≈ 5 s): the waiter is still waiting, not gone.
+        // Longer than the old bound's nominal 300 ms, far under the default's nominal 5 s.
         std::thread::sleep(std::time::Duration::from_millis(600));
         let winner = establish_node_instance(&network_dir).expect("installed");
         let _ = FileExt::unlock(&held);
@@ -2907,7 +2924,8 @@ mod tests {
 
     // The timeout contender's bound really is the short one *inside its own thread*: a
     // doomed contender that set the override on its parent instead would wait the
-    // generous default (≈5 s) out. Bounded well under that, so a wrong placement fails.
+    // generous default (500 attempts, nominally ~5 s and never less) out. Bounded well
+    // under that, so a wrong placement fails.
     #[test]
     fn a_quick_bound_contender_gives_up_promptly_while_a_default_waiter_does_not() {
         use fs4::fs_std::FileExt;

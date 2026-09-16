@@ -69,9 +69,11 @@ pub fn managed_conf_lock_path(coincube_datadir: &CoincubeDirectory) -> PathBuf {
 /// contenders are meant to succeed rarely fails on wall-clock luck — margin,
 /// not immunity; a test that wants the `Busy` path sets a short bound for its
 /// own thread with [`with_quick_lock_bound`] instead of waiting the default
-/// out. The marker lock has the same shape with its own, separate override
-/// (`bitcoind::with_quick_marker_lock_bound`); neither override reaches the
-/// other lock or a spawned thread.
+/// out. The marker lock has the same bound shape with its own, separate
+/// override (`bitcoind::with_quick_marker_lock_bound`), scoped by a guard that
+/// restores the prior value on return or unwind — which the two helpers below
+/// do not have (they reset to `None`); neither override reaches the other lock
+/// or a spawned thread.
 fn lock_acquisition_bound() -> (u32, std::time::Duration) {
     #[cfg(not(test))]
     {
