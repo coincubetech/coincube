@@ -429,7 +429,9 @@ impl State for LiquidTransactions {
                 // Discard the in-flight navigation: `current_page` stays on
                 // the page whose data is still displayed.
                 self.pending_page = None;
-                Task::done(Message::View(view::Message::ShowError(e.to_string())))
+                Task::done(Message::View(view::Message::ShowError(
+                    crate::user_error::report_liquid(&e),
+                )))
             }
             Message::RefundablesLoaded(Ok(refundables)) => {
                 // Reconcile in-flight refunds with the freshly-fetched list.
@@ -440,9 +442,9 @@ impl State for LiquidTransactions {
                 self.reconcile_in_flight(refundables);
                 Task::none()
             }
-            Message::RefundablesLoaded(Err(e)) => {
-                Task::done(Message::View(view::Message::ShowError(e.to_string())))
-            }
+            Message::RefundablesLoaded(Err(e)) => Task::done(Message::View(
+                view::Message::ShowError(crate::user_error::report_liquid(&e)),
+            )),
             Message::View(view::Message::Select(i)) => {
                 self.selected_payment = self.payments.get(i).cloned();
                 self.selected_refundable = None;
@@ -612,7 +614,9 @@ impl State for LiquidTransactions {
                 crate::export::Progress::Error(e),
             ))) => {
                 self.modal = LiquidTransactionsModal::None;
-                Task::done(Message::View(view::Message::ShowError(e.to_string())))
+                Task::done(Message::View(view::Message::ShowError(
+                    crate::user_error::report_export(&e),
+                )))
             }
             Message::View(view::Message::ImportExport(ImportExportMessage::Close)) => {
                 self.modal = LiquidTransactionsModal::None;
@@ -775,10 +779,16 @@ impl State for LiquidTransactions {
                 self.pending_vault_refund_id = None;
                 match result {
                     Ok(addr) => Task::done(Message::View(view::Message::RefundAddressEdited(addr))),
-                    Err(e) => Task::done(Message::View(view::Message::ShowError(format!(
-                        "Could not generate Vault refund address: {}",
-                        e
-                    )))),
+                    Err(e) => Task::done(Message::View(view::Message::ShowError(
+                        crate::user_error::UserError::logged(
+                            "Couldn't get a refund address from your Vault",
+                            "Make sure your Vault is open and its backend is reachable, then try again.",
+                            crate::user_error::CC_DMN_DOWN,
+                            true,
+                            e,
+                        )
+                        .toast(),
+                    ))),
                 }
             }
             Message::View(view::Message::SubmitRefund) => {
@@ -863,10 +873,16 @@ impl State for LiquidTransactions {
                         self.in_flight_refunds.remove(&swap_address);
                     }
                 }
-                Task::done(Message::View(view::Message::ShowError(format!(
-                    "Refund failed: {}",
-                    e
-                ))))
+                Task::done(Message::View(view::Message::ShowError(
+                    crate::user_error::UserError::logged(
+                        "Refund failed",
+                        "The refund wasn't broadcast. Check your internet connection and try again.",
+                        crate::user_error::CC_LQD_SDK,
+                        true,
+                        e,
+                    )
+                    .toast(),
+                )))
             }
             _ => Task::none(),
         }

@@ -17,11 +17,16 @@ pub enum MavapayApiResult<T> {
 impl<T> From<coincube::CoincubeError> for MavapayApiResult<T> {
     fn from(e: coincube::CoincubeError) -> Self {
         let message = match &e {
-            coincube::CoincubeError::Unsuccessful(info) => info.message(),
+            coincube::CoincubeError::Unsuccessful(info) => {
+                log::error!("[MAVAPAY] HTTP {}: {}", info.status_code, info.raw_text());
+                info.message()
+                    .unwrap_or_else(|| "Request failed".to_string())
+            }
             coincube::CoincubeError::Network(e) => format!("Network error: {e}"),
             coincube::CoincubeError::Api(msg) => msg.clone(),
-            coincube::CoincubeError::Parse(e) => format!("Parse error: {e:?}"),
-            coincube::CoincubeError::SseError(e) => format!("EventSource error: {:?}", e),
+            // `{}` not `{:?}`: Debug on these prints internal struct guts.
+            coincube::CoincubeError::Parse(e) => format!("Parse error: {e}"),
+            coincube::CoincubeError::SseError(e) => format!("EventSource error: {e}"),
             coincube::CoincubeError::VaultKeyholderLocked { .. }
             | coincube::CoincubeError::NotFound
             | coincube::CoincubeError::RateLimited { .. } => e.to_string(),

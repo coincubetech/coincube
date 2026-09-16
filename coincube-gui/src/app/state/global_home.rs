@@ -1334,10 +1334,16 @@ impl State for GlobalHome {
                                 self.vault_transfer_preview_task(cache, &daemon)
                             }
                             Err(e) => {
-                                log::warn!("Fee estimator failed for preset {preset:?}: {e}");
-                                Task::done(Message::View(view::Message::ShowError(format!(
-                                    "Couldn't fetch mempool fee rate: {e}"
-                                ))))
+                                Task::done(Message::View(view::Message::ShowError(
+                                    crate::user_error::UserError::logged(
+                                        "Couldn't fetch the current fee rate",
+                                        "Check your internet connection and try again, or enter a fee rate yourself.",
+                                        crate::user_error::CC_NET_UNKNOWN,
+                                        true,
+                                        format!("fee estimator, preset {preset:?}: {e}"),
+                                    )
+                                    .toast(),
+                                )))
                             }
                         }
                     }
@@ -1726,8 +1732,23 @@ impl State for GlobalHome {
                         Task::none()
                     }
                     HomeMessage::Error(err) => {
+                        // Every producer of this variant is a step in the
+                        // wallet-to-wallet transfer flow, and between them they
+                        // pass everything from "Vault unavailable" to a raw
+                        // `SparkClientError`. This is the one boundary they all
+                        // cross, so it is where the detail goes to the log and
+                        // the user gets a sentence.
                         self.is_sending = false;
-                        Task::done(Message::View(view::Message::ShowError(err)))
+                        Task::done(Message::View(view::Message::ShowError(
+                            crate::user_error::UserError::logged(
+                                "Transfer failed",
+                                "Your funds weren't moved. Check your internet connection and try again.",
+                                crate::user_error::CC_UNEXPECTED,
+                                true,
+                                err,
+                            )
+                            .toast(),
+                        )))
                     }
                     HomeMessage::PendingAmountsUpdated {
                         liquid_send_sats,
@@ -2327,7 +2348,16 @@ impl State for GlobalHome {
                                 }
                             }
                             Err(e) => {
-                                return Task::done(Message::View(view::Message::ShowError(e)));
+                                return Task::done(Message::View(view::Message::ShowError(
+                                    crate::user_error::UserError::logged(
+                                        "Couldn't prepare that transfer for signing",
+                                        "Try again. If it keeps failing, contact support and quote the reference below.",
+                                        crate::user_error::CC_SPEND,
+                                        true,
+                                        e,
+                                    )
+                                    .toast(),
+                                )));
                             }
                         }
                         Task::none()
@@ -2378,7 +2408,7 @@ impl State for GlobalHome {
                     Task::none()
                 }
                 Err(e) => {
-                    let err_msg = e.to_string();
+                    let err_msg = crate::user_error::report(&e);
                     self.receive_address_info = None;
                     Task::done(Message::View(view::Message::ShowError(err_msg)))
                 }
@@ -2398,7 +2428,7 @@ impl State for GlobalHome {
                     ) {
                         Ok(cmd) => cmd,
                         Err(e) => {
-                            let err_msg = e.to_string();
+                            let err_msg = crate::user_error::report(&e);
                             Task::done(Message::View(view::Message::ShowError(err_msg)))
                         }
                     }

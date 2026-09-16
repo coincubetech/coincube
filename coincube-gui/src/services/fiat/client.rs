@@ -65,7 +65,12 @@ async fn get_data(
     let response = request
         .send()
         .await
-        .map_err(|e| PriceApiError::RequestFailed(e.to_string()))?
+        // `without_url()` before stringifying: `reqwest::Error`'s `Display`
+        // embeds the request URL on a timeout ("error sending request for url
+        // (https://…)"), and this variant is a `String` so there is no second
+        // chance to scrub it later. Mirrors
+        // `services::coincube`'s `From<reqwest::Error>`.
+        .map_err(|e| PriceApiError::RequestFailed(e.without_url().to_string()))?
         .check_success()
         .await
         .map_err(PriceApiError::NotSuccessResponse)?;
@@ -74,4 +79,11 @@ async fn get_data(
         .await
         .map_err(|e| PriceApiError::CannotParseResponse(e.to_string()))?;
     Ok(data)
+}
+
+/// Drives the real `get_data` transport path so the URL-scrubbing above is
+/// exercised where it actually runs, rather than on a hand-built error.
+#[cfg(test)]
+pub(crate) async fn get_data_for_test(url: &str) -> Result<serde_json::Value, PriceApiError> {
+    get_data(&reqwest::Client::new(), url, None).await
 }

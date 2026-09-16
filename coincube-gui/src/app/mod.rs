@@ -827,9 +827,14 @@ impl ConnectionStatus {
     pub fn tooltip(&self) -> String {
         match self {
             Self::Inactive => "Connect inactive".to_string(),
-            Self::Connecting => "Connecting to Coincube Connect…".to_string(),
+            Self::Connecting => "Connecting to COINCUBE | Connect…".to_string(),
             Self::Connected => "Connected".to_string(),
-            Self::Error(e) => format!("Connection error: {}", e),
+            // Fixed copy, not the raw stream error. The detail is already
+            // logged where this variant is built; interpolating it here put
+            // transport internals into a tooltip that anyone could hover.
+            Self::Error(_) => {
+                "Can't reach COINCUBE | Connect — retrying. Live updates are paused.".to_string()
+            }
         }
     }
 }
@@ -2945,7 +2950,16 @@ impl App {
                     Some(s)
                 })
                 .await
-                .map_err(|e| format!("Failed to save recovery-alerts answer: {}", e))
+                .map_err(|e| {
+                    crate::user_error::UserError::logged(
+                        "Couldn't save that preference",
+                        "Try again. If it keeps failing, contact support and quote the reference below.",
+                        crate::user_error::CC_CONFIG,
+                        true,
+                        e,
+                    )
+                    .toast()
+                })
             },
             |res: Result<(), String>| match res {
                 Ok(()) => Message::SettingsSaved,
@@ -4645,12 +4659,16 @@ impl App {
                         ))),
                         Task::done(Message::CacheUpdated),
                     ]),
-                    Err(e) => {
-                        log::error!("duress: failed to persist enrollment: {e}");
-                        Task::done(Message::View(view::Message::ShowError(format!(
-                            "Couldn't finish enabling duress mode: {e}. Please try again."
-                        ))))
-                    }
+                    Err(e) => Task::done(Message::View(view::Message::ShowError(
+                        crate::user_error::UserError::logged(
+                            "Couldn't finish enabling duress mode",
+                            "Try again. If it keeps failing, contact support and quote the reference below.",
+                            crate::user_error::CC_API_BADRESP,
+                            true,
+                            e,
+                        )
+                        .toast(),
+                    ))),
                 });
             }
             Message::RecoveryHeartbeatSent(res) => {
@@ -6904,14 +6922,17 @@ mod tests {
         assert!(ConnectionStatus::Connecting.is_visible());
         assert!(ConnectionStatus::Connecting
             .tooltip()
-            .starts_with("Connecting to Coincube Connect"));
+            .starts_with("Connecting to COINCUBE | Connect"));
 
         assert!(ConnectionStatus::Connected.is_visible());
         assert_eq!(ConnectionStatus::Connected.tooltip(), "Connected");
 
         let err = ConnectionStatus::Error("socket closed".to_string());
         assert!(err.is_visible());
-        assert_eq!(err.tooltip(), "Connection error: socket closed");
+        // The tooltip must describe the situation without echoing the
+        // transport error back at the user.
+        assert!(err.tooltip().starts_with("Can't reach COINCUBE | Connect"));
+        assert!(!err.tooltip().contains("socket closed"));
     }
 
     #[test]

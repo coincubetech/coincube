@@ -130,7 +130,7 @@ impl State for SparkOverview {
                     },
                 )),
                 (Err(e), _) | (_, Err(e)) => Message::View(view::Message::SparkOverview(
-                    view::SparkOverviewMessage::Error(e.to_string()),
+                    view::SparkOverviewMessage::Error(crate::user_error::report_spark(&e)),
                 )),
             },
         );

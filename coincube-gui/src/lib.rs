@@ -27,6 +27,7 @@ pub mod pin_input;
 pub mod recover_vault;
 pub mod services;
 pub mod signer;
+pub mod user_error;
 pub mod utils;
 
 use coincubed::ApiVersion;

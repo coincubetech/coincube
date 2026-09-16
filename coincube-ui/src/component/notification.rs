@@ -110,3 +110,50 @@ pub fn processing_hardware_wallet_error<'a, T: 'a + Clone>(
     .style(theme::notification::error)
     .width(Length::Fill)
 }
+
+/// A blocking error card: a plain-language headline, a line saying what to do
+/// next, an optional action button, and a short support reference.
+///
+/// This is the component every user-visible failure should route through. The
+/// raw technical detail (a `reqwest::Error`, an SDK string, an HTTP body)
+/// deliberately has no parameter here — it belongs in the log file, not on
+/// screen. `reference` is the opaque code that ties what the user sees to the
+/// logged detail, so support can triage without asking for a log dump.
+///
+/// Built from a plain `Column` for the same reason [`warning`] is: the
+/// `collapse::Collapse` widget rides the deprecated `iced::widget::Component`
+/// API and renders as a blank rectangle on some themes.
+pub fn error_card<'a, T: 'a + Clone>(
+    title: impl Into<String>,
+    guidance: impl Into<String>,
+    reference: impl Into<String>,
+    action: Option<(&'static str, T)>,
+) -> Container<'a, T> {
+    let mut col = Column::new()
+        .spacing(6)
+        .push(
+            Row::new()
+                .spacing(10)
+                .align_y(Alignment::Center)
+                .push(icon::warning_icon().color(color::RED))
+                .push(text::p1_bold(title.into()).color(color::RED)),
+        )
+        .push(text::p2_regular(guidance.into()).color(color::GREY_3));
+
+    if let Some((label, message)) = action {
+        col = col
+            .push(iced::widget::Space::new().height(Length::Fixed(6.0)))
+            .push(
+                Button::new(text::p2_regular(label))
+                    .style(theme::button::primary)
+                    .on_press(message),
+            );
+    }
+
+    Container::new(
+        col.push(text::caption(format!("Ref: {}", reference.into())).color(color::GREY_3)),
+    )
+    .padding(15)
+    .style(theme::card::error)
+    .width(Length::Fill)
+}

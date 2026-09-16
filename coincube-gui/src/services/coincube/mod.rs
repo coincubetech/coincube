@@ -50,8 +50,31 @@ impl From<crate::services::http::NotSuccessResponseInfo> for CoincubeError {
 }
 
 impl From<reqwest::Error> for CoincubeError {
+    /// Strips the request URL before the error can ever be rendered.
+    ///
+    /// `reqwest::Error` embeds the full URL, and `without_url()` is the only
+    /// way to get rid of it — formatting with `{}` instead of `{:?}` is not
+    /// enough. Verified against this reqwest version:
+    ///
+    /// - connect refused → `Display` is `error sending request`
+    /// - **timed out → `Display` is
+    ///   `error sending request for url (http://host/api/v1/auth/token/refresh)`**
+    ///
+    /// The reported bug was a timeout, so switching the `Display` arm to `{}`
+    /// on its own would have left that exact case still leaking the endpoint.
+    /// Scrubbing at construction is what actually fixes it, and means no
+    /// future call site can reintroduce the leak. The untouched error still
+    /// reaches the log. Pinned by
+    /// `user_error_mapping_tests::a_stalled_server_produces_timeout_copy_and_leaks_nothing`.
+    ///
+    /// Mirrors `crate::services::mavapay::api`'s handling of the same type.
+    /// `is_timeout()` / `is_connect()` / `status()` all survive
+    /// `without_url()`, so classification for user-facing copy is unaffected.
     fn from(e: reqwest::Error) -> Self {
-        Self::Network(e)
+        // No log here: `UserError::logged` records this under the same
+        // reference the user is shown, and logging again at construction put
+        // the same failure in the file three times.
+        Self::Network(e.without_url())
     }
 }
 
@@ -64,8 +87,22 @@ impl From<reqwest_sse::error::EventSourceError> for CoincubeError {
 impl std::fmt::Display for CoincubeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            CoincubeError::Network(msg) => write!(f, "Network error: {:?}", msg),
-            CoincubeError::Unsuccessful(e) => write!(f, "{}", e.message()),
+            // `{}` not `{:?}`: Debug prints the whole struct including the
+            // URL. This is not what stops the leak — the `From` impl above is
+            // (see its comment) — but it keeps the arm consistent with every
+            // other one here, which is what made it an easy defect to miss.
+            CoincubeError::Network(e) => write!(f, "Network error: {}", e),
+            // The UI is supposed to go through `UserError`, but plenty of
+            // call sites still render `err.to_string()` directly (the buy/sell
+            // toasts, for one), so `Display` must stay safe to show: the
+            // envelope's own message if there is one, otherwise the bare
+            // status. Never the raw body — that is what put upstream payloads
+            // and GORM errors on screen. Log sites that genuinely want the
+            // body ask for it explicitly via `raw_text()`.
+            CoincubeError::Unsuccessful(e) => match e.message() {
+                Some(message) => write!(f, "{}", message),
+                None => write!(f, "HTTP {}", e.status_code),
+            },
             CoincubeError::Api(msg) => write!(f, "API error: {}", msg),
             CoincubeError::Parse(msg) => write!(f, "Parse error: {}", msg),
             CoincubeError::SseError(e) => write!(f, "SSE Error: {}", e),
@@ -83,6 +120,235 @@ impl std::fmt::Display for CoincubeError {
 }
 
 impl std::error::Error for CoincubeError {}
+
+impl From<&CoincubeError> for crate::user_error::UserError {
+    /// Turns a transport/API failure into copy a person can act on.
+    ///
+    /// Modelled on `friendly_grpc_error`
+    /// (`crate::app::state::vault::keychain_sign`), which makes the same
+    /// argument for `tonic::Status`.
+    ///
+    /// For an HTTP response, "could re-running this succeed?" is exactly
+    /// [`CoincubeError::is_transient`], so that is what sets `retryable` here
+    /// rather than a second hand-written status test that can drift from it
+    /// (408 did: transient there, settled here). The non-HTTP variants set the
+    /// flag explicitly, because `is_transient` answers a narrower question for
+    /// them — a truncated response or a dropped stream is worth another go even
+    /// though neither is a transport failure.
+    ///
+    /// No arm interpolates a raw error into user-visible text. Where the server
+    /// sent our envelope we surface *its* message (it is authored for users and
+    /// is the only copy that knows the domain specifics), and we adopt its
+    /// `code` as the support reference. Everything else gets hand-written copy
+    /// and a `CC-*` reference, with the detail going to the log.
+    fn from(e: &CoincubeError) -> Self {
+        use crate::user_error::*;
+
+        match e {
+            CoincubeError::Network(err) => {
+                // The URL is already stripped (see `From<reqwest::Error>`), but
+                // the *kind* survives — which is the part worth telling the
+                // user apart, because the remedy differs.
+                let (title, guidance, reference) = if err.is_timeout() {
+                    (
+                        "Can't reach COINCUBE | Connect",
+                        "The server took too long to respond. Check your internet connection and try again.",
+                        CC_NET_TIMEOUT,
+                    )
+                } else if err.is_connect() {
+                    (
+                        "No connection",
+                        "You appear to be offline. Reconnect to the internet and try again.",
+                        CC_NET_OFFLINE,
+                    )
+                } else {
+                    ("Can't reach COINCUBE | Connect", RETRY_GUIDANCE, CC_NET_UNKNOWN)
+                };
+                UserError::logged(title, guidance, reference, true, err)
+            }
+
+            CoincubeError::Unsuccessful(info) => {
+                let status = info.status_code;
+
+                // 401/403 is settled either way: the request was rejected, so
+                // re-running it unchanged fails identically and no retry button
+                // is offered. But *why* it was rejected decides the copy, and
+                // the status alone cannot say — only the taxonomy code can.
+                //
+                // Getting this wrong is not a cosmetic matter. "Sign in again"
+                // is the right advice for exactly one of these situations and
+                // is a dead end in every other: it tells someone who mistyped a
+                // code, or whose plan doesn't cover a feature, to do something
+                // that will not help and that they may already be doing.
+                if status == 401 || status == 403 {
+                    let code = info.code();
+                    let server_message = info.message();
+                    let (title, guidance) = match code.as_deref() {
+                        // `/auth/login/verify-otp` answers 401 for a wrong
+                        // code. Telling that user to sign in again is both
+                        // wrong and a dead end on the screen where they just
+                        // typed one.
+                        Some("OTP_INVALID") | Some("OTP_EXPIRED") => (
+                            "That code didn't work".to_string(),
+                            "Check the code and enter it again, or request a new one.".to_string(),
+                        ),
+                        // A wrong email or password. Also a 401, also not a
+                        // session problem — and the user is on the sign-in
+                        // screen already.
+                        Some("CREDENTIALS_INVALID") => (
+                            "That email or password didn't work".to_string(),
+                            "Check them and try again, or reset your password.".to_string(),
+                        ),
+                        // A wrong or stale authenticator code.
+                        Some("TWO_FACTOR_INVALID") => (
+                            "That verification code didn't work".to_string(),
+                            "Codes expire quickly — enter the current one from your authenticator app."
+                                .to_string(),
+                        ),
+                        // Also a 401, and also not a session problem: the
+                        // account exists and the password was fine, the inbox
+                        // is what is outstanding.
+                        Some("EMAIL_NOT_VERIFIED") => (
+                            "Your email isn't verified yet".to_string(),
+                            "Check your inbox for the verification link, then sign in again."
+                                .to_string(),
+                        ),
+                        // A plan gate, which the server answers with 403. The
+                        // session is perfectly good; the account just doesn't
+                        // include this feature.
+                        Some("PLAN_PRO_REQUIRED") | Some("PLAN_ESTATE_REQUIRED") => (
+                            server_message
+                                .clone()
+                                .unwrap_or_else(|| "Your plan doesn't include this".to_string()),
+                            "Upgrade your plan in Settings → Plan to use it.".to_string(),
+                        ),
+                        // Any other 403: a permission or policy refusal, never
+                        // a session problem. The server's own message (a
+                        // signing-policy limit, say) is the substance.
+                        _ if status == 403 => (
+                            server_message
+                                .clone()
+                                .unwrap_or_else(|| "You don't have access to this".to_string()),
+                            "This account isn't allowed to do that. If that looks wrong, contact support and quote the reference below."
+                                .to_string(),
+                        ),
+                        // A 401 with nothing more specific really is a dead
+                        // session.
+                        _ => (
+                            server_message
+                                .clone()
+                                .unwrap_or_else(|| "Your session has expired".to_string()),
+                            "Sign in again to continue.".to_string(),
+                        ),
+                    };
+                    return UserError::logged(
+                        title,
+                        guidance,
+                        code.unwrap_or_else(|| CC_AUTH_EXPIRED.to_string()),
+                        false,
+                        info.raw_text(),
+                    );
+                }
+
+                if status == 429 {
+                    return UserError::logged(
+                        "Too many attempts",
+                        "Wait a moment before trying again.",
+                        info.code().unwrap_or_else(|| CC_AUTH_RATELIMIT.to_string()),
+                        e.is_transient(),
+                        info.raw_text(),
+                    );
+                }
+
+                if status >= 500 {
+                    return UserError::logged(
+                        "COINCUBE | Connect is having trouble",
+                        "This is on our side. Try again in a moment.",
+                        info.code().unwrap_or_else(|| CC_API_5XX.to_string()),
+                        e.is_transient(),
+                        info.raw_text(),
+                    );
+                }
+
+                // A 4xx: the server has authored a message for this exact
+                // situation and knows far more about it than we do, so prefer
+                // it. `message()` returns `None` unless the body really is our
+                // envelope, so a raw upstream payload can't get here.
+                match info.message() {
+                    Some(message) => UserError::logged(
+                        message,
+                        "Check the details and try again.",
+                        info.code().unwrap_or_else(|| CC_API_BADRESP.to_string()),
+                        e.is_transient(),
+                        info.raw_text(),
+                    ),
+                    None => UserError::logged(
+                        "That didn't work",
+                        "Check the details and try again.",
+                        CC_API_BADRESP,
+                        e.is_transient(),
+                        info.raw_text(),
+                    ),
+                }
+            }
+
+            CoincubeError::Api(msg) => UserError::logged(
+                "That didn't work",
+                "Check the details and try again.",
+                CC_API_BADRESP,
+                false,
+                msg,
+            ),
+
+            CoincubeError::Parse(err) => UserError::logged(
+                "Unexpected response from COINCUBE | Connect",
+                "Try again. If this keeps happening, update the app or contact support with the reference below.",
+                CC_API_BADRESP,
+                true,
+                err,
+            ),
+
+            CoincubeError::SseError(err) => UserError::logged(
+                "Lost connection to COINCUBE | Connect",
+                "Live updates stopped. Check your internet connection and try again.",
+                CC_API_STREAM,
+                true,
+                err,
+            ),
+
+            // Already good, user-facing copy — keep it verbatim.
+            CoincubeError::VaultKeyholderLocked { vault_id } => UserError::new(
+                format!("Vault #{} is locked to its current signers", vault_id),
+                "The signing quorum is fixed when a Vault is built and can't be changed. Create a new Vault to use a different set of keyholders.",
+                "VAULT_KEYHOLDER_LOCKED",
+                false,
+            ),
+
+            CoincubeError::NotFound => UserError::new(
+                "Not found",
+                "This item no longer exists, or was never created.",
+                CC_API_NOTFOUND,
+                false,
+            ),
+
+            CoincubeError::RateLimited { retry_after } => UserError::new(
+                "Too many attempts",
+                format!(
+                    "Wait {} seconds before trying again.",
+                    retry_after.as_secs()
+                ),
+                CC_AUTH_RATELIMIT,
+                true,
+            ),
+        }
+    }
+}
+
+impl From<CoincubeError> for crate::user_error::UserError {
+    fn from(e: CoincubeError) -> Self {
+        (&e).into()
+    }
+}
 
 /// Body shape of an atomic-create member rejection: the offending member is
 /// named inside the `error` object (`memberIndex`, and `keyId` when the entry
@@ -3897,5 +4163,512 @@ mod contact_role_tests {
         // (invite.go:87) and only accepts the three invitable roles.
         let json = serde_json::to_string(&ContactRole::Keyholder).unwrap();
         assert_eq!(json, "\"keyholder\"");
+    }
+}
+
+#[cfg(test)]
+mod user_error_mapping_tests {
+    use super::*;
+    use crate::services::http::NotSuccessResponseInfo;
+    use crate::user_error::{
+        UserError, CC_API_5XX, CC_AUTH_RATELIMIT, CC_NET_OFFLINE, CC_NET_TIMEOUT,
+    };
+
+    /// The reported bug, pinned.
+    ///
+    /// A token refresh that couldn't reach the API rendered as
+    /// `Network error: reqwest::Error { kind: Request, url:
+    /// "https://api.coincube.io/api/v1/auth/token/refresh", source: TimedOut }`
+    /// — the `{:?}` of the transport error, endpoint and all.
+    ///
+    /// Uses a connection to a closed local port so the test needs no network.
+    /// Whether that is refused or times out does not matter here — the
+    /// assertions are about what must never appear, which holds for both.
+    #[tokio::test]
+    async fn transport_failure_never_exposes_the_endpoint() {
+        let url = "http://127.0.0.1:1/api/v1/auth/token/refresh";
+        let err: CoincubeError = reqwest::Client::new()
+            .get(url)
+            .timeout(std::time::Duration::from_secs(2))
+            .send()
+            .await
+            .expect_err("connecting to a closed port must fail")
+            .into();
+
+        let user: UserError = (&err).into();
+        for field in [&user.title, &user.guidance, &user.reference] {
+            assert!(!field.contains("127.0.0.1"), "host leaked: {}", field);
+            assert!(
+                !field.contains("token/refresh"),
+                "endpoint leaked: {}",
+                field
+            );
+            assert!(
+                !field.contains("reqwest"),
+                "crate internals leaked: {}",
+                field
+            );
+        }
+        // Even the log-facing Display must not carry the URL, because the
+        // `From` impl scrubs it at construction.
+        assert!(!err.to_string().contains("127.0.0.1"));
+        assert!(!err.to_string().contains("token/refresh"));
+
+        // A transport failure is worth retrying, so the card offers a button.
+        assert!(user.retryable);
+    }
+
+    /// `Display` is not the sanctioned way to show an error — views render a
+    /// `UserError` — but many call sites still do it, so it has to be safe on
+    /// its own. It once fell back to the raw body, which is how a GORM error
+    /// reached the screen; it must never do that again.
+    #[test]
+    fn display_is_safe_to_render_for_the_call_sites_that_still_use_it() {
+        let leaky = CoincubeError::Unsuccessful(NotSuccessResponseInfo {
+            status_code: 500,
+            text: r#"ERROR: duplicate key value violates unique constraint "uni_users_email" (SQLSTATE 23505)"#
+                .to_string(),
+        });
+        let shown = leaky.to_string();
+        assert!(!shown.contains("SQLSTATE"), "raw body rendered: {}", shown);
+        assert!(
+            !shown.contains("uni_users_email"),
+            "raw body rendered: {}",
+            shown
+        );
+        assert_eq!(shown, "HTTP 500");
+
+        // With our envelope, the server's own message is the right thing to
+        // show — this is what the buy/sell toasts print.
+        let enveloped = CoincubeError::Unsuccessful(NotSuccessResponseInfo {
+            status_code: 400,
+            text: r#"{"success":false,"error":{"code":"OTP_EXPIRED","message":"That code has expired."}}"#
+                .to_string(),
+        });
+        assert_eq!(enveloped.to_string(), "That code has expired.");
+    }
+
+    #[test]
+    fn a_non_envelope_error_body_never_reaches_the_user() {
+        // What the legacy auth rate limiter emits, and what any nginx/HTML
+        // error page looks like. Previously rendered verbatim on screen.
+        let err = CoincubeError::Unsuccessful(NotSuccessResponseInfo {
+            status_code: 500,
+            text: r#"ERROR: duplicate key value violates unique constraint "uni_users_email" (SQLSTATE 23505)"#
+                .to_string(),
+        });
+
+        let user: UserError = (&err).into();
+        assert!(!user.title.contains("SQLSTATE"));
+        assert!(!user.guidance.contains("SQLSTATE"));
+        assert!(!user.title.contains("uni_users_email"));
+    }
+
+    #[test]
+    fn auth_rejection_is_not_retryable() {
+        // Offering "Try again" on a dead session just reproduces the 401.
+        let err = CoincubeError::Unsuccessful(NotSuccessResponseInfo {
+            status_code: 401,
+            text: r#"{"success":false,"error":{"code":"UNAUTHORIZED","message":"Invalid refresh token"}}"#
+                .to_string(),
+        });
+
+        let user: UserError = (&err).into();
+        assert!(!user.retryable);
+        // The server's own taxonomy code becomes the support reference.
+        assert_eq!(user.reference, "UNAUTHORIZED");
+    }
+
+    /// The screenshot, reproduced end to end.
+    ///
+    /// A socket that accepts the connection and then never answers is exactly
+    /// what a stalled API looks like to the client, and it is what produced
+    /// `source: TimedOut` in the report. This drives the real `refresh_login`
+    /// call — the same method the sign-in screen uses — so the scrubbing in
+    /// `From<reqwest::Error>` is exercised on the actual code path rather than
+    /// on a hand-built error.
+    #[tokio::test]
+    async fn a_stalled_server_produces_timeout_copy_and_leaks_nothing() {
+        // Bind, accept, hold the connection open, answer nothing.
+        //
+        // The margin between the client's timeout and how long the socket is
+        // held is deliberately wide: this test also runs on shared CI runners
+        // and on Windows, where a few hundred milliseconds of scheduling jitter
+        // is ordinary. A narrow margin here fails as a mysterious "expected a
+        // timeout, got ..." rather than as a real regression.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        let accepted = std::thread::spawn(move || {
+            let held = listener.accept();
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            drop(held);
+        });
+
+        let client = crate::services::coincube::client::CoincubeClient::for_test_with_timeout(
+            format!("http://{}", addr),
+            std::time::Duration::from_millis(150),
+        );
+        let err = client
+            .refresh_login("a-refresh-token")
+            .await
+            .expect_err("an unanswered request must fail");
+        let _ = accepted.join();
+
+        assert!(
+            matches!(&err, CoincubeError::Network(e) if e.is_timeout()),
+            "expected a timeout, got {:?}",
+            err
+        );
+
+        let user: UserError = (&err).into();
+        assert_eq!(user.reference, CC_NET_TIMEOUT);
+        assert!(user.retryable, "a timeout is worth retrying");
+        assert!(
+            user.retry_action(()).is_some(),
+            "the card must offer a button — the banner said 'Tap to retry' and had none"
+        );
+
+        // Nothing about the transport, the host, or the endpoint may appear in
+        // anything rendered.
+        for field in [&user.title, &user.guidance, &user.reference] {
+            for forbidden in ["127.0.0.1", "token/refresh", "reqwest", "TimedOut", "kind:"] {
+                assert!(
+                    !field.contains(forbidden),
+                    "{} leaked in {:?}",
+                    forbidden,
+                    field
+                );
+            }
+        }
+        assert!(!err.to_string().contains("127.0.0.1"));
+    }
+
+    /// Offline and stalled are different situations with different remedies, so
+    /// they must not collapse into one message.
+    ///
+    /// Port 1 is normally refused outright. On a host that silently drops to it
+    /// instead — a firewall, some CI sandboxes — the same call times out, which
+    /// is a different (and equally valid) classification. The invariants that
+    /// matter hold either way, so only the offline-specific assertion is
+    /// conditional.
+    #[tokio::test]
+    async fn offline_and_timeout_are_told_apart() {
+        let refused: CoincubeError = reqwest::Client::new()
+            .get("http://127.0.0.1:1/api/v1/auth/token/refresh")
+            .timeout(std::time::Duration::from_secs(2))
+            .send()
+            .await
+            .expect_err("closed port must fail")
+            .into();
+        let was_refused = matches!(&refused, CoincubeError::Network(e) if e.is_connect());
+        let user: UserError = (&refused).into();
+
+        assert_ne!(user.guidance, "", "every error must say what to do next");
+        assert!(user.retryable, "a transport failure is worth retrying");
+        if was_refused {
+            assert_eq!(user.reference, CC_NET_OFFLINE);
+            assert_ne!(
+                user.reference, CC_NET_TIMEOUT,
+                "connection refused is not a timeout"
+            );
+        } else {
+            assert_eq!(
+                user.reference, CC_NET_TIMEOUT,
+                "a dropped connection is a timeout, not an unclassified failure"
+            );
+        }
+    }
+
+    /// The legacy rate-limiter body, which is what a desktop build still sees
+    /// when it talks to an API instance that predates the envelope fix. It is
+    /// not our envelope, so none of it may be rendered.
+    #[tokio::test]
+    async fn legacy_rate_limit_body_is_not_rendered() {
+        use httpmock::{Method, MockServer};
+
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(Method::POST).path("/api/v1/auth/token/refresh");
+            then.status(429)
+                .header("content-type", "application/json")
+                .body(r#"{"status":"ERROR","reason":"too many requests from 41.203.68.2"}"#);
+        });
+
+        let client = crate::services::coincube::client::CoincubeClient::for_test(server.base_url());
+        let err = client
+            .refresh_login("a-refresh-token")
+            .await
+            .expect_err("429 must be an error");
+        mock.assert();
+
+        let user: UserError = (&err).into();
+        assert_eq!(user.reference, CC_AUTH_RATELIMIT);
+        for field in [&user.title, &user.guidance] {
+            assert!(!field.contains("ERROR"), "raw JSON rendered: {}", field);
+            assert!(!field.contains("41.203.68.2"), "IP leaked: {}", field);
+            assert!(!field.contains("reason"), "raw JSON rendered: {}", field);
+        }
+    }
+
+    /// A server that leaks in its own body must not be able to leak through us.
+    #[tokio::test]
+    async fn a_database_error_from_the_server_stops_at_the_client() {
+        use httpmock::{Method, MockServer};
+
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(Method::POST).path("/api/v1/auth/token/refresh");
+            then.status(500).body(
+                r#"ERROR: duplicate key value violates unique constraint "uni_users_email" (SQLSTATE 23505)"#,
+            );
+        });
+
+        let client = crate::services::coincube::client::CoincubeClient::for_test(server.base_url());
+        let err = client
+            .refresh_login("a-refresh-token")
+            .await
+            .expect_err("500 must be an error");
+        mock.assert();
+
+        let user: UserError = (&err).into();
+        for field in [&user.title, &user.guidance, &user.reference] {
+            for forbidden in ["SQLSTATE", "uni_users_email", "constraint", "duplicate key"] {
+                assert!(
+                    !field.contains(forbidden),
+                    "{} leaked in {}",
+                    forbidden,
+                    field
+                );
+            }
+        }
+        assert_eq!(user.reference, CC_API_5XX);
+        assert!(user.retryable);
+    }
+
+    /// The server's own copy is the best copy for a 4xx it authored, so it is
+    /// surfaced — along with its taxonomy code as the support reference.
+    #[tokio::test]
+    async fn the_servers_own_message_is_preferred_for_a_4xx() {
+        use httpmock::{Method, MockServer};
+
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(Method::POST).path("/api/v1/auth/login/verify-otp");
+            then.status(400)
+                .header("content-type", "application/json")
+                .body(
+                    r#"{"success":false,"data":null,"error":{"code":"OTP_EXPIRED","message":"That code has expired. Request a new one."}}"#,
+                );
+        });
+
+        let client = crate::services::coincube::client::CoincubeClient::for_test(server.base_url());
+        let err = client
+            .login_verify_otp(crate::services::coincube::OtpVerifyRequest {
+                email: "a@b.co".into(),
+                otp: "000000".into(),
+            })
+            .await
+            .expect_err("400 must be an error");
+        mock.assert();
+
+        let user: UserError = (&err).into();
+        assert_eq!(user.title, "That code has expired. Request a new one.");
+        assert_eq!(user.reference, "OTP_EXPIRED");
+        assert!(!user.retryable, "a wrong code needs new input, not a retry");
+    }
+
+    /// A wrong OTP comes back as 401, the same status as a dead session. If
+    /// the copy keys off the status alone, the user who just mistyped a code is
+    /// told their session expired and sent back to sign in — from the very
+    /// screen they are already signing in on.
+    #[tokio::test]
+    async fn a_wrong_otp_is_not_reported_as_an_expired_session() {
+        use httpmock::{Method, MockServer};
+
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(Method::POST)
+                .path("/api/v1/auth/login/verify-otp");
+            then.status(401)
+                .header("content-type", "application/json")
+                .body(
+                    r#"{"success":false,"data":null,"error":{"code":"OTP_INVALID","message":"That code is incorrect or has expired. Request a new one."}}"#,
+                );
+        });
+
+        let client = crate::services::coincube::client::CoincubeClient::for_test(server.base_url());
+        let err = client
+            .login_verify_otp(crate::services::coincube::OtpVerifyRequest {
+                email: "a@b.co".into(),
+                otp: "000000".into(),
+            })
+            .await
+            .expect_err("a wrong code must fail");
+        mock.assert();
+
+        let user: UserError = (&err).into();
+        assert!(
+            !user.title.contains("session"),
+            "a mistyped code is not an expired session: {}",
+            user.title
+        );
+        assert!(
+            !user.guidance.contains("Sign in again"),
+            "the user is already signing in: {}",
+            user.guidance
+        );
+        assert_eq!(user.reference, "OTP_INVALID");
+        // Retrying the same code fails the same way — they need a new one.
+        assert!(!user.retryable);
+    }
+
+    /// Three different situations arrive as 401. Each needs its own next
+    /// step, and none of them is the others'.
+    #[test]
+    fn the_three_meanings_of_401_get_three_different_next_steps() {
+        let of = |code: &str, message: &str| -> UserError {
+            (&CoincubeError::Unsuccessful(NotSuccessResponseInfo {
+                status_code: 401,
+                text: format!(
+                    r#"{{"success":false,"error":{{"code":"{}","message":"{}"}}}}"#,
+                    code, message
+                ),
+            }))
+                .into()
+        };
+
+        let otp = of("OTP_INVALID", "That code is incorrect or has expired.");
+        let unverified = of("EMAIL_NOT_VERIFIED", "Email is not verified");
+        let dead = of("REFRESH_TOKEN_INVALID", "Your session has expired");
+
+        // Distinct copy, so the screen never gives advice for the wrong problem.
+        assert_ne!(otp.guidance, unverified.guidance);
+        assert_ne!(otp.guidance, dead.guidance);
+        assert_ne!(unverified.guidance, dead.guidance);
+
+        assert!(unverified.guidance.contains("inbox"));
+        assert!(dead.guidance.contains("Sign in again"));
+        assert!(!otp.guidance.contains("Sign in again"));
+
+        // None is worth a retry button: all three need different input.
+        for e in [&otp, &unverified, &dead] {
+            assert!(!e.retryable, "{} should not offer a retry", e.reference);
+        }
+    }
+
+    /// A plan gate is a 403, and so is a signing-policy refusal. Neither is a
+    /// session problem, and both used to be answered with "Sign in again to
+    /// continue." — advice that cannot work, on an account that is signed in.
+    #[test]
+    fn a_403_never_tells_the_user_to_sign_in_again() {
+        let of = |code: &str, message: &str| -> UserError {
+            (&CoincubeError::Unsuccessful(NotSuccessResponseInfo {
+                status_code: 403,
+                text: format!(
+                    r#"{{"success":false,"error":{{"code":"{}","message":"{}"}}}}"#,
+                    code, message
+                ),
+            }))
+                .into()
+        };
+
+        let plan = of("PLAN_PRO_REQUIRED", "Pro plan or above required");
+        assert_eq!(plan.title, "Pro plan or above required");
+        assert!(
+            plan.guidance.contains("Upgrade"),
+            "a plan gate must point at the plan, got {:?}",
+            plan.guidance
+        );
+
+        let policy = of("FORBIDDEN", "policy: period spending limit exceeded");
+        assert_eq!(policy.title, "policy: period spending limit exceeded");
+
+        for e in [&plan, &policy] {
+            assert!(
+                !e.guidance.contains("Sign in again"),
+                "403 is not an expired session: {:?}",
+                e.guidance
+            );
+            assert!(
+                !e.retryable,
+                "re-running a refused request just fails again"
+            );
+        }
+    }
+
+    /// The other two 401s that are not a dead session. Both arrive on a screen
+    /// where "sign in again" is what the user is already doing.
+    #[test]
+    fn wrong_credentials_and_wrong_2fa_get_their_own_copy() {
+        let of = |code: &str| -> UserError {
+            (&CoincubeError::Unsuccessful(NotSuccessResponseInfo {
+                status_code: 401,
+                text: format!(
+                    r#"{{"success":false,"error":{{"code":"{}","message":"nope"}}}}"#,
+                    code
+                ),
+            }))
+                .into()
+        };
+
+        let creds = of("CREDENTIALS_INVALID");
+        assert!(!creds.guidance.contains("Sign in again"));
+        assert!(creds.title.to_lowercase().contains("password"));
+
+        let two_factor = of("TWO_FACTOR_INVALID");
+        assert!(!two_factor.guidance.contains("Sign in again"));
+        assert!(two_factor.guidance.contains("authenticator"));
+
+        for e in [&creds, &two_factor] {
+            assert!(!e.retryable);
+        }
+    }
+
+    /// `is_transient` is the single definition of "could re-running this
+    /// work?", and 408 is where the two used to disagree.
+    #[test]
+    fn retryability_matches_is_transient_for_http_responses() {
+        for status in [408, 429, 500, 503, 400, 404, 409, 422] {
+            let err = CoincubeError::Unsuccessful(NotSuccessResponseInfo {
+                status_code: status,
+                text: r#"{"success":false,"error":{"code":"X","message":"m"}}"#.to_string(),
+            });
+            let user: UserError = (&err).into();
+            assert_eq!(
+                user.retryable,
+                err.is_transient(),
+                "status {} disagrees with is_transient",
+                status
+            );
+        }
+    }
+
+    /// A genuinely dead refresh token still says so.
+    #[test]
+    fn a_dead_refresh_token_still_sends_the_user_to_sign_in() {
+        let err = CoincubeError::Unsuccessful(NotSuccessResponseInfo {
+            status_code: 401,
+            text: r#"{"success":false,"error":{"code":"REFRESH_TOKEN_INVALID","message":"Your session has expired"}}"#
+                .to_string(),
+        });
+
+        let user: UserError = (&err).into();
+        assert_eq!(user.title, "Your session has expired");
+        assert_eq!(user.guidance, "Sign in again to continue.");
+        assert_eq!(user.reference, "REFRESH_TOKEN_INVALID");
+        assert!(!user.retryable);
+    }
+
+    #[test]
+    fn server_5xx_is_retryable_and_says_it_is_not_the_users_fault() {
+        let err = CoincubeError::Unsuccessful(NotSuccessResponseInfo {
+            status_code: 503,
+            text: r#"{"success":false,"error":{"code":"SERVICE_UNAVAILABLE","message":"down"}}"#
+                .to_string(),
+        });
+
+        let user: UserError = (&err).into();
+        assert!(user.retryable);
+        assert_eq!(user.reference, "SERVICE_UNAVAILABLE");
     }
 }

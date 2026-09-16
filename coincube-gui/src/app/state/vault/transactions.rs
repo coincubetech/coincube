@@ -209,7 +209,7 @@ impl State for VaultTransactionsPanel {
                     // a failed initial fetch would otherwise leave the panel
                     // stuck on the loading indicator with Prev/Next disabled.
                     self.processing = false;
-                    let err_msg = e.to_string();
+                    let err_msg = crate::user_error::report(&e);
                     self.warning = Some(e);
                     return Task::done(Message::View(view::Message::ShowError(err_msg)));
                 }
@@ -239,7 +239,7 @@ impl State for VaultTransactionsPanel {
                         return Task::none();
                     }
                     self.processing = false;
-                    let err_msg = e.to_string();
+                    let err_msg = crate::user_error::report(&e);
                     self.warning = Some(e);
                     return Task::done(Message::View(view::Message::ShowError(err_msg)));
                 }
@@ -294,7 +294,7 @@ impl State for VaultTransactionsPanel {
                 }
                 Err(e) => {
                     let err: Error = e;
-                    let err_msg = err.to_string();
+                    let err_msg = crate::user_error::report(&err);
                     self.warning = Some(err);
                     return Task::done(Message::View(view::Message::ShowError(err_msg)));
                 }
@@ -452,7 +452,7 @@ impl State for VaultTransactionsPanel {
                         return cmd;
                     }
                     Err(e) => {
-                        let err_msg = e.to_string();
+                        let err_msg = crate::user_error::report(&e);
                         self.warning = Some(e);
                         return Task::done(Message::View(view::Message::ShowError(err_msg)));
                     }
@@ -731,7 +731,7 @@ impl CreateRbfModal {
                         self.replacement_txid = Some(txid);
                     }
                     Err(e) => {
-                        let err_msg = e.to_string();
+                        let err_msg = crate::user_error::report(&e);
                         self.warning = Some(e);
                         return Task::done(Message::View(view::Message::ShowError(err_msg)));
                     }

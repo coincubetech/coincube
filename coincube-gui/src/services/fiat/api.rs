@@ -28,12 +28,22 @@ impl std::fmt::Display for PriceApiError {
         match self {
             Self::RequestFailed(e) => write!(f, "Request failed: {}", e),
             Self::NotSuccessResponse(info) => {
-                write!(
-                    f,
-                    "Not success response ({}): {}",
-                    info.status_code,
-                    info.message()
-                )
+                // Nothing renders this today — `Error::FiatPrice` is mapped
+                // to fixed copy by `crate::user_error` — but it is one
+                // `Display` call away from a screen at all times, so it stays
+                // safe to show: the envelope's own message if there is one,
+                // never the raw body. Callers wanting the body for a log ask
+                // for `raw_text()` directly.
+                match info.message() {
+                    Some(message) => {
+                        write!(
+                            f,
+                            "Not success response ({}): {}",
+                            info.status_code, message
+                        )
+                    }
+                    None => write!(f, "Not success response ({})", info.status_code),
+                }
             }
             Self::CannotParseResponse(e) => write!(f, "Cannot parse response: {}", e),
             Self::CannotParseData(e) => write!(f, "Cannot parse data: {}", e),
@@ -70,13 +80,50 @@ mod tests {
     }
 
     #[test]
-    fn display_unwraps_coincube_error_envelope() {
-        let err = PriceApiError::NotSuccessResponse(NotSuccessResponseInfo {
+    fn display_shows_the_envelope_message_and_never_the_raw_body() {
+        let info = NotSuccessResponseInfo {
             status_code: 429,
             text: r#"{"success":false,"error":{"code":"rate_limited","message":"slow down"}}"#
                 .to_string(),
+        };
+        assert_eq!(info.message().as_deref(), Some("slow down"));
+        assert_eq!(info.code().as_deref(), Some("rate_limited"));
+
+        let err = PriceApiError::NotSuccessResponse(info);
+        assert_eq!(err.to_string(), "Not success response (429): slow down");
+    }
+
+    /// A body that is not our envelope must never be echoed into this
+    /// `Display`, whether or not a screen happens to render it today.
+    #[test]
+    fn display_withholds_a_body_that_is_not_our_envelope() {
+        let err = PriceApiError::NotSuccessResponse(NotSuccessResponseInfo {
+            status_code: 502,
+            text: "<html><title>502 Bad Gateway</title>nginx/1.24.0</html>".to_string(),
         });
 
-        assert_eq!(err.to_string(), "Not success response (429): slow down");
+        let shown = err.to_string();
+        assert!(!shown.contains("nginx"), "raw body rendered: {}", shown);
+        assert!(!shown.contains("<html>"), "raw body rendered: {}", shown);
+        assert_eq!(shown, "Not success response (502)");
+    }
+
+    /// The transport arm is a `String`, so whatever is put in it is final.
+    /// `client::get_data` scrubs the URL before it gets here; this pins that
+    /// the endpoint cannot ride along.
+    #[tokio::test]
+    async fn a_transport_failure_carries_no_url() {
+        let err =
+            super::super::client::get_data_for_test("http://127.0.0.1:1/api/v1/prices/btc-usd")
+                .await
+                .expect_err("a closed port must fail");
+
+        let shown = err.to_string();
+        assert!(!shown.contains("127.0.0.1"), "host leaked: {}", shown);
+        assert!(
+            !shown.contains("prices/btc-usd"),
+            "endpoint leaked: {}",
+            shown
+        );
     }
 }

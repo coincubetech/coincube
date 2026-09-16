@@ -6,6 +6,7 @@ use crate::{
         message::Message,
         view::{
             self, ConnectAccountMessage, ContactsMessage, DuressContactsMessage, DuressMessage,
+            RetryAction,
         },
     },
     services::coincube::{
@@ -17,6 +18,7 @@ use crate::{
         UpdateDuressAlertContactRequest, User, VerifiedDevice, DURESS_CHANNEL_EMAIL,
         DURESS_CHANNEL_SMS, DURESS_CHANNEL_WHATSAPP, MAX_DURESS_ALERT_CONTACTS,
     },
+    user_error::UserError,
 };
 
 use super::{
@@ -749,6 +751,52 @@ impl DuressContactsState {
     }
 }
 
+/// A failure on the Connect panel: the copy to show, and what the card's
+/// "Try again" should re-run.
+///
+/// Splitting the two matters because they are decided in different places. The
+/// copy comes from the error itself (`UserError`), which knows whether retrying
+/// could possibly help; the *target* is only known by the call site that
+/// failed. Wiring the button to one fixed message instead — which is what the
+/// card originally did — gave a button that silently did nothing on the
+/// dashboard and one that navigated away from the code-entry screen.
+#[derive(Debug, Clone)]
+pub struct PanelError {
+    pub user: UserError,
+    retry: Option<RetryAction>,
+}
+
+impl PanelError {
+    /// A failure the card shows without a button: either retrying cannot help,
+    /// or the screen already has its own control for re-running the action.
+    pub fn settled(user: impl Into<UserError>) -> Self {
+        Self {
+            user: user.into(),
+            retry: None,
+        }
+    }
+
+    /// A failure the card can re-run itself.
+    pub fn retryable(user: impl Into<UserError>, action: RetryAction) -> Self {
+        Self {
+            user: user.into(),
+            retry: Some(action),
+        }
+    }
+
+    /// The button to render, if any.
+    ///
+    /// A target alone is not enough: the error must also be one where re-running
+    /// the same request could plausibly succeed. A 401 carrying
+    /// `RetryAction::Session` still gets no button, because the refresh would be
+    /// refused identically.
+    pub fn retry_button(&self) -> Option<(&'static str, ConnectAccountMessage)> {
+        self.retry
+            .filter(|_| self.user.retryable)
+            .map(|action| ("Try again", ConnectAccountMessage::Retry(action)))
+    }
+}
+
 pub struct ConnectAccountPanel {
     pub step: ConnectFlowStep,
     pub active_sub: ConnectSubMenu,
@@ -769,7 +817,9 @@ pub struct ConnectAccountPanel {
     pub overview_contact_count: Option<usize>,
     pub overview_cube_count: Option<usize>,
     pub contacts_state: ContactsState,
-    pub error: Option<String>,
+    /// Presentation-ready failure for this panel's error card, with the retry
+    /// it should offer. Never a raw error string — see [`crate::user_error`].
+    pub error: Option<PanelError>,
     /// Incremented on each login/logout so stale async completions can be discarded.
     session_generation: u64,
     // ── Plan & Billing ──
@@ -1204,6 +1254,14 @@ impl ConnectAccountPanel {
                 if matches!(self.step, ConnectFlowStep::Login { loading: true, .. }) {
                     return iced::Task::none();
                 }
+                // Clear any previous failure. Past the re-entry guards above,
+                // this path always either starts a refresh or falls back to the
+                // login form, and both make the old card stale: this is also
+                // the "Try again" button, so leaving it up while the retry runs
+                // makes a working retry look like a no-op — and leaving it up
+                // on the no-session fallback strands it on screen with nothing
+                // left to retry.
+                self.error = None;
                 // A code stashed during an abandoned signup must not ride into
                 // a restored or next session — it belongs to that signup only.
                 // Clearing here (and in SubmitLogin) confines redemption to the
@@ -1243,7 +1301,7 @@ impl ConnectAccountPanel {
                                 ))
                             } else {
                                 Message::View(view::Message::ConnectAccount(
-                                    ConnectAccountMessage::RefreshFailed(e.to_string()),
+                                    ConnectAccountMessage::RefreshFailed((&e).into()),
                                 ))
                             }
                         }
@@ -1253,7 +1311,11 @@ impl ConnectAccountPanel {
 
             ConnectAccountMessage::RefreshFailed(err) => {
                 log::warn!("[CONNECT] Session refresh failed (transient): {}", err);
-                self.error = Some(format!("Connection error: {}. Tap to retry.", err));
+                // The card renders its own "Try again" button, wired to
+                // `Init` — which re-reads the keyring session and re-fires the
+                // refresh. Previously this string ended in "Tap to retry" while
+                // the banner had no button at all.
+                self.error = Some(PanelError::retryable(err, RetryAction::Session));
                 self.scrub_recovery_passphrase();
                 self.step = ConnectFlowStep::Login {
                     email: String::new(),
@@ -1418,7 +1480,7 @@ impl ConnectAccountPanel {
                                 ))
                             } else {
                                 Message::View(view::Message::ConnectAccount(
-                                    ConnectAccountMessage::Error(e.to_string()),
+                                    ConnectAccountMessage::Error((&e).into()),
                                 ))
                             }
                         }
@@ -1457,7 +1519,7 @@ impl ConnectAccountPanel {
                             },
                         )),
                         Err(e) => Message::View(view::Message::ConnectAccount(
-                            ConnectAccountMessage::Error(e.to_string()),
+                            ConnectAccountMessage::Error((&e).into()),
                         )),
                     },
                 );
@@ -1538,7 +1600,7 @@ impl ConnectAccountPanel {
                             ConnectAccountMessage::OtpResent,
                         )),
                         Err(e) => Message::View(view::Message::ConnectAccount(
-                            ConnectAccountMessage::Error(e.to_string()),
+                            ConnectAccountMessage::Error((&e).into()),
                         )),
                     },
                 );
@@ -1592,7 +1654,7 @@ impl ConnectAccountPanel {
                             ConnectAccountMessage::SetSession(login),
                         )),
                         Err(e) => Message::View(view::Message::ConnectAccount(
-                            ConnectAccountMessage::Error(e.to_string()),
+                            ConnectAccountMessage::Error((&e).into()),
                         )),
                     },
                 );
@@ -1614,7 +1676,7 @@ impl ConnectAccountPanel {
                             ConnectAccountMessage::OtpResent,
                         )),
                         Err(e) => Message::View(view::Message::ConnectAccount(
-                            ConnectAccountMessage::Error(e.to_string()),
+                            ConnectAccountMessage::Error((&e).into()),
                         )),
                     },
                 );
@@ -1670,7 +1732,13 @@ impl ConnectAccountPanel {
                     }
                     Err(err) => {
                         return iced::Task::done(Message::View(view::Message::ConnectAccount(
-                            ConnectAccountMessage::Error(err),
+                            ConnectAccountMessage::Error(UserError::logged(
+                                "Couldn't remove that device",
+                                "Try again. If it keeps failing, contact support and quote the reference below.",
+                                crate::user_error::CC_API_BADRESP,
+                                true,
+                                err,
+                            )),
                         )));
                     }
                 }
@@ -1955,7 +2023,7 @@ impl ConnectAccountPanel {
                                         ConnectAccountMessage::UserProfileLoaded(u),
                                     )),
                                     Err(e) => Message::View(view::Message::ConnectAccount(
-                                        ConnectAccountMessage::UserProfileFailed(e.to_string()),
+                                        ConnectAccountMessage::UserProfileFailed((&e).into()),
                                     )),
                                 }
                             },
@@ -1968,7 +2036,10 @@ impl ConnectAccountPanel {
                 return self.update_contacts(contacts_msg);
             }
             ConnectAccountMessage::Error(error_msg) => {
-                self.error = Some(error_msg);
+                // No card button: every sender of this variant is an action the
+                // user started from a control that is still on screen (Continue,
+                // Verify, Resend, Remove). That control is the retry.
+                self.error = Some(PanelError::settled(error_msg));
 
                 match &mut self.step {
                     ConnectFlowStep::Login { loading, .. }
@@ -1991,7 +2062,16 @@ impl ConnectAccountPanel {
                             self.error = None;
                         }
                         Err(e) => {
-                            self.error = Some(e);
+                            self.error = Some(PanelError::retryable(
+                                UserError::logged(
+                                    "Couldn't load billing history",
+                                    "Check your internet connection and try again.",
+                                    crate::user_error::CC_API_BADRESP,
+                                    true,
+                                    e,
+                                ),
+                                RetryAction::BillingHistory,
+                            ));
                         }
                     }
                 }
@@ -2002,7 +2082,63 @@ impl ConnectAccountPanel {
             }
             ConnectAccountMessage::UserProfileFailed(error) => {
                 // Non-auth error - just show error, don't redirect to login
-                self.error = Some(error);
+                self.error = Some(PanelError::retryable(error, RetryAction::UserProfile));
+            }
+
+            ConnectAccountMessage::SecurityDataFailed(error) => {
+                self.error = Some(PanelError::retryable(error, RetryAction::SecurityData));
+            }
+
+            ConnectAccountMessage::Retry(action) => {
+                // The card is gone the moment its button is pressed: leaving it
+                // up while the retry runs makes a working retry look like a
+                // dead button.
+                self.error = None;
+                return match action {
+                    RetryAction::Session => {
+                        // `Init` re-reads the keyring session and re-fires the
+                        // refresh, and already guards against re-entry while one
+                        // is in flight.
+                        self.update_message(ConnectAccountMessage::Init)
+                    }
+                    RetryAction::SecurityData => {
+                        load_security_data(&self.client, self.session_generation)
+                    }
+                    RetryAction::UserProfile => {
+                        let client = self.client.clone();
+                        iced::Task::perform(
+                            async move {
+                                match client.get_user().await {
+                                    Ok(u) => Message::View(view::Message::ConnectAccount(
+                                        ConnectAccountMessage::UserProfileLoaded(u),
+                                    )),
+                                    Err(e) => Message::View(view::Message::ConnectAccount(
+                                        ConnectAccountMessage::UserProfileFailed((&e).into()),
+                                    )),
+                                }
+                            },
+                            |m| m,
+                        )
+                    }
+                    RetryAction::BillingHistory => {
+                        let gen = self.session_generation;
+                        let client = self.client.clone();
+                        iced::Task::perform(
+                            async move { client.get_billing_history().await },
+                            move |res| match res {
+                                Ok(history) => Message::View(view::Message::ConnectAccount(
+                                    ConnectAccountMessage::BillingHistoryLoaded(Ok(history), gen),
+                                )),
+                                Err(e) => Message::View(view::Message::ConnectAccount(
+                                    ConnectAccountMessage::BillingHistoryLoaded(
+                                        Err(e.to_string()),
+                                        gen,
+                                    ),
+                                )),
+                            },
+                        )
+                    }
+                };
             }
 
             // ── Campaign code redemption (v2 campaign engine) ─────────────
@@ -2222,8 +2358,15 @@ impl ConnectAccountPanel {
                         // drops the JWT client, keyring session, and cached
                         // user/plan) so the next Init doesn't restore it.
                         self.clear_session();
-                        self.error =
-                            Some("Your session expired. Please sign in again.".to_string());
+                        // Settled, not retryable: the session is gone, so the
+                        // card offers no "Try again" — signing in is the only
+                        // way forward.
+                        self.error = Some(PanelError::settled(UserError::new(
+                            "Your session has expired",
+                            "Sign in again to continue.",
+                            crate::user_error::CC_AUTH_EXPIRED,
+                            false,
+                        )));
                         self.step = ConnectFlowStep::Login {
                             email: String::new(),
                             loading: false,
@@ -2668,7 +2811,17 @@ impl ConnectAccountPanel {
                             *cleared = true;
                             cleared_ok = true;
                         }
-                        Err(e) => self.error = Some(e),
+                        Err(e) => {
+                            // The all-clear screen has its own Submit; a
+                            // second button on the card would race it.
+                            self.error = Some(PanelError::settled(UserError::logged(
+                                "Couldn't confirm the all-clear",
+                                "Check your internet connection and try again.",
+                                crate::user_error::CC_API_BADRESP,
+                                true,
+                                e,
+                            )))
+                        }
                     }
                 }
                 if cleared_ok {
@@ -2873,9 +3026,16 @@ impl ConnectAccountPanel {
                 let dir = match crate::dir::CoincubeDirectory::active() {
                     Ok(dir) => dir,
                     Err(err) => {
-                        e.error = Some(format!(
-                            "Couldn't access your Cube data to verify the duress PIN: {err}"
-                        ));
+                        e.error = Some(
+                            UserError::logged(
+                                "Couldn't open your Cube data",
+                                "Tenshu can't read its data folder, so it can't verify the duress PIN. Restart the app and try again.",
+                                crate::user_error::CC_CONFIG,
+                                true,
+                                err,
+                            )
+                            .toast(),
+                        );
                         return iced::Task::none();
                     }
                 };
@@ -3140,9 +3300,16 @@ impl ConnectAccountPanel {
                     Err(err) => {
                         if let Some(d) = &mut self.duress_disable {
                             d.method = Some(crate::app::DuressStepUpMethod::Unavailable);
-                            d.error = Some(format!(
-                                "Couldn't access your Cube data to verify it's you: {err}"
-                            ));
+                            d.error = Some(
+                                UserError::logged(
+                                    "Couldn't open your Cube data",
+                                    "Tenshu can't read its data folder, so it can't verify it's you. Restart the app and try again.",
+                                    crate::user_error::CC_CONFIG,
+                                    true,
+                                    err,
+                                )
+                                .toast(),
+                            );
                         }
                         return iced::Task::none();
                     }
@@ -3225,9 +3392,16 @@ impl ConnectAccountPanel {
                 let dir = match crate::dir::CoincubeDirectory::active() {
                     Ok(dir) => dir,
                     Err(err) => {
-                        d.error = Some(format!(
-                            "Couldn't access your Cube data to verify your PIN: {err}"
-                        ));
+                        d.error = Some(
+                            UserError::logged(
+                                "Couldn't open your Cube data",
+                                "Tenshu can't read its data folder, so it can't verify your PIN. Restart the app and try again.",
+                                crate::user_error::CC_CONFIG,
+                                true,
+                                err,
+                            )
+                            .toast(),
+                        );
                         return iced::Task::none();
                     }
                 };
@@ -3346,11 +3520,16 @@ impl ConnectAccountPanel {
                             Err(err) => {
                                 if let Some(d) = &mut self.duress_disable {
                                     d.submitting = false;
-                                    d.error = Some(format!(
-                                        "Duress was turned off on the server, but this \
-                                         device couldn't be disarmed: {err}. Reopen \
-                                         Settings to retry."
-                                    ));
+                                    d.error = Some(
+                                        UserError::logged(
+                                            "Duress is off on your account, but not on this device",
+                                            "Tenshu couldn't read its data folder to finish. Reopen Settings to retry.",
+                                            crate::user_error::CC_CONFIG,
+                                            true,
+                                            err,
+                                        )
+                                        .toast(),
+                                    );
                                 }
                                 return iced::Task::none();
                             }
@@ -3419,13 +3598,25 @@ impl ConnectAccountPanel {
                         }
                     }
                     Err(e) => {
-                        log::error!("[CONNECT] duress disarm failed: {e}");
-                        let msg = format!("Couldn't turn off duress mode: {e}. Please try again.");
+                        // Built once, logged once, rendered in whichever of the
+                        // two places is on screen. The dialog branch used to
+                        // interpolate `{e}` — the common path, and the one that
+                        // actually reached a user.
+                        let user = UserError::logged(
+                            "Couldn't turn off duress mode",
+                            "Try again. If it keeps failing, contact support and quote the reference below.",
+                            crate::user_error::CC_API_BADRESP,
+                            true,
+                            &e,
+                        );
                         if let Some(d) = &mut self.duress_disable {
                             d.submitting = false;
-                            d.error = Some(msg);
+                            d.error = Some(user.toast());
                         } else {
-                            self.error = Some(msg);
+                            // Settled on the panel card: the dialog is gone, so
+                            // there is no control left for the user to re-press
+                            // and nothing for a card button to re-run.
+                            self.error = Some(PanelError::settled(user));
                         }
                     }
                 }
@@ -4634,7 +4825,7 @@ pub fn load_security_data(client: &CoincubeClient, generation: u64) -> iced::Tas
                     ConnectAccountMessage::VerifiedDevicesLoaded(devices, generation),
                 )),
                 Err(e) => Message::View(view::Message::ConnectAccount(
-                    ConnectAccountMessage::Error(e.to_string()),
+                    ConnectAccountMessage::SecurityDataFailed((&e).into()),
                 )),
             },
         ),
@@ -4645,7 +4836,7 @@ pub fn load_security_data(client: &CoincubeClient, generation: u64) -> iced::Tas
                     ConnectAccountMessage::LoginActivityLoaded(activity, generation),
                 )),
                 Err(e) => Message::View(view::Message::ConnectAccount(
-                    ConnectAccountMessage::Error(e.to_string()),
+                    ConnectAccountMessage::SecurityDataFailed((&e).into()),
                 )),
             },
         ),
@@ -7259,5 +7450,205 @@ mod duress_contacts_tests {
         // Even though the account is Estate-entitled, the nav guard keys on
         // `is_authenticated()`, so the section is not rendered/loaded.
         assert!(panel.is_duress_alerts_entitled());
+    }
+}
+
+#[cfg(test)]
+mod retry_card_tests {
+    use super::*;
+    use crate::services::coincube::CoincubeError;
+    use crate::user_error::{UserError, CC_NET_TIMEOUT};
+
+    fn timed_out() -> UserError {
+        UserError::new(
+            "Can't reach COINCUBE | Connect",
+            "The server took too long to respond. Check your internet connection and try again.",
+            CC_NET_TIMEOUT,
+            true,
+        )
+    }
+
+    /// A failed refresh must leave the panel in a state that actually renders
+    /// the card: an error to show, and a step that is not mid-load.
+    #[test]
+    fn a_failed_refresh_surfaces_a_retryable_card() {
+        let mut panel = ConnectAccountPanel::new();
+        panel.step = ConnectFlowStep::Login {
+            email: String::new(),
+            loading: true,
+        };
+
+        let _ = panel.update_message(ConnectAccountMessage::RefreshFailed(timed_out()));
+
+        let err = panel.error.as_ref().expect("the failure must be shown");
+        assert!(err.user.retryable, "a timeout must offer a retry");
+        assert!(
+            matches!(
+                err.retry_button(),
+                Some((
+                    "Try again",
+                    ConnectAccountMessage::Retry(RetryAction::Session)
+                ))
+            ),
+            "the card must offer a button that re-runs the refresh — the \
+             original banner said 'Tap to retry' and had none"
+        );
+        assert!(
+            matches!(panel.step, ConnectFlowStep::Login { loading: false, .. }),
+            "the spinner must stop so the card is reachable, got {:?}",
+            panel.step
+        );
+    }
+
+    /// Pressing "Try again" takes the error card down. Whether the keyring
+    /// still holds a session decides which branch the session retry takes, but
+    /// neither may leave the stale card on screen: one starts a fresh refresh,
+    /// the other drops to the login form, and in both the old failure is
+    /// history.
+    #[test]
+    fn pressing_try_again_takes_the_card_down() {
+        let mut panel = ConnectAccountPanel::new();
+        panel.error = Some(PanelError::retryable(timed_out(), RetryAction::Session));
+        panel.step = ConnectFlowStep::Login {
+            email: String::new(),
+            loading: false,
+        };
+
+        let _ = panel.update_message(ConnectAccountMessage::Retry(RetryAction::Session));
+
+        assert!(
+            panel.error.is_none(),
+            "a retry that leaves the card up looks like a dead button"
+        );
+    }
+
+    /// The session retry is guarded against double-firing: a second press while
+    /// the refresh is in flight must not race a second token refresh.
+    #[test]
+    fn a_second_press_while_retrying_is_ignored() {
+        let mut panel = ConnectAccountPanel::new();
+        panel.step = ConnectFlowStep::Login {
+            email: String::new(),
+            loading: true,
+        };
+
+        let _ = panel.update_message(ConnectAccountMessage::Retry(RetryAction::Session));
+
+        assert!(
+            matches!(panel.step, ConnectFlowStep::Login { loading: true, .. }),
+            "an in-flight refresh must not be restarted"
+        );
+    }
+
+    /// Session expiry is not a transport blip: retrying reproduces the 401, so
+    /// the card must send the user to sign in instead of offering a button —
+    /// even though the failure arrived on the path that *does* carry a retry
+    /// target.
+    #[test]
+    fn an_expired_session_offers_no_retry_button() {
+        let expired: UserError = (&CoincubeError::Unsuccessful(
+            crate::services::http::NotSuccessResponseInfo {
+                status_code: 401,
+                text: r#"{"success":false,"error":{"code":"REFRESH_TOKEN_INVALID","message":"Refresh token expired"}}"#
+                    .to_string(),
+            },
+        ))
+            .into();
+
+        assert!(!expired.retryable);
+        assert_eq!(expired.reference, "REFRESH_TOKEN_INVALID");
+
+        let panel_error = PanelError::retryable(expired, RetryAction::Session);
+        assert!(
+            panel_error.retry_button().is_none(),
+            "a settled failure gets no button even when a target was supplied"
+        );
+    }
+
+    /// The dashboard bug. `Init` returns early once signed in, so a card wired
+    /// to it rendered a button that did nothing at all and never cleared. Each
+    /// dashboard failure must carry the reload that actually re-runs it.
+    #[test]
+    fn dashboard_failures_retry_their_own_load_not_init() {
+        let cases = [
+            (
+                ConnectAccountMessage::SecurityDataFailed(timed_out()),
+                RetryAction::SecurityData,
+            ),
+            (
+                ConnectAccountMessage::UserProfileFailed(timed_out()),
+                RetryAction::UserProfile,
+            ),
+        ];
+
+        for (message, expected) in cases {
+            let mut panel = ConnectAccountPanel::new();
+            panel.step = ConnectFlowStep::Dashboard;
+
+            let _ = panel.update_message(message);
+
+            let err = panel.error.as_ref().expect("the failure must be shown");
+            match err.retry_button() {
+                Some(("Try again", ConnectAccountMessage::Retry(action))) => {
+                    assert_eq!(action, expected, "wrong reload wired to the button");
+                }
+                other => panic!("expected a retry button, got {:?}", other),
+            }
+        }
+    }
+
+    /// Pressing a dashboard card's retry must not run the session path: `Init`
+    /// on the dashboard is a no-op, which is what made the button look dead.
+    #[test]
+    fn a_dashboard_retry_does_not_fall_through_to_init() {
+        let mut panel = ConnectAccountPanel::new();
+        panel.step = ConnectFlowStep::Dashboard;
+        panel.error = Some(PanelError::retryable(
+            timed_out(),
+            RetryAction::SecurityData,
+        ));
+
+        let _ = panel.update_message(ConnectAccountMessage::Retry(RetryAction::SecurityData));
+
+        assert!(panel.error.is_none(), "the card must come down");
+        assert!(
+            matches!(panel.step, ConnectFlowStep::Dashboard),
+            "a dashboard reload must not change the step, got {:?}",
+            panel.step
+        );
+    }
+
+    /// The code-entry bug. A network blip during verify or resend used to
+    /// produce a card whose button ran `Init`, which found no stored session
+    /// and dropped the user back to the email form — off the screen they were
+    /// part-way through. Those failures now carry no target at all, because the
+    /// screen's own Verify/Resend button is the retry.
+    #[test]
+    fn an_otp_screen_failure_offers_no_button_and_stays_put() {
+        let mut panel = ConnectAccountPanel::new();
+        panel.step = ConnectFlowStep::OtpVerification {
+            email: "a@b.co".to_string(),
+            otp: "123456".to_string(),
+            sending: true,
+            is_signup: false,
+            cooldown: 0,
+        };
+
+        let _ = panel.update_message(ConnectAccountMessage::Error(timed_out()));
+
+        let err = panel.error.as_ref().expect("the failure must be shown");
+        assert!(
+            err.retry_button().is_none(),
+            "the screen's own Verify button is the retry; a card button here \
+             navigates the user away"
+        );
+        assert!(
+            matches!(
+                panel.step,
+                ConnectFlowStep::OtpVerification { sending: false, .. }
+            ),
+            "the user must stay on the code screen, got {:?}",
+            panel.step
+        );
     }
 }

@@ -1,5 +1,3 @@
-use std::convert::From;
-
 use iced::Length;
 
 use coincube_ui::{
@@ -7,69 +5,48 @@ use coincube_ui::{
     widget::{Column, Container},
 };
 
-use crate::{
-    app::error::Error,
-    daemon::{client::error::RpcErrorCode, DaemonError},
-};
+use crate::{app::error::Error, user_error::UserError};
 
-/// Simple warning message displayed to non technical user.
-pub struct WarningMessage(String);
-
-impl From<&Error> for WarningMessage {
-    fn from(error: &Error) -> WarningMessage {
-        match error {
-            Error::Config(e) => WarningMessage(e.to_owned()),
-            Error::Wallet(_) => WarningMessage("Wallet error".to_string()),
-            Error::Daemon(e) => match e {
-                DaemonError::Rpc(code, _) => {
-                    if *code == RpcErrorCode::JSONRPC2_INVALID_PARAMS as i32 {
-                        WarningMessage("Some fields are invalid".to_string())
-                    } else {
-                        WarningMessage("Internal error".to_string())
-                    }
-                }
-                DaemonError::Http(Some(code), error) => {
-                    WarningMessage(format!("HTTP error {}: {}", code, error))
-                }
-                DaemonError::Http(None, error) => WarningMessage(format!("HTTP error: {}", error)),
-                DaemonError::Unexpected(_) => WarningMessage("Unknown error".to_string()),
-                DaemonError::Start(_) => WarningMessage("Daemon failed to start".to_string()),
-                DaemonError::ClientNotSupported => {
-                    WarningMessage("Daemon client is not supported".to_string())
-                }
-                DaemonError::NoAnswer | DaemonError::RpcSocket(..) => {
-                    WarningMessage("Communication with Daemon failed".to_string())
-                }
-                DaemonError::DaemonStopped => WarningMessage("Daemon stopped".to_string()),
-                DaemonError::CoinSelectionError => {
-                    WarningMessage("Error when selecting coins for spend".to_string())
-                }
-                DaemonError::NotImplemented => {
-                    WarningMessage("Feature not implemented for this backend".to_string())
-                }
-            },
-            Error::Unexpected(_) => WarningMessage("Unknown error".to_string()),
-            Error::HardwareWallet(_) => WarningMessage("Hardware wallet error".to_string()),
-            Error::Desc(e) => WarningMessage(format!("Descriptor analysis error: '{}'.", e)),
-            Error::Spend(e) => WarningMessage(format!("Spend creation error: '{}'.", e)),
-            Error::ImportExport(e) => WarningMessage(format!("{e}")),
-            Error::RestoreBackup(e) => WarningMessage(format!("Failed to restore backup: {e}")),
-            Error::FiatPrice(e) => WarningMessage(format!("Fiat price error: {}", e)),
-        }
-    }
-}
-
-impl std::fmt::Display for WarningMessage {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
+/// Renders a Vault error through the same card every other failure uses.
+///
+/// Two things changed here. The detail line is the support **reference**, not
+/// the raw error — that string used to be `error.to_string()`, which is how
+/// daemon RPC codes and HTTP internals reached the screen. And the widget is
+/// [`notification::error_card`] rather than a warning banner, so a Vault
+/// failure and a Connect failure look like the same thing to the user: title,
+/// what to do next, `Ref:`. Previously this one crammed title and guidance
+/// together into the bold line, which is not a layout any other error used.
+///
+/// No action button: `warn` is a shared banner with no idea what the caller
+/// could re-run. Screens that can retry offer their own control.
 pub fn warn<'a, T: 'a + Clone>(error: Option<&Error>) -> Container<'a, T> {
     if let Some(w) = error {
-        let message: WarningMessage = w.into();
-        notification::warning(message.to_string(), w.to_string()).width(Length::Fill)
+        let u: UserError = w.into();
+        notification::error_card(u.title, u.guidance, u.reference, None).width(Length::Fill)
     } else {
         Container::new(Column::new()).width(Length::Fill)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::daemon::DaemonError;
+
+    /// `warn` runs on every frame, so the conversion it calls must not log.
+    /// This is a documentation test as much as a behavioural one: it builds the
+    /// banner repeatedly, which is exactly what iced does.
+    #[test]
+    fn rendering_the_banner_repeatedly_is_free_of_side_effects() {
+        let e = Error::Daemon(DaemonError::DaemonStopped);
+        for _ in 0..100 {
+            let _: Container<'_, ()> = warn(Some(&e));
+        }
+    }
+
+    /// The empty case must still produce a widget, not panic or vanish.
+    #[test]
+    fn no_error_renders_an_empty_container() {
+        let _: Container<'_, ()> = warn(None);
     }
 }

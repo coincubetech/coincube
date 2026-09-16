@@ -187,7 +187,7 @@ impl State for VaultReceivePanel {
                 ) {
                     Ok(cmd) => cmd,
                     Err(e) => {
-                        let err_msg = e.to_string();
+                        let err_msg = crate::user_error::report(&e);
                         self.warning = Some(e);
                         Task::done(Message::View(view::Message::ShowError(err_msg)))
                     }
@@ -203,7 +203,7 @@ impl State for VaultReceivePanel {
                         Task::none()
                     }
                     Err(e) => {
-                        let err_msg = e.to_string();
+                        let err_msg = crate::user_error::report(&e);
                         self.warning = Some(e);
                         Task::done(Message::View(view::Message::ShowError(err_msg)))
                     }
@@ -304,7 +304,7 @@ impl State for VaultReceivePanel {
                         }
                     }
                     Err(e) => {
-                        let err_msg = e.to_string();
+                        let err_msg = crate::user_error::report(&e);
                         self.warning = Some(e);
                         return Task::done(Message::View(view::Message::ShowError(err_msg)));
                     }
@@ -453,7 +453,7 @@ impl VerifyAddressModal {
                 Ok(cmd) => cmd.map(Message::HardwareWallets),
                 Err(e) => {
                     let err: Error = e.into();
-                    let err_msg = err.to_string();
+                    let err_msg = crate::user_error::report(&err);
                     self.warning = Some(err);
                     Task::done(Message::View(view::Message::ShowError(err_msg)))
                 }
@@ -461,7 +461,7 @@ impl VerifyAddressModal {
             Message::Verified(fg, res) => {
                 self.chosen_hws.remove(&fg);
                 if let Err(e) = res {
-                    let err_msg = e.to_string();
+                    let err_msg = crate::user_error::report(&e);
                     self.warning = Some(e);
                     return Task::done(Message::View(view::Message::ShowError(err_msg)));
                 }

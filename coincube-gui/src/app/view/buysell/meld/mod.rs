@@ -229,7 +229,13 @@ impl MeldState {
                     err = message;
                 }
 
-                let msg = match description {
+                // `description` is our internal step code and `err` is
+                // whatever the Meld API returned — neither is user copy, and
+                // the old format put both on screen as
+                // "MELD | QUOTE_ACQUISITION_FAILED | <upstream payload>".
+                // The provider's own code becomes the support reference so it
+                // is still greppable against their dashboard.
+                let (title, guidance) = match description {
                     "QUOTE_ACQUISITION_FAILED" => {
                         if let Some(MeldFlowStep::AddressSelection {
                             processing_request, ..
@@ -238,7 +244,10 @@ impl MeldState {
                             *processing_request = false;
                         }
 
-                        format!("MELD | Unable to acquire Quotes from API | {}", err)
+                        (
+                            "Couldn't get a quote",
+                            "Our payment provider didn't return any prices. Check your internet connection and try again in a moment.",
+                        )
                     }
                     "WEBVIEW_INIT_FAILURE" => {
                         // reset webview loading state
@@ -249,10 +258,20 @@ impl MeldState {
                             *webview_pending = false;
                         }
 
-                        format!("MELD | {}", err)
+                        (
+                            "Couldn't open the payment page",
+                            "Close this and start the purchase again. If it keeps failing, contact support and quote the reference below.",
+                        )
                     }
-                    desc => format!("MELD | {} | {}", desc, err),
+                    _ => (
+                        "That didn't work",
+                        "Check the details and try again. If it keeps failing, contact support and quote the reference below.",
+                    ),
                 };
+
+                let msg =
+                    crate::user_error::UserError::logged(title, guidance, description, true, &err)
+                        .toast();
 
                 return Some(iced::Task::done(view::Message::ShowError(msg)));
             }

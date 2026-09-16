@@ -558,9 +558,20 @@ impl CoincubeClient {
     /// loopback URLs are accepted.
     #[cfg(test)]
     pub fn for_test(base_url: impl Into<String>) -> Self {
+        Self::for_test_with_timeout(base_url, std::time::Duration::from_secs(5))
+    }
+
+    /// As [`Self::for_test`], with the request timeout set explicitly so a test
+    /// can provoke a real timeout against an unresponsive socket without
+    /// waiting out the default.
+    #[cfg(test)]
+    pub fn for_test_with_timeout(
+        base_url: impl Into<String>,
+        timeout: std::time::Duration,
+    ) -> Self {
         Self {
             client: reqwest::ClientBuilder::new()
-                .timeout(std::time::Duration::from_secs(5))
+                .timeout(timeout)
                 .https_only(false)
                 .build()
                 .unwrap(),
@@ -813,7 +824,11 @@ impl CoincubeClient {
             .map_err(|e| e.to_string())?
             .check_success()
             .await
-            .map_err(|e| format!("HTTP {}: {}", e.status_code, e.message()))?;
+            .map_err(|e| {
+                log::error!("[SIDESHIFT] HTTP {}: {}", e.status_code, e.raw_text());
+                e.message()
+                    .unwrap_or_else(|| "Unexpected response".to_string())
+            })?;
         let config: crate::services::sideshift::SideshiftConfig =
             res.json().await.map_err(|e| e.to_string())?;
         Ok(config.affiliate_id)

@@ -55,7 +55,9 @@ impl State for AboutSettingsState {
                     }
                 }
                 Err(e) => {
-                    return Task::done(Message::View(view::Message::ShowError(e.to_string())));
+                    return Task::done(Message::View(view::Message::ShowError(
+                        crate::user_error::report(&e),
+                    )));
                 }
             },
             Message::View(view::Message::Settings(

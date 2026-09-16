@@ -13,6 +13,7 @@ use crate::{
         fiat::{Currency, PriceSource},
         sideshift::{ShiftQuote, ShiftResponse, ShiftStatus, SideshiftNetwork},
     },
+    user_error::UserError,
 };
 use coincubed::config::BitcoindConfig;
 use zeroize::Zeroizing;
@@ -1013,7 +1014,13 @@ pub enum LiquidReceiveMessage {
     CloseQrCode,
     DismissCelebration,
     GenerateAddress,
-    AddressGenerated(ReceiveMethod, Result<String, String>),
+    /// Carries the SDK error itself, not its `to_string()`: the receive panel
+    /// renders this, and the raw Breez string is a GraphQL/swap-service trace.
+    /// `crate::user_error` turns it into copy at the point of display.
+    AddressGenerated(
+        ReceiveMethod,
+        Result<String, crate::app::breez_liquid::BreezError>,
+    ),
     AmountInput(String),
     UsdtAmountInput(String),
     DescriptionInput(String),
@@ -1470,6 +1477,31 @@ impl From<SettingsMessage> for Message {
     }
 }
 
+/// What the error card's "Try again" button re-runs.
+///
+/// The card used to dispatch [`ConnectAccountMessage::Init`] no matter which
+/// operation had failed, which made the button wrong in two directions: on the
+/// dashboard `Init` returns early and the button did nothing, and on the
+/// code-entry screen it fell through to the login form and threw the user off
+/// the screen they were on.
+///
+/// Only operations that can be re-run from the card appear here. A failure on a
+/// screen that already has its own control — the sign-in form's Continue, the
+/// code screen's Verify, a dialog's Submit — carries no action: that control is
+/// the retry, and a second one beside it is noise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetryAction {
+    /// Re-read the stored session and re-run the token refresh. This is the
+    /// reported bug's path: a refresh that timed out.
+    Session,
+    /// Reload the Security tab's verified devices and login activity.
+    SecurityData,
+    /// Reload the signed-in user's profile.
+    UserProfile,
+    /// Reload the billing history list.
+    BillingHistory,
+}
+
 /// Account-level Connect messages (login/session, plan, security, etc.).
 #[derive(Debug, Clone)]
 pub enum ConnectAccountMessage {
@@ -1492,7 +1524,10 @@ pub enum ConnectAccountMessage {
         cubes: Option<usize>,
         generation: u64,
     },
-    RefreshFailed(String),
+    /// A session refresh failed for a reason that is *not* an auth rejection
+    /// (a timeout, an offline device, a 5xx). Carries presentation-ready copy
+    /// rather than a raw error string — see [`crate::user_error`].
+    RefreshFailed(UserError),
     LogOut,
     EmailChanged(String),
     SubmitLogin,
@@ -1516,7 +1551,18 @@ pub enum ConnectAccountMessage {
     VerifiedDeviceDeleted(u32, u64, Result<(), String>),
     CopyToClipboard(String),
     Contacts(ContactsMessage),
-    Error(String),
+    /// A Connect-account operation failed. Carries presentation-ready copy;
+    /// never a raw `CoincubeError` string.
+    ///
+    /// Every sender of this variant is an action started from a form or dialog
+    /// that is still on screen, so the resulting card offers no button of its
+    /// own — see [`RetryAction`].
+    Error(UserError),
+    /// The Security tab's background loads failed. Separate from [`Self::Error`]
+    /// because this one *is* re-runnable from the card.
+    SecurityDataFailed(UserError),
+    /// The error card's "Try again" was pressed.
+    Retry(RetryAction),
     // --- Plan & Billing ---
     FeaturesLoaded(Option<crate::services::coincube::FeaturesResponse>, u64),
     BillingCycleSelected(crate::services::coincube::BillingCycle),
@@ -1548,7 +1594,7 @@ pub enum ConnectAccountMessage {
     /// User profile refreshed (billing history view update)
     UserProfileLoaded(crate::services::coincube::User),
     /// User profile refresh failed (non-auth error)
-    UserProfileFailed(String),
+    UserProfileFailed(UserError),
     // --- Campaign code redemption (v2 campaign engine) ---
     /// Settings → Plan code field edited.
     CampaignCodeChanged(String),

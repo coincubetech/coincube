@@ -364,9 +364,10 @@ pub fn update(
                     // flag — we don't want to defer the toast
                     // indefinitely because of a transient error.
                     rk.nudge_on_next_status_load = false;
-                    return Task::done(Message::View(view::Message::ShowError(format!(
-                        "Couldn't load Recovery Kit status: {}",
-                        e
+                    return Task::done(Message::View(view::Message::ShowError(kit_toast(
+                        "Couldn't load your Recovery Kit",
+                        "Check your internet connection and try again.",
+                        &e,
                     ))));
                 }
             }
@@ -694,7 +695,11 @@ pub fn update(
                     // otherwise it keeps showing the pre-upload cache.
                     let reload = load_status(rk, client, server_cube_id);
                     Task::batch([
-                        Task::done(Message::View(view::Message::ShowError(e))),
+                        Task::done(Message::View(view::Message::ShowError(kit_toast(
+                            "Couldn't finish sealing your Recovery Kit",
+                            "Your phone's copy wasn't saved. Try again from Settings.",
+                            &e,
+                        )))),
                         reload,
                     ])
                 }
@@ -763,7 +768,11 @@ pub fn update(
                     // password (and re-enter their PIN to decrypt
                     // the mnemonic again). See `restore_entry_on_upload_error`.
                     restore_entry_on_upload_error(&mut rk.flow, &e);
-                    Task::done(Message::View(view::Message::ShowError(e)))
+                    Task::done(Message::View(view::Message::ShowError(kit_toast(
+                        "Couldn't save your Recovery Kit",
+                        "Your password is still filled in. Check your internet connection and try again.",
+                        &e,
+                    ))))
                 }
             }
         }
@@ -858,7 +867,11 @@ pub fn update(
                         Task::none()
                     };
                     Task::batch([
-                        Task::done(Message::View(view::Message::ShowError(message))),
+                        Task::done(Message::View(view::Message::ShowError(kit_toast(
+                            "Couldn't remove your Recovery Kit",
+                            "Some copies may still be stored. Reopen Settings to see what's left, then try again.",
+                            &message,
+                        )))),
                         clear_stale_password,
                         reload,
                     ])
@@ -1145,6 +1158,25 @@ fn submit_password(
             )))
         },
     )
+}
+
+/// Wrap a Recovery Kit failure for display.
+///
+/// The failures in this module are internal `String`s assembled deep in the
+/// upload/remove paths ("serialize descriptor: …", "PIN verification task
+/// failed: …", a bare `CoincubeError`). Sanitising each producer would mean
+/// touching a dozen call sites; this is the one boundary they all cross on
+/// their way to a toast, so it is where the detail goes to the log and the
+/// user gets a sentence instead.
+fn kit_toast(title: &str, guidance: &str, detail: &str) -> String {
+    crate::user_error::UserError::logged(
+        title,
+        guidance,
+        crate::user_error::CC_BACKUP,
+        true,
+        detail,
+    )
+    .toast()
 }
 
 fn set_pw_error(rk: &mut RecoveryKit, msg: &str) {
@@ -2027,7 +2059,13 @@ fn update_cube_settings(
                 Some(s)
             })
             .await
-            .map_err(|e| format!("Failed to update settings: {}", e))
+            .map_err(|e| {
+                kit_toast(
+                    "Couldn't save that setting",
+                    "Try again. If it keeps failing, contact support and quote the reference below.",
+                    &e.to_string(),
+                )
+            })
         },
         |res: Result<(), String>| match res {
             Ok(()) => Message::SettingsSaved,

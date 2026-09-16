@@ -2345,8 +2345,12 @@ impl Home {
                         log::error!("duress: failed to persist enrollment: {e}");
                         // Surface via the Connect panel's error display.
                         Task::done(Message::View(ViewMessage::ConnectAccount(
-                            ConnectAccountMessage::Error(format!(
-                                "Couldn't finish enabling duress mode: {e}. Please try again."
+                            ConnectAccountMessage::Error(crate::user_error::UserError::logged(
+                                "Couldn't finish enabling duress mode",
+                                "Try again. If it keeps failing, contact support and quote the reference below.",
+                                crate::user_error::CC_API_BADRESP,
+                                true,
+                                e,
                             )),
                         )))
                     }

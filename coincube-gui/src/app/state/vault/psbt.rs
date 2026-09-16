@@ -454,7 +454,7 @@ impl PsbtState {
                         return cmd;
                     }
                     Err(e) => {
-                        let err_msg = e.to_string();
+                        let err_msg = crate::user_error::report(&e);
                         self.warning = Some(e);
                         return Task::done(Message::View(view::Message::ShowError(err_msg)));
                     }
@@ -541,7 +541,7 @@ impl PsbtState {
                     }));
                 }
                 Err(e) => {
-                    let err_msg = e.to_string();
+                    let err_msg = crate::user_error::report(&e);
                     self.warning = Some(e);
                     return Task::done(Message::View(view::Message::ShowError(err_msg)));
                 }
@@ -621,7 +621,7 @@ impl Modal for SaveModal {
             Message::Updated(res) => match res {
                 Ok(()) => self.saved = true,
                 Err(e) => {
-                    let err_msg = e.to_string();
+                    let err_msg = crate::user_error::report(&e);
                     self.error = Some(e);
                     return Task::done(Message::View(view::Message::ShowError(err_msg)));
                 }
@@ -730,7 +730,7 @@ impl Modal for BroadcastModal {
                         );
                     }
                     Err(e) => {
-                        let err_msg = e.to_string();
+                        let err_msg = crate::user_error::report(&e);
                         self.error = Some(e);
                         return Task::done(Message::View(view::Message::ShowError(err_msg)));
                     }
@@ -898,7 +898,7 @@ impl Modal for DeleteModal {
             Message::Updated(res) => match res {
                 Ok(()) => self.deleted = true,
                 Err(e) => {
-                    let err_msg = e.to_string();
+                    let err_msg = crate::user_error::report(&e);
                     self.error = Some(e);
                     return Task::done(Message::View(view::Message::ShowError(err_msg)));
                 }
@@ -1075,8 +1075,19 @@ impl BorderWalletReconstructionState {
                                     return Some((self.target_fingerprint, mnemonic));
                                 }
                                 Err(e) => {
-                                    self.error =
-                                        Some(format!("Mnemonic construction failed: {:?}", e));
+                                    // The raw error names BIP39 internals the
+                                    // user can do nothing with; what matters is
+                                    // that the pattern doesn't reconstruct.
+                                    log::error!(
+                                        "[{}] border wallet mnemonic: {}",
+                                        crate::user_error::CC_WALLET,
+                                        e
+                                    );
+                                    self.error = Some(
+                                        "That pattern doesn't rebuild this wallet's recovery phrase. \
+                                         Check the grid and your cell order, then try again."
+                                            .to_string(),
+                                    );
                                 }
                             }
                         }
@@ -1102,7 +1113,9 @@ impl BorderWalletReconstructionState {
                 } else {
                     match self.pattern.add(cell) {
                         Ok(()) => self.error = None,
-                        Err(e) => self.error = Some(format!("{:?}", e)),
+                        Err(e) => {
+                            self.error = Some(crate::user_error::border_wallet_cell_message(&e))
+                        }
                     }
                 }
                 self.refresh_checksum();
@@ -1776,7 +1789,7 @@ impl Modal for SignModal {
                     Err(e) => {
                         self.display_modal = true;
                         if !matches!(e, Error::HardwareWallet(async_hwi::Error::UserRefused)) {
-                            let err_msg = e.to_string();
+                            let err_msg = crate::user_error::report(&e);
                             self.error = Some(e);
                             return Task::done(Message::View(view::Message::ShowError(err_msg)));
                         }
@@ -1831,13 +1844,18 @@ impl Modal for SignModal {
                 Ok(()) => match self.wallet.main_descriptor.partial_spend_info(&tx.psbt) {
                     Ok(sigs) => tx.sigs = sigs,
                     Err(e) => {
-                        let err_msg = e.to_string();
-                        self.error = Some(Error::Unexpected(err_msg.clone()));
+                        // Keep the descriptor error as itself rather than
+                        // flattening it into `Unexpected(String)`: `Desc` has
+                        // copy that names the failing part of the descriptor,
+                        // and flattening threw that away along with the class.
+                        let e = Error::Desc(e);
+                        let err_msg = crate::user_error::report(&e);
+                        self.error = Some(e);
                         return Task::done(Message::View(view::Message::ShowError(err_msg)));
                     }
                 },
                 Err(e) => {
-                    let err_msg = e.to_string();
+                    let err_msg = crate::user_error::report(&e);
                     self.error = Some(e);
                     return Task::done(Message::View(view::Message::ShowError(err_msg)));
                 }
@@ -1848,8 +1866,9 @@ impl Modal for SignModal {
                     return cmd.map(Message::HardwareWallets);
                 }
                 Err(e) => {
-                    let err_msg = e.to_string();
-                    self.error = Some(e.into());
+                    let e: Error = e.into();
+                    let err_msg = crate::user_error::report(&e);
+                    self.error = Some(e);
                     return Task::done(Message::View(view::Message::ShowError(err_msg)));
                 }
             },

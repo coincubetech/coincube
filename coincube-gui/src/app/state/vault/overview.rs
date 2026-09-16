@@ -178,7 +178,7 @@ impl State for VaultOverview {
             }
             Message::Coins(res) => match res {
                 Err(e) => {
-                    let err_msg = e.to_string();
+                    let err_msg = crate::user_error::report(&e);
                     self.warning = Some(e);
                     return Task::done(Message::View(view::Message::ShowError(err_msg)));
                 }
@@ -198,7 +198,7 @@ impl State for VaultOverview {
             },
             Message::Payments(res) => match res {
                 Err(e) => {
-                    let err_msg = e.to_string();
+                    let err_msg = crate::user_error::report(&e);
                     self.warning = Some(e);
                     return Task::done(Message::View(view::Message::ShowError(err_msg)));
                 }
@@ -238,7 +238,7 @@ impl State for VaultOverview {
             Message::PaymentsExtension(res) => match res {
                 Err(e) => {
                     self.processing = false;
-                    let err_msg = e.to_string();
+                    let err_msg = crate::user_error::report(&e);
                     self.warning = Some(e);
                     return Task::done(Message::View(view::Message::ShowError(err_msg)));
                 }
@@ -288,7 +288,7 @@ impl State for VaultOverview {
                     self.selected_event = Some(event);
                 }
                 Err(e) => {
-                    let err_msg = e.to_string();
+                    let err_msg = crate::user_error::report(&e);
                     self.warning = Some(e);
                     return Task::done(Message::View(view::Message::ShowError(err_msg)));
                 }
@@ -329,7 +329,7 @@ impl State for VaultOverview {
                         return cmd;
                     }
                     Err(e) => {
-                        let err_msg = e.to_string();
+                        let err_msg = crate::user_error::report(&e);
                         self.warning = Some(e);
                         return Task::done(Message::View(view::Message::ShowError(err_msg)));
                     }

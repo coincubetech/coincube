@@ -80,12 +80,34 @@ impl LiquidOverview {
                     })
                     .unwrap_or(0);
 
+                // Fixed copy, and the SDK detail goes to the log rather than
+                // the screen — but it does have to go *somewhere*, or a user
+                // reporting "couldn't fetch balance" leaves nothing to look up.
+                for detail in [info.as_ref().err(), payments.as_ref().err()]
+                    .iter()
+                    .flatten()
+                {
+                    log::error!(
+                        "[{}] liquid overview: {}",
+                        crate::user_error::CC_LQD_SDK,
+                        detail
+                    );
+                }
                 let error = match (&info, &payments) {
-                    (Err(_), Err(_)) => Some("Couldn't fetch balance or transactions".to_string()),
-                    (Err(_), _) => Some("Couldn't fetch account balance".to_string()),
-                    (_, Err(_)) => Some("Couldn't fetch recent transactions".to_string()),
+                    (Err(_), Err(_)) => Some("Couldn't fetch balance or transactions"),
+                    (Err(_), _) => Some("Couldn't fetch account balance"),
+                    (_, Err(_)) => Some("Couldn't fetch recent transactions"),
                     _ => None,
-                };
+                }
+                .map(|title| {
+                    crate::user_error::UserError::new(
+                        title,
+                        crate::user_error::RETRY_GUIDANCE,
+                        crate::user_error::CC_LQD_SDK,
+                        true,
+                    )
+                    .toast()
+                });
 
                 let payments = payments.unwrap_or_default();
 
@@ -307,8 +329,10 @@ impl State for LiquidOverview {
                     }
                 }
                 view::LiquidOverviewMessage::Error(err) => {
-                    self.error = Some(err.to_string());
-                    return Task::done(Message::View(view::Message::ShowError(err.to_string())));
+                    // Already presentation copy: the producer built it with
+                    // `UserError::toast()` and sent the SDK detail to the log.
+                    self.error = Some(err.clone());
+                    return Task::done(Message::View(view::Message::ShowError(err.clone())));
                 }
                 view::LiquidOverviewMessage::RefreshRequested => {
                     return self.load_balance();
