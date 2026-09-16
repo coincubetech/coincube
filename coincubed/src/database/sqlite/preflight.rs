@@ -234,7 +234,13 @@ pub fn refuse_orphan_sidecars(db_path: &Path) -> Result<(), PreflightError> {
 }
 
 /// Translate SQLite's refusal codes into the typed reasons above.
-fn sqlite_error(db_path: &Path, e: rusqlite::Error) -> PreflightError {
+///
+/// `SQLITE_CANTOPEN` covers more than a missing file (permissions, a directory in the way,
+/// an exhausted descriptor table, …), so it is reported as [`PreflightError::NotFound`] only
+/// when the path is confirmed absent at this point; otherwise the SQLite error is preserved
+/// so the real reason is not hidden behind a wrong one. The header gate has normally caught
+/// absence before SQLite is opened, so this branch is the file vanishing in between.
+pub(super) fn sqlite_error(db_path: &Path, e: rusqlite::Error) -> PreflightError {
     if let rusqlite::Error::SqliteFailure(ffi_err, _) = &e {
         match ffi_err.extended_code {
             rusqlite::ffi::SQLITE_READONLY_ROLLBACK
@@ -245,7 +251,7 @@ fn sqlite_error(db_path: &Path, e: rusqlite::Error) -> PreflightError {
             rusqlite::ffi::SQLITE_NOTADB => {
                 return PreflightError::NotSqliteDatabase(db_path.to_path_buf())
             }
-            rusqlite::ffi::SQLITE_CANTOPEN => {
+            rusqlite::ffi::SQLITE_CANTOPEN if !db_path.exists() => {
                 return PreflightError::NotFound(db_path.to_path_buf())
             }
             _ => {}

@@ -1379,10 +1379,11 @@ CREATE TABLE labels (
         let options = dummy_options();
 
         let db = SqliteDb::new(db_path.clone(), Some(options.clone()), &secp).unwrap();
-        db.sanity_check(ChainId::Testnet, &options.main_descriptor)
+        assert!(db
+            .sanity_check(ChainId::Testnet, &options.main_descriptor)
             .unwrap_err()
             .to_string()
-            .contains("Database was created for chain");
+            .contains("Database was created for chain"));
         // The encoding twin is a different chain too: a mainnet database is not a BTCB2 one.
         assert!(matches!(
             db.sanity_check(ChainId::BitcoinBlake2b, &options.main_descriptor),
@@ -1395,10 +1396,11 @@ CREATE TABLE labels (
         let other_desc_str = "wsh(andor(pk([aabbccdd]tpubDExU4YLJkyQ9RRbVScQq2brFxWWha7WmAUByPWyaWYwmcTv3Shx8aHp6mVwuE5n4TeM4z5DTWGf2YhNPmXtfvyr8cUDVvA3txdrFnFgNdF7/<0;1>/*),older(10000),pk([aabbccdd]tpubD8LYfn6njiA2inCoxwM7EuN3cuLVcaHAwLYeups13dpevd3nHLRdK9NdQksWXrhLQVxcUZRpnp5CkJ1FhE61WRAsHxDNAkvGkoQkAeWDYjV/<0;1>/*)))";
         let other_desc = CoincubeDescriptor::from_str(other_desc_str).unwrap();
         let db = SqliteDb::new(db_path.clone(), Some(options.clone()), &secp).unwrap();
-        db.sanity_check(ChainId::Bitcoin, &other_desc)
+        assert!(db
+            .sanity_check(ChainId::Bitcoin, &other_desc)
             .unwrap_err()
             .to_string()
-            .contains("Database descriptor mismatch");
+            .contains("Database descriptor mismatch"));
         fs::remove_file(&db_path).unwrap();
         // TODO: version check
 
@@ -4164,6 +4166,45 @@ CREATE TABLE labels (
             assert_eq!(table_info(&db_path, "tip").len(), 3);
             maybe_apply_migration(&db_path, &[]).unwrap();
             assert_eq!(read_stored_identity(&db_path).unwrap().version, 9);
+            fs::remove_dir_all(tmp_dir).unwrap();
+        }
+
+        #[test]
+        fn cantopen_is_not_found_only_when_the_file_is_actually_absent() {
+            use crate::database::sqlite::preflight::sqlite_error;
+            fn cantopen() -> rusqlite::Error {
+                rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CANTOPEN),
+                    Some("unable to open database file".to_string()),
+                )
+            }
+            let tmp_dir = tmp_dir();
+            fs::create_dir_all(&tmp_dir).unwrap();
+            // Absent: the file is genuinely gone, so "not found" is the truth.
+            let missing = tmp_dir.join("coincubed.sqlite3");
+            assert!(matches!(
+                sqlite_error(&missing, cantopen()),
+                PreflightError::NotFound(p) if p == missing
+            ));
+            // Present: SQLite could not open an existing file for some other reason —
+            // the SQLite error is preserved, not relabelled as a missing file.
+            let (_, present, _) = v8_fixture(ChainId::Bitcoin);
+            match sqlite_error(&present, cantopen()) {
+                PreflightError::Sqlite(rusqlite::Error::SqliteFailure(e, msg)) => {
+                    assert_eq!(e.extended_code, rusqlite::ffi::SQLITE_CANTOPEN);
+                    assert_eq!(msg.as_deref(), Some("unable to open database file"));
+                }
+                other => panic!("expected the SQLite error preserved, got {:?}", other),
+            }
+            // And the other classifications are unaffected by the path's existence.
+            let notadb = rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_NOTADB),
+                None,
+            );
+            assert!(matches!(
+                sqlite_error(&present, notadb),
+                PreflightError::NotSqliteDatabase(_)
+            ));
             fs::remove_dir_all(tmp_dir).unwrap();
         }
 
