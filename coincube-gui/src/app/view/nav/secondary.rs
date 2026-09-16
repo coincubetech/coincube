@@ -38,7 +38,7 @@ pub fn rail<'a>(menu: &Menu, ctx: &NavContext<'a>) -> Element<'a, Message> {
 
     container(list)
         .width(Length::Fixed(RAIL_WIDTH))
-        .height(Length::Fill)
+        .height(Length::Shrink)
         .style(theme::container::sidebar_primary)
         .into()
 }
