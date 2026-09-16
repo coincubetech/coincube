@@ -60,15 +60,18 @@ pub fn managed_conf_lock_path(coincube_datadir: &CoincubeDirectory) -> PathBuf {
 
 /// How long to keep trying for the lock, as (attempts, delay between them).
 ///
-/// The same bound as the node-identity marker lock: real holders finish in
-/// microseconds (a read, an allocation, a rename), so contention is rare and
-/// brief, but a wedged holder must not wedge every start behind it.
+/// The same production bound as the node-identity marker lock: real holders
+/// finish in microseconds (a read, an allocation, a rename), so contention is
+/// rare and brief, but a wedged holder must not wedge every start behind it.
 ///
 /// Under test the default is *generous* (a loaded CI runner can take well
 /// over a second to schedule a thread and flush a file), so a test whose
-/// contenders are meant to succeed never fails on wall-clock luck; a test that
-/// wants the `Busy` path sets a short bound for its own thread with
-/// [`with_quick_lock_bound`] instead of waiting the default out.
+/// contenders are meant to succeed rarely fails on wall-clock luck — margin,
+/// not immunity; a test that wants the `Busy` path sets a short bound for its
+/// own thread with [`with_quick_lock_bound`] instead of waiting the default
+/// out. The marker lock has the same shape with its own, separate override
+/// (`bitcoind::with_quick_marker_lock_bound`); neither override reaches the
+/// other lock or a spawned thread.
 fn lock_acquisition_bound() -> (u32, std::time::Duration) {
     #[cfg(not(test))]
     {
