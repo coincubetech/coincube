@@ -1,0 +1,129 @@
+name: BTCB2 Regtest Harness
+
+# The two-chain Bitcoin Blake2b harness (tests/test_btcb2_harness.py) builds a
+# BLAKE2b-aware Esplora indexer from source and downloads two Bitcoin Knots
+# releases, so it only runs on pull requests carrying the `btcb2` label or when
+# dispatched by hand — never on every push — to protect Actions minutes.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+  workflow_dispatch:
+
+concurrency:
+  group: btcb2-regtest-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  KNOTS_LEGACY_VERSION: 29.3.knots20260507
+  KNOTS_BLAKE2B_VERSION: 29.4.1.knots20260508
+  ELECTRS_BLAKE2B_COMMIT: 4453cac61979322c0260f4b90e899379ae606206
+
+jobs:
+  btcb2-harness:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'btcb2')
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.1
+
+      - name: Install build dependencies (rocksdb for electrs)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang libclang-dev cmake
+
+      - name: Setup Python dependencies
+        run: pip install --break-system-packages -r tests/requirements.txt
+
+      - name: Cache target/
+        uses: actions/cache@v5
+        with:
+          path: target
+          key: ${{ runner.os }}-target-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-target-
+
+      - name: Cache knots_verify
+        uses: actions/cache@v5
+        with:
+          path: tests/tools/knots_verify/target/release/knots_verify
+          key: ${{ runner.os }}-knots-verify-${{ hashFiles('tests/tools/knots_verify/Cargo.lock', 'tests/tools/knots_verify/src/main.rs', 'coincube-gui/assets/knots_signing_key.asc') }}
+
+      - name: Cache verified Knots releases
+        uses: actions/cache@v5
+        with:
+          path: tests/tools/knots
+          key: ${{ runner.os }}-knots-${{ env.KNOTS_LEGACY_VERSION }}-${{ env.KNOTS_BLAKE2B_VERSION }}
+
+      - name: Cache electrs (BLAKE2b) build
+        uses: actions/cache@v5
+        with:
+          path: |
+            tests/tools/electrs-blake2b/target/release/electrs
+            tests/tools/electrs-blake2b/.built-${{ env.ELECTRS_BLAKE2B_COMMIT }}
+          key: ${{ runner.os }}-electrs-blake2b-${{ env.ELECTRS_BLAKE2B_COMMIT }}
+
+      - name: Build coincubed
+        run: cargo build --release --package coincubed
+
+      - name: Build knots_verify
+        run: |
+          if [ ! -x tests/tools/knots_verify/target/release/knots_verify ]; then
+            (cd tests/tools/knots_verify && cargo build --release --locked)
+          fi
+
+      - name: Fetch and verify both Bitcoin Knots releases
+        # Each archive's checksum must be listed in the release SHA256SUMS and
+        # SHA256SUMS.asc must verify against the Knots signing key the desktop
+        # vendors (coincube-gui/assets/knots_signing_key.asc). Nothing is
+        # extracted otherwise — a stand-in node would make the B4.2 rows lie.
+        run: |
+          set -e
+          echo "KNOTS_LEGACY_PATH=$(tests/tools/fetch_knots.sh "$KNOTS_LEGACY_VERSION")" >> "$GITHUB_ENV"
+          echo "KNOTS_BLAKE2B_PATH=$(tests/tools/fetch_knots.sh "$KNOTS_BLAKE2B_VERSION")" >> "$GITHUB_ENV"
+
+      - name: Build retropex/electrs (BLAKE2b-aware Esplora indexer)
+        run: |
+          set -e
+          echo "ELECTRS_BLAKE2B_PATH=$(tests/tools/fetch_electrs_blake2b.sh)" >> "$GITHUB_ENV"
+
+      - name: Run the two-chain harness
+        env:
+          VERBOSE: 0
+          LOG_LEVEL: debug
+          TIMEOUT: 120
+          # Failing tests keep their datadirs here so the logs can be collected.
+          TEST_DIR: ${{ github.workspace }}/test-datadirs
+        run: |
+          set -xe
+          mkdir -p "$TEST_DIR"
+          "$KNOTS_LEGACY_PATH" --version | head -1
+          "$KNOTS_BLAKE2B_PATH" --version | head -1
+          pytest tests/test_btcb2_harness.py -vvv
+
+      - name: Collect logs from failed tests
+        if: failure()
+        run: |
+          set -x
+          dest="$GITHUB_WORKSPACE/failure-logs"
+          mkdir -p "$dest"
+          cd "$GITHUB_WORKSPACE/test-datadirs" || exit 0
+          find . -type f \( -name 'log' -o -name 'debug.log' \) -size -50M |
+            while read -r f; do
+              mkdir -p "$dest/$(dirname "$f")"
+              cp "$f" "$dest/$f"
+            done
+          du -sh "$dest"
+
+      - name: Upload logs from failed tests
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: failure-logs-btcb2-harness
+          path: failure-logs
+          retention-days: 14
+          if-no-files-found: warn
