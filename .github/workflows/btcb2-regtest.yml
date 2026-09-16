@@ -66,9 +66,11 @@ jobs:
       - name: Cache electrs (BLAKE2b) build
         uses: actions/cache@v5
         with:
+          # Built outside the checkout: inside it Cargo would treat the electrs
+          # crate as a member of Coincube's workspace and refuse to build it.
           path: |
-            tests/tools/electrs-blake2b/target/release/electrs
-            tests/tools/electrs-blake2b/.built-${{ env.ELECTRS_BLAKE2B_COMMIT }}
+            ~/.cache/coincube/electrs-blake2b/target/release/electrs
+            ~/.cache/coincube/electrs-blake2b/.built-${{ env.ELECTRS_BLAKE2B_COMMIT }}
           key: ${{ runner.os }}-electrs-blake2b-${{ env.ELECTRS_BLAKE2B_COMMIT }}
 
       - name: Build coincubed
@@ -85,21 +87,30 @@ jobs:
         # SHA256SUMS.asc must verify against the Knots signing key the desktop
         # vendors (coincube-gui/assets/knots_signing_key.asc). Nothing is
         # extracted otherwise — a stand-in node would make the B4.2 rows lie.
+        # Assign first, then export: `echo "X=$(cmd)"` succeeds even when cmd
+        # fails, which would export an empty path and let the harness skip.
         run: |
           set -e
-          echo "KNOTS_LEGACY_PATH=$(tests/tools/fetch_knots.sh "$KNOTS_LEGACY_VERSION")" >> "$GITHUB_ENV"
-          echo "KNOTS_BLAKE2B_PATH=$(tests/tools/fetch_knots.sh "$KNOTS_BLAKE2B_VERSION")" >> "$GITHUB_ENV"
+          legacy="$(tests/tools/fetch_knots.sh "$KNOTS_LEGACY_VERSION")"
+          blake2b="$(tests/tools/fetch_knots.sh "$KNOTS_BLAKE2B_VERSION")"
+          test -x "$legacy" && test -x "$blake2b"
+          echo "KNOTS_LEGACY_PATH=$legacy" >> "$GITHUB_ENV"
+          echo "KNOTS_BLAKE2B_PATH=$blake2b" >> "$GITHUB_ENV"
 
       - name: Build retropex/electrs (BLAKE2b-aware Esplora indexer)
         run: |
           set -e
-          echo "ELECTRS_BLAKE2B_PATH=$(tests/tools/fetch_electrs_blake2b.sh)" >> "$GITHUB_ENV"
+          electrs="$(tests/tools/fetch_electrs_blake2b.sh)"
+          test -x "$electrs"
+          echo "ELECTRS_BLAKE2B_PATH=$electrs" >> "$GITHUB_ENV"
 
       - name: Run the two-chain harness
         env:
           VERBOSE: 0
           LOG_LEVEL: debug
           TIMEOUT: 120
+          # A missing binary fails the run instead of skipping the tests.
+          BTCB2_HARNESS_REQUIRED: "1"
           # Failing tests keep their datadirs here so the logs can be collected.
           TEST_DIR: ${{ github.workspace }}/test-datadirs
         run: |

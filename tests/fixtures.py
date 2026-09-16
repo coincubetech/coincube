@@ -420,13 +420,16 @@ def two_chain(request, test_base_dir):
     Module-scoped: bringing up two nodes, two indexers and two daemons is the
     expensive part, and the harness is read-mostly for the tests that share it.
     """
-    from test_framework.btcb2 import TwoChainRegtest, harness_available
+    from test_framework.btcb2 import TwoChainRegtest, missing_binaries
 
-    if not harness_available():
-        pytest.skip(
-            "BTCB2 harness needs KNOTS_LEGACY_PATH, KNOTS_BLAKE2B_PATH and "
-            "ELECTRS_BLAKE2B_PATH"
-        )
+    missing = missing_binaries()
+    if missing:
+        msg = f"BTCB2 harness binaries unset or not executable: {', '.join(missing)}"
+        # The labelled CI workflow sets BTCB2_HARNESS_REQUIRED=1: there a
+        # missing binary is a broken pipeline, and a skip must never read green.
+        if os.getenv("BTCB2_HARNESS_REQUIRED") == "1":
+            pytest.fail(msg)
+        pytest.skip(msg)
     directory = os.path.join(test_base_dir, "btcb2_two_chain")
     os.makedirs(directory, exist_ok=True)
     harness = TwoChainRegtest(directory)

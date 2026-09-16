@@ -91,8 +91,11 @@ it unless its checksum is listed in the release `SHA256SUMS` *and*
 `coincube-gui/assets/knots_signing_key.asc` — the same check the desktop
 installer performs (`tests/tools/knots_verify`, no `gpg` needed).
 `fetch_electrs_blake2b.sh` clones and builds the pinned indexer commit (RocksDB
-compiles from source: a few minutes the first time; `clang`/`cmake` required).
-Both cache under `tests/tools/` (gitignored).
+compiles from source: a few minutes the first time; `clang`/`cmake` required)
+under `~/.cache/coincube/electrs-blake2b` — outside the repository, or Cargo
+would treat the checkout as part of Coincube's workspace. Knots downloads cache
+under `tests/tools/knots/` (gitignored). In CI `BTCB2_HARNESS_REQUIRED=1` turns
+a missing binary into a failure rather than a skip.
 
 Every node, indexer and daemon datadir is created under the test directory, and
 every child process runs with `HOME`/`XDG_*` pointing at an empty sandbox inside

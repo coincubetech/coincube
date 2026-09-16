@@ -59,6 +59,5 @@ contrib/release/macos/build-sign-local.sh
 /tenshu-*.dmg
 /tenshu-*-notarize.zip
 
-# BTCB2 two-chain harness tool caches (tests/tools/fetch_knots.sh, fetch_electrs_blake2b.sh)
+# BTCB2 two-chain harness: verified Knots downloads (tests/tools/fetch_knots.sh)
 tests/tools/knots/
-tests/tools/electrs-blake2b/

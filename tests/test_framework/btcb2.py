@@ -65,8 +65,21 @@ RDTS_EXPIRY_FAR_FUTURE = 4102444800
 COINBASE_MATURITY = 100
 
 
+def missing_binaries():
+    """Names of the harness binaries that are unset or not executable."""
+    return [
+        name
+        for name, path in (
+            ("KNOTS_LEGACY_PATH", KNOTS_LEGACY_PATH),
+            ("KNOTS_BLAKE2B_PATH", KNOTS_BLAKE2B_PATH),
+            ("ELECTRS_BLAKE2B_PATH", ELECTRS_BLAKE2B_PATH),
+        )
+        if not (path and os.access(path, os.X_OK))
+    ]
+
+
 def harness_available():
-    return bool(KNOTS_LEGACY_PATH and KNOTS_BLAKE2B_PATH and ELECTRS_BLAKE2B_PATH)
+    return not missing_binaries()
 
 
 def _child_env(home_dir):

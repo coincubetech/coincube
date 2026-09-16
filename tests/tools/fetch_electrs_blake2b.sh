@@ -7,11 +7,13 @@
 #   tests/tools/fetch_electrs_blake2b.sh [cache-dir]
 #
 # The commit is pinned and re-checked after clone; a checkout at any other
-# commit is refused rather than built.
+# commit is refused rather than built. The cache dir defaults to
+# $XDG_CACHE_HOME/coincube/electrs-blake2b (~/.cache/...): it must live
+# outside this repository, or Cargo treats the checkout as a member of
+# Coincube's workspace and refuses to build it.
 set -euo pipefail
 
-tools_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cache_dir="${1:-$tools_dir/electrs-blake2b}"
+cache_dir="${1:-${XDG_CACHE_HOME:-$HOME/.cache}/coincube/electrs-blake2b}"
 repo_url="https://github.com/retropex/electrs.git"
 commit="4453cac61979322c0260f4b90e899379ae606206"
 src="$cache_dir/src"
