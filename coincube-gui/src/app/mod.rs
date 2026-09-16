@@ -829,7 +829,12 @@ impl ConnectionStatus {
             Self::Inactive => "Connect inactive".to_string(),
             Self::Connecting => "Connecting to Coincube Connect…".to_string(),
             Self::Connected => "Connected".to_string(),
-            Self::Error(e) => format!("Connection error: {}", e),
+            // Fixed copy, not the raw stream error. The detail is already
+            // logged where this variant is built; interpolating it here put
+            // transport internals into a tooltip that anyone could hover.
+            Self::Error(_) => {
+                "Can't reach Coincube Connect — retrying. Live updates are paused.".to_string()
+            }
         }
     }
 }
@@ -6911,7 +6916,10 @@ mod tests {
 
         let err = ConnectionStatus::Error("socket closed".to_string());
         assert!(err.is_visible());
-        assert_eq!(err.tooltip(), "Connection error: socket closed");
+        // The tooltip must describe the situation without echoing the
+        // transport error back at the user.
+        assert!(err.tooltip().starts_with("Can't reach Coincube Connect"));
+        assert!(!err.tooltip().contains("socket closed"));
     }
 
     #[test]

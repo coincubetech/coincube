@@ -28,12 +28,20 @@ impl std::fmt::Display for PriceApiError {
         match self {
             Self::RequestFailed(e) => write!(f, "Request failed: {}", e),
             Self::NotSuccessResponse(info) => {
-                write!(
-                    f,
-                    "Not success response ({}): {}",
-                    info.status_code,
-                    info.message()
-                )
+                // Safe to render: this reaches the screen through
+                // `app::error::Error`'s Display on the installer's connection
+                // pages, so it must never carry the raw body. Callers wanting
+                // the body for a log ask for `raw_text()` directly.
+                match info.message() {
+                    Some(message) => {
+                        write!(
+                            f,
+                            "Not success response ({}): {}",
+                            info.status_code, message
+                        )
+                    }
+                    None => write!(f, "Not success response ({})", info.status_code),
+                }
             }
             Self::CannotParseResponse(e) => write!(f, "Cannot parse response: {}", e),
             Self::CannotParseData(e) => write!(f, "Cannot parse data: {}", e),
@@ -70,13 +78,32 @@ mod tests {
     }
 
     #[test]
-    fn display_unwraps_coincube_error_envelope() {
-        let err = PriceApiError::NotSuccessResponse(NotSuccessResponseInfo {
+    fn display_shows_the_envelope_message_and_never_the_raw_body() {
+        let info = NotSuccessResponseInfo {
             status_code: 429,
             text: r#"{"success":false,"error":{"code":"rate_limited","message":"slow down"}}"#
                 .to_string(),
+        };
+        assert_eq!(info.message().as_deref(), Some("slow down"));
+        assert_eq!(info.code().as_deref(), Some("rate_limited"));
+
+        let err = PriceApiError::NotSuccessResponse(info);
+        assert_eq!(err.to_string(), "Not success response (429): slow down");
+    }
+
+    /// This Display reaches the screen via `app::error::Error` on the
+    /// installer's connection pages, so a body that is not our envelope must
+    /// not be echoed into it.
+    #[test]
+    fn display_withholds_a_body_that_is_not_our_envelope() {
+        let err = PriceApiError::NotSuccessResponse(NotSuccessResponseInfo {
+            status_code: 502,
+            text: "<html><title>502 Bad Gateway</title>nginx/1.24.0</html>".to_string(),
         });
 
-        assert_eq!(err.to_string(), "Not success response (429): slow down");
+        let shown = err.to_string();
+        assert!(!shown.contains("nginx"), "raw body rendered: {}", shown);
+        assert!(!shown.contains("<html>"), "raw body rendered: {}", shown);
+        assert_eq!(shown, "Not success response (502)");
     }
 }

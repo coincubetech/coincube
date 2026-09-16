@@ -1287,7 +1287,16 @@ impl std::fmt::Display for SparkClientError {
                 write!(f, "Spark bridge subprocess unavailable: {}", msg)
             }
             Self::BridgeError { kind, message } => {
-                write!(f, "Spark bridge returned {:?}: {}", kind, message)
+                // `{:?}` printed the Rust variant name (`Sdk`, `NotConnected`).
+                // The message carries the substance; the kind is a log tag.
+                let kind = match kind {
+                    ErrorKind::NotConnected => "not connected",
+                    ErrorKind::AlreadyConnected => "already connected",
+                    ErrorKind::Sdk => "sdk",
+                    ErrorKind::BadRequest => "bad request",
+                    ErrorKind::ShuttingDown => "shutting down",
+                };
+                write!(f, "Spark bridge error ({}): {}", kind, message)
             }
             Self::OutcomeUnknown { message, .. } => {
                 write!(f, "Spark payment outcome unknown: {}", message)
@@ -1594,7 +1603,8 @@ mod stderr_relay_tests {
                 message: "bridge offline".to_string(),
             }
             .to_string(),
-            "Spark bridge returned NotConnected: bridge offline"
+            // Human-readable kind, not the Rust variant name.
+            "Spark bridge error (not connected): bridge offline"
         );
         assert_eq!(
             SparkClientError::Protocol("wrong payload".to_string()).to_string(),

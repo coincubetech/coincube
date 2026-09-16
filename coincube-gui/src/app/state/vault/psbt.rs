@@ -1075,8 +1075,19 @@ impl BorderWalletReconstructionState {
                                     return Some((self.target_fingerprint, mnemonic));
                                 }
                                 Err(e) => {
-                                    self.error =
-                                        Some(format!("Mnemonic construction failed: {:?}", e));
+                                    // The raw error names BIP39 internals the
+                                    // user can do nothing with; what matters is
+                                    // that the pattern doesn't reconstruct.
+                                    log::error!(
+                                        "[{}] border wallet mnemonic: {}",
+                                        crate::user_error::CC_WALLET,
+                                        e
+                                    );
+                                    self.error = Some(
+                                        "That pattern doesn't rebuild this wallet's recovery phrase. \
+                                         Check the grid and your cell order, then try again."
+                                            .to_string(),
+                                    );
                                 }
                             }
                         }
@@ -1102,7 +1113,9 @@ impl BorderWalletReconstructionState {
                 } else {
                     match self.pattern.add(cell) {
                         Ok(()) => self.error = None,
-                        Err(e) => self.error = Some(format!("{:?}", e)),
+                        Err(e) => {
+                            self.error = Some(crate::user_error::border_wallet_cell_message(&e))
+                        }
                     }
                 }
                 self.refresh_checksum();

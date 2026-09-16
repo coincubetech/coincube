@@ -324,7 +324,7 @@ impl BorderWalletWizard {
         } else {
             match self.pattern.add(cell) {
                 Ok(()) => self.error = None,
-                Err(e) => self.error = Some(format!("{:?}", e)),
+                Err(e) => self.error = Some(crate::user_error::border_wallet_cell_message(&e)),
             }
         }
         Task::none()

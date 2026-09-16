@@ -1,8 +1,8 @@
-use iced::{widget::Space, Alignment, Length};
+use iced::{Alignment, Length};
 
 use coincube_ui::component::amount::BitcoinDisplayUnit;
 use coincube_ui::{
-    component::{amount::*, badge, button, card, form, text::*},
+    component::{amount::*, badge, button, card, text::*},
     icon::{self, receipt_icon},
     theme,
     widget::{Button, Column, ColumnExt, Container, Element, Row},
@@ -10,7 +10,6 @@ use coincube_ui::{
 
 use crate::{
     app::{
-        error::Error,
         menu::{Menu, VaultSubMenu},
         view::placeholder,
     },
@@ -18,41 +17,6 @@ use crate::{
 };
 
 use super::super::message::*;
-use super::warning::warn;
-
-pub fn import_psbt_view<'a>(
-    imported: &form::Value<String>,
-    error: Option<&Error>,
-    processing: bool,
-) -> Element<'a, Message> {
-    Column::new()
-        .push(warn(error))
-        .push(card::simple(
-            Column::new()
-                .spacing(10)
-                .push(text("Insert PSBT:").bold())
-                .push(
-                    form::Form::new_trimmed("PSBT", imported, move |msg| {
-                        Message::ImportSpend(ImportSpendMessage::PsbtEdited(msg))
-                    })
-                    .warning("Please enter a base64 encoded PSBT")
-                    .size(P1_SIZE)
-                    .padding(10),
-                )
-                .push(Row::new().push(Space::new().width(Length::Fill)).push(
-                    if imported.valid && !imported.value.is_empty() && !processing {
-                        button::secondary(None, "Import")
-                            .on_press(Message::ImportSpend(ImportSpendMessage::Confirm))
-                    } else if processing {
-                        button::secondary(None, "Processing...")
-                    } else {
-                        button::secondary(None, "Import")
-                    },
-                )),
-        ))
-        .max_width(400)
-        .into()
-}
 
 pub fn import_psbt_success_view<'a>() -> Element<'a, Message> {
     Column::new()

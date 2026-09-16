@@ -11,6 +11,13 @@ struct ApiErrorEnvelope {
 
 #[derive(Debug, Deserialize)]
 struct ApiErrorBody {
+    /// The API's machine-readable taxonomy code (`responses.go` defines ~70).
+    /// Previously discarded here and re-parsed by a second, separate struct in
+    /// `services::coincube`; deserialising it once means every caller can key
+    /// user-facing copy — and the support reference — off a stable value
+    /// instead of matching on English prose.
+    #[serde(default)]
+    code: String,
     message: String,
 }
 
@@ -22,19 +29,41 @@ pub struct NotSuccessResponseInfo {
 }
 
 impl NotSuccessResponseInfo {
-    /// The human-readable error message. If the body is the standard coincube-api
-    /// error envelope (`{"success":false,"error":{"code","message"}}`), returns
-    /// the parsed `error.message`; otherwise returns the raw body text.
+    /// The server's human-readable message, **only** when the body is the
+    /// standard coincube-api envelope
+    /// (`{"success":false,"error":{"code","message"}}`).
     ///
-    /// This is the single place that unwraps the envelope, so every caller
-    /// renders a clean message regardless of which endpoint failed. As of the
-    /// CC-API-001 backend migration, the `core/*` endpoints (Meld/Mavapay/fiat/
-    /// config) now return this envelope where they previously returned plain
-    /// text — the fallback keeps any non-envelope body working unchanged.
-    pub fn message(&self) -> String {
-        serde_json::from_str::<ApiErrorEnvelope>(&self.text)
-            .map(|env| env.error.message)
-            .unwrap_or_else(|_| self.text.clone())
+    /// Returns `None` for anything else. This is deliberate and is the point of
+    /// the type: the previous implementation fell back to `self.text.clone()`,
+    /// so a body that wasn't our envelope — an nginx HTML error page, a raw
+    /// upstream Mavapay/Meld payload, the legacy rate-limiter's
+    /// `{"status":"ERROR","reason":…}`, or a Go handler that passed a GORM
+    /// error through `err.Error()` — was rendered to the user verbatim. That
+    /// one line was what turned every server-side leak into on-screen text.
+    ///
+    /// Callers that need the body for diagnostics use [`Self::raw_text`], which
+    /// is log-only by convention.
+    pub fn message(&self) -> Option<String> {
+        self.envelope().map(|env| env.error.message)
+    }
+
+    /// The envelope's machine-readable `code`, when the body is our envelope
+    /// and carries one. Used as the support reference so a single value is
+    /// greppable in both the desktop log and the API log.
+    pub fn code(&self) -> Option<String> {
+        self.envelope()
+            .map(|env| env.error.code)
+            .filter(|c| !c.is_empty())
+    }
+
+    /// The raw response body. **Log-only** — never render this to a user; see
+    /// [`Self::message`] for why.
+    pub fn raw_text(&self) -> &str {
+        &self.text
+    }
+
+    fn envelope(&self) -> Option<ApiErrorEnvelope> {
+        serde_json::from_str::<ApiErrorEnvelope>(&self.text).ok()
     }
 }
 
@@ -74,16 +103,44 @@ mod tests {
                 .to_string(),
         };
 
-        assert_eq!(info.message(), "Invalid cube");
+        assert_eq!(info.message().as_deref(), Some("Invalid cube"));
+        assert_eq!(info.code().as_deref(), Some("bad_request"));
     }
 
     #[test]
-    fn message_falls_back_to_raw_body_for_non_envelope_errors() {
+    fn non_envelope_body_never_reaches_the_user() {
+        // Previously this returned the body verbatim, which is how raw
+        // upstream payloads and database errors ended up on screen.
         let info = NotSuccessResponseInfo {
             status_code: 500,
             text: "plain upstream failure".to_string(),
         };
 
-        assert_eq!(info.message(), "plain upstream failure");
+        assert_eq!(info.message(), None);
+        assert_eq!(info.code(), None);
+        assert_eq!(info.raw_text(), "plain upstream failure");
+    }
+
+    #[test]
+    fn legacy_rate_limit_body_is_not_surfaced() {
+        // The auth rate limiter emits this non-envelope shape on every 429.
+        let info = NotSuccessResponseInfo {
+            status_code: 429,
+            text: r#"{"status":"ERROR","reason":"Too many attempts. Please try again later."}"#
+                .to_string(),
+        };
+
+        assert_eq!(info.message(), None);
+    }
+
+    #[test]
+    fn envelope_without_a_code_reports_no_code() {
+        let info = NotSuccessResponseInfo {
+            status_code: 400,
+            text: r#"{"success":false,"error":{"message":"Invalid cube"}}"#.to_string(),
+        };
+
+        assert_eq!(info.message().as_deref(), Some("Invalid cube"));
+        assert_eq!(info.code(), None);
     }
 }

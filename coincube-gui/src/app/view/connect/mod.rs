@@ -6,7 +6,7 @@ pub mod sign_in_prompt;
 
 use coincube_ui::{
     color,
-    component::{button, text},
+    component::{button, notification, text},
     icon::*,
     image::coincube_wordmark,
     theme,
@@ -33,6 +33,8 @@ use crate::{
         AvatarGender, BillingCycle, ConnectPlan, PlanTier,
     },
 };
+
+use crate::app::state::connect::account::PanelError;
 
 use crate::app::view::Message as ViewMessage;
 
@@ -104,20 +106,8 @@ pub fn connect_panel<'a>(state: &'a ConnectPanel) -> Element<'a, ViewMessage> {
         .align_x(col_align)
         .width(Length::Fill);
 
-    if let Some(e) = acct.error.as_deref() {
-        col = col.push(
-            container(text::p2_regular(e).color(color::RED))
-                .padding(8)
-                .style(|t| container::Style {
-                    background: Some(iced::Background::Color(t.colors.cards.simple.background)),
-                    border: iced::Border {
-                        color: color::RED,
-                        width: 0.5,
-                        radius: 8.0.into(),
-                    },
-                    ..Default::default()
-                }),
-        );
+    if let Some(e) = acct.error.as_ref() {
+        col = col.push(account_error_card(e).map(ViewMessage::ConnectAccount));
     }
 
     col.push(body).into()
@@ -182,20 +172,8 @@ pub fn connect_account_panel<'a>(
         .align_x(col_align)
         .width(Length::Fill);
 
-    if let Some(e) = acct.error.as_deref() {
-        col = col.push(
-            container(text::p2_regular(e).color(color::RED))
-                .padding(8)
-                .style(|t| container::Style {
-                    background: Some(iced::Background::Color(t.colors.cards.simple.background)),
-                    border: iced::Border {
-                        color: color::RED,
-                        width: 0.5,
-                        radius: 8.0.into(),
-                    },
-                    ..Default::default()
-                }),
-        );
+    if let Some(e) = acct.error.as_ref() {
+        col = col.push(account_error_card(e));
     }
 
     col.push(body).into()
@@ -244,6 +222,34 @@ fn card_style(t: &theme::Theme) -> container::Style {
         },
         ..Default::default()
     }
+}
+
+/// The account panel's error card.
+///
+/// Replaces two byte-identical copy-pasted banners that rendered a raw error
+/// string as red text — including, on a token-refresh timeout, the API host and
+/// endpoint path. It also makes the retry real: the old banner's copy ended in
+/// "Tap to retry" while the widget had no button and no `on_press` at all.
+///
+/// The button, when there is one, re-runs the operation that actually failed —
+/// see [`crate::app::view::RetryAction`]. It is deliberately *not* one fixed
+/// message: wiring every card to `Init` gave a button that did nothing on the
+/// dashboard (`Init` returns early once signed in) and one that navigated away
+/// from the code-entry screen (`Init` falls through to the login form).
+///
+/// Two independent things have to be true for a button to appear: the failure
+/// must be worth retrying (`UserError::retryable` — an expired session or a
+/// rejected 4xx is not), and this screen must have something to re-run that the
+/// user cannot already press for themselves.
+fn account_error_card<'a>(err: &PanelError) -> Element<'a, ConnectAccountMessage> {
+    notification::error_card(
+        err.user.title.clone(),
+        err.user.guidance.clone(),
+        err.user.reference.clone(),
+        err.retry_button(),
+    )
+    .max_width(500)
+    .into()
 }
 
 fn login_ux<'a>(email: &'a str, loading: bool) -> Element<'a, ConnectAccountMessage> {
@@ -2605,6 +2611,7 @@ mod renewal_banner_tests {
     //! `Option<Element>` and its `style`/`on_press` closures are deferred,
     //! so we can construct it headless and assert only Some/None.
     use super::*;
+    use crate::user_error::UserError;
     use crate::{
         app::state::connect::{
             account::SUPPORTED_PRICING_SCHEMA_VERSION, CheckoutState, DuressDisableState,
@@ -2879,7 +2886,15 @@ mod renewal_banner_tests {
     #[test]
     fn auth_gate_and_error_views_build_for_each_step() {
         let mut account = ConnectAccountPanel::new();
-        account.error = Some("temporary outage".to_string());
+        account.error = Some(PanelError::retryable(
+            UserError::new(
+                "Can't reach COINCUBE",
+                crate::user_error::RETRY_GUIDANCE,
+                crate::user_error::CC_NET_TIMEOUT,
+                true,
+            ),
+            crate::app::view::RetryAction::Session,
+        ));
 
         let unlock_at = chrono::DateTime::parse_from_rfc3339("2026-07-20T12:00:00Z")
             .unwrap()
@@ -3184,7 +3199,15 @@ mod renewal_banner_tests {
             "bitcoin".to_string(),
             true,
         );
-        panel.account.error = Some("connectivity".to_string());
+        panel.account.error = Some(PanelError::retryable(
+            UserError::new(
+                "Can't reach COINCUBE",
+                crate::user_error::RETRY_GUIDANCE,
+                crate::user_error::CC_NET_TIMEOUT,
+                true,
+            ),
+            crate::app::view::RetryAction::Session,
+        ));
         for step in [
             ConnectFlowStep::CheckingSession,
             ConnectFlowStep::Login {

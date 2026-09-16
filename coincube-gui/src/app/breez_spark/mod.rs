@@ -196,7 +196,7 @@ mod tests {
         };
         assert_eq!(
             SparkLoadError::from(client).to_string(),
-            "Spark client error: Spark bridge returned BadRequest: invalid handle"
+            "Spark client error: Spark bridge error (bad request): invalid handle"
         );
     }
 }
