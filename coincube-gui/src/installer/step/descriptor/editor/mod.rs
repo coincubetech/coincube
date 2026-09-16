@@ -544,7 +544,11 @@ impl Step for DefineDescriptor {
             return false;
         }
 
-        ctx.bitcoin_config.network = self.network;
+        // Through the context, so the chain identity moves with the encoding.
+        if let Err(e) = ctx.set_bitcoin_network(self.network) {
+            self.error = Some(e);
+            return false;
+        }
         ctx.keys = HashMap::new();
         // Reset backend-vault payloads — `apply()` runs every time the
         // user re-confirms the descriptor, including after going back

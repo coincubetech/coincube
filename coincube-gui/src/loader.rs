@@ -941,6 +941,18 @@ pub async fn start_bitcoind_and_daemon(
         .path()
         .to_path_buf();
     config_path.push("daemon.toml");
+    // The `daemon.toml` in this Cube's directory must be for this Cube's chain — checked
+    // on the file as found, before the migration below gets to rewrite it, so a mismatched
+    // file is refused byte-for-byte untouched. The daemon checks an *existing* database
+    // against its config; this is the only check for a Cube whose database does not exist
+    // yet, and it runs before any node or daemon is started.
+    let found = Config::from_file(Some(config_path.clone())).map_err(Error::Config)?;
+    if found.bitcoin_config.chain != chain {
+        return Err(Error::ChainMismatch {
+            cube: chain,
+            config: found.bitcoin_config.chain,
+        });
+    }
     // Promote pre-fallback vaults: rewrite `daemon.toml` so the
     // Connect URL moves to `fallback_addr` and `mempool.space`
     // becomes the primary `addr`. Idempotent (skips when
@@ -949,14 +961,19 @@ pub async fn start_bitcoind_and_daemon(
     // here is surfaced as a startup error rather than swallowed
     // — if we can't migrate the file we shouldn't pretend we
     // did.
-    if let Err(e) = crate::installer::migration::migrate_esplora_config(&config_path) {
-        tracing::warn!(
-            "esplora-config migration failed for {}: {} — continuing with the existing daemon.toml",
-            config_path.display(),
-            e,
-        );
-    }
-    let config = Config::from_file(Some(config_path)).map_err(Error::Config)?;
+    let config = match crate::installer::migration::migrate_esplora_config(&config_path) {
+        // Rewritten: read back what is now on disk.
+        Ok(true) => Config::from_file(Some(config_path)).map_err(Error::Config)?,
+        Ok(false) => found,
+        Err(e) => {
+            tracing::warn!(
+                "esplora-config migration failed for {}: {} — continuing with the existing daemon.toml",
+                config_path.display(),
+                e,
+            );
+            found
+        }
+    };
     let bitcoind = match (start_internal_bitcoind, &config.bitcoin_backend) {
         (true, Some(BitcoinBackend::Bitcoind(bitcoind_config))) => {
             // The provider the ledger names must serve this chain *before* Tor
@@ -1072,6 +1089,13 @@ pub enum Error {
     /// this is the loader's own copy of the refusal for any path that reaches
     /// it directly.
     ChainUnavailable(&'static str),
+    /// The Cube's `daemon.toml` names another chain than the Cube record it sits under
+    /// (a file copied between chain directories, say). Raised before any node or daemon
+    /// is started, whether or not a database exists yet.
+    ChainMismatch {
+        cube: crate::chain::ChainId,
+        config: crate::chain::ChainId,
+    },
     Unexpected(String),
 }
 
@@ -1085,6 +1109,13 @@ impl std::fmt::Display for Error {
             Self::BitcoindLogs(e) => write!(f, "Bitcoind logs error: {}", e),
             Self::RestoreBackup(e) => write!(f, "Restore backup: {e}"),
             Self::ChainUnavailable(reason) => f.write_str(reason),
+            Self::ChainMismatch { cube, config } => write!(
+                f,
+                "This Cube is on {} but its daemon configuration is for {}. Nothing was started \
+                 or modified; the configuration file needs to be fixed or restored.",
+                cube.label(),
+                config.label()
+            ),
             Self::Unexpected(e) => write!(f, "Unexpected error: {}", e),
         }
     }
@@ -1117,7 +1148,7 @@ mod tests {
     // A mainnet descriptor (so `Config::check()`'s xpub-network validation
     // passes against `network = "bitcoin"`), borrowed from coincubed's own
     // config tests.
-    const MAINNET_DESC: &str = "tr([abcdef01]xpub6Eze7yAT3Y1wGrnzedCNVYDXUqa9NmHVWck5emBaTbXtURbe1NWZbK9bsz1TiVE7Cz341PMTfYgFw1KdLWdzcM1UMFTcdQfCYhhXZ2HJvTW/<0;1>/*,and_v(v:pk([abcdef01]xpub688Hn4wScQAAiYJLPg9yH27hUpfZAUnmJejRQBCiwfP5PEDzjWMNW1wChcninxr5gyavFqbbDjdV1aK5USJz8NDVjUy7FRQaaqqXHh5SbXe/<0;1>/*),older(52560)))#0mt7e93c";
+    pub(super) const MAINNET_DESC: &str = "tr([abcdef01]xpub6Eze7yAT3Y1wGrnzedCNVYDXUqa9NmHVWck5emBaTbXtURbe1NWZbK9bsz1TiVE7Cz341PMTfYgFw1KdLWdzcM1UMFTcdQfCYhhXZ2HJvTW/<0;1>/*,and_v(v:pk([abcdef01]xpub688Hn4wScQAAiYJLPg9yH27hUpfZAUnmJejRQBCiwfP5PEDzjWMNW1wChcninxr5gyavFqbbDjdV1aK5USJz8NDVjUy7FRQaaqqXHh5SbXe/<0;1>/*),older(52560)))#0mt7e93c";
 
     static COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -1355,6 +1386,7 @@ mod chain_identity_tests {
     //! Cube first; these pin that the loader and the daemon-start path refuse
     //! on their own, before a socket is dialled or a `daemon.toml` is read.
 
+    use super::tests::MAINNET_DESC;
     use super::*;
     use crate::chain::{ChainId, BTCB2_DORMANT_REASON};
     use std::path::PathBuf;
@@ -1627,6 +1659,237 @@ mod chain_identity_tests {
         let rewritten = std::fs::read(&conf_path).unwrap();
         assert_ne!(rewritten, conf_bytes);
         assert!(!String::from_utf8_lossy(&rewritten).contains("listenonion"));
+        let _ = std::fs::remove_dir_all(root.path());
+    }
+
+    /// A testnet-family descriptor for every encoding but mainnet, so that `Config::check`'s
+    /// xpub-network validation passes and the chain comparison is the gate under test.
+    const TESTNET_DESC: &str = "wsh(andor(pk([aabbccdd]tpubDEN9WSToTyy9ZQfaYqSKfmVqmq1VVLNtYfj3Vkqh67et57eJ5sTKZQBkHqSwPUsoSskJeaYnPttHe2VrkCsKA27kUaN9SDc5zhqeLzKa1rr/<0;1>/*),older(10000),pk([aabbccdd]tpubD8LYfn6njiA2inCoxwM7EuN3cuLVcaHAwLYeups13dpevd3nHLRdK9NdQksWXrhLQVxcUZRpnp5CkJ1FhE61WRAsHxDNAkvGkoQkAeWDYjV/<0;1>/*)))#dw4ulnrs";
+
+    fn desc_for(network: &str) -> &'static str {
+        match network {
+            "bitcoin" | "bitcoin-blake2b" => MAINNET_DESC,
+            _ => TESTNET_DESC,
+        }
+    }
+
+    /// The Cube's daemon directory under `root` for `chain` (created).
+    fn cube_daemon_dir(root: &CoincubeDirectory, chain: ChainId) -> PathBuf {
+        let dir = root
+            .network_directory(chain)
+            .coincubed_data_directory(&wallet().wallet_id())
+            .path()
+            .to_path_buf();
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// The `data_directory` line every fixture below carries, pinning the daemon to the
+    /// Cube's own temp directory. Without it `Config::data_directory()` falls through to the
+    /// real config folder (`config_folder_path()/<chain>`), and a control that reaches the
+    /// daemon would create — or migrate — a database there. `data_directory` is used
+    /// verbatim (the installer's own key); the legacy `data_dir` would append the chain
+    /// segment. A TOML literal string, so Windows paths pass through unescaped.
+    fn data_directory_line(dir: &std::path::Path) -> String {
+        format!("data_directory = '{}'\n", dir.display())
+    }
+
+    /// The fixture at `dir` resolves its data directory to `dir` itself — never to the real
+    /// config folder. Checked on the parsed file, the way the daemon will resolve it.
+    fn assert_pinned_to(dir: &std::path::Path) {
+        let config = Config::from_file(Some(dir.join("daemon.toml"))).unwrap();
+        assert_eq!(config.data_directory().unwrap().path(), dir);
+    }
+
+    /// A `daemon.toml` for `network` in the Cube's daemon directory, with a bitcoind backend
+    /// pointing nowhere. Returns the directory that would hold the database (absent).
+    fn write_cube_daemon_toml(root: &CoincubeDirectory, chain: ChainId, network: &str) -> PathBuf {
+        let dir = cube_daemon_dir(root, chain);
+        std::fs::write(
+            dir.join("daemon.toml"),
+            format!(
+                "{}main_descriptor = \"{}\"\n\n\
+                 [bitcoin_config]\nnetwork = \"{network}\"\n\n\
+                 [bitcoind_config]\ncookie_path = '/nonexistent/.cookie'\naddr = \"127.0.0.1:1\"\n",
+                data_directory_line(&dir),
+                desc_for(network)
+            ),
+        )
+        .unwrap();
+        dir
+    }
+
+    /// A deterministic, network-free stop for a control that is *meant* to get past the
+    /// loader's chain comparison: a stray SQLite sidecar in the Cube's daemon directory makes
+    /// the daemon refuse at its own preflight (`OrphanSidecar`) — after the loader's compare
+    /// and `daemon.toml` migration, but before `data_dir.init`, any bitcoind RPC, any
+    /// database creation and any Esplora client. So the control proves the comparison passed
+    /// without a node, a database or a socket.
+    fn plant_orphan_sidecar(dir: &std::path::Path) -> PathBuf {
+        let stray = dir.join("coincubed.sqlite3-shm");
+        std::fs::write(&stray, b"remains").unwrap();
+        stray
+    }
+
+    /// The daemon refused at its preflight because of the planted sidecar — the only
+    /// acceptable outcome for a control that got past the loader's comparison.
+    fn assert_stopped_by_planted_sidecar(result: &StartedResult, stray: &std::path::Path) {
+        match result {
+            Err(Error::Daemon(DaemonError::Start(StartupError::DbPreflight(
+                coincubed::PreflightError::OrphanSidecar(p),
+            )))) => assert_eq!(p, stray),
+            Err(other) => panic!("expected the planted sidecar refusal, got: {}", other),
+            Ok(_) => panic!("started a daemon"),
+        }
+    }
+
+    /// A *legacy* Esplora `daemon.toml` for `network` — Connect as the only `addr`, no
+    /// fallback, a pre-Esplora poll interval — i.e. exactly the shape
+    /// `migrate_esplora_config` rewrites when it runs.
+    fn write_legacy_esplora_daemon_toml(
+        root: &CoincubeDirectory,
+        chain: ChainId,
+        network: &str,
+        config_chain: ChainId,
+    ) -> PathBuf {
+        let dir = cube_daemon_dir(root, chain);
+        std::fs::write(
+            dir.join("daemon.toml"),
+            format!(
+                "{}main_descriptor = \"{}\"\n\n\
+                 [bitcoin_config]\nnetwork = \"{network}\"\npoll_interval_secs = 10\n\n\
+                 [esplora_config]\naddr = \"{}\"\ntoken = \"jwt\"\n",
+                data_directory_line(&dir),
+                desc_for(network),
+                crate::installer::connect_url(config_chain)
+            ),
+        )
+        .unwrap();
+        dir
+    }
+
+    /// Every file under `root` with its bytes, so "nothing changed" is a comparison of
+    /// contents, not of path lists.
+    fn snapshot(root: &std::path::Path) -> Vec<(PathBuf, Vec<u8>)> {
+        tree(root)
+            .into_iter()
+            .map(|p| {
+                let bytes = if p.is_file() {
+                    std::fs::read(&p).unwrap()
+                } else {
+                    Vec::new()
+                };
+                (p, bytes)
+            })
+            .collect()
+    }
+
+    // A Bitcoin Cube whose `daemon.toml` names another chain — a file copied between chain
+    // directories, or edited by hand. No database exists yet, so the daemon's own preflight
+    // would have nothing to compare against and would create a database for the *config's*
+    // chain inside the *Cube's* directory. The loader refuses first, and nothing is created.
+    #[tokio::test]
+    async fn a_daemon_toml_for_another_chain_is_refused_before_anything_starts() {
+        for (cube_chain, config_network, config_chain) in [
+            (ChainId::Bitcoin, "signet", ChainId::Signet),
+            (ChainId::Signet, "bitcoin", ChainId::Bitcoin),
+            // The encoding twin, which an older build could not even tell apart.
+            (ChainId::Bitcoin, "bitcoin-blake2b", ChainId::BitcoinBlake2b),
+        ] {
+            let root = temp_root("mismatch");
+            let dir = write_cube_daemon_toml(&root, cube_chain, config_network);
+            assert_pinned_to(&dir);
+            let before = snapshot(root.path());
+            let result = start_bitcoind_and_daemon(root.clone(), false, cube_chain, wallet()).await;
+            match result {
+                Err(Error::ChainMismatch { cube, config }) => {
+                    assert_eq!((cube, config), (cube_chain, config_chain));
+                }
+                Err(other) => panic!("wrong refusal for {:?}: {}", cube_chain, other),
+                Ok(_) => panic!("started a daemon for {:?}", cube_chain),
+            }
+            // No database, no lock, no node datadir, and every file byte-identical.
+            assert_eq!(snapshot(root.path()), before, "{:?}", cube_chain);
+            assert!(!dir.join("coincubed.sqlite3").exists());
+            let _ = std::fs::remove_dir_all(root.path());
+        }
+    }
+
+    // A mismatched `daemon.toml` that the Esplora-config migration *would* rewrite (Connect as
+    // the sole `addr`, a 10 s poll interval) must be refused before that migration runs, so
+    // the refusal's "nothing was modified" is true down to the bytes. The control below shows
+    // the same file for the matching chain does get rewritten by the same call.
+    #[tokio::test]
+    async fn a_mismatched_legacy_daemon_toml_is_refused_before_it_is_migrated() {
+        let root = temp_root("legacy-mismatch");
+        let dir =
+            write_legacy_esplora_daemon_toml(&root, ChainId::Bitcoin, "signet", ChainId::Signet);
+        let config_path = dir.join("daemon.toml");
+        assert_pinned_to(&dir);
+        let before_bytes = std::fs::read(&config_path).unwrap();
+        let before = snapshot(root.path());
+        // The fixture is one the migration acts on: it carries the Connect URL as `addr`.
+        assert!(String::from_utf8_lossy(&before_bytes)
+            .contains(&crate::installer::connect_url(ChainId::Signet)));
+
+        let result =
+            start_bitcoind_and_daemon(root.clone(), false, ChainId::Bitcoin, wallet()).await;
+        match result {
+            Err(Error::ChainMismatch { cube, config }) => {
+                assert_eq!((cube, config), (ChainId::Bitcoin, ChainId::Signet));
+            }
+            Err(other) => panic!("wrong refusal: {}", other),
+            Ok(_) => panic!("started a daemon"),
+        }
+        assert_eq!(
+            std::fs::read(&config_path).unwrap(),
+            before_bytes,
+            "daemon.toml was rewritten"
+        );
+        assert_eq!(snapshot(root.path()), before);
+        let _ = std::fs::remove_dir_all(root.path());
+
+        // Control: the matching chain passes the comparison and the migration then rewrites
+        // the file (Connect demoted to a fallback slot). The daemon is stopped right after,
+        // at its own preflight, by a planted sidecar — so no database is created and no
+        // Esplora client is built.
+        let root = temp_root("legacy-match");
+        let dir =
+            write_legacy_esplora_daemon_toml(&root, ChainId::Signet, "signet", ChainId::Signet);
+        let config_path = dir.join("daemon.toml");
+        let before_bytes = std::fs::read(&config_path).unwrap();
+        let stray = plant_orphan_sidecar(&dir);
+        assert_pinned_to(&dir);
+        let result =
+            start_bitcoind_and_daemon(root.clone(), false, ChainId::Signet, wallet()).await;
+        assert_stopped_by_planted_sidecar(&result, &stray);
+        let after = std::fs::read_to_string(&config_path).unwrap();
+        assert_ne!(
+            after.as_bytes(),
+            before_bytes.as_slice(),
+            "migration did not run"
+        );
+        assert!(after.contains("fallback_addr"), "{}", after);
+        // The migrated file still pins the daemon to the temp directory.
+        assert_pinned_to(&dir);
+        assert!(!dir.join("coincubed.sqlite3").exists());
+        let _ = std::fs::remove_dir_all(root.path());
+    }
+
+    // The control: the same Cube with a matching `daemon.toml` gets past the comparison and
+    // is stopped one gate later — at the daemon's own preflight, by a planted sidecar —
+    // proving the mismatch refusal is its own gate, without reaching a node, a database or
+    // a socket.
+    #[tokio::test]
+    async fn a_matching_daemon_toml_passes_the_chain_comparison() {
+        let root = temp_root("match");
+        let dir = write_cube_daemon_toml(&root, ChainId::Signet, "signet");
+        let stray = plant_orphan_sidecar(&dir);
+        assert_pinned_to(&dir);
+        let result =
+            start_bitcoind_and_daemon(root.clone(), false, ChainId::Signet, wallet()).await;
+        assert_stopped_by_planted_sidecar(&result, &stray);
+        assert!(!dir.join("coincubed.sqlite3").exists());
         let _ = std::fs::remove_dir_all(root.path());
     }
 

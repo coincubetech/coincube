@@ -2315,12 +2315,10 @@ mod tests {
     }
 
     fn bitcoin_config(network: Network) -> BitcoinConfig {
-        BitcoinConfig {
-            network,
-            poll_interval_secs: std::time::Duration::from_secs(
-                coincubed::config::LOCAL_BACKEND_POLL_INTERVAL_SECS,
-            ),
-        }
+        BitcoinConfig::new(
+            crate::chain::ChainId::from(network),
+            std::time::Duration::from_secs(coincubed::config::LOCAL_BACKEND_POLL_INTERVAL_SECS),
+        )
     }
 
     fn bitcoind_config(rpc_auth: BitcoindRpcAuth) -> BitcoindConfig {

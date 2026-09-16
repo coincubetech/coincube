@@ -1,3 +1,4 @@
+use coincube_core::chain::ChainId;
 use coincube_core::descriptors::CoincubeDescriptor;
 
 use std::{fmt, net::SocketAddr, path::PathBuf, str::FromStr, time::Duration};
@@ -258,17 +259,85 @@ impl std::fmt::Debug for EsploraConfig {
     }
 }
 
+/// Settings for the Bitcoin interface.
+///
+/// On the wire this is `{ network, poll_interval_secs }`, exactly as it always was. The `network`
+/// value is the chain *identity* (`ChainId`'s directory string): for the Bitcoin family that is
+/// byte-for-byte what `bitcoin::Network` wrote — `"bitcoin"`, `"testnet"`, `"testnet4"`,
+/// `"signet"`, `"regtest"` — and for Bitcoin Blake2b it is `"bitcoin-blake2b"` /
+/// `"bitcoin-blake2b-testnet4"`, strings no previous build accepts. That is deliberate: an older
+/// binary must *refuse* a fork configuration at parse time rather than run it as mainnet, which
+/// is what an ignored optional key would have let it do (this struct never denied unknown fields).
+///
+/// The encoding [`Network`] (address bytes, HRP, descriptor and PSBT rules) is derived from the
+/// identity and is never written to the file. It is still a plain field so that the many
+/// encoding-only readers of `bitcoin_config.network` keep working unchanged; the pair must stay
+/// consistent (see [`BitcoinConfig::check_chain_encoding`]).
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(from = "BitcoinConfigWire", into = "BitcoinConfigWire")]
 pub struct BitcoinConfig {
-    /// The network we are operating on, one of "bitcoin", "testnet", "testnet4", "regtest", "signet"
+    /// The chain we are operating on: the identity that keys the data directory, the database
+    /// and (later) the backend. Never derived from `network`.
+    pub chain: ChainId,
+    /// The encoding this chain uses, `chain.bitcoin_network()`. Not on the wire.
     pub network: Network,
     /// The poll interval for the Bitcoin interface
+    pub poll_interval_secs: Duration,
+}
+
+impl BitcoinConfig {
+    /// A configuration for `chain`, with the encoding derived from it.
+    pub fn new(chain: ChainId, poll_interval_secs: Duration) -> Self {
+        Self {
+            chain,
+            network: chain.bitcoin_network(),
+            poll_interval_secs,
+        }
+    }
+
+    /// The identity/encoding pair must agree. The pair is always consistent when it came through
+    /// serde or [`BitcoinConfig::new`]; this exists for hand-built values (tests, the GUI's
+    /// installer) so the daemon can refuse before touching anything on disk.
+    pub fn check_chain_encoding(&self) -> Result<(), ConfigError> {
+        let expected = self.chain.bitcoin_network();
+        if self.network != expected {
+            return Err(ConfigError::Unexpected(format!(
+                "Chain '{}' encodes as network '{}' but the configuration carries network '{}'",
+                self.chain, expected, self.network
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// The on-disk shape of [`BitcoinConfig`]: the single `network` key carrying the chain identity,
+/// plus the poll interval with its historical encoding and default.
+#[derive(Deserialize, Serialize)]
+struct BitcoinConfigWire {
+    /// One of "bitcoin", "testnet", "testnet4", "signet", "regtest", "bitcoin-blake2b",
+    /// "bitcoin-blake2b-testnet4". Anything else is a parse error, never a default.
+    network: ChainId,
     #[serde(
         deserialize_with = "deserialize_duration",
         serialize_with = "serialize_duration",
         default = "default_poll_interval"
     )]
-    pub poll_interval_secs: Duration,
+    poll_interval_secs: Duration,
+}
+
+impl From<BitcoinConfigWire> for BitcoinConfig {
+    fn from(wire: BitcoinConfigWire) -> Self {
+        BitcoinConfig::new(wire.network, wire.poll_interval_secs)
+    }
+}
+
+impl From<BitcoinConfig> for BitcoinConfigWire {
+    fn from(config: BitcoinConfig) -> Self {
+        BitcoinConfigWire {
+            network: config.chain,
+            poll_interval_secs: config.poll_interval_secs,
+        }
+    }
 }
 
 /// Static informations we require to operate
@@ -350,11 +419,13 @@ impl Config {
         if self.data_directory.is_some() {
             self.data_directory.clone().map(DataDirectory::new)
         } else if let Some(mut dir) = self.data_dir.clone() {
-            dir.push(self.bitcoin_config.network.to_string());
+            dir.push(self.bitcoin_config.chain.dir_name());
             Some(DataDirectory::new(dir))
         } else {
             config_folder_path().map(|mut dir| {
-                dir.push(self.bitcoin_config.network.to_string());
+                // Keyed on the identity, not the encoding: a Bitcoin Blake2b Cube must never
+                // land in — or read from — `bitcoin/`. Byte-identical for the Bitcoin family.
+                dir.push(self.bitcoin_config.chain.dir_name());
                 DataDirectory::new(dir)
             })
         }
@@ -451,6 +522,9 @@ impl Config {
 
     /// Make sure the settings are sane.
     pub fn check(&self) -> Result<(), ConfigError> {
+        // The identity and the encoding it implies must agree before either is trusted.
+        self.bitcoin_config.check_chain_encoding()?;
+
         // Check the network of the xpubs in the descriptors
         let expected_network = match self.bitcoin_config.network {
             Network::Bitcoin => Network::Bitcoin,
@@ -861,5 +935,194 @@ mod tests {
         assert!(filepath
             .as_path()
             .ends_with(r#"AppData\Roaming\Coincube\coincube.toml"#));
+    }
+
+    // ── Chain identity on the wire (BTCB2 plan, coincube-api#292) ──────────────
+
+    /// A `bitcoin_config` table as an older build wrote it, for `network`.
+    fn bitcoin_config_toml(network: &str) -> String {
+        format!("network = \"{}\"\npoll_interval_secs = 18\n", network)
+    }
+
+    #[test]
+    fn legacy_network_values_parse_and_round_trip_byte_for_byte() {
+        // What every existing daemon.toml contains, and what it must keep containing: the
+        // identity is the Bitcoin-family one, the encoding is the network itself, and writing
+        // the value back produces the same bytes an older build wrote.
+        for (raw, network, chain) in [
+            ("bitcoin", Network::Bitcoin, ChainId::Bitcoin),
+            ("testnet", Network::Testnet, ChainId::Testnet),
+            ("testnet4", Network::Testnet4, ChainId::Testnet4),
+            ("signet", Network::Signet, ChainId::Signet),
+            ("regtest", Network::Regtest, ChainId::Regtest),
+        ] {
+            let toml_str = bitcoin_config_toml(raw);
+            let parsed = toml::from_str::<BitcoinConfig>(&toml_str).expect(raw);
+            assert_eq!(parsed.chain, chain, "{}", raw);
+            assert_eq!(parsed.network, network, "{}", raw);
+            assert_eq!(parsed.poll_interval_secs, Duration::from_secs(18));
+            parsed.check_chain_encoding().expect(raw);
+            assert_eq!(toml::to_string(&parsed).expect(raw), toml_str, "{}", raw);
+            // The pair the wire produces is the one `new` produces.
+            let built = BitcoinConfig::new(chain, Duration::from_secs(18));
+            assert_eq!(built.network, parsed.network);
+            assert_eq!(toml::to_string(&built).expect(raw), toml_str);
+        }
+    }
+
+    #[test]
+    fn fork_network_values_carry_identity_and_project_to_their_encoding() {
+        for (raw, network, chain) in [
+            ("bitcoin-blake2b", Network::Bitcoin, ChainId::BitcoinBlake2b),
+            (
+                "bitcoin-blake2b-testnet4",
+                Network::Testnet4,
+                ChainId::BitcoinBlake2bTestnet4,
+            ),
+        ] {
+            let toml_str = bitcoin_config_toml(raw);
+            let parsed = toml::from_str::<BitcoinConfig>(&toml_str).expect(raw);
+            assert_eq!(parsed.chain, chain, "{}", raw);
+            assert_eq!(parsed.network, network, "{}", raw);
+            parsed.check_chain_encoding().expect(raw);
+            // Written back as the single key, with the fork string — never as the encoding.
+            let serialized = toml::to_string(&parsed).expect(raw);
+            assert_eq!(serialized, toml_str);
+            assert!(!serialized.contains("chain"), "{}", serialized);
+        }
+    }
+
+    #[test]
+    fn fork_network_values_are_refused_by_the_legacy_parser() {
+        // What an older binary does with a fork daemon.toml: its `network` field is a
+        // `bitcoin::Network`, which does not know the fork strings, so the file fails to
+        // parse — it is never run as mainnet.
+        #[derive(Debug, Deserialize)]
+        struct LegacyBitcoinConfig {
+            #[allow(dead_code)]
+            network: Network,
+        }
+        for raw in ["bitcoin-blake2b", "bitcoin-blake2b-testnet4"] {
+            let err = toml::from_str::<LegacyBitcoinConfig>(&bitcoin_config_toml(raw))
+                .expect_err("legacy parser accepted a fork string");
+            assert!(err.to_string().contains("network"), "{}", err);
+        }
+        // …while the five legacy values still parse for it, of course.
+        for raw in ["bitcoin", "testnet", "testnet4", "signet", "regtest"] {
+            toml::from_str::<LegacyBitcoinConfig>(&bitcoin_config_toml(raw)).expect(raw);
+        }
+    }
+
+    #[test]
+    fn unknown_network_values_are_a_parse_error_never_a_default() {
+        for raw in [
+            "",
+            "mainnet",
+            "Bitcoin",
+            "btcb2",
+            "bitcoin_blake2b",
+            "bitcoin-blake2b-signet",
+        ] {
+            let err = toml::from_str::<BitcoinConfig>(&bitcoin_config_toml(raw)).expect_err(raw);
+            assert!(err.to_string().contains("network"), "{:?}: {}", raw, err);
+        }
+        // A missing key is missing, not defaulted either.
+        assert!(toml::from_str::<BitcoinConfig>("poll_interval_secs = 18\n").is_err());
+        // The poll interval keeps its historical default when absent.
+        let parsed = toml::from_str::<BitcoinConfig>("network = \"bitcoin\"\n").unwrap();
+        assert_eq!(
+            parsed.poll_interval_secs,
+            Duration::from_secs(ESPLORA_POLL_INTERVAL_SECS)
+        );
+    }
+
+    #[test]
+    fn an_inconsistent_hand_built_pair_is_refused_before_any_io() {
+        let mut config = BitcoinConfig::new(ChainId::Bitcoin, Duration::from_secs(10));
+        config.check_chain_encoding().unwrap();
+        config.network = Network::Signet;
+        match config.check_chain_encoding() {
+            Err(ConfigError::Unexpected(msg)) => {
+                assert!(msg.contains("bitcoin") && msg.contains("signet"), "{}", msg);
+            }
+            other => panic!("expected a configuration error, got {:?}", other),
+        }
+        // A fork identity with the wrong encoding is caught the same way.
+        let mut fork = BitcoinConfig::new(ChainId::BitcoinBlake2bTestnet4, Duration::from_secs(10));
+        assert_eq!(fork.network, Network::Testnet4);
+        fork.network = Network::Bitcoin;
+        assert!(fork.check_chain_encoding().is_err());
+    }
+
+    #[test]
+    fn config_check_enforces_the_chain_encoding_pair() {
+        let toml_str = r#"
+            data_dir = "/home/wizardsardine/custom/folder/"
+            log_level = "debug"
+            main_descriptor = "wsh(andor(pk([aabbccdd]tpubDEN9WSToTyy9ZQfaYqSKfmVqmq1VVLNtYfj3Vkqh67et57eJ5sTKZQBkHqSwPUsoSskJeaYnPttHe2VrkCsKA27kUaN9SDc5zhqeLzKa1rr/<0;1>/*),older(10000),pk([aabbccdd]tpubD8LYfn6njiA2inCoxwM7EuN3cuLVcaHAwLYeups13dpevd3nHLRdK9NdQksWXrhLQVxcUZRpnp5CkJ1FhE61WRAsHxDNAkvGkoQkAeWDYjV/<0;1>/*)))#dw4ulnrs"
+
+            [bitcoin_config]
+            network = "signet"
+            poll_interval_secs = 18
+
+            [bitcoind_config]
+            cookie_path = "/home/user/.bitcoin/.cookie"
+            addr = "127.0.0.1:8332"
+            "#.trim_start().replace("            ", "");
+        let mut config = toml::from_str::<Config>(&toml_str).expect("Deserializing toml_str");
+        config.check().expect("consistent config");
+        config.bitcoin_config.network = Network::Bitcoin;
+        assert!(matches!(config.check(), Err(ConfigError::Unexpected(_))));
+    }
+
+    #[test]
+    fn data_directory_is_keyed_on_the_chain_identity() {
+        let toml_str = |network: &str| {
+            format!(
+                r#"
+            data_dir = "/home/wizardsardine/custom/folder/"
+            log_level = "debug"
+            main_descriptor = "wsh(andor(pk([aabbccdd]tpubDEN9WSToTyy9ZQfaYqSKfmVqmq1VVLNtYfj3Vkqh67et57eJ5sTKZQBkHqSwPUsoSskJeaYnPttHe2VrkCsKA27kUaN9SDc5zhqeLzKa1rr/<0;1>/*),older(10000),pk([aabbccdd]tpubD8LYfn6njiA2inCoxwM7EuN3cuLVcaHAwLYeups13dpevd3nHLRdK9NdQksWXrhLQVxcUZRpnp5CkJ1FhE61WRAsHxDNAkvGkoQkAeWDYjV/<0;1>/*)))#dw4ulnrs"
+
+            [bitcoin_config]
+            network = "{}"
+
+            [bitcoind_config]
+            cookie_path = "/home/user/.bitcoin/.cookie"
+            addr = "127.0.0.1:8332"
+            "#,
+                network
+            )
+            .trim_start()
+            .replace("            ", "")
+        };
+        // The Bitcoin family resolves to exactly the directories older builds used …
+        for (raw, dir) in [
+            ("bitcoin", "bitcoin"),
+            ("testnet", "testnet"),
+            ("testnet4", "testnet4"),
+            ("signet", "signet"),
+            ("regtest", "regtest"),
+        ] {
+            let config = toml::from_str::<Config>(&toml_str(raw)).expect(raw);
+            let data_dir = config.data_directory().expect("legacy data_dir is set");
+            assert_eq!(
+                data_dir.path(),
+                PathBuf::from("/home/wizardsardine/custom/folder/").join(dir),
+                "{}",
+                raw
+            );
+        }
+        // … and a fork identity gets its own, never the encoding twin's.
+        let config = toml::from_str::<Config>(&toml_str("bitcoin-blake2b")).unwrap();
+        assert_eq!(
+            config.data_directory().unwrap().path(),
+            PathBuf::from("/home/wizardsardine/custom/folder/bitcoin-blake2b")
+        );
+        let config = toml::from_str::<Config>(&toml_str("bitcoin-blake2b-testnet4")).unwrap();
+        assert_eq!(
+            config.data_directory().unwrap().path(),
+            PathBuf::from("/home/wizardsardine/custom/folder/bitcoin-blake2b-testnet4")
+        );
     }
 }

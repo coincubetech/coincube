@@ -191,7 +191,11 @@ impl Step for ImportDescriptor {
     }
 
     fn apply(&mut self, ctx: &mut Context) -> bool {
-        ctx.bitcoin_config.network = self.network;
+        // Through the context, so the chain identity moves with the encoding.
+        if let Err(e) = ctx.set_bitcoin_network(self.network) {
+            self.error = Some(e);
+            return false;
+        }
         // Set to true in order to force the registration process to be shown to user.
         ctx.hw_is_used = true;
         // descriptor forms for import or creation cannot be both empty or filled.

@@ -1,4 +1,5 @@
 use bip329::Label;
+use coincube_core::chain::ChainId;
 use coincube_core::descriptors::CoincubeDescriptor;
 
 use std::{convert::TryFrom, str::FromStr};
@@ -22,9 +23,15 @@ CREATE TABLE version (
     version INTEGER NOT NULL
 );
 
-/* About the Bitcoin network. */
+/* About the chain we follow. 'network' is the *encoding* (address bytes, HRP, descriptor and
+ * PSBT rules) as bitcoin::Network spells it; 'chain' is the *identity* as ChainId spells it
+ * (its directory string). For the Bitcoin family the two are the same string; a Bitcoin Blake2b
+ * database carries 'bitcoin'/'bitcoin-blake2b', so it can never be mistaken for a mainnet one.
+ * Rebuilt (not ALTERed) by the v8 -> v9 migration so both columns are genuinely NOT NULL and the
+ * column order is identical between fresh and migrated databases. */
 CREATE TABLE tip (
     network TEXT NOT NULL,
+    chain TEXT NOT NULL,
     blockheight INTEGER,
     blockhash BLOB
 );
@@ -124,12 +131,28 @@ CREATE TABLE labels (
 );
 ";
 
-/// A row in the "tip" table.
+/// A row in the "tip" table (database version 9 layout: `network, chain, blockheight,
+/// blockhash`). Only ever decoded from a database whose version the startup preflight and
+/// `sanity_check` have already established; the version-aware preflight in
+/// [`super::preflight`] reads older layouts with explicit columns instead of this decoder.
 #[derive(Clone, Debug)]
 pub struct DbTip {
+    /// The encoding, `chain.bitcoin_network()`.
     pub network: bitcoin::Network,
+    /// The identity.
+    pub chain: ChainId,
     pub block_height: Option<i32>,
     pub block_hash: Option<bitcoin::BlockHash>,
+}
+
+/// A stored value this decoder cannot make sense of, surfaced as a typed conversion failure at
+/// the column it came from rather than a panic.
+fn insane_column(index: usize, what: &str, value: impl std::fmt::Debug) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(
+        index,
+        rusqlite::types::Type::Text,
+        format!("Insane database: can't parse {} {:?}", what, value).into(),
+    )
 }
 
 impl TryFrom<&rusqlite::Row<'_>> for DbTip {
@@ -138,15 +161,28 @@ impl TryFrom<&rusqlite::Row<'_>> for DbTip {
     fn try_from(row: &rusqlite::Row) -> Result<Self, Self::Error> {
         let network: String = row.get(0)?;
         let network = bitcoin::Network::from_str(&network)
-            .expect("Insane database: can't parse network string");
+            .map_err(|_| insane_column(0, "network string", &network))?;
 
-        let block_height: Option<i32> = row.get(1)?;
-        let block_hash: Option<Vec<u8>> = row.get(2)?;
+        let chain: String = row.get(1)?;
+        let chain = ChainId::from_dir_name(&chain)
+            .ok_or_else(|| insane_column(1, "chain string", &chain))?;
+        if chain.bitcoin_network() != network {
+            return Err(insane_column(
+                1,
+                "chain/network pair",
+                (chain.dir_name(), network.to_string()),
+            ));
+        }
+
+        let block_height: Option<i32> = row.get(2)?;
+        let block_hash: Option<Vec<u8>> = row.get(3)?;
         let block_hash: Option<bitcoin::BlockHash> = block_hash
-            .map(|h| encode::deserialize(&h).expect("Insane database: can't parse network string"));
+            .map(|h| encode::deserialize(&h).map_err(|_| insane_column(3, "block hash", &h)))
+            .transpose()?;
 
         Ok(DbTip {
             network,
+            chain,
             block_height,
             block_hash,
         })
