@@ -79,8 +79,8 @@ use super::{Cache, Menu, State};
 use crate::app::state::vault::label::LabelsEdited;
 use crate::app::state::vault::receive::ShowQrCodeModal;
 use crate::app::view::global_home::{
-    GlobalViewConfig, HomeView, PendingTransfer, PickerSide, TransferDirection, TransferStage,
-    WalletKind,
+    GlobalViewConfig, HomeView, PendingTransfer, PickerSide, TransferDirection, TransferError,
+    TransferStage, WalletKind,
 };
 
 /// The (from, to) pair the Transfer flow opens on, given which wallets this
@@ -802,7 +802,9 @@ impl State for GlobalHome {
                                         },
                                     )),
                                     Err(error) => Message::View(view::Message::Home(
-                                        HomeMessage::Error(error.to_string()),
+                                        HomeMessage::Error(TransferError::FeeEstimateFailed {
+                                            detail: error.to_string(),
+                                        }),
                                     )),
                                 },
                             );
@@ -819,7 +821,9 @@ impl State for GlobalHome {
                             ) {
                                 let Some(daemon) = daemon.clone() else {
                                     return Task::done(Message::View(view::Message::Home(
-                                        HomeMessage::Error("Vault unavailable".to_string()),
+                                        HomeMessage::Error(TransferError::WalletUnavailable(
+                                            WalletKind::Vault,
+                                        )),
                                     )));
                                 };
                                 self.current_view.next();
@@ -853,7 +857,9 @@ impl State for GlobalHome {
                                         move |result| match result {
                                             Ok(response) => Message::View(view::Message::Home(HomeMessage::PrepareOnChainResponseReceived(response))),
                                             Err(error) => Message::View(view::Message::Home(
-                                                HomeMessage::Error(error.to_string()),
+                                                HomeMessage::Error(TransferError::FeeEstimateFailed {
+                                                    detail: error.to_string(),
+                                                }),
                                             )),
                                         },
                                     ))
@@ -874,7 +880,10 @@ impl State for GlobalHome {
                                             HomeMessage::BreezOnchainAddress(response.destination),
                                         )),
                                         Err(error) => Message::View(view::Message::Home(
-                                            HomeMessage::Error(error.to_string()),
+                                            HomeMessage::Error(TransferError::NoDepositAddress {
+                                                to: WalletKind::Liquid,
+                                                detail: error.to_string(),
+                                            }),
                                         )),
                                     },
                                 ));
@@ -902,13 +911,20 @@ impl State for GlobalHome {
                                                 ),
                                             )),
                                             Err(error) => Message::View(view::Message::Home(
-                                                HomeMessage::Error(error.to_string()),
+                                                HomeMessage::Error(
+                                                    TransferError::NoDepositAddress {
+                                                        to: WalletKind::Spark,
+                                                        detail: error.to_string(),
+                                                    },
+                                                ),
                                             )),
                                         },
                                     ));
                                 } else {
                                     return Task::done(Message::View(view::Message::Home(
-                                        HomeMessage::Error("Spark backend unavailable".to_string()),
+                                        HomeMessage::Error(TransferError::WalletUnavailable(
+                                            WalletKind::Spark,
+                                        )),
                                     )));
                                 }
                             } else if matches!(
@@ -920,7 +936,9 @@ impl State for GlobalHome {
                                 // the Spark-issued BTC deposit address.
                                 let Some(spark) = self.spark_backend.clone() else {
                                     return Task::done(Message::View(view::Message::Home(
-                                        HomeMessage::Error("Spark backend unavailable".to_string()),
+                                        HomeMessage::Error(TransferError::WalletUnavailable(
+                                            WalletKind::Spark,
+                                        )),
                                     )));
                                 };
                                 self.current_view.next();
@@ -933,7 +951,10 @@ impl State for GlobalHome {
                                             ),
                                         )),
                                         Err(error) => Message::View(view::Message::Home(
-                                            HomeMessage::Error(error.to_string()),
+                                            HomeMessage::Error(TransferError::NoDepositAddress {
+                                                to: WalletKind::Spark,
+                                                detail: error.to_string(),
+                                            }),
                                         )),
                                     },
                                 ));
@@ -958,7 +979,9 @@ impl State for GlobalHome {
                                         move |result| match result {
                                             Ok(response) => Message::View(view::Message::Home(HomeMessage::PrepareOnChainResponseReceived(response))),
                                             Err(error) => Message::View(view::Message::Home(
-                                                HomeMessage::Error(error.to_string()),
+                                                HomeMessage::Error(TransferError::FeeEstimateFailed {
+                                                    detail: error.to_string(),
+                                                }),
                                             )),
                                         },
                                     ));
@@ -982,7 +1005,9 @@ impl State for GlobalHome {
                                 };
                                 let Some(spark) = self.spark_backend.clone() else {
                                     return Task::done(Message::View(view::Message::Home(
-                                        HomeMessage::Error("Spark backend unavailable".to_string()),
+                                        HomeMessage::Error(TransferError::WalletUnavailable(
+                                            WalletKind::Spark,
+                                        )),
                                     )));
                                 };
                                 self.current_view.next();
@@ -990,18 +1015,25 @@ impl State for GlobalHome {
                                 let amount_sat = amount.to_sat();
                                 tasks.push(Task::perform(
                                     async move {
-                                        let addr_res =
-                                            breez_client.receive_onchain(None).await.map_err(
-                                                |e| format!("Breez receive_onchain failed: {e}"),
-                                            )?;
+                                        let addr_res = breez_client
+                                            .receive_onchain(None)
+                                            .await
+                                            .map_err(|e| TransferError::NoDepositAddress {
+                                                to: WalletKind::Liquid,
+                                                detail: e.to_string(),
+                                            })?;
                                         let destination = addr_res.destination;
                                         let prep = spark
                                             .prepare_send(destination.clone(), Some(amount_sat))
                                             .await
-                                            .map_err(|e| {
-                                                format!("Spark prepare_send failed: {e}")
+                                            .map_err(|e| TransferError::FeeEstimateFailed {
+                                                detail: e.to_string(),
                                             })?;
-                                        Ok::<_, String>((destination, prep.handle, prep.fee_sat))
+                                        Ok::<_, TransferError>((
+                                            destination,
+                                            prep.handle,
+                                            prep.fee_sat,
+                                        ))
                                     },
                                     |result| match result {
                                         Ok((destination, prepare_handle, fee_sat)) => {
@@ -1038,30 +1070,41 @@ impl State for GlobalHome {
                                 };
                                 let Some(spark) = self.spark_backend.clone() else {
                                     return Task::done(Message::View(view::Message::Home(
-                                        HomeMessage::Error("Spark backend unavailable".to_string()),
+                                        HomeMessage::Error(TransferError::WalletUnavailable(
+                                            WalletKind::Spark,
+                                        )),
                                     )));
                                 };
                                 let Some(daemon_clone) = daemon.clone() else {
                                     return Task::done(Message::View(view::Message::Home(
-                                        HomeMessage::Error("Vault unavailable".to_string()),
+                                        HomeMessage::Error(TransferError::WalletUnavailable(
+                                            WalletKind::Vault,
+                                        )),
                                     )));
                                 };
                                 self.current_view.next();
                                 let amount_sat = amount.to_sat();
                                 tasks.push(Task::perform(
                                     async move {
-                                        let addr_res =
-                                            daemon_clone.get_new_address().await.map_err(|e| {
-                                                format!("Failed to get Vault address: {e:?}")
+                                        let addr_res = daemon_clone
+                                            .get_new_address()
+                                            .await
+                                            .map_err(|e| TransferError::NoDepositAddress {
+                                                to: WalletKind::Vault,
+                                                detail: e.to_string(),
                                             })?;
                                         let addr_str = addr_res.address.to_string();
                                         let prep = spark
                                             .prepare_send(addr_str.clone(), Some(amount_sat))
                                             .await
-                                            .map_err(|e| {
-                                                format!("Spark prepare_send failed: {e}")
+                                            .map_err(|e| TransferError::FeeEstimateFailed {
+                                                detail: e.to_string(),
                                             })?;
-                                        Ok::<_, String>((addr_str, prep.handle, prep.fee_sat))
+                                        Ok::<_, TransferError>((
+                                            addr_str,
+                                            prep.handle,
+                                            prep.fee_sat,
+                                        ))
                                     },
                                     |result| match result {
                                         Ok((destination, prepare_handle, fee_sat)) => {
@@ -1134,14 +1177,13 @@ impl State for GlobalHome {
                         {
                             Some(a) => a,
                             None => {
-                                log::error!(
-                                    "Spark destination {addr_str} is not valid for network {:?}",
-                                    cache.network
-                                );
                                 return Task::done(Message::View(view::Message::Home(
-                                    HomeMessage::Error(format!(
-                                        "Prepared Spark destination is not a valid address for this network: {addr_str}"
-                                    )),
+                                    HomeMessage::Error(TransferError::DestinationRejected {
+                                        detail: format!(
+                                            "Spark destination {addr_str} is not valid for network {:?}",
+                                            cache.network
+                                        ),
+                                    }),
                                 )));
                             }
                         };
@@ -1159,10 +1201,13 @@ impl State for GlobalHome {
                         // destination address + prepare handle were populated at
                         // step 1→2 (see `SparkPrepareSendReady`).
                         let Some(spark) = self.spark_backend.clone() else {
+                            // Not an expired preparation — the wallet itself is
+                            // gone, and "go back and re-enter the amount" would
+                            // send the user in a circle.
                             return Task::done(Message::View(view::Message::Home(
-                                HomeMessage::Error(
-                                    "No prepared Spark send — retry from amount step".to_string(),
-                                ),
+                                HomeMessage::Error(TransferError::WalletUnavailable(
+                                    WalletKind::Spark,
+                                )),
                             )));
                         };
                         // Single-use handle: take it out of state before
@@ -1174,9 +1219,7 @@ impl State for GlobalHome {
                         // otherwise cleared it.
                         let Some(handle) = self.spark_send_handle.take() else {
                             return Task::done(Message::View(view::Message::Home(
-                                HomeMessage::Error(
-                                    "No prepared Spark send — retry from amount step".to_string(),
-                                ),
+                                HomeMessage::Error(TransferError::PreparationExpired),
                             )));
                         };
                         let Some(direction) = self.transfer_direction else {
@@ -1206,7 +1249,10 @@ impl State for GlobalHome {
                                     },
                                 )),
                                 Err(error) => Message::View(view::Message::Home(
-                                    HomeMessage::Error(error.to_string()),
+                                    HomeMessage::Error(TransferError::BroadcastFailed {
+                                        from: WalletKind::Spark,
+                                        detail: error.to_string(),
+                                    }),
                                 )),
                             },
                         )
@@ -1466,7 +1512,7 @@ impl State for GlobalHome {
                                                 _ => {
                                                     return Task::done(Message::View(
                                                         view::Message::Home(HomeMessage::Error(
-                                                            "Invalid feerate".to_string(),
+                                                            TransferError::InvalidFeerate,
                                                         )),
                                                     ));
                                                 }
@@ -1610,7 +1656,12 @@ impl State for GlobalHome {
                                                     }
                                                 }
                                                 Err(error) => Message::View(view::Message::Home(
-                                                    HomeMessage::Error(error.to_string()),
+                                                    HomeMessage::Error(
+                                                        TransferError::BroadcastFailed {
+                                                            from: WalletKind::Liquid,
+                                                            detail: error.to_string(),
+                                                        },
+                                                    ),
                                                 )),
                                             },
                                         );
@@ -1709,15 +1760,14 @@ impl State for GlobalHome {
                                                             ))
                                                         }
                                                     },
-                                                    Err(e) => {
-                                                        log::error!(
-                                                            "Failed to broadcast transfer: {}",
-                                                            e
-                                                        );
-                                                        Message::View(view::Message::Home(
-                                                            HomeMessage::Error(e),
-                                                        ))
-                                                    }
+                                                    Err(e) => Message::View(view::Message::Home(
+                                                        HomeMessage::Error(
+                                                            TransferError::BroadcastFailed {
+                                                                from: WalletKind::Vault,
+                                                                detail: e,
+                                                            },
+                                                        ),
+                                                    )),
                                                 },
                                             );
                                         }
@@ -1732,22 +1782,12 @@ impl State for GlobalHome {
                         Task::none()
                     }
                     HomeMessage::Error(err) => {
-                        // Every producer of this variant is a step in the
-                        // wallet-to-wallet transfer flow, and between them they
-                        // pass everything from "Vault unavailable" to a raw
-                        // `SparkClientError`. This is the one boundary they all
-                        // cross, so it is where the detail goes to the log and
-                        // the user gets a sentence.
+                        // `TransferError` already knows which wallet is unwell
+                        // and whether anything was sent; `report_transfer` turns
+                        // that into copy and logs the detail once.
                         self.is_sending = false;
                         Task::done(Message::View(view::Message::ShowError(
-                            crate::user_error::UserError::logged(
-                                "Transfer failed",
-                                "Your funds weren't moved. Check your internet connection and try again.",
-                                crate::user_error::CC_UNEXPECTED,
-                                true,
-                                err,
-                            )
-                            .toast(),
+                            crate::user_error::report_transfer(&err),
                         )))
                     }
                     HomeMessage::PendingAmountsUpdated {
@@ -1988,6 +2028,20 @@ impl State for GlobalHome {
                         self.usdt_balance_error = false;
                         self.usdt_balance_loaded = true;
                         Task::none()
+                    }
+                    HomeMessage::LiquidBalanceFetchFailed(detail) => {
+                        // The balance already on screen stays; it is just stale.
+                        // Mirrors `UsdtBalanceFetchFailed` in not being fatal.
+                        Task::done(Message::View(view::Message::ShowError(
+                            crate::user_error::UserError::logged(
+                                "Couldn't refresh your Liquid balance",
+                                "The amount shown may be out of date. Check your internet connection.",
+                                crate::user_error::CC_LQD_CONN,
+                                true,
+                                detail,
+                            )
+                            .toast(),
+                        )))
                     }
                     HomeMessage::UsdtBalanceFetchFailed => {
                         self.usdt_balance_error = true;
@@ -2797,8 +2851,8 @@ impl GlobalHome {
                     balance,
                 )))
             } else {
-                Message::View(view::Message::Home(HomeMessage::Error(
-                    "Couldn't fetch Liquid Wallet Balance".to_string(),
+                Message::View(view::Message::Home(HomeMessage::LiquidBalanceFetchFailed(
+                    info.err().map(|e| e.to_string()).unwrap_or_default(),
                 )))
             }
         })

@@ -3,7 +3,7 @@ use crate::{
         menu::Menu,
         settings::unit::BitcoinDisplayUnit,
         view::{
-            global_home::{PickerSide, TransferStage, WalletKind},
+            global_home::{PickerSide, TransferError, TransferStage, WalletKind},
             FiatAmountConverter,
         },
     },
@@ -2114,8 +2114,16 @@ pub enum HomeMessage {
     AmountEdited(String),
     NextStep,
     PreviousStep,
-    Error(String),
+    /// A transfer failed. Typed rather than a `String` so the card can say
+    /// which wallet is unwell and whether anything was sent — see
+    /// [`TransferError`].
+    Error(TransferError),
     LiquidBalanceUpdated(Amount),
+    /// A dashboard balance refresh failed. Separate from [`Self::Error`]
+    /// because it is not a transfer: it fires on every home-screen reload, and
+    /// routing it through the transfer copy told users "nothing was sent" when
+    /// they had not tried to send anything.
+    LiquidBalanceFetchFailed(String),
     UsdtBalanceUpdated(u64),
     UsdtBalanceFetchFailed,
     OnChainLimitsFetched {

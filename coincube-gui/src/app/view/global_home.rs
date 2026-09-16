@@ -1290,6 +1290,97 @@ impl WalletKind {
     }
 }
 
+/// Why a wallet-to-wallet transfer couldn't go through.
+///
+/// The transfer flow spans three wallets and six directions, and its ~20
+/// failure points used to funnel into one `String`. That left the screen with
+/// two bad options: echo the underlying SDK trace, or — once that was
+/// sanitised — say "Transfer failed" to everyone, whether their Vault simply
+/// wasn't open or a broadcast had just been refused.
+///
+/// The distinction that matters most to someone moving money is **whether
+/// anything was sent**. Every variant sits on one side of that line and
+/// [`TransferError::failure_point`] is what says which, so the copy can promise "your
+/// funds haven't moved" only where that is actually true.
+///
+/// Each variant carries the technical `detail` for the log. None of it is
+/// rendered — `crate::user_error` turns the variant into copy.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TransferError {
+    /// A wallet this transfer needs isn't open or configured in this Cube.
+    /// Reached by reconciling state the dashboard thought it had, so it is a
+    /// dead end rather than something to retry.
+    WalletUnavailable(WalletKind),
+    /// The receiving wallet couldn't issue a deposit address.
+    NoDepositAddress { to: WalletKind, detail: String },
+    /// Working out the network fee, or fetching the swap limits that bound it,
+    /// failed. Nothing has been prepared, let alone sent.
+    FeeEstimateFailed { detail: String },
+    /// The fee-rate field doesn't hold a usable value. Reachable only by
+    /// bypassing the form's own validation.
+    InvalidFeerate,
+    /// The prepared send is gone: Spark's prepare handle is single-use, and a
+    /// failed attempt consumes it. The user has to go back and re-enter the
+    /// amount, which is a different instruction from "try again".
+    PreparationExpired,
+    /// The address the prepare step returned isn't valid for the active
+    /// network. An internal invariant violation, not anything the user did or
+    /// can fix — so the copy points at support rather than at a retry.
+    DestinationRejected { detail: String },
+    /// The send was submitted and refused. The `from` wallet is the one whose
+    /// funds were being moved.
+    BroadcastFailed { from: WalletKind, detail: String },
+}
+
+/// How far a transfer got before it failed — the only thing a person moving
+/// money reliably wants to know first.
+///
+/// Distinct from [`TransferStage`], which tracks a *successful* transfer's
+/// progress towards settlement. This one only ever describes a failure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransferFailurePoint {
+    /// Nothing was submitted. The user's balances are untouched, and saying so
+    /// is the most useful sentence on the screen.
+    BeforeSending,
+    /// A send was submitted to a wallet or swap service and refused. Funds
+    /// were not moved, but we stop short of the same flat reassurance: the
+    /// request did reach a backend.
+    WhileSending,
+}
+
+impl TransferError {
+    pub fn failure_point(&self) -> TransferFailurePoint {
+        match self {
+            Self::BroadcastFailed { .. } => TransferFailurePoint::WhileSending,
+            Self::WalletUnavailable(_)
+            | Self::NoDepositAddress { .. }
+            | Self::FeeEstimateFailed { .. }
+            | Self::InvalidFeerate
+            | Self::PreparationExpired
+            | Self::DestinationRejected { .. } => TransferFailurePoint::BeforeSending,
+        }
+    }
+
+    /// The technical cause, for the log only.
+    pub fn detail(&self) -> String {
+        match self {
+            Self::WalletUnavailable(w) => format!("{} wallet unavailable", w.label()),
+            Self::NoDepositAddress { to, detail } => {
+                format!("no deposit address from {}: {}", to.label(), detail)
+            }
+            Self::FeeEstimateFailed { detail } => format!("fee estimate: {detail}"),
+            Self::InvalidFeerate => "feerate field did not parse".to_string(),
+            Self::PreparationExpired => "prepared send handle missing or consumed".to_string(),
+            Self::DestinationRejected { detail } => {
+                format!("prepared destination rejected: {detail}")
+            }
+            Self::BroadcastFailed { from, detail } => {
+                format!("broadcast from {}: {}", from.label(), detail)
+            }
+        }
+    }
+}
+
 /// Which side of the From/To transfer pair is being edited in the wallet picker.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PickerSide {
