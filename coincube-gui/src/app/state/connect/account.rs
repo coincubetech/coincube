@@ -2010,7 +2010,7 @@ impl ConnectAccountPanel {
                                 )),
                                 Err(e) => Message::View(view::Message::ConnectAccount(
                                     ConnectAccountMessage::BillingHistoryLoaded(
-                                        Err(e.to_string()),
+                                        Err((&e).into()),
                                         gen,
                                     ),
                                 )),
@@ -2020,10 +2020,10 @@ impl ConnectAccountPanel {
                             async move {
                                 match c2.get_user().await {
                                     Ok(u) => Message::View(view::Message::ConnectAccount(
-                                        ConnectAccountMessage::UserProfileLoaded(u),
+                                        ConnectAccountMessage::UserProfileLoaded(u, gen),
                                     )),
                                     Err(e) => Message::View(view::Message::ConnectAccount(
-                                        ConnectAccountMessage::UserProfileFailed((&e).into()),
+                                        ConnectAccountMessage::UserProfileFailed((&e).into(), gen),
                                     )),
                                 }
                             },
@@ -2061,32 +2061,44 @@ impl ConnectAccountPanel {
                             self.billing_history = Some(history);
                             self.error = None;
                         }
-                        Err(e) => {
-                            self.error = Some(PanelError::retryable(
-                                UserError::logged(
-                                    "Couldn't load billing history",
-                                    "Check your internet connection and try again.",
-                                    crate::user_error::CC_API_BADRESP,
-                                    true,
-                                    e,
-                                ),
-                                RetryAction::BillingHistory,
-                            ));
+                        Err(user) => {
+                            // Retryability and the `Ref:` come from the error
+                            // itself. Hardcoding them meant a 401 or a plan-gate
+                            // 403 — both perfectly likely on a *billing* screen —
+                            // rendered "check your internet connection" over a
+                            // "Try again" button that could only ever reproduce
+                            // the same refusal.
+                            self.error =
+                                Some(PanelError::retryable(user, RetryAction::BillingHistory));
                         }
                     }
                 }
             }
-            ConnectAccountMessage::UserProfileLoaded(user) => {
+            ConnectAccountMessage::UserProfileLoaded(user, gen) => {
                 // Non-auth profile refresh - only update user, no step/session changes
-                self.user = Some(user);
+                if gen == self.session_generation {
+                    self.user = Some(user);
+                }
             }
-            ConnectAccountMessage::UserProfileFailed(error) => {
-                // Non-auth error - just show error, don't redirect to login
-                self.error = Some(PanelError::retryable(error, RetryAction::UserProfile));
+            ConnectAccountMessage::UserProfileFailed(error, gen) => {
+                // Non-auth error - just show error, don't redirect to login.
+                //
+                // Generation-gated like its success sibling: a profile fetch
+                // that loses its race with a logout or a re-login must not put
+                // a card — with a live "Try again" — on the session that
+                // replaced it. `clear_session` bumps the counter precisely so
+                // in-flight results can be dropped.
+                if gen == self.session_generation {
+                    self.error = Some(PanelError::retryable(error, RetryAction::UserProfile));
+                }
             }
 
-            ConnectAccountMessage::SecurityDataFailed(error) => {
-                self.error = Some(PanelError::retryable(error, RetryAction::SecurityData));
+            ConnectAccountMessage::SecurityDataFailed(error, gen) => {
+                // Same guard as `VerifiedDevicesLoaded` / `LoginActivityLoaded`,
+                // which this is the failure half of.
+                if gen == self.session_generation {
+                    self.error = Some(PanelError::retryable(error, RetryAction::SecurityData));
+                }
             }
 
             ConnectAccountMessage::Retry(action) => {
@@ -2105,15 +2117,16 @@ impl ConnectAccountPanel {
                         load_security_data(&self.client, self.session_generation)
                     }
                     RetryAction::UserProfile => {
+                        let gen = self.session_generation;
                         let client = self.client.clone();
                         iced::Task::perform(
                             async move {
                                 match client.get_user().await {
                                     Ok(u) => Message::View(view::Message::ConnectAccount(
-                                        ConnectAccountMessage::UserProfileLoaded(u),
+                                        ConnectAccountMessage::UserProfileLoaded(u, gen),
                                     )),
                                     Err(e) => Message::View(view::Message::ConnectAccount(
-                                        ConnectAccountMessage::UserProfileFailed((&e).into()),
+                                        ConnectAccountMessage::UserProfileFailed((&e).into(), gen),
                                     )),
                                 }
                             },
@@ -2131,7 +2144,7 @@ impl ConnectAccountPanel {
                                 )),
                                 Err(e) => Message::View(view::Message::ConnectAccount(
                                     ConnectAccountMessage::BillingHistoryLoaded(
-                                        Err(e.to_string()),
+                                        Err((&e).into()),
                                         gen,
                                     ),
                                 )),
@@ -4825,7 +4838,7 @@ pub fn load_security_data(client: &CoincubeClient, generation: u64) -> iced::Tas
                     ConnectAccountMessage::VerifiedDevicesLoaded(devices, generation),
                 )),
                 Err(e) => Message::View(view::Message::ConnectAccount(
-                    ConnectAccountMessage::SecurityDataFailed((&e).into()),
+                    ConnectAccountMessage::SecurityDataFailed((&e).into(), generation),
                 )),
             },
         ),
@@ -4836,7 +4849,7 @@ pub fn load_security_data(client: &CoincubeClient, generation: u64) -> iced::Tas
                     ConnectAccountMessage::LoginActivityLoaded(activity, generation),
                 )),
                 Err(e) => Message::View(view::Message::ConnectAccount(
-                    ConnectAccountMessage::SecurityDataFailed((&e).into()),
+                    ConnectAccountMessage::SecurityDataFailed((&e).into(), generation),
                 )),
             },
         ),
@@ -7572,11 +7585,11 @@ mod retry_card_tests {
     fn dashboard_failures_retry_their_own_load_not_init() {
         let cases = [
             (
-                ConnectAccountMessage::SecurityDataFailed(timed_out()),
+                ConnectAccountMessage::SecurityDataFailed(timed_out(), 0),
                 RetryAction::SecurityData,
             ),
             (
-                ConnectAccountMessage::UserProfileFailed(timed_out()),
+                ConnectAccountMessage::UserProfileFailed(timed_out(), 0),
                 RetryAction::UserProfile,
             ),
         ];
@@ -7584,6 +7597,7 @@ mod retry_card_tests {
         for (message, expected) in cases {
             let mut panel = ConnectAccountPanel::new();
             panel.step = ConnectFlowStep::Dashboard;
+            assert_eq!(panel.session_generation, 0, "the fixtures assume gen 0");
 
             let _ = panel.update_message(message);
 
@@ -7616,6 +7630,141 @@ mod retry_card_tests {
             "a dashboard reload must not change the step, got {:?}",
             panel.step
         );
+    }
+
+    /// A dashboard load that loses its race with a logout must not surface on
+    /// the session that replaced it.
+    ///
+    /// `clear_session` bumps `session_generation` precisely so in-flight
+    /// results can be dropped, and the matching success messages
+    /// (`VerifiedDevicesLoaded`, `LoginActivityLoaded`) already honour it. The
+    /// failure halves did not, so a request that failed after sign-out raised a
+    /// card — with a live "Try again" — over the login screen.
+    #[test]
+    fn a_stale_dashboard_failure_is_discarded() {
+        for stale in [
+            ConnectAccountMessage::SecurityDataFailed(timed_out(), 0),
+            ConnectAccountMessage::UserProfileFailed(timed_out(), 0),
+        ] {
+            let mut panel = ConnectAccountPanel::new();
+            panel.step = ConnectFlowStep::Dashboard;
+            // Whatever the old request was keyed to, the session has moved on.
+            panel.session_generation = 7;
+
+            let _ = panel.update_message(stale);
+
+            assert!(
+                panel.error.is_none(),
+                "a result from a dead session must not raise a card"
+            );
+        }
+    }
+
+    /// The guard must not swallow failures that *do* belong to this session —
+    /// the card is the only signal the user gets.
+    #[test]
+    fn a_current_dashboard_failure_still_surfaces() {
+        let mut panel = ConnectAccountPanel::new();
+        panel.step = ConnectFlowStep::Dashboard;
+        panel.session_generation = 7;
+
+        let _ = panel.update_message(ConnectAccountMessage::SecurityDataFailed(timed_out(), 7));
+
+        assert!(
+            panel.error.is_some(),
+            "a live failure must still reach the user"
+        );
+    }
+
+    /// A stale profile *success* must not overwrite the signed-in user either —
+    /// the same race, in the direction that silently shows the wrong account.
+    #[test]
+    fn a_stale_profile_load_does_not_replace_the_current_user() {
+        let mut panel = ConnectAccountPanel::new();
+        panel.step = ConnectFlowStep::Dashboard;
+        panel.session_generation = 7;
+        assert!(panel.user.is_none());
+
+        let _ = panel.update_message(ConnectAccountMessage::UserProfileLoaded(
+            crate::services::coincube::User {
+                id: 1,
+                email: "stale@example.com".into(),
+                email_verified: Some(true),
+            },
+            0,
+        ));
+
+        assert!(
+            panel.user.is_none(),
+            "a profile from a dead session must not land on the new one"
+        );
+    }
+
+    /// Billing history failures must classify like every other API failure.
+    ///
+    /// The error used to be stringified at the async boundary and re-wrapped
+    /// with a hardcoded `CC-API-BADRESP` and `retryable: true`, so a settled
+    /// refusal got "check your internet connection" over a button that could
+    /// only reproduce it. A plan gate is not a hypothetical here — it is a
+    /// *billing* screen.
+    #[test]
+    fn billing_failures_follow_the_real_error_not_a_hardcoded_guess() {
+        let of = |status: u16, code: &str, message: &str| -> UserError {
+            (&CoincubeError::Unsuccessful(crate::services::http::NotSuccessResponseInfo {
+                status_code: status,
+                text: format!(
+                    r#"{{"success":false,"error":{{"code":"{}","message":"{}"}}}}"#,
+                    code, message
+                ),
+            }))
+                .into()
+        };
+
+        // A dead session and a plan gate are both settled: no button.
+        for user in [
+            of(401, "REFRESH_TOKEN_INVALID", "Your session has expired"),
+            of(403, "PLAN_PRO_REQUIRED", "Pro plan or above required"),
+        ] {
+            let mut panel = ConnectAccountPanel::new();
+            panel.step = ConnectFlowStep::Dashboard;
+            let reference = user.reference.clone();
+
+            let _ = panel.update_message(ConnectAccountMessage::BillingHistoryLoaded(
+                Err(user),
+                panel.session_generation,
+            ));
+
+            let err = panel.error.as_ref().expect("the failure must be shown");
+            assert!(
+                err.retry_button().is_none(),
+                "a refused request must not offer a retry: {:?}",
+                err.user
+            );
+            // The server's own taxonomy code survives as the support reference
+            // instead of a blanket CC-API-BADRESP.
+            assert_eq!(err.user.reference, reference);
+            assert!(
+                !err.user.guidance.contains("internet connection"),
+                "a server refusal is not a connectivity problem: {:?}",
+                err.user.guidance
+            );
+        }
+
+        // A 5xx really is worth another go, and still gets its button.
+        let mut panel = ConnectAccountPanel::new();
+        panel.step = ConnectFlowStep::Dashboard;
+        let _ = panel.update_message(ConnectAccountMessage::BillingHistoryLoaded(
+            Err(of(503, "SERVICE_UNAVAILABLE", "down")),
+            panel.session_generation,
+        ));
+        let err = panel.error.as_ref().expect("the failure must be shown");
+        assert!(matches!(
+            err.retry_button(),
+            Some((
+                "Try again",
+                ConnectAccountMessage::Retry(RetryAction::BillingHistory)
+            ))
+        ));
     }
 
     /// The code-entry bug. A network blip during verify or resend used to

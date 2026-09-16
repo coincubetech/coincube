@@ -1480,6 +1480,9 @@ pub struct GlobalViewConfig<'a> {
     /// True once the Liquid bridge has reported its first L-BTC
     /// balance. Drives the L-BTC row's animated-dots placeholder.
     pub liquid_balance_loaded: bool,
+    /// A balance fetch failed, so the row shows "Balance unavailable" rather
+    /// than the zero it never managed to overwrite.
+    pub liquid_balance_error: bool,
     /// True once the Liquid bridge has reported USDt balance (or an
     /// explicit error, captured in `usdt_balance_error`). Drives the
     /// USDt row's animated-dots placeholder.
@@ -1580,6 +1583,7 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
         total_balance_loading,
         spark_balance_loaded,
         liquid_balance_loaded,
+        liquid_balance_error,
         usdt_balance_loaded,
         vault_loaded,
         display_mode,
@@ -1741,6 +1745,8 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
                 )
                 .push(if balance_masked {
                     Row::new().push(text("********").size(P1_SIZE))
+                } else if liquid_balance_error {
+                    Row::new().push(text("Balance unavailable").size(P1_SIZE).color(color::RED))
                 } else if !liquid_balance_loaded {
                     Row::new().push(spinner::typing_text_carousel(
                         "...",
@@ -1752,7 +1758,7 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
                     amount_with_size_and_unit(&liquid_balance, P1_SIZE, bitcoin_unit)
                 })
                 .push_maybe(
-                    (!balance_masked && liquid_balance_loaded)
+                    (!balance_masked && liquid_balance_loaded && !liquid_balance_error)
                         .then(|| {
                             lbtc_fiat
                                 .map(|f| f.to_text().size(P2_SIZE).style(theme::text::secondary))
@@ -1775,23 +1781,30 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
                 )),
         )
         .push_maybe(
-            (!balance_masked && liquid_balance_loaded && pending_liquid_send_sats > 0).then(|| {
-                Row::new()
-                    .spacing(6)
-                    .align_y(Alignment::Center)
-                    .push(warning_icon().size(12).style(theme::text::secondary))
-                    .push(text("-").size(P2_SIZE).style(theme::text::secondary))
-                    .push(amount_with_size_and_unit(
-                        &Amount::from_sat(pending_liquid_send_sats),
-                        P2_SIZE,
-                        bitcoin_unit,
-                    ))
-                    .push(text("pending").size(P2_SIZE).style(theme::text::secondary))
-            }),
+            (!balance_masked
+                && liquid_balance_loaded
+                && !liquid_balance_error
+                && pending_liquid_send_sats > 0)
+                .then(|| {
+                    Row::new()
+                        .spacing(6)
+                        .align_y(Alignment::Center)
+                        .push(warning_icon().size(12).style(theme::text::secondary))
+                        .push(text("-").size(P2_SIZE).style(theme::text::secondary))
+                        .push(amount_with_size_and_unit(
+                            &Amount::from_sat(pending_liquid_send_sats),
+                            P2_SIZE,
+                            bitcoin_unit,
+                        ))
+                        .push(text("pending").size(P2_SIZE).style(theme::text::secondary))
+                }),
         )
         .push_maybe(
-            (!balance_masked && liquid_balance_loaded && pending_liquid_receive_sats > 0).then(
-                || {
+            (!balance_masked
+                && liquid_balance_loaded
+                && !liquid_balance_error
+                && pending_liquid_receive_sats > 0)
+                .then(|| {
                     Row::new()
                         .spacing(6)
                         .align_y(Alignment::Center)
@@ -1803,8 +1816,7 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
                             bitcoin_unit,
                         ))
                         .push(text("pending").size(P2_SIZE).style(theme::text::secondary))
-                },
-            ),
+                }),
         );
 
     // USDt asset row
@@ -2117,7 +2129,7 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
             .on_press(Message::Home(HomeMessage::ToggleBalanceMask)),
         )
         .push_maybe(
-            (usdt_balance_error && !total_balance_loading)
+            ((usdt_balance_error || liquid_balance_error) && !total_balance_loading)
                 .then(|| warning_icon().size(12).style(theme::text::secondary)),
         );
 
@@ -2322,6 +2334,7 @@ mod tests {
                 total_balance_loading: false,
                 spark_balance_loaded: true,
                 liquid_balance_loaded: true,
+                liquid_balance_error: false,
                 usdt_balance_loaded: true,
                 vault_loaded: true,
                 display_mode: DisplayMode::FiatNative,
@@ -2498,6 +2511,14 @@ mod tests {
         loading.vault_loaded = false;
         loading.usdt_balance_error = true;
         let _ = global_home_view(loading);
+
+        // A failed fetch: loaded (so the aggregate settles) but flagged, so the
+        // row says "Balance unavailable" rather than rendering the zero it
+        // never managed to overwrite.
+        let mut liquid_failed = fixture.config(0, None, None);
+        liquid_failed.liquid_balance_loaded = true;
+        liquid_failed.liquid_balance_error = true;
+        let _ = global_home_view(liquid_failed);
 
         let mut spark_only = fixture.config(0, None, None);
         spark_only.has_liquid = false;

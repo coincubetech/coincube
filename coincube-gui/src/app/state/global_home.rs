@@ -83,6 +83,35 @@ use crate::app::view::global_home::{
     TransferStage, WalletKind,
 };
 
+/// Which per-wallet balances the Total Balance aggregate is still waiting on.
+#[derive(Clone, Copy, Debug)]
+struct BalanceReadiness {
+    has_spark: bool,
+    spark_loaded: bool,
+    has_liquid: bool,
+    liquid_loaded: bool,
+    usdt_loaded: bool,
+    vault_pending: bool,
+}
+
+/// Whether the Total Balance placeholder should still be spinning.
+///
+/// Extracted from `view` so the rule can be tested, because getting it wrong is
+/// invisible until someone's dashboard hangs. The rule: a wallet gates the
+/// aggregate only while it is *present and still outstanding*.
+///
+/// "Outstanding" is not "successful". A fetch that failed has to mark itself
+/// loaded — see `HomeMessage::LiquidBalanceFetchFailed` — or one wallet's
+/// network blip freezes the total for every wallet, including the ones that
+/// answered. A gated-off Liquid wallet never loads at all, which is the same
+/// trap from the other direction.
+fn total_balance_pending(r: BalanceReadiness) -> bool {
+    let spark_pending = r.has_spark && !r.spark_loaded;
+    let liquid_pending = r.has_liquid && !r.liquid_loaded;
+    let usdt_pending = r.has_liquid && !r.usdt_loaded;
+    spark_pending || liquid_pending || usdt_pending || r.vault_pending
+}
+
 /// The (from, to) pair the Transfer flow opens on, given which wallets this
 /// cube actually has. `None` when fewer than two exist — the view's
 /// `transfer_available` already hides the button in that case, so this is a
@@ -209,6 +238,9 @@ pub struct GlobalHome {
     spark_backend: Option<Arc<SparkBackend>>,
     liquid_balance: Amount,
     liquid_balance_loaded: bool,
+    /// Set when a balance fetch failed, so the row can say so instead of
+    /// rendering the untouched zero. Mirrors `usdt_balance_error`.
+    liquid_balance_error: bool,
     /// Spark wallet balance in sats, refreshed by
     /// [`load_balance`]. `Amount::ZERO` while the first
     /// `get_info` RPC is in flight, or forever when no Spark
@@ -361,6 +393,7 @@ impl GlobalHome {
             wallet: Some(wallet),
             liquid_balance: Amount::ZERO,
             liquid_balance_loaded: false,
+            liquid_balance_error: false,
             spark_balance: Amount::ZERO,
             spark_balance_loaded: false,
             spark_synced_seen: false,
@@ -428,6 +461,7 @@ impl GlobalHome {
             wallet: None,
             liquid_balance: Amount::from_sat(0),
             liquid_balance_loaded: false,
+            liquid_balance_error: false,
             spark_balance: Amount::ZERO,
             spark_balance_loaded: false,
             spark_synced_seen: false,
@@ -540,15 +574,15 @@ impl State for GlobalHome {
         // would be a wallet the user can't actually use.
         let has_liquid =
             crate::app::features::liquid_wallet_usable(cache.network, cache.liquid_gate);
-        let spark_pending = has_spark && !self.spark_balance_loaded;
-        // A gated-off Liquid wallet never loads, so it must not gate the Total
-        // Balance placeholder either — otherwise the aggregate would spin
-        // forever on a cube that has no Liquid at all.
-        let liquid_pending = has_liquid && !self.liquid_balance_loaded;
-        let usdt_pending = has_liquid && !self.usdt_balance_loaded;
         let vault_pending = cache.has_vault && cache.blockheight() <= 0;
-        let total_balance_loading =
-            spark_pending || liquid_pending || usdt_pending || vault_pending;
+        let total_balance_loading = total_balance_pending(BalanceReadiness {
+            has_spark,
+            spark_loaded: self.spark_balance_loaded,
+            has_liquid,
+            liquid_loaded: self.liquid_balance_loaded,
+            usdt_loaded: self.usdt_balance_loaded,
+            vault_pending,
+        });
 
         let content = view::dashboard(
             menu,
@@ -564,6 +598,7 @@ impl State for GlobalHome {
                 total_balance_loading,
                 spark_balance_loaded: self.spark_balance_loaded,
                 liquid_balance_loaded: self.liquid_balance_loaded,
+                liquid_balance_error: self.liquid_balance_error,
                 usdt_balance_loaded: self.usdt_balance_loaded,
                 vault_loaded: !vault_pending,
                 display_mode: cache.display_mode,
@@ -2020,6 +2055,7 @@ impl State for GlobalHome {
                     }
                     HomeMessage::LiquidBalanceUpdated(liquid_balance) => {
                         self.liquid_balance = liquid_balance;
+                        self.liquid_balance_error = false;
                         self.liquid_balance_loaded = true;
                         Task::none()
                     }
@@ -2030,8 +2066,18 @@ impl State for GlobalHome {
                         Task::none()
                     }
                     HomeMessage::LiquidBalanceFetchFailed(detail) => {
-                        // The balance already on screen stays; it is just stale.
-                        // Mirrors `UsdtBalanceFetchFailed` in not being fatal.
+                        // `loaded` means "we are no longer waiting on this", not
+                        // "we have a number". Without it `liquid_pending` stays
+                        // true and the *aggregate* Total Balance spins forever —
+                        // taking the Vault and Spark rows down with it, neither
+                        // of which failed. `UsdtBalanceFetchFailed` below is the
+                        // same bargain.
+                        self.liquid_balance_loaded = true;
+                        // ...and `error` is what stops the row rendering the
+                        // untouched `Amount::ZERO` as though it were a real
+                        // balance. On a first-load failure that is not a stale
+                        // number, it is a wrong one.
+                        self.liquid_balance_error = true;
                         Task::done(Message::View(view::Message::ShowError(
                             crate::user_error::UserError::logged(
                                 "Couldn't refresh your Liquid balance",
@@ -2584,6 +2630,7 @@ impl State for GlobalHome {
             self.liquid_balance = Amount::ZERO;
             self.usdt_balance = 0;
             self.liquid_balance_loaded = true;
+            self.liquid_balance_error = false;
             self.usdt_balance_loaded = true;
             self.pending_liquid_send_sats = 0;
             self.pending_liquid_receive_sats = 0;
@@ -3150,6 +3197,59 @@ mod tests {
     use std::str::FromStr;
 
     const MAINNET_ADDR: &str = "bc1qvrl2849aggm6qry9ea7xqp2kk39j8vaa8r3cwg";
+
+    /// A wallet whose balance fetch *failed* must stop gating the aggregate.
+    ///
+    /// The failure path has to mark itself loaded — otherwise one wallet's
+    /// network blip leaves the Total Balance spinning forever, taking down the
+    /// Vault and Spark rows that answered perfectly well.
+    #[test]
+    fn a_failed_balance_fetch_does_not_hang_the_total() {
+        let all_present = BalanceReadiness {
+            has_spark: true,
+            spark_loaded: true,
+            has_liquid: true,
+            liquid_loaded: true,
+            usdt_loaded: true,
+            vault_pending: false,
+        };
+        assert!(!total_balance_pending(all_present));
+
+        // Still in flight: the spinner is correct here.
+        assert!(total_balance_pending(BalanceReadiness {
+            liquid_loaded: false,
+            ..all_present
+        }));
+
+        // Failed, and marked loaded by the failure handler: the aggregate must
+        // settle rather than punish the wallets that answered.
+        assert!(!total_balance_pending(BalanceReadiness {
+            liquid_loaded: true,
+            ..all_present
+        }));
+        assert!(!total_balance_pending(BalanceReadiness {
+            usdt_loaded: true,
+            ..all_present
+        }));
+
+        // A gated-off Liquid wallet never loads and must not gate anything.
+        assert!(!total_balance_pending(BalanceReadiness {
+            has_liquid: false,
+            liquid_loaded: false,
+            usdt_loaded: false,
+            ..all_present
+        }));
+
+        // A wallet that is present and genuinely outstanding still gates.
+        assert!(total_balance_pending(BalanceReadiness {
+            spark_loaded: false,
+            ..all_present
+        }));
+        assert!(total_balance_pending(BalanceReadiness {
+            vault_pending: true,
+            ..all_present
+        }));
+    }
 
     #[test]
     fn transfer_defaults_never_open_on_an_absent_wallet() {
