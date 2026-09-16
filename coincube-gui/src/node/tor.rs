@@ -34,11 +34,12 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use crate::dir::CoincubeDirectory;
+#[cfg(test)]
+use crate::node::bitcoind::internal_bitcoind_config_path;
 use crate::node::bitcoind::{
-    internal_bitcoind_config_path, internal_bitcoind_datadir, internal_bitcoind_directory,
-    internal_tor_directory, internal_tor_exe_path, internal_tor_geoip_dir, tor_download_url,
-    tor_supported_on_host, InternalBitcoindConfig, MAX_CONNECTIONS_DEFAULT,
-    MAX_UPLOAD_TARGET_MB_DAY_DEFAULT, TOR_VERSION,
+    internal_bitcoind_datadir, internal_bitcoind_directory, internal_tor_directory,
+    internal_tor_exe_path, internal_tor_geoip_dir, tor_download_url, tor_supported_on_host,
+    InternalBitcoindConfig, MAX_CONNECTIONS_DEFAULT, MAX_UPLOAD_TARGET_MB_DAY_DEFAULT, TOR_VERSION,
 };
 
 /// How long to wait for Tor to reach "Bootstrapped 100%" before giving up and
@@ -129,9 +130,15 @@ impl Tor {
     /// Start the managed Tor daemon for `version` and block until it has
     /// bootstrapped (or the timeout elapses). On success the SOCKS + control
     /// ports are live and bitcoind can be pointed at them.
+    ///
+    /// `reserved` is every port a managed-node conf under this datadir records
+    /// (see [`crate::node::bitcoind::InternalBitcoindConfig::ports_in_use`]),
+    /// so Tor's fresh ports never land on a node's RPC/P2P port that merely
+    /// happens to be unbound right now.
     pub fn start(
         coincube_datadir: &CoincubeDirectory,
         version: &str,
+        reserved: &[u16],
     ) -> Result<Self, StartTorError> {
         if !tor_supported_on_host() {
             return Err(StartTorError::UnsupportedPlatform);
@@ -146,7 +153,7 @@ impl Tor {
         // makes it 0700 on unix.
         crate::dir::create_directory(&datadir).map_err(|e| StartTorError::Io(e.to_string()))?;
 
-        let ports = allocate_ports()?;
+        let ports = allocate_ports(reserved)?;
         let geoip_dir = internal_tor_geoip_dir(coincube_datadir, version);
         let torrc_path = internal_tor_torrc_path(coincube_datadir);
         let log_path = internal_tor_log_path(coincube_datadir);
@@ -237,13 +244,21 @@ impl Tor {
 }
 
 /// Allocate two distinct local ports for Tor's control + SOCKS listeners.
-fn allocate_ports() -> Result<TorPorts, StartTorError> {
+/// Two distinct local ports for Tor's control and SOCKS listeners, from the
+/// same bounded policy the node ports use: OS bind-and-release candidates,
+/// none of them a bitcoind default or a port in `reserved`.
+///
+/// Not race-free, and not claimed to be: each candidate is bound and released
+/// before Tor is spawned, so between that release and Tor's own bind another
+/// process — a third party, or a COINCUBE allocation that has not yet seen
+/// these ports persisted — can take it. A collision fails Tor's bootstrap
+/// (or bitcoind's bind) loudly rather than silently, and the ports are only
+/// persisted into `bitcoin.conf` once Tor is actually up.
+fn allocate_ports(reserved: &[u16]) -> Result<TorPorts, StartTorError> {
     use crate::installer::step::node::bitcoind::get_available_port;
-    let control = get_available_port().map_err(|e| StartTorError::Port(e.to_string()))?;
-    let socks = get_available_port().map_err(|e| StartTorError::Port(e.to_string()))?;
-    if control == socks {
-        return Err(StartTorError::Port("ports collided".to_string()));
-    }
+    use crate::node::bitcoind::allocate_managed_ports;
+    let (control, socks) = allocate_managed_ports(reserved, get_available_port)
+        .map_err(|e| StartTorError::Port(e.to_string()))?;
     Ok(TorPorts { control, socks })
 }
 
@@ -404,6 +419,33 @@ fn register_managed_tor(tor: Tor) {
     }
 }
 
+/// Serialise tests that touch the process-global managed-Tor registry.
+///
+/// Every test that can register, stop or observe the managed Tor — directly
+/// or through `prepare_inbound_tor` / the loader and settings start helpers
+/// that call it — takes this guard, so a test that registers a disposable
+/// process cannot have it stopped by another test's `stop_managed_tor()`
+/// running in parallel. Poison-tolerant: a panicking holder must not take
+/// every later registry test down with it.
+///
+/// Returned as an opaque token rather than the bare `MutexGuard`: the async
+/// loader tests hold it across `.await`, which is fine on their current-thread
+/// runtime (nothing else can run on that thread meanwhile) but is exactly the
+/// shape clippy's `await_holding_lock` warns about for multi-threaded ones.
+#[cfg(test)]
+pub(crate) fn registry_test_guard() -> RegistryTestGuard {
+    static GUARD: Mutex<()> = Mutex::new(());
+    RegistryTestGuard(
+        GUARD
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+    )
+}
+
+/// The hold returned by [`registry_test_guard`]; released on drop.
+#[cfg(test)]
+pub(crate) struct RegistryTestGuard(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+
 /// Stop and deregister the managed Tor, if any. Idempotent; call from every app
 /// shutdown path alongside stopping the managed bitcoind.
 pub fn stop_managed_tor() {
@@ -448,87 +490,213 @@ pub fn managed_tor_ports() -> Option<TorPorts> {
 // Tie-together: prepare inbound-over-Tor before starting bitcoind
 // -------------------------------------------------------------------------
 
+/// Why the managed conf could not be brought to a safe inbound/outbound state
+/// for this start. Every variant means the same thing to a caller: **do not
+/// start bitcoind from what is on disk** — it may still carry a previous run's
+/// `listenonion`/`torcontrol`/`proxy` lines pointing at a Tor that is not
+/// there. Retryable.
+#[derive(Debug)]
+pub struct PrepareInboundTorError(pub crate::node::managed_conf::ManagedConfError);
+
+impl std::fmt::Display for PrepareInboundTorError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for PrepareInboundTorError {}
+
+/// The one thing `prepare_inbound_tor` writes: the inbound-over-Tor fields of
+/// the conf. Everything else in the file — network sections, resources, a
+/// section another setup added a moment ago — is taken from the fresh read
+/// under the lock, never from an earlier snapshot.
+#[derive(Debug, Clone, Copy)]
+enum InboundFields {
+    /// No inbound knobs at all: outbound-only, Tor not in use.
+    OutboundOnly,
+    /// Inbound on, with the running Tor's ports.
+    Inbound {
+        outbound_via_tor: bool,
+        max_upload_target_mb_day: Option<u32>,
+        max_connections: Option<u16>,
+        ports: TorPorts,
+    },
+}
+
+impl InboundFields {
+    fn apply(self, conf: &mut InternalBitcoindConfig) {
+        match self {
+            Self::OutboundOnly => {
+                conf.inbound_tor = false;
+                conf.outbound_via_tor = false;
+                conf.max_upload_target_mb_day = None;
+                conf.max_connections = None;
+                conf.tor_control_port = None;
+                conf.tor_socks_port = None;
+            }
+            Self::Inbound {
+                outbound_via_tor,
+                max_upload_target_mb_day,
+                max_connections,
+                ports,
+            } => {
+                conf.inbound_tor = true;
+                conf.outbound_via_tor = outbound_via_tor;
+                conf.max_upload_target_mb_day = max_upload_target_mb_day;
+                conf.max_connections = max_connections;
+                conf.tor_control_port = Some(ports.control);
+                conf.tor_socks_port = Some(ports.socks);
+            }
+        }
+    }
+}
+
+/// Persist `fields` onto a fresh read of the managed conf, under the
+/// datadir-wide lock. `Ok(true)` if there was a conf to write; `Ok(false)` if
+/// there is no managed-node config at all (external backend; nothing to do).
+fn persist_inbound_fields(
+    coincube_datadir: &CoincubeDirectory,
+    fields: InboundFields,
+) -> Result<bool, PrepareInboundTorError> {
+    use crate::node::bitcoind::NodeChainFamily;
+    use crate::node::managed_conf::update_managed_conf;
+    update_managed_conf(coincube_datadir, NodeChainFamily::Bitcoin, |txn| {
+        let Some(mut conf) = txn.conf.clone() else {
+            return Ok((false, None));
+        };
+        fields.apply(&mut conf);
+        Ok((true, Some(conf)))
+    })
+    .map(|outcome| outcome.logged("writing the managed bitcoin.conf's inbound-over-tor state"))
+    .map_err(PrepareInboundTorError)
+}
+
 /// Start Tor (if the user wants inbound and it's available) and rewrite
 /// `bitcoin.conf` so bitcoind emits the right inbound knobs for **this** run.
 /// Call this immediately before starting the managed bitcoind.
 ///
-/// Fail-safe and infallible by design: any problem (preference off, wrong
-/// network, platform unsupported, binary missing, bootstrap timeout, I/O error)
-/// leaves `bitcoin.conf` with **no** inbound knobs, so bitcoind runs
-/// outbound-only exactly as today. Returns `true` iff Tor is up and bitcoind
-/// will host an onion service. The user's preference sidecar is never modified
-/// here, so a transient failure is retried next launch.
+/// Fail-safe on every Tor problem (preference off, wrong network, platform
+/// unsupported, binary missing, bootstrap timeout): `bitcoin.conf` is left
+/// with **no** inbound knobs, so bitcoind runs outbound-only exactly as today,
+/// and `Ok(false)` is returned. `Ok(true)` iff Tor is up and bitcoind will host
+/// an onion service. The user's preference sidecar is never modified here, so a
+/// transient failure is retried next launch.
+///
+/// **Not** fail-safe on a conf problem, deliberately: if the file cannot be
+/// read, locked (another setup is writing it) or replaced, the previous run's
+/// inbound lines may still be in it, and starting bitcoind against them would
+/// point it at a Tor that is not running. That is `Err`, and every caller
+/// turns it into a retryable start refusal rather than starting anyway. On
+/// that refusal the process-global managed Tor is left exactly as it was: it
+/// is stopped only once the outbound-only reset has actually been persisted,
+/// so a sibling session's node in this process never loses the Tor its conf
+/// still names because *this* start could not get the lock.
+///
+/// Lock discipline: Tor's bootstrap (seconds) runs *outside* the conf lock;
+/// the lock is held only for a fresh read, the merge of the inbound fields
+/// this function owns, and the atomic replace — so a network section another
+/// setup persisted meanwhile is never erased, and no one waits on Tor.
 ///
 /// Inbound-over-Tor is **mainnet-only**: the managed node exists to serve
 /// mainnet, and onion reachability has no value on test networks, so we run
 /// outbound-only on anything but [`Network::Bitcoin`].
-pub fn prepare_inbound_tor(coincube_datadir: &CoincubeDirectory, network: Network) -> bool {
-    // Any prior managed tor from this process is replaced.
+pub fn prepare_inbound_tor(
+    coincube_datadir: &CoincubeDirectory,
+    network: Network,
+) -> Result<bool, PrepareInboundTorError> {
+    use crate::node::bitcoind::NodeChainFamily;
+    use crate::node::managed_conf::update_managed_conf;
+
+    // Always start from a clean inbound state, whatever the file carried from
+    // a previous run; the inbound lines are re-derived below only once Tor is
+    // actually up. This first pass also tells us whether there is a managed
+    // conf at all, and reads (under the lock) every port the datadir's confs
+    // record, so Tor's own ports are chosen around them.
+    //
+    // The process-global Tor from a previous start is stopped only *after*
+    // this reset has succeeded (below). A refusal here — the lock is busy, the
+    // conf unreadable or not replaceable — returns with the file untouched,
+    // and it must also leave that Tor untouched: a sibling session in this
+    // process may still be running a node whose conf points at it, and
+    // stopping it on a refusal would cut that node's SOCKS/control path while
+    // the file keeps naming a dead process. Nothing here needs the old Tor
+    // gone yet: the reservation below reads confs, not the registry, and the
+    // old Tor's ports are cleared from this conf by the reset (they are
+    // re-derived from a fresh start), so its still-running listeners only
+    // matter to the bind-and-release probe, which simply skips them.
+    let reserved = update_managed_conf(coincube_datadir, NodeChainFamily::Bitcoin, |txn| {
+        let Some(mut conf) = txn.conf.clone() else {
+            return Ok((None, None));
+        };
+        InboundFields::OutboundOnly.apply(&mut conf);
+        let reserved = crate::node::bitcoind::reserved_managed_ports(
+            coincube_datadir,
+            NodeChainFamily::Bitcoin,
+            &conf,
+        )?;
+        Ok((Some(reserved), Some(conf)))
+    })
+    .map(|outcome| outcome.logged("resetting the managed bitcoin.conf to outbound-only"))
+    .map_err(PrepareInboundTorError)?;
+
+    // The conf is durably outbound-only (or absent): any prior managed tor
+    // from this process is now safe to replace, and is — on every path from
+    // here on, including "no conf" and "Tor stays off", exactly as before.
     stop_managed_tor();
 
-    let config_path = internal_bitcoind_config_path(&internal_bitcoind_datadir(coincube_datadir));
-    let Ok(base) = InternalBitcoindConfig::from_file(&config_path) else {
+    let Some(reserved) = reserved else {
         // No managed-node config on disk → nothing to do (external backend).
-        return false;
-    };
-
-    // Always start from a clean inbound state; whatever the file happened to
-    // carry (stale ports from a previous run) is derived fresh below.
-    let mut conf = base;
-    let write_outbound_only = |mut conf: InternalBitcoindConfig| {
-        conf.inbound_tor = false;
-        conf.outbound_via_tor = false;
-        conf.max_upload_target_mb_day = None;
-        conf.max_connections = None;
-        conf.tor_control_port = None;
-        conf.tor_socks_port = None;
-        if let Err(e) = conf.to_file(&config_path) {
-            warn!("failed to write outbound-only bitcoin.conf: {e}");
-        }
+        return Ok(false);
     };
 
     // Mainnet-only (see the doc comment above).
     if network != Network::Bitcoin {
-        write_outbound_only(conf);
-        return false;
+        return Ok(false);
     }
-
     let pref = InboundTorPreference::load(coincube_datadir);
     if !pref.enabled {
-        write_outbound_only(conf);
-        return false;
+        return Ok(false);
     }
     if !tor_supported_on_host() {
         info!("inbound-over-tor requested but unavailable on this platform; running outbound-only");
-        write_outbound_only(conf);
-        return false;
+        return Ok(false);
     }
 
-    match Tor::start(coincube_datadir, TOR_VERSION) {
-        Ok(tor) => {
-            let ports = tor.ports();
-            conf.inbound_tor = true;
-            conf.outbound_via_tor = pref.outbound_via_tor;
-            conf.max_upload_target_mb_day = pref.max_upload_target_mb_day;
-            conf.max_connections = pref.max_connections;
-            conf.tor_control_port = Some(ports.control);
-            conf.tor_socks_port = Some(ports.socks);
-            if let Err(e) = conf.to_file(&config_path) {
-                // Couldn't persist the inbound config → don't start bitcoind
-                // against a stale conf; tear tor down and run outbound-only.
-                warn!("failed to write inbound bitcoin.conf ({e}); running outbound-only");
-                tor.stop();
-                write_outbound_only(conf);
-                return false;
-            }
-            register_managed_tor(tor);
-            info!("inbound-over-tor enabled; bitcoind will host a v3 onion service");
-            true
-        }
+    // The slow part, with no lock held.
+    let tor = match Tor::start(coincube_datadir, TOR_VERSION, &reserved) {
+        Ok(tor) => tor,
         Err(e) => {
             warn!("managed tor did not start ({e}); inbound unavailable, running outbound-only");
-            write_outbound_only(conf);
-            false
+            // The conf is already outbound-only from the first pass.
+            return Ok(false);
+        }
+    };
+    let fields = InboundFields::Inbound {
+        outbound_via_tor: pref.outbound_via_tor,
+        max_upload_target_mb_day: pref.max_upload_target_mb_day,
+        max_connections: pref.max_connections,
+        ports: tor.ports(),
+    };
+    match persist_inbound_fields(coincube_datadir, fields) {
+        Ok(true) => {
+            register_managed_tor(tor);
+            info!("inbound-over-tor enabled; bitcoind will host a v3 onion service");
+            Ok(true)
+        }
+        Ok(false) => {
+            // The conf disappeared between the two passes; nothing to point
+            // bitcoind at, so no reason to keep Tor either.
+            tor.stop();
+            Ok(false)
+        }
+        Err(e) => {
+            // Couldn't persist the inbound config: the file is still the
+            // outbound-only one from the first pass, but we cannot know that
+            // for sure without the lock, and a stale-inbound start is the one
+            // outcome to rule out — refuse, and tear tor down.
+            warn!("failed to write inbound bitcoin.conf ({e}); refusing to start from it");
+            tor.stop();
+            Err(e)
         }
     }
 }
@@ -726,6 +894,7 @@ mod tests {
     fn prepare_is_failsafe_without_tor_binary() {
         use crate::node::bitcoind::{InternalBitcoindConfig, InternalBitcoindNetworkConfig};
 
+        let _registry = registry_test_guard();
         let datadir = temp_datadir("failsafe");
         // A managed-node config exists (Knots) but no tor binary is
         // installed, and the preference asks for inbound.
@@ -748,7 +917,7 @@ mod tests {
 
         // No tor binary on disk → prepare must fail-safe to outbound-only and
         // leave no inbound knobs in bitcoin.conf.
-        let enabled = prepare_inbound_tor(&datadir, Network::Bitcoin);
+        let enabled = prepare_inbound_tor(&datadir, Network::Bitcoin).unwrap();
         assert!(
             !enabled,
             "must not report inbound enabled without a tor binary"
@@ -768,6 +937,7 @@ mod tests {
     fn prepare_is_mainnet_only() {
         use crate::node::bitcoind::{InternalBitcoindConfig, InternalBitcoindNetworkConfig};
 
+        let _registry = registry_test_guard();
         let datadir = temp_datadir("mainnet-only");
         let config_path = internal_bitcoind_config_path(&internal_bitcoind_datadir(&datadir));
         std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
@@ -787,7 +957,7 @@ mod tests {
             .save(&datadir)
             .unwrap();
 
-        let enabled = prepare_inbound_tor(&datadir, Network::Signet);
+        let enabled = prepare_inbound_tor(&datadir, Network::Signet).unwrap();
         assert!(!enabled, "inbound-over-tor must be mainnet-only");
         let reloaded = InternalBitcoindConfig::from_file(&config_path).unwrap();
         assert!(!reloaded.inbound_tor, "no inbound knobs off-mainnet");
@@ -851,5 +1021,270 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    // The outbound-only reset is a locked read-modify-write on a *fresh*
+    // read: a network section another setup persists while this start waits
+    // for the lock survives it. The other writer holds the lock, adds a
+    // section and releases; `prepare_inbound_tor` waits (bounded), then
+    // strips the inbound knobs from what is on disk *now*.
+    #[test]
+    fn prepare_strips_inbound_on_a_fresh_read_and_keeps_a_section_added_meanwhile() {
+        use crate::node::bitcoind::{InternalBitcoindConfig, InternalBitcoindNetworkConfig};
+        use crate::node::managed_conf::ManagedConfLock;
+
+        let _registry = registry_test_guard();
+        let datadir = temp_datadir("fresh-read");
+        let config_path = internal_bitcoind_config_path(&internal_bitcoind_datadir(&datadir));
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        let section = |rpc_port: u16, p2p_port: u16| InternalBitcoindNetworkConfig {
+            rpc_port,
+            p2p_port,
+            prune: 15000,
+            rpc_auth: None,
+        };
+        let mut conf = InternalBitcoindConfig::for_flavor(crate::node::bitcoind::NodeFlavor::Knots);
+        conf.networks.insert(Network::Signet, section(12345, 12346));
+        conf.inbound_tor = true;
+        conf.outbound_via_tor = true;
+        conf.tor_control_port = Some(9051);
+        conf.tor_socks_port = Some(9050);
+        conf.to_file(&config_path).unwrap();
+
+        // Handshake, not wall-clock: the writer takes the lock and waits to
+        // be told to persist; while it holds, this thread proves contention
+        // (a quick bounded acquire is `Busy`); then the writer persists its
+        // section and releases; only then does the reset run — on a fresh
+        // read that must include what the writer left behind.
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel::<()>();
+        let (persist_tx, persist_rx) = std::sync::mpsc::channel::<()>();
+        let writer = {
+            let datadir = datadir.clone();
+            let config_path = config_path.clone();
+            std::thread::spawn(move || {
+                let held = ManagedConfLock::acquire(&datadir).unwrap();
+                locked_tx.send(()).unwrap();
+                persist_rx.recv().unwrap();
+                let mut conf = InternalBitcoindConfig::from_file(&config_path).unwrap();
+                conf.networks
+                    .insert(Network::Testnet4, section(22222, 22223));
+                conf.to_file(&config_path).unwrap();
+                drop(held);
+            })
+        };
+        locked_rx.recv().unwrap();
+        assert!(
+            matches!(
+                ManagedConfLock::acquire_with_bound(
+                    &datadir,
+                    2,
+                    std::time::Duration::from_millis(5)
+                ),
+                Err(crate::node::managed_conf::ManagedConfLockError::Busy { .. })
+            ),
+            "the writer must be holding the lock at this point"
+        );
+        persist_tx.send(()).unwrap();
+        writer.join().unwrap();
+        // Signet: outbound-only by policy, so this is purely the reset write.
+        let enabled = prepare_inbound_tor(&datadir, Network::Signet).unwrap();
+        assert!(!enabled);
+        let reloaded = InternalBitcoindConfig::from_file(&config_path).unwrap();
+        assert!(!reloaded.inbound_tor);
+        assert!(reloaded.tor_control_port.is_none());
+        assert!(reloaded.tor_socks_port.is_none());
+        assert_eq!(
+            reloaded.networks.get(&Network::Signet),
+            Some(&section(12345, 12346))
+        );
+        assert_eq!(
+            reloaded.networks.get(&Network::Testnet4),
+            Some(&section(22222, 22223)),
+            "the section persisted while we waited must survive the reset"
+        );
+        let _ = std::fs::remove_dir_all(datadir.path());
+    }
+
+    // A conf that cannot be brought to a known state — the lock is busy for
+    // the whole bounded wait — is a refusal, not an outbound-only success:
+    // the file still carries the previous run's inbound lines, and the
+    // caller must not start bitcoind from it.
+    #[test]
+    fn prepare_refuses_on_a_busy_lock_and_leaves_the_conf_untouched() {
+        use crate::node::bitcoind::{InternalBitcoindConfig, InternalBitcoindNetworkConfig};
+        use crate::node::managed_conf::ManagedConfLock;
+
+        let _registry = registry_test_guard();
+        let datadir = temp_datadir("busy");
+        let config_path = internal_bitcoind_config_path(&internal_bitcoind_datadir(&datadir));
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        let mut conf = InternalBitcoindConfig::for_flavor(crate::node::bitcoind::NodeFlavor::Knots);
+        conf.networks.insert(
+            Network::Bitcoin,
+            InternalBitcoindNetworkConfig {
+                rpc_port: 12345,
+                p2p_port: 12346,
+                prune: 15000,
+                rpc_auth: None,
+            },
+        );
+        conf.inbound_tor = true;
+        conf.tor_control_port = Some(9051);
+        conf.tor_socks_port = Some(9050);
+        conf.to_file(&config_path).unwrap();
+        let before = std::fs::read(&config_path).unwrap();
+        assert!(String::from_utf8_lossy(&before).contains("torcontrol"));
+
+        let held = ManagedConfLock::acquire(&datadir).unwrap();
+        let result = crate::node::managed_conf::with_quick_lock_bound(|| {
+            prepare_inbound_tor(&datadir, Network::Bitcoin)
+        });
+        drop(held);
+        match result {
+            Err(PrepareInboundTorError(crate::node::managed_conf::ManagedConfError::Lock(
+                crate::node::managed_conf::ManagedConfLockError::Busy { .. },
+            ))) => {}
+            other => panic!("expected a Busy refusal, got {:?}", other.map(|_| ())),
+        }
+        // Byte-identical: the stale inbound lines are still there, which is
+        // exactly why the caller must not start from this file.
+        assert_eq!(std::fs::read(&config_path).unwrap(), before);
+        assert!(managed_tor_ports().is_none(), "no Tor was started");
+        let _ = std::fs::remove_dir_all(datadir.path());
+    }
+
+    // No managed conf at all is not an error and writes nothing: an external
+    // backend has nothing for this function to do.
+    #[test]
+    fn prepare_is_a_no_op_without_a_managed_conf() {
+        let _registry = registry_test_guard();
+        let datadir = temp_datadir("no-conf");
+        std::fs::create_dir_all(datadir.path()).unwrap();
+        InboundTorPreference::default_enabled()
+            .save(&datadir)
+            .unwrap();
+        assert!(!prepare_inbound_tor(&datadir, Network::Bitcoin).unwrap());
+        assert!(!internal_bitcoind_config_path(&internal_bitcoind_datadir(&datadir)).exists());
+        let _ = std::fs::remove_dir_all(datadir.path());
+    }
+
+    // A refused reset must not take the process-global managed Tor down with
+    // it: a sibling session's node in this process may still be using it,
+    // and the conf — deliberately untouched on refusal — still names it. The
+    // stop happens only once the outbound-only reset is durably in place,
+    // after which the success and "no conf" paths stop it exactly as before.
+    // The "Tor" here is a disposable child process registered as the managed
+    // one; no real Tor or node.
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_reset_leaves_the_registered_tor_running_and_success_still_stops_it() {
+        use crate::node::bitcoind::{InternalBitcoindConfig, InternalBitcoindNetworkConfig};
+        use crate::node::managed_conf::{with_quick_lock_bound, ManagedConfLock};
+
+        let _registry = registry_test_guard();
+        let datadir = temp_datadir("tor-survives-refusal");
+        let config_path = internal_bitcoind_config_path(&internal_bitcoind_datadir(&datadir));
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        let mut conf = InternalBitcoindConfig::for_flavor(crate::node::bitcoind::NodeFlavor::Knots);
+        conf.networks.insert(
+            Network::Bitcoin,
+            InternalBitcoindNetworkConfig {
+                rpc_port: 12345,
+                p2p_port: 12346,
+                prune: 15000,
+                rpc_auth: None,
+            },
+        );
+        conf.inbound_tor = true;
+        conf.outbound_via_tor = true;
+        conf.tor_control_port = Some(9051);
+        conf.tor_socks_port = Some(9050);
+        conf.to_file(&config_path).unwrap();
+        let before = std::fs::read(&config_path).unwrap();
+        InboundTorPreference::default_enabled()
+            .save(&datadir)
+            .unwrap();
+
+        // A disposable process standing in for a running managed Tor, and a
+        // handle on it that outlives the registry entry so its fate can be
+        // observed either way.
+        let register_fake = |ports: TorPorts| -> Arc<Mutex<std::process::Child>> {
+            let child = std::process::Command::new("sleep")
+                .arg("60")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("spawn a disposable child");
+            let process = Arc::new(Mutex::new(child));
+            register_managed_tor(Tor {
+                ports,
+                process: process.clone(),
+            });
+            process
+        };
+        let alive = |process: &Arc<Mutex<std::process::Child>>| -> bool {
+            process.lock().unwrap().try_wait().unwrap().is_none()
+        };
+        let ports = TorPorts {
+            control: 9051,
+            socks: 9050,
+        };
+        let process = register_fake(ports);
+        assert_eq!(managed_tor_ports(), Some(ports));
+        assert!(alive(&process));
+
+        // Refusal: the lock is busy for the whole (quick) bounded wait.
+        let held = ManagedConfLock::acquire(&datadir).unwrap();
+        let result = with_quick_lock_bound(|| prepare_inbound_tor(&datadir, Network::Bitcoin));
+        drop(held);
+        assert!(
+            matches!(
+                result,
+                Err(PrepareInboundTorError(
+                    crate::node::managed_conf::ManagedConfError::Lock(
+                        crate::node::managed_conf::ManagedConfLockError::Busy { .. },
+                    )
+                ))
+            ),
+            "expected a Busy refusal"
+        );
+        // The registered Tor is untouched — still registered, still running —
+        // and so is the conf that names it.
+        assert_eq!(
+            managed_tor_ports(),
+            Some(ports),
+            "the refusal deregistered Tor"
+        );
+        assert!(
+            alive(&process),
+            "the refusal stopped the registered process"
+        );
+        assert_eq!(std::fs::read(&config_path).unwrap(), before);
+
+        // Success path (lock free; no tor binary, so Tor stays off): the reset
+        // is persisted first, then the previous Tor is stopped and
+        // deregistered, as it always was.
+        let enabled = prepare_inbound_tor(&datadir, Network::Bitcoin).unwrap();
+        assert!(!enabled);
+        assert_eq!(
+            managed_tor_ports(),
+            None,
+            "success must replace the previous Tor"
+        );
+        assert!(!alive(&process), "success must stop the previous process");
+        let reloaded = InternalBitcoindConfig::from_file(&config_path).unwrap();
+        assert!(!reloaded.inbound_tor);
+        assert!(reloaded.tor_control_port.is_none());
+
+        // "No conf" path: also stops the previous Tor, as before.
+        let process = register_fake(ports);
+        let bare = temp_datadir("tor-no-conf");
+        std::fs::create_dir_all(bare.path()).unwrap();
+        assert!(!prepare_inbound_tor(&bare, Network::Bitcoin).unwrap());
+        assert_eq!(managed_tor_ports(), None);
+        assert!(!alive(&process));
+
+        let _ = std::fs::remove_dir_all(datadir.path());
+        let _ = std::fs::remove_dir_all(bare.path());
     }
 }

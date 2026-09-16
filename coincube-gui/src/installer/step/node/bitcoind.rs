@@ -33,8 +33,8 @@ use crate::{
     node::bitcoind::{
         self, bitcoind_network_dir, internal_bitcoind_cookie_path, internal_bitcoind_datadir,
         internal_bitcoind_directory, Bitcoind, ConfigField, InternalBitcoindConfig,
-        InternalBitcoindConfigError, InternalBitcoindNetworkConfig, NodeFlavor, NodeResources,
-        RpcAuthType, RpcAuthValues, StartInternalBitcoindError,
+        InternalBitcoindNetworkConfig, NodeFlavor, NodeResources, RpcAuthType, RpcAuthValues,
+        StartInternalBitcoindError,
     },
 };
 
@@ -577,22 +577,6 @@ pub fn get_available_port() -> Result<u16, Error> {
     Err(Error::CannotGetAvailablePort(
         "Exhausted attempts".to_string(),
     ))
-}
-
-/// RPC and P2P ports for a *new* network section of the managed `bitcoin.conf`
-/// `conf` (already parsed by the caller; a section that exists keeps its
-/// ports and never comes here). One bounded policy for the installer and the
-/// settings node-setup path: candidates come from the OS, and none may be a
-/// port any other managed-node section already holds — this conf's other
-/// networks, or the other chain family's file — nor a bitcoind default. Refuses
-/// when the other family's conf exists but cannot be read.
-pub fn allocate_ports_for_new_section(
-    coincube_datadir: &CoincubeDirectory,
-    family: bitcoind::NodeChainFamily,
-    conf: &InternalBitcoindConfig,
-) -> Result<(u16, u16), bitcoind::PortAllocationError> {
-    let reserved = bitcoind::reserved_managed_ports(coincube_datadir, family, conf)?;
-    bitcoind::allocate_managed_ports(&reserved, get_available_port)
 }
 
 /// Checks if port is valid for use by internal bitcoind.
@@ -1198,98 +1182,110 @@ impl Step for InternalBitcoindStep {
                             return Task::none();
                         }
                     };
-                    let mut conf = match InternalBitcoindConfig::from_file(
-                        &bitcoind::internal_bitcoind_config_path(&self.bitcoind_datadir),
-                    ) {
-                        // An existing managed node is shared by every Vault, so
-                        // flavour is global. Keep its ports/datadir (so every
-                        // Vault keeps connecting to the same RPC endpoint) and
-                        // apply the chosen flavour in place — a switch just flips
-                        // the binary, and `maybe_start` stops the old-flavour node
-                        // so the configured binary takes over the same port.
-                        Ok(mut conf) => {
-                            conf.flavor = self.flavor;
-                            // Drop any legacy `consensusrules=rdts`: no build we
-                            // ship enforces BIP-110, and the write below rebuilds
-                            // the file from this struct.
-                            conf.enforce_rdts = false;
-                            conf
-                        }
-                        // Fresh install: build for the chosen flavour (ports are
-                        // allocated below).
-                        Err(InternalBitcoindConfigError::FileNotFound) => {
-                            InternalBitcoindConfig::for_flavor(self.flavor)
-                        }
+                    // Everything from the read of the existing conf to its
+                    // replacement runs under the datadir-wide managed-conf
+                    // lock, on a fresh read: the ports chosen here are chosen
+                    // against what every other setup has persisted by now, and
+                    // the write cannot erase a section one of them added
+                    // meanwhile. The ledger is recorded inside the same span,
+                    // before the write that would drop a legacy marker — so a
+                    // failure to replace the conf leaves the ledger recorded
+                    // and the conf as it was (two files, not one transaction).
+                    let flavor = self.flavor;
+                    let network = self.network;
+                    let coincube_datadir = self.coincube_datadir.clone();
+                    let bitcoind_datadir = self.bitcoind_datadir.clone();
+                    let written = crate::node::managed_conf::update_managed_conf(
+                        &self.coincube_datadir,
+                        flavor.chain_family(),
+                        |txn| {
+                            let mut conf = match txn.conf.clone() {
+                                // An existing managed node is shared by every
+                                // Vault, so flavour is global. Keep its
+                                // ports/datadir (so every Vault keeps
+                                // connecting to the same RPC endpoint) and
+                                // apply the chosen flavour in place — a switch
+                                // just flips the binary, and `maybe_start`
+                                // stops the old-flavour node so the configured
+                                // binary takes over the same port.
+                                Some(mut conf) => {
+                                    conf.flavor = flavor;
+                                    // Drop any legacy `consensusrules=rdts`: no
+                                    // build we ship enforces BIP-110, and the
+                                    // write below rebuilds the file from this
+                                    // struct.
+                                    conf.enforce_rdts = false;
+                                    conf
+                                }
+                                // Fresh install: build for the chosen flavour
+                                // (ports are allocated below).
+                                None => InternalBitcoindConfig::for_flavor(flavor),
+                            };
+                            let network_conf = conf.networks.get(&network).cloned();
+                            // Use same ports again if there is an existing
+                            // installation.
+                            let (rpc_port, p2p_port) = match &network_conf {
+                                Some(network_conf) => {
+                                    (network_conf.rpc_port, network_conf.p2p_port)
+                                }
+                                // Never a port another network section or the
+                                // other chain family's node already holds,
+                                // bound right now or not; refuse outright if
+                                // that cannot be known.
+                                None => txn.allocate_ports(&conf, get_available_port)?,
+                            };
+
+                            // Use cookie file authentication for new wallets.
+                            // For an existing bitcoind, we would not know the
+                            // RPC password to use without checking in other
+                            // daemon.toml files.
+                            let cookie_file_auth = BitcoindRpcAuth::CookieFile(
+                                internal_bitcoind_cookie_path(&bitcoind_datadir, &network),
+                            );
+                            let bitcoind_config = BitcoindConfig {
+                                rpc_auth: cookie_file_auth,
+                                addr: internal_bitcoind_address(rpc_port),
+                            };
+                            // Use existing network conf if it exists as it may
+                            // have rpc_auth field set. This ensures an existing
+                            // wallet using username/password authentication
+                            // will continue to work.
+                            let mut network_conf =
+                                network_conf.unwrap_or(InternalBitcoindNetworkConfig {
+                                    rpc_port,
+                                    p2p_port,
+                                    prune: resources.prune_mb,
+                                    rpc_auth: None, // can be omitted for new bitcoin.conf entries
+                                });
+                            // Overwrite prune even for an existing datadir so
+                            // an edited target actually applies (keeping
+                            // ports/rpc_auth). The mempool cap is a global key
+                            // on the whole config.
+                            network_conf.prune = resources.prune_mb;
+                            conf.networks.insert(network, network_conf);
+                            conf.max_mempool_mb = resources.max_mempool_mb;
+                            // The file itself cannot say which flavour it is
+                            // for, so the ledger has to — recorded before the
+                            // write that would drop a legacy `consensusrules`
+                            // marker.
+                            crate::node::revalidate::ManagedNodeState::record_configured(
+                                &coincube_datadir,
+                                flavor,
+                            );
+                            Ok(((bitcoind_config, conf.clone()), Some(conf)))
+                        },
+                    );
+                    let (bitcoind_config, conf) = match written {
+                        Ok(outcome) => outcome.logged("writing the managed bitcoin.conf"),
                         Err(e) => {
                             self.error = Some(e.to_string());
                             return Task::none();
                         }
                     };
-                    // Keep the step in sync with the flavour actually being
-                    // written, so the download / executable / verification paths
-                    // match the conf.
+                    // Keep the step in sync with the flavour actually written,
+                    // so the download / executable / verification paths match
+                    // the conf.
                     self.flavor = conf.flavor;
-                    let network_conf = conf.networks.get(&self.network);
-                    // Use same ports again if there is an existing installation.
-                    let (rpc_port, p2p_port) = if let Some(network_conf) = network_conf {
-                        (network_conf.rpc_port, network_conf.p2p_port)
-                    } else {
-                        // Never a port another network section or the other
-                        // chain family's node already holds, bound right now
-                        // or not; refuse outright if that cannot be known.
-                        match allocate_ports_for_new_section(
-                            &self.coincube_datadir,
-                            self.flavor.chain_family(),
-                            &conf,
-                        ) {
-                            Ok(ports) => ports,
-                            Err(e) => {
-                                self.error = Some(e.to_string());
-                                return Task::none();
-                            }
-                        }
-                    };
-
-                    // Use cookie file authentication for new wallets.
-                    // For an existing bitcoind, we would not know the RPC password to use without checking
-                    // in other daemon.toml files.
-                    let cookie_file_auth = BitcoindRpcAuth::CookieFile(
-                        internal_bitcoind_cookie_path(&self.bitcoind_datadir, &self.network),
-                    );
-                    let bitcoind_config = BitcoindConfig {
-                        rpc_auth: cookie_file_auth,
-                        addr: internal_bitcoind_address(rpc_port),
-                    };
-                    // Use existing network conf if it exists as it may have rpc_auth field set.
-                    // This ensures an existing wallet using username/password authentication will continue to work.
-                    let mut network_conf =
-                        network_conf
-                            .cloned()
-                            .unwrap_or(InternalBitcoindNetworkConfig {
-                                rpc_port,
-                                p2p_port,
-                                prune: resources.prune_mb,
-                                rpc_auth: None, // can be omitted for new bitcoin.conf entries
-                            });
-                    // Overwrite prune even for an existing datadir so an edited
-                    // target actually applies (keeping ports/rpc_auth). The
-                    // mempool cap is a global key on the whole config.
-                    network_conf.prune = resources.prune_mb;
-                    conf.networks.insert(self.network, network_conf);
-                    conf.max_mempool_mb = resources.max_mempool_mb;
-                    // The file itself cannot say which flavour it is for, so the
-                    // ledger has to — recorded before the write that would drop a
-                    // legacy `consensusrules` marker.
-                    crate::node::revalidate::ManagedNodeState::record_configured(
-                        &self.coincube_datadir,
-                        self.flavor,
-                    );
-                    if let Err(e) = conf.to_file(&bitcoind::internal_bitcoind_config_path(
-                        &self.bitcoind_datadir,
-                    )) {
-                        self.error = Some(e.to_string());
-                        return Task::none();
-                    }
                     // Default-ON inbound-over-Tor for a freshly set-up enforcing
                     // (Knots) node on mainnet — see the settings path for
                     // rationale; it's mainnet-only. Only write the sidecar when
@@ -2196,12 +2192,14 @@ mod tests {
             .networks
             .insert(Network::Testnet4, section(held2.wrapping_add(7), 40999));
         for _ in 0..20 {
-            let (rpc, p2p) = allocate_ports_for_new_section(
+            // The same policy the step runs inside its locked update.
+            let (rpc, p2p) = crate::node::managed_conf::update_managed_conf(
                 &datadir,
                 bitcoind::NodeChainFamily::Bitcoin,
-                &bitcoin,
+                |txn| Ok((txn.allocate_ports(&bitcoin, get_available_port)?, None)),
             )
-            .unwrap();
+            .unwrap()
+            .value;
             assert_ne!(rpc, p2p);
             for p in [rpc, p2p].iter() {
                 assert!(![held, held2, held2.wrapping_add(7), 40999].contains(p));
