@@ -61,6 +61,45 @@ Rust program:
 Then the test suite can be run by using Taproot descriptors instead of P2WSH descriptors by setting
 the `USE_TAPROOT` environment variable to `1`.
 
+### BTCB2 two-chain harness
+
+`tests/test_btcb2_harness.py` brings up the Bitcoin Blake2b (BTCB2) regtest
+harness from launch-ga Lane B4.1: Bitcoin Knots `29.3.knots20260507` (the pinned
+non-enforcing build) and `29.4.1.knots20260508` with the BLAKE2b hardfork
+scheduled at a chosen height, a BLAKE2b-aware Esplora indexer
+(`retropex/electrs`, branch `mempool`, commit `4453cac`) on each chain, and
+`coincubed` on the Esplora backend against each. Both nodes start from one
+pre-fork history (node B is started on a copy of node A's datadir at
+`activation_height - 1`) and are never peered, so they diverge at the height.
+The fixture funds a 2-of-3 Vault with a recovery path before the fork and creates
+one post-fork Bitcoin-only coin (spent from a post-fork coinbase) for the input
+poison. See `tests/test_framework/btcb2.py`.
+
+The harness is skipped unless all three binaries are configured:
+
+```
+(cd tests/tools/knots_verify && cargo build --release)
+export KNOTS_LEGACY_PATH=$(tests/tools/fetch_knots.sh 29.3.knots20260507)
+export KNOTS_BLAKE2B_PATH=$(tests/tools/fetch_knots.sh 29.4.1.knots20260508)
+export ELECTRS_BLAKE2B_PATH=$(tests/tools/fetch_electrs_blake2b.sh)
+pytest tests/test_btcb2_harness.py -vvv
+```
+
+`fetch_knots.sh` downloads a release for the host platform and refuses to extract
+it unless its checksum is listed in the release `SHA256SUMS` *and*
+`SHA256SUMS.asc` verifies against the Knots signing key vendored in
+`coincube-gui/assets/knots_signing_key.asc` — the same check the desktop
+installer performs (`tests/tools/knots_verify`, no `gpg` needed).
+`fetch_electrs_blake2b.sh` clones and builds the pinned indexer commit (RocksDB
+compiles from source: a few minutes the first time; `clang`/`cmake` required).
+Both cache under `tests/tools/` (gitignored).
+
+Every node, indexer and daemon datadir is created under the test directory, and
+every child process runs with `HOME`/`XDG_*` pointing at an empty sandbox inside
+it; `test_every_datadir_is_pinned_under_the_test_directory` fails if anything
+lands there. In CI the harness runs from `.github/workflows/btcb2-regtest.yml`
+only on pull requests labelled `btcb2` (or on manual dispatch).
+
 ### Tips and tricks
 
 #### Logging
