@@ -296,7 +296,7 @@ impl BitcoindSettingsState {
                  (external coincubed?) — cannot switch to Connect"
             );
             let err = Error::Unexpected("Cannot enable Connect: configuration missing".to_string());
-            let err_msg = err.to_string();
+            let err_msg = crate::user_error::report(&err);
             self.warning = Some(err);
             return Task::done(Message::View(view::Message::ShowError(err_msg)));
         };
@@ -448,7 +448,7 @@ impl State for BitcoindSettingsState {
                     self.node_switch_processing = false;
                     self.pending_node_setup = None;
                     self.cancel_node_setup_in_flight = false;
-                    let err_msg = e.to_string();
+                    let err_msg = crate::user_error::report(&e);
                     self.warning = Some(e);
                     if let Some(settings) = &mut self.bitcoind_settings {
                         settings.edited(false);
@@ -461,7 +461,7 @@ impl State for BitcoindSettingsState {
             },
             Message::Info(res) => match res {
                 Err(e) => {
-                    let err_msg = e.to_string();
+                    let err_msg = crate::user_error::report(&e);
                     self.warning = Some(e);
                     return Task::done(Message::View(view::Message::ShowError(err_msg)));
                 }
@@ -873,11 +873,22 @@ impl State for BitcoindSettingsState {
                                 .await
                                 .unwrap_or_else(|e| Err(e.to_string()))
                             },
-                            |res| match res {
+                            |res| {
+                                match res {
                                 Ok(msg) => {
                                     Message::View(view::Message::ShowToast(log::Level::Info, msg))
                                 }
-                                Err(e) => Message::View(view::Message::ShowError(e)),
+                                Err(e) => Message::View(view::Message::ShowError(
+                                    crate::user_error::UserError::logged(
+                                        "Couldn't reach your node",
+                                        "Check that it's running and that the connection details in Settings are right, then try again.",
+                                        crate::user_error::CC_DMN_DOWN,
+                                        true,
+                                        e,
+                                    )
+                                    .toast(),
+                                )),
+                            }
                             },
                         );
                     }

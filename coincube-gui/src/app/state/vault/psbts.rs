@@ -73,7 +73,7 @@ impl State for PsbtsPanel {
             }
             Message::SpendTxs(res) => match res {
                 Err(e) => {
-                    let err_msg = e.to_string();
+                    let err_msg = crate::user_error::report(&e);
                     self.warning = Some(e);
                     return Task::done(Message::View(view::Message::ShowError(err_msg)));
                 }

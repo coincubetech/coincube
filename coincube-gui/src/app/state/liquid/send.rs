@@ -764,10 +764,16 @@ impl State for LiquidSend {
                                     },
                                 )),
                                 Err(e) => Message::View(view::Message::LiquidSend(
-                                    view::LiquidSendMessage::Error(format!(
-                                        "Couldn't fetch lightning limits: {}",
-                                        e
-                                    )),
+                                    view::LiquidSendMessage::Error(
+                                        crate::user_error::UserError::logged(
+                                            "Couldn't load Lightning limits",
+                                            "Check your internet connection and try again.",
+                                            crate::user_error::CC_LQD_CONN,
+                                            true,
+                                            e,
+                                        )
+                                        .toast(),
+                                    ),
                                 )),
                             },
                         );
@@ -782,10 +788,16 @@ impl State for LiquidSend {
                                     },
                                 )),
                                 Err(e) => Message::View(view::Message::LiquidSend(
-                                    view::LiquidSendMessage::Error(format!(
-                                        "Couldn't fetch onchain limits: {}",
-                                        e
-                                    )),
+                                    view::LiquidSendMessage::Error(
+                                        crate::user_error::UserError::logged(
+                                            "Couldn't load on-chain limits",
+                                            "Check your internet connection and try again.",
+                                            crate::user_error::CC_LQD_CONN,
+                                            true,
+                                            e,
+                                        )
+                                        .toast(),
+                                    ),
                                 )),
                             },
                         );
@@ -1682,7 +1694,8 @@ impl State for LiquidSend {
                                             )
                                             .await
                                     },
-                                    move |result| match result {
+                                    move |result| {
+                                        match result {
                                         Ok(prepare_response) => {
                                             Message::View(view::Message::LiquidSend(
                                                 view::LiquidSendMessage::PrepareResponseReceived(
@@ -1692,11 +1705,18 @@ impl State for LiquidSend {
                                             ))
                                         }
                                         Err(e) => Message::View(view::Message::LiquidSend(
-                                            view::LiquidSendMessage::Error(format!(
-                                                "Failed to prepare cross-asset payment: {}",
-                                                e
-                                            )),
+                                            view::LiquidSendMessage::Error(
+    crate::user_error::UserError::logged(
+        "Couldn't prepare that payment",
+        "Check the amount and the asset, then try again.",
+        crate::user_error::CC_LQD_SDK,
+        true,
+        e,
+    )
+    .toast(),
+),
                                         )),
+                                    }
                                     },
                                 );
                             }
@@ -1742,10 +1762,16 @@ impl State for LiquidSend {
                                             ))
                                         }
                                         Err(e) => Message::View(view::Message::LiquidSend(
-                                            view::LiquidSendMessage::Error(format!(
-                                                "Failed to prepare payment: {}",
-                                                e
-                                            )),
+                                            view::LiquidSendMessage::Error(
+    crate::user_error::UserError::logged(
+        "Couldn't prepare that payment",
+        "Check the amount and the address, then try again.",
+        crate::user_error::CC_LQD_SDK,
+        true,
+        e,
+    )
+    .toast(),
+),
                                         )),
                                     }
                                     },
@@ -1782,10 +1808,16 @@ impl State for LiquidSend {
                                         ))
                                     }
                                     Err(e) => Message::View(view::Message::LiquidSend(
-                                        view::LiquidSendMessage::Error(format!(
-                                            "Failed to prepare payment: {}",
-                                            e
-                                        )),
+                                        view::LiquidSendMessage::Error(
+                                            crate::user_error::UserError::logged(
+                                                "Couldn't prepare that payment",
+                                                "Check the amount and the address, then try again.",
+                                                crate::user_error::CC_LQD_SDK,
+                                                true,
+                                                e,
+                                            )
+                                            .toast(),
+                                        ),
                                     )),
                                 },
                             );
@@ -2052,15 +2084,24 @@ impl State for LiquidSend {
                                             .saturating_sub(onchain_resp.total_fees_sat);
                                         Ok::<u64, String>(max_sat)
                                     },
-                                    |result| match result {
+                                    |result| {
+                                        match result {
                                         Ok(max_sat) => Message::View(view::Message::LiquidSend(
                                             view::LiquidSendMessage::SendMaxOnChainResult(max_sat),
                                         )),
                                         Err(e) => Message::View(view::Message::LiquidSend(
-                                            view::LiquidSendMessage::Error(format!(
-                                                "Failed to estimate max: {e}"
-                                            )),
+                                            view::LiquidSendMessage::Error(
+    crate::user_error::UserError::logged(
+        "Couldn't work out the maximum you can send",
+        "Check your internet connection and try again, or enter an amount yourself.",
+        crate::user_error::CC_LQD_SDK,
+        true,
+        e,
+    )
+    .toast(),
+),
                                         )),
+                                    }
                                     },
                                 );
                             }
@@ -2280,16 +2321,24 @@ impl State for LiquidSend {
                                         )
                                         .await
                                 },
-                                |result| match result {
+                                |result| {
+                                    match result {
                                     Ok(_send_response) => Message::View(view::Message::LiquidSend(
                                         view::LiquidSendMessage::SendComplete,
                                     )),
                                     Err(e) => Message::View(view::Message::LiquidSend(
-                                        view::LiquidSendMessage::Error(format!(
-                                            "Failed to send payment: {}",
-                                            e
-                                        )),
+                                        view::LiquidSendMessage::Error(
+    crate::user_error::UserError::logged(
+        "Payment failed",
+        "Your funds weren't sent. Check your internet connection and try again.",
+        crate::user_error::CC_LQD_SDK,
+        true,
+        e,
+    )
+    .toast(),
+),
                                     )),
+                                }
                                 },
                             );
                         }
@@ -2307,16 +2356,24 @@ impl State for LiquidSend {
                                         )
                                         .await
                                 },
-                                |result| match result {
+                                |result| {
+                                    match result {
                                     Ok(_send_response) => Message::View(view::Message::LiquidSend(
                                         view::LiquidSendMessage::SendComplete,
                                     )),
                                     Err(e) => Message::View(view::Message::LiquidSend(
-                                        view::LiquidSendMessage::Error(format!(
-                                            "Failed to send payment: {}",
-                                            e
-                                        )),
+                                        view::LiquidSendMessage::Error(
+    crate::user_error::UserError::logged(
+        "Payment failed",
+        "Your funds weren't sent. Check your internet connection and try again.",
+        crate::user_error::CC_LQD_SDK,
+        true,
+        e,
+    )
+    .toast(),
+),
                                     )),
+                                }
                                 },
                             );
                         }
@@ -2367,10 +2424,16 @@ impl State for LiquidSend {
                                 view::LiquidSendMessage::RefreshRequested,
                             )),
                             Err(err) => Message::View(view::Message::LiquidSend(
-                                view::LiquidSendMessage::Error(format!(
-                                    "Failed to sync wallet: {}",
-                                    err
-                                )),
+                                view::LiquidSendMessage::Error(
+    crate::user_error::UserError::logged(
+        "Couldn't sync your Liquid wallet",
+        "Balances may be out of date. Check your internet connection and try again.",
+        crate::user_error::CC_LQD_CONN,
+        true,
+        err,
+    )
+    .toast(),
+),
                             )),
                         }
                     });

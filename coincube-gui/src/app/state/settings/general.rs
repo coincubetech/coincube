@@ -562,14 +562,36 @@ mod tests {
             ))),
         );
 
-        assert!(matches!(
-            &state.backup_state,
-            BackupSeedState::Verification {
-                error: Some(error),
-                saving: false,
-                ..
-            } if error == "Failed to save backup status: disk full"
-        ));
+        // The inline error keeps the user informed without echoing the
+        // underlying failure ("disk full" is the tame case; the same path
+        // carries IO paths and keyring errors). The detail goes to the log
+        // under the reference shown here.
+        let BackupSeedState::Verification {
+            error: Some(error),
+            saving: false,
+            ..
+        } = &state.backup_state
+        else {
+            panic!(
+                "expected a verification error, got {:?}",
+                state.backup_state
+            );
+        };
+        assert!(
+            !error.contains("disk full"),
+            "raw detail reached the user: {}",
+            error
+        );
+        assert!(
+            error.contains(crate::user_error::CC_CONFIG),
+            "no reference: {}",
+            error
+        );
+        assert!(
+            error.starts_with("Couldn't record that your seed is backed up"),
+            "got {}",
+            error
+        );
     }
 
     #[test]
@@ -1213,6 +1235,14 @@ impl GeneralSettingsState {
                         view::SettingsMessage::BackupMasterSeedUpdated,
                     ))),
                     Err(e) => {
+                        let msg = crate::user_error::UserError::logged(
+                            "Couldn't record that your seed is backed up",
+                            "Your seed is safe — only the reminder didn't save. Try again.",
+                            crate::user_error::CC_CONFIG,
+                            true,
+                            &e,
+                        )
+                        .toast();
                         if let BackupSeedState::Verification {
                             word_indices,
                             word_inputs,
@@ -1222,11 +1252,11 @@ impl GeneralSettingsState {
                             self.backup_state = BackupSeedState::Verification {
                                 word_indices: *word_indices,
                                 word_inputs: word_inputs.clone(),
-                                error: Some(format!("Failed to save backup status: {}", e)),
+                                error: Some(msg.clone()),
                                 saving: false,
                             };
                         }
-                        Task::done(Message::View(view::Message::ShowError(e)))
+                        Task::done(Message::View(view::Message::ShowError(msg)))
                     }
                 }
             }
@@ -1453,7 +1483,7 @@ impl State for GeneralSettingsState {
                 Task::none()
             }
             Message::SettingsSaveFailed(e) => {
-                let err_msg = e.to_string();
+                let err_msg = crate::user_error::report(&e);
                 self.error = Some(e);
                 // Show error in global toast
                 let toast_task = Task::done(Message::View(view::Message::ShowError(err_msg)));
@@ -1488,7 +1518,7 @@ impl State for GeneralSettingsState {
                     } else {
                         let err =
                             Error::Unexpected("No available currencies in the list.".to_string());
-                        let err_msg = err.to_string();
+                        let err_msg = crate::user_error::report(&err);
                         self.error = Some(err);
                         return Task::done(Message::View(view::Message::ShowError(err_msg)));
                     }
@@ -1509,7 +1539,7 @@ impl State for GeneralSettingsState {
                     }
                     Err(e) => {
                         let err: Error = e.into();
-                        let err_msg = err.to_string();
+                        let err_msg = crate::user_error::report(&err);
                         self.error = Some(err);
                         Task::done(Message::View(view::Message::ShowError(err_msg)))
                     }

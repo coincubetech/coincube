@@ -171,7 +171,7 @@ impl State for WalletSettingsState {
                             Task::none()
                         }
                         Err(e) => {
-                            let err_msg = e.to_string();
+                            let err_msg = crate::user_error::report(&e);
                             self.warning = Some(e);
                             Task::done(Message::View(view::Message::ShowError(err_msg)))
                         }
@@ -394,7 +394,7 @@ impl RegisterWalletModal {
                 Ok(cmd) => cmd.map(Message::HardwareWallets),
                 Err(e) => {
                     let err: Error = e.into();
-                    let err_msg = err.to_string();
+                    let err_msg = crate::user_error::report(&err);
                     self.warning = Some(err);
                     Task::done(Message::View(view::Message::ShowError(err_msg)))
                 }
@@ -412,7 +412,7 @@ impl RegisterWalletModal {
                     }
                     Err(e) => {
                         if !matches!(e, Error::HardwareWallet(async_hwi::Error::UserRefused)) {
-                            let err_msg = e.to_string();
+                            let err_msg = crate::user_error::report(&e);
                             self.warning = Some(e);
                             return Task::done(Message::View(view::Message::ShowError(err_msg)));
                         }

@@ -412,11 +412,20 @@ impl State for BuySellPanel {
                     *loading = false;
                 }
 
-                // display error using error toast
-                return iced::Task::done(Message::View(view::Message::ShowError(format!(
-                    "{} ({})",
-                    description, error
-                ))));
+                // `description` is our internal step code and `error` is the
+                // provider's raw message; neither belongs on screen. The code
+                // becomes the support reference instead, so the pair is still
+                // recoverable from the log.
+                return iced::Task::done(Message::View(view::Message::ShowError(
+                    crate::user_error::UserError::logged(
+                        "That didn't work",
+                        "Check the details and try again. If it keeps failing, contact support and quote the reference below.",
+                        description,
+                        true,
+                        &error,
+                    )
+                    .toast(),
+                )));
             }
 
             // state specific messages

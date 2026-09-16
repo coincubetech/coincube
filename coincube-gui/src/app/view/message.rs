@@ -1014,7 +1014,13 @@ pub enum LiquidReceiveMessage {
     CloseQrCode,
     DismissCelebration,
     GenerateAddress,
-    AddressGenerated(ReceiveMethod, Result<String, String>),
+    /// Carries the SDK error itself, not its `to_string()`: the receive panel
+    /// renders this, and the raw Breez string is a GraphQL/swap-service trace.
+    /// `crate::user_error` turns it into copy at the point of display.
+    AddressGenerated(
+        ReceiveMethod,
+        Result<String, crate::app::breez_liquid::BreezError>,
+    ),
     AmountInput(String),
     UsdtAmountInput(String),
     DescriptionInput(String),

@@ -168,7 +168,7 @@ impl Display for Error {
             ),
             Error::EncryptedBackup(e) => write!(f, "Failed to encrypt backup: {e:?}"),
             Error::UnknownFormat => write!(f, "Format of the file unknown"),
-            Error::EncryptionFailed => write!(f, "Encryption failed, please contact Wizarsardine team.")
+            Error::EncryptionFailed => write!(f, "Encryption failed")
         }
     }
 }
@@ -1147,7 +1147,7 @@ pub async fn import_backup(
         1 => backup.accounts.first().expect("already checked"),
         _ => {
             return Err(Error::BackupImport(
-                "Tenshu is actually not supporting import of backup with several accounts!".into(),
+                "Tenshu does not support importing a backup that contains several accounts.".into(),
             ));
         }
     };
@@ -1458,7 +1458,7 @@ pub async fn from_backup(sender: &UnboundedSender<Progress>, path: PathBuf) -> R
         1 => backup.accounts.first().expect("already checked"),
         _ => {
             return Err(Error::BackupImport(
-                "Tenshu is actually not supporting import of backup with several accounts!".into(),
+                "Tenshu does not support importing a backup that contains several accounts.".into(),
             ));
         }
     };

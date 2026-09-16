@@ -151,7 +151,7 @@ impl From<&CoincubeError> for crate::user_error::UserError {
                 // user apart, because the remedy differs.
                 let (title, guidance, reference) = if err.is_timeout() {
                     (
-                        "Can't reach COINCUBE",
+                        "Can't reach COINCUBE | Connect",
                         "The server took too long to respond. Check your internet connection and try again.",
                         CC_NET_TIMEOUT,
                     )
@@ -162,7 +162,7 @@ impl From<&CoincubeError> for crate::user_error::UserError {
                         CC_NET_OFFLINE,
                     )
                 } else {
-                    ("Can't reach COINCUBE", RETRY_GUIDANCE, CC_NET_UNKNOWN)
+                    ("Can't reach COINCUBE | Connect", RETRY_GUIDANCE, CC_NET_UNKNOWN)
                 };
                 UserError::logged(title, guidance, reference, true, err)
             }
@@ -262,7 +262,7 @@ impl From<&CoincubeError> for crate::user_error::UserError {
 
                 if status >= 500 {
                     return UserError::logged(
-                        "COINCUBE is having trouble",
+                        "COINCUBE | Connect is having trouble",
                         "This is on our side. Try again in a moment.",
                         info.code().unwrap_or_else(|| CC_API_5XX.to_string()),
                         e.is_transient(),
@@ -301,7 +301,7 @@ impl From<&CoincubeError> for crate::user_error::UserError {
             ),
 
             CoincubeError::Parse(err) => UserError::logged(
-                "Unexpected response from COINCUBE",
+                "Unexpected response from COINCUBE | Connect",
                 "Try again. If this keeps happening, update the app or contact support with the reference below.",
                 CC_API_BADRESP,
                 true,
@@ -309,7 +309,7 @@ impl From<&CoincubeError> for crate::user_error::UserError {
             ),
 
             CoincubeError::SseError(err) => UserError::logged(
-                "Lost connection to COINCUBE",
+                "Lost connection to COINCUBE | Connect",
                 "Live updates stopped. Check your internet connection and try again.",
                 CC_API_STREAM,
                 true,

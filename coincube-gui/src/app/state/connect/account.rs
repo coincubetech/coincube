@@ -3026,9 +3026,16 @@ impl ConnectAccountPanel {
                 let dir = match crate::dir::CoincubeDirectory::active() {
                     Ok(dir) => dir,
                     Err(err) => {
-                        e.error = Some(format!(
-                            "Couldn't access your Cube data to verify the duress PIN: {err}"
-                        ));
+                        e.error = Some(
+                            UserError::logged(
+                                "Couldn't open your Cube data",
+                                "Tenshu can't read its data folder, so it can't verify the duress PIN. Restart the app and try again.",
+                                crate::user_error::CC_CONFIG,
+                                true,
+                                err,
+                            )
+                            .toast(),
+                        );
                         return iced::Task::none();
                     }
                 };
@@ -3293,9 +3300,16 @@ impl ConnectAccountPanel {
                     Err(err) => {
                         if let Some(d) = &mut self.duress_disable {
                             d.method = Some(crate::app::DuressStepUpMethod::Unavailable);
-                            d.error = Some(format!(
-                                "Couldn't access your Cube data to verify it's you: {err}"
-                            ));
+                            d.error = Some(
+                                UserError::logged(
+                                    "Couldn't open your Cube data",
+                                    "Tenshu can't read its data folder, so it can't verify it's you. Restart the app and try again.",
+                                    crate::user_error::CC_CONFIG,
+                                    true,
+                                    err,
+                                )
+                                .toast(),
+                            );
                         }
                         return iced::Task::none();
                     }
@@ -3378,9 +3392,16 @@ impl ConnectAccountPanel {
                 let dir = match crate::dir::CoincubeDirectory::active() {
                     Ok(dir) => dir,
                     Err(err) => {
-                        d.error = Some(format!(
-                            "Couldn't access your Cube data to verify your PIN: {err}"
-                        ));
+                        d.error = Some(
+                            UserError::logged(
+                                "Couldn't open your Cube data",
+                                "Tenshu can't read its data folder, so it can't verify your PIN. Restart the app and try again.",
+                                crate::user_error::CC_CONFIG,
+                                true,
+                                err,
+                            )
+                            .toast(),
+                        );
                         return iced::Task::none();
                     }
                 };
@@ -3499,11 +3520,16 @@ impl ConnectAccountPanel {
                             Err(err) => {
                                 if let Some(d) = &mut self.duress_disable {
                                     d.submitting = false;
-                                    d.error = Some(format!(
-                                        "Duress was turned off on the server, but this \
-                                         device couldn't be disarmed: {err}. Reopen \
-                                         Settings to retry."
-                                    ));
+                                    d.error = Some(
+                                        UserError::logged(
+                                            "Duress is off on your account, but not on this device",
+                                            "Tenshu couldn't read its data folder to finish. Reopen Settings to retry.",
+                                            crate::user_error::CC_CONFIG,
+                                            true,
+                                            err,
+                                        )
+                                        .toast(),
+                                    );
                                 }
                                 return iced::Task::none();
                             }
@@ -3572,18 +3598,25 @@ impl ConnectAccountPanel {
                         }
                     }
                     Err(e) => {
-                        log::error!("[CONNECT] duress disarm failed: {e}");
-                        let msg = format!("Couldn't turn off duress mode: {e}. Please try again.");
+                        // Built once, logged once, rendered in whichever of the
+                        // two places is on screen. The dialog branch used to
+                        // interpolate `{e}` — the common path, and the one that
+                        // actually reached a user.
+                        let user = UserError::logged(
+                            "Couldn't turn off duress mode",
+                            "Try again. If it keeps failing, contact support and quote the reference below.",
+                            crate::user_error::CC_API_BADRESP,
+                            true,
+                            &e,
+                        );
                         if let Some(d) = &mut self.duress_disable {
                             d.submitting = false;
-                            d.error = Some(msg);
+                            d.error = Some(user.toast());
                         } else {
-                            self.error = Some(PanelError::settled(UserError::new(
-                                "Couldn't turn off duress mode",
-                                "Try again. If it keeps failing, contact support and quote the reference below.",
-                                crate::user_error::CC_API_BADRESP,
-                                true,
-                            )));
+                            // Settled on the panel card: the dialog is gone, so
+                            // there is no control left for the user to re-press
+                            // and nothing for a card button to re-run.
+                            self.error = Some(PanelError::settled(user));
                         }
                     }
                 }
@@ -7428,7 +7461,7 @@ mod retry_card_tests {
 
     fn timed_out() -> UserError {
         UserError::new(
-            "Can't reach COINCUBE",
+            "Can't reach COINCUBE | Connect",
             "The server took too long to respond. Check your internet connection and try again.",
             CC_NET_TIMEOUT,
             true,

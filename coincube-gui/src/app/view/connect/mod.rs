@@ -2888,7 +2888,7 @@ mod renewal_banner_tests {
         let mut account = ConnectAccountPanel::new();
         account.error = Some(PanelError::retryable(
             UserError::new(
-                "Can't reach COINCUBE",
+                "Can't reach COINCUBE | Connect",
                 crate::user_error::RETRY_GUIDANCE,
                 crate::user_error::CC_NET_TIMEOUT,
                 true,
@@ -3201,7 +3201,7 @@ mod renewal_banner_tests {
         );
         panel.account.error = Some(PanelError::retryable(
             UserError::new(
-                "Can't reach COINCUBE",
+                "Can't reach COINCUBE | Connect",
                 crate::user_error::RETRY_GUIDANCE,
                 crate::user_error::CC_NET_TIMEOUT,
                 true,

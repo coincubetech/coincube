@@ -423,7 +423,7 @@ impl State for BackendSettingsState {
                     }
                     Err(e) => {
                         self.success = false;
-                        let err_msg = e.to_string();
+                        let err_msg = crate::user_error::report(&e);
                         self.warning = Some(e);
                         Task::done(Message::View(view::Message::ShowError(err_msg)))
                     }

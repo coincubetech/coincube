@@ -397,10 +397,9 @@ impl State for SparkTransactions {
             ))) => {
                 if matches!(self.modal, SparkTransactionsModal::Export { .. }) {
                     self.modal = SparkTransactionsModal::None;
-                    return Task::done(Message::View(view::Message::ShowError(format!(
-                        "Export failed: {:?}",
-                        e
-                    ))));
+                    return Task::done(Message::View(view::Message::ShowError(
+                        crate::user_error::report_export(&e),
+                    )));
                 }
             }
             Message::View(view::Message::ImportExport(ImportExportMessage::Close)) => {

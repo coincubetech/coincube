@@ -823,7 +823,7 @@ impl Step for DefineSpend {
                     }
                     view::CreateSpendMessage::SessionError(error) => {
                         let err: Error = error.into();
-                        let err_msg = err.to_string();
+                        let err_msg = crate::user_error::report(&err);
                         self.warning = Some(err);
                         return Task::done(Message::View(view::Message::ShowError(err_msg)));
                     }
@@ -990,7 +990,7 @@ impl Step for DefineSpend {
                         return Task::done(Message::View(view::Message::Next));
                     }
                     Err(e) => {
-                        let err_msg = e.to_string();
+                        let err_msg = crate::user_error::report(&e);
                         self.warning = Some(e);
                         return Task::done(Message::View(view::Message::ShowError(err_msg)));
                     }
@@ -1001,7 +1001,7 @@ impl Step for DefineSpend {
                     self.coins_labels = labels;
                 }
                 Err(e) => {
-                    let err_msg = e.to_string();
+                    let err_msg = crate::user_error::report(&e);
                     self.warning = Some(e);
                     return Task::done(Message::View(view::Message::ShowError(err_msg)));
                 }
@@ -1036,7 +1036,7 @@ impl Step for DefineSpend {
                     return task;
                 }
                 (Err(e), _) | (Ok(_), Err(e)) => {
-                    let err_msg = e.to_string();
+                    let err_msg = crate::user_error::report(&e);
                     self.warning = Some(e);
                     return Task::done(Message::View(view::Message::ShowError(err_msg)));
                 }
@@ -1732,7 +1732,7 @@ impl Step for SelectRecoveryPath {
                     self.load_from_coins_and_tip_height(&coins, tip);
                 }
                 (Err(e), _) | (Ok(_), Err(e)) => {
-                    let err_msg = e.to_string();
+                    let err_msg = crate::user_error::report(&e);
                     self.warning = Some(e);
                     return Task::done(Message::View(view::Message::ShowError(err_msg)));
                 }

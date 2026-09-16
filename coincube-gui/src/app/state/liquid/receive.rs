@@ -21,6 +21,7 @@ use super::sideshift_receive::SideshiftReceiveFlow;
 use crate::app::breez_liquid::assets::{
     format_usdt_display, parse_asset_to_minor_units, usdt_asset_id, USDT_PRECISION,
 };
+use crate::app::breez_liquid::BreezError;
 use crate::app::menu::LiquidSubMenu;
 use crate::app::settings::unit::BitcoinDisplayUnit;
 use crate::app::state::liquid::send::SendAsset;
@@ -168,26 +169,20 @@ impl LiquidReceive {
         client: Arc<LiquidBackend>,
         amount: Amount,
         description: Option<String>,
-    ) -> Result<String, String> {
-        let response = client
-            .receive_invoice(Some(amount), description)
-            .await
-            .map_err(|e| e.to_string())?;
+    ) -> Result<String, BreezError> {
+        let response = client.receive_invoice(Some(amount), description).await?;
 
         Ok(response.destination)
     }
 
-    async fn generate_onchain_address(client: Arc<LiquidBackend>) -> Result<String, String> {
-        let response = client
-            .receive_onchain(None)
-            .await
-            .map_err(|e| e.to_string())?;
+    async fn generate_onchain_address(client: Arc<LiquidBackend>) -> Result<String, BreezError> {
+        let response = client.receive_onchain(None).await?;
 
         Ok(response.destination)
     }
 
-    async fn generate_liquid_address(client: Arc<LiquidBackend>) -> Result<String, String> {
-        let response = client.receive_liquid().await.map_err(|e| e.to_string())?;
+    async fn generate_liquid_address(client: Arc<LiquidBackend>) -> Result<String, BreezError> {
+        let response = client.receive_liquid().await?;
 
         Ok(response.destination)
     }
@@ -510,7 +505,7 @@ impl State for LiquidReceive {
                             self.description_input.clear();
                         }
                         Err(e) => {
-                            let err_msg = e.to_string();
+                            let err_msg = crate::user_error::report_liquid(&e);
                             self.error = Some(err_msg.clone());
                             match method {
                                 ReceiveMethod::Lightning => {
@@ -1021,7 +1016,6 @@ impl LiquidReceive {
                     .receive_usdt(&asset_id, amount, USDT_PRECISION)
                     .await
                     .map(|r| r.destination)
-                    .map_err(|e| e.to_string())
             },
             |result| {
                 Message::View(view::Message::LiquidReceive(
