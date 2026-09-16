@@ -81,11 +81,14 @@ jobs:
       - name: Build coincubed
         run: cargo build --release --package coincubed
 
-      - name: Build knots_verify
+      - name: Test and build knots_verify
+        # The verifier decides which node binaries the harness may execute, so
+        # its own tests (real signed manifest, tampered/garbled/missing
+        # signature, wrong pin, filename/hash mismatch) run on every job.
         run: |
-          if [ ! -x tests/tools/knots_verify/target/release/knots_verify ]; then
-            (cd tests/tools/knots_verify && cargo build --release --locked)
-          fi
+          cd tests/tools/knots_verify
+          cargo test --release --locked
+          cargo build --release --locked
 
       - name: Fetch and verify both Bitcoin Knots releases
         # Each archive's checksum must be listed in the release SHA256SUMS and

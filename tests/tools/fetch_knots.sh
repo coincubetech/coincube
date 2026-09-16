@@ -7,7 +7,9 @@
 #   e.g. tests/tools/fetch_knots.sh 29.4.1.knots20260508
 #
 # Nothing is extracted unless verification succeeds. The cache dir defaults to
-# tests/tools/knots/ (gitignored); re-runs reuse a verified extraction.
+# tests/tools/knots/ (gitignored). A re-run reuses the extraction only if the
+# extracted bitcoind still hashes to what was recorded at verification time
+# (".verified"); otherwise the cached archive is verified and extracted again.
 set -euo pipefail
 
 version="${1:?usage: fetch_knots.sh <version> [cache-dir]}"
@@ -41,13 +43,20 @@ if [ -z "$verify_bin" ]; then
   exit 2
 fi
 
-if [ -x "$bitcoind" ] && [ -f "$dest/.verified" ]; then
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1
+  else shasum -a 256 "$1" | cut -d' ' -f1; fi
+}
+
+if [ -x "$bitcoind" ] && [ -f "$dest/.verified" ] \
+   && [ "$(cat "$dest/.verified")" = "$(sha256_of "$bitcoind")" ]; then
   echo "$bitcoind"
   exit 0
 fi
 
 mkdir -p "$dest"
 cd "$dest"
+rm -rf ".verified" "bitcoin-$version"
 for f in "$archive" SHA256SUMS SHA256SUMS.asc; do
   # Download to a temporary name and rename on success: a transfer that fails
   # after its retries must not leave a partial file the `-f` check accepts.
@@ -60,5 +69,5 @@ done
 "$verify_bin" "$archive" SHA256SUMS SHA256SUMS.asc >&2
 tar -xzf "$archive"
 [ -x "$bitcoind" ] || { echo "no bitcoind in $archive" >&2; exit 1; }
-touch .verified
+sha256_of "$bitcoind" > .verified
 echo "$bitcoind"

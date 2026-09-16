@@ -20,14 +20,22 @@ src="$cache_dir/src"
 target="${ELECTRS_BLAKE2B_TARGET_DIR:-$cache_dir/target}"
 bin="$target/release/electrs"
 # The "built from the pinned commit" marker lives next to the binary it
-# vouches for, so an overridden target dir can never reuse another build's
-# marker and hand back an unpinned electrs.
+# vouches for and records that binary's SHA-256: a reused cache entry is only
+# trusted if the executable still hashes to what this script built, so a
+# replaced or stale binary is rebuilt from the checked-out commit instead of
+# being handed back as the pinned one.
 marker="$target/.built-$commit"
 
-if [ -x "$bin" ] && [ -f "$marker" ]; then
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1
+  else shasum -a 256 "$1" | cut -d' ' -f1; fi
+}
+
+if [ -x "$bin" ] && [ -f "$marker" ] && [ "$(cat "$marker")" = "$(sha256_of "$bin")" ]; then
   echo "$bin"
   exit 0
 fi
+rm -f "$marker"
 
 mkdir -p "$cache_dir"
 if [ ! -d "$src/.git" ]; then
@@ -44,5 +52,5 @@ fi
 # `--locked` keeps the dependency graph at the upstream Cargo.lock.
 (cd "$src" && CARGO_TARGET_DIR="$target" cargo build --release --locked --bin electrs >&2)
 [ -x "$bin" ] || { echo "electrs binary not produced" >&2; exit 1; }
-touch "$marker"
+sha256_of "$bin" > "$marker"
 echo "$bin"

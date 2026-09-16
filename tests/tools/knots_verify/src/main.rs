@@ -35,18 +35,24 @@ fn hash_listed_in_manifest(bytes: &[u8], archive_filename: &str, sha256sums: &st
     })
 }
 
-fn verify_detached_signature(data: &[u8], asc: &str) -> Result<(), String> {
+/// Same rule as the installer's `verify_detached_signature`: the armored key
+/// must re-derive to `expected_fingerprint`, and at least one signature in
+/// `asc` must verify over `data` against that key or a subkey it has bound.
+fn verify_detached_signature(
+    data: &[u8],
+    asc: &str,
+    pubkey_armored: &str,
+    expected_fingerprint: &str,
+) -> Result<(), String> {
     if !asc
         .trim_start()
         .starts_with("-----BEGIN PGP SIGNATURE-----")
     {
         return Err("no PGP signature block".into());
     }
-    let (pubkey, _) = SignedPublicKey::from_string(KNOTS_SIGNING_KEY_ASC)
+    let (pubkey, _) = SignedPublicKey::from_string(pubkey_armored)
         .map_err(|e| format!("vendored key unreadable: {e}"))?;
-    if !hex::encode(pubkey.fingerprint().as_bytes())
-        .eq_ignore_ascii_case(KNOTS_SIGNING_KEY_FINGERPRINT)
-    {
+    if !hex::encode(pubkey.fingerprint().as_bytes()).eq_ignore_ascii_case(expected_fingerprint) {
         return Err("vendored key fingerprint does not match the pin".into());
     }
     let bound_subkeys: Vec<_> = pubkey
@@ -69,7 +75,7 @@ fn verify_detached_signature(data: &[u8], asc: &str) -> Result<(), String> {
         Err(format!(
             "none of the {} signature(s) verify against {}",
             signatures.len(),
-            KNOTS_SIGNING_KEY_FINGERPRINT
+            expected_fingerprint
         ))
     }
 }
@@ -98,7 +104,12 @@ fn main() {
         exit(2)
     });
 
-    if let Err(e) = verify_detached_signature(&sums_bytes, &asc) {
+    if let Err(e) = verify_detached_signature(
+        &sums_bytes,
+        &asc,
+        KNOTS_SIGNING_KEY_ASC,
+        KNOTS_SIGNING_KEY_FINGERPRINT,
+    ) {
         eprintln!("SHA256SUMS.asc: {e}");
         exit(1);
     }
@@ -111,4 +122,137 @@ fn main() {
         "ok: {archive_name} listed in SHA256SUMS; SHA256SUMS.asc verified against {}",
         KNOTS_SIGNING_KEY_FINGERPRINT
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The real, multi-maintainer-signed manifest of the fork release, as
+    // published at bitcoinknots.org/files/29.x/29.4.1.knots20260508/.
+    const SUMS: &[u8] = include_bytes!("../tests/fixtures/29.4.1.knots20260508.SHA256SUMS");
+    const ASC: &str = include_str!("../tests/fixtures/29.4.1.knots20260508.SHA256SUMS.asc");
+
+    #[test]
+    fn real_manifest_verifies_against_vendored_key() {
+        verify_detached_signature(
+            SUMS,
+            ASC,
+            KNOTS_SIGNING_KEY_ASC,
+            KNOTS_SIGNING_KEY_FINGERPRINT,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn tampered_manifest_does_not_verify() {
+        let mut tampered = SUMS.to_vec();
+        tampered.extend_from_slice(
+            b"\n0000000000000000000000000000000000000000000000000000000000000000  extra\n",
+        );
+        let err = verify_detached_signature(
+            &tampered,
+            ASC,
+            KNOTS_SIGNING_KEY_ASC,
+            KNOTS_SIGNING_KEY_FINGERPRINT,
+        )
+        .unwrap_err();
+        assert!(err.contains("none of the"), "{err}");
+    }
+
+    #[test]
+    fn single_flipped_byte_does_not_verify() {
+        let mut flipped = SUMS.to_vec();
+        flipped[0] ^= 0x01;
+        assert!(verify_detached_signature(
+            &flipped,
+            ASC,
+            KNOTS_SIGNING_KEY_ASC,
+            KNOTS_SIGNING_KEY_FINGERPRINT
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn wrong_pin_rejects_the_vendored_key() {
+        let err = verify_detached_signature(
+            SUMS,
+            ASC,
+            KNOTS_SIGNING_KEY_ASC,
+            "0000000000000000000000000000000000000000",
+        )
+        .unwrap_err();
+        assert!(err.contains("fingerprint"), "{err}");
+    }
+
+    #[test]
+    fn missing_signature_block_is_reported_as_such() {
+        for asc in [
+            "",
+            "not a signature",
+            "-----BEGIN PGP PUBLIC KEY BLOCK-----",
+        ] {
+            let err = verify_detached_signature(
+                SUMS,
+                asc,
+                KNOTS_SIGNING_KEY_ASC,
+                KNOTS_SIGNING_KEY_FINGERPRINT,
+            )
+            .unwrap_err();
+            assert_eq!(err, "no PGP signature block");
+        }
+    }
+
+    #[test]
+    fn garbled_signature_block_is_invalid() {
+        let garbled = "-----BEGIN PGP SIGNATURE-----\n\nnot-base64!\n-----END PGP SIGNATURE-----\n";
+        assert!(verify_detached_signature(
+            SUMS,
+            garbled,
+            KNOTS_SIGNING_KEY_ASC,
+            KNOTS_SIGNING_KEY_FINGERPRINT
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn manifest_lists_hash_for_exact_filename_only() {
+        let bytes = b"release archive bytes";
+        let digest = hex::encode(Sha256::digest(bytes));
+        let manifest = format!(
+            "{digest}  bitcoin-x.tar.gz\n{}  other.tar.gz\n",
+            "ab".repeat(32)
+        );
+        assert!(hash_listed_in_manifest(
+            bytes,
+            "bitcoin-x.tar.gz",
+            &manifest
+        ));
+        assert!(!hash_listed_in_manifest(bytes, "other.tar.gz", &manifest));
+        assert!(!hash_listed_in_manifest(bytes, "renamed.tar.gz", &manifest));
+        assert!(!hash_listed_in_manifest(
+            b"different bytes",
+            "bitcoin-x.tar.gz",
+            &manifest
+        ));
+        // Hex case does not matter; whitespace shape follows GNU coreutils.
+        let upper = manifest
+            .to_uppercase()
+            .replace("BITCOIN-X.TAR.GZ", "bitcoin-x.tar.gz");
+        assert!(hash_listed_in_manifest(bytes, "bitcoin-x.tar.gz", &upper));
+    }
+
+    #[test]
+    fn real_archive_names_are_listed_in_the_real_manifest() {
+        let sums = String::from_utf8_lossy(SUMS);
+        for name in [
+            "bitcoin-29.4.1.knots20260508-x86_64-linux-gnu.tar.gz",
+            "bitcoin-29.4.1.knots20260508-arm64-apple-darwin.tar.gz",
+        ] {
+            assert!(
+                sums.lines().any(|l| l.ends_with(&format!("  {name}"))),
+                "{name}"
+            );
+        }
+    }
 }
