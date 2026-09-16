@@ -801,6 +801,11 @@ impl DaemonHandle {
         let fresh_data_dir = !data_dir.exists() || !data_dir.sqlite_db_file_path().exists();
         if !fresh_data_dir {
             preflight_existing_database(&config, &data_dir.sqlite_db_file_path())?;
+        } else if data_dir.exists() {
+            // A directory without a database is only "fresh" if nothing of a database is left
+            // in it: a stray rollback journal or WAL sidecar means one was here.
+            preflight::refuse_orphan_sidecars(&data_dir.sqlite_db_file_path())
+                .map_err(StartupError::DbPreflight)?;
         }
         if !data_dir.exists() {
             data_dir
@@ -1822,6 +1827,45 @@ mod tests {
             }
             node.assert_untouched();
             fs::remove_dir_all(tmp_dir).unwrap();
+        }
+
+        #[test]
+        fn a_stray_sidecar_without_a_database_is_refused_before_rpc_wallet_or_creation() {
+            // The directory exists but the database does not: without this check the start
+            // would be "fresh" — create a database, create the watch-only wallet — next to
+            // the remains of a database that is gone.
+            for sidecar in [
+                "coincubed.sqlite3-journal",
+                "coincubed.sqlite3-wal",
+                "coincubed.sqlite3-shm",
+            ] {
+                let tmp_dir = tmp_dir();
+                fs::create_dir_all(&tmp_dir).unwrap();
+                let node = SilentNode::bind();
+                let data_directory = tmp_dir.join("bitcoin");
+                fs::create_dir_all(&data_directory).unwrap();
+                let stray = data_directory.join(sidecar);
+                fs::write(&stray, b"remains").unwrap();
+                let before = listing(&data_directory);
+                let config = config_for(ChainId::Bitcoin, &tmp_dir, data_directory.clone(), &node);
+
+                match DaemonHandle::start_default(config, false) {
+                    Err(StartupError::DbPreflight(PreflightError::OrphanSidecar(p))) => {
+                        assert_eq!(p, stray, "{}", sidecar)
+                    }
+                    other => panic!(
+                        "{}: expected OrphanSidecar, got {:?}",
+                        sidecar,
+                        other.map(|_| ())
+                    ),
+                }
+                assert_eq!(fs::read(&stray).unwrap(), b"remains");
+                assert_eq!(listing(&data_directory), before, "{}", sidecar);
+                assert!(!data_directory.join("coincubed.sqlite3").exists());
+                assert!(!data_directory.join("coincubed_watchonly_wallet").exists());
+                node.assert_untouched();
+                fs::remove_dir_all(tmp_dir).unwrap();
+            }
         }
 
         /// The compatibility path: an existing Bitcoin-family v8 database starts, is migrated

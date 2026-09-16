@@ -64,7 +64,10 @@ and `setup_sqlite`. Ordering in `start`:
 1. `check_chain_encoding()` on the in-memory config — no I/O.
 2. `chain_runtime_gate` — BTCB2 → `StartupError::ChainDormant`, no I/O.
 3. If a database exists: the preflight, then `StartupError::ChainMismatch` if
-   its identity is not the configured one.
+   its identity is not the configured one. If the directory exists but the
+   database does not, a stray `coincubed.sqlite3-journal`, `-wal` or `-shm`
+   is refused (`OrphanSidecar`) instead of a fresh database being created next
+   to the remains of another.
 4. Only then: directory creation, watch-only wallet, migrations, healing,
    backends — in the order they always ran.
 
@@ -116,7 +119,12 @@ What the preflight does, and what it promises:
   Cube's `daemon.toml` names a different chain than the Cube record it sits
   under (`Error::ChainMismatch`), which covers a Cube whose database does not
   exist yet — the daemon's preflight has nothing to compare against in that
-  case.
+  case. The comparison runs on the file as found, before the Esplora-config
+  migration may rewrite it, so a mismatched file is left byte-for-byte as it
+  was. The installer changes the daemon's network only through
+  `Context::set_bitcoin_network`, which moves the chain identity with the
+  encoding (a Bitcoin-family identity follows the picker; a fork identity is
+  never mapped back to Bitcoin).
 
 ## Not in this slice
 

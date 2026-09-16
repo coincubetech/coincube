@@ -4168,6 +4168,37 @@ CREATE TABLE labels (
         }
 
         #[test]
+        fn orphan_sidecars_are_refused_and_left_alone_when_the_database_is_absent() {
+            use crate::database::sqlite::preflight::refuse_orphan_sidecars;
+            let tmp_dir = tmp_dir();
+            fs::create_dir_all(&tmp_dir).unwrap();
+            let db_path = tmp_dir.join("coincubed.sqlite3");
+            // Nothing there at all: fine, nothing created.
+            refuse_orphan_sidecars(&db_path).unwrap();
+            assert_eq!(listing(&tmp_dir), Vec::<String>::new());
+            for sidecar in [
+                "coincubed.sqlite3-journal",
+                "coincubed.sqlite3-wal",
+                "coincubed.sqlite3-shm",
+            ] {
+                let stray = tmp_dir.join(sidecar);
+                fs::write(&stray, b"remains").unwrap();
+                let before = listing(&tmp_dir);
+                match refuse_orphan_sidecars(&db_path) {
+                    Err(PreflightError::OrphanSidecar(p)) => assert_eq!(p, stray),
+                    other => panic!("{}: {:?}", sidecar, other),
+                }
+                assert_eq!(fs::read(&stray).unwrap(), b"remains");
+                assert_eq!(listing(&tmp_dir), before);
+                fs::remove_file(&stray).unwrap();
+            }
+            // A file that merely shares the prefix is not a sidecar.
+            fs::write(tmp_dir.join("coincubed.sqlite3.bak"), b"x").unwrap();
+            refuse_orphan_sidecars(&db_path).unwrap();
+            fs::remove_dir_all(tmp_dir).unwrap();
+        }
+
+        #[test]
         fn a_legacy_layout_fixture_cannot_carry_a_fork_identity() {
             let tmp_dir = tmp_dir();
             fs::create_dir_all(&tmp_dir).unwrap();

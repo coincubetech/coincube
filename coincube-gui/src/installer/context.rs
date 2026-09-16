@@ -5,6 +5,7 @@ use std::time::Duration;
 use crate::{
     app::settings::KeySetting,
     backup::Backup,
+    chain::ChainIdExt,
     dir::CoincubeDirectory,
     installer::descriptor::PathKind,
     node::bitcoind::{Bitcoind, InternalBitcoindConfig, NodeFlavor},
@@ -300,6 +301,52 @@ impl Context {
     pub fn installs_vault(&self) -> bool {
         self.descriptor.is_some()
     }
+
+    /// Re-key the daemon configuration on `network`, keeping the chain identity and the
+    /// encoding together. A `BitcoinConfig` must never carry a `network` that is not
+    /// `chain.bitcoin_network()`: the daemon refuses such a pair before it touches anything.
+    /// So a step that learns the network from a descriptor or a picker must not write the
+    /// field on its own — it goes through here, which derives the identity the new encoding
+    /// selects (see [`chain_for_network`]) and refuses when there is none.
+    pub fn set_bitcoin_network(&mut self, network: bitcoin::Network) -> Result<(), String> {
+        let current = self.bitcoin_config.chain;
+        let chain = chain_for_network(current, network).ok_or_else(|| {
+            format!(
+                "{} has no variant that uses the {} network; keep the chain or pick a matching \
+                 network.",
+                current.label(),
+                network
+            )
+        })?;
+        self.bitcoin_config = BitcoinConfig::new(chain, self.bitcoin_config.poll_interval_secs);
+        Ok(())
+    }
+}
+
+/// The chain identity that `network` selects for a configuration currently on `current`.
+///
+/// The encoding alone cannot name a chain — Bitcoin Blake2b encodes exactly like its Bitcoin
+/// twin — so the answer depends on where the configuration already is:
+/// - the encoding is unchanged: the identity stays what it is (a fork stays a fork);
+/// - a Bitcoin-family identity follows the network to the Bitcoin-family identity of that
+///   network, which is what the installer's network picker means today;
+/// - a fork identity moves only within the fork's own variants (mainnet ↔ testnet4) and has
+///   no answer for a network the fork does not exist on. It is never mapped back to Bitcoin.
+pub(crate) fn chain_for_network(
+    current: crate::chain::ChainId,
+    network: bitcoin::Network,
+) -> Option<crate::chain::ChainId> {
+    use crate::chain::ChainId;
+    if current.bitcoin_network() == network {
+        return Some(current);
+    }
+    if !current.is_blake2b() {
+        return Some(ChainId::from(network));
+    }
+    ChainId::ALL
+        .iter()
+        .copied()
+        .find(|candidate| candidate.is_blake2b() && candidate.bitcoin_network() == network)
 }
 
 impl Context {
@@ -383,6 +430,67 @@ mod tests {
             None,
             None,
         )
+    }
+
+    /// `set_bitcoin_network` is the only way a step changes the daemon's network, and it
+    /// keeps the identity/encoding pair the daemon insists on.
+    #[test]
+    fn changing_the_network_keeps_chain_and_encoding_together() {
+        use super::chain_for_network;
+        use crate::chain::ChainId;
+
+        let mut c = ctx();
+        assert_eq!(c.bitcoin_config.chain, ChainId::Bitcoin);
+        let poll = c.bitcoin_config.poll_interval_secs;
+        for (network, chain) in [
+            (Network::Signet, ChainId::Signet),
+            (Network::Testnet4, ChainId::Testnet4),
+            (Network::Regtest, ChainId::Regtest),
+            (Network::Testnet, ChainId::Testnet),
+            (Network::Bitcoin, ChainId::Bitcoin),
+        ] {
+            c.set_bitcoin_network(network).unwrap();
+            assert_eq!(c.bitcoin_config.chain, chain, "{}", network);
+            assert_eq!(c.bitcoin_config.network, network);
+            assert_eq!(c.bitcoin_config.poll_interval_secs, poll);
+            c.bitcoin_config.check_chain_encoding().unwrap();
+        }
+
+        // A fork identity is never mapped back to Bitcoin: unchanged encoding keeps it, the
+        // fork's other variant is reachable, and a network the fork does not exist on is a
+        // refusal rather than a silent downgrade.
+        assert_eq!(
+            chain_for_network(ChainId::BitcoinBlake2b, Network::Bitcoin),
+            Some(ChainId::BitcoinBlake2b)
+        );
+        assert_eq!(
+            chain_for_network(ChainId::BitcoinBlake2b, Network::Testnet4),
+            Some(ChainId::BitcoinBlake2bTestnet4)
+        );
+        assert_eq!(
+            chain_for_network(ChainId::BitcoinBlake2bTestnet4, Network::Bitcoin),
+            Some(ChainId::BitcoinBlake2b)
+        );
+        for network in [Network::Signet, Network::Testnet, Network::Regtest] {
+            assert_eq!(
+                chain_for_network(ChainId::BitcoinBlake2b, network),
+                None,
+                "{}",
+                network
+            );
+        }
+        let mut fork = ctx();
+        fork.bitcoin_config = coincubed::config::BitcoinConfig::new(ChainId::BitcoinBlake2b, poll);
+        let err = fork.set_bitcoin_network(Network::Signet).unwrap_err();
+        assert!(err.contains("Bitcoin Blake2b"), "{}", err);
+        assert_eq!(
+            fork.bitcoin_config.chain,
+            ChainId::BitcoinBlake2b,
+            "left untouched"
+        );
+        assert_eq!(fork.bitcoin_config.network, Network::Bitcoin);
+        fork.set_bitcoin_network(Network::Testnet4).unwrap();
+        assert_eq!(fork.bitcoin_config.chain, ChainId::BitcoinBlake2bTestnet4);
     }
 
     fn with_vault() -> Context {

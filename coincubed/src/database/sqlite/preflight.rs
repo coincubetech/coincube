@@ -82,6 +82,10 @@ pub enum PreflightError {
     },
     /// A `-wal` or `-shm` file sits next to the database.
     UnexpectedSidecar(PathBuf),
+    /// A `-journal`, `-wal` or `-shm` file is present but the database itself is not: the
+    /// remains of a database that was removed or never finished being written. Starting
+    /// "fresh" here would create a new database next to them.
+    OrphanSidecar(PathBuf),
     /// SQLite needs to roll back a hot journal (or recover a WAL) before this database can be
     /// read, which a read-only connection will not do. Not recovered automatically.
     RecoveryRequired(PathBuf),
@@ -124,6 +128,12 @@ impl fmt::Display for PreflightError {
             Self::UnexpectedSidecar(p) => write!(
                 f,
                 "Unexpected WAL/SHM sidecar '{}' next to the database; refusing to open it.",
+                p.display()
+            ),
+            Self::OrphanSidecar(p) => write!(
+                f,
+                "Found '{}' but no database next to it; refusing to create a fresh database \
+                 over the remains of another. Move the stray file away first.",
                 p.display()
             ),
             Self::RecoveryRequired(p) => write!(
@@ -185,19 +195,39 @@ fn inspect_header(db_path: &Path) -> Result<(), PreflightError> {
     }
 }
 
+fn with_suffix(db_path: &Path, suffix: &str) -> PathBuf {
+    let mut name = db_path.as_os_str().to_owned();
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
 /// The `-wal` / `-shm` files SQLite keeps next to a WAL-mode database.
 fn sidecar_paths(db_path: &Path) -> [PathBuf; 2] {
-    let mut name = db_path.as_os_str().to_owned();
-    let mut wal = name.clone();
-    wal.push("-wal");
-    name.push("-shm");
-    [PathBuf::from(wal), PathBuf::from(name)]
+    [with_suffix(db_path, "-wal"), with_suffix(db_path, "-shm")]
 }
 
 fn refuse_sidecars(db_path: &Path) -> Result<(), PreflightError> {
     for sidecar in sidecar_paths(db_path) {
         if sidecar.exists() {
             return Err(PreflightError::UnexpectedSidecar(sidecar));
+        }
+    }
+    Ok(())
+}
+
+/// For a data directory *without* a database at `db_path`: refuse to treat it as fresh when
+/// the rollback journal or a WAL sidecar of a database is still there. Those files mean a
+/// database existed (or was being created) and is gone; a fresh database written next to
+/// them would inherit a hot journal that is not its own, or bury evidence someone may need.
+/// Purely a filesystem check — no file is opened, created or removed.
+pub fn refuse_orphan_sidecars(db_path: &Path) -> Result<(), PreflightError> {
+    for sidecar in [
+        with_suffix(db_path, "-journal"),
+        with_suffix(db_path, "-wal"),
+        with_suffix(db_path, "-shm"),
+    ] {
+        if sidecar.exists() {
+            return Err(PreflightError::OrphanSidecar(sidecar));
         }
     }
     Ok(())
