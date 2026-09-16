@@ -33,6 +33,10 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.97.1
+          # rust-toolchain.toml lists these; installing them here (as
+          # integration.yml does) avoids rustup adding them at first cargo
+          # invocation, which conflicts with the action's bin/cargo-fmt.
+          components: rustfmt, clippy
 
       - name: Install build dependencies (rocksdb for electrs)
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang libclang-dev cmake
