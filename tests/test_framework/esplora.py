@@ -17,7 +17,12 @@ import socket
 import urllib.error
 import urllib.request
 
-from test_framework.utils import BitcoinBackend, TailableProc, TIMEOUT, wait_for
+from test_framework.utils import (
+    BitcoinBackend,
+    TailableProc,
+    TIMEOUT,
+    wait_for_while_condition_holds,
+)
 
 ELECTRS_BLAKE2B_PATH = os.getenv("ELECTRS_BLAKE2B_PATH")
 
@@ -29,18 +34,27 @@ ELECTRS_BLAKE2B_PATH = os.getenv("ELECTRS_BLAKE2B_PATH")
 # out as a *source* port for one of those connections in the meantime, and the
 # bind then fails with AddrInUse (seen on the ubuntu CI runner).
 _LISTEN_PORT_RANGE = (20000, 32000)
+# Ports already handed out by reserve_listen_port in this process. The probe
+# socket is closed before the port is returned, and both indexers are
+# constructed before either binds, so without this a later call could pick a
+# number an earlier one already holds.
+_RESERVED_LISTEN_PORTS = set()
 
 
 def reserve_listen_port():
-    """A currently-free TCP port on 127.0.0.1 below the ephemeral range."""
+    """A currently-free TCP port on 127.0.0.1 below the ephemeral range, not
+    handed out before in this process."""
     for _ in range(200):
         port = random.randint(*_LISTEN_PORT_RANGE)
+        if port in _RESERVED_LISTEN_PORTS:
+            continue
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             try:
                 s.bind(("127.0.0.1", port))
             except OSError:
                 continue
-            return port
+        _RESERVED_LISTEN_PORTS.add(port)
+        return port
     raise RuntimeError("no free listener port found for electrs")
 
 
@@ -126,13 +140,14 @@ class EsploraElectrs(BitcoinBackend):
         # the log line alone is not readiness: poll the API until it answers,
         # and fail fast if the process dies (e.g. a bind panic).
         self.wait_for_log("REST server running on", timeout=TIMEOUT)
-        wait_for(
+        # `condition` is re-checked on every poll: a bind panic after the log
+        # line stops the wait immediately instead of running out the timeout.
+        wait_for_while_condition_holds(
             lambda: self._tip_height_or_none() is not None,
+            lambda: self.running,
             timeout=TIMEOUT,
             debug_fn=lambda: f"{self.prefix}: REST API not answering yet",
         )
-        if not self.running:
-            raise RuntimeError(f"{self.prefix} exited during startup")
         logging.info("Esplora electrs started on %s", self.url)
 
     def startup(self):
@@ -149,9 +164,10 @@ class EsploraElectrs(BitcoinBackend):
             return None
 
     def wait_for_tip(self, block_hash, timeout=TIMEOUT):
-        """Block until the indexer's tip is `block_hash`."""
-        wait_for(
+        """Block until the indexer's tip is `block_hash` (fails at once if it exits)."""
+        wait_for_while_condition_holds(
             lambda: self._tip_hash_or_none() == block_hash,
+            lambda: self.running,
             timeout=timeout,
             debug_fn=lambda: f"{self.prefix} tip {self._tip_hash_or_none()} != {block_hash}",
         )
