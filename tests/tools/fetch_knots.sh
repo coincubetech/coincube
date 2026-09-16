@@ -49,7 +49,13 @@ fi
 mkdir -p "$dest"
 cd "$dest"
 for f in "$archive" SHA256SUMS SHA256SUMS.asc; do
-  [ -f "$f" ] || curl -fsSL --retry 3 -o "$f" "$base_url/$f"
+  # Download to a temporary name and rename on success: a transfer that fails
+  # after its retries must not leave a partial file the `-f` check accepts.
+  if [ ! -f "$f" ]; then
+    rm -f "$f.part"
+    curl -fsSL --retry 3 -o "$f.part" "$base_url/$f"
+    mv "$f.part" "$f"
+  fi
 done
 "$verify_bin" "$archive" SHA256SUMS SHA256SUMS.asc >&2
 tar -xzf "$archive"

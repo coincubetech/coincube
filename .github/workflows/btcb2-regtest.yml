@@ -70,7 +70,7 @@ jobs:
           # crate as a member of Coincube's workspace and refuse to build it.
           path: |
             ~/.cache/coincube/electrs-blake2b/target/release/electrs
-            ~/.cache/coincube/electrs-blake2b/.built-${{ env.ELECTRS_BLAKE2B_COMMIT }}
+            ~/.cache/coincube/electrs-blake2b/target/.built-${{ env.ELECTRS_BLAKE2B_COMMIT }}
           key: ${{ runner.os }}-electrs-blake2b-${{ env.ELECTRS_BLAKE2B_COMMIT }}
 
       - name: Build coincubed

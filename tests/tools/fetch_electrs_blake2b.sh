@@ -19,8 +19,12 @@ commit="4453cac61979322c0260f4b90e899379ae606206"
 src="$cache_dir/src"
 target="${ELECTRS_BLAKE2B_TARGET_DIR:-$cache_dir/target}"
 bin="$target/release/electrs"
+# The "built from the pinned commit" marker lives next to the binary it
+# vouches for, so an overridden target dir can never reuse another build's
+# marker and hand back an unpinned electrs.
+marker="$target/.built-$commit"
 
-if [ -x "$bin" ] && [ -f "$cache_dir/.built-$commit" ]; then
+if [ -x "$bin" ] && [ -f "$marker" ]; then
   echo "$bin"
   exit 0
 fi
@@ -40,5 +44,5 @@ fi
 # `--locked` keeps the dependency graph at the upstream Cargo.lock.
 (cd "$src" && CARGO_TARGET_DIR="$target" cargo build --release --locked --bin electrs >&2)
 [ -x "$bin" ] || { echo "electrs binary not produced" >&2; exit 1; }
-touch "$cache_dir/.built-$commit"
+touch "$marker"
 echo "$bin"
