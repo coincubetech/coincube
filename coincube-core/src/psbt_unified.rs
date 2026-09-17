@@ -35,6 +35,9 @@ const PSBT_GLOBAL_VERSION: u8 = 0xfb;
 const PSBT_IN_PARTIAL_SIG: u8 = 0x02;
 const PSBT_PROPRIETARY: u8 = 0xfc;
 const UNIFIED_SIGHASH_ALL: u8 = 0x21;
+/// Plain `SIGHASH_ALL`, the only other sighash request a Blake2b Vault PSBT
+/// may carry (a legacy signer's request on an input with no unified record).
+const LEGACY_SIGHASH_ALL: u8 = 0x01;
 const PROPRIETARY_PREFIX: &[u8] = b"coincube";
 const PROPRIETARY_SUBTYPE: u8 = 0;
 // CompactSize(1) + key 0xfb + CompactSize(4) + four-byte version zero.
@@ -150,6 +153,12 @@ pub enum UnifiedPsbtError {
     UnsupportedUnifiedSighash { input: usize, sighash: u8 },
     /// One input/pubkey used both standard and proprietary encodings.
     AmbiguousSignatureEncoding { input: usize, public_key: PublicKey },
+    /// The input's `PSBT_IN_SIGHASH_TYPE` request is neither absent,
+    /// `SIGHASH_ALL` nor `ALL|UNIFIED`. Refused at the adapter so every
+    /// boundary that parses, merges or stores a Blake2b PSBT — not only the
+    /// finaliser — rejects an `ANYONECANPAY` (or otherwise unsupported)
+    /// request before it is "apparently collected".
+    UnsupportedSighashRequest { input: usize, sighash: u32 },
     /// The PSBTs do not describe the same unsigned transaction.
     UnsignedTransactionMismatch,
     /// A requested input map does not exist.
@@ -219,6 +228,11 @@ impl fmt::Display for UnifiedPsbtError {
             Self::UnsupportedUnifiedSighash { input, sighash } => write!(
                 f,
                 "unsupported unified sighash 0x{sighash:02x} in input {input}"
+            ),
+            Self::UnsupportedSighashRequest { input, sighash } => write!(
+                f,
+                "input {input} asks for sighash 0x{sighash:02x}, which is neither SIGHASH_ALL nor \
+                 ALL|UNIFIED"
             ),
             Self::AmbiguousSignatureEncoding { input, public_key } => write!(
                 f,
@@ -333,6 +347,19 @@ fn validate_typed_psbt(psbt: &Psbt) -> Result<usize, UnifiedPsbtError> {
     }
 
     for (input_index, input) in psbt.inputs.iter().enumerate() {
+        // A sighash *request* the chain does not serve is invalid here, not
+        // just at finalisation: absent, `SIGHASH_ALL` or `ALL|UNIFIED`. (An
+        // input that also carries a unified record is held to the stricter
+        // rule — absent or `ALL|UNIFIED` — by the verifier.)
+        if let Some(requested) = input.sighash_type {
+            let raw = requested.to_u32();
+            if raw != u32::from(LEGACY_SIGHASH_ALL) && raw != u32::from(UNIFIED_SIGHASH_ALL) {
+                return Err(UnifiedPsbtError::UnsupportedSighashRequest {
+                    input: input_index,
+                    sighash: raw,
+                });
+            }
+        }
         for (key, value) in &input.proprietary {
             if !is_reserved_key(key) {
                 continue;

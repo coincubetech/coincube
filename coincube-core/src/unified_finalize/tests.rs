@@ -693,12 +693,15 @@ fn an_unused_legacy_record_is_still_verified_and_can_refuse_the_call() {
     );
 }
 
-/// The input's sighash *request* is checked even when no unified record is
-/// there to make the verifier look at it: a legacy-only input asking for
+/// The input's sighash *request* is held to the adapter's rule at every
+/// boundary — here through the verifier the finaliser runs first — whether
+/// or not a unified record is present: a legacy-only input asking for
 /// `ANYONECANPAY` is refused although its `SIGHASH_ALL` signatures are valid.
-/// `SIGHASH_ALL` and `ALL|UNIFIED` requests, and no request, are fine.
+/// `SIGHASH_ALL` and `ALL|UNIFIED` requests, and no request, are fine on a
+/// legacy-only input. The adapter refuses the same PSBT on its own.
 #[test]
 fn a_requested_anyonecanpay_is_refused_even_with_valid_legacy_signatures() {
+    use crate::psbt_unified::UnifiedPsbtError;
     use miniscript::bitcoin::psbt::PsbtSighashType;
     let secp = secp();
     let fixture = fixture(1);
@@ -718,21 +721,60 @@ fn a_requested_anyonecanpay_is_refused_even_with_valid_legacy_signatures() {
         let mut asked = legacy_only.clone();
         asked.psbt_mut().inputs[0].sighash_type = Some(requested);
         let result = finalize_p2wsh_all_unified(&asked, &secp);
+        let adapter = UnifiedPsbt::from_psbt(asked.psbt().clone());
         if expect_ok {
             assert!(result.is_ok(), "0x{:02x}", requested.to_u32());
+            assert!(adapter.is_ok());
         } else {
             match result {
-                Err(UnifiedFinalizeError::UnsupportedRequestedSighash { input: 0, sighash }) => {
-                    assert_eq!(sighash, requested.to_u32())
-                }
+                Err(UnifiedFinalizeError::Signing(UnifiedSigningError::Adapter(
+                    UnifiedPsbtError::UnsupportedSighashRequest { input: 0, sighash },
+                ))) => assert_eq!(sighash, requested.to_u32()),
                 other => panic!(
                     "0x{:02x}: expected the request to be refused, got {:?}",
                     requested.to_u32(),
                     other
                 ),
             }
+            assert!(matches!(
+                adapter,
+                Err(UnifiedPsbtError::UnsupportedSighashRequest { input: 0, .. })
+            ));
         }
     }
+}
+
+/// An input that carries a unified record is held to the stricter rule: a
+/// `SIGHASH_ALL` request next to it is refused by the verifier, not
+/// reconciled — the header's posture, pinned. (No Coincube path writes that
+/// request; only an imported PSBT can reach this.)
+#[test]
+fn a_sighash_all_request_next_to_a_unified_record_is_refused() {
+    use miniscript::bitcoin::psbt::PsbtSighashType;
+    let secp = secp();
+    let fixture = fixture(1);
+    let two = sign_p2wsh_all_unified(&fixture.signers[0], &fixture.psbt, &secp).unwrap();
+    let mut two = sign_p2wsh_all_unified(&fixture.signers[1], &two, &secp).unwrap();
+    assert_eq!(
+        two.psbt().inputs[0].sighash_type,
+        Some(PsbtSighashType::from_u32(0x21)),
+        "the unified signer writes 0x21"
+    );
+    two.psbt_mut().inputs[0].sighash_type = Some(PsbtSighashType::from_u32(0x01));
+    // The adapter alone accepts it (a legacy request is fine in general)…
+    assert!(UnifiedPsbt::from_psbt(two.psbt().clone()).is_ok());
+    // …the verifier does not, because this input carries a unified record.
+    assert!(matches!(
+        finalize_p2wsh_all_unified(&two, &secp),
+        Err(UnifiedFinalizeError::Signing(
+            UnifiedSigningError::IncompatibleSighash {
+                input: 0,
+                actual: 0x01
+            }
+        ))
+    ));
+    two.psbt_mut().inputs[0].sighash_type = None;
+    assert!(finalize_p2wsh_all_unified(&two, &secp).is_ok());
 }
 
 /// BIP-68: a CSV leaf is only enforced for transaction version ≥ 2. The bare

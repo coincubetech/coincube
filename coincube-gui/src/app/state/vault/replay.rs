@@ -200,11 +200,11 @@ impl std::fmt::Display for DispatchRefused {
 /// rejects, or that carries Taproot signature data at all (a Blake2b Vault
 /// is P2WSH; Taproot signatures bring their own sighash byte).
 pub fn refuse_before_dispatch(psbt: &Psbt) -> Result<(), DispatchRefused> {
-    // Adapter validation first: it is the same check every merge and the
-    // finaliser apply, and it covers the reserved records' own sighash byte,
-    // which the `partial_sigs` walk below cannot see.
-    UnifiedPsbt::from_psbt(psbt.clone())
-        .map_err(|e| DispatchRefused::MalformedUnifiedRecord(e.to_string()))?;
+    // The specific refusals first, so the user is told "ANYONECANPAY" or
+    // "Taproot" rather than the adapter's generic wording; then the adapter's
+    // own validation — the same check every merge and the finaliser apply —
+    // which also covers the reserved records' sighash byte and the sighash
+    // request rule the walk below does not restate.
     const ANYONECANPAY: u32 = 0x80;
     for (index, input) in psbt.inputs.iter().enumerate() {
         if input.tap_key_sig.is_some() || !input.tap_script_sigs.is_empty() {
@@ -229,6 +229,8 @@ pub fn refuse_before_dispatch(psbt: &Psbt) -> Result<(), DispatchRefused> {
             }
         }
     }
+    UnifiedPsbt::from_psbt(psbt.clone())
+        .map_err(|e| DispatchRefused::MalformedUnifiedRecord(e.to_string()))?;
     Ok(())
 }
 

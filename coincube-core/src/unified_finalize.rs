@@ -35,6 +35,17 @@
 //! degraded. Every other sighash type, `ANYONECANPAY` included, is refused
 //! rather than warned about.
 //!
+//! Sighash *requests* (`PSBT_IN_SIGHASH_TYPE`) follow the same posture. The
+//! adapter accepts an absent request, `SIGHASH_ALL` or `ALL|UNIFIED` and
+//! refuses anything else at every boundary; on an input that carries a
+//! unified record the verifier is stricter and accepts only absent or
+//! `ALL|UNIFIED` — a `SIGHASH_ALL` request next to a unified signature is
+//! refused, not reconciled. That strictness cannot strand a Coincube spend:
+//! nothing in spend creation or signature merging writes the request field,
+//! and the only writer, the unified signer, writes `0x21`; the case is
+//! reachable only through an imported PSBT that pre-set `SIGHASH_ALL` and
+//! then acquired a unified signature.
+//!
 //! The result reports, per input, how many unified and legacy signatures ended
 //! up in the witness. That is the *only* basis a caller may use for a replay
 //! statement (`#276` correction 1): an input whose final witness holds at least
@@ -119,16 +130,6 @@ pub enum UnifiedFinalizeError {
         public_key: PublicKey,
         sighash: u32,
     },
-    /// The input's `PSBT_IN_SIGHASH_TYPE` request is something other than
-    /// `SIGHASH_ALL`, `ALL|UNIFIED` or absent. A request is not a signature,
-    /// but a PSBT asking for `ANYONECANPAY` is not one this finaliser will
-    /// assemble from whatever signatures happen to be valid — the daemon is
-    /// its own boundary and the GUI's dispatch refusal does not cover RPC or
-    /// imported PSBTs.
-    UnsupportedRequestedSighash {
-        input: usize,
-        sighash: u32,
-    },
     /// A legacy partial signature that does not verify against the BIP-143
     /// digest of this transaction.
     InvalidLegacySignature {
@@ -197,11 +198,6 @@ impl fmt::Display for UnifiedFinalizeError {
             Self::InvalidLegacySignature { input, public_key } => write!(
                 f,
                 "input {input} legacy signature for {public_key} does not verify"
-            ),
-            Self::UnsupportedRequestedSighash { input, sighash } => write!(
-                f,
-                "input {input} asks for sighash 0x{sighash:02x}, which is neither SIGHASH_ALL nor \
-                 ALL|UNIFIED; refusing to finalise"
             ),
             Self::Unsatisfiable { input, reason } => {
                 write!(f, "input {input} cannot be satisfied: {reason}")
@@ -629,22 +625,11 @@ pub fn finalize_p2wsh_all_unified<C: secp256k1::Verification>(
             );
         }
 
-        // The input's own sighash *request* has to be one this finaliser
-        // serves: absent, `SIGHASH_ALL`, or `ALL|UNIFIED`. The verifier above
-        // checks it only for inputs that carry a unified record; a legacy-only
-        // input asking for `ANYONECANPAY` would otherwise be assembled from
-        // its valid `SIGHASH_ALL` signatures as if nothing had been asked.
-        if let Some(requested) = input.sighash_type {
-            let raw = requested.to_u32();
-            if raw != u32::from(EcdsaSighashType::All as u8)
-                && raw != u32::from(UNIFIED_SIGHASH_ALL)
-            {
-                return Err(UnifiedFinalizeError::UnsupportedRequestedSighash {
-                    input: input_index,
-                    sighash: raw,
-                });
-            }
-        }
+        // The input's own sighash *request* was already held to the adapter's
+        // rule (absent, `SIGHASH_ALL` or `ALL|UNIFIED`) by `validate_internal`
+        // inside the verifier above, and to the stricter rule (absent or
+        // `ALL|UNIFIED`) where the input carries a unified record. Nothing to
+        // repeat here: one definition, at the adapter, for every boundary.
 
         // Every legacy record is verified now, whether or not a witness will
         // use it: against the BIP-143 digest and restricted to SIGHASH_ALL. A

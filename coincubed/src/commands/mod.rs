@@ -70,6 +70,12 @@ pub enum CommandError {
     /// PSBT: the incoming unified records conflict with, or are malformed next to,
     /// the ones already held. The stored spend is unchanged.
     UnifiedSignatureMerge(String),
+    /// A Bitcoin Blake2b PSBT handed to the daemon is not one it will hold: a
+    /// malformed reserved unified record, a key with both encodings, an
+    /// unsupported sighash request. Refused before the first insert as well as
+    /// before a merge, so the database never stores a spend that every later
+    /// update and the finaliser would refuse. Nothing was stored.
+    UnifiedSpendValidation(String),
     TxBroadcast(String),
     AlreadyRescanning,
     InsaneRescanTimestamp(u32),
@@ -135,6 +141,9 @@ impl fmt::Display for CommandError {
                 "Refused to merge signatures into the stored Bitcoin Blake2b spend: '{}'.",
                 e
             ),
+            Self::UnifiedSpendValidation(e) => {
+                write!(f, "Refused to store the Bitcoin Blake2b spend: '{}'.", e)
+            }
             Self::TxBroadcast(e) => write!(f, "Failed to broadcast transaction: {}", e),
             Self::AlreadyRescanning => write!(
                 f,
@@ -233,6 +242,24 @@ impl<'a> TxGetter for DbTxGetter<'a> {
 /// through the txid committed by the outpoint. An input whose previous
 /// transaction the wallet does not hold cannot be authenticated at all and the
 /// spend must be recreated.
+/// Hold an incoming PSBT to the chain's representation before anything is
+/// stored: on Bitcoin Blake2b the adapter's `validate_internal` (well-formed
+/// reserved records, no key with both encodings, a supported sighash request);
+/// on a Bitcoin-family chain nothing, as before. Runs ahead of both branches
+/// of `update_spend` — the first insert as much as a merge — so a row the
+/// daemon could never merge into or finalise is never written.
+fn validate_spend_for_chain(
+    chain: coincube_core::chain::ChainId,
+    psbt: &Psbt,
+) -> Result<(), CommandError> {
+    if !chain.is_blake2b() {
+        return Ok(());
+    }
+    coincube_core::psbt_unified::UnifiedPsbt::from_psbt(psbt.clone())
+        .map(|_| ())
+        .map_err(|e| CommandError::UnifiedSpendValidation(e.to_string()))
+}
+
 /// Merge the signatures of an incoming PSBT for a spend already stored, keyed on
 /// the chain the daemon runs on.
 ///
@@ -1024,6 +1051,9 @@ impl DaemonControl {
     }
 
     pub fn update_spend(&self, mut psbt: Psbt) -> Result<(), CommandError> {
+        // Before the existence check, so the first insert stores only what the
+        // chain's representation accepts (a merge re-validates both sides).
+        validate_spend_for_chain(self.config.bitcoin_config.chain, &psbt)?;
         let mut db_conn = self.db.connection();
         let tx = &psbt.unsigned_tx;
 
@@ -3779,6 +3809,42 @@ mod tests {
 
         /// (signers, unsigned PSBT with authenticated prevout and witness script).
         fn vault_psbt() -> (Vec<MasterSigner>, Psbt) {
+            let (signers, _, psbt) = vault_fixture();
+            (signers, psbt)
+        }
+
+        /// A `DaemonControl` on Bitcoin Blake2b over the dummy backend and
+        /// database, built directly: `DaemonHandle::start` refuses the chain
+        /// while it is dormant, but the control's own chain-keyed paths are
+        /// what these tests are about.
+        fn blake2b_control(descriptor: CoincubeDescriptor) -> DaemonControl {
+            let tmp = tmp_dir();
+            std::fs::create_dir_all(&tmp).unwrap();
+            let config = crate::config::Config::new(
+                crate::config::BitcoinConfig::new(
+                    ChainId::BitcoinBlake2b,
+                    std::time::Duration::from_secs(2),
+                ),
+                None,
+                log::LevelFilter::Debug,
+                descriptor,
+                crate::datadir::DataDirectory::new(tmp.join("d")),
+            );
+            let (poller_sender, _poller_receiver) = std::sync::mpsc::sync_channel(1);
+            DaemonControl::new(
+                config,
+                std::sync::Arc::new(std::sync::Mutex::new(DummyBitcoind::new())),
+                poller_sender,
+                std::sync::Arc::new(std::sync::Mutex::new(DummyDatabase::new())),
+                secp256k1::Secp256k1::verification_only(),
+                Default::default(),
+                Default::default(),
+            )
+        }
+
+        /// (signers, descriptor, unsigned PSBT with authenticated prevout and
+        /// witness script).
+        fn vault_fixture() -> (Vec<MasterSigner>, CoincubeDescriptor, Psbt) {
             let secp = secp256k1::Secp256k1::new();
             let signers = vec![signer(11), signer(12), signer(13)];
             let primary = PathInfo::Multi(
@@ -3831,7 +3897,7 @@ mod tests {
             derived.update_psbt_in(&mut psbt.inputs[0]);
             psbt.inputs[0].non_witness_utxo = Some(previous_tx);
             psbt.inputs[0].witness_utxo = Some(output);
-            (signers, psbt)
+            (signers, descriptor, psbt)
         }
 
         fn unified(psbt: &Psbt, signer: &MasterSigner) -> Psbt {
@@ -3864,6 +3930,96 @@ mod tests {
                 }
             }
             (u, l)
+        }
+
+        /// `update_spend` on Bitcoin Blake2b, through the real control and the
+        /// dummy database: a PSBT the chain's representation refuses — a
+        /// malformed reserved record, a key with both encodings, an
+        /// `ANYONECANPAY` request — is refused on the **first insert** with
+        /// nothing stored, not only on a merge; a valid one is stored; and a
+        /// later conflicting merge is refused with the stored row byte-unchanged.
+        #[test]
+        fn blake2b_update_spend_validates_before_the_first_insert_and_stores_nothing_on_refusal() {
+            let (signers, descriptor, psbt) = vault_fixture();
+            let control = blake2b_control(descriptor);
+            let txid = psbt.unsigned_tx.compute_txid();
+            let outpoint = psbt.unsigned_tx.input[0].previous_output;
+            {
+                let mut db = control.db().lock().unwrap().connection();
+                db.new_unspent_coins(&[Coin {
+                    outpoint,
+                    is_immature: false,
+                    block_info: None,
+                    amount: bitcoin::Amount::from_sat(50_000),
+                    derivation_index: bip32::ChildNumber::from(3),
+                    is_change: false,
+                    spend_txid: None,
+                    spend_block: None,
+                    is_from_self: false,
+                }]);
+            }
+            let stored =
+                |control: &DaemonControl| control.db().lock().unwrap().connection().spend_tx(&txid);
+
+            // (a) A reserved record ending 0xa1.
+            let mut malformed = unified(&psbt, &signers[0]);
+            for value in malformed.inputs[0].proprietary.values_mut() {
+                *value.last_mut().unwrap() = 0xa1;
+            }
+            assert!(matches!(
+                control.update_spend(malformed),
+                Err(CommandError::UnifiedSpendValidation(_))
+            ));
+            assert!(stored(&control).is_none(), "nothing stored on refusal");
+
+            // (b) One key with both encodings.
+            let mut both = unified(&psbt, &signers[0]);
+            let legacy_same_key = legacy(&psbt, &signers[0]);
+            both.inputs[0]
+                .partial_sigs
+                .extend(legacy_same_key.inputs[0].partial_sigs.clone());
+            assert!(matches!(
+                control.update_spend(both),
+                Err(CommandError::UnifiedSpendValidation(_))
+            ));
+            assert!(stored(&control).is_none());
+
+            // (c) A request for ANYONECANPAY next to valid legacy signatures.
+            let mut asked = legacy(&legacy(&psbt, &signers[0]), &signers[1]);
+            asked.inputs[0].sighash_type = Some(btc::psbt::PsbtSighashType::from_u32(0x81));
+            match control.update_spend(asked) {
+                Err(CommandError::UnifiedSpendValidation(reason)) => {
+                    assert!(reason.contains("0x81"), "{}", reason)
+                }
+                other => panic!("expected the request to be refused, got {:?}", other),
+            }
+            assert!(stored(&control).is_none());
+
+            // Control: a valid unified PSBT is stored on first insert…
+            let valid = unified(&psbt, &signers[0]);
+            control.update_spend(valid.clone()).unwrap();
+            let row = stored(&control).expect("stored");
+            assert_eq!(row.serialize(), valid.serialize());
+            // …a second signer merges into it…
+            control.update_spend(unified(&psbt, &signers[1])).unwrap();
+            let merged = stored(&control).unwrap();
+            assert_eq!(
+                unified_signatures(&UnifiedPsbt::from_psbt(merged.clone()).unwrap())
+                    .unwrap()
+                    .len(),
+                2
+            );
+            // …and a conflicting legacy signature for a key already held as
+            // unified (both encodings) is refused with the row byte-unchanged.
+            let mut conflicting = psbt.clone();
+            conflicting.inputs[0]
+                .partial_sigs
+                .extend(legacy(&psbt, &signers[0]).inputs[0].partial_sigs.clone());
+            assert!(matches!(
+                control.update_spend(conflicting),
+                Err(CommandError::UnifiedSignatureMerge(_))
+            ));
+            assert_eq!(stored(&control).unwrap().serialize(), merged.serialize());
         }
 
         /// Gandalf's probe from the review of 15a26267 (WORK_LOGS/LAUNCH_GA/B1/

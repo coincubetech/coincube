@@ -161,6 +161,7 @@ impl From<commands::CommandError> for Error {
             | commands::CommandError::SpendFinalization(..)
             | commands::CommandError::UnifiedSpendFinalization(..)
             | commands::CommandError::UnifiedSignatureMerge(..)
+            | commands::CommandError::UnifiedSpendValidation(..)
             | commands::CommandError::InsaneRescanTimestamp(..)
             | commands::CommandError::AlreadyRescanning
             | commands::CommandError::InvalidDerivationIndex

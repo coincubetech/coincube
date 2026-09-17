@@ -3511,6 +3511,17 @@ mod tests {
             // Merging the same signature again is a no-op, not a conflict.
             merge_signatures_for_chain(ChainId::BitcoinBlake2b, &mut destination, &stored).unwrap();
             assert_eq!(destination.serialize(), stored_bytes);
+
+            // A sighash *request* the chain does not serve is refused at the
+            // merge boundary too, not only at finalisation: the spend never
+            // reads "apparently collected" and then fails at Broadcast.
+            let mut asks = legacy(&f.psbt, &f.signers[1]);
+            asks.inputs[0].sighash_type =
+                Some(coincube_core::miniscript::bitcoin::psbt::PsbtSighashType::from_u32(0x81));
+            let err = merge_signatures_for_chain(ChainId::BitcoinBlake2b, &mut destination, &asks)
+                .unwrap_err();
+            assert!(err.contains("0x81"), "{}", err);
+            assert_eq!(destination.serialize(), stored_bytes);
         }
 
         // Gandalf's probes from the review of 15a26267 (WORK_LOGS/LAUNCH_GA/

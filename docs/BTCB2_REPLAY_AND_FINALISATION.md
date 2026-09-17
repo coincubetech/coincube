@@ -37,9 +37,18 @@ node about *which* signatures go into the witness — the next section.
    fails the whole call. Prevouts and witness scripts are authenticated. Then
    **every** legacy `partial_sigs` entry of every input is verified against
    the BIP-143 digest and restricted to `SIGHASH_ALL` — including entries no
-   witness will use — and each input's own sighash *request*
-   (`PSBT_IN_SIGHASH_TYPE`) must be absent, `SIGHASH_ALL` or `ALL|UNIFIED`,
-   whether or not a unified record is there to make the verifier look at it. A PSBT that lies anywhere is not finalised from the parts
+   witness will use. Each input's own sighash *request*
+   (`PSBT_IN_SIGHASH_TYPE`) is held to one rule, defined once at the PSBT
+   adapter and therefore applied at every boundary that parses, merges or
+   stores a Blake2b PSBT — the desktop merge, the daemon's first insert and
+   merge, the dispatch guard, the finaliser: absent, `SIGHASH_ALL` or
+   `ALL|UNIFIED`, anything else refused. On an input that carries a unified
+   record the verifier is stricter — absent or `ALL|UNIFIED` only — so a
+   `SIGHASH_ALL` request next to a unified signature is refused, not
+   reconciled. That cannot strand a Coincube spend: nothing in spend creation
+   or signature merging writes the request field and the only writer, the
+   unified signer, writes `0x21`; the case is reachable only through an
+   imported PSBT. A PSBT that lies anywhere is not finalised from the parts
    that happen to be true. (This is stricter than a node's `finalizepsbt`, and
    than the Bitcoin path's `finalize_mut`, which only checks what it places —
    but it matches the module's refuse-rather-than-broadcast posture, and the
@@ -75,9 +84,12 @@ node about *which* signatures go into the witness — the next section.
 ## Daemon
 
 `coincubed` keys both spend mutations on `config.bitcoin_config.chain`:
-`update_spend` merges signatures with the prior copy on Bitcoin (last write
-wins on a key, as before) and, on BTCB2, runs the adapter merge **against the
-stored PSBT as it is** — never after the copy, which would have overwritten a
+`update_spend` first holds the incoming PSBT to the adapter's rules on BTCB2
+— before the existence check, so a **first insert** stores only what every
+later update and the finaliser would accept (`CommandError::UnifiedSpendValidation`,
+nothing stored on refusal) — then merges signatures with the prior copy on
+Bitcoin (last write wins on a key, as before) and, on BTCB2, runs the adapter
+merge **against the stored PSBT as it is** — never after the copy, which would have overwritten a
 stored signature before the adapter could compare it — refusing conflicting
 or ambiguous encodings with nothing stored on refusal; `broadcast_spend` uses
 `finalize_mut` on Bitcoin and the core finaliser on BTCB2, logging each
