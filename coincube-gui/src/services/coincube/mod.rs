@@ -2096,6 +2096,11 @@ pub fn recovery_recipients(members: &[VaultMemberResponse]) -> RecoveryRecipient
     // regardless of the order the server listed the rows in.
     for role in [VaultMemberRole::Keyholder, VaultMemberRole::Beneficiary] {
         for m in members.iter().filter(|m| m.role == role) {
+            // The owner's self-owned key has no contact row by design. It is
+            // not an unreachable external member.
+            if m.contact_id.is_none() {
+                continue;
+            }
             let email = m
                 .contact
                 .as_ref()
@@ -2191,20 +2196,27 @@ mod recovery_recipients_tests {
 
     #[test]
     fn members_without_a_contact_email_are_counted_not_listed() {
-        // A keyholder added by key alone (the Vault Builder's `contact_id:
-        // None` path) has no address, so the sweep skips it silently.
+        // External members with a contact row but no linked email have no
+        // address, so the sweep skips them silently. The owner keyholder has
+        // no contact row by design and must not be counted as unreachable.
         let mut no_email_contact = member(3, VaultMemberRole::Keyholder, Some("x@example.com"));
         no_email_contact.contact = Some(VaultMemberContactSummary {
             id: 3,
             contact_user: None,
         });
+        let mut another_no_email_contact =
+            member(4, VaultMemberRole::Beneficiary, Some("y@example.com"));
+        another_no_email_contact.contact = Some(VaultMemberContactSummary {
+            id: 4,
+            contact_user: None,
+        });
         let got = recovery_recipients(&[
             member(1, VaultMemberRole::Keyholder, None),
-            member(2, VaultMemberRole::Beneficiary, None),
             no_email_contact,
+            another_no_email_contact,
         ]);
         assert!(got.notified.is_empty());
-        assert_eq!(got.unreachable, 3);
+        assert_eq!(got.unreachable, 2);
     }
 
     #[test]
@@ -2274,9 +2286,9 @@ mod recovery_recipients_tests {
         let got = recovery_recipients(&vault.members);
         assert_eq!(got.notified.len(), 1);
         assert_eq!(got.notified[0].email, "kay@example.com");
-        // The key-only keyholder (no contact) is unreachable; the observer is
-        // simply not a recipient.
-        assert_eq!(got.unreachable, 1);
+        // Only keyholders with contacts are recovery recipients; the contactless
+        // key-only keyholder and observer are excluded.
+        assert_eq!(got.unreachable, 0);
     }
 }
 
