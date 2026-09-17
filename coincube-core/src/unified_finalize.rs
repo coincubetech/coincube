@@ -389,6 +389,68 @@ fn satisfy_input(
     Ok((witness, report))
 }
 
+/// Satisfy with unified signatures plus legacy ones, but never let a legacy
+/// signature crowd out a verified unified one.
+///
+/// miniscript picks the cheapest satisfaction it can and all ECDSA signatures
+/// cost the same, so with more signatures on offer than the threshold needs it
+/// may take legacy keys in script order and leave a unified key unused — a
+/// replayable witness for an input that had a replay-proof signature. When that
+/// happens, and the input has unified signatures at all, every subset of the
+/// legacy set is tried (there are only a handful of keys) and the satisfaction
+/// using the most unified signatures wins; ties go to the smaller witness. If no
+/// subset can include a unified signature, the input genuinely needs legacy ones
+/// only and is reported as such.
+fn satisfy_preferring_unified(
+    input_index: usize,
+    context: &InputContext,
+    unified: &BTreeMap<PublicKey, AvailableSignature>,
+    legacy: &BTreeMap<PublicKey, AvailableSignature>,
+    sequence: miniscript::bitcoin::Sequence,
+    lock_time: absolute::LockTime,
+) -> Result<(Witness, InputWitnessReport), UnifiedFinalizeError> {
+    let mut all: BTreeMap<PublicKey, AvailableSignature> = unified.clone();
+    all.extend(legacy.iter().map(|(k, v)| (*k, v.clone())));
+    let (witness, report) = satisfy_input(input_index, context, &all, sequence, lock_time)?;
+    if unified.is_empty() || report.unified_used > 0 {
+        return Ok((witness, report));
+    }
+
+    // Bounded search: a Vault path has a handful of keys, so 2^n subsets of the
+    // legacy signatures is tiny. Guard anyway so a hostile PSBT cannot make
+    // this exponential.
+    const MAX_LEGACY_KEYS_FOR_SEARCH: usize = 12;
+    let legacy_keys: Vec<&PublicKey> = legacy.keys().collect();
+    if legacy_keys.len() > MAX_LEGACY_KEYS_FOR_SEARCH {
+        return Ok((witness, report));
+    }
+    let mut best: Option<(Witness, InputWitnessReport)> = None;
+    for mask in 0u32..(1u32 << legacy_keys.len()) {
+        let mut subset: BTreeMap<PublicKey, AvailableSignature> = unified.clone();
+        for (bit, key) in legacy_keys.iter().enumerate() {
+            if mask & (1 << bit) != 0 {
+                subset.insert(**key, legacy[*key].clone());
+            }
+        }
+        if let Ok((w, r)) = satisfy_input(input_index, context, &subset, sequence, lock_time) {
+            if r.unified_used == 0 {
+                continue;
+            }
+            let better = match &best {
+                None => true,
+                Some((bw, br)) => {
+                    r.unified_used > br.unified_used
+                        || (r.unified_used == br.unified_used && w.size() < bw.size())
+                }
+            };
+            if better {
+                best = Some((w, r));
+            }
+        }
+    }
+    Ok(best.unwrap_or((witness, report)))
+}
+
 /// A witness element shaped like a DER ECDSA signature with a trailing sighash
 /// byte. Used only to refuse elements the finaliser did not place; script
 /// pushes (empty, `1`, hash preimages, keys) never look like this.
@@ -477,6 +539,7 @@ pub fn finalize_p2wsh_all_unified<C: secp256k1::Verification>(
             Err(UnifiedFinalizeError::Unsatisfiable { .. }) => {
                 // Legacy signatures for keys without a unified one, each verified
                 // against the BIP-143 digest and restricted to SIGHASH_ALL.
+                let mut legacy: BTreeMap<PublicKey, AvailableSignature> = BTreeMap::new();
                 for (public_key, signature) in &input.partial_sigs {
                     if available.contains_key(public_key) {
                         continue;
@@ -491,7 +554,7 @@ pub fn finalize_p2wsh_all_unified<C: secp256k1::Verification>(
                     )?;
                     let mut witness_bytes = signature.signature.serialize_der().to_vec();
                     witness_bytes.push(EcdsaSighashType::All as u8);
-                    available.insert(
+                    legacy.insert(
                         *public_key,
                         AvailableSignature {
                             der: *signature,
@@ -500,10 +563,11 @@ pub fn finalize_p2wsh_all_unified<C: secp256k1::Verification>(
                         },
                     );
                 }
-                satisfy_input(
+                satisfy_preferring_unified(
                     input_index,
                     context,
                     &available,
+                    &legacy,
                     txin.sequence,
                     unsigned_tx.lock_time,
                 )?

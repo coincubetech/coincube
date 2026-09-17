@@ -11,6 +11,7 @@ use crate::{
 };
 
 use super::*;
+use std::collections::BTreeMap;
 
 fn secp() -> secp256k1::Secp256k1<secp256k1::All> {
     secp256k1::Secp256k1::new()
@@ -148,6 +149,76 @@ fn a_key_with_both_a_unified_and_a_legacy_signature_is_refused_by_the_adapter() 
             crate::psbt_unified::UnifiedPsbtError::AmbiguousSignatureEncoding { input: 0, .. }
         )))
     ));
+}
+
+#[test]
+fn a_unified_signature_is_never_crowded_out_by_legacy_ones() {
+    // 2-of-3 with a unified signature from the *third* key in script order and
+    // legacy signatures from the first two: a cheapest-first satisfaction would
+    // take the two legacy ones and leave the unified unused. The finaliser must
+    // keep the unified signature in the witness.
+    let secp = secp();
+    let fixture = fixture(1);
+    let signed = sign_p2wsh_all_unified(&fixture.signers[2], &fixture.psbt, &secp).unwrap();
+    // Signer 2 also holds the recovery key; keep only its primary-key record so
+    // the recovery leaf (timelocked, not enabled here) plays no part.
+    let signed = add_legacy(&signed, &fixture.signers[0], &secp);
+    let signed = add_legacy(&signed, &fixture.signers[1], &secp);
+
+    // The scenario is real: a plain cheapest-first satisfaction over the whole
+    // set does drop the unified signature.
+    {
+        let contexts = input_contexts(&signed).unwrap();
+        let mut all: BTreeMap<PublicKey, AvailableSignature> = BTreeMap::new();
+        for record in unified_signatures(&signed).unwrap() {
+            let der_part = &record.signature[..record.signature.len() - 1];
+            all.insert(
+                record.public_key,
+                AvailableSignature {
+                    der: ecdsa::Signature {
+                        signature: secp256k1::ecdsa::Signature::from_der(der_part).unwrap(),
+                        sighash_type: EcdsaSighashType::All,
+                    },
+                    witness_bytes: record.signature.clone(),
+                    unified: true,
+                },
+            );
+        }
+        for (pk, sig) in &signed.psbt().inputs[0].partial_sigs {
+            let mut bytes = sig.signature.serialize_der().to_vec();
+            bytes.push(0x01);
+            all.insert(
+                *pk,
+                AvailableSignature {
+                    der: *sig,
+                    witness_bytes: bytes,
+                    unified: false,
+                },
+            );
+        }
+        let txin = &signed.psbt().unsigned_tx.input[0];
+        let (_, naive) = satisfy_input(
+            0,
+            &contexts[0],
+            &all,
+            txin.sequence,
+            signed.psbt().unsigned_tx.lock_time,
+        )
+        .unwrap();
+        assert_eq!(
+            naive.unified_used, 0,
+            "premise: cheapest-first drops the unified signature"
+        );
+    }
+
+    let finalized = finalize_p2wsh_all_unified(&signed, &secp).unwrap();
+    assert!(
+        finalized.inputs[0].replay_protected(),
+        "a verified unified signature was dropped for legacy ones: {:?}",
+        finalized.inputs[0]
+    );
+    assert_eq!(finalized.inputs[0].unified_used, 1);
+    assert_eq!(finalized.inputs[0].legacy_used, 1);
 }
 
 #[test]
