@@ -47,6 +47,9 @@ def pinned_repo(tmp_path):
 
 
 def run_fetch(cache_dir, repo, commit, dry_run=True):
+    """Drive the script against the throwaway repo. The test overrides are only
+    honoured together with ELECTRS_BLAKE2B_DRY_RUN=1; refusal and reuse paths
+    are reached before the dry-run point, so every scenario below runs with it."""
     env = dict(
         os.environ,
         ELECTRS_BLAKE2B_TEST_REPO=repo,
@@ -108,7 +111,7 @@ def test_edited_tracked_file_at_pinned_head_is_refused_before_build(
     edited.write_text("fn main() { /* local edit */ }\n")
     assert _git(str(cache / "src"), "rev-parse", "HEAD") == commit
 
-    res = run_fetch(cache, repo, commit, dry_run=False)
+    res = run_fetch(cache, repo, commit)
     assert res.returncode == 1
     assert "local changes" in res.stderr
     assert "src/bin/electrs.rs" in res.stderr
@@ -121,13 +124,40 @@ def test_edited_tracked_file_at_pinned_head_is_refused_before_build(
     assert "local edit" in edited.read_text()
 
 
+def test_overrides_are_refused_outside_dry_run(tmp_path, pinned_repo):
+    """An inherited ELECTRS_BLAKE2B_TEST_* variable must not redirect a real build."""
+    repo, commit = pinned_repo
+    res = run_fetch(tmp_path / "cache", repo, commit, dry_run=False)
+    assert res.returncode == 2
+    assert "only accepted with ELECTRS_BLAKE2B_DRY_RUN=1" in res.stderr
+    assert res.stdout.strip() == ""
+    assert not (tmp_path / "cache").exists(), "nothing may be cloned or built"
+
+
+def test_ignored_file_in_checkout_is_refused(tmp_path, pinned_repo):
+    """Ignored files are build inputs too (e.g. a stale .cargo/config.toml)."""
+    repo, commit = pinned_repo
+    cache = tmp_path / "cache"
+    assert run_fetch(cache, repo, commit).returncode == 0
+    (cache / "src" / ".gitignore").write_text("*.log\n")
+    _git(str(cache / "src"), "add", ".gitignore")
+    _git(str(cache / "src"), "commit", "-q", "-m", "ignore logs")
+    ignored_commit = _git(str(cache / "src"), "rev-parse", "HEAD")
+    (cache / "src" / "build.log").write_text("stale\n")
+    assert "build.log" not in _git(str(cache / "src"), "status", "--porcelain")
+    res = run_fetch(cache, repo, ignored_commit)
+    assert res.returncode == 1
+    assert "build.log" in res.stderr
+    assert res.stdout.strip() == ""
+
+
 def test_untracked_file_is_refused_like_an_edit(tmp_path, pinned_repo):
     repo, commit = pinned_repo
     cache = tmp_path / "cache"
     assert run_fetch(cache, repo, commit).returncode == 0
     (cache / "src" / "src" / "bin" / "extra.rs").write_text("// dropped in\n")
 
-    res = run_fetch(cache, repo, commit, dry_run=False)
+    res = run_fetch(cache, repo, commit)
     assert res.returncode == 1
     assert "src/bin/extra.rs" in res.stderr
     assert res.stdout.strip() == ""
@@ -143,13 +173,13 @@ def test_cached_binary_is_not_reused_when_source_is_modified(tmp_path, pinned_re
     write_marker(cache, commit, binary, version_line)
 
     # Clean tree: the recorded binary is reused.
-    res = run_fetch(cache, repo, commit, dry_run=False)
+    res = run_fetch(cache, repo, commit)
     assert res.returncode == 0, res.stderr
     assert res.stdout.strip() == str(binary)
 
     # Same binary and marker, but the source was edited: refused.
     (cache / "src" / "src" / "bin" / "electrs.rs").write_text("fn main() { 1 }\n")
-    res = run_fetch(cache, repo, commit, dry_run=False)
+    res = run_fetch(cache, repo, commit)
     assert res.returncode == 1
     assert res.stdout.strip() == ""
     assert "local changes" in res.stderr

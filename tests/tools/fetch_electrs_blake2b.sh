@@ -10,8 +10,8 @@
 # followed by `rev-parse HEAD` only pins HEAD: with the cache already at the
 # commit the checkout is a no-op and edits to tracked files survive it, and
 # `--locked` pins dependencies, not source. So before Cargo runs the checkout
-# must be clean — no modified, staged or untracked file (a dropped-in source
-# file changes the build as surely as an edit). A dirty tree is *refused*, not
+# must be clean — no modified, staged, untracked or ignored file (a dropped-in
+# source file or ignored build input changes the build as surely as an edit). A dirty tree is *refused*, not
 # reset: a developer's deliberate local patch is left in place and the message
 # says how to restore the tree or use another cache dir.
 #
@@ -30,15 +30,23 @@
 # checkout as a member of Coincube's workspace and refuses to build it.
 #
 # ELECTRS_BLAKE2B_TEST_REPO / ELECTRS_BLAKE2B_TEST_COMMIT / ELECTRS_BLAKE2B_TEST_BRANCH
-# and ELECTRS_BLAKE2B_DRY_RUN=1 exist only for tests/test_btcb2_tools.py, which
-# exercises the source checks against a throwaway repository without building.
+# exist only for tests/test_btcb2_tools.py, which exercises the source checks
+# against a throwaway repository, and are honoured only together with
+# ELECTRS_BLAKE2B_DRY_RUN=1, which never builds: an override that leaks into a
+# real build environment is refused, so the production path cannot be pointed
+# at another repository or commit.
 set -euo pipefail
 
 cache_dir="${1:-${XDG_CACHE_HOME:-$HOME/.cache}/coincube/electrs-blake2b}"
+if [ -n "${ELECTRS_BLAKE2B_TEST_REPO:-}${ELECTRS_BLAKE2B_TEST_COMMIT:-}${ELECTRS_BLAKE2B_TEST_BRANCH:-}" ] \
+   && [ "${ELECTRS_BLAKE2B_DRY_RUN:-0}" != "1" ]; then
+  echo "ELECTRS_BLAKE2B_TEST_* overrides are only accepted with ELECTRS_BLAKE2B_DRY_RUN=1 (test mode); refusing to build from an overridden repository or commit" >&2
+  exit 2
+fi
 repo_url="${ELECTRS_BLAKE2B_TEST_REPO:-https://github.com/retropex/electrs.git}"
 branch="${ELECTRS_BLAKE2B_TEST_BRANCH:-mempool}"
 commit="${ELECTRS_BLAKE2B_TEST_COMMIT:-4453cac61979322c0260f4b90e899379ae606206}"
-if [ -n "${ELECTRS_BLAKE2B_TEST_REPO:-}${ELECTRS_BLAKE2B_TEST_COMMIT:-}" ]; then
+if [ -n "${ELECTRS_BLAKE2B_TEST_REPO:-}${ELECTRS_BLAKE2B_TEST_COMMIT:-}${ELECTRS_BLAKE2B_TEST_BRANCH:-}" ]; then
   echo "TEST MODE: repository/commit overridden; this is not the pinned indexer" >&2
 fi
 src="$cache_dir/src"
@@ -68,12 +76,15 @@ verify_source() {
     echo "retropex/electrs checkout is at $actual, expected $commit" >&2
     exit 1
   fi
+  # Ignored files count too: an ignored build input (a stale .cargo/config.toml,
+  # say) changes what Cargo compiles just as a tracked edit does, and this
+  # script never creates ignored files here — the target dir lives outside.
   local dirty
-  dirty="$(git -C "$src" status --porcelain --untracked-files=all --ignored=no)"
+  dirty="$(git -C "$src" status --porcelain --untracked-files=all --ignored)"
   if [ -n "$dirty" ]; then
     echo "retropex/electrs checkout at $src has local changes; refusing to build or reuse the pinned commit from a modified tree:" >&2
     echo "$dirty" >&2
-    echo "(restore it with: git -C '$src' checkout -- . && git -C '$src' clean -fd; or point the script at a fresh cache dir)" >&2
+    echo "(restore it with: git -C '$src' checkout -- . && git -C '$src' clean -fdx; or point the script at a fresh cache dir)" >&2
     exit 1
   fi
 }
