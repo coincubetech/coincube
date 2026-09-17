@@ -54,7 +54,8 @@ Proto additions land in `coincube-api` first and reach this repo via `make sync-
 | when | rule | refusal |
 |---|---|---|
 | device registration (`coincube-gui/src/services/connect/grpc/device.rs:47`) | add `chain-identity-v1` to the capabilities sent (`create_session, cancel_session` today) | — |
-| after `ResolveSigners` (`on_signers_resolved`) | `resp.network` must equal `wallet.chain.api_str()`; otherwise create **nothing** | R1.10: "Connect reports this Vault on a different network than this Cube. Nothing was sent. Reopen the Cube; if this repeats, contact support." |
+| after `ResolveSigners` (`on_signers_resolved`) | `resp.network` **non-empty** and ≠ `wallet.chain.api_str()` → create **nothing** | R1.10: "Connect reports this Vault on a different network than this Cube. Nothing was sent. Reopen the Cube; if this repeats, contact support." |
+| same | `resp.network` **empty** (pre-identity Connect): BTCB2 Vault → create **nothing**; Bitcoin-family Vault → proceed during the compatibility window (canonical §7, Q1), still sending `network` on create | R1.11 on BTCB2: "Connect needs updating before Keychain can sign on Bitcoin Blake2b. Nothing was sent to the signer." |
 | same | on a BTCB2 Vault, a target whose `capabilities` lack `chain-identity-v1` (and, after B3.2, `btcb2-unified-v1`), or an `unresolved` entry with `signer_app_outdated` | R1.7 row: "<name>'s Keychain needs updating before it can sign on Bitcoin Blake2b." — no session for that signer |
 | `create_session_for` | `network: wallet.chain.api_str()` on every `CreateSigningSessionRequest` | — |
 | create response and every fetch | `session.network` must equal `wallet.chain.api_str()`. Empty on a BTCB2 Vault ⇒ pre-identity Connect ⇒ cancel the session | R1.11: "Connect needs updating before Keychain can sign on Bitcoin Blake2b. Nothing was sent to the signer." Empty on a Bitcoin-family Vault is tolerated during the compatibility window (canonical §7, Q1) |
@@ -149,17 +150,25 @@ is unchanged: the chain rides `connect.v1.SigningSession.network` (field 21).
   - row on another chain → not dialled; "Paired for <other network>. Pair again to
     use it here." (R2.7)
 - `sign_tx` sets `session.network = wallet.chain.api_str()` on the `PresentSession`.
-- On `PartialSignature`: `partial.network` must equal `session.network` **before**
-  the signature is verified or merged; otherwise discard with R2.13 "The signature
-  Keychain returned is for a different network. Pair again." A phone `ErrorEnvelope`
-  with code `network_mismatch` or `pair_again` is surfaced with its message.
+- On `PartialSignature`, **before** the signature is verified or merged:
+  - row has `network` (v3 pairing): `partial.network` is **required** and must equal
+    `session.network`; empty or different → discard, R2.13 ("The signature Keychain
+    returned is for a different network. Pair again." / "Update Keychain and pair
+    again." when missing);
+  - legacy row (`None`; only ever a Bitcoin-family Vault, R2.6): an **empty**
+    `partial.network` is admitted — a pre-identity phone omits the field
+    (`keychain-app/lib/services/local_signer/local_signer_host.dart:262-270` at
+    `5d1b1190`); a non-empty value must equal `session.network`, else R2.13.
+  A phone `ErrorEnvelope` with code `network_mismatch` or `pair_again` is surfaced
+  with its message.
 
 ### 4.6 Old-client matrix (Rail 2)
 
 | desktop | Keychain | outcome |
 |---|---|---|
 | this contract (v3 offer) | pre-identity | scan refuses `v: 3`; nothing is paired |
-| this contract, legacy `PairedPhone` row | new | Bitcoin-family Vaults keep working (`session.network` set; the phone compares it with its record); a BTCB2 Vault never dials the row (R2.6) |
+| this contract, legacy `PairedPhone` row | pre-identity | Bitcoin-family Vaults keep working: `session.network` is sent and ignored; the phone answers without `PartialSignature.network`, which the legacy row admits; a BTCB2 Vault never dials the row (R2.6) |
+| this contract, legacy `PairedPhone` row | new | Bitcoin-family Vaults keep working: the phone compares `session.network` with its record and answers with `PartialSignature.network`, which must match; a BTCB2 Vault never dials the row (R2.6) |
 | pre-identity (v2 offer) | new | the phone accepts v2 only while it holds no BTCB2 record for `key`; sessions carry no `network` and are admitted as the record's Bitcoin-family network. A pre-identity desktop cannot run a BTCB2 Vault |
 | this contract | new | full v3 |
 
@@ -173,13 +182,17 @@ is unchanged: the chain rides `connect.v1.SigningSession.network` (field 21).
 - `exact_signer`: same-descriptor twin Vaults (`ChainId::Bitcoin` vs
   `ChainId::BitcoinBlake2b`) resolve only the row on their own chain; legacy row
   usable on Bitcoin only.
-- `sign_tx`: `session.network` present; `PartialSignature.network` mismatch is
-  discarded before `signatures::verify…`; the `lan_keychain_native` example
-  round-trips on a Bitcoin regtest Vault and on a BTCB2 regtest Vault (the latter
-  reaching the phone's B3.2 refusal, not BDK).
-- Rail 1: `on_signers_resolved` mismatch sends no `CreateSigningSession`; `network`
-  present on every create; empty `network` on a BTCB2 Vault cancels; capability
-  registered. Bitcoin-family sessions render and merge exactly as today (existing
+- `sign_tx`: `session.network` present; `PartialSignature.network` in all three
+  shapes — v3 row + mismatch discarded, v3 row + empty discarded, **legacy row +
+  empty accepted on a Bitcoin Vault** — before `signatures::verify…`; **existing v2
+  pairing + pre-identity phone** completes a Bitcoin signature end to end; the
+  `lan_keychain_native` example round-trips on a Bitcoin regtest Vault and on a
+  BTCB2 regtest Vault (the latter reaching the phone's B3.2 refusal, not BDK).
+- Rail 1: `on_signers_resolved` non-empty mismatch sends no `CreateSigningSession`;
+  **resolve → create against an old Connect** (empty `resp.network`): Bitcoin Vault
+  proceeds and sends `network`, then tolerates the empty session; BTCB2 Vault sends
+  nothing; `network` present on every create; empty `network` on a created/fetched
+  BTCB2 session cancels; capability registered. Bitcoin-family sessions render and merge exactly as today (existing
   tests unchanged).
 
 ## 6. Not in this contract
