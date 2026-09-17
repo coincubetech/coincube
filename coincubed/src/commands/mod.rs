@@ -63,6 +63,13 @@ pub enum CommandError {
     SpendMissingPreviousTransaction(bitcoin::OutPoint),
     // FIXME: when upgrading Miniscript put the actual error there
     SpendFinalization(String),
+    /// A Bitcoin Blake2b spend could not be finalised from its verified unified
+    /// (and, where allowed, legacy) signatures. Nothing was broadcast.
+    UnifiedSpendFinalization(String),
+    /// Signatures for a Bitcoin Blake2b spend could not be merged into the stored
+    /// PSBT: the incoming unified records conflict with, or are malformed next to,
+    /// the ones already held. The stored spend is unchanged.
+    UnifiedSignatureMerge(String),
     TxBroadcast(String),
     AlreadyRescanning,
     InsaneRescanTimestamp(u32),
@@ -118,6 +125,16 @@ impl fmt::Display for CommandError {
             Self::SpendFinalization(e) => {
                 write!(f, "Failed to finalize the spend transaction PSBT: '{}'.", e)
             }
+            Self::UnifiedSpendFinalization(e) => write!(
+                f,
+                "Failed to finalize the Bitcoin Blake2b spend from its verified signatures: '{}'.",
+                e
+            ),
+            Self::UnifiedSignatureMerge(e) => write!(
+                f,
+                "Refused to merge signatures into the stored Bitcoin Blake2b spend: '{}'.",
+                e
+            ),
             Self::TxBroadcast(e) => write!(f, "Failed to broadcast transaction: {}", e),
             Self::AlreadyRescanning => write!(
                 f,
@@ -216,6 +233,115 @@ impl<'a> TxGetter for DbTxGetter<'a> {
 /// through the txid committed by the outpoint. An input whose previous
 /// transaction the wallet does not hold cannot be authenticated at all and the
 /// spend must be recreated.
+/// Merge the signatures of an incoming PSBT for a spend already stored, keyed on
+/// the chain the daemon runs on.
+///
+/// The Bitcoin arm is the historical best-effort merge, unchanged: partial and
+/// Taproot signatures of matching inputs are copied over, nothing else. The
+/// Bitcoin Blake2b arm does the same *and* carries the unified (`0x21`) records,
+/// which live in the PSBT's proprietary map and would otherwise be dropped on the
+/// floor by the copy above — through the adapter, which refuses a merge that would
+/// leave a key with conflicting or ambiguous encodings, so a stored spend never
+/// ends up with a record it cannot finalise from. On refusal nothing is stored.
+fn merge_spend_signatures(
+    chain: coincube_core::chain::ChainId,
+    mut db_psbt: Psbt,
+    psbt: &Psbt,
+) -> Result<Psbt, CommandError> {
+    let tx = &psbt.unsigned_tx;
+    let db_tx = db_psbt.unsigned_tx.clone();
+    for i in 0..db_tx.input.len() {
+        if tx
+            .input
+            .get(i)
+            .map(|tx_in| tx_in.previous_output == db_tx.input[i].previous_output)
+            != Some(true)
+        {
+            continue;
+        }
+        let psbtin = match psbt.inputs.get(i) {
+            Some(psbtin) => psbtin,
+            None => continue,
+        };
+        let db_psbtin = match db_psbt.inputs.get_mut(i) {
+            Some(db_psbtin) => db_psbtin,
+            None => continue,
+        };
+        db_psbtin.partial_sigs.extend(psbtin.partial_sigs.clone());
+        db_psbtin
+            .tap_script_sigs
+            .extend(psbtin.tap_script_sigs.clone());
+        if db_psbtin.tap_key_sig.is_none() {
+            db_psbtin.tap_key_sig = psbtin.tap_key_sig;
+        }
+    }
+    if !chain.is_blake2b() {
+        return Ok(db_psbt);
+    }
+
+    // Unified records: validated representation on both sides, then an atomic
+    // merge that refuses conflicts rather than picking a winner.
+    use coincube_core::psbt_unified::{merge_signatures, UnifiedPsbt};
+    let mut stored = UnifiedPsbt::from_psbt(db_psbt)
+        .map_err(|e| CommandError::UnifiedSignatureMerge(e.to_string()))?;
+    let incoming = UnifiedPsbt::from_psbt(psbt.clone())
+        .map_err(|e| CommandError::UnifiedSignatureMerge(e.to_string()))?;
+    merge_signatures(&mut stored, &incoming)
+        .map_err(|e| CommandError::UnifiedSignatureMerge(e.to_string()))?;
+    Ok(stored.psbt().clone())
+}
+
+/// Finalise a stored spend into the transaction to broadcast, keyed on the chain
+/// the daemon runs on.
+///
+/// The Bitcoin arm is rust-miniscript's finaliser, exactly as before. The Bitcoin
+/// Blake2b arm is the core unified finaliser: every unified record is
+/// cryptographically verified first and the witnesses are assembled from the
+/// miniscript satisfaction, unified signatures before legacy ones, with no node
+/// involved (so the Connect Esplora backend needs nothing beyond broadcast). It
+/// never uses rust-miniscript's finaliser, which cannot see unified records and
+/// would otherwise finalise a Blake2b spend from legacy signatures alone —
+/// exactly the replayable witness the unified ones exist to prevent.
+fn finalize_spend_for_chain(
+    chain: coincube_core::chain::ChainId,
+    mut spend_psbt: Psbt,
+    secp: &bitcoin::secp256k1::Secp256k1<bitcoin::secp256k1::VerifyOnly>,
+) -> Result<bitcoin::Transaction, CommandError> {
+    if !chain.is_blake2b() {
+        spend_psbt.finalize_mut(secp).map_err(|e| {
+            CommandError::SpendFinalization(
+                e.into_iter()
+                    .next()
+                    .map(|e| e.to_string())
+                    .unwrap_or_default(),
+            )
+        })?;
+        return Ok(spend_psbt.extract_tx_unchecked_fee_rate());
+    }
+
+    use coincube_core::{psbt_unified::UnifiedPsbt, unified_finalize::finalize_p2wsh_all_unified};
+    let unified = UnifiedPsbt::from_psbt(spend_psbt)
+        .map_err(|e| CommandError::UnifiedSpendFinalization(e.to_string()))?;
+    let finalized = finalize_p2wsh_all_unified(&unified, secp)
+        .map_err(|e| CommandError::UnifiedSpendFinalization(e.to_string()))?;
+    for (index, report) in finalized.inputs.iter().enumerate() {
+        if report.replay_protected() {
+            log::info!(
+                "spend input {} finalised with {} unified signature(s): not replayable on Bitcoin",
+                index,
+                report.unified_used
+            );
+        } else {
+            log::warn!(
+                "spend input {} finalised from {} legacy signature(s) only: replayable on Bitcoin",
+                index,
+                report.legacy_used
+            );
+        }
+    }
+    Ok(finalized.transaction)
+}
+
 fn backfill_previous_transactions(
     psbt: &mut Psbt,
     tx_getter: &mut impl TxGetter,
@@ -891,34 +1017,8 @@ impl DaemonControl {
         // If the transaction already exists in DB, merge the signatures for each input on a best
         // effort basis.
         let txid = tx.compute_txid();
-        if let Some(mut db_psbt) = db_conn.spend_tx(&txid) {
-            let db_tx = db_psbt.unsigned_tx.clone();
-            for i in 0..db_tx.input.len() {
-                if tx
-                    .input
-                    .get(i)
-                    .map(|tx_in| tx_in.previous_output == db_tx.input[i].previous_output)
-                    != Some(true)
-                {
-                    continue;
-                }
-                let psbtin = match psbt.inputs.get(i) {
-                    Some(psbtin) => psbtin,
-                    None => continue,
-                };
-                let db_psbtin = match db_psbt.inputs.get_mut(i) {
-                    Some(db_psbtin) => db_psbtin,
-                    None => continue,
-                };
-                db_psbtin.partial_sigs.extend(psbtin.partial_sigs.clone());
-                db_psbtin
-                    .tap_script_sigs
-                    .extend(psbtin.tap_script_sigs.clone());
-                if db_psbtin.tap_key_sig.is_none() {
-                    db_psbtin.tap_key_sig = psbtin.tap_key_sig;
-                }
-            }
-            psbt = db_psbt;
+        if let Some(db_psbt) = db_conn.spend_tx(&txid) {
+            psbt = merge_spend_signatures(self.config.bitcoin_config.chain, db_psbt, &psbt)?;
         } else {
             // If the transaction doesn't exist in DB already, sanity check its inputs.
             // FIXME: should we allow for external inputs?
@@ -1014,19 +1114,11 @@ impl DaemonControl {
         // creation and broadcast is rejected before it can hit the network.
         spend::reverify_spend_before_broadcast(&self.config.main_descriptor, &spend_psbt)?;
 
-        spend_psbt.finalize_mut(&self.secp).map_err(|e| {
-            CommandError::SpendFinalization(
-                e.into_iter()
-                    .next()
-                    .map(|e| e.to_string())
-                    .unwrap_or_default(),
-            )
-        })?;
-
         // Then, broadcast it (or try to, we never know if we are not going to hit an
         // error at broadcast time).
         // These checks are already performed at Spend creation time. TODO: a belt-and-suspenders is still worth it though.
-        let final_tx = spend_psbt.extract_tx_unchecked_fee_rate();
+        let final_tx =
+            finalize_spend_for_chain(self.config.bitcoin_config.chain, spend_psbt, &self.secp)?;
         self.bitcoin
             .broadcast_tx(&final_tx)
             .map_err(CommandError::TxBroadcast)?;
@@ -3618,5 +3710,265 @@ mod tests {
         );
 
         ms.shutdown();
+    }
+
+    // ── Chain-keyed signature merge and finalisation (Lane B1.2) ────────────────
+    //
+    // A 2-of-3 native P2WSH Vault with a timelocked recovery leaf, signed with
+    // real keys, so the Bitcoin arm can be checked byte-for-byte against
+    // rust-miniscript's finaliser and the Blake2b arm against the core one. The
+    // daemon itself still refuses to start on a Blake2b chain (dormant), which is
+    // why the two helpers are exercised directly with both chain identities.
+    mod chain_keyed_spend {
+        use super::*;
+        use coincube_core::{
+            chain::ChainId,
+            descriptors::{CoincubeDescriptor, CoincubePolicy, PathInfo},
+            miniscript::{
+                bitcoin::{
+                    self as btc, absolute, bip32::DerivationPath, ecdsa, secp256k1,
+                    sighash::EcdsaSighashType, transaction, Amount, OutPoint, ScriptBuf, Sequence,
+                    Transaction, TxIn, TxOut,
+                },
+                descriptor::{DerivPaths, DescriptorMultiXKey, DescriptorPublicKey, Wildcard},
+            },
+            psbt_unified::{unified_signatures, UnifiedPsbt},
+            signer::MasterSigner,
+            unified_signing::sign_p2wsh_all_unified,
+        };
+        use std::str::FromStr;
+
+        fn signer(byte: u8) -> MasterSigner {
+            let mnemonic = coincube_core::bip39::Mnemonic::from_entropy(&[byte; 16]).unwrap();
+            MasterSigner::from_mnemonic(btc::Network::Bitcoin, mnemonic).unwrap()
+        }
+
+        fn descriptor_key(
+            signer: &MasterSigner,
+            branch: u32,
+            secp: &secp256k1::Secp256k1<secp256k1::All>,
+        ) -> DescriptorPublicKey {
+            let origin = DerivationPath::from(vec![
+                bip32::ChildNumber::from_hardened_idx(48).unwrap(),
+                bip32::ChildNumber::from_hardened_idx(branch).unwrap(),
+            ]);
+            DescriptorPublicKey::MultiXPub(DescriptorMultiXKey {
+                origin: Some((signer.fingerprint(secp), origin.clone())),
+                xkey: signer.xpub_at(&origin, secp),
+                derivation_paths: DerivPaths::new(vec![
+                    DerivationPath::from_str("m/0").unwrap(),
+                    DerivationPath::from_str("m/1").unwrap(),
+                ])
+                .unwrap(),
+                wildcard: Wildcard::Unhardened,
+            })
+        }
+
+        /// (signers, unsigned PSBT with authenticated prevout and witness script).
+        fn vault_psbt() -> (Vec<MasterSigner>, Psbt) {
+            let secp = secp256k1::Secp256k1::new();
+            let signers = vec![signer(11), signer(12), signer(13)];
+            let primary = PathInfo::Multi(
+                2,
+                vec![
+                    descriptor_key(&signers[0], 0, &secp),
+                    descriptor_key(&signers[1], 0, &secp),
+                    descriptor_key(&signers[2], 0, &secp),
+                ],
+            );
+            let recovery = PathInfo::Single(descriptor_key(&signers[2], 1, &secp));
+            let descriptor = CoincubeDescriptor::new(
+                CoincubePolicy::new_legacy(primary, [(46, recovery)].iter().cloned().collect())
+                    .unwrap(),
+            );
+            let derived = descriptor.receive_descriptor().derive(3.into(), &secp);
+            let output = TxOut {
+                value: Amount::from_sat(50_000),
+                script_pubkey: derived.script_pubkey(),
+            };
+            let previous_tx = Transaction {
+                version: transaction::Version::TWO,
+                lock_time: absolute::LockTime::ZERO,
+                input: vec![TxIn {
+                    previous_output: OutPoint::null(),
+                    script_sig: ScriptBuf::new(),
+                    sequence: Sequence(7),
+                    witness: btc::Witness::new(),
+                }],
+                output: vec![output.clone()],
+            };
+            let unsigned_tx = Transaction {
+                version: transaction::Version::TWO,
+                lock_time: absolute::LockTime::ZERO,
+                input: vec![TxIn {
+                    previous_output: OutPoint {
+                        txid: previous_tx.compute_txid(),
+                        vout: 0,
+                    },
+                    script_sig: ScriptBuf::new(),
+                    sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                    witness: btc::Witness::new(),
+                }],
+                output: vec![TxOut {
+                    value: Amount::from_sat(40_000),
+                    script_pubkey: ScriptBuf::new_p2wsh(&ScriptBuf::new().wscript_hash()),
+                }],
+            };
+            let mut psbt = Psbt::from_unsigned_tx(unsigned_tx).unwrap();
+            derived.update_psbt_in(&mut psbt.inputs[0]);
+            psbt.inputs[0].non_witness_utxo = Some(previous_tx);
+            psbt.inputs[0].witness_utxo = Some(output);
+            (signers, psbt)
+        }
+
+        fn unified(psbt: &Psbt, signer: &MasterSigner) -> Psbt {
+            let secp = secp256k1::Secp256k1::new();
+            let u = UnifiedPsbt::from_psbt(psbt.clone()).unwrap();
+            sign_p2wsh_all_unified(signer, &u, &secp)
+                .unwrap()
+                .psbt()
+                .clone()
+        }
+
+        fn legacy(psbt: &Psbt, signer: &MasterSigner) -> Psbt {
+            let secp = secp256k1::Secp256k1::new();
+            signer.sign_psbt(psbt.clone(), &secp).unwrap()
+        }
+
+        fn verify_only() -> secp256k1::Secp256k1<secp256k1::VerifyOnly> {
+            secp256k1::Secp256k1::verification_only()
+        }
+
+        fn sig_elements(witness: &btc::Witness) -> (usize, usize) {
+            let (mut u, mut l) = (0, 0);
+            for e in witness.iter() {
+                if e.len() > 8 && e[0] == 0x30 {
+                    match e.last() {
+                        Some(0x21) => u += 1,
+                        Some(0x01) => l += 1,
+                        other => panic!("unexpected sighash byte {:?}", other),
+                    }
+                }
+            }
+            (u, l)
+        }
+
+        #[test]
+        fn bitcoin_merge_is_the_historical_copy_and_ignores_unified_records() {
+            let (signers, psbt) = vault_psbt();
+            let stored = legacy(&psbt, &signers[0]);
+            let mut incoming = legacy(&psbt, &signers[1]);
+            // A unified record riding along on a Bitcoin spend is not carried:
+            // the Bitcoin arm copies partial/Taproot signatures and nothing else,
+            // exactly as before this change.
+            incoming = unified(&incoming, &signers[2]);
+            assert!(!incoming.inputs[0].proprietary.is_empty());
+            let merged =
+                merge_spend_signatures(ChainId::Bitcoin, stored.clone(), &incoming).unwrap();
+            assert_eq!(merged.inputs[0].partial_sigs.len(), 2);
+            assert!(merged.inputs[0].proprietary.is_empty());
+            assert_eq!(merged.unsigned_tx, stored.unsigned_tx);
+        }
+
+        #[test]
+        fn blake2b_merge_carries_unified_records_and_refuses_conflicts() {
+            let (signers, psbt) = vault_psbt();
+            let stored = unified(&psbt, &signers[0]);
+            let incoming = unified(&psbt, &signers[1]);
+            let merged =
+                merge_spend_signatures(ChainId::BitcoinBlake2b, stored.clone(), &incoming).unwrap();
+            let records =
+                unified_signatures(&UnifiedPsbt::from_psbt(merged.clone()).unwrap()).unwrap();
+            assert_eq!(records.len(), 2, "both signers' records are held");
+
+            // A conflicting record for a key already stored is refused whole.
+            let mut conflicting = stored.clone();
+            let (key, value) = conflicting.inputs[0]
+                .proprietary
+                .iter()
+                .next()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .unwrap();
+            let mut other = value.clone();
+            other[12] ^= 0x01;
+            conflicting.inputs[0].proprietary.insert(key, other);
+            assert!(matches!(
+                merge_spend_signatures(ChainId::BitcoinBlake2b, stored.clone(), &conflicting),
+                Err(CommandError::UnifiedSignatureMerge(_))
+            ));
+            // Legacy partial signatures still merge on the Blake2b arm too (signer
+            // 2 holds a primary key and the recovery key, hence two of them).
+            let incoming_legacy = legacy(&psbt, &signers[2]);
+            let merged =
+                merge_spend_signatures(ChainId::BitcoinBlake2b, stored, &incoming_legacy).unwrap();
+            assert_eq!(merged.inputs[0].partial_sigs.len(), 2);
+            assert_eq!(merged.inputs[0].proprietary.len(), 1);
+        }
+
+        #[test]
+        fn bitcoin_finalisation_is_miniscripts_and_cannot_see_unified_records() {
+            let (signers, psbt) = vault_psbt();
+            let signed = legacy(&legacy(&psbt, &signers[0]), &signers[1]);
+            let secp = verify_only();
+            let tx = finalize_spend_for_chain(ChainId::Bitcoin, signed.clone(), &secp).unwrap();
+            // Same bytes rust-miniscript's finaliser produces on its own.
+            let mut expected = signed.clone();
+            expected.finalize_mut(&secp).unwrap();
+            assert_eq!(tx, expected.extract_tx_unchecked_fee_rate());
+            assert_eq!(sig_elements(&tx.input[0].witness), (0, 2));
+
+            // Unified-only on the Bitcoin arm: miniscript's finaliser does not
+            // see the records, so this fails as it always did — the Bitcoin path
+            // gains no Blake2b behaviour.
+            let unified_only = unified(&unified(&psbt, &signers[0]), &signers[1]);
+            assert!(matches!(
+                finalize_spend_for_chain(ChainId::Bitcoin, unified_only, &secp),
+                Err(CommandError::SpendFinalization(_))
+            ));
+        }
+
+        #[test]
+        fn blake2b_finalisation_assembles_unified_witnesses_and_refuses_anyonecanpay() {
+            let (signers, psbt) = vault_psbt();
+            let secp = verify_only();
+            let signed = unified(&unified(&psbt, &signers[0]), &signers[1]);
+            let tx =
+                finalize_spend_for_chain(ChainId::BitcoinBlake2b, signed.clone(), &secp).unwrap();
+            assert_eq!(sig_elements(&tx.input[0].witness), (2, 0));
+            let mut stripped = tx.clone();
+            stripped.input[0].witness = btc::Witness::new();
+            assert_eq!(stripped, signed.unsigned_tx);
+
+            // Legacy-only still finalises (replayable; the GUI gates that), and
+            // the unified + legacy mix keeps the unified signature.
+            let legacy_only = legacy(&legacy(&psbt, &signers[0]), &signers[1]);
+            let tx = finalize_spend_for_chain(ChainId::BitcoinBlake2b, legacy_only, &secp).unwrap();
+            assert_eq!(sig_elements(&tx.input[0].witness), (0, 2));
+            let mixed = legacy(&unified(&psbt, &signers[0]), &signers[1]);
+            let tx = finalize_spend_for_chain(ChainId::BitcoinBlake2b, mixed, &secp).unwrap();
+            assert_eq!(sig_elements(&tx.input[0].witness), (1, 1));
+
+            // ANYONECANPAY is refused, not warned about.
+            let mut acp = legacy(&unified(&psbt, &signers[0]), &signers[1]);
+            let (key, sig) = acp.inputs[0]
+                .partial_sigs
+                .iter()
+                .next()
+                .map(|(k, s)| (*k, *s))
+                .unwrap();
+            acp.inputs[0].partial_sigs.insert(
+                key,
+                ecdsa::Signature {
+                    signature: sig.signature,
+                    sighash_type: EcdsaSighashType::AllPlusAnyoneCanPay,
+                },
+            );
+            match finalize_spend_for_chain(ChainId::BitcoinBlake2b, acp, &secp) {
+                Err(CommandError::UnifiedSpendFinalization(msg)) => {
+                    assert!(msg.contains("0x81"), "{}", msg)
+                }
+                other => panic!("expected the ANYONECANPAY refusal, got {:?}", other),
+            }
+        }
     }
 }

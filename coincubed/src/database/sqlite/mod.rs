@@ -4256,6 +4256,37 @@ CREATE TABLE labels (
             fs::remove_dir_all(tmp_dir).unwrap();
         }
 
+        /// A stored spend keeps its unified signature records: they live in the
+        /// PSBT's proprietary map, which rust-bitcoin serialises and parses back
+        /// verbatim, so the round trip through `spend_transactions` loses nothing
+        /// a Blake2b finalisation will need.
+        #[test]
+        fn stored_spends_keep_unified_proprietary_records() {
+            use bitcoin::psbt::raw::ProprietaryKey;
+            let (tmp_dir, db_path, _) = v9_fixture(ChainId::Bitcoin);
+            let secp = secp256k1::Secp256k1::verification_only();
+            let db = SqliteDb::new(db_path, None, &secp).unwrap();
+            let mut conn = db.connection().unwrap();
+            let mut psbt = psbt_from_str("cHNidP8BAIkCAAAAAWi3OFgkj1CqCDT3Swm8kbxZS9lxz4L3i4W2v9KGC7nqAQAAAAD9////AkANAwAAAAAAIgAg27lNc1rog+dOq80ohRuds4Hgg/RcpxVun2XwgpuLSrFYMwwAAAAAACIAIDyWveqaElWmFGkTbFojg1zXWHODtiipSNjfgi2DqBy9AAAAAAABAOoCAAAAAAEBsRWl70USoAFFozxc86pC7Dovttdg4kvja//3WMEJskEBAAAAAP7///8CWKmCIk4GAAAWABRKBWYWkCNS46jgF0r69Ehdnq+7T0BCDwAAAAAAIgAgTt5fs+CiB+FRzNC8lHcgWLH205sNjz1pT59ghXlG5tQCRzBEAiBXK9MF8z3bX/VnY2aefgBBmiAHPL4tyDbUOe7+KpYA4AIgL5kU0DFG8szKd+szRzz/OTUWJ0tZqij41h2eU9rSe1IBIQNBB1hy+jKsg1TihMT0dXw7etpu9TkO3NuvhBDFJlBj1cP2AQABAStAQg8AAAAAACIAIE7eX7PgogfhUczQvJR3IFix9tObDY89aU+fYIV5RubUIgICSKJsNs0zFJN58yd2aYQ+C3vhMbi0x7k0FV3wBhR4THlIMEUCIQCPWWWOhs2lThxOq/G8X2fYBRvM9MXSm7qPH+dRVYQZEwIgfut2vx3RvwZWcgEj4ohQJD5lNJlwOkA4PAiN1fjx6dABIgID3mvj1zerZKohOVhKCiskYk+3qrCum6PIwDhQ16ePACpHMEQCICZNR+0/1hPkrDQwPFmg5VjUHkh6aK9cXUu3kPbM8hirAiAyE/5NUXKfmFKij30isuyysJbq8HrURjivd+S9vdRGKQEBBZNSIQJIomw2zTMUk3nzJ3ZphD4Le+ExuLTHuTQVXfAGFHhMeSEC9OfCXl+sJOrxUFLBuMV4ZUlJYjuzNGZSld5ioY14y8FSrnNkUSED3mvj1zerZKohOVhKCiskYk+3qrCum6PIwDhQ16ePACohA+ECH+HlR+8Sf3pumaXH3IwSsoqSLCH7H1THiBP93z3ZUq9SsmgiBgJIomw2zTMUk3nzJ3ZphD4Le+ExuLTHuTQVXfAGFHhMeRxjat8/MAAAgAEAAIAAAACAAgAAgAAAAAABAAAAIgYC9OfCXl+sJOrxUFLBuMV4ZUlJYjuzNGZSld5ioY14y8Ec/9Y8jTAAAIABAACAAAAAgAIAAIAAAAAAAQAAACIGA95r49c3q2SqITlYSgorJGJPt6qwrpujyMA4UNenjwAqHGNq3z8wAACAAQAAgAEAAIACAACAAAAAAAEAAAAiBgPhAh/h5UfvEn96bpmlx9yMErKKkiwh+x9Ux4gT/d892Rz/1jyNMAAAgAEAAIABAACAAgAAgAAAAAABAAAAACICAlBQ7gGocg7eF3sXrCio+zusAC9+xfoyIV95AeR69DWvHGNq3z8wAACAAQAAgAEAAIACAACAAAAAAAMAAAAiAgMvVy984eg8Kgvj058PBHetFayWbRGb7L0DMnS9KHSJzBxjat8/MAAAgAEAAIAAAACAAgAAgAAAAAADAAAAIgIDSRIG1dn6njdjsDXenHa2lUvQHWGPLKBVrSzbQOhiIxgc/9Y8jTAAAIABAACAAAAAgAIAAIAAAAAAAwAAACICA0/epE59sVEj7Et0I4R9qJQNuX23RNvDZKCRL7eUps9FHP/WPI0wAACAAQAAgAEAAIACAACAAAAAAAMAAAAAIgICgldCOK6iHscv//2NipgaMABLV5TICU/zlP7HlQmlg08cY2rfPzAAAIABAACAAQAAgAIAAIABAAAAAQAAACICApb0p9rfpJshB3J186PGWrvzQdixcwQZWmebOUMdkquZHP/WPI0wAACAAQAAgAAAAIACAACAAQAAAAEAAAAiAgLY5q+unoDxC/HI5BaNiPq12ei1REZIcUAN304JfKXUwxz/1jyNMAAAgAEAAIABAACAAgAAgAEAAAABAAAAIgIDg6cUVCJB79cMcofiURHojxFARWyS4YEhJNRixuOZZRgcY2rfPzAAAIABAACAAAAAgAIAAIABAAAAAQAAAAA=");
+            let key = ProprietaryKey {
+                prefix: b"coincube".to_vec(),
+                subtype: 0u8,
+                key: vec![0x02; 33],
+            };
+            let value = vec![0x30, 0x44, 0x02, 0x20, 0x21];
+            psbt.inputs[0]
+                .proprietary
+                .insert(key.clone(), value.clone());
+            conn.store_spend(&psbt);
+            let stored = conn
+                .db_spend(&psbt.unsigned_tx.compute_txid())
+                .unwrap()
+                .psbt;
+            assert_eq!(stored.inputs[0].proprietary.get(&key), Some(&value));
+            assert_eq!(stored, psbt);
+            fs::remove_dir_all(tmp_dir).unwrap();
+        }
+
         #[test]
         fn a_legacy_layout_fixture_cannot_carry_a_fork_identity() {
             let tmp_dir = tmp_dir();

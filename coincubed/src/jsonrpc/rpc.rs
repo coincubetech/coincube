@@ -159,6 +159,8 @@ impl From<commands::CommandError> for Error {
             | commands::CommandError::UnknownSpend(..)
             | commands::CommandError::SpendMissingPreviousTransaction(..)
             | commands::CommandError::SpendFinalization(..)
+            | commands::CommandError::UnifiedSpendFinalization(..)
+            | commands::CommandError::UnifiedSignatureMerge(..)
             | commands::CommandError::InsaneRescanTimestamp(..)
             | commands::CommandError::AlreadyRescanning
             | commands::CommandError::InvalidDerivationIndex
