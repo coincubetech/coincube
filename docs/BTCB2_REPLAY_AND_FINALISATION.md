@@ -37,7 +37,9 @@ node about *which* signatures go into the witness — the next section.
    fails the whole call. Prevouts and witness scripts are authenticated. Then
    **every** legacy `partial_sigs` entry of every input is verified against
    the BIP-143 digest and restricted to `SIGHASH_ALL` — including entries no
-   witness will use. A PSBT that lies anywhere is not finalised from the parts
+   witness will use — and each input's own sighash *request*
+   (`PSBT_IN_SIGHASH_TYPE`) must be absent, `SIGHASH_ALL` or `ALL|UNIFIED`,
+   whether or not a unified record is there to make the verifier look at it. A PSBT that lies anywhere is not finalised from the parts
    that happen to be true. (This is stricter than a node's `finalizepsbt`, and
    than the Bitcoin path's `finalize_mut`, which only checks what it places —
    but it matches the module's refuse-rather-than-broadcast posture, and the
@@ -93,9 +95,12 @@ input's report. Stored PSBTs round-trip the proprietary records unchanged.
   sign unified (`Signer::sign_psbt_unified`,
   `sign_psbt_with_border_wallet_unified`); hardware and Keychain sign legacy as
   before. Before any signer — local, device or Keychain — is dispatched, the
-  PSBT is refused if any input asks for or carries `ANYONECANPAY`, or if it
-  carries a reserved unified record the adapter rejects (so no device or phone
-  is prompted for a signature that would be thrown away). Merges go through
+  PSBT is refused if any input asks for or carries `ANYONECANPAY`, carries a
+  reserved unified record the adapter rejects, or carries Taproot signature
+  data at all (a Blake2b Vault is P2WSH; Taproot signatures bring their own
+  sighash byte) — so no device or phone is prompted for a signature that would
+  be thrown away. `Wallet::chain` is set by both wallet constructors, the
+  local loader and the remote-backend path, from `CubeSettings::network`. Merges go through
   the adapter against the destination as it is, so the desktop never holds a
   PSBT the daemon would reject and a conflicting signature never overwrites a
   stored one. The Keychain flow's "who still has to sign" classification uses

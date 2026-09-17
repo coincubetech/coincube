@@ -119,6 +119,16 @@ pub enum UnifiedFinalizeError {
         public_key: PublicKey,
         sighash: u32,
     },
+    /// The input's `PSBT_IN_SIGHASH_TYPE` request is something other than
+    /// `SIGHASH_ALL`, `ALL|UNIFIED` or absent. A request is not a signature,
+    /// but a PSBT asking for `ANYONECANPAY` is not one this finaliser will
+    /// assemble from whatever signatures happen to be valid — the daemon is
+    /// its own boundary and the GUI's dispatch refusal does not cover RPC or
+    /// imported PSBTs.
+    UnsupportedRequestedSighash {
+        input: usize,
+        sighash: u32,
+    },
     /// A legacy partial signature that does not verify against the BIP-143
     /// digest of this transaction.
     InvalidLegacySignature {
@@ -187,6 +197,11 @@ impl fmt::Display for UnifiedFinalizeError {
             Self::InvalidLegacySignature { input, public_key } => write!(
                 f,
                 "input {input} legacy signature for {public_key} does not verify"
+            ),
+            Self::UnsupportedRequestedSighash { input, sighash } => write!(
+                f,
+                "input {input} asks for sighash 0x{sighash:02x}, which is neither SIGHASH_ALL nor \
+                 ALL|UNIFIED; refusing to finalise"
             ),
             Self::Unsatisfiable { input, reason } => {
                 write!(f, "input {input} cannot be satisfied: {reason}")
@@ -612,6 +627,23 @@ pub fn finalize_p2wsh_all_unified<C: secp256k1::Verification>(
                     unified: true,
                 },
             );
+        }
+
+        // The input's own sighash *request* has to be one this finaliser
+        // serves: absent, `SIGHASH_ALL`, or `ALL|UNIFIED`. The verifier above
+        // checks it only for inputs that carry a unified record; a legacy-only
+        // input asking for `ANYONECANPAY` would otherwise be assembled from
+        // its valid `SIGHASH_ALL` signatures as if nothing had been asked.
+        if let Some(requested) = input.sighash_type {
+            let raw = requested.to_u32();
+            if raw != u32::from(EcdsaSighashType::All as u8)
+                && raw != u32::from(UNIFIED_SIGHASH_ALL)
+            {
+                return Err(UnifiedFinalizeError::UnsupportedRequestedSighash {
+                    input: input_index,
+                    sighash: raw,
+                });
+            }
         }
 
         // Every legacy record is verified now, whether or not a witness will

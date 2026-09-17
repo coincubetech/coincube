@@ -162,6 +162,11 @@ pub enum DispatchRefused {
     /// keeps "before any signer is dispatched" true, so no device or phone is
     /// prompted for a signature that would be thrown away.
     MalformedUnifiedRecord(String),
+    /// An input carries Taproot signature data (`tap_key_sig` or
+    /// `tap_script_sigs`). A Bitcoin Blake2b Vault is native P2WSH, so this
+    /// is not a PSBT for it; and Taproot signatures carry their own sighash
+    /// byte, which the ECDSA walk below cannot vet.
+    TaprootSignatureData { input: usize },
 }
 
 impl std::fmt::Display for DispatchRefused {
@@ -179,14 +184,21 @@ impl std::fmt::Display for DispatchRefused {
                  refusing to sign",
                 reason
             ),
+            Self::TaprootSignatureData { input } => write!(
+                f,
+                "input {} carries Taproot signature data, which a Bitcoin Blake2b Vault spend \
+                 never has; refusing to sign",
+                input
+            ),
         }
     }
 }
 
 /// Refuse, before any signer — local, device or Keychain — is dispatched on
 /// Bitcoin Blake2b, a PSBT that asks for or carries an `ANYONECANPAY`
-/// sighash on any input, or that carries a reserved unified record the
-/// adapter rejects.
+/// sighash on any input, that carries a reserved unified record the adapter
+/// rejects, or that carries Taproot signature data at all (a Blake2b Vault
+/// is P2WSH; Taproot signatures bring their own sighash byte).
 pub fn refuse_before_dispatch(psbt: &Psbt) -> Result<(), DispatchRefused> {
     // Adapter validation first: it is the same check every merge and the
     // finaliser apply, and it covers the reserved records' own sighash byte,
@@ -195,6 +207,9 @@ pub fn refuse_before_dispatch(psbt: &Psbt) -> Result<(), DispatchRefused> {
         .map_err(|e| DispatchRefused::MalformedUnifiedRecord(e.to_string()))?;
     const ANYONECANPAY: u32 = 0x80;
     for (index, input) in psbt.inputs.iter().enumerate() {
+        if input.tap_key_sig.is_some() || !input.tap_script_sigs.is_empty() {
+            return Err(DispatchRefused::TaprootSignatureData { input: index });
+        }
         if let Some(sighash) = input.sighash_type {
             let raw = sighash.to_u32();
             if raw & ANYONECANPAY != 0 {
@@ -678,6 +693,57 @@ mod tests {
             replay_status(&carried, &secp(), None),
             ReplayStatus::Unknown(UnknownReason::Refused(_))
         ));
+    }
+
+    /// Taproot signature data never belongs to a Blake2b Vault PSBT, and its
+    /// own sighash byte is not something the ECDSA walk vets: refused at the
+    /// dispatch boundary whatever its sighash says.
+    #[test]
+    fn taproot_signature_data_is_refused_before_dispatch() {
+        use coincube_core::miniscript::bitcoin::{
+            key::Secp256k1, secp256k1::SecretKey, taproot, TapSighashType, XOnlyPublicKey,
+        };
+        let f = fixture();
+        let secp = Secp256k1::new();
+        let secret = SecretKey::from_slice(&[5u8; 32]).unwrap();
+        let keypair = secp256k1::Keypair::from_secret_key(&secp, &secret);
+        let (xonly, _) = XOnlyPublicKey::from_keypair(&keypair);
+        let signature =
+            secp.sign_schnorr_no_aux_rand(&secp256k1::Message::from_digest([4u8; 32]), &keypair);
+        for sighash in [TapSighashType::All, TapSighashType::AllPlusAnyoneCanPay] {
+            let mut with_key_sig = f.psbt.clone();
+            with_key_sig.inputs[0].tap_key_sig = Some(taproot::Signature {
+                signature,
+                sighash_type: sighash,
+            });
+            assert_eq!(
+                refuse_before_dispatch(&with_key_sig),
+                Err(DispatchRefused::TaprootSignatureData { input: 0 }),
+                "{:?}",
+                sighash
+            );
+            let mut with_script_sig = f.psbt.clone();
+            with_script_sig.inputs[0].tap_script_sigs.insert(
+                (
+                    xonly,
+                    coincube_core::miniscript::bitcoin::TapLeafHash::from_script(
+                        &coincube_core::miniscript::bitcoin::ScriptBuf::new(),
+                        coincube_core::miniscript::bitcoin::taproot::LeafVersion::TapScript,
+                    ),
+                ),
+                taproot::Signature {
+                    signature,
+                    sighash_type: sighash,
+                },
+            );
+            assert_eq!(
+                refuse_before_dispatch(&with_script_sig),
+                Err(DispatchRefused::TaprootSignatureData { input: 0 }),
+                "{:?}",
+                sighash
+            );
+        }
+        assert_eq!(refuse_before_dispatch(&f.psbt), Ok(()));
     }
 
     /// A reserved unified record with an `ANYONECANPAY` sighash byte (`0xa1`)

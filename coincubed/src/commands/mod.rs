@@ -4054,6 +4054,17 @@ mod tests {
                 }
                 other => panic!("expected the ANYONECANPAY refusal, got {:?}", other),
             }
+            // …and so is an input that merely *asks* for it, with valid
+            // SIGHASH_ALL signatures on board (an RPC or imported PSBT is
+            // this boundary's concern, not the GUI's dispatch check).
+            let mut asked = legacy(&legacy(&psbt, &signers[0]), &signers[1]);
+            asked.inputs[0].sighash_type = Some(btc::psbt::PsbtSighashType::from_u32(0x81));
+            match finalize_spend_for_chain(ChainId::BitcoinBlake2b, asked, &secp) {
+                Err(CommandError::UnifiedSpendFinalization(msg)) => {
+                    assert!(msg.contains("0x81") && msg.contains("asks"), "{}", msg)
+                }
+                other => panic!("expected the requested-sighash refusal, got {:?}", other),
+            }
         }
     }
 }

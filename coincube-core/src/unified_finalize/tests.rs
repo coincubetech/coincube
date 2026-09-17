@@ -693,6 +693,48 @@ fn an_unused_legacy_record_is_still_verified_and_can_refuse_the_call() {
     );
 }
 
+/// The input's sighash *request* is checked even when no unified record is
+/// there to make the verifier look at it: a legacy-only input asking for
+/// `ANYONECANPAY` is refused although its `SIGHASH_ALL` signatures are valid.
+/// `SIGHASH_ALL` and `ALL|UNIFIED` requests, and no request, are fine.
+#[test]
+fn a_requested_anyonecanpay_is_refused_even_with_valid_legacy_signatures() {
+    use miniscript::bitcoin::psbt::PsbtSighashType;
+    let secp = secp();
+    let fixture = fixture(1);
+    let legacy_only = add_legacy(
+        &add_legacy(&fixture.psbt, &fixture.signers[0], &secp),
+        &fixture.signers[1],
+        &secp,
+    );
+    assert!(finalize_p2wsh_all_unified(&legacy_only, &secp).is_ok());
+    for (requested, expect_ok) in [
+        (PsbtSighashType::from_u32(0x01), true),
+        (PsbtSighashType::from_u32(0x21), true),
+        (PsbtSighashType::from_u32(0x81), false),
+        (PsbtSighashType::from_u32(0x02), false),
+        (PsbtSighashType::from_u32(0xa1), false),
+    ] {
+        let mut asked = legacy_only.clone();
+        asked.psbt_mut().inputs[0].sighash_type = Some(requested);
+        let result = finalize_p2wsh_all_unified(&asked, &secp);
+        if expect_ok {
+            assert!(result.is_ok(), "0x{:02x}", requested.to_u32());
+        } else {
+            match result {
+                Err(UnifiedFinalizeError::UnsupportedRequestedSighash { input: 0, sighash }) => {
+                    assert_eq!(sighash, requested.to_u32())
+                }
+                other => panic!(
+                    "0x{:02x}: expected the request to be refused, got {:?}",
+                    requested.to_u32(),
+                    other
+                ),
+            }
+        }
+    }
+}
+
 /// BIP-68: a CSV leaf is only enforced for transaction version ≥ 2. The bare
 /// `Sequence` satisfier does not know the version, so without the guard the
 /// finaliser would assemble a recovery witness for a version-1 transaction
