@@ -230,11 +230,6 @@ pub enum Message {
             crate::services::entangled::Entanglement,
         )>,
     },
-    /// The spend screen re-checked the entanglement of a replayable spend's
-    /// inputs at the moment it matters (`#276` I13). Cached by the app, then
-    /// routed to the current panel so the spend clears its "checking" state;
-    /// `spend` is the unsigned transaction's txid so a stale reply for another
-    /// spend is ignored.
     /// The spend screen accepted a re-check reply for its current generation:
     /// record every resolved answer. Positives were already recorded when the
     /// reply was routed (`Entangled` is terminal, so a stale positive is still
@@ -246,6 +241,11 @@ pub enum Message {
             crate::services::entangled::Entanglement,
         )>,
     },
+    /// The spend screen re-checked the entanglement of a replayable spend's
+    /// inputs at the moment it matters (`#276` I13). Cached by the app, then
+    /// routed to the current panel so the spend clears its "checking" state;
+    /// `spend` is the unsigned transaction's txid so a stale reply for another
+    /// spend is ignored.
     EntangledRevalidated {
         spend: coincube_core::miniscript::bitcoin::Txid,
         /// The check generation this reply answers
