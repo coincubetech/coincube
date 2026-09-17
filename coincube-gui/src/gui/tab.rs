@@ -3170,6 +3170,7 @@ pub fn create_app_with_remote_backend(
             // half in `App::new` (from whether the Liquid SDK actually
             // connected), the server half when `/connect/features` loads.
             liquid_gate: crate::app::features::LiquidGate::HIDDEN,
+            entangled: std::collections::HashMap::new(),
             // We ignore last poll fields for remote backend.
             last_poll_at_startup: None,
             daemon_cache: DaemonCache {
@@ -3232,6 +3233,11 @@ pub fn create_app_with_remote_backend(
         },
         Arc::new(
             Wallet::new(wallet.descriptor)
+                // Same chain source as the local loader (`CubeSettings::network`):
+                // the signing, merge and finalisation paths key on it, so a
+                // Cube opened through the remote backend must not default to
+                // Bitcoin.
+                .with_chain(cube_settings.network)
                 .with_name(wallet.name)
                 .with_alias(wallet.metadata.wallet_alias)
                 .with_pinned_at(wallet_settings.pinned_at)
@@ -3239,6 +3245,7 @@ pub fn create_app_with_remote_backend(
                 .with_provider_keys(provider_keys)
                 .with_border_wallet_fingerprints(wallet_settings.border_wallet_fingerprints())
                 .with_border_wallet_grid_seed(wallet_settings.border_wallet_grid_seed_sources())
+                .with_replay_marks(wallet_settings.replay_marks())
                 .with_hardware_wallets(hws)
                 .load_hotsigners(
                     &coincube_dir,

@@ -331,6 +331,11 @@ pub enum SpendTxMessage {
     /// jump to Vault → Settings → Pair so the user can pair a phone over
     /// Wi-Fi and sign locally without Connect.
     KeychainPairPhone,
+    /// The user ticked (or cleared) the replay acknowledgement on a
+    /// replayable Bitcoin Blake2b spend
+    /// (`state::vault::replay::REPLAYABLE_ACKNOWLEDGEMENT`). Broadcast stays
+    /// disabled until it is ticked.
+    AcknowledgeReplay(bool),
     Broadcast,
     Save,
     Confirm,

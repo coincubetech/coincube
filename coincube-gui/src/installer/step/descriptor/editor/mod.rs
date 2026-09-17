@@ -53,6 +53,10 @@ pub trait DescriptorEditModal {
 
 pub struct DefineDescriptor {
     network: Network,
+    /// The chain the Vault is being created on, from the installer context.
+    /// Only read to decide whether the replay-capability notice applies
+    /// (Bitcoin Blake2b); `network` stays the encoding for key work.
+    chain: crate::chain::ChainId,
     use_taproot: bool,
 
     modal: Option<Box<dyn DescriptorEditModal>>,
@@ -84,6 +88,7 @@ impl DefineDescriptor {
     pub fn new(network: Network, signer: Arc<Mutex<Signer>>) -> Self {
         Self {
             network,
+            chain: crate::chain::ChainId::from(network),
             use_taproot: false,
             modal: None,
 
@@ -125,6 +130,15 @@ impl DefineDescriptor {
                 .any(|key| !path.kind().can_choose_key_source_kind(&key.source.kind()))
             {
                 path.warning = Some(PathWarning::KeySourceKindDisallowed);
+            } else if self.chain.is_blake2b()
+                && path.keys.iter().all(|key| key.is_some())
+                && !path.has_replay_capable_key()
+            {
+                // Advice, not a refusal: the path is complete and valid, but
+                // every spend through it would be replayable onto Bitcoin.
+                // Only once every slot is filled, so a half-built path is not
+                // nagged about keys it has not chosen yet.
+                path.warning = Some(PathWarning::NoReplayCapableSigner);
             } else {
                 path.warning = None;
             }
@@ -269,6 +283,7 @@ impl DefineDescriptor {
 
 impl Step for DefineDescriptor {
     fn load_context(&mut self, ctx: &Context) {
+        self.chain = ctx.bitcoin_config.chain;
         self.load_template(ctx.descriptor_template);
         self.cube_id = ctx.cube_id.clone();
         self.coincube_client = ctx.coincube_client.clone();
@@ -580,6 +595,7 @@ impl Step for DefineDescriptor {
                                 crate::installer::descriptor::KeySource::BorderWallet { .. }
                             ),
                             grid_seed_source: key.source.grid_seed_source(),
+                            replay_protected: None,
                         },
                     );
                     if key.source.device_kind().is_some() {
@@ -621,6 +637,7 @@ impl Step for DefineDescriptor {
                                     crate::installer::descriptor::KeySource::BorderWallet { .. }
                                 ),
                                 grid_seed_source: key.source.grid_seed_source(),
+                                replay_protected: None,
                             },
                         );
                         if key.source.device_kind().is_some() {
@@ -1293,5 +1310,126 @@ mod tests {
                 desc
             );
         });
+    }
+
+    /// Bitcoin Blake2b Vault creation warns — without refusing — when a
+    /// complete path has no signer that can make replay-protected
+    /// signatures (`#276` I3, desktop plan PR 6). Devices stay selectable and
+    /// the path stays valid; on a Bitcoin-family chain nothing is added.
+    #[tokio::test]
+    async fn blake2b_creation_notices_paths_without_a_replay_capable_signer() {
+        use crate::installer::descriptor::{Path, PathWarning};
+
+        let device_key = DescriptorPublicKey::from_str("[4df3f0e3/84'/0'/0']tpubDDRs9DnRUiJc4hq92PSJKhfzQBgHJUrDo7T2i48smsDfLsQcm3Vh7JhuGqJv8zozVkNFin8YPgpmn2NWNmpRaE3GW2pSxbmAzYf2juy7LeW").unwrap();
+        let device = Key {
+            name: "Specter".to_string(),
+            fingerprint: device_key.master_fingerprint(),
+            key: device_key,
+            source: KeySource::Device(async_hwi::DeviceKind::Specter, None),
+            account: None,
+        };
+        let manual_key = DescriptorPublicKey::from_str("[f5acc2fd/48'/1'/0'/2']tpubDFAqEGNyad35aBCKUAXbQGDjdVhNueno5ZZVEn3sQbW5ci457gLR7HyTmHBg93oourBssgUxuWz1jX5uhc1qaqFo9VsybY1J5FuedLfm4dK").unwrap();
+        let manual = Key {
+            name: "Pasted".to_string(),
+            fingerprint: manual_key.master_fingerprint(),
+            key: manual_key,
+            source: KeySource::Manual,
+            account: None,
+        };
+        let hot = Key {
+            name: "Cube key".to_string(),
+            fingerprint: manual.fingerprint,
+            key: manual.key.clone(),
+            source: KeySource::MasterSigner,
+            account: None,
+        };
+
+        let mut ctx = Context::new(
+            Network::Bitcoin,
+            CoincubeDirectory::new(PathBuf::from_str("/").unwrap()),
+            crate::installer::context::RemoteBackend::None,
+            None,
+            None,
+        );
+        ctx.bitcoin_config.chain = crate::chain::ChainId::BitcoinBlake2b;
+        let sandbox: Sandbox<DefineDescriptor> = Sandbox::new(DefineDescriptor::new(
+            Network::Bitcoin,
+            Arc::new(Mutex::new(Signer::generate(Network::Bitcoin).unwrap())),
+        ));
+        sandbox.load(&ctx).await;
+
+        sandbox.check(|step| {
+            assert_eq!(step.chain, crate::chain::ChainId::BitcoinBlake2b);
+            let mut primary = Path::new_primary_path();
+            primary.keys = vec![Some(device.clone())];
+            let mut recovery = Path::new_recovery_path();
+            recovery.keys = vec![Some(manual.clone())];
+            step.paths = vec![primary, recovery];
+            step.check_for_warning();
+            for path in &step.paths {
+                assert_eq!(path.warning, Some(PathWarning::NoReplayCapableSigner));
+                assert!(path.valid(), "the notice never blocks the path");
+            }
+            assert!(step.valid());
+            assert!(!PathWarning::NoReplayCapableSigner.blocks());
+            assert!(PathWarning::NoReplayCapableSigner
+                .message()
+                .contains("replayed onto Bitcoin unless the coins were split first"));
+
+            // A half-built path is not nagged about keys it has not chosen.
+            step.paths[0].keys.push(None);
+            step.check_for_warning();
+            assert_eq!(step.paths[0].warning, None);
+            step.paths[0].keys.pop();
+
+            // The Cube key on the primary path clears its notice; the
+            // recovery path keeps its own.
+            step.paths[0].keys = vec![Some(hot.clone()), Some(device.clone())];
+            step.check_for_warning();
+            assert_eq!(step.paths[0].warning, None);
+            assert_eq!(
+                step.paths[1].warning,
+                Some(PathWarning::NoReplayCapableSigner)
+            );
+
+            // Blocking warnings still win over the notice.
+            step.paths[1].sequence = crate::installer::descriptor::PathSequence::Recovery(10);
+            step.paths.push({
+                let mut duplicate = Path::new_recovery_path();
+                duplicate.sequence = crate::installer::descriptor::PathSequence::Recovery(10);
+                duplicate.keys = vec![Some(manual.clone())];
+                duplicate
+            });
+            step.check_for_warning();
+            assert_eq!(step.paths[1].warning, Some(PathWarning::DuplicateSequence));
+            assert!(!step.paths[1].valid());
+            step.paths.pop();
+
+            // Bitcoin family: no notice, whatever the keys.
+            step.chain = crate::chain::ChainId::Bitcoin;
+            step.paths[0].keys = vec![Some(device.clone())];
+            step.check_for_warning();
+            assert!(step.paths.iter().all(|p| p.warning.is_none()));
+        });
+    }
+
+    #[test]
+    fn replay_capable_key_sources_are_the_in_process_ones() {
+        use crate::app::settings::GridSeedSource;
+        assert!(KeySource::MasterSigner.replay_capable());
+        assert!(KeySource::BorderWallet {
+            grid_seed_source: GridSeedSource::Independent
+        }
+        .replay_capable());
+        assert!(!KeySource::Device(async_hwi::DeviceKind::Specter, None).replay_capable());
+        assert!(!KeySource::Manual.replay_capable());
+        assert!(!KeySource::KeychainKey {
+            owner: crate::installer::descriptor::KeychainKeyOwner::SelfUser {
+                primary_owner_id: 1,
+            },
+            key_id: 1,
+            name: "phone".to_string(),
+        }
+        .replay_capable());
     }
 }

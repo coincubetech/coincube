@@ -1158,6 +1158,16 @@ impl WalletSettings {
             .collect()
     }
 
+    /// Signers the user has marked as replay-protected (or explicitly not).
+    /// Sparse: an unmarked signer is absent, which the signer index reads as
+    /// `UserMarked(false)` for a device and ignores for every other kind.
+    pub fn replay_marks(&self) -> HashMap<Fingerprint, bool> {
+        self.keys
+            .iter()
+            .filter_map(|k| k.replay_protected.map(|mark| (k.master_fingerprint, mark)))
+            .collect()
+    }
+
     pub fn update_alias(&mut self, key: &Fingerprint, alias: &str) {
         let key_aliases = self.keys_aliases();
         if key_aliases.contains_key(key) {
@@ -1337,6 +1347,16 @@ pub struct KeySetting {
     /// Meaningless unless [`Self::is_border_wallet`]; no other key kind sets it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grid_seed_source: Option<GridSeedSource>,
+    /// The user's own statement that this signer produces replay-protected
+    /// (unified-sighash) signatures on Bitcoin Blake2b. Only meaningful for a
+    /// device signer — hardware firmware cannot report it, so it is the
+    /// user's mark (`ReplayProtection::UserMarked`); hot keys and Border
+    /// Wallet keys are capable by construction and Keychain keys are legacy
+    /// until Lane B3, whatever this says. Absent from the file when unset, so
+    /// a Cube that never marked a signer gains no noise. Read by
+    /// [`crate::app::state::vault::signers::ReplayCapabilities`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay_protected: Option<bool>,
 }
 
 /// Where a Border Wallet key's Entropy Grid seed came from.
@@ -1416,6 +1436,7 @@ impl KeySetting {
                 provider_key,
                 is_border_wallet: false,
                 grid_seed_source: None,
+                replay_protected: None,
             })
         } else {
             let is_border_wallet = metadata
@@ -1431,6 +1452,10 @@ impl KeySetting {
                 provider_key: None,
                 is_border_wallet,
                 grid_seed_source,
+                // A user's replay mark is a statement about a device on this
+                // machine, not part of the Vault's backup; a restore starts
+                // unmarked.
+                replay_protected: None,
             })
         }
     }

@@ -77,6 +77,20 @@ pub enum KeySource {
 }
 
 impl KeySource {
+    /// Whether a key from this source can produce a Bitcoin Blake2b unified
+    /// signature at creation time: only what signs in-process from a seed
+    /// (the Cube key, a Border Wallet key). Devices are unmarked until the
+    /// user says otherwise after enrolment, Keychain keys are legacy until
+    /// Lane B3, and a pasted xpub or provider token cannot sign here at all.
+    /// Mirrors `app::state::vault::signers::ReplayProtection` for the
+    /// signer index a loaded Vault builds.
+    pub fn replay_capable(&self) -> bool {
+        matches!(
+            self,
+            KeySource::MasterSigner | KeySource::BorderWallet { .. }
+        )
+    }
+
     pub fn device_kind(&self) -> Option<&DeviceKind> {
         if let KeySource::Device(ref device_kind, _) = self {
             Some(device_kind)
@@ -236,7 +250,19 @@ impl Path {
     }
 
     pub fn valid(&self) -> bool {
-        !self.keys.is_empty() && !self.keys.iter().any(|k| k.is_none()) && self.warning.is_none()
+        !self.keys.is_empty()
+            && !self.keys.iter().any(|k| k.is_none())
+            && !self.warning.is_some_and(|w| w.blocks())
+    }
+
+    /// Whether at least one chosen key on this path can sign with replay
+    /// protection on Bitcoin Blake2b ([`KeySource::replay_capable`]). Unset
+    /// slots do not count.
+    pub fn has_replay_capable_key(&self) -> bool {
+        self.keys
+            .iter()
+            .flatten()
+            .any(|key| key.source.replay_capable())
     }
 }
 
@@ -299,12 +325,18 @@ impl From<PathSequence> for PathKind {
     }
 }
 
-/// A path warning.
+/// A path warning. The first three block the descriptor
+/// ([`PathWarning::blocks`]); [`PathWarning::NoReplayCapableSigner`] is a
+/// notice only — the path stays valid and devices stay selectable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PathWarning {
     DuplicateSequence,
     OnlyCosignerKeys,
     KeySourceKindDisallowed,
+    /// Bitcoin Blake2b only: no key on the path can make a unified
+    /// signature, so a spend through it is replayable onto Bitcoin unless
+    /// the coins were poison-split first (`#276` I3, desktop plan PR 6).
+    NoReplayCapableSigner,
 }
 
 impl PathWarning {
@@ -317,6 +349,15 @@ impl PathWarning {
             Self::KeySourceKindDisallowed => {
                 "Path contains a key that is disallowed for this kind of path."
             }
+            Self::NoReplayCapableSigner => {
+                "No signer on this path can make replay-protected signatures: spends from this \
+                 path can be replayed onto Bitcoin unless the coins were split first."
+            }
         }
+    }
+
+    /// Whether the warning makes the path invalid, or is only advice.
+    pub fn blocks(&self) -> bool {
+        !matches!(self, Self::NoReplayCapableSigner)
     }
 }

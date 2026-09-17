@@ -218,6 +218,46 @@ pub enum Message {
     /// Result of polling the *active* managed node's network stats (connection
     /// counts, upload used vs. cap, onion address) for the Node settings.
     BitcoindNetStats(Result<crate::app::cache::NodeNetStats, String>),
+    /// A sync-driven entangled-deposit lookup batch for a Bitcoin Blake2b
+    /// Cube (`#276` I13) has answered: `claimed` is every txid the batch took
+    /// in flight (released as a whole), `answers` every answer, `Unknown`
+    /// included (only resolved ones are cached; the rest are asked again
+    /// after the next sync).
+    EntangledLookups {
+        claimed: Vec<coincube_core::miniscript::bitcoin::Txid>,
+        answers: Vec<(
+            coincube_core::miniscript::bitcoin::Txid,
+            crate::services::entangled::Entanglement,
+        )>,
+    },
+    /// The spend screen accepted a re-check reply for its current generation:
+    /// record every resolved answer. Positives were already recorded when the
+    /// reply was routed (`Entangled` is terminal, so a stale positive is still
+    /// true); a *negative* is recorded only here, so a stale reply can never
+    /// re-stamp a `NotEntangled` answer's resolve instant and extend its TTL.
+    EntanglementAnswered {
+        answers: Vec<(
+            coincube_core::miniscript::bitcoin::Txid,
+            crate::services::entangled::Entanglement,
+        )>,
+    },
+    /// The spend screen re-checked the entanglement of a replayable spend's
+    /// inputs at the moment it matters (`#276` I13). Cached by the app, then
+    /// routed to the current panel so the spend clears its "checking" state;
+    /// `spend` is the unsigned transaction's txid so a stale reply for another
+    /// spend is ignored.
+    EntangledRevalidated {
+        spend: coincube_core::miniscript::bitcoin::Txid,
+        /// The check generation this reply answers
+        /// (`PsbtState::entangled_check`): process-wide monotonic, so a
+        /// reply for an earlier generation — an older screen instance, or
+        /// an earlier signature set — can never clear the current claim.
+        generation: u64,
+        answers: Vec<(
+            coincube_core::miniscript::bitcoin::Txid,
+            crate::services::entangled::Entanglement,
+        )>,
+    },
     /// Latest UpdateTip/blockheaders line streamed from the pending internal
     /// bitcoind's debug.log.  `None` means no matching line found yet.
     PendingBitcoindLog(Option<String>),

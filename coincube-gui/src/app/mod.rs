@@ -14,7 +14,7 @@ pub mod view;
 pub mod wallet;
 pub mod wallets;
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::sync::Arc;
@@ -348,6 +348,7 @@ impl Panels {
             coins: Some(CoinsPanel::new(
                 cache.coins(),
                 wallet.main_descriptor.first_timelock_value(),
+                wallet.chain,
             )),
             transactions: Some(VaultTransactionsPanel::new(wallet.clone())),
             psbts: Some(PsbtsPanel::new(wallet.clone())),
@@ -456,6 +457,7 @@ impl Panels {
         self.coins = Some(CoinsPanel::new(
             cache.coins(),
             wallet.main_descriptor.first_timelock_value(),
+            wallet.chain,
         ));
         self.transactions = Some(VaultTransactionsPanel::new(wallet.clone()));
         self.psbts = Some(PsbtsPanel::new(wallet.clone()));
@@ -728,6 +730,13 @@ pub struct App {
     /// churning the daemon. Suppresses auto-switch until the next *successful*
     /// switch (a fresh adopt / manual switch re-arms it by clearing this).
     auto_switch_suppressed: bool,
+    /// Deposit txids a sync-driven entangled lookup batch has claimed and not
+    /// yet answered (`#276` I13). Single-flight: two syncs inside one
+    /// in-flight window would otherwise queue the same txids twice. Released
+    /// as a whole set when the batch's `EntangledLookups` lands — including
+    /// txids that answered `Unknown`, which are not written to the cache and
+    /// would otherwise stay claimed forever.
+    entangled_in_flight: HashSet<bitcoin::Txid>,
     /// Global "payment received" celebration overlay — shown for incoming
     /// Liquid payments (e.g. LNURL) regardless of which panel is active.
     show_received_celebration: bool,
@@ -2503,6 +2512,7 @@ impl App {
             node_net_stats_probe_in_progress: false,
             daemon_switch_in_progress: false,
             auto_switch_suppressed: false,
+            entangled_in_flight: HashSet::new(),
             show_received_celebration: false,
             show_recovery_alerts_prompt: false,
             spark_stable_balance_reconciled: false,
@@ -2640,6 +2650,7 @@ impl App {
                 node_net_stats_probe_in_progress: false,
                 daemon_switch_in_progress: false,
                 auto_switch_suppressed: false,
+                entangled_in_flight: HashSet::new(),
                 show_received_celebration: false,
                 show_recovery_alerts_prompt: false,
                 spark_stable_balance_reconciled: false,
@@ -2694,6 +2705,44 @@ impl App {
         &self,
     ) -> Option<crate::services::coincube::CoincubeClient> {
         self.panels.connect.account.authenticated_client()
+    }
+
+    /// Entangled-deposit detection for a Bitcoin Blake2b Cube (`#276` I13):
+    /// after each sync, look up every deposit txid the cache has no answer
+    /// for on the twin Bitcoin chain's Esplora through Connect, one call per
+    /// deposit. Returns `Task::none()` on a Bitcoin-family Cube, without a
+    /// Connect session (a lookup that cannot run is *Unknown*, not "not
+    /// entangled"), or when every deposit is already resolved. Never blocks
+    /// or affects sync.
+    fn entangled_lookup_task(&mut self) -> Task<Message> {
+        let Some(wallet) = self.wallet.as_ref() else {
+            return Task::none();
+        };
+        if !wallet.chain.is_blake2b() {
+            return Task::none();
+        }
+        let Some(client) = self.authenticated_coincube_client() else {
+            return Task::none();
+        };
+        let pending = crate::services::entangled::pending_lookups(
+            self.cache.coins().iter().map(|coin| coin.outpoint.txid),
+            &self.cache.entangled,
+            &self.entangled_in_flight,
+            std::time::Instant::now(),
+        );
+        if pending.is_empty() {
+            return Task::none();
+        }
+        self.entangled_in_flight.extend(pending.iter().copied());
+        let chain = wallet.chain;
+        let claimed = pending.clone();
+        Task::perform(
+            crate::services::entangled::lookup_all(client, chain, pending),
+            move |answers| Message::EntangledLookups {
+                claimed: claimed.clone(),
+                answers,
+            },
+        )
     }
 
     /// Fire-and-forget vault recovery heartbeat (Estate Notifications —
@@ -4366,6 +4415,72 @@ impl App {
                     }
                 }
             }
+            Message::EntangledLookups { claimed, answers } => {
+                // Release the whole claim first — by claim, not by reply, so a
+                // txid that answered `Unknown` (never cached) is asked again
+                // next sync instead of staying in flight forever.
+                for txid in &claimed {
+                    self.entangled_in_flight.remove(txid);
+                }
+                let now = std::time::Instant::now();
+                let changed = answers.into_iter().fold(false, |changed, (txid, answer)| {
+                    self.cache.record_entanglement(txid, answer, now) || changed
+                });
+                if !changed {
+                    return Task::none();
+                }
+                return Task::done(Message::CacheUpdated);
+            }
+            Message::EntanglementAnswered { answers } => {
+                let now = std::time::Instant::now();
+                let changed = answers.into_iter().fold(false, |changed, (txid, answer)| {
+                    self.cache.record_entanglement(txid, answer, now) || changed
+                });
+                if !changed {
+                    return Task::none();
+                }
+                return Task::done(Message::CacheUpdated);
+            }
+            Message::EntangledRevalidated {
+                spend,
+                generation,
+                answers,
+            } => {
+                // The spend screen's own re-check of a replayable spend's
+                // inputs. Only **terminal positives** are cached here, before
+                // the generation is known: a stale reply's `Entangled` is
+                // still true. A negative is recorded only once the panel has
+                // accepted the reply for its current generation
+                // (`Message::EntanglementAnswered`), so a stale *screen* reply
+                // never re-stamps a negative's resolve instant. The
+                // sync-driven batches (`EntangledLookups` above) still stamp
+                // at processing time and can re-stamp an older negative after
+                // a newer screen answer — #395 carries the observation-time
+                // fix for both paths.
+                let now = std::time::Instant::now();
+                let changed = answers
+                    .iter()
+                    .filter(|(_, answer)| {
+                        matches!(answer, crate::services::entangled::Entanglement::Entangled)
+                    })
+                    .fold(false, |changed, (txid, answer)| {
+                        self.cache.record_entanglement(*txid, *answer, now) || changed
+                    });
+                let routed = Message::EntangledRevalidated {
+                    spend,
+                    generation,
+                    answers,
+                };
+                let forwarded = match (self.daemon.clone(), self.panels.current_mut()) {
+                    (Some(daemon), Some(panel)) => panel.update(Some(daemon), &self.cache, routed),
+                    (None, Some(panel)) => panel.update(None, &self.cache, routed),
+                    (_, None) => Task::none(),
+                };
+                if changed {
+                    return Task::batch([forwarded, Task::done(Message::CacheUpdated)]);
+                }
+                return forwarded;
+            }
             Message::BitcoindNetStats(res) => {
                 self.node_net_stats_probe_in_progress = false;
                 match res {
@@ -4564,7 +4679,14 @@ impl App {
                         // alongside the normal cache cascade so it never delays
                         // or blocks it.
                         let heartbeat = self.recovery_heartbeat_task();
-                        return Task::batch([heartbeat, Task::done(Message::CacheUpdated)]);
+                        // Same posture for the BTCB2 entangled-deposit lookups:
+                        // `Task::none()` on every Bitcoin-family Cube.
+                        let entangled = self.entangled_lookup_task();
+                        return Task::batch([
+                            heartbeat,
+                            entangled,
+                            Task::done(Message::CacheUpdated),
+                        ]);
                     }
                     Err(e) => {
                         tracing::error!("Failed to update daemon cache: {}", e);

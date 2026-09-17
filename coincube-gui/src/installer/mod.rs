@@ -20,8 +20,17 @@ pub(crate) use view::node_resources_controls;
 /// format, so a BTCB2 spend broadcast there would *be* a replay onto Bitcoin
 /// executed by our own software (audit F3 on coincube-api#276).
 pub(crate) fn connect_url<C: Into<crate::chain::ChainId>>(chain: C) -> String {
+    let base = crate::services::coincube_api_base_url();
+    format!("{}/api/v1/esplora/{}", base, connect_esplora_path(chain))
+}
+
+/// The `<family>/<net>` segment of Connect's Esplora proxy for a chain — the
+/// part of [`connect_url`] that does not depend on which API base is in use,
+/// so callers that already hold a client with a base URL (tests included)
+/// build the same path.
+pub(crate) fn connect_esplora_path<C: Into<crate::chain::ChainId>>(chain: C) -> &'static str {
     use crate::chain::ChainId;
-    let network_path = match chain.into() {
+    match chain.into() {
         ChainId::Bitcoin => "bitcoin/mainnet",
         ChainId::Testnet => "bitcoin/testnet",
         ChainId::Signet => "bitcoin/signet",
@@ -29,9 +38,7 @@ pub(crate) fn connect_url<C: Into<crate::chain::ChainId>>(chain: C) -> String {
         ChainId::Regtest => "bitcoin/regtest",
         ChainId::BitcoinBlake2b => "bitcoin-blake2b/mainnet",
         ChainId::BitcoinBlake2bTestnet4 => "bitcoin-blake2b/testnet4",
-    };
-    let base = crate::services::coincube_api_base_url();
-    format!("{}/api/v1/esplora/{}", base, network_path)
+    }
 }
 
 /// Public-Esplora URL for the given network. On non-mainnet networks this is

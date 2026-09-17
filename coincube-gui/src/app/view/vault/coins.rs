@@ -7,7 +7,7 @@ use coincube_ui::{
     component::{amount::*, badge, button, form, text::*},
     icon::{self, coins_icon},
     theme,
-    widget::{Button, Column, Container, Element, Row},
+    widget::{Button, Column, Container, Element, Row, RowExt},
 };
 
 use crate::{
@@ -17,8 +17,29 @@ use crate::{
         view::{message::Message, placeholder, vault::label},
     },
     daemon::model::{remaining_sequence, Coin},
+    services::entangled::Entanglement,
 };
 
+/// The entangled-deposit badge of a Bitcoin Blake2b coin (`#276` I13). A
+/// definite "not entangled" shows nothing; an unresolved lookup is shown as
+/// such rather than passed off as safe.
+pub fn entangled_badge<'a, T: 'a>(status: Entanglement) -> Option<Container<'a, T>> {
+    match status {
+        Entanglement::Entangled => Some(badge::badge_pill(
+            "  Entangled  ",
+            "This deposit also exists on Bitcoin. Spending it without a replay-capable \
+             signature (or a poison split first) also spends the Bitcoin.",
+        )),
+        Entanglement::Unknown => Some(badge::badge_pill(
+            "  Not yet checked  ",
+            "Whether this deposit also exists on Bitcoin has not been checked yet; the \
+             lookup runs after the next sync.",
+        )),
+        Entanglement::NotEntangled => None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn coins_view<'a>(
     cache: &Cache,
     coins: &'a [Coin],
@@ -27,6 +48,7 @@ pub fn coins_view<'a>(
     labels: &'a HashMap<String, String>,
     labels_editing: &'a HashMap<String, form::Value<String>>,
     bitcoin_unit: BitcoinDisplayUnit,
+    blake2b: bool,
 ) -> Element<'a, Message> {
     Column::new()
         .push(Container::new(h3("Coins").bold()).width(Length::Fill))
@@ -52,6 +74,7 @@ pub fn coins_view<'a>(
                             labels,
                             labels_editing,
                             bitcoin_unit,
+                            blake2b.then(|| cache.entanglement_of(&coin.outpoint.txid)),
                         ))
                     },
                 )),
@@ -72,6 +95,7 @@ fn coin_list_view<'a>(
     labels: &'a HashMap<String, String>,
     labels_editing: &'a HashMap<String, form::Value<String>>,
     bitcoin_unit: BitcoinDisplayUnit,
+    entangled: Option<Entanglement>,
 ) -> Container<'a, Message> {
     let outpoint = coin.outpoint.to_string();
     let address = coin.address.to_string();
@@ -136,6 +160,7 @@ fn coin_list_view<'a>(
                                 } else {
                                     coin_sequence_label(seq, timelock as u32)
                                 })
+                                .push_maybe(entangled.and_then(entangled_badge))
                                 .spacing(10)
                                 .align_y(Alignment::Center)
                                 .width(Length::Fill),
@@ -420,6 +445,14 @@ pub fn expire_message_units(sequence: u32) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn entangled_badge_shows_for_entangled_and_unchecked_never_for_a_definite_no() {
+        assert!(entangled_badge::<Message>(Entanglement::Entangled).is_some());
+        assert!(entangled_badge::<Message>(Entanglement::Unknown).is_some());
+        assert!(entangled_badge::<Message>(Entanglement::NotEntangled).is_none());
+    }
+
     #[test]
     fn test_expire_message_units() {
         let testcases = [

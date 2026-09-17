@@ -53,6 +53,15 @@ pub enum UnifiedSigningError {
     UnsupportedPrevoutScript {
         input: usize,
     },
+    /// The input carries Taproot signature data (`tap_key_sig` or
+    /// `tap_script_sigs`) although it spends native P2WSH. Nothing here could
+    /// act on it; it would be stored and finalised around, ignored, which is
+    /// the unsupported-data contract failing. Refused wherever the P2WSH
+    /// context is established, so every verifying boundary — finaliser,
+    /// daemon insert and merge, desktop merge — inherits it.
+    TaprootSignatureData {
+        input: usize,
+    },
     WitnessScriptCommitmentMismatch {
         input: usize,
     },
@@ -101,6 +110,10 @@ impl fmt::Display for UnifiedSigningError {
             Self::UnsupportedPrevoutScript { input } => {
                 write!(f, "input {input} does not spend native P2WSH")
             }
+            Self::TaprootSignatureData { input } => write!(
+                f,
+                "input {input} spends native P2WSH but carries Taproot signature data"
+            ),
             Self::WitnessScriptCommitmentMismatch { input } => {
                 write!(
                     f,
@@ -292,6 +305,9 @@ fn validate_inputs(psbt: &UnifiedPsbt) -> Result<Vec<InputContext>, UnifiedSigni
         if !spent_output.script_pubkey.is_p2wsh() {
             return Err(UnifiedSigningError::UnsupportedPrevoutScript { input: input_index });
         }
+        if input.tap_key_sig.is_some() || !input.tap_script_sigs.is_empty() {
+            return Err(UnifiedSigningError::TaprootSignatureData { input: input_index });
+        }
         let witness_script = input
             .witness_script
             .clone()
@@ -414,4 +430,4 @@ fn empty_signature_delta(psbt: &UnifiedPsbt) -> Result<UnifiedPsbt, UnifiedSigni
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

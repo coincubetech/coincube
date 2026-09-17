@@ -16,12 +16,12 @@ use crate::{
 
 use super::*;
 
-struct Fixture {
-    signers: Vec<MasterSigner>,
-    psbt: UnifiedPsbt,
+pub(crate) struct Fixture {
+    pub(crate) signers: Vec<MasterSigner>,
+    pub(crate) psbt: UnifiedPsbt,
 }
 
-fn signer(byte: u8) -> MasterSigner {
+pub(crate) fn signer(byte: u8) -> MasterSigner {
     let mnemonic = bip39::Mnemonic::from_entropy(&[byte; 16]).unwrap();
     MasterSigner::from_mnemonic(Network::Bitcoin, mnemonic).unwrap()
 }
@@ -61,7 +61,7 @@ fn funding_transaction(output: TxOut, marker: u32) -> Transaction {
     }
 }
 
-fn fixture(input_count: usize) -> Fixture {
+pub(crate) fn fixture(input_count: usize) -> Fixture {
     let secp = secp256k1::Secp256k1::new();
     let signers = vec![signer(1), signer(2), signer(3), signer(4)];
     let primary = PathInfo::Multi(

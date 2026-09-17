@@ -71,6 +71,22 @@ impl Signer {
         self.key.sign_psbt(psbt, &self.curve)
     }
 
+    /// Sign a Bitcoin Blake2b Vault spend with unified signatures
+    /// (`SIGHASH_ALL | UNIFIED`), which are invalid on Bitcoin. The signatures
+    /// go into the PSBT's proprietary records, never `partial_sigs`; see
+    /// [`coincube_core::unified_signing::sign_p2wsh_all_unified`]. Only the
+    /// BTCB2 signing path calls this — [`Self::sign_psbt`] is the Bitcoin path
+    /// and is untouched.
+    pub fn sign_psbt_unified(
+        &self,
+        psbt: &coincube_core::psbt_unified::UnifiedPsbt,
+    ) -> Result<
+        coincube_core::psbt_unified::UnifiedPsbt,
+        coincube_core::unified_signing::UnifiedSigningError,
+    > {
+        coincube_core::unified_signing::sign_p2wsh_all_unified(&self.key, psbt, &self.curve)
+    }
+
     /// Write the mnemonic file, encrypted under `password` (Argon2id-derived
     /// key, AES-256-GCM).
     ///

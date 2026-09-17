@@ -6,6 +6,7 @@ pub mod overview;
 pub mod psbt;
 pub mod psbts;
 pub mod receive;
+pub mod replay;
 pub mod settings;
 pub mod signers;
 pub mod spend;

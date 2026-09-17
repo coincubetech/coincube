@@ -567,6 +567,7 @@ pub async fn update_aliases(
                             .border_wallet_grid_seed
                             .get(master_fingerprint)
                             .copied(),
+                        replay_protected: wallet.replay_marks.get(master_fingerprint).copied(),
                     })
                     .collect();
             }

@@ -2132,7 +2132,13 @@ pub fn defined_sequence<'a>(
                     .align_y(alignment::Vertical::Center),
                 ),
             })
-            .push(warning.map(|w| text(w.message()).small().style(theme::text::error)))
+            .push(warning.map(|w| {
+                text(w.message()).small().style(if w.blocks() {
+                    theme::text::error
+                } else {
+                    theme::text::warning
+                })
+            }))
             .spacing(15),
     )
     .padding(5)

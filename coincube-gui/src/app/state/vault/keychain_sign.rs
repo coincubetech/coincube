@@ -686,9 +686,15 @@ impl KeychainSignModal {
                 .vault;
                 let index: KeychainSignerIndex =
                     build_keychain_index(&vault.members, &cube_keys, self_user_id);
-                let required =
-                    classify_signers(&psbt, &wallet.main_descriptor, &index, &wallet.keys_aliases)
-                        .map_err(|e| OpError::new(e.to_string()))?;
+                let required = classify_signers(
+                    wallet.chain,
+                    &psbt,
+                    &wallet.main_descriptor,
+                    &index,
+                    &wallet.keys_aliases,
+                    &super::signers::ReplayCapabilities::from_wallet(&wallet),
+                )
+                .map_err(|e| OpError::new(e.to_string()))?;
                 Ok(ClassifiedSigners {
                     vault,
                     required,
@@ -1504,29 +1510,20 @@ impl KeychainSignModal {
             .map_err(|e| e.to_string())
         };
 
-        let mut submitted = session.submitted_signatures.into_iter();
-        let first = submitted.next().expect("checked non-empty above");
-        let first_bytes = match open_signature(&first) {
-            Ok(b) => b,
-            Err(e) => {
-                if let Some(entry) = self.pending.iter_mut().find(|p| p.session_id == session_id) {
-                    entry.status = PendingSessionStatus::Failed;
-                    entry.error = Some(format!("Couldn't decrypt the returned signature: {}", e));
-                }
-                return Task::none();
-            }
-        };
-        let mut signed_psbt = match Psbt::deserialize(&first_bytes) {
-            Ok(p) => p,
-            Err(e) => {
-                if let Some(entry) = self.pending.iter_mut().find(|p| p.session_id == session_id) {
-                    entry.status = PendingSessionStatus::Failed;
-                    entry.error = Some(format!("Malformed signed PSBT from API: {}", e));
-                }
-                return Task::none();
-            }
-        };
-        for sig in submitted {
+        // Every returned blob is merged into a clone of the local PSBT — the
+        // one this desktop already holds and authenticated — never into a
+        // remote blob, and never into `tx.psbt` mid-loop. On Bitcoin Blake2b
+        // the merge verifies each merged candidate against the prevouts and
+        // witness scripts the local copy carries, so a sparse return (a
+        // signer answering with signatures only) verifies against local
+        // metadata, and a refusal on any blob — wrong transaction, conflict,
+        // a signature that does not verify — leaves `tx.psbt` untouched with
+        // nothing scheduled for persistence. On the Bitcoin family this is
+        // the historical copy applied in submission order, which resolves
+        // to the same result as the former blob-seeded accumulator (last
+        // write wins on a key either way).
+        let mut signed_psbt = tx.psbt.clone();
+        for sig in session.submitted_signatures {
             let bytes = match open_signature(&sig) {
                 Ok(b) => b,
                 Err(e) => {
@@ -1541,7 +1538,25 @@ impl KeychainSignModal {
                 }
             };
             match Psbt::deserialize(&bytes) {
-                Ok(psbt) => super::psbt::merge_signatures_pub(&mut signed_psbt, &psbt),
+                Ok(psbt) => {
+                    if let Err(e) = super::psbt::merge_signatures_pub(
+                        self.wallet.chain,
+                        &mut signed_psbt,
+                        &psbt,
+                    ) {
+                        // Nothing merged, nothing persisted: the row fails
+                        // with the adapter's reason instead of the daemon
+                        // refusing later.
+                        if let Some(entry) =
+                            self.pending.iter_mut().find(|p| p.session_id == session_id)
+                        {
+                            entry.status = PendingSessionStatus::Failed;
+                            entry.error =
+                                Some(format!("Couldn't merge the returned signatures: {}", e));
+                        }
+                        return Task::none();
+                    }
+                }
                 Err(e) => {
                     if let Some(entry) =
                         self.pending.iter_mut().find(|p| p.session_id == session_id)
@@ -1559,7 +1574,7 @@ impl KeychainSignModal {
             session_id = %session_id,
             "Merging signed PSBT from session into local SpendTx"
         );
-        super::psbt::merge_signatures_pub(&mut tx.psbt, &signed_psbt);
+        tx.psbt = signed_psbt;
         // Mark the row merged-but-not-yet-persisted (blocks threshold close
         // until saved or retried) and persist-in-flight (keeps a dismissed
         // modal mounted until the callback below returns).
@@ -2879,5 +2894,417 @@ mod tests {
         assert_eq!(fingerprint_as_str(&fp), "f5acc2fd");
         assert_eq!(OpError::new("plain").message, "plain");
         assert!(!OpError::new("plain").auth);
+    }
+
+    // ── API rail: every returned blob merges into the local PSBT ──────
+    //
+    // `on_session_fetched` seeds its accumulator from `tx.psbt` — the PSBT
+    // this desktop already holds and authenticated — and merges every
+    // returned blob into that clone. These drive the handler end to end with
+    // **two** sealed returns: a one-return session never reaches the in-loop
+    // merge, so it cannot tell a remote-seeded accumulator from a local one.
+    mod api_rail_merge {
+        use super::*;
+        use crate::app::state::vault::test_support::unified::{fixture, legacy, unified, Fixture};
+        use crate::chain::ChainId;
+        use crate::services::connect::crypto::{seal_to_device, DeviceTransportKey};
+        use crate::services::connect::grpc::connect_v1::{
+            GetSigningSessionResponse, PayloadEnvelope, SessionStatus, SigningSession,
+            SubmittedSignature,
+        };
+        use crate::utils::mock::Daemon as MockDaemon;
+        use coincube_core::miniscript::bitcoin::{secp256k1, Amount, Network};
+        use coincube_core::psbt_unified::UnifiedPsbt;
+        use coincube_core::unified_finalize::verify_all_signatures;
+        use serde_json::json;
+
+        const SESSION_ID: &str = "session-two-blobs";
+        const REQUEST_ID: &str = "req-two-blobs";
+
+        /// A modal on `chain` for the fixture's Vault, holding `psbt` locally,
+        /// with one live row whose fetch is in flight — the state a
+        /// `SIGNATURE_SUBMITTED` / `SESSION_COMPLETED` fetch lands on.
+        fn modal_on(
+            f: &Fixture,
+            chain: ChainId,
+            psbt: &Psbt,
+            key: &Arc<DeviceTransportKey>,
+        ) -> KeychainSignModal {
+            let wallet = Arc::new(Wallet::new(f.descriptor.clone()).with_chain(chain));
+            let mut modal = KeychainSignModal::new(
+                wallet,
+                CoincubeClient::new(),
+                tokens(),
+                "https://grpc.example.test".to_string(),
+                "desktop-device".to_string(),
+                42,
+                "cube-local".to_string(),
+                psbt.clone(),
+                Some(key.clone()),
+            );
+            let mut row = pending(PendingSessionStatus::PartiallySigned);
+            row.session_id = SESSION_ID.to_string();
+            row.request_id = REQUEST_ID.to_string();
+            row.signed_psbt_fetching = true;
+            modal.pending.push(row);
+            modal
+        }
+
+        fn spend_tx(f: &Fixture, psbt: &Psbt) -> SpendTx {
+            SpendTx::new(
+                None,
+                psbt.clone(),
+                Vec::new(),
+                &f.descriptor,
+                &secp256k1::Secp256k1::new(),
+                Network::Bitcoin,
+            )
+        }
+
+        /// `psbt` sealed to this desktop's transport key under the session's
+        /// request id, as a signer submits it (plaintext field empty).
+        fn sealed(key: &DeviceTransportKey, psbt: &Psbt) -> SubmittedSignature {
+            let s = seal_to_device(&key.public_key(), REQUEST_ID, &psbt.serialize()).unwrap();
+            SubmittedSignature {
+                device_id: "phone-1".to_string(),
+                signed_psbt: Vec::new(),
+                signed_key_ids: Vec::new(),
+                created_at: None,
+                signature_envelope: Some(PayloadEnvelope {
+                    device_id: "desktop-device".to_string(),
+                    ephemeral_pubkey: s.ephemeral_pubkey,
+                    nonce: s.nonce,
+                    ciphertext: s.ciphertext,
+                }),
+            }
+        }
+
+        /// A completed session carrying `blobs` in submission order.
+        fn fetched(blobs: Vec<SubmittedSignature>) -> Result<GetSigningSessionResponse, OpError> {
+            let session = SigningSession {
+                session_id: SESSION_ID.to_string(),
+                request_id: REQUEST_ID.to_string(),
+                status: SessionStatus::Completed as i32,
+                submitted_signatures: blobs,
+                ..created_session()
+            };
+            Ok(GetSigningSessionResponse {
+                session: Some(session),
+            })
+        }
+
+        /// A signer's return stripped to its signatures — no prevout, no
+        /// witness script, no derivations. Whether a Keychain's return is this
+        /// sparse is the Keychain app's behaviour, not this repository's; the
+        /// rail must not depend on it either way.
+        fn sparse(psbt: &Psbt) -> Psbt {
+            let mut p = psbt.clone();
+            for input in &mut p.inputs {
+                input.non_witness_utxo = None;
+                input.witness_utxo = None;
+                input.witness_script = None;
+                input.bip32_derivation.clear();
+            }
+            p
+        }
+
+        /// The fixture's transaction with one output amount changed: a
+        /// different txid, so signatures over it are for another transaction.
+        fn other_transaction(f: &Fixture) -> Psbt {
+            let mut other = f.psbt.clone();
+            other.unsigned_tx.output[0].value = Amount::from_sat(40_001);
+            other
+        }
+
+        fn unified_records(psbt: &Psbt) -> usize {
+            psbt.inputs[0].proprietary.len()
+        }
+
+        /// Drive a task to completion, collecting the messages it emits. An
+        /// `updatespend` the mock daemon was not told to expect panics the
+        /// mock's thread and this future, so a completed drive against the
+        /// empty mock is the proof that nothing was scheduled for persistence.
+        async fn drive(task: Task<Message>) -> Vec<Message> {
+            use iced::futures::StreamExt;
+            use iced_runtime::{task::into_stream, Action};
+            let mut out = Vec::new();
+            if let Some(mut stream) = into_stream(task) {
+                while let Some(action) = stream.next().await {
+                    if let Action::Output(message) = action {
+                        out.push(message);
+                    }
+                }
+            }
+            out
+        }
+
+        fn refusing_daemon() -> Arc<dyn Daemon + Sync + Send> {
+            Arc::new(crate::daemon::client::Coincubed::new(
+                MockDaemon::new(vec![]).run(),
+            ))
+        }
+
+        /// Asserts the row failed with `needle`, `tx.psbt` is byte-identical
+        /// to `before`, and neither merge nor persistence was recorded.
+        fn assert_refused(modal: &KeychainSignModal, tx: &SpendTx, before: &[u8], needle: &str) {
+            let row = &modal.pending[0];
+            assert!(matches!(row.status, PendingSessionStatus::Failed));
+            let error = row.error.as_deref().unwrap_or_default();
+            assert!(error.contains(needle), "{}", error);
+            assert_eq!(tx.psbt.serialize(), before, "local PSBT must be untouched");
+            assert!(!row.signed_psbt_merged);
+            assert!(!row.signed_psbt_persisting);
+            assert!(!row.signed_psbt_fetching);
+        }
+
+        #[tokio::test]
+        async fn two_sparse_encrypted_returns_merge_against_local_metadata() {
+            let f = fixture();
+            let key = Arc::new(test_transport_key());
+            let first = sparse(&unified(&f.psbt, &f.signers[0]));
+            let second = sparse(&unified(&f.psbt, &f.signers[1]));
+            // Neither return can be verified on its own: the prevouts and
+            // witness script live only in the local PSBT. An accumulator
+            // seeded from the first return would refuse the second.
+            for blob in [&first, &second] {
+                assert!(verify_all_signatures(
+                    &UnifiedPsbt::from_psbt(blob.clone()).unwrap(),
+                    &secp256k1::Secp256k1::verification_only(),
+                )
+                .is_err());
+            }
+            let mut modal = modal_on(&f, ChainId::BitcoinBlake2b, &f.psbt, &key);
+            let mut tx = spend_tx(&f, &f.psbt);
+            let mut expected = f.psbt.clone();
+            crate::app::state::vault::psbt::merge_signatures_pub(
+                ChainId::BitcoinBlake2b,
+                &mut expected,
+                &first,
+            )
+            .unwrap();
+            crate::app::state::vault::psbt::merge_signatures_pub(
+                ChainId::BitcoinBlake2b,
+                &mut expected,
+                &second,
+            )
+            .unwrap();
+            // The persisted row is the merged local PSBT, prevouts and all.
+            let daemon: Arc<dyn Daemon + Sync + Send> =
+                Arc::new(crate::daemon::client::Coincubed::new(
+                    MockDaemon::new(vec![(
+                        Some(json!({
+                            "method": "updatespend",
+                            "params": vec![expected.to_string()],
+                        })),
+                        Ok(json!({})),
+                    )])
+                    .run(),
+                ));
+
+            let task = modal.on_session_fetched(
+                daemon,
+                &mut tx,
+                SESSION_ID.to_string(),
+                fetched(vec![sealed(&key, &first), sealed(&key, &second)]),
+                false,
+            );
+
+            assert_eq!(tx.psbt.serialize(), expected.serialize());
+            assert_eq!(unified_records(&tx.psbt), 2);
+            assert!(tx.psbt.inputs[0].non_witness_utxo.is_some());
+            verify_all_signatures(
+                &UnifiedPsbt::from_psbt(tx.psbt.clone()).unwrap(),
+                &secp256k1::Secp256k1::verification_only(),
+            )
+            .unwrap();
+            let row = &modal.pending[0];
+            assert!(matches!(row.status, PendingSessionStatus::Completed));
+            assert!(row.signed_psbt_merged);
+            assert!(row.signed_psbt_persisting);
+            let messages = drive(task).await;
+            assert!(messages.iter().any(|m| matches!(
+                m,
+                Message::KeychainSign(KeychainSignMessage::Persisted { session_id, result: Ok(()) })
+                    if session_id == SESSION_ID
+            )));
+            assert!(messages.iter().any(|m| matches!(m, Message::Reconcile)));
+        }
+
+        #[tokio::test]
+        async fn a_wrong_transaction_first_return_refuses_without_touching_the_local_psbt() {
+            let f = fixture();
+            let key = Arc::new(test_transport_key());
+            let wrong = unified(&other_transaction(&f), &f.signers[0]);
+            let valid = sparse(&unified(&f.psbt, &f.signers[1]));
+            let mut modal = modal_on(&f, ChainId::BitcoinBlake2b, &f.psbt, &key);
+            let mut tx = spend_tx(&f, &f.psbt);
+            let before = tx.psbt.serialize();
+
+            let task = modal.on_session_fetched(
+                refusing_daemon(),
+                &mut tx,
+                SESSION_ID.to_string(),
+                fetched(vec![sealed(&key, &wrong), sealed(&key, &valid)]),
+                false,
+            );
+
+            assert_refused(&modal, &tx, &before, "different transactions");
+            assert!(
+                drive(task).await.is_empty(),
+                "nothing scheduled for persistence"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_valid_first_and_invalid_later_return_refuses_atomically() {
+            let f = fixture();
+            let key = Arc::new(test_transport_key());
+            let valid = sparse(&unified(&f.psbt, &f.signers[0]));
+            // The second return is for this transaction but its signature was
+            // produced over another one: representation is fine, the
+            // signature does not verify.
+            let mut invalid = sparse(&f.psbt);
+            invalid.inputs[0].proprietary = unified(&other_transaction(&f), &f.signers[1]).inputs
+                [0]
+            .proprietary
+            .clone();
+            let mut modal = modal_on(&f, ChainId::BitcoinBlake2b, &f.psbt, &key);
+            let mut tx = spend_tx(&f, &f.psbt);
+            let before = tx.psbt.serialize();
+
+            let task = modal.on_session_fetched(
+                refusing_daemon(),
+                &mut tx,
+                SESSION_ID.to_string(),
+                fetched(vec![sealed(&key, &valid), sealed(&key, &invalid)]),
+                false,
+            );
+
+            // Refused for the signature, not for missing prevouts: the
+            // candidate was verified against the local metadata.
+            assert_refused(&modal, &tx, &before, "cryptographically invalid");
+            assert_eq!(
+                unified_records(&tx.psbt),
+                0,
+                "the valid first return must not leak"
+            );
+            assert!(
+                drive(task).await.is_empty(),
+                "nothing scheduled for persistence"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_pre_existing_local_signature_is_kept_and_a_conflict_is_refused() {
+            // The local PSBT already carries a signature (a hot key, an
+            // earlier session). Two returns: one adds a second key, the other
+            // conflicts with the local one. Nothing of either lands.
+            let f = fixture();
+            let key = Arc::new(test_transport_key());
+            let local = unified(&f.psbt, &f.signers[0]);
+            let adds = sparse(&unified(&f.psbt, &f.signers[1]));
+            let mut conflicting = sparse(&f.psbt);
+            conflicting.inputs[0].proprietary = unified(&other_transaction(&f), &f.signers[0])
+                .inputs[0]
+                .proprietary
+                .clone();
+            let mut modal = modal_on(&f, ChainId::BitcoinBlake2b, &local, &key);
+            let mut tx = spend_tx(&f, &local);
+            let before = tx.psbt.serialize();
+
+            let task = modal.on_session_fetched(
+                refusing_daemon(),
+                &mut tx,
+                SESSION_ID.to_string(),
+                fetched(vec![sealed(&key, &adds), sealed(&key, &conflicting)]),
+                false,
+            );
+
+            assert_refused(&modal, &tx, &before, "conflicting signature");
+            assert_eq!(unified_records(&tx.psbt), 1);
+            assert!(
+                drive(task).await.is_empty(),
+                "nothing scheduled for persistence"
+            );
+        }
+
+        #[tokio::test]
+        async fn bitcoin_two_returns_copy_in_submission_order_unchanged() {
+            // The Bitcoin family keeps the historical copy. Pinned against the
+            // former blob-seeded composition (first return as the base, later
+            // returns copied over it, the result copied into the local PSBT):
+            // last write wins on a key, so the two orders agree byte for byte.
+            let f = fixture();
+            let key = Arc::new(test_transport_key());
+            let local = legacy(&f.psbt, &f.signers[2]);
+            let first = legacy(&f.psbt, &f.signers[0]);
+            let mut second = legacy(&f.psbt, &f.signers[1]);
+            // The second return also carries a different signature for the
+            // first return's key, so the copy order is observable.
+            let (first_key, _) = first.inputs[0].partial_sigs.iter().next().unwrap();
+            let replacement = legacy(&other_transaction(&f), &f.signers[0]).inputs[0]
+                .partial_sigs
+                .values()
+                .next()
+                .copied()
+                .unwrap();
+            second.inputs[0]
+                .partial_sigs
+                .insert(*first_key, replacement);
+            let former = {
+                let mut accumulator = first.clone();
+                crate::app::state::vault::psbt::merge_signatures_pub(
+                    ChainId::Bitcoin,
+                    &mut accumulator,
+                    &second,
+                )
+                .unwrap();
+                let mut destination = local.clone();
+                crate::app::state::vault::psbt::merge_signatures_pub(
+                    ChainId::Bitcoin,
+                    &mut destination,
+                    &accumulator,
+                )
+                .unwrap();
+                destination
+            };
+            // Local signatures kept, one key from each return (the first's
+            // key overwritten by the second's copy of it).
+            assert_eq!(
+                former.inputs[0].partial_sigs.len(),
+                local.inputs[0].partial_sigs.len() + 2
+            );
+            assert_eq!(former.inputs[0].partial_sigs[first_key], replacement);
+            let mut modal = modal_on(&f, ChainId::Bitcoin, &local, &key);
+            let mut tx = spend_tx(&f, &local);
+            let daemon: Arc<dyn Daemon + Sync + Send> =
+                Arc::new(crate::daemon::client::Coincubed::new(
+                    MockDaemon::new(vec![(
+                        Some(json!({
+                            "method": "updatespend",
+                            "params": vec![former.to_string()],
+                        })),
+                        Ok(json!({})),
+                    )])
+                    .run(),
+                ));
+
+            let task = modal.on_session_fetched(
+                daemon,
+                &mut tx,
+                SESSION_ID.to_string(),
+                fetched(vec![sealed(&key, &first), sealed(&key, &second)]),
+                false,
+            );
+
+            assert_eq!(tx.psbt.serialize(), former.serialize());
+            assert!(modal.pending[0].signed_psbt_merged);
+            assert!(modal.pending[0].signed_psbt_persisting);
+            let messages = drive(task).await;
+            assert!(messages.iter().any(|m| matches!(
+                m,
+                Message::KeychainSign(KeychainSignMessage::Persisted { result: Ok(()), .. })
+            )));
+        }
     }
 }

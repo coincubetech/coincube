@@ -5,11 +5,12 @@ use iced::Subscription;
 
 use coincube_core::{
     border_wallet::{
-        build_mnemonic, sign_psbt_with_border_wallet, CellRef, GridRecoveryPhrase, OrderedPattern,
-        WordGrid, PATTERN_LENGTH,
+        build_mnemonic, sign_psbt_with_border_wallet, sign_psbt_with_border_wallet_unified,
+        CellRef, GridRecoveryPhrase, OrderedPattern, WordGrid, PATTERN_LENGTH,
     },
     descriptors::CoincubePolicy,
-    miniscript::bitcoin::{bip32::Fingerprint, psbt::Psbt, Network, Txid},
+    miniscript::bitcoin::{bip32::Fingerprint, psbt::Psbt, secp256k1, Network, Txid},
+    psbt_unified::UnifiedPsbt,
 };
 use coincubed::commands::CoinStatus;
 use iced::Task;
@@ -26,11 +27,15 @@ use crate::{
         error::Error,
         menu::{Menu, VaultSubMenu},
         message::Message,
-        state::vault::label::{label_item_from_str, LabelsEdited},
+        state::vault::{
+            label::{label_item_from_str, LabelsEdited},
+            replay::{self, ReplayReview},
+        },
         view,
         view::BorderWalletReconMessage,
         wallet::{Wallet, WalletError},
     },
+    chain::ChainId,
     daemon::{
         model::{LabelItem, Labelled, SpendStatus, SpendTx},
         Daemon,
@@ -123,10 +128,68 @@ pub struct PsbtState {
     pub labels_edited: LabelsEdited,
     recipient_identities: Option<RecipientIdentities>,
     pub modal: Option<PsbtModal>,
+    /// The replay-protection review of this spend. `Some` only on a Bitcoin
+    /// Blake2b Cube; `None` leaves every Bitcoin-family screen and gate
+    /// exactly as before. Recomputed from the verified witness after every
+    /// signature merge ([`Self::refresh_replay`]).
+    pub replay: Option<ReplayReview>,
+    /// The spend screen's own re-check of a replayable spend's inputs
+    /// against the twin chain (`#276` I13, cache lifecycle): a sync-time
+    /// *not entangled* has a shelf life, so it is asked again at the moment
+    /// it matters. See [`Self::revalidate_entanglement`].
+    pub entangled_check: EntangledCheck,
+    /// The PSBT digest the last re-check was started for, so each new set of
+    /// signatures gets exactly one re-check.
+    revalidated_for: Option<[u8; 32]>,
+}
+
+/// State of the spend screen's entanglement re-check ([`PsbtState::entangled_check`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EntangledCheck {
+    /// Not applicable (not replayable, or a Bitcoin-family Cube) or not yet
+    /// started for the current signatures.
+    Idle,
+    /// These deposits are being asked about right now; Broadcast is disabled
+    /// and says so until the answer lands. `generation` is the process-wide
+    /// token the reply must carry to be accepted: a reply for an older
+    /// generation — from an earlier instance of this screen, or from before
+    /// a signature was added — never clears the current claim.
+    InFlight { generation: u64, txids: Vec<Txid> },
+    /// The re-check finished. `unresolved` are the deposits it could not get
+    /// an answer for (Connect unreachable, no session, …): the acknowledgement
+    /// path stays open and the copy says the check could not complete —
+    /// blocking on *Unknown* would make a legacy-only spend impossible
+    /// whenever Connect is down, which the brief rules out.
+    Done { unresolved: Vec<Txid> },
+}
+
+impl EntangledCheck {
+    pub fn in_flight(&self) -> bool {
+        matches!(self, Self::InFlight { .. })
+    }
+}
+
+/// Process-wide generation counter for [`EntangledCheck::InFlight`]. Global
+/// rather than per screen so two instances of the same spend screen (close
+/// and reopen) never hand out the same token.
+static NEXT_CHECK_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn next_check_generation() -> u64 {
+    NEXT_CHECK_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 impl PsbtState {
-    pub fn new(wallet: Arc<Wallet>, tx: SpendTx, saved: bool) -> Self {
+    pub fn new(wallet: Arc<Wallet>, mut tx: SpendTx, saved: bool) -> Self {
+        let replay = wallet.chain.is_blake2b().then(|| {
+            // `SpendTx::new` counted `partial_sigs` only; on BTCB2 the unified
+            // records count too (see `replay::spend_info_for_chain`).
+            if let Ok(sigs) =
+                replay::spend_info_for_chain(wallet.chain, &wallet.main_descriptor, &tx.psbt)
+            {
+                tx.sigs = sigs;
+            }
+            ReplayReview::new(&tx.psbt, &secp256k1::Secp256k1::verification_only())
+        });
         Self {
             desc_policy: wallet.main_descriptor.policy(),
             wallet,
@@ -136,7 +199,214 @@ impl PsbtState {
             modal: None,
             tx,
             saved,
+            replay,
+            entangled_check: EntangledCheck::Idle,
+            revalidated_for: None,
         }
+    }
+
+    /// Recompute the replay review from the current (merged) PSBT. A no-op on
+    /// a Bitcoin-family Cube. The acknowledgement survives only if the PSBT is
+    /// byte-identical to the one it was given for
+    /// ([`ReplayReview::refreshed`]).
+    fn refresh_replay(&mut self) {
+        if let Some(review) = &self.replay {
+            self.replay =
+                Some(review.refreshed(&self.tx.psbt, &secp256k1::Secp256k1::verification_only()));
+        }
+    }
+
+    /// Re-check, at the moment it matters, the twin-chain entanglement of the
+    /// inputs of a **replayable** spend that the cache does not hold as
+    /// *Entangled* — a sync-time *not entangled* can go stale, and a never
+    /// looked-up input deserves an answer before the user acknowledges
+    /// anything. Runs once per set of signatures (keyed on the PSBT digest);
+    /// on entering the screen it is kicked by the first message, and again
+    /// whenever the status becomes replayable. The gate stays synchronous:
+    /// while the check is in flight Broadcast is disabled and says it is
+    /// checking; the answer arrives as [`Message::EntangledRevalidated`],
+    /// which the app caches and routes back here. A *Protected* spend checks
+    /// nothing — no answer could change it.
+    fn revalidate_entanglement(&mut self, cache: &Cache) -> Task<Message> {
+        let Some(review) = &self.replay else {
+            return Task::none();
+        };
+        if !review.status.needs_acknowledgement() {
+            self.entangled_check = EntangledCheck::Idle;
+            return Task::none();
+        }
+        let digest = review.psbt_digest();
+        if self.revalidated_for == Some(digest) {
+            return Task::none();
+        }
+        let mut txids: Vec<Txid> = self
+            .tx
+            .psbt
+            .unsigned_tx
+            .input
+            .iter()
+            .map(|txin| txin.previous_output.txid)
+            .filter(|txid| {
+                !matches!(
+                    cache.entanglement_of(txid),
+                    crate::services::entangled::Entanglement::Entangled
+                )
+            })
+            .collect();
+        txids.sort();
+        txids.dedup();
+        if txids.is_empty() {
+            self.revalidated_for = Some(digest);
+            self.entangled_check = EntangledCheck::Done {
+                unresolved: Vec::new(),
+            };
+            return Task::none();
+        }
+        let Some(tokens) = cache.connect_tokens.clone() else {
+            // No Connect session: the check cannot run. Say so; the
+            // acknowledgement path stays open. `revalidated_for` is left
+            // unset, so the check runs once a session arrives on this same
+            // screen instead of staying "could not check" for good.
+            self.entangled_check = EntangledCheck::Done { unresolved: txids };
+            return Task::none();
+        };
+        // Recorded only now that the check can run.
+        self.revalidated_for = Some(digest);
+        let generation = next_check_generation();
+        self.entangled_check = EntangledCheck::InFlight {
+            generation,
+            txids: txids.clone(),
+        };
+        let chain = self.wallet.chain;
+        let spend = self.tx.psbt.unsigned_tx.compute_txid();
+        Task::perform(
+            async move {
+                let mut client = crate::services::coincube::CoincubeClient::new();
+                let access_token = tokens.read().await.access_token.clone();
+                client.set_token(&access_token);
+                crate::services::entangled::lookup_all(client, chain, txids).await
+            },
+            move |answers| Message::EntangledRevalidated {
+                spend,
+                generation,
+                answers,
+            },
+        )
+    }
+
+    /// Apply a re-check reply: only if it answers the generation currently in
+    /// flight for this spend. Anything else is stale — an older screen
+    /// instance, or an earlier signature set — and is ignored here (the app
+    /// has already cached whatever it resolved).
+    ///
+    /// Returns the task that records the accepted answers in the app's cache
+    /// (`Message::EntanglementAnswered`): the app caches only terminal
+    /// positives before the generation is known, so negatives reach the cache
+    /// only through here and a stale reply can never re-stamp one.
+    fn apply_entangled_reply(
+        &mut self,
+        spend: Txid,
+        generation: u64,
+        answers: &[(Txid, crate::services::entangled::Entanglement)],
+    ) -> Task<Message> {
+        let current = match &self.entangled_check {
+            EntangledCheck::InFlight { generation, .. } => *generation,
+            _ => return Task::none(),
+        };
+        if generation != current || spend != self.tx.psbt.unsigned_tx.compute_txid() {
+            return Task::none();
+        }
+        let unresolved = answers
+            .iter()
+            .filter(|(_, answer)| !answer.is_resolved())
+            .map(|(txid, _)| *txid)
+            .collect();
+        self.entangled_check = EntangledCheck::Done { unresolved };
+        let resolved: Vec<_> = answers
+            .iter()
+            .copied()
+            .filter(|(_, answer)| answer.is_resolved())
+            .collect();
+        if resolved.is_empty() {
+            return Task::none();
+        }
+        Task::done(Message::EntanglementAnswered { answers: resolved })
+    }
+
+    /// The Broadcast dialog is open on a spend that is no longer ready — a
+    /// lookup landed, a re-check started, a signature changed since the
+    /// gated click that opened it. Close it back to the spend screen, where
+    /// the pill names the reason, and say why. No path dispatches
+    /// `broadcast_spend_tx` ungated: [`Self::update_inner`] intercepts Confirm
+    /// with the same check, and the dialog is never opened unready.
+    fn close_broadcast_dialog_if_not_ready(&mut self, cache: &Cache) -> Task<Message> {
+        let awaiting = matches!(
+            &self.modal,
+            Some(PsbtModal::Broadcast(dialog)) if dialog.awaiting_confirmation()
+        );
+        if !awaiting || self.broadcast_ready(cache) {
+            return Task::none();
+        }
+        self.modal = None;
+        match self.not_ready_reason(cache) {
+            Some(reason) => Task::done(Message::View(view::Message::ShowError(reason))),
+            None => Task::none(),
+        }
+    }
+
+    /// Why this spend is not ready, in the copy the spend screen already
+    /// shows. `None` on a Bitcoin-family Cube.
+    fn not_ready_reason(&self, cache: &Cache) -> Option<String> {
+        let review = self.replay.as_ref()?;
+        Some(replay::not_ready_reason(
+            review,
+            &self.entangled_inputs(cache),
+            self.entangled_check.in_flight(),
+        ))
+    }
+
+    /// Inputs (by index) whose re-check could not get an answer, for the
+    /// "could not complete" copy.
+    fn unresolved_inputs(&self) -> Vec<usize> {
+        let EntangledCheck::Done { unresolved } = &self.entangled_check else {
+            return Vec::new();
+        };
+        self.tx
+            .psbt
+            .unsigned_tx
+            .input
+            .iter()
+            .enumerate()
+            .filter(|(_, txin)| unresolved.contains(&txin.previous_output.txid))
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    /// Which inputs spend an entangled (or unchecked) deposit, resolved from
+    /// the cache **now** — never frozen into the review at signature time, so
+    /// an I13 lookup that lands after the last signature still tightens the
+    /// gate. Empty on a Bitcoin-family Cube.
+    fn entangled_inputs(
+        &self,
+        cache: &Cache,
+    ) -> Vec<(usize, crate::services::entangled::Entanglement)> {
+        if self.replay.is_none() {
+            return Vec::new();
+        }
+        replay::entangled_inputs(&self.tx.psbt, |txid| cache.entanglement_of(txid))
+    }
+
+    /// Whether this spend may be broadcast now — the one definition the
+    /// Broadcast handler and the view share ([`replay::broadcast_ready`]):
+    /// the path threshold on a Bitcoin-family Cube; on Bitcoin Blake2b the
+    /// finaliser's verdict, the I13 requirement on known-entangled inputs,
+    /// and the acknowledgement.
+    pub fn broadcast_ready(&self, cache: &Cache) -> bool {
+        replay::broadcast_ready(
+            self.tx.path_ready().is_some(),
+            self.replay.as_ref(),
+            &self.entangled_inputs(cache),
+        ) && !self.entangled_check.in_flight()
     }
 
     pub fn with_recipient_identities(mut self, identities: Option<RecipientIdentities>) -> Self {
@@ -166,17 +436,20 @@ impl PsbtState {
     /// spending path is satisfied (or it was dismissed and its Keychain
     /// sessions drained). Idempotent — safe to call after every signature
     /// merge, decoupled from the persist round-trip.
-    fn reconcile_and_maybe_close(&mut self) -> Task<Message> {
-        if let Ok(sigs) = self
-            .wallet
-            .main_descriptor
-            .partial_spend_info(&self.tx.psbt)
-        {
+    fn reconcile_and_maybe_close(&mut self, cache: &Cache) -> Task<Message> {
+        if let Ok(sigs) = replay::spend_info_for_chain(
+            self.wallet.chain,
+            &self.wallet.main_descriptor,
+            &self.tx.psbt,
+        ) {
             self.tx.sigs = sigs;
         }
+        self.refresh_replay();
+        let recheck = self.revalidate_entanglement(cache);
         // Derive the picker's "Signed" indicator from the counted signers so
         // the per-key rows and the "X of N collected" badge can't diverge.
         let counted = self.tx.signers();
+        let entangled = self.entangled_inputs(cache);
         let close = match self.modal.as_mut() {
             Some(PsbtModal::Sign(sign)) => {
                 sign.set_counted_signers(counted);
@@ -186,7 +459,17 @@ impl PsbtState {
                 // daemon holds the signature it must broadcast (and before the
                 // failing row could be marked Failed). Dismissal-driven close
                 // has its own drain gate and is unaffected.
-                (self.tx.path_ready().is_some() && !sign.keychain_persistence_pending())
+                // On Bitcoin Blake2b "path satisfied" is the finaliser's
+                // verdict over verified signatures, not the partial-sig count,
+                // and a known-entangled input left replayable keeps the picker
+                // open so its required replay-capable signature can be added
+                // (`ReplayReview::signatures_complete`); the acknowledgement is
+                // asked for at Broadcast, not here.
+                let path_satisfied = match &self.replay {
+                    None => self.tx.path_ready().is_some(),
+                    Some(review) => review.signatures_complete(&entangled),
+                };
+                (path_satisfied && !sign.keychain_persistence_pending())
                     || sign.should_close_after_dismiss()
             }
             _ => false,
@@ -200,9 +483,9 @@ impl PsbtState {
                 Task::none()
             };
             self.modal = None;
-            return extra;
+            return Task::batch([extra, recheck]);
         }
-        Task::none()
+        recheck
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
@@ -222,6 +505,34 @@ impl PsbtState {
     }
 
     pub fn update(
+        &mut self,
+        daemon: Arc<dyn Daemon + Sync + Send>,
+        cache: &Cache,
+        message: Message,
+    ) -> Task<Message> {
+        // Order matters: the message is applied **before** any new re-check
+        // is kicked, so a pass can never start a check and then resolve it
+        // with an older answer. A reply is accepted only for the generation
+        // currently in flight ([`Self::apply_entangled_reply`]).
+        let task = match message {
+            Message::EntangledRevalidated {
+                spend,
+                generation,
+                ref answers,
+            } => self.apply_entangled_reply(spend, generation, answers),
+            message => self.update_inner(daemon, cache, message),
+        };
+        // Entering the screen: the first message through here starts the
+        // entanglement re-check of a replayable spend (once per signature
+        // set; a no-op otherwise).
+        let recheck = self.revalidate_entanglement(cache);
+        // And whatever just happened, a Broadcast dialog open on a spend that
+        // is no longer ready comes down with the reason.
+        let dialog = self.close_broadcast_dialog_if_not_ready(cache);
+        Task::batch([task, recheck, dialog])
+    }
+
+    fn update_inner(
         &mut self,
         daemon: Arc<dyn Daemon + Sync + Send>,
         cache: &Cache,
@@ -423,7 +734,19 @@ impl PsbtState {
                     return modal.as_mut().update(daemon.clone(), message, &mut self.tx);
                 }
             }
+            Message::View(view::Message::Spend(view::SpendTxMessage::AcknowledgeReplay(
+                acknowledged,
+            ))) => {
+                if let Some(review) = self.replay.as_mut() {
+                    review.set_acknowledged(acknowledged);
+                }
+            }
             Message::View(view::Message::Spend(view::SpendTxMessage::Broadcast)) => {
+                // The button is disabled until `broadcast_ready`; this is the
+                // same gate for anything that reaches the handler another way.
+                if !self.broadcast_ready(cache) {
+                    return Task::none();
+                }
                 let outpoints: Vec<_> = self.tx.coins.keys().cloned().collect();
                 return Task::perform(
                     async move {
@@ -466,7 +789,7 @@ impl PsbtState {
                 // does NOT set `saved` — the persist may still be in flight or
                 // may fail, and marking the tx saved here would wrongly enable
                 // Export/Delete on a never-persisted spend.
-                return self.reconcile_and_maybe_close();
+                return self.reconcile_and_maybe_close(cache);
             }
             Message::Updated(Ok(_)) => {
                 self.saved = true;
@@ -479,11 +802,23 @@ impl PsbtState {
                     // drain) drives the same idempotent path regardless of
                     // persist ordering.
                     let cmd = modal.as_mut().update(daemon.clone(), message, &mut self.tx);
-                    return Task::batch([cmd, self.reconcile_and_maybe_close()]);
+                    return Task::batch([cmd, self.reconcile_and_maybe_close(cache)]);
                 }
             }
             Message::BroadcastModal(res) => match res {
                 Ok(conflicting_txids) => {
+                    // The click that asked for this dialog was gated, but the
+                    // `list_coins` round trip is a window: a lookup landing in
+                    // it must not open a dialog whose Confirm the gate would
+                    // then refuse. Re-check now, and say why if it moved.
+                    if !self.broadcast_ready(cache) {
+                        return match self.not_ready_reason(cache) {
+                            Some(reason) => {
+                                Task::done(Message::View(view::Message::ShowError(reason)))
+                            }
+                            None => Task::none(),
+                        };
+                    }
                     use coincube_ui::component::amount::DisplayAmount;
                     let is_self_transfer = self.tx.is_send_to_self();
                     // For a self-transfer every output is change, so `spend_amount`
@@ -547,12 +882,36 @@ impl PsbtState {
                 }
             },
             Message::Export(ImportExportMessage::Progress(Progress::Psbt(psbt))) => {
-                merge_signatures(&mut self.tx.psbt, &psbt);
-                self.tx.sigs = self
-                    .wallet
-                    .main_descriptor
-                    .partial_spend_info(&self.tx.psbt)
-                    .expect("already check in psbt import logic");
+                if let Err(e) =
+                    merge_signatures_for_chain(self.wallet.chain, &mut self.tx.psbt, &psbt)
+                {
+                    let e = Error::Unexpected(format!("Couldn't merge the imported PSBT: {e}"));
+                    let err_msg = crate::user_error::report(&e);
+                    self.warning = Some(e);
+                    return Task::done(Message::View(view::Message::ShowError(err_msg)));
+                }
+                self.tx.sigs = replay::spend_info_for_chain(
+                    self.wallet.chain,
+                    &self.wallet.main_descriptor,
+                    &self.tx.psbt,
+                )
+                .expect("already check in psbt import logic");
+                self.refresh_replay();
+            }
+            // Final dispatch is gated on the **current** cache, not on the
+            // click that opened the dialog: a lookup that lands, a re-check
+            // that starts or a signature that changes in between must not be
+            // able to reach `broadcast_spend_tx`. Same gate as the Broadcast
+            // arm above; on refusal the dialog closes and the reason is shown.
+            Message::View(view::Message::Spend(view::SpendTxMessage::Confirm))
+                if matches!(self.modal, Some(PsbtModal::Broadcast(_))) =>
+            {
+                if !self.broadcast_ready(cache) {
+                    return self.close_broadcast_dialog_if_not_ready(cache);
+                }
+                if let Some(modal) = self.modal.as_mut() {
+                    return modal.as_mut().update(daemon.clone(), message, &mut self.tx);
+                }
             }
             _ => {
                 if let Some(modal) = self.modal.as_mut() {
@@ -561,6 +920,21 @@ impl PsbtState {
             }
         }
         Task::none()
+    }
+
+    /// The replay pill's inputs for the view: the review plus which inputs
+    /// spend an entangled (or unchecked) deposit, resolved from the cache at
+    /// render time. `None` on a Bitcoin-family Cube.
+    pub fn replay_presentation(&self, cache: &Cache) -> Option<view::vault::psbt::ReplayPill<'_>> {
+        self.replay
+            .as_ref()
+            .map(|review| view::vault::psbt::ReplayPill {
+                review,
+                entangled: self.entangled_inputs(cache),
+                broadcast_ready: self.broadcast_ready(cache),
+                checking: self.entangled_check.in_flight(),
+                unresolved: self.unresolved_inputs(),
+            })
     }
 
     pub fn view<'a>(&'a self, cache: &'a Cache) -> Element<'a, view::Message> {
@@ -578,6 +952,7 @@ impl PsbtState {
                 false
             },
             cache.bitcoin_unit,
+            self.replay_presentation(cache),
         );
         if let Some(modal) = &self.modal {
             modal.as_ref().view(content)
@@ -667,6 +1042,15 @@ pub struct BroadcastModal {
     network: Network,
     bitcoin_unit: coincube_ui::component::amount::BitcoinDisplayUnit,
     theme_mode: coincube_ui::theme::palette::ThemeMode,
+}
+
+impl BroadcastModal {
+    /// The dialog is waiting for the user's Confirm: nothing dispatched yet,
+    /// nothing succeeded. Only then does the readiness gate apply to it — a
+    /// broadcast in flight or done is past the point the gate protects.
+    pub fn awaiting_confirmation(&self) -> bool {
+        !self.broadcasting && !self.broadcast
+    }
 }
 
 impl Modal for BroadcastModal {
@@ -1285,6 +1669,26 @@ impl SignModal {
         !self.signing.is_empty()
     }
 
+    /// On a Bitcoin Blake2b Cube, refuse to dispatch *any* signer — local,
+    /// device or Keychain — for a PSBT that asks for or carries an
+    /// `ANYONECANPAY` sighash, or a reserved unified record the adapter
+    /// rejects ([`replay::refuse_before_dispatch`]). Returns the error task to
+    /// run instead. A no-op on every other chain.
+    fn refuse_before_dispatch(&mut self, psbt: &Psbt) -> Option<Task<Message>> {
+        if !self.wallet.chain.is_blake2b() {
+            return None;
+        }
+        match replay::refuse_before_dispatch(psbt) {
+            Ok(()) => None,
+            Err(refused) => {
+                let e = Error::Unexpected(refused.to_string());
+                let err_msg = crate::user_error::report(&e);
+                self.error = Some(e);
+                Some(Task::done(Message::View(view::Message::ShowError(err_msg))))
+            }
+        }
+    }
+
     /// Begin dismissing the picker. Cancels any in-flight keychain sessions
     /// server-side and reports whether the modal must stay mounted (hidden)
     /// to drain deferred cancels — mirroring the old standalone keychain
@@ -1698,6 +2102,9 @@ impl Modal for SignModal {
     ) -> Task<Message> {
         match message {
             Message::View(view::Message::SelectHardwareWallet(i)) => {
+                if let Some(refused) = self.refuse_before_dispatch(&tx.psbt) {
+                    return refused;
+                }
                 if let Some(HardwareWallet::Supported {
                     fingerprint,
                     device,
@@ -1719,6 +2126,9 @@ impl Modal for SignModal {
                 }
             }
             Message::View(view::Message::Spend(view::SpendTxMessage::SelectMasterSigner)) => {
+                if let Some(refused) = self.refuse_before_dispatch(&tx.psbt) {
+                    return refused;
+                }
                 if let Some(fingerprint) = self.wallet.signer.as_ref().map(|s| s.fingerprint()) {
                     self.signing.insert(fingerprint);
                 }
@@ -1728,6 +2138,9 @@ impl Modal for SignModal {
                 );
             }
             Message::View(view::Message::Spend(view::SpendTxMessage::SelectBorderWallet(fg))) => {
+                if let Some(refused) = self.refuse_before_dispatch(&tx.psbt) {
+                    return refused;
+                }
                 let network = self.network;
                 let mut recon = BorderWalletReconstructionState::new(fg, network);
                 // Offered only when this machine still holds the seed this key
@@ -1755,6 +2168,7 @@ impl Modal for SignModal {
                 if let Some(recon) = &mut self.border_wallet_recon {
                     if let Some((fingerprint, mnemonic)) = recon.update(msg) {
                         let network = recon.network;
+                        let chain = self.wallet.chain;
                         let psbt = tx.psbt.clone();
                         // Clear reconstruction state (zeroizes phrase words via Drop).
                         self.border_wallet_recon = None;
@@ -1762,7 +2176,8 @@ impl Modal for SignModal {
                         self.signing.insert(fingerprint);
                         return Task::perform(
                             async move {
-                                let result = sign_psbt_with_border_wallet(
+                                let result = sign_border_wallet_for_chain(
+                                    chain,
                                     mnemonic,
                                     fingerprint,
                                     network,
@@ -1803,9 +2218,21 @@ impl Modal for SignModal {
                         // `Message::Updated(Ok)` handler — so a sub-threshold
                         // signature should leave it visible to add more.
                         self.display_modal = true;
-                        self.signed.insert(fingerprint);
                         let daemon = daemon.clone();
-                        merge_signatures(&mut tx.psbt, &psbt);
+                        if let Err(e) =
+                            merge_signatures_for_chain(self.wallet.chain, &mut tx.psbt, &psbt)
+                        {
+                            // Nothing was merged and nothing is persisted: a
+                            // signature the adapter refuses (conflicting or
+                            // ambiguous encoding) must not reach the daemon.
+                            let e = Error::Unexpected(format!(
+                                "Couldn't merge the signature from {fingerprint}: {e}"
+                            ));
+                            let err_msg = crate::user_error::report(&e);
+                            self.error = Some(e);
+                            return Task::done(Message::View(view::Message::ShowError(err_msg)));
+                        }
+                        self.signed.insert(fingerprint);
                         // Persist the *merged* PSBT (not the lone single-signer
                         // result) so the daemon's stored copy always matches the
                         // desktop's in-memory set. Otherwise a later re-read of
@@ -1841,7 +2268,11 @@ impl Modal for SignModal {
                 }
             }
             Message::Updated(res) => match res {
-                Ok(()) => match self.wallet.main_descriptor.partial_spend_info(&tx.psbt) {
+                Ok(()) => match replay::spend_info_for_chain(
+                    self.wallet.chain,
+                    &self.wallet.main_descriptor,
+                    &tx.psbt,
+                ) {
                     Ok(sigs) => tx.sigs = sigs,
                     Err(e) => {
                         // Keep the descriptor error as itself rather than
@@ -1890,6 +2321,19 @@ impl Modal for SignModal {
                 | view::SpendTxMessage::RetryKeychainSigner(_)
                 | view::SpendTxMessage::CancelKeychainSign,
             )) => {
+                let requests_signature = matches!(
+                    message,
+                    Message::View(view::Message::Spend(
+                        view::SpendTxMessage::SelectKeychainSigner(_)
+                            | view::SpendTxMessage::RequestFromEveryone
+                            | view::SpendTxMessage::RetryKeychainSigner(_),
+                    ))
+                );
+                if requests_signature {
+                    if let Some(refused) = self.refuse_before_dispatch(&tx.psbt) {
+                        return refused;
+                    }
+                }
                 if let Some(k) = self.keychain.as_mut() {
                     return k.update(daemon, message, tx);
                 }
@@ -1948,10 +2392,110 @@ fn merge_signatures(psbt: &mut Psbt, signed_psbt: &Psbt) {
     }
 }
 
-/// Merge BIP32 / Tapscript signatures from `signed_psbt` into `psbt`.
-/// Public so the Keychain sign flow can reuse the same merge semantics.
-pub(crate) fn merge_signatures_pub(psbt: &mut Psbt, signed_psbt: &Psbt) {
-    merge_signatures(psbt, signed_psbt)
+/// Merge the signatures of `signed_psbt` into `psbt`, keyed on the chain.
+///
+/// Bitcoin family: [`merge_signatures`], the prior behaviour, unchanged and
+/// infallible (last write wins on a key). Bitcoin Blake2b: the unified
+/// adapter merge ([`coincube_core::psbt_unified::merge_signatures`]) run
+/// against `psbt` **as it is** — never after the prior copy, which would
+/// have overwritten a stored signature before the adapter could compare it —
+/// carries `partial_sigs` and the proprietary unified records across and
+/// **refuses**, leaving `psbt` untouched, a conflicting signature for a key,
+/// a key that would end up with both a unified and a legacy signature, or a
+/// PSBT for another transaction, or a signature that does not verify (checked
+/// on the merged result, so a signer's result need not carry prevouts).
+/// Mirrors the daemon's `update_spend` so the desktop never holds a PSBT the
+/// daemon would reject. (A Blake2b Vault
+/// is native P2WSH — Taproot is not offered on that chain — so the adapter's
+/// ECDSA-only view is the whole picture there.)
+fn merge_signatures_for_chain(
+    chain: ChainId,
+    psbt: &mut Psbt,
+    signed_psbt: &Psbt,
+) -> Result<(), String> {
+    if !chain.is_blake2b() {
+        merge_signatures(psbt, signed_psbt);
+        return Ok(());
+    }
+    let mut destination = UnifiedPsbt::from_psbt(psbt.clone()).map_err(|e| e.to_string())?;
+    let delta = UnifiedPsbt::from_psbt(signed_psbt.clone()).map_err(|e| e.to_string())?;
+    coincube_core::psbt_unified::merge_signatures(&mut destination, &delta)
+        .map_err(|e| e.to_string())?;
+    // The adapter validates representation, not validity: a signer result
+    // carrying a signature that does not verify (wrong digest, ANYONECANPAY)
+    // must not enter the in-memory PSBT — the daemon would refuse to store
+    // it, and a later correct signature for the same key would then read as
+    // a conflict. Verified on the **merged** PSBT, as the daemon verifies the
+    // whole PSBT it is handed: the destination carries the prevouts and
+    // witness scripts verification needs, whereas a signer's result (a device
+    // returning only its signatures, or a Keychain's return over the API
+    // rail, whose contents this repository does not control) need not. `psbt`
+    // is assigned only after the merged result verifies.
+    coincube_core::unified_finalize::verify_all_signatures(
+        &destination,
+        &secp256k1::Secp256k1::verification_only(),
+    )
+    .map_err(|e| e.to_string())?;
+    *psbt = destination.psbt().clone();
+    Ok(())
+}
+
+/// [`merge_signatures_for_chain`] for the Keychain sign flow, so every merge
+/// site shares one definition.
+pub(crate) fn merge_signatures_pub(
+    chain: ChainId,
+    psbt: &mut Psbt,
+    signed_psbt: &Psbt,
+) -> Result<(), String> {
+    merge_signatures_for_chain(chain, psbt, signed_psbt)
+}
+
+/// Sign with the Vault's hot key, keyed on the chain: `SIGHASH_ALL` into
+/// `partial_sigs` on the Bitcoin family (unchanged), unified signatures into
+/// the proprietary records on Bitcoin Blake2b.
+fn sign_with_master_signer_for_chain(
+    chain: ChainId,
+    signer: &crate::signer::Signer,
+    psbt: Psbt,
+) -> Result<Psbt, Error> {
+    if !chain.is_blake2b() {
+        return signer.sign_psbt(psbt).map_err(|e| {
+            WalletError::MasterSigner(format!("Master signer failed to sign psbt: {}", e)).into()
+        });
+    }
+    let unified = UnifiedPsbt::from_psbt(psbt).map_err(|e| {
+        Error::from(WalletError::MasterSigner(format!(
+            "Master signer refused the PSBT: {}",
+            e
+        )))
+    })?;
+    let signed = signer.sign_psbt_unified(&unified).map_err(|e| {
+        Error::from(WalletError::MasterSigner(format!(
+            "Master signer failed to sign psbt: {}",
+            e
+        )))
+    })?;
+    Ok(signed.psbt().clone())
+}
+
+/// Border Wallet signing keyed on the chain, same split as
+/// [`sign_with_master_signer_for_chain`].
+fn sign_border_wallet_for_chain(
+    chain: ChainId,
+    mnemonic: coincube_core::bip39::Mnemonic,
+    fingerprint: Fingerprint,
+    network: Network,
+    psbt: Psbt,
+) -> Result<(Fingerprint, Psbt), coincube_core::border_wallet::BorderWalletError> {
+    if !chain.is_blake2b() {
+        return sign_psbt_with_border_wallet(mnemonic, fingerprint, network, psbt);
+    }
+    let unified = UnifiedPsbt::from_psbt(psbt).map_err(|e| {
+        coincube_core::border_wallet::BorderWalletError::SigningFailed(e.to_string())
+    })?;
+    let (fingerprint, signed) =
+        sign_psbt_with_border_wallet_unified(mnemonic, fingerprint, network, &unified)?;
+    Ok((fingerprint, signed.psbt().clone()))
 }
 
 async fn sign_psbt_with_master_signer(
@@ -1959,12 +2503,7 @@ async fn sign_psbt_with_master_signer(
     psbt: Psbt,
 ) -> (Fingerprint, Result<Psbt, Error>) {
     if let Some(signer) = &wallet.signer {
-        let res = signer
-            .sign_psbt(psbt)
-            .map_err(|e| {
-                WalletError::MasterSigner(format!("Master signer failed to sign psbt: {}", e))
-            })
-            .map_err(|e| e.into());
+        let res = sign_with_master_signer_for_chain(wallet.chain, signer, psbt);
         (signer.fingerprint(), res)
     } else {
         (
@@ -2716,5 +3255,1519 @@ mod tests {
                 )),
             )
             .await;
+    }
+
+    /// The Bitcoin regression the lane requires (`#276`, "flag off"): every
+    /// chain-keyed entry point this slice added is byte for byte the prior
+    /// code on every Bitcoin-family chain, and the replay model does not
+    /// exist there at all.
+    mod bitcoin_paths_are_unchanged {
+        use super::super::*;
+        use crate::app::state::vault::{
+            replay,
+            test_support::unified::{fixture, legacy, signer},
+        };
+        use coincube_core::{
+            border_wallet::sign_psbt_with_border_wallet, miniscript::bitcoin::secp256k1,
+        };
+        use std::path::PathBuf;
+
+        const BITCOIN_FAMILY: [ChainId; 5] = [
+            ChainId::Bitcoin,
+            ChainId::Testnet,
+            ChainId::Testnet4,
+            ChainId::Signet,
+            ChainId::Regtest,
+        ];
+
+        #[test]
+        fn master_signer_bytes_are_the_prior_sign_psbt() {
+            let f = fixture();
+            let hot = crate::signer::Signer::new(signer(21));
+            let expected = hot.sign_psbt(f.psbt.clone()).unwrap().serialize();
+            assert!(!expected.is_empty());
+            for chain in BITCOIN_FAMILY {
+                let got = sign_with_master_signer_for_chain(chain, &hot, f.psbt.clone())
+                    .unwrap()
+                    .serialize();
+                assert_eq!(got, expected, "{:?}", chain);
+            }
+            // And the prior path never produced a unified record.
+            let signed = hot.sign_psbt(f.psbt.clone()).unwrap();
+            assert!(signed.inputs[0].proprietary.is_empty());
+            assert_eq!(signed.inputs[0].partial_sigs.len(), 1);
+        }
+
+        #[test]
+        fn border_wallet_bytes_are_the_prior_sign_psbt_with_border_wallet() {
+            let f = fixture();
+            let secp = secp256k1::Secp256k1::new();
+            let mnemonic = coincube_core::bip39::Mnemonic::from_entropy(&[22; 16]).unwrap();
+            let fingerprint = signer(22).fingerprint(&secp);
+            let (fp, expected) = sign_psbt_with_border_wallet(
+                mnemonic.clone(),
+                fingerprint,
+                Network::Bitcoin,
+                f.psbt.clone(),
+            )
+            .unwrap();
+            for chain in BITCOIN_FAMILY {
+                let (got_fp, got) = sign_border_wallet_for_chain(
+                    chain,
+                    mnemonic.clone(),
+                    fingerprint,
+                    Network::Bitcoin,
+                    f.psbt.clone(),
+                )
+                .unwrap();
+                assert_eq!(got_fp, fp);
+                assert_eq!(got.serialize(), expected.serialize(), "{:?}", chain);
+            }
+        }
+
+        #[test]
+        fn merge_is_the_prior_merge_and_never_fails() {
+            let f = fixture();
+            let a = legacy(&f.psbt, &f.signers[0]);
+            let b = legacy(&f.psbt, &f.signers[1]);
+            let mut expected = a.clone();
+            merge_signatures(&mut expected, &b);
+            for chain in BITCOIN_FAMILY {
+                let mut got = a.clone();
+                merge_signatures_for_chain(chain, &mut got, &b).unwrap();
+                assert_eq!(got.serialize(), expected.serialize(), "{:?}", chain);
+                // A conflicting signature on the Bitcoin path is merged the way
+                // it always was (last write wins) — the adapter's refusal is
+                // BTCB2-only behaviour.
+                let conflicting = b.clone();
+                let (pk, sig) = conflicting.inputs[0]
+                    .partial_sigs
+                    .iter()
+                    .map(|(pk, sig)| (*pk, *sig))
+                    .next()
+                    .unwrap();
+                let mut other = a.clone();
+                other.inputs[0].partial_sigs.insert(pk, sig);
+                let mut prior = other.clone();
+                merge_signatures(&mut prior, &conflicting);
+                let mut keyed = other.clone();
+                assert_eq!(
+                    merge_signatures_for_chain(chain, &mut keyed, &conflicting),
+                    Ok(())
+                );
+                assert_eq!(keyed.serialize(), prior.serialize());
+            }
+        }
+
+        #[test]
+        fn a_bitcoin_wallet_has_no_replay_review_and_gates_on_the_path_threshold() {
+            let f = fixture();
+            for chain in BITCOIN_FAMILY {
+                let wallet = Arc::new(Wallet::new(f.descriptor.clone()).with_chain(chain));
+                let secp = secp256k1::Secp256k1::new();
+                let tx = SpendTx::new(
+                    None,
+                    legacy(&legacy(&f.psbt, &f.signers[0]), &f.signers[1]),
+                    Vec::new(),
+                    &f.descriptor,
+                    &secp,
+                    Network::Bitcoin,
+                );
+                let state = PsbtState::new(wallet, tx, true);
+                assert!(state.replay.is_none(), "{:?}", chain);
+                assert!(state.tx.path_ready().is_some());
+                assert!(state.broadcast_ready(&Cache::default()));
+                assert!(state.replay_presentation(&Cache::default()).is_none());
+                assert_eq!(
+                    state.tx.sigs,
+                    f.descriptor.partial_spend_info(&state.tx.psbt).unwrap()
+                );
+            }
+            let _ = replay::REPLAYABLE_ACKNOWLEDGEMENT;
+        }
+
+        #[test]
+        fn anyonecanpay_is_not_refused_on_bitcoin() {
+            // Prior behaviour: the picker dispatches whatever the PSBT asks
+            // for; the refusal is BTCB2-only. (Without a loaded signer the
+            // async task reports "not loaded" later — what matters here is
+            // that the synchronous refusal did not fire.)
+            let f = fixture();
+            let mut asked = f.psbt.clone();
+            asked.inputs[0].sighash_type = Some(
+                coincube_core::miniscript::bitcoin::sighash::EcdsaSighashType::AllPlusAnyoneCanPay
+                    .into(),
+            );
+            let wallet = Arc::new(Wallet::new(f.descriptor.clone()).with_chain(ChainId::Bitcoin));
+            let mut modal = SignModal::new(
+                HashSet::new(),
+                wallet,
+                CoincubeDirectory::new(PathBuf::new()),
+                Network::Bitcoin,
+                false,
+                None,
+                None,
+                false,
+            );
+            assert!(modal.refuse_before_dispatch(&asked).is_none());
+            assert!(modal.error.is_none());
+        }
+    }
+
+    /// The Bitcoin Blake2b side of the same entry points.
+    mod blake2b_paths {
+        use super::super::*;
+        use crate::app::state::vault::{
+            replay::{ReplayStatus, UnknownReason},
+            test_support::unified::{fixture, legacy, signer, unified},
+        };
+        use crate::utils::mock::Daemon as MockDaemon;
+        use coincube_core::{
+            miniscript::bitcoin::secp256k1,
+            psbt_unified::{unified_signatures, UnifiedPsbt},
+        };
+        use std::path::PathBuf;
+        use std::str::FromStr;
+
+        /// The generation of the re-check currently in flight, or a panic.
+        fn in_flight_generation(state: &PsbtState) -> u64 {
+            match &state.entangled_check {
+                EntangledCheck::InFlight { generation, .. } => *generation,
+                other => panic!("no re-check in flight: {:?}", other),
+            }
+        }
+
+        fn wallet_with_hot_signer(
+            f: &crate::app::state::vault::test_support::unified::Fixture,
+        ) -> Arc<Wallet> {
+            let mut wallet = Wallet::new(f.descriptor.clone()).with_chain(ChainId::BitcoinBlake2b);
+            wallet.signer = Some(Arc::new(crate::signer::Signer::new(signer(21))));
+            Arc::new(wallet)
+        }
+
+        #[test]
+        fn master_signer_produces_unified_records_not_partial_sigs() {
+            let f = fixture();
+            let hot = crate::signer::Signer::new(signer(21));
+            let signed =
+                sign_with_master_signer_for_chain(ChainId::BitcoinBlake2b, &hot, f.psbt.clone())
+                    .unwrap();
+            assert!(signed.inputs[0].partial_sigs.is_empty());
+            let records =
+                unified_signatures(&UnifiedPsbt::from_psbt(signed.clone()).unwrap()).unwrap();
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].signature.last(), Some(&0x21));
+            // Verified by the same verifier the status reads.
+            assert_eq!(
+                replay::replay_status(&signed, &secp256k1::Secp256k1::verification_only(), None),
+                ReplayStatus::Unknown(UnknownReason::Incomplete)
+            );
+        }
+
+        #[test]
+        fn border_wallet_produces_unified_records() {
+            let f = fixture();
+            let secp = secp256k1::Secp256k1::new();
+            let mnemonic = coincube_core::bip39::Mnemonic::from_entropy(&[22; 16]).unwrap();
+            let fingerprint = signer(22).fingerprint(&secp);
+            let (fp, signed) = sign_border_wallet_for_chain(
+                ChainId::BitcoinBlake2b,
+                mnemonic,
+                fingerprint,
+                Network::Bitcoin,
+                f.psbt.clone(),
+            )
+            .unwrap();
+            assert_eq!(fp, fingerprint);
+            assert!(signed.inputs[0].partial_sigs.is_empty());
+            assert_eq!(
+                unified_signatures(&UnifiedPsbt::from_psbt(signed).unwrap())
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
+
+        #[test]
+        fn merge_carries_unified_records_and_refuses_conflicts() {
+            let f = fixture();
+            let a = unified(&f.psbt, &f.signers[0]);
+            let b = unified(&f.psbt, &f.signers[1]);
+            let mut merged = a.clone();
+            merge_signatures_for_chain(ChainId::BitcoinBlake2b, &mut merged, &b).unwrap();
+            assert_eq!(
+                unified_signatures(&UnifiedPsbt::from_psbt(merged.clone()).unwrap())
+                    .unwrap()
+                    .len(),
+                2
+            );
+            // Legacy from a third signer rides along in `partial_sigs`.
+            let c = legacy(&f.psbt, &f.signers[2]);
+            merge_signatures_for_chain(ChainId::BitcoinBlake2b, &mut merged, &c).unwrap();
+            assert_eq!(merged.inputs[0].partial_sigs.len(), 2);
+
+            // A key with both encodings is refused and the destination is
+            // untouched.
+            let both = legacy(&f.psbt, &f.signers[0]);
+            let before = merged.serialize();
+            let err = merge_signatures_for_chain(ChainId::BitcoinBlake2b, &mut merged, &both)
+                .unwrap_err();
+            assert!(
+                err.contains("both") || err.contains("ambiguous") || err.contains("Ambiguous"),
+                "{}",
+                err
+            );
+            assert_eq!(merged.serialize(), before);
+
+            // A conflicting *legacy* signature — the same key, a different
+            // signature — is refused and the destination is byte-unchanged.
+            // The prior copy is last-write-wins, so running it before the
+            // adapter would have replaced the stored signature and hidden the
+            // conflict. Two shapes: key B's signature assigned to key A (a
+            // parseable signature that does not verify — refused by the
+            // signature check now, "does not verify"), and a *second valid*
+            // signature by key A over the same digest with different nonce
+            // data (verifies, differs — the adapter's "conflict").
+            let stored = legacy(&f.psbt, &f.signers[0]);
+            let stored_bytes = stored.serialize();
+            let key_a = *stored.inputs[0].partial_sigs.keys().next().unwrap();
+            let sig_b = *legacy(&f.psbt, &f.signers[1]).inputs[0]
+                .partial_sigs
+                .values()
+                .next()
+                .unwrap();
+            let mut unverifiable = f.psbt.clone();
+            unverifiable.inputs[0].partial_sigs.insert(key_a, sig_b);
+            // Against a destination that already holds A's valid signature it
+            // is a conflict (the merge runs first; the merged result is what
+            // is verified)…
+            let mut destination = stored.clone();
+            let err = merge_signatures_for_chain(
+                ChainId::BitcoinBlake2b,
+                &mut destination,
+                &unverifiable,
+            )
+            .unwrap_err();
+            assert!(err.to_lowercase().contains("conflict"), "{}", err);
+            assert_eq!(destination.serialize(), stored_bytes);
+            // …and against an unsigned destination it is refused because the
+            // merged result does not verify — nothing enters.
+            let mut unsigned = f.psbt.clone();
+            let unsigned_bytes = unsigned.serialize();
+            let err =
+                merge_signatures_for_chain(ChainId::BitcoinBlake2b, &mut unsigned, &unverifiable)
+                    .unwrap_err();
+            assert!(err.contains("does not verify"), "{}", err);
+            assert_eq!(unsigned.serialize(), unsigned_bytes);
+            {
+                use coincube_core::miniscript::bitcoin::{
+                    bip32::DerivationPath, hashes::Hash, sighash::SighashCache,
+                };
+                let secp_all = secp256k1::Secp256k1::new();
+                let witness_script = f.psbt.inputs[0].witness_script.clone().unwrap();
+                let value = f.psbt.inputs[0].witness_utxo.as_ref().unwrap().value;
+                let digest = SighashCache::new(&f.psbt.unsigned_tx)
+                    .p2wsh_signature_hash(
+                        0,
+                        &witness_script,
+                        value,
+                        coincube_core::miniscript::bitcoin::sighash::EcdsaSighashType::All,
+                    )
+                    .unwrap();
+                let secret = f.signers[0]
+                    .xpriv_at(
+                        &DerivationPath::from_str("m/48'/0'/0/3").unwrap(),
+                        &secp_all,
+                    )
+                    .private_key;
+                assert_eq!(
+                    coincube_core::miniscript::bitcoin::PublicKey::new(
+                        secp256k1::PublicKey::from_secret_key(&secp_all, &secret)
+                    ),
+                    key_a,
+                    "the derivation reaches key A"
+                );
+                let second = secp_all.sign_ecdsa_with_noncedata(
+                    &secp256k1::Message::from_digest(digest.to_byte_array()),
+                    &secret,
+                    &[7u8; 32],
+                );
+                assert_ne!(second, stored.inputs[0].partial_sigs[&key_a].signature);
+                let mut conflicting = f.psbt.clone();
+                conflicting.inputs[0].partial_sigs.insert(
+                    key_a,
+                    coincube_core::miniscript::bitcoin::ecdsa::Signature {
+                        signature: second,
+                        sighash_type:
+                            coincube_core::miniscript::bitcoin::sighash::EcdsaSighashType::All,
+                    },
+                );
+                // Verifies on its own…
+                assert!(coincube_core::unified_finalize::verify_all_signatures(
+                    &UnifiedPsbt::from_psbt(conflicting.clone()).unwrap(),
+                    &secp_all
+                )
+                .is_ok());
+                // …and is refused as a conflict, destination untouched.
+                let err = merge_signatures_for_chain(
+                    ChainId::BitcoinBlake2b,
+                    &mut destination,
+                    &conflicting,
+                )
+                .unwrap_err();
+                assert!(err.to_lowercase().contains("conflict"), "{}", err);
+                assert_eq!(destination.serialize(), stored_bytes);
+            }
+            // Merging the same signature again is a no-op, not a conflict.
+            merge_signatures_for_chain(ChainId::BitcoinBlake2b, &mut destination, &stored).unwrap();
+            assert_eq!(destination.serialize(), stored_bytes);
+
+            // A sighash *request* the chain does not serve is refused at the
+            // merge boundary too, not only at finalisation: the spend never
+            // reads "apparently collected" and then fails at Broadcast.
+            let mut asks = legacy(&f.psbt, &f.signers[1]);
+            asks.inputs[0].sighash_type =
+                Some(coincube_core::miniscript::bitcoin::psbt::PsbtSighashType::from_u32(0x81));
+            let err = merge_signatures_for_chain(ChainId::BitcoinBlake2b, &mut destination, &asks)
+                .unwrap_err();
+            assert!(err.contains("0x81"), "{}", err);
+            assert_eq!(destination.serialize(), stored_bytes);
+
+            // Signatures that pass the adapter's representation checks but do
+            // not verify are refused at the merge too, destination untouched:
+            // an ANYONECANPAY legacy signature, a legacy signature for another
+            // transaction, a unified signature for another transaction.
+            let mut other_tx = f.psbt.clone();
+            other_tx.unsigned_tx.output[0].value =
+                coincube_core::miniscript::bitcoin::Amount::from_sat(40_001);
+            let mut acp = legacy(&f.psbt, &f.signers[1]);
+            for sig in acp.inputs[0].partial_sigs.values_mut() {
+                sig.sighash_type =
+                    coincube_core::miniscript::bitcoin::sighash::EcdsaSighashType::AllPlusAnyoneCanPay;
+            }
+            let mut wrong_legacy = f.psbt.clone();
+            wrong_legacy.inputs[0].partial_sigs = legacy(&other_tx, &f.signers[1]).inputs[0]
+                .partial_sigs
+                .clone();
+            let mut wrong_unified = f.psbt.clone();
+            wrong_unified.inputs[0].proprietary = unified(&other_tx, &f.signers[1]).inputs[0]
+                .proprietary
+                .clone();
+            for (name, bad, representation_accepts) in [
+                // The ANYONECANPAY flag is a representation rule (the adapter
+                // refuses it alone); the wrong-digest ones pass the adapter
+                // and are caught only by signature verification.
+                ("legacy ANYONECANPAY", acp, false),
+                ("legacy for another tx", wrong_legacy, true),
+                ("unified for another tx", wrong_unified, true),
+            ] {
+                assert_eq!(
+                    UnifiedPsbt::from_psbt(bad.clone()).is_ok(),
+                    representation_accepts,
+                    "{}",
+                    name
+                );
+                let err =
+                    merge_signatures_for_chain(ChainId::BitcoinBlake2b, &mut destination, &bad)
+                        .unwrap_err();
+                assert!(!err.is_empty(), "{}", name);
+                assert_eq!(destination.serialize(), stored_bytes, "{}", name);
+            }
+            // …and the correct signature for the same key still merges after.
+            merge_signatures_for_chain(
+                ChainId::BitcoinBlake2b,
+                &mut destination,
+                &legacy(&f.psbt, &f.signers[1]),
+            )
+            .unwrap();
+            assert_eq!(destination.inputs[0].partial_sigs.len(), 2);
+
+            // The merged *candidate* is what is verified, not each side alone:
+            // a destination whose input asks for `SIGHASH_ALL` plus a
+            // signer's unified record is a PSBT the verifier refuses
+            // (`IncompatibleSighash`), so the merge is refused and the
+            // destination untouched — never a PSBT the daemon would reject.
+            let mut asks_all = f.psbt.clone();
+            asks_all.inputs[0].sighash_type =
+                Some(coincube_core::miniscript::bitcoin::psbt::PsbtSighashType::from_u32(0x01));
+            let asks_all_bytes = asks_all.serialize();
+            let incoming_unified = unified(&f.psbt, &f.signers[0]);
+            assert!(coincube_core::unified_finalize::verify_all_signatures(
+                &UnifiedPsbt::from_psbt(incoming_unified.clone()).unwrap(),
+                &secp256k1::Secp256k1::verification_only()
+            )
+            .is_ok());
+            let err = merge_signatures_for_chain(
+                ChainId::BitcoinBlake2b,
+                &mut asks_all,
+                &incoming_unified,
+            )
+            .unwrap_err();
+            assert!(err.contains("sighash"), "{}", err);
+            assert_eq!(asks_all.serialize(), asks_all_bytes);
+
+            // A signer's result that carries **no prevout data at all** — a
+            // device returning only its signatures, or a sparse return over
+            // the Keychain API rail — still merges: verification runs on the merged
+            // destination, which always carries the prevouts and witness
+            // scripts, never on the delta.
+            let mut bare = legacy(&f.psbt, &f.signers[0]);
+            bare.inputs[0].non_witness_utxo = None;
+            bare.inputs[0].witness_utxo = None;
+            bare.inputs[0].witness_script = None;
+            bare.inputs[0].bip32_derivation.clear();
+            assert!(
+                coincube_core::unified_finalize::verify_all_signatures(
+                    &UnifiedPsbt::from_psbt(bare.clone()).unwrap(),
+                    &secp256k1::Secp256k1::verification_only()
+                )
+                .is_err(),
+                "on its own the delta cannot be verified"
+            );
+            let mut full = f.psbt.clone();
+            merge_signatures_for_chain(ChainId::BitcoinBlake2b, &mut full, &bare).unwrap();
+            assert_eq!(full.inputs[0].partial_sigs.len(), 1);
+            assert!(full.inputs[0].non_witness_utxo.is_some());
+            // …and a bare delta with a *bad* signature is still refused,
+            // through the merged result.
+            let mut bare_bad = bare.clone();
+            let (bad_key, bad_sig) = {
+                let other_signed = legacy(&other_tx, &f.signers[0]);
+                other_signed.inputs[0]
+                    .partial_sigs
+                    .iter()
+                    .map(|(k, v)| (*k, *v))
+                    .next()
+                    .unwrap()
+            };
+            bare_bad.inputs[0].partial_sigs.clear();
+            bare_bad.inputs[0].partial_sigs.insert(bad_key, bad_sig);
+            let mut untouched = f.psbt.clone();
+            let untouched_bytes = untouched.serialize();
+            let err =
+                merge_signatures_for_chain(ChainId::BitcoinBlake2b, &mut untouched, &bare_bad)
+                    .unwrap_err();
+            assert!(err.contains("does not verify"), "{}", err);
+            assert_eq!(untouched.serialize(), untouched_bytes);
+
+            // Taproot signature data in a signer's result never enters the
+            // destination: the adapter merge carries signatures only, so the
+            // merged (verified) PSBT has none — the dispatch guard is the
+            // door that refuses such a PSBT before a signer sees it, and the
+            // daemon's boundary refuses one handed to it directly.
+            let mut with_tap = legacy(&f.psbt, &f.signers[1]);
+            let tap_secp = secp256k1::Secp256k1::new();
+            let tap_keypair = secp256k1::Keypair::from_secret_key(
+                &tap_secp,
+                &secp256k1::SecretKey::from_slice(&[5u8; 32]).unwrap(),
+            );
+            with_tap.inputs[0].tap_key_sig =
+                Some(coincube_core::miniscript::bitcoin::taproot::Signature {
+                    signature: tap_secp.sign_schnorr_no_aux_rand(
+                        &secp256k1::Message::from_digest([4u8; 32]),
+                        &tap_keypair,
+                    ),
+                    sighash_type:
+                        coincube_core::miniscript::bitcoin::TapSighashType::AllPlusAnyoneCanPay,
+                });
+            let mut plain = f.psbt.clone();
+            merge_signatures_for_chain(ChainId::BitcoinBlake2b, &mut plain, &with_tap).unwrap();
+            assert_eq!(plain.inputs[0].partial_sigs.len(), 1);
+            assert!(plain.inputs[0].tap_key_sig.is_none());
+            assert!(plain.inputs[0].tap_script_sigs.is_empty());
+            // Handed to the verifier as a whole, the same PSBT is refused.
+            assert!(matches!(
+                coincube_core::unified_finalize::verify_all_signatures(
+                    &UnifiedPsbt::from_psbt(with_tap).unwrap(),
+                    &secp256k1::Secp256k1::verification_only()
+                ),
+                Err(
+                    coincube_core::unified_finalize::UnifiedFinalizeError::Signing(
+                        coincube_core::unified_signing::UnifiedSigningError::TaprootSignatureData {
+                            input: 0
+                        }
+                    )
+                )
+            ));
+        }
+
+        // Gandalf's probes from the review of 15a26267 (WORK_LOGS/LAUNCH_GA/
+        // B1/B1.2/GANDALF_15a26267/PROBES.patch), kept as regressions: they
+        // assert the fixed behaviour and failed on that head. Adapted only
+        // where the repair changed an API (`set_acknowledged`,
+        // `record_entanglement`, the chain parameter of `classify_signers`,
+        // `refuse_before_dispatch`).
+
+        #[test]
+        fn gandalf_probe_entangled_legacy_ack_is_not_sufficient() {
+            let f = fixture();
+            let wallet = wallet_with_hot_signer(&f);
+            let secp = secp256k1::Secp256k1::new();
+            let signed = legacy(&legacy(&f.psbt, &f.signers[0]), &f.signers[1]);
+            let tx = SpendTx::new(
+                None,
+                signed,
+                Vec::new(),
+                &f.descriptor,
+                &secp,
+                Network::Bitcoin,
+            );
+            let mut state = PsbtState::new(wallet, tx, true);
+            let mut cache = Cache::default();
+            cache.record_entanglement(
+                f.psbt.unsigned_tx.input[0].previous_output.txid,
+                crate::services::entangled::Entanglement::Entangled,
+                std::time::Instant::now(),
+            );
+            state.replay.as_mut().unwrap().set_acknowledged(true);
+            let pill = state.replay_presentation(&cache).unwrap();
+            assert_eq!(
+                pill.entangled,
+                vec![(0, crate::services::entangled::Entanglement::Entangled)]
+            );
+            println!(
+                "GANDALF entangled legacy-only acknowledged broadcast ready: {}",
+                pill.broadcast_ready
+            );
+            assert!(
+                !pill.broadcast_ready,
+                "I13 requires a verified unified signature or positive split evidence"
+            );
+        }
+
+        #[test]
+        fn gandalf_probe_gui_legacy_conflict_is_atomic() {
+            let f = fixture();
+            let mut stored = legacy(&f.psbt, &f.signers[0]);
+            let other = legacy(&f.psbt, &f.signers[1]);
+            let key = *stored.inputs[0].partial_sigs.keys().next().unwrap();
+            let bad_sig = *other.inputs[0].partial_sigs.values().next().unwrap();
+            let mut incoming = stored.clone();
+            incoming.inputs[0].partial_sigs.insert(key, bad_sig);
+            let before = stored.serialize();
+            let result =
+                merge_signatures_for_chain(ChainId::BitcoinBlake2b, &mut stored, &incoming);
+            println!(
+                "GANDALF GUI conflict accepted: {}; mutated: {}",
+                result.is_ok(),
+                before != stored.serialize()
+            );
+            assert!(
+                result.is_err(),
+                "BTCB2 legacy conflict must be rejected before overwrite"
+            );
+            assert_eq!(stored.serialize(), before);
+        }
+
+        #[test]
+        fn gandalf_probe_classification_counts_existing_unified_signature() {
+            let f = fixture();
+            let wallet = wallet_with_hot_signer(&f);
+            let signed = unified(&f.psbt, &f.signers[0]);
+            let caps = crate::app::state::vault::signers::ReplayCapabilities::from_wallet(&wallet);
+            // The BTCB2 classification of the raw PSBT must agree with the
+            // Bitcoin classification of the counting projection: the record
+            // counts.
+            let raw = crate::app::state::vault::signers::classify_signers(
+                ChainId::BitcoinBlake2b,
+                &signed,
+                &f.descriptor,
+                &HashMap::new(),
+                &HashMap::new(),
+                &caps,
+            )
+            .unwrap();
+            let projected = replay::counting_projection(&signed);
+            let checked = crate::app::state::vault::signers::classify_signers(
+                ChainId::Bitcoin,
+                &projected,
+                &f.descriptor,
+                &HashMap::new(),
+                &HashMap::new(),
+                &caps,
+            )
+            .unwrap();
+            println!(
+                "GANDALF remaining signer rows raw={} projected={}",
+                raw.len(),
+                checked.len()
+            );
+            assert_eq!(
+                raw.len(),
+                checked.len(),
+                "BTCB2 classification must count unified signatures"
+            );
+            assert_eq!(raw.len(), 1);
+        }
+
+        #[test]
+        fn gandalf_probe_dispatch_rejects_reserved_anyonecanpay() {
+            let f = fixture();
+            let mut signed = unified(&f.psbt, &f.signers[0]);
+            for bytes in signed.inputs[0].proprietary.values_mut() {
+                *bytes.last_mut().unwrap() = 0xa1;
+            }
+            assert!(UnifiedPsbt::from_psbt(signed.clone()).is_err());
+            let result = replay::refuse_before_dispatch(&signed);
+            println!(
+                "GANDALF reserved ANYONECANPAY dispatch guard accepts: {}",
+                result.is_ok()
+            );
+            assert!(
+                result.is_err(),
+                "invalid reserved records must not be dispatched"
+            );
+        }
+
+        #[test]
+        fn psbt_state_reads_the_verified_witness_and_gates_broadcast() {
+            let f = fixture();
+            let wallet = wallet_with_hot_signer(&f);
+            let secp = secp256k1::Secp256k1::new();
+            let tx = SpendTx::new(
+                None,
+                f.psbt.clone(),
+                Vec::new(),
+                &f.descriptor,
+                &secp,
+                Network::Bitcoin,
+            );
+            let mut state = PsbtState::new(wallet.clone(), tx, true);
+            assert_eq!(
+                state.replay.as_ref().map(|r| r.status.clone()),
+                Some(ReplayStatus::Unknown(UnknownReason::NotYetChecked))
+            );
+            assert!(!state.broadcast_ready(&Cache::default()));
+
+            // Two unified signatures: protected, ready, and the picker's
+            // signature count sees both (the daemon's analysis alone would
+            // show zero).
+            state.tx.psbt = unified(&unified(&f.psbt, &f.signers[0]), &f.signers[1]);
+            let _ = state.reconcile_and_maybe_close(&Cache::default());
+            assert_eq!(
+                state.replay.as_ref().unwrap().status,
+                ReplayStatus::Protected
+            );
+            assert_eq!(state.tx.sigs.primary_path().sigs_count, 2);
+            assert!(state.broadcast_ready(&Cache::default()));
+            let pill = state.replay_presentation(&Cache::default()).unwrap();
+            assert!(pill.broadcast_ready);
+            // No lookup has run: every input is "not yet checked", never safe.
+            assert_eq!(
+                pill.entangled,
+                vec![(0, crate::services::entangled::Entanglement::Unknown)]
+            );
+
+            // Legacy only: replayable, and Broadcast waits for the
+            // acknowledgement, given through the view message.
+            state.tx.psbt = legacy(&legacy(&f.psbt, &f.signers[0]), &f.signers[1]);
+            let _ = state.reconcile_and_maybe_close(&Cache::default());
+            assert_eq!(
+                state.replay.as_ref().unwrap().status,
+                ReplayStatus::Replayable { inputs: vec![0] }
+            );
+            assert!(!state.broadcast_ready(&Cache::default()));
+            let daemon: Arc<dyn Daemon + Sync + Send> = Arc::new(
+                crate::daemon::client::Coincubed::new(MockDaemon::new(vec![]).run()),
+            );
+            let _ = state.update(
+                daemon.clone(),
+                &Cache::default(),
+                Message::View(view::Message::Spend(
+                    view::SpendTxMessage::AcknowledgeReplay(true),
+                )),
+            );
+            assert!(state.broadcast_ready(&Cache::default()));
+            // A new signature resets the acknowledgement.
+            state.tx.psbt = legacy(&state.tx.psbt, &f.signers[2]);
+            let _ = state.reconcile_and_maybe_close(&Cache::default());
+            assert!(!state.replay.as_ref().unwrap().acknowledged());
+            assert!(!state.broadcast_ready(&Cache::default()));
+        }
+
+        /// `#276` I13 through the state: a legacy-only spend of a deposit
+        /// Connect has confirmed on Bitcoin is not broadcastable — not through
+        /// the handler's gate, not through the view's button, and not after
+        /// the acknowledgement — until a verified unified signature is in the
+        /// witness. The entangled set is read from the cache at every check,
+        /// so a lookup that lands after the last signature still tightens the
+        /// gate. `Unknown` and `NotEntangled` keep the acknowledgement path.
+        #[test]
+        fn a_known_entangled_input_requires_a_unified_signature_through_state_and_view() {
+            use crate::services::entangled::Entanglement;
+            let f = fixture();
+            let wallet = wallet_with_hot_signer(&f);
+            let secp = secp256k1::Secp256k1::new();
+            let legacy_only = legacy(&legacy(&f.psbt, &f.signers[0]), &f.signers[1]);
+            let tx = SpendTx::new(
+                None,
+                legacy_only.clone(),
+                Vec::new(),
+                &f.descriptor,
+                &secp,
+                Network::Bitcoin,
+            );
+            let mut state = PsbtState::new(wallet, tx, true);
+            let txid = f.psbt.unsigned_tx.input[0].previous_output.txid;
+            let daemon: Arc<dyn Daemon + Sync + Send> = Arc::new(
+                crate::daemon::client::Coincubed::new(MockDaemon::new(vec![]).run()),
+            );
+
+            // Before any lookup: Unknown, amber, acknowledgeable.
+            let unchecked = Cache::default();
+            let pill = state.replay_presentation(&unchecked).unwrap();
+            assert_eq!(pill.entangled, vec![(0, Entanglement::Unknown)]);
+            assert!(pill.review.signatures_complete(&pill.entangled));
+            assert!(!pill.broadcast_ready);
+            let _ = state.update(
+                daemon.clone(),
+                &unchecked,
+                Message::View(view::Message::Spend(
+                    view::SpendTxMessage::AcknowledgeReplay(true),
+                )),
+            );
+            assert!(state.broadcast_ready(&unchecked));
+            assert!(
+                state
+                    .replay_presentation(&unchecked)
+                    .unwrap()
+                    .broadcast_ready
+            );
+
+            // The lookup lands *after* the acknowledgement: the same review,
+            // read against the new cache, is no longer ready — through the
+            // state gate and through the pill the view renders.
+            let mut entangled = Cache::default();
+            entangled.record_entanglement(txid, Entanglement::Entangled, std::time::Instant::now());
+            assert!(state.replay.as_ref().unwrap().acknowledged());
+            assert!(!state.broadcast_ready(&entangled));
+            let pill = state.replay_presentation(&entangled).unwrap();
+            assert!(!pill.broadcast_ready);
+            assert!(!pill.review.signatures_complete(&pill.entangled));
+            assert_eq!(
+                replay::blocked_entangled_inputs(&pill.review.status, &pill.entangled),
+                vec![0]
+            );
+            let (label, _) = replay::pill_copy(&pill.review.status, &pill.entangled);
+            assert_eq!(
+                label,
+                "Replayable — no replay-capable signature on input 0 \
+                 (also exists on Bitcoin — signature required)"
+            );
+            assert!(replay::blocked_entangled_copy(&[0]).is_some());
+            // Ticking again changes nothing.
+            let _ = state.update(
+                daemon.clone(),
+                &entangled,
+                Message::View(view::Message::Spend(
+                    view::SpendTxMessage::AcknowledgeReplay(true),
+                )),
+            );
+            assert!(!state.broadcast_ready(&entangled));
+            // The picker would not close on this set of signatures either.
+            state.modal = Some(PsbtModal::Sign(SignModal::new(
+                HashSet::new(),
+                state.wallet.clone(),
+                CoincubeDirectory::new(PathBuf::new()),
+                Network::Bitcoin,
+                true,
+                None,
+                None,
+                false,
+            )));
+            let _ = state.reconcile_and_maybe_close(&entangled);
+            assert!(
+                state.modal.is_some(),
+                "a blocked input keeps the picker open"
+            );
+            // …but a lookup answering NotEntangled lets the ordinary
+            // acknowledgement path close it.
+            let mut not_entangled = Cache::default();
+            not_entangled.record_entanglement(
+                txid,
+                Entanglement::NotEntangled,
+                std::time::Instant::now(),
+            );
+            let _ = state.reconcile_and_maybe_close(&not_entangled);
+            assert!(state.modal.is_none());
+            assert!(state
+                .replay_presentation(&not_entangled)
+                .unwrap()
+                .entangled
+                .is_empty());
+
+            // The remedy: a verified unified signature on that input (the hot
+            // key, position 2 — the finaliser keeps it whichever key holds it).
+            state.tx.psbt = legacy(
+                &legacy(&unified(&f.psbt, &f.signers[2]), &f.signers[0]),
+                &f.signers[1],
+            );
+            let _ = state.reconcile_and_maybe_close(&entangled);
+            assert_eq!(
+                state.replay.as_ref().unwrap().status,
+                ReplayStatus::Protected
+            );
+            assert!(state.broadcast_ready(&entangled));
+            let pill = state.replay_presentation(&entangled).unwrap();
+            assert!(pill.broadcast_ready);
+            assert!(
+                replay::blocked_entangled_inputs(&pill.review.status, &pill.entangled).is_empty()
+            );
+
+            // Forward ordering: the lookup is already known when the legacy
+            // threshold is reached. The picker stays open at the threshold,
+            // the view keeps offering Sign (`signatures_complete` is what the
+            // Sign/Broadcast switch reads), and the hot key's unified
+            // signature then completes it.
+            let tx = SpendTx::new(
+                None,
+                legacy_only.clone(),
+                Vec::new(),
+                &f.descriptor,
+                &secp,
+                Network::Bitcoin,
+            );
+            let mut state = PsbtState::new(state.wallet.clone(), tx, true);
+            state.modal = Some(PsbtModal::Sign(SignModal::new(
+                HashSet::new(),
+                state.wallet.clone(),
+                CoincubeDirectory::new(PathBuf::new()),
+                Network::Bitcoin,
+                true,
+                None,
+                None,
+                false,
+            )));
+            let _ = state.reconcile_and_maybe_close(&entangled);
+            assert!(
+                state.modal.is_some(),
+                "picker stays open at the legacy threshold"
+            );
+            let pill = state.replay_presentation(&entangled).unwrap();
+            assert!(
+                !pill.review.signatures_complete(&pill.entangled),
+                "Sign stays offered"
+            );
+            assert!(!pill.broadcast_ready);
+            state.tx.psbt = legacy(
+                &legacy(&unified(&f.psbt, &f.signers[2]), &f.signers[0]),
+                &f.signers[1],
+            );
+            let _ = state.reconcile_and_maybe_close(&entangled);
+            assert!(
+                state.modal.is_none(),
+                "picker closes once the requirement is met"
+            );
+            let pill = state.replay_presentation(&entangled).unwrap();
+            assert!(pill.review.signatures_complete(&pill.entangled));
+            assert!(pill.broadcast_ready);
+        }
+
+        #[test]
+        fn anyonecanpay_is_refused_before_any_signer_is_dispatched() {
+            let f = fixture();
+            let mut asked = f.psbt.clone();
+            asked.inputs[0].sighash_type = Some(
+                coincube_core::miniscript::bitcoin::sighash::EcdsaSighashType::AllPlusAnyoneCanPay
+                    .into(),
+            );
+            let wallet = wallet_with_hot_signer(&f);
+            let mut modal = SignModal::new(
+                HashSet::new(),
+                wallet,
+                CoincubeDirectory::new(PathBuf::new()),
+                Network::Bitcoin,
+                false,
+                None,
+                None,
+                false,
+            );
+            assert!(modal.refuse_before_dispatch(&asked).is_some());
+            assert!(modal
+                .error
+                .as_ref()
+                .map(|e| e.to_string())
+                .unwrap_or_default()
+                .contains("ANYONECANPAY"));
+            assert!(modal.signing.is_empty());
+            // A clean PSBT is not refused.
+            modal.error = None;
+            assert!(modal.refuse_before_dispatch(&f.psbt).is_none());
+            assert!(modal.error.is_none());
+        }
+
+        /// The spend screen re-checks a replayable spend's inputs at the
+        /// moment it matters (`#276` I13, cache lifecycle): once per set of
+        /// signatures; Broadcast is disabled and says it is checking while the
+        /// answer is in flight (the tick does not override that); `Entangled`
+        /// closes the gate; `Unknown` leaves the acknowledgement path open
+        /// with the "could not check" copy; no Connect session means the
+        /// check cannot run and says so. A reply for another spend is ignored.
+        #[test]
+        fn a_replayable_spend_rechecks_its_inputs_before_it_can_be_acknowledged() {
+            use crate::app::state::vault::test_support::tokens;
+            use crate::services::entangled::Entanglement;
+            let f = fixture();
+            let wallet = wallet_with_hot_signer(&f);
+            let secp = secp256k1::Secp256k1::new();
+            let legacy_only = legacy(&legacy(&f.psbt, &f.signers[0]), &f.signers[1]);
+            let txid = f.psbt.unsigned_tx.input[0].previous_output.txid;
+            let spend = f.psbt.unsigned_tx.compute_txid();
+            let daemon: Arc<dyn Daemon + Sync + Send> = Arc::new(
+                crate::daemon::client::Coincubed::new(MockDaemon::new(vec![]).run()),
+            );
+            let ack = || {
+                Message::View(view::Message::Spend(
+                    view::SpendTxMessage::AcknowledgeReplay(true),
+                ))
+            };
+            let new_state = |psbt: &Psbt| {
+                PsbtState::new(
+                    wallet.clone(),
+                    SpendTx::new(
+                        None,
+                        psbt.clone(),
+                        Vec::new(),
+                        &f.descriptor,
+                        &secp,
+                        Network::Bitcoin,
+                    ),
+                    true,
+                )
+            };
+
+            // No Connect session: the check cannot run; it says so and the
+            // acknowledgement path stays open.
+            let mut state = new_state(&legacy_only);
+            assert_eq!(state.entangled_check, EntangledCheck::Idle);
+            let no_session = Cache::default();
+            let _ = state.update(daemon.clone(), &no_session, ack());
+            assert_eq!(
+                state.entangled_check,
+                EntangledCheck::Done {
+                    unresolved: vec![txid]
+                }
+            );
+            let pill = state.replay_presentation(&no_session).unwrap();
+            assert_eq!(pill.unresolved, vec![0]);
+            assert!(!pill.checking);
+            assert!(
+                state.broadcast_ready(&no_session),
+                "acknowledged, check could not run"
+            );
+
+            // With a session: in flight on the first message, Broadcast
+            // disabled even though the tick was given.
+            let session = Cache {
+                connect_tokens: Some(tokens()),
+                ..Cache::default()
+            };
+            let mut state = new_state(&legacy_only);
+            let _ = state.update(daemon.clone(), &session, ack());
+            assert!(
+                matches!(&state.entangled_check, EntangledCheck::InFlight { txids, .. } if *txids == vec![txid])
+            );
+            assert!(state.replay.as_ref().unwrap().acknowledged());
+            assert!(!state.broadcast_ready(&session));
+            let pill = state.replay_presentation(&session).unwrap();
+            assert!(pill.checking);
+            assert!(!pill.broadcast_ready);
+            // Once per signature set: another message does not restart it.
+            let _ = state.update(daemon.clone(), &session, ack());
+            assert!(
+                matches!(&state.entangled_check, EntangledCheck::InFlight { txids, .. } if *txids == vec![txid])
+            );
+
+            // A reply for another spend is ignored, even with the right
+            // generation.
+            let generation = in_flight_generation(&state);
+            let _ = state.update(
+                daemon.clone(),
+                &session,
+                Message::EntangledRevalidated {
+                    spend: Txid::from_str(
+                        "0000000000000000000000000000000000000000000000000000000000000001",
+                    )
+                    .unwrap(),
+                    generation,
+                    answers: vec![(txid, Entanglement::Entangled)],
+                },
+            );
+            assert!(
+                matches!(&state.entangled_check, EntangledCheck::InFlight { txids, .. } if *txids == vec![txid])
+            );
+
+            // `Entangled` comes back (the app has cached it before routing):
+            // the requirement gate closes, no acknowledgement helps.
+            let mut entangled = Cache {
+                connect_tokens: Some(tokens()),
+                ..Cache::default()
+            };
+            entangled.record_entanglement(txid, Entanglement::Entangled, std::time::Instant::now());
+            let _ = state.update(
+                daemon.clone(),
+                &entangled,
+                Message::EntangledRevalidated {
+                    spend,
+                    generation,
+                    answers: vec![(txid, Entanglement::Entangled)],
+                },
+            );
+            assert_eq!(
+                state.entangled_check,
+                EntangledCheck::Done { unresolved: vec![] }
+            );
+            assert!(!state.broadcast_ready(&entangled));
+            assert!(!state.replay_presentation(&entangled).unwrap().checking);
+
+            // `Unknown` comes back: acknowledgement path open, copy says the
+            // check could not complete.
+            let mut state = new_state(&legacy_only);
+            let _ = state.update(daemon.clone(), &session, ack());
+            let generation = in_flight_generation(&state);
+            let _ = state.update(
+                daemon.clone(),
+                &session,
+                Message::EntangledRevalidated {
+                    spend,
+                    generation,
+                    answers: vec![(txid, Entanglement::Unknown)],
+                },
+            );
+            assert_eq!(
+                state.entangled_check,
+                EntangledCheck::Done {
+                    unresolved: vec![txid]
+                }
+            );
+            assert!(state.broadcast_ready(&session));
+            assert_eq!(
+                state.replay_presentation(&session).unwrap().unresolved,
+                vec![0]
+            );
+
+            // A new signature is a new set: the re-check runs again, and the
+            // tick from the previous set is gone.
+            state.tx.psbt = legacy(&legacy_only, &f.signers[2]);
+            let _ = state.reconcile_and_maybe_close(&session);
+            assert!(
+                matches!(&state.entangled_check, EntangledCheck::InFlight { txids, .. } if *txids == vec![txid])
+            );
+            assert!(!state.replay.as_ref().unwrap().acknowledged());
+
+            // A protected spend checks nothing.
+            let protected = unified(&unified(&f.psbt, &f.signers[0]), &f.signers[1]);
+            let mut state = new_state(&protected);
+            let _ = state.update(daemon.clone(), &session, ack());
+            assert_eq!(state.entangled_check, EntangledCheck::Idle);
+            assert!(state.broadcast_ready(&session));
+        }
+
+        /// Drive a task to completion, collecting the messages it emits. A
+        /// `broadcast_spend_tx` against the empty mock daemon would panic the
+        /// mock's thread and this future ("Mock Daemon must have all requests
+        /// mocked"), so a completed drive is the proof that no RPC was made.
+        async fn drive(task: Task<Message>) -> Vec<Message> {
+            use iced::futures::StreamExt;
+            use iced_runtime::{task::into_stream, Action};
+            let mut out = Vec::new();
+            if let Some(mut stream) = into_stream(task) {
+                while let Some(action) = stream.next().await {
+                    if let Action::Output(message) = action {
+                        out.push(message);
+                    }
+                }
+            }
+            out
+        }
+
+        fn shows_error(messages: &[Message], needle: &str) -> bool {
+            messages.iter().any(|m| {
+                matches!(m, Message::View(view::Message::ShowError(text)) if text.contains(needle))
+            })
+        }
+
+        /// Final Confirm is gated on the **current** cache (`#276` I13): a
+        /// positive lookup landing after the Broadcast dialog was created, or
+        /// between the gated click and the dialog's creation, or a re-check in
+        /// flight, means Confirm dispatches nothing — the dialog closes and the
+        /// reason is on screen. The empty mock daemon turns any dispatch into a
+        /// panic, so the drive completing is the zero-call assertion.
+        #[tokio::test]
+        async fn confirm_is_gated_on_the_current_cache_in_every_ordering() {
+            use crate::services::entangled::Entanglement;
+            let f = fixture();
+            let wallet = wallet_with_hot_signer(&f);
+            let secp = secp256k1::Secp256k1::new();
+            let legacy_only = legacy(&legacy(&f.psbt, &f.signers[0]), &f.signers[1]);
+            let txid = f.psbt.unsigned_tx.input[0].previous_output.txid;
+            let daemon: Arc<dyn Daemon + Sync + Send> = Arc::new(
+                crate::daemon::client::Coincubed::new(MockDaemon::new(vec![]).run()),
+            );
+            let confirm = || Message::View(view::Message::Spend(view::SpendTxMessage::Confirm));
+            let ack = || {
+                Message::View(view::Message::Spend(
+                    view::SpendTxMessage::AcknowledgeReplay(true),
+                ))
+            };
+            let open_dialog = || Message::BroadcastModal(Ok(HashSet::new()));
+            let new_state = || {
+                PsbtState::new(
+                    wallet.clone(),
+                    SpendTx::new(
+                        None,
+                        legacy_only.clone(),
+                        Vec::new(),
+                        &f.descriptor,
+                        &secp,
+                        Network::Bitcoin,
+                    ),
+                    true,
+                )
+            };
+            // No Connect session: the re-check cannot run, the spend is
+            // acknowledgeable, and the dialog opens.
+            let unchecked = Cache::default();
+            let mut entangled = Cache::default();
+            entangled.record_entanglement(txid, Entanglement::Entangled, std::time::Instant::now());
+
+            // 1. Lookup lands *after* the dialog is created.
+            let mut state = new_state();
+            let _ = drive(state.update(daemon.clone(), &unchecked, ack())).await;
+            assert!(state.broadcast_ready(&unchecked));
+            let _ = drive(state.update(daemon.clone(), &unchecked, open_dialog())).await;
+            assert!(
+                matches!(&state.modal, Some(PsbtModal::Broadcast(d)) if d.awaiting_confirmation())
+            );
+            let out = drive(state.update(daemon.clone(), &entangled, confirm())).await;
+            assert!(
+                state.modal.is_none(),
+                "dialog closed back to the spend screen"
+            );
+            assert!(
+                shows_error(&out, "also exists on Bitcoin"),
+                "{:?}",
+                out.len()
+            );
+            assert!(!state.broadcast_ready(&entangled));
+
+            // 2. Lookup lands *before* the dialog is created (inside the
+            //    `list_coins` window): the dialog never opens.
+            let mut state = new_state();
+            let _ = drive(state.update(daemon.clone(), &unchecked, ack())).await;
+            let out = drive(state.update(daemon.clone(), &entangled, open_dialog())).await;
+            assert!(state.modal.is_none(), "an unready dialog is never opened");
+            assert!(shows_error(&out, "also exists on Bitcoin"));
+            // …and a Confirm that somehow arrives anyway dispatches nothing.
+            let _ = drive(state.update(daemon.clone(), &entangled, confirm())).await;
+            assert!(state.modal.is_none());
+
+            // 3. A re-check in flight when Confirm arrives: nothing dispatched,
+            //    the checking copy is the reason.
+            let mut state = new_state();
+            let _ = drive(state.update(daemon.clone(), &unchecked, ack())).await;
+            let _ = drive(state.update(daemon.clone(), &unchecked, open_dialog())).await;
+            assert!(matches!(&state.modal, Some(PsbtModal::Broadcast(_))));
+            state.entangled_check = EntangledCheck::InFlight {
+                generation: u64::MAX,
+                txids: vec![txid],
+            };
+            let out = drive(state.update(daemon.clone(), &unchecked, confirm())).await;
+            assert!(state.modal.is_none());
+            assert!(shows_error(&out, replay::CHECKING_COPY));
+
+            // 4. A dialog open on a spend whose acknowledgement was dropped by
+            //    a new signature (status equal, content changed) comes down on
+            //    the next message too.
+            let mut state = new_state();
+            let _ = drive(state.update(daemon.clone(), &unchecked, ack())).await;
+            let _ = drive(state.update(daemon.clone(), &unchecked, open_dialog())).await;
+            state.tx.psbt = legacy(&legacy_only, &f.signers[2]);
+            let out = drive(state.update(daemon.clone(), &unchecked, Message::Reconcile)).await;
+            assert!(state.modal.is_none());
+            assert!(shows_error(&out, replay::REPLAYABLE_ACKNOWLEDGEMENT));
+
+            // Control: a ready spend's Confirm reaches the dialog, which
+            // dispatches — the mock has no `broadcastspend` scripted, so the
+            // drive is not attempted; the dialog's own state shows the
+            // dispatch happened.
+            let mut state = new_state();
+            let _ = drive(state.update(daemon.clone(), &unchecked, ack())).await;
+            let _ = drive(state.update(daemon.clone(), &unchecked, open_dialog())).await;
+            let _task = state.update(daemon.clone(), &unchecked, confirm());
+            assert!(
+                matches!(&state.modal, Some(PsbtModal::Broadcast(d)) if !d.awaiting_confirmation())
+            );
+        }
+
+        /// A re-check reply is accepted only for the generation currently in
+        /// flight: a reply from an earlier instance of the screen, or from
+        /// before a signature was added, never clears the current claim — and
+        /// the message is applied before any new check is kicked, so a pass
+        /// cannot start a check and resolve it with an older answer. A stale
+        /// reply's positive still lands in the cache (the app does that before
+        /// routing) and closes the gate.
+        #[tokio::test]
+        async fn a_stale_recheck_reply_never_clears_the_current_claim() {
+            use crate::app::state::vault::test_support::tokens;
+            use crate::services::entangled::Entanglement;
+            let f = fixture();
+            let wallet = wallet_with_hot_signer(&f);
+            let secp = secp256k1::Secp256k1::new();
+            let legacy_only = legacy(&legacy(&f.psbt, &f.signers[0]), &f.signers[1]);
+            let txid = f.psbt.unsigned_tx.input[0].previous_output.txid;
+            let spend = f.psbt.unsigned_tx.compute_txid();
+            let daemon: Arc<dyn Daemon + Sync + Send> = Arc::new(
+                crate::daemon::client::Coincubed::new(MockDaemon::new(vec![]).run()),
+            );
+            let ack = || {
+                Message::View(view::Message::Spend(
+                    view::SpendTxMessage::AcknowledgeReplay(true),
+                ))
+            };
+            let session = Cache {
+                connect_tokens: Some(tokens()),
+                ..Cache::default()
+            };
+            let new_state = |psbt: &Psbt| {
+                PsbtState::new(
+                    wallet.clone(),
+                    SpendTx::new(
+                        None,
+                        psbt.clone(),
+                        Vec::new(),
+                        &f.descriptor,
+                        &secp,
+                        Network::Bitcoin,
+                    ),
+                    true,
+                )
+            };
+            let reply = |generation: u64, answer: Entanglement| Message::EntangledRevalidated {
+                spend,
+                generation,
+                answers: vec![(txid, answer)],
+            };
+
+            // Screen instance A starts a check and is closed with it in flight.
+            let mut a = new_state(&legacy_only);
+            let _ = a.update(daemon.clone(), &session, ack());
+            let stale = in_flight_generation(&a);
+            drop(a);
+
+            // Instance B reopens the same spend. A's reply arrives first, on a
+            // fresh state: it must not both kick B's check and resolve it.
+            let mut b = new_state(&legacy_only);
+            let _ = b.update(
+                daemon.clone(),
+                &session,
+                reply(stale, Entanglement::NotEntangled),
+            );
+            let current = in_flight_generation(&b);
+            assert_ne!(current, stale, "generations are process-wide, never reused");
+            assert!(!b.broadcast_ready(&session), "still checking");
+            // The stale reply again, now with B in flight: ignored.
+            let _ = b.update(
+                daemon.clone(),
+                &session,
+                reply(stale, Entanglement::NotEntangled),
+            );
+            assert_eq!(in_flight_generation(&b), current);
+            // B's own reply resolves it.
+            let _ = b.update(
+                daemon.clone(),
+                &session,
+                reply(current, Entanglement::NotEntangled),
+            );
+            assert_eq!(
+                b.entangled_check,
+                EntangledCheck::Done { unresolved: vec![] }
+            );
+
+            // A signature added while a reply is in flight: the new set gets a
+            // new generation; the old reply is ignored, the new one lands.
+            let mut c = new_state(&legacy_only);
+            let _ = c.update(daemon.clone(), &session, ack());
+            let first = in_flight_generation(&c);
+            c.tx.psbt = legacy(&legacy_only, &f.signers[2]);
+            let _ = c.update(daemon.clone(), &session, Message::Reconcile);
+            let second = in_flight_generation(&c);
+            assert_ne!(second, first);
+            let _ = c.update(
+                daemon.clone(),
+                &session,
+                reply(first, Entanglement::Unknown),
+            );
+            assert_eq!(in_flight_generation(&c), second, "stale reply ignored");
+            let _ = c.update(
+                daemon.clone(),
+                &session,
+                reply(second, Entanglement::Unknown),
+            );
+            assert_eq!(
+                c.entangled_check,
+                EntangledCheck::Done {
+                    unresolved: vec![txid]
+                }
+            );
+
+            // Recording goes through the panel's acceptance: an accepted
+            // reply emits `EntanglementAnswered` with its resolved answers
+            // (negatives included); a stale reply emits nothing, so the app —
+            // which caches only terminal positives before routing — never
+            // re-stamps a `NotEntangled` answer's resolve instant from it.
+            let mut e = new_state(&legacy_only);
+            let _ = e.update(daemon.clone(), &session, ack());
+            let live = in_flight_generation(&e);
+            let stale_out = drive(e.update(
+                daemon.clone(),
+                &session,
+                reply(stale, Entanglement::NotEntangled),
+            ))
+            .await;
+            assert!(
+                !stale_out
+                    .iter()
+                    .any(|m| matches!(m, Message::EntanglementAnswered { .. })),
+                "a stale negative is never handed to the cache"
+            );
+            assert_eq!(in_flight_generation(&e), live);
+            let live_out = drive(e.update(
+                daemon.clone(),
+                &session,
+                reply(live, Entanglement::NotEntangled),
+            ))
+            .await;
+            assert!(
+                live_out.iter().any(|m| matches!(
+                    m,
+                    Message::EntanglementAnswered { answers }
+                        if *answers == vec![(txid, Entanglement::NotEntangled)]
+                )),
+                "the accepted negative is recorded"
+            );
+            // An accepted reply with only Unknown records nothing.
+            let mut g = new_state(&legacy_only);
+            let _ = g.update(daemon.clone(), &session, ack());
+            let live = in_flight_generation(&g);
+            let unknown_out =
+                drive(g.update(daemon.clone(), &session, reply(live, Entanglement::Unknown))).await;
+            assert!(!unknown_out
+                .iter()
+                .any(|m| matches!(m, Message::EntanglementAnswered { .. })));
+
+            // A stale reply carrying `Entangled`: the claim is untouched, but
+            // the answer is in the cache (as the app records it before
+            // routing) and the gate is closed by it.
+            let mut d = new_state(&legacy_only);
+            let _ = d.update(daemon.clone(), &session, ack());
+            let live = in_flight_generation(&d);
+            let mut cached = Cache {
+                connect_tokens: Some(tokens()),
+                ..Cache::default()
+            };
+            cached.record_entanglement(txid, Entanglement::Entangled, std::time::Instant::now());
+            let _ = d.update(
+                daemon.clone(),
+                &cached,
+                reply(stale, Entanglement::Entangled),
+            );
+            assert_eq!(in_flight_generation(&d), live, "claim untouched");
+            assert!(!d.broadcast_ready(&cached));
+            let _ = d.update(
+                daemon.clone(),
+                &cached,
+                reply(live, Entanglement::Entangled),
+            );
+            assert_eq!(
+                d.entangled_check,
+                EntangledCheck::Done { unresolved: vec![] }
+            );
+            assert!(!d.broadcast_ready(&cached), "gate closed by the positive");
+            assert!(!d.replay_presentation(&cached).unwrap().broadcast_ready);
+        }
+
+        /// A reserved unified record ending `0xa1` reaches no device and no
+        /// phone: the hardware arm and the Keychain-request arm of the picker
+        /// both refuse through `update` before anything is dispatched, with
+        /// the error set and no signer marked as signing.
+        #[test]
+        fn a_malformed_reserved_record_never_reaches_a_device_or_a_phone() {
+            let f = fixture();
+            let mut tx = SpendTx::new(
+                None,
+                unified(&f.psbt, &f.signers[0]),
+                Vec::new(),
+                &f.descriptor,
+                &secp256k1::Secp256k1::new(),
+                Network::Bitcoin,
+            );
+            let key = tx.psbt.inputs[0]
+                .proprietary
+                .keys()
+                .next()
+                .cloned()
+                .unwrap();
+            *tx.psbt.inputs[0]
+                .proprietary
+                .get_mut(&key)
+                .unwrap()
+                .last_mut()
+                .unwrap() = 0xa1;
+            let wallet = wallet_with_hot_signer(&f);
+            let daemon: Arc<dyn Daemon + Sync + Send> = Arc::new(
+                crate::daemon::client::Coincubed::new(MockDaemon::new(vec![]).run()),
+            );
+            for message in [
+                // Hardware: index 0 of an (empty) device list — the refusal
+                // fires before the list is even consulted.
+                Message::View(view::Message::SelectHardwareWallet(0)),
+                // Hot key.
+                Message::View(view::Message::Spend(
+                    view::SpendTxMessage::SelectMasterSigner,
+                )),
+                // Keychain request (would be forwarded to the nested flow).
+                Message::View(view::Message::Spend(
+                    view::SpendTxMessage::RequestFromEveryone,
+                )),
+                Message::View(view::Message::Spend(
+                    view::SpendTxMessage::SelectKeychainSigner(
+                        f.signers[1].fingerprint(&secp256k1::Secp256k1::new()),
+                    ),
+                )),
+            ] {
+                let mut modal = SignModal::new(
+                    HashSet::new(),
+                    wallet.clone(),
+                    CoincubeDirectory::new(PathBuf::new()),
+                    Network::Bitcoin,
+                    true,
+                    None,
+                    None,
+                    true,
+                );
+                let _ = modal.update(daemon.clone(), message, &mut tx);
+                let error = modal
+                    .error
+                    .as_ref()
+                    .map(|e| e.to_string())
+                    .unwrap_or_default();
+                assert!(error.contains("refusing to sign"), "{}", error);
+                assert!(modal.signing.is_empty(), "nothing was dispatched");
+            }
+            // The same PSBT with a well-formed record passes the boundary.
+            let clean = unified(&f.psbt, &f.signers[0]);
+            let mut modal = SignModal::new(
+                HashSet::new(),
+                wallet,
+                CoincubeDirectory::new(PathBuf::new()),
+                Network::Bitcoin,
+                true,
+                None,
+                None,
+                true,
+            );
+            assert!(modal.refuse_before_dispatch(&clean).is_none());
+        }
     }
 }

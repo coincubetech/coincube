@@ -12,14 +12,111 @@
 //! `KeychainSignModal::launch`; this module is pure logic so it can be
 //! unit-tested.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use coincube_core::{
-    descriptors::{CoincubeDescriptor, CoincubePolicy},
+    descriptors::{CoincubeDescriptor, CoincubePolicy, PathInfo},
     miniscript::bitcoin::{bip32::Fingerprint, psbt::Psbt},
 };
 
 use crate::services::coincube::{CubeKeyRaw, VaultMemberResponse};
+
+/// Whether a signer can produce a Bitcoin Blake2b *unified* signature
+/// (`SIGHASH_ALL | UNIFIED`), which is what makes a spend impossible to replay
+/// on Bitcoin. A statement about the signer's kind, never about a signature:
+/// the replay pill on a spend is derived only from verified signatures in the
+/// finalised witness (`#276` correction 1), and this classification only
+/// steers which signers the flow prefers and which spending paths it warns
+/// about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplayProtection {
+    /// Signs in this process from a seed it holds: the Vault's hot key, or a
+    /// Border Wallet key reconstructed for one signature. Unified by
+    /// construction on a Bitcoin Blake2b Cube.
+    Capable,
+    /// Known to sign `SIGHASH_ALL` only. Every Keychain key reads `Legacy`
+    /// until Lane B3 ships unified signing on the phone and a version
+    /// handshake proves the paired app has it.
+    Legacy,
+    /// A device signer (hardware wallet, phone signer). Firmware cannot
+    /// report the sighash it will use, so this is the user's own mark from
+    /// [`crate::app::settings::KeySetting::replay_protected`]; `false` when
+    /// unmarked.
+    UserMarked(bool),
+}
+
+impl ReplayProtection {
+    /// Whether the flow may count on this signer for a replay-protected
+    /// witness. A user mark is taken at its word — the verified witness, not
+    /// this flag, is what the pill reports afterwards.
+    pub fn is_capable(self) -> bool {
+        matches!(self, Self::Capable | Self::UserMarked(true))
+    }
+}
+
+/// What the wallet knows about its signers' kinds, extracted once from
+/// [`crate::app::wallet::Wallet`] so the classification stays pure and
+/// testable. Keychain keys are recognised through the
+/// [`KeychainSignerIndex`], not here.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReplayCapabilities {
+    /// Fingerprints that sign in-process from a seed: the loaded hot signer
+    /// and every Border Wallet key.
+    pub in_process: HashSet<Fingerprint>,
+    /// User marks for device signers ([`ReplayProtection::UserMarked`]).
+    pub user_marks: HashMap<Fingerprint, bool>,
+}
+
+impl ReplayCapabilities {
+    pub fn from_wallet(wallet: &crate::app::wallet::Wallet) -> Self {
+        let mut in_process: HashSet<Fingerprint> =
+            wallet.border_wallet_fingerprints.iter().copied().collect();
+        if let Some(signer) = &wallet.signer {
+            in_process.insert(signer.fingerprint());
+        }
+        Self {
+            in_process,
+            user_marks: wallet.replay_marks.clone(),
+        }
+    }
+
+    /// Classify one signer. Order matters: a Keychain key is `Legacy` even if
+    /// the same fingerprint were somehow also marked, because the phone is
+    /// what will sign it.
+    pub fn replay_protection(
+        &self,
+        fingerprint: Fingerprint,
+        keychain_index: &KeychainSignerIndex,
+    ) -> ReplayProtection {
+        if keychain_index.contains_key(&fingerprint) {
+            ReplayProtection::Legacy
+        } else if self.in_process.contains(&fingerprint) {
+            ReplayProtection::Capable
+        } else {
+            ReplayProtection::UserMarked(
+                self.user_marks.get(&fingerprint).copied().unwrap_or(false),
+            )
+        }
+    }
+}
+
+/// Whether a spending path can be satisfied with at least one replay-capable
+/// signer taking part — i.e. whether a spend through it can ever be replay
+/// protected. `false` is what the Vault-creation warning and the recovery
+/// screens key off: "spends from this path can be replayed unless the coins
+/// were split first".
+pub fn path_has_replay_capable_signer(
+    path: &PathInfo,
+    capabilities: &ReplayCapabilities,
+    keychain_index: &KeychainSignerIndex,
+) -> bool {
+    let (_, origins) = path.thresh_origins();
+    origins.into_keys().any(|fingerprint| {
+        capabilities
+            .replay_protection(fingerprint, keychain_index)
+            .is_capable()
+    })
+}
 
 /// One signer that the user still has to bring to the PSBT to advance
 /// the active spending path past its threshold.
@@ -32,6 +129,8 @@ pub enum RequiredSigner {
         fingerprint: Fingerprint,
         /// Display alias from `wallet.keys_aliases`, if known.
         name: Option<String>,
+        /// Whether this signer can make the spend replay protected.
+        replay_protection: ReplayProtection,
     },
     /// A signer that lives on a Keychain-registered phone. The desktop
     /// must open a `SigningSession` against the API and wait for the
@@ -51,6 +150,9 @@ pub enum RequiredSigner {
         /// Backend `contacts.id` when the signer is a contact; `None`
         /// for self-signers.
         contact_id: Option<u64>,
+        /// Always [`ReplayProtection::Legacy`] until Lane B3; carried so the
+        /// picker reads one field for every row.
+        replay_protection: ReplayProtection,
     },
 }
 
@@ -59,6 +161,17 @@ impl RequiredSigner {
         match self {
             Self::Local { fingerprint, .. } => *fingerprint,
             Self::Keychain { fingerprint, .. } => *fingerprint,
+        }
+    }
+
+    pub fn replay_protection(&self) -> ReplayProtection {
+        match self {
+            Self::Local {
+                replay_protection, ..
+            }
+            | Self::Keychain {
+                replay_protection, ..
+            } => *replay_protection,
         }
     }
 
@@ -210,7 +323,8 @@ pub fn build_keychain_index(
 /// Classify the still-required signers for the active spending path.
 ///
 /// Strategy:
-/// 1. Compute `PartialSpendInfo` on the PSBT. The primary path is always
+/// 1. Compute `PartialSpendInfo` on the PSBT, keyed on the chain so unified
+///    records count on Bitcoin Blake2b. The primary path is always
 ///    available; recovery paths only show up when the input nSequence
 ///    matches their CSV timelock.
 /// 2. Pick the path the transaction was built to spend through: an available
@@ -222,13 +336,19 @@ pub fn build_keychain_index(
 ///    set that already signed, classify each survivor against the
 ///    `keychain_index`.
 pub fn classify_signers(
+    chain: crate::chain::ChainId,
     psbt: &Psbt,
     descriptor: &CoincubeDescriptor,
     keychain_index: &KeychainSignerIndex,
     keys_aliases: &HashMap<Fingerprint, String>,
+    capabilities: &ReplayCapabilities,
 ) -> Result<Vec<RequiredSigner>, ClassifyError> {
-    let info = descriptor
-        .partial_spend_info(psbt)
+    // The same chain-keyed analysis `PsbtState` shows in the picker: on
+    // Bitcoin Blake2b a collected unified record (proprietary map) counts as
+    // a signature, so a signer who is already done is not asked again; on a
+    // Bitcoin-family chain this is the unchanged analysis of the unchanged
+    // PSBT.
+    let info = super::replay::spend_info_for_chain(chain, descriptor, psbt)
         .map_err(|e| ClassifyError::PsbtAnalysis(e.to_string()))?;
 
     let policy: CoincubePolicy = descriptor.policy();
@@ -306,6 +426,7 @@ pub fn classify_signers(
     let mut required: Vec<RequiredSigner> = unsigned
         .into_iter()
         .map(|fg| {
+            let replay_protection = capabilities.replay_protection(fg, keychain_index);
             if let Some(info) = keychain_index.get(&fg) {
                 RequiredSigner::Keychain {
                     fingerprint: fg,
@@ -314,11 +435,13 @@ pub fn classify_signers(
                     name: info.name.clone(),
                     owner_email: info.owner_email.clone(),
                     contact_id: info.contact_id,
+                    replay_protection,
                 }
             } else {
                 RequiredSigner::Local {
                     fingerprint: fg,
                     name: keys_aliases.get(&fg).cloned(),
+                    replay_protection,
                 }
             }
         })
@@ -492,8 +615,15 @@ mod tests {
         // so `partial_spend_info` surfaces the recovery path.
         psbt.unsigned_tx.input[0].sequence = Sequence::from_height(10);
 
-        let required =
-            classify_signers(&psbt, &desc, &recovery_keychain_index(), &HashMap::new()).unwrap();
+        let required = classify_signers(
+            crate::chain::ChainId::Bitcoin,
+            &psbt,
+            &desc,
+            &recovery_keychain_index(),
+            &HashMap::new(),
+            &ReplayCapabilities::default(),
+        )
+        .unwrap();
 
         // Regression: the primary path is always "available", so the old
         // "prefer primary while under threshold" rule classified this against
@@ -513,11 +643,178 @@ mod tests {
         // path is the spend route.
         let psbt = Psbt::from_str(UNSIGNED_PSBT_B64).unwrap();
 
-        let required =
-            classify_signers(&psbt, &desc, &recovery_keychain_index(), &HashMap::new()).unwrap();
+        let required = classify_signers(
+            crate::chain::ChainId::Bitcoin,
+            &psbt,
+            &desc,
+            &recovery_keychain_index(),
+            &HashMap::new(),
+            &ReplayCapabilities::default(),
+        )
+        .unwrap();
 
         assert_eq!(required.len(), 1);
         assert!(!required[0].is_keychain());
         assert_eq!(required[0].fingerprint(), primary_fg());
+    }
+
+    fn caps(in_process: &[Fingerprint], marks: &[(Fingerprint, bool)]) -> ReplayCapabilities {
+        ReplayCapabilities {
+            in_process: in_process.iter().copied().collect(),
+            user_marks: marks.iter().copied().collect(),
+        }
+    }
+
+    #[test]
+    fn replay_protection_defaults_per_signer_kind() {
+        let keychain = recovery_keychain_index();
+        let empty = KeychainSignerIndex::new();
+        let hot = primary_fg();
+        let device: Fingerprint = "00000001".parse().unwrap();
+
+        // Hot / Border Wallet key: capable by construction.
+        assert_eq!(
+            caps(&[hot], &[]).replay_protection(hot, &empty),
+            ReplayProtection::Capable
+        );
+        // Keychain key: legacy until Lane B3, even if it were marked.
+        assert_eq!(
+            caps(&[], &[(recovery_fg(), true)]).replay_protection(recovery_fg(), &keychain),
+            ReplayProtection::Legacy
+        );
+        // Device signer: the user's mark, `false` when unmarked.
+        assert_eq!(
+            caps(&[], &[]).replay_protection(device, &empty),
+            ReplayProtection::UserMarked(false)
+        );
+        assert_eq!(
+            caps(&[], &[(device, true)]).replay_protection(device, &empty),
+            ReplayProtection::UserMarked(true)
+        );
+        assert!(ReplayProtection::Capable.is_capable());
+        assert!(ReplayProtection::UserMarked(true).is_capable());
+        assert!(!ReplayProtection::UserMarked(false).is_capable());
+        assert!(!ReplayProtection::Legacy.is_capable());
+    }
+
+    #[test]
+    fn classify_carries_replay_protection_on_every_row() {
+        use std::str::FromStr;
+        let desc = CoincubeDescriptor::from_str(RECOVERY_DESC).unwrap();
+        let psbt = Psbt::from_str(UNSIGNED_PSBT_B64).unwrap();
+        let hot = classify_signers(
+            crate::chain::ChainId::Bitcoin,
+            &psbt,
+            &desc,
+            &recovery_keychain_index(),
+            &HashMap::new(),
+            &caps(&[primary_fg()], &[]),
+        )
+        .unwrap();
+        assert_eq!(hot[0].replay_protection(), ReplayProtection::Capable);
+        let device = classify_signers(
+            crate::chain::ChainId::Bitcoin,
+            &psbt,
+            &desc,
+            &recovery_keychain_index(),
+            &HashMap::new(),
+            &ReplayCapabilities::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            device[0].replay_protection(),
+            ReplayProtection::UserMarked(false)
+        );
+    }
+
+    /// On Bitcoin Blake2b a collected unified record counts toward the
+    /// threshold, so the Keychain flow asks for exactly the signatures still
+    /// missing — one, not two — and never for the signer who already signed.
+    /// On Bitcoin the same PSBT (the record is invisible there) still needs
+    /// two. Opening and reopening the picker read the same answer.
+    #[test]
+    fn classify_counts_collected_unified_records_on_blake2b_only() {
+        use crate::app::state::vault::test_support::unified::{fixture, unified};
+        let f = fixture();
+        let one_unified = unified(&f.psbt, &f.signers[0]);
+        let secp = coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::new();
+        let signed_fg = f.signers[0].fingerprint(&secp);
+        // The other two primary signers are "Keychain" for this index.
+        let mut index = KeychainSignerIndex::new();
+        for signer in &f.signers[1..] {
+            index.insert(
+                signer.fingerprint(&secp),
+                KeychainSignerInfo {
+                    key_id: 1,
+                    owner_user_id: 100,
+                    name: "phone".to_string(),
+                    owner_email: None,
+                    contact_id: None,
+                },
+            );
+        }
+        for _open in 0..2 {
+            let blake2b = classify_signers(
+                crate::chain::ChainId::BitcoinBlake2b,
+                &one_unified,
+                &f.descriptor,
+                &index,
+                &HashMap::new(),
+                &ReplayCapabilities::default(),
+            )
+            .unwrap();
+            assert_eq!(blake2b.len(), 1, "one signature still missing");
+            assert_ne!(
+                blake2b[0].fingerprint(),
+                signed_fg,
+                "the signer who signed is done"
+            );
+            assert!(blake2b[0].is_keychain());
+            assert_eq!(blake2b[0].replay_protection(), ReplayProtection::Legacy);
+        }
+        let bitcoin = classify_signers(
+            crate::chain::ChainId::Bitcoin,
+            &one_unified,
+            &f.descriptor,
+            &index,
+            &HashMap::new(),
+            &ReplayCapabilities::default(),
+        )
+        .unwrap();
+        assert_eq!(bitcoin.len(), 2, "the record is invisible on Bitcoin");
+    }
+
+    #[test]
+    fn path_warning_fires_only_when_no_signer_on_the_path_is_capable() {
+        use std::str::FromStr;
+        let desc = CoincubeDescriptor::from_str(RECOVERY_DESC).unwrap();
+        let policy = desc.policy();
+        let keychain = recovery_keychain_index();
+        let recovery = policy.recovery_paths().values().next().unwrap();
+
+        // Primary: hot key → capable. Recovery: Keychain-only → not.
+        let capabilities = caps(&[primary_fg()], &[]);
+        assert!(path_has_replay_capable_signer(
+            policy.primary_path(),
+            &capabilities,
+            &keychain
+        ));
+        assert!(!path_has_replay_capable_signer(
+            recovery,
+            &capabilities,
+            &keychain
+        ));
+        // With no hot key and an unmarked device on the primary path, both
+        // paths warn; a user mark on the device clears the primary one.
+        assert!(!path_has_replay_capable_signer(
+            policy.primary_path(),
+            &ReplayCapabilities::default(),
+            &keychain
+        ));
+        assert!(path_has_replay_capable_signer(
+            policy.primary_path(),
+            &caps(&[], &[(primary_fg(), true)]),
+            &keychain
+        ));
     }
 }
