@@ -89,7 +89,10 @@ pytest tests/test_btcb2_harness.py -vvv
 it unless its checksum is listed in the release `SHA256SUMS` *and*
 `SHA256SUMS.asc` verifies against the Knots signing key vendored in
 `coincube-gui/assets/knots_signing_key.asc` — the same check the desktop
-installer performs (`tests/tools/knots_verify`, no `gpg` needed).
+installer performs (`tests/tools/knots_verify`, no `gpg` needed). The check runs
+on every invocation, cached or not, and the extracted `bitcoind` is reused only
+if it matches the archive member byte for byte; there is no stored "verified"
+marker to trust.
 `fetch_electrs_blake2b.sh` clones and builds the pinned indexer commit (RocksDB
 compiles from source: a few minutes the first time; `clang`/`cmake` required)
 under `~/.cache/coincube/electrs-blake2b` — outside the repository, or Cargo

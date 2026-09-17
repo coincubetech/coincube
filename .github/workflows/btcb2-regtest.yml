@@ -62,11 +62,21 @@ jobs:
           path: tests/tools/knots_verify/target/release/knots_verify
           key: ${{ runner.os }}-knots-verify-${{ hashFiles('tests/tools/knots_verify/Cargo.lock', 'tests/tools/knots_verify/src/main.rs', 'coincube-gui/assets/knots_signing_key.asc') }}
 
-      - name: Cache verified Knots releases
+      - name: Cache Knots releases
         uses: actions/cache@v5
         with:
           path: tests/tools/knots
-          key: ${{ runner.os }}-knots-${{ env.KNOTS_LEGACY_VERSION }}-${{ env.KNOTS_BLAKE2B_VERSION }}
+          # Bound to the same verifier inputs as the knots_verify cache above
+          # (its source, its lock file, the vendored signing key), so a change
+          # to the trust anchor or the verifier can never be paired with
+          # archives that only an older verifier ever checked. This is
+          # belt-and-braces: fetch_knots.sh keeps no "verified" marker and
+          # re-verifies the cached archive with the current verifier on every
+          # run, comparing the extracted bitcoind against the archive member —
+          # nothing within a key generation is trusted on a stored digest
+          # either. Cost: the archives are re-downloaded only when a verifier
+          # input or a pinned version changes, not per run.
+          key: ${{ runner.os }}-knots-v2-${{ env.KNOTS_LEGACY_VERSION }}-${{ env.KNOTS_BLAKE2B_VERSION }}-${{ hashFiles('tests/tools/knots_verify/Cargo.lock', 'tests/tools/knots_verify/src/main.rs', 'coincube-gui/assets/knots_signing_key.asc') }}
 
       - name: Cache electrs (BLAKE2b) build
         uses: actions/cache@v5
@@ -96,8 +106,9 @@ jobs:
       - name: Fetch and verify both Bitcoin Knots releases
         # Each archive's checksum must be listed in the release SHA256SUMS and
         # SHA256SUMS.asc must verify against the Knots signing key the desktop
-        # vendors (coincube-gui/assets/knots_signing_key.asc). Nothing is
-        # extracted otherwise — a stand-in node would make the B4.2 rows lie.
+        # vendors (coincube-gui/assets/knots_signing_key.asc). This runs on
+        # every job, cache hit or not; nothing is extracted or reused otherwise
+        # — a stand-in node would make the B4.2 rows lie.
         # Assign first, then export: `echo "X=$(cmd)"` succeeds even when cmd
         # fails, which would export an empty path and let the harness skip.
         run: |
