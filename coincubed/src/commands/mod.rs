@@ -3866,6 +3866,29 @@ mod tests {
             (u, l)
         }
 
+        /// Gandalf's probe from the review of 15a26267 (WORK_LOGS/LAUNCH_GA/B1/
+        /// B1.2/GANDALF_15a26267/PROBES.patch), kept as a regression: it
+        /// asserts the fixed behaviour and failed on that head.
+        #[test]
+        fn gandalf_probe_legacy_conflict_is_atomic() {
+            let (signers, psbt) = vault_psbt();
+            let stored = legacy(&psbt, &signers[0]);
+            let other = legacy(&psbt, &signers[1]);
+            let key = *stored.inputs[0].partial_sigs.keys().next().unwrap();
+            let bad_sig = *other.inputs[0].partial_sigs.values().next().unwrap();
+            let mut incoming = stored.clone();
+            incoming.inputs[0].partial_sigs.insert(key, bad_sig);
+            let mut direct = UnifiedPsbt::from_psbt(stored.clone()).unwrap();
+            let delta = UnifiedPsbt::from_psbt(incoming.clone()).unwrap();
+            assert!(coincube_core::psbt_unified::merge_signatures(&mut direct, &delta).is_err());
+            let merged = merge_spend_signatures(ChainId::BitcoinBlake2b, stored, &incoming);
+            println!("GANDALF daemon conflict accepted: {}", merged.is_ok());
+            assert!(
+                merged.is_err(),
+                "BTCB2 legacy conflict must be rejected before overwrite"
+            );
+        }
+
         #[test]
         fn bitcoin_merge_is_the_historical_copy_and_ignores_unified_records() {
             let (signers, psbt) = vault_psbt();

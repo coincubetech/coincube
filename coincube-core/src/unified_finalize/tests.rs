@@ -893,3 +893,43 @@ fn a_legacy_only_witness_is_accepted_by_the_miniscript_interpreter() {
         assert!(!finalized.inputs[index].replay_protected());
     }
 }
+
+// Gandalf's probes from the review of 15a26267 (WORK_LOGS/LAUNCH_GA/B1/B1.2/
+// GANDALF_15a26267/PROBES.patch), kept verbatim as regressions: they assert
+// the fixed behaviour and failed on that head.
+
+#[test]
+fn gandalf_probe_csv_requires_version_two() {
+    let secp = secp();
+    let mut f = fixture(1);
+    f.psbt.psbt_mut().unsigned_tx.version = miniscript::bitcoin::transaction::Version::ONE;
+    f.psbt.psbt_mut().unsigned_tx.input[0].sequence = Sequence::from_height(46);
+    let signed = sign_p2wsh_all_unified(&f.signers[2], &f.psbt, &secp).unwrap();
+    let result = finalize_p2wsh_all_unified(&signed, &secp);
+    println!("GANDALF CSV version 1 accepted: {}", result.is_ok());
+    assert!(
+        result.is_err(),
+        "CSV recovery on tx version 1 must not finalise"
+    );
+}
+
+#[test]
+fn gandalf_probe_unused_legacy_anyonecanpay_is_refused() {
+    let secp = secp();
+    let f = fixture(1);
+    let one = sign_p2wsh_all_unified(&f.signers[0], &f.psbt, &secp).unwrap();
+    let both = sign_p2wsh_all_unified(&f.signers[1], &one, &secp).unwrap();
+    let mut mixed = add_legacy(&both, &f.signers[2], &secp);
+    for signature in mixed.psbt_mut().inputs[0].partial_sigs.values_mut() {
+        signature.sighash_type = EcdsaSighashType::AllPlusAnyoneCanPay;
+    }
+    let result = finalize_p2wsh_all_unified(&mixed, &secp);
+    println!(
+        "GANDALF unused legacy ANYONECANPAY accepted: {}",
+        result.is_ok()
+    );
+    assert!(
+        result.is_err(),
+        "all legacy records must be validated even if unified alone satisfies"
+    );
+}

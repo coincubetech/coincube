@@ -3388,6 +3388,134 @@ mod tests {
             assert_eq!(destination.serialize(), stored_bytes);
         }
 
+        // Gandalf's probes from the review of 15a26267 (WORK_LOGS/LAUNCH_GA/
+        // B1/B1.2/GANDALF_15a26267/PROBES.patch), kept as regressions: they
+        // assert the fixed behaviour and failed on that head. Adapted only
+        // where the repair changed an API (`set_acknowledged`,
+        // `record_entanglement`, the chain parameter of `classify_signers`,
+        // `refuse_before_dispatch`).
+
+        #[test]
+        fn gandalf_probe_entangled_legacy_ack_is_not_sufficient() {
+            let f = fixture();
+            let wallet = wallet_with_hot_signer(&f);
+            let secp = secp256k1::Secp256k1::new();
+            let signed = legacy(&legacy(&f.psbt, &f.signers[0]), &f.signers[1]);
+            let tx = SpendTx::new(
+                None,
+                signed,
+                Vec::new(),
+                &f.descriptor,
+                &secp,
+                Network::Bitcoin,
+            );
+            let mut state = PsbtState::new(wallet, tx, true);
+            let mut cache = Cache::default();
+            cache.record_entanglement(
+                f.psbt.unsigned_tx.input[0].previous_output.txid,
+                crate::services::entangled::Entanglement::Entangled,
+                std::time::Instant::now(),
+            );
+            state.replay.as_mut().unwrap().set_acknowledged(true);
+            let pill = state.replay_presentation(&cache).unwrap();
+            assert_eq!(
+                pill.entangled,
+                vec![(0, crate::services::entangled::Entanglement::Entangled)]
+            );
+            println!(
+                "GANDALF entangled legacy-only acknowledged broadcast ready: {}",
+                pill.broadcast_ready
+            );
+            assert!(
+                !pill.broadcast_ready,
+                "I13 requires a verified unified signature or positive split evidence"
+            );
+        }
+
+        #[test]
+        fn gandalf_probe_gui_legacy_conflict_is_atomic() {
+            let f = fixture();
+            let mut stored = legacy(&f.psbt, &f.signers[0]);
+            let other = legacy(&f.psbt, &f.signers[1]);
+            let key = *stored.inputs[0].partial_sigs.keys().next().unwrap();
+            let bad_sig = *other.inputs[0].partial_sigs.values().next().unwrap();
+            let mut incoming = stored.clone();
+            incoming.inputs[0].partial_sigs.insert(key, bad_sig);
+            let before = stored.serialize();
+            let result =
+                merge_signatures_for_chain(ChainId::BitcoinBlake2b, &mut stored, &incoming);
+            println!(
+                "GANDALF GUI conflict accepted: {}; mutated: {}",
+                result.is_ok(),
+                before != stored.serialize()
+            );
+            assert!(
+                result.is_err(),
+                "BTCB2 legacy conflict must be rejected before overwrite"
+            );
+            assert_eq!(stored.serialize(), before);
+        }
+
+        #[test]
+        fn gandalf_probe_classification_counts_existing_unified_signature() {
+            let f = fixture();
+            let wallet = wallet_with_hot_signer(&f);
+            let signed = unified(&f.psbt, &f.signers[0]);
+            let caps = crate::app::state::vault::signers::ReplayCapabilities::from_wallet(&wallet);
+            // The BTCB2 classification of the raw PSBT must agree with the
+            // Bitcoin classification of the counting projection: the record
+            // counts.
+            let raw = crate::app::state::vault::signers::classify_signers(
+                ChainId::BitcoinBlake2b,
+                &signed,
+                &f.descriptor,
+                &HashMap::new(),
+                &HashMap::new(),
+                &caps,
+            )
+            .unwrap();
+            let projected = replay::counting_projection(&signed);
+            let checked = crate::app::state::vault::signers::classify_signers(
+                ChainId::Bitcoin,
+                &projected,
+                &f.descriptor,
+                &HashMap::new(),
+                &HashMap::new(),
+                &caps,
+            )
+            .unwrap();
+            println!(
+                "GANDALF remaining signer rows raw={} projected={}",
+                raw.len(),
+                checked.len()
+            );
+            assert_eq!(
+                raw.len(),
+                checked.len(),
+                "BTCB2 classification must count unified signatures"
+            );
+            assert_eq!(raw.len(), 1);
+        }
+
+        #[test]
+        fn gandalf_probe_dispatch_rejects_reserved_anyonecanpay() {
+            let f = fixture();
+            let mut signed = unified(&f.psbt, &f.signers[0]);
+            for bytes in signed.inputs[0].proprietary.values_mut() {
+                *bytes.last_mut().unwrap() = 0xa1;
+            }
+            assert!(UnifiedPsbt::from_psbt(signed.clone()).is_err());
+            let result = replay::refuse_before_dispatch(&signed);
+            println!(
+                "GANDALF reserved ANYONECANPAY dispatch guard accepts: {}",
+                result.is_ok()
+            );
+            assert!(
+                result.is_err(),
+                "invalid reserved records must not be dispatched"
+            );
+        }
+
         #[test]
         fn psbt_state_reads_the_verified_witness_and_gates_broadcast() {
             let f = fixture();
