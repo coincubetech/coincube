@@ -414,4 +414,4 @@ fn empty_signature_delta(psbt: &UnifiedPsbt) -> Result<UnifiedPsbt, UnifiedSigni
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
