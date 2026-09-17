@@ -239,7 +239,6 @@ impl PsbtState {
         if self.revalidated_for == Some(digest) {
             return Task::none();
         }
-        self.revalidated_for = Some(digest);
         let mut txids: Vec<Txid> = self
             .tx
             .psbt
@@ -257,6 +256,7 @@ impl PsbtState {
         txids.sort();
         txids.dedup();
         if txids.is_empty() {
+            self.revalidated_for = Some(digest);
             self.entangled_check = EntangledCheck::Done {
                 unresolved: Vec::new(),
             };
@@ -264,10 +264,14 @@ impl PsbtState {
         }
         let Some(tokens) = cache.connect_tokens.clone() else {
             // No Connect session: the check cannot run. Say so; the
-            // acknowledgement path stays open.
+            // acknowledgement path stays open. `revalidated_for` is left
+            // unset, so the check runs once a session arrives on this same
+            // screen instead of staying "could not check" for good.
             self.entangled_check = EntangledCheck::Done { unresolved: txids };
             return Task::none();
         };
+        // Recorded only now that the check can run.
+        self.revalidated_for = Some(digest);
         let generation = next_check_generation();
         self.entangled_check = EntangledCheck::InFlight {
             generation,
@@ -2398,9 +2402,10 @@ fn merge_signatures(psbt: &mut Psbt, signed_psbt: &Psbt) {
 /// carries `partial_sigs` and the proprietary unified records across and
 /// **refuses**, leaving `psbt` untouched, a conflicting signature for a key,
 /// a key that would end up with both a unified and a legacy signature, or a
-/// PSBT for another transaction, or a signature that does not verify. Mirrors
-/// the daemon's `update_spend` so the desktop never holds a PSBT the daemon
-/// would reject. (A Blake2b Vault
+/// PSBT for another transaction, or a signature that does not verify (checked
+/// on the merged result, so a signer's result need not carry prevouts).
+/// Mirrors the daemon's `update_spend` so the desktop never holds a PSBT the
+/// daemon would reject. (A Blake2b Vault
 /// is native P2WSH — Taproot is not offered on that chain — so the adapter's
 /// ECDSA-only view is the whole picture there.)
 fn merge_signatures_for_chain(
@@ -2414,18 +2419,23 @@ fn merge_signatures_for_chain(
     }
     let mut destination = UnifiedPsbt::from_psbt(psbt.clone()).map_err(|e| e.to_string())?;
     let delta = UnifiedPsbt::from_psbt(signed_psbt.clone()).map_err(|e| e.to_string())?;
+    coincube_core::psbt_unified::merge_signatures(&mut destination, &delta)
+        .map_err(|e| e.to_string())?;
     // The adapter validates representation, not validity: a signer result
     // carrying a signature that does not verify (wrong digest, ANYONECANPAY)
-    // is refused here, before it enters the in-memory PSBT — the daemon would
-    // refuse to store it, and a later correct signature for the same key
-    // would then read as a conflict.
+    // must not enter the in-memory PSBT — the daemon would refuse to store
+    // it, and a later correct signature for the same key would then read as
+    // a conflict. Verified on the **merged** PSBT, as the daemon verifies the
+    // whole PSBT it is handed: the destination carries the prevouts and
+    // witness scripts verification needs, whereas a signer's result (a device
+    // returning only its signatures, or a Keychain's return over the API
+    // rail, whose contents this repository does not control) need not. `psbt`
+    // is assigned only after the merged result verifies.
     coincube_core::unified_finalize::verify_all_signatures(
-        &delta,
+        &destination,
         &secp256k1::Secp256k1::verification_only(),
     )
     .map_err(|e| e.to_string())?;
-    coincube_core::psbt_unified::merge_signatures(&mut destination, &delta)
-        .map_err(|e| e.to_string())?;
     *psbt = destination.psbt().clone();
     Ok(())
 }
@@ -3528,6 +3538,9 @@ mod tests {
                 .unwrap();
             let mut unverifiable = f.psbt.clone();
             unverifiable.inputs[0].partial_sigs.insert(key_a, sig_b);
+            // Against a destination that already holds A's valid signature it
+            // is a conflict (the merge runs first; the merged result is what
+            // is verified)…
             let mut destination = stored.clone();
             let err = merge_signatures_for_chain(
                 ChainId::BitcoinBlake2b,
@@ -3535,8 +3548,17 @@ mod tests {
                 &unverifiable,
             )
             .unwrap_err();
-            assert!(err.contains("does not verify"), "{}", err);
+            assert!(err.to_lowercase().contains("conflict"), "{}", err);
             assert_eq!(destination.serialize(), stored_bytes);
+            // …and against an unsigned destination it is refused because the
+            // merged result does not verify — nothing enters.
+            let mut unsigned = f.psbt.clone();
+            let unsigned_bytes = unsigned.serialize();
+            let err =
+                merge_signatures_for_chain(ChainId::BitcoinBlake2b, &mut unsigned, &unverifiable)
+                    .unwrap_err();
+            assert!(err.contains("does not verify"), "{}", err);
+            assert_eq!(unsigned.serialize(), unsigned_bytes);
             {
                 use coincube_core::miniscript::bitcoin::{
                     bip32::DerivationPath, hashes::Hash, sighash::SighashCache,
@@ -3659,6 +3681,114 @@ mod tests {
             )
             .unwrap();
             assert_eq!(destination.inputs[0].partial_sigs.len(), 2);
+
+            // The merged *candidate* is what is verified, not each side alone:
+            // a destination whose input asks for `SIGHASH_ALL` plus a
+            // signer's unified record is a PSBT the verifier refuses
+            // (`IncompatibleSighash`), so the merge is refused and the
+            // destination untouched — never a PSBT the daemon would reject.
+            let mut asks_all = f.psbt.clone();
+            asks_all.inputs[0].sighash_type =
+                Some(coincube_core::miniscript::bitcoin::psbt::PsbtSighashType::from_u32(0x01));
+            let asks_all_bytes = asks_all.serialize();
+            let incoming_unified = unified(&f.psbt, &f.signers[0]);
+            assert!(coincube_core::unified_finalize::verify_all_signatures(
+                &UnifiedPsbt::from_psbt(incoming_unified.clone()).unwrap(),
+                &secp256k1::Secp256k1::verification_only()
+            )
+            .is_ok());
+            let err = merge_signatures_for_chain(
+                ChainId::BitcoinBlake2b,
+                &mut asks_all,
+                &incoming_unified,
+            )
+            .unwrap_err();
+            assert!(err.contains("sighash"), "{}", err);
+            assert_eq!(asks_all.serialize(), asks_all_bytes);
+
+            // A signer's result that carries **no prevout data at all** — a
+            // device returning only its signatures, or a sparse return over
+            // the Keychain API rail — still merges: verification runs on the merged
+            // destination, which always carries the prevouts and witness
+            // scripts, never on the delta.
+            let mut bare = legacy(&f.psbt, &f.signers[0]);
+            bare.inputs[0].non_witness_utxo = None;
+            bare.inputs[0].witness_utxo = None;
+            bare.inputs[0].witness_script = None;
+            bare.inputs[0].bip32_derivation.clear();
+            assert!(
+                coincube_core::unified_finalize::verify_all_signatures(
+                    &UnifiedPsbt::from_psbt(bare.clone()).unwrap(),
+                    &secp256k1::Secp256k1::verification_only()
+                )
+                .is_err(),
+                "on its own the delta cannot be verified"
+            );
+            let mut full = f.psbt.clone();
+            merge_signatures_for_chain(ChainId::BitcoinBlake2b, &mut full, &bare).unwrap();
+            assert_eq!(full.inputs[0].partial_sigs.len(), 1);
+            assert!(full.inputs[0].non_witness_utxo.is_some());
+            // …and a bare delta with a *bad* signature is still refused,
+            // through the merged result.
+            let mut bare_bad = bare.clone();
+            let (bad_key, bad_sig) = {
+                let other_signed = legacy(&other_tx, &f.signers[0]);
+                other_signed.inputs[0]
+                    .partial_sigs
+                    .iter()
+                    .map(|(k, v)| (*k, *v))
+                    .next()
+                    .unwrap()
+            };
+            bare_bad.inputs[0].partial_sigs.clear();
+            bare_bad.inputs[0].partial_sigs.insert(bad_key, bad_sig);
+            let mut untouched = f.psbt.clone();
+            let untouched_bytes = untouched.serialize();
+            let err =
+                merge_signatures_for_chain(ChainId::BitcoinBlake2b, &mut untouched, &bare_bad)
+                    .unwrap_err();
+            assert!(err.contains("does not verify"), "{}", err);
+            assert_eq!(untouched.serialize(), untouched_bytes);
+
+            // Taproot signature data in a signer's result never enters the
+            // destination: the adapter merge carries signatures only, so the
+            // merged (verified) PSBT has none — the dispatch guard is the
+            // door that refuses such a PSBT before a signer sees it, and the
+            // daemon's boundary refuses one handed to it directly.
+            let mut with_tap = legacy(&f.psbt, &f.signers[1]);
+            let tap_secp = secp256k1::Secp256k1::new();
+            let tap_keypair = secp256k1::Keypair::from_secret_key(
+                &tap_secp,
+                &secp256k1::SecretKey::from_slice(&[5u8; 32]).unwrap(),
+            );
+            with_tap.inputs[0].tap_key_sig =
+                Some(coincube_core::miniscript::bitcoin::taproot::Signature {
+                    signature: tap_secp.sign_schnorr_no_aux_rand(
+                        &secp256k1::Message::from_digest([4u8; 32]),
+                        &tap_keypair,
+                    ),
+                    sighash_type:
+                        coincube_core::miniscript::bitcoin::TapSighashType::AllPlusAnyoneCanPay,
+                });
+            let mut plain = f.psbt.clone();
+            merge_signatures_for_chain(ChainId::BitcoinBlake2b, &mut plain, &with_tap).unwrap();
+            assert_eq!(plain.inputs[0].partial_sigs.len(), 1);
+            assert!(plain.inputs[0].tap_key_sig.is_none());
+            assert!(plain.inputs[0].tap_script_sigs.is_empty());
+            // Handed to the verifier as a whole, the same PSBT is refused.
+            assert!(matches!(
+                coincube_core::unified_finalize::verify_all_signatures(
+                    &UnifiedPsbt::from_psbt(with_tap).unwrap(),
+                    &secp256k1::Secp256k1::verification_only()
+                ),
+                Err(
+                    coincube_core::unified_finalize::UnifiedFinalizeError::Signing(
+                        coincube_core::unified_signing::UnifiedSigningError::TaprootSignatureData {
+                            input: 0
+                        }
+                    )
+                )
+            ));
         }
 
         // Gandalf's probes from the review of 15a26267 (WORK_LOGS/LAUNCH_GA/

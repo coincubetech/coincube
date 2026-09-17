@@ -4449,10 +4449,14 @@ impl App {
                 // The spend screen's own re-check of a replayable spend's
                 // inputs. Only **terminal positives** are cached here, before
                 // the generation is known: a stale reply's `Entangled` is
-                // still true. A negative is not — an answer obtained at T0
-                // must not be re-stamped as obtained now — so negatives are
-                // recorded only once the panel has accepted the reply for
-                // its current generation (`Message::EntanglementAnswered`).
+                // still true. A negative is recorded only once the panel has
+                // accepted the reply for its current generation
+                // (`Message::EntanglementAnswered`), so a stale *screen* reply
+                // never re-stamps a negative's resolve instant. The
+                // sync-driven batches (`EntangledLookups` above) still stamp
+                // at processing time and can re-stamp an older negative after
+                // a newer screen answer — #395 carries the observation-time
+                // fix for both paths.
                 let now = std::time::Instant::now();
                 let changed = answers
                     .iter()

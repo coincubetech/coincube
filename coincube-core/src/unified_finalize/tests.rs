@@ -882,6 +882,59 @@ fn verify_all_signatures_refuses_what_the_adapter_alone_would_store() {
     ));
 }
 
+/// Taproot signature data on a P2WSH input is refused by the verifier the
+/// boundaries share — not ignored and finalised around — for both shapes and
+/// whatever its sighash says. The adapter alone still accepts it (it is a
+/// representation-preserving type for ordinary PSBTs, pinned by B1.1's
+/// `ordinary_psbt_without_unified_signatures_is_byte_content_preserving`).
+#[test]
+fn taproot_signature_data_on_a_p2wsh_input_is_refused_by_the_verifier() {
+    use miniscript::bitcoin::{taproot, ScriptBuf, TapLeafHash, TapSighashType, XOnlyPublicKey};
+    let secp = secp();
+    let fixture = fixture(1);
+    let good = add_legacy(
+        &add_legacy(&fixture.psbt, &fixture.signers[0], &secp),
+        &fixture.signers[1],
+        &secp,
+    );
+    assert!(finalize_p2wsh_all_unified(&good, &secp).is_ok());
+    let secret = secp256k1::SecretKey::from_slice(&[5u8; 32]).unwrap();
+    let keypair = secp256k1::Keypair::from_secret_key(&secp, &secret);
+    let (xonly, _) = XOnlyPublicKey::from_keypair(&keypair);
+    for sighash in [TapSighashType::All, TapSighashType::AllPlusAnyoneCanPay] {
+        let signature = taproot::Signature {
+            signature: secp
+                .sign_schnorr_no_aux_rand(&secp256k1::Message::from_digest([4u8; 32]), &keypair),
+            sighash_type: sighash,
+        };
+        let mut key_path = good.clone();
+        key_path.psbt_mut().inputs[0].tap_key_sig = Some(signature);
+        let mut script_path = good.clone();
+        script_path.psbt_mut().inputs[0].tap_script_sigs.insert(
+            (
+                xonly,
+                TapLeafHash::from_script(&ScriptBuf::new(), taproot::LeafVersion::TapScript),
+            ),
+            signature,
+        );
+        for bad in [key_path, script_path] {
+            assert!(UnifiedPsbt::from_psbt(bad.psbt().clone()).is_ok());
+            assert!(matches!(
+                verify_all_signatures(&bad, &secp),
+                Err(UnifiedFinalizeError::Signing(
+                    UnifiedSigningError::TaprootSignatureData { input: 0 }
+                ))
+            ));
+            assert!(matches!(
+                finalize_p2wsh_all_unified(&bad, &secp),
+                Err(UnifiedFinalizeError::Signing(
+                    UnifiedSigningError::TaprootSignatureData { input: 0 }
+                ))
+            ));
+        }
+    }
+}
+
 /// BIP-68: a CSV leaf is only enforced for transaction version ≥ 2. The bare
 /// `Sequence` satisfier does not know the version, so without the guard the
 /// finaliser would assemble a recovery witness for a version-1 transaction

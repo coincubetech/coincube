@@ -94,21 +94,23 @@ fn replay_status_view<'a>(pill: &ReplayPill<'a>) -> Element<'a, Message> {
         if pill.checking {
             column = column.push(p2_regular(replay::CHECKING_COPY).style(theme::text::secondary));
         } else if !pill.unresolved.is_empty() {
+            let (noun, verb) = if pill.unresolved.len() == 1 {
+                ("input", "exists")
+            } else {
+                ("inputs", "exist")
+            };
             column = column.push(
                 p2_regular(format!(
-                    "Could not check whether {} {} also on Bitcoin (Connect did not answer). \
+                    "Could not check whether {} {} {} also on Bitcoin (Connect did not answer). \
                      You can still send after acknowledging below; the check is retried after \
                      the next sync.",
-                    if pill.unresolved.len() == 1 {
-                        "input"
-                    } else {
-                        "inputs"
-                    },
+                    noun,
                     pill.unresolved
                         .iter()
-                        .map(|i| format!("{i} exists"))
+                        .map(|i| i.to_string())
                         .collect::<Vec<_>>()
-                        .join(", ")
+                        .join(", "),
+                    verb
                 ))
                 .style(theme::text::warning),
             );

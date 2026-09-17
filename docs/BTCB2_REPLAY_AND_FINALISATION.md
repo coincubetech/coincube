@@ -54,8 +54,10 @@ node about *which* signatures go into the witness — the next section.
    but it matches the module's refuse-rather-than-broadcast posture, and the
    adapter already refuses to *store* an ambiguous or conflicting record, so
    an unusable legacy record should not be reachable through Coincube's own
-   flow. A Bitcoin-path spend with an invalid legacy signature strands in
-   `finalize_mut` the same way.)
+   flow. On the Bitcoin path `finalize_mut` checks only the signatures it
+   selects for the witness, so an invalid legacy signature strands a spend
+   there when it is one the satisfaction needs; an unused invalid entry can be
+   ignored there, whereas here it is refused.)
 2. Per input, unified signatures are offered to the miniscript satisfier
    alone. Only if the script cannot be satisfied from those are the verified
    legacy signatures added, and only for keys with **no** unified record (a
@@ -96,14 +98,31 @@ validity: a signature made for another transaction passes it, and once stored
 would be refused by every later merge as a conflict against its correct
 replacement — a spend that cannot be completed through the API that wrote
 it. (A legacy `ANYONECANPAY` *flag* is a representation rule, refused by the
-adapter itself.) Unsigned and partially signed spends pass — a daemon-created
-spend carries the authenticated prevout, P2WSH prevout and committing witness
-script the verifier needs on every input, pinned by a regression. Then it
-merges signatures with the prior copy on
+adapter itself; Taproot signature data on a P2WSH input is refused by the
+shared verifier, key-path and script-path, whatever its sighash.) Unsigned and
+partially signed spends pass — `update_spend` backfills `non_witness_utxo`
+from the wallet before verifying (the public `updatespend` contract never
+required it), and stores the backfilled, verified PSBT: **the value verified
+is the value stored**. Storing the incoming bytes would also be sound — the
+backfilled data is additive and bound to what the PSBT already commits to, so
+the digest is the same — but the desktop's merge verifies the *merged* PSBT
+against the row it read back, so the stored row carries the prevouts that
+verification needs. The compatibility criterion, Blake2b-only (the other
+chains return before any of this): a Blake2b PSBT whose signatures all verify
+and whose previous transactions the wallet holds is accepted whether or not
+the incoming bytes carried `non_witness_utxo`; when the wallet cannot supply
+one, the refusal is the named `SpendMissingPreviousTransaction`, not a
+verification error. All three shapes are pinned, as is the daemon-created
+spend, which carries the authenticated prevout, P2WSH prevout and committing
+witness script on every input. Then it merges signatures with the prior copy on
 Bitcoin (last write wins on a key, as before) and, on BTCB2, runs the adapter
 merge **against the stored PSBT as it is** — never after the copy, which would have overwritten a
 stored signature before the adapter could compare it — refusing conflicting
-or ambiguous encodings with nothing stored on refusal; `broadcast_spend` uses
+or ambiguous encodings with nothing stored on refusal, and **verifying the
+merged candidate as a whole** before it is stored: the adapter merge keeps the
+stored request field, so a stored `SIGHASH_ALL` request plus an incoming
+unified record is a PSBT the verifier refuses (`IncompatibleSighash`), refused
+atomically rather than stored or reconciled; `broadcast_spend` uses
 `finalize_mut` on Bitcoin and the core finaliser on BTCB2, logging each
 input's report. Stored PSBTs round-trip the proprietary records unchanged.
 
@@ -125,11 +144,25 @@ input's report. Stored PSBTs round-trip the proprietary records unchanged.
   sighash byte) — so no device or phone is prompted for a signature that would
   be thrown away. `Wallet::chain` is set by both wallet constructors, the
   local loader and the remote-backend path, from `CubeSettings::network`. Merges go through
-  the adapter against the destination as it is, and every signature in a
-  signer's result is cryptographically verified (`verify_all_signatures`)
-  before it enters the in-memory PSBT, so the desktop never holds a PSBT the
-  daemon would reject and a conflicting or invalid signature never overwrites
-  a stored one. The Keychain flow's "who still has to sign" classification uses
+  the adapter against the destination as it is, and the **merged result** is
+  cryptographically verified (`verify_all_signatures`) before it replaces the
+  in-memory PSBT — the merged PSBT, as the daemon verifies the whole PSBT it
+  is handed, because a signer's result need not carry the prevouts
+  verification needs — so the desktop never holds a PSBT the daemon would
+  reject and a conflicting or invalid signature never overwrites a stored one.
+  The merge destination is therefore always the local, authenticated PSBT:
+  the Keychain API rail (`keychain_sign.rs`, `on_session_fetched`) seeds its
+  accumulator from a clone of `tx.psbt` and merges every returned blob into
+  that clone — the first included, so the adapter's transaction check binds
+  every return to the request, not only the last — and assigns `tx.psbt` only
+  once all of them merged; a refusal on any blob leaves `tx.psbt` untouched
+  and schedules nothing for persistence. (The LAN rail never reaches this
+  merge: `phone_signer` authenticates prevouts from the original request.)
+  On the Bitcoin family the accumulator change is outcome-preserving — the
+  historical copy applied in submission order, last write wins on a key —
+  and pinned byte-for-byte against the former composition. A signer result's
+  Taproot fields never enter: the adapter merge carries signatures only, and
+  the dispatch guard refuses such a PSBT before any signer sees it. The Keychain flow's "who still has to sign" classification uses
   the same chain-keyed analysis, so a collected unified signature is not asked
   for again.
 - **Status** (`state/vault/replay.rs`): four states derived from the
