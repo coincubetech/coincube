@@ -237,6 +237,11 @@ pub enum Message {
     /// spend is ignored.
     EntangledRevalidated {
         spend: coincube_core::miniscript::bitcoin::Txid,
+        /// The check generation this reply answers
+        /// (`PsbtState::entangled_check`): process-wide monotonic, so a
+        /// reply for an earlier generation — an older screen instance, or
+        /// an earlier signature set — can never clear the current claim.
+        generation: u64,
         answers: Vec<(
             coincube_core::miniscript::bitcoin::Txid,
             crate::services::entangled::Entanglement,

@@ -146,7 +146,17 @@ input's report. Stored PSBTs round-trip the proprietary records unchanged.
   is disabled and says it is checking meanwhile (the gate stays a pure function
   of cache state plus the in-flight flag); *Entangled* back closes the gate,
   *Unknown* back leaves the acknowledgement path open with copy saying the
-  check could not complete, a *Protected* spend checks nothing.
+  check could not complete, a *Protected* spend checks nothing. Each check
+  carries a process-wide generation token; a reply is accepted only for the
+  generation currently in flight, so a reply from an earlier instance of the
+  screen or from before a signature was added never clears the current claim
+  (its positive still lands in the cache — *Entangled* is terminal), and a
+  reply is applied before any new check is kicked. **The gate holds at final
+  dispatch too:** Confirm in the Broadcast dialog re-runs `broadcast_ready`
+  against the current cache, the dialog is never opened unready, and a dialog
+  open on a spend that stops being ready (a lookup landed, a re-check started,
+  a signature changed) is closed back to the spend screen with the reason —
+  no path reaches `broadcast_spend_tx` ungated.
 - **Creation** (installer descriptor editor): on BTCB2 a complete path with no
   replay-capable key gets a non-blocking notice ("spends from this path can be
   replayed onto Bitcoin unless the coins were split first"). Devices stay

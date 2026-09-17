@@ -420,6 +420,33 @@ pub fn broadcast_ready(
     }
 }
 
+/// Shown while the spend screen's entanglement re-check is in flight.
+pub const CHECKING_COPY: &str =
+    "Checking whether these coins also exist on Bitcoin before this can be sent…";
+
+/// Why a spend that looked ready is not — for the toast shown when the
+/// Broadcast dialog is closed under the user because the gate moved (a
+/// lookup landed, a re-check started, a signature changed). Composed only
+/// from the copy the spend screen already shows.
+pub fn not_ready_reason(
+    review: &ReplayReview,
+    entangled: &[(usize, Entanglement)],
+    checking: bool,
+) -> String {
+    if checking {
+        return CHECKING_COPY.to_string();
+    }
+    let blocked = blocked_entangled_inputs(&review.status, entangled);
+    if let Some(required) = blocked_entangled_copy(&blocked) {
+        return required;
+    }
+    let (label, _) = pill_copy(&review.status, entangled);
+    if review.status.needs_acknowledgement() && !review.acknowledged() {
+        return format!("{label}. Tick \"{REPLAYABLE_ACKNOWLEDGEMENT}\" to send.");
+    }
+    label
+}
+
 /// The remedy line shown under the pill when [`blocked_entangled_inputs`] is
 /// non-empty: what is true in this build (a replay-capable signature — the
 /// Cube key or a Border Wallet key), and that splitting first is not yet

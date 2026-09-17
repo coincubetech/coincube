@@ -150,8 +150,11 @@ pub enum EntangledCheck {
     /// started for the current signatures.
     Idle,
     /// These deposits are being asked about right now; Broadcast is disabled
-    /// and says so until the answer lands.
-    InFlight(Vec<Txid>),
+    /// and says so until the answer lands. `generation` is the process-wide
+    /// token the reply must carry to be accepted: a reply for an older
+    /// generation — from an earlier instance of this screen, or from before
+    /// a signature was added — never clears the current claim.
+    InFlight { generation: u64, txids: Vec<Txid> },
     /// The re-check finished. `unresolved` are the deposits it could not get
     /// an answer for (Connect unreachable, no session, …): the acknowledgement
     /// path stays open and the copy says the check could not complete —
@@ -162,8 +165,17 @@ pub enum EntangledCheck {
 
 impl EntangledCheck {
     pub fn in_flight(&self) -> bool {
-        matches!(self, Self::InFlight(_))
+        matches!(self, Self::InFlight { .. })
     }
+}
+
+/// Process-wide generation counter for [`EntangledCheck::InFlight`]. Global
+/// rather than per screen so two instances of the same spend screen (close
+/// and reopen) never hand out the same token.
+static NEXT_CHECK_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn next_check_generation() -> u64 {
+    NEXT_CHECK_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 impl PsbtState {
@@ -256,7 +268,11 @@ impl PsbtState {
             self.entangled_check = EntangledCheck::Done { unresolved: txids };
             return Task::none();
         };
-        self.entangled_check = EntangledCheck::InFlight(txids.clone());
+        let generation = next_check_generation();
+        self.entangled_check = EntangledCheck::InFlight {
+            generation,
+            txids: txids.clone(),
+        };
         let chain = self.wallet.chain;
         let spend = self.tx.psbt.unsigned_tx.compute_txid();
         Task::perform(
@@ -266,8 +282,69 @@ impl PsbtState {
                 client.set_token(&access_token);
                 crate::services::entangled::lookup_all(client, chain, txids).await
             },
-            move |answers| Message::EntangledRevalidated { spend, answers },
+            move |answers| Message::EntangledRevalidated {
+                spend,
+                generation,
+                answers,
+            },
         )
+    }
+
+    /// Apply a re-check reply: only if it answers the generation currently in
+    /// flight for this spend. Anything else is stale — an older screen
+    /// instance, or an earlier signature set — and is ignored here (the app
+    /// has already cached whatever it resolved).
+    fn apply_entangled_reply(
+        &mut self,
+        spend: Txid,
+        generation: u64,
+        answers: &[(Txid, crate::services::entangled::Entanglement)],
+    ) {
+        let current = match &self.entangled_check {
+            EntangledCheck::InFlight { generation, .. } => *generation,
+            _ => return,
+        };
+        if generation != current || spend != self.tx.psbt.unsigned_tx.compute_txid() {
+            return;
+        }
+        let unresolved = answers
+            .iter()
+            .filter(|(_, answer)| !answer.is_resolved())
+            .map(|(txid, _)| *txid)
+            .collect();
+        self.entangled_check = EntangledCheck::Done { unresolved };
+    }
+
+    /// The Broadcast dialog is open on a spend that is no longer ready — a
+    /// lookup landed, a re-check started, a signature changed since the
+    /// gated click that opened it. Close it back to the spend screen, where
+    /// the pill names the reason, and say why. No path dispatches
+    /// `broadcast_spend_tx` ungated: [`Self::update_inner`] intercepts Confirm
+    /// with the same check, and the dialog is never opened unready.
+    fn close_broadcast_dialog_if_not_ready(&mut self, cache: &Cache) -> Task<Message> {
+        let awaiting = matches!(
+            &self.modal,
+            Some(PsbtModal::Broadcast(dialog)) if dialog.awaiting_confirmation()
+        );
+        if !awaiting || self.broadcast_ready(cache) {
+            return Task::none();
+        }
+        self.modal = None;
+        match self.not_ready_reason(cache) {
+            Some(reason) => Task::done(Message::View(view::Message::ShowError(reason))),
+            None => Task::none(),
+        }
+    }
+
+    /// Why this spend is not ready, in the copy the spend screen already
+    /// shows. `None` on a Bitcoin-family Cube.
+    fn not_ready_reason(&self, cache: &Cache) -> Option<String> {
+        let review = self.replay.as_ref()?;
+        Some(replay::not_ready_reason(
+            review,
+            &self.entangled_inputs(cache),
+            self.entangled_check.in_flight(),
+        ))
     }
 
     /// Inputs (by index) whose re-check could not get an answer, for the
@@ -415,25 +492,29 @@ impl PsbtState {
         cache: &Cache,
         message: Message,
     ) -> Task<Message> {
+        // Order matters: the message is applied **before** any new re-check
+        // is kicked, so a pass can never start a check and then resolve it
+        // with an older answer. A reply is accepted only for the generation
+        // currently in flight ([`Self::apply_entangled_reply`]).
+        let task = match message {
+            Message::EntangledRevalidated {
+                spend,
+                generation,
+                ref answers,
+            } => {
+                self.apply_entangled_reply(spend, generation, answers);
+                Task::none()
+            }
+            message => self.update_inner(daemon, cache, message),
+        };
         // Entering the screen: the first message through here starts the
         // entanglement re-check of a replayable spend (once per signature
-        // set; a no-op otherwise), batched with whatever the message does.
+        // set; a no-op otherwise).
         let recheck = self.revalidate_entanglement(cache);
-        if let Message::EntangledRevalidated { spend, answers } = &message {
-            // A reply for another spend (the screen moved on) is ignored;
-            // the app already cached whatever it resolved.
-            if *spend == self.tx.psbt.unsigned_tx.compute_txid() {
-                let unresolved = answers
-                    .iter()
-                    .filter(|(_, answer)| !answer.is_resolved())
-                    .map(|(txid, _)| *txid)
-                    .collect();
-                self.entangled_check = EntangledCheck::Done { unresolved };
-            }
-            return recheck;
-        }
-        let task = self.update_inner(daemon, cache, message);
-        Task::batch([recheck, task])
+        // And whatever just happened, a Broadcast dialog open on a spend that
+        // is no longer ready comes down with the reason.
+        let dialog = self.close_broadcast_dialog_if_not_ready(cache);
+        Task::batch([task, recheck, dialog])
     }
 
     fn update_inner(
@@ -711,6 +792,18 @@ impl PsbtState {
             }
             Message::BroadcastModal(res) => match res {
                 Ok(conflicting_txids) => {
+                    // The click that asked for this dialog was gated, but the
+                    // `list_coins` round trip is a window: a lookup landing in
+                    // it must not open a dialog whose Confirm the gate would
+                    // then refuse. Re-check now, and say why if it moved.
+                    if !self.broadcast_ready(cache) {
+                        return match self.not_ready_reason(cache) {
+                            Some(reason) => {
+                                Task::done(Message::View(view::Message::ShowError(reason)))
+                            }
+                            None => Task::none(),
+                        };
+                    }
                     use coincube_ui::component::amount::DisplayAmount;
                     let is_self_transfer = self.tx.is_send_to_self();
                     // For a self-transfer every output is change, so `spend_amount`
@@ -789,6 +882,21 @@ impl PsbtState {
                 )
                 .expect("already check in psbt import logic");
                 self.refresh_replay();
+            }
+            // Final dispatch is gated on the **current** cache, not on the
+            // click that opened the dialog: a lookup that lands, a re-check
+            // that starts or a signature that changes in between must not be
+            // able to reach `broadcast_spend_tx`. Same gate as the Broadcast
+            // arm above; on refusal the dialog closes and the reason is shown.
+            Message::View(view::Message::Spend(view::SpendTxMessage::Confirm))
+                if matches!(self.modal, Some(PsbtModal::Broadcast(_))) =>
+            {
+                if !self.broadcast_ready(cache) {
+                    return self.close_broadcast_dialog_if_not_ready(cache);
+                }
+                if let Some(modal) = self.modal.as_mut() {
+                    return modal.as_mut().update(daemon.clone(), message, &mut self.tx);
+                }
             }
             _ => {
                 if let Some(modal) = self.modal.as_mut() {
@@ -919,6 +1027,15 @@ pub struct BroadcastModal {
     network: Network,
     bitcoin_unit: coincube_ui::component::amount::BitcoinDisplayUnit,
     theme_mode: coincube_ui::theme::palette::ThemeMode,
+}
+
+impl BroadcastModal {
+    /// The dialog is waiting for the user's Confirm: nothing dispatched yet,
+    /// nothing succeeded. Only then does the readiness gate apply to it — a
+    /// broadcast in flight or done is past the point the gate protects.
+    pub fn awaiting_confirmation(&self) -> bool {
+        !self.broadcasting && !self.broadcast
+    }
 }
 
 impl Modal for BroadcastModal {
@@ -3280,6 +3397,14 @@ mod tests {
         use std::path::PathBuf;
         use std::str::FromStr;
 
+        /// The generation of the re-check currently in flight, or a panic.
+        fn in_flight_generation(state: &PsbtState) -> u64 {
+            match &state.entangled_check {
+                EntangledCheck::InFlight { generation, .. } => *generation,
+                other => panic!("no re-check in flight: {:?}", other),
+            }
+        }
+
         fn wallet_with_hot_signer(
             f: &crate::app::state::vault::test_support::unified::Fixture,
         ) -> Arc<Wallet> {
@@ -3861,7 +3986,9 @@ mod tests {
             };
             let mut state = new_state(&legacy_only);
             let _ = state.update(daemon.clone(), &session, ack());
-            assert_eq!(state.entangled_check, EntangledCheck::InFlight(vec![txid]));
+            assert!(
+                matches!(&state.entangled_check, EntangledCheck::InFlight { txids, .. } if *txids == vec![txid])
+            );
             assert!(state.replay.as_ref().unwrap().acknowledged());
             assert!(!state.broadcast_ready(&session));
             let pill = state.replay_presentation(&session).unwrap();
@@ -3869,9 +3996,13 @@ mod tests {
             assert!(!pill.broadcast_ready);
             // Once per signature set: another message does not restart it.
             let _ = state.update(daemon.clone(), &session, ack());
-            assert_eq!(state.entangled_check, EntangledCheck::InFlight(vec![txid]));
+            assert!(
+                matches!(&state.entangled_check, EntangledCheck::InFlight { txids, .. } if *txids == vec![txid])
+            );
 
-            // A reply for another spend is ignored.
+            // A reply for another spend is ignored, even with the right
+            // generation.
+            let generation = in_flight_generation(&state);
             let _ = state.update(
                 daemon.clone(),
                 &session,
@@ -3880,10 +4011,13 @@ mod tests {
                         "0000000000000000000000000000000000000000000000000000000000000001",
                     )
                     .unwrap(),
+                    generation,
                     answers: vec![(txid, Entanglement::Entangled)],
                 },
             );
-            assert_eq!(state.entangled_check, EntangledCheck::InFlight(vec![txid]));
+            assert!(
+                matches!(&state.entangled_check, EntangledCheck::InFlight { txids, .. } if *txids == vec![txid])
+            );
 
             // `Entangled` comes back (the app has cached it before routing):
             // the requirement gate closes, no acknowledgement helps.
@@ -3897,6 +4031,7 @@ mod tests {
                 &entangled,
                 Message::EntangledRevalidated {
                     spend,
+                    generation,
                     answers: vec![(txid, Entanglement::Entangled)],
                 },
             );
@@ -3911,11 +4046,13 @@ mod tests {
             // check could not complete.
             let mut state = new_state(&legacy_only);
             let _ = state.update(daemon.clone(), &session, ack());
+            let generation = in_flight_generation(&state);
             let _ = state.update(
                 daemon.clone(),
                 &session,
                 Message::EntangledRevalidated {
                     spend,
+                    generation,
                     answers: vec![(txid, Entanglement::Unknown)],
                 },
             );
@@ -3935,7 +4072,9 @@ mod tests {
             // tick from the previous set is gone.
             state.tx.psbt = legacy(&legacy_only, &f.signers[2]);
             let _ = state.reconcile_and_maybe_close(&session);
-            assert_eq!(state.entangled_check, EntangledCheck::InFlight(vec![txid]));
+            assert!(
+                matches!(&state.entangled_check, EntangledCheck::InFlight { txids, .. } if *txids == vec![txid])
+            );
             assert!(!state.replay.as_ref().unwrap().acknowledged());
 
             // A protected spend checks nothing.
@@ -3944,6 +4083,285 @@ mod tests {
             let _ = state.update(daemon.clone(), &session, ack());
             assert_eq!(state.entangled_check, EntangledCheck::Idle);
             assert!(state.broadcast_ready(&session));
+        }
+
+        /// Drive a task to completion, collecting the messages it emits. A
+        /// `broadcast_spend_tx` against the empty mock daemon would panic the
+        /// mock's thread and this future ("Mock Daemon must have all requests
+        /// mocked"), so a completed drive is the proof that no RPC was made.
+        async fn drive(task: Task<Message>) -> Vec<Message> {
+            use iced::futures::StreamExt;
+            use iced_runtime::{task::into_stream, Action};
+            let mut out = Vec::new();
+            if let Some(mut stream) = into_stream(task) {
+                while let Some(action) = stream.next().await {
+                    if let Action::Output(message) = action {
+                        out.push(message);
+                    }
+                }
+            }
+            out
+        }
+
+        fn shows_error(messages: &[Message], needle: &str) -> bool {
+            messages.iter().any(|m| {
+                matches!(m, Message::View(view::Message::ShowError(text)) if text.contains(needle))
+            })
+        }
+
+        /// Final Confirm is gated on the **current** cache (`#276` I13): a
+        /// positive lookup landing after the Broadcast dialog was created, or
+        /// between the gated click and the dialog's creation, or a re-check in
+        /// flight, means Confirm dispatches nothing — the dialog closes and the
+        /// reason is on screen. The empty mock daemon turns any dispatch into a
+        /// panic, so the drive completing is the zero-call assertion.
+        #[tokio::test]
+        async fn confirm_is_gated_on_the_current_cache_in_every_ordering() {
+            use crate::services::entangled::Entanglement;
+            let f = fixture();
+            let wallet = wallet_with_hot_signer(&f);
+            let secp = secp256k1::Secp256k1::new();
+            let legacy_only = legacy(&legacy(&f.psbt, &f.signers[0]), &f.signers[1]);
+            let txid = f.psbt.unsigned_tx.input[0].previous_output.txid;
+            let daemon: Arc<dyn Daemon + Sync + Send> = Arc::new(
+                crate::daemon::client::Coincubed::new(MockDaemon::new(vec![]).run()),
+            );
+            let confirm = || Message::View(view::Message::Spend(view::SpendTxMessage::Confirm));
+            let ack = || {
+                Message::View(view::Message::Spend(
+                    view::SpendTxMessage::AcknowledgeReplay(true),
+                ))
+            };
+            let open_dialog = || Message::BroadcastModal(Ok(HashSet::new()));
+            let new_state = || {
+                PsbtState::new(
+                    wallet.clone(),
+                    SpendTx::new(
+                        None,
+                        legacy_only.clone(),
+                        Vec::new(),
+                        &f.descriptor,
+                        &secp,
+                        Network::Bitcoin,
+                    ),
+                    true,
+                )
+            };
+            // No Connect session: the re-check cannot run, the spend is
+            // acknowledgeable, and the dialog opens.
+            let unchecked = Cache::default();
+            let mut entangled = Cache::default();
+            entangled.record_entanglement(txid, Entanglement::Entangled, std::time::Instant::now());
+
+            // 1. Lookup lands *after* the dialog is created.
+            let mut state = new_state();
+            let _ = drive(state.update(daemon.clone(), &unchecked, ack())).await;
+            assert!(state.broadcast_ready(&unchecked));
+            let _ = drive(state.update(daemon.clone(), &unchecked, open_dialog())).await;
+            assert!(
+                matches!(&state.modal, Some(PsbtModal::Broadcast(d)) if d.awaiting_confirmation())
+            );
+            let out = drive(state.update(daemon.clone(), &entangled, confirm())).await;
+            assert!(
+                state.modal.is_none(),
+                "dialog closed back to the spend screen"
+            );
+            assert!(
+                shows_error(&out, "also exists on Bitcoin"),
+                "{:?}",
+                out.len()
+            );
+            assert!(!state.broadcast_ready(&entangled));
+
+            // 2. Lookup lands *before* the dialog is created (inside the
+            //    `list_coins` window): the dialog never opens.
+            let mut state = new_state();
+            let _ = drive(state.update(daemon.clone(), &unchecked, ack())).await;
+            let out = drive(state.update(daemon.clone(), &entangled, open_dialog())).await;
+            assert!(state.modal.is_none(), "an unready dialog is never opened");
+            assert!(shows_error(&out, "also exists on Bitcoin"));
+            // …and a Confirm that somehow arrives anyway dispatches nothing.
+            let _ = drive(state.update(daemon.clone(), &entangled, confirm())).await;
+            assert!(state.modal.is_none());
+
+            // 3. A re-check in flight when Confirm arrives: nothing dispatched,
+            //    the checking copy is the reason.
+            let mut state = new_state();
+            let _ = drive(state.update(daemon.clone(), &unchecked, ack())).await;
+            let _ = drive(state.update(daemon.clone(), &unchecked, open_dialog())).await;
+            assert!(matches!(&state.modal, Some(PsbtModal::Broadcast(_))));
+            state.entangled_check = EntangledCheck::InFlight {
+                generation: u64::MAX,
+                txids: vec![txid],
+            };
+            let out = drive(state.update(daemon.clone(), &unchecked, confirm())).await;
+            assert!(state.modal.is_none());
+            assert!(shows_error(&out, replay::CHECKING_COPY));
+
+            // 4. A dialog open on a spend whose acknowledgement was dropped by
+            //    a new signature (status equal, content changed) comes down on
+            //    the next message too.
+            let mut state = new_state();
+            let _ = drive(state.update(daemon.clone(), &unchecked, ack())).await;
+            let _ = drive(state.update(daemon.clone(), &unchecked, open_dialog())).await;
+            state.tx.psbt = legacy(&legacy_only, &f.signers[2]);
+            let out = drive(state.update(daemon.clone(), &unchecked, Message::Reconcile)).await;
+            assert!(state.modal.is_none());
+            assert!(shows_error(&out, replay::REPLAYABLE_ACKNOWLEDGEMENT));
+
+            // Control: a ready spend's Confirm reaches the dialog, which
+            // dispatches — the mock has no `broadcastspend` scripted, so the
+            // drive is not attempted; the dialog's own state shows the
+            // dispatch happened.
+            let mut state = new_state();
+            let _ = drive(state.update(daemon.clone(), &unchecked, ack())).await;
+            let _ = drive(state.update(daemon.clone(), &unchecked, open_dialog())).await;
+            let _task = state.update(daemon.clone(), &unchecked, confirm());
+            assert!(
+                matches!(&state.modal, Some(PsbtModal::Broadcast(d)) if !d.awaiting_confirmation())
+            );
+        }
+
+        /// A re-check reply is accepted only for the generation currently in
+        /// flight: a reply from an earlier instance of the screen, or from
+        /// before a signature was added, never clears the current claim — and
+        /// the message is applied before any new check is kicked, so a pass
+        /// cannot start a check and resolve it with an older answer. A stale
+        /// reply's positive still lands in the cache (the app does that before
+        /// routing) and closes the gate.
+        #[tokio::test]
+        async fn a_stale_recheck_reply_never_clears_the_current_claim() {
+            use crate::app::state::vault::test_support::tokens;
+            use crate::services::entangled::Entanglement;
+            let f = fixture();
+            let wallet = wallet_with_hot_signer(&f);
+            let secp = secp256k1::Secp256k1::new();
+            let legacy_only = legacy(&legacy(&f.psbt, &f.signers[0]), &f.signers[1]);
+            let txid = f.psbt.unsigned_tx.input[0].previous_output.txid;
+            let spend = f.psbt.unsigned_tx.compute_txid();
+            let daemon: Arc<dyn Daemon + Sync + Send> = Arc::new(
+                crate::daemon::client::Coincubed::new(MockDaemon::new(vec![]).run()),
+            );
+            let ack = || {
+                Message::View(view::Message::Spend(
+                    view::SpendTxMessage::AcknowledgeReplay(true),
+                ))
+            };
+            let session = Cache {
+                connect_tokens: Some(tokens()),
+                ..Cache::default()
+            };
+            let new_state = |psbt: &Psbt| {
+                PsbtState::new(
+                    wallet.clone(),
+                    SpendTx::new(
+                        None,
+                        psbt.clone(),
+                        Vec::new(),
+                        &f.descriptor,
+                        &secp,
+                        Network::Bitcoin,
+                    ),
+                    true,
+                )
+            };
+            let reply = |generation: u64, answer: Entanglement| Message::EntangledRevalidated {
+                spend,
+                generation,
+                answers: vec![(txid, answer)],
+            };
+
+            // Screen instance A starts a check and is closed with it in flight.
+            let mut a = new_state(&legacy_only);
+            let _ = a.update(daemon.clone(), &session, ack());
+            let stale = in_flight_generation(&a);
+            drop(a);
+
+            // Instance B reopens the same spend. A's reply arrives first, on a
+            // fresh state: it must not both kick B's check and resolve it.
+            let mut b = new_state(&legacy_only);
+            let _ = b.update(
+                daemon.clone(),
+                &session,
+                reply(stale, Entanglement::NotEntangled),
+            );
+            let current = in_flight_generation(&b);
+            assert_ne!(current, stale, "generations are process-wide, never reused");
+            assert!(!b.broadcast_ready(&session), "still checking");
+            // The stale reply again, now with B in flight: ignored.
+            let _ = b.update(
+                daemon.clone(),
+                &session,
+                reply(stale, Entanglement::NotEntangled),
+            );
+            assert_eq!(in_flight_generation(&b), current);
+            // B's own reply resolves it.
+            let _ = b.update(
+                daemon.clone(),
+                &session,
+                reply(current, Entanglement::NotEntangled),
+            );
+            assert_eq!(
+                b.entangled_check,
+                EntangledCheck::Done { unresolved: vec![] }
+            );
+
+            // A signature added while a reply is in flight: the new set gets a
+            // new generation; the old reply is ignored, the new one lands.
+            let mut c = new_state(&legacy_only);
+            let _ = c.update(daemon.clone(), &session, ack());
+            let first = in_flight_generation(&c);
+            c.tx.psbt = legacy(&legacy_only, &f.signers[2]);
+            let _ = c.update(daemon.clone(), &session, Message::Reconcile);
+            let second = in_flight_generation(&c);
+            assert_ne!(second, first);
+            let _ = c.update(
+                daemon.clone(),
+                &session,
+                reply(first, Entanglement::Unknown),
+            );
+            assert_eq!(in_flight_generation(&c), second, "stale reply ignored");
+            let _ = c.update(
+                daemon.clone(),
+                &session,
+                reply(second, Entanglement::Unknown),
+            );
+            assert_eq!(
+                c.entangled_check,
+                EntangledCheck::Done {
+                    unresolved: vec![txid]
+                }
+            );
+
+            // A stale reply carrying `Entangled`: the claim is untouched, but
+            // the answer is in the cache (as the app records it before
+            // routing) and the gate is closed by it.
+            let mut d = new_state(&legacy_only);
+            let _ = d.update(daemon.clone(), &session, ack());
+            let live = in_flight_generation(&d);
+            let mut cached = Cache {
+                connect_tokens: Some(tokens()),
+                ..Cache::default()
+            };
+            cached.record_entanglement(txid, Entanglement::Entangled, std::time::Instant::now());
+            let _ = d.update(
+                daemon.clone(),
+                &cached,
+                reply(stale, Entanglement::Entangled),
+            );
+            assert_eq!(in_flight_generation(&d), live, "claim untouched");
+            assert!(!d.broadcast_ready(&cached));
+            let _ = d.update(
+                daemon.clone(),
+                &cached,
+                reply(live, Entanglement::Entangled),
+            );
+            assert_eq!(
+                d.entangled_check,
+                EntangledCheck::Done { unresolved: vec![] }
+            );
+            assert!(!d.broadcast_ready(&cached), "gate closed by the positive");
+            assert!(!d.replay_presentation(&cached).unwrap().broadcast_ready);
         }
 
         /// A reserved unified record ending `0xa1` reaches no device and no

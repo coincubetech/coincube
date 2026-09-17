@@ -4431,15 +4431,25 @@ impl App {
                 }
                 return Task::done(Message::CacheUpdated);
             }
-            Message::EntangledRevalidated { spend, answers } => {
+            Message::EntangledRevalidated {
+                spend,
+                generation,
+                answers,
+            } => {
                 // The spend screen's own re-check of a replayable spend's
-                // inputs: cache what resolved, then hand the message to the
-                // panel that asked so it can close its in-flight state.
+                // inputs: cache what resolved — a stale reply's positive is
+                // still true, `Entangled` being terminal — then hand the
+                // message to the panel that asked so it can close its
+                // in-flight state (only if the generation is still current).
                 let now = std::time::Instant::now();
                 let changed = answers.iter().fold(false, |changed, (txid, answer)| {
                     self.cache.record_entanglement(*txid, *answer, now) || changed
                 });
-                let routed = Message::EntangledRevalidated { spend, answers };
+                let routed = Message::EntangledRevalidated {
+                    spend,
+                    generation,
+                    answers,
+                };
                 let forwarded = match (self.daemon.clone(), self.panels.current_mut()) {
                     (Some(daemon), Some(panel)) => panel.update(Some(daemon), &self.cache, routed),
                     (None, Some(panel)) => panel.update(None, &self.cache, routed),

@@ -92,12 +92,7 @@ fn replay_status_view<'a>(pill: &ReplayPill<'a>) -> Element<'a, Message> {
         column = column.push(p2_regular(required).style(theme::text::warning));
     } else if pill.review.status.needs_acknowledgement() {
         if pill.checking {
-            column = column.push(
-                p2_regular(
-                    "Checking whether these coins also exist on Bitcoin before this can be sent…",
-                )
-                .style(theme::text::secondary),
-            );
+            column = column.push(p2_regular(replay::CHECKING_COPY).style(theme::text::secondary));
         } else if !pill.unresolved.is_empty() {
             column = column.push(
                 p2_regular(format!(
