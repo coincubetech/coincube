@@ -31,7 +31,12 @@
 #
 # The cache dir defaults to $XDG_CACHE_HOME/coincube/electrs-blake2b
 # (~/.cache/...): it must live outside this repository, or Cargo treats the
-# checkout as a member of Coincube's workspace and refuses to build it.
+# checkout as a member of Coincube's workspace and refuses to build it. The
+# build target defaults to <cache>/target and may be moved with
+# ELECTRS_BLAKE2B_TARGET_DIR, but never into the checkout: a target equal to
+# or below <cache>/src — by any spelling, relative, absolute or through a
+# symlink — is refused before anything is created, since Cargo's output there
+# would fail the clean-checkout gate above on every later run.
 #
 # ELECTRS_BLAKE2B_TEST_REPO / ELECTRS_BLAKE2B_TEST_COMMIT / ELECTRS_BLAKE2B_TEST_BRANCH
 # exist only for tests/test_btcb2_tools.py, which exercises the source checks
@@ -58,17 +63,46 @@ fi
 # would make Cargo write under "$src/<relative>/…" while the binary is looked
 # for at "<cache>/target/…" — a full build that then "produced no binary", and
 # a stray untracked tree inside the checkout that the next run's clean-tree
-# check refuses. Canonicalise both before deriving any path. (No CI path
+# check refuses. A target that resolves *inside* the checkout by any other
+# spelling (absolute, or through a symlink to it) fails the same way one build
+# later, and on a fresh cache earlier still: creating it makes $src non-empty
+# before `git clone`. So both paths are resolved to physical absolute paths
+# without creating anything, a target equal to or below the checkout is
+# refused, and only then does the script touch the filesystem. (No CI path
 # passes either: the workflow and README call the script with no argument.)
-mkdir -p "$cache_dir"
-cache_dir="$(cd "$cache_dir" && pwd -P)"
-src="$cache_dir/src"
+#
+# Physical absolute path for $1 without creating it: resolve the deepest
+# existing ancestor (`cd -P`: symlinks before `..`, as the kernel will when
+# Cargo opens the path) and re-append the missing remainder verbatim.
+physical_path() {
+  local path="$1" rest="" parent
+  while [ ! -d "$path" ]; do
+    parent="$(dirname -- "$path")"
+    if [ "$parent" = "$path" ]; then
+      echo "cannot resolve $1: no existing ancestor directory" >&2
+      return 1
+    fi
+    rest="$(basename -- "$path")${rest:+/$rest}"
+    path="$parent"
+  done
+  path="$(cd -P -- "$path" && pwd -P)"
+  path="${path%/}${rest:+/$rest}"
+  printf '%s\n' "${path:-/}"
+}
+
+cache_dir="$(physical_path "$cache_dir")"
+src="$(physical_path "$cache_dir/src")"
 if [ -n "${ELECTRS_BLAKE2B_TARGET_DIR:-}" ]; then
-  mkdir -p "$ELECTRS_BLAKE2B_TARGET_DIR"
-  target="$(cd "$ELECTRS_BLAKE2B_TARGET_DIR" && pwd -P)"
+  target="$(physical_path "$ELECTRS_BLAKE2B_TARGET_DIR")"
 else
   target="$cache_dir/target"
 fi
+case "$target" in
+  "$src"|"$src"/*)
+    echo "ELECTRS_BLAKE2B_TARGET_DIR=${ELECTRS_BLAKE2B_TARGET_DIR:-<unset>} resolves to $target, inside the source checkout $src; Cargo's output there would make the checkout dirty and every later run would refuse it. Use a directory outside the checkout (the default is $cache_dir/target). Nothing was created or removed." >&2
+    exit 2
+    ;;
+esac
 bin="$target/release/electrs"
 marker="$target/.built-$commit-v2"
 

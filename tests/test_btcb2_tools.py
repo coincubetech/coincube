@@ -13,17 +13,24 @@ is driven against a file:// release directory with a stand-in verifier that
 records its invocations. The workflow's Knots cache key is asserted to be
 bound to the verifier's inputs.
 
+`Bitcoind(extra_args=...)` (introduced for the harness) must take a sequence
+of complete argument strings and refuse a bare string instead of splitting it
+into characters.
+
 These tests need no node binaries and run wherever `pytest tests/` runs: the
 six generic Functional Tests legs (the Knots leg runs `test_knots.py` only,
 and the labelled BTCB2 workflow runs `test_btcb2_harness.py` only).
 """
 
+import hashlib
 import os
 import stat
 import subprocess
 import textwrap
 
 import pytest
+
+from test_framework.bitcoind import Bitcoind
 
 SCRIPT = os.path.join(os.path.dirname(__file__), "tools", "fetch_electrs_blake2b.sh")
 
@@ -74,9 +81,10 @@ def run_fetch(cache_dir, repo, commit, dry_run=True, cwd=None, extra_env=None):
     )
 
 
-def fake_binary(cache_dir, commit, version_line=None):
-    """A stand-in `electrs` that answers `--version` like upstream's build does."""
-    target = cache_dir / "target" / "release"
+def fake_binary(cache_dir, commit, version_line=None, target=None):
+    """A stand-in `electrs` that answers `--version` like upstream's build does,
+    under the default target or an explicit ELECTRS_BLAKE2B_TARGET_DIR."""
+    target = (target or cache_dir / "target") / "release"
     target.mkdir(parents=True, exist_ok=True)
     binary = target / "electrs"
     version_line = version_line or f"mempool-electrs 0.0.0-dev-{commit[:7]}"
@@ -91,14 +99,32 @@ def sha256_file(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def write_marker(cache_dir, commit, binary, version_line):
-    marker = cache_dir / "target" / f".built-{commit}-v2"
+def write_marker(cache_dir, commit, binary, version_line, target=None):
+    marker = (target or cache_dir / "target") / f".built-{commit}-v2"
     marker.write_text(textwrap.dedent(f"""\
             commit={commit}
             sha256={sha256_file(binary)}
             version={version_line}
             """))
     return marker
+
+
+def snapshot(root):
+    """Every entry under `root` with its kind and content digest (or link target),
+    so a refused run can be shown to have created, removed or changed nothing."""
+    out = {}
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        for name in dirnames + filenames:
+            path = os.path.join(dirpath, name)
+            rel = os.path.relpath(path, root)
+            if os.path.islink(path):
+                out[rel] = ("link", os.readlink(path))
+            elif os.path.isdir(path):
+                out[rel] = ("dir",)
+            else:
+                with open(path, "rb") as f:
+                    out[rel] = ("file", hashlib.sha256(f.read()).hexdigest())
+    return out
 
 
 def test_clean_checkout_proceeds_to_build(tmp_path, pinned_repo):
@@ -206,8 +232,147 @@ def test_electrs_relative_cache_and_target_dirs_are_canonicalised(
     )
     assert res.returncode == 0, res.stderr
     assert res.stdout.strip() == str(tmp_path / "rel-target" / "release" / "electrs")
-    assert (tmp_path / "rel-target").is_dir()
     assert not (tmp_path / "rel-cache" / "src" / "rel-target").exists()
+
+
+def _target_env(path):
+    return {"ELECTRS_BLAKE2B_TARGET_DIR": str(path)}
+
+
+def _assert_refused_inside_checkout(res):
+    assert res.returncode == 2, res.stderr
+    assert "ELECTRS_BLAKE2B_TARGET_DIR=" in res.stderr
+    assert "inside the source checkout" in res.stderr
+    assert (
+        "local changes" not in res.stderr
+    ), "refused by the guard, not as dirty source"
+    assert res.stdout.strip() == "", "no binary path may be printed"
+
+
+def test_target_dir_equal_to_source_checkout_is_refused(tmp_path, pinned_repo):
+    repo, commit = pinned_repo
+    cache = tmp_path / "cache"
+    assert run_fetch(cache, repo, commit).returncode == 0
+    before = snapshot(tmp_path)
+    for spelling in (str(cache / "src"), str(cache / "src") + "/"):
+        res = run_fetch(cache, repo, commit, extra_env=_target_env(spelling))
+        _assert_refused_inside_checkout(res)
+        assert snapshot(tmp_path) == before
+
+
+def test_target_dir_under_source_checkout_is_refused_on_fresh_cache(
+    tmp_path, pinned_repo
+):
+    """The reviewer's repro at 3e540317: on a fresh cache the script created the
+    nested target first, `$src` was then non-empty and `git clone` died (128)."""
+    repo, commit = pinned_repo
+    cache = tmp_path / "cache"
+    res = run_fetch(
+        cache, repo, commit, extra_env=_target_env(cache / "src" / "target")
+    )
+    _assert_refused_inside_checkout(res)
+    assert not cache.exists(), "nothing may be created or cloned"
+
+
+def test_target_dir_under_source_checkout_is_refused_on_existing_checkout(
+    tmp_path, pinned_repo
+):
+    """The reviewer's other repro: an empty nested target was accepted and, one
+    build artefact later, refused as *dirty source* — the wrong diagnosis, and
+    the restore hint would have told the developer to `git clean` their files."""
+    repo, commit = pinned_repo
+    cache = tmp_path / "cache"
+    assert run_fetch(cache, repo, commit).returncode == 0
+    nested = cache / "src" / "target"
+
+    # Not there yet: refused, not created; the checkout stays clean.
+    before = snapshot(tmp_path)
+    res = run_fetch(cache, repo, commit, extra_env=_target_env(nested))
+    _assert_refused_inside_checkout(res)
+    assert not nested.exists()
+    assert snapshot(tmp_path) == before
+    assert (
+        _git(
+            str(cache / "src"),
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--ignored",
+        )
+        == ""
+    )
+
+    # The developer's files are already there: refused for the same reason and
+    # left exactly where they are.
+    (nested / "release").mkdir(parents=True)
+    (nested / "release" / "electrs").write_text("developer's artefact\n")
+    before = snapshot(tmp_path)
+    for spelling in (
+        str(nested),
+        str(cache / "src" / "deeper" / "still"),
+        "target",  # relative, resolved against a CWD inside the checkout
+    ):
+        cwd = str(cache / "src") if spelling == "target" else None
+        res = run_fetch(cache, repo, commit, cwd=cwd, extra_env=_target_env(spelling))
+        _assert_refused_inside_checkout(res)
+        assert snapshot(tmp_path) == before
+
+
+def test_target_dir_through_a_symlink_into_the_checkout_is_refused(
+    tmp_path, pinned_repo
+):
+    """Aliases in both directions: a symlink *to* the checkout, and a checkout
+    that is itself reached through a symlink (its physical tree lives elsewhere,
+    so a textual prefix test against <cache>/src would miss it)."""
+    repo, commit = pinned_repo
+    cache = tmp_path / "cache"
+    assert run_fetch(cache, repo, commit).returncode == 0
+
+    alias = tmp_path / "alias"
+    alias.symlink_to(cache / "src", target_is_directory=True)
+    before = snapshot(tmp_path)
+    res = run_fetch(cache, repo, commit, extra_env=_target_env(alias / "target"))
+    _assert_refused_inside_checkout(res)
+    assert snapshot(tmp_path) == before
+
+    physical = tmp_path / "physical-src"
+    (cache / "src").rename(physical)
+    (cache / "src").symlink_to(physical, target_is_directory=True)
+    res = run_fetch(cache, repo, commit)  # still a valid checkout through the link
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.strip() == str(cache / "target" / "release" / "electrs")
+    before = snapshot(tmp_path)
+    res = run_fetch(cache, repo, commit, extra_env=_target_env(physical / "target"))
+    _assert_refused_inside_checkout(res)
+    assert snapshot(tmp_path) == before
+
+
+def test_external_target_dir_is_accepted_and_reused(tmp_path, pinned_repo):
+    """A valid ELECTRS_BLAKE2B_TARGET_DIR outside the checkout still works end to
+    end: the binary path is derived under it, a checked build recorded there is
+    reused from there, and a later refused run leaves it byte-identical."""
+    repo, commit = pinned_repo
+    cache = tmp_path / "cache"
+    external = tmp_path / "external-target"  # deliberately not created here
+    res = run_fetch(cache, repo, commit, extra_env=_target_env(external))
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.strip() == str(external / "release" / "electrs")
+    assert (cache / "src" / ".git").is_dir()
+    assert not (cache / "src" / "external-target").exists()
+
+    binary, version_line = fake_binary(cache, commit, target=external)
+    write_marker(cache, commit, binary, version_line, target=external)
+    res = run_fetch(cache, repo, commit, extra_env=_target_env(external))
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.strip() == str(binary)
+    assert "dry-run" not in res.stderr, "reused, not rebuilt"
+
+    before = snapshot(tmp_path)
+    res = run_fetch(
+        cache, repo, commit, extra_env=_target_env(cache / "src" / "target")
+    )
+    _assert_refused_inside_checkout(res)
+    assert snapshot(tmp_path) == before
 
 
 def test_untracked_file_is_refused_like_an_edit(tmp_path, pinned_repo):
@@ -518,3 +683,24 @@ def test_workflow_knots_cache_key_is_bound_to_verifier_inputs():
         "KNOTS_LEGACY_VERSION" in knots_keys[0]
         and "KNOTS_BLAKE2B_VERSION" in knots_keys[0]
     )
+
+
+# ── Bitcoind(extra_args=...) ─────────────────────────────────────────────────
+
+
+def test_bitcoind_extra_args_are_complete_argument_strings(tmp_path):
+    """A bare string used to be iterated into one argument per character."""
+    node_dir = tmp_path / "node"
+    node_dir.mkdir()
+    with pytest.raises(TypeError, match="sequence of complete argument strings"):
+        Bitcoind(str(node_dir), extra_args="-testactivationheight=blake2b@110")
+    assert list(node_dir.iterdir()) == [], "refused before any side effect"
+
+    schedule = ["-testactivationheight=blake2b@110", "-rdtsexpiry=4102444800"]
+    node = Bitcoind(str(node_dir), extra_args=schedule)
+    assert node.cmd_line[0] == node.bitcoind_path
+    assert node.cmd_line[-2:] == schedule
+
+    plain = Bitcoind(str(node_dir), extra_args=None)
+    assert plain.cmd_line == node.cmd_line[:-2]
+    assert plain.cmd_line[-1] == "-debugexclude=tor"

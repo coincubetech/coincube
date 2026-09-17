@@ -52,9 +52,17 @@ class Bitcoind(BitcoinBackend):
         `bitcoind_path` overrides the suite-wide BITCOIND_PATH so one test can
         drive two different node builds (the BTCB2 two-chain harness runs the
         pinned non-enforcing Knots next to the BLAKE2b-forking one).
-        `extra_args` are appended to the command line verbatim, e.g. the
-        regtest fork schedule `-testactivationheight=blake2b@N`.
+        `extra_args` is a sequence of complete argument strings appended to
+        the command line verbatim, e.g. `["-testactivationheight=blake2b@N"]`
+        for the regtest fork schedule. A bare string is refused rather than
+        iterated character by character.
         """
+        if isinstance(extra_args, (str, bytes)):
+            raise TypeError(
+                "extra_args must be a sequence of complete argument strings, "
+                f"e.g. ['-testactivationheight=blake2b@110']; got {extra_args!r}"
+            )
+        extra_args = list(extra_args or [])
         TailableProc.__init__(self, bitcoin_dir, verbose=False)
 
         if rpcport is None:
@@ -78,7 +86,7 @@ class Bitcoind(BitcoinBackend):
             "-debug=1",
             "-debugexclude=libevent",
             "-debugexclude=tor",
-        ] + list(extra_args or [])
+        ] + extra_args
         bitcoind_conf = {
             "bind": f"127.0.0.1:{self.p2pport}",
             "rpcport": rpcport,
