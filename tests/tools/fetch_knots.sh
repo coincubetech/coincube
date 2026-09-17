@@ -23,11 +23,19 @@
 # (a stand-in verifier) exist for tests/test_btcb2_tools.py and are honoured
 # only together with KNOTS_TEST_MODE=1; any of them set otherwise makes the
 # script exit before downloading or verifying anything, so an inherited
-# variable can neither redirect the download nor replace the verifier. In test
+# variable can neither redirect the download nor name a verifier. In test
 # mode the stand-in verifier is mandatory: the real one is never searched for,
-# so a test cannot silently run against a repo-local build. To use a
-# knots_verify built elsewhere for real runs, set CARGO_TARGET_DIR to the same
-# target dir it was built with; the trust anchor itself is never overridable.
+# so a test cannot silently run against a repo-local build.
+#
+# What that does and does not guarantee: in real runs the verifier is no
+# longer selectable by a dedicated variable, but it is *located* through the
+# Cargo target dir — "${CARGO_TARGET_DIR:-<this dir>/knots_verify/target}/
+# release/knots_verify" first, the repo-local build second — and the caller
+# controls CARGO_TARGET_DIR. A stale or foreign knots_verify there is used.
+# The script therefore prints the verifier it resolved on stderr on every run,
+# so the CI log and a local run both show which binary vouched for the
+# archives. The trust anchor inside the verifier (the vendored Knots signing
+# key and its pinned fingerprint) is compiled into that binary.
 set -euo pipefail
 
 version="${1:?usage: fetch_knots.sh <version> [cache-dir]}"
@@ -86,6 +94,7 @@ else
     exit 2
   fi
 fi
+echo "verifier: $verify_bin" >&2
 
 sha256_of() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1

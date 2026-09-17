@@ -92,8 +92,11 @@ it unless its checksum is listed in the release `SHA256SUMS` *and*
 installer performs (`tests/tools/knots_verify`, no `gpg` needed). The check runs
 on every invocation, cached or not, and the extracted `bitcoind` is reused only
 if it matches the archive member byte for byte; there is no stored "verified"
-marker to trust. The verifier path is not overridable outside the script's own
-test mode (`KNOTS_TEST_MODE=1`, used only by `tests/test_btcb2_tools.py`).
+marker to trust. No dedicated variable names the verifier outside the script's
+own test mode (`KNOTS_TEST_MODE=1`, used only by `tests/test_btcb2_tools.py`);
+in real runs it is located through `CARGO_TARGET_DIR` (then the repo-local
+build), and the script prints the verifier it resolved on stderr every time so
+a stale or foreign build is visible in the log.
 `fetch_electrs_blake2b.sh` clones and builds the pinned indexer commit (RocksDB
 compiles from source: a few minutes the first time; `clang`/`cmake` required)
 under `~/.cache/coincube/electrs-blake2b` — outside the repository, or Cargo

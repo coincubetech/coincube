@@ -335,6 +335,9 @@ def test_knots_reuse_reverifies_with_the_current_verifier(
     assert len(_invocations(log)) == 1
     assert archive.name in _invocations(log)[0]
     assert not list((cache / FAKE_VERSION).glob(".verified*"))
+    # The verifier that vouched is always named on stderr (the resolution is
+    # environment-dependent in real runs, via CARGO_TARGET_DIR).
+    assert f"verifier: {verifier}" in first.stderr
 
     second = run_knots_fetch(cache, release, verifier)
     assert second.returncode == 0 and second.stdout.strip() == str(bitcoind)
