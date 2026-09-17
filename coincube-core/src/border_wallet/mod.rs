@@ -217,6 +217,37 @@ pub fn sign_psbt_with_border_wallet(
     Ok((actual_fingerprint, signed_psbt))
 }
 
+/// [`sign_psbt_with_border_wallet`] for a Bitcoin Blake2b Vault: the same
+/// transient key and fingerprint check, but the signatures are unified
+/// (`SIGHASH_ALL | UNIFIED`, [`crate::unified_signing::sign_p2wsh_all_unified`])
+/// and land in the PSBT's proprietary records, so they are invalid on Bitcoin.
+/// A separate function rather than a flag on the legacy one so the Bitcoin
+/// path's bytes are untouched.
+pub fn sign_psbt_with_border_wallet_unified(
+    mnemonic: bip39::Mnemonic,
+    expected_fingerprint: Fingerprint,
+    network: Network,
+    psbt: &crate::psbt_unified::UnifiedPsbt,
+) -> Result<(Fingerprint, crate::psbt_unified::UnifiedPsbt), BorderWalletError> {
+    let secp = secp256k1::Secp256k1::new();
+
+    let signer = MasterSigner::from_mnemonic(network, mnemonic)
+        .map_err(|e| BorderWalletError::KeyDerivation(e.to_string()))?;
+
+    let actual_fingerprint = signer.fingerprint(&secp);
+    if actual_fingerprint != expected_fingerprint {
+        return Err(BorderWalletError::FingerprintMismatch {
+            expected: expected_fingerprint,
+            got: actual_fingerprint,
+        });
+    }
+
+    let signed = crate::unified_signing::sign_p2wsh_all_unified(&signer, psbt, &secp)
+        .map_err(|e| BorderWalletError::SigningFailed(e.to_string()))?;
+
+    Ok((actual_fingerprint, signed))
+}
+
 /// The default derivation path for Border Wallet signers.
 ///
 /// Uses the BIP-48 native segwit multisig path:
@@ -531,5 +562,62 @@ mod tests {
         // The derived phrase should produce a valid grid.
         let grid = derived.generate_grid();
         assert_eq!(grid.cells().len(), WordGrid::TOTAL_CELLS);
+    }
+
+    /// The unified variant is the legacy one with a different signature
+    /// encoding: same fingerprint check, records instead of `partial_sigs`,
+    /// and the legacy function's bytes are untouched by its existence.
+    #[test]
+    fn unified_border_wallet_signing_checks_the_fingerprint_and_writes_records() {
+        use crate::{
+            psbt_unified::{unified_signatures, UnifiedPsbt},
+            unified_signing::tests::fixture,
+        };
+        let secp = secp256k1::Secp256k1::new();
+        let fixture = fixture(1);
+        // Signer 0 of the fixture is the mnemonic built from `[1u8; 16]`.
+        let mnemonic = bip39::Mnemonic::from_entropy(&[1u8; 16]).unwrap();
+        let expected = fixture.signers[0].fingerprint(&secp);
+
+        let (fingerprint, signed) = sign_psbt_with_border_wallet_unified(
+            mnemonic.clone(),
+            expected,
+            Network::Bitcoin,
+            &fixture.psbt,
+        )
+        .unwrap();
+        assert_eq!(fingerprint, expected);
+        assert!(signed.psbt().inputs[0].partial_sigs.is_empty());
+        let records = unified_signatures(&signed).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].signature.last(), Some(&0x21));
+        assert_eq!(
+            crate::unified_signing::verify_p2wsh_all_unified(&signed, &secp).unwrap(),
+            1
+        );
+
+        // Wrong expected fingerprint: refused before signing.
+        assert!(matches!(
+            sign_psbt_with_border_wallet_unified(
+                mnemonic.clone(),
+                Fingerprint::default(),
+                Network::Bitcoin,
+                &fixture.psbt,
+            ),
+            Err(BorderWalletError::FingerprintMismatch { .. })
+        ));
+
+        // The legacy function is unchanged: `SIGHASH_ALL` into `partial_sigs`,
+        // no record.
+        let (_, legacy) = sign_psbt_with_border_wallet(
+            mnemonic,
+            expected,
+            Network::Bitcoin,
+            fixture.psbt.psbt().clone(),
+        )
+        .unwrap();
+        assert_eq!(legacy.inputs[0].partial_sigs.len(), 1);
+        assert!(legacy.inputs[0].proprietary.is_empty());
+        let _ = UnifiedPsbt::from_psbt(legacy).unwrap();
     }
 }

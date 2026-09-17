@@ -10,6 +10,7 @@ use coincubed::commands::LCSpendInfo;
 
 use coincube_core::{miniscript::bitcoin, signer::MasterSigner};
 
+use crate::chain::ChainId;
 use coincube_core::descriptors::CoincubeDescriptor;
 use coincube_core::miniscript::bitcoin::bip32::Fingerprint;
 use coincube_core::miniscript::bitcoin::{Network, OutPoint, Transaction, Txid};
@@ -133,6 +134,11 @@ pub struct RecentBroadcast {
 pub struct Wallet {
     pub name: String,
     pub alias: Option<String>,
+    /// The chain this Vault's Cube lives on. Decides the signing policy
+    /// (unified sighash on Bitcoin Blake2b, legacy `SIGHASH_ALL` elsewhere)
+    /// and whether the replay-protection model is shown at all. Defaults to
+    /// Bitcoin; the loader sets it from `CubeSettings::network`.
+    pub chain: ChainId,
     pub main_descriptor: CoincubeDescriptor,
     pub descriptor_checksum: String,
     pub pinned_at: Option<i64>,
@@ -146,6 +152,10 @@ pub struct Wallet {
     /// provenance was tracked, which is *unrecorded*, not `Independent`. See
     /// [`crate::app::settings::KeySetting::grid_seed_source`].
     pub border_wallet_grid_seed: HashMap<Fingerprint, settings::GridSeedSource>,
+    /// Per-signer user marks for replay protection
+    /// ([`settings::KeySetting::replay_protected`]). Sparse; only device
+    /// signers are read through it.
+    pub replay_marks: HashMap<Fingerprint, bool>,
     pub hardware_wallets: Vec<HardwareWalletConfig>,
     pub signer: Option<Arc<Signer>>,
     /// Descriptor keys whose seed file is on this machine but which this
@@ -178,6 +188,7 @@ impl Wallet {
         Self {
             name: wallet_name(&main_descriptor),
             alias: None,
+            chain: ChainId::Bitcoin,
             descriptor_checksum: main_descriptor
                 .to_string()
                 .split_once('#')
@@ -190,6 +201,7 @@ impl Wallet {
             provider_keys: HashMap::new(),
             border_wallet_fingerprints: HashSet::new(),
             border_wallet_grid_seed: HashMap::new(),
+            replay_marks: HashMap::new(),
             hardware_wallets: Vec::new(),
             signer: None,
             unopenable_seed_keys: HashSet::new(),
@@ -431,6 +443,18 @@ impl Wallet {
         self
     }
 
+    pub fn with_replay_marks(mut self, replay_marks: HashMap<Fingerprint, bool>) -> Self {
+        self.replay_marks = replay_marks;
+        self
+    }
+
+    /// The chain the Cube lives on. Set once by the loader from
+    /// `CubeSettings::network`; a `Wallet` never changes chain.
+    pub fn with_chain<C: Into<ChainId>>(mut self, chain: C) -> Self {
+        self.chain = chain.into();
+        self
+    }
+
     pub fn with_hardware_wallets(mut self, hardware_wallets: Vec<HardwareWalletConfig>) -> Self {
         self.hardware_wallets = hardware_wallets;
         self
@@ -479,6 +503,7 @@ impl Wallet {
                 .with_provider_keys(wallet_settings.provider_keys())
                 .with_border_wallet_fingerprints(wallet_settings.border_wallet_fingerprints())
                 .with_border_wallet_grid_seed(wallet_settings.border_wallet_grid_seed_sources())
+                .with_replay_marks(wallet_settings.replay_marks())
                 .with_alias(wallet_settings.alias)
                 .with_name(wallet_settings.name)
                 .with_pinned_at(wallet_settings.pinned_at)
@@ -651,6 +676,7 @@ impl Wallet {
                     provider_key: None,
                     is_border_wallet: self.border_wallet_fingerprints.contains(fg),
                     grid_seed_source: self.border_wallet_grid_seed.get(fg).copied(),
+                    replay_protected: self.replay_marks.get(fg).copied(),
                 },
             );
         });
@@ -978,6 +1004,67 @@ mod tests {
             Some(GridSeedSource::Independent)
         );
         assert_eq!(keys.get(&unrecorded).and_then(|k| k.grid_seed_source), None);
+    }
+
+    /// The replay mark (`KeySetting::replay_protected`) is sparse on disk and
+    /// survives the alias-edit rewrite, and a Cube that never marked a signer
+    /// writes exactly the bytes it did before the field existed.
+    #[test]
+    fn replay_marks_round_trip_and_stay_absent_when_unset() {
+        let marked = Fingerprint::from_str("f714c228").unwrap();
+        let cleared = Fingerprint::from_str("2522f23c").unwrap();
+        let unmarked = Fingerprint::from_str("8a64f2a9").unwrap();
+        let wallet = Wallet::new(CoincubeDescriptor::from_str(DESC).unwrap())
+            .with_key_aliases(HashMap::from([
+                (marked, "Ledger".to_string()),
+                (cleared, "Jade".to_string()),
+                (unmarked, "Coldcard".to_string()),
+            ]))
+            .with_replay_marks(HashMap::from([(marked, true), (cleared, false)]));
+        let keys = wallet.keys();
+        assert_eq!(keys[&marked].replay_protected, Some(true));
+        assert_eq!(keys[&cleared].replay_protected, Some(false));
+        assert_eq!(keys[&unmarked].replay_protected, None);
+
+        // Serialised: present only when set.
+        let json = serde_json::to_string(&keys[&marked]).unwrap();
+        assert!(json.contains("\"replay_protected\":true"), "{}", json);
+        let json = serde_json::to_string(&keys[&unmarked]).unwrap();
+        assert!(!json.contains("replay_protected"), "{}", json);
+        // A pre-existing file without the field parses as unmarked.
+        let parsed: settings::KeySetting = serde_json::from_str(
+            r#"{"name":"Coldcard","master_fingerprint":"8a64f2a9","provider_key":null}"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.replay_protected, None);
+
+        // And the settings accessor is the same sparse map.
+        let wallet_settings = settings::WalletSettings {
+            name: wallet.name.clone(),
+            alias: None,
+            descriptor_checksum: wallet.descriptor_checksum.clone(),
+            pinned_at: None,
+            keys: keys.values().cloned().collect(),
+            hardware_wallets: Vec::new(),
+            remote_backend_auth: None,
+            start_internal_bitcoind: None,
+            pending_rescan: None,
+        };
+        assert_eq!(
+            wallet_settings.replay_marks(),
+            HashMap::from([(marked, true), (cleared, false)])
+        );
+        assert_eq!(
+            Wallet::new(CoincubeDescriptor::from_str(DESC).unwrap())
+                .with_chain(crate::chain::ChainId::BitcoinBlake2b)
+                .chain,
+            crate::chain::ChainId::BitcoinBlake2b
+        );
+        assert_eq!(
+            Wallet::new(CoincubeDescriptor::from_str(DESC).unwrap()).chain,
+            crate::chain::ChainId::Bitcoin,
+            "a wallet is on Bitcoin until the loader says otherwise"
+        );
     }
 
     /// A Vault whose descriptor names a **hot key** must be able to sign with

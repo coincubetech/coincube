@@ -218,6 +218,16 @@ pub enum Message {
     /// Result of polling the *active* managed node's network stats (connection
     /// counts, upload used vs. cap, onion address) for the Node settings.
     BitcoindNetStats(Result<crate::app::cache::NodeNetStats, String>),
+    /// Resolved entangled-deposit lookups for a Bitcoin Blake2b Cube (`#276`
+    /// I13): each deposit txid with a definite answer from the twin chain's
+    /// Esplora through Connect. Unresolved lookups are simply absent and are
+    /// retried after the next sync.
+    EntangledLookups(
+        Vec<(
+            coincube_core::miniscript::bitcoin::Txid,
+            crate::services::entangled::Entanglement,
+        )>,
+    ),
     /// Latest UpdateTip/blockheaders line streamed from the pending internal
     /// bitcoind's debug.log.  `None` means no matching line found yet.
     PendingBitcoindLog(Option<String>),

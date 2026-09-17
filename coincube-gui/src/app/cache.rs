@@ -156,6 +156,15 @@ pub struct Cache {
     /// wallet stays reachable when Connect is down. See
     /// [`crate::app::features::LiquidGate`].
     pub liquid_gate: crate::app::features::LiquidGate,
+    /// Entangled-deposit answers for a Bitcoin Blake2b Cube (`#276` I13),
+    /// keyed by the deposit's txid: whether the same transaction exists on
+    /// the twin Bitcoin chain. Only *resolved* answers are stored — a deposit
+    /// absent from the map has not been checked (or the check failed) and is
+    /// retried after the next sync. Always empty on a Bitcoin-family Cube.
+    pub entangled: std::collections::HashMap<
+        coincube_core::miniscript::bitcoin::Txid,
+        crate::services::entangled::Entanglement,
+    >,
     /// Current theme mode (dark/light) — used for theme-aware widget rendering
     pub theme_mode: coincube_ui::theme::palette::ThemeMode,
     /// BTC price in USD, always fetched regardless of the user's selected fiat
@@ -293,6 +302,7 @@ impl std::default::Default for Cache {
             p2p_test_coordinator: false,
             marketplace_flags: crate::app::features::MarketplaceServerFlags::OFF,
             liquid_gate: crate::app::features::LiquidGate::HIDDEN,
+            entangled: std::collections::HashMap::new(),
             theme_mode: coincube_ui::theme::palette::ThemeMode::default(),
             btc_usd_price: None,
             show_direction_badges: true,
@@ -314,6 +324,18 @@ impl std::default::Default for Cache {
 }
 
 impl Cache {
+    /// The cached entanglement answer for a deposit, [`Entanglement::Unknown`]
+    /// when none has been resolved yet.
+    pub fn entanglement_of(
+        &self,
+        txid: &coincube_core::miniscript::bitcoin::Txid,
+    ) -> crate::services::entangled::Entanglement {
+        self.entangled
+            .get(txid)
+            .copied()
+            .unwrap_or(crate::services::entangled::Entanglement::Unknown)
+    }
+
     pub fn blockheight(&self) -> i32 {
         self.daemon_cache.blockheight
     }

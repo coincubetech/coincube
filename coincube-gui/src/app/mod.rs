@@ -348,6 +348,7 @@ impl Panels {
             coins: Some(CoinsPanel::new(
                 cache.coins(),
                 wallet.main_descriptor.first_timelock_value(),
+                wallet.chain,
             )),
             transactions: Some(VaultTransactionsPanel::new(wallet.clone())),
             psbts: Some(PsbtsPanel::new(wallet.clone())),
@@ -456,6 +457,7 @@ impl Panels {
         self.coins = Some(CoinsPanel::new(
             cache.coins(),
             wallet.main_descriptor.first_timelock_value(),
+            wallet.chain,
         ));
         self.transactions = Some(VaultTransactionsPanel::new(wallet.clone()));
         self.psbts = Some(PsbtsPanel::new(wallet.clone()));
@@ -2696,6 +2698,42 @@ impl App {
         self.panels.connect.account.authenticated_client()
     }
 
+    /// Entangled-deposit detection for a Bitcoin Blake2b Cube (`#276` I13):
+    /// after each sync, look up every deposit txid the cache has no answer
+    /// for on the twin Bitcoin chain's Esplora through Connect, one call per
+    /// deposit. Returns `Task::none()` on a Bitcoin-family Cube, without a
+    /// Connect session (a lookup that cannot run is *Unknown*, not "not
+    /// entangled"), or when every deposit is already resolved. Never blocks
+    /// or affects sync.
+    fn entangled_lookup_task(&self) -> Task<Message> {
+        let Some(wallet) = self.wallet.as_ref() else {
+            return Task::none();
+        };
+        if !wallet.chain.is_blake2b() {
+            return Task::none();
+        }
+        let Some(client) = self.authenticated_coincube_client() else {
+            return Task::none();
+        };
+        let mut pending: Vec<bitcoin::Txid> = self
+            .cache
+            .coins()
+            .iter()
+            .map(|coin| coin.outpoint.txid)
+            .filter(|txid| !self.cache.entangled.contains_key(txid))
+            .collect();
+        pending.sort();
+        pending.dedup();
+        if pending.is_empty() {
+            return Task::none();
+        }
+        let chain = wallet.chain;
+        Task::perform(
+            crate::services::entangled::lookup_all(client, chain, pending),
+            Message::EntangledLookups,
+        )
+    }
+
     /// Fire-and-forget vault recovery heartbeat (Estate Notifications —
     /// PR 2). Returns a detached task that POSTs
     /// `{earliest_recovery_height, computed_at}` after a sync when this
@@ -4366,6 +4404,15 @@ impl App {
                     }
                 }
             }
+            Message::EntangledLookups(resolved) => {
+                if resolved.is_empty() {
+                    return Task::none();
+                }
+                for (txid, answer) in resolved {
+                    self.cache.entangled.insert(txid, answer);
+                }
+                return Task::done(Message::CacheUpdated);
+            }
             Message::BitcoindNetStats(res) => {
                 self.node_net_stats_probe_in_progress = false;
                 match res {
@@ -4564,7 +4611,14 @@ impl App {
                         // alongside the normal cache cascade so it never delays
                         // or blocks it.
                         let heartbeat = self.recovery_heartbeat_task();
-                        return Task::batch([heartbeat, Task::done(Message::CacheUpdated)]);
+                        // Same posture for the BTCB2 entangled-deposit lookups:
+                        // `Task::none()` on every Bitcoin-family Cube.
+                        let entangled = self.entangled_lookup_task();
+                        return Task::batch([
+                            heartbeat,
+                            entangled,
+                            Task::done(Message::CacheUpdated),
+                        ]);
                     }
                     Err(e) => {
                         tracing::error!("Failed to update daemon cache: {}", e);

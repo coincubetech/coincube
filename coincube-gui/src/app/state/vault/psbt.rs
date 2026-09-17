@@ -5,11 +5,12 @@ use iced::Subscription;
 
 use coincube_core::{
     border_wallet::{
-        build_mnemonic, sign_psbt_with_border_wallet, CellRef, GridRecoveryPhrase, OrderedPattern,
-        WordGrid, PATTERN_LENGTH,
+        build_mnemonic, sign_psbt_with_border_wallet, sign_psbt_with_border_wallet_unified,
+        CellRef, GridRecoveryPhrase, OrderedPattern, WordGrid, PATTERN_LENGTH,
     },
     descriptors::CoincubePolicy,
-    miniscript::bitcoin::{bip32::Fingerprint, psbt::Psbt, Network, Txid},
+    miniscript::bitcoin::{bip32::Fingerprint, psbt::Psbt, secp256k1, Network, Txid},
+    psbt_unified::UnifiedPsbt,
 };
 use coincubed::commands::CoinStatus;
 use iced::Task;
@@ -26,11 +27,15 @@ use crate::{
         error::Error,
         menu::{Menu, VaultSubMenu},
         message::Message,
-        state::vault::label::{label_item_from_str, LabelsEdited},
+        state::vault::{
+            label::{label_item_from_str, LabelsEdited},
+            replay::{self, ReplayReview},
+        },
         view,
         view::BorderWalletReconMessage,
         wallet::{Wallet, WalletError},
     },
+    chain::ChainId,
     daemon::{
         model::{LabelItem, Labelled, SpendStatus, SpendTx},
         Daemon,
@@ -123,10 +128,25 @@ pub struct PsbtState {
     pub labels_edited: LabelsEdited,
     recipient_identities: Option<RecipientIdentities>,
     pub modal: Option<PsbtModal>,
+    /// The replay-protection review of this spend. `Some` only on a Bitcoin
+    /// Blake2b Cube; `None` leaves every Bitcoin-family screen and gate
+    /// exactly as before. Recomputed from the verified witness after every
+    /// signature merge ([`Self::refresh_replay`]).
+    pub replay: Option<ReplayReview>,
 }
 
 impl PsbtState {
-    pub fn new(wallet: Arc<Wallet>, tx: SpendTx, saved: bool) -> Self {
+    pub fn new(wallet: Arc<Wallet>, mut tx: SpendTx, saved: bool) -> Self {
+        let replay = wallet.chain.is_blake2b().then(|| {
+            // `SpendTx::new` counted `partial_sigs` only; on BTCB2 the unified
+            // records count too (see `replay::spend_info_for_chain`).
+            if let Ok(sigs) =
+                replay::spend_info_for_chain(wallet.chain, &wallet.main_descriptor, &tx.psbt)
+            {
+                tx.sigs = sigs;
+            }
+            ReplayReview::new(&tx.psbt, &secp256k1::Secp256k1::verification_only())
+        });
         Self {
             desc_policy: wallet.main_descriptor.policy(),
             wallet,
@@ -136,7 +156,27 @@ impl PsbtState {
             modal: None,
             tx,
             saved,
+            replay,
         }
+    }
+
+    /// Recompute the replay review from the current (merged) PSBT. A no-op on
+    /// a Bitcoin-family Cube. Any acknowledgement is dropped: it was given for
+    /// a different set of signatures.
+    fn refresh_replay(&mut self) {
+        if self.replay.is_some() {
+            self.replay = Some(ReplayReview::new(
+                &self.tx.psbt,
+                &secp256k1::Secp256k1::verification_only(),
+            ));
+        }
+    }
+
+    /// Whether this spend may be broadcast now — the one definition the
+    /// picker close, the Broadcast handler and the view share
+    /// ([`replay::broadcast_ready`]).
+    pub fn broadcast_ready(&self) -> bool {
+        replay::broadcast_ready(self.tx.path_ready().is_some(), self.replay.as_ref())
     }
 
     pub fn with_recipient_identities(mut self, identities: Option<RecipientIdentities>) -> Self {
@@ -167,13 +207,14 @@ impl PsbtState {
     /// sessions drained). Idempotent — safe to call after every signature
     /// merge, decoupled from the persist round-trip.
     fn reconcile_and_maybe_close(&mut self) -> Task<Message> {
-        if let Ok(sigs) = self
-            .wallet
-            .main_descriptor
-            .partial_spend_info(&self.tx.psbt)
-        {
+        if let Ok(sigs) = replay::spend_info_for_chain(
+            self.wallet.chain,
+            &self.wallet.main_descriptor,
+            &self.tx.psbt,
+        ) {
             self.tx.sigs = sigs;
         }
+        self.refresh_replay();
         // Derive the picker's "Signed" indicator from the counted signers so
         // the per-key rows and the "X of N collected" badge can't diverge.
         let counted = self.tx.signers();
@@ -186,7 +227,15 @@ impl PsbtState {
                 // daemon holds the signature it must broadcast (and before the
                 // failing row could be marked Failed). Dismissal-driven close
                 // has its own drain gate and is unaffected.
-                (self.tx.path_ready().is_some() && !sign.keychain_persistence_pending())
+                // On Bitcoin Blake2b "path satisfied" is the finaliser's
+                // verdict over verified signatures, not the partial-sig count
+                // (`replay::broadcast_ready`); the acknowledgement is asked
+                // for at Broadcast, not here.
+                let path_satisfied = match &self.replay {
+                    None => self.tx.path_ready().is_some(),
+                    Some(review) => review.status.is_finalisable(),
+                };
+                (path_satisfied && !sign.keychain_persistence_pending())
                     || sign.should_close_after_dismiss()
             }
             _ => false,
@@ -423,7 +472,19 @@ impl PsbtState {
                     return modal.as_mut().update(daemon.clone(), message, &mut self.tx);
                 }
             }
+            Message::View(view::Message::Spend(view::SpendTxMessage::AcknowledgeReplay(
+                acknowledged,
+            ))) => {
+                if let Some(review) = self.replay.as_mut() {
+                    review.acknowledged = acknowledged;
+                }
+            }
             Message::View(view::Message::Spend(view::SpendTxMessage::Broadcast)) => {
+                // The button is disabled until `broadcast_ready`; this is the
+                // same gate for anything that reaches the handler another way.
+                if !self.broadcast_ready() {
+                    return Task::none();
+                }
                 let outpoints: Vec<_> = self.tx.coins.keys().cloned().collect();
                 return Task::perform(
                     async move {
@@ -547,12 +608,21 @@ impl PsbtState {
                 }
             },
             Message::Export(ImportExportMessage::Progress(Progress::Psbt(psbt))) => {
-                merge_signatures(&mut self.tx.psbt, &psbt);
-                self.tx.sigs = self
-                    .wallet
-                    .main_descriptor
-                    .partial_spend_info(&self.tx.psbt)
-                    .expect("already check in psbt import logic");
+                if let Err(e) =
+                    merge_signatures_for_chain(self.wallet.chain, &mut self.tx.psbt, &psbt)
+                {
+                    let e = Error::Unexpected(format!("Couldn't merge the imported PSBT: {e}"));
+                    let err_msg = crate::user_error::report(&e);
+                    self.warning = Some(e);
+                    return Task::done(Message::View(view::Message::ShowError(err_msg)));
+                }
+                self.tx.sigs = replay::spend_info_for_chain(
+                    self.wallet.chain,
+                    &self.wallet.main_descriptor,
+                    &self.tx.psbt,
+                )
+                .expect("already check in psbt import logic");
+                self.refresh_replay();
             }
             _ => {
                 if let Some(modal) = self.modal.as_mut() {
@@ -561,6 +631,21 @@ impl PsbtState {
             }
         }
         Task::none()
+    }
+
+    /// The replay pill's inputs for the view: the review plus which inputs
+    /// spend an entangled (or unchecked) deposit, resolved from the cache at
+    /// render time. `None` on a Bitcoin-family Cube.
+    pub fn replay_presentation(&self, cache: &Cache) -> Option<view::vault::psbt::ReplayPill<'_>> {
+        self.replay
+            .as_ref()
+            .map(|review| view::vault::psbt::ReplayPill {
+                review,
+                entangled: replay::entangled_inputs(&self.tx.psbt, |txid| {
+                    cache.entanglement_of(txid)
+                }),
+                broadcast_ready: self.broadcast_ready(),
+            })
     }
 
     pub fn view<'a>(&'a self, cache: &'a Cache) -> Element<'a, view::Message> {
@@ -578,6 +663,7 @@ impl PsbtState {
                 false
             },
             cache.bitcoin_unit,
+            self.replay_presentation(cache),
         );
         if let Some(modal) = &self.modal {
             modal.as_ref().view(content)
@@ -1285,6 +1371,25 @@ impl SignModal {
         !self.signing.is_empty()
     }
 
+    /// On a Bitcoin Blake2b Cube, refuse to dispatch *any* signer — local,
+    /// device or Keychain — for a PSBT that asks for or carries an
+    /// `ANYONECANPAY` sighash. Returns the error task to run instead. A no-op
+    /// on every other chain.
+    fn refuse_anyonecanpay(&mut self, psbt: &Psbt) -> Option<Task<Message>> {
+        if !self.wallet.chain.is_blake2b() {
+            return None;
+        }
+        match replay::refuse_anyonecanpay(psbt) {
+            Ok(()) => None,
+            Err(refused) => {
+                let e = Error::Unexpected(refused.to_string());
+                let err_msg = crate::user_error::report(&e);
+                self.error = Some(e);
+                Some(Task::done(Message::View(view::Message::ShowError(err_msg))))
+            }
+        }
+    }
+
     /// Begin dismissing the picker. Cancels any in-flight keychain sessions
     /// server-side and reports whether the modal must stay mounted (hidden)
     /// to drain deferred cancels — mirroring the old standalone keychain
@@ -1698,6 +1803,9 @@ impl Modal for SignModal {
     ) -> Task<Message> {
         match message {
             Message::View(view::Message::SelectHardwareWallet(i)) => {
+                if let Some(refused) = self.refuse_anyonecanpay(&tx.psbt) {
+                    return refused;
+                }
                 if let Some(HardwareWallet::Supported {
                     fingerprint,
                     device,
@@ -1719,6 +1827,9 @@ impl Modal for SignModal {
                 }
             }
             Message::View(view::Message::Spend(view::SpendTxMessage::SelectMasterSigner)) => {
+                if let Some(refused) = self.refuse_anyonecanpay(&tx.psbt) {
+                    return refused;
+                }
                 if let Some(fingerprint) = self.wallet.signer.as_ref().map(|s| s.fingerprint()) {
                     self.signing.insert(fingerprint);
                 }
@@ -1728,6 +1839,9 @@ impl Modal for SignModal {
                 );
             }
             Message::View(view::Message::Spend(view::SpendTxMessage::SelectBorderWallet(fg))) => {
+                if let Some(refused) = self.refuse_anyonecanpay(&tx.psbt) {
+                    return refused;
+                }
                 let network = self.network;
                 let mut recon = BorderWalletReconstructionState::new(fg, network);
                 // Offered only when this machine still holds the seed this key
@@ -1755,6 +1869,7 @@ impl Modal for SignModal {
                 if let Some(recon) = &mut self.border_wallet_recon {
                     if let Some((fingerprint, mnemonic)) = recon.update(msg) {
                         let network = recon.network;
+                        let chain = self.wallet.chain;
                         let psbt = tx.psbt.clone();
                         // Clear reconstruction state (zeroizes phrase words via Drop).
                         self.border_wallet_recon = None;
@@ -1762,7 +1877,8 @@ impl Modal for SignModal {
                         self.signing.insert(fingerprint);
                         return Task::perform(
                             async move {
-                                let result = sign_psbt_with_border_wallet(
+                                let result = sign_border_wallet_for_chain(
+                                    chain,
                                     mnemonic,
                                     fingerprint,
                                     network,
@@ -1803,9 +1919,21 @@ impl Modal for SignModal {
                         // `Message::Updated(Ok)` handler — so a sub-threshold
                         // signature should leave it visible to add more.
                         self.display_modal = true;
-                        self.signed.insert(fingerprint);
                         let daemon = daemon.clone();
-                        merge_signatures(&mut tx.psbt, &psbt);
+                        if let Err(e) =
+                            merge_signatures_for_chain(self.wallet.chain, &mut tx.psbt, &psbt)
+                        {
+                            // Nothing was merged and nothing is persisted: a
+                            // signature the adapter refuses (conflicting or
+                            // ambiguous encoding) must not reach the daemon.
+                            let e = Error::Unexpected(format!(
+                                "Couldn't merge the signature from {fingerprint}: {e}"
+                            ));
+                            let err_msg = crate::user_error::report(&e);
+                            self.error = Some(e);
+                            return Task::done(Message::View(view::Message::ShowError(err_msg)));
+                        }
+                        self.signed.insert(fingerprint);
                         // Persist the *merged* PSBT (not the lone single-signer
                         // result) so the daemon's stored copy always matches the
                         // desktop's in-memory set. Otherwise a later re-read of
@@ -1890,6 +2018,19 @@ impl Modal for SignModal {
                 | view::SpendTxMessage::RetryKeychainSigner(_)
                 | view::SpendTxMessage::CancelKeychainSign,
             )) => {
+                let requests_signature = matches!(
+                    message,
+                    Message::View(view::Message::Spend(
+                        view::SpendTxMessage::SelectKeychainSigner(_)
+                            | view::SpendTxMessage::RequestFromEveryone
+                            | view::SpendTxMessage::RetryKeychainSigner(_),
+                    ))
+                );
+                if requests_signature {
+                    if let Some(refused) = self.refuse_anyonecanpay(&tx.psbt) {
+                        return refused;
+                    }
+                }
                 if let Some(k) = self.keychain.as_mut() {
                     return k.update(daemon, message, tx);
                 }
@@ -1948,10 +2089,91 @@ fn merge_signatures(psbt: &mut Psbt, signed_psbt: &Psbt) {
     }
 }
 
-/// Merge BIP32 / Tapscript signatures from `signed_psbt` into `psbt`.
-/// Public so the Keychain sign flow can reuse the same merge semantics.
-pub(crate) fn merge_signatures_pub(psbt: &mut Psbt, signed_psbt: &Psbt) {
-    merge_signatures(psbt, signed_psbt)
+/// Merge the signatures of `signed_psbt` into `psbt`, keyed on the chain.
+///
+/// Bitcoin family: [`merge_signatures`], the prior behaviour, unchanged and
+/// infallible. Bitcoin Blake2b: the same copy first, then the unified adapter
+/// merge ([`coincube_core::psbt_unified::merge_signatures`]) carries the
+/// proprietary unified records across and **refuses** — leaving `psbt`
+/// untouched — a conflicting signature for a key, or a key that would end up
+/// with both a unified and a legacy signature. Mirrors the daemon's
+/// `update_spend` merge so the desktop never holds a PSBT the daemon would
+/// reject.
+fn merge_signatures_for_chain(
+    chain: ChainId,
+    psbt: &mut Psbt,
+    signed_psbt: &Psbt,
+) -> Result<(), String> {
+    if !chain.is_blake2b() {
+        merge_signatures(psbt, signed_psbt);
+        return Ok(());
+    }
+    let mut merged = psbt.clone();
+    merge_signatures(&mut merged, signed_psbt);
+    let mut destination = UnifiedPsbt::from_psbt(merged).map_err(|e| e.to_string())?;
+    let delta = UnifiedPsbt::from_psbt(signed_psbt.clone()).map_err(|e| e.to_string())?;
+    coincube_core::psbt_unified::merge_signatures(&mut destination, &delta)
+        .map_err(|e| e.to_string())?;
+    *psbt = destination.psbt().clone();
+    Ok(())
+}
+
+/// [`merge_signatures_for_chain`] for the Keychain sign flow, so every merge
+/// site shares one definition.
+pub(crate) fn merge_signatures_pub(
+    chain: ChainId,
+    psbt: &mut Psbt,
+    signed_psbt: &Psbt,
+) -> Result<(), String> {
+    merge_signatures_for_chain(chain, psbt, signed_psbt)
+}
+
+/// Sign with the Vault's hot key, keyed on the chain: `SIGHASH_ALL` into
+/// `partial_sigs` on the Bitcoin family (unchanged), unified signatures into
+/// the proprietary records on Bitcoin Blake2b.
+fn sign_with_master_signer_for_chain(
+    chain: ChainId,
+    signer: &crate::signer::Signer,
+    psbt: Psbt,
+) -> Result<Psbt, Error> {
+    if !chain.is_blake2b() {
+        return signer.sign_psbt(psbt).map_err(|e| {
+            WalletError::MasterSigner(format!("Master signer failed to sign psbt: {}", e)).into()
+        });
+    }
+    let unified = UnifiedPsbt::from_psbt(psbt).map_err(|e| {
+        Error::from(WalletError::MasterSigner(format!(
+            "Master signer refused the PSBT: {}",
+            e
+        )))
+    })?;
+    let signed = signer.sign_psbt_unified(&unified).map_err(|e| {
+        Error::from(WalletError::MasterSigner(format!(
+            "Master signer failed to sign psbt: {}",
+            e
+        )))
+    })?;
+    Ok(signed.psbt().clone())
+}
+
+/// Border Wallet signing keyed on the chain, same split as
+/// [`sign_with_master_signer_for_chain`].
+fn sign_border_wallet_for_chain(
+    chain: ChainId,
+    mnemonic: coincube_core::bip39::Mnemonic,
+    fingerprint: Fingerprint,
+    network: Network,
+    psbt: Psbt,
+) -> Result<(Fingerprint, Psbt), coincube_core::border_wallet::BorderWalletError> {
+    if !chain.is_blake2b() {
+        return sign_psbt_with_border_wallet(mnemonic, fingerprint, network, psbt);
+    }
+    let unified = UnifiedPsbt::from_psbt(psbt).map_err(|e| {
+        coincube_core::border_wallet::BorderWalletError::SigningFailed(e.to_string())
+    })?;
+    let (fingerprint, signed) =
+        sign_psbt_with_border_wallet_unified(mnemonic, fingerprint, network, &unified)?;
+    Ok((fingerprint, signed.psbt().clone()))
 }
 
 async fn sign_psbt_with_master_signer(
@@ -1959,12 +2181,7 @@ async fn sign_psbt_with_master_signer(
     psbt: Psbt,
 ) -> (Fingerprint, Result<Psbt, Error>) {
     if let Some(signer) = &wallet.signer {
-        let res = signer
-            .sign_psbt(psbt)
-            .map_err(|e| {
-                WalletError::MasterSigner(format!("Master signer failed to sign psbt: {}", e))
-            })
-            .map_err(|e| e.into());
+        let res = sign_with_master_signer_for_chain(wallet.chain, signer, psbt);
         (signer.fingerprint(), res)
     } else {
         (
@@ -2716,5 +2933,391 @@ mod tests {
                 )),
             )
             .await;
+    }
+
+    /// The Bitcoin regression the lane requires (`#276`, "flag off"): every
+    /// chain-keyed entry point this slice added is byte for byte the prior
+    /// code on every Bitcoin-family chain, and the replay model does not
+    /// exist there at all.
+    mod bitcoin_paths_are_unchanged {
+        use super::super::*;
+        use crate::app::state::vault::{
+            replay,
+            test_support::unified::{fixture, legacy, signer},
+        };
+        use coincube_core::{
+            border_wallet::sign_psbt_with_border_wallet, miniscript::bitcoin::secp256k1,
+        };
+        use std::path::PathBuf;
+
+        const BITCOIN_FAMILY: [ChainId; 5] = [
+            ChainId::Bitcoin,
+            ChainId::Testnet,
+            ChainId::Testnet4,
+            ChainId::Signet,
+            ChainId::Regtest,
+        ];
+
+        #[test]
+        fn master_signer_bytes_are_the_prior_sign_psbt() {
+            let f = fixture();
+            let hot = crate::signer::Signer::new(signer(21));
+            let expected = hot.sign_psbt(f.psbt.clone()).unwrap().serialize();
+            assert!(!expected.is_empty());
+            for chain in BITCOIN_FAMILY {
+                let got = sign_with_master_signer_for_chain(chain, &hot, f.psbt.clone())
+                    .unwrap()
+                    .serialize();
+                assert_eq!(got, expected, "{:?}", chain);
+            }
+            // And the prior path never produced a unified record.
+            let signed = hot.sign_psbt(f.psbt.clone()).unwrap();
+            assert!(signed.inputs[0].proprietary.is_empty());
+            assert_eq!(signed.inputs[0].partial_sigs.len(), 1);
+        }
+
+        #[test]
+        fn border_wallet_bytes_are_the_prior_sign_psbt_with_border_wallet() {
+            let f = fixture();
+            let secp = secp256k1::Secp256k1::new();
+            let mnemonic = coincube_core::bip39::Mnemonic::from_entropy(&[22; 16]).unwrap();
+            let fingerprint = signer(22).fingerprint(&secp);
+            let (fp, expected) = sign_psbt_with_border_wallet(
+                mnemonic.clone(),
+                fingerprint,
+                Network::Bitcoin,
+                f.psbt.clone(),
+            )
+            .unwrap();
+            for chain in BITCOIN_FAMILY {
+                let (got_fp, got) = sign_border_wallet_for_chain(
+                    chain,
+                    mnemonic.clone(),
+                    fingerprint,
+                    Network::Bitcoin,
+                    f.psbt.clone(),
+                )
+                .unwrap();
+                assert_eq!(got_fp, fp);
+                assert_eq!(got.serialize(), expected.serialize(), "{:?}", chain);
+            }
+        }
+
+        #[test]
+        fn merge_is_the_prior_merge_and_never_fails() {
+            let f = fixture();
+            let a = legacy(&f.psbt, &f.signers[0]);
+            let b = legacy(&f.psbt, &f.signers[1]);
+            let mut expected = a.clone();
+            merge_signatures(&mut expected, &b);
+            for chain in BITCOIN_FAMILY {
+                let mut got = a.clone();
+                merge_signatures_for_chain(chain, &mut got, &b).unwrap();
+                assert_eq!(got.serialize(), expected.serialize(), "{:?}", chain);
+                // A conflicting signature on the Bitcoin path is merged the way
+                // it always was (last write wins) — the adapter's refusal is
+                // BTCB2-only behaviour.
+                let conflicting = b.clone();
+                let (pk, sig) = conflicting.inputs[0]
+                    .partial_sigs
+                    .iter()
+                    .map(|(pk, sig)| (*pk, *sig))
+                    .next()
+                    .unwrap();
+                let mut other = a.clone();
+                other.inputs[0].partial_sigs.insert(pk, sig);
+                let mut prior = other.clone();
+                merge_signatures(&mut prior, &conflicting);
+                let mut keyed = other.clone();
+                assert_eq!(
+                    merge_signatures_for_chain(chain, &mut keyed, &conflicting),
+                    Ok(())
+                );
+                assert_eq!(keyed.serialize(), prior.serialize());
+            }
+        }
+
+        #[test]
+        fn a_bitcoin_wallet_has_no_replay_review_and_gates_on_the_path_threshold() {
+            let f = fixture();
+            for chain in BITCOIN_FAMILY {
+                let wallet = Arc::new(Wallet::new(f.descriptor.clone()).with_chain(chain));
+                let secp = secp256k1::Secp256k1::new();
+                let tx = SpendTx::new(
+                    None,
+                    legacy(&legacy(&f.psbt, &f.signers[0]), &f.signers[1]),
+                    Vec::new(),
+                    &f.descriptor,
+                    &secp,
+                    Network::Bitcoin,
+                );
+                let state = PsbtState::new(wallet, tx, true);
+                assert!(state.replay.is_none(), "{:?}", chain);
+                assert!(state.tx.path_ready().is_some());
+                assert!(state.broadcast_ready());
+                assert!(state.replay_presentation(&Cache::default()).is_none());
+                assert_eq!(
+                    state.tx.sigs,
+                    f.descriptor.partial_spend_info(&state.tx.psbt).unwrap()
+                );
+            }
+            let _ = replay::REPLAYABLE_ACKNOWLEDGEMENT;
+        }
+
+        #[test]
+        fn anyonecanpay_is_not_refused_on_bitcoin() {
+            // Prior behaviour: the picker dispatches whatever the PSBT asks
+            // for; the refusal is BTCB2-only. (Without a loaded signer the
+            // async task reports "not loaded" later — what matters here is
+            // that the synchronous refusal did not fire.)
+            let f = fixture();
+            let mut asked = f.psbt.clone();
+            asked.inputs[0].sighash_type = Some(
+                coincube_core::miniscript::bitcoin::sighash::EcdsaSighashType::AllPlusAnyoneCanPay
+                    .into(),
+            );
+            let wallet = Arc::new(Wallet::new(f.descriptor.clone()).with_chain(ChainId::Bitcoin));
+            let mut modal = SignModal::new(
+                HashSet::new(),
+                wallet,
+                CoincubeDirectory::new(PathBuf::new()),
+                Network::Bitcoin,
+                false,
+                None,
+                None,
+                false,
+            );
+            assert!(modal.refuse_anyonecanpay(&asked).is_none());
+            assert!(modal.error.is_none());
+        }
+    }
+
+    /// The Bitcoin Blake2b side of the same entry points.
+    mod blake2b_paths {
+        use super::super::*;
+        use crate::app::state::vault::{
+            replay::{ReplayStatus, UnknownReason},
+            test_support::unified::{fixture, legacy, signer, unified},
+        };
+        use crate::utils::mock::Daemon as MockDaemon;
+        use coincube_core::{
+            miniscript::bitcoin::secp256k1,
+            psbt_unified::{unified_signatures, UnifiedPsbt},
+        };
+        use std::path::PathBuf;
+
+        fn wallet_with_hot_signer(
+            f: &crate::app::state::vault::test_support::unified::Fixture,
+        ) -> Arc<Wallet> {
+            let mut wallet = Wallet::new(f.descriptor.clone()).with_chain(ChainId::BitcoinBlake2b);
+            wallet.signer = Some(Arc::new(crate::signer::Signer::new(signer(21))));
+            Arc::new(wallet)
+        }
+
+        #[test]
+        fn master_signer_produces_unified_records_not_partial_sigs() {
+            let f = fixture();
+            let hot = crate::signer::Signer::new(signer(21));
+            let signed =
+                sign_with_master_signer_for_chain(ChainId::BitcoinBlake2b, &hot, f.psbt.clone())
+                    .unwrap();
+            assert!(signed.inputs[0].partial_sigs.is_empty());
+            let records =
+                unified_signatures(&UnifiedPsbt::from_psbt(signed.clone()).unwrap()).unwrap();
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].signature.last(), Some(&0x21));
+            // Verified by the same verifier the status reads.
+            assert_eq!(
+                replay::replay_status(&signed, &secp256k1::Secp256k1::verification_only(), None),
+                ReplayStatus::Unknown(UnknownReason::Incomplete)
+            );
+        }
+
+        #[test]
+        fn border_wallet_produces_unified_records() {
+            let f = fixture();
+            let secp = secp256k1::Secp256k1::new();
+            let mnemonic = coincube_core::bip39::Mnemonic::from_entropy(&[22; 16]).unwrap();
+            let fingerprint = signer(22).fingerprint(&secp);
+            let (fp, signed) = sign_border_wallet_for_chain(
+                ChainId::BitcoinBlake2b,
+                mnemonic,
+                fingerprint,
+                Network::Bitcoin,
+                f.psbt.clone(),
+            )
+            .unwrap();
+            assert_eq!(fp, fingerprint);
+            assert!(signed.inputs[0].partial_sigs.is_empty());
+            assert_eq!(
+                unified_signatures(&UnifiedPsbt::from_psbt(signed).unwrap())
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
+
+        #[test]
+        fn merge_carries_unified_records_and_refuses_conflicts() {
+            let f = fixture();
+            let a = unified(&f.psbt, &f.signers[0]);
+            let b = unified(&f.psbt, &f.signers[1]);
+            let mut merged = a.clone();
+            merge_signatures_for_chain(ChainId::BitcoinBlake2b, &mut merged, &b).unwrap();
+            assert_eq!(
+                unified_signatures(&UnifiedPsbt::from_psbt(merged.clone()).unwrap())
+                    .unwrap()
+                    .len(),
+                2
+            );
+            // Legacy from a third signer rides along in `partial_sigs`.
+            let c = legacy(&f.psbt, &f.signers[2]);
+            merge_signatures_for_chain(ChainId::BitcoinBlake2b, &mut merged, &c).unwrap();
+            assert_eq!(merged.inputs[0].partial_sigs.len(), 2);
+
+            // A key with both encodings is refused and the destination is
+            // untouched.
+            let both = legacy(&f.psbt, &f.signers[0]);
+            let before = merged.serialize();
+            let err = merge_signatures_for_chain(ChainId::BitcoinBlake2b, &mut merged, &both)
+                .unwrap_err();
+            assert!(
+                err.contains("both") || err.contains("ambiguous") || err.contains("Ambiguous"),
+                "{}",
+                err
+            );
+            assert_eq!(merged.serialize(), before);
+        }
+
+        #[test]
+        fn psbt_state_reads_the_verified_witness_and_gates_broadcast() {
+            let f = fixture();
+            let wallet = wallet_with_hot_signer(&f);
+            let secp = secp256k1::Secp256k1::new();
+            let tx = SpendTx::new(
+                None,
+                f.psbt.clone(),
+                Vec::new(),
+                &f.descriptor,
+                &secp,
+                Network::Bitcoin,
+            );
+            let mut state = PsbtState::new(wallet.clone(), tx, true);
+            assert_eq!(
+                state.replay.as_ref().map(|r| r.status.clone()),
+                Some(ReplayStatus::Unknown(UnknownReason::NotYetChecked))
+            );
+            assert!(!state.broadcast_ready());
+
+            // Two unified signatures: protected, ready, and the picker's
+            // signature count sees both (the daemon's analysis alone would
+            // show zero).
+            state.tx.psbt = unified(&unified(&f.psbt, &f.signers[0]), &f.signers[1]);
+            let _ = state.reconcile_and_maybe_close();
+            assert_eq!(
+                state.replay.as_ref().unwrap().status,
+                ReplayStatus::Protected
+            );
+            assert_eq!(state.tx.sigs.primary_path().sigs_count, 2);
+            assert!(state.broadcast_ready());
+            let pill = state.replay_presentation(&Cache::default()).unwrap();
+            assert!(pill.broadcast_ready);
+            // No lookup has run: every input is "not yet checked", never safe.
+            assert_eq!(
+                pill.entangled,
+                vec![(0, crate::services::entangled::Entanglement::Unknown)]
+            );
+
+            // Legacy only: replayable, and Broadcast waits for the
+            // acknowledgement, given through the view message.
+            state.tx.psbt = legacy(&legacy(&f.psbt, &f.signers[0]), &f.signers[1]);
+            let _ = state.reconcile_and_maybe_close();
+            assert_eq!(
+                state.replay.as_ref().unwrap().status,
+                ReplayStatus::Replayable { inputs: vec![0] }
+            );
+            assert!(!state.broadcast_ready());
+            let daemon: Arc<dyn Daemon + Sync + Send> = Arc::new(
+                crate::daemon::client::Coincubed::new(MockDaemon::new(vec![]).run()),
+            );
+            let _ = state.update(
+                daemon.clone(),
+                &Cache::default(),
+                Message::View(view::Message::Spend(
+                    view::SpendTxMessage::AcknowledgeReplay(true),
+                )),
+            );
+            assert!(state.broadcast_ready());
+            // A new signature resets the acknowledgement.
+            state.tx.psbt = legacy(&state.tx.psbt, &f.signers[2]);
+            let _ = state.reconcile_and_maybe_close();
+            assert!(!state.replay.as_ref().unwrap().acknowledged);
+            assert!(!state.broadcast_ready());
+        }
+
+        #[test]
+        fn a_resolved_entanglement_shows_on_the_pill_from_the_cache() {
+            let f = fixture();
+            let wallet = wallet_with_hot_signer(&f);
+            let secp = secp256k1::Secp256k1::new();
+            let tx = SpendTx::new(
+                None,
+                legacy(&legacy(&f.psbt, &f.signers[0]), &f.signers[1]),
+                Vec::new(),
+                &f.descriptor,
+                &secp,
+                Network::Bitcoin,
+            );
+            let state = PsbtState::new(wallet, tx, true);
+            let txid = f.psbt.unsigned_tx.input[0].previous_output.txid;
+            let mut cache = Cache::default();
+            cache
+                .entangled
+                .insert(txid, crate::services::entangled::Entanglement::Entangled);
+            let pill = state.replay_presentation(&cache).unwrap();
+            let (label, _) = replay::pill_copy(&pill.review.status, &pill.entangled);
+            assert_eq!(
+                label,
+                "Replayable — no replay-capable signature on input 0 (also exists on Bitcoin)"
+            );
+            cache
+                .entangled
+                .insert(txid, crate::services::entangled::Entanglement::NotEntangled);
+            let pill = state.replay_presentation(&cache).unwrap();
+            assert!(pill.entangled.is_empty());
+        }
+
+        #[test]
+        fn anyonecanpay_is_refused_before_any_signer_is_dispatched() {
+            let f = fixture();
+            let mut asked = f.psbt.clone();
+            asked.inputs[0].sighash_type = Some(
+                coincube_core::miniscript::bitcoin::sighash::EcdsaSighashType::AllPlusAnyoneCanPay
+                    .into(),
+            );
+            let wallet = wallet_with_hot_signer(&f);
+            let mut modal = SignModal::new(
+                HashSet::new(),
+                wallet,
+                CoincubeDirectory::new(PathBuf::new()),
+                Network::Bitcoin,
+                false,
+                None,
+                None,
+                false,
+            );
+            assert!(modal.refuse_anyonecanpay(&asked).is_some());
+            assert!(modal
+                .error
+                .as_ref()
+                .map(|e| e.to_string())
+                .unwrap_or_default()
+                .contains("ANYONECANPAY"));
+            assert!(modal.signing.is_empty());
+            // A clean PSBT is not refused.
+            modal.error = None;
+            assert!(modal.refuse_anyonecanpay(&f.psbt).is_none());
+            assert!(modal.error.is_none());
+        }
     }
 }

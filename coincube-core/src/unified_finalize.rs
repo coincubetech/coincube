@@ -418,9 +418,11 @@ fn satisfy_input(
 }
 
 /// Largest legacy candidate set [`satisfy_preferring_unified`] will search
-/// exhaustively (2^12 satisfactions, each a few microseconds). A Vault path has
-/// a handful of keys; a PSBT carrying more legacy signatures than this on one
-/// input while also holding a unified one is refused rather than degraded.
+/// exhaustively: 2^12 satisfactions at ~15 µs each in a release build, about
+/// 63 ms for the worst case on one input (measured by Elrond at `0eb042c2`;
+/// a 2-of-3 searches four subsets). A Vault path has a handful of keys; a
+/// PSBT carrying more legacy signatures than this on one input while also
+/// holding a unified one is refused rather than degraded.
 const MAX_LEGACY_KEYS_FOR_SEARCH: usize = 12;
 
 /// Satisfy with unified signatures plus legacy ones, but never let a legacy

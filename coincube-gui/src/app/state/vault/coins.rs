@@ -52,16 +52,20 @@ pub struct CoinsPanel {
     warning: Option<Error>,
     /// timelock value to pass for the heir to consume a coin.
     timelock: u16,
+    /// The Cube's chain: on Bitcoin Blake2b each coin carries its
+    /// entangled-deposit badge (`#276` I13); elsewhere the list is unchanged.
+    chain: crate::chain::ChainId,
 }
 
 impl CoinsPanel {
-    pub fn new(coins: &[Coin], timelock: u16) -> Self {
+    pub fn new(coins: &[Coin], timelock: u16, chain: crate::chain::ChainId) -> Self {
         let mut panel = Self {
             labels_edited: LabelsEdited::default(),
             coins: Coins::default(),
             selected: Vec::new(),
             warning: None,
             timelock,
+            chain,
         };
         panel.update_coins(coins);
         panel
@@ -104,6 +108,7 @@ impl State for CoinsPanel {
                 &self.coins.labels,
                 self.labels_edited.cache(),
                 cache.bitcoin_unit,
+                self.chain.is_blake2b(),
             ),
         )
     }
@@ -219,7 +224,7 @@ mod tests {
 
     #[test]
     fn test_coins_panel_update_coins() {
-        let mut panel = CoinsPanel::new(&[], 0);
+        let mut panel = CoinsPanel::new(&[], 0, crate::chain::ChainId::Bitcoin);
         let txid = bitcoin::Txid::from_str(
             "f7bd1b2a995b689d326e51eb742eb1088c4a8f110d9cb56128fd553acc9f88e5",
         )

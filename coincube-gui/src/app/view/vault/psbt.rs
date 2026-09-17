@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use iced::{
     alignment::Horizontal,
-    widget::{scrollable, tooltip, Space},
+    widget::{checkbox, scrollable, tooltip, Space},
     Alignment, Length,
 };
 
@@ -34,12 +34,80 @@ use crate::{
     app::{
         cache::Cache,
         menu::{Menu, VaultSubMenu},
-        state::vault::psbt::{BorderWalletReconstructionState, ReconStep},
+        state::vault::{
+            psbt::{BorderWalletReconstructionState, ReconStep},
+            replay::{self, PillTone, ReplayReview},
+        },
         view::{dashboard, message::*, vault::label},
     },
     daemon::model::{Coin, SpendStatus, SpendTx},
     hw::HardwareWallet,
+    services::entangled::Entanglement,
 };
+
+/// What the spend screen needs to render the replay-protection pill of a
+/// Bitcoin Blake2b spend. `None` on every other chain: nothing is added to
+/// the screen and Broadcast gates on the path threshold as before.
+#[derive(Debug, Clone)]
+pub struct ReplayPill<'a> {
+    pub review: &'a ReplayReview,
+    /// [`replay::entangled_inputs`] for this PSBT, from the cache.
+    pub entangled: Vec<(usize, Entanglement)>,
+    /// [`crate::app::state::vault::psbt::PsbtState::broadcast_ready`].
+    pub broadcast_ready: bool,
+}
+
+/// The status pill plus, for a replayable spend, the acknowledgement the user
+/// must give before Broadcast is enabled.
+fn replay_status_view<'a>(pill: &ReplayPill<'a>) -> Element<'a, Message> {
+    let (label, tone) = replay::pill_copy(&pill.review.status, &pill.entangled);
+    let style: fn(&theme::Theme) -> iced::widget::container::Style = match tone {
+        PillTone::Success => theme::pill::success,
+        PillTone::Warning => theme::pill::warning,
+        PillTone::Neutral => theme::pill::simple,
+    };
+    let mut column = Column::new().spacing(10).padding(15).push(
+        Row::new()
+            .spacing(10)
+            .align_y(Alignment::Center)
+            .push(p1_bold("Replay"))
+            .push(
+                Container::new(p2_regular(label))
+                    .padding(10)
+                    .center_x(Length::Shrink)
+                    .style(style),
+            ),
+    );
+    if pill.review.status.needs_acknowledgement() {
+        let acknowledged = pill.review.acknowledged;
+        column = column.push(
+            checkbox(acknowledged)
+                .label(replay::REPLAYABLE_ACKNOWLEDGEMENT)
+                .on_toggle(|checked| Message::Spend(SpendTxMessage::AcknowledgeReplay(checked))),
+        );
+    }
+    let unchecked: Vec<usize> = pill
+        .entangled
+        .iter()
+        .filter(|(_, status)| matches!(status, Entanglement::Unknown))
+        .map(|(index, _)| *index)
+        .collect();
+    if !unchecked.is_empty() {
+        column = column.push(
+            p2_regular(format!(
+                "Not yet checked whether {} {} also on Bitcoin (the lookup will run after the next sync).",
+                if unchecked.len() == 1 { "input" } else { "inputs" },
+                unchecked
+                    .iter()
+                    .map(|i| i.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+            .style(theme::text::secondary),
+        );
+    }
+    column.into()
+}
 
 #[allow(clippy::too_many_arguments)]
 pub fn psbt_view<'a>(
@@ -52,6 +120,7 @@ pub fn psbt_view<'a>(
     network: Network,
     currently_signing: bool,
     bitcoin_unit: BitcoinDisplayUnit,
+    replay: Option<ReplayPill<'a>>,
 ) -> Element<'a, Message> {
     dashboard(
         &Menu::Vault(VaultSubMenu::PSBTs(None)),
@@ -82,6 +151,7 @@ pub fn psbt_view<'a>(
                 key_aliases,
                 currently_signing,
                 saved,
+                replay,
             ))
             .push(
                 Column::new()
@@ -491,13 +561,26 @@ pub fn spend_header<'a>(
         .into()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn spend_overview_view<'a>(
     tx: &'a SpendTx,
     desc_info: &'a CoincubePolicy,
     key_aliases: &'a HashMap<Fingerprint, String>,
     currently_signing: bool,
     saved: bool,
+    replay: Option<ReplayPill<'a>>,
 ) -> Element<'a, Message> {
+    // Broadcast readiness has one definition shared with the state
+    // (`replay::broadcast_ready`): the path threshold on a Bitcoin-family
+    // Cube; on Bitcoin Blake2b the finaliser's verdict plus the acknowledgement.
+    let broadcast_ready = match &replay {
+        None => tx.path_ready().is_some(),
+        Some(pill) => pill.broadcast_ready,
+    };
+    let sign_or_broadcast = match &replay {
+        None => tx.path_ready().is_none(),
+        Some(pill) => !pill.review.status.is_finalisable(),
+    };
     // Force the user to save (which commits the derivation-index increment to the
     // database) before exporting, otherwise the exported PSBT can lead to change
     // address reuse.
@@ -570,7 +653,8 @@ pub fn spend_overview_view<'a>(
                                     .align_y(Alignment::Center),
                             ),
                     )
-                    .push(signatures(tx, desc_info, key_aliases)),
+                    .push(signatures(tx, desc_info, key_aliases))
+                    .push_maybe(replay.as_ref().map(replay_status_view)),
             )
             .style(theme::card::simple),
         )
@@ -578,7 +662,7 @@ pub fn spend_overview_view<'a>(
             Some(
                 Row::new()
                     .push(Space::new().width(Length::Fill))
-                    .push(if tx.path_ready().is_none() {
+                    .push(if sign_or_broadcast {
                         // A single "Sign" entry point opens the unified
                         // picker, which lists every signer — local (HW,
                         // master, border) and Keychain (contacts' phones) —
@@ -591,10 +675,15 @@ pub fn spend_overview_view<'a>(
                             ),
                         )
                     } else {
+                        // Disabled (never hidden) while a replayable BTCB2
+                        // spend awaits its acknowledgement.
                         Some(
                             Row::new().push(
                                 button::primary(None, "Broadcast")
-                                    .on_press(Message::Spend(SpendTxMessage::Broadcast))
+                                    .on_press_maybe(
+                                        broadcast_ready
+                                            .then_some(Message::Spend(SpendTxMessage::Broadcast)),
+                                    )
                                     .width(Length::Fixed(150.0)),
                             ),
                         )

@@ -686,9 +686,14 @@ impl KeychainSignModal {
                 .vault;
                 let index: KeychainSignerIndex =
                     build_keychain_index(&vault.members, &cube_keys, self_user_id);
-                let required =
-                    classify_signers(&psbt, &wallet.main_descriptor, &index, &wallet.keys_aliases)
-                        .map_err(|e| OpError::new(e.to_string()))?;
+                let required = classify_signers(
+                    &psbt,
+                    &wallet.main_descriptor,
+                    &index,
+                    &wallet.keys_aliases,
+                    &super::signers::ReplayCapabilities::from_wallet(&wallet),
+                )
+                .map_err(|e| OpError::new(e.to_string()))?;
                 Ok(ClassifiedSigners {
                     vault,
                     required,
@@ -1541,7 +1546,22 @@ impl KeychainSignModal {
                 }
             };
             match Psbt::deserialize(&bytes) {
-                Ok(psbt) => super::psbt::merge_signatures_pub(&mut signed_psbt, &psbt),
+                Ok(psbt) => {
+                    if let Err(e) = super::psbt::merge_signatures_pub(
+                        self.wallet.chain,
+                        &mut signed_psbt,
+                        &psbt,
+                    ) {
+                        if let Some(entry) =
+                            self.pending.iter_mut().find(|p| p.session_id == session_id)
+                        {
+                            entry.status = PendingSessionStatus::Failed;
+                            entry.error =
+                                Some(format!("Couldn't merge the returned signatures: {}", e));
+                        }
+                        return Task::none();
+                    }
+                }
                 Err(e) => {
                     if let Some(entry) =
                         self.pending.iter_mut().find(|p| p.session_id == session_id)
@@ -1559,7 +1579,17 @@ impl KeychainSignModal {
             session_id = %session_id,
             "Merging signed PSBT from session into local SpendTx"
         );
-        super::psbt::merge_signatures_pub(&mut tx.psbt, &signed_psbt);
+        if let Err(e) =
+            super::psbt::merge_signatures_pub(self.wallet.chain, &mut tx.psbt, &signed_psbt)
+        {
+            // Nothing merged, nothing persisted: the row fails with the
+            // adapter's reason instead of the daemon refusing later.
+            if let Some(entry) = self.pending.iter_mut().find(|p| p.session_id == session_id) {
+                entry.status = PendingSessionStatus::Failed;
+                entry.error = Some(format!("Couldn't merge the signed PSBT: {}", e));
+            }
+            return Task::none();
+        }
         // Mark the row merged-but-not-yet-persisted (blocks threshold close
         // until saved or retried) and persist-in-flight (keeps a dismissed
         // modal mounted until the callback below returns).

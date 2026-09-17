@@ -646,6 +646,7 @@ pub async fn load_application(
     // the Vault silently loses the ability to sign with a key it holds.
     let seed_password = crate::app::session::seed_file_password(&config.cube_settings);
     let wallet = Wallet::new(config.info.descriptors.main)
+        .with_chain(config.cube_settings.network)
         .load_from_settings(config.wallet_settings)?
         .load_hotsigners(
             &config.datadir_path,
@@ -679,6 +680,7 @@ pub async fn load_application(
         // in `App::new` (from whether the Liquid SDK actually connected), the
         // server half when `/connect/features` loads.
         liquid_gate: crate::app::features::LiquidGate::HIDDEN,
+        entangled: std::collections::HashMap::new(),
         last_poll_at_startup: config.info.last_poll_timestamp,
         daemon_cache: DaemonCache {
             blockheight: config.info.block_height,

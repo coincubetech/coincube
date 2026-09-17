@@ -3170,6 +3170,7 @@ pub fn create_app_with_remote_backend(
             // half in `App::new` (from whether the Liquid SDK actually
             // connected), the server half when `/connect/features` loads.
             liquid_gate: crate::app::features::LiquidGate::HIDDEN,
+            entangled: std::collections::HashMap::new(),
             // We ignore last poll fields for remote backend.
             last_poll_at_startup: None,
             daemon_cache: DaemonCache {
