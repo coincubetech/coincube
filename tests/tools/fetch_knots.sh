@@ -32,6 +32,8 @@
 # Cargo target dir — "${CARGO_TARGET_DIR:-<this dir>/knots_verify/target}/
 # release/knots_verify" first, the repo-local build second — and the caller
 # controls CARGO_TARGET_DIR. A stale or foreign knots_verify there is used.
+# (A relative CARGO_TARGET_DIR is resolved against the caller's cwd, before
+# the script changes directory.)
 # The script therefore prints the verifier it resolved on stderr on every run,
 # so the CI log and a local run both show which binary vouched for the
 # archives. The trust anchor inside the verifier (the vendored Knots signing
@@ -93,6 +95,13 @@ else
     echo "knots_verify not built: (cd tests/tools/knots_verify && cargo build --release)" >&2
     exit 2
   fi
+  # The candidate was tested against the caller's cwd, but it is invoked after
+  # `cd "$dest"` below: a relative CARGO_TARGET_DIR must be made absolute here
+  # or the verifier it selected is not found at verification time.
+  case "$verify_bin" in
+    /*) ;;
+    *) verify_bin="$(cd "$(dirname "$verify_bin")" && pwd -P)/$(basename "$verify_bin")" ;;
+  esac
 fi
 echo "verifier: $verify_bin" >&2
 

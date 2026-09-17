@@ -753,6 +753,52 @@ def test_knots_relative_cache_dir_is_canonicalised(
     assert not (tmp_path / "rel-cache" / FAKE_VERSION / "rel-cache").exists()
 
 
+def test_knots_relative_cargo_target_dir_reaches_the_verifier_after_the_cd(
+    tmp_path, fake_release, fake_verifier
+):
+    """Outside test mode the verifier is located through CARGO_TARGET_DIR. The
+    candidate is tested against the caller's cwd but invoked after `cd "$dest"`,
+    so a relative CARGO_TARGET_DIR used to select a verifier and then fail to
+    find it (exit 127). Hermetic: the release files are pre-seeded in the cache
+    so nothing is downloaded, no KNOTS_TEST_* variable is set, and any
+    unexpected download is sent to a closed local proxy port."""
+    import shutil
+
+    release, archive = fake_release
+    verifier, log, _ = fake_verifier
+    target = tmp_path / "target" / "release"
+    target.mkdir(parents=True)
+    shutil.copy2(verifier, target / "knots_verify")
+    cache = tmp_path / "cache"
+    dest = cache / FAKE_VERSION
+    dest.mkdir(parents=True)
+    for name in (archive.name, "SHA256SUMS", "SHA256SUMS.asc"):
+        shutil.copy2(release / name, dest / name)
+
+    env = dict(os.environ, CARGO_TARGET_DIR="target")
+    for var in ("KNOTS_TEST_MODE", "KNOTS_TEST_BASE_URL", "KNOTS_TEST_VERIFY_PATH"):
+        env.pop(var, None)
+    env.update(
+        https_proxy="http://127.0.0.1:1",
+        HTTPS_PROXY="http://127.0.0.1:1",
+        http_proxy="http://127.0.0.1:1",
+        no_proxy="",
+    )
+    res = subprocess.run(
+        ["bash", KNOTS_SCRIPT, FAKE_VERSION, str(cache)],
+        env=env,
+        capture_output=True,
+        text=True,
+        cwd=str(tmp_path),
+    )
+    assert res.returncode == 0, res.stderr
+    assert f"verifier: {target / 'knots_verify'}" in res.stderr
+    assert _invocations(log) == [f"{archive.name} SHA256SUMS SHA256SUMS.asc"]
+    assert res.stdout.strip() == str(
+        dest / f"bitcoin-{FAKE_VERSION}" / "bin" / "bitcoind"
+    )
+
+
 def test_workflow_knots_cache_key_is_bound_to_verifier_inputs():
     """The archives' cache key must change whenever the verifier's inputs do,
     exactly like the verifier's own cache key (parse-and-assert over the YAML)."""
