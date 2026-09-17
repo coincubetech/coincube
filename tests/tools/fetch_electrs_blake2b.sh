@@ -20,10 +20,14 @@
 # it is only ever written after the source-state checks above passed. On reuse
 # the script re-verifies the source state (clone present, HEAD at the commit,
 # tree clean), the binary against the recorded digest, and the binary's
-# `--version` against the recorded line — which upstream's build.rs stamps with
-# the commit and suffixes with "(dirty)" when built from an unclean tree, an
-# independent witness of what was compiled. Markers of an older format are
-# ignored, which forces one rebuild through the checked path.
+# `--version` against the recorded line. Upstream's build.rs stamps that line
+# with the commit and suffixes "(dirty)" when it built from an unclean tree —
+# but only when GIT_HASH is not already set in the build environment, since
+# build.rs returns early if it is and the stamp is then whatever the
+# environment said. Neither this script nor the workflow sets GIT_HASH, so
+# here the stamp is a secondary check; the clean-checkout requirement above is
+# the gate. Markers of an older format are ignored, which forces one rebuild
+# through the checked path.
 #
 # The cache dir defaults to $XDG_CACHE_HOME/coincube/electrs-blake2b
 # (~/.cache/...): it must live outside this repository, or Cargo treats the
@@ -120,8 +124,9 @@ fi
 (cd "$src" && CARGO_TARGET_DIR="$target" cargo build --release --locked --bin electrs >&2)
 [ -x "$bin" ] || { echo "electrs binary not produced" >&2; exit 1; }
 
-# Independent of the checks above: upstream's build.rs stamps the commit into
-# the version string and appends "(dirty)" when it built from an unclean tree.
+# Secondary check (see the header: valid because GIT_HASH is not preset here):
+# upstream's build.rs stamps the commit into the version string and appends
+# "(dirty)" when it built from an unclean tree.
 version="$(version_of "$bin")"
 case "$version" in
   *dirty*) echo "built electrs reports a dirty tree: $version" >&2; rm -f "$bin"; exit 1 ;;
