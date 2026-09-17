@@ -93,7 +93,11 @@ installer performs (`tests/tools/knots_verify`, no `gpg` needed).
 `fetch_electrs_blake2b.sh` clones and builds the pinned indexer commit (RocksDB
 compiles from source: a few minutes the first time; `clang`/`cmake` required)
 under `~/.cache/coincube/electrs-blake2b` — outside the repository, or Cargo
-would treat the checkout as part of Coincube's workspace. Knots downloads cache
+would treat the checkout as part of Coincube's workspace. It refuses to build
+or reuse anything if that checkout has local changes (edited, staged or
+untracked files): `--locked` pins dependencies, not source. Your edits are left
+in place; restore the tree or use another cache dir. `tests/test_btcb2_tools.py`
+covers these checks without a build. Knots downloads cache
 under `tests/tools/knots/` (gitignored). In CI `BTCB2_HARNESS_REQUIRED=1` turns
 a missing binary into a failure rather than a skip.
 
