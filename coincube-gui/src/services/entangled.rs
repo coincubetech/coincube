@@ -26,6 +26,13 @@
 //!   spend screen re-checks the inputs of a replayable spend at the moment it
 //!   matters ([`crate::app::state::vault::psbt::PsbtState`]).
 //! - *Unknown* is never cached.
+//!
+//! Every answer is stamped with the instant it was **observed** — when the
+//! twin chain answered, not when the batch carrying it was processed
+//! ([`LookupAnswer::observed_at`], `#395`). [`lookup_all`] asks in turn, so
+//! the first answer of a batch of N can be N-1 round trips old by the time
+//! the batch lands; the cache orders negatives by that instant, never by
+//! arrival, so an older observation cannot re-stamp a newer one.
 
 use std::time::{Duration, Instant};
 
@@ -58,10 +65,14 @@ impl Entanglement {
 /// serves Bitcoin Cubes.
 pub const NEGATIVE_ANSWER_TTL: Duration = Duration::from_secs(60 * 60);
 
-/// A resolved answer with the instant it was resolved at.
+/// A resolved answer with the instant it was observed at
+/// ([`LookupAnswer::observed_at`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CachedEntanglement {
     pub answer: Entanglement,
+    /// When the twin chain gave this answer — the instant the negative's
+    /// shelf life is measured from, and the order two negatives for the same
+    /// deposit are reconciled by.
     pub resolved_at: Instant,
 }
 
@@ -73,6 +84,19 @@ impl CachedEntanglement {
         matches!(self.answer, Entanglement::NotEntangled)
             && now.saturating_duration_since(self.resolved_at) >= NEGATIVE_ANSWER_TTL
     }
+}
+
+/// One deposit's lookup answer, stamped with the instant the twin chain gave
+/// it. The stamp travels with the answer through [`lookup_all`] and the
+/// message that carries the batch, so the cache records *when the answer was
+/// observed*, not when the batch was processed (`#395`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LookupAnswer {
+    pub txid: Txid,
+    pub answer: Entanglement,
+    /// Taken as soon as the twin chain's response (or the failure) was in
+    /// hand. Meaningful only for a resolved answer; `Unknown` is never cached.
+    pub observed_at: Instant,
 }
 
 /// The Bitcoin-family chain a Bitcoin Blake2b chain forked from, on which a
@@ -131,8 +155,20 @@ struct EsploraTx {
 
 /// Look one deposit up on the twin chain of `chain`. `client` must already
 /// carry the Connect session token; an unauthenticated client gets a `401`
-/// and therefore [`Entanglement::Unknown`], which is the right answer.
-pub async fn lookup(client: &CoincubeClient, chain: ChainId, txid: Txid) -> Entanglement {
+/// and therefore [`Entanglement::Unknown`], which is the right answer. The
+/// answer is stamped with the instant it was observed, once the response
+/// (or the failure) is in hand.
+pub async fn lookup(client: &CoincubeClient, chain: ChainId, txid: Txid) -> LookupAnswer {
+    let answer = ask(client, chain, txid).await;
+    LookupAnswer {
+        txid,
+        answer,
+        observed_at: Instant::now(),
+    }
+}
+
+/// The lookup itself, without the stamp.
+async fn ask(client: &CoincubeClient, chain: ChainId, txid: Txid) -> Entanglement {
     let Some(twin) = twin_chain(chain) else {
         return Entanglement::Unknown;
     };
@@ -187,16 +223,16 @@ pub async fn lookup(client: &CoincubeClient, chain: ChainId, txid: Txid) -> Enta
 /// Look every txid up in turn and return **every** answer, `Unknown` ones
 /// included: the caller caches the resolved ones and needs the unresolved
 /// ones too — to release its in-flight claim on them, and to say which inputs
-/// it could not check.
+/// it could not check. Each answer keeps its own observation instant: the
+/// lookups are sequential, so the answers are not observed at one time.
 pub async fn lookup_all(
     client: CoincubeClient,
     chain: ChainId,
     txids: Vec<Txid>,
-) -> Vec<(Txid, Entanglement)> {
+) -> Vec<LookupAnswer> {
     let mut answers = Vec::with_capacity(txids.len());
     for txid in txids {
-        let answer = lookup(&client, chain, txid).await;
-        answers.push((txid, answer));
+        answers.push(lookup(&client, chain, txid).await);
     }
     answers
 }
@@ -257,9 +293,13 @@ mod tests {
                 .body(format!(r#"{{"txid":"{TXID}","version":2,"locktime":0}}"#));
         });
         let client = CoincubeClient::for_test(server.base_url());
-        assert_eq!(
-            lookup(&client, ChainId::BitcoinBlake2b, txid()).await,
-            Entanglement::Entangled
+        let before = Instant::now();
+        let answer = lookup(&client, ChainId::BitcoinBlake2b, txid()).await;
+        assert_eq!(answer.txid, txid());
+        assert_eq!(answer.answer, Entanglement::Entangled);
+        assert!(
+            before <= answer.observed_at && answer.observed_at <= Instant::now(),
+            "stamped when observed"
         );
         mock.assert();
     }
@@ -274,7 +314,9 @@ mod tests {
         });
         let client = CoincubeClient::for_test(server.base_url());
         assert_eq!(
-            lookup(&client, ChainId::BitcoinBlake2b, txid()).await,
+            lookup(&client, ChainId::BitcoinBlake2b, txid())
+                .await
+                .answer,
             Entanglement::NotEntangled
         );
     }
@@ -303,7 +345,9 @@ mod tests {
             });
             let client = CoincubeClient::for_test(server.base_url());
             assert_eq!(
-                lookup(&client, ChainId::BitcoinBlake2b, txid()).await,
+                lookup(&client, ChainId::BitcoinBlake2b, txid())
+                    .await
+                    .answer,
                 Entanglement::Unknown,
                 "status {} body {}",
                 status,
@@ -316,12 +360,14 @@ mod tests {
         drop(listener);
         let client = CoincubeClient::for_test(format!("http://{addr}"));
         assert_eq!(
-            lookup(&client, ChainId::BitcoinBlake2b, txid()).await,
+            lookup(&client, ChainId::BitcoinBlake2b, txid())
+                .await
+                .answer,
             Entanglement::Unknown
         );
         // A non-BTCB2 chain has nothing to look up.
         assert_eq!(
-            lookup(&client, ChainId::Bitcoin, txid()).await,
+            lookup(&client, ChainId::Bitcoin, txid()).await.answer,
             Entanglement::Unknown
         );
     }
@@ -405,11 +451,55 @@ mod tests {
         let client = CoincubeClient::for_test(server.base_url());
         let answers = lookup_all(client, ChainId::BitcoinBlake2b, vec![txid(), other]).await;
         assert_eq!(
-            answers,
+            answers
+                .iter()
+                .map(|a| (a.txid, a.answer))
+                .collect::<Vec<_>>(),
             vec![
                 (txid(), Entanglement::Entangled),
                 (other, Entanglement::Unknown)
             ]
+        );
+    }
+
+    /// `#395`: a batch is asked in turn, and each answer is stamped when *it*
+    /// was observed — the first answer of the batch is older than the last.
+    /// A single batch-completion stamp would make them equal.
+    #[tokio::test]
+    async fn every_answer_in_a_batch_carries_its_own_observation_instant() {
+        let other =
+            Txid::from_str("0000000000000000000000000000000000000000000000000000000000000001")
+                .unwrap();
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(Method::GET)
+                .path(format!("/api/v1/esplora/bitcoin/mainnet/tx/{TXID}"));
+            then.status(404).body("Transaction not found");
+        });
+        server.mock(|when, then| {
+            when.method(Method::GET)
+                .path(format!("/api/v1/esplora/bitcoin/mainnet/tx/{other}"));
+            then.status(404)
+                .delay(Duration::from_millis(50))
+                .body("Transaction not found");
+        });
+        let client = CoincubeClient::for_test(server.base_url());
+        let batch_started = Instant::now();
+        let answers = lookup_all(client, ChainId::BitcoinBlake2b, vec![txid(), other]).await;
+        let batch_landed = Instant::now();
+        let [first, second] = answers.as_slice() else {
+            panic!("two answers, got {:?}", answers);
+        };
+        assert_eq!(first.answer, Entanglement::NotEntangled);
+        assert_eq!(second.answer, Entanglement::NotEntangled);
+        assert!(first.observed_at >= batch_started);
+        assert!(
+            first.observed_at < second.observed_at,
+            "the first answer was observed before the second was even asked"
+        );
+        assert!(
+            batch_landed.saturating_duration_since(first.observed_at) >= Duration::from_millis(50),
+            "the first answer predates the batch landing by at least the second lookup's latency"
         );
     }
 }

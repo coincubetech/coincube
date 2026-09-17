@@ -3157,6 +3157,7 @@ pub fn create_app_with_remote_backend(
 
     Ok(App::new(
         Cache {
+            app_generation: crate::app::cache::AppGeneration::next(),
             connect_transport_key: None,
             cube_encryption_key: None,
             network,

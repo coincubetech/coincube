@@ -278,6 +278,10 @@ impl PsbtState {
             txids: txids.clone(),
         };
         let chain = self.wallet.chain;
+        let origin = crate::app::cache::LookupOrigin {
+            app: cache.app_generation,
+            chain,
+        };
         let spend = self.tx.psbt.unsigned_tx.compute_txid();
         Task::perform(
             async move {
@@ -287,6 +291,7 @@ impl PsbtState {
                 crate::services::entangled::lookup_all(client, chain, txids).await
             },
             move |answers| Message::EntangledRevalidated {
+                origin,
                 spend,
                 generation,
                 answers,
@@ -305,9 +310,10 @@ impl PsbtState {
     /// only through here and a stale reply can never re-stamp one.
     fn apply_entangled_reply(
         &mut self,
+        origin: crate::app::cache::LookupOrigin,
         spend: Txid,
         generation: u64,
-        answers: &[(Txid, crate::services::entangled::Entanglement)],
+        answers: &[crate::services::entangled::LookupAnswer],
     ) -> Task<Message> {
         let current = match &self.entangled_check {
             EntangledCheck::InFlight { generation, .. } => *generation,
@@ -318,19 +324,22 @@ impl PsbtState {
         }
         let unresolved = answers
             .iter()
-            .filter(|(_, answer)| !answer.is_resolved())
-            .map(|(txid, _)| *txid)
+            .filter(|reply| !reply.answer.is_resolved())
+            .map(|reply| reply.txid)
             .collect();
         self.entangled_check = EntangledCheck::Done { unresolved };
         let resolved: Vec<_> = answers
             .iter()
             .copied()
-            .filter(|(_, answer)| answer.is_resolved())
+            .filter(|reply| reply.answer.is_resolved())
             .collect();
         if resolved.is_empty() {
             return Task::none();
         }
-        Task::done(Message::EntanglementAnswered { answers: resolved })
+        Task::done(Message::EntanglementAnswered {
+            origin,
+            answers: resolved,
+        })
     }
 
     /// The Broadcast dialog is open on a spend that is no longer ready — a
@@ -516,10 +525,11 @@ impl PsbtState {
         // currently in flight ([`Self::apply_entangled_reply`]).
         let task = match message {
             Message::EntangledRevalidated {
+                origin,
                 spend,
                 generation,
                 ref answers,
-            } => self.apply_entangled_reply(spend, generation, answers),
+            } => self.apply_entangled_reply(origin, spend, generation, answers),
             message => self.update_inner(daemon, cache, message),
         };
         // Entering the screen: the first message through here starts the
@@ -3437,6 +3447,26 @@ mod tests {
             }
         }
 
+        /// A lookup answer observed now.
+        fn observed(
+            txid: Txid,
+            answer: crate::services::entangled::Entanglement,
+        ) -> crate::services::entangled::LookupAnswer {
+            crate::services::entangled::LookupAnswer {
+                txid,
+                answer,
+                observed_at: std::time::Instant::now(),
+            }
+        }
+
+        /// The origin a re-check issued by the screen under `cache` carries.
+        fn origin_of(cache: &Cache) -> crate::app::cache::LookupOrigin {
+            crate::app::cache::LookupOrigin {
+                app: cache.app_generation,
+                chain: ChainId::BitcoinBlake2b,
+            }
+        }
+
         fn wallet_with_hot_signer(
             f: &crate::app::state::vault::test_support::unified::Fixture,
         ) -> Arc<Wallet> {
@@ -4285,12 +4315,13 @@ mod tests {
                 daemon.clone(),
                 &session,
                 Message::EntangledRevalidated {
+                    origin: origin_of(&session),
                     spend: Txid::from_str(
                         "0000000000000000000000000000000000000000000000000000000000000001",
                     )
                     .unwrap(),
                     generation,
-                    answers: vec![(txid, Entanglement::Entangled)],
+                    answers: vec![observed(txid, Entanglement::Entangled)],
                 },
             );
             assert!(
@@ -4308,9 +4339,10 @@ mod tests {
                 daemon.clone(),
                 &entangled,
                 Message::EntangledRevalidated {
+                    origin: origin_of(&entangled),
                     spend,
                     generation,
-                    answers: vec![(txid, Entanglement::Entangled)],
+                    answers: vec![observed(txid, Entanglement::Entangled)],
                 },
             );
             assert_eq!(
@@ -4329,9 +4361,10 @@ mod tests {
                 daemon.clone(),
                 &session,
                 Message::EntangledRevalidated {
+                    origin: origin_of(&session),
                     spend,
                     generation,
-                    answers: vec![(txid, Entanglement::Unknown)],
+                    answers: vec![observed(txid, Entanglement::Unknown)],
                 },
             );
             assert_eq!(
@@ -4544,9 +4577,10 @@ mod tests {
                 )
             };
             let reply = |generation: u64, answer: Entanglement| Message::EntangledRevalidated {
+                origin: origin_of(&session),
                 spend,
                 generation,
-                answers: vec![(txid, answer)],
+                answers: vec![observed(txid, answer)],
             };
 
             // Screen instance A starts a check and is closed with it in flight.
@@ -4641,10 +4675,13 @@ mod tests {
             assert!(
                 live_out.iter().any(|m| matches!(
                     m,
-                    Message::EntanglementAnswered { answers }
-                        if *answers == vec![(txid, Entanglement::NotEntangled)]
+                    Message::EntanglementAnswered { origin, answers }
+                        if *origin == origin_of(&session)
+                            && answers.len() == 1
+                            && answers[0].txid == txid
+                            && answers[0].answer == Entanglement::NotEntangled
                 )),
-                "the accepted negative is recorded"
+                "the accepted negative is recorded, under the reply's origin"
             );
             // An accepted reply with only Unknown records nothing.
             let mut g = new_state(&legacy_only);
