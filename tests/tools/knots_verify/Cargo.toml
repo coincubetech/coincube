@@ -1,0 +1,15 @@
+[package]
+name = "knots_verify"
+version = "0.1.0"
+edition = "2021"
+description = "Verify a Bitcoin Knots release archive against its PGP-signed SHA256SUMS, the way the Tenshu installer does."
+
+[dependencies]
+# Same crates and versions the desktop installer uses for this check
+# (coincube-gui/Cargo.toml: pgp 0.16, sha2 0.11, hex 0.4).
+pgp = "0.16"
+sha2 = "0.11"
+hex = "0.4"
+
+# Avoid it being built under Coincube's target dir.
+[workspace]

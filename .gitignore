@@ -58,3 +58,6 @@ contrib/release/macos/build-sign-local.sh
 # Its outputs, alongside the bundle above.
 /tenshu-*.dmg
 /tenshu-*-notarize.zip
+
+# BTCB2 two-chain harness: verified Knots downloads (tests/tools/fetch_knots.sh)
+tests/tools/knots/

@@ -46,13 +46,30 @@ class BitcoindRpcInterface:
 
 
 class Bitcoind(BitcoinBackend):
-    def __init__(self, bitcoin_dir, rpcport=None):
+    def __init__(self, bitcoin_dir, rpcport=None, bitcoind_path=None, extra_args=None):
+        """A regtest bitcoind under `bitcoin_dir`.
+
+        `bitcoind_path` overrides the suite-wide BITCOIND_PATH so one test can
+        drive two different node builds (the BTCB2 two-chain harness runs the
+        pinned non-enforcing Knots next to the BLAKE2b-forking one).
+        `extra_args` is a sequence of complete argument strings appended to
+        the command line verbatim, e.g. `["-testactivationheight=blake2b@N"]`
+        for the regtest fork schedule. A bare string is refused rather than
+        iterated character by character.
+        """
+        if isinstance(extra_args, (str, bytes)):
+            raise TypeError(
+                "extra_args must be a sequence of complete argument strings, "
+                f"e.g. ['-testactivationheight=blake2b@110']; got {extra_args!r}"
+            )
+        extra_args = list(extra_args or [])
         TailableProc.__init__(self, bitcoin_dir, verbose=False)
 
         if rpcport is None:
             rpcport = reserve()
 
         self.bitcoin_dir = bitcoin_dir
+        self.bitcoind_path = bitcoind_path or BITCOIND_PATH
         self.rpcport = rpcport
         self.p2pport = reserve()
         self.prefix = "bitcoind"
@@ -62,14 +79,14 @@ class Bitcoind(BitcoinBackend):
             os.makedirs(regtestdir)
 
         self.cmd_line = [
-            BITCOIND_PATH,
+            self.bitcoind_path,
             "-datadir={}".format(bitcoin_dir),
             "-printtoconsole",
             "-server",
             "-debug=1",
             "-debugexclude=libevent",
             "-debugexclude=tor",
-        ]
+        ] + extra_args
         bitcoind_conf = {
             "bind": f"127.0.0.1:{self.p2pport}",
             "rpcport": rpcport,
