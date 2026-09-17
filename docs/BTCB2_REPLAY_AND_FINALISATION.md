@@ -34,12 +34,26 @@ node about *which* signatures go into the witness — the next section.
 `finalize_p2wsh_all_unified(psbt, secp) -> FinalizedSpend { transaction, inputs: Vec<InputWitnessReport> }`
 
 1. Every unified record is cryptographically verified first; one bad record
-   fails the whole call. Prevouts and witness scripts are authenticated.
+   fails the whole call. Prevouts and witness scripts are authenticated. Then
+   **every** legacy `partial_sigs` entry of every input is verified against
+   the BIP-143 digest and restricted to `SIGHASH_ALL` — including entries no
+   witness will use. A PSBT that lies anywhere is not finalised from the parts
+   that happen to be true. (This is stricter than a node's `finalizepsbt`, and
+   than the Bitcoin path's `finalize_mut`, which only checks what it places —
+   but it matches the module's refuse-rather-than-broadcast posture, and the
+   adapter already refuses to *store* an ambiguous or conflicting record, so
+   an unusable legacy record should not be reachable through Coincube's own
+   flow. A Bitcoin-path spend with an invalid legacy signature strands in
+   `finalize_mut` the same way.)
 2. Per input, unified signatures are offered to the miniscript satisfier
-   alone. Only if the script cannot be satisfied from those are verified
-   legacy `SIGHASH_ALL` signatures added, and only for keys with **no**
-   unified record (a key with both encodings is refused a layer down by the
-   PSBT adapter).
+   alone. Only if the script cannot be satisfied from those are the verified
+   legacy signatures added, and only for keys with **no** unified record (a
+   key with both encodings is refused a layer down by the PSBT adapter).
+   Timelock leaves are answered with the transaction-level consensus guards
+   rust-miniscript's own `PsbtInputSatisfier` applies — CSV needs transaction
+   version ≥ 2 and a sequence that is a relative lock time, CLTV needs a
+   sequence that enables lock time — so a recovery witness is never assembled
+   for a transaction a node would reject.
 3. **A usable unified signature is never dropped for legacy ones.** miniscript
    picks the cheapest satisfaction and `multi` takes keys in script order, so
    with more signatures than the threshold needs it can build an all-legacy
@@ -59,11 +73,13 @@ node about *which* signatures go into the witness — the next section.
 ## Daemon
 
 `coincubed` keys both spend mutations on `config.bitcoin_config.chain`:
-`update_spend` merges signatures with the prior copy on Bitcoin and, on BTCB2,
-additionally runs the adapter merge (refuses conflicting or ambiguous
-encodings, nothing stored on refusal); `broadcast_spend` uses `finalize_mut`
-on Bitcoin and the core finaliser on BTCB2, logging each input's report.
-Stored PSBTs round-trip the proprietary records unchanged.
+`update_spend` merges signatures with the prior copy on Bitcoin (last write
+wins on a key, as before) and, on BTCB2, runs the adapter merge **against the
+stored PSBT as it is** — never after the copy, which would have overwritten a
+stored signature before the adapter could compare it — refusing conflicting
+or ambiguous encodings with nothing stored on refusal; `broadcast_spend` uses
+`finalize_mut` on Bitcoin and the core finaliser on BTCB2, logging each
+input's report. Stored PSBTs round-trip the proprietary records unchanged.
 
 ## Desktop
 
@@ -76,14 +92,22 @@ Stored PSBTs round-trip the proprietary records unchanged.
 - **Signing** (`state/vault/psbt.rs`): on BTCB2 the hot key and Border Wallet
   sign unified (`Signer::sign_psbt_unified`,
   `sign_psbt_with_border_wallet_unified`); hardware and Keychain sign legacy as
-  before. `ANYONECANPAY` on any input is refused before any signer is
-  dispatched. Merges go through the adapter so the desktop never holds a PSBT
-  the daemon would reject.
+  before. Before any signer — local, device or Keychain — is dispatched, the
+  PSBT is refused if any input asks for or carries `ANYONECANPAY`, or if it
+  carries a reserved unified record the adapter rejects (so no device or phone
+  is prompted for a signature that would be thrown away). Merges go through
+  the adapter against the destination as it is, so the desktop never holds a
+  PSBT the daemon would reject and a conflicting signature never overwrites a
+  stored one. The Keychain flow's "who still has to sign" classification uses
+  the same chain-keyed analysis, so a collected unified signature is not asked
+  for again.
 - **Status** (`state/vault/replay.rs`): four states derived from the
   finaliser's report over the merged PSBT — *Replay protected*, *Replayable —
   no replay-capable signature on input N* (amber; Broadcast disabled until "I
-  understand this can also spend my Bitcoin" is ticked; the tick is dropped
-  whenever a signature changes), *Split — cannot replay* (wired; its evidence
+  understand this can also spend my Bitcoin" is ticked; the tick is keyed to
+  the PSBT's bytes, so it survives a recompute over the same signatures and is
+  dropped on any content change even when the status enum stays equal),
+  *Split — cannot replay* (wired; its evidence
   type `SplitEvidence` has no values until Lane B1.5, so the state is
   unreachable by construction and tested as such), *Unknown / not yet checked*
   (no signatures, not enough, or the verifier refused). On BTCB2 "ready to
@@ -93,8 +117,36 @@ Stored PSBTs round-trip the proprietary records unchanged.
   (`bitcoin/mainnet` for `BitcoinBlake2b`, `bitcoin/testnet4` for its
   testnet). `200` with the same txid → *Entangled*; `404` → *Not entangled*;
   anything else → *Unknown*, not cached, retried next sync. Coins carry an
-  *Entangled* / *Not yet checked* badge; the replayable pill names entangled
-  inputs as also existing on Bitcoin.
+  *Entangled* / *Not yet checked* badge. **A replayable input whose deposit is
+  confirmed *Entangled* is a requirement, not a warning**
+  (`replay::blocked_entangled_inputs`): the acknowledgement does not apply,
+  Broadcast stays disabled, the picker stays open, and the copy names the
+  remedy that exists in this build — a replay-capable signature on that input
+  (Cube key or Border Wallet key); splitting first is B1.5 and is said to be
+  unavailable rather than offered. *Unknown* never blocks: gating on an
+  unanswered lookup would stop every BTCB2 spend until a sync completed, and
+  "never reads as not entangled" asks for the honest amber, not a hard stop.
+  The entangled set is read from the cache at every check (handler, picker
+  close, view), never frozen into the review at signature time, so a lookup
+  landing after the last signature tightens the gate — and Sign stays
+  offered and the picker stays open while the requirement is unmet, so the
+  hot key or Border Wallet signature that satisfies it can still be collected.
+  Consequence, accepted deliberately: a Vault whose only usable path has no
+  replay-capable signer cannot spend a known-entangled coin until Lane B3
+  (Keychain unified) or B1.5 (split) — which is why the creation notice exists.
+  **Cache lifecycle:** *Entangled* is terminal (never re-queried, never
+  overwritten); *Not entangled* carries the instant it was resolved and is
+  re-queried by the sync task once older than one hour (anyone holding the
+  funding transaction can broadcast it onto Bitcoin after our 404); *Unknown*
+  is never cached. Lookup batches are single-flight (claimed txids are
+  excluded from the next batch and released as a whole when the reply lands,
+  `Unknown` included). At the moment it matters — on entering the spend screen
+  and whenever the status becomes replayable, once per set of signatures — the
+  screen re-checks that spend's inputs not already known *Entangled*; Broadcast
+  is disabled and says it is checking meanwhile (the gate stays a pure function
+  of cache state plus the in-flight flag); *Entangled* back closes the gate,
+  *Unknown* back leaves the acknowledgement path open with copy saying the
+  check could not complete, a *Protected* spend checks nothing.
 - **Creation** (installer descriptor editor): on BTCB2 a complete path with no
   replay-capable key gets a non-blocking notice ("spends from this path can be
   replayed onto Bitcoin unless the coins were split first"). Devices stay

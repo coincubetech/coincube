@@ -15,7 +15,10 @@
 //! What a witness may contain, per key: a **unified** signature (`0x21`,
 //! verified by [`verify_p2wsh_all_unified`]) or, failing that, a **legacy**
 //! `SIGHASH_ALL` signature from `partial_sigs` (verified here against the
-//! BIP-143 digest). A key that has a verified unified signature never
+//! BIP-143 digest). Every signature the PSBT carries is verified before any
+//! witness is chosen — a legacy record that would not be used still has to be
+//! valid, or the whole call is refused: a PSBT that lies anywhere is not
+//! finalised from the parts that happen to be true. A key that has a verified unified signature never
 //! contributes its legacy one, an input is first satisfied from unified
 //! signatures alone, and legacy signatures are offered only when that is
 //! impossible. Offering them is not enough on its own: miniscript picks the
@@ -46,9 +49,9 @@ use miniscript::{
     bitcoin::{
         absolute, ecdsa,
         hashes::{hash160, Hash},
-        secp256k1,
+        relative, secp256k1,
         sighash::{EcdsaSighashType, SighashCache},
-        Amount, PublicKey, ScriptBuf, Transaction, TxOut, Witness,
+        transaction, Amount, PublicKey, ScriptBuf, Sequence, Transaction, TxOut, Witness,
     },
     ExtParams, Miniscript, Satisfier, Segwitv0,
 };
@@ -230,10 +233,36 @@ struct AvailableSignature {
     unified: bool,
 }
 
+/// The transaction-level facts a timelock check needs, taken from the
+/// unsigned transaction and the input being satisfied.
+#[derive(Debug, Clone, Copy)]
+struct InputLocks {
+    version: transaction::Version,
+    sequence: Sequence,
+    lock_time: absolute::LockTime,
+}
+
+impl InputLocks {
+    fn of(tx: &Transaction, input_index: usize) -> Self {
+        Self {
+            version: tx.version,
+            sequence: tx.input[input_index].sequence,
+            lock_time: tx.lock_time,
+        }
+    }
+}
+
 /// Offers exactly one signature per key, and remembers the placeholder bytes
 /// miniscript will write for it so they can be swapped for the real encoding.
+/// Answers timelock checks the way rust-miniscript's own `PsbtInputSatisfier`
+/// does — with the transaction-level consensus guards, not the bare
+/// `Sequence`/`LockTime` satisfiers: a CSV leaf needs transaction version ≥ 2
+/// and a sequence that is a relative lock time; a CLTV leaf needs a sequence
+/// that enables lock time. Without them the finaliser would assemble a
+/// recovery witness for a transaction a node rejects.
 struct KeyedSatisfier<'a> {
     available: &'a BTreeMap<PublicKey, AvailableSignature>,
+    locks: InputLocks,
 }
 
 impl KeyedSatisfier<'_> {
@@ -271,6 +300,28 @@ impl Satisfier<PublicKey> for KeyedSatisfier<'_> {
             .iter()
             .find(|(pk, _)| pk.pubkey_hash().as_byte_array() == hash.as_byte_array())
             .map(|(pk, sig)| (*pk, Self::placeholder(sig)))
+    }
+
+    // Mirrors `miniscript::psbt::PsbtInputSatisfier::check_after`
+    // (`TxIn::enables_lock_time`): an input whose sequence is final disables
+    // the transaction's lock time.
+    fn check_after(&self, n: absolute::LockTime) -> bool {
+        if !self.locks.sequence.enables_absolute_lock_time() {
+            return false;
+        }
+        <dyn Satisfier<PublicKey>>::check_after(&self.locks.lock_time, n)
+    }
+
+    // Mirrors `miniscript::psbt::PsbtInputSatisfier::check_older`: BIP-68 is
+    // only enforced for version ≥ 2 transactions, and only a sequence with the
+    // disable flag clear is a relative lock time.
+    fn check_older(&self, n: relative::LockTime) -> bool {
+        if self.locks.version < transaction::Version::TWO
+            || !self.locks.sequence.is_relative_lock_time()
+        {
+            return false;
+        }
+        <dyn Satisfier<PublicKey>>::check_older(&self.locks.sequence, n)
     }
 }
 
@@ -370,10 +421,9 @@ fn satisfy_input(
     input_index: usize,
     context: &InputContext,
     available: &BTreeMap<PublicKey, AvailableSignature>,
-    sequence: miniscript::bitcoin::Sequence,
-    lock_time: absolute::LockTime,
+    locks: InputLocks,
 ) -> Result<(Witness, InputWitnessReport), UnifiedFinalizeError> {
-    let satisfier = (KeyedSatisfier { available }, sequence, lock_time);
+    let satisfier = KeyedSatisfier { available, locks };
     let stack =
         context
             .miniscript
@@ -447,12 +497,11 @@ fn satisfy_preferring_unified(
     context: &InputContext,
     unified: &BTreeMap<PublicKey, AvailableSignature>,
     legacy: &BTreeMap<PublicKey, AvailableSignature>,
-    sequence: miniscript::bitcoin::Sequence,
-    lock_time: absolute::LockTime,
+    locks: InputLocks,
 ) -> Result<(Witness, InputWitnessReport), UnifiedFinalizeError> {
     let mut all: BTreeMap<PublicKey, AvailableSignature> = unified.clone();
     all.extend(legacy.iter().map(|(k, v)| (*k, v.clone())));
-    let (witness, report) = satisfy_input(input_index, context, &all, sequence, lock_time)?;
+    let (witness, report) = satisfy_input(input_index, context, &all, locks)?;
     if unified.is_empty() || report.unified_used > 0 {
         return Ok((witness, report));
     }
@@ -472,7 +521,7 @@ fn satisfy_preferring_unified(
                 subset.insert(**key, legacy[*key].clone());
             }
         }
-        if let Ok((w, r)) = satisfy_input(input_index, context, &subset, sequence, lock_time) {
+        if let Ok((w, r)) = satisfy_input(input_index, context, &subset, locks) {
             if r.unified_used == 0 {
                 continue;
             }
@@ -507,15 +556,16 @@ fn looks_like_der_signature(element: &[u8]) -> bool {
 /// Finalise every input of `psbt` and return the transaction ready to
 /// broadcast, together with what each witness is made of.
 ///
-/// Every unified signature in the PSBT is verified first (an invalid one fails
-/// the whole call: nothing is assembled from a PSBT that lies). Then, per
-/// input: unified signatures are offered alone; if the script cannot be
-/// satisfied from those, verified legacy `SIGHASH_ALL` signatures are added for
-/// keys that have **no** unified signature, and the input is tried again with
-/// the preference pass of [`satisfy_preferring_unified`], so a unified
-/// signature that *can* be part of the witness always is. A caller that wants
-/// to refuse replayable inputs uses the report; this function does not decide
-/// policy.
+/// Every unified signature in the PSBT is verified first, then every legacy
+/// `partial_sigs` entry of every input — including ones no witness will use
+/// (an invalid or non-`SIGHASH_ALL` record anywhere fails the whole call:
+/// nothing is assembled from a PSBT that lies). Then, per input: unified
+/// signatures are offered alone; if the script cannot be satisfied from those,
+/// the verified legacy signatures are added for keys that have **no** unified
+/// signature, and the input is tried again with the preference pass of
+/// [`satisfy_preferring_unified`], so a unified signature that *can* be part of
+/// the witness always is. A caller that wants to refuse replayable inputs uses
+/// the report; this function does not decide policy.
 pub fn finalize_p2wsh_all_unified<C: secp256k1::Verification>(
     psbt: &UnifiedPsbt,
     secp: &secp256k1::Secp256k1<C>,
@@ -533,7 +583,6 @@ pub fn finalize_p2wsh_all_unified<C: secp256k1::Verification>(
 
     for (input_index, context) in contexts.iter().enumerate() {
         let input = &psbt.psbt().inputs[input_index];
-        let txin = &unsigned_tx.input[input_index];
 
         // Unified first: verified above; the witness bytes are the record itself.
         let mut available: BTreeMap<PublicKey, AvailableSignature> = BTreeMap::new();
@@ -565,50 +614,39 @@ pub fn finalize_p2wsh_all_unified<C: secp256k1::Verification>(
             );
         }
 
-        let first = satisfy_input(
-            input_index,
-            context,
-            &available,
-            txin.sequence,
-            unsigned_tx.lock_time,
-        );
+        // Every legacy record is verified now, whether or not a witness will
+        // use it: against the BIP-143 digest and restricted to SIGHASH_ALL. A
+        // key with a unified record cannot also have a legacy one — the
+        // adapter's `validate_internal` refused that above — so each of these
+        // is a distinct key.
+        let mut legacy: BTreeMap<PublicKey, AvailableSignature> = BTreeMap::new();
+        for (public_key, signature) in &input.partial_sigs {
+            verify_legacy_signature(
+                secp,
+                &mut legacy_cache,
+                input_index,
+                context,
+                public_key,
+                signature,
+            )?;
+            let mut witness_bytes = signature.signature.serialize_der().to_vec();
+            witness_bytes.push(EcdsaSighashType::All as u8);
+            legacy.insert(
+                *public_key,
+                AvailableSignature {
+                    der: *signature,
+                    witness_bytes,
+                    unified: false,
+                },
+            );
+        }
+
+        let locks = InputLocks::of(unsigned_tx, input_index);
+        let first = satisfy_input(input_index, context, &available, locks);
         let (witness, report) = match first {
             Ok(done) => done,
             Err(UnifiedFinalizeError::Unsatisfiable { .. }) => {
-                // Legacy signatures for keys without a unified one, each verified
-                // against the BIP-143 digest and restricted to SIGHASH_ALL.
-                let mut legacy: BTreeMap<PublicKey, AvailableSignature> = BTreeMap::new();
-                for (public_key, signature) in &input.partial_sigs {
-                    if available.contains_key(public_key) {
-                        continue;
-                    }
-                    verify_legacy_signature(
-                        secp,
-                        &mut legacy_cache,
-                        input_index,
-                        context,
-                        public_key,
-                        signature,
-                    )?;
-                    let mut witness_bytes = signature.signature.serialize_der().to_vec();
-                    witness_bytes.push(EcdsaSighashType::All as u8);
-                    legacy.insert(
-                        *public_key,
-                        AvailableSignature {
-                            der: *signature,
-                            witness_bytes,
-                            unified: false,
-                        },
-                    );
-                }
-                satisfy_preferring_unified(
-                    input_index,
-                    context,
-                    &available,
-                    &legacy,
-                    txin.sequence,
-                    unsigned_tx.lock_time,
-                )?
+                satisfy_preferring_unified(input_index, context, &available, &legacy, locks)?
             }
             Err(other) => return Err(other),
         };

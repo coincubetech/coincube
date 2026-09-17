@@ -55,12 +55,20 @@ pub struct ReplayPill<'a> {
     pub entangled: Vec<(usize, Entanglement)>,
     /// [`crate::app::state::vault::psbt::PsbtState::broadcast_ready`].
     pub broadcast_ready: bool,
+    /// The spend screen is re-checking the inputs against the twin chain
+    /// right now; Broadcast waits for the answer.
+    pub checking: bool,
+    /// Inputs (by index) the re-check could not get an answer for.
+    pub unresolved: Vec<usize>,
 }
 
-/// The status pill plus, for a replayable spend, the acknowledgement the user
-/// must give before Broadcast is enabled.
+/// The status pill plus, for a replayable spend, either the acknowledgement
+/// the user must give before Broadcast is enabled or — when a replayable
+/// input is known to also exist on Bitcoin (`#276` I13) — the requirement
+/// that cannot be acknowledged away.
 fn replay_status_view<'a>(pill: &ReplayPill<'a>) -> Element<'a, Message> {
     let (label, tone) = replay::pill_copy(&pill.review.status, &pill.entangled);
+    let blocked = replay::blocked_entangled_inputs(&pill.review.status, &pill.entangled);
     let style: fn(&theme::Theme) -> iced::widget::container::Style = match tone {
         PillTone::Success => theme::pill::success,
         PillTone::Warning => theme::pill::warning,
@@ -78,8 +86,39 @@ fn replay_status_view<'a>(pill: &ReplayPill<'a>) -> Element<'a, Message> {
                     .style(style),
             ),
     );
-    if pill.review.status.needs_acknowledgement() {
-        let acknowledged = pill.review.acknowledged;
+    if let Some(required) = replay::blocked_entangled_copy(&blocked) {
+        // No checkbox: the acknowledgement does not apply to a required
+        // signature, and showing one would suggest it does.
+        column = column.push(p2_regular(required).style(theme::text::warning));
+    } else if pill.review.status.needs_acknowledgement() {
+        if pill.checking {
+            column = column.push(
+                p2_regular(
+                    "Checking whether these coins also exist on Bitcoin before this can be sent…",
+                )
+                .style(theme::text::secondary),
+            );
+        } else if !pill.unresolved.is_empty() {
+            column = column.push(
+                p2_regular(format!(
+                    "Could not check whether {} {} also on Bitcoin (Connect did not answer). \
+                     You can still send after acknowledging below; the check is retried after \
+                     the next sync.",
+                    if pill.unresolved.len() == 1 {
+                        "input"
+                    } else {
+                        "inputs"
+                    },
+                    pill.unresolved
+                        .iter()
+                        .map(|i| format!("{i} exists"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))
+                .style(theme::text::warning),
+            );
+        }
+        let acknowledged = pill.review.acknowledged();
         column = column.push(
             checkbox(acknowledged)
                 .label(replay::REPLAYABLE_ACKNOWLEDGEMENT)
@@ -572,14 +611,17 @@ pub fn spend_overview_view<'a>(
 ) -> Element<'a, Message> {
     // Broadcast readiness has one definition shared with the state
     // (`replay::broadcast_ready`): the path threshold on a Bitcoin-family
-    // Cube; on Bitcoin Blake2b the finaliser's verdict plus the acknowledgement.
+    // Cube; on Bitcoin Blake2b the finaliser's verdict, the I13 requirement on
+    // known-entangled inputs, and the acknowledgement. "Sign" stays the action
+    // while a required signature is missing, so the user is led to add it
+    // rather than to a Broadcast button that cannot be enabled.
     let broadcast_ready = match &replay {
         None => tx.path_ready().is_some(),
         Some(pill) => pill.broadcast_ready,
     };
     let sign_or_broadcast = match &replay {
         None => tx.path_ready().is_none(),
-        Some(pill) => !pill.review.status.is_finalisable(),
+        Some(pill) => !pill.review.signatures_complete(&pill.entangled),
     };
     // Force the user to save (which commits the derivation-index increment to the
     // database) before exporting, otherwise the exported PSBT can lead to change

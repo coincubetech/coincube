@@ -14,7 +14,13 @@
 //!   unified signature. Legacy signatures alongside are fine.
 //! - *Replayable*: at least one input would be finalised from legacy
 //!   signatures alone. Amber; broadcasting needs the explicit acknowledgement
-//!   [`REPLAYABLE_ACKNOWLEDGEMENT`].
+//!   [`REPLAYABLE_ACKNOWLEDGEMENT`] — **unless** one of those inputs spends a
+//!   deposit Connect has positively confirmed also exists on Bitcoin (`#276`
+//!   I13). Such an input *requires* a replay-capable signature (or, once Lane
+//!   B1.5 exists, a poison split first); no acknowledgement clears it
+//!   ([`blocked_entangled_inputs`]). An input whose entanglement is *Unknown*
+//!   is amber and acknowledgeable, never blocked — a lookup that has not
+//!   happened is not evidence either way.
 //! - *Split — cannot replay*: positive poison-split evidence for every input.
 //!   Wired here, unreachable by construction until Lane B1.5 defines the
 //!   evidence ([`SplitEvidence`] has no values yet).
@@ -141,36 +147,58 @@ pub fn replay_status(
     }
 }
 
-/// An input that must not be signed: `ANYONECANPAY` never occurs in a Vault
-/// flow, and on Bitcoin Blake2b it is refused outright rather than warned
-/// about (a unified `ANYONECANPAY` would commit to fewer inputs than the
-/// replay model reasons over).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AnyoneCanPayRefused {
-    pub input: usize,
-    pub sighash: u32,
+/// Why a Bitcoin Blake2b PSBT must not be handed to any signer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DispatchRefused {
+    /// An input asks for, or already carries, an `ANYONECANPAY` sighash.
+    /// `ANYONECANPAY` never occurs in a Vault flow, and on Bitcoin Blake2b it
+    /// is refused outright rather than warned about (a unified `ANYONECANPAY`
+    /// would commit to fewer inputs than the replay model reasons over).
+    AnyoneCanPay { input: usize, sighash: u32 },
+    /// A reserved unified record (`coincube`/0 proprietary entry) the adapter
+    /// rejects — wrong trailing sighash byte (`0xa1` included), non-strict
+    /// DER, a key that also has a legacy signature. Such a PSBT would be
+    /// refused by every merge and by the finaliser anyway; refusing it here
+    /// keeps "before any signer is dispatched" true, so no device or phone is
+    /// prompted for a signature that would be thrown away.
+    MalformedUnifiedRecord(String),
 }
 
-impl std::fmt::Display for AnyoneCanPayRefused {
+impl std::fmt::Display for DispatchRefused {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "input {} asks for sighash 0x{:02x} (ANYONECANPAY), which a Bitcoin Blake2b \
-             Vault spend never uses; refusing to sign",
-            self.input, self.sighash
-        )
+        match self {
+            Self::AnyoneCanPay { input, sighash } => write!(
+                f,
+                "input {} asks for sighash 0x{:02x} (ANYONECANPAY), which a Bitcoin Blake2b \
+                 Vault spend never uses; refusing to sign",
+                input, sighash
+            ),
+            Self::MalformedUnifiedRecord(reason) => write!(
+                f,
+                "the PSBT carries a unified signature record no signer could add to: {}; \
+                 refusing to sign",
+                reason
+            ),
+        }
     }
 }
 
-/// Refuse a PSBT that asks for, or already carries, an `ANYONECANPAY` sighash
-/// on any input. Checked before any signer is dispatched on Bitcoin Blake2b.
-pub fn refuse_anyonecanpay(psbt: &Psbt) -> Result<(), AnyoneCanPayRefused> {
+/// Refuse, before any signer — local, device or Keychain — is dispatched on
+/// Bitcoin Blake2b, a PSBT that asks for or carries an `ANYONECANPAY`
+/// sighash on any input, or that carries a reserved unified record the
+/// adapter rejects.
+pub fn refuse_before_dispatch(psbt: &Psbt) -> Result<(), DispatchRefused> {
+    // Adapter validation first: it is the same check every merge and the
+    // finaliser apply, and it covers the reserved records' own sighash byte,
+    // which the `partial_sigs` walk below cannot see.
+    UnifiedPsbt::from_psbt(psbt.clone())
+        .map_err(|e| DispatchRefused::MalformedUnifiedRecord(e.to_string()))?;
     const ANYONECANPAY: u32 = 0x80;
     for (index, input) in psbt.inputs.iter().enumerate() {
         if let Some(sighash) = input.sighash_type {
             let raw = sighash.to_u32();
             if raw & ANYONECANPAY != 0 {
-                return Err(AnyoneCanPayRefused {
+                return Err(DispatchRefused::AnyoneCanPay {
                     input: index,
                     sighash: raw,
                 });
@@ -179,7 +207,7 @@ pub fn refuse_anyonecanpay(psbt: &Psbt) -> Result<(), AnyoneCanPayRefused> {
         for signature in input.partial_sigs.values() {
             let raw = signature.sighash_type.to_u32();
             if raw & ANYONECANPAY != 0 {
-                return Err(AnyoneCanPayRefused {
+                return Err(DispatchRefused::AnyoneCanPay {
                     input: index,
                     sighash: raw,
                 });
@@ -251,25 +279,105 @@ pub(crate) fn counting_projection(psbt: &Psbt) -> Psbt {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplayReview {
     pub status: ReplayStatus,
-    /// The user ticked [`REPLAYABLE_ACKNOWLEDGEMENT`]. Reset whenever the
-    /// status is recomputed, so a new signature never inherits an old
-    /// acknowledgement.
-    pub acknowledged: bool,
+    /// SHA-256 of the serialised PSBT the status was derived from: the exact
+    /// signatures the user is looking at.
+    psbt_digest: [u8; 32],
+    /// The PSBT digest the user ticked [`REPLAYABLE_ACKNOWLEDGEMENT`] for, if
+    /// any. Keyed to **content**, not to the status: a new signature can leave
+    /// `Replayable { inputs: [0] }` unchanged while the PSBT changed, and an
+    /// acknowledgement must never carry across a signature the user did not
+    /// see. Keying to content also means a recompute with no new signature
+    /// (every Keychain stream event emits one) keeps the tick.
+    acknowledged_for: Option<[u8; 32]>,
 }
 
 impl ReplayReview {
     pub fn new(psbt: &Psbt, secp: &secp256k1::Secp256k1<impl secp256k1::Verification>) -> Self {
         Self {
             status: replay_status(psbt, secp, None),
-            acknowledged: false,
+            psbt_digest: psbt_digest(psbt),
+            acknowledged_for: None,
         }
     }
 
-    /// Whether the spend may be broadcast: finalisable, and acknowledged when
-    /// it is replayable.
-    pub fn broadcast_ready(&self) -> bool {
-        self.status.is_finalisable() && (!self.status.needs_acknowledgement() || self.acknowledged)
+    /// Recompute for the current PSBT, carrying an acknowledgement over
+    /// **only** if the PSBT is byte-identical to the one it was given for.
+    pub fn refreshed(
+        &self,
+        psbt: &Psbt,
+        secp: &secp256k1::Secp256k1<impl secp256k1::Verification>,
+    ) -> Self {
+        let mut next = Self::new(psbt, secp);
+        if self.acknowledged_for == Some(next.psbt_digest) {
+            next.acknowledged_for = self.acknowledged_for;
+        }
+        next
     }
+
+    /// Whether the user has acknowledged *these* signatures.
+    pub fn acknowledged(&self) -> bool {
+        self.acknowledged_for == Some(self.psbt_digest)
+    }
+
+    /// Record or clear the acknowledgement for the PSBT this review is of.
+    pub fn set_acknowledged(&mut self, acknowledged: bool) {
+        self.acknowledged_for = acknowledged.then_some(self.psbt_digest);
+    }
+
+    /// The digest of the PSBT this review describes.
+    pub fn psbt_digest(&self) -> [u8; 32] {
+        self.psbt_digest
+    }
+
+    /// Whether the signatures collected are enough: the finaliser would
+    /// produce a transaction **and** no input the user is required to protect
+    /// ([`blocked_entangled_inputs`]) is left replayable. This is what closes
+    /// the signing picker on BTCB2 — a blocked input keeps it open so the
+    /// replay-capable signature can be added. `entangled` is
+    /// [`entangled_inputs`] resolved from the cache at the time of the check.
+    pub fn signatures_complete(&self, entangled: &[(usize, Entanglement)]) -> bool {
+        self.status.is_finalisable() && blocked_entangled_inputs(&self.status, entangled).is_empty()
+    }
+
+    /// Whether the spend may be broadcast: [`Self::signatures_complete`], and
+    /// acknowledged when it is replayable. The acknowledgement never
+    /// substitutes for a required signature on a known-entangled input.
+    pub fn broadcast_ready(&self, entangled: &[(usize, Entanglement)]) -> bool {
+        self.signatures_complete(entangled)
+            && (!self.status.needs_acknowledgement() || self.acknowledged())
+    }
+}
+
+/// SHA-256 of the serialised PSBT — the identity of a set of signatures.
+pub fn psbt_digest(psbt: &Psbt) -> [u8; 32] {
+    use coincube_core::miniscript::bitcoin::hashes::{sha256, Hash};
+    sha256::Hash::hash(&psbt.serialize()).to_byte_array()
+}
+
+/// Inputs (by index) that are replayable **and** spend a deposit Connect has
+/// positively confirmed on the twin chain ([`Entanglement::Entangled`]). These
+/// require a replay-capable signature in the witness (`#276` I13); the
+/// acknowledgement does not apply to them. `Unknown` inputs are never in this
+/// set: gating on an unanswered lookup would block every BTCB2 spend until a
+/// sync completed, and "never reads as not entangled" asks for the honest
+/// amber, not a hard stop.
+pub fn blocked_entangled_inputs(
+    status: &ReplayStatus,
+    entangled: &[(usize, Entanglement)],
+) -> Vec<usize> {
+    let ReplayStatus::Replayable { inputs } = status else {
+        return Vec::new();
+    };
+    let confirmed: BTreeSet<usize> = entangled
+        .iter()
+        .filter(|(_, status)| matches!(status, Entanglement::Entangled))
+        .map(|(index, _)| *index)
+        .collect();
+    inputs
+        .iter()
+        .copied()
+        .filter(|index| confirmed.contains(index))
+        .collect()
 }
 
 /// Inputs (by index) that spend an entangled deposit, or one whose
@@ -294,14 +402,47 @@ pub fn entangled_inputs(
 }
 
 /// Whether the Broadcast action is available. One definition for the state
-/// (picker close, broadcast handler) and the view (button), so they cannot
-/// disagree: on a Bitcoin-family Cube it is the path threshold as before; on
-/// Bitcoin Blake2b it is the finaliser's verdict plus the acknowledgement.
-pub fn broadcast_ready(path_ready: bool, review: Option<&ReplayReview>) -> bool {
+/// (broadcast handler) and the view (button), so they cannot disagree: on a
+/// Bitcoin-family Cube it is the path threshold as before (`entangled` is
+/// ignored — it is always empty there); on Bitcoin Blake2b it is the
+/// finaliser's verdict, the I13 requirement on known-entangled inputs, and
+/// the acknowledgement. `entangled` must be resolved from the cache at the
+/// point of the check, so a lookup that lands after the last signature
+/// tightens the gate instead of being missed by it.
+pub fn broadcast_ready(
+    path_ready: bool,
+    review: Option<&ReplayReview>,
+    entangled: &[(usize, Entanglement)],
+) -> bool {
     match review {
         None => path_ready,
-        Some(review) => review.broadcast_ready(),
+        Some(review) => review.broadcast_ready(entangled),
     }
+}
+
+/// The remedy line shown under the pill when [`blocked_entangled_inputs`] is
+/// non-empty: what is true in this build (a replay-capable signature — the
+/// Cube key or a Border Wallet key), and that splitting first is not yet
+/// available rather than offering a tool that does not exist (Lane B1.5).
+pub fn blocked_entangled_copy(blocked: &[usize]) -> Option<String> {
+    if blocked.is_empty() {
+        return None;
+    }
+    let list = blocked
+        .iter()
+        .map(|i| i.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let (noun, verb, pronoun) = if blocked.len() == 1 {
+        ("Input", "exists", "it")
+    } else {
+        ("Inputs", "exist", "them")
+    };
+    Some(format!(
+        "{noun} {list} also {verb} on Bitcoin, so this cannot be sent without a replay-capable \
+         signature on {pronoun} (the Cube key or a Border Wallet key). Splitting the coins first \
+         is not available in this version."
+    ))
 }
 
 /// Visual weight of the status pill.
@@ -320,12 +461,17 @@ pub fn pill_copy(status: &ReplayStatus, entangled: &[(usize, Entanglement)]) -> 
         ReplayStatus::Protected => ("Replay protected".to_string(), PillTone::Success),
         ReplayStatus::Split => ("Split — cannot replay".to_string(), PillTone::Success),
         ReplayStatus::Replayable { inputs } => {
+            let blocked: BTreeSet<usize> = blocked_entangled_inputs(status, entangled)
+                .into_iter()
+                .collect();
             let entangled: BTreeSet<usize> = entangled.iter().map(|(index, _)| *index).collect();
             let list = inputs
                 .iter()
                 .map(|index| {
-                    if entangled.contains(index) {
-                        format!("{index} (also exists on Bitcoin)")
+                    if blocked.contains(index) {
+                        format!("{index} (also exists on Bitcoin — signature required)")
+                    } else if entangled.contains(index) {
+                        format!("{index} (not yet checked against Bitcoin)")
                     } else {
                         index.to_string()
                     }
@@ -463,19 +609,19 @@ mod tests {
     #[test]
     fn anyonecanpay_is_refused_before_signing_and_in_status() {
         let f = fixture();
-        assert_eq!(refuse_anyonecanpay(&f.psbt), Ok(()));
+        assert_eq!(refuse_before_dispatch(&f.psbt), Ok(()));
 
         // Requested on the input.
         let mut asked = f.psbt.clone();
         asked.inputs[0].sighash_type = Some(EcdsaSighashType::AllPlusAnyoneCanPay.into());
         assert_eq!(
-            refuse_anyonecanpay(&asked),
-            Err(AnyoneCanPayRefused {
+            refuse_before_dispatch(&asked),
+            Err(DispatchRefused::AnyoneCanPay {
                 input: 0,
                 sighash: 0x81
             })
         );
-        assert!(refuse_anyonecanpay(&asked)
+        assert!(refuse_before_dispatch(&asked)
             .unwrap_err()
             .to_string()
             .contains("ANYONECANPAY"));
@@ -498,13 +644,52 @@ mod tests {
             },
         );
         assert!(matches!(
-            refuse_anyonecanpay(&carried),
-            Err(AnyoneCanPayRefused { input: 0, .. })
+            refuse_before_dispatch(&carried),
+            Err(DispatchRefused::AnyoneCanPay { input: 0, .. })
         ));
         assert!(matches!(
             replay_status(&carried, &secp(), None),
             ReplayStatus::Unknown(UnknownReason::Refused(_))
         ));
+    }
+
+    /// A reserved unified record with an `ANYONECANPAY` sighash byte (`0xa1`)
+    /// is not a `partial_sigs` entry and not the input's sighash field, so the
+    /// plain walk would let it through to a device; adapter validation at the
+    /// dispatch boundary refuses it. Not a funds risk — every merge and the
+    /// finaliser reject such a record too — but a signer must not be prompted
+    /// for a signature that will be thrown away.
+    #[test]
+    fn a_malformed_reserved_record_is_refused_before_dispatch() {
+        let f = fixture();
+        let signed = unified(&f.psbt, &f.signers[0]);
+        assert_eq!(refuse_before_dispatch(&signed), Ok(()));
+        let mut malformed = signed.clone();
+        let key = malformed.inputs[0]
+            .proprietary
+            .keys()
+            .next()
+            .cloned()
+            .unwrap();
+        let record = malformed.inputs[0].proprietary.get_mut(&key).unwrap();
+        *record.last_mut().unwrap() = 0xa1;
+        match refuse_before_dispatch(&malformed) {
+            Err(DispatchRefused::MalformedUnifiedRecord(reason)) => {
+                assert!(
+                    reason.contains("a1") || reason.contains("sighash"),
+                    "{}",
+                    reason
+                )
+            }
+            other => panic!(
+                "expected the reserved record to be refused, got {:?}",
+                other
+            ),
+        }
+        assert!(refuse_before_dispatch(&malformed)
+            .unwrap_err()
+            .to_string()
+            .contains("refusing to sign"));
     }
 
     #[test]
@@ -534,42 +719,158 @@ mod tests {
     fn broadcast_ready_needs_the_acknowledgement_only_when_replayable() {
         let f = fixture();
         let secp = secp();
-        // Bitcoin family: the path threshold, whatever it says.
-        assert!(broadcast_ready(true, None));
-        assert!(!broadcast_ready(false, None));
+        let none: &[(usize, Entanglement)] = &[];
+        // Bitcoin family: the path threshold, whatever it says — and whatever
+        // the entangled set says.
+        assert!(broadcast_ready(true, None, none));
+        assert!(!broadcast_ready(false, None, none));
+        assert!(broadcast_ready(true, None, &[(0, Entanglement::Entangled)]));
 
         let protected = ReplayReview::new(
             &unified(&unified(&f.psbt, &f.signers[0]), &f.signers[1]),
             &secp,
         );
         assert_eq!(protected.status, ReplayStatus::Protected);
-        assert!(protected.broadcast_ready());
+        assert!(protected.broadcast_ready(none));
         // The path count is irrelevant on BTCB2: verified witness decides.
-        assert!(broadcast_ready(false, Some(&protected)));
+        assert!(broadcast_ready(false, Some(&protected), none));
 
         let mut replayable = ReplayReview::new(
             &legacy(&legacy(&f.psbt, &f.signers[0]), &f.signers[1]),
             &secp,
         );
         assert!(replayable.status.needs_acknowledgement());
-        assert!(!replayable.broadcast_ready());
-        replayable.acknowledged = true;
-        assert!(replayable.broadcast_ready());
+        assert!(!replayable.broadcast_ready(none));
+        replayable.set_acknowledged(true);
+        assert!(replayable.broadcast_ready(none));
 
         let unknown = ReplayReview::new(&f.psbt, &secp);
-        assert!(!unknown.broadcast_ready());
-        assert!(!broadcast_ready(true, Some(&unknown)));
+        assert!(!unknown.broadcast_ready(none));
+        assert!(!broadcast_ready(true, Some(&unknown), none));
+    }
+
+    /// `#276` I13: a replayable input that Connect has confirmed also exists
+    /// on Bitcoin *requires* a replay-capable signature. The acknowledgement
+    /// never clears it; an unanswered lookup never imposes it.
+    #[test]
+    fn a_known_entangled_replayable_input_cannot_be_acknowledged_away() {
+        let f = fixture();
+        let secp = secp();
+        let legacy_only = legacy(&legacy(&f.psbt, &f.signers[0]), &f.signers[1]);
+        let mut review = ReplayReview::new(&legacy_only, &secp);
+        assert_eq!(review.status, ReplayStatus::Replayable { inputs: vec![0] });
+        let entangled = [(0, Entanglement::Entangled)];
+
+        // 1. Known entangled + legacy-only: not ready, and still not ready
+        //    after the tick — the check that distinguishes a requirement
+        //    from a warning.
+        assert_eq!(
+            blocked_entangled_inputs(&review.status, &entangled),
+            vec![0]
+        );
+        assert!(!review.signatures_complete(&entangled));
+        assert!(!review.broadcast_ready(&entangled));
+        review.set_acknowledged(true);
+        assert!(!review.broadcast_ready(&entangled));
+        assert!(!broadcast_ready(true, Some(&review), &entangled));
+
+        // 2. The same input with a verified unified signature in the witness
+        //    is ready: the requirement is satisfiable in this build.
+        let with_unified = legacy(&unified(&f.psbt, &f.signers[2]), &f.signers[0]);
+        let with_unified = legacy(&with_unified, &f.signers[1]);
+        let protected = ReplayReview::new(&with_unified, &secp);
+        assert_eq!(protected.status, ReplayStatus::Protected);
+        assert!(blocked_entangled_inputs(&protected.status, &entangled).is_empty());
+        assert!(protected.signatures_complete(&entangled));
+        assert!(protected.broadcast_ready(&entangled));
+
+        // 3. Unknown + replayable: unchanged amber, the tick still works —
+        //    the gate must not over-block a spend nobody has looked up yet.
+        let unknown = [(0, Entanglement::Unknown)];
+        let mut review = ReplayReview::new(&legacy_only, &secp);
+        assert!(blocked_entangled_inputs(&review.status, &unknown).is_empty());
+        assert!(review.signatures_complete(&unknown));
+        assert!(!review.broadcast_ready(&unknown));
+        review.set_acknowledged(true);
+        assert!(review.broadcast_ready(&unknown));
+
+        // 4. Not entangled + replayable: the unchanged acknowledgement path.
+        let mut review = ReplayReview::new(&legacy_only, &secp);
+        assert!(!review.broadcast_ready(&[]));
+        review.set_acknowledged(true);
+        assert!(review.broadcast_ready(&[]));
+        // (`entangled_inputs` never yields NotEntangled entries, but the gate
+        // ignores them if handed one.)
+        assert!(review.broadcast_ready(&[(0, Entanglement::NotEntangled)]));
+
+        // The requirement is on the witness, not on the coin: an entangled
+        // input that is not replayable, or is not an input at all, is not
+        // blocked.
+        assert!(blocked_entangled_inputs(
+            &ReplayStatus::Replayable { inputs: vec![1] },
+            &[(0, Entanglement::Entangled)]
+        )
+        .is_empty());
+        assert!(blocked_entangled_inputs(
+            &ReplayStatus::Unknown(UnknownReason::Incomplete),
+            &[(0, Entanglement::Entangled)]
+        )
+        .is_empty());
     }
 
     #[test]
-    fn a_recomputed_review_drops_the_acknowledgement() {
+    fn blocked_copy_names_the_input_and_the_honest_remedy() {
+        assert_eq!(blocked_entangled_copy(&[]), None);
+        let one = blocked_entangled_copy(&[0]).unwrap();
+        assert!(one.starts_with("Input 0 also exists on Bitcoin"), "{}", one);
+        assert!(one.contains("replay-capable signature on it"), "{}", one);
+        assert!(one.contains("Cube key or a Border Wallet key"), "{}", one);
+        assert!(
+            one.contains("Splitting the coins first is not available in this version"),
+            "{}",
+            one
+        );
+        let two = blocked_entangled_copy(&[0, 2]).unwrap();
+        assert!(
+            two.starts_with("Inputs 0, 2 also exist on Bitcoin"),
+            "{}",
+            two
+        );
+        assert!(two.contains("signature on them"), "{}", two);
+    }
+
+    /// The acknowledgement is keyed to the PSBT's bytes: a recompute over the
+    /// same bytes (a Keychain stream event emits one for every event) keeps
+    /// it; any content change — even one that leaves the status enum equal —
+    /// drops it; a brand-new review never has one.
+    #[test]
+    fn the_acknowledgement_follows_the_psbt_bytes_not_the_status() {
         let f = fixture();
+        let secp = secp();
         let legacy_only = legacy(&legacy(&f.psbt, &f.signers[0]), &f.signers[1]);
-        let mut review = ReplayReview::new(&legacy_only, &secp());
-        review.acknowledged = true;
-        let fresh = ReplayReview::new(&legacy_only, &secp());
-        assert!(!fresh.acknowledged);
-        assert_eq!(fresh.status, review.status);
+        let mut review = ReplayReview::new(&legacy_only, &secp);
+        assert!(!review.acknowledged());
+        review.set_acknowledged(true);
+        assert!(review.acknowledged());
+
+        // Same bytes: kept.
+        let same = review.refreshed(&legacy_only, &secp);
+        assert!(same.acknowledged());
+        assert_eq!(same.status, review.status);
+
+        // A third legacy signature: the status is still `Replayable { [0] }`
+        // but the content changed, so the tick is gone.
+        let three = legacy(&legacy_only, &f.signers[2]);
+        let changed = review.refreshed(&three, &secp);
+        assert_eq!(changed.status, review.status);
+        assert!(!changed.acknowledged());
+        assert_ne!(changed.psbt_digest(), review.psbt_digest());
+
+        // Clearing works, and a fresh review starts unacknowledged.
+        review.set_acknowledged(false);
+        assert!(!review.acknowledged());
+        assert!(!ReplayReview::new(&legacy_only, &secp).acknowledged());
+        assert_eq!(psbt_digest(&legacy_only), review.psbt_digest());
     }
 
     #[test]
@@ -588,13 +889,21 @@ mod tests {
         assert_eq!(
             pill_copy(
                 &ReplayStatus::Replayable { inputs: vec![0, 2] },
-                &[(0, Entanglement::Entangled), (1, Entanglement::Unknown)]
+                &[(0, Entanglement::Entangled), (2, Entanglement::Unknown)]
             ),
             (
-                "Replayable — no replay-capable signature on inputs 0 (also exists on Bitcoin), 2"
+                "Replayable — no replay-capable signature on inputs \
+                 0 (also exists on Bitcoin — signature required), \
+                 2 (not yet checked against Bitcoin)"
                     .to_string(),
                 PillTone::Warning
             )
+        );
+        // An entangled input that already carries a unified signature is not
+        // named: the pill is about the witness, not the coin.
+        assert_eq!(
+            pill_copy(&ReplayStatus::Protected, &[(0, Entanglement::Entangled)]),
+            ("Replay protected".to_string(), PillTone::Success)
         );
         assert_eq!(
             pill_copy(&ReplayStatus::Unknown(UnknownReason::NotYetChecked), &[]),

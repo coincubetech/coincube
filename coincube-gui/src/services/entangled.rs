@@ -15,6 +15,19 @@
 //! [`Entanglement::Unknown`], which the caller must treat as "not yet
 //! checked", never as "safe". Unknown results are not cached, so the next sync
 //! retries them.
+//!
+//! # Cache lifecycle
+//!
+//! - *Entangled* is terminal: a transaction confirmed on the twin chain does
+//!   not un-exist, so it is never re-queried and never overwritten.
+//! - *Not entangled* has a shelf life: anyone holding the funding transaction
+//!   can broadcast it onto Bitcoin after our `404`, so a negative older than
+//!   [`NEGATIVE_ANSWER_TTL`] is re-queried by the sync-driven task, and the
+//!   spend screen re-checks the inputs of a replayable spend at the moment it
+//!   matters ([`crate::app::state::vault::psbt::PsbtState`]).
+//! - *Unknown* is never cached.
+
+use std::time::{Duration, Instant};
 
 use coincube_core::miniscript::bitcoin::Txid;
 use serde::Deserialize;
@@ -40,6 +53,28 @@ impl Entanglement {
     }
 }
 
+/// How long a *not entangled* answer is trusted before the sync-driven task
+/// asks again. One `GET` per deposit per hour through a proxy that already
+/// serves Bitcoin Cubes.
+pub const NEGATIVE_ANSWER_TTL: Duration = Duration::from_secs(60 * 60);
+
+/// A resolved answer with the instant it was resolved at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CachedEntanglement {
+    pub answer: Entanglement,
+    pub resolved_at: Instant,
+}
+
+impl CachedEntanglement {
+    /// Whether the sync-driven task should ask again: only a negative, and
+    /// only once it is older than [`NEGATIVE_ANSWER_TTL`]. A positive answer
+    /// is terminal.
+    pub fn needs_refresh(&self, now: Instant) -> bool {
+        matches!(self.answer, Entanglement::NotEntangled)
+            && now.saturating_duration_since(self.resolved_at) >= NEGATIVE_ANSWER_TTL
+    }
+}
+
 /// The Bitcoin-family chain a Bitcoin Blake2b chain forked from, on which a
 /// BTCB2 deposit may have a twin. `None` for every non-BTCB2 chain: there is
 /// nothing to look up.
@@ -53,6 +88,29 @@ pub fn twin_chain(chain: ChainId) -> Option<ChainId> {
         | ChainId::Signet
         | ChainId::Regtest => None,
     }
+}
+
+/// Which deposits the sync-driven task should ask about now: every txid the
+/// cache has no answer for or holds a stale negative for, minus the ones a
+/// batch already claimed. Sorted and deduplicated.
+pub fn pending_lookups(
+    deposits: impl IntoIterator<Item = Txid>,
+    cache: &std::collections::HashMap<Txid, CachedEntanglement>,
+    in_flight: &std::collections::HashSet<Txid>,
+    now: Instant,
+) -> Vec<Txid> {
+    let mut pending: Vec<Txid> = deposits
+        .into_iter()
+        .filter(|txid| !in_flight.contains(txid))
+        .filter(|txid| {
+            cache
+                .get(txid)
+                .is_none_or(|cached| cached.needs_refresh(now))
+        })
+        .collect();
+    pending.sort();
+    pending.dedup();
+    pending
 }
 
 /// `GET {base}/api/v1/esplora/<twin>/tx/{txid}` — Esplora's transaction
@@ -126,21 +184,21 @@ pub async fn lookup(client: &CoincubeClient, chain: ChainId, txid: Txid) -> Enta
     }
 }
 
-/// Look every txid up in turn and return only the resolved answers — the
-/// caller merges them into its cache and leaves the rest for the next sync.
+/// Look every txid up in turn and return **every** answer, `Unknown` ones
+/// included: the caller caches the resolved ones and needs the unresolved
+/// ones too — to release its in-flight claim on them, and to say which inputs
+/// it could not check.
 pub async fn lookup_all(
     client: CoincubeClient,
     chain: ChainId,
     txids: Vec<Txid>,
 ) -> Vec<(Txid, Entanglement)> {
-    let mut resolved = Vec::new();
+    let mut answers = Vec::with_capacity(txids.len());
     for txid in txids {
         let answer = lookup(&client, chain, txid).await;
-        if answer.is_resolved() {
-            resolved.push((txid, answer));
-        }
+        answers.push((txid, answer));
     }
-    resolved
+    answers
 }
 
 #[cfg(test)]
@@ -268,8 +326,68 @@ mod tests {
         );
     }
 
+    #[test]
+    fn only_a_stale_negative_needs_a_refresh() {
+        let now = Instant::now();
+        let fresh_no = CachedEntanglement {
+            answer: Entanglement::NotEntangled,
+            resolved_at: now,
+        };
+        assert!(!fresh_no.needs_refresh(now));
+        assert!(!fresh_no.needs_refresh(now + NEGATIVE_ANSWER_TTL - Duration::from_secs(1)));
+        assert!(fresh_no.needs_refresh(now + NEGATIVE_ANSWER_TTL));
+        let yes = CachedEntanglement {
+            answer: Entanglement::Entangled,
+            resolved_at: now,
+        };
+        assert!(
+            !yes.needs_refresh(now + NEGATIVE_ANSWER_TTL * 100),
+            "Entangled is terminal"
+        );
+        // A clock that went backwards does not panic or refresh.
+        assert!(!fresh_no.needs_refresh(now - Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn pending_lookups_skip_fresh_negatives_positives_and_claimed_txids() {
+        use std::collections::{HashMap, HashSet};
+        let now = Instant::now();
+        let t = |b: u8| Txid::from_str(&format!("{:0>64}", b)).unwrap();
+        let mut cache = HashMap::new();
+        cache.insert(
+            t(1),
+            CachedEntanglement {
+                answer: Entanglement::NotEntangled,
+                resolved_at: now,
+            },
+        );
+        cache.insert(
+            t(2),
+            CachedEntanglement {
+                answer: Entanglement::NotEntangled,
+                resolved_at: now - NEGATIVE_ANSWER_TTL,
+            },
+        );
+        cache.insert(
+            t(3),
+            CachedEntanglement {
+                answer: Entanglement::Entangled,
+                resolved_at: now - NEGATIVE_ANSWER_TTL * 10,
+            },
+        );
+        let in_flight: HashSet<Txid> = HashSet::from([t(4)]);
+        let pending = pending_lookups(
+            [t(5), t(4), t(3), t(2), t(1), t(5)],
+            &cache,
+            &in_flight,
+            now,
+        );
+        // 5: never asked; 2: stale negative. 1 fresh, 3 terminal, 4 claimed.
+        assert_eq!(pending, vec![t(2), t(5)]);
+    }
+
     #[tokio::test]
-    async fn lookup_all_keeps_only_resolved_answers() {
+    async fn lookup_all_returns_every_answer_including_unknown() {
         let other =
             Txid::from_str("0000000000000000000000000000000000000000000000000000000000000001")
                 .unwrap();
@@ -285,7 +403,13 @@ mod tests {
             then.status(503).body("unavailable");
         });
         let client = CoincubeClient::for_test(server.base_url());
-        let resolved = lookup_all(client, ChainId::BitcoinBlake2b, vec![txid(), other]).await;
-        assert_eq!(resolved, vec![(txid(), Entanglement::Entangled)]);
+        let answers = lookup_all(client, ChainId::BitcoinBlake2b, vec![txid(), other]).await;
+        assert_eq!(
+            answers,
+            vec![
+                (txid(), Entanglement::Entangled),
+                (other, Entanglement::Unknown)
+            ]
+        );
     }
 }

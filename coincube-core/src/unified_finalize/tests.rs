@@ -3,7 +3,7 @@
 
 use std::str::FromStr;
 
-use miniscript::bitcoin::{ecdsa, secp256k1, sighash::EcdsaSighashType, Sequence};
+use miniscript::bitcoin::{ecdsa, relative, secp256k1, sighash::EcdsaSighashType, Sequence};
 
 use crate::{
     psbt_unified::{unified_signatures, UnifiedPsbt},
@@ -84,13 +84,11 @@ fn naive_report(psbt: &UnifiedPsbt, input: usize) -> InputWitnessReport {
             },
         );
     }
-    let txin = &psbt.psbt().unsigned_tx.input[input];
     satisfy_input(
         input,
         &contexts[input],
         &all,
-        txin.sequence,
-        psbt.psbt().unsigned_tx.lock_time,
+        InputLocks::of(&psbt.psbt().unsigned_tx, input),
     )
     .unwrap()
     .1
@@ -394,15 +392,8 @@ fn too_many_legacy_candidates_to_search_is_refused_not_degraded() {
     }
     assert!(legacy.len() > MAX_LEGACY_KEYS_FOR_SEARCH);
 
-    let txin = &signed.psbt().unsigned_tx.input[0];
-    let result = satisfy_preferring_unified(
-        0,
-        &contexts[0],
-        &unified,
-        &legacy,
-        txin.sequence,
-        signed.psbt().unsigned_tx.lock_time,
-    );
+    let locks = InputLocks::of(&signed.psbt().unsigned_tx, 0);
+    let result = satisfy_preferring_unified(0, &contexts[0], &unified, &legacy, locks);
     match result {
         Err(UnifiedFinalizeError::RefusedToDropUnified {
             input: 0,
@@ -422,8 +413,7 @@ fn too_many_legacy_candidates_to_search_is_refused_not_degraded() {
             .into_iter()
             .take(MAX_LEGACY_KEYS_FOR_SEARCH)
             .collect(),
-        txin.sequence,
-        signed.psbt().unsigned_tx.lock_time,
+        locks,
     )
     .unwrap();
     assert!(report.replay_protected());
@@ -619,6 +609,219 @@ fn an_invalid_legacy_signature_is_refused() {
         finalize_p2wsh_all_unified(&signed, &secp),
         Err(UnifiedFinalizeError::InvalidLegacySignature { input: 0, .. })
     ));
+}
+
+/// A legacy record that no witness would use is still verified: two unified
+/// signatures satisfy the 2-of-3 on their own, yet a third key's wrong-digest
+/// or `ANYONECANPAY` legacy entry refuses the whole call. The finaliser's
+/// contract is "every signature in the PSBT is verified", not "every
+/// signature it happened to need".
+#[test]
+fn an_unused_legacy_record_is_still_verified_and_can_refuse_the_call() {
+    let secp = secp();
+    let fixture = fixture(1);
+    let two_unified = sign_p2wsh_all_unified(&fixture.signers[0], &fixture.psbt, &secp).unwrap();
+    let two_unified = sign_p2wsh_all_unified(&fixture.signers[1], &two_unified, &secp).unwrap();
+    // Premise: unified alone finalises, protected.
+    let clean = finalize_p2wsh_all_unified(&two_unified, &secp).unwrap();
+    assert_eq!(
+        (clean.inputs[0].unified_used, clean.inputs[0].legacy_used),
+        (2, 0)
+    );
+
+    // Signer 2's legacy record, first with a wrong digest…
+    let with_third = add_legacy(&two_unified, &fixture.signers[2], &secp);
+    let third_key = *with_third.psbt().inputs[0]
+        .partial_sigs
+        .keys()
+        .next()
+        .expect("signer 2 signed its primary key");
+    let mut wrong_digest = with_third.clone();
+    let wrong = secp.sign_ecdsa(
+        &secp256k1::Message::from_digest([9; 32]),
+        &fixture.signers[2]
+            .xpriv_at(
+                &miniscript::bitcoin::bip32::DerivationPath::from_str("m/48'/0'/0/7").unwrap(),
+                &secp,
+            )
+            .private_key,
+    );
+    wrong_digest.psbt_mut().inputs[0].partial_sigs.insert(
+        third_key,
+        ecdsa::Signature {
+            signature: wrong,
+            sighash_type: EcdsaSighashType::All,
+        },
+    );
+    match finalize_p2wsh_all_unified(&wrong_digest, &secp) {
+        Err(UnifiedFinalizeError::InvalidLegacySignature {
+            input: 0,
+            public_key,
+        }) => {
+            assert_eq!(public_key, third_key)
+        }
+        other => panic!("expected the unused record to be refused, got {:?}", other),
+    }
+
+    // …then with ANYONECANPAY on an otherwise valid signature.
+    let mut anyonecanpay = with_third.clone();
+    let valid = with_third.psbt().inputs[0].partial_sigs[&third_key];
+    anyonecanpay.psbt_mut().inputs[0].partial_sigs.insert(
+        third_key,
+        ecdsa::Signature {
+            signature: valid.signature,
+            sighash_type: EcdsaSighashType::AllPlusAnyoneCanPay,
+        },
+    );
+    match finalize_p2wsh_all_unified(&anyonecanpay, &secp) {
+        Err(UnifiedFinalizeError::UnsupportedLegacySighash {
+            input: 0,
+            public_key,
+            sighash,
+        }) => {
+            assert_eq!(public_key, third_key);
+            assert_eq!(sighash, 0x81);
+        }
+        other => panic!("expected the ANYONECANPAY refusal, got {:?}", other),
+    }
+
+    // And the valid third record, unused, is fine.
+    let ok = finalize_p2wsh_all_unified(&with_third, &secp).unwrap();
+    assert_eq!(
+        (ok.inputs[0].unified_used, ok.inputs[0].legacy_used),
+        (2, 0)
+    );
+}
+
+/// BIP-68: a CSV leaf is only enforced for transaction version ≥ 2. The bare
+/// `Sequence` satisfier does not know the version, so without the guard the
+/// finaliser would assemble a recovery witness for a version-1 transaction
+/// that every node rejects — while the pill read *Replay protected*.
+#[test]
+fn a_version_one_transaction_cannot_take_the_csv_recovery_leaf() {
+    let secp = secp();
+    let mut fixture = fixture(1);
+    fixture.psbt.psbt_mut().unsigned_tx.input[0].sequence = Sequence::from_height(46);
+    fixture.psbt.psbt_mut().unsigned_tx.version = miniscript::bitcoin::transaction::Version::ONE;
+    let signed = sign_p2wsh_all_unified(&fixture.signers[2], &fixture.psbt, &secp).unwrap();
+
+    // Premise: the bare sequence satisfier says the timelock is met, version
+    // notwithstanding — the guard is what refuses.
+    assert!(<Sequence as Satisfier<PublicKey>>::check_older(
+        &Sequence::from_height(46),
+        relative::LockTime::from_height(46)
+    ));
+    assert!(matches!(
+        finalize_p2wsh_all_unified(&signed, &secp),
+        Err(UnifiedFinalizeError::Unsatisfiable { input: 0, .. })
+    ));
+
+    // Version 2, same everything else: the recovery leaf is taken (the
+    // existing `recovery_key_after_the_timelock…` test, restated here so the
+    // two sit side by side).
+    let mut v2 = signed.clone();
+    v2.psbt_mut().unsigned_tx.version = miniscript::bitcoin::transaction::Version::TWO;
+    // The unified signatures committed to the version-1 transaction; re-sign.
+    v2.psbt_mut().inputs[0].proprietary.clear();
+    let v2 = sign_p2wsh_all_unified(&fixture.signers[2], &v2, &secp).unwrap();
+    let finalized = finalize_p2wsh_all_unified(&v2, &secp).unwrap();
+    assert!(finalized.inputs[0].replay_protected());
+    assert_eq!(finalized.inputs[0].unified_used, 1);
+}
+
+/// BIP-65: an input whose sequence is final disables the transaction's lock
+/// time, so a CLTV leaf is not satisfiable through it whatever `lock_time`
+/// says. The Vault descriptors carry no `after()` leaf, so this uses a
+/// hand-built `and_v(v:pk(K),after(200))` P2WSH script with a legacy
+/// signature, which is the only signature kind such a script can get here.
+#[test]
+fn a_final_sequence_input_cannot_take_a_cltv_leaf() {
+    use miniscript::bitcoin::{
+        absolute, sighash::SighashCache, transaction, Amount, OutPoint, Psbt, ScriptBuf,
+        Transaction, TxIn, TxOut,
+    };
+    let secp = secp();
+    let secret = secp256k1::SecretKey::from_slice(&[3u8; 32]).unwrap();
+    let public_key = PublicKey::new(secp256k1::PublicKey::from_secret_key(&secp, &secret));
+    let miniscript = Miniscript::<PublicKey, Segwitv0>::from_str(&format!(
+        "and_v(v:pk({}),after(200))",
+        public_key
+    ))
+    .unwrap();
+    let witness_script = miniscript.encode();
+    let prevout = TxOut {
+        value: Amount::from_sat(30_000),
+        script_pubkey: witness_script.to_p2wsh(),
+    };
+    let funding = Transaction {
+        version: transaction::Version::TWO,
+        lock_time: absolute::LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint::null(),
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence(1),
+            witness: Witness::new(),
+        }],
+        output: vec![prevout.clone()],
+    };
+    let build = |sequence: Sequence| -> UnifiedPsbt {
+        let unsigned = Transaction {
+            version: transaction::Version::TWO,
+            lock_time: absolute::LockTime::from_height(200).unwrap(),
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: funding.compute_txid(),
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(20_000),
+                script_pubkey: ScriptBuf::new_p2wsh(&ScriptBuf::new().wscript_hash()),
+            }],
+        };
+        let digest = SighashCache::new(&unsigned)
+            .p2wsh_signature_hash(0, &witness_script, prevout.value, EcdsaSighashType::All)
+            .unwrap();
+        let signature = secp.sign_ecdsa(
+            &secp256k1::Message::from_digest(digest.to_byte_array()),
+            &secret,
+        );
+        let mut psbt = Psbt::from_unsigned_tx(unsigned).unwrap();
+        psbt.inputs[0].non_witness_utxo = Some(funding.clone());
+        psbt.inputs[0].witness_utxo = Some(prevout.clone());
+        psbt.inputs[0].witness_script = Some(witness_script.clone());
+        psbt.inputs[0].partial_sigs.insert(
+            public_key,
+            ecdsa::Signature {
+                signature,
+                sighash_type: EcdsaSighashType::All,
+            },
+        );
+        UnifiedPsbt::from_psbt(psbt).unwrap()
+    };
+
+    // Final sequence: lock time disabled, the leaf is unsatisfiable.
+    assert!(matches!(
+        finalize_p2wsh_all_unified(&build(Sequence::MAX), &secp),
+        Err(UnifiedFinalizeError::Unsatisfiable { input: 0, .. })
+    ));
+    // Any non-final sequence enables it; legacy-only, honestly replayable.
+    let finalized =
+        finalize_p2wsh_all_unified(&build(Sequence::ENABLE_RBF_NO_LOCKTIME), &secp).unwrap();
+    assert_eq!(
+        finalized.inputs[0],
+        InputWitnessReport {
+            unified_used: 0,
+            legacy_used: 1
+        }
+    );
+    assert_eq!(
+        finalized.transaction.lock_time,
+        absolute::LockTime::from_height(200).unwrap()
+    );
 }
 
 #[test]

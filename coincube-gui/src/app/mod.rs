@@ -14,7 +14,7 @@ pub mod view;
 pub mod wallet;
 pub mod wallets;
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::sync::Arc;
@@ -730,6 +730,13 @@ pub struct App {
     /// churning the daemon. Suppresses auto-switch until the next *successful*
     /// switch (a fresh adopt / manual switch re-arms it by clearing this).
     auto_switch_suppressed: bool,
+    /// Deposit txids a sync-driven entangled lookup batch has claimed and not
+    /// yet answered (`#276` I13). Single-flight: two syncs inside one
+    /// in-flight window would otherwise queue the same txids twice. Released
+    /// as a whole set when the batch's `EntangledLookups` lands — including
+    /// txids that answered `Unknown`, which are not written to the cache and
+    /// would otherwise stay claimed forever.
+    entangled_in_flight: HashSet<bitcoin::Txid>,
     /// Global "payment received" celebration overlay — shown for incoming
     /// Liquid payments (e.g. LNURL) regardless of which panel is active.
     show_received_celebration: bool,
@@ -2505,6 +2512,7 @@ impl App {
             node_net_stats_probe_in_progress: false,
             daemon_switch_in_progress: false,
             auto_switch_suppressed: false,
+            entangled_in_flight: HashSet::new(),
             show_received_celebration: false,
             show_recovery_alerts_prompt: false,
             spark_stable_balance_reconciled: false,
@@ -2642,6 +2650,7 @@ impl App {
                 node_net_stats_probe_in_progress: false,
                 daemon_switch_in_progress: false,
                 auto_switch_suppressed: false,
+                entangled_in_flight: HashSet::new(),
                 show_received_celebration: false,
                 show_recovery_alerts_prompt: false,
                 spark_stable_balance_reconciled: false,
@@ -2705,7 +2714,7 @@ impl App {
     /// Connect session (a lookup that cannot run is *Unknown*, not "not
     /// entangled"), or when every deposit is already resolved. Never blocks
     /// or affects sync.
-    fn entangled_lookup_task(&self) -> Task<Message> {
+    fn entangled_lookup_task(&mut self) -> Task<Message> {
         let Some(wallet) = self.wallet.as_ref() else {
             return Task::none();
         };
@@ -2715,22 +2724,24 @@ impl App {
         let Some(client) = self.authenticated_coincube_client() else {
             return Task::none();
         };
-        let mut pending: Vec<bitcoin::Txid> = self
-            .cache
-            .coins()
-            .iter()
-            .map(|coin| coin.outpoint.txid)
-            .filter(|txid| !self.cache.entangled.contains_key(txid))
-            .collect();
-        pending.sort();
-        pending.dedup();
+        let pending = crate::services::entangled::pending_lookups(
+            self.cache.coins().iter().map(|coin| coin.outpoint.txid),
+            &self.cache.entangled,
+            &self.entangled_in_flight,
+            std::time::Instant::now(),
+        );
         if pending.is_empty() {
             return Task::none();
         }
+        self.entangled_in_flight.extend(pending.iter().copied());
         let chain = wallet.chain;
+        let claimed = pending.clone();
         Task::perform(
             crate::services::entangled::lookup_all(client, chain, pending),
-            Message::EntangledLookups,
+            move |answers| Message::EntangledLookups {
+                claimed: claimed.clone(),
+                answers,
+            },
         )
     }
 
@@ -4404,14 +4415,40 @@ impl App {
                     }
                 }
             }
-            Message::EntangledLookups(resolved) => {
-                if resolved.is_empty() {
+            Message::EntangledLookups { claimed, answers } => {
+                // Release the whole claim first — by claim, not by reply, so a
+                // txid that answered `Unknown` (never cached) is asked again
+                // next sync instead of staying in flight forever.
+                for txid in &claimed {
+                    self.entangled_in_flight.remove(txid);
+                }
+                let now = std::time::Instant::now();
+                let changed = answers.into_iter().fold(false, |changed, (txid, answer)| {
+                    self.cache.record_entanglement(txid, answer, now) || changed
+                });
+                if !changed {
                     return Task::none();
                 }
-                for (txid, answer) in resolved {
-                    self.cache.entangled.insert(txid, answer);
-                }
                 return Task::done(Message::CacheUpdated);
+            }
+            Message::EntangledRevalidated { spend, answers } => {
+                // The spend screen's own re-check of a replayable spend's
+                // inputs: cache what resolved, then hand the message to the
+                // panel that asked so it can close its in-flight state.
+                let now = std::time::Instant::now();
+                let changed = answers.iter().fold(false, |changed, (txid, answer)| {
+                    self.cache.record_entanglement(*txid, *answer, now) || changed
+                });
+                let routed = Message::EntangledRevalidated { spend, answers };
+                let forwarded = match (self.daemon.clone(), self.panels.current_mut()) {
+                    (Some(daemon), Some(panel)) => panel.update(Some(daemon), &self.cache, routed),
+                    (None, Some(panel)) => panel.update(None, &self.cache, routed),
+                    (_, None) => Task::none(),
+                };
+                if changed {
+                    return Task::batch([forwarded, Task::done(Message::CacheUpdated)]);
+                }
+                return forwarded;
             }
             Message::BitcoindNetStats(res) => {
                 self.node_net_stats_probe_in_progress = false;

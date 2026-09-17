@@ -687,6 +687,7 @@ impl KeychainSignModal {
                 let index: KeychainSignerIndex =
                     build_keychain_index(&vault.members, &cube_keys, self_user_id);
                 let required = classify_signers(
+                    wallet.chain,
                     &psbt,
                     &wallet.main_descriptor,
                     &index,

@@ -323,7 +323,8 @@ pub fn build_keychain_index(
 /// Classify the still-required signers for the active spending path.
 ///
 /// Strategy:
-/// 1. Compute `PartialSpendInfo` on the PSBT. The primary path is always
+/// 1. Compute `PartialSpendInfo` on the PSBT, keyed on the chain so unified
+///    records count on Bitcoin Blake2b. The primary path is always
 ///    available; recovery paths only show up when the input nSequence
 ///    matches their CSV timelock.
 /// 2. Pick the path the transaction was built to spend through: an available
@@ -335,14 +336,19 @@ pub fn build_keychain_index(
 ///    set that already signed, classify each survivor against the
 ///    `keychain_index`.
 pub fn classify_signers(
+    chain: crate::chain::ChainId,
     psbt: &Psbt,
     descriptor: &CoincubeDescriptor,
     keychain_index: &KeychainSignerIndex,
     keys_aliases: &HashMap<Fingerprint, String>,
     capabilities: &ReplayCapabilities,
 ) -> Result<Vec<RequiredSigner>, ClassifyError> {
-    let info = descriptor
-        .partial_spend_info(psbt)
+    // The same chain-keyed analysis `PsbtState` shows in the picker: on
+    // Bitcoin Blake2b a collected unified record (proprietary map) counts as
+    // a signature, so a signer who is already done is not asked again; on a
+    // Bitcoin-family chain this is the unchanged analysis of the unchanged
+    // PSBT.
+    let info = super::replay::spend_info_for_chain(chain, descriptor, psbt)
         .map_err(|e| ClassifyError::PsbtAnalysis(e.to_string()))?;
 
     let policy: CoincubePolicy = descriptor.policy();
@@ -610,6 +616,7 @@ mod tests {
         psbt.unsigned_tx.input[0].sequence = Sequence::from_height(10);
 
         let required = classify_signers(
+            crate::chain::ChainId::Bitcoin,
             &psbt,
             &desc,
             &recovery_keychain_index(),
@@ -637,6 +644,7 @@ mod tests {
         let psbt = Psbt::from_str(UNSIGNED_PSBT_B64).unwrap();
 
         let required = classify_signers(
+            crate::chain::ChainId::Bitcoin,
             &psbt,
             &desc,
             &recovery_keychain_index(),
@@ -695,6 +703,7 @@ mod tests {
         let desc = CoincubeDescriptor::from_str(RECOVERY_DESC).unwrap();
         let psbt = Psbt::from_str(UNSIGNED_PSBT_B64).unwrap();
         let hot = classify_signers(
+            crate::chain::ChainId::Bitcoin,
             &psbt,
             &desc,
             &recovery_keychain_index(),
@@ -704,6 +713,7 @@ mod tests {
         .unwrap();
         assert_eq!(hot[0].replay_protection(), ReplayProtection::Capable);
         let device = classify_signers(
+            crate::chain::ChainId::Bitcoin,
             &psbt,
             &desc,
             &recovery_keychain_index(),
@@ -715,6 +725,63 @@ mod tests {
             device[0].replay_protection(),
             ReplayProtection::UserMarked(false)
         );
+    }
+
+    /// On Bitcoin Blake2b a collected unified record counts toward the
+    /// threshold, so the Keychain flow asks for exactly the signatures still
+    /// missing — one, not two — and never for the signer who already signed.
+    /// On Bitcoin the same PSBT (the record is invisible there) still needs
+    /// two. Opening and reopening the picker read the same answer.
+    #[test]
+    fn classify_counts_collected_unified_records_on_blake2b_only() {
+        use crate::app::state::vault::test_support::unified::{fixture, unified};
+        let f = fixture();
+        let one_unified = unified(&f.psbt, &f.signers[0]);
+        let secp = coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::new();
+        let signed_fg = f.signers[0].fingerprint(&secp);
+        // The other two primary signers are "Keychain" for this index.
+        let mut index = KeychainSignerIndex::new();
+        for signer in &f.signers[1..] {
+            index.insert(
+                signer.fingerprint(&secp),
+                KeychainSignerInfo {
+                    key_id: 1,
+                    owner_user_id: 100,
+                    name: "phone".to_string(),
+                    owner_email: None,
+                    contact_id: None,
+                },
+            );
+        }
+        for _open in 0..2 {
+            let blake2b = classify_signers(
+                crate::chain::ChainId::BitcoinBlake2b,
+                &one_unified,
+                &f.descriptor,
+                &index,
+                &HashMap::new(),
+                &ReplayCapabilities::default(),
+            )
+            .unwrap();
+            assert_eq!(blake2b.len(), 1, "one signature still missing");
+            assert_ne!(
+                blake2b[0].fingerprint(),
+                signed_fg,
+                "the signer who signed is done"
+            );
+            assert!(blake2b[0].is_keychain());
+            assert_eq!(blake2b[0].replay_protection(), ReplayProtection::Legacy);
+        }
+        let bitcoin = classify_signers(
+            crate::chain::ChainId::Bitcoin,
+            &one_unified,
+            &f.descriptor,
+            &index,
+            &HashMap::new(),
+            &ReplayCapabilities::default(),
+        )
+        .unwrap();
+        assert_eq!(bitcoin.len(), 2, "the record is invisible on Bitcoin");
     }
 
     #[test]

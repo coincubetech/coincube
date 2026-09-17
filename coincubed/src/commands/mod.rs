@@ -237,17 +237,38 @@ impl<'a> TxGetter for DbTxGetter<'a> {
 /// the chain the daemon runs on.
 ///
 /// The Bitcoin arm is the historical best-effort merge, unchanged: partial and
-/// Taproot signatures of matching inputs are copied over, nothing else. The
-/// Bitcoin Blake2b arm does the same *and* carries the unified (`0x21`) records,
-/// which live in the PSBT's proprietary map and would otherwise be dropped on the
-/// floor by the copy above — through the adapter, which refuses a merge that would
-/// leave a key with conflicting or ambiguous encodings, so a stored spend never
+/// Taproot signatures of matching inputs are copied over (last write wins on a
+/// key), nothing else. The Bitcoin Blake2b arm is the adapter merge instead —
+/// `partial_sigs` plus the unified (`0x21`) records in the proprietary map,
+/// which the copy would drop on the floor — run against the stored PSBT as it
+/// is, so a merge that would leave a key with a conflicting or ambiguous
+/// encoding is refused before anything is overwritten and a stored spend never
 /// ends up with a record it cannot finalise from. On refusal nothing is stored.
 fn merge_spend_signatures(
     chain: coincube_core::chain::ChainId,
     mut db_psbt: Psbt,
     psbt: &Psbt,
 ) -> Result<Psbt, CommandError> {
+    if chain.is_blake2b() {
+        // The checked adapter merge runs against the **stored** PSBT as it is,
+        // never after a copy: the historical copy below is last-write-wins on
+        // `partial_sigs`, and a conflicting legacy signature copied first would
+        // have replaced the stored one before the adapter compared anything.
+        // Refuses conflicting or ambiguous encodings, and an incoming PSBT for
+        // a different unsigned transaction; nothing is stored on refusal. (A
+        // Blake2b Vault is native P2WSH — Taproot is not offered on that chain
+        // — so the adapter's ECDSA-only view of signatures is the whole
+        // picture there.)
+        use coincube_core::psbt_unified::{merge_signatures, UnifiedPsbt};
+        let mut stored = UnifiedPsbt::from_psbt(db_psbt)
+            .map_err(|e| CommandError::UnifiedSignatureMerge(e.to_string()))?;
+        let incoming = UnifiedPsbt::from_psbt(psbt.clone())
+            .map_err(|e| CommandError::UnifiedSignatureMerge(e.to_string()))?;
+        merge_signatures(&mut stored, &incoming)
+            .map_err(|e| CommandError::UnifiedSignatureMerge(e.to_string()))?;
+        return Ok(stored.psbt().clone());
+    }
+
     let tx = &psbt.unsigned_tx;
     let db_tx = db_psbt.unsigned_tx.clone();
     for i in 0..db_tx.input.len() {
@@ -275,20 +296,7 @@ fn merge_spend_signatures(
             db_psbtin.tap_key_sig = psbtin.tap_key_sig;
         }
     }
-    if !chain.is_blake2b() {
-        return Ok(db_psbt);
-    }
-
-    // Unified records: validated representation on both sides, then an atomic
-    // merge that refuses conflicts rather than picking a winner.
-    use coincube_core::psbt_unified::{merge_signatures, UnifiedPsbt};
-    let mut stored = UnifiedPsbt::from_psbt(db_psbt)
-        .map_err(|e| CommandError::UnifiedSignatureMerge(e.to_string()))?;
-    let incoming = UnifiedPsbt::from_psbt(psbt.clone())
-        .map_err(|e| CommandError::UnifiedSignatureMerge(e.to_string()))?;
-    merge_signatures(&mut stored, &incoming)
-        .map_err(|e| CommandError::UnifiedSignatureMerge(e.to_string()))?;
-    Ok(stored.psbt().clone())
+    Ok(db_psbt)
 }
 
 /// Finalise a stored spend into the transaction to broadcast, keyed on the chain
@@ -3908,6 +3916,55 @@ mod tests {
                 merge_spend_signatures(ChainId::BitcoinBlake2b, stored, &incoming_legacy).unwrap();
             assert_eq!(merged.inputs[0].partial_sigs.len(), 2);
             assert_eq!(merged.inputs[0].proprietary.len(), 1);
+        }
+
+        /// A conflicting **legacy** signature — same key, a different parseable
+        /// signature — is refused on the Blake2b arm and the stored PSBT is
+        /// byte-unchanged. The historical copy is last-write-wins, so running it
+        /// before the adapter would have replaced the valid stored signature and
+        /// left the adapter comparing the incoming value with itself.
+        #[test]
+        fn blake2b_merge_refuses_a_conflicting_legacy_signature_without_touching_the_stored_psbt() {
+            let (signers, psbt) = vault_psbt();
+            let stored = legacy(&psbt, &signers[0]);
+            let stored_bytes = stored.serialize();
+            let (key_a, _) = stored.inputs[0]
+                .partial_sigs
+                .iter()
+                .next()
+                .map(|(k, s)| (*k, *s))
+                .unwrap();
+            // Key B's signature, assigned to key A: well formed, wrong.
+            let other = legacy(&psbt, &signers[1]);
+            let sig_b = *other.inputs[0].partial_sigs.values().next().unwrap();
+            let mut conflicting = psbt.clone();
+            conflicting.inputs[0].partial_sigs.insert(key_a, sig_b);
+
+            let refused =
+                merge_spend_signatures(ChainId::BitcoinBlake2b, stored.clone(), &conflicting);
+            match refused {
+                Err(CommandError::UnifiedSignatureMerge(reason)) => {
+                    assert!(reason.to_lowercase().contains("conflict"), "{}", reason)
+                }
+                other => panic!("expected the conflict to be refused, got {:?}", other),
+            }
+            assert_eq!(
+                stored.serialize(),
+                stored_bytes,
+                "the stored PSBT is untouched"
+            );
+
+            // The Bitcoin arm keeps its historical last-write-wins behaviour.
+            let merged =
+                merge_spend_signatures(ChainId::Bitcoin, stored.clone(), &conflicting).unwrap();
+            assert_eq!(merged.inputs[0].partial_sigs[&key_a], sig_b);
+
+            // And through `update_spend` on the daemon: refusal stores nothing.
+            // (Chain-keyed on the control's config, exercised on the pure
+            // function above; the store happens only after `?` succeeds.)
+            let same_stored =
+                merge_spend_signatures(ChainId::BitcoinBlake2b, stored.clone(), &stored).unwrap();
+            assert_eq!(same_stored.serialize(), stored_bytes, "idempotent re-merge");
         }
 
         #[test]

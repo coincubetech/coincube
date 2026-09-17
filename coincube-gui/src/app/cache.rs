@@ -158,12 +158,15 @@ pub struct Cache {
     pub liquid_gate: crate::app::features::LiquidGate,
     /// Entangled-deposit answers for a Bitcoin Blake2b Cube (`#276` I13),
     /// keyed by the deposit's txid: whether the same transaction exists on
-    /// the twin Bitcoin chain. Only *resolved* answers are stored — a deposit
-    /// absent from the map has not been checked (or the check failed) and is
-    /// retried after the next sync. Always empty on a Bitcoin-family Cube.
+    /// the twin Bitcoin chain, and when that was resolved. Only *resolved*
+    /// answers are stored — a deposit absent from the map has not been
+    /// checked (or the check failed) and is retried after the next sync; a
+    /// negative older than `NEGATIVE_ANSWER_TTL` is re-queried; a positive is
+    /// terminal. In-memory only. Always empty on a Bitcoin-family Cube. Write
+    /// through [`Self::record_entanglement`].
     pub entangled: std::collections::HashMap<
         coincube_core::miniscript::bitcoin::Txid,
-        crate::services::entangled::Entanglement,
+        crate::services::entangled::CachedEntanglement,
     >,
     /// Current theme mode (dark/light) — used for theme-aware widget rendering
     pub theme_mode: coincube_ui::theme::palette::ThemeMode,
@@ -325,15 +328,45 @@ impl std::default::Default for Cache {
 
 impl Cache {
     /// The cached entanglement answer for a deposit, [`Entanglement::Unknown`]
-    /// when none has been resolved yet.
+    /// when none has been resolved yet. A stale negative still reads as
+    /// *not entangled* here — the refresh is the sync task's job and the
+    /// spend screen's re-check, not this accessor's.
     pub fn entanglement_of(
         &self,
         txid: &coincube_core::miniscript::bitcoin::Txid,
     ) -> crate::services::entangled::Entanglement {
         self.entangled
             .get(txid)
-            .copied()
+            .map(|cached| cached.answer)
             .unwrap_or(crate::services::entangled::Entanglement::Unknown)
+    }
+
+    /// Record a lookup answer. `Unknown` is never stored; `Entangled` is
+    /// terminal and is never overwritten by a later negative. Returns whether
+    /// the cache changed.
+    pub fn record_entanglement(
+        &mut self,
+        txid: coincube_core::miniscript::bitcoin::Txid,
+        answer: crate::services::entangled::Entanglement,
+        now: std::time::Instant,
+    ) -> bool {
+        use crate::services::entangled::{CachedEntanglement, Entanglement};
+        if !answer.is_resolved() {
+            return false;
+        }
+        if let Some(existing) = self.entangled.get(&txid) {
+            if matches!(existing.answer, Entanglement::Entangled) {
+                return false;
+            }
+        }
+        self.entangled.insert(
+            txid,
+            CachedEntanglement {
+                answer,
+                resolved_at: now,
+            },
+        );
+        true
     }
 
     pub fn blockheight(&self) -> i32 {
@@ -437,5 +470,40 @@ impl FiatPriceRequest {
             res: client.get_price(self.currency).await,
             request: self,
         }
+    }
+}
+
+#[cfg(test)]
+mod entangled_cache_tests {
+    use super::*;
+    use crate::services::entangled::Entanglement;
+    use coincube_core::miniscript::bitcoin::Txid;
+    use std::str::FromStr;
+
+    #[test]
+    fn positives_are_terminal_negatives_are_replaceable_unknown_is_never_stored() {
+        let txid =
+            Txid::from_str("0000000000000000000000000000000000000000000000000000000000000009")
+                .unwrap();
+        let now = Instant::now();
+        let mut cache = Cache::default();
+        assert_eq!(cache.entanglement_of(&txid), Entanglement::Unknown);
+
+        assert!(!cache.record_entanglement(txid, Entanglement::Unknown, now));
+        assert!(cache.entangled.is_empty());
+
+        assert!(cache.record_entanglement(txid, Entanglement::NotEntangled, now));
+        assert_eq!(cache.entanglement_of(&txid), Entanglement::NotEntangled);
+        assert_eq!(cache.entangled[&txid].resolved_at, now);
+
+        // A later positive replaces the negative…
+        let later = now + std::time::Duration::from_secs(10);
+        assert!(cache.record_entanglement(txid, Entanglement::Entangled, later));
+        assert_eq!(cache.entanglement_of(&txid), Entanglement::Entangled);
+        // …and is terminal: neither a negative nor Unknown moves it.
+        assert!(!cache.record_entanglement(txid, Entanglement::NotEntangled, later));
+        assert!(!cache.record_entanglement(txid, Entanglement::Unknown, later));
+        assert_eq!(cache.entanglement_of(&txid), Entanglement::Entangled);
+        assert_eq!(cache.entangled[&txid].resolved_at, later);
     }
 }
