@@ -2286,9 +2286,9 @@ mod recovery_recipients_tests {
         let got = recovery_recipients(&vault.members);
         assert_eq!(got.notified.len(), 1);
         assert_eq!(got.notified[0].email, "kay@example.com");
-        // The key-only keyholder (no contact) is unreachable; the observer is
-        // simply not a recipient.
-        assert_eq!(got.unreachable, 1);
+        // Only keyholders with contacts are recovery recipients; the contactless
+        // key-only keyholder and observer are excluded.
+        assert_eq!(got.unreachable, 0);
     }
 }
 
