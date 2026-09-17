@@ -63,8 +63,9 @@ Proto additions land in `coincube-api` first and reach this repo via `make sync-
 
 Server-side refusals the desktop must render (message prefix is the token):
 `NETWORK_INVALID`, `NETWORK_MISMATCH`, `CHAIN_IDENTITY_REQUIRED`, `TARGET_KEY_NOT_ON_VAULT`,
-`SIGNER_APP_OUTDATED`, `NETWORK_DISABLED`, and `NotFound "vault not found"` for a
-vault the account neither owns nor is a member of. Copy for each is in the canonical §8.
+`SIGNER_APP_OUTDATED`, `NETWORK_DISABLED`, and — on an ordinary spend — `NotFound "vault not found"`
+for a vault the account neither owns nor holds a keyholder seat on (recovery spends keep
+the unchanged heir gate's `PermissionDenied`). Copy for each is in the canonical §8.
 
 ## 4. Rail 2 — pairing protocol v3
 
