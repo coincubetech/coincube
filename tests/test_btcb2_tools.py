@@ -12,6 +12,10 @@ every run and never reuse an extraction on the strength of a stored marker; it
 is driven against a file:// release directory with a stand-in verifier that
 records its invocations. The workflow's Knots cache key is asserted to be
 bound to the verifier's inputs.
+
+These tests need no node binaries and run wherever `pytest tests/` runs: the
+six generic Functional Tests legs (the Knots leg runs `test_knots.py` only,
+and the labelled BTCB2 workflow runs `test_btcb2_harness.py` only).
 """
 
 import os
@@ -46,7 +50,7 @@ def pinned_repo(tmp_path):
     return str(repo), _git(str(repo), "rev-parse", "HEAD")
 
 
-def run_fetch(cache_dir, repo, commit, dry_run=True):
+def run_fetch(cache_dir, repo, commit, dry_run=True, cwd=None, extra_env=None):
     """Drive the script against the throwaway repo. The test overrides are only
     honoured together with ELECTRS_BLAKE2B_DRY_RUN=1; refusal and reuse paths
     are reached before the dry-run point, so every scenario below runs with it."""
@@ -56,10 +60,17 @@ def run_fetch(cache_dir, repo, commit, dry_run=True):
         ELECTRS_BLAKE2B_TEST_COMMIT=commit,
         ELECTRS_BLAKE2B_TEST_BRANCH="mempool",
     )
+    env.pop("ELECTRS_BLAKE2B_DRY_RUN", None)  # parity with run_knots_fetch
     if dry_run:
         env["ELECTRS_BLAKE2B_DRY_RUN"] = "1"
+    if extra_env:
+        env.update(extra_env)
     return subprocess.run(
-        ["bash", SCRIPT, str(cache_dir)], env=env, capture_output=True, text=True
+        ["bash", SCRIPT, str(cache_dir)],
+        env=env,
+        capture_output=True,
+        text=True,
+        cwd=cwd,
     )
 
 
@@ -161,6 +172,42 @@ def test_ignored_file_in_checkout_is_refused(tmp_path, pinned_repo):
     assert res.returncode == 1
     assert "build.log" in res.stderr
     assert res.stdout.strip() == ""
+
+
+def test_electrs_relative_cache_and_target_dirs_are_canonicalised(
+    tmp_path, pinned_repo
+):
+    """A relative [cache-dir] or ELECTRS_BLAKE2B_TARGET_DIR used to be resolved
+    under the checkout by the build subshell (`cd "$src"`), so the binary was
+    written to <cache>/src/<cache>/target/… and never found at <cache>/target/….
+
+    This is a *proxy* regression: dry-run returns before `cargo build`, so the
+    failing build itself is not reachable here. It pins what the build depends
+    on — every derived path is absolute and rooted where the caller meant."""
+    repo, commit = pinned_repo
+    res = run_fetch("rel-cache", repo, commit, cwd=str(tmp_path))
+    assert res.returncode == 0, res.stderr
+    printed = res.stdout.strip()
+    assert os.path.isabs(printed)
+    assert printed == str(tmp_path / "rel-cache" / "target" / "release" / "electrs")
+    assert (tmp_path / "rel-cache" / "src" / ".git").is_dir()
+    assert not (tmp_path / "rel-cache" / "src" / "rel-cache").exists()
+    assert (
+        f"would build {commit} from a clean checkout at {tmp_path / 'rel-cache' / 'src'}"
+        in res.stderr
+    )
+
+    res = run_fetch(
+        "rel-cache",
+        repo,
+        commit,
+        cwd=str(tmp_path),
+        extra_env={"ELECTRS_BLAKE2B_TARGET_DIR": "rel-target"},
+    )
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.strip() == str(tmp_path / "rel-target" / "release" / "electrs")
+    assert (tmp_path / "rel-target").is_dir()
+    assert not (tmp_path / "rel-cache" / "src" / "rel-target").exists()
 
 
 def test_untracked_file_is_refused_like_an_edit(tmp_path, pinned_repo):

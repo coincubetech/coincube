@@ -53,8 +53,22 @@ commit="${ELECTRS_BLAKE2B_TEST_COMMIT:-4453cac61979322c0260f4b90e899379ae606206}
 if [ -n "${ELECTRS_BLAKE2B_TEST_REPO:-}${ELECTRS_BLAKE2B_TEST_COMMIT:-}${ELECTRS_BLAKE2B_TEST_BRANCH:-}" ]; then
   echo "TEST MODE: repository/commit overridden; this is not the pinned indexer" >&2
 fi
+# Both directories are used from inside the checkout later (`cd "$src" && …
+# cargo build`), so a relative cache dir or a relative ELECTRS_BLAKE2B_TARGET_DIR
+# would make Cargo write under "$src/<relative>/…" while the binary is looked
+# for at "<cache>/target/…" — a full build that then "produced no binary", and
+# a stray untracked tree inside the checkout that the next run's clean-tree
+# check refuses. Canonicalise both before deriving any path. (No CI path
+# passes either: the workflow and README call the script with no argument.)
+mkdir -p "$cache_dir"
+cache_dir="$(cd "$cache_dir" && pwd -P)"
 src="$cache_dir/src"
-target="${ELECTRS_BLAKE2B_TARGET_DIR:-$cache_dir/target}"
+if [ -n "${ELECTRS_BLAKE2B_TARGET_DIR:-}" ]; then
+  mkdir -p "$ELECTRS_BLAKE2B_TARGET_DIR"
+  target="$(cd "$ELECTRS_BLAKE2B_TARGET_DIR" && pwd -P)"
+else
+  target="$cache_dir/target"
+fi
 bin="$target/release/electrs"
 marker="$target/.built-$commit-v2"
 
