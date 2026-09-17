@@ -33,10 +33,15 @@
 # (~/.cache/...): it must live outside this repository, or Cargo treats the
 # checkout as a member of Coincube's workspace and refuses to build it. The
 # build target defaults to <cache>/target and may be moved with
-# ELECTRS_BLAKE2B_TARGET_DIR, but never into the checkout: a target equal to
-# or below <cache>/src — by any spelling, relative, absolute or through a
-# symlink — is refused before anything is created, since Cargo's output there
-# would fail the clean-checkout gate above on every later run.
+# ELECTRS_BLAKE2B_TARGET_DIR, but never into or through the checkout. Three
+# spellings are refused before anything is created, each with its own
+# message: a target that resolves inside <cache>/src (relative, absolute or
+# through a symlink); one that routes through <cache>/src and climbs back out
+# with `..`, even though it would land outside today (below the checkout the
+# clone creates what is missing, and a tracked symlink there would move the
+# rest of the path); and one passing through a symlink that cannot be
+# followed yet. Cargo's output inside the checkout would fail the
+# clean-checkout gate above on every later run.
 #
 # ELECTRS_BLAKE2B_TEST_REPO / ELECTRS_BLAKE2B_TEST_COMMIT / ELECTRS_BLAKE2B_TEST_BRANCH
 # exist only for tests/test_btcb2_tools.py, which exercises the source checks
@@ -75,14 +80,24 @@ fi
 # component from the left. A component that exists is resolved by the kernel
 # (`cd -P`), so a symlink there is followed and a later `..` is the physical
 # parent, not the lexical one. A component that does not exist yet is kept
-# lexically, and a `..` after it pops it lexically — which is exact, not an
-# approximation: `mkdir -p` will create it as an ordinary directory, never a
-# symlink, so its parent *is* the lexical parent once the path exists. The
-# missing remainder is never re-appended verbatim: "<x>/new/../cache/src/t"
-# with `new` absent must resolve to "<x>/cache/src/t" so the guard below sees
-# it. Nothing is created, on the accepted path or the refused one.
+# lexically, and a `..` after it pops it lexically — exact, not an
+# approximation, because the only thing that will create it is `mkdir -p`,
+# as an ordinary directory, never a symlink. Two things break that exactness
+# and are refused (non-zero status, diagnostic on stderr) instead of guessed:
+#   - a symlink component that cannot be followed now (dangling, or pointing
+#     at a file): where it lands after the clone is unknowable here;
+#   - a path that resolves inside $2 (the source checkout), and — a separate
+#     refusal with its own message — one that merely *routes through* it,
+#     reaching $2 at some step and climbing back out with `..`: below $2 the
+#     clone, not `mkdir -p`, creates the missing components, as whatever the
+#     pinned commit tracks, and a tracked symlink there would move the rest
+#     of the path once it exists. `<cache>/src/../target` is therefore
+#     refused although it would land at `<cache>/target` today.
+# The missing remainder is never re-appended verbatim: "<x>/new/../cache/src/t"
+# with `new` absent must resolve to "<x>/cache/src/t" so the check sees it.
+# Nothing is created, on the accepted path or the refused one.
 physical_path() {
-  local input="$1" resolved comp oldifs
+  local input="$1" forbidden="${2:-}" resolved comp oldifs entered=""
   case "$input" in /*) resolved="/" ;; *) resolved="$(pwd -P)" ;; esac
   # Split on "/" into the positional parameters with globbing off, then put
   # both back before anything else runs.
@@ -91,7 +106,7 @@ physical_path() {
   IFS="$oldifs"; set +f
   for comp in "$@"; do
     case "$comp" in
-      ''|.) ;;
+      ''|.) continue ;;
       ..)
         if [ -d "$resolved" ]; then
           resolved="$(cd -P -- "$resolved/.." && pwd -P)"
@@ -104,26 +119,51 @@ physical_path() {
         resolved="${resolved%/}/$comp"
         if [ -d "$resolved" ]; then
           resolved="$(cd -P -- "$resolved" && pwd -P)"
+        elif [ -L "$resolved" ]; then
+          echo "unresolved symlink component $resolved -> $(readlink "$resolved"): cannot be followed now, so where it lands after the clone is unknowable" >&2
+          return 3
         fi
         ;;
     esac
+    if [ -n "$forbidden" ] && [ -z "$entered" ]; then
+      case "$resolved" in
+        "$forbidden"|"$forbidden"/*) entered="$resolved" ;;
+      esac
+    fi
   done
-  printf '%s\n' "${resolved:-/}"
+  resolved="${resolved:-/}"
+  if [ -n "$forbidden" ]; then
+    case "$resolved" in
+      "$forbidden"|"$forbidden"/*)
+        echo "$input resolves to $resolved, inside the source checkout $forbidden; Cargo's output there would make the checkout dirty and every later run would refuse it" >&2
+        return 3
+        ;;
+    esac
+    if [ -n "$entered" ]; then
+      echo "$input routes through the source checkout $forbidden (reaches $entered, then climbs back out to $resolved); below the checkout the clone, not mkdir -p, creates what is missing, so the rest of the path cannot be trusted" >&2
+      return 3
+    fi
+  fi
+  printf '%s\n' "$resolved"
 }
 
-cache_dir="$(physical_path "$cache_dir")"
-src="$(physical_path "$cache_dir/src")"
-if [ -n "${ELECTRS_BLAKE2B_TARGET_DIR:-}" ]; then
-  target="$(physical_path "$ELECTRS_BLAKE2B_TARGET_DIR")"
-else
-  target="$cache_dir/target"
-fi
-case "$target" in
-  "$src"|"$src"/*)
-    echo "ELECTRS_BLAKE2B_TARGET_DIR=${ELECTRS_BLAKE2B_TARGET_DIR:-<unset>} resolves to $target, inside the source checkout $src; Cargo's output there would make the checkout dirty and every later run would refuse it. Use a directory outside the checkout (the default is $cache_dir/target). Nothing was created or removed." >&2
+# resolve VAR LABEL PATH [FORBIDDEN]: VAR=<physical path>, or refuse (exit 2).
+resolve() {
+  local out
+  if ! out="$(physical_path "$3" "${4:-}")"; then
+    echo "refusing $2: it cannot be proved to stay outside the source checkout once the clone exists (the default target is $cache_dir/target); nothing was created or removed" >&2
     exit 2
-    ;;
-esac
+  fi
+  printf -v "$1" '%s' "$out"
+}
+
+resolve cache_dir "cache dir $cache_dir" "$cache_dir"
+resolve src "source checkout $cache_dir/src" "$cache_dir/src"
+if [ -n "${ELECTRS_BLAKE2B_TARGET_DIR:-}" ]; then
+  resolve target "ELECTRS_BLAKE2B_TARGET_DIR=$ELECTRS_BLAKE2B_TARGET_DIR" "$ELECTRS_BLAKE2B_TARGET_DIR" "$src"
+else
+  resolve target "default target $cache_dir/target" "$cache_dir/target" "$src"
+fi
 bin="$target/release/electrs"
 marker="$target/.built-$commit-v2"
 

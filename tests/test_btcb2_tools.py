@@ -24,6 +24,7 @@ and the labelled BTCB2 workflow runs `test_btcb2_harness.py` only).
 
 import hashlib
 import os
+import pathlib
 import stat
 import subprocess
 import textwrap
@@ -243,6 +244,8 @@ def _assert_refused_inside_checkout(res):
     assert res.returncode == 2, res.stderr
     assert "ELECTRS_BLAKE2B_TARGET_DIR=" in res.stderr
     assert "inside the source checkout" in res.stderr
+    assert "routes through the source checkout" not in res.stderr
+    assert "unresolved symlink" not in res.stderr
     assert (
         "local changes" not in res.stderr
     ), "refused by the guard, not as dirty source"
@@ -436,6 +439,161 @@ def test_sibling_prefix_and_parent_targets_are_accepted(tmp_path, pinned_repo):
     res = run_fetch(cache, repo, commit, extra_env=_target_env(cache / ".." / "target"))
     assert res.returncode == 0, res.stderr
     assert res.stdout.strip() == str(tmp_path / "target" / "release" / "electrs")
+
+
+def _assert_refused_through_checkout(res):
+    """The 'routes through the checkout' refusal: the target would land outside
+    today, but its path enters `<cache>/src` and climbs back out with `..`."""
+    assert res.returncode == 2, res.stderr
+    assert "ELECTRS_BLAKE2B_TARGET_DIR=" in res.stderr
+    assert "routes through the source checkout" in res.stderr
+    assert "inside the source checkout" not in res.stderr
+    assert "unresolved symlink" not in res.stderr
+    assert "local changes" not in res.stderr
+    assert res.stdout.strip() == ""
+
+
+def _assert_refused_unprovable(res):
+    """The 'cannot prove it' refusal, as opposed to 'it is inside the checkout'."""
+    assert res.returncode == 2, res.stderr
+    assert "ELECTRS_BLAKE2B_TARGET_DIR=" in res.stderr
+    assert "cannot be proved to stay outside the source checkout" in res.stderr
+    assert "unresolved symlink component" in res.stderr
+    assert "inside the source checkout" not in res.stderr
+    assert "routes through the source checkout" not in res.stderr
+    assert "local changes" not in res.stderr
+    assert res.stdout.strip() == ""
+
+
+def test_target_dir_through_an_unresolvable_symlink_is_refused(tmp_path, pinned_repo):
+    """The 61de1982 gate finding: a symlink that cannot be followed at check time
+    (dangling — including one that will come alive when the clone creates
+    `<cache>/src` — or pointing at a file) was kept lexically, so the guard
+    compared a string that stops meaning that once the link resolves. Refused as
+    'cannot prove it', naming the component and its readlink target; a live link
+    to a valid external directory is still accepted with the physical path."""
+    repo, commit = pinned_repo
+    cache = tmp_path / "cache"
+
+    alias = tmp_path / "alias"
+    alias.symlink_to(cache / "src")  # dangling: the checkout does not exist yet
+    res = run_fetch(cache, repo, commit, extra_env=_target_env(alias / "target"))
+    _assert_refused_unprovable(res)
+    assert f"unresolved symlink component {alias} -> {cache / 'src'}" in res.stderr
+    assert not cache.exists(), "nothing may be created or cloned"
+
+    harmless = tmp_path / "harmless"
+    harmless.symlink_to(tmp_path / "nowhere")
+    res = run_fetch(cache, repo, commit, extra_env=_target_env(harmless / "target"))
+    _assert_refused_unprovable(res)
+    assert (
+        f"unresolved symlink component {harmless} -> {tmp_path / 'nowhere'}"
+        in res.stderr
+    )
+    assert not cache.exists()
+
+    afile = tmp_path / "afile"
+    afile.write_text("")
+    filelink = tmp_path / "filelink"
+    filelink.symlink_to(afile)
+    res = run_fetch(cache, repo, commit, extra_env=_target_env(filelink / "target"))
+    _assert_refused_unprovable(res)
+    assert f"unresolved symlink component {filelink} -> {afile}" in res.stderr
+    assert not cache.exists()
+
+    realdir = tmp_path / "elsewhere" / "realdir"
+    realdir.mkdir(parents=True)
+    live = tmp_path / "live"
+    live.symlink_to(realdir, target_is_directory=True)
+    res = run_fetch(cache, repo, commit, extra_env=_target_env(live / "t"))
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.strip() == str(realdir / "t" / "release" / "electrs")
+    assert (cache / "src" / ".git").is_dir()
+
+
+def test_target_dir_routed_through_the_checkout_is_refused_even_if_it_climbs_out(
+    tmp_path, pinned_repo
+):
+    """Below `<cache>/src` the clone, not `mkdir -p`, creates the missing
+    components — as whatever the pinned commit tracks, including a symlink. So
+    a spelling that enters the checkout and climbs back out with `..` resolves
+    to one place at check time and to another once the link exists:
+    `<cache>/src/foo/../../../elsewhere` with a tracked `foo -> bin/x/y` is
+    `<x>/elsewhere` before the clone and `<cache>/src/elsewhere` after it. The
+    check therefore runs at every step of the resolution: reaching the
+    checkout at any point refuses, on a fresh cache and on an existing one."""
+    repo, commit = pinned_repo
+    (pathlib.Path(repo) / "bin" / "x" / "y").mkdir(parents=True)
+    (pathlib.Path(repo) / "bin" / "x" / "y" / "e.rs").write_text(
+        ""
+    )  # git tracks files, not dirs
+    (pathlib.Path(repo) / "foo").symlink_to(os.path.join("bin", "x", "y"))
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "tracked symlink")
+    commit = _git(repo, "rev-parse", "HEAD")
+    cache = tmp_path / "cache"
+    through = cache / "src" / "foo" / ".." / ".." / ".." / "elsewhere"
+
+    # Fresh cache: the clone would create `foo` as a symlink and move the target.
+    res = run_fetch(cache, repo, commit, extra_env=_target_env(through))
+    _assert_refused_through_checkout(res)
+    assert (
+        f"(reaches {cache / 'src'}, then climbs back out to {tmp_path / 'elsewhere'})"
+        in res.stderr
+    )
+    assert not cache.exists(), "nothing may be created or cloned"
+    assert not (tmp_path / "elsewhere").exists()
+
+    # Existing checkout: `foo` is live now, so the same spelling resolves
+    # physically to where the clone really put it — inside the checkout — and
+    # is refused as such. Byte-identical either way.
+    assert run_fetch(cache, repo, commit).returncode == 0
+    assert (cache / "src" / "foo").is_symlink() and (cache / "src" / "foo").is_dir()
+    before = snapshot(tmp_path)
+    res = run_fetch(cache, repo, commit, extra_env=_target_env(through))
+    _assert_refused_inside_checkout(res)
+    assert f"resolves to {cache / 'src' / 'elsewhere'}, inside" in res.stderr
+    assert snapshot(tmp_path) == before
+    # ...while spellings that never enter the checkout are unaffected.
+    for spelling, printed in (
+        (cache / "src2" / "target", cache / "src2" / "target"),
+        (cache / "nope" / ".." / "target", cache / "target"),
+        (cache / ".." / "target", tmp_path / "target"),
+    ):
+        res = run_fetch(cache, repo, commit, extra_env=_target_env(spelling))
+        assert res.returncode == 0, res.stderr
+        assert res.stdout.strip() == str(printed / "release" / "electrs")
+    assert snapshot(tmp_path) == before
+
+
+def test_target_dir_climbing_out_of_the_checkout_is_refused_as_routed_through(
+    tmp_path, pinned_repo
+):
+    """Behaviour change from 61de1982, deliberate: `<cache>/src/../target` was
+    accepted there (it lands at `<cache>/target` today) and is now refused with
+    the routes-through message, because the class rule is that a target may not
+    pass through the checkout at all — not that it may not end up inside it."""
+    repo, commit = pinned_repo
+    cache = tmp_path / "cache"
+    spelling = cache / "src" / ".." / "target"
+
+    res = run_fetch(cache, repo, commit, extra_env=_target_env(spelling))
+    _assert_refused_through_checkout(res)
+    assert not cache.exists()
+
+    assert run_fetch(cache, repo, commit).returncode == 0
+    before = snapshot(tmp_path)
+    res = run_fetch(cache, repo, commit, extra_env=_target_env(spelling))
+    _assert_refused_through_checkout(res)
+    assert (
+        f"(reaches {cache / 'src'}, then climbs back out to {cache / 'target'})"
+        in res.stderr
+    )
+    assert snapshot(tmp_path) == before
+    # The equivalent spelling that never enters the checkout is still accepted.
+    res = run_fetch(cache, repo, commit, extra_env=_target_env(cache / "target"))
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.strip() == str(cache / "target" / "release" / "electrs")
 
 
 def test_external_target_dir_is_accepted_and_reused(tmp_path, pinned_repo):
