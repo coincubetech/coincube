@@ -347,6 +347,97 @@ def test_target_dir_through_a_symlink_into_the_checkout_is_refused(
     assert snapshot(tmp_path) == before
 
 
+def test_target_dir_via_dotdot_through_a_missing_component_is_refused(
+    tmp_path, pinned_repo
+):
+    """The e99e86fa gate finding: a `..` that traverses a component which does not
+    exist yet survived into the guard string verbatim, so `<x>/new/../cache/src/t`
+    with `new` absent was not seen as `<x>/cache/src/t` — `mkdir -p` would have
+    created `new`, the kernel would have resolved `..`, and Cargo would have
+    written inside the checkout."""
+    repo, commit = pinned_repo
+    cache = tmp_path / "cache"
+    spellings = (
+        str(tmp_path / "new" / ".." / "cache" / "src" / "target"),
+        str(tmp_path / "a" / "b" / ".." / ".." / "cache" / "src" / "deep" / "t"),
+        os.path.join("a", "b", "..", "..", "cache", "src", "deep", "t"),  # relative
+    )
+
+    # Fresh cache: refused before anything is created or cloned.
+    for spelling in spellings:
+        res = run_fetch(
+            cache, repo, commit, cwd=str(tmp_path), extra_env=_target_env(spelling)
+        )
+        _assert_refused_inside_checkout(res)
+        assert not cache.exists(), spelling
+        assert not (tmp_path / "new").exists() and not (tmp_path / "a").exists()
+
+    # Existing checkout: refused by the guard, tree byte-identical.
+    assert run_fetch(cache, repo, commit).returncode == 0
+    before = snapshot(tmp_path)
+    for spelling in spellings:
+        res = run_fetch(
+            cache, repo, commit, cwd=str(tmp_path), extra_env=_target_env(spelling)
+        )
+        _assert_refused_inside_checkout(res)
+        assert snapshot(tmp_path) == before, spelling
+
+
+def test_dotdot_after_an_existing_symlink_resolves_physically(tmp_path, pinned_repo):
+    """Collapsing `..` lexically over the whole path would be wrong where the
+    path exists: after a symlink, `..` is the physical parent. Both directions
+    are pinned — a link out of the cache whose `..` lands in a valid external
+    directory (accepted, and the printed path is the physical one Cargo will
+    use), and a link into the checkout whose `..` lands back inside it
+    (refused, although the lexical parent would be outside)."""
+    repo, commit = pinned_repo
+    cache = tmp_path / "cache"
+    assert run_fetch(cache, repo, commit).returncode == 0
+
+    elsewhere = tmp_path / "elsewhere" / "realdir"
+    elsewhere.mkdir(parents=True)
+    (cache / "link").symlink_to(elsewhere, target_is_directory=True)
+    before = snapshot(tmp_path)
+    res = run_fetch(
+        cache, repo, commit, extra_env=_target_env(cache / "link" / ".." / "t")
+    )
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.strip() == str(
+        tmp_path / "elsewhere" / "t" / "release" / "electrs"
+    )
+    assert snapshot(tmp_path) == before, "resolution creates nothing"
+
+    into = tmp_path / "into"
+    into.symlink_to(
+        cache / "src" / "src", target_is_directory=True
+    )  # inside the checkout
+    before = snapshot(tmp_path)
+    res = run_fetch(
+        cache, repo, commit, extra_env=_target_env(into / ".." / "sub" / "t")
+    )
+    _assert_refused_inside_checkout(res)
+    assert str(cache / "src" / "sub" / "t") in res.stderr
+    assert snapshot(tmp_path) == before
+
+
+def test_sibling_prefix_and_parent_targets_are_accepted(tmp_path, pinned_repo):
+    """The guard is a path-component test, not a string-prefix test: `<cache>/src2`
+    shares the prefix `<cache>/src` and must not be refused; `<cache>/../target`
+    resolves through an existing directory to a valid external one."""
+    repo, commit = pinned_repo
+    cache = tmp_path / "cache"
+    assert run_fetch(cache, repo, commit).returncode == 0
+    res = run_fetch(
+        cache, repo, commit, extra_env=_target_env(cache / "src2" / "target")
+    )
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.strip() == str(cache / "src2" / "target" / "release" / "electrs")
+    assert not (cache / "src2").exists(), "a dry run creates no target"
+    res = run_fetch(cache, repo, commit, extra_env=_target_env(cache / ".." / "target"))
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.strip() == str(tmp_path / "target" / "release" / "electrs")
+
+
 def test_external_target_dir_is_accepted_and_reused(tmp_path, pinned_repo):
     """A valid ELECTRS_BLAKE2B_TARGET_DIR outside the checkout still works end to
     end: the binary path is derived under it, a checked build recorded there is

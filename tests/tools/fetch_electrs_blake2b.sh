@@ -71,23 +71,44 @@ fi
 # refused, and only then does the script touch the filesystem. (No CI path
 # passes either: the workflow and README call the script with no argument.)
 #
-# Physical absolute path for $1 without creating it: resolve the deepest
-# existing ancestor (`cd -P`: symlinks before `..`, as the kernel will when
-# Cargo opens the path) and re-append the missing remainder verbatim.
+# Physical absolute path for $1 without creating it, resolved component by
+# component from the left. A component that exists is resolved by the kernel
+# (`cd -P`), so a symlink there is followed and a later `..` is the physical
+# parent, not the lexical one. A component that does not exist yet is kept
+# lexically, and a `..` after it pops it lexically — which is exact, not an
+# approximation: `mkdir -p` will create it as an ordinary directory, never a
+# symlink, so its parent *is* the lexical parent once the path exists. The
+# missing remainder is never re-appended verbatim: "<x>/new/../cache/src/t"
+# with `new` absent must resolve to "<x>/cache/src/t" so the guard below sees
+# it. Nothing is created, on the accepted path or the refused one.
 physical_path() {
-  local path="$1" rest="" parent
-  while [ ! -d "$path" ]; do
-    parent="$(dirname -- "$path")"
-    if [ "$parent" = "$path" ]; then
-      echo "cannot resolve $1: no existing ancestor directory" >&2
-      return 1
-    fi
-    rest="$(basename -- "$path")${rest:+/$rest}"
-    path="$parent"
+  local input="$1" resolved comp oldifs
+  case "$input" in /*) resolved="/" ;; *) resolved="$(pwd -P)" ;; esac
+  # Split on "/" into the positional parameters with globbing off, then put
+  # both back before anything else runs.
+  oldifs="$IFS"; set -f; IFS=/
+  set -- $input
+  IFS="$oldifs"; set +f
+  for comp in "$@"; do
+    case "$comp" in
+      ''|.) ;;
+      ..)
+        if [ -d "$resolved" ]; then
+          resolved="$(cd -P -- "$resolved/.." && pwd -P)"
+        else
+          resolved="${resolved%/*}"
+          [ -n "$resolved" ] || resolved="/"
+        fi
+        ;;
+      *)
+        resolved="${resolved%/}/$comp"
+        if [ -d "$resolved" ]; then
+          resolved="$(cd -P -- "$resolved" && pwd -P)"
+        fi
+        ;;
+    esac
   done
-  path="$(cd -P -- "$path" && pwd -P)"
-  path="${path%/}${rest:+/$rest}"
-  printf '%s\n' "${path:-/}"
+  printf '%s\n' "${resolved:-/}"
 }
 
 cache_dir="$(physical_path "$cache_dir")"
