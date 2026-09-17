@@ -47,6 +47,55 @@ fn add_legacy(
     add_legacy_to(psbt, signer, &all, secp)
 }
 
+/// What a plain cheapest-first satisfaction over *every* signature on `input`
+/// (unified and legacy together, no preference pass) would put in the witness.
+/// This is the behaviour the preference pass exists to override, so tests use
+/// it to prove a scenario really is one where miniscript would drop a unified
+/// signature.
+fn naive_report(psbt: &UnifiedPsbt, input: usize) -> InputWitnessReport {
+    let contexts = input_contexts(psbt).unwrap();
+    let mut all: BTreeMap<PublicKey, AvailableSignature> = BTreeMap::new();
+    for record in unified_signatures(psbt).unwrap() {
+        if record.input_index != input {
+            continue;
+        }
+        let der_part = &record.signature[..record.signature.len() - 1];
+        all.insert(
+            record.public_key,
+            AvailableSignature {
+                der: ecdsa::Signature {
+                    signature: secp256k1::ecdsa::Signature::from_der(der_part).unwrap(),
+                    sighash_type: EcdsaSighashType::All,
+                },
+                witness_bytes: record.signature.clone(),
+                unified: true,
+            },
+        );
+    }
+    for (pk, sig) in &psbt.psbt().inputs[input].partial_sigs {
+        let mut bytes = sig.signature.serialize_der().to_vec();
+        bytes.push(0x01);
+        all.insert(
+            *pk,
+            AvailableSignature {
+                der: *sig,
+                witness_bytes: bytes,
+                unified: false,
+            },
+        );
+    }
+    let txin = &psbt.psbt().unsigned_tx.input[input];
+    satisfy_input(
+        input,
+        &contexts[input],
+        &all,
+        txin.sequence,
+        psbt.psbt().unsigned_tx.lock_time,
+    )
+    .unwrap()
+    .1
+}
+
 /// The signature-shaped elements of a witness, split by trailing sighash byte.
 fn signature_elements(witness: &Witness) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
     let mut unified = Vec::new();
@@ -160,56 +209,18 @@ fn a_unified_signature_is_never_crowded_out_by_legacy_ones() {
     let secp = secp();
     let fixture = fixture(1);
     let signed = sign_p2wsh_all_unified(&fixture.signers[2], &fixture.psbt, &secp).unwrap();
-    // Signer 2 also holds the recovery key; keep only its primary-key record so
-    // the recovery leaf (timelocked, not enabled here) plays no part.
+    // Signer 2 also signs the recovery key, but that leaf is timelocked and not
+    // enabled here, so only its primary-key record can enter the witness.
     let signed = add_legacy(&signed, &fixture.signers[0], &secp);
     let signed = add_legacy(&signed, &fixture.signers[1], &secp);
 
     // The scenario is real: a plain cheapest-first satisfaction over the whole
     // set does drop the unified signature.
-    {
-        let contexts = input_contexts(&signed).unwrap();
-        let mut all: BTreeMap<PublicKey, AvailableSignature> = BTreeMap::new();
-        for record in unified_signatures(&signed).unwrap() {
-            let der_part = &record.signature[..record.signature.len() - 1];
-            all.insert(
-                record.public_key,
-                AvailableSignature {
-                    der: ecdsa::Signature {
-                        signature: secp256k1::ecdsa::Signature::from_der(der_part).unwrap(),
-                        sighash_type: EcdsaSighashType::All,
-                    },
-                    witness_bytes: record.signature.clone(),
-                    unified: true,
-                },
-            );
-        }
-        for (pk, sig) in &signed.psbt().inputs[0].partial_sigs {
-            let mut bytes = sig.signature.serialize_der().to_vec();
-            bytes.push(0x01);
-            all.insert(
-                *pk,
-                AvailableSignature {
-                    der: *sig,
-                    witness_bytes: bytes,
-                    unified: false,
-                },
-            );
-        }
-        let txin = &signed.psbt().unsigned_tx.input[0];
-        let (_, naive) = satisfy_input(
-            0,
-            &contexts[0],
-            &all,
-            txin.sequence,
-            signed.psbt().unsigned_tx.lock_time,
-        )
-        .unwrap();
-        assert_eq!(
-            naive.unified_used, 0,
-            "premise: cheapest-first drops the unified signature"
-        );
-    }
+    assert_eq!(
+        naive_report(&signed, 0).unified_used,
+        0,
+        "premise: cheapest-first drops the unified signature"
+    );
 
     let finalized = finalize_p2wsh_all_unified(&signed, &secp).unwrap();
     assert!(
@@ -219,6 +230,221 @@ fn a_unified_signature_is_never_crowded_out_by_legacy_ones() {
     );
     assert_eq!(finalized.inputs[0].unified_used, 1);
     assert_eq!(finalized.inputs[0].legacy_used, 1);
+}
+
+#[test]
+fn a_unified_signature_is_kept_whichever_key_position_holds_it() {
+    // The drop is position-dependent: `multi` takes keys in script order, so
+    // the unified signature survives a naive satisfaction on some positions
+    // and not others. Sweep every position, with the other two signers legacy,
+    // on a one- and a two-input spend. The sweep must include at least one
+    // position the naive pass drops, or it proves nothing about the fix.
+    let secp = secp();
+    for input_count in [1usize, 2] {
+        let mut dropped_by_naive = Vec::new();
+        for unified_signer in 0..3 {
+            let fixture = fixture(input_count);
+            let signed =
+                sign_p2wsh_all_unified(&fixture.signers[unified_signer], &fixture.psbt, &secp)
+                    .unwrap();
+            let signed = (0..3)
+                .filter(|s| *s != unified_signer)
+                .fold(signed, |psbt, s| {
+                    add_legacy(&psbt, &fixture.signers[s], &secp)
+                });
+
+            for input in 0..input_count {
+                if naive_report(&signed, input).unified_used == 0 {
+                    dropped_by_naive.push((unified_signer, input));
+                }
+            }
+
+            let finalized = finalize_p2wsh_all_unified(&signed, &secp)
+                .unwrap_or_else(|e| panic!("unified signer {}: {}", unified_signer, e));
+            for (input, report) in finalized.inputs.iter().enumerate() {
+                assert!(
+                    report.replay_protected(),
+                    "inputs={} unified signer {} input {}: unified signature dropped: {:?}",
+                    input_count,
+                    unified_signer,
+                    input,
+                    report
+                );
+                assert_eq!(
+                    (report.unified_used, report.legacy_used),
+                    (1, 1),
+                    "inputs={} unified signer {} input {}",
+                    input_count,
+                    unified_signer,
+                    input
+                );
+                let (unified, legacy) =
+                    signature_elements(&finalized.transaction.input[input].witness);
+                assert_eq!((unified.len(), legacy.len()), (1, 1));
+            }
+        }
+        assert!(
+            !dropped_by_naive.is_empty(),
+            "the sweep never reached a position the naive satisfaction drops"
+        );
+    }
+}
+
+#[test]
+fn a_unified_signature_the_script_cannot_use_leaves_an_honest_legacy_witness() {
+    // Signer 2's unified signature is left only on its *recovery* key, whose
+    // leaf is behind a timelock this transaction does not enable. No
+    // satisfaction can include it, so the input finalises from the two legacy
+    // signatures and says so — the preference pass never manufactures
+    // protection that the script cannot express.
+    let secp = secp();
+    let fixture = fixture(1);
+    let mut signed = sign_p2wsh_all_unified(&fixture.signers[2], &fixture.psbt, &secp).unwrap();
+    let primary_keys: Vec<PublicKey> = input_contexts(&signed).unwrap()[0]
+        .miniscript
+        .iter_pk()
+        .collect();
+    let removed_primary = {
+        let input = &mut signed.psbt_mut().inputs[0];
+        let before = input.proprietary.len();
+        input
+            .proprietary
+            .retain(|key, _| !primary_keys.iter().any(|pk| key.key == pk.to_bytes()));
+        before - input.proprietary.len()
+    };
+    assert_eq!(removed_primary, 1, "signer 2 had one primary-key record");
+    let remaining = unified_signatures(&signed).unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert!(!primary_keys.contains(&remaining[0].public_key));
+    let signed = add_legacy(&signed, &fixture.signers[0], &secp);
+    let signed = add_legacy(&signed, &fixture.signers[1], &secp);
+
+    let finalized = finalize_p2wsh_all_unified(&signed, &secp).unwrap();
+    assert_eq!(
+        finalized.inputs[0],
+        InputWitnessReport {
+            unified_used: 0,
+            legacy_used: 2
+        }
+    );
+    assert!(!finalized.inputs[0].replay_protected());
+    let (unified, legacy) = signature_elements(&finalized.transaction.input[0].witness);
+    assert!(unified.is_empty());
+    assert_eq!(legacy.len(), 2);
+}
+
+#[test]
+fn too_many_legacy_candidates_to_search_is_refused_not_degraded() {
+    // The subset search is bounded. Past the bound, with a unified signature
+    // present and legacy ones that satisfy on their own, the input is refused
+    // with a typed error rather than finalised replayable.
+    let secp = secp();
+    let fixture = fixture(1);
+    let signed = sign_p2wsh_all_unified(&fixture.signers[2], &fixture.psbt, &secp).unwrap();
+    let signed = add_legacy(&signed, &fixture.signers[0], &secp);
+    let signed = add_legacy(&signed, &fixture.signers[1], &secp);
+    let contexts = input_contexts(&signed).unwrap();
+
+    let mut unified: BTreeMap<PublicKey, AvailableSignature> = BTreeMap::new();
+    for record in unified_signatures(&signed).unwrap() {
+        let der_part = &record.signature[..record.signature.len() - 1];
+        unified.insert(
+            record.public_key,
+            AvailableSignature {
+                der: ecdsa::Signature {
+                    signature: secp256k1::ecdsa::Signature::from_der(der_part).unwrap(),
+                    sighash_type: EcdsaSighashType::All,
+                },
+                witness_bytes: record.signature.clone(),
+                unified: true,
+            },
+        );
+    }
+    let mut legacy: BTreeMap<PublicKey, AvailableSignature> = BTreeMap::new();
+    let mut a_legacy_sig = None;
+    for (pk, sig) in &signed.psbt().inputs[0].partial_sigs {
+        let mut bytes = sig.signature.serialize_der().to_vec();
+        bytes.push(0x01);
+        a_legacy_sig = Some(*sig);
+        legacy.insert(
+            *pk,
+            AvailableSignature {
+                der: *sig,
+                witness_bytes: bytes,
+                unified: false,
+            },
+        );
+    }
+    // Pad with signatures for keys the script does not contain: they can never
+    // be used, only searched over.
+    let filler = a_legacy_sig.unwrap();
+    for i in 0..MAX_LEGACY_KEYS_FOR_SEARCH as u32 {
+        let secret = secp256k1::SecretKey::from_slice(&[(i + 100) as u8; 32]).unwrap();
+        let pk = PublicKey::new(secp256k1::PublicKey::from_secret_key(&secp, &secret));
+        let mut bytes = filler.signature.serialize_der().to_vec();
+        bytes.push(0x01);
+        legacy.insert(
+            pk,
+            AvailableSignature {
+                der: filler,
+                witness_bytes: bytes,
+                unified: false,
+            },
+        );
+    }
+    assert!(legacy.len() > MAX_LEGACY_KEYS_FOR_SEARCH);
+
+    let txin = &signed.psbt().unsigned_tx.input[0];
+    let result = satisfy_preferring_unified(
+        0,
+        &contexts[0],
+        &unified,
+        &legacy,
+        txin.sequence,
+        signed.psbt().unsigned_tx.lock_time,
+    );
+    match result {
+        Err(UnifiedFinalizeError::RefusedToDropUnified {
+            input: 0,
+            legacy_candidates,
+        }) => assert_eq!(legacy_candidates, legacy.len()),
+        other => panic!(
+            "expected RefusedToDropUnified, got {:?}",
+            other.map(|r| r.1)
+        ),
+    }
+    // Within the bound the same input is fine.
+    let (_, report) = satisfy_preferring_unified(
+        0,
+        &contexts[0],
+        &unified,
+        &legacy
+            .into_iter()
+            .take(MAX_LEGACY_KEYS_FOR_SEARCH)
+            .collect(),
+        txin.sequence,
+        signed.psbt().unsigned_tx.lock_time,
+    )
+    .unwrap();
+    assert!(report.replay_protected());
+}
+
+#[test]
+fn a_stray_unified_shaped_element_is_refused_by_the_backstop() {
+    let secp = secp();
+    let fixture = fixture(1);
+    let signed = sign_p2wsh_all_unified(&fixture.signers[0], &fixture.psbt, &secp).unwrap();
+    let record = &unified_signatures(&signed).unwrap()[0];
+    assert!(looks_like_der_signature(&record.signature), "DER || 0x21");
+    let mut legacy_shaped = record.signature.clone();
+    *legacy_shaped.last_mut().unwrap() = 0x01;
+    assert!(looks_like_der_signature(&legacy_shaped), "DER || 0x01");
+    assert!(!looks_like_der_signature(&[]));
+    assert!(!looks_like_der_signature(&[1]));
+    assert!(!looks_like_der_signature(
+        &fixture.signers[0].fingerprint(&secp).to_bytes()
+    ));
+    assert!(!looks_like_der_signature(&record.public_key.to_bytes()));
 }
 
 #[test]

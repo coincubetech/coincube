@@ -297,11 +297,16 @@ fn merge_spend_signatures(
 /// The Bitcoin arm is rust-miniscript's finaliser, exactly as before. The Bitcoin
 /// Blake2b arm is the core unified finaliser: every unified record is
 /// cryptographically verified first and the witnesses are assembled from the
-/// miniscript satisfaction, unified signatures before legacy ones, with no node
-/// involved (so the Connect Esplora backend needs nothing beyond broadcast). It
-/// never uses rust-miniscript's finaliser, which cannot see unified records and
-/// would otherwise finalise a Blake2b spend from legacy signatures alone —
-/// exactly the replayable witness the unified ones exist to prevent.
+/// miniscript satisfaction with no node involved (so the Connect Esplora
+/// backend needs nothing beyond broadcast). A verified unified signature that
+/// the script *can* use always ends up in the witness, whichever key position
+/// it sits on and however many legacy signatures are alongside — the finaliser
+/// searches the legacy subsets for a satisfaction that keeps one, and refuses
+/// rather than degrades if it cannot complete that search. An input comes out
+/// legacy-only, and is logged as replayable below, only when no unified
+/// signature on it is usable for this transaction. rust-miniscript's own
+/// finaliser is never used here: it cannot see unified records and would
+/// finalise a Blake2b spend from whatever legacy signatures are present.
 fn finalize_spend_for_chain(
     chain: coincube_core::chain::ChainId,
     mut spend_psbt: Psbt,

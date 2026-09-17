@@ -16,11 +16,21 @@
 //! verified by [`verify_p2wsh_all_unified`]) or, failing that, a **legacy**
 //! `SIGHASH_ALL` signature from `partial_sigs` (verified here against the
 //! BIP-143 digest). A key that has a verified unified signature never
-//! contributes its legacy one — that is the "never drop a verified unified
-//! witness in favour of a legacy one" rule — and an input is first satisfied
-//! from unified signatures alone; legacy signatures are offered only when that
-//! is impossible. Every other sighash type, `ANYONECANPAY` included, is
-//! refused rather than warned about.
+//! contributes its legacy one, an input is first satisfied from unified
+//! signatures alone, and legacy signatures are offered only when that is
+//! impossible. Offering them is not enough on its own: miniscript picks the
+//! cheapest satisfaction, all ECDSA signatures weigh the same, and a `multi`
+//! takes keys in script order — so with more signatures than the threshold
+//! needs it can build an all-legacy witness for an input that had a unified
+//! signature on a later key. [`satisfy_preferring_unified`] catches that case
+//! and searches the legacy subsets for a satisfaction that keeps a unified
+//! signature; the witness only falls back to legacy-only when **no** offered
+//! subset lets the script use one (for instance a unified signature on a
+//! recovery key whose timelock this transaction does not enable). That is the
+//! "never drop a verified unified witness in favour of a legacy one" rule;
+//! when the search cannot be run to completion the input is refused, not
+//! degraded. Every other sighash type, `ANYONECANPAY` included, is refused
+//! rather than warned about.
 //!
 //! The result reports, per input, how many unified and legacy signatures ended
 //! up in the witness. That is the *only* basis a caller may use for a replay
@@ -123,6 +133,15 @@ pub enum UnifiedFinalizeError {
     UnexpectedWitnessElement {
         input: usize,
     },
+    /// The input has a verified unified signature, the offered legacy
+    /// signatures alone would satisfy it, and there were too many legacy
+    /// candidates to search every subset for a satisfaction that keeps a
+    /// unified one. Refused rather than finalised from legacy signatures
+    /// alone — the caller can drop surplus legacy signatures and retry.
+    RefusedToDropUnified {
+        input: usize,
+        legacy_candidates: usize,
+    },
 }
 
 impl fmt::Display for UnifiedFinalizeError {
@@ -172,6 +191,15 @@ impl fmt::Display for UnifiedFinalizeError {
             Self::UnexpectedWitnessElement { input } => write!(
                 f,
                 "input {input} witness contained a signature this finaliser did not place"
+            ),
+            Self::RefusedToDropUnified {
+                input,
+                legacy_candidates,
+            } => write!(
+                f,
+                "input {input} has a verified unified signature but {legacy_candidates} legacy \
+                 signatures are too many to search for a witness that keeps it; refusing to \
+                 finalise from legacy signatures alone"
             ),
         }
     }
@@ -389,6 +417,12 @@ fn satisfy_input(
     Ok((witness, report))
 }
 
+/// Largest legacy candidate set [`satisfy_preferring_unified`] will search
+/// exhaustively (2^12 satisfactions, each a few microseconds). A Vault path has
+/// a handful of keys; a PSBT carrying more legacy signatures than this on one
+/// input while also holding a unified one is refused rather than degraded.
+const MAX_LEGACY_KEYS_FOR_SEARCH: usize = 12;
+
 /// Satisfy with unified signatures plus legacy ones, but never let a legacy
 /// signature crowd out a verified unified one.
 ///
@@ -397,10 +431,15 @@ fn satisfy_input(
 /// may take legacy keys in script order and leave a unified key unused — a
 /// replayable witness for an input that had a replay-proof signature. When that
 /// happens, and the input has unified signatures at all, every subset of the
-/// legacy set is tried (there are only a handful of keys) and the satisfaction
-/// using the most unified signatures wins; ties go to the smaller witness. If no
-/// subset can include a unified signature, the input genuinely needs legacy ones
-/// only and is reported as such.
+/// legacy set is offered alongside all the unified signatures and the
+/// satisfaction using the most unified signatures wins; ties go to the smaller
+/// witness, then to the first subset in enumeration order. The enumeration is
+/// over a `BTreeMap` of keys, so the outcome is a deterministic function of
+/// the signatures present. The only way a legacy-only witness comes out of
+/// here is when **no** offered subset lets the script use a unified signature
+/// — the unified key is then genuinely unusable for this transaction (e.g. a
+/// recovery key whose timelock is not enabled) and the input is reported as
+/// replayable. Over [`MAX_LEGACY_KEYS_FOR_SEARCH`] the input is refused.
 fn satisfy_preferring_unified(
     input_index: usize,
     context: &InputContext,
@@ -416,13 +455,12 @@ fn satisfy_preferring_unified(
         return Ok((witness, report));
     }
 
-    // Bounded search: a Vault path has a handful of keys, so 2^n subsets of the
-    // legacy signatures is tiny. Guard anyway so a hostile PSBT cannot make
-    // this exponential.
-    const MAX_LEGACY_KEYS_FOR_SEARCH: usize = 12;
     let legacy_keys: Vec<&PublicKey> = legacy.keys().collect();
     if legacy_keys.len() > MAX_LEGACY_KEYS_FOR_SEARCH {
-        return Ok((witness, report));
+        return Err(UnifiedFinalizeError::RefusedToDropUnified {
+            input: input_index,
+            legacy_candidates: legacy_keys.len(),
+        });
     }
     let mut best: Option<(Witness, InputWitnessReport)> = None;
     for mask in 0u32..(1u32 << legacy_keys.len()) {
@@ -452,10 +490,16 @@ fn satisfy_preferring_unified(
 }
 
 /// A witness element shaped like a DER ECDSA signature with a trailing sighash
-/// byte. Used only to refuse elements the finaliser did not place; script
-/// pushes (empty, `1`, hash preimages, keys) never look like this.
+/// byte — any trailing byte, so a stray `DER || 0x21` is caught as well as a
+/// `DER || 0x01`. Used only to refuse elements the finaliser did not place;
+/// script pushes (empty, `1`, hash preimages, keys) never look like this.
 fn looks_like_der_signature(element: &[u8]) -> bool {
-    element.len() > 8 && element[0] == 0x30 && ecdsa::Signature::from_slice(element).is_ok()
+    match element.split_last() {
+        Some((_, der)) => {
+            der.len() > 8 && der[0] == 0x30 && secp256k1::ecdsa::Signature::from_der(der).is_ok()
+        }
+        None => false,
+    }
 }
 
 /// Finalise every input of `psbt` and return the transaction ready to
@@ -465,9 +509,11 @@ fn looks_like_der_signature(element: &[u8]) -> bool {
 /// the whole call: nothing is assembled from a PSBT that lies). Then, per
 /// input: unified signatures are offered alone; if the script cannot be
 /// satisfied from those, verified legacy `SIGHASH_ALL` signatures are added for
-/// keys that have **no** unified signature, and the input is tried again. A
-/// caller that wants to refuse replayable inputs uses the report; this function
-/// does not decide policy.
+/// keys that have **no** unified signature, and the input is tried again with
+/// the preference pass of [`satisfy_preferring_unified`], so a unified
+/// signature that *can* be part of the witness always is. A caller that wants
+/// to refuse replayable inputs uses the report; this function does not decide
+/// policy.
 pub fn finalize_p2wsh_all_unified<C: secp256k1::Verification>(
     psbt: &UnifiedPsbt,
     secp: &secp256k1::Secp256k1<C>,
@@ -490,33 +536,23 @@ pub fn finalize_p2wsh_all_unified<C: secp256k1::Verification>(
         // Unified first: verified above; the witness bytes are the record itself.
         let mut available: BTreeMap<PublicKey, AvailableSignature> = BTreeMap::new();
         for record in unified.iter().filter(|r| r.input_index == input_index) {
-            let der = ecdsa::Signature::from_slice(&record.signature).map_err(|_| {
+            // A record is `DER || 0x21` (the adapter validated the shape and the
+            // verifier above checked the signature). `ecdsa::Signature::from_slice`
+            // cannot parse a 0x21 sighash byte, so the placeholder is rebuilt from
+            // the DER part with `SIGHASH_ALL`; the witness gets the record itself.
+            debug_assert_eq!(record.signature.last(), Some(&UNIFIED_SIGHASH_ALL));
+            let invalid = || {
                 UnifiedFinalizeError::Signing(UnifiedSigningError::InvalidUnifiedSignature {
                     input: input_index,
                     public_key: record.public_key,
                 })
-            });
-            // `from_slice` rejects the 0x21 byte; rebuild from the DER part instead.
-            let der = match der {
-                Ok(sig) => sig,
-                Err(_) => {
-                    let der_part = &record.signature[..record.signature.len() - 1];
-                    ecdsa::Signature {
-                        signature: secp256k1::ecdsa::Signature::from_der(der_part).map_err(
-                            |_| {
-                                UnifiedFinalizeError::Signing(
-                                    UnifiedSigningError::InvalidUnifiedSignature {
-                                        input: input_index,
-                                        public_key: record.public_key,
-                                    },
-                                )
-                            },
-                        )?,
-                        sighash_type: EcdsaSighashType::All,
-                    }
-                }
             };
-            debug_assert_eq!(record.signature.last(), Some(&UNIFIED_SIGHASH_ALL));
+            let (_, der_part) = record.signature.split_last().ok_or(invalid())?;
+            let der = ecdsa::Signature {
+                signature: secp256k1::ecdsa::Signature::from_der(der_part)
+                    .map_err(|_| invalid())?,
+                sighash_type: EcdsaSighashType::All,
+            };
             available.insert(
                 record.public_key,
                 AvailableSignature {
