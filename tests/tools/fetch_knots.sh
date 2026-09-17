@@ -19,15 +19,39 @@
 # that no longer verifies is discarded and fetched once more; if that copy does
 # not verify either, the script fails and prints no path.
 #
-# KNOTS_TEST_BASE_URL and KNOTS_VERIFY_PATH exist for tests/test_btcb2_tools.py
-# (a file:// release directory and a stand-in verifier); the harness never sets
-# them.
+# KNOTS_TEST_BASE_URL (a file:// release directory) and KNOTS_TEST_VERIFY_PATH
+# (a stand-in verifier) exist for tests/test_btcb2_tools.py and are honoured
+# only together with KNOTS_TEST_MODE=1; any of them set otherwise makes the
+# script exit before downloading or verifying anything, so an inherited
+# variable can neither redirect the download nor replace the verifier. In test
+# mode the stand-in verifier is mandatory: the real one is never searched for,
+# so a test cannot silently run against a repo-local build. To use a
+# knots_verify built elsewhere for real runs, set CARGO_TARGET_DIR to the same
+# target dir it was built with; the trust anchor itself is never overridable.
 set -euo pipefail
 
 version="${1:?usage: fetch_knots.sh <version> [cache-dir]}"
 tools_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cache_dir="${2:-$tools_dir/knots}"
 major="${version%%.*}"
+
+test_mode="${KNOTS_TEST_MODE:-0}"
+if [ -n "${KNOTS_TEST_BASE_URL:-}${KNOTS_TEST_VERIFY_PATH:-}" ] && [ "$test_mode" != "1" ]; then
+  echo "KNOTS_TEST_* overrides are only accepted with KNOTS_TEST_MODE=1; refusing to fetch or verify with an overridden release directory or verifier" >&2
+  exit 2
+fi
+if [ "$test_mode" = "1" ]; then
+  echo "TEST MODE: release directory/verifier overridden; this is not a verified bitcoinknots.org release" >&2
+  if [ -z "${KNOTS_TEST_BASE_URL:-}" ] || [ -z "${KNOTS_TEST_VERIFY_PATH:-}" ]; then
+    echo "KNOTS_TEST_MODE=1 requires both KNOTS_TEST_BASE_URL and KNOTS_TEST_VERIFY_PATH" >&2
+    exit 2
+  fi
+fi
+
+# The cache dir is used from inside itself later (`cd "$dest"`), so it must be
+# absolute whatever the caller passed; the printed path must work from any cwd.
+mkdir -p "$cache_dir"
+cache_dir="$(cd "$cache_dir" && pwd -P)"
 
 case "$(uname -s)-$(uname -m)" in
   Darwin-arm64)   suffix="arm64-apple-darwin" ;;
@@ -37,26 +61,30 @@ case "$(uname -s)-$(uname -m)" in
   *) echo "unsupported host $(uname -s)-$(uname -m)" >&2; exit 2 ;;
 esac
 
-base_url="${KNOTS_TEST_BASE_URL:-https://bitcoinknots.org/files/${major}.x/${version}}"
-if [ -n "${KNOTS_TEST_BASE_URL:-}" ]; then
-  echo "TEST MODE: release directory overridden; this is not a bitcoinknots.org release" >&2
-fi
+base_url="https://bitcoinknots.org/files/${major}.x/${version}"
+[ "$test_mode" = "1" ] && base_url="$KNOTS_TEST_BASE_URL"
 archive="bitcoin-${version}-${suffix}.tar.gz"
 member="bitcoin-${version}/bin/bitcoind"
 dest="$cache_dir/$version"
 bitcoind="$dest/$member"
 
-verify_bin="${KNOTS_VERIFY_PATH:-}"
-if [ -z "$verify_bin" ]; then
+verify_bin=""
+if [ "$test_mode" = "1" ]; then
+  verify_bin="$KNOTS_TEST_VERIFY_PATH"
+  if [ ! -x "$verify_bin" ]; then
+    echo "KNOTS_TEST_VERIFY_PATH is not an executable: $verify_bin" >&2
+    exit 2
+  fi
+else
   for candidate in \
       "${CARGO_TARGET_DIR:-$tools_dir/knots_verify/target}/release/knots_verify" \
       "$tools_dir/knots_verify/target/release/knots_verify"; do
     if [ -x "$candidate" ]; then verify_bin="$candidate"; break; fi
   done
-fi
-if [ -z "$verify_bin" ]; then
-  echo "knots_verify not built: (cd tests/tools/knots_verify && cargo build --release)" >&2
-  exit 2
+  if [ -z "$verify_bin" ]; then
+    echo "knots_verify not built: (cd tests/tools/knots_verify && cargo build --release)" >&2
+    exit 2
+  fi
 fi
 
 sha256_of() {

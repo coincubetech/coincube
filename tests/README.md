@@ -78,7 +78,7 @@ poison. See `tests/test_framework/btcb2.py`.
 The harness is skipped unless all three binaries are configured:
 
 ```
-(cd tests/tools/knots_verify && cargo build --release)
+(cd tests/tools/knots_verify && cargo build --release)   # or set CARGO_TARGET_DIR to where it was built
 export KNOTS_LEGACY_PATH=$(tests/tools/fetch_knots.sh 29.3.knots20260507)
 export KNOTS_BLAKE2B_PATH=$(tests/tools/fetch_knots.sh 29.4.1.knots20260508)
 export ELECTRS_BLAKE2B_PATH=$(tests/tools/fetch_electrs_blake2b.sh)
@@ -92,7 +92,8 @@ it unless its checksum is listed in the release `SHA256SUMS` *and*
 installer performs (`tests/tools/knots_verify`, no `gpg` needed). The check runs
 on every invocation, cached or not, and the extracted `bitcoind` is reused only
 if it matches the archive member byte for byte; there is no stored "verified"
-marker to trust.
+marker to trust. The verifier path is not overridable outside the script's own
+test mode (`KNOTS_TEST_MODE=1`, used only by `tests/test_btcb2_tools.py`).
 `fetch_electrs_blake2b.sh` clones and builds the pinned indexer commit (RocksDB
 compiles from source: a few minutes the first time; `clang`/`cmake` required)
 under `~/.cache/coincube/electrs-blake2b` — outside the repository, or Cargo

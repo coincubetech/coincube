@@ -297,17 +297,23 @@ def fake_verifier(tmp_path):
     return script, log, rc_file
 
 
-def run_knots_fetch(cache_dir, release_dir, verifier):
+def run_knots_fetch(cache_dir, release_dir, verifier, test_mode=True, cwd=None):
+    """Drive the script against the file:// release with the stand-in verifier.
+    Both overrides are honoured only with KNOTS_TEST_MODE=1."""
     env = dict(
         os.environ,
         KNOTS_TEST_BASE_URL=f"file://{release_dir}",
-        KNOTS_VERIFY_PATH=str(verifier),
+        KNOTS_TEST_VERIFY_PATH=str(verifier),
     )
+    env.pop("KNOTS_TEST_MODE", None)
+    if test_mode:
+        env["KNOTS_TEST_MODE"] = "1"
     return subprocess.run(
         ["bash", KNOTS_SCRIPT, FAKE_VERSION, str(cache_dir)],
         env=env,
         capture_output=True,
         text=True,
+        cwd=cwd,
     )
 
 
@@ -377,20 +383,68 @@ def test_knots_rejected_cache_is_refetched_then_fails_if_still_rejected(
     assert res.returncode == 0 and res.stdout.strip() == str(bitcoind)
 
 
-def test_knots_missing_verifier_is_fatal(tmp_path, fake_release):
+def test_knots_overrides_are_refused_outside_test_mode(
+    tmp_path, fake_release, fake_verifier
+):
+    """An inherited KNOTS_TEST_* variable must neither redirect the download nor
+    replace the verifier: the script exits before fetching or creating anything."""
     release, _ = fake_release
-    env = dict(
-        os.environ, KNOTS_TEST_BASE_URL=f"file://{release}", KNOTS_VERIFY_PATH=""
-    )
-    env["CARGO_TARGET_DIR"] = str(tmp_path / "nowhere")
+    verifier, log, _ = fake_verifier
+    cache = tmp_path / "cache"
+    res = run_knots_fetch(cache, release, verifier, test_mode=False)
+    assert res.returncode == 2
+    assert "only accepted with KNOTS_TEST_MODE=1" in res.stderr
+    assert res.stdout.strip() == ""
+    assert not cache.exists()
+    assert _invocations(log) == []
+
+
+def test_knots_test_mode_never_falls_back_to_a_real_verifier(tmp_path, fake_release):
+    """Hermetic by construction: in test mode the stand-in verifier is mandatory,
+    so a repo-local knots_verify build can never be picked up by a test."""
+    release, _ = fake_release
+    cache = tmp_path / "cache"
+    res = run_knots_fetch(cache, release, tmp_path / "no-such-verifier")
+    assert res.returncode == 2
+    assert "not an executable" in res.stderr
+    assert res.stdout.strip() == ""
+    assert not (cache / FAKE_VERSION).exists(), "nothing may be downloaded"
+
+    env = dict(os.environ, KNOTS_TEST_MODE="1", KNOTS_TEST_BASE_URL=f"file://{release}")
+    env.pop("KNOTS_TEST_VERIFY_PATH", None)
     res = subprocess.run(
-        ["bash", KNOTS_SCRIPT, FAKE_VERSION, str(tmp_path / "cache")],
+        ["bash", KNOTS_SCRIPT, FAKE_VERSION, str(cache)],
         env=env,
         capture_output=True,
         text=True,
     )
-    assert res.returncode == 2 and "knots_verify not built" in res.stderr
-    assert res.stdout.strip() == ""
+    assert res.returncode == 2 and "requires both" in res.stderr
+
+
+def test_knots_relative_cache_dir_is_canonicalised(
+    tmp_path, fake_release, fake_verifier
+):
+    """The documented [cache-dir] argument may be relative; the script cd's into
+    it, so it must be resolved first and the printed path must work from anywhere."""
+    release, _ = fake_release
+    verifier, _, _ = fake_verifier
+    res = run_knots_fetch("rel-cache", release, verifier, cwd=str(tmp_path))
+    assert res.returncode == 0, res.stderr
+    printed = res.stdout.strip()
+    assert os.path.isabs(printed)
+    assert printed == str(
+        tmp_path
+        / "rel-cache"
+        / FAKE_VERSION
+        / f"bitcoin-{FAKE_VERSION}"
+        / "bin"
+        / "bitcoind"
+    )
+    assert os.access(printed, os.X_OK)
+    # Reuse from another cwd resolves the same extraction rather than nesting one.
+    res = run_knots_fetch(str(tmp_path / "rel-cache"), release, verifier, cwd="/")
+    assert res.returncode == 0 and res.stdout.strip() == printed
+    assert not (tmp_path / "rel-cache" / FAKE_VERSION / "rel-cache").exists()
 
 
 def test_workflow_knots_cache_key_is_bound_to_verifier_inputs():

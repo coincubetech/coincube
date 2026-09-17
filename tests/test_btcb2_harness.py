@@ -11,6 +11,7 @@ Skipped unless the three binaries are configured (see tests/README.md).
 """
 
 import os
+import subprocess
 
 import pytest
 
@@ -30,7 +31,21 @@ def _subversion(node):
 
 
 def test_node_builds_are_the_pinned_ones(two_chain):
-    """Node A runs the pinned non-enforcing Knots, node B the fork build."""
+    """Node A runs the pinned non-enforcing Knots, node B the fork build, and the
+    indexer reports the pinned retropex/electrs commit."""
+    # Secondary check behind the fetcher's clean-checkout gate (upstream build.rs
+    # stamps the commit, and "(dirty)" for an unclean tree, when GIT_HASH is not
+    # preset); outside the labelled workflow ELECTRS_BLAKE2B_PATH may point at
+    # any binary, so the harness asserts what it is actually talking to.
+    version = subprocess.run(
+        [two_chain.electrs_legacy.electrs_path, "--version"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,  # electrs prints its version on stderr
+        text=True,
+        timeout=30,
+    ).stdout.splitlines()[0]
+    assert ELECTRS_BLAKE2B_COMMIT[:7] in version, version
+    assert "dirty" not in version, version
     # Knots reports itself as `/Satoshi:<core version>/Knots:<build date>/`.
     assert (
         _subversion(two_chain.legacy) == "/Satoshi:29.3.0/Knots:20260507/"
