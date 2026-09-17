@@ -141,7 +141,19 @@ def test_ignored_file_in_checkout_is_refused(tmp_path, pinned_repo):
     assert run_fetch(cache, repo, commit).returncode == 0
     (cache / "src" / ".gitignore").write_text("*.log\n")
     _git(str(cache / "src"), "add", ".gitignore")
-    _git(str(cache / "src"), "commit", "-q", "-m", "ignore logs")
+    # The clone carries no identity of its own (the fixture configured the
+    # upstream repo only); CI runners have no global git identity either.
+    _git(
+        str(cache / "src"),
+        "-c",
+        "user.email=harness@example.invalid",
+        "-c",
+        "user.name=harness",
+        "commit",
+        "-q",
+        "-m",
+        "ignore logs",
+    )
     ignored_commit = _git(str(cache / "src"), "rev-parse", "HEAD")
     (cache / "src" / "build.log").write_text("stale\n")
     assert "build.log" not in _git(str(cache / "src"), "status", "--porcelain")
