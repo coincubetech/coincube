@@ -301,26 +301,22 @@ impl PsbtState {
 
     /// Apply a re-check reply: only if it answers the generation currently in
     /// flight for this spend. Anything else is stale — an older screen
-    /// instance, or an earlier signature set — and is ignored here (the app
-    /// has already cached whatever it resolved).
-    ///
-    /// Returns the task that records the accepted answers in the app's cache
-    /// (`Message::EntanglementAnswered`): the app caches only terminal
-    /// positives before the generation is known, so negatives reach the cache
-    /// only through here and a stale reply can never re-stamp one.
+    /// instance, or an earlier signature set — and is ignored here. The
+    /// cache is the app's concern, settled before the reply was routed: every
+    /// resolved answer is recorded there under its own observation instant,
+    /// so this screen has nothing to hand back.
     fn apply_entangled_reply(
         &mut self,
-        origin: crate::app::cache::LookupOrigin,
         spend: Txid,
         generation: u64,
         answers: &[crate::services::entangled::LookupAnswer],
-    ) -> Task<Message> {
+    ) {
         let current = match &self.entangled_check {
             EntangledCheck::InFlight { generation, .. } => *generation,
-            _ => return Task::none(),
+            _ => return,
         };
         if generation != current || spend != self.tx.psbt.unsigned_tx.compute_txid() {
-            return Task::none();
+            return;
         }
         let unresolved = answers
             .iter()
@@ -328,18 +324,6 @@ impl PsbtState {
             .map(|reply| reply.txid)
             .collect();
         self.entangled_check = EntangledCheck::Done { unresolved };
-        let resolved: Vec<_> = answers
-            .iter()
-            .copied()
-            .filter(|reply| reply.answer.is_resolved())
-            .collect();
-        if resolved.is_empty() {
-            return Task::none();
-        }
-        Task::done(Message::EntanglementAnswered {
-            origin,
-            answers: resolved,
-        })
     }
 
     /// The Broadcast dialog is open on a spend that is no longer ready — a
@@ -525,11 +509,14 @@ impl PsbtState {
         // currently in flight ([`Self::apply_entangled_reply`]).
         let task = match message {
             Message::EntangledRevalidated {
-                origin,
                 spend,
                 generation,
                 ref answers,
-            } => self.apply_entangled_reply(origin, spend, generation, answers),
+                ..
+            } => {
+                self.apply_entangled_reply(spend, generation, answers);
+                Task::none()
+            }
             message => self.update_inner(daemon, cache, message),
         };
         // Entering the screen: the first message through here starts the
@@ -4645,11 +4632,14 @@ mod tests {
                 }
             );
 
-            // Recording goes through the panel's acceptance: an accepted
-            // reply emits `EntanglementAnswered` with its resolved answers
-            // (negatives included); a stale reply emits nothing, so the app —
-            // which caches only terminal positives before routing — never
-            // re-stamps a `NotEntangled` answer's resolve instant from it.
+            // The cache is not the screen's to write: neither a stale nor an
+            // accepted reply hands anything back to the app. The app records
+            // every resolved answer under its own observation instant before
+            // routing, and the cache is monotonic in that instant
+            // (`Cache::record_entanglement`,
+            // `entangled_cache_tests::a_stale_negative_cannot_re_stamp_a_newer_one`),
+            // which is what keeps a stale negative from re-stamping a newer
+            // one — the screen's generation filter only guards the claim.
             let mut e = new_state(&legacy_only);
             let _ = e.update(daemon.clone(), &session, ack());
             let live = in_flight_generation(&e);
@@ -4660,10 +4650,9 @@ mod tests {
             ))
             .await;
             assert!(
-                !stale_out
-                    .iter()
-                    .any(|m| matches!(m, Message::EntanglementAnswered { .. })),
-                "a stale negative is never handed to the cache"
+                stale_out.is_empty(),
+                "a stale reply emits nothing: {:?}",
+                stale_out
             );
             assert_eq!(in_flight_generation(&e), live);
             let live_out = drive(e.update(
@@ -4673,25 +4662,14 @@ mod tests {
             ))
             .await;
             assert!(
-                live_out.iter().any(|m| matches!(
-                    m,
-                    Message::EntanglementAnswered { origin, answers }
-                        if *origin == origin_of(&session)
-                            && answers.len() == 1
-                            && answers[0].txid == txid
-                            && answers[0].answer == Entanglement::NotEntangled
-                )),
-                "the accepted negative is recorded, under the reply's origin"
+                live_out.is_empty(),
+                "an accepted reply clears the claim and emits nothing: {:?}",
+                live_out
             );
-            // An accepted reply with only Unknown records nothing.
-            let mut g = new_state(&legacy_only);
-            let _ = g.update(daemon.clone(), &session, ack());
-            let live = in_flight_generation(&g);
-            let unknown_out =
-                drive(g.update(daemon.clone(), &session, reply(live, Entanglement::Unknown))).await;
-            assert!(!unknown_out
-                .iter()
-                .any(|m| matches!(m, Message::EntanglementAnswered { .. })));
+            assert_eq!(
+                e.entangled_check,
+                EntangledCheck::Done { unresolved: vec![] }
+            );
 
             // A stale reply carrying `Entangled`: the claim is untouched, but
             // the answer is in the cache (as the app records it before

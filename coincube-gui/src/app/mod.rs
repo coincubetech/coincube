@@ -4446,15 +4446,6 @@ impl App {
                 }
                 return Task::done(Message::CacheUpdated);
             }
-            Message::EntanglementAnswered { origin, answers } => {
-                let changed = self
-                    .cache
-                    .accept_entanglement(origin, self.vault_chain(), &answers);
-                if !changed {
-                    return Task::none();
-                }
-                return Task::done(Message::CacheUpdated);
-            }
             Message::EntangledRevalidated {
                 origin,
                 spend,
@@ -4462,34 +4453,21 @@ impl App {
                 answers,
             } => {
                 // The spend screen's own re-check of a replayable spend's
-                // inputs. A reply from a predecessor `App` instance (`#393`)
-                // contributes at most same-chain positives to the cache
-                // (`Cache::accept_entanglement`) and is not routed: the screen
-                // that asked is gone with that instance.
-                let own = self.cache.issued_here(origin);
-                // Only **terminal positives** are cached here, before the
-                // check generation is known: a stale reply's `Entangled` is
-                // still true. A negative is recorded only once the panel has
-                // accepted the reply for its current generation
-                // (`Message::EntanglementAnswered`). Both paths stamp each
-                // answer with its own observation instant and the cache is
-                // monotonic in it (`#395`), so neither this screen reply nor a
-                // sync-driven batch (`EntangledLookups` above) can re-stamp a
-                // newer negative with an older observation.
-                let positives: Vec<_> = answers
-                    .iter()
-                    .copied()
-                    .filter(|reply| {
-                        matches!(
-                            reply.answer,
-                            crate::services::entangled::Entanglement::Entangled
-                        )
-                    })
-                    .collect();
-                let changed =
-                    self.cache
-                        .accept_entanglement(origin, self.vault_chain(), &positives);
-                if !own {
+                // inputs. Every resolved answer is cached before the reply is
+                // routed, stale-by-check-generation ones included: each
+                // carries its own observation instant and the cache is
+                // monotonic in it (`#395`), so a reply from a screen since
+                // closed, or from before a signature was added, cannot
+                // re-stamp a newer negative — and its `Entangled` is still
+                // true. The check generation is the *panel's* filter, for the
+                // claim it clears, not the cache's. A reply from a predecessor
+                // `App` instance (`#393`) contributes at most same-chain
+                // positives (`Cache::accept_entanglement`) and is not routed:
+                // the screen that asked is gone with that instance.
+                let changed = self
+                    .cache
+                    .accept_entanglement(origin, self.vault_chain(), &answers);
+                if !self.cache.issued_here(origin) {
                     if changed {
                         return Task::done(Message::CacheUpdated);
                     }

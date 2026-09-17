@@ -234,22 +234,15 @@ pub enum Message {
         claimed: Vec<coincube_core::miniscript::bitcoin::Txid>,
         answers: Vec<crate::services::entangled::LookupAnswer>,
     },
-    /// The spend screen accepted a re-check reply for its current generation:
-    /// record every resolved answer. Positives were already recorded when the
-    /// reply was routed (`Entangled` is terminal, so a stale positive is still
-    /// true); a *negative* is recorded only here, so a stale reply can never
-    /// re-stamp a `NotEntangled` answer's resolve instant and extend its TTL.
-    /// `origin` is the reply's, carried through from `EntangledRevalidated`.
-    EntanglementAnswered {
-        origin: crate::app::cache::LookupOrigin,
-        answers: Vec<crate::services::entangled::LookupAnswer>,
-    },
     /// The spend screen re-checked the entanglement of a replayable spend's
-    /// inputs at the moment it matters (`#276` I13). Cached by the app, then
-    /// routed to the current panel so the spend clears its "checking" state;
-    /// `spend` is the unsigned transaction's txid so a stale reply for another
-    /// spend is ignored. `origin` names the `App` instance whose screen asked
-    /// (`#393`): a reply from a predecessor instance is not routed at all.
+    /// inputs at the moment it matters (`#276` I13). Every resolved answer is
+    /// cached by the app — each under its own observation instant, so a
+    /// reply from a screen since closed cannot re-stamp a newer negative —
+    /// then the reply is routed to the current panel so the spend clears its
+    /// "checking" state; `spend` is the unsigned transaction's txid so a
+    /// stale reply for another spend is ignored. `origin` names the `App`
+    /// instance whose screen asked (`#393`): a reply from a predecessor
+    /// instance is not routed at all.
     EntangledRevalidated {
         origin: crate::app::cache::LookupOrigin,
         spend: coincube_core::miniscript::bitcoin::Txid,
