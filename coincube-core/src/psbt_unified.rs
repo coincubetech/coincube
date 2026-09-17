@@ -159,6 +159,16 @@ pub enum UnifiedPsbtError {
     /// finaliser — rejects an `ANYONECANPAY` (or otherwise unsupported)
     /// request before it is "apparently collected".
     UnsupportedSighashRequest { input: usize, sighash: u32 },
+    /// A standard `partial_sigs` entry whose sighash flag is not `SIGHASH_ALL`
+    /// (`ANYONECANPAY` and friends). A flag byte in the map, checkable
+    /// without a secp context or prevouts, so it lives beside the request
+    /// rule and every boundary inherits it; the finaliser's digest selection
+    /// checks it again on its own path.
+    UnsupportedLegacySighash {
+        input: usize,
+        public_key: PublicKey,
+        sighash: u32,
+    },
     /// The PSBTs do not describe the same unsigned transaction.
     UnsignedTransactionMismatch,
     /// A requested input map does not exist.
@@ -233,6 +243,15 @@ impl fmt::Display for UnifiedPsbtError {
                 f,
                 "input {input} asks for sighash 0x{sighash:02x}, which is neither SIGHASH_ALL nor \
                  ALL|UNIFIED"
+            ),
+            Self::UnsupportedLegacySighash {
+                input,
+                public_key,
+                sighash,
+            } => write!(
+                f,
+                "input {input} legacy signature for {public_key} uses sighash 0x{sighash:02x}; only \
+                 SIGHASH_ALL is supported"
             ),
             Self::AmbiguousSignatureEncoding { input, public_key } => write!(
                 f,
@@ -356,6 +375,17 @@ fn validate_typed_psbt(psbt: &Psbt) -> Result<usize, UnifiedPsbtError> {
             if raw != u32::from(LEGACY_SIGHASH_ALL) && raw != u32::from(UNIFIED_SIGHASH_ALL) {
                 return Err(UnifiedPsbtError::UnsupportedSighashRequest {
                     input: input_index,
+                    sighash: raw,
+                });
+            }
+        }
+        // And every standard signature's own flag: `SIGHASH_ALL` only.
+        for (public_key, signature) in &input.partial_sigs {
+            let raw = signature.sighash_type.to_u32();
+            if raw != u32::from(LEGACY_SIGHASH_ALL) {
+                return Err(UnifiedPsbtError::UnsupportedLegacySighash {
+                    input: input_index,
+                    public_key: *public_key,
                     sighash: raw,
                 });
             }

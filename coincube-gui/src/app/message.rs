@@ -235,6 +235,17 @@ pub enum Message {
     /// routed to the current panel so the spend clears its "checking" state;
     /// `spend` is the unsigned transaction's txid so a stale reply for another
     /// spend is ignored.
+    /// The spend screen accepted a re-check reply for its current generation:
+    /// record every resolved answer. Positives were already recorded when the
+    /// reply was routed (`Entangled` is terminal, so a stale positive is still
+    /// true); a *negative* is recorded only here, so a stale reply can never
+    /// re-stamp a `NotEntangled` answer's resolve instant and extend its TTL.
+    EntanglementAnswered {
+        answers: Vec<(
+            coincube_core::miniscript::bitcoin::Txid,
+            crate::services::entangled::Entanglement,
+        )>,
+    },
     EntangledRevalidated {
         spend: coincube_core::miniscript::bitcoin::Txid,
         /// The check generation this reply answers

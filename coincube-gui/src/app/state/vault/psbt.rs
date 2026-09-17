@@ -294,18 +294,23 @@ impl PsbtState {
     /// flight for this spend. Anything else is stale — an older screen
     /// instance, or an earlier signature set — and is ignored here (the app
     /// has already cached whatever it resolved).
+    ///
+    /// Returns the task that records the accepted answers in the app's cache
+    /// (`Message::EntanglementAnswered`): the app caches only terminal
+    /// positives before the generation is known, so negatives reach the cache
+    /// only through here and a stale reply can never re-stamp one.
     fn apply_entangled_reply(
         &mut self,
         spend: Txid,
         generation: u64,
         answers: &[(Txid, crate::services::entangled::Entanglement)],
-    ) {
+    ) -> Task<Message> {
         let current = match &self.entangled_check {
             EntangledCheck::InFlight { generation, .. } => *generation,
-            _ => return,
+            _ => return Task::none(),
         };
         if generation != current || spend != self.tx.psbt.unsigned_tx.compute_txid() {
-            return;
+            return Task::none();
         }
         let unresolved = answers
             .iter()
@@ -313,6 +318,15 @@ impl PsbtState {
             .map(|(txid, _)| *txid)
             .collect();
         self.entangled_check = EntangledCheck::Done { unresolved };
+        let resolved: Vec<_> = answers
+            .iter()
+            .copied()
+            .filter(|(_, answer)| answer.is_resolved())
+            .collect();
+        if resolved.is_empty() {
+            return Task::none();
+        }
+        Task::done(Message::EntanglementAnswered { answers: resolved })
     }
 
     /// The Broadcast dialog is open on a spend that is no longer ready — a
@@ -501,10 +515,7 @@ impl PsbtState {
                 spend,
                 generation,
                 ref answers,
-            } => {
-                self.apply_entangled_reply(spend, generation, answers);
-                Task::none()
-            }
+            } => self.apply_entangled_reply(spend, generation, answers),
             message => self.update_inner(daemon, cache, message),
         };
         // Entering the screen: the first message through here starts the
@@ -2387,8 +2398,9 @@ fn merge_signatures(psbt: &mut Psbt, signed_psbt: &Psbt) {
 /// carries `partial_sigs` and the proprietary unified records across and
 /// **refuses**, leaving `psbt` untouched, a conflicting signature for a key,
 /// a key that would end up with both a unified and a legacy signature, or a
-/// PSBT for another transaction. Mirrors the daemon's `update_spend` merge so
-/// the desktop never holds a PSBT the daemon would reject. (A Blake2b Vault
+/// PSBT for another transaction, or a signature that does not verify. Mirrors
+/// the daemon's `update_spend` so the desktop never holds a PSBT the daemon
+/// would reject. (A Blake2b Vault
 /// is native P2WSH — Taproot is not offered on that chain — so the adapter's
 /// ECDSA-only view is the whole picture there.)
 fn merge_signatures_for_chain(
@@ -2402,6 +2414,16 @@ fn merge_signatures_for_chain(
     }
     let mut destination = UnifiedPsbt::from_psbt(psbt.clone()).map_err(|e| e.to_string())?;
     let delta = UnifiedPsbt::from_psbt(signed_psbt.clone()).map_err(|e| e.to_string())?;
+    // The adapter validates representation, not validity: a signer result
+    // carrying a signature that does not verify (wrong digest, ANYONECANPAY)
+    // is refused here, before it enters the in-memory PSBT — the daemon would
+    // refuse to store it, and a later correct signature for the same key
+    // would then read as a conflict.
+    coincube_core::unified_finalize::verify_all_signatures(
+        &delta,
+        &secp256k1::Secp256k1::verification_only(),
+    )
+    .map_err(|e| e.to_string())?;
     coincube_core::psbt_unified::merge_signatures(&mut destination, &delta)
         .map_err(|e| e.to_string())?;
     *psbt = destination.psbt().clone();
@@ -3488,10 +3510,14 @@ mod tests {
             assert_eq!(merged.serialize(), before);
 
             // A conflicting *legacy* signature — the same key, a different
-            // parseable signature (key B's, assigned to key A) — is refused
-            // and the destination is byte-unchanged. The prior copy is
-            // last-write-wins, so running it before the adapter would have
-            // replaced the valid stored signature and hidden the conflict.
+            // signature — is refused and the destination is byte-unchanged.
+            // The prior copy is last-write-wins, so running it before the
+            // adapter would have replaced the stored signature and hidden the
+            // conflict. Two shapes: key B's signature assigned to key A (a
+            // parseable signature that does not verify — refused by the
+            // signature check now, "does not verify"), and a *second valid*
+            // signature by key A over the same digest with different nonce
+            // data (verifies, differs — the adapter's "conflict").
             let stored = legacy(&f.psbt, &f.signers[0]);
             let stored_bytes = stored.serialize();
             let key_a = *stored.inputs[0].partial_sigs.keys().next().unwrap();
@@ -3500,14 +3526,76 @@ mod tests {
                 .values()
                 .next()
                 .unwrap();
-            let mut conflicting = f.psbt.clone();
-            conflicting.inputs[0].partial_sigs.insert(key_a, sig_b);
+            let mut unverifiable = f.psbt.clone();
+            unverifiable.inputs[0].partial_sigs.insert(key_a, sig_b);
             let mut destination = stored.clone();
-            let err =
-                merge_signatures_for_chain(ChainId::BitcoinBlake2b, &mut destination, &conflicting)
-                    .unwrap_err();
-            assert!(err.to_lowercase().contains("conflict"), "{}", err);
+            let err = merge_signatures_for_chain(
+                ChainId::BitcoinBlake2b,
+                &mut destination,
+                &unverifiable,
+            )
+            .unwrap_err();
+            assert!(err.contains("does not verify"), "{}", err);
             assert_eq!(destination.serialize(), stored_bytes);
+            {
+                use coincube_core::miniscript::bitcoin::{
+                    bip32::DerivationPath, hashes::Hash, sighash::SighashCache,
+                };
+                let secp_all = secp256k1::Secp256k1::new();
+                let witness_script = f.psbt.inputs[0].witness_script.clone().unwrap();
+                let value = f.psbt.inputs[0].witness_utxo.as_ref().unwrap().value;
+                let digest = SighashCache::new(&f.psbt.unsigned_tx)
+                    .p2wsh_signature_hash(
+                        0,
+                        &witness_script,
+                        value,
+                        coincube_core::miniscript::bitcoin::sighash::EcdsaSighashType::All,
+                    )
+                    .unwrap();
+                let secret = f.signers[0]
+                    .xpriv_at(
+                        &DerivationPath::from_str("m/48'/0'/0/3").unwrap(),
+                        &secp_all,
+                    )
+                    .private_key;
+                assert_eq!(
+                    coincube_core::miniscript::bitcoin::PublicKey::new(
+                        secp256k1::PublicKey::from_secret_key(&secp_all, &secret)
+                    ),
+                    key_a,
+                    "the derivation reaches key A"
+                );
+                let second = secp_all.sign_ecdsa_with_noncedata(
+                    &secp256k1::Message::from_digest(digest.to_byte_array()),
+                    &secret,
+                    &[7u8; 32],
+                );
+                assert_ne!(second, stored.inputs[0].partial_sigs[&key_a].signature);
+                let mut conflicting = f.psbt.clone();
+                conflicting.inputs[0].partial_sigs.insert(
+                    key_a,
+                    coincube_core::miniscript::bitcoin::ecdsa::Signature {
+                        signature: second,
+                        sighash_type:
+                            coincube_core::miniscript::bitcoin::sighash::EcdsaSighashType::All,
+                    },
+                );
+                // Verifies on its own…
+                assert!(coincube_core::unified_finalize::verify_all_signatures(
+                    &UnifiedPsbt::from_psbt(conflicting.clone()).unwrap(),
+                    &secp_all
+                )
+                .is_ok());
+                // …and is refused as a conflict, destination untouched.
+                let err = merge_signatures_for_chain(
+                    ChainId::BitcoinBlake2b,
+                    &mut destination,
+                    &conflicting,
+                )
+                .unwrap_err();
+                assert!(err.to_lowercase().contains("conflict"), "{}", err);
+                assert_eq!(destination.serialize(), stored_bytes);
+            }
             // Merging the same signature again is a no-op, not a conflict.
             merge_signatures_for_chain(ChainId::BitcoinBlake2b, &mut destination, &stored).unwrap();
             assert_eq!(destination.serialize(), stored_bytes);
@@ -3522,6 +3610,55 @@ mod tests {
                 .unwrap_err();
             assert!(err.contains("0x81"), "{}", err);
             assert_eq!(destination.serialize(), stored_bytes);
+
+            // Signatures that pass the adapter's representation checks but do
+            // not verify are refused at the merge too, destination untouched:
+            // an ANYONECANPAY legacy signature, a legacy signature for another
+            // transaction, a unified signature for another transaction.
+            let mut other_tx = f.psbt.clone();
+            other_tx.unsigned_tx.output[0].value =
+                coincube_core::miniscript::bitcoin::Amount::from_sat(40_001);
+            let mut acp = legacy(&f.psbt, &f.signers[1]);
+            for sig in acp.inputs[0].partial_sigs.values_mut() {
+                sig.sighash_type =
+                    coincube_core::miniscript::bitcoin::sighash::EcdsaSighashType::AllPlusAnyoneCanPay;
+            }
+            let mut wrong_legacy = f.psbt.clone();
+            wrong_legacy.inputs[0].partial_sigs = legacy(&other_tx, &f.signers[1]).inputs[0]
+                .partial_sigs
+                .clone();
+            let mut wrong_unified = f.psbt.clone();
+            wrong_unified.inputs[0].proprietary = unified(&other_tx, &f.signers[1]).inputs[0]
+                .proprietary
+                .clone();
+            for (name, bad, representation_accepts) in [
+                // The ANYONECANPAY flag is a representation rule (the adapter
+                // refuses it alone); the wrong-digest ones pass the adapter
+                // and are caught only by signature verification.
+                ("legacy ANYONECANPAY", acp, false),
+                ("legacy for another tx", wrong_legacy, true),
+                ("unified for another tx", wrong_unified, true),
+            ] {
+                assert_eq!(
+                    UnifiedPsbt::from_psbt(bad.clone()).is_ok(),
+                    representation_accepts,
+                    "{}",
+                    name
+                );
+                let err =
+                    merge_signatures_for_chain(ChainId::BitcoinBlake2b, &mut destination, &bad)
+                        .unwrap_err();
+                assert!(!err.is_empty(), "{}", name);
+                assert_eq!(destination.serialize(), stored_bytes, "{}", name);
+            }
+            // …and the correct signature for the same key still merges after.
+            merge_signatures_for_chain(
+                ChainId::BitcoinBlake2b,
+                &mut destination,
+                &legacy(&f.psbt, &f.signers[1]),
+            )
+            .unwrap();
+            assert_eq!(destination.inputs[0].partial_sigs.len(), 2);
         }
 
         // Gandalf's probes from the review of 15a26267 (WORK_LOGS/LAUNCH_GA/
@@ -4343,6 +4480,51 @@ mod tests {
                     unresolved: vec![txid]
                 }
             );
+
+            // Recording goes through the panel's acceptance: an accepted
+            // reply emits `EntanglementAnswered` with its resolved answers
+            // (negatives included); a stale reply emits nothing, so the app —
+            // which caches only terminal positives before routing — never
+            // re-stamps a `NotEntangled` answer's resolve instant from it.
+            let mut e = new_state(&legacy_only);
+            let _ = e.update(daemon.clone(), &session, ack());
+            let live = in_flight_generation(&e);
+            let stale_out = drive(e.update(
+                daemon.clone(),
+                &session,
+                reply(stale, Entanglement::NotEntangled),
+            ))
+            .await;
+            assert!(
+                !stale_out
+                    .iter()
+                    .any(|m| matches!(m, Message::EntanglementAnswered { .. })),
+                "a stale negative is never handed to the cache"
+            );
+            assert_eq!(in_flight_generation(&e), live);
+            let live_out = drive(e.update(
+                daemon.clone(),
+                &session,
+                reply(live, Entanglement::NotEntangled),
+            ))
+            .await;
+            assert!(
+                live_out.iter().any(|m| matches!(
+                    m,
+                    Message::EntanglementAnswered { answers }
+                        if *answers == vec![(txid, Entanglement::NotEntangled)]
+                )),
+                "the accepted negative is recorded"
+            );
+            // An accepted reply with only Unknown records nothing.
+            let mut g = new_state(&legacy_only);
+            let _ = g.update(daemon.clone(), &session, ack());
+            let live = in_flight_generation(&g);
+            let unknown_out =
+                drive(g.update(daemon.clone(), &session, reply(live, Entanglement::Unknown))).await;
+            assert!(!unknown_out
+                .iter()
+                .any(|m| matches!(m, Message::EntanglementAnswered { .. })));
 
             // A stale reply carrying `Entangled`: the claim is untouched, but
             // the answer is in the cache (as the app records it before

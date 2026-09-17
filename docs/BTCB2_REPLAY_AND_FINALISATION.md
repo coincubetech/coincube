@@ -84,10 +84,22 @@ node about *which* signatures go into the witness — the next section.
 ## Daemon
 
 `coincubed` keys both spend mutations on `config.bitcoin_config.chain`:
-`update_spend` first holds the incoming PSBT to the adapter's rules on BTCB2
-— before the existence check, so a **first insert** stores only what every
-later update and the finaliser would accept (`CommandError::UnifiedSpendValidation`,
-nothing stored on refusal) — then merges signatures with the prior copy on
+`update_spend` first holds the incoming PSBT to the adapter's rules **and
+cryptographically verifies every signature it carries**
+(`unified_finalize::verify_all_signatures`: unified records through the
+verifier, legacy ones against the BIP-143 digest, `SIGHASH_ALL` only) on
+BTCB2 — before the existence check, so a **first insert** stores only what
+every later update and the finaliser would accept, and an invalid update
+leaves the stored row byte-identical (`CommandError::UnifiedSpendValidation`,
+nothing stored on refusal). The adapter alone validates representation, not
+validity: a signature made for another transaction passes it, and once stored
+would be refused by every later merge as a conflict against its correct
+replacement — a spend that cannot be completed through the API that wrote
+it. (A legacy `ANYONECANPAY` *flag* is a representation rule, refused by the
+adapter itself.) Unsigned and partially signed spends pass — a daemon-created
+spend carries the authenticated prevout, P2WSH prevout and committing witness
+script the verifier needs on every input, pinned by a regression. Then it
+merges signatures with the prior copy on
 Bitcoin (last write wins on a key, as before) and, on BTCB2, runs the adapter
 merge **against the stored PSBT as it is** — never after the copy, which would have overwritten a
 stored signature before the adapter could compare it — refusing conflicting
@@ -113,9 +125,11 @@ input's report. Stored PSBTs round-trip the proprietary records unchanged.
   sighash byte) — so no device or phone is prompted for a signature that would
   be thrown away. `Wallet::chain` is set by both wallet constructors, the
   local loader and the remote-backend path, from `CubeSettings::network`. Merges go through
-  the adapter against the destination as it is, so the desktop never holds a
-  PSBT the daemon would reject and a conflicting signature never overwrites a
-  stored one. The Keychain flow's "who still has to sign" classification uses
+  the adapter against the destination as it is, and every signature in a
+  signer's result is cryptographically verified (`verify_all_signatures`)
+  before it enters the in-memory PSBT, so the desktop never holds a PSBT the
+  daemon would reject and a conflicting or invalid signature never overwrites
+  a stored one. The Keychain flow's "who still has to sign" classification uses
   the same chain-keyed analysis, so a collected unified signature is not asked
   for again.
 - **Status** (`state/vault/replay.rs`): four states derived from the
@@ -168,7 +182,10 @@ input's report. Stored PSBTs round-trip the proprietary records unchanged.
   generation currently in flight, so a reply from an earlier instance of the
   screen or from before a signature was added never clears the current claim
   (its positive still lands in the cache — *Entangled* is terminal), and a
-  reply is applied before any new check is kicked. **The gate holds at final
+  reply is applied before any new check is kicked; a stale reply's *positive*
+  is still cached (terminal), but a *negative* is cached only once the screen
+  has accepted the reply for its current generation, so a stale `NotEntangled`
+  can never re-stamp an earlier answer's resolve instant. **The gate holds at final
   dispatch too:** Confirm in the Broadcast dialog re-runs `broadcast_ready`
   against the current cache, the dialog is never opened unready, and a dialog
   open on a spend that stops being ready (a lookup landed, a re-check started,

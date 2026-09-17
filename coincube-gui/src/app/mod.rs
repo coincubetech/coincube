@@ -4431,20 +4431,37 @@ impl App {
                 }
                 return Task::done(Message::CacheUpdated);
             }
+            Message::EntanglementAnswered { answers } => {
+                let now = std::time::Instant::now();
+                let changed = answers.into_iter().fold(false, |changed, (txid, answer)| {
+                    self.cache.record_entanglement(txid, answer, now) || changed
+                });
+                if !changed {
+                    return Task::none();
+                }
+                return Task::done(Message::CacheUpdated);
+            }
             Message::EntangledRevalidated {
                 spend,
                 generation,
                 answers,
             } => {
                 // The spend screen's own re-check of a replayable spend's
-                // inputs: cache what resolved — a stale reply's positive is
-                // still true, `Entangled` being terminal — then hand the
-                // message to the panel that asked so it can close its
-                // in-flight state (only if the generation is still current).
+                // inputs. Only **terminal positives** are cached here, before
+                // the generation is known: a stale reply's `Entangled` is
+                // still true. A negative is not — an answer obtained at T0
+                // must not be re-stamped as obtained now — so negatives are
+                // recorded only once the panel has accepted the reply for
+                // its current generation (`Message::EntanglementAnswered`).
                 let now = std::time::Instant::now();
-                let changed = answers.iter().fold(false, |changed, (txid, answer)| {
-                    self.cache.record_entanglement(*txid, *answer, now) || changed
-                });
+                let changed = answers
+                    .iter()
+                    .filter(|(_, answer)| {
+                        matches!(answer, crate::services::entangled::Entanglement::Entangled)
+                    })
+                    .fold(false, |changed, (txid, answer)| {
+                        self.cache.record_entanglement(*txid, *answer, now) || changed
+                    });
                 let routed = Message::EntangledRevalidated {
                     spend,
                     generation,

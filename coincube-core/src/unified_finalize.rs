@@ -564,6 +564,78 @@ fn looks_like_der_signature(element: &[u8]) -> bool {
     }
 }
 
+/// How many signatures of each kind [`verify_all_signatures`] checked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct VerifiedSignatureCounts {
+    pub unified: usize,
+    pub legacy: usize,
+}
+
+/// Verify **every** signature the PSBT carries, without assembling a witness:
+/// unified records through [`verify_p2wsh_all_unified`] (which also holds the
+/// PSBT to the adapter's rules), legacy `partial_sigs` against the BIP-143
+/// digest and restricted to `SIGHASH_ALL`. An unsigned or partially signed
+/// PSBT passes; any signature that would make finalisation refuse fails here
+/// with the same typed error.
+///
+/// This is the check for *persistence and merge boundaries* — the daemon's
+/// first insert and merge, the desktop's merge — where the adapter alone is
+/// not enough: it validates representation, not cryptographic validity, so a
+/// legacy `ANYONECANPAY` signature or a signature made for another
+/// transaction would otherwise be stored, refused by every later merge as a
+/// conflict against its correct replacement, and refused again at
+/// finalisation — a stored spend that cannot be completed through the API
+/// that wrote it.
+pub fn verify_all_signatures<C: secp256k1::Verification>(
+    psbt: &UnifiedPsbt,
+    secp: &secp256k1::Secp256k1<C>,
+) -> Result<VerifiedSignatureCounts, UnifiedFinalizeError> {
+    let unified = verify_p2wsh_all_unified(psbt, secp)?;
+    let contexts = input_contexts(psbt)?;
+    let mut legacy_cache = SighashCache::new(&psbt.psbt().unsigned_tx);
+    let mut legacy = 0;
+    for (input_index, context) in contexts.iter().enumerate() {
+        legacy += verified_legacy_signatures(
+            secp,
+            &mut legacy_cache,
+            input_index,
+            context,
+            &psbt.psbt().inputs[input_index],
+        )?
+        .len();
+    }
+    Ok(VerifiedSignatureCounts { unified, legacy })
+}
+
+/// Every legacy `partial_sigs` entry of one input, verified against the
+/// BIP-143 digest and restricted to `SIGHASH_ALL`, as signatures the
+/// satisfier may offer. A key with a unified record cannot also have a legacy
+/// one — the adapter's `validate_internal` refuses that — so each is a
+/// distinct key.
+fn verified_legacy_signatures<C: secp256k1::Verification>(
+    secp: &secp256k1::Secp256k1<C>,
+    cache: &mut SighashCache<&Transaction>,
+    input_index: usize,
+    context: &InputContext,
+    input: &miniscript::bitcoin::psbt::Input,
+) -> Result<BTreeMap<PublicKey, AvailableSignature>, UnifiedFinalizeError> {
+    let mut legacy: BTreeMap<PublicKey, AvailableSignature> = BTreeMap::new();
+    for (public_key, signature) in &input.partial_sigs {
+        verify_legacy_signature(secp, cache, input_index, context, public_key, signature)?;
+        let mut witness_bytes = signature.signature.serialize_der().to_vec();
+        witness_bytes.push(EcdsaSighashType::All as u8);
+        legacy.insert(
+            *public_key,
+            AvailableSignature {
+                der: *signature,
+                witness_bytes,
+                unified: false,
+            },
+        );
+    }
+    Ok(legacy)
+}
+
 /// Finalise every input of `psbt` and return the transaction ready to
 /// broadcast, together with what each witness is made of.
 ///
@@ -632,31 +704,10 @@ pub fn finalize_p2wsh_all_unified<C: secp256k1::Verification>(
         // repeat here: one definition, at the adapter, for every boundary.
 
         // Every legacy record is verified now, whether or not a witness will
-        // use it: against the BIP-143 digest and restricted to SIGHASH_ALL. A
-        // key with a unified record cannot also have a legacy one — the
-        // adapter's `validate_internal` refused that above — so each of these
-        // is a distinct key.
-        let mut legacy: BTreeMap<PublicKey, AvailableSignature> = BTreeMap::new();
-        for (public_key, signature) in &input.partial_sigs {
-            verify_legacy_signature(
-                secp,
-                &mut legacy_cache,
-                input_index,
-                context,
-                public_key,
-                signature,
-            )?;
-            let mut witness_bytes = signature.signature.serialize_der().to_vec();
-            witness_bytes.push(EcdsaSighashType::All as u8);
-            legacy.insert(
-                *public_key,
-                AvailableSignature {
-                    der: *signature,
-                    witness_bytes,
-                    unified: false,
-                },
-            );
-        }
+        // use it (`verified_legacy_signatures`, the same check the persistence
+        // boundaries run through `verify_all_signatures`).
+        let legacy =
+            verified_legacy_signatures(secp, &mut legacy_cache, input_index, context, input)?;
 
         let locks = InputLocks::of(unsigned_tx, input_index);
         let first = satisfy_input(input_index, context, &available, locks);

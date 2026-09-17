@@ -534,7 +534,33 @@ fn anyonecanpay_legacy_signature_is_refused_before_any_witness() {
             sighash_type: EcdsaSighashType::AllPlusAnyoneCanPay,
         },
     );
+    // The adapter's flag rule fires first, at every boundary…
     match finalize_p2wsh_all_unified(&signed, &secp) {
+        Err(UnifiedFinalizeError::Signing(UnifiedSigningError::Adapter(
+            crate::psbt_unified::UnifiedPsbtError::UnsupportedLegacySighash {
+                input: 0,
+                public_key,
+                sighash,
+            },
+        ))) => {
+            assert_eq!(public_key, key);
+            assert_eq!(sighash, 0x81);
+        }
+        other => panic!("expected the ANYONECANPAY refusal, got {:?}", other),
+    }
+    // …and the finaliser's own check — the one that selects the digest right
+    // before `verify_ecdsa` — still refuses on its own path, so the witness
+    // stage never depends on the adapter having run.
+    let contexts = input_contexts(&signed).unwrap();
+    let mut cache = SighashCache::new(&signed.psbt().unsigned_tx);
+    match verify_legacy_signature(
+        &secp,
+        &mut cache,
+        0,
+        &contexts[0],
+        &key,
+        &signed.psbt().inputs[0].partial_sigs[&key],
+    ) {
         Err(UnifiedFinalizeError::UnsupportedLegacySighash {
             input: 0,
             public_key,
@@ -543,7 +569,7 @@ fn anyonecanpay_legacy_signature_is_refused_before_any_witness() {
             assert_eq!(public_key, key);
             assert_eq!(sighash, 0x81);
         }
-        other => panic!("expected the ANYONECANPAY refusal, got {:?}", other),
+        other => panic!("expected the finaliser's own refusal, got {:?}", other),
     }
 }
 
@@ -674,11 +700,13 @@ fn an_unused_legacy_record_is_still_verified_and_can_refuse_the_call() {
         },
     );
     match finalize_p2wsh_all_unified(&anyonecanpay, &secp) {
-        Err(UnifiedFinalizeError::UnsupportedLegacySighash {
-            input: 0,
-            public_key,
-            sighash,
-        }) => {
+        Err(UnifiedFinalizeError::Signing(UnifiedSigningError::Adapter(
+            crate::psbt_unified::UnifiedPsbtError::UnsupportedLegacySighash {
+                input: 0,
+                public_key,
+                sighash,
+            },
+        ))) => {
             assert_eq!(public_key, third_key);
             assert_eq!(sighash, 0x81);
         }
@@ -775,6 +803,83 @@ fn a_sighash_all_request_next_to_a_unified_record_is_refused() {
     ));
     two.psbt_mut().inputs[0].sighash_type = None;
     assert!(finalize_p2wsh_all_unified(&two, &secp).is_ok());
+}
+
+/// `verify_all_signatures` is the persistence/merge boundary check: it
+/// accepts unsigned and partially signed PSBTs, counts what it verified, and
+/// refuses exactly what finalisation would refuse — a legacy `ANYONECANPAY`
+/// signature, a legacy or unified signature made for another transaction —
+/// each of which the adapter's representation check alone lets through.
+#[test]
+fn verify_all_signatures_refuses_what_the_adapter_alone_would_store() {
+    let secp = secp();
+    let fixture = fixture(1);
+    assert_eq!(
+        verify_all_signatures(&fixture.psbt, &secp).unwrap(),
+        VerifiedSignatureCounts {
+            unified: 0,
+            legacy: 0
+        }
+    );
+    let one_unified = sign_p2wsh_all_unified(&fixture.signers[0], &fixture.psbt, &secp).unwrap();
+    let mixed = add_legacy(&one_unified, &fixture.signers[1], &secp);
+    assert_eq!(
+        verify_all_signatures(&mixed, &secp).unwrap(),
+        VerifiedSignatureCounts {
+            unified: 1,
+            legacy: 1
+        }
+    );
+
+    let mut other = fixture.psbt.clone();
+    other.psbt_mut().unsigned_tx.output[0].value = miniscript::bitcoin::Amount::from_sat(1);
+
+    // Legacy ANYONECANPAY.
+    let mut acp = add_legacy(&fixture.psbt, &fixture.signers[0], &secp);
+    for sig in acp.psbt_mut().inputs[0].partial_sigs.values_mut() {
+        sig.sighash_type = EcdsaSighashType::AllPlusAnyoneCanPay;
+    }
+    // The flag is a representation rule since fold 1: the adapter refuses
+    // it on its own, and the boundary check surfaces that.
+    assert!(matches!(
+        UnifiedPsbt::from_psbt(acp.psbt().clone()),
+        Err(crate::psbt_unified::UnifiedPsbtError::UnsupportedLegacySighash { input: 0, .. })
+    ));
+    assert!(matches!(
+        verify_all_signatures(&acp, &secp),
+        Err(UnifiedFinalizeError::Signing(UnifiedSigningError::Adapter(
+            crate::psbt_unified::UnifiedPsbtError::UnsupportedLegacySighash { input: 0, .. }
+        )))
+    ));
+
+    // Legacy signature for another transaction.
+    let mut wrong_legacy = fixture.psbt.clone();
+    wrong_legacy.psbt_mut().inputs[0].partial_sigs =
+        add_legacy(&other, &fixture.signers[0], &secp).psbt().inputs[0]
+            .partial_sigs
+            .clone();
+    assert!(UnifiedPsbt::from_psbt(wrong_legacy.psbt().clone()).is_ok());
+    assert!(matches!(
+        verify_all_signatures(&wrong_legacy, &secp),
+        Err(UnifiedFinalizeError::InvalidLegacySignature { input: 0, .. })
+    ));
+
+    // Unified signature for another transaction.
+    let mut wrong_unified = fixture.psbt.clone();
+    wrong_unified.psbt_mut().inputs[0].proprietary =
+        sign_p2wsh_all_unified(&fixture.signers[0], &other, &secp)
+            .unwrap()
+            .psbt()
+            .inputs[0]
+            .proprietary
+            .clone();
+    assert!(UnifiedPsbt::from_psbt(wrong_unified.psbt().clone()).is_ok());
+    assert!(matches!(
+        verify_all_signatures(&wrong_unified, &secp),
+        Err(UnifiedFinalizeError::Signing(
+            UnifiedSigningError::InvalidUnifiedSignature { input: 0, .. }
+        ))
+    ));
 }
 
 /// BIP-68: a CSV leaf is only enforced for transaction version ≥ 2. The bare
