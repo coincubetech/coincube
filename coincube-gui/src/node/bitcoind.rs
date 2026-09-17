@@ -858,15 +858,71 @@ pub fn allocate_managed_ports<E: fmt::Display>(
 /// version of this function — is discarded and replaced rather than trusted forever.
 /// How long to keep trying for the marker lock, as (attempts, delay between them).
 ///
-/// Short in tests so the timeout path is exercisable without a two-second wait; the
-/// behaviour either side of it is what the tests are about, not the duration.
+/// This is an *attempt count*, not a deadline: its wall-clock cost is the attempts times
+/// whatever one `try_lock_exclusive` plus one `sleep` costs at the time — the nominal
+/// figure where `sleep` tracks nominal, and several times that where it overshoots (the
+/// same macOS host has measured the old 30-attempt bound at both ~0.3 s and ~2.8 s in
+/// different sessions). Every duration quoted here is nominal.
+///
+/// Under test the default is *generous* (500 attempts 10 ms apart, nominally ~5 s): a
+/// waiter whose holder is merely slow — a loaded CI runner flushing a staged marker to a
+/// shared disk can take most of a second — must wait it out and adopt the installed
+/// identity, not give up with `WouldBlock`. That is margin, not immunity: a test whose
+/// holder must finish inside the waiter's bound still depends on it, and says so. A test
+/// that wants the *timeout* path sets a short bound on the contender's own thread with
+/// [`with_quick_marker_lock_bound`], so the doomed join costs milliseconds instead of the
+/// default — nothing in the suite waits the default out. The production bound is
+/// unchanged.
 fn lock_acquisition_bound() -> (u32, std::time::Duration) {
     #[cfg(not(test))]
     {
         (40, std::time::Duration::from_millis(50))
     }
     #[cfg(test)]
-    (30, std::time::Duration::from_millis(10))
+    {
+        marker_lock_bound_override().unwrap_or((500, std::time::Duration::from_millis(10)))
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A per-thread override of the default test bound (see
+    /// [`lock_acquisition_bound`]). Thread-local on purpose: a contender spawned by a
+    /// test keeps the generous default unless *it* asks for the short bound, so a test
+    /// thread's override never leaks into the waiter it is racing. Separate from the
+    /// managed-conf lock's override — the two locks are independent and so are their
+    /// test bounds.
+    static MARKER_LOCK_BOUND_OVERRIDE: std::cell::Cell<Option<(u32, std::time::Duration)>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn marker_lock_bound_override() -> Option<(u32, std::time::Duration)> {
+    MARKER_LOCK_BOUND_OVERRIDE.with(|b| b.get())
+}
+
+/// The short bound [`with_quick_marker_lock_bound`] installs: 3 × 5 ms.
+#[cfg(test)]
+const QUICK_MARKER_LOCK_BOUND: (u32, std::time::Duration) =
+    (3, std::time::Duration::from_millis(5));
+
+/// Run `body` with *this thread's* marker-lock acquisition bound set short
+/// ([`QUICK_MARKER_LOCK_BOUND`]), for a contender that is meant to time out. Scoped:
+/// the previous value is captured and restored when `body` returns — normally or by
+/// unwinding — so the override nests and a panicking body cannot leave the short bound
+/// behind on a reused thread. A contender that runs on a spawned thread must call this
+/// *inside* that thread; setting it on the parent does nothing for the child. Test-only.
+#[cfg(test)]
+pub(crate) fn with_quick_marker_lock_bound<T>(body: impl FnOnce() -> T) -> T {
+    struct Restore(Option<(u32, std::time::Duration)>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            MARKER_LOCK_BOUND_OVERRIDE.with(|b| b.set(self.0));
+        }
+    }
+    let prior = MARKER_LOCK_BOUND_OVERRIDE.with(|b| b.replace(Some(QUICK_MARKER_LOCK_BOUND)));
+    let _restore = Restore(prior);
+    body()
 }
 
 /// Whether the managed node's durable identity can be relied on yet.
@@ -2627,12 +2683,17 @@ mod tests {
         held.lock_exclusive().unwrap();
 
         // The second caller exhausts its attempts and gives up. Joining takes exactly as
-        // long as the bound, so nothing here depends on a guessed sleep.
+        // long as the bound, so nothing here depends on a guessed sleep — and the bound is
+        // the *short* one, set inside the contender's own thread (an override on this
+        // thread would not reach it), so the doomed join costs milliseconds rather than
+        // the generous default a successful waiter gets.
         let timed_out = {
             let config = config.clone();
-            std::thread::spawn(move || establish_node_identity(&config))
-                .join()
-                .unwrap()
+            std::thread::spawn(move || {
+                with_quick_marker_lock_bound(|| establish_node_identity(&config))
+            })
+            .join()
+            .unwrap()
         };
         assert_eq!(
             timed_out,
@@ -2734,8 +2795,13 @@ mod tests {
         };
 
         // It must not get past the lock. If it did, it would be reading the malformed
-        // marker right now and preparing to delete whatever replaces it. Comfortably
-        // inside the acquisition bound, so it is still waiting rather than giving up.
+        // marker right now and preparing to delete whatever replaces it. The waiter is
+        // on the generous default bound (500 attempts, nominally ~5 s, longer where
+        // `sleep` overshoots), so this 40 ms wait plus the install below leave it still
+        // waiting rather than giving up — a margin, not a guarantee: this test still
+        // requires the holder's critical section (this wait, the install's
+        // stage/flush/link, the unlock) to finish inside the waiter's bound, which the
+        // old 30-attempt bound did not on a loaded runner.
         assert!(
             done_rx
                 .recv_timeout(std::time::Duration::from_millis(40))
@@ -2758,6 +2824,167 @@ mod tests {
             marker_artifacts(&cookie_path),
             vec![format!("{}.lock", coincubed::NODE_INSTANCE_FILE)]
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The success scenario the nightly failure's shape calls for, with the holder's delay
+    // under the test's control instead of the runner's disk: a holder keeps the lock for
+    // 600 ms while it installs — well past the old 30-attempt bound's *nominal* 300 ms
+    // and far under the default's nominal 5 s — and a waiter on the default bound must
+    // wait it out and adopt the installed identity, never give up with `WouldBlock`.
+    //
+    // What this does and does not demonstrate: the bound is an attempt count, so the
+    // old bound's real wall clock is 30 × (one `try_lock_exclusive` + one 10 ms `sleep`)
+    // — about 300 ms where `sleep` tracks nominal, and several times that where it
+    // overshoots (the same macOS host has measured it at ~0.3 s and at ~2.8 s in
+    // different sessions). Against the old bound this test therefore fails where the old
+    // bound really costs less than 600 ms and passes where it costs more; it does not
+    // distinguish the old bound on every run or platform, and it does not reproduce the
+    // runner's own I/O timing. The invariant it asserts — a default waiter outlasts a
+    // 600 ms holder — is the one the nightly broke, and it holds under the default bound
+    // wherever it has been run.
+    #[test]
+    fn a_default_waiter_outlasts_a_holder_slower_than_the_old_bound() {
+        use fs4::fs_std::FileExt;
+
+        let (dir, cookie_path) = a_marker_datadir("slow-holder");
+        let network_dir = cookie_path.parent().unwrap().to_path_buf();
+        let marker = network_dir.join(coincubed::NODE_INSTANCE_FILE);
+        std::fs::create_dir_all(&network_dir).unwrap();
+        std::fs::write(&marker, "partial").unwrap();
+
+        let lock_path = network_dir.join(format!("{}.lock", coincubed::NODE_INSTANCE_FILE));
+        let held = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        held.lock_exclusive().unwrap();
+
+        let waiter = {
+            let cookie_path = cookie_path.clone();
+            std::thread::spawn(move || ensure_node_instance_marker(&cookie_path))
+        };
+
+        // Longer than the old bound's nominal 300 ms, far under the default's nominal 5 s.
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        let winner = establish_node_instance(&network_dir).expect("installed");
+        let _ = FileExt::unlock(&held);
+
+        let adopted = waiter
+            .join()
+            .unwrap()
+            .expect("a default-bound waiter must outlast a slow holder, not time out");
+        assert_eq!(adopted, winner);
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), winner);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The override is per thread and scoped: it does not reach a spawned thread, it
+    // nests by restoring the previous value, and a panicking body does not leave the
+    // short bound behind.
+    #[test]
+    fn the_quick_marker_bound_is_thread_scoped_nests_and_survives_unwinding() {
+        let default = (500, std::time::Duration::from_millis(10));
+        assert_eq!(lock_acquisition_bound(), default);
+
+        with_quick_marker_lock_bound(|| {
+            assert_eq!(lock_acquisition_bound(), QUICK_MARKER_LOCK_BOUND);
+            // A thread spawned from inside the override keeps the default.
+            let seen_by_child = std::thread::spawn(lock_acquisition_bound).join().unwrap();
+            assert_eq!(
+                seen_by_child, default,
+                "the override leaked into a spawned thread"
+            );
+            // Nesting restores the value that was in force, not `None`.
+            with_quick_marker_lock_bound(|| {
+                assert_eq!(lock_acquisition_bound(), QUICK_MARKER_LOCK_BOUND);
+            });
+            assert_eq!(lock_acquisition_bound(), QUICK_MARKER_LOCK_BOUND);
+        });
+        assert_eq!(lock_acquisition_bound(), default);
+
+        // A body that panics unwinds through the guard, and the bound is restored.
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            with_quick_marker_lock_bound(|| {
+                assert_eq!(lock_acquisition_bound(), QUICK_MARKER_LOCK_BOUND);
+                panic!("body panicked while the short bound was in force");
+            })
+        }));
+        assert!(unwound.is_err());
+        assert_eq!(
+            lock_acquisition_bound(),
+            default,
+            "a panicking body left the short bound set on this thread"
+        );
+    }
+
+    // The timeout contender's bound really is the short one *inside its own thread*: a
+    // doomed contender that set the override on its parent instead would wait the
+    // generous default (500 attempts, nominally ~5 s and never less) out. Bounded well
+    // under that, so a wrong placement fails.
+    #[test]
+    fn a_quick_bound_contender_gives_up_promptly_while_a_default_waiter_does_not() {
+        use fs4::fs_std::FileExt;
+
+        let (dir, cookie_path) = a_marker_datadir("quick-vs-default");
+        let network_dir = cookie_path.parent().unwrap().to_path_buf();
+        std::fs::create_dir_all(&network_dir).unwrap();
+        let lock_path = network_dir.join(format!("{}.lock", coincubed::NODE_INSTANCE_FILE));
+        let held = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        held.lock_exclusive().unwrap();
+
+        // Short bound, set inside the contender: gives up in milliseconds.
+        let begin = std::time::Instant::now();
+        let quick = {
+            let cookie_path = cookie_path.clone();
+            std::thread::spawn(move || {
+                with_quick_marker_lock_bound(|| ensure_node_instance_marker(&cookie_path))
+            })
+            .join()
+            .unwrap()
+        };
+        let quick_elapsed = begin.elapsed();
+        assert_eq!(
+            quick
+                .expect_err("held lock must time the quick contender out")
+                .kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        assert!(
+            quick_elapsed < std::time::Duration::from_secs(2),
+            "the quick contender took {:?}: the override did not apply inside its thread",
+            quick_elapsed
+        );
+
+        // Default bound: still waiting well past the quick contender's give-up point,
+        // and it adopts what is installed once the holder releases.
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let waiter = {
+            let cookie_path = cookie_path.clone();
+            std::thread::spawn(move || {
+                let r = ensure_node_instance_marker(&cookie_path);
+                let _ = done_tx.send(());
+                r
+            })
+        };
+        assert!(
+            done_rx
+                .recv_timeout(quick_elapsed + std::time::Duration::from_millis(200))
+                .is_err(),
+            "a default-bound waiter gave up as fast as a quick one"
+        );
+        let winner = establish_node_instance(&network_dir).expect("installed");
+        let _ = FileExt::unlock(&held);
+        assert_eq!(waiter.join().unwrap().expect("adopted"), winner);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
