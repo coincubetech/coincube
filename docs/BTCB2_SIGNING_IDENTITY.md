@@ -87,10 +87,15 @@ the unchanged heir gate's `PermissionDenied`). Copy for each is in the canonical
   longer emits v2 at all; a pre-identity phone refuses `v: 3` at scan
   ("unsupported version"), which is the intended fail-closed outcome. The offer
   screen should say: "If Keychain reports an unsupported QR version, update Keychain."
-- `net` is required and must be one of the closed set. The worst-case fragment
-  `"net":"bitcoin-blake2b-testnet4",` measures 33 UTF-8 bytes
-  (`len('"net":"bitcoin-blake2b-testnet4",'.encode())`; the value is 24 characters)
-  and fits the 2048-byte QR cap.
+- `net` is required and must be one of the closed set, canonical spelling only (the
+  phone refuses `bitcoin`). The worst-case fragment `"net":"bitcoin-blake2b-testnet4",`
+  measures 33 UTF-8 bytes of raw JSON (`len('"net":"bitcoin-blake2b-testnet4",'.encode())`;
+  the value is 24 characters), ≈ 44 characters after base64url. The phone's cap is on
+  the **encoded** payload (`pairing_qr.dart:118`, 2048); with the ECDSA P-256
+  self-signed certificate this desktop emits (`phone_signer/identity.rs`, ~400–500-byte
+  DER) a v3 payload encodes to an estimated ≈ 1.3–1.45 K characters. That is an
+  estimate: the implementing slice pins the longest emitted v3 payload under the cap
+  with a test (§5).
 - v1 offers are untouched (their removal keeps its own schedule).
 
 ### 4.2 Proof v3 (`phone_signer/pairing.rs`)
@@ -121,7 +126,8 @@ message SignerBinding {
   // ... 1-4 unchanged ...
   // Connect network id of the local record selected for this pairing. Must equal
   // the scanned offer's `net`; the desktop refuses otherwise. Empty only from a
-  // pre-identity phone answering a pre-v3 (v1 or v2) offer.
+  // pre-identity phone answering a v2 offer (a v1 offer never yields a
+  // SignerBinding: the phone requires v2 to bind at all).
   string network = 5;
 }
 
@@ -193,14 +199,26 @@ is unchanged: the chain rides `connect.v1.SigningSession.network` (field 21).
 | desktop | Keychain | outcome |
 |---|---|---|
 | this contract (v3 offer) | pre-identity | scan refuses `v: 3`; nothing is paired |
-| this contract, legacy `PairedPhone` row | pre-identity | Bitcoin-family Vaults keep working: `session.network` is sent and ignored; the phone answers without `PartialSignature.network`, which the legacy row admits; a BTCB2 Vault never dials the row (R2.6) |
+| this contract, legacy `PairedPhone` row | pre-identity | Bitcoin-family Vaults keep working — **until that phone holds a second record with the paired xpub** (e.g. it creates the BTCB2 twin under keychain-app#146): its own pre-contract `validate` requires global xpub uniqueness (`keychain-app/lib/services/local_signer/lan_signer_binding.dart:109` at `5d1b1190`) and then refuses even a Bitcoin-family session; the remedy is a phone update and a re-pair. Before that: `session.network` is sent and ignored; the phone answers without `PartialSignature.network`, which the legacy row admits; a BTCB2 Vault never dials the row (R2.6) |
 | this contract, legacy `PairedPhone` row | new | Bitcoin-family Vaults keep working: the phone compares `session.network` with its record and answers with `PartialSignature.network`, which must match; a BTCB2 Vault never dials the row (R2.6) |
-| pre-identity (v2 offer) | new | the phone accepts v2 only while it holds no BTCB2 record for `key`; sessions carry no `network` and are admitted as the record's Bitcoin-family network. A pre-identity desktop cannot run a BTCB2 Vault |
+| pre-identity (v2 offer) | new | the phone accepts v2 only while it holds no BTCB2 record for `key` **and its store is reconciled** (canonical §6.2 / R2.3); sessions carry no `network` and are admitted as the record's Bitcoin-family network. Safe only under the deployment prerequisite below — the v2 protocol cannot express or detect a BTCB2 intent |
 | this contract | new | full v3 |
+
+**Deployment prerequisite (not a protocol property).** BTCB2 Keychain signing over
+LAN is enabled only on desktops that implement this contract and emit v3 offers
+(LANE-B3 §B3.4: BTCB2 stays Connect-rail-only, or is refused on LAN, until
+chain-bound pairing ships). A pre-identity desktop must never have BTCB2 Keychain
+signing enabled — it may load a `ChainId::BitcoinBlake2b` Vault (`coincube-core/src/chain.rs`),
+but the v2 offer (`coincube-gui/src/phone_signer/pairing.rs:65-105`) carries no
+chain, so a phone holding only the Bitcoin twin cannot tell a Bitcoin session from a
+BTCB2 one and would sign on its Bitcoin-family record. The legacy protocol does not
+detect or refuse that; the activation gate is the guarantee. Canonical §4.6 says the
+same.
 
 ## 5. Tests the implementing slice must add (fail-before / pass-after)
 
-- v3 offer serialisation and the 2048-byte bound with the longest `net`.
+- v3 offer serialisation and the 2048-**encoded-character** bound with the longest
+  `net` and the largest certificate the desktop can emit.
 - Proof v3 known-answer vector (shared with Keychain), plus: wrong `net`, wrong psk,
   swapped fps, empty — all reject.
 - Listener: v3 offer + empty `reported.network` → R2.5; `reported.network != offer.net`
@@ -209,13 +227,19 @@ is unchanged: the chain rides `connect.v1.SigningSession.network` (field 21).
   `ChainId::BitcoinBlake2b`) resolve only the row on their own chain; legacy row
   usable on Bitcoin only; a v3 row whose stored capabilities lack the literal
   `chain-identity-v1` (and, once B3.2 defines it, `btcb2-unified-v1`) is not dialled
-  for a BTCB2 Vault but is for a Bitcoin-family Vault.
+  for a BTCB2 Vault, while a Bitcoin-family Vault dials a row **whose `network`
+  matches it** regardless of capabilities (the positive control uses a matching
+  Bitcoin-family row; a BTCB2-network row is never dialable for a Bitcoin-family
+  Vault — the network predicate is checked first).
 - `sign_tx`: `session.network` present; `PartialSignature.network` in all three
   shapes — v3 row + mismatch discarded, v3 row + empty discarded, **legacy row +
   empty accepted on a Bitcoin Vault** — before `signatures::verify…`; **existing v2
   pairing + pre-identity phone** completes a Bitcoin signature end to end; the
   `lan_keychain_native` example round-trips on a Bitcoin regtest Vault and on a
-  BTCB2 regtest Vault (the latter reaching the phone's B3.2 refusal, not BDK).
+  `bitcoin-blake2b-testnet4` Vault — the only non-mainnet BTCB2 identity in the
+  closed set; there is no BTCB2 regtest `ChainId`, and the B4 harness tests the node
+  pair, not a Vault identity (canonical §11) — the latter reaching the phone's B3.2
+  refusal, not BDK.
 - Rail 1: `on_signers_resolved` non-empty mismatch sends no `CreateSigningSession`;
   **resolve → create against an old Connect** (empty `resp.network`): Bitcoin Vault
   proceeds and sends `network`, then tolerates the empty session; BTCB2 Vault sends
