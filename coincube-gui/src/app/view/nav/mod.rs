@@ -32,7 +32,7 @@ use coincube_ui::{
     widget::{Button, Column, Element, Row},
 };
 use iced::{
-    widget::{column, container, row, text::Wrapping, Space},
+    widget::{column, container, row, scrollable, text::Wrapping, Space},
     Alignment, Length,
 };
 
@@ -71,8 +71,15 @@ pub fn sidebar<'a>(menu: &Menu, ctx: &NavContext<'a>) -> Element<'a, Message> {
     // [`tertiary_rail`] and `dashboard_with_info` — so content never
     // shifts horizontally when the tertiary rail slides out.
     let rails_row: Row<Message> = row![primary::rail(menu, ctx), secondary::rail(menu, ctx)]
-        .height(Length::Fill)
         .width(Length::Fixed(SIDEBAR_BASE_WIDTH));
+    let rails = container(
+        scrollable(rails_row)
+            .width(Length::Fixed(SIDEBAR_BASE_WIDTH))
+            .height(Length::Fill),
+    )
+    .width(Length::Fixed(SIDEBAR_BASE_WIDTH))
+    .height(Length::Fill)
+    .style(theme::container::sidebar_primary);
 
     let wordmark = container(tenshu_wordmark(WORDMARK_SIZE))
         .width(Length::Fixed(SIDEBAR_BASE_WIDTH))
@@ -84,7 +91,7 @@ pub fn sidebar<'a>(menu: &Menu, ctx: &NavContext<'a>) -> Element<'a, Message> {
     let identity = identity_block(ctx);
     let toggle = theme_toggle_row(ctx);
 
-    let col: Column<Message> = column![wordmark, identity, rails_row, toggle]
+    let col: Column<Message> = column![wordmark, identity, rails, toggle]
         .width(Length::Fixed(SIDEBAR_BASE_WIDTH))
         .height(Length::Fill)
         .align_x(Alignment::Start);
