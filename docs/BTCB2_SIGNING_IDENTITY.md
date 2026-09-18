@@ -136,8 +136,11 @@ message SignerBinding {
 
 message PartialSignature {
   // ... 1-4 unchanged ...
-  // The chain the phone signed for (== the presented session's network). The
-  // desktop refuses a mismatch before verifying or merging the signature.
+  // The effective chain the phone signed for: the presented session's network
+  // when it was stated, else (a session from a pre-identity desktop, which omits
+  // it) the phone's verified record network. A new desktop always states the
+  // session network and refuses a mismatch before verifying or merging; an old
+  // desktop ignores this field.
   string network = 5;
 }
 ```
@@ -182,23 +185,32 @@ is unchanged: the chain rides `connect.v1.SigningSession.network` (field 21).
   the same predicate when deciding which phones to dial for the loaded Vault.
   - BTCB2 Vault + legacy row → not dialled; signer list: "Pair this Keychain again
     for Bitcoin Blake2b." (R2.6)
+  - any Vault + legacy row, once the desktop release that closes the window has
+    shipped (canonical §7) → not dialled; signer list: "This pairing predates
+    network-aware signing. Pair this Keychain again." (R2.6, closure variant — a
+    mainnet Vault's user must never see the Bitcoin Blake2b sentence)
   - BTCB2 Vault + v3 row without the required capability → not dialled; signer list:
     "This Keychain needs updating before it can sign on Bitcoin Blake2b." (R2.6,
     capability variant)
   - row on another chain → not dialled; "Paired for `<other network>`. Pair again to
     use it here." (R2.7) — `<other network>` is the **display label** from the
-    canonical §2.1 table (`bitcoin-blake2b` → "Bitcoin Blake2b"). This repo has no
-    such label today: `ChainId`'s `Display` writes `dir_name()`
-    (`coincube-core/src/chain.rs:119-129`, `:160-163`), so a naive `{chain}` would
-    render "Paired for bitcoin-blake2b." The implementing slice adds a `ChainId`
-    display-label accessor returning the canonical table; `Display` / `dir_name()`
-    is **not** a user-facing label.
+    canonical §2.1 table (`bitcoin-blake2b` → "Bitcoin Blake2b"). Core `ChainId`'s
+    `Display` writes `dir_name()` (`coincube-core/src/chain.rs:119-129`, `:160-163`)
+    and is **not** a user-facing label — a naive `{chain}` would render "Paired for
+    bitcoin-blake2b." This repo **already has** the label: `ChainIdExt::label()`
+    (`coincube-gui/src/chain.rs:84-93`, trait at `:55-64`, pinned by `labels_and_tickers`
+    at `coincube-gui/src/chain.rs:180`) returns exactly the canonical table, plain "Bitcoin" for mainnet
+    included. The implementing slice **reuses** it — no new accessor (earlier
+    revisions wrongly said no label existed).
 - `sign_tx` sets `session.network = wallet.chain.api_str()` on the `PresentSession`.
 - On `PartialSignature`, **before** the signature is verified or merged:
   - row has `network` (v3 pairing): `partial.network` is **required** and must equal
-    `session.network`; empty or different → discard, R2.13 ("The signature Keychain
-    returned is for a different network. Pair again." / "Update Keychain and pair
-    again." when missing);
+    `session.network`; empty or different → discard, R2.13 ("Your signature wasn't
+    accepted and nothing was broadcast from it. The signature Keychain returned is for
+    a different network. Pair again." / "Your signature wasn't accepted and nothing
+    was broadcast from it. Update Keychain and pair again." when missing — canonical
+    R2.13, byte-identical; desktop-side copy: the desktop discards, so the phone user
+    may see nothing — recorded, not decided);
   - legacy row (`None`; only ever a Bitcoin-family Vault, R2.6): an **empty**
     `partial.network` is admitted — a pre-identity phone omits the field
     (`keychain-app/lib/services/local_signer/local_signer_host.dart:262-270` at
@@ -211,9 +223,9 @@ is unchanged: the chain rides `connect.v1.SigningSession.network` (field 21).
 | desktop | Keychain | outcome |
 |---|---|---|
 | this contract (v3 offer) | pre-identity | scan refuses `v: 3`; nothing is paired |
-| this contract, legacy `PairedPhone` row | pre-identity | Bitcoin-family Vaults keep working — **until that phone holds a second record with the paired xpub** (e.g. it creates the BTCB2 twin under keychain-app#146): its own pre-contract `validate` requires global xpub uniqueness (`keychain-app/lib/services/local_signer/lan_signer_binding.dart:109` at `5d1b1190`) and then refuses even a Bitcoin-family session; the remedy is a phone update and a re-pair. Before that: `session.network` is sent and ignored; the phone answers without `PartialSignature.network`, which the legacy row admits; a BTCB2 Vault never dials the row (R2.6) |
-| this contract, legacy `PairedPhone` row | new | Bitcoin-family Vaults keep working: the phone compares `session.network` with its record and answers with `PartialSignature.network`, which must match; a BTCB2 Vault never dials the row (R2.6) |
-| pre-identity (v2 offer) | new | the phone accepts v2 only while it holds no BTCB2 record for `key` **and its store is reconciled** (canonical §6.2 / R2.3); sessions carry no `network` and are admitted as the record's Bitcoin-family network. Safe only under the deployment prerequisite below — the v2 protocol cannot express or detect a BTCB2 intent |
+| this contract, legacy `PairedPhone` row | pre-identity | **while the window is open (canonical §7)** Bitcoin-family Vaults keep working — **until that phone holds a second record with the paired xpub** (e.g. it creates the BTCB2 twin under keychain-app#146): its own pre-contract `validate` requires global xpub uniqueness (`keychain-app/lib/services/local_signer/lan_signer_binding.dart:109` at `5d1b1190`) and then refuses even a Bitcoin-family session; the remedy is a phone update and a re-pair. Before that: `session.network` is sent and ignored; the phone answers without `PartialSignature.network`, which the legacy row admits; a BTCB2 Vault never dials the row (R2.6) |
+| this contract, legacy `PairedPhone` row | new | **while the window is open (canonical §7)** Bitcoin-family Vaults keep working: the phone compares `session.network` with its record and answers with `PartialSignature.network`, which must match; after the closing desktop release the row is not dialled (R2.6, closure variant); a BTCB2 Vault never dials the row (R2.6) |
+| pre-identity (v2 offer) | new | **while the window is open (canonical §7):** the phone accepts v2 only while every local record with `key` is `verified` and none is BTCB2, **and its store is reconciled** (canonical §4.4 / R2.3); sessions carry no `network` and are admitted as the record's Bitcoin-family network. Safe only under the deployment prerequisite below — the v2 protocol cannot express or detect a BTCB2 intent |
 | this contract | new | full v3 |
 
 **Deployment prerequisite (not a protocol property).** BTCB2 Keychain signing over
