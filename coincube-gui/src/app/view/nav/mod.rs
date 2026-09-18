@@ -32,7 +32,7 @@ use coincube_ui::{
     widget::{Button, Column, Element, Row},
 };
 use iced::{
-    widget::{column, container, row, text::Wrapping, Space},
+    widget::{column, container, row, scrollable, text::Wrapping, Space},
     Alignment, Length,
 };
 
@@ -62,17 +62,32 @@ pub const TERTIARY_TOP_OFFSET: f32 = WORDMARK_BAND_HEIGHT + IDENTITY_BLOCK_HEIGH
 /// ```text
 /// [ Tenshu logo (mark + label)    ]  full 144px
 /// [ avatar + cube name + LN addr  ]  full 144px — pushes both rails down
-/// [ primary (72px) | secondary (72px) ]
+/// [ primary (72px) | secondary (72px) ]  fills the remaining height
 /// [ dark/light toggle             ]  full 144px
 /// ```
+///
+/// The two rails sit inside a single scrollable that takes all the height
+/// left between the identity block and the toggle. When the rails are
+/// taller than that (short windows, many submenu items) they scroll
+/// together rather than pushing the toggle off-screen or being clipped.
+/// The rails themselves are content-sized and unstyled; the surrounding
+/// container paints the shared `sidebar_primary` background so it covers
+/// the whole band even when the rails are shorter than the viewport.
 pub fn sidebar<'a>(menu: &Menu, ctx: &NavContext<'a>) -> Element<'a, Message> {
     // Base sidebar is always 144px wide (primary + secondary rails only).
     // The tertiary rail lives as an overlay on the content area — see
     // [`tertiary_rail`] and `dashboard_with_info` — so content never
     // shifts horizontally when the tertiary rail slides out.
     let rails_row: Row<Message> = row![primary::rail(menu, ctx), secondary::rail(menu, ctx)]
-        .height(Length::Fill)
         .width(Length::Fixed(SIDEBAR_BASE_WIDTH));
+    let rails = container(
+        scrollable(rails_row)
+            .width(Length::Fixed(SIDEBAR_BASE_WIDTH))
+            .height(Length::Fill),
+    )
+    .width(Length::Fixed(SIDEBAR_BASE_WIDTH))
+    .height(Length::Fill)
+    .style(theme::container::sidebar_primary);
 
     let wordmark = container(tenshu_wordmark(WORDMARK_SIZE))
         .width(Length::Fixed(SIDEBAR_BASE_WIDTH))
@@ -84,7 +99,7 @@ pub fn sidebar<'a>(menu: &Menu, ctx: &NavContext<'a>) -> Element<'a, Message> {
     let identity = identity_block(ctx);
     let toggle = theme_toggle_row(ctx);
 
-    let col: Column<Message> = column![wordmark, identity, rails_row, toggle]
+    let col: Column<Message> = column![wordmark, identity, rails, toggle]
         .width(Length::Fixed(SIDEBAR_BASE_WIDTH))
         .height(Length::Fill)
         .align_x(Alignment::Start);
