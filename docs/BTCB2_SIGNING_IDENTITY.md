@@ -54,7 +54,7 @@ Proto additions land in `coincube-api` first and reach this repo via `make sync-
 | when | rule | refusal |
 |---|---|---|
 | device registration (`coincube-gui/src/services/connect/grpc/device.rs:47`) | add `chain-identity-v1` to the capabilities sent (`create_session, cancel_session` today) | — |
-| after `ResolveSigners` (`on_signers_resolved`) | `resp.network` **non-empty** and ≠ `wallet.chain.api_str()` → create **nothing**. The comparison is a literal string compare: Connect canonicalises the Cube's stored value first (a legacy `bitcoin` row is echoed as `mainnet`; canonical §2.1), so the desktop never maps aliases | R1.10: "Connect reports this Vault on a different network than this Cube. Nothing was sent. Reopen the Cube; if this repeats, contact support." |
+| after `ResolveSigners` (`on_signers_resolved`) | `resp.network` **non-empty** and ≠ `wallet.chain.api_str()` → create **nothing**. The comparison is a literal string compare: Connect canonicalises the Cube's stored value first (a legacy `bitcoin` row is echoed as `mainnet`; canonical §2.1), so the desktop never maps aliases | R1.10: "Connect reports this Vault on a different network than this Cube. Nothing was sent. Reopen the Cube; if this repeats, contact support at coincube.io/support." — rendered as a link to `https://coincube.io/support` |
 | same | `resp.network` **empty** (pre-identity Connect): BTCB2 Vault → create **nothing**; Bitcoin-family Vault → proceed during the compatibility window (canonical §7, Q1), still sending `network` on create | R1.11 on BTCB2: "Connect needs updating before Keychain can sign on Bitcoin Blake2b. Nothing was sent to the signer." |
 | same | on a BTCB2 Vault, a target whose `capabilities` lack `chain-identity-v1` (and, after B3.2, `btcb2-unified-v1`), or an `unresolved` entry with `signer_app_outdated` | R1.7 row: "<name>'s Keychain needs updating before it can sign on Bitcoin Blake2b." — no session for that signer |
 | `create_session_for` | `network: wallet.chain.api_str()` on every `CreateSigningSessionRequest` | — |
@@ -64,8 +64,9 @@ Proto additions land in `coincube-api` first and reach this repo via `make sync-
 Server-side refusals the desktop must render (message prefix is the token):
 `NETWORK_INVALID`, `NETWORK_MISMATCH`, `CHAIN_IDENTITY_REQUIRED`, `TARGET_KEY_NOT_ON_VAULT`,
 `SIGNER_APP_OUTDATED`, `NETWORK_DISABLED`, and — on an ordinary spend — `NotFound "vault not found"`
-for a vault the account neither owns nor holds a keyholder seat on (recovery spends keep
-the unchanged heir gate's `PermissionDenied`). Copy for each is in the canonical §8.
+for a vault the account does not own (ordinary create is owner-only — decided, Robert
+2026-09-18; recovery spends keep the unchanged heir gate's `PermissionDenied`). Copy for
+each is in the canonical §8.
 
 ## 4. Rail 2 — pairing protocol v3
 
@@ -161,7 +162,8 @@ is unchanged: the chain rides `connect.v1.SigningSession.network` (field 21).
   (`PAIRING_PROTOCOL.md`) is unchanged.
 - One row per phone cert stays the model (`pairing_transaction.rs:99`): a pairing
   is now for one `(vault, key, chain)`; switching chains on the same desktop is a
-  re-pair, as switching Vaults already is (canonical Q2).
+  re-pair, as switching Vaults already is (canonical Q2 — decided (a), Robert
+  2026-09-18: an advanced feature, correctness over UX for now).
 
 ### 4.5 Presenting and receiving (`phone_signer/mod.rs`, `pairing_store.rs`)
 
@@ -180,7 +182,13 @@ is unchanged: the chain rides `connect.v1.SigningSession.network` (field 21).
     "This Keychain needs updating before it can sign on Bitcoin Blake2b." (R2.6,
     capability variant)
   - row on another chain → not dialled; "Paired for <other network>. Pair again to
-    use it here." (R2.7)
+    use it here." (R2.7) — `<other network>` is the **display label** from the
+    canonical §2.1 table (`bitcoin-blake2b` → "Bitcoin Blake2b"). This repo has no
+    such label today: `ChainId`'s `Display` writes `dir_name()`
+    (`coincube-core/src/chain.rs:119-129`, `:160-163`), so a naive `{chain}` would
+    render "Paired for bitcoin-blake2b." The implementing slice adds a `ChainId`
+    display-label accessor returning the canonical table; `Display` / `dir_name()`
+    is **not** a user-facing label.
 - `sign_tx` sets `session.network = wallet.chain.api_str()` on the `PresentSession`.
 - On `PartialSignature`, **before** the signature is verified or merged:
   - row has `network` (v3 pairing): `partial.network` is **required** and must equal
