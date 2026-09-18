@@ -12,10 +12,7 @@ use crate::app::{
     menu::{Menu, TopLevel},
     view::Message,
 };
-use coincube_ui::{
-    theme,
-    widget::{Column, Element},
-};
+use coincube_ui::widget::{Column, Element};
 use iced::{widget::container, Length};
 
 pub const RAIL_WIDTH: f32 = 72.0;
