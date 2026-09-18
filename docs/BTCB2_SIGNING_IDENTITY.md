@@ -87,8 +87,10 @@ the unchanged heir gate's `PermissionDenied`). Copy for each is in the canonical
   longer emits v2 at all; a pre-identity phone refuses `v: 3` at scan
   ("unsupported version"), which is the intended fail-closed outcome. The offer
   screen should say: "If Keychain reports an unsupported QR version, update Keychain."
-- `net` is required and must be one of the closed set. The 35-byte worst case
-  (`"net":"bitcoin-blake2b-testnet4",`) fits the 2048-byte QR cap.
+- `net` is required and must be one of the closed set. The worst-case fragment
+  `"net":"bitcoin-blake2b-testnet4",` measures 33 UTF-8 bytes
+  (`len('"net":"bitcoin-blake2b-testnet4",'.encode())`; the value is 24 characters)
+  and fits the 2048-byte QR cap.
 - v1 offers are untouched (their removal keeps its own schedule).
 
 ### 4.2 Proof v3 (`phone_signer/pairing.rs`)
@@ -119,7 +121,7 @@ message SignerBinding {
   // ... 1-4 unchanged ...
   // Connect network id of the local record selected for this pairing. Must equal
   // the scanned offer's `net`; the desktop refuses otherwise. Empty only from a
-  // pre-identity phone answering a v2 offer.
+  // pre-identity phone answering a pre-v3 (v1 or v2) offer.
   string network = 5;
 }
 
@@ -147,7 +149,9 @@ is unchanged: the chain rides `connect.v1.SigningSession.network` (field 21).
   `reported.network` (i.e. `complete.signer_binding.network`) must be non-empty (else
   R2.5 "Update Keychain and pair again.") and equal `offer.net` (else R2.4 "Exact
   pairing identity mismatch; pair again."). Store that value and
-  `complete.capabilities` on the row. The durable pairing transaction
+  `complete.capabilities` on the row — the capability list is what the BTCB2 dial
+  predicate below reads; answering a v3 offer is evidence of v3 pairing, not of the
+  advertised capability strings. The durable pairing transaction
   (`PAIRING_PROTOCOL.md`) is unchanged.
 - One row per phone cert stays the model (`pairing_transaction.rs:99`): a pairing
   is now for one `(vault, key, chain)`; switching chains on the same desktop is a
@@ -157,10 +161,18 @@ is unchanged: the chain rides `connect.v1.SigningSession.network` (field 21).
 
 - `PairedPhone::exact_signer(descriptor)` takes the Vault's chain. A row is usable
   only if `row.network == Some(wallet.chain.api_str())`; a legacy row (`None`) is
-  usable only for Bitcoin-family Vaults. The hw refresh loop applies the same
-  predicate when deciding which phones to dial for the loaded Vault.
+  usable only for Bitcoin-family Vaults. For a **BTCB2** Vault the row's stored
+  `capabilities` must additionally contain the literal `chain-identity-v1` **and**,
+  once B3.2 defines it, `btcb2-unified-v1`; a v3 row lacking either is not usable and
+  not dialled. Until B3.2 ships, a row with `chain-identity-v1` but without
+  `btcb2-unified-v1` may be dialled and the phone's #146 refusal applies, exactly as
+  on Rail 1. Bitcoin-family Vaults require no capability. The hw refresh loop applies
+  the same predicate when deciding which phones to dial for the loaded Vault.
   - BTCB2 Vault + legacy row → not dialled; signer list: "Pair this Keychain again
     for Bitcoin Blake2b." (R2.6)
+  - BTCB2 Vault + v3 row without the required capability → not dialled; signer list:
+    "This Keychain needs updating before it can sign on Bitcoin Blake2b." (R2.6,
+    capability variant)
   - row on another chain → not dialled; "Paired for <other network>. Pair again to
     use it here." (R2.7)
 - `sign_tx` sets `session.network = wallet.chain.api_str()` on the `PresentSession`.
@@ -195,7 +207,9 @@ is unchanged: the chain rides `connect.v1.SigningSession.network` (field 21).
   → R2.4; success stores `network` and `capabilities`.
 - `exact_signer`: same-descriptor twin Vaults (`ChainId::Bitcoin` vs
   `ChainId::BitcoinBlake2b`) resolve only the row on their own chain; legacy row
-  usable on Bitcoin only.
+  usable on Bitcoin only; a v3 row whose stored capabilities lack the literal
+  `chain-identity-v1` (and, once B3.2 defines it, `btcb2-unified-v1`) is not dialled
+  for a BTCB2 Vault but is for a Bitcoin-family Vault.
 - `sign_tx`: `session.network` present; `PartialSignature.network` in all three
   shapes — v3 row + mismatch discarded, v3 row + empty discarded, **legacy row +
   empty accepted on a Bitcoin Vault** — before `signatures::verify…`; **existing v2
