@@ -34,6 +34,8 @@ until Lane B3.2; this contract supplies the version handshake that lets it flip.
 
 Always `Wallet.chain.api_str()` (`coincube_core::chain::ChainId::api_str`, one of
 `mainnet | testnet | testnet4 | signet | regtest | bitcoin-blake2b | bitcoin-blake2b-testnet4`).
+**Bitcoin-family** means exactly the five pre-fork ids (`!chain.is_blake2b()`); the two
+BTCB2 ids are never Bitcoin-family (canonical §2.1).
 Never `bitcoin::Network`, never derived from the descriptor. An unknown string from
 any peer is a refusal, never mapped to Bitcoin (`ChainId::from_api_str` already
 returns `None`).
@@ -56,7 +58,7 @@ Proto additions land in `coincube-api` first and reach this repo via `make sync-
 | device registration (`coincube-gui/src/services/connect/grpc/device.rs:47`) | add `chain-identity-v1` to the capabilities sent (`create_session, cancel_session` today) | — |
 | after `ResolveSigners` (`on_signers_resolved`) | `resp.network` **non-empty** and ≠ `wallet.chain.api_str()` → create **nothing**. The comparison is a literal string compare: Connect canonicalises the Cube's stored value first (a legacy `bitcoin` row is echoed as `mainnet`; canonical §2.1), so the desktop never maps aliases | R1.10: "Connect reports this Vault on a different network than this Cube. Nothing was sent. Reopen the Cube; if this repeats, contact support at coincube.io/support." — rendered as a link to `https://coincube.io/support` |
 | same | `resp.network` **empty** (pre-identity Connect): BTCB2 Vault → create **nothing**; Bitcoin-family Vault → proceed during the compatibility window (canonical §7, Q1), still sending `network` on create | R1.11 on BTCB2: "Connect needs updating before Keychain can sign on Bitcoin Blake2b. Nothing was sent to the signer." |
-| same | on a BTCB2 Vault, a target whose `capabilities` lack `chain-identity-v1` (and, after B3.2, `btcb2-unified-v1`), or an `unresolved` entry with `signer_app_outdated` | R1.7 row: "<name>'s Keychain needs updating before it can sign on Bitcoin Blake2b." — no session for that signer |
+| same | on a BTCB2 Vault, a target whose `capabilities` lack `chain-identity-v1` (and, after B3.2, `btcb2-unified-v1`), or an `unresolved` entry with `signer_app_outdated` | R1.7 row: "`<name>`'s Keychain needs updating before it can sign on Bitcoin Blake2b." (`<name>` = the signer's name in the Vault) — no session for that signer |
 | `create_session_for` | `network: wallet.chain.api_str()` on every `CreateSigningSessionRequest` | — |
 | create response and every fetch | `session.network` must equal `wallet.chain.api_str()`. Empty on a BTCB2 Vault ⇒ pre-identity Connect ⇒ cancel the session (defensive: the session exists and a signer may already have been notified — no "nothing was sent" promise here; that promise belongs to the resolve-time check above) | R1.11 session variant: "Connect needs updating before Keychain can sign on Bitcoin Blake2b. The request was cancelled." Empty on a Bitcoin-family Vault is tolerated during the compatibility window (canonical §7, Q1) |
 | `SIGNATURE_SUBMITTED` merge | unchanged: the signature is verified under `wallet.chain`'s rule by the existing verifier (#392 replay model). That verification is not a substitute for the identity checks above | — |
@@ -64,7 +66,7 @@ Proto additions land in `coincube-api` first and reach this repo via `make sync-
 Server-side refusals the desktop must render (message prefix is the token):
 `NETWORK_INVALID`, `NETWORK_MISMATCH`, `CHAIN_IDENTITY_REQUIRED`, `TARGET_KEY_NOT_ON_VAULT`,
 `SIGNER_APP_OUTDATED`, `NETWORK_DISABLED`, and — on an ordinary spend — `NotFound "vault not found"`
-for a vault the account does not own (ordinary create is owner-only — decided, Robert
+for a vault the **authenticated Connect account** does not own (ordinary create is owner-only — decided, Robert
 2026-09-18; recovery spends keep the unchanged heir gate's `PermissionDenied`). Copy for
 each is in the canonical §8.
 
@@ -151,7 +153,7 @@ is unchanged: the chain rides `connect.v1.SigningSession.network` (field 21).
   today). `network: None` is a **legacy row** (paired under v2).
 - `pairing_listener.rs`, after the existing proof / `SignerBinding` / fingerprint
   checks (`:300-419`), where `reported` is the existing alias for
-  `complete.signer_binding.as_ref()` (`:372`) — the new field is
+  `complete.signer_binding.as_ref()` (`coincube-gui/src/phone_signer/pairing_listener.rs:372`) — the new field is
   `SignerBinding.network` (§4.3), **not** a field on `PairingComplete`: on a v3 offer
   `reported.network` (i.e. `complete.signer_binding.network`) must be non-empty (else
   R2.5 "Update Keychain and pair again.") and equal `offer.net` (else R2.4 "Exact
@@ -169,7 +171,9 @@ is unchanged: the chain rides `connect.v1.SigningSession.network` (field 21).
 
 - `PairedPhone::exact_signer(descriptor)` takes the Vault's chain. A row is usable
   only if `row.network == Some(wallet.chain.api_str())`; a legacy row (`None`) is
-  usable only for Bitcoin-family Vaults. For a **BTCB2** Vault the row's stored
+  usable only for Bitcoin-family Vaults, and only until the desktop release that
+  closes the compatibility window (canonical §7) — after that a legacy row is never
+  dialled. For a **BTCB2** Vault the row's stored
   `capabilities` must additionally contain the literal `chain-identity-v1` **and**,
   once B3.2 defines it, `btcb2-unified-v1`; a v3 row lacking either is not usable and
   not dialled. Until B3.2 ships, a row with `chain-identity-v1` but without
@@ -181,7 +185,7 @@ is unchanged: the chain rides `connect.v1.SigningSession.network` (field 21).
   - BTCB2 Vault + v3 row without the required capability → not dialled; signer list:
     "This Keychain needs updating before it can sign on Bitcoin Blake2b." (R2.6,
     capability variant)
-  - row on another chain → not dialled; "Paired for <other network>. Pair again to
+  - row on another chain → not dialled; "Paired for `<other network>`. Pair again to
     use it here." (R2.7) — `<other network>` is the **display label** from the
     canonical §2.1 table (`bitcoin-blake2b` → "Bitcoin Blake2b"). This repo has no
     such label today: `ChainId`'s `Display` writes `dir_name()`
