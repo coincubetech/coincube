@@ -52,8 +52,39 @@ pub enum SparkNotice {
     StableBalanceOffWithHolding,
 }
 
+/// Identity of one `App` instance — one per Cube open (`#393`).
+///
+/// A task an `App` spawned can complete after the tab has replaced that `App`
+/// (a Cube switch, a lock and unlock, a return from the installer), and the
+/// tab hands its message to whichever `App` is current. Every reply that
+/// writes into [`Cache::entangled`] therefore carries the generation it was
+/// issued under, and [`Cache::accept_entanglement`] compares it with the
+/// receiving instance's. Process-wide monotonic, so two opens of the same
+/// Cube never share one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AppGeneration(u64);
+
+impl AppGeneration {
+    /// A fresh, never-handed-out generation.
+    pub fn next() -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Self(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+    }
+}
+
+/// Where an entanglement lookup was issued from: the `App` instance, and the
+/// chain whose twin it asked about. Carried by every reply so the receiving
+/// `App` can tell its own lookups from a predecessor's ([`Cache::accept_entanglement`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LookupOrigin {
+    pub app: AppGeneration,
+    pub chain: crate::chain::ChainId,
+}
+
 #[derive(Debug, Clone)]
 pub struct Cache {
+    /// The `App` instance this cache belongs to. See [`AppGeneration`].
+    pub app_generation: AppGeneration,
     pub datadir_path: CoincubeDirectory,
     /// IBD progress (0.0–1.0) of the pending local Bitcoind, polled via its
     /// RPC.  `None` when no local node is pending.
@@ -162,7 +193,8 @@ pub struct Cache {
     /// answers are stored — a deposit absent from the map has not been
     /// checked (or the check failed) and is retried after the next sync; a
     /// negative older than `NEGATIVE_ANSWER_TTL` is re-queried; a positive is
-    /// terminal. In-memory only. Always empty on a Bitcoin-family Cube. Write
+    /// terminal. In-memory only. Always empty on a Bitcoin-family Cube. Every
+    /// lookup reply enters through [`Self::accept_entanglement`], every write
     /// through [`Self::record_entanglement`].
     pub entangled: std::collections::HashMap<
         coincube_core::miniscript::bitcoin::Txid,
@@ -279,6 +311,7 @@ pub struct Cache {
 impl std::default::Default for Cache {
     fn default() -> Self {
         Self {
+            app_generation: AppGeneration::next(),
             connect_transport_key: None,
             cube_encryption_key: None,
             datadir_path: CoincubeDirectory::new(std::path::PathBuf::new()),
@@ -341,14 +374,19 @@ impl Cache {
             .unwrap_or(crate::services::entangled::Entanglement::Unknown)
     }
 
-    /// Record a lookup answer. `Unknown` is never stored; `Entangled` is
-    /// terminal and is never overwritten by a later negative. Returns whether
-    /// the cache changed.
+    /// Record a lookup answer observed at `observed_at`. `Unknown` is never
+    /// stored. `Entangled` is terminal: it replaces any negative whatever the
+    /// instants say, and is never overwritten. A negative is monotonic in its
+    /// observation instant: it replaces an existing negative only if it was
+    /// observed strictly later, so an older observation that lands later —
+    /// the first answer of a slow batch, a reply from a screen since closed —
+    /// cannot re-stamp a newer one and extend its `NEGATIVE_ANSWER_TTL`
+    /// (`#395`). Returns whether the cache changed.
     pub fn record_entanglement(
         &mut self,
         txid: coincube_core::miniscript::bitcoin::Txid,
         answer: crate::services::entangled::Entanglement,
-        now: std::time::Instant,
+        observed_at: std::time::Instant,
     ) -> bool {
         use crate::services::entangled::{CachedEntanglement, Entanglement};
         if !answer.is_resolved() {
@@ -358,15 +396,80 @@ impl Cache {
             if matches!(existing.answer, Entanglement::Entangled) {
                 return false;
             }
+            if !matches!(answer, Entanglement::Entangled) && observed_at <= existing.resolved_at {
+                return false;
+            }
         }
         self.entangled.insert(
             txid,
             CachedEntanglement {
                 answer,
-                resolved_at: now,
+                resolved_at: observed_at,
             },
         );
         true
+    }
+
+    /// Apply a lookup reply to this Cube's cache — the one entry point for
+    /// every reply, whichever message carried it (`#393`).
+    ///
+    /// `origin` is where the lookup was issued; `chain` is this Cube's chain
+    /// (`None` without a Vault). A reply from this `App` instance is applied
+    /// in full. A reply from another instance — a task that outlived a Cube
+    /// switch — is that Cube's, not this one's: its negatives are dropped
+    /// (this instance asks about its own deposits after its next sync, and a
+    /// stale negative would only pre-empt that), while a terminal positive
+    /// for the same chain is still recorded, because a transaction on the
+    /// twin chain is there regardless of which Cube asked. A different chain
+    /// says nothing about this Cube's deposits and is dropped whole, which
+    /// also keeps a Bitcoin-family Cube's cache empty. Every write goes
+    /// through [`Self::record_entanglement`], so nothing here can re-stamp a
+    /// newer negative. Returns whether the cache changed.
+    pub fn accept_entanglement(
+        &mut self,
+        origin: LookupOrigin,
+        chain: Option<crate::chain::ChainId>,
+        answers: &[crate::services::entangled::LookupAnswer],
+    ) -> bool {
+        use crate::services::entangled::Entanglement;
+        let own = self.issued_here(origin);
+        let same_chain = Some(origin.chain) == chain;
+        answers.iter().fold(false, |changed, reply| {
+            let admitted = own || (same_chain && matches!(reply.answer, Entanglement::Entangled));
+            (admitted && self.record_entanglement(reply.txid, reply.answer, reply.observed_at))
+                || changed
+        })
+    }
+
+    /// Whether a lookup was issued by the `App` instance this cache belongs
+    /// to — as opposed to a predecessor whose task outlived a Cube switch.
+    pub fn issued_here(&self, origin: LookupOrigin) -> bool {
+        origin.app == self.app_generation
+    }
+
+    /// A sync-driven lookup batch landed (`Message::EntangledLookups`).
+    /// `in_flight` is the receiving `App`'s single-flight claim set: a batch
+    /// issued here releases its whole claim first — by claim, not by reply,
+    /// so a txid that answered `Unknown` (never cached) is asked again next
+    /// sync instead of staying in flight forever. A batch from a predecessor
+    /// instance claimed on *that* instance and releases nothing here, where
+    /// the same txids may be legitimately in flight for this instance's own
+    /// batch. Its answers then go through [`Self::accept_entanglement`].
+    /// Returns whether the cache changed.
+    pub fn entangled_batch_landed(
+        &mut self,
+        in_flight: &mut std::collections::HashSet<coincube_core::miniscript::bitcoin::Txid>,
+        chain: Option<crate::chain::ChainId>,
+        origin: LookupOrigin,
+        claimed: &[coincube_core::miniscript::bitcoin::Txid],
+        answers: &[crate::services::entangled::LookupAnswer],
+    ) -> bool {
+        if self.issued_here(origin) {
+            for txid in claimed {
+                in_flight.remove(txid);
+            }
+        }
+        self.accept_entanglement(origin, chain, answers)
     }
 
     pub fn blockheight(&self) -> i32 {
@@ -476,15 +579,27 @@ impl FiatPriceRequest {
 #[cfg(test)]
 mod entangled_cache_tests {
     use super::*;
-    use crate::services::entangled::Entanglement;
+    use crate::chain::ChainId;
+    use crate::services::entangled::{Entanglement, LookupAnswer, NEGATIVE_ANSWER_TTL};
     use coincube_core::miniscript::bitcoin::Txid;
     use std::str::FromStr;
+    use std::time::Duration;
+
+    fn txid(b: u8) -> Txid {
+        Txid::from_str(&format!("{:0>64}", b)).unwrap()
+    }
+
+    fn observed(txid: Txid, answer: Entanglement, observed_at: Instant) -> LookupAnswer {
+        LookupAnswer {
+            txid,
+            answer,
+            observed_at,
+        }
+    }
 
     #[test]
     fn positives_are_terminal_negatives_are_replaceable_unknown_is_never_stored() {
-        let txid =
-            Txid::from_str("0000000000000000000000000000000000000000000000000000000000000009")
-                .unwrap();
+        let txid = txid(9);
         let now = Instant::now();
         let mut cache = Cache::default();
         assert_eq!(cache.entanglement_of(&txid), Entanglement::Unknown);
@@ -497,7 +612,7 @@ mod entangled_cache_tests {
         assert_eq!(cache.entangled[&txid].resolved_at, now);
 
         // A later positive replaces the negative…
-        let later = now + std::time::Duration::from_secs(10);
+        let later = now + Duration::from_secs(10);
         assert!(cache.record_entanglement(txid, Entanglement::Entangled, later));
         assert_eq!(cache.entanglement_of(&txid), Entanglement::Entangled);
         // …and is terminal: neither a negative nor Unknown moves it.
@@ -505,5 +620,272 @@ mod entangled_cache_tests {
         assert!(!cache.record_entanglement(txid, Entanglement::Unknown, later));
         assert_eq!(cache.entanglement_of(&txid), Entanglement::Entangled);
         assert_eq!(cache.entangled[&txid].resolved_at, later);
+    }
+
+    /// `#395`: negatives are ordered by observation, not by arrival. A stale
+    /// `NotEntangled` landing after a newer one leaves the newer instant in
+    /// place — so the next refresh is due when the *newer* observation ages
+    /// out, not `NEGATIVE_ANSWER_TTL` after the stale one was processed. A
+    /// positive replaces a negative whatever the instants say.
+    #[test]
+    fn a_stale_negative_cannot_re_stamp_a_newer_one() {
+        let txid = txid(9);
+        let older = Instant::now();
+        let newer = older + Duration::from_secs(30);
+        let mut cache = Cache::default();
+
+        assert!(cache.record_entanglement(txid, Entanglement::NotEntangled, newer));
+        assert!(
+            !cache.record_entanglement(txid, Entanglement::NotEntangled, older),
+            "an older observation does not replace a newer one"
+        );
+        assert_eq!(cache.entangled[&txid].resolved_at, newer);
+        assert!(
+            !cache.record_entanglement(txid, Entanglement::NotEntangled, newer),
+            "the same observation again is not a change"
+        );
+        // The refresh is due relative to the newer observation, not the
+        // stale one's arrival.
+        let refresh_due = newer + NEGATIVE_ANSWER_TTL;
+        assert!(cache.entangled[&txid].needs_refresh(refresh_due));
+        assert!(!cache.entangled[&txid].needs_refresh(refresh_due - Duration::from_secs(1)));
+
+        // A strictly newer negative does move it.
+        let newest = newer + Duration::from_secs(1);
+        assert!(cache.record_entanglement(txid, Entanglement::NotEntangled, newest));
+        assert_eq!(cache.entangled[&txid].resolved_at, newest);
+
+        // An older positive still wins: Entangled is terminal truth.
+        assert!(cache.record_entanglement(txid, Entanglement::Entangled, older));
+        assert_eq!(cache.entanglement_of(&txid), Entanglement::Entangled);
+        assert_eq!(cache.entangled[&txid].resolved_at, older);
+    }
+
+    /// `#393`: a reply issued by App instance A, arriving after the tab has
+    /// moved to instance B, does not put A's negatives into B's cache; B's
+    /// own reply still applies in full; a terminal positive for the same
+    /// chain is not lost to the scoping; a different chain's reply is dropped
+    /// whole, positives included.
+    #[test]
+    fn a_reply_from_another_app_instance_only_contributes_same_chain_positives() {
+        let now = Instant::now();
+        let a = Cache::default();
+        let mut b = Cache::default();
+        assert_ne!(a.app_generation, b.app_generation, "never reused");
+        let chain = ChainId::BitcoinBlake2b;
+        let from_a = LookupOrigin {
+            app: a.app_generation,
+            chain,
+        };
+        let from_b = LookupOrigin {
+            app: b.app_generation,
+            chain,
+        };
+
+        // A's negative and Unknown never reach B's cache; A's positive does.
+        let changed = b.accept_entanglement(
+            from_a,
+            Some(chain),
+            &[
+                observed(txid(1), Entanglement::NotEntangled, now),
+                observed(txid(2), Entanglement::Unknown, now),
+                observed(txid(3), Entanglement::Entangled, now),
+            ],
+        );
+        assert!(changed, "the positive is a change");
+        assert_eq!(
+            b.entanglement_of(&txid(1)),
+            Entanglement::Unknown,
+            "A's negative never reaches B's cache"
+        );
+        assert_eq!(b.entanglement_of(&txid(2)), Entanglement::Unknown);
+        assert_eq!(
+            b.entanglement_of(&txid(3)),
+            Entanglement::Entangled,
+            "A's terminal positive is not lost to the scoping"
+        );
+        assert_eq!(b.entangled.len(), 1);
+        assert!(
+            !b.accept_entanglement(
+                from_a,
+                Some(chain),
+                &[observed(txid(1), Entanglement::NotEntangled, now)]
+            ),
+            "a stale instance's negative alone is no change"
+        );
+
+        // B's own reply applies in full.
+        assert!(b.accept_entanglement(
+            from_b,
+            Some(chain),
+            &[
+                observed(txid(1), Entanglement::NotEntangled, now),
+                observed(txid(2), Entanglement::Unknown, now),
+            ],
+        ));
+        assert_eq!(b.entanglement_of(&txid(1)), Entanglement::NotEntangled);
+        assert_eq!(b.entangled[&txid(1)].resolved_at, now);
+        assert_eq!(b.entanglement_of(&txid(2)), Entanglement::Unknown);
+
+        // A's stale negative, observed earlier, cannot re-stamp B's — nor,
+        // observed later, replace it: it is not B's lookup at all.
+        for at in [now - Duration::from_secs(5), now + Duration::from_secs(5)] {
+            assert!(!b.accept_entanglement(
+                from_a,
+                Some(chain),
+                &[observed(txid(1), Entanglement::NotEntangled, at)]
+            ));
+            assert_eq!(b.entangled[&txid(1)].resolved_at, now);
+        }
+
+        // Another chain's reply — a BTCB2 testnet Cube's lookup landing on a
+        // mainnet Cube, or on a Bitcoin-family Cube — is dropped whole.
+        let mut bitcoin_cube = Cache::default();
+        for (cube_chain, reply_chain) in [
+            (
+                Some(ChainId::BitcoinBlake2b),
+                ChainId::BitcoinBlake2bTestnet4,
+            ),
+            (Some(ChainId::Bitcoin), ChainId::BitcoinBlake2b),
+            (None, ChainId::BitcoinBlake2b),
+        ] {
+            assert!(!bitcoin_cube.accept_entanglement(
+                LookupOrigin {
+                    app: a.app_generation,
+                    chain: reply_chain,
+                },
+                cube_chain,
+                &[
+                    observed(txid(3), Entanglement::Entangled, now),
+                    observed(txid(4), Entanglement::NotEntangled, now),
+                ],
+            ));
+            assert!(bitcoin_cube.entangled.is_empty(), "{:?}", cube_chain);
+        }
+    }
+
+    /// `#395`, the scenario as filed: a sync batch started before the spend
+    /// screen's re-check lands after it. The batch's answer for the shared
+    /// deposit was observed *before* the screen's, so it does not re-stamp
+    /// the screen's `resolved_at`, and the next refresh is still due
+    /// `NEGATIVE_ANSWER_TTL` after the screen's observation — not after the
+    /// batch was processed.
+    #[test]
+    fn a_batch_observed_before_a_screen_negative_does_not_re_stamp_it() {
+        use std::collections::HashSet;
+        let chain = ChainId::BitcoinBlake2b;
+        let mut cache = Cache::default();
+        let origin = LookupOrigin {
+            app: cache.app_generation,
+            chain,
+        };
+        let mut in_flight: HashSet<Txid> = HashSet::from([txid(1), txid(2)]);
+
+        // The batch asks about 1 first (observed at t0), then 2 (slow).
+        let t0 = Instant::now();
+        // Meanwhile the spend screen asks about 1 and gets its answer at t1.
+        let t1 = t0 + Duration::from_secs(20);
+        assert!(cache.accept_entanglement(
+            origin,
+            Some(chain),
+            &[observed(txid(1), Entanglement::NotEntangled, t1)]
+        ));
+        // The batch lands at t2, carrying 1's answer observed at t0.
+        let t2 = t1 + Duration::from_secs(40);
+        let changed = cache.entangled_batch_landed(
+            &mut in_flight,
+            Some(chain),
+            origin,
+            &[txid(1), txid(2)],
+            &[
+                observed(txid(1), Entanglement::NotEntangled, t0),
+                observed(txid(2), Entanglement::NotEntangled, t2),
+            ],
+        );
+        assert!(changed, "2 is new");
+        assert!(in_flight.is_empty());
+        assert_eq!(
+            cache.entangled[&txid(1)].resolved_at,
+            t1,
+            "the screen's newer observation stands"
+        );
+        assert_eq!(cache.entangled[&txid(2)].resolved_at, t2);
+        assert!(
+            cache.entangled[&txid(1)].needs_refresh(t1 + NEGATIVE_ANSWER_TTL),
+            "refresh is due relative to the screen's observation"
+        );
+        assert!(!cache.entangled[&txid(1)]
+            .needs_refresh(t1 + NEGATIVE_ANSWER_TTL - Duration::from_secs(1)));
+    }
+
+    /// `#393`, the sync-driven variant: a batch issued here releases its
+    /// claim as a whole (`Unknown` included) and is applied; a predecessor
+    /// instance's batch releases nothing on this instance — its `claimed`
+    /// may name txids this instance has in flight for its own batch — and
+    /// contributes only same-chain positives.
+    #[test]
+    fn a_batch_from_another_app_instance_releases_no_claim_here() {
+        use std::collections::HashSet;
+        let now = Instant::now();
+        let chain = ChainId::BitcoinBlake2b;
+        let a = Cache::default();
+        let mut b = Cache::default();
+        let from_a = LookupOrigin {
+            app: a.app_generation,
+            chain,
+        };
+        let from_b = LookupOrigin {
+            app: b.app_generation,
+            chain,
+        };
+        // B has its own batch in flight on 1 and 2.
+        let mut in_flight: HashSet<Txid> = HashSet::from([txid(1), txid(2)]);
+
+        // A's batch, claimed on A, lands on B: B's claim is untouched, A's
+        // negative for 1 is dropped, A's positive for 3 is kept.
+        let changed = b.entangled_batch_landed(
+            &mut in_flight,
+            Some(chain),
+            from_a,
+            &[txid(1), txid(2), txid(3)],
+            &[
+                observed(txid(1), Entanglement::NotEntangled, now),
+                observed(txid(2), Entanglement::Unknown, now),
+                observed(txid(3), Entanglement::Entangled, now),
+            ],
+        );
+        assert!(changed);
+        assert_eq!(
+            in_flight,
+            HashSet::from([txid(1), txid(2)]),
+            "claim untouched"
+        );
+        assert_eq!(
+            b.entanglement_of(&txid(1)),
+            Entanglement::Unknown,
+            "A's negative never reaches B's cache"
+        );
+        assert_eq!(
+            b.entanglement_of(&txid(3)),
+            Entanglement::Entangled,
+            "A's terminal positive is kept"
+        );
+
+        // B's own batch: the whole claim is released, `Unknown` included,
+        // and every resolved answer is recorded.
+        let changed = b.entangled_batch_landed(
+            &mut in_flight,
+            Some(chain),
+            from_b,
+            &[txid(1), txid(2)],
+            &[
+                observed(txid(1), Entanglement::NotEntangled, now),
+                observed(txid(2), Entanglement::Unknown, now),
+            ],
+        );
+        assert!(changed);
+        assert!(in_flight.is_empty(), "released by claim, not by reply");
+        assert_eq!(b.entanglement_of(&txid(1)), Entanglement::NotEntangled);
+        assert_eq!(b.entanglement_of(&txid(2)), Entanglement::Unknown);
     }
 }

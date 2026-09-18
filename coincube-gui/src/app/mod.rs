@@ -2735,14 +2735,25 @@ impl App {
         }
         self.entangled_in_flight.extend(pending.iter().copied());
         let chain = wallet.chain;
+        let origin = cache::LookupOrigin {
+            app: self.cache.app_generation,
+            chain,
+        };
         let claimed = pending.clone();
         Task::perform(
             crate::services::entangled::lookup_all(client, chain, pending),
             move |answers| Message::EntangledLookups {
+                origin,
                 claimed: claimed.clone(),
                 answers,
             },
         )
+    }
+
+    /// The chain of this Cube's Vault, `None` without one — what a lookup
+    /// reply's [`cache::LookupOrigin::chain`] is compared with.
+    fn vault_chain(&self) -> Option<crate::chain::ChainId> {
+        self.wallet.as_ref().map(|wallet| wallet.chain)
     }
 
     /// Fire-and-forget vault recovery heartbeat (Estate Notifications —
@@ -4415,58 +4426,55 @@ impl App {
                     }
                 }
             }
-            Message::EntangledLookups { claimed, answers } => {
-                // Release the whole claim first — by claim, not by reply, so a
-                // txid that answered `Unknown` (never cached) is asked again
-                // next sync instead of staying in flight forever.
-                for txid in &claimed {
-                    self.entangled_in_flight.remove(txid);
-                }
-                let now = std::time::Instant::now();
-                let changed = answers.into_iter().fold(false, |changed, (txid, answer)| {
-                    self.cache.record_entanglement(txid, answer, now) || changed
-                });
-                if !changed {
-                    return Task::none();
-                }
-                return Task::done(Message::CacheUpdated);
-            }
-            Message::EntanglementAnswered { answers } => {
-                let now = std::time::Instant::now();
-                let changed = answers.into_iter().fold(false, |changed, (txid, answer)| {
-                    self.cache.record_entanglement(txid, answer, now) || changed
-                });
+            Message::EntangledLookups {
+                origin,
+                claimed,
+                answers,
+            } => {
+                // Claim release and cache write, scoped to the instance that
+                // issued the batch (`#393`): see `Cache::entangled_batch_landed`.
+                let chain = self.vault_chain();
+                let changed = self.cache.entangled_batch_landed(
+                    &mut self.entangled_in_flight,
+                    chain,
+                    origin,
+                    &claimed,
+                    &answers,
+                );
                 if !changed {
                     return Task::none();
                 }
                 return Task::done(Message::CacheUpdated);
             }
             Message::EntangledRevalidated {
+                origin,
                 spend,
                 generation,
                 answers,
             } => {
                 // The spend screen's own re-check of a replayable spend's
-                // inputs. Only **terminal positives** are cached here, before
-                // the generation is known: a stale reply's `Entangled` is
-                // still true. A negative is recorded only once the panel has
-                // accepted the reply for its current generation
-                // (`Message::EntanglementAnswered`), so a stale *screen* reply
-                // never re-stamps a negative's resolve instant. The
-                // sync-driven batches (`EntangledLookups` above) still stamp
-                // at processing time and can re-stamp an older negative after
-                // a newer screen answer — #395 carries the observation-time
-                // fix for both paths.
-                let now = std::time::Instant::now();
-                let changed = answers
-                    .iter()
-                    .filter(|(_, answer)| {
-                        matches!(answer, crate::services::entangled::Entanglement::Entangled)
-                    })
-                    .fold(false, |changed, (txid, answer)| {
-                        self.cache.record_entanglement(*txid, *answer, now) || changed
-                    });
+                // inputs. Every resolved answer is cached before the reply is
+                // routed, stale-by-check-generation ones included: each
+                // carries its own observation instant and the cache is
+                // monotonic in it (`#395`), so a reply from a screen since
+                // closed, or from before a signature was added, cannot
+                // re-stamp a newer negative — and its `Entangled` is still
+                // true. The check generation is the *panel's* filter, for the
+                // claim it clears, not the cache's. A reply from a predecessor
+                // `App` instance (`#393`) contributes at most same-chain
+                // positives (`Cache::accept_entanglement`) and is not routed:
+                // the screen that asked is gone with that instance.
+                let changed = self
+                    .cache
+                    .accept_entanglement(origin, self.vault_chain(), &answers);
+                if !self.cache.issued_here(origin) {
+                    if changed {
+                        return Task::done(Message::CacheUpdated);
+                    }
+                    return Task::none();
+                }
                 let routed = Message::EntangledRevalidated {
+                    origin,
                     spend,
                     generation,
                     answers,
