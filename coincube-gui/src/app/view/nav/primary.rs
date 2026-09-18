@@ -31,6 +31,20 @@ const HIGHLIGHT_WIDTH: f32 = 5.0;
 const ICON_SIZE: f32 = 22.0;
 const LABEL_SIZE: f32 = 10.0;
 
+/// Primary rail: one icon+label button per visible [`TopLevel`] section,
+/// with the active section highlighted.
+///
+/// Which sections appear depends on `ctx` — Liquid is hidden unless the
+/// account is grandfathered or a Liquid wallet already exists, the Vault
+/// slot becomes a "setup vault" action when the cube has no vault, and
+/// Marketplace is hidden entirely unless the server permits one of its
+/// children. Spark and Liquid are greyed out (not hidden) on networks
+/// where they have no backend.
+///
+/// The returned column is only as tall as its items: [`super::sidebar`]
+/// wraps both rails in a single scrollable, full-height container that
+/// paints the shared background, so the rail must not claim `Length::Fill`
+/// itself or the scroll region would never overflow.
 pub fn rail<'a>(menu: &Menu, ctx: &NavContext<'a>) -> Element<'a, Message> {
     let current: TopLevel = menu.into();
 

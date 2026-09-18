@@ -62,9 +62,17 @@ pub const TERTIARY_TOP_OFFSET: f32 = WORDMARK_BAND_HEIGHT + IDENTITY_BLOCK_HEIGH
 /// ```text
 /// [ Tenshu logo (mark + label)    ]  full 144px
 /// [ avatar + cube name + LN addr  ]  full 144px — pushes both rails down
-/// [ primary (72px) | secondary (72px) ]
+/// [ primary (72px) | secondary (72px) ]  fills the remaining height
 /// [ dark/light toggle             ]  full 144px
 /// ```
+///
+/// The two rails sit inside a single scrollable that takes all the height
+/// left between the identity block and the toggle. When the rails are
+/// taller than that (short windows, many submenu items) they scroll
+/// together rather than pushing the toggle off-screen or being clipped.
+/// The rails themselves are content-sized and unstyled; the surrounding
+/// container paints the shared `sidebar_primary` background so it covers
+/// the whole band even when the rails are shorter than the viewport.
 pub fn sidebar<'a>(menu: &Menu, ctx: &NavContext<'a>) -> Element<'a, Message> {
     // Base sidebar is always 144px wide (primary + secondary rails only).
     // The tertiary rail lives as an overlay on the content area — see

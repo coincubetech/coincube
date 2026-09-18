@@ -17,6 +17,18 @@ use iced::{widget::container, Length};
 
 pub const RAIL_WIDTH: f32 = 72.0;
 
+/// Secondary rail: the submenu of whichever [`TopLevel`] section `menu`
+/// currently resolves to, one [`render_item_row`] per [`super::SubItem`].
+///
+/// The per-section item lists live in the sibling modules (`cube`,
+/// `spark`, `liquid`, `vault`, `marketplace`); this function only picks
+/// the right one and lays it out.
+///
+/// Like [`super::primary::rail`], the column is sized to its content and
+/// carries no background of its own — [`super::sidebar`] wraps both rails
+/// in one scrollable, full-height container styled with
+/// `sidebar_primary`, so a rail taller than the window scrolls instead of
+/// being clipped.
 pub fn rail<'a>(menu: &Menu, ctx: &NavContext<'a>) -> Element<'a, Message> {
     let current: TopLevel = menu.into();
 
