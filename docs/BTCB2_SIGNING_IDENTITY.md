@@ -54,7 +54,7 @@ Proto additions land in `coincube-api` first and reach this repo via `make sync-
 | when | rule | refusal |
 |---|---|---|
 | device registration (`coincube-gui/src/services/connect/grpc/device.rs:47`) | add `chain-identity-v1` to the capabilities sent (`create_session, cancel_session` today) | — |
-| after `ResolveSigners` (`on_signers_resolved`) | `resp.network` **non-empty** and ≠ `wallet.chain.api_str()` → create **nothing** | R1.10: "Connect reports this Vault on a different network than this Cube. Nothing was sent. Reopen the Cube; if this repeats, contact support." |
+| after `ResolveSigners` (`on_signers_resolved`) | `resp.network` **non-empty** and ≠ `wallet.chain.api_str()` → create **nothing**. The comparison is a literal string compare: Connect canonicalises the Cube's stored value first (a legacy `bitcoin` row is echoed as `mainnet`; canonical §2.1), so the desktop never maps aliases | R1.10: "Connect reports this Vault on a different network than this Cube. Nothing was sent. Reopen the Cube; if this repeats, contact support." |
 | same | `resp.network` **empty** (pre-identity Connect): BTCB2 Vault → create **nothing**; Bitcoin-family Vault → proceed during the compatibility window (canonical §7, Q1), still sending `network` on create | R1.11 on BTCB2: "Connect needs updating before Keychain can sign on Bitcoin Blake2b. Nothing was sent to the signer." |
 | same | on a BTCB2 Vault, a target whose `capabilities` lack `chain-identity-v1` (and, after B3.2, `btcb2-unified-v1`), or an `unresolved` entry with `signer_app_outdated` | R1.7 row: "<name>'s Keychain needs updating before it can sign on Bitcoin Blake2b." — no session for that signer |
 | `create_session_for` | `network: wallet.chain.api_str()` on every `CreateSigningSessionRequest` | — |
@@ -103,7 +103,16 @@ phone-reported strings). `PAIRING_PROOF_DOMAIN` becomes per-version; keep
 the known-answer vector for v3 must be shared with
 `keychain-app/test/services/local_signer/pairing_qr_test.dart` ("matches the locked Rust ↔ Dart vector").
 
-### 4.3 `grpc/local_envelope.proto` delta (byte-identical in both repos; `make sync-local-envelope-proto`)
+### 4.3 `grpc/local_envelope.proto` delta (byte-identical in both repos)
+
+This repo's `grpc/local_envelope.proto` is the **source of truth** for the LAN
+protocol; `coincube-gui/build.rs` compiles it. There is **no** sync target for it in
+this repo's `Makefile` (only `sync-proto`, which copies `connect.proto` *from*
+`coincube-api`); the `sync-local-envelope-proto` target named in the proto's own
+header comment lives in **keychain-app**'s Makefile and copies *from* this repo
+(`make sync-local-envelope-proto COINCUBE_DESKTOP_PATH=<this checkout>` then
+`make proto-gen` there). The implementing slice edits the file here, commits, and the
+Keychain slice pulls it; byte-identity is checked by diffing the two files.
 
 ```proto
 message SignerBinding {
@@ -132,10 +141,14 @@ is unchanged: the chain rides `connect.v1.SigningSession.network` (field 21).
   `#[serde(default)] pub capabilities: Vec<String>` (from `PairingComplete`; dropped
   today). `network: None` is a **legacy row** (paired under v2).
 - `pairing_listener.rs`, after the existing proof / `SignerBinding` / fingerprint
-  checks (`:300-419`): on a v3 offer `reported.network` must be non-empty (else
+  checks (`:300-419`), where `reported` is the existing alias for
+  `complete.signer_binding.as_ref()` (`:372`) — the new field is
+  `SignerBinding.network` (§4.3), **not** a field on `PairingComplete`: on a v3 offer
+  `reported.network` (i.e. `complete.signer_binding.network`) must be non-empty (else
   R2.5 "Update Keychain and pair again.") and equal `offer.net` (else R2.4 "Exact
-  pairing identity mismatch; pair again."). Store both fields on the row. The
-  durable pairing transaction (`PAIRING_PROTOCOL.md`) is unchanged.
+  pairing identity mismatch; pair again."). Store that value and
+  `complete.capabilities` on the row. The durable pairing transaction
+  (`PAIRING_PROTOCOL.md`) is unchanged.
 - One row per phone cert stays the model (`pairing_transaction.rs:99`): a pairing
   is now for one `(vault, key, chain)`; switching chains on the same desktop is a
   re-pair, as switching Vaults already is (canonical Q2).
