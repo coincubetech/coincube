@@ -2134,7 +2134,12 @@ fn unresolved_signer_reason(entry: &str) -> Option<&str> {
     rest.strip_suffix(')')
 }
 
-/// User-facing copy for one unresolved signer.
+/// User-facing copy for one unresolved signer — the **only** place that
+/// turns an unresolved entry into words. Every surface that shows
+/// `unresolved()` (this modal's view, the unified picker's
+/// `SignModal::keychain_notices`) calls it; a second hand-written
+/// diagnosis is how the false "no registered device" claim survived on
+/// the picker after it was fixed here.
 ///
 /// The arms match the **exact** `UnresolvedSigner.reason` tokens Connect emits —
 /// the Go constants in `coincube-api`
@@ -2149,7 +2154,7 @@ fn unresolved_signer_reason(entry: &str) -> Option<&str> {
 /// fallthrough appended "owner has no registered device" to every unrecognised
 /// token — for `transport_key_stale` that told a signer who owns a registered
 /// device that they had none, while the real fix was one screen away.
-fn friendly_unresolved_signer(entry: &str) -> String {
+pub(crate) fn friendly_unresolved_signer(entry: &str) -> String {
     match unresolved_signer_reason(entry) {
         Some("no_device_registered") => format!(
             "{} hasn't set up the Keychain app yet. Ask them to install it \
@@ -2315,7 +2320,11 @@ mod tests {
     // (`services/connect/signing/grpc/session_server.go`). A paraphrase would
     // pass here while the arm never fires in production.
 
-    const FALSE_DIAGNOSIS: &str = "owner has no registered device";
+    // The two wordings the desktop used to append to every unrecognised
+    // reason: the modal said "owner has no registered device", the unified
+    // picker said "this signer has no registered device". The shared suffix
+    // catches both and any future rephrasing of the same claim.
+    const FALSE_DIAGNOSIS: &str = "no registered device";
 
     fn entry(reason: &str) -> String {
         // Same shape `on_signers_resolved` stores: "<fingerprint> (<reason>)".
@@ -2404,6 +2413,104 @@ mod tests {
             Some("nested) reason")
         );
         assert_eq!(unresolved_signer_reason("no parens here"), None);
+    }
+
+    /// The unified picker (`SignModal::keychain_notices`) shows the same
+    /// unresolved entries as this modal's own view. Driven through the real
+    /// producer — `ResolveSigners` returning `unresolved` rows, stored by
+    /// `on_signers_resolved` — and asserted as *equality* with
+    /// `friendly_unresolved_signer`, so the two surfaces cannot drift: the
+    /// picker used to hard-code "this signer has no registered device" for
+    /// every reason, and a string-list assertion here would not have caught
+    /// it.
+    #[test]
+    fn the_unified_picker_renders_unresolved_signers_through_the_shared_copy() {
+        use crate::dir::CoincubeDirectory;
+        use crate::services::coincube::VaultStatus;
+        use crate::services::connect::grpc::connect_v1::UnresolvedSigner;
+        use coincube_core::miniscript::bitcoin::Network;
+        use std::collections::HashSet;
+        use std::path::PathBuf;
+
+        let mut modal = modal();
+        // `on_signers_resolved` refuses to run before classification; an
+        // empty required list is enough — no targets, only unresolved rows.
+        modal.classified = Some(ClassifiedSigners {
+            vault: ConnectVaultResponse {
+                id: 1,
+                cube_id: 42,
+                timelock_days: 90,
+                timelock_expires_at: "2027-01-01T00:00:00Z".to_string(),
+                last_reset_at: "2026-01-01T00:00:00Z".to_string(),
+                status: VaultStatus::Active,
+                members: vec![],
+                fingerprint: String::new(),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                updated_at: "2026-01-01T00:00:00Z".to_string(),
+            },
+            required: vec![],
+            self_user_id: 7,
+        });
+        let unresolved = |fp: &str, reason: &str| UnresolvedSigner {
+            key_id: format!("key-{}", fp),
+            key_fingerprint: fp.to_string(),
+            owner_user_id: "user-9".to_string(),
+            reason: reason.to_string(),
+        };
+        let _ = modal.on_signers_resolved(ResolveSignersResponse {
+            targets: vec![],
+            unresolved: vec![
+                unresolved("f5acc2fd", "transport_key_stale"),
+                unresolved("8a64f2a9", "enrolled_device_unavailable"),
+                unresolved("0badcafe", "some_future_reason"),
+            ],
+        });
+        // The stored shape the copy function parses.
+        assert_eq!(
+            modal.unresolved(),
+            [
+                "f5acc2fd (transport_key_stale)".to_string(),
+                "8a64f2a9 (enrolled_device_unavailable)".to_string(),
+                "0badcafe (some_future_reason)".to_string(),
+            ]
+        );
+        let expected: Vec<String> = modal
+            .unresolved()
+            .iter()
+            .map(|u| friendly_unresolved_signer(u))
+            .collect();
+
+        let picker = super::super::psbt::SignModal::new(
+            HashSet::new(),
+            modal.wallet.clone(),
+            CoincubeDirectory::new(PathBuf::new()),
+            Network::Signet,
+            false,
+            None,
+            Some(modal),
+            true,
+        );
+        let notices = picker.keychain_notices();
+        assert_eq!(notices, expected);
+        assert_eq!(notices.len(), 3);
+        for notice in &notices {
+            assert!(!notice.contains(FALSE_DIAGNOSIS), "{}", notice);
+        }
+        assert!(
+            notices[0].contains("open Keychain on their phone"),
+            "{}",
+            notices[0]
+        );
+        assert!(
+            notices[1].contains("phone that holds this key"),
+            "{}",
+            notices[1]
+        );
+        assert!(
+            notices[2].contains("doesn't recognise this reason"),
+            "{}",
+            notices[2]
+        );
     }
 
     /// Verifies that `seal_signing_payloads` produces distinct ephemeral keys
