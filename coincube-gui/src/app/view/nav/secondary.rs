@@ -36,7 +36,5 @@ pub fn rail<'a>(menu: &Menu, ctx: &NavContext<'a>) -> Element<'a, Message> {
         list = list.push(render_item_row(menu, &item, RAIL_WIDTH));
     }
 
-    container(list)
-        .width(Length::Fixed(RAIL_WIDTH))
-        .into()
+    container(list).width(Length::Fixed(RAIL_WIDTH)).into()
 }

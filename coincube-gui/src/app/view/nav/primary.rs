@@ -87,9 +87,7 @@ pub fn rail<'a>(menu: &Menu, ctx: &NavContext<'a>) -> Element<'a, Message> {
         ));
     }
 
-    container(top)
-        .width(Length::Fixed(RAIL_WIDTH))
-        .into()
+    container(top).width(Length::Fixed(RAIL_WIDTH)).into()
 }
 
 fn item<'a>(t: TopLevel, active: bool, disabled_reason: Option<String>) -> Element<'a, Message> {
