@@ -11,7 +11,7 @@ use crate::{
 };
 
 use super::*;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 fn secp() -> secp256k1::Secp256k1<secp256k1::All> {
     secp256k1::Secp256k1::new()
@@ -45,6 +45,34 @@ fn add_legacy(
 ) -> UnifiedPsbt {
     let all: Vec<usize> = (0..psbt.psbt().inputs.len()).collect();
     add_legacy_to(psbt, signer, &all, secp)
+}
+
+/// Primary keys of the 2-of-3. The recovery leaf is `pkh(...)`, so
+/// `iter_pk` does not yield it.
+fn primary_keys(psbt: &UnifiedPsbt) -> BTreeSet<PublicKey> {
+    input_contexts(psbt).unwrap()[0]
+        .miniscript
+        .iter_pk()
+        .collect()
+}
+
+/// The one `partial_sigs` key that is not a primary key — signer 2's recovery
+/// key in this fixture.
+fn recovery_legacy_key(psbt: &UnifiedPsbt) -> PublicKey {
+    let primary = primary_keys(psbt);
+    let extras: Vec<PublicKey> = psbt.psbt().inputs[0]
+        .partial_sigs
+        .keys()
+        .copied()
+        .filter(|pk| !primary.contains(pk))
+        .collect();
+    assert_eq!(
+        extras.len(),
+        1,
+        "expected exactly one recovery-key legacy signature, got {:?}",
+        extras
+    );
+    extras[0]
 }
 
 /// What a plain cheapest-first satisfaction over *every* signature on `input`
@@ -1359,7 +1387,19 @@ fn issue_398_timelocked_recovery_legacy_is_not_an_alternate_without_csv() {
     // Signer 2 controls the recovery key. Its legacy signatures land, but the
     // recovery leaf stays locked (sequence is not a relative lock time).
     let mixed = add_legacy(&mixed, &fixture.signers[2], &secp);
-    assert!(!mixed.psbt().inputs[0].partial_sigs.is_empty());
+    let primary = primary_keys(&mixed);
+    let recovery = recovery_legacy_key(&mixed);
+    assert!(
+        mixed.psbt().inputs[0].partial_sigs.contains_key(&recovery),
+        "CSV-disabled negative must actually collect the recovery-key signature"
+    );
+    assert!(
+        mixed.psbt().inputs[0]
+            .partial_sigs
+            .keys()
+            .any(|pk| primary.contains(pk)),
+        "signer 2 also signs its primary key"
+    );
 
     let coincube = finalize_p2wsh_all_unified(&mixed, &secp).unwrap();
     // One unified + however many of signer 2's primary-key legacy the script
@@ -1377,4 +1417,69 @@ fn issue_398_timelocked_recovery_legacy_is_not_an_alternate_without_csv() {
         finalize_p2wsh_all_unified(&stripped, &secp),
         Err(UnifiedFinalizeError::Unsatisfiable { input: 0, .. })
     ));
+
+    // Recovery signature alone, still without CSV: the leaf is the thing
+    // that is locked, not merely "one primary is not enough".
+    let mut recovery_only = stripped;
+    recovery_only.psbt_mut().inputs[0]
+        .partial_sigs
+        .retain(|pk, _| *pk == recovery);
+    assert_eq!(recovery_only.psbt().inputs[0].partial_sigs.len(), 1);
+    assert!(matches!(
+        finalize_p2wsh_all_unified(&recovery_only, &secp),
+        Err(UnifiedFinalizeError::Unsatisfiable { input: 0, .. })
+    ));
+}
+
+/// The same recovery-key leftover becomes a Bitcoin-valid spend once CSV is
+/// enabled on the unsigned transaction *before* signing. Sequence is set
+/// first: a later sequence change would invalidate `SIGHASH_ALL`. Only the
+/// recovery signature is offered, so a second primary key cannot be what
+/// satisfies the input.
+#[test]
+fn issue_398_recovery_legacy_is_an_alternate_once_csv_is_enabled() {
+    use miniscript::psbt::PsbtExt;
+
+    let secp = secp();
+    let mut fixture = fixture(1);
+    fixture.psbt.psbt_mut().unsigned_tx.input[0].sequence = Sequence::from_height(46);
+    let signed = add_legacy(&fixture.psbt, &fixture.signers[2], &secp);
+    let primary = primary_keys(&signed);
+    let recovery = recovery_legacy_key(&signed);
+    let mut recovery_only = signed;
+    recovery_only.psbt_mut().inputs[0]
+        .partial_sigs
+        .retain(|pk, _| *pk == recovery);
+    assert_eq!(recovery_only.psbt().inputs[0].partial_sigs.len(), 1);
+    assert!(!primary.contains(&recovery));
+
+    let coincube = finalize_p2wsh_all_unified(&recovery_only, &secp).unwrap();
+    assert_eq!(
+        coincube.inputs[0],
+        InputWitnessReport {
+            unified_used: 0,
+            legacy_used: 1
+        }
+    );
+    assert!(!coincube.inputs[0].replay_protected());
+    assert_eq!(
+        coincube.transaction.input[0].sequence,
+        Sequence::from_height(46)
+    );
+    let (unified, legacy) = signature_elements(&coincube.transaction.input[0].witness);
+    assert!(unified.is_empty());
+    assert_eq!(legacy.len(), 1);
+
+    let mut bitcoin_view = recovery_only.psbt().clone();
+    bitcoin_view
+        .finalize_mut(&secp)
+        .expect("CSV-enabled recovery leaf is a standard satisfaction");
+    let alternate = bitcoin_view.extract_tx_unchecked_fee_rate();
+    assert_eq!(
+        alternate.compute_txid(),
+        coincube.transaction.compute_txid()
+    );
+    let (unified, legacy) = signature_elements(&alternate.input[0].witness);
+    assert!(unified.is_empty());
+    assert_eq!(legacy.len(), 1);
 }

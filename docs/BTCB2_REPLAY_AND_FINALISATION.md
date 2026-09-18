@@ -117,11 +117,12 @@ How leftover signatures arise in this build:
   (`AmbiguousSignatureEncoding`). It cannot bind a second file that never
   comes back.
 
-What the app can prevent locally: storing or exporting a `partial_sigs` set
-that already satisfies an input while a unified record is present; refusing
-further legacy collection once a unified path is finalisable. What it cannot
-revoke: signatures that already left on a Keychain, a hardware device, an
-exported file, or another coordinator.
+A follow-up collection/export policy, still tracked in `#398` and **not
+implemented in this slice**, could prevent storing or exporting a
+`partial_sigs` set that already satisfies an input while a unified record is
+present, and could refuse further legacy collection once a unified path is
+finalisable. The app cannot revoke signatures that already left on a
+Keychain, a hardware device, an exported file, or another coordinator.
 
 A unified spend is therefore not proof the Bitcoin twin cannot be spent, and
 not poison evidence. Lane B1.5's *Split — cannot replay* is the exclusivity
