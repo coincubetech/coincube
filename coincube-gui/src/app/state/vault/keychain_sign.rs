@@ -1964,38 +1964,12 @@ impl Modal for KeychainSignModal {
             col = col.push(p1_regular(format!("Couldn't start signing: {}", err)));
         }
 
-        // Unresolved (resolved-but-unaddressable) signers. The "owner
-        // has no registered device" case is the most common — the
-        // contact hasn't installed the Keychain app yet. Friendlier
-        // copy than the raw API reason string.
+        // Unresolved (resolved-but-unaddressable) signers. Friendlier
+        // copy than the raw API reason string; the mapping lives in
+        // `friendly_unresolved_signer` so it is testable against the
+        // exact wire tokens.
         for u in &self.unresolved {
-            // The format from `on_signers_resolved` is `"<fingerprint>
-            // (<reason>)"`. We surface the friendlier message but
-            // keep the original suffix so an unfamiliar reason still
-            // reaches the user verbatim (forward-compat with new API
-            // reason codes).
-            let friendly = if u.contains("no_device_registered") {
-                format!(
-                    "{} hasn't set up the Keychain app yet. Ask them to install it \
-                     and sign in, then retry.",
-                    u,
-                )
-            } else if u.contains("all_devices_revoked") {
-                format!(
-                    "{} has revoked every device on their account. They need to \
-                     register a new device before this transaction can be signed.",
-                    u,
-                )
-            } else if u.contains("owner_unknown") {
-                format!(
-                    "{} — this signer's owner isn't known to the backend. \
-                     Contact support if this persists.",
-                    u,
-                )
-            } else {
-                format!("Cannot sign with {} — owner has no registered device", u)
-            };
-            col = col.push(p1_regular(friendly));
+            col = col.push(p1_regular(friendly_unresolved_signer(u)));
         }
         match self.phase {
             Phase::Loading => col = col.push(p1_regular("Loading vault members…")),
@@ -2152,6 +2126,75 @@ fn friendly_grpc_error(status: tonic::Status) -> (String, bool) {
     }
 }
 
+/// The reason token in an unresolved-signer entry as stored by
+/// `on_signers_resolved` (`"<fingerprint> (<reason>)"`), or `None` when the
+/// entry is not in that shape.
+fn unresolved_signer_reason(entry: &str) -> Option<&str> {
+    let (_, rest) = entry.rsplit_once(" (")?;
+    rest.strip_suffix(')')
+}
+
+/// User-facing copy for one unresolved signer.
+///
+/// The arms match the **exact** `UnresolvedSigner.reason` tokens Connect emits —
+/// the Go constants in `coincube-api`
+/// `services/connect/signing/grpc/session_server.go` are the source of truth,
+/// not the comment on the proto field (which has been wrong in both directions:
+/// it listed `owner_unknown`, which no server path emits, and omitted
+/// `transport_key_stale`, which the server has emitted all along). A substring
+/// or paraphrase match here would pass its test and never fire in production.
+///
+/// The fallthrough carries **no diagnosis**: an unfamiliar reason reaches the
+/// user verbatim, and nothing else is claimed about it. Before this fix the
+/// fallthrough appended "owner has no registered device" to every unrecognised
+/// token — for `transport_key_stale` that told a signer who owns a registered
+/// device that they had none, while the real fix was one screen away.
+fn friendly_unresolved_signer(entry: &str) -> String {
+    match unresolved_signer_reason(entry) {
+        Some("no_device_registered") => format!(
+            "{} hasn't set up the Keychain app yet. Ask them to install it \
+             and sign in, then retry.",
+            entry,
+        ),
+        Some("all_devices_revoked") => format!(
+            "{} has revoked every device on their account. They need to \
+             register a new device before this transaction can be signed.",
+            entry,
+        ),
+        // The target device's transport key is past its confirmation TTL.
+        // Opening Keychain re-registers the device; nothing about the
+        // account's registration state is wrong, so say nothing about it.
+        Some("transport_key_stale") => format!(
+            "{} — this signer's Keychain hasn't checked in with Connect \
+             recently. Ask them to open Keychain on their phone, then retry.",
+            entry,
+        ),
+        // The key is bound to a device Connect can no longer target (revoked,
+        // deleted, or owned by another account). Connect does not guess a
+        // replacement; Keychain re-claims the key on launch on the handset
+        // that holds it (keychain-app#145).
+        Some("enrolled_device_unavailable") => format!(
+            "{} is bound to a Keychain that can no longer be reached. Ask them \
+             to open Keychain on the phone that holds this key, then retry.",
+            entry,
+        ),
+        // Kept for compatibility, but no server code path emits this token
+        // today; the Go constants above are the source of truth. Do not read
+        // "three matching arms" as "the list is complete" — that is how the
+        // stale-transport-key case was missed.
+        Some("owner_unknown") => format!(
+            "{} — this signer's owner isn't known to the backend. \
+             Contact support if this persists.",
+            entry,
+        ),
+        _ => format!(
+            "Cannot sign with {}: COINCUBE doesn't recognise this reason. Update \
+             COINCUBE, or contact support at coincube.io/support.",
+            entry,
+        ),
+    }
+}
+
 /// Keep the full descriptor available for the phone's local xpub membership
 /// check, while exposing only ciphertext to Connect. Each seal uses fresh
 /// randomness and the same request-bound AAD as the PSBT.
@@ -2264,6 +2307,103 @@ mod tests {
             empty_psbt(),
             Some(Arc::new(test_transport_key())),
         )
+    }
+
+    // ── Unresolved-signer copy ──────────────────────────────────────────
+    //
+    // The wire tokens below are spelled exactly as `coincube-api` emits them
+    // (`services/connect/signing/grpc/session_server.go`). A paraphrase would
+    // pass here while the arm never fires in production.
+
+    const FALSE_DIAGNOSIS: &str = "owner has no registered device";
+
+    fn entry(reason: &str) -> String {
+        // Same shape `on_signers_resolved` stores: "<fingerprint> (<reason>)".
+        format!("f5acc2fd ({})", reason)
+    }
+
+    /// The regression: an unrecognised reason must not carry a diagnosis. Before
+    /// the fix the fallthrough told the user the owner had no registered device
+    /// for every token it did not know — including `transport_key_stale`, which
+    /// the server emits and the desktop never matched.
+    #[test]
+    fn an_unrecognised_unresolved_reason_carries_no_diagnosis() {
+        for reason in ["signer_app_outdated", "some_future_reason", ""] {
+            let copy = friendly_unresolved_signer(&entry(reason));
+            assert!(
+                !copy.contains(FALSE_DIAGNOSIS),
+                "{:?} rendered the false diagnosis: {}",
+                reason,
+                copy
+            );
+            // Verbatim, and pointed at something the user can do.
+            assert!(copy.contains(&entry(reason)), "{}", copy);
+            assert!(copy.contains("doesn't recognise this reason"), "{}", copy);
+            assert!(copy.contains("coincube.io/support"), "{}", copy);
+        }
+        // An entry that is not even in the stored shape gets the same treatment.
+        let copy = friendly_unresolved_signer("garbage");
+        assert!(!copy.contains(FALSE_DIAGNOSIS), "{}", copy);
+        assert!(copy.contains("garbage"), "{}", copy);
+    }
+
+    #[test]
+    fn a_stale_transport_key_tells_the_signer_to_open_keychain() {
+        let copy = friendly_unresolved_signer(&entry("transport_key_stale"));
+        assert!(copy.contains("open Keychain on their phone"), "{}", copy);
+        assert!(!copy.contains(FALSE_DIAGNOSIS), "{}", copy);
+        assert!(!copy.contains("registered"), "{}", copy);
+    }
+
+    #[test]
+    fn an_unavailable_enrolled_device_points_at_the_phone_holding_the_key() {
+        let copy = friendly_unresolved_signer(&entry("enrolled_device_unavailable"));
+        assert!(copy.contains("can no longer be reached"), "{}", copy);
+        assert!(copy.contains("phone that holds this key"), "{}", copy);
+        assert!(!copy.contains(FALSE_DIAGNOSIS), "{}", copy);
+    }
+
+    /// The pre-existing arms keep their copy, matched on the exact token.
+    #[test]
+    fn the_existing_unresolved_arms_still_match_their_exact_tokens() {
+        let no_device = friendly_unresolved_signer(&entry("no_device_registered"));
+        assert!(
+            no_device.contains("hasn't set up the Keychain app yet"),
+            "{}",
+            no_device
+        );
+        let revoked = friendly_unresolved_signer(&entry("all_devices_revoked"));
+        assert!(revoked.contains("revoked every device"), "{}", revoked);
+        // No server path emits this today; the arm is kept, not relied on.
+        let unknown_owner = friendly_unresolved_signer(&entry("owner_unknown"));
+        assert!(
+            unknown_owner.contains("owner isn't known"),
+            "{}",
+            unknown_owner
+        );
+    }
+
+    /// Exact-token matching: a token that merely *contains* a known token is
+    /// unrecognised, so a renamed or extended wire value cannot be mistaken for
+    /// the old one and given the old advice.
+    #[test]
+    fn unresolved_reason_matching_is_exact_not_substring() {
+        let copy = friendly_unresolved_signer(&entry("no_device_registered_v2"));
+        assert!(
+            !copy.contains("hasn't set up the Keychain app yet"),
+            "{}",
+            copy
+        );
+        assert!(copy.contains("doesn't recognise this reason"), "{}", copy);
+        assert_eq!(
+            unresolved_signer_reason("abcd1234 (transport_key_stale)"),
+            Some("transport_key_stale")
+        );
+        assert_eq!(
+            unresolved_signer_reason("abcd1234 (a (nested) reason)"),
+            Some("nested) reason")
+        );
+        assert_eq!(unresolved_signer_reason("no parens here"), None);
     }
 
     /// Verifies that `seal_signing_payloads` produces distinct ephemeral keys
