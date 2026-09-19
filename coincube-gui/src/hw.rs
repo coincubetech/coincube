@@ -729,7 +729,14 @@ fn refresh(mut state: State) -> impl Stream<Item = HardwareWalletMessage> {
         // paired but currently unreachable (mDNS silent or dial
         // failed) surface as `Unsupported(AppIsNotOpen)` so the user
         // sees "phone offline" rather than silence.
-        match crate::phone_signer::pairing_store::load(&state.datadir_path) {
+        let lan_chain = state.wallet.as_ref().map(|w| w.chain);
+        let phone_store = if lan_chain.is_some_and(crate::phone_signer::lan_signing_allowed) {
+            crate::phone_signer::pairing_store::load(&state.datadir_path)
+        } else {
+            // No discovery, identity creation or dial for an unsupported chain.
+            Ok(Default::default())
+        };
+        match phone_store {
             Ok(store) if !store.phones.is_empty() => {
                 let discovered = crate::phone_signer::mdns::browse();
                 let identity =
@@ -892,12 +899,16 @@ fn refresh(mut state: State) -> impl Stream<Item = HardwareWalletMessage> {
                                     continue;
                                 };
                                 let fingerprint = binding.fingerprint;
+                                let Some(lan_chain) = lan_chain else {
+                                    continue;
+                                };
                                 let signer = Arc::new(crate::phone_signer::PhoneSigner::new(
                                     t,
                                     fingerprint,
                                     None,
                                     paired.clone(),
                                     lan_descriptor.clone(),
+                                    lan_chain,
                                     lan_transport_key.clone(),
                                 ));
                                 // Stash a clone so the next refresh
