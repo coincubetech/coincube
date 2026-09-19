@@ -115,6 +115,9 @@ pub struct Cache {
     pub last_poll_at_startup: Option<u32>,
     pub daemon_cache: DaemonCache,
     pub fiat_price: Option<FiatPrice>,
+    /// Pricing identity, retained separately from the address-encoding network.
+    pub fiat_chain: crate::chain::ChainId,
+    pub btcb2_price_request: Option<FiatPriceRequest>,
     /// Bitcoin display unit preference (BTC or Sats)
     pub bitcoin_unit: BitcoinDisplayUnit,
     /// Global fiat-native vs. bitcoin-native display preference. Drives
@@ -325,6 +328,8 @@ impl std::default::Default for Cache {
             last_poll_at_startup: None,
             daemon_cache: DaemonCache::default(),
             fiat_price: None,
+            fiat_chain: crate::chain::ChainId::Bitcoin,
+            btcb2_price_request: None,
             bitcoin_unit: BitcoinDisplayUnit::default(),
             display_mode: DisplayMode::default(),
             connect_authenticated: false,
@@ -555,6 +560,8 @@ pub struct FiatPriceRequest {
     pub source: PriceSource,
     pub currency: Currency,
     pub instant: Instant,
+    /// None is an existing globally shared Bitcoin price; BTCB2 is App-scoped.
+    pub origin: Option<LookupOrigin>,
 }
 
 impl FiatPriceRequest {
@@ -563,11 +570,52 @@ impl FiatPriceRequest {
             source,
             currency,
             instant: Instant::now(),
+            origin: None,
         }
+    }
+
+    pub fn for_btcb2(currency: Currency, origin: LookupOrigin) -> Self {
+        Self {
+            source: PriceSource::Coincube,
+            currency,
+            instant: Instant::now(),
+            origin: Some(origin),
+        }
+    }
+
+    pub async fn send_connect(
+        self,
+        client: crate::services::coincube::CoincubeClient,
+    ) -> FiatPrice {
+        use crate::services::fiat::btcb2;
+        let res = if self
+            .origin
+            .is_some_and(|o| o.chain == crate::chain::ChainId::BitcoinBlake2b)
+        {
+            match client.btcb2_quote(self.currency).await {
+                Ok(quote) => btcb2::unix_now()
+                    .ok_or_else(|| PriceApiError::CannotParseData("Clock unavailable".into()))
+                    .and_then(|now| quote.usable_price(self.currency, now)),
+                Err(error) => Err(btcb2::request_error(error)),
+            }
+        } else {
+            Err(PriceApiError::CannotParseData(
+                "BTCB2 pricing is unavailable for this chain".into(),
+            ))
+        };
+        FiatPrice { res, request: self }
     }
 
     /// Sends the request using the default client for the given source.
     pub async fn send_default(self) -> FiatPrice {
+        if self.origin.is_some() {
+            return FiatPrice {
+                res: Err(PriceApiError::CannotParseData(
+                    "Scoped prices require Connect".into(),
+                )),
+                request: self,
+            };
+        }
         let client = PriceClient::default_from_source(self.source);
         FiatPrice {
             res: client.get_price(self.currency).await,
@@ -887,5 +935,173 @@ mod entangled_cache_tests {
         assert!(in_flight.is_empty(), "released by claim, not by reply");
         assert_eq!(b.entanglement_of(&txid(1)), Entanglement::NotEntangled);
         assert_eq!(b.entanglement_of(&txid(2)), Entanglement::Unknown);
+    }
+}
+
+impl Cache {
+    pub fn fiat_toggle_allowed(&self) -> bool {
+        !self.fiat_chain.is_blake2b() || self.btcb2_price_usable()
+    }
+
+    pub fn btcb2_price_usable(&self) -> bool {
+        self.fiat_chain == crate::chain::ChainId::BitcoinBlake2b
+            && self.fiat_price.as_ref().is_some_and(|price| {
+                price.requested_at().elapsed().as_secs()
+                    <= crate::services::fiat::btcb2::MAX_QUOTE_AGE
+                    && price.source() == PriceSource::Coincube
+                    && price.request.origin
+                        == Some(LookupOrigin {
+                            app: self.app_generation,
+                            chain: self.fiat_chain,
+                        })
+                    && price.res.as_ref().is_ok_and(|result| {
+                        result.value.is_finite()
+                            && result.value > 0.0
+                            && result
+                                .updated_at
+                                .zip(crate::services::fiat::btcb2::unix_now())
+                                .is_some_and(|(at, now)| {
+                                    crate::services::fiat::btcb2::timestamp_fresh(at, now)
+                                })
+                    })
+            })
+    }
+
+    pub fn clear_btcb2_fiat(&mut self) -> bool {
+        let changed = self.fiat_price.is_some()
+            || self.btc_usd_price.is_some()
+            || self.display_mode != DisplayMode::BitcoinNative;
+        self.fiat_price = None;
+        self.btc_usd_price = None;
+        self.display_mode = DisplayMode::BitcoinNative;
+        changed
+    }
+
+    pub fn accept_btcb2_price(&mut self, price: FiatPrice) -> bool {
+        if !self.fiat_chain.is_blake2b()
+            || price.request.origin
+                != Some(LookupOrigin {
+                    app: self.app_generation,
+                    chain: self.fiat_chain,
+                })
+            || self.btcb2_price_request != Some(price.request)
+        {
+            return false;
+        }
+        self.btc_usd_price = None;
+        self.fiat_price = Some(price);
+        if !self.btcb2_price_usable() {
+            self.clear_btcb2_fiat();
+        }
+        true
+    }
+}
+
+#[cfg(test)]
+mod btcb2_fiat_tests {
+    use super::*;
+    use crate::chain::ChainId;
+
+    fn cache() -> Cache {
+        Cache {
+            fiat_chain: ChainId::BitcoinBlake2b,
+            ..Default::default()
+        }
+    }
+
+    fn answer(cache: &mut Cache, at: u64) -> FiatPrice {
+        let request = FiatPriceRequest::for_btcb2(
+            Currency::USD,
+            LookupOrigin {
+                app: cache.app_generation,
+                chain: cache.fiat_chain,
+            },
+        );
+        cache.btcb2_price_request = Some(request);
+        FiatPrice {
+            request,
+            res: Ok(GetPriceResult {
+                value: 102.0,
+                updated_at: Some(at),
+            }),
+        }
+    }
+
+    #[test]
+    fn scoped_quotes_never_cross_app_generation_or_chain() {
+        let mut current = cache();
+        let mut previous = cache();
+        let now = crate::services::fiat::btcb2::unix_now().unwrap();
+        let own = answer(&mut current, now);
+        let old = answer(&mut previous, now);
+        assert!(!current.accept_btcb2_price(old));
+        let mut wrong_chain = own.clone();
+        wrong_chain.request.origin.as_mut().unwrap().chain = ChainId::BitcoinBlake2bTestnet4;
+        assert!(!current.accept_btcb2_price(wrong_chain));
+        current.btc_usd_price = Some(99_999.0);
+        assert!(current.accept_btcb2_price(own));
+        assert!(current.fiat_toggle_allowed());
+        assert_eq!(current.btc_usd_price, None);
+    }
+
+    #[test]
+    fn unavailable_or_expired_quotes_remove_fiat_and_disable_toggle() {
+        let mut cache = cache();
+        let now = crate::services::fiat::btcb2::unix_now().unwrap();
+        let own = answer(&mut cache, now);
+        assert!(cache.accept_btcb2_price(own));
+        cache.display_mode = DisplayMode::FiatNative;
+        let mut failed = answer(&mut cache, now);
+        failed.res = Err(PriceApiError::RequestFailed("unavailable".into()));
+        assert!(cache.accept_btcb2_price(failed));
+        assert!(cache.fiat_price.is_none());
+        assert!(!cache.fiat_toggle_allowed());
+        assert_eq!(cache.display_mode, DisplayMode::BitcoinNative);
+        let expired = answer(
+            &mut cache,
+            now - crate::services::fiat::btcb2::MAX_QUOTE_AGE - 1,
+        );
+        assert!(cache.accept_btcb2_price(expired));
+        assert!(cache.fiat_price.is_none());
+        assert!(!cache.fiat_toggle_allowed());
+    }
+
+    #[test]
+    fn newer_request_invalidates_an_older_currency_result() {
+        let mut cache = cache();
+        let now = crate::services::fiat::btcb2::unix_now().unwrap();
+        let old = answer(&mut cache, now);
+        cache.btcb2_price_request.as_mut().unwrap().currency = Currency::EUR;
+        assert!(!cache.accept_btcb2_price(old));
+        assert!(cache.fiat_price.is_none());
+        assert!(
+            Cache::default().fiat_toggle_allowed(),
+            "Bitcoin behavior unchanged"
+        );
+        let old_same_currency = answer(&mut cache, now);
+        cache.btcb2_price_request.as_mut().unwrap().instant += std::time::Duration::from_secs(1);
+        assert!(!cache.accept_btcb2_price(old_same_currency));
+    }
+
+    #[tokio::test]
+    async fn btcb2_cannot_use_default_bitcoin_transport_or_testnet_mainnet_quote() {
+        let current = cache();
+        let request = FiatPriceRequest::for_btcb2(
+            Currency::USD,
+            LookupOrigin {
+                app: current.app_generation,
+                chain: ChainId::BitcoinBlake2b,
+            },
+        );
+        assert!(request.send_default().await.res.is_err());
+        let testnet = FiatPriceRequest::for_btcb2(
+            Currency::USD,
+            LookupOrigin {
+                app: current.app_generation,
+                chain: ChainId::BitcoinBlake2bTestnet4,
+            },
+        );
+        let client = crate::services::coincube::CoincubeClient::for_test("http://127.0.0.1:1");
+        assert!(testnet.send_connect(client).await.res.is_err());
     }
 }

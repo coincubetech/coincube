@@ -696,6 +696,8 @@ pub async fn load_application(
         cube_encryption_key: None,
         datadir_path: config.datadir_path,
         network: config.info.network,
+        fiat_chain: config.cube_settings.network,
+        btcb2_price_request: None,
         // Recomputed from the P2P panel's Mostro config once panels are built.
         p2p_test_coordinator: false,
         // Fail-closed until `/connect/features` loads and the account panel

@@ -231,6 +231,24 @@ impl TryFrom<&cache::FiatPrice> for FiatAmountConverter {
 
     fn try_from(fiat_price: &cache::FiatPrice) -> Result<Self, Self::Error> {
         let cache::FiatPrice { res, request, .. } = fiat_price;
+        if request.origin.is_some() {
+            let fresh = request.instant.elapsed().as_secs()
+                <= crate::services::fiat::btcb2::MAX_QUOTE_AGE
+                && res.as_ref().is_ok_and(|price| {
+                    price.value.is_finite()
+                        && price
+                            .updated_at
+                            .zip(crate::services::fiat::btcb2::unix_now())
+                            .is_some_and(|(at, now)| {
+                                crate::services::fiat::btcb2::timestamp_fresh(at, now)
+                            })
+                });
+            if !fresh {
+                return Err(AmountConverterError::ParseError(
+                    "BTCB2 quote is unavailable or stale".into(),
+                ));
+            }
+        }
         res.as_ref()
             .map_err(|e| AmountConverterError::ParseError(e.to_string()))
             .and_then(|price| Self::new(price.value, price.updated_at, *request))
@@ -263,6 +281,7 @@ mod tests {
             source: PriceSource::CoinGecko,
             currency: Currency::USD,
             instant: std::time::Instant::now(),
+            origin: None,
         };
         // Try with non-positive prices.
         for price in &[-1000.0, -10.5, -0.0, 0.0] {

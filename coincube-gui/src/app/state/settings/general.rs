@@ -85,10 +85,14 @@ pub(crate) fn generate_random_word_indices(mnemonic_len: usize) -> Option<[usize
 
 async fn update_price_setting(
     data_dir: CoincubeDirectory,
-    network: Network,
+    network: impl Into<crate::chain::ChainId>,
     cube_id: String,
-    new_price_setting: PriceSetting,
+    mut new_price_setting: PriceSetting,
 ) -> Result<(), Error> {
+    let network = network.into();
+    if network.is_blake2b() {
+        new_price_setting.source = crate::services::fiat::PriceSource::Coincube;
+    }
     let network_dir = data_dir.network_directory(network);
     let mut cube_found = false;
     let result = update_settings_file(&network_dir, |mut settings| {
@@ -132,6 +136,69 @@ mod tests {
         PriceSource,
     };
     use coincube_ui::component::amount::BitcoinDisplayUnit;
+
+    #[tokio::test]
+    async fn btcb2_price_preferences_never_write_bitcoin_settings() {
+        use crate::chain::ChainId;
+        let temp = std::env::temp_dir().join(format!(
+            "coincube-btcb2-price-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let root = CoincubeDirectory::new(temp.clone());
+        for chain in [ChainId::Bitcoin, ChainId::BitcoinBlake2b] {
+            let cube =
+                settings::CubeSettings::new_with_raw_id("same-id".into(), "Fixture".into(), chain);
+            update_settings_file(&root.network_directory(chain), move |mut value| {
+                value.cubes.push(cube);
+                Some(value)
+            })
+            .await
+            .unwrap();
+        }
+        let bitcoin_path = root
+            .network_directory(ChainId::Bitcoin)
+            .path()
+            .join(settings::SETTINGS_FILE_NAME);
+        let before = std::fs::read(&bitcoin_path).unwrap();
+        update_price_setting(
+            root.clone(),
+            ChainId::BitcoinBlake2b,
+            "same-id".into(),
+            PriceSetting {
+                source: PriceSource::CoinGecko,
+                currency: Currency::EUR,
+                is_enabled: true,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read(bitcoin_path).unwrap(), before);
+        let persisted =
+            settings::Settings::from_file(&root.network_directory(ChainId::BitcoinBlake2b))
+                .unwrap();
+        let price = persisted.cubes[0].fiat_price.as_ref().unwrap();
+        assert_eq!(price.currency, Currency::EUR);
+        assert_eq!(price.source, PriceSource::Coincube);
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn btcb2_source_edits_cannot_select_an_aggregator() {
+        let mut state = state();
+        let cache = Cache {
+            fiat_chain: crate::chain::ChainId::BitcoinBlake2b,
+            ..Default::default()
+        };
+        let _ = state.update(
+            None,
+            &cache,
+            Message::View(view::Message::Settings(view::SettingsMessage::Fiat(
+                view::FiatMessage::SourceEdited(PriceSource::CoinGecko),
+            ))),
+        );
+        assert_eq!(state.new_price_setting.source, PriceSource::Coincube);
+    }
 
     fn state() -> GeneralSettingsState {
         GeneralSettingsState::new(
@@ -1430,7 +1497,11 @@ impl State for GeneralSettingsState {
                     self.new_price_setting
                 );
                 let price_setting = self.new_price_setting.clone();
-                let network = cache.network;
+                let network = if cache.fiat_chain.is_blake2b() {
+                    cache.fiat_chain
+                } else {
+                    cache.network.into()
+                };
                 let datadir_path = cache.datadir_path.clone();
                 let cube_id = self.cube_id.clone();
                 Task::perform(
@@ -1447,7 +1518,14 @@ impl State for GeneralSettingsState {
                 tracing::info!("GeneralSettingsState: SettingsSaved received");
                 self.error = None;
                 // Reload unit setting from disk to sync toggle state with what was saved
-                let network_dir = cache.datadir_path.network_directory(cache.network);
+                let network_dir =
+                    cache
+                        .datadir_path
+                        .network_directory(if cache.fiat_chain.is_blake2b() {
+                            cache.fiat_chain
+                        } else {
+                            cache.network.into()
+                        });
                 tracing::info!(
                     "GeneralSettingsState: Loading settings from {:?}",
                     network_dir.path()
@@ -1488,7 +1566,14 @@ impl State for GeneralSettingsState {
                 // Show error in global toast
                 let toast_task = Task::done(Message::View(view::Message::ShowError(err_msg)));
                 // Reload settings from disk to revert toggle state to persisted value
-                let network_dir = cache.datadir_path.network_directory(cache.network);
+                let network_dir =
+                    cache
+                        .datadir_path
+                        .network_directory(if cache.fiat_chain.is_blake2b() {
+                            cache.fiat_chain
+                        } else {
+                            cache.network.into()
+                        });
                 if let Ok(settings) = crate::app::settings::Settings::from_file(&network_dir) {
                     if let Some(cube) = settings.cubes.iter().find(|c| c.id == self.cube_id) {
                         tracing::info!(
@@ -1561,7 +1646,11 @@ impl State for GeneralSettingsState {
                         }
                     }
                     view::FiatMessage::SourceEdited(source) => {
-                        self.new_price_setting.source = source;
+                        self.new_price_setting.source = if cache.fiat_chain.is_blake2b() {
+                            crate::services::fiat::PriceSource::Coincube
+                        } else {
+                            source
+                        };
                         if self.new_price_setting.is_enabled {
                             let source = self.new_price_setting.source;
                             return Task::perform(async move { source }, |source| {
