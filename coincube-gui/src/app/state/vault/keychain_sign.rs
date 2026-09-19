@@ -95,6 +95,8 @@ pub struct PendingSession {
     /// keyholder's app predates end-to-end signing** — the session fails
     /// closed rather than falling back to a plaintext rail (master I5).
     pub transport_pubkey: Vec<u8>,
+    /// Authenticated device capabilities from ResolveSigners.
+    pub capabilities: Vec<String>,
     /// The client-generated `request_id` of this row's live session. Bound into
     /// the payload AAD in both directions, so it's needed again to open the
     /// signature envelope that comes back. Empty until a session is created.
@@ -411,6 +413,28 @@ pub struct KeychainSignModal {
     /// path. Without this the modal would be dropped immediately and the
     /// just-created sessions would be orphaned server-side until TTL.
     dismissed: bool,
+}
+
+fn check_session_network(
+    chain: crate::chain::ChainId,
+    network: &str,
+    session_exists: bool,
+) -> Result<(), &'static str> {
+    if network == chain.api_str() || (network.is_empty() && !chain.is_blake2b()) {
+        return Ok(());
+    }
+    if network.is_empty() {
+        return Err(if session_exists {
+            "Connect needs updating before Keychain can sign on Bitcoin Blake2b. The request was cancelled."
+        } else {
+            "Connect needs updating before Keychain can sign on Bitcoin Blake2b. Nothing was sent to the signer."
+        });
+    }
+    Err(if session_exists {
+        "Connect reports this request on a different network than this Cube. The request was cancelled. Reopen the Cube; if this repeats, contact https://coincube.io/support."
+    } else {
+        "Connect reports this Vault on a different network than this Cube. Nothing was sent. Reopen the Cube; if this repeats, contact https://coincube.io/support."
+    })
 }
 
 impl KeychainSignModal {
@@ -800,6 +824,12 @@ impl KeychainSignModal {
             "ResolveSigners returned"
         );
         self.phase = Phase::Sessions;
+        if let Err(message) = check_session_network(self.wallet.chain, &resp.network, false) {
+            self.pending.clear();
+            self.error = Some(message.to_string());
+            self.phase = Phase::AllDone;
+            return Task::none();
+        }
         let classified = match self.classified.as_ref() {
             Some(c) => c,
             None => {
@@ -815,7 +845,25 @@ impl KeychainSignModal {
         self.unresolved = resp
             .unresolved
             .iter()
-            .map(|u| format!("{} ({})", u.key_fingerprint, u.reason))
+            .map(|u| {
+                let label = if u.reason == "signer_app_outdated" {
+                    classified
+                        .required
+                        .iter()
+                        .find_map(|r| match r {
+                            RequiredSigner::Keychain {
+                                fingerprint, name, ..
+                            } if fingerprint.to_string() == u.key_fingerprint => {
+                                Some(name.as_str())
+                            }
+                            _ => None,
+                        })
+                        .unwrap_or(&u.key_fingerprint)
+                } else {
+                    &u.key_fingerprint
+                };
+                format!("{} ({})", label, u.reason)
+            })
             .collect();
 
         // For each resolved target, pair it with the matching
@@ -863,16 +911,29 @@ impl KeychainSignModal {
                 }
                 _ => unreachable!(),
             };
+            let outdated = self.wallet.chain.is_blake2b()
+                && !target.capabilities.iter().any(|c| c == "chain-identity-v1");
+            let error = outdated.then(|| {
+                format!(
+                    "{}'s Keychain needs updating before it can sign on Bitcoin Blake2b.",
+                    label
+                )
+            });
             self.pending.push(PendingSession {
                 session_id: String::new(), // populated by SessionCreated
                 key_id,
                 fingerprint,
                 device_id: target.device_id.clone(),
                 transport_pubkey: target.transport_pubkey.clone(),
+                capabilities: target.capabilities.clone(),
                 request_id: String::new(),
                 label,
-                status: PendingSessionStatus::Idle,
-                error: None,
+                status: if outdated {
+                    PendingSessionStatus::Failed
+                } else {
+                    PendingSessionStatus::Idle
+                },
+                error,
                 cancel_requested: false,
                 signed_psbt_persisted: false,
                 signed_psbt_fetching: false,
@@ -893,6 +954,16 @@ impl KeychainSignModal {
         let Some(entry) = self.pending.get_mut(index) else {
             return Task::none();
         };
+        if self.wallet.chain.is_blake2b()
+            && !entry.capabilities.iter().any(|c| c == "chain-identity-v1")
+        {
+            entry.status = PendingSessionStatus::Failed;
+            entry.error = Some(format!(
+                "{}'s Keychain needs updating before it can sign on Bitcoin Blake2b.",
+                entry.label
+            ));
+            return Task::none();
+        }
         let fingerprint = entry.fingerprint;
         let device_id = entry.device_id.clone();
         let key_id = entry.key_id;
@@ -1012,6 +1083,8 @@ impl KeychainSignModal {
             entry.request_id = request_id.clone();
         }
         let envelope_device_id = device_id.clone();
+        let network = self.wallet.chain.api_str().to_string();
+        let capabilities = self.pending[index].capabilities.clone();
 
         let vault_id = self.vault_id.unwrap_or(0).to_string();
         let descriptor_id =
@@ -1030,6 +1103,7 @@ impl KeychainSignModal {
                     AuthInterceptor::with_device_id(&access_token, desktop_device_id),
                 );
                 let req = CreateSigningSessionRequest {
+                    network,
                     request_id,
                     vault_id,
                     descriptor_id,
@@ -1061,6 +1135,7 @@ impl KeychainSignModal {
                         // Echoed back so the server can pair target ↔ envelope
                         // without re-reading the device row.
                         transport_pubkey,
+                        capabilities,
                     }],
                     note: String::new(),
                     ttl: Some(prost_types::Duration {
@@ -1178,7 +1253,14 @@ impl KeychainSignModal {
                             !session.creator_transport_pubkey.is_empty()
                                 && session.creator_transport_pubkey != ours
                         });
-                    if mismatched {
+                    if let Err(message) =
+                        check_session_network(self.wallet.chain, &session.network, true)
+                    {
+                        entry.status = PendingSessionStatus::Failed;
+                        entry.error = Some(message.to_string());
+                        entry.cancel_requested = true;
+                        Some((session_id, "network_mismatch"))
+                    } else if mismatched {
                         tracing::error!(
                             target: "coincube_gui::signing",
                             session_id = %session_id,
@@ -1236,6 +1318,10 @@ impl KeychainSignModal {
         let Some((sid, reason)) = cancel_sid else {
             return Task::none();
         };
+        self.cancel_session_task(sid, reason)
+    }
+
+    fn cancel_session_task(&self, sid: String, reason: &'static str) -> Task<Message> {
         let tokens = self.tokens.clone();
         let grpc_url = self.grpc_url.clone();
         let desktop_device_id = self.desktop_device_id.clone();
@@ -1433,6 +1519,15 @@ impl KeychainSignModal {
             }
             return Task::none();
         };
+        if let Err(message) = check_session_network(self.wallet.chain, &session.network, true) {
+            if let Some(entry) = self.pending.iter_mut().find(|p| p.session_id == session_id) {
+                entry.signed_psbt_fetching = false;
+                entry.cancel_requested = true;
+                entry.status = PendingSessionStatus::Failed;
+                entry.error = Some(message.to_string());
+            }
+            return self.cancel_session_task(session_id, "network_mismatch");
+        }
         // Reflect the authoritative status from the fetch response.
         // Without this the row can stay stuck at `PartiallySigned` if
         // the separate `SESSION_COMPLETED` stream event races, drops, or
@@ -2086,6 +2181,30 @@ fn is_rest_auth_failure(msg: &str) -> bool {
 /// decide whether to surface a "Please sign in again." path that
 /// closes the modal rather than just dismissing the error.
 fn friendly_grpc_error(status: tonic::Status) -> (String, bool) {
+    if matches!(
+        status.code(),
+        tonic::Code::InvalidArgument | tonic::Code::FailedPrecondition
+    ) {
+        let message = match status.message().split(':').next().unwrap_or_default() {
+            "NETWORK_INVALID" if status.code() == tonic::Code::InvalidArgument => Some("Connect doesn't recognise this Vault's network. Update COINCUBE."),
+            "NETWORK_INVALID" => Some("This Vault's Connect record has an unrecognised network. Contact support at https://coincube.io/support."),
+            "NETWORK_MISMATCH" => Some("This Vault's network doesn't match its Connect Cube. Reopen the Cube; if this repeats, contact support at https://coincube.io/support."),
+            "CHAIN_IDENTITY_REQUIRED" => Some("Update COINCUBE to keep signing with Keychain."),
+            "TARGET_KEY_NOT_ON_VAULT" => Some("One of the keys selected isn't part of this Vault. Refresh the signers and try again."),
+            "SIGNER_APP_OUTDATED" => Some("This signer's Keychain needs updating before it can sign on Bitcoin Blake2b."),
+            "NETWORK_DISABLED" => Some("Bitcoin Blake2b isn't enabled for this account."),
+            _ => None,
+        };
+        if let Some(message) = message {
+            return (message.to_string(), false);
+        }
+    }
+    if status.code() == tonic::Code::NotFound && status.message() == "vault not found" {
+        return (
+            "This Vault isn't registered to your account.".to_string(),
+            false,
+        );
+    }
     match status.code() {
         tonic::Code::Unauthenticated => (
             "Your Connect session has expired. Please sign in again.".to_string(),
@@ -2156,6 +2275,10 @@ fn unresolved_signer_reason(entry: &str) -> Option<&str> {
 /// device that they had none, while the real fix was one screen away.
 pub(crate) fn friendly_unresolved_signer(entry: &str) -> String {
     match unresolved_signer_reason(entry) {
+        Some("signer_app_outdated") => format!(
+            "{}'s Keychain needs updating before it can sign on Bitcoin Blake2b.",
+            entry.trim_end_matches(" (signer_app_outdated)"),
+        ),
         Some("no_device_registered") => format!(
             "{} hasn't set up the Keychain app yet. Ask them to install it \
              and sign in, then retry.",
@@ -2292,6 +2415,190 @@ mod tests {
     use crate::app::state::vault::test_support::{empty_psbt, tokens};
     use coincube_core::descriptors::CoincubeDescriptor;
     use std::str::FromStr;
+
+    #[test]
+    fn chain_identity_is_exact_with_only_the_bitcoin_legacy_window() {
+        use crate::chain::ChainId;
+        for chain in [
+            ChainId::Bitcoin,
+            ChainId::Testnet,
+            ChainId::Testnet4,
+            ChainId::Signet,
+            ChainId::Regtest,
+            ChainId::BitcoinBlake2b,
+            ChainId::BitcoinBlake2bTestnet4,
+        ] {
+            for exists in [false, true] {
+                assert!(check_session_network(chain, chain.api_str(), exists).is_ok());
+                assert_eq!(
+                    check_session_network(chain, "", exists).is_ok(),
+                    !chain.is_blake2b()
+                );
+                for wrong in ["bitcoin", "future-chain", " mainnet"] {
+                    assert!(check_session_network(chain, wrong, exists).is_err());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn resolve_mismatch_and_identityless_btcb2_clear_targets_before_sealing() {
+        use crate::chain::ChainId;
+        for chain in [
+            ChainId::Bitcoin,
+            ChainId::BitcoinBlake2b,
+            ChainId::BitcoinBlake2bTestnet4,
+        ] {
+            for network in ["future-chain", "bitcoin", "testnet"] {
+                let mut m = modal();
+                m.wallet = Arc::new(
+                    Wallet::new(CoincubeDescriptor::from_str(RECOVERY_DESC).unwrap())
+                        .with_chain(chain),
+                );
+                m.pending.push(pending(PendingSessionStatus::Idle));
+                let task = m.on_signers_resolved(ResolveSignersResponse {
+                    network: network.into(),
+                    ..Default::default()
+                });
+                assert!(iced_runtime::task::into_stream(task).is_none());
+                assert!(m.pending.is_empty());
+                assert!(m.error.unwrap().contains("Nothing was sent"));
+            }
+        }
+        let mut m = modal();
+        m.wallet = Arc::new(
+            Wallet::new(CoincubeDescriptor::from_str(RECOVERY_DESC).unwrap())
+                .with_chain(ChainId::BitcoinBlake2b),
+        );
+        let task = m.on_signers_resolved(ResolveSignersResponse::default());
+        assert!(iced_runtime::task::into_stream(task).is_none());
+        assert!(m.error.unwrap().contains("Nothing was sent"));
+    }
+
+    #[test]
+    fn resolving_old_bitcoin_and_identified_btcb2_preserves_target_eligibility() {
+        use crate::chain::ChainId;
+        use crate::services::coincube::VaultStatus;
+        use crate::services::connect::grpc::connect_v1::SignerTarget;
+        for (chain, network, capable, allowed) in [
+            (ChainId::Bitcoin, "", false, true),
+            (ChainId::Bitcoin, "mainnet", false, true),
+            (ChainId::BitcoinBlake2b, "bitcoin-blake2b", false, false),
+            (ChainId::BitcoinBlake2b, "bitcoin-blake2b", true, true),
+        ] {
+            let mut m = modal();
+            m.wallet = Arc::new(
+                Wallet::new(CoincubeDescriptor::from_str(RECOVERY_DESC).unwrap()).with_chain(chain),
+            );
+            m.classified = Some(ClassifiedSigners {
+                vault: ConnectVaultResponse {
+                    id: 1,
+                    cube_id: 42,
+                    timelock_days: 90,
+                    timelock_expires_at: String::new(),
+                    last_reset_at: String::new(),
+                    status: VaultStatus::Active,
+                    members: vec![],
+                    fingerprint: String::new(),
+                    created_at: String::new(),
+                    updated_at: String::new(),
+                },
+                required: vec![RequiredSigner::Keychain {
+                    fingerprint: Fingerprint::from_str("f5acc2fd").unwrap(),
+                    key_id: 7,
+                    owner_user_id: 7,
+                    name: "Fixture".into(),
+                    owner_email: None,
+                    contact_id: None,
+                    replay_protection: crate::app::state::vault::signers::ReplayProtection::Legacy,
+                }],
+                self_user_id: 7,
+            });
+            let task = m.on_signers_resolved(ResolveSignersResponse {
+                network: network.into(),
+                unresolved: vec![],
+                targets: vec![SignerTarget {
+                    key_fingerprint: "f5acc2fd".into(),
+                    key_id: "7".into(),
+                    capabilities: if capable {
+                        vec!["chain-identity-v1".into()]
+                    } else {
+                        vec![]
+                    },
+                    transport_pubkey: TEST_TARGET_TRANSPORT_PUBKEY.to_vec(),
+                    device_id: "phone".into(),
+                }],
+            });
+            assert!(iced_runtime::task::into_stream(task).is_none());
+            assert!(m.error.is_none());
+            assert_eq!(m.pending.len(), 1);
+            assert_eq!(m.pending[0].status.is_idle(), allowed);
+            assert_eq!(m.pending[0].error.is_none(), allowed);
+        }
+    }
+
+    #[test]
+    fn missing_target_capability_refuses_before_psbt_preparation() {
+        let mut m = modal();
+        m.wallet = Arc::new(
+            Wallet::new(CoincubeDescriptor::from_str(RECOVERY_DESC).unwrap())
+                .with_chain(crate::chain::ChainId::BitcoinBlake2b),
+        );
+        m.pending.push(pending(PendingSessionStatus::Idle));
+        let task = m.create_session_for(0);
+        assert!(iced_runtime::task::into_stream(task).is_none());
+        assert!(m.pending[0].request_id.is_empty());
+        assert_eq!(m.pending[0].status, PendingSessionStatus::Failed);
+        assert!(m.pending[0]
+            .error
+            .as_ref()
+            .unwrap()
+            .contains("needs updating"));
+    }
+
+    #[test]
+    fn wrong_created_session_identity_cancels_and_blocks_later_merge() {
+        use crate::chain::ChainId;
+        for chain in [ChainId::Bitcoin, ChainId::BitcoinBlake2b] {
+            for network in ["future-chain", "bitcoin-blake2b-testnet4", ""] {
+                let mut m = modal();
+                m.wallet = Arc::new(
+                    Wallet::new(CoincubeDescriptor::from_str(RECOVERY_DESC).unwrap())
+                        .with_chain(chain),
+                );
+                m.pending.push(pending(PendingSessionStatus::Creating));
+                let mut session = created_session();
+                session.network = network.into();
+                let task = m.on_session_created(m.pending[0].fingerprint, Ok(session));
+                let refused = !network.is_empty() || chain.is_blake2b();
+                assert_eq!(m.pending[0].cancel_requested, refused);
+                assert_eq!(iced_runtime::task::into_stream(task).is_some(), refused);
+                if refused {
+                    assert_eq!(m.pending[0].status, PendingSessionStatus::Failed);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn identity_refusals_do_not_misdiagnose_the_transport_key() {
+        for token in [
+            "NETWORK_INVALID",
+            "NETWORK_MISMATCH",
+            "CHAIN_IDENTITY_REQUIRED",
+            "TARGET_KEY_NOT_ON_VAULT",
+            "SIGNER_APP_OUTDATED",
+            "NETWORK_DISABLED",
+        ] {
+            let (message, auth) = friendly_grpc_error(tonic::Status::failed_precondition(format!(
+                "{}: server detail",
+                token
+            )));
+            assert!(!auth);
+            assert!(!message.contains("encrypted signing"), "{}", token);
+            assert!(!message.contains("server detail"));
+        }
+    }
 
     // Primary signer `f5acc2fd`; recovery signer `8a64f2a9` behind a CSV.
     // Same fixture used by the `signers` classification tests.
@@ -2458,6 +2765,7 @@ mod tests {
             reason: reason.to_string(),
         };
         let _ = modal.on_signers_resolved(ResolveSignersResponse {
+            network: String::new(),
             targets: vec![],
             unresolved: vec![
                 unresolved("f5acc2fd", "transport_key_stale"),
@@ -2592,6 +2900,7 @@ mod tests {
     /// test fills in only the field it is about.
     fn created_session() -> SigningSession {
         SigningSession {
+            network: String::new(),
             session_id: "session-created".to_string(),
             request_id: "req-1".to_string(),
             user_id: String::new(),
@@ -2618,6 +2927,7 @@ mod tests {
 
     fn pending(status: PendingSessionStatus) -> PendingSession {
         PendingSession {
+            capabilities: Vec::new(),
             session_id: "session-1".to_string(),
             request_id: "req-1".to_string(),
             transport_pubkey: TEST_TARGET_TRANSPORT_PUBKEY.to_vec(),
@@ -3227,8 +3537,12 @@ mod tests {
         }
 
         /// A completed session carrying `blobs` in submission order.
-        fn fetched(blobs: Vec<SubmittedSignature>) -> Result<GetSigningSessionResponse, OpError> {
+        fn fetched(
+            chain: ChainId,
+            blobs: Vec<SubmittedSignature>,
+        ) -> Result<GetSigningSessionResponse, OpError> {
             let session = SigningSession {
+                network: chain.api_str().to_string(),
                 session_id: SESSION_ID.to_string(),
                 request_id: REQUEST_ID.to_string(),
                 status: SessionStatus::Completed as i32,
@@ -3304,6 +3618,32 @@ mod tests {
             assert!(!row.signed_psbt_fetching);
         }
 
+        #[test]
+        fn fetched_wrong_or_missing_btcb2_identity_cancels_without_opening_or_merging() {
+            let f = fixture();
+            let key = Arc::new(test_transport_key());
+            for network in ["", "mainnet", "future-chain"] {
+                let mut modal = modal_on(&f, ChainId::BitcoinBlake2b, &f.psbt, &key);
+                let mut tx = spend_tx(&f, &f.psbt);
+                let before = tx.psbt.serialize();
+                let mut response = fetched(ChainId::BitcoinBlake2b, vec![]).unwrap();
+                response.session.as_mut().unwrap().network = network.into();
+                let task = modal.on_session_fetched(
+                    refusing_daemon(),
+                    &mut tx,
+                    SESSION_ID.into(),
+                    Ok(response),
+                    true,
+                );
+                assert!(
+                    iced_runtime::task::into_stream(task).is_some(),
+                    "defensive cancellation must be queued"
+                );
+                assert!(modal.pending[0].cancel_requested);
+                assert_refused(&modal, &tx, &before, "cancelled");
+            }
+        }
+
         #[tokio::test]
         async fn two_sparse_encrypted_returns_merge_against_local_metadata() {
             let f = fixture();
@@ -3352,7 +3692,10 @@ mod tests {
                 daemon,
                 &mut tx,
                 SESSION_ID.to_string(),
-                fetched(vec![sealed(&key, &first), sealed(&key, &second)]),
+                fetched(
+                    modal.wallet.chain,
+                    vec![sealed(&key, &first), sealed(&key, &second)],
+                ),
                 false,
             );
 
@@ -3391,7 +3734,10 @@ mod tests {
                 refusing_daemon(),
                 &mut tx,
                 SESSION_ID.to_string(),
-                fetched(vec![sealed(&key, &wrong), sealed(&key, &valid)]),
+                fetched(
+                    modal.wallet.chain,
+                    vec![sealed(&key, &wrong), sealed(&key, &valid)],
+                ),
                 false,
             );
 
@@ -3423,7 +3769,10 @@ mod tests {
                 refusing_daemon(),
                 &mut tx,
                 SESSION_ID.to_string(),
-                fetched(vec![sealed(&key, &valid), sealed(&key, &invalid)]),
+                fetched(
+                    modal.wallet.chain,
+                    vec![sealed(&key, &valid), sealed(&key, &invalid)],
+                ),
                 false,
             );
 
@@ -3463,7 +3812,10 @@ mod tests {
                 refusing_daemon(),
                 &mut tx,
                 SESSION_ID.to_string(),
-                fetched(vec![sealed(&key, &adds), sealed(&key, &conflicting)]),
+                fetched(
+                    modal.wallet.chain,
+                    vec![sealed(&key, &adds), sealed(&key, &conflicting)],
+                ),
                 false,
             );
 
@@ -3540,7 +3892,10 @@ mod tests {
                 daemon,
                 &mut tx,
                 SESSION_ID.to_string(),
-                fetched(vec![sealed(&key, &first), sealed(&key, &second)]),
+                fetched(
+                    modal.wallet.chain,
+                    vec![sealed(&key, &first), sealed(&key, &second)],
+                ),
                 false,
             );
 

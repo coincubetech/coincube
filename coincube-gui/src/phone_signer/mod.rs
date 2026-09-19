@@ -279,6 +279,8 @@ impl HWI for PhoneSigner {
         };
 
         let session = cv1::SigningSession {
+            // LAN remains pre-identity and BTCB2-gated until pairing v3 lands.
+            network: String::new(),
             session_id: session_id.clone(),
             request_id: request_id.clone(),
             user_id: String::new(),
@@ -291,6 +293,7 @@ impl HWI for PhoneSigner {
             tx_summary: None,
             policy_summary: None,
             targets: vec![cv1::SignerTarget {
+                capabilities: Vec::new(),
                 device_id: String::new(),
                 key_fingerprint: binding.fingerprint.to_string(),
                 key_id: binding.key_id.clone(),
