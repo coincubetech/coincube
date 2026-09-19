@@ -1686,7 +1686,9 @@ impl Home {
                 }
             }
             Message::View(ViewMessage::SelectNetwork(network)) => {
-                if !self.developer_mode {
+                if !self.developer_mode
+                    && !(self.network.is_blake2b() && network == ChainId::Bitcoin)
+                {
                     tracing::debug!(
                         "Ignoring SelectNetwork action because developer mode is disabled"
                     );
@@ -1697,6 +1699,7 @@ impl Home {
                     return Task::none();
                 }
                 self.network = network;
+                self.error = None;
                 // Clear stale limit from previous network
                 self.server_cube_limit = None;
                 let network_dir = self.datadir_path.network_directory(self.network);
@@ -3567,6 +3570,10 @@ impl Home {
                 .spacing(16)
                 .push(h3(self.network.label()))
                 .push(text(reason))
+                .push(
+                    button::secondary(None, "Back to Bitcoin")
+                        .on_press(Message::View(ViewMessage::SelectNetwork(ChainId::Bitcoin))),
+                )
                 .into();
         }
         let content = Into::<Element<ViewMessage>>::into(scrollable(
@@ -3873,7 +3880,7 @@ impl Home {
             .height(Length::Fill)
             .into();
 
-        let layout = if self.network != ChainId::Bitcoin {
+        let layout = if self.network != ChainId::Bitcoin && !self.network.is_blake2b() {
             Column::with_children(vec![
                 network_banner(self.network.bitcoin_network()).into(),
                 layout,
@@ -8988,6 +8995,9 @@ mod chain_identity_open_tests {
                 assert!(!dir.join(chain.bitcoin_network().to_string()).exists());
             }
             let _ = home.view();
+            home.developer_mode = false;
+            let _ = home.update(Message::View(ViewMessage::SelectNetwork(ChainId::Bitcoin)));
+            assert_eq!(home.network, ChainId::Bitcoin);
             std::fs::remove_dir_all(dir).unwrap();
         }
     }
