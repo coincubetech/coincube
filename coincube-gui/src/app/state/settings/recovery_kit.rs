@@ -15,6 +15,7 @@
 
 use std::sync::Arc;
 
+#[cfg(test)]
 use coincube_core::miniscript::bitcoin::Network;
 use iced::Task;
 use sha2::{Digest, Sha256};
@@ -930,7 +931,7 @@ fn verify_pin(rk: &mut RecoveryKit, cache: &Cache, local_cube_id: &str) -> Task<
 
     // Reach into the on-disk settings for this cube to get the
     // fingerprint + PIN hash. Matches `handle_backup_message`.
-    let network_dir = cache.datadir_path.network_directory(cache.network);
+    let network_dir = cache.datadir_path.network_directory(cache.chain());
     let Ok(s) = settings::Settings::from_file(&network_dir) else {
         rk.flow = RecoveryKitState::PinEntry {
             mode,
@@ -938,7 +939,12 @@ fn verify_pin(rk: &mut RecoveryKit, cache: &Cache, local_cube_id: &str) -> Task<
         };
         return Task::none();
     };
-    let Some(cube) = s.cubes.iter().find(|c| c.id == local_cube_id).cloned() else {
+    let Some(cube) = s
+        .cubes
+        .iter()
+        .find(|c| c.id == local_cube_id && c.network == cache.chain())
+        .cloned()
+    else {
         rk.flow = RecoveryKitState::PinEntry {
             mode,
             error: Some("Cube not found in settings".to_string()),
@@ -953,7 +959,7 @@ fn verify_pin(rk: &mut RecoveryKit, cache: &Cache, local_cube_id: &str) -> Task<
         return Task::none();
     };
     let datadir = cache.datadir_path.path().to_path_buf();
-    let network = cache.network;
+    let network = cache.chain();
     let cube_id = cube.id.clone();
 
     // Same reasoning as the Backup-Master-Seed flow in `general.rs`: this is a
@@ -1100,12 +1106,17 @@ fn submit_password(
     };
 
     // Pull cube-scoped metadata from settings so the blob is complete.
-    let network_dir = cache.datadir_path.network_directory(cache.network);
+    let network_dir = cache.datadir_path.network_directory(cache.chain());
     let Ok(s) = settings::Settings::from_file(&network_dir) else {
         set_pw_error(rk, "Failed to read settings file.");
         return Task::none();
     };
-    let Some(cube) = s.cubes.iter().find(|c| c.id == local_cube_id).cloned() else {
+    let Some(cube) = s
+        .cubes
+        .iter()
+        .find(|c| c.id == local_cube_id && c.network == cache.chain())
+        .cloned()
+    else {
         set_pw_error(rk, "Cube not found in settings.");
         return Task::none();
     };
@@ -1309,18 +1320,25 @@ fn set_protection_error(rk: &mut RecoveryKit, msg: &str) {
 /// The passkey path needs the credential id and the network, and neither is
 /// carried in `Cache`. Same read `gather_cube_meta` does, narrowed to the Cube.
 fn lookup_cube(cache: &Cache, local_cube_id: &str) -> Option<settings::CubeSettings> {
-    let network_dir = cache.datadir_path.network_directory(cache.network);
+    let network_dir = cache.datadir_path.network_directory(cache.chain());
     let s = settings::Settings::from_file(&network_dir).ok()?;
-    s.cubes.iter().find(|c| c.id == local_cube_id).cloned()
+    s.cubes
+        .iter()
+        .find(|c| c.id == local_cube_id && c.network == cache.chain())
+        .cloned()
 }
 
 /// Read cube-scoped metadata from settings: the `SeedBlobCube` (for a seed blob)
 /// plus the cube uuid + canonical network string (for the descriptor blob).
 /// Mirrors the gathering `submit_password` does inline.
 fn gather_cube_meta(cache: &Cache, local_cube_id: &str) -> Option<(SeedBlobCube, String, String)> {
-    let network_dir = cache.datadir_path.network_directory(cache.network);
+    let network_dir = cache.datadir_path.network_directory(cache.chain());
     let s = settings::Settings::from_file(&network_dir).ok()?;
-    let cube = s.cubes.iter().find(|c| c.id == local_cube_id).cloned()?;
+    let cube = s
+        .cubes
+        .iter()
+        .find(|c| c.id == local_cube_id && c.network == cache.chain())
+        .cloned()?;
     let cube_uuid = cube.id.clone();
     let network = network_str(cube.network);
     let created_at_str = chrono::DateTime::<chrono::Utc>::from_timestamp(cube.created_at, 0)
@@ -1390,7 +1408,7 @@ fn start_phone_seal(
     // phone key's xpub as an envelope sealed to this Cube's encryption key, so
     // the seal needs that key to read the recipient before sealing to it.
     let cube_enc_key = cache.cube_encryption_key.clone();
-    let cube_network = cache.network;
+    let cube_network = cache.chain();
     rk.flow = RecoveryKitState::PhoneSealing { mode };
     Task::perform(
         async move {
@@ -1442,11 +1460,12 @@ async fn seal_phone(
     client: CoincubeClient,
     cube_id: u64,
     cube_enc_key: Option<&CubeEncryptionKey>,
-    network: Network,
+    network: impl Into<crate::chain::ChainId>,
     descriptor_blob: Option<DescriptorBlob>,
     mnemonic: Option<Zeroizing<Vec<String>>>,
     cube_meta: SeedBlobCube,
 ) -> Result<Option<String>, String> {
+    let network = network.into();
     let recipient = find_owner_self_recipient(&client, cube_id)
         .await
         .map_err(|e| e.to_string())?;
@@ -1485,7 +1504,7 @@ async fn seal_phone(
         &client,
         cube_id,
         cube_enc_key,
-        network,
+        network.bitcoin_network(),
         &recipient,
         descriptor_json.as_deref().map(Vec::as_slice),
         seed_json,
@@ -2048,12 +2067,13 @@ fn update_cube_settings(
     local_cube_id: &str,
     mutate: impl FnOnce(&mut settings::CubeSettings) + Send + 'static,
 ) -> Task<Message> {
-    let network_dir = cache.datadir_path.network_directory(cache.network);
+    let network_dir = cache.datadir_path.network_directory(cache.chain());
     let cube_id = local_cube_id.to_string();
+    let chain = cache.chain();
     Task::perform(
         async move {
             update_settings_file(&network_dir, |mut s| {
-                if let Some(cube) = s.cubes.iter_mut().find(|c| c.id == cube_id) {
+                if let Some(cube) = s.cubes.iter_mut().find(|c| c.id == cube_id && c.network == chain) {
                     mutate(cube);
                 }
                 Some(s)
@@ -2166,6 +2186,41 @@ fn clear_recovery_kit_state(cache: &Cache, local_cube_id: &str) -> Task<Message>
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn backup_metadata_keeps_twin_cubes_separate() {
+        use crate::{chain::ChainId, dir::CoincubeDirectory};
+        let root_path = std::env::temp_dir().join(format!("backup-meta-{}", uuid::Uuid::new_v4()));
+        let root = CoincubeDirectory::new(root_path.clone());
+        for chain in [ChainId::Bitcoin, ChainId::BitcoinBlake2b] {
+            let cube = settings::CubeSettings::new_with_raw_id(
+                "same-id".into(),
+                chain.api_str().into(),
+                chain,
+            );
+            crate::app::settings::update_settings_file(
+                &root.network_directory(chain),
+                move |mut s| {
+                    s.cubes.push(cube);
+                    Some(s)
+                },
+            )
+            .await
+            .unwrap();
+        }
+        let mut cache = Cache {
+            datadir_path: root.clone(),
+            fiat_chain: ChainId::BitcoinBlake2b,
+            ..Cache::default()
+        };
+        assert_eq!(
+            lookup_cube(&cache, "same-id").map(|c| c.name).as_deref(),
+            Some("bitcoin-blake2b")
+        );
+        cache.fiat_chain = ChainId::BitcoinBlake2bTestnet4;
+        assert!(lookup_cube(&cache, "same-id").map(|c| c.name).is_none());
+        std::fs::remove_dir_all(root_path).unwrap();
+    }
+
     use crate::services::recovery::{
         DescriptorBlob, DescriptorBlobCube, DescriptorBlobSigner, DescriptorBlobVault,
     };

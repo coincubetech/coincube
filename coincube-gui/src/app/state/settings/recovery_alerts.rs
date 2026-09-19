@@ -506,7 +506,7 @@ pub fn update(
                     // descriptor blob from the live wallet and enrol. `enroll_escrow`
                     // turns alerts on too, so this auto-enables alerts when off.
                     let Some(descriptor_json) =
-                        descriptor_blob_json(wallet.as_deref(), local_cube_id, cache.network)
+                        descriptor_blob_json(wallet.as_deref(), local_cube_id, cache.chain())
                     else {
                         ra.error = Some(
                             "This Vault's descriptor isn't available on this device, so recovery \
@@ -521,14 +521,14 @@ pub fn update(
                     // serves envelopes, so sealing needs this Cube's encryption
                     // key to read the keyholder xpubs first.
                     let cube_enc_key = cache.cube_encryption_key.clone();
-                    let network = cache.network;
+                    let network = cache.chain();
                     Task::perform(
                         async move {
                             enroll_escrow(
                                 &client,
                                 server_cube_id,
                                 cube_enc_key.as_deref(),
-                                network,
+                                network.bitcoin_network(),
                                 descriptor_json,
                                 None,
                             )
@@ -589,7 +589,7 @@ pub fn update(
                 return Task::none();
             };
             let Some(descriptor_json) =
-                descriptor_blob_json(wallet.as_deref(), local_cube_id, cache.network)
+                descriptor_blob_json(wallet.as_deref(), local_cube_id, cache.chain())
             else {
                 ra.error =
                     Some("This Vault's descriptor isn't available on this device.".to_string());
@@ -609,9 +609,9 @@ pub fn update(
                     return Task::none();
                 }
             };
-            let network_dir = cache.datadir_path.network_directory(cache.network);
+            let network_dir = cache.datadir_path.network_directory(cache.chain());
             let datadir = cache.datadir_path.path().to_path_buf();
-            let network = cache.network;
+            let network = cache.chain();
             // See the Vault-only branch: keyholder xpubs arrive blinded.
             let cube_enc_key = cache.cube_encryption_key.clone();
             let local_cube_id = local_cube_id.to_string();
@@ -636,7 +636,7 @@ pub fn update(
                         &client,
                         server_cube_id,
                         cube_enc_key.as_deref(),
-                        network,
+                        network.bitcoin_network(),
                         descriptor_json,
                         Some(seed_json),
                     )
@@ -674,11 +674,15 @@ pub fn update(
 fn descriptor_blob_json(
     wallet: Option<&Wallet>,
     cube_uuid: &str,
-    network: coincube_core::miniscript::bitcoin::Network,
+    network: impl Into<crate::chain::ChainId>,
 ) -> Option<Vec<u8>> {
     let wallet = wallet?;
-    let net = settings::network_to_api_string(network);
-    let blob = super::recovery_kit::descriptor_blob_from_wallet(wallet, cube_uuid, &net);
+    let network = network.into();
+    if wallet.chain != network {
+        return None;
+    }
+    let net = network.api_str();
+    let blob = super::recovery_kit::descriptor_blob_from_wallet(wallet, cube_uuid, net);
     serde_json::to_vec(&blob).ok()
 }
 
@@ -686,13 +690,13 @@ fn descriptor_blob_json(
 /// live cache. Read on the main thread before the PIN task so a settings/cube
 /// lookup failure surfaces synchronously.
 fn seed_blob_cube(cache: &Cache, local_cube_id: &str) -> Result<SeedBlobCube, String> {
-    let network_dir = cache.datadir_path.network_directory(cache.network);
+    let network_dir = cache.datadir_path.network_directory(cache.chain());
     let s = settings::Settings::from_file(&network_dir)
         .map_err(|_| "Failed to read settings file.".to_string())?;
     let cube = s
         .cubes
         .iter()
-        .find(|c| c.id == local_cube_id)
+        .find(|c| c.id == local_cube_id && c.network == cache.chain())
         .ok_or_else(|| "Cube not found in settings.".to_string())?;
     let created_at = chrono::DateTime::<chrono::Utc>::from_timestamp(cube.created_at, 0)
         .map(|t| t.to_rfc3339())
@@ -700,7 +704,7 @@ fn seed_blob_cube(cache: &Cache, local_cube_id: &str) -> Result<SeedBlobCube, St
     Ok(SeedBlobCube {
         uuid: local_cube_id.to_string(),
         name: cube.name.clone(),
-        network: settings::network_to_api_string(cache.network),
+        network: cache.chain().api_str().to_string(),
         created_at,
         lightning_address: cache.lightning_address.clone(),
     })
@@ -716,17 +720,21 @@ fn seed_blob_cube(cache: &Cache, local_cube_id: &str) -> Result<SeedBlobCube, St
 fn build_seed_blob_json(
     network_dir: &crate::dir::NetworkDirectory,
     datadir: &std::path::Path,
-    network: coincube_core::miniscript::bitcoin::Network,
+    network: impl Into<crate::chain::ChainId>,
     local_cube_id: &str,
     pin: &str,
     cube: SeedBlobCube,
 ) -> Result<Zeroizing<Vec<u8>>, String> {
+    let network = network.into();
+    if cube.network != network.api_str() || cube.uuid != local_cube_id {
+        return Err("Cube recovery identity mismatch.".to_string());
+    }
     let s =
         settings::Settings::from_file(network_dir).map_err(|_| "Failed to read settings file.")?;
     let cube_settings = s
         .cubes
         .iter()
-        .find(|c| c.id == local_cube_id)
+        .find(|c| c.id == local_cube_id && c.network == network)
         .ok_or("Cube not found in settings.")?;
     let fingerprint = cube_settings
         .master_signer_fingerprint
@@ -762,6 +770,46 @@ fn build_seed_blob_json(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn backup_metadata_keeps_twin_cubes_separate() {
+        use crate::{chain::ChainId, dir::CoincubeDirectory};
+        let root_path = std::env::temp_dir().join(format!("backup-meta-{}", uuid::Uuid::new_v4()));
+        let root = CoincubeDirectory::new(root_path.clone());
+        for chain in [ChainId::Bitcoin, ChainId::BitcoinBlake2b] {
+            let cube = settings::CubeSettings::new_with_raw_id(
+                "same-id".into(),
+                chain.api_str().into(),
+                chain,
+            );
+            crate::app::settings::update_settings_file(
+                &root.network_directory(chain),
+                move |mut s| {
+                    s.cubes.push(cube);
+                    Some(s)
+                },
+            )
+            .await
+            .unwrap();
+        }
+        let mut cache = Cache {
+            datadir_path: root.clone(),
+            fiat_chain: ChainId::BitcoinBlake2b,
+            ..Cache::default()
+        };
+        assert_eq!(
+            seed_blob_cube(&cache, "same-id")
+                .ok()
+                .map(|c| c.name)
+                .as_deref(),
+            Some("bitcoin-blake2b")
+        );
+        cache.fiat_chain = ChainId::BitcoinBlake2bTestnet4;
+        assert!(seed_blob_cube(&cache, "same-id")
+            .ok()
+            .map(|c| c.name)
+            .is_none());
+        std::fs::remove_dir_all(root_path).unwrap();
+    }
 
     /// Monitoring on with the given escrowed-artifact kinds reported (new API).
     fn monitoring_on_with(artifacts: Option<Vec<&str>>) -> VaultMonitoringStatus {
