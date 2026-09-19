@@ -48,7 +48,8 @@ The authenticated typed Connect status client in desktop PR #408 supplies
 network, tip height, fork activation and `reduced_data` height/expiry/active.
 It does **not** provide a tip hash or median-time-past. A future adapter must
 obtain chain-bound MTP and bracket the typed status request with identical
-before/after fork tip hashes before attaching its anchor. No adapter exists here;
+before/after fork tip hashes before attaching its anchor. The returned status
+`tip_height` must equal the attached anchor height. No adapter exists here;
 missing inputs cannot be manufactured from local time or a block timestamp.
 The adapter must also query both chains' step-one status and current Bitcoin
 block hash, then obtain new tip reads immediately before preflight.
