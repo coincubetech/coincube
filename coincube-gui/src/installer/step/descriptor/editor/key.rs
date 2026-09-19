@@ -350,6 +350,7 @@ pub struct SelectKeySource {
 }
 
 impl SelectKeySource {
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         network: Network,

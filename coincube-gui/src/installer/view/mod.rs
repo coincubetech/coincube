@@ -3124,8 +3124,17 @@ mod tests {
         let prune = value("15000", true);
         let max_mempool = value("", true);
 
-        let _ = define_coincube_connect((1, 4), &email, &otp, false, true, false, None);
-        let _ = define_coincube_connect((1, 4), &email, &otp, true, false, true, Some("try again"));
+        let _ = define_coincube_connect((1, 4), &email, &otp, false, true, false, None, true);
+        let _ = define_coincube_connect(
+            (1, 4),
+            &email,
+            &otp,
+            true,
+            false,
+            true,
+            Some("try again"),
+            false,
+        );
 
         let _ = select_bitcoind_type(
             (2, 4),
