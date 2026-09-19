@@ -1078,6 +1078,7 @@ pub fn define_esplora<'a>(
     Column::new().push(col_address).spacing(50).into()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn define_coincube_connect<'a>(
     progress: (usize, usize),
     email: &form::Value<String>,
@@ -1086,6 +1087,7 @@ pub fn define_coincube_connect<'a>(
     is_signup: bool,
     processing: bool,
     error: Option<&'a str>,
+    allow_skip: bool,
 ) -> Element<'a, Message> {
     let content: Element<'a, Message> = if !otp_sent {
         let (action_label, toggle_label) = if is_signup {
@@ -1131,10 +1133,8 @@ pub fn define_coincube_connect<'a>(
                     .on_press(Message::CoincubeConnect(CoincubeConnectMsg::ToggleMode)),
             )
             .push(Space::new().height(Length::Fixed(10.0)))
-            .push(
-                button::transparent(None, "Skip for now")
-                    .on_press(Message::CoincubeConnect(CoincubeConnectMsg::Skip)),
-            )
+            .push(allow_skip.then(|| button::transparent(None, "Skip for now")
+                    .on_press(Message::CoincubeConnect(CoincubeConnectMsg::Skip))))
             .into()
     } else {
         Column::new()
