@@ -572,9 +572,13 @@ impl Wallet {
         // reads plaintext files only and this cache was never consulted. The
         // cache needs no password by construction: it is keyed on `cube_id` and
         // holds material the unlock already proved.
-        for fingerprint in &keys {
-            if let Some(signer) = crate::app::session::unlocked_signer(cube_id, *fingerprint) {
-                return Ok(self.with_signer(Signer::new(signer)));
+        // The legacy session is keyed by Cube ID and fingerprint, not ChainId.
+        // Until it is chain-bound, a fork must authenticate its own seed file.
+        if !chain.is_blake2b() {
+            for fingerprint in &keys {
+                if let Some(signer) = crate::app::session::unlocked_signer(cube_id, *fingerprint) {
+                    return Ok(self.with_signer(Signer::new(signer)));
+                }
             }
         }
 
@@ -1083,6 +1087,8 @@ mod tests {
     /// back, and `wallet.signer` was `None` on a Vault that owned a key.
     #[test]
     fn an_encrypted_hot_signer_is_loaded_with_the_cubes_credential() {
+        let _guard = crate::app::session::test_guard();
+        crate::app::session::close();
         use coincube_core::miniscript::bitcoin::bip32::DerivationPath;
 
         let secp = bitcoin::secp256k1::Secp256k1::signing_only();
@@ -1155,7 +1161,7 @@ mod tests {
 
         // A wrong credential must not hand back *some other* signer, and must
         // not fail the load either.
-        let wrong = Wallet::new(descriptor)
+        let wrong = Wallet::new(descriptor.clone())
             .load_hotsigners(&dir, net, &cube_id, Some("9999"))
             .unwrap();
         assert!(wrong.signer.is_none());
@@ -1170,6 +1176,21 @@ mod tests {
             "a credential was available, so this is not the locked case"
         );
 
+        crate::app::session::store_unlocked_signer(&cube_id, fp, signer.try_clone().unwrap());
+        assert!(Wallet::new(descriptor.clone())
+            .load_hotsigners(&dir, net, &cube_id, None)
+            .unwrap()
+            .signer
+            .is_some());
+        // Same Cube ID and seed fingerprint, but no fork file: the Bitcoin
+        // cache must not supply a hot signer to this fork wallet.
+        assert!(Wallet::new(descriptor)
+            .with_chain(ChainId::BitcoinBlake2bTestnet4)
+            .load_hotsigners(&dir, ChainId::BitcoinBlake2bTestnet4, &cube_id, Some(pin))
+            .unwrap()
+            .signer
+            .is_none());
+        crate::app::session::close();
         std::fs::remove_dir_all(root).unwrap();
     }
 

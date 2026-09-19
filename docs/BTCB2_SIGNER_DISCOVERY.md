@@ -27,3 +27,12 @@ under different PINs, and prove the fork scan cannot use the Bitcoin copy.
 They cover missing fork storage, locked keys, failed decrypt versus no seed,
 correct decrypt, legacy filtering, and Connect metadata backfill. No existing
 wallet files or production services are touched.
+
+The existing unlocked-signer cache has no ChainId. Fork Vault lookup and
+Connect encryption-key fallback bypass that cache and authenticate the fork's
+own seed file; Bitcoin keeps the cached fast path. Fork encryption-key fallback
+uses the keystore-aware reader for v3 seeds. Synthetic tests preload a Bitcoin
+session with the same Cube ID/fingerprint and verify a missing fork file still
+refuses; the Bitcoin control still returns its cached signer. A fully
+chain-bound session cache is required before any seedless fork signing path
+can depend on cache reuse.

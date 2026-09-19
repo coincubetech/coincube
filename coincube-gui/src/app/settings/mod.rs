@@ -478,8 +478,22 @@ pub fn derive_connect_encryption_pubkey(
     use crate::services::connect::crypto::CubeEncryptionKey;
     use coincube_core::signer::{MasterSigner, SignerError};
 
-    let loaded = match crate::app::session::unlocked_signer(cube_id, fingerprint) {
+    // Legacy sessions carry no ChainId. Forks authenticate only their own
+    // chain-specific seed, including the OS-keystore secret for v3 files.
+    let cached = if chain.is_blake2b() {
+        None
+    } else {
+        crate::app::session::unlocked_signer(cube_id, fingerprint)
+    };
+    let loaded = match cached {
         Some(signer) => Ok(signer),
+        None if chain.is_blake2b() => crate::services::unlock::open_seed_by_fingerprint(
+            datadir_root,
+            chain,
+            fingerprint,
+            pin,
+            cube_id,
+        ),
         None => MasterSigner::from_datadir_by_fingerprint_for_chain(
             datadir_root,
             chain,
@@ -2988,6 +3002,8 @@ mod chain_seed_backfill_tests {
 
     #[test]
     fn backfill_and_encryption_key_use_only_the_cube_chain() {
+        let _guard = crate::app::session::test_guard();
+        crate::app::session::close();
         let secp = coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::signing_only();
         for chain in [
             crate::chain::ChainId::BitcoinBlake2b,
@@ -3010,6 +3026,17 @@ mod chain_seed_backfill_tests {
                     None,
                 )
                 .unwrap();
+            crate::app::session::store_unlocked_signer(&cube_id, fp, signer.try_clone().unwrap());
+            assert!(matches!(
+                derive_connect_encryption_pubkey(
+                    &root,
+                    chain.bitcoin_network(),
+                    fp,
+                    "wrong-pin",
+                    &cube_id
+                ),
+                ConnectEncryptionKey::Derived(_)
+            ));
             assert_eq!(
                 derive_master_signer_fingerprint(&root, chain, "1234", &cube_id, 1000),
                 None
@@ -3033,6 +3060,7 @@ mod chain_seed_backfill_tests {
                 derive_connect_encryption_pubkey(&root, chain, fp, "1234", &cube_id),
                 ConnectEncryptionKey::Derived(_)
             ));
+            crate::app::session::close();
             std::fs::remove_dir_all(root).unwrap();
         }
     }
