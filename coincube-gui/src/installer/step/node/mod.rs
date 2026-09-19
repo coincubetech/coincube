@@ -186,6 +186,11 @@ impl Default for DefineNode {
 
 impl Step for DefineNode {
     fn load_context(&mut self, ctx: &Context) {
+        if ctx.bitcoin_config.chain.is_blake2b() {
+            self.nodes
+                .retain(|node| node.definition.node_type() == NodeType::Esplora);
+            self.selected_node_type = NodeType::Esplora;
+        }
         for node in self.nodes.iter_mut() {
             node.definition.load_context(ctx);
         }
@@ -194,7 +199,9 @@ impl Step for DefineNode {
         if let Message::DefineNode(msg) = message {
             match msg {
                 message::DefineNode::NodeTypeSelected(node_type) => {
-                    self.selected_node_type = node_type;
+                    if self.get(node_type).is_some() {
+                        self.selected_node_type = node_type;
+                    }
                 }
                 message::DefineNode::Ping => {
                     let selected = self.selected_mut();
@@ -264,5 +271,30 @@ impl Step for DefineNode {
             || ctx.remote_backend.is_some()
             || ctx.use_coincube_connect
             || ctx.install_node_alongside_connect
+    }
+}
+
+#[cfg(test)]
+mod chain_tests {
+    use super::*;
+    use crate::{chain::ChainId, dir::CoincubeDirectory, installer::context::RemoteBackend};
+
+    #[test]
+    fn fork_node_selection_never_exposes_electrum_or_a_bitcoin_node() {
+        for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
+            let ctx = Context::new_for_chain(
+                chain,
+                CoincubeDirectory::new(std::path::PathBuf::new()),
+                RemoteBackend::None,
+                None,
+                None,
+            );
+            let mut step = DefineNode::default();
+            step.load_context(&ctx);
+            assert_eq!(step.selected_node_type, NodeType::Esplora);
+            assert!(step.get(NodeType::Electrum).is_none());
+            assert!(step.get(NodeType::Bitcoind).is_none());
+            assert_eq!(step.nodes.len(), 1);
+        }
     }
 }

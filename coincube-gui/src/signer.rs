@@ -116,9 +116,32 @@ impl Signer {
         cube_id: &str,
         device_secret: Option<&coincube_core::seed_crypt::DeviceSecret>,
     ) -> Result<(), SignerError> {
-        self.key.store_encrypted(
+        self.store_encrypted_for_chain(
+            datadir_root,
+            network.into(),
+            checksum,
+            timestamp,
+            password,
+            cube_id,
+            device_secret,
+        )
+    }
+
+    /// Persist only within the explicitly selected chain.
+    #[allow(clippy::too_many_arguments)]
+    pub fn store_encrypted_for_chain(
+        &self,
+        datadir_root: &CoincubeDirectory,
+        chain: crate::chain::ChainId,
+        checksum: &str,
+        timestamp: i64,
+        password: &str,
+        cube_id: &str,
+        device_secret: Option<&coincube_core::seed_crypt::DeviceSecret>,
+    ) -> Result<(), SignerError> {
+        self.key.store_encrypted_for_chain(
             datadir_root.path(),
-            network,
+            chain,
             &self.curve,
             Some((checksum.to_string(), timestamp)),
             password,
@@ -138,9 +161,27 @@ impl Signer {
         cube_id: &str,
         device_secret: Option<&coincube_core::seed_crypt::DeviceSecret>,
     ) -> Result<(), SignerError> {
-        self.key.store_encrypted(
+        self.store_encrypted_seed_only_for_chain(
+            datadir_root,
+            network.into(),
+            password,
+            cube_id,
+            device_secret,
+        )
+    }
+
+    /// Persist only within the explicitly selected chain.
+    pub fn store_encrypted_seed_only_for_chain(
+        &self,
+        datadir_root: &CoincubeDirectory,
+        chain: crate::chain::ChainId,
+        password: &str,
+        cube_id: &str,
+        device_secret: Option<&coincube_core::seed_crypt::DeviceSecret>,
+    ) -> Result<(), SignerError> {
+        self.key.store_encrypted_for_chain(
             datadir_root.path(),
-            network,
+            chain,
             &self.curve,
             None,
             password,
