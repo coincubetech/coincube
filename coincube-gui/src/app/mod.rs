@@ -2370,6 +2370,10 @@ impl App {
         )>,
     ) -> (App, Task<Message>) {
         let mut cache = cache;
+        cache.fiat_chain = cube_settings.network;
+        if cache.fiat_chain.is_blake2b() {
+            cache.clear_btcb2_fiat();
+        }
         // Connect blinding (PR D3): derive the Cube's encryption key once from
         // the master signer the unlock already loaded, so every surface that
         // opens a Connect-served key can do so without re-prompting for a PIN.
@@ -2556,7 +2560,7 @@ impl App {
             spark_backend.clone(),
         );
         // Load bitcoin_unit and display_mode from settings if available
-        let network_dir = datadir.network_directory(network);
+        let network_dir = datadir.network_directory(cube_settings.network);
         let settings_file = settings::Settings::from_file(&network_dir).ok();
         let bitcoin_unit = settings_file
             .as_ref()
@@ -2576,7 +2580,12 @@ impl App {
             datadir_path: datadir.clone(),
             has_vault: false,
             bitcoin_unit,
-            display_mode,
+            fiat_chain: cube_settings.network,
+            display_mode: if cube_settings.network.is_blake2b() {
+                settings::display::DisplayMode::BitcoinNative
+            } else {
+                display_mode
+            },
             cube_name: cube_settings.name.clone(),
             current_cube_backed_up: cube_settings.backed_up,
             cube_id: cube_settings.id.clone(),
@@ -3574,18 +3583,85 @@ impl App {
         }
     }
 
+    fn btcb2_price_task(&mut self) -> Task<Message> {
+        use crate::services::fiat::btcb2::POLL_INTERVAL;
+        let chain = self.cube_settings.network;
+        if !chain.is_blake2b() {
+            return Task::none();
+        }
+        let currency = self
+            .cube_settings
+            .fiat_price
+            .as_ref()
+            .filter(|setting| setting.is_enabled)
+            .map(|setting| setting.currency);
+        let client = self.authenticated_coincube_client();
+        if chain != crate::chain::ChainId::BitcoinBlake2b || currency.is_none() || client.is_none()
+        {
+            let changed = self.cache.clear_btcb2_fiat();
+            self.cache.btcb2_price_request = None;
+            return if changed {
+                Task::done(Message::CacheUpdated)
+            } else {
+                Task::none()
+            };
+        }
+        let mut changed = false;
+        if !self.cache.btcb2_price_usable() {
+            changed |= self.cache.clear_btcb2_fiat();
+        }
+        let (Some(currency), Some(client)) = (currency, client) else {
+            return Task::none();
+        };
+        if self.cache.btcb2_price_request.is_some_and(|request| {
+            request.currency == currency && request.instant.elapsed() < POLL_INTERVAL
+        }) {
+            return if changed {
+                Task::done(Message::CacheUpdated)
+            } else {
+                Task::none()
+            };
+        }
+        // A settings change invalidates the displayed currency immediately.
+        if self
+            .cache
+            .fiat_price
+            .as_ref()
+            .is_some_and(|price| price.currency() != currency)
+        {
+            changed |= self.cache.clear_btcb2_fiat();
+        }
+        let request = cache::FiatPriceRequest::for_btcb2(
+            currency,
+            cache::LookupOrigin {
+                app: self.cache.app_generation,
+                chain,
+            },
+        );
+        self.cache.btcb2_price_request = Some(request);
+        let request_task = Task::perform(request.send_connect(client), |price| {
+            Message::Fiat(FiatMessage::GetPriceResult(price))
+        });
+        if changed {
+            Task::batch([Task::done(Message::CacheUpdated), request_task])
+        } else {
+            request_task
+        }
+    }
+
     pub fn on_tick(&mut self) -> Task<Message> {
+        let price_task = self.btcb2_price_task();
         // Skip tick processing if no vault is configured
         if self.daemon.is_none() {
             tracing::debug!("Skipping tick - no vault configured");
-            return Task::none();
+            return price_task;
         }
         // Skip while a backend switch is in flight: `self.daemon` still points at
         // the daemon the off-thread switch is stopping, so polling it here would
         // hit a stopped poller/RPC. The next tick after `DaemonRestarted` swaps in
         // the new daemon resumes normally.
         if self.daemon_switch_in_progress {
-            return Task::none();
+            return price_task;
         }
 
         let tick = std::time::Instant::now();
@@ -3598,6 +3674,8 @@ impl App {
         } else {
             vec![]
         };
+
+        tasks.push(price_task);
 
         // Check if we need to update the daemon cache.
         let duration = Duration::from_secs(
@@ -4556,7 +4634,7 @@ impl App {
                 let network_dir = self
                     .cache
                     .datadir_path
-                    .network_directory(self.cache.network);
+                    .network_directory(self.cube_settings.network);
                 if let Ok(settings) = settings::Settings::from_file(&network_dir) {
                     if let Some(cube) = settings
                         .cubes
@@ -4565,6 +4643,16 @@ impl App {
                     {
                         self.cache.bitcoin_unit = cube.unit_setting.display_unit;
                         self.cube_settings.fiat_price = cube.fiat_price.clone();
+                        if self.cube_settings.network.is_blake2b()
+                            && self.cache.fiat_price.as_ref().is_some_and(|price| {
+                                !cube.fiat_price.as_ref().is_some_and(|setting| {
+                                    setting.is_enabled && setting.currency == price.currency()
+                                })
+                            })
+                        {
+                            self.cache.clear_btcb2_fiat();
+                            self.cache.btcb2_price_request = None;
+                        }
                         // Keep the "backed up" banner state in sync with
                         // whatever was persisted — the backup flow saves
                         // cube.backed_up = true via this same path. If the
@@ -4610,6 +4698,10 @@ impl App {
                         // USDt→sats conversion regardless of fiat display setting.
                         if !cube.fiat_price.as_ref().is_some_and(|p| p.is_enabled) {
                             self.cache.fiat_price = None;
+                            if self.cube_settings.network.is_blake2b() {
+                                self.cache.clear_btcb2_fiat();
+                                self.cache.btcb2_price_request = None;
+                            }
                         }
                     }
                 }
@@ -4633,6 +4725,23 @@ impl App {
                 return Task::done(Message::CacheUpdated);
             }
             Message::Fiat(FiatMessage::GetPriceResult(fiat_price)) => {
+                if self.cube_settings.network.is_blake2b() {
+                    let relevant = self
+                        .cube_settings
+                        .fiat_price
+                        .as_ref()
+                        .is_some_and(|setting| {
+                            setting.is_enabled && setting.currency == fiat_price.currency()
+                        });
+                    if relevant && self.cache.accept_btcb2_price(fiat_price) {
+                        return Task::done(Message::CacheUpdated);
+                    }
+                    return Task::none();
+                }
+                // A scoped BTCB2 quote must never seed Bitcoin/USD conversion.
+                if fiat_price.request.origin.is_some() {
+                    return Task::none();
+                }
                 let mut updated = false;
 
                 // Always extract BTC/USD price for USDt→sats conversion,
@@ -5468,9 +5577,13 @@ impl App {
                 return Task::batch([record, panel]);
             }
             Message::View(view::Message::FlipDisplayMode) => {
+                if !self.cache.fiat_toggle_allowed() {
+                    self.cache.clear_btcb2_fiat();
+                    return Task::done(Message::CacheUpdated);
+                }
                 let new_mode = self.cache.display_mode.flipped();
                 self.cache.display_mode = new_mode;
-                let network_dir = self.datadir.network_directory(self.cache.network);
+                let network_dir = self.datadir.network_directory(self.cube_settings.network);
                 return Task::perform(
                     async move {
                         settings::update_settings_file(&network_dir, move |mut current| {
