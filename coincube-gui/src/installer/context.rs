@@ -319,6 +319,7 @@ impl Context {
             )
         })?;
         self.bitcoin_config = BitcoinConfig::new(chain, self.bitcoin_config.poll_interval_secs);
+        self.network = network;
         Ok(())
     }
 }
@@ -357,15 +358,29 @@ impl Context {
         cube_settings: Option<&crate::app::settings::CubeSettings>,
         coincube_client: Option<CoincubeClient>,
     ) -> Self {
+        Self::new_for_chain(
+            network.into(),
+            coincube_directory,
+            remote_backend,
+            cube_settings,
+            coincube_client,
+        )
+    }
+
+    /// Construct dormant installer state without losing the authenticated chain.
+    /// This does not grant permission to start a wallet; runtime boundaries still
+    /// require the chain's runtime support and the account's feature flag.
+    pub fn new_for_chain(
+        chain: crate::chain::ChainId,
+        coincube_directory: CoincubeDirectory,
+        remote_backend: RemoteBackend,
+        cube_settings: Option<&crate::app::settings::CubeSettings>,
+        coincube_client: Option<CoincubeClient>,
+    ) -> Self {
+        let network = chain.bitcoin_network();
         Self {
             descriptor_template: DescriptorTemplate::default(),
-            // The installer only creates Bitcoin-family Cubes while Bitcoin Blake2b is
-            // dormant, so the identity is the network's own; the daemon derives the
-            // encoding from it.
-            bitcoin_config: BitcoinConfig::new(
-                crate::chain::ChainId::from(network),
-                Duration::from_secs(10),
-            ),
+            bitcoin_config: BitcoinConfig::new(chain, Duration::from_secs(10)),
             hws: Vec::new(),
             keys: HashMap::new(),
             bitcoin_backend: None,
@@ -380,7 +395,11 @@ impl Context {
             use_coincube_connect: false,
             connect_jwt: None,
             install_node_alongside_connect: false,
-            node_flavor: NodeFlavor::Knots,
+            node_flavor: if chain.is_blake2b() {
+                NodeFlavor::KnotsBlake2b
+            } else {
+                NodeFlavor::Knots
+            },
             internal_bitcoind_config: None,
             internal_bitcoind: None,
             pending_bitcoind_config: None,
@@ -410,6 +429,34 @@ mod tests {
     use coincube_core::miniscript::bitcoin::Network;
     use std::path::PathBuf;
     use std::str::FromStr;
+
+    #[test]
+    fn explicit_chain_context_keeps_encoding_and_identity_separate() {
+        use crate::chain::ChainId;
+        for chain in ChainId::ALL {
+            let context = Context::new_for_chain(
+                chain,
+                CoincubeDirectory::new(PathBuf::new()),
+                RemoteBackend::None,
+                None,
+                None,
+            );
+            assert_eq!(context.bitcoin_config.chain, chain);
+            assert_eq!(context.network, chain.bitcoin_network());
+            assert_eq!(context.bitcoin_config.network, chain.bitcoin_network());
+            assert_eq!(
+                context.node_flavor == crate::node::bitcoind::NodeFlavor::KnotsBlake2b,
+                chain.is_blake2b()
+            );
+            assert_eq!(
+                context
+                    .coincube_directory
+                    .network_directory(context.bitcoin_config.chain)
+                    .path(),
+                std::path::Path::new(chain.dir_name())
+            );
+        }
+    }
 
     /// Compile-time pin: if anyone reverts `Context.connect_jwt` to a
     /// plain `Option<String>`, this type-level assertion stops
@@ -452,6 +499,7 @@ mod tests {
             c.set_bitcoin_network(network).unwrap();
             assert_eq!(c.bitcoin_config.chain, chain, "{}", network);
             assert_eq!(c.bitcoin_config.network, network);
+            assert_eq!(c.network, network);
             assert_eq!(c.bitcoin_config.poll_interval_secs, poll);
             c.bitcoin_config.check_chain_encoding().unwrap();
         }
