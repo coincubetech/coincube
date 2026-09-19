@@ -310,9 +310,17 @@ impl MasterSigner {
     }
 
     pub fn mnemonics_folder(datadir_root: &path::Path, network: bitcoin::Network) -> path::PathBuf {
+        Self::mnemonics_folder_for_chain(datadir_root, network.into())
+    }
+
+    /// Chain-specific storage; Bitcoin keeps its historical directory names.
+    pub fn mnemonics_folder_for_chain(
+        datadir_root: &path::Path,
+        chain: crate::chain::ChainId,
+    ) -> path::PathBuf {
         [
             datadir_root,
-            path::Path::new(&network.to_string()),
+            path::Path::new(chain.dir_name()),
             path::Path::new(MNEMONICS_FOLDER_NAME),
         ]
         .iter()
@@ -368,9 +376,26 @@ impl MasterSigner {
         cube_id: &str,
         vault_only: bool,
     ) -> Result<Vec<Self>, SignerError> {
+        Self::from_datadir_with_password_filtered_for_chain(
+            datadir_root,
+            network.into(),
+            password,
+            cube_id,
+            vault_only,
+        )
+    }
+
+    /// Read only the selected chain directory, retaining the legacy filtering rules.
+    pub fn from_datadir_with_password_filtered_for_chain(
+        datadir_root: &path::Path,
+        chain: crate::chain::ChainId,
+        password: Option<&str>,
+        cube_id: &str,
+        vault_only: bool,
+    ) -> Result<Vec<Self>, SignerError> {
         let mut signers = Vec::new();
 
-        let mnemonics_folder = Self::mnemonics_folder(datadir_root, network);
+        let mnemonics_folder = Self::mnemonics_folder_for_chain(datadir_root, chain);
         let mnemonic_paths =
             fs::read_dir(mnemonics_folder).map_err(SignerError::MnemonicStorage)?;
 
@@ -395,7 +420,7 @@ impl MasterSigner {
             }
             let mnemonic_str = Self::read_mnemonic_bytes(data, password, cube_id)?;
 
-            signers.push(Self::from_str(network, &mnemonic_str)?);
+            signers.push(Self::from_str(chain.bitcoin_network(), &mnemonic_str)?);
         }
 
         Ok(signers)
@@ -409,7 +434,24 @@ impl MasterSigner {
         password: Option<&str>,
         cube_id: &str,
     ) -> Result<Self, SignerError> {
-        let mnemonics_folder = Self::mnemonics_folder(datadir_root, network);
+        Self::from_datadir_by_fingerprint_for_chain(
+            datadir_root,
+            network.into(),
+            target_fingerprint,
+            password,
+            cube_id,
+        )
+    }
+
+    /// Explicit chain variant; never searches a sibling chain directory.
+    pub fn from_datadir_by_fingerprint_for_chain(
+        datadir_root: &path::Path,
+        chain: crate::chain::ChainId,
+        target_fingerprint: Fingerprint,
+        password: Option<&str>,
+        cube_id: &str,
+    ) -> Result<Self, SignerError> {
+        let mnemonics_folder = Self::mnemonics_folder_for_chain(datadir_root, chain);
         let mnemonic_paths =
             fs::read_dir(&mnemonics_folder).map_err(SignerError::MnemonicStorage)?;
 
@@ -424,7 +466,7 @@ impl MasterSigner {
                     // Found a potential match, try to load it
                     let data = fs::read(&path).map_err(SignerError::MnemonicStorage)?;
                     let mnemonic_str = Self::read_mnemonic_bytes(data, password, cube_id)?;
-                    let signer = Self::from_str(network, &mnemonic_str)?;
+                    let signer = Self::from_str(chain.bitcoin_network(), &mnemonic_str)?;
 
                     // Verify the fingerprint matches
                     let secp = secp256k1::Secp256k1::signing_only();
@@ -547,7 +589,30 @@ impl MasterSigner {
         cube_id: &str,
         device_secret: Option<&seed_crypt::DeviceSecret>,
     ) -> Result<(), SignerError> {
-        let mnemonics_folder = Self::mnemonics_folder(datadir_root, network);
+        self.store_encrypted_for_chain(
+            datadir_root,
+            network.into(),
+            secp,
+            descriptor_info,
+            password,
+            cube_id,
+            device_secret,
+        )
+    }
+
+    /// Explicit chain variant; never searches a sibling chain directory.
+    #[allow(clippy::too_many_arguments)]
+    pub fn store_encrypted_for_chain(
+        &self,
+        datadir_root: &path::Path,
+        chain: crate::chain::ChainId,
+        secp: &secp256k1::Secp256k1<impl secp256k1::Signing>,
+        descriptor_info: Option<(String, i64)>,
+        password: &str,
+        cube_id: &str,
+        device_secret: Option<&seed_crypt::DeviceSecret>,
+    ) -> Result<(), SignerError> {
+        let mnemonics_folder = Self::mnemonics_folder_for_chain(datadir_root, chain);
         if !mnemonics_folder.exists() {
             create_dir(&mnemonics_folder).map_err(SignerError::MnemonicStorage)?;
         }
@@ -1072,6 +1137,68 @@ mod tests {
         );
         assert_ne!(xpriv.chain_code, chain_before);
         assert_eq!(xpriv.chain_code, bip32::ChainCode::from([0u8; 32]));
+    }
+
+    #[test]
+    fn encrypted_seed_storage_is_chain_isolated() {
+        use crate::chain::ChainId;
+        let root = tmp_dir();
+        fs::create_dir_all(&root).unwrap();
+        let secp = secp256k1::Secp256k1::signing_only();
+        for chain in ChainId::ALL {
+            let signer = MasterSigner::generate(chain.bitcoin_network()).unwrap();
+            signer
+                .store_encrypted_for_chain(&root, chain, &secp, None, "1234", "cube-a", None)
+                .unwrap();
+            let loaded = MasterSigner::from_datadir_by_fingerprint_for_chain(
+                &root,
+                chain,
+                signer.fingerprint(&secp),
+                Some("1234"),
+                "cube-a",
+            )
+            .unwrap();
+            assert_eq!(loaded.fingerprint(&secp), signer.fingerprint(&secp));
+            assert!(MasterSigner::from_datadir_by_fingerprint_for_chain(
+                &root,
+                chain,
+                signer.fingerprint(&secp),
+                Some("1234"),
+                "wrong-cube"
+            )
+            .is_err());
+            let folder = MasterSigner::mnemonics_folder_for_chain(&root, chain);
+            assert_eq!(
+                folder,
+                root.join(chain.dir_name()).join(MNEMONICS_FOLDER_NAME)
+            );
+            if !chain.is_blake2b() {
+                assert_eq!(
+                    folder,
+                    MasterSigner::mnemonics_folder(&root, chain.bitcoin_network())
+                );
+            } else {
+                assert!(MasterSigner::from_datadir_by_fingerprint(
+                    &root,
+                    chain.bitcoin_network(),
+                    signer.fingerprint(&secp),
+                    Some("1234"),
+                    "cube-a"
+                )
+                .is_err());
+            }
+            let bytes = fs::read(
+                fs::read_dir(folder)
+                    .unwrap()
+                    .next()
+                    .unwrap()
+                    .unwrap()
+                    .path(),
+            )
+            .unwrap();
+            assert!(MasterSigner::is_encrypted(&bytes));
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -77,6 +77,12 @@ pub enum KeySource {
 }
 
 impl KeySource {
+    /// Creation capability, not proof that funds are replay-protected.
+    /// Fork external signers remain gated until their full signing contract is verified.
+    pub fn available_for_creation(&self, chain: crate::chain::ChainId) -> bool {
+        !chain.is_blake2b() || matches!(self, Self::MasterSigner | Self::Manual)
+    }
+
     /// Whether a key from this source can produce a Bitcoin Blake2b unified
     /// signature at creation time: only what signs in-process from a seed
     /// (the Cube key, a Border Wallet key). Devices are unmarked until the

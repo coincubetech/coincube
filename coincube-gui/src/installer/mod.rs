@@ -305,6 +305,57 @@ impl Installer {
         Task::none()
     }
 
+    /// Chain-aware entry point. Reject dormant chains before generating a
+    /// signer or constructing any backend; an encoding twin is never a fallback.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new_for_chain(
+        destination_path: CoincubeDirectory,
+        chain: crate::chain::ChainId,
+        remote_backend: Option<BackendClient>,
+        user_flow: UserFlow,
+        launched_from_app: bool,
+        cube_settings: Option<crate::app::settings::CubeSettings>,
+        breez_client: Option<std::sync::Arc<crate::app::breez_liquid::BreezClient>>,
+        spark_backend: Option<std::sync::Arc<crate::app::wallets::SparkBackend>>,
+        developer_mode: bool,
+        coincube_client: Option<crate::services::coincube::CoincubeClient>,
+    ) -> Result<(Installer, Task<Message>), Error> {
+        use crate::chain::ChainIdExt;
+        if let crate::chain::RuntimeSupport::Dormant { reason } = chain.runtime_support() {
+            return Err(Error::Unexpected(reason.to_string()));
+        }
+        if cube_settings
+            .as_ref()
+            .is_some_and(|cube| cube.network != chain)
+        {
+            return Err(Error::Unexpected(
+                "Installer chain differs from the Cube chain".to_string(),
+            ));
+        }
+        if chain.is_blake2b()
+            && (remote_backend.is_some()
+                || breez_client.is_some()
+                || spark_backend.is_some()
+                || !matches!(user_flow, UserFlow::CreateWallet))
+        {
+            return Err(Error::Unexpected(
+                "Bitcoin Blake2b supports only a Connect-backed Vault creation flow".to_string(),
+            ));
+        }
+        Ok(Self::build_for_chain(
+            destination_path,
+            chain,
+            remote_backend,
+            user_flow,
+            launched_from_app,
+            cube_settings,
+            breez_client,
+            spark_backend,
+            developer_mode,
+            coincube_client,
+        ))
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         destination_path: CoincubeDirectory,
@@ -315,9 +366,37 @@ impl Installer {
         cube_settings: Option<crate::app::settings::CubeSettings>,
         breez_client: Option<std::sync::Arc<crate::app::breez_liquid::BreezClient>>,
         spark_backend: Option<std::sync::Arc<crate::app::wallets::SparkBackend>>,
+        developer_mode: bool,
+        coincube_client: Option<crate::services::coincube::CoincubeClient>,
+    ) -> (Installer, Task<Message>) {
+        Self::build_for_chain(
+            destination_path,
+            network.into(),
+            remote_backend,
+            user_flow,
+            launched_from_app,
+            cube_settings,
+            breez_client,
+            spark_backend,
+            developer_mode,
+            coincube_client,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_for_chain(
+        destination_path: CoincubeDirectory,
+        chain: crate::chain::ChainId,
+        remote_backend: Option<BackendClient>,
+        user_flow: UserFlow,
+        launched_from_app: bool,
+        cube_settings: Option<crate::app::settings::CubeSettings>,
+        breez_client: Option<std::sync::Arc<crate::app::breez_liquid::BreezClient>>,
+        spark_backend: Option<std::sync::Arc<crate::app::wallets::SparkBackend>>,
         mut developer_mode: bool,
         coincube_client: Option<crate::services::coincube::CoincubeClient>,
     ) -> (Installer, Task<Message>) {
+        let network = chain.bitcoin_network();
         let signer = if developer_mode {
             let master_signer = breez_client
                 .as_ref()
@@ -342,8 +421,8 @@ impl Installer {
         } else {
             Arc::new(Mutex::new(Signer::generate(network).unwrap()))
         };
-        let mut context = Context::new(
-            network,
+        let mut context = Context::new_for_chain(
+            chain,
             destination_path.clone(),
             remote_backend
                 .map(RemoteBackend::WithoutWallet)
@@ -434,8 +513,20 @@ impl Installer {
                 // comes straight from the backend which uses that shape.
                 // Using any other form here silently filters out every
                 // server-side cube on mainnet.
-                let network_str = crate::app::settings::network_to_api_string(network);
+                let network_str = chain.api_str().to_string();
                 match user_flow {
+                    UserFlow::CreateWallet if chain.is_blake2b() => vec![
+                        ChooseDescriptorTemplate::default().into(),
+                        DescriptorTemplateDescription::default().into(),
+                        DefineDescriptor::new(network, signer.clone()).into(),
+                        BackupMnemonic::new(signer.clone()).into(),
+                        BackupDescriptor::default().into(),
+                        RegisterDescriptor::new_create_wallet().into(),
+                        CoincubeConnectStep::new().into(),
+                        SelectBitcoindTypeStep::new().into(),
+                        WalletAlias::default().into(),
+                        Final::new().into(),
+                    ],
                     UserFlow::CreateWallet => vec![
                         ChooseDescriptorTemplate::default().into(),
                         DescriptorTemplateDescription::default().into(),
@@ -774,7 +865,7 @@ impl Installer {
                             persist_seed_only_install(
                                 recovered,
                                 &ctx.coincube_directory,
-                                ctx.bitcoin_config.network,
+                                ctx.bitcoin_config.chain,
                                 password.as_str(),
                                 ctx.seed_cube_id(),
                                 seed_device_secret(&ctx)?.as_ref(),
@@ -792,7 +883,7 @@ impl Installer {
                     let network_directory = self
                         .context
                         .coincube_directory
-                        .network_directory(self.context.bitcoin_config.network);
+                        .network_directory(self.context.bitcoin_config.chain);
                     // In case of failure during install, block the thread to
                     // deleted the data_dir/network directory in order to start clean again.
                     warn!("Installation failed. Cleaning up the network directory.");
@@ -992,14 +1083,33 @@ fn pending_rescan(ctx: &Context) -> Option<crate::app::settings::PendingRescan> 
     )
 }
 
+fn require_installable_chain(ctx: &Context) -> Result<(), Error> {
+    use crate::chain::ChainIdExt;
+    if let crate::chain::RuntimeSupport::Dormant { reason } =
+        ctx.bitcoin_config.chain.runtime_support()
+    {
+        return Err(Error::Unexpected(reason.to_string()));
+    }
+    ctx.bitcoin_config
+        .check_chain_encoding()
+        .map_err(|e| Error::Unexpected(e.to_string()))?;
+    if ctx.network != ctx.bitcoin_config.network {
+        return Err(Error::Unexpected(
+            "Installer encoding differs from its chain".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 pub async fn install_local_wallet(
     ctx: Context,
     wallet_id: WalletId,
     signer: Arc<Mutex<Signer>>,
 ) -> Result<WalletSettings, Error> {
+    require_installable_chain(&ctx)?;
     let network_datadir = ctx
         .coincube_directory
-        .network_directory(ctx.bitcoin_config.network);
+        .network_directory(ctx.bitcoin_config.chain);
     network_datadir
         .init()
         .map_err(|e| Error::Unexpected(format!("Failed to create datadir path: {}", e)))?;
@@ -1068,9 +1178,9 @@ pub async fn install_local_wallet(
         signer
             .lock()
             .unwrap()
-            .store_encrypted(
+            .store_encrypted_for_chain(
                 &ctx.coincube_directory,
-                cfg.bitcoin_config.network,
+                cfg.bitcoin_config.chain,
                 &wallet_id.descriptor_checksum,
                 wallet_id
                     .timestamp
@@ -1096,9 +1206,9 @@ pub async fn install_local_wallet(
         // the same PIN that Cube's other seed files already use.
         let password = seed_password(&ctx)?;
         signer
-            .store_encrypted(
+            .store_encrypted_for_chain(
                 &ctx.coincube_directory,
-                cfg.bitcoin_config.network,
+                cfg.bitcoin_config.chain,
                 &wallet_id.descriptor_checksum,
                 timestamp,
                 password.as_str(),
@@ -1132,7 +1242,10 @@ pub async fn create_remote_wallet(
     signer: Arc<Mutex<Signer>>,
     remote_backend: BackendClient,
 ) -> Result<WalletSettings, Error> {
-    let network_datadir = ctx.coincube_directory.network_directory(ctx.network);
+    require_installable_chain(&ctx)?;
+    let network_datadir = ctx
+        .coincube_directory
+        .network_directory(ctx.bitcoin_config.chain);
     network_datadir
         .init()
         .map_err(|e| Error::Unexpected(format!("Failed to create datadir path: {}", e)))?;
@@ -1150,9 +1263,9 @@ pub async fn create_remote_wallet(
         signer
             .lock()
             .unwrap()
-            .store_encrypted(
+            .store_encrypted_for_chain(
                 &ctx.coincube_directory,
-                ctx.network,
+                ctx.bitcoin_config.chain,
                 &wallet_id.descriptor_checksum,
                 wallet_id
                     .timestamp
@@ -1169,9 +1282,9 @@ pub async fn create_remote_wallet(
     if let Some(signer) = &ctx.recovered_signer {
         let password = seed_password(&ctx)?;
         signer
-            .store_encrypted(
+            .store_encrypted_for_chain(
                 &ctx.coincube_directory,
-                ctx.network,
+                ctx.bitcoin_config.chain,
                 &wallet_id.descriptor_checksum,
                 wallet_id
                     .timestamp
@@ -1288,14 +1401,15 @@ pub async fn import_remote_wallet(
     wallet_id: WalletId,
     backend: BackendWalletClient,
 ) -> Result<WalletSettings, Error> {
+    require_installable_chain(&ctx)?;
     tracing::info!("Importing wallet from remote backend");
 
     if let Some(signer) = &ctx.recovered_signer {
         let password = seed_password(&ctx)?;
         signer
-            .store_encrypted(
+            .store_encrypted_for_chain(
                 &ctx.coincube_directory,
-                ctx.network,
+                ctx.bitcoin_config.chain,
                 &wallet_id.descriptor_checksum,
                 wallet_id
                     .timestamp
@@ -1309,7 +1423,9 @@ pub async fn import_remote_wallet(
         info!("Recovered signer mnemonic stored (encrypted)");
     }
 
-    let network_datadir = ctx.coincube_directory.network_directory(ctx.network);
+    let network_datadir = ctx
+        .coincube_directory
+        .network_directory(ctx.bitcoin_config.chain);
     network_datadir
         .init()
         .map_err(|e| Error::Unexpected(format!("Failed to create datadir path: {}", e)))?;
@@ -1388,14 +1504,15 @@ pub async fn import_remote_wallet(
 fn persist_seed_only_install(
     recovered: &Signer,
     coincube_directory: &CoincubeDirectory,
-    network: Network,
+    chain: impl Into<crate::chain::ChainId>,
     password: &str,
     cube_id: &str,
     device_secret: Option<&coincube_core::seed_crypt::DeviceSecret>,
 ) -> Result<(), Error> {
-    if let Err(e) = recovered.store_encrypted_seed_only(
+    let chain = chain.into();
+    if let Err(e) = recovered.store_encrypted_seed_only_for_chain(
         coincube_directory,
-        network,
+        chain,
         password,
         cube_id,
         device_secret,
@@ -1405,9 +1522,9 @@ fn persist_seed_only_install(
                 if io_err.kind() == std::io::ErrorKind::AlreadyExists =>
             {
                 if let Err(verify_err) =
-                    coincube_core::signer::MasterSigner::from_datadir_by_fingerprint(
+                    coincube_core::signer::MasterSigner::from_datadir_by_fingerprint_for_chain(
                         coincube_directory.path(),
-                        network,
+                        chain,
                         recovered.fingerprint(),
                         Some(password),
                         cube_id,
@@ -1432,7 +1549,7 @@ fn persist_seed_only_install(
     // the seed-only path never did, so a fresh (non-post-wipe) datadir reached
     // the `CubeSaved` finish line with no config and panicked. Seed-only cubes
     // run no managed bitcoind, so `start_internal_bitcoind` is false.
-    let network_datadir = coincube_directory.network_directory(network);
+    let network_datadir = coincube_directory.network_directory(chain);
     network_datadir
         .init()
         .map_err(|e| Error::Unexpected(format!("Failed to create datadir path: {}", e)))?;
@@ -1478,9 +1595,10 @@ pub fn create_and_write_file(path: &Path, data: &[u8]) -> Result<(), Error> {
 }
 
 pub fn extract_daemon_config(ctx: &Context, settings: &WalletSettings) -> Result<Config, Error> {
+    require_installable_chain(ctx)?;
     let data_directory = ctx
         .coincube_directory
-        .network_directory(ctx.bitcoin_config.network)
+        .network_directory(ctx.bitcoin_config.chain)
         .coincubed_data_directory(&settings.wallet_id());
     data_directory
         .init()
@@ -1635,6 +1753,103 @@ mod pending_rescan_tests {
             version: 0,
         });
         ctx
+    }
+
+    #[test]
+    fn internal_fork_builder_preserves_chain_without_local_node_or_sdks() {
+        for chain in [
+            crate::chain::ChainId::BitcoinBlake2b,
+            crate::chain::ChainId::BitcoinBlake2bTestnet4,
+        ] {
+            let root = std::env::temp_dir().join(format!("fork-builder-{}", uuid::Uuid::new_v4()));
+            let (installer, _) = Installer::build_for_chain(
+                CoincubeDirectory::new(root.clone()),
+                chain,
+                None,
+                UserFlow::CreateWallet,
+                false,
+                None,
+                None,
+                None,
+                false,
+                None,
+            );
+            assert_eq!(installer.context.bitcoin_config.chain, chain);
+            assert_eq!(installer.context.network, chain.bitcoin_network());
+            assert!(installer.context.remote_backend.is_none());
+            assert!(!installer.context.install_node_alongside_connect);
+            assert!(installer.context.internal_bitcoind.is_none());
+            assert!(installer.breez_client.is_none());
+            assert!(installer.spark_backend.is_none());
+            assert!(!root.exists(), "construction must not touch a datadir");
+            // The public entry still refuses this same chain while dormant.
+            assert!(Installer::try_new_for_chain(
+                CoincubeDirectory::new(root),
+                chain,
+                None,
+                UserFlow::CreateWallet,
+                false,
+                None,
+                None,
+                None,
+                false,
+                None
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn dormant_chain_constructor_refuses_before_creating_any_files() {
+        for chain in [
+            crate::chain::ChainId::BitcoinBlake2b,
+            crate::chain::ChainId::BitcoinBlake2bTestnet4,
+        ] {
+            let temp =
+                std::env::temp_dir().join(format!("btcb2-installer-{}", uuid::Uuid::new_v4()));
+            let result = Installer::try_new_for_chain(
+                CoincubeDirectory::new(temp.clone()),
+                chain,
+                None,
+                UserFlow::CreateWallet,
+                false,
+                None,
+                None,
+                None,
+                false,
+                None,
+            );
+            assert!(
+                matches!(result, Err(Error::Unexpected(reason)) if reason.contains("Bitcoin Blake2b"))
+            );
+            assert!(!temp.exists());
+        }
+    }
+
+    #[test]
+    fn install_boundary_rejects_dormant_or_mismatched_chain_before_io() {
+        for chain in crate::chain::ChainId::ALL {
+            let temp =
+                std::env::temp_dir().join(format!("btcb2-installer-{}", uuid::Uuid::new_v4()));
+            let mut context = Context::new_for_chain(
+                chain,
+                CoincubeDirectory::new(temp.clone()),
+                RemoteBackend::None,
+                None,
+                None,
+            );
+            assert_eq!(
+                require_installable_chain(&context).is_ok(),
+                !chain.is_blake2b()
+            );
+            context.network = if context.network == Network::Signet {
+                Network::Bitcoin
+            } else {
+                Network::Signet
+            };
+            assert!(require_installable_chain(&context).is_err());
+            assert!(!temp.exists());
+        }
     }
 
     fn staged_with_descriptor(
@@ -1968,6 +2183,31 @@ mod seed_only_install_tests {
             !cfg.start_internal_bitcoind,
             "existing gui.toml must not be overwritten"
         );
+    }
+
+    #[test]
+    fn seed_persistence_retry_uses_explicit_chain() {
+        for chain in [
+            crate::chain::ChainId::BitcoinBlake2b,
+            crate::chain::ChainId::BitcoinBlake2bTestnet4,
+        ] {
+            let dir = temp_coincube_dir("fork-seed");
+            let signer = Signer::generate(chain.bitcoin_network()).unwrap();
+            persist_seed_only_install(&signer, &dir, chain, "246810", "cube-a", None).unwrap();
+            persist_seed_only_install(&signer, &dir, chain, "246810", "cube-a", None).unwrap();
+            assert!(
+                persist_seed_only_install(&signer, &dir, chain, "999999", "cube-a", None).is_err()
+            );
+            assert!(dir
+                .network_directory(chain)
+                .path()
+                .join(gui_config::DEFAULT_FILE_NAME)
+                .exists());
+            assert!(!dir
+                .network_directory(chain.bitcoin_network())
+                .path()
+                .exists());
+        }
     }
 
     #[test]

@@ -116,6 +116,7 @@ fn measure(
     };
     let ciphertext_len = psbt_env.ciphertext.len();
     let target = cv1::SignerTarget {
+        capabilities: Vec::new(),
         device_id: String::new(),
         key_fingerprint: "ffd63c8d".into(),
         key_id: "10".into(),
@@ -124,6 +125,7 @@ fn measure(
     let psbt_env = to_proto(psbt_env);
     let desc_env = to_proto(desc_env);
     let connect = cv1::CreateSigningSessionRequest {
+        network: "regtest".into(),
         request_id: request_id.into(),
         vault_id: "vault-00000000-0000-0000-0000-000000000000".into(),
         descriptor_id: "ffd63c8d".into(),
@@ -141,6 +143,7 @@ fn measure(
         descriptor_envelopes: vec![desc_env.clone()],
     };
     let session = cv1::SigningSession {
+        network: String::new(),
         session_id: "11111111-2222-3333-4444-555555555555".into(),
         request_id: request_id.into(),
         user_id: String::new(),
@@ -309,6 +312,7 @@ async fn signer_against_echo_phone() -> (PhoneSigner, tokio::task::JoinHandle<Op
         None,
         paired,
         large_psbt::TR_DESC.to_string(),
+        coincube_core::chain::ChainId::Regtest,
         Some(Arc::new(fresh_transport_key("desktop"))),
     );
     (signer, handle)

@@ -189,6 +189,53 @@ def test_esplora_indexers_follow_their_own_chain(two_chain):
     eb.wait_for_tip(b.rpc.getbestblockhash())
 
 
+def test_esplora_serves_the_genesis_summary_the_rescan_bound_reads(two_chain):
+    """`GET /blocks/0` answers in the shape the rescan lower bound is read from.
+
+    `Client::genesis_block_timestamp` (`coincubed/src/bitcoin/esplora/client.rs`)
+    accepts *exactly one* height-zero summary carrying a `u32` timestamp, and
+    refuses anything else — an empty list, a wrong height, an ambiguous window,
+    or an out-of-range timestamp. The refusal is fail-safe but silent: the
+    `BitcoinInterface` forwarding maps it to `0`
+    (`coincubed/src/bitcoin/mod.rs`), which only turns `start_rescan`'s
+    `timestamp < genesis_timestamp` guard into a no-op. So a shape mismatch on
+    this route would not announce itself anywhere downstream — it has to be
+    pinned here, against the indexer build the fork actually runs on.
+
+    The unit tests cover what the reader does with each shape; what they cannot
+    cover is which shape `retropex/electrs` emits. That is this test.
+    """
+    for node, esplora in (
+        (two_chain.legacy, two_chain.electrs_legacy),
+        (two_chain.blake2b, two_chain.electrs_blake2b),
+    ):
+        genesis_hash = node.rpc.getblockhash(0)
+        summaries = esplora.rest("/blocks/0")
+        # Exactly one. Esplora's `/blocks/:start_height` counts *down* from
+        # `start_height`, so height 0 bottoms out at a single entry; an indexer
+        # that counted up would answer with a window and the reader would
+        # refuse it as ambiguous.
+        assert isinstance(summaries, list), summaries
+        assert len(summaries) == 1, summaries
+        genesis = summaries[0]
+        assert genesis["height"] == 0, genesis
+        assert genesis["id"] == genesis_hash, (genesis, genesis_hash)
+        # Cross-checked against the node rather than a regtest constant: this
+        # is the value that becomes the rescan lower bound.
+        expected_time = node.rpc.getblock(genesis_hash)["time"]
+        assert genesis["timestamp"] == expected_time, (genesis, expected_time)
+        assert 0 <= genesis["timestamp"] <= 0xFFFFFFFF, genesis
+
+    # Both chains share their pre-fork history, so the bound is the same value
+    # on either side of the fork. The JSON route stays usable exactly where the
+    # raw header route diverges (80 vs 164 bytes at the activation height,
+    # asserted above) — which is why the reader no longer decodes headers.
+    legacy_genesis = two_chain.electrs_legacy.rest("/blocks/0")[0]
+    blake2b_genesis = two_chain.electrs_blake2b.rest("/blocks/0")[0]
+    assert legacy_genesis["id"] == blake2b_genesis["id"]
+    assert legacy_genesis["timestamp"] == blake2b_genesis["timestamp"]
+
+
 def test_daemon_syncs_each_chain_through_esplora(two_chain):
     """coincubed on the Esplora backend sees the right coins on each chain."""
     a, b = two_chain.legacy, two_chain.blake2b

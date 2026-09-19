@@ -31,6 +31,7 @@ pub struct CoincubeConnectStep {
     processing: bool,
     error: Option<String>,
     skipped: bool,
+    required: bool,
     /// Set by `load_context` when the installer was launched with an
     /// already-authenticated Connect session (e.g. Vault setup started
     /// from Home while signed in). Tells `load()` to fire `Message::Next`
@@ -56,6 +57,7 @@ impl CoincubeConnectStep {
             processing: false,
             error: None,
             skipped: false,
+            required: false,
             preauthenticated: false,
         }
     }
@@ -100,6 +102,10 @@ impl Step for CoincubeConnectStep {
     ///   * `client.token().is_some()` — an unauthenticated client is
     ///     useless here and would just 401 downstream.
     fn load_context(&mut self, ctx: &Context) {
+        self.required = ctx.bitcoin_config.chain.is_blake2b();
+        if self.required {
+            self.skipped = false;
+        }
         if self.jwt.is_some() || self.otp_sent || self.preauthenticated {
             return;
         }
@@ -143,6 +149,10 @@ impl Step for CoincubeConnectStep {
     }
 
     fn apply(&mut self, ctx: &mut Context) -> bool {
+        if self.skipped && ctx.bitcoin_config.chain.is_blake2b() {
+            self.error = Some("Connect authentication is required for Bitcoin Blake2b".to_string());
+            return false;
+        }
         if self.skipped {
             ctx.use_coincube_connect = false;
             ctx.connect_jwt = None;
@@ -303,6 +313,12 @@ impl Step for CoincubeConnectStep {
                     }
                 }
                 CoincubeConnectMsg::Skip => {
+                    if self.required {
+                        self.error = Some(
+                            "Connect authentication is required for Bitcoin Blake2b".to_string(),
+                        );
+                        return Task::none();
+                    }
                     self.skipped = true;
                     return Task::done(Message::Next);
                 }
@@ -333,6 +349,40 @@ impl Step for CoincubeConnectStep {
             self.is_signup,
             self.processing,
             self.error.as_deref(),
+            !self.required,
         )
+    }
+}
+
+#[cfg(test)]
+mod chain_auth_tests {
+    use super::*;
+    use crate::{chain::ChainId, dir::CoincubeDirectory, installer::context::RemoteBackend};
+
+    #[test]
+    fn fork_connect_cannot_be_skipped_but_bitcoin_can() {
+        for chain in [
+            ChainId::Bitcoin,
+            ChainId::BitcoinBlake2b,
+            ChainId::BitcoinBlake2bTestnet4,
+        ] {
+            let dir = CoincubeDirectory::new(Default::default());
+            let mut ctx =
+                Context::new_for_chain(chain, dir.clone(), RemoteBackend::None, None, None);
+            let mut step = CoincubeConnectStep::new();
+            step.load_context(&ctx);
+            let mut hws = HardwareWallets::new(dir, chain.bitcoin_network());
+            let _ = step.update(&mut hws, Message::CoincubeConnect(CoincubeConnectMsg::Skip));
+            assert_eq!(step.skipped, !chain.is_blake2b());
+            assert_eq!(step.apply(&mut ctx), !chain.is_blake2b());
+            if chain.is_blake2b() {
+                step.skipped = true;
+                assert!(!step.apply(&mut ctx));
+                step.skipped = false;
+                step.jwt = Some(Zeroizing::new("synthetic-token".to_string()));
+                assert!(step.apply(&mut ctx));
+                assert!(ctx.connect_jwt.is_some());
+            }
+        }
     }
 }
