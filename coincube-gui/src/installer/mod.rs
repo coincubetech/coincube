@@ -774,7 +774,7 @@ impl Installer {
                             persist_seed_only_install(
                                 recovered,
                                 &ctx.coincube_directory,
-                                ctx.bitcoin_config.network,
+                                ctx.bitcoin_config.chain,
                                 password.as_str(),
                                 ctx.seed_cube_id(),
                                 seed_device_secret(&ctx)?.as_ref(),
@@ -1068,9 +1068,9 @@ pub async fn install_local_wallet(
         signer
             .lock()
             .unwrap()
-            .store_encrypted(
+            .store_encrypted_for_chain(
                 &ctx.coincube_directory,
-                cfg.bitcoin_config.network,
+                cfg.bitcoin_config.chain,
                 &wallet_id.descriptor_checksum,
                 wallet_id
                     .timestamp
@@ -1096,9 +1096,9 @@ pub async fn install_local_wallet(
         // the same PIN that Cube's other seed files already use.
         let password = seed_password(&ctx)?;
         signer
-            .store_encrypted(
+            .store_encrypted_for_chain(
                 &ctx.coincube_directory,
-                cfg.bitcoin_config.network,
+                cfg.bitcoin_config.chain,
                 &wallet_id.descriptor_checksum,
                 timestamp,
                 password.as_str(),
@@ -1150,9 +1150,9 @@ pub async fn create_remote_wallet(
         signer
             .lock()
             .unwrap()
-            .store_encrypted(
+            .store_encrypted_for_chain(
                 &ctx.coincube_directory,
-                ctx.network,
+                ctx.bitcoin_config.chain,
                 &wallet_id.descriptor_checksum,
                 wallet_id
                     .timestamp
@@ -1169,9 +1169,9 @@ pub async fn create_remote_wallet(
     if let Some(signer) = &ctx.recovered_signer {
         let password = seed_password(&ctx)?;
         signer
-            .store_encrypted(
+            .store_encrypted_for_chain(
                 &ctx.coincube_directory,
-                ctx.network,
+                ctx.bitcoin_config.chain,
                 &wallet_id.descriptor_checksum,
                 wallet_id
                     .timestamp
@@ -1293,9 +1293,9 @@ pub async fn import_remote_wallet(
     if let Some(signer) = &ctx.recovered_signer {
         let password = seed_password(&ctx)?;
         signer
-            .store_encrypted(
+            .store_encrypted_for_chain(
                 &ctx.coincube_directory,
-                ctx.network,
+                ctx.bitcoin_config.chain,
                 &wallet_id.descriptor_checksum,
                 wallet_id
                     .timestamp
@@ -1388,14 +1388,15 @@ pub async fn import_remote_wallet(
 fn persist_seed_only_install(
     recovered: &Signer,
     coincube_directory: &CoincubeDirectory,
-    network: Network,
+    chain: impl Into<crate::chain::ChainId>,
     password: &str,
     cube_id: &str,
     device_secret: Option<&coincube_core::seed_crypt::DeviceSecret>,
 ) -> Result<(), Error> {
-    if let Err(e) = recovered.store_encrypted_seed_only(
+    let chain = chain.into();
+    if let Err(e) = recovered.store_encrypted_seed_only_for_chain(
         coincube_directory,
-        network,
+        chain,
         password,
         cube_id,
         device_secret,
@@ -1405,9 +1406,9 @@ fn persist_seed_only_install(
                 if io_err.kind() == std::io::ErrorKind::AlreadyExists =>
             {
                 if let Err(verify_err) =
-                    coincube_core::signer::MasterSigner::from_datadir_by_fingerprint(
+                    coincube_core::signer::MasterSigner::from_datadir_by_fingerprint_for_chain(
                         coincube_directory.path(),
-                        network,
+                        chain,
                         recovered.fingerprint(),
                         Some(password),
                         cube_id,
@@ -1432,7 +1433,7 @@ fn persist_seed_only_install(
     // the seed-only path never did, so a fresh (non-post-wipe) datadir reached
     // the `CubeSaved` finish line with no config and panicked. Seed-only cubes
     // run no managed bitcoind, so `start_internal_bitcoind` is false.
-    let network_datadir = coincube_directory.network_directory(network);
+    let network_datadir = coincube_directory.network_directory(chain);
     network_datadir
         .init()
         .map_err(|e| Error::Unexpected(format!("Failed to create datadir path: {}", e)))?;
@@ -1968,6 +1969,31 @@ mod seed_only_install_tests {
             !cfg.start_internal_bitcoind,
             "existing gui.toml must not be overwritten"
         );
+    }
+
+    #[test]
+    fn seed_persistence_retry_uses_explicit_chain() {
+        for chain in [
+            crate::chain::ChainId::BitcoinBlake2b,
+            crate::chain::ChainId::BitcoinBlake2bTestnet4,
+        ] {
+            let dir = temp_coincube_dir("fork-seed");
+            let signer = Signer::generate(chain.bitcoin_network()).unwrap();
+            persist_seed_only_install(&signer, &dir, chain, "246810", "cube-a", None).unwrap();
+            persist_seed_only_install(&signer, &dir, chain, "246810", "cube-a", None).unwrap();
+            assert!(
+                persist_seed_only_install(&signer, &dir, chain, "999999", "cube-a", None).is_err()
+            );
+            assert!(dir
+                .network_directory(chain)
+                .path()
+                .join(gui_config::DEFAULT_FILE_NAME)
+                .exists());
+            assert!(!dir
+                .network_directory(chain.bitcoin_network())
+                .path()
+                .exists());
+        }
     }
 
     #[test]
