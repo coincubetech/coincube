@@ -324,6 +324,12 @@ impl Step for DefineDescriptor {
             Message::DefineDescriptor(message::DefineDescriptor::OpenBorderWalletWizard(
                 coordinates,
             )) => {
+                if self.chain.is_blake2b() {
+                    self.error = Some(
+                        "Border Wallet creation is unavailable for Bitcoin Blake2b".to_string(),
+                    );
+                    return Task::none();
+                }
                 let modal = border_wallet_wizard::BorderWalletWizard::new(
                     self.network,
                     coordinates,
@@ -1027,6 +1033,14 @@ mod tests {
             let _ = step.update(&mut hws, Message::CreateTaprootDescriptor(true));
             assert!(!step.use_taproot);
             assert!(step.error.is_some());
+            let task = step.update(
+                &mut hws,
+                Message::DefineDescriptor(message::DefineDescriptor::OpenBorderWalletWizard(vec![
+                    (0, 0),
+                ])),
+            );
+            assert!(into_stream(task).is_none());
+            assert!(step.modal.is_none());
             step.use_taproot = true;
             assert!(!step.apply(&mut ctx));
             assert!(ctx.descriptor.is_none());
