@@ -141,10 +141,7 @@ impl Step for Final {
         self.coincube_client.clone_from(&ctx.coincube_client);
         self.cube_uuid.clone_from(&ctx.cube_id);
         self.cube_name.clone_from(&ctx.cube_name);
-        self.network = match ctx.bitcoin_config.network {
-            coincube_core::miniscript::bitcoin::Network::Bitcoin => "mainnet".to_string(),
-            other => other.to_string(),
-        };
+        self.network = ctx.bitcoin_config.chain.api_str().to_string();
         self.connect_vault_members
             .clone_from(&ctx.connect_vault_members);
         self.connect_vault_timelock_days = ctx.connect_vault_timelock_days;
@@ -370,5 +367,36 @@ impl Step for Final {
 impl From<Final> for Box<dyn Step> {
     fn from(s: Final) -> Box<dyn Step> {
         Box::new(s)
+    }
+}
+
+#[cfg(test)]
+mod chain_registration_tests {
+    use super::*;
+    use crate::{chain::ChainId, dir::CoincubeDirectory, installer::context::RemoteBackend};
+
+    #[test]
+    fn final_registration_preserves_chain_identity() {
+        for (chain, expected) in [
+            (ChainId::Bitcoin, "mainnet"),
+            (ChainId::Testnet, "testnet"),
+            (ChainId::Testnet4, "testnet4"),
+            (ChainId::Signet, "signet"),
+            (ChainId::Regtest, "regtest"),
+            (ChainId::BitcoinBlake2b, "bitcoin-blake2b"),
+            (ChainId::BitcoinBlake2bTestnet4, "bitcoin-blake2b-testnet4"),
+        ] {
+            let mut ctx = Context::new(
+                chain.bitcoin_network(),
+                CoincubeDirectory::new(Default::default()),
+                RemoteBackend::None,
+                None,
+                None,
+            );
+            ctx.bitcoin_config.chain = chain;
+            let mut step = Final::new();
+            step.load_context(&ctx);
+            assert_eq!(step.network, expected);
+        }
     }
 }
