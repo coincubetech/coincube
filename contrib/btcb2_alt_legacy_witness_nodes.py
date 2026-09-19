@@ -122,6 +122,51 @@ def command_version(binary: Path) -> str:
     return text.splitlines()[0] if text else ""
 
 
+def require(condition: bool, message) -> None:
+    """Always-on check. Do not use assert: python -O / PYTHONOPTIMIZE strips those."""
+    if not condition:
+        raise RuntimeError(message)
+
+
+def pick_free_tcp_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+# What Knots 29.4.1 actually writes when -rpcport is already taken (verified
+# against a live collision, coincube#400 CR-2): stdout/stderr carries only
+# "Error: Unable to start HTTP server. See debug log for details."; the
+# bind detail — "Binding RPC on address 127.0.0.1 port N failed (Error:
+# Address already in use (48))" / "Unable to bind all endpoints for RPC
+# server" — goes to <datadir>/regtest/debug.log. Both files are checked.
+_BIND_FAIL_MARKERS = (
+    "unable to start http server",
+    "binding rpc on address",
+    "unable to bind all endpoints",
+    "unable to bind any endpoint",
+    "address already in use",
+    "unable to bind",
+    "failed to bind",
+    "error binding",
+)
+
+
+def rpc_bind_failed(log: str) -> bool:
+    lower = log.lower()
+    return any(marker in lower for marker in _BIND_FAIL_MARKERS)
+
+
+def read_from(path: Path, offset: int) -> str:
+    """The bytes appended to `path` since `offset`, or "" if it does not exist."""
+    if not path.exists():
+        return ""
+    with path.open("rb") as handle:
+        handle.seek(offset)
+        return handle.read().decode("utf-8", "replace")
+
+
 class Node:
     def __init__(self, name: str, extra: list[str], parent: Path, bitcoind: Path, bitcoin_cli: Path):
         self.name = name
@@ -129,16 +174,14 @@ class Node:
         self.bitcoin_cli = bitcoin_cli
         self.data = Path(tempfile.mkdtemp(prefix=f"alt-legacy-{name}-", dir=parent))
         self.data.chmod(0o700)
-        with socket.socket() as sock:
-            sock.bind(("127.0.0.1", 0))
-            self.port = sock.getsockname()[1]
-        self.args = [f"-datadir={self.data}", "-regtest", f"-rpcport={self.port}"]
+        self.port = None
+        self.args: list[str] = []
         self.extra = extra
         self.process = None
         self.log = None
         self.argv = []
 
-    def rpc(self, method: str, *params):
+    def rpc(self, method: str, *params, timeout: float = 20):
         cmd = [
             str(self.bitcoin_cli),
             *self.args,
@@ -146,7 +189,7 @@ class Node:
             method,
             *map(str, params),
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         if result.returncode:
             raise RuntimeError(result.stderr.strip())
         if not result.stdout.strip():
@@ -157,42 +200,73 @@ class Node:
             return result.stdout.strip()
 
     def start(self):
-        self.log = (self.data / "process.log").open("a")
-        self.argv = [
-            str(self.bitcoind),
-            *self.args,
-            "-server=1",
-            "-daemon=0",
-            "-networkactive=0",
-            "-connect=0",
-            "-listen=0",
-            "-dnsseed=0",
-            "-discover=0",
-            "-listenonion=0",
-            "-natpmp=0",
-            "-upnp=0",
-            "-rpcbind=127.0.0.1",
-            "-rpcallowip=127.0.0.1",
-            "-disablewallet=1",
-            "-printtoconsole=0",
-            *self.extra,
-        ]
-        self.process = subprocess.Popen(
-            self.argv,
-            stdout=self.log,
-            stderr=subprocess.STDOUT,
-        )
-        for _ in range(80):
-            if self.process.poll() is not None:
-                raise RuntimeError((self.data / "process.log").read_text())
-            try:
-                info = self.rpc("getblockchaininfo")
-                assert info["chain"] == "regtest"
-                assert not self.rpc("getnetworkinfo")["networkactive"]
+        last_log = ""
+        for attempt in range(8):
+            self.port = pick_free_tcp_port()
+            self.args = [f"-datadir={self.data}", "-regtest", f"-rpcport={self.port}"]
+            if self.log:
+                self.log.close()
+            self.log = (self.data / "process.log").open("a")
+            self.argv = [
+                str(self.bitcoind),
+                *self.args,
+                "-server=1",
+                "-daemon=0",
+                "-networkactive=0",
+                "-connect=0",
+                "-listen=0",
+                "-dnsseed=0",
+                "-discover=0",
+                "-listenonion=0",
+                "-natpmp=0",
+                "-upnp=0",
+                "-rpcbind=127.0.0.1",
+                "-rpcallowip=127.0.0.1",
+                "-disablewallet=1",
+                "-printtoconsole=0",
+                *self.extra,
+            ]
+            # Only this attempt's output is classified: the datadir (and so
+            # both logs) is reused across attempts, and an earlier bind
+            # failure must not re-label a later, different failure.
+            process_log = self.data / "process.log"
+            process_offset = process_log.stat().st_size
+            debug_log = self.data / "regtest" / "debug.log"
+            debug_offset = debug_log.stat().st_size if debug_log.exists() else 0
+            self.process = subprocess.Popen(
+                self.argv,
+                stdout=self.log,
+                stderr=subprocess.STDOUT,
+            )
+            for _ in range(80):
+                if self.process.poll() is not None:
+                    last_log = read_from(process_log, process_offset)
+                    attempt_debug = read_from(debug_log, debug_offset)
+                    if rpc_bind_failed(last_log + attempt_debug) and attempt < 7:
+                        self.process = None
+                        break
+                    raise RuntimeError(last_log + attempt_debug)
+                try:
+                    # Short probe: if the port went to a process that accepts
+                    # the connection and never answers, a 20 s hang per poll
+                    # would turn the bind retry into a multi-minute stall.
+                    info = self.rpc("getblockchaininfo", timeout=5)
+                except (RuntimeError, subprocess.TimeoutExpired):
+                    time.sleep(0.25)
+                    continue
+                require(
+                    info["chain"] == "regtest",
+                    f"{self.name} chain {info.get('chain')!r}",
+                )
+                network = self.rpc("getnetworkinfo")
+                require(
+                    not network["networkactive"],
+                    f"{self.name} networkactive",
+                )
                 return
-            except RuntimeError:
-                time.sleep(0.25)
-        raise RuntimeError("startup deadline")
+            else:
+                raise RuntimeError(f"{self.name} startup deadline")
+        raise RuntimeError(last_log or f"{self.name} rpc bind retries exhausted")
 
     def stop(self):
         if self.process is not None and self.process.poll() is None:
@@ -270,8 +344,12 @@ def main(argv=None) -> None:
         blake.start()
         common = sha.rpc("generatetoaddress", 101, template["address"])
         for height in common:
-            assert blake.rpc("submitblock", sha.rpc("getblock", height, 0)) is None
-        assert sha.rpc("getbestblockhash") == blake.rpc("getbestblockhash")
+            block = sha.rpc("getblock", height, 0)
+            submitted = blake.rpc("submitblock", block)
+            require(submitted is None, f"submitblock {height}: {submitted}")
+        sha_tip = sha.rpc("getbestblockhash")
+        blake_tip = blake.rpc("getbestblockhash")
+        require(sha_tip == blake_tip, f"tips diverged: {sha_tip} vs {blake_tip}")
         funding = sha.rpc("getblock", common[0], 2)["tx"][0]["hex"]
         signed = cargo_example(config["repo"], "sign", stdin=funding)
         sha.rpc("generatetoaddress", 1, template["address"])
@@ -332,25 +410,30 @@ def main(argv=None) -> None:
                 "GUI, daemon updatespend, Keychain, hardware, or poison split."
             ),
         }
-        assert verdicts["unified"]["blake"].get("allowed") is True, verdicts["unified"]
-        assert verdicts["unified"]["sha"].get("allowed") is False, verdicts["unified"]
-        assert verdicts["mixed"]["blake"].get("allowed") is True, verdicts["mixed"]
-        assert verdicts["mixed"]["sha"].get("allowed") is False, verdicts["mixed"]
-        assert verdicts["alternate_legacy"]["sha"].get("allowed") is True, verdicts[
-            "alternate_legacy"
-        ]
-        assert verdicts["alternate_legacy"]["blake"].get("allowed") is True, verdicts[
-            "alternate_legacy"
-        ]
-        assert verdicts["same_keys_legacy"]["sha"].get("allowed") is True, verdicts[
-            "same_keys_legacy"
-        ]
-        assert verdicts["insufficient_legacy"]["sha"].get("allowed") is False, verdicts[
-            "insufficient_legacy"
-        ]
-        assert verdicts["insufficient_legacy"]["blake"].get("allowed") is False, verdicts[
-            "insufficient_legacy"
-        ]
+        require(verdicts["unified"]["blake"].get("allowed") is True, verdicts["unified"])
+        require(verdicts["unified"]["sha"].get("allowed") is False, verdicts["unified"])
+        require(verdicts["mixed"]["blake"].get("allowed") is True, verdicts["mixed"])
+        require(verdicts["mixed"]["sha"].get("allowed") is False, verdicts["mixed"])
+        require(
+            verdicts["alternate_legacy"]["sha"].get("allowed") is True,
+            verdicts["alternate_legacy"],
+        )
+        require(
+            verdicts["alternate_legacy"]["blake"].get("allowed") is True,
+            verdicts["alternate_legacy"],
+        )
+        require(
+            verdicts["same_keys_legacy"]["sha"].get("allowed") is True,
+            verdicts["same_keys_legacy"],
+        )
+        require(
+            verdicts["insufficient_legacy"]["sha"].get("allowed") is False,
+            verdicts["insufficient_legacy"],
+        )
+        require(
+            verdicts["insufficient_legacy"]["blake"].get("allowed") is False,
+            verdicts["insufficient_legacy"],
+        )
         result["passed"] = True
     finally:
         for node in (sha, blake):
