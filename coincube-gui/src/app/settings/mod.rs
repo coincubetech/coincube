@@ -26,7 +26,6 @@ use crate::{
     utils::serde::ok_or_none,
 };
 
-
 pub const SETTINGS_FILE_NAME: &str = "settings.json";
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
