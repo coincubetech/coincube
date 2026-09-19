@@ -267,8 +267,8 @@ impl DefineDescriptor {
             token_kind,
         };
         let keys = self.keys();
-        SelectKeySource::new(
-            self.network,
+        SelectKeySource::new_for_chain(
+            self.chain,
             self.use_taproot,
             actual_path,
             keys,
@@ -566,6 +566,17 @@ impl Step for DefineDescriptor {
     fn apply(&mut self, ctx: &mut Context) -> bool {
         if ctx.bitcoin_config.chain != self.chain || (self.chain.is_blake2b() && self.use_taproot) {
             self.error = Some("Descriptor chain or type is unsupported".to_string());
+            return false;
+        }
+        if self
+            .paths
+            .iter()
+            .flat_map(|path| path.keys.iter())
+            .flatten()
+            .any(|key| !key.source.available_for_creation(self.chain))
+        {
+            self.error =
+                Some("This key source is not available for Bitcoin Blake2b yet".to_string());
             return false;
         }
         if self.paths.len() < 2 {
@@ -1019,6 +1030,28 @@ mod tests {
             step.use_taproot = true;
             assert!(!step.apply(&mut ctx));
             assert!(ctx.descriptor.is_none());
+            step.use_taproot = false;
+            let xpub = step.signer.lock().unwrap().get_extended_pubkey(
+                &coincube_core::miniscript::bitcoin::bip32::DerivationPath::master(),
+            );
+            step.paths[0].keys = vec![Some(Key {
+                source: KeySource::KeychainKey {
+                    owner: crate::installer::descriptor::KeychainKeyOwner::SelfUser {
+                        primary_owner_id: 1,
+                    },
+                    key_id: 1,
+                    name: "phone".to_string(),
+                },
+                name: "phone".to_string(),
+                fingerprint: step.signer.lock().unwrap().fingerprint(),
+                key: DescriptorPublicKey::from_str(&xpub.to_string()).unwrap(),
+                account: None,
+            })];
+            assert!(!step.apply(&mut ctx));
+            assert!(step.error.as_ref().unwrap().contains("key source"));
+            assert!(ctx.descriptor.is_none());
+            assert!(KeySource::Manual.available_for_creation(chain));
+            assert!(KeySource::MasterSigner.available_for_creation(chain));
         }
     }
 
