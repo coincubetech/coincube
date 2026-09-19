@@ -186,11 +186,9 @@ impl std::error::Error for UnlockError {}
 /// `MasterSigner::mnemonics_folder(root, chain.bitcoin_network())`, so every
 /// existing seed file is where it always was; for a Bitcoin Blake2b Cube it
 /// is a directory of its own, so its seeds can never be looked up in — or
-/// written into — `bitcoin/mnemonics`. `coincube-core` still derives that
-/// folder from a `bitcoin::Network` in its own read/write helpers; those are
-/// only ever reached for a chain whose [`RuntimeSupport`] is `Supported`
-/// (the dormant guards in this module and at every start path make sure of
-/// it), and keying them on `ChainId` is the runtime follow-up's job.
+/// written into — `bitcoin/mnemonics`. Explicit chain-aware core and GUI
+/// helpers preserve that identity through seed discovery as well. Runtime
+/// guards still refuse dormant chains at application entry points.
 pub fn seed_folder(datadir_root: &Path, chain: ChainId) -> PathBuf {
     datadir_root
         .join(chain.dir_name())
@@ -533,17 +531,18 @@ fn open_seed(
 /// nothing against the shared unlock throttle (invariant I7).
 pub(crate) fn open_seed_by_fingerprint(
     datadir_root: &Path,
-    network: Network,
+    chain: impl Into<ChainId>,
     fingerprint: Fingerprint,
     pin: &str,
     cube_id: &str,
 ) -> Result<MasterSigner, SignerError> {
+    let chain = chain.into();
     // "No entry for this Cube" is `None`, not an error — a v2 file needs no
     // secret and must keep opening without one.
     let secret = device_secret::load_optional(cube_id)
         .map_err(|e| SignerError::DecryptionFailed(e.to_string()))?;
 
-    for (path, named) in seed_files(datadir_root, network)? {
+    for (path, named) in seed_files(datadir_root, chain)? {
         // The duress marker deliberately shares this filename grammar, but its
         // fingerprint field is random rather than derived (unit 6a), so it will
         // not collide with the Cube's real fingerprint. Same independent filter
@@ -552,7 +551,14 @@ pub(crate) fn open_seed_by_fingerprint(
         if named != fingerprint {
             continue;
         }
-        return open_seed_at(&path, network, fingerprint, pin, cube_id, secret.as_ref());
+        return open_seed_at(
+            &path,
+            chain.bitcoin_network(),
+            fingerprint,
+            pin,
+            cube_id,
+            secret.as_ref(),
+        );
     }
 
     Err(SignerError::SignerNotFound(fingerprint))
@@ -574,12 +580,13 @@ pub(crate) fn open_seed_by_fingerprint(
 /// seed here" for itself, where a Cube with no seed file is an ordinary state.
 fn seed_files(
     datadir_root: &Path,
-    network: Network,
+    chain: impl Into<ChainId>,
 ) -> Result<Vec<(PathBuf, Fingerprint)>, SignerError> {
+    let chain = chain.into();
     use coincube_core::signer::MnemonicFileName;
     use std::str::FromStr;
 
-    let folder = MasterSigner::mnemonics_folder(datadir_root, network);
+    let folder = MasterSigner::mnemonics_folder_for_chain(datadir_root, chain);
     let entries = std::fs::read_dir(&folder).map_err(SignerError::MnemonicStorage)?;
 
     let mut files: Vec<(i64, PathBuf, Fingerprint)> = entries
@@ -700,13 +707,14 @@ pub(crate) struct SeedLookup {
 /// no password or keystore access.
 pub(crate) fn encrypted_seed_keys(
     datadir_root: &Path,
-    network: Network,
+    chain: impl Into<ChainId>,
     wanted: &std::collections::HashSet<Fingerprint>,
 ) -> std::collections::HashSet<Fingerprint> {
+    let chain = chain.into();
     if wanted.is_empty() {
         return Default::default();
     }
-    let Ok(files) = seed_files(datadir_root, network) else {
+    let Ok(files) = seed_files(datadir_root, chain) else {
         // No folder, or unreadable: "no seed here" is the honest answer, and
         // this must never be the thing that fails a Vault load.
         return Default::default();
@@ -725,12 +733,13 @@ pub(crate) fn encrypted_seed_keys(
 
 pub(crate) fn open_seed_for_any_of(
     datadir_root: &Path,
-    network: Network,
+    chain: impl Into<ChainId>,
     wanted: &std::collections::HashSet<Fingerprint>,
     password: &str,
     cube_id: &str,
 ) -> Result<SeedLookup, SignerError> {
-    let files = match seed_files(datadir_root, network) {
+    let chain = chain.into();
+    let files = match seed_files(datadir_root, chain) {
         Ok(files) => files,
         // No `mnemonics/` folder at all: this Cube has no seed on this device.
         // Ordinary (watch-only restore, a passkey Cube with no Vault hot key),
@@ -763,7 +772,14 @@ pub(crate) fn open_seed_for_any_of(
         if !wanted.contains(&named) {
             continue;
         }
-        match open_seed_at(&path, network, named, password, cube_id, secret.as_ref()) {
+        match open_seed_at(
+            &path,
+            chain.bitcoin_network(),
+            named,
+            password,
+            cube_id,
+            secret.as_ref(),
+        ) {
             Ok(found) => {
                 // Keep the first and carry on. Returning here would end the
                 // sweep, so a *later* wanted seed that will not open would never
@@ -1297,6 +1313,74 @@ mod tests {
     use coincube_core::miniscript::bitcoin::secp256k1::Secp256k1;
 
     const NET: Network = Network::Bitcoin;
+
+    #[test]
+    fn seed_discovery_never_searches_the_bitcoin_sibling() {
+        use std::collections::HashSet;
+        let secp = Secp256k1::signing_only();
+        for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
+            let dir = tmp_dir("chain-discovery");
+            let cube_id = format!("discovery-{}-{}", chain, std::process::id());
+            let signer = MasterSigner::generate(chain.bitcoin_network()).unwrap();
+            let fp = signer.fingerprint(&secp);
+            let wanted = HashSet::from([fp]);
+            signer
+                .store_encrypted(
+                    &dir,
+                    chain.bitcoin_network(),
+                    &secp,
+                    None,
+                    "1234",
+                    &cube_id,
+                    None,
+                )
+                .unwrap();
+            assert!(open_seed_for_any_of(&dir, chain, &wanted, "1234", &cube_id)
+                .unwrap()
+                .signer
+                .is_none());
+            assert!(encrypted_seed_keys(&dir, chain, &wanted).is_empty());
+            signer
+                .store_encrypted_for_chain(&dir, chain, &secp, None, "5678", &cube_id, None)
+                .unwrap();
+            assert_eq!(encrypted_seed_keys(&dir, chain, &wanted), wanted);
+            let wrong_pin = open_seed_for_any_of(&dir, chain, &wanted, "1234", &cube_id).unwrap();
+            assert!(wrong_pin.signer.is_none());
+            assert_eq!(wrong_pin.unopenable, wanted);
+            assert_eq!(
+                open_seed_for_any_of(&dir, chain, &wanted, "5678", &cube_id)
+                    .unwrap()
+                    .signer
+                    .unwrap()
+                    .fingerprint(&secp),
+                fp
+            );
+            assert_eq!(
+                open_seed_by_fingerprint(&dir, chain, fp, "5678", &cube_id)
+                    .unwrap()
+                    .fingerprint(&secp),
+                fp
+            );
+            assert!(MasterSigner::from_datadir_with_password_filtered_for_chain(
+                &dir, chain, None, &cube_id, true
+            )
+            .unwrap()
+            .is_empty());
+            assert_eq!(
+                MasterSigner::from_datadir_with_password_filtered_for_chain(
+                    &dir,
+                    chain,
+                    Some("5678"),
+                    &cube_id,
+                    true
+                )
+                .unwrap()
+                .len(),
+                1
+            );
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
 
     fn tmp_dir(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!(
