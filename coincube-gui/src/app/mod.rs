@@ -3103,13 +3103,22 @@ impl App {
         )
     }
 
-    /// True when this tab's ConnectAccountPanel either already holds an
-    /// authenticated session or can pull one out of the shared keyring
-    /// entry. Lets the tab-level OpenConnectSignIn handler short-circuit
-    /// the Home-tab handoff when the in-tab inline refresh is enough.
-    pub fn can_restore_connect_session(&self) -> bool {
+    /// True when this tab already has a usable Connect session or a session
+    /// recoverable from the shared keyring.
+    ///
+    /// This is intentionally treated as a Home-tab handoff trigger for the
+    /// sign-in button: the user may already be authenticated under a different
+    /// account, and silently refreshing in place would hide that mismatch.
+    pub fn has_connect_session_available(&self) -> bool {
         self.panels.connect.account.is_authenticated()
             || self.panels.connect.account.has_stored_session()
+    }
+
+    /// Back-compat alias retained for older call sites that meant "a Connect
+    /// session exists and the user must be routed to the overview to choose or
+    /// confirm the right account" rather than silently reusing it in place.
+    pub fn can_restore_connect_session(&self) -> bool {
+        self.has_connect_session_available()
     }
 
     pub fn wallet(&self) -> Option<&Wallet> {

@@ -1647,16 +1647,13 @@ impl Tab {
                         Task::none()
                     }
                     app::Message::View(app::view::Message::OpenConnectSignIn) => {
-                        // Re-check this tab's ConnectAccountPanel against
-                        // the keyring before deciding whether to bubble
-                        // up. When the user already signed in on another
-                        // tab the session is in the shared keyring entry
-                        // and Init can refresh this tab's panel in place;
-                        // jumping to the Home tab in that case would be
-                        // an unnecessary context switch. We only bubble
-                        // when the panel has no path to authenticating
-                        // itself.
-                        let needs_home_handoff = !app.can_restore_connect_session();
+                        // A Connect session already exists (whether authenticated
+                        // in this tab or recoverable from the shared keyring), and
+                        // the user may be signed into a different account than the
+                        // one required for this transaction. Do not silently refresh
+                        // in place here: route them to the Connect overview so they
+                        // can switch accounts explicitly.
+                        let needs_home_handoff = app.has_connect_session_available();
                         let init_task = app
                             .update(app::Message::View(app::view::Message::ConnectAccount(
                                 app::view::ConnectAccountMessage::Init,
