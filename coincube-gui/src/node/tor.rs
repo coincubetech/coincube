@@ -600,6 +600,27 @@ fn persist_inbound_fields(
 /// Inbound-over-Tor is **mainnet-only**: the managed node exists to serve
 /// mainnet, and onion reachability has no value on test networks, so we run
 /// outbound-only on anything but [`Network::Bitcoin`].
+/// Prepare the supported managed Tor lifecycle using explicit chain identity.
+/// BTCB2 has a separate node directory but no separate Tor registry/bundle yet.
+/// Refuse before touching either family's configuration or the global process;
+/// Connect-only BTCB2 never needs to call this function.
+pub fn prepare_inbound_tor_for_chain(
+    coincube_datadir: &CoincubeDirectory,
+    chain: crate::chain::ChainId,
+) -> Result<bool, PrepareInboundTorError> {
+    if chain.is_blake2b() {
+        return Err(PrepareInboundTorError(
+            crate::node::managed_conf::ManagedConfError::Edit(
+                crate::node::managed_conf::ManagedConfEditError::Other(
+                    "Managed Bitcoin Blake2b Tor startup is unavailable; use Connect Esplora"
+                        .to_string(),
+                ),
+            ),
+        ));
+    }
+    prepare_inbound_tor(coincube_datadir, chain.bitcoin_network())
+}
+
 pub fn prepare_inbound_tor(
     coincube_datadir: &CoincubeDirectory,
     network: Network,
@@ -826,6 +847,34 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&base);
         CoincubeDirectory::new(base)
+    }
+
+    #[test]
+    fn fork_tor_preparation_refuses_before_creating_or_changing_files() {
+        use crate::{chain::ChainId, node::bitcoind::NodeChainFamily};
+        let _guard = registry_test_guard();
+        for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
+            let root = temp_datadir("fork-refusal");
+            let fresh = prepare_inbound_tor_for_chain(&root, chain).unwrap_err();
+            assert!(fresh.to_string().contains("use Connect Esplora"));
+            assert!(!root.path().exists());
+            let mut paths = Vec::new();
+            for family in [NodeChainFamily::Bitcoin, NodeChainFamily::BitcoinBlake2b] {
+                let dir = crate::node::bitcoind::internal_bitcoind_datadir_for(&root, family);
+                std::fs::create_dir_all(&dir).unwrap();
+                let path = dir.join("bitcoin.conf");
+                std::fs::write(&path, b"sentinel: do not parse or rewrite").unwrap();
+                paths.push(path);
+            }
+            assert!(prepare_inbound_tor_for_chain(&root, chain).is_err());
+            for path in paths {
+                assert_eq!(
+                    std::fs::read(path).unwrap(),
+                    b"sentinel: do not parse or rewrite"
+                );
+            }
+            std::fs::remove_dir_all(root.path()).unwrap();
+        }
     }
 
     #[test]
