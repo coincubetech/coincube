@@ -83,6 +83,59 @@ node about *which* signatures go into the witness — the next section.
    for a replay statement: `replay_protected()` is true iff the witness holds
    at least one verified unified signature, which is invalid on Bitcoin.
 
+## What the finaliser does not guarantee (`#398`)
+
+The pill is a statement about **the exact witness Coincube would broadcast**,
+not about exclusive ancestry of the coin and not about every signature that
+has ever been produced for this unsigned transaction.
+
+`replay_protected()` is true when that witness contains a verified `0x21`
+signature. Bitcoin will reject *that* serialization. It will not reject a
+different witness assembled later from leftover `SIGHASH_ALL` signatures for
+the same prevouts, sequence, locktime and script. Those two serializations
+share a txid and differ in wtxid.
+
+How leftover signatures arise in this build:
+
+- Keychain keys are classified `ReplayProtection::Legacy` until Lane B3
+  (`state/vault/signers.rs`). Hardware is `UserMarked`, default unmarked =
+  not capable. The unified picker still collects them, and `updatespend`
+  persists every verified `partial_sigs` entry it is given.
+- The Sign action hides once the spend is finalisable
+  (`ReplayReview::signatures_complete`), but Import remains, and copies
+  signed in parallel (exported PSBT, another coordinator, a device that
+  already signed) never have to merge back.
+- Export writes `Psbt::to_string()` (`state/vault/psbt.rs` `ExportPsbt`) —
+  rust-bitcoin's internal representation, proprietary unified records plus
+  standard `partial_sigs`. A Bitcoin-family consumer ignores the proprietary
+  keys and runs `finalize_mut` / `finalizepsbt` on the legacy set. That is
+  the construction rust-miniscript would have produced on Blake2b if the core
+  finaliser were not in the way.
+- `export_standard` is the opposite transform: it *moves* `0x21` records
+  into `PSBT_IN_PARTIAL_SIG`. The GUI export path does not use it.
+- The adapter refuses both encodings for one key in **one** PSBT
+  (`AmbiguousSignatureEncoding`). It cannot bind a second file that never
+  comes back.
+
+A follow-up collection/export policy, still tracked in `#398` and **not
+implemented in this slice**, could prevent storing or exporting a
+`partial_sigs` set that already satisfies an input while a unified record is
+present, and could refuse further legacy collection once a unified path is
+finalisable. The app cannot revoke signatures that already left on a
+Keychain, a hardware device, an exported file, or another coordinator.
+
+A unified spend is therefore not proof the Bitcoin twin cannot be spent, and
+not poison evidence. Lane B1.5's *Split — cannot replay* is the exclusivity
+claim; that type still has no values.
+
+Copy today (`state/vault/replay.rs`): the success pill is the two words
+"Replay protected". The acknowledgement "I understand this can also spend my
+Bitcoin" is shown only for `ReplayStatus::Replayable`. A Protected spend does
+not warn that leftover or external legacy signatures may still spend the
+twin. That wording overstates the established guarantee if it is read as
+coin exclusivity. This slice does not change the pill; the follow-up is
+collection policy plus copy, listed on `#398`.
+
 ## Daemon
 
 `coincubed` keys both spend mutations on `config.bitcoin_config.chain`:

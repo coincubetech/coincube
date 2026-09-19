@@ -11,7 +11,7 @@ use crate::{
 };
 
 use super::*;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 fn secp() -> secp256k1::Secp256k1<secp256k1::All> {
     secp256k1::Secp256k1::new()
@@ -45,6 +45,34 @@ fn add_legacy(
 ) -> UnifiedPsbt {
     let all: Vec<usize> = (0..psbt.psbt().inputs.len()).collect();
     add_legacy_to(psbt, signer, &all, secp)
+}
+
+/// Primary keys of the 2-of-3. The recovery leaf is `pkh(...)`, so
+/// `iter_pk` does not yield it.
+fn primary_keys(psbt: &UnifiedPsbt) -> BTreeSet<PublicKey> {
+    input_contexts(psbt).unwrap()[0]
+        .miniscript
+        .iter_pk()
+        .collect()
+}
+
+/// The one `partial_sigs` key that is not a primary key — signer 2's recovery
+/// key in this fixture.
+fn recovery_legacy_key(psbt: &UnifiedPsbt) -> PublicKey {
+    let primary = primary_keys(psbt);
+    let extras: Vec<PublicKey> = psbt.psbt().inputs[0]
+        .partial_sigs
+        .keys()
+        .copied()
+        .filter(|pk| !primary.contains(pk))
+        .collect();
+    assert_eq!(
+        extras.len(),
+        1,
+        "expected exactly one recovery-key legacy signature, got {:?}",
+        extras
+    );
+    extras[0]
 }
 
 /// What a plain cheapest-first satisfaction over *every* signature on `input`
@@ -1174,4 +1202,284 @@ fn gandalf_probe_unused_legacy_anyonecanpay_is_refused() {
         result.is_err(),
         "all legacy records must be validated even if unified alone satisfies"
     );
+}
+
+/// Issue #398: a verified unified final witness is not proof that an
+/// alternative Bitcoin-valid legacy witness cannot be assembled from
+/// independently collected legacy signatures for the same unsigned
+/// transaction.
+///
+/// Product shape: 2-of-3 primary. One key signs unified (hot / Border Wallet);
+/// the other two sign legacy (Keychain until B3, unmarked hardware, or a
+/// retained/exported copy). Coincube's finaliser keeps a unified signature in
+/// the broadcast witness. rust-miniscript's `finalize_mut` — the Bitcoin-path
+/// finaliser, and what a standard PSBT consumer sees in `partial_sigs` — does
+/// not read proprietary unified records. Two leftover legacy signatures meet
+/// the threshold, so that consumer produces an all-legacy witness for the same
+/// txid (different wtxid).
+#[test]
+fn issue_398_surplus_legacy_signatures_form_an_alternate_bitcoin_witness() {
+    use miniscript::psbt::PsbtExt;
+
+    let secp = secp();
+    let fixture = fixture(1);
+    let mixed = sign_p2wsh_all_unified(&fixture.signers[0], &fixture.psbt, &secp).unwrap();
+    let mixed = add_legacy(&mixed, &fixture.signers[1], &secp);
+    let mixed = add_legacy(&mixed, &fixture.signers[2], &secp);
+    assert_eq!(unified_signatures(&mixed).unwrap().len(), 1);
+    assert!(
+        mixed.psbt().inputs[0].partial_sigs.len() >= 2,
+        "two legacy-class keys must leave a satisfying `partial_sigs` set"
+    );
+
+    let coincube = finalize_p2wsh_all_unified(&mixed, &secp).unwrap();
+    assert!(
+        coincube.inputs[0].replay_protected(),
+        "Coincube must still broadcast a unified-bearing witness: {:?}",
+        coincube.inputs[0]
+    );
+    assert_eq!(coincube.inputs[0].unified_used, 1);
+    let (unified, _) = signature_elements(&coincube.transaction.input[0].witness);
+    assert_eq!(unified.len(), 1);
+
+    let mut bitcoin_view = mixed.psbt().clone();
+    bitcoin_view.finalize_mut(&secp).unwrap_or_else(|e| {
+        panic!(
+            "standard PSBT finaliser should succeed from two legacy signatures: {:?}",
+            e
+        )
+    });
+    let alternate = bitcoin_view.extract_tx_unchecked_fee_rate();
+    let (unified, legacy) = signature_elements(&alternate.input[0].witness);
+    assert!(
+        unified.is_empty(),
+        "standard finaliser must not place 0x21 records it cannot see"
+    );
+    assert_eq!(legacy.len(), 2);
+
+    assert_eq!(
+        coincube.transaction.compute_txid(),
+        alternate.compute_txid(),
+        "same unsigned transaction / same txid"
+    );
+    assert_ne!(
+        coincube.transaction.compute_wtxid(),
+        alternate.compute_wtxid(),
+        "witnesses differ, so wtxid differs"
+    );
+    assert_eq!(
+        coincube.transaction.compute_txid(),
+        mixed.psbt().unsigned_tx.compute_txid()
+    );
+
+    // Stripping unified records from a retained copy is enough: Coincube then
+    // honestly reports the leftover witness as replayable. The app cannot
+    // revoke the copy that never came back.
+    let mut stripped = mixed.clone();
+    stripped.psbt_mut().inputs[0].proprietary.clear();
+    assert!(unified_signatures(&stripped).unwrap().is_empty());
+    let coincube_stripped = finalize_p2wsh_all_unified(&stripped, &secp).unwrap();
+    assert!(!coincube_stripped.inputs[0].replay_protected());
+    assert_eq!(
+        (
+            coincube_stripped.inputs[0].unified_used,
+            coincube_stripped.inputs[0].legacy_used
+        ),
+        (0, 2)
+    );
+    assert_eq!(
+        coincube_stripped.transaction.compute_txid(),
+        coincube.transaction.compute_txid()
+    );
+}
+
+/// Negative control: one leftover legacy signature cannot satisfy the 2-of-3,
+/// so stripping the unified record does not yield a Bitcoin-valid alternate.
+#[test]
+fn issue_398_one_legacy_signature_cannot_form_an_alternate_witness() {
+    use miniscript::psbt::PsbtExt;
+
+    let secp = secp();
+    let fixture = fixture(1);
+    let mixed = sign_p2wsh_all_unified(&fixture.signers[0], &fixture.psbt, &secp).unwrap();
+    let mixed = add_legacy(&mixed, &fixture.signers[1], &secp);
+    assert_eq!(mixed.psbt().inputs[0].partial_sigs.len(), 1);
+
+    let coincube = finalize_p2wsh_all_unified(&mixed, &secp).unwrap();
+    assert!(coincube.inputs[0].replay_protected());
+    assert_eq!(
+        (
+            coincube.inputs[0].unified_used,
+            coincube.inputs[0].legacy_used
+        ),
+        (1, 1)
+    );
+
+    let mut bitcoin_view = mixed.psbt().clone();
+    assert!(
+        bitcoin_view.finalize_mut(&secp).is_err(),
+        "one legacy signature must not satisfy the 2-of-3"
+    );
+
+    let mut stripped = mixed.clone();
+    stripped.psbt_mut().inputs[0].proprietary.clear();
+    assert!(matches!(
+        finalize_p2wsh_all_unified(&stripped, &secp),
+        Err(UnifiedFinalizeError::Unsatisfiable { input: 0, .. })
+    ));
+}
+
+/// Same keys, two retained copies: unified signatures live on copy A, legacy
+/// signatures on copy B. The adapter refuses both encodings on one key in a
+/// single PSBT; it cannot bind copies that never merge.
+#[test]
+fn issue_398_retained_legacy_copy_of_the_same_keys_is_a_separate_psbt() {
+    use miniscript::psbt::PsbtExt;
+
+    let secp = secp();
+    let fixture = fixture(1);
+    let unified_copy = sign_p2wsh_all_unified(&fixture.signers[0], &fixture.psbt, &secp).unwrap();
+    let unified_copy = sign_p2wsh_all_unified(&fixture.signers[1], &unified_copy, &secp).unwrap();
+    let protected = finalize_p2wsh_all_unified(&unified_copy, &secp).unwrap();
+    assert!(protected.inputs[0].replay_protected());
+    assert_eq!(
+        (
+            protected.inputs[0].unified_used,
+            protected.inputs[0].legacy_used
+        ),
+        (2, 0)
+    );
+
+    let legacy_copy = add_legacy(
+        &add_legacy(&fixture.psbt, &fixture.signers[0], &secp),
+        &fixture.signers[1],
+        &secp,
+    );
+    assert!(unified_signatures(&legacy_copy).unwrap().is_empty());
+    let coincube_legacy = finalize_p2wsh_all_unified(&legacy_copy, &secp).unwrap();
+    assert!(!coincube_legacy.inputs[0].replay_protected());
+
+    let mut bitcoin_view = legacy_copy.psbt().clone();
+    bitcoin_view
+        .finalize_mut(&secp)
+        .expect("legacy copy meets the 2-of-3");
+    let alternate = bitcoin_view.extract_tx_unchecked_fee_rate();
+    assert_eq!(
+        protected.transaction.compute_txid(),
+        alternate.compute_txid()
+    );
+    assert_ne!(
+        protected.transaction.compute_wtxid(),
+        alternate.compute_wtxid()
+    );
+}
+
+/// A timelocked recovery-key legacy signature is not an alternate spend while
+/// CSV is disabled: the primary 2-of-3 still needs two signatures, and the
+/// recovery leaf is not satisfiable.
+#[test]
+fn issue_398_timelocked_recovery_legacy_is_not_an_alternate_without_csv() {
+    use miniscript::psbt::PsbtExt;
+
+    let secp = secp();
+    let fixture = fixture(1);
+    let mixed = sign_p2wsh_all_unified(&fixture.signers[0], &fixture.psbt, &secp).unwrap();
+    // Signer 2 controls the recovery key. Its legacy signatures land, but the
+    // recovery leaf stays locked (sequence is not a relative lock time).
+    let mixed = add_legacy(&mixed, &fixture.signers[2], &secp);
+    let primary = primary_keys(&mixed);
+    let recovery = recovery_legacy_key(&mixed);
+    assert!(
+        mixed.psbt().inputs[0].partial_sigs.contains_key(&recovery),
+        "CSV-disabled negative must actually collect the recovery-key signature"
+    );
+    assert!(
+        mixed.psbt().inputs[0]
+            .partial_sigs
+            .keys()
+            .any(|pk| primary.contains(pk)),
+        "signer 2 also signs its primary key"
+    );
+
+    let coincube = finalize_p2wsh_all_unified(&mixed, &secp).unwrap();
+    // One unified + however many of signer 2's primary-key legacy the script
+    // can use. Recovery is not enabled, so this is still the primary path.
+    assert!(coincube.inputs[0].replay_protected());
+
+    let mut stripped = mixed.clone();
+    stripped.psbt_mut().inputs[0].proprietary.clear();
+    let mut bitcoin_view = stripped.psbt().clone();
+    assert!(
+        bitcoin_view.finalize_mut(&secp).is_err(),
+        "recovery-key leftovers must not satisfy the primary 2-of-3 without a second primary signature"
+    );
+    assert!(matches!(
+        finalize_p2wsh_all_unified(&stripped, &secp),
+        Err(UnifiedFinalizeError::Unsatisfiable { input: 0, .. })
+    ));
+
+    // Recovery signature alone, still without CSV: the leaf is the thing
+    // that is locked, not merely "one primary is not enough".
+    let mut recovery_only = stripped;
+    recovery_only.psbt_mut().inputs[0]
+        .partial_sigs
+        .retain(|pk, _| *pk == recovery);
+    assert_eq!(recovery_only.psbt().inputs[0].partial_sigs.len(), 1);
+    assert!(matches!(
+        finalize_p2wsh_all_unified(&recovery_only, &secp),
+        Err(UnifiedFinalizeError::Unsatisfiable { input: 0, .. })
+    ));
+}
+
+/// The same recovery-key leftover becomes a Bitcoin-valid spend once CSV is
+/// enabled on the unsigned transaction *before* signing. Sequence is set
+/// first: a later sequence change would invalidate `SIGHASH_ALL`. Only the
+/// recovery signature is offered, so a second primary key cannot be what
+/// satisfies the input.
+#[test]
+fn issue_398_recovery_legacy_is_an_alternate_once_csv_is_enabled() {
+    use miniscript::psbt::PsbtExt;
+
+    let secp = secp();
+    let mut fixture = fixture(1);
+    fixture.psbt.psbt_mut().unsigned_tx.input[0].sequence = Sequence::from_height(46);
+    let signed = add_legacy(&fixture.psbt, &fixture.signers[2], &secp);
+    let primary = primary_keys(&signed);
+    let recovery = recovery_legacy_key(&signed);
+    let mut recovery_only = signed;
+    recovery_only.psbt_mut().inputs[0]
+        .partial_sigs
+        .retain(|pk, _| *pk == recovery);
+    assert_eq!(recovery_only.psbt().inputs[0].partial_sigs.len(), 1);
+    assert!(!primary.contains(&recovery));
+
+    let coincube = finalize_p2wsh_all_unified(&recovery_only, &secp).unwrap();
+    assert_eq!(
+        coincube.inputs[0],
+        InputWitnessReport {
+            unified_used: 0,
+            legacy_used: 1
+        }
+    );
+    assert!(!coincube.inputs[0].replay_protected());
+    assert_eq!(
+        coincube.transaction.input[0].sequence,
+        Sequence::from_height(46)
+    );
+    let (unified, legacy) = signature_elements(&coincube.transaction.input[0].witness);
+    assert!(unified.is_empty());
+    assert_eq!(legacy.len(), 1);
+
+    let mut bitcoin_view = recovery_only.psbt().clone();
+    bitcoin_view
+        .finalize_mut(&secp)
+        .expect("CSV-enabled recovery leaf is a standard satisfaction");
+    let alternate = bitcoin_view.extract_tx_unchecked_fee_rate();
+    assert_eq!(
+        alternate.compute_txid(),
+        coincube.transaction.compute_txid()
+    );
+    let (unified, legacy) = signature_elements(&alternate.input[0].witness);
+    assert!(unified.is_empty());
+    assert_eq!(legacy.len(), 1);
 }

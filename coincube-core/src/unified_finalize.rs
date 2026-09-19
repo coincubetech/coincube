@@ -52,7 +52,11 @@
 //! one verified unified signature cannot be replayed on Bitcoin, because that
 //! signature is invalid there; an input satisfied by legacy signatures alone is
 //! replayable, whatever the PSBT claimed. Nothing here asserts chain inclusion,
-//! finality, poison evidence or policy authorisation.
+//! finality, poison evidence or policy authorisation. It also does not assert
+//! that no *other* witness exists: leftover or externally retained
+//! `SIGHASH_ALL` signatures that independently meet the script threshold can
+//! still be assembled by a standard PSBT consumer that never sees the
+//! proprietary unified records (`#398`).
 
 use std::{collections::BTreeMap, error, fmt};
 
