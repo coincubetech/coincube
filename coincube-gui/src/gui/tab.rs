@@ -3161,6 +3161,8 @@ pub fn create_app_with_remote_backend(
             connect_transport_key: None,
             cube_encryption_key: None,
             network,
+            fiat_chain: cube_settings.network,
+            btcb2_price_request: None,
             datadir_path: coincube_dir.clone(),
             // Recomputed from the P2P panel's Mostro config once panels are built.
             p2p_test_coordinator: false,
