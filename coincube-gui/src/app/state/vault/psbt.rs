@@ -2050,7 +2050,10 @@ impl SignModal {
     /// Keychain-flow banners for the unified picker (errors, degraded stream,
     /// unaddressable signers) — surfaced above the signer list. Empty when no
     /// keychain flow is active or everything is healthy.
-    fn keychain_notices(&self) -> Vec<String> {
+    ///
+    /// `pub(super)` so `keychain_sign`'s tests can pin this surface to the
+    /// same copy as the modal's own view.
+    pub(super) fn keychain_notices(&self) -> Vec<String> {
         let Some(k) = self.keychain.as_ref() else {
             return Vec::new();
         };
@@ -2061,11 +2064,11 @@ impl SignModal {
         if let Some(banner) = k.stream_health_banner() {
             notices.push(banner);
         }
+        // Same entries, same copy as the Keychain modal's own view — never a
+        // second hand-written diagnosis here (this site used to say "this
+        // signer has no registered device" for every reason).
         for u in k.unresolved() {
-            notices.push(format!(
-                "Can't sign with {} — this signer has no registered device.",
-                u
-            ));
+            notices.push(super::keychain_sign::friendly_unresolved_signer(u));
         }
         notices
     }
