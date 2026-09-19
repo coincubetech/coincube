@@ -152,6 +152,7 @@ pub fn two_of_three_inheritance_description(progress: (usize, usize)) -> Element
 pub fn two_of_three_inheritance_template<'a>(
     progress: (usize, usize),
     use_taproot: bool,
+    allow_taproot: bool,
     primary_path: &'a Path,
     inheritance_path: &'a Path,
     valid: bool,
@@ -184,7 +185,7 @@ pub fn two_of_three_inheritance_template<'a>(
                     )
                     .style(theme::button::transparent)
                 },
-                move || define_descriptor_advanced_settings(use_taproot),
+                move || define_descriptor_advanced_settings(use_taproot, allow_taproot),
             ))
             .push(
                 path(
@@ -318,6 +319,7 @@ pub fn two_of_three_inheritance_template<'a>(
 pub fn inheritance_template<'a>(
     progress: (usize, usize),
     use_taproot: bool,
+    allow_taproot: bool,
     primary_path: &'a Path,
     recovery_path: &'a Path,
     valid: bool,
@@ -355,7 +357,7 @@ pub fn inheritance_template<'a>(
                     )
                     .style(theme::button::transparent)
                 },
-                move || define_descriptor_advanced_settings(use_taproot),
+                move || define_descriptor_advanced_settings(use_taproot, allow_taproot),
             ))
             .push(
                 path(

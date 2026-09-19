@@ -284,6 +284,10 @@ impl DefineDescriptor {
 impl Step for DefineDescriptor {
     fn load_context(&mut self, ctx: &Context) {
         self.chain = ctx.bitcoin_config.chain;
+        self.network = ctx.bitcoin_config.network;
+        if self.chain.is_blake2b() {
+            self.use_taproot = false;
+        }
         self.load_template(ctx.descriptor_template);
         self.cube_id = ctx.cube_id.clone();
         self.coincube_client = ctx.coincube_client.clone();
@@ -298,6 +302,11 @@ impl Step for DefineDescriptor {
                 self.modal = None;
             }
             Message::CreateTaprootDescriptor(use_taproot) => {
+                if use_taproot && self.chain.is_blake2b() {
+                    self.error =
+                        Some("Taproot creation is unavailable for Bitcoin Blake2b".to_string());
+                    return Task::none();
+                }
                 self.use_taproot = use_taproot;
                 self.check_setup();
             }
@@ -555,6 +564,10 @@ impl Step for DefineDescriptor {
     }
 
     fn apply(&mut self, ctx: &mut Context) -> bool {
+        if ctx.bitcoin_config.chain != self.chain || (self.chain.is_blake2b() && self.use_taproot) {
+            self.error = Some("Descriptor chain or type is unsupported".to_string());
+            return false;
+        }
         if self.paths.len() < 2 {
             return false;
         }
@@ -766,6 +779,7 @@ impl Step for DefineDescriptor {
                 view::editor::template::inheritance::inheritance_template(
                     progress,
                     self.use_taproot,
+                    !self.chain.is_blake2b(),
                     &self.paths[0],
                     &self.paths[1],
                     self.valid(),
@@ -775,6 +789,7 @@ impl Step for DefineDescriptor {
                 view::editor::template::multisig_security_wallet::multisig_security_template(
                     progress,
                     self.use_taproot,
+                    !self.chain.is_blake2b(),
                     &self.paths[0],
                     &self.paths[1],
                     self.valid(),
@@ -786,6 +801,7 @@ impl Step for DefineDescriptor {
                 view::editor::template::multisig_security_wallet::expanding_multisig_inheritance_template(
                     progress,
                     self.use_taproot,
+                    !self.chain.is_blake2b(),
                     &self.paths[0],
                     &self.paths[1],
                     &self.paths[2],
@@ -796,6 +812,7 @@ impl Step for DefineDescriptor {
                 view::editor::template::inheritance::two_of_three_inheritance_template(
                     progress,
                     self.use_taproot,
+                    !self.chain.is_blake2b(),
                     &self.paths[0],
                     &self.paths[1],
                     self.valid(),
@@ -805,6 +822,7 @@ impl Step for DefineDescriptor {
                 view::editor::template::multisig_security_wallet::multisig_inheritance_recovery_template(
                     progress,
                     self.use_taproot,
+                    !self.chain.is_blake2b(),
                     &self.paths[0],
                     &self.paths[1],
                     &self.paths[2],
@@ -815,6 +833,7 @@ impl Step for DefineDescriptor {
                 view::editor::template::custom::custom_template(
                     progress,
                     self.use_taproot,
+                    !self.chain.is_blake2b(),
                     &self.paths[0],
                     &mut self.paths[1..]
                         .iter()
@@ -975,6 +994,33 @@ mod tests {
 
     use crate::installer::step::descriptor::editor::key::{SelectKeySource, SelectedKey};
     use crate::{dir::CoincubeDirectory, installer::descriptor::KeySource};
+
+    #[test]
+    fn fork_descriptor_refuses_taproot_messages_and_stale_state() {
+        use crate::installer::context::RemoteBackend;
+        for chain in [
+            crate::chain::ChainId::BitcoinBlake2b,
+            crate::chain::ChainId::BitcoinBlake2bTestnet4,
+        ] {
+            let dir = CoincubeDirectory::new(PathBuf::new());
+            let signer = Arc::new(Mutex::new(
+                Signer::generate(chain.bitcoin_network()).unwrap(),
+            ));
+            let mut ctx =
+                Context::new_for_chain(chain, dir.clone(), RemoteBackend::None, None, None);
+            let mut step = DefineDescriptor::new(chain.bitcoin_network(), signer);
+            step.use_taproot = true;
+            step.load_context(&ctx);
+            assert!(!step.use_taproot);
+            let mut hws = HardwareWallets::new(dir, chain.bitcoin_network());
+            let _ = step.update(&mut hws, Message::CreateTaprootDescriptor(true));
+            assert!(!step.use_taproot);
+            assert!(step.error.is_some());
+            step.use_taproot = true;
+            assert!(!step.apply(&mut ctx));
+            assert!(ctx.descriptor.is_none());
+        }
+    }
 
     pub struct Sandbox<S: Step> {
         step: Arc<Mutex<S>>,

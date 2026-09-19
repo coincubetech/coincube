@@ -332,16 +332,19 @@ impl Installer {
                 "Installer chain differs from the Cube chain".to_string(),
             ));
         }
-        // BTCB2 must remain explicitly refused even if runtime support changes
-        // before the remaining creation/signing contract has been completed.
-        if chain.is_blake2b() {
+        if chain.is_blake2b()
+            && (remote_backend.is_some()
+                || breez_client.is_some()
+                || spark_backend.is_some()
+                || !matches!(user_flow, UserFlow::CreateWallet))
+        {
             return Err(Error::Unexpected(
-                "Bitcoin Blake2b Cube creation is not available yet".to_string(),
+                "Bitcoin Blake2b supports only a Connect-backed Vault creation flow".to_string(),
             ));
         }
-        Ok(Self::new(
+        Ok(Self::build_for_chain(
             destination_path,
-            chain.bitcoin_network(),
+            chain,
             remote_backend,
             user_flow,
             launched_from_app,
@@ -363,9 +366,37 @@ impl Installer {
         cube_settings: Option<crate::app::settings::CubeSettings>,
         breez_client: Option<std::sync::Arc<crate::app::breez_liquid::BreezClient>>,
         spark_backend: Option<std::sync::Arc<crate::app::wallets::SparkBackend>>,
+        developer_mode: bool,
+        coincube_client: Option<crate::services::coincube::CoincubeClient>,
+    ) -> (Installer, Task<Message>) {
+        Self::build_for_chain(
+            destination_path,
+            network.into(),
+            remote_backend,
+            user_flow,
+            launched_from_app,
+            cube_settings,
+            breez_client,
+            spark_backend,
+            developer_mode,
+            coincube_client,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_for_chain(
+        destination_path: CoincubeDirectory,
+        chain: crate::chain::ChainId,
+        remote_backend: Option<BackendClient>,
+        user_flow: UserFlow,
+        launched_from_app: bool,
+        cube_settings: Option<crate::app::settings::CubeSettings>,
+        breez_client: Option<std::sync::Arc<crate::app::breez_liquid::BreezClient>>,
+        spark_backend: Option<std::sync::Arc<crate::app::wallets::SparkBackend>>,
         mut developer_mode: bool,
         coincube_client: Option<crate::services::coincube::CoincubeClient>,
     ) -> (Installer, Task<Message>) {
+        let network = chain.bitcoin_network();
         let signer = if developer_mode {
             let master_signer = breez_client
                 .as_ref()
@@ -390,8 +421,8 @@ impl Installer {
         } else {
             Arc::new(Mutex::new(Signer::generate(network).unwrap()))
         };
-        let mut context = Context::new(
-            network,
+        let mut context = Context::new_for_chain(
+            chain,
             destination_path.clone(),
             remote_backend
                 .map(RemoteBackend::WithoutWallet)
@@ -482,8 +513,20 @@ impl Installer {
                 // comes straight from the backend which uses that shape.
                 // Using any other form here silently filters out every
                 // server-side cube on mainnet.
-                let network_str = crate::app::settings::network_to_api_string(network);
+                let network_str = chain.api_str().to_string();
                 match user_flow {
+                    UserFlow::CreateWallet if chain.is_blake2b() => vec![
+                        ChooseDescriptorTemplate::default().into(),
+                        DescriptorTemplateDescription::default().into(),
+                        DefineDescriptor::new(network, signer.clone()).into(),
+                        BackupMnemonic::new(signer.clone()).into(),
+                        BackupDescriptor::default().into(),
+                        RegisterDescriptor::new_create_wallet().into(),
+                        CoincubeConnectStep::new().into(),
+                        SelectBitcoindTypeStep::new().into(),
+                        WalletAlias::default().into(),
+                        Final::new().into(),
+                    ],
                     UserFlow::CreateWallet => vec![
                         ChooseDescriptorTemplate::default().into(),
                         DescriptorTemplateDescription::default().into(),
@@ -1710,6 +1753,50 @@ mod pending_rescan_tests {
             version: 0,
         });
         ctx
+    }
+
+    #[test]
+    fn internal_fork_builder_preserves_chain_without_local_node_or_sdks() {
+        for chain in [
+            crate::chain::ChainId::BitcoinBlake2b,
+            crate::chain::ChainId::BitcoinBlake2bTestnet4,
+        ] {
+            let root = std::env::temp_dir().join(format!("fork-builder-{}", uuid::Uuid::new_v4()));
+            let (installer, _) = Installer::build_for_chain(
+                CoincubeDirectory::new(root.clone()),
+                chain,
+                None,
+                UserFlow::CreateWallet,
+                false,
+                None,
+                None,
+                None,
+                false,
+                None,
+            );
+            assert_eq!(installer.context.bitcoin_config.chain, chain);
+            assert_eq!(installer.context.network, chain.bitcoin_network());
+            assert!(installer.context.remote_backend.is_none());
+            assert!(!installer.context.install_node_alongside_connect);
+            assert!(installer.context.internal_bitcoind.is_none());
+            assert!(installer.breez_client.is_none());
+            assert!(installer.spark_backend.is_none());
+            assert!(!root.exists(), "construction must not touch a datadir");
+            // The public entry still refuses this same chain while dormant.
+            assert!(Installer::try_new_for_chain(
+                CoincubeDirectory::new(root),
+                chain,
+                None,
+                UserFlow::CreateWallet,
+                false,
+                None,
+                None,
+                None,
+                false,
+                None
+            )
+            .is_err());
+        }
     }
 
     #[test]
