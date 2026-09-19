@@ -14,7 +14,7 @@ use coincubed::config::ConfigError;
 use tokio::runtime::Handle;
 
 use crate::app::state::settings::recovery_kit::encrypt_and_upload as recovery_kit_upload;
-use crate::chain::ChainIdExt;
+use crate::chain::{ChainId, ChainIdExt, RuntimeSupport};
 use crate::feature_flags;
 use crate::pin_input;
 use crate::recover_vault::{self, RecoverVaultMessage, RecoverVaultPanel};
@@ -62,13 +62,7 @@ fn pending_advisory_notice(
         .find(|advisory| !GlobalSettings::advisory_notice_seen(&path, advisory.id))
 }
 
-const NETWORKS: [Network; 5] = [
-    Network::Bitcoin,
-    Network::Testnet,
-    Network::Testnet4,
-    Network::Signet,
-    Network::Regtest,
-];
+const NETWORKS: [ChainId; 5] = ChainId::LAUNCHER;
 
 #[derive(Debug, Clone)]
 pub enum State {
@@ -258,8 +252,8 @@ struct PendingRemoteRename {
 
 pub struct Home {
     state: State,
-    displayed_networks: Vec<Network>,
-    network: Network,
+    displayed_networks: Vec<ChainId>,
+    network: ChainId,
     pub datadir_path: CoincubeDirectory,
     error: Option<String>,
     delete_cube_modal: Option<DeleteCubeModal>,
@@ -380,6 +374,13 @@ pub struct Home {
 
 impl Home {
     pub fn new(datadir_path: CoincubeDirectory, network: Option<Network>) -> (Self, Task<Message>) {
+        Self::new_for_chain(datadir_path, network.map(ChainId::from))
+    }
+
+    pub fn new_for_chain(
+        datadir_path: CoincubeDirectory,
+        network: Option<ChainId>,
+    ) -> (Self, Task<Message>) {
         let developer_mode =
             GlobalSettings::load_developer_mode(&GlobalSettings::path(&datadir_path));
         let selected_network = network.unwrap_or(
@@ -387,12 +388,12 @@ impl Home {
                 .iter()
                 .find(|net| has_existing_wallet(&datadir_path, **net))
                 .cloned()
-                .unwrap_or(Network::Bitcoin),
+                .unwrap_or(ChainId::Bitcoin),
         );
-        let network = if developer_mode {
+        let network = if developer_mode || selected_network.is_blake2b() {
             selected_network
         } else {
-            Network::Bitcoin
+            ChainId::Bitcoin
         };
         let network_dir = datadir_path.network_directory(network);
         (
@@ -732,6 +733,30 @@ impl Home {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        if let RuntimeSupport::Dormant { reason } = self.network.runtime_support() {
+            if !matches!(&message, Message::View(ViewMessage::SelectNetwork(_))) {
+                self.set_error(reason);
+                return Task::none();
+            }
+        }
+        // BTCB2 Cubes use the Vault installer, never the seed-only Liquid/Spark flow.
+        if self.network.is_blake2b()
+            && matches!(
+                &message,
+                Message::View(
+                    ViewMessage::CreateCube
+                        | ViewMessage::CreateWallet
+                        | ViewMessage::ShowCreateCube(true)
+                )
+            )
+        {
+            return Task::done(Message::Install(
+                self.datadir_path.clone(),
+                self.network,
+                UserFlow::CreateWallet,
+                self.connect_account.authenticated_client(),
+            ));
+        }
         match message {
             Message::View(ViewMessage::ImportWallet) => {
                 let datadir_path = self.datadir_path.clone();
@@ -973,7 +998,7 @@ impl Home {
                         self.error = Some(why);
                         return Task::none();
                     }
-                    match MasterSigner::generate(self.network) {
+                    match MasterSigner::generate(self.network.bitcoin_network()) {
                         Ok(signer) => {
                             self.creating_cube = false;
                             self.error = None;
@@ -1667,6 +1692,10 @@ impl Home {
                     );
                     return Task::none();
                 }
+                if let RuntimeSupport::Dormant { reason } = network.runtime_support() {
+                    self.set_error(reason);
+                    return Task::none();
+                }
                 self.network = network;
                 // Clear stale limit from previous network
                 self.server_cube_limit = None;
@@ -1699,8 +1728,8 @@ impl Home {
                     self.error = None;
                 }
 
-                if !enabled && self.network != Network::Bitcoin {
-                    self.network = Network::Bitcoin;
+                if !enabled && self.network != ChainId::Bitcoin {
+                    self.network = ChainId::Bitcoin;
                     let network_dir = self.datadir_path.network_directory(self.network);
                     return probe_network_datadir(self.network, network_dir);
                 }
@@ -1765,10 +1794,10 @@ impl Home {
             }
             Message::View(ViewMessage::DeleteCube(DeleteCubeMessage::CloseModal)) => {
                 self.delete_cube_modal = None;
-                if self.network == Network::Testnet
+                if self.network == ChainId::Testnet
                     && !has_existing_wallet(&self.datadir_path, Network::Testnet)
                 {
-                    self.network = Network::Testnet4;
+                    self.network = ChainId::Testnet4;
                 }
                 Task::none()
             }
@@ -1777,7 +1806,7 @@ impl Home {
                 // switched away from: its result describes another
                 // directory. Dropping it keeps `State::Cubes::source` — and
                 // the list it labels — in step with `self.network`.
-                _ if for_chain != crate::chain::ChainId::from(self.network) => {
+                _ if for_chain != self.network => {
                     tracing::debug!(
                         "Ignoring stale datadir probe for {} (now on {})",
                         for_chain,
@@ -1901,6 +1930,10 @@ impl Home {
                 Task::none()
             }
             Message::View(ViewMessage::SubmitRecovery) => {
+                if self.network.is_blake2b() {
+                    self.set_error("Bitcoin Blake2b supports Vault creation only");
+                    return Task::none();
+                }
                 let words = self.recovery_words.join(" ");
                 match bip39::Mnemonic::parse_in(bip39::Language::English, words) {
                     Ok(mnemonic) => {
@@ -1955,10 +1988,11 @@ impl Home {
                                 };
 
                                 // Restore MasterSigner from recovery mnemonic
-                                let master_signer = MasterSigner::from_mnemonic(network, mnemonic)
-                                    .map_err(|e| {
-                                        format!("Failed to restore from mnemonic: {}", e)
-                                    })?;
+                                let master_signer = MasterSigner::from_mnemonic(
+                                    network.bitcoin_network(),
+                                    mnemonic,
+                                )
+                                .map_err(|e| format!("Failed to restore from mnemonic: {}", e))?;
 
                                 // Create secp context for fingerprint calculation
                                 let secp =
@@ -1978,7 +2012,7 @@ impl Home {
 
                                 // Store master seed mnemonic encrypted with PIN (always required)
                                 master_signer
-                                    .store_encrypted(
+                                    .store_encrypted_for_chain(
                                         datadir_path.path(),
                                         network,
                                         &secp,
@@ -2877,6 +2911,10 @@ impl Home {
         credential_id: String,
         prf_output: &zeroize::Zeroizing<[u8; 32]>,
     ) -> Task<Message> {
+        if self.network.is_blake2b() {
+            self.set_error("Bitcoin Blake2b supports Vault creation only");
+            return Task::none();
+        }
         // Derive the signer, take its fingerprint, and keep the phrase only for
         // the duration of the step.
         //
@@ -2887,14 +2925,15 @@ impl Home {
         // same `Zeroizing`, and the same `scrub_creation_seed` on every exit —
         // and unlike the PIN path this phrase is never displayed.
         let (master_fingerprint, words) = {
-            let master_signer = match MasterSigner::from_prf_output(self.network, prf_output) {
-                Ok(signer) => signer,
-                Err(e) => {
-                    self.creating_cube = false;
-                    self.error = Some(format!("Failed to derive master signer: {}", e));
-                    return Task::none();
-                }
-            };
+            let master_signer =
+                match MasterSigner::from_prf_output(self.network.bitcoin_network(), prf_output) {
+                    Ok(signer) => signer,
+                    Err(e) => {
+                        self.creating_cube = false;
+                        self.error = Some(format!("Failed to derive master signer: {}", e));
+                        return Task::none();
+                    }
+                };
             let secp = coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::new();
             let words: Vec<String> = master_signer
                 .words()
@@ -2998,6 +3037,10 @@ impl Home {
     /// reconciled by the same catch-up sync that already handles a Cube
     /// registered from another device.
     fn submit_creation_kit(&mut self) -> Task<Message> {
+        if self.network.is_blake2b() {
+            self.set_error("Bitcoin Blake2b supports Vault creation only");
+            return Task::none();
+        }
         use crate::services::recovery::MIN_PASSWORD_LEN;
 
         let Some(client) = self.connect_account.authenticated_client() else {
@@ -3179,6 +3222,10 @@ impl Home {
         bypass: Option<creation_gate::CreationBackupBypass>,
         recovery_kit: Option<creation_gate::CreationRecoveryKit>,
     ) -> Task<Message> {
+        if self.network.is_blake2b() {
+            self.set_error("Bitcoin Blake2b supports Vault creation only");
+            return Task::none();
+        }
         let Some(pending) = self.pending_passkey_cube.clone() else {
             self.error = Some(
                 "This passkey Cube's registration was lost before it could be saved. \
@@ -3288,7 +3335,7 @@ impl Home {
         self.state = State::Cubes {
             cubes,
             create_cube: true,
-            source: self.network.into(),
+            source: self.network,
         };
     }
 
@@ -3308,6 +3355,10 @@ impl Home {
         bypass: Option<creation_gate::CreationBackupBypass>,
         recovery_kit: Option<creation_gate::CreationRecoveryKit>,
     ) -> Task<Message> {
+        if self.network.is_blake2b() {
+            self.set_error("Bitcoin Blake2b supports Vault creation only");
+            return Task::none();
+        }
         let Some(words) = self.creation_backup_words.clone() else {
             return self.lose_creation_seed();
         };
@@ -3360,8 +3411,9 @@ impl Home {
                 // Same call the recovery path makes, so "what the user wrote
                 // down" and "what gets sealed" are the same words by
                 // construction.
-                let master_signer = MasterSigner::from_mnemonic(network, mnemonic)
-                    .map_err(|e| format!("Failed to build master seed signer: {}", e))?;
+                let master_signer =
+                    MasterSigner::from_mnemonic(network.bitcoin_network(), mnemonic)
+                        .map_err(|e| format!("Failed to build master seed signer: {}", e))?;
 
                 // Create secp context for fingerprint calculation
                 let secp = coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::new();
@@ -3398,7 +3450,7 @@ impl Home {
 
                 // Store master seed mnemonic encrypted with PIN
                 master_signer
-                    .store_encrypted(
+                    .store_encrypted_for_chain(
                         datadir_path.path(),
                         network,
                         &secp,
@@ -3491,7 +3543,32 @@ impl Home {
         )
     }
 
+    fn creation_form(&self) -> Element<ViewMessage> {
+        if self.network.is_blake2b() {
+            return Column::new().spacing(16)
+                .push(text("Create a Bitcoin Blake2b Vault with Connect. Other wallet and recovery flows are unavailable."))
+                .push(button::primary(None, "Create Vault").on_press(ViewMessage::CreateWallet))
+                .into();
+        }
+        create_cube_form(
+            &self.create_cube_name,
+            &self.create_cube_pin,
+            &self.create_cube_pin_confirm,
+            &self.error,
+            self.creating_cube,
+            self.passkey_mode,
+            self.connect_account.authenticated_client().is_some(),
+        )
+    }
+
     pub fn view(&self) -> Element<Message> {
+        if let RuntimeSupport::Dormant { reason } = self.network.runtime_support() {
+            return Column::new()
+                .spacing(16)
+                .push(h3(self.network.label()))
+                .push(text(reason))
+                .into();
+        }
         let content = Into::<Element<ViewMessage>>::into(scrollable(
             Column::new()
                 // Developer mode controls — right-aligned at top
@@ -3587,15 +3664,7 @@ impl Home {
                                     cubes, create_cube, ..
                                 } => {
                                     if *create_cube {
-                                        create_cube_form(
-                                            &self.create_cube_name,
-                                            &self.create_cube_pin,
-                                            &self.create_cube_pin_confirm,
-                                            &self.error,
-                                            self.creating_cube,
-                                            self.passkey_mode,
-                                            self.connect_account.authenticated_client().is_some(),
-                                        )
+                                        self.creation_form()
                                     } else {
                                         let current_net_str =
                                             settings::network_to_api_string(self.network);
@@ -3623,7 +3692,7 @@ impl Home {
                                         }
                                         let total_count = self.total_cube_count();
                                         let at_limit = cubes.len() >= self.account_tier.cube_limit()
-                                            && matches!(self.network, Network::Bitcoin);
+                                            && matches!(self.network, ChainId::Bitcoin);
                                         if at_limit {
                                             col = col.push(
                                                 Column::new()
@@ -3706,17 +3775,7 @@ impl Home {
                                                 .max_width(500),
                                             );
                                         } else {
-                                            col = col.push(create_cube_form(
-                                                &self.create_cube_name,
-                                                &self.create_cube_pin,
-                                                &self.create_cube_pin_confirm,
-                                                &self.error,
-                                                self.creating_cube,
-                                                self.passkey_mode,
-                                                self.connect_account
-                                                    .authenticated_client()
-                                                    .is_some(),
-                                            ));
+                                            col = col.push(self.creation_form());
                                         }
                                         col.into()
                                     } else {
@@ -3814,8 +3873,12 @@ impl Home {
             .height(Length::Fill)
             .into();
 
-        let layout = if self.network != Network::Bitcoin {
-            Column::with_children(vec![network_banner(self.network).into(), layout]).into()
+        let layout = if self.network != ChainId::Bitcoin {
+            Column::with_children(vec![
+                network_banner(self.network.bitcoin_network()).into(),
+                layout,
+            ])
+            .into()
         } else {
             layout
         };
@@ -5057,10 +5120,10 @@ fn recovery_input_view(
         .into()
 }
 
-fn has_existing_wallet(data_dir: &CoincubeDirectory, network: Network) -> bool {
+fn has_existing_wallet(data_dir: &CoincubeDirectory, network: impl Into<ChainId>) -> bool {
     data_dir
         .path()
-        .join(network.to_string())
+        .join(network.into().dir_name())
         .join(settings::SETTINGS_FILE_NAME)
         .exists()
 }
@@ -5107,7 +5170,7 @@ pub enum Message {
     /// demand the user retype email + OTP a second time. `None` means
     /// "home had no Connect session" — the relevant installer step
     /// then falls back to its own auth form.
-    Install(CoincubeDirectory, Network, UserFlow, Option<CoincubeClient>),
+    Install(CoincubeDirectory, ChainId, UserFlow, Option<CoincubeClient>),
     /// Result of probing a chain directory. `for_chain` is the chain the probe
     /// was started for; a result that arrives after the user has switched
     /// networks is stale and must not replace the current list.
@@ -5250,8 +5313,8 @@ pub enum ViewMessage {
     CreateCube,
     PinInput(pin_input::Message),
     PinConfirmInput(pin_input::Message),
-    SelectNetwork(Network),
-    StartInstall(Network),
+    SelectNetwork(ChainId),
+    StartInstall(ChainId),
     Check,
     Run(usize),
     DeleteCube(DeleteCubeMessage),
@@ -7125,7 +7188,8 @@ mod tests {
         home.passkey_mode = false;
         type_pin(&mut home.create_cube_pin, pin);
         type_pin(&mut home.create_cube_pin_confirm, pin);
-        let signer = MasterSigner::generate(home.network).expect("seed generation");
+        let signer =
+            MasterSigner::generate(home.network.bitcoin_network()).expect("seed generation");
         home.pending_cube_id.get_or_insert_with(uuid::Uuid::new_v4);
         home.creating_cube = false;
         home.error = None;
@@ -7429,7 +7493,7 @@ mod tests {
     fn cancelling_the_backup_step_puts_the_existing_cubes_back() {
         let dir = tmp_datadir("cancel-keeps-cubes");
         let mut home = home_with_datadir(&dir);
-        let existing = cube("already-here", "First", home.network);
+        let existing = cube("already-here", "First", home.network.bitcoin_network());
         home.state = State::Cubes {
             cubes: vec![existing.clone()],
             create_cube: true,
@@ -8880,7 +8944,7 @@ mod chain_identity_open_tests {
             Some(Network::Bitcoin),
         )
         .0;
-        assert_eq!(home.network, Network::Bitcoin);
+        assert_eq!(home.network, ChainId::Bitcoin);
         let msgs = drain(home.reload());
         assert_eq!(msgs.len(), 1, "one probe result expected");
         for m in msgs {
@@ -8898,6 +8962,68 @@ mod chain_identity_open_tests {
 
     fn is_run_for(msg: &Message, chain: ChainId, id: &str) -> bool {
         matches!(msg, Message::Run(_, _, c, cube) if *c == chain && cube.id == id)
+    }
+
+    #[test]
+    fn dormant_home_refuses_creation_and_recovery_before_side_effects() {
+        for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
+            let dir = tmp_datadir("dormant-home");
+            let mut home = Home::new_for_chain(CoincubeDirectory::new(dir.clone()), Some(chain)).0;
+            assert_eq!(home.network, chain);
+            assert!(!home.displayed_networks.contains(&chain));
+            for event in [
+                ViewMessage::CreateCube,
+                ViewMessage::CreateWallet,
+                ViewMessage::ImportWallet,
+                ViewMessage::SubmitRecovery,
+                ViewMessage::ShowCreateCube(true),
+                ViewMessage::TogglePasskeyMode(true),
+            ] {
+                assert!(drain(home.update(Message::View(event))).is_empty());
+                assert_eq!(home.error(), Some(BTCB2_DORMANT_REASON));
+                assert!(!home.creating_cube);
+                assert!(home.pending_cube_id.is_none());
+                assert!(home.creation_backup_words.is_none());
+                assert!(!dir.join(chain.dir_name()).exists());
+                assert!(!dir.join(chain.bitcoin_network().to_string()).exists());
+            }
+            let _ = home.view();
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_direct_dormant_selection_cannot_change_the_active_chain() {
+        let dir = tmp_datadir("dormant-selection");
+        let mut home = Home::new(CoincubeDirectory::new(dir.clone()), Some(Network::Bitcoin)).0;
+        home.developer_mode = true;
+        assert!(drain(home.update(Message::View(ViewMessage::SelectNetwork(
+            ChainId::BitcoinBlake2b
+        ))))
+        .is_empty());
+        assert_eq!(home.network, ChainId::Bitcoin);
+        assert_eq!(home.error(), Some(BTCB2_DORMANT_REASON));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn home_installer_handoff_retains_selected_chain() {
+        let dir = tmp_datadir("installer-chain");
+        let mut home = Home::new(CoincubeDirectory::new(dir.clone()), Some(Network::Bitcoin)).0;
+        home.developer_mode = true;
+        home.network = ChainId::Testnet4;
+        let messages = drain(home.update(Message::View(ViewMessage::CreateWallet)));
+        assert!(matches!(
+            messages.as_slice(),
+            [Message::Install(
+                _,
+                ChainId::Testnet4,
+                UserFlow::CreateWallet,
+                _
+            )]
+        ));
+        assert!(!dir.join("testnet4").exists());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
