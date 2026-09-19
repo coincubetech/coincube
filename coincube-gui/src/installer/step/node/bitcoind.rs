@@ -590,6 +590,7 @@ pub struct SelectBitcoindTypeStep {
     install_node: bool,
     show_advanced: bool,
     network: Network,
+    chain: crate::chain::ChainId,
     connect_authenticated: bool,
     /// Managed-node flavour to install when a node is installed. Defaults to
     /// Knots; the user can switch to Core. Carried into
@@ -622,6 +623,7 @@ impl SelectBitcoindTypeStep {
             install_node: true,
             show_advanced: false,
             network: Network::Bitcoin,
+            chain: crate::chain::ChainId::Bitcoin,
             connect_authenticated: false,
             node_flavor: NodeFlavor::Knots,
             existing_flavor: None,
@@ -632,7 +634,19 @@ impl SelectBitcoindTypeStep {
 impl Step for SelectBitcoindTypeStep {
     fn load_context(&mut self, ctx: &Context) {
         self.network = ctx.network;
+        self.chain = ctx.bitcoin_config.chain;
         self.connect_authenticated = ctx.use_coincube_connect;
+        if self.chain.is_blake2b() {
+            // Do not inspect or inherit the Bitcoin family's global node config.
+            // Connect-only remains the default until managed loader isolation lands.
+            self.use_connect = true;
+            self.use_external = true;
+            self.install_node = false;
+            self.show_advanced = false;
+            self.node_flavor = NodeFlavor::KnotsBlake2b;
+            self.existing_flavor = None;
+            return;
+        }
         // Expand advanced section by default on non-mainnet networks.
         if ctx.network != Network::Bitcoin {
             self.show_advanced = true;
@@ -659,6 +673,15 @@ impl Step for SelectBitcoindTypeStep {
 
     fn update(&mut self, _hws: &mut HardwareWallets, message: Message) -> Task<Message> {
         if let Message::SelectBitcoindType(msg) = message {
+            if self.chain.is_blake2b()
+                && !matches!(
+                    msg,
+                    message::SelectBitcoindTypeMsg::ContinueWithConnect
+                        | message::SelectBitcoindTypeMsg::UseConnect
+                )
+            {
+                return Task::none();
+            }
             match msg {
                 message::SelectBitcoindTypeMsg::ContinueWithConnect => {
                     self.use_connect = true;
@@ -688,6 +711,25 @@ impl Step for SelectBitcoindTypeStep {
     }
 
     fn apply(&mut self, ctx: &mut Context) -> bool {
+        if ctx.bitcoin_config.chain.is_blake2b() {
+            if !self.use_connect || self.install_node || !self.use_external {
+                return false;
+            }
+            let Some(token) = &ctx.connect_jwt else {
+                return false;
+            };
+            ctx.bitcoin_backend = Some(BitcoinBackend::Esplora(
+                crate::installer::connect_esplora_config(ctx.bitcoin_config.chain, token.as_str()),
+            ));
+            ctx.node_flavor = NodeFlavor::KnotsBlake2b;
+            ctx.use_coincube_connect = true;
+            ctx.install_node_alongside_connect = false;
+            ctx.bitcoind_is_external = true;
+            ctx.internal_bitcoind_config = None;
+            ctx.pending_bitcoind_config = None;
+            ctx.internal_bitcoind = None;
+            return true;
+        }
         // Carry the chosen managed-node flavour to the InternalBitcoindStep.
         // Harmless on the non-install paths (that step is skipped then).
         ctx.node_flavor = self.node_flavor;
@@ -715,7 +757,10 @@ impl Step for SelectBitcoindTypeStep {
                     return false;
                 };
                 ctx.bitcoin_backend = Some(BitcoinBackend::Esplora(
-                    crate::installer::connect_esplora_config(ctx.network, token.as_str()),
+                    crate::installer::connect_esplora_config(
+                        ctx.bitcoin_config.chain,
+                        token.as_str(),
+                    ),
                 ));
                 ctx.internal_bitcoind_config = None;
                 ctx.pending_bitcoind_config = None;
@@ -1506,7 +1551,10 @@ impl Step for InternalBitcoindStep {
                 // COINCUBE API primary, others → public primary): see
                 // `connect_esplora_config`.
                 ctx.bitcoin_backend = Some(BitcoinBackend::Esplora(
-                    crate::installer::connect_esplora_config(ctx.network, token.as_str()),
+                    crate::installer::connect_esplora_config(
+                        ctx.bitcoin_config.chain,
+                        token.as_str(),
+                    ),
                 ));
             } else {
                 ctx.bitcoin_backend = bitcoind_config.map(BitcoinBackend::Bitcoind);
@@ -1556,6 +1604,72 @@ impl Step for InternalBitcoindStep {
 mod tests {
     use super::*;
     use bitcoin_hashes::sha256;
+
+    #[test]
+    fn fork_connect_selection_keeps_auth_chain_and_has_no_bitcoin_fallback() {
+        use crate::{chain::ChainId, installer::context::RemoteBackend};
+        for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
+            let mut ctx = Context::new_for_chain(
+                chain,
+                CoincubeDirectory::new(
+                    std::env::temp_dir().join(format!("btcb2-selection-{}", uuid::Uuid::new_v4())),
+                ),
+                RemoteBackend::None,
+                None,
+                None,
+            );
+            let mut step = SelectBitcoindTypeStep::new();
+            step.load_context(&ctx);
+            assert_eq!(step.node_flavor, NodeFlavor::KnotsBlake2b);
+            assert!(step.existing_flavor.is_none());
+            assert!(!step.apply(&mut ctx), "authentication required");
+            assert!(ctx.bitcoin_backend.is_none());
+            ctx.connect_jwt = Some(zeroize::Zeroizing::new("synthetic-jwt".to_string()));
+            assert!(step.apply(&mut ctx));
+            let Some(BitcoinBackend::Esplora(config)) = &ctx.bitcoin_backend else {
+                panic!("Connect Esplora required")
+            };
+            assert_eq!(config.addr, crate::installer::connect_url(chain));
+            assert_eq!(config.token.as_deref(), Some("synthetic-jwt"));
+            assert!(config.fallback_addr.is_none());
+            assert!(config.secondary_fallback_addr.is_none());
+            assert!(!ctx.install_node_alongside_connect);
+            assert!(ctx.pending_bitcoind_config.is_none());
+            assert!(!ctx.coincube_directory.path().exists());
+
+            step.install_node = true;
+            assert!(!step.apply(&mut ctx), "managed path is not ready");
+            step.install_node = false;
+            step.use_connect = false;
+            assert!(!step.apply(&mut ctx), "arbitrary external path refused");
+        }
+    }
+
+    #[test]
+    fn staged_node_handoff_preserves_connect_chain_identity() {
+        use crate::{chain::ChainId, installer::context::RemoteBackend};
+        for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
+            let dir = CoincubeDirectory::new(
+                std::env::temp_dir().join(format!("btcb2-staged-{}", uuid::Uuid::new_v4())),
+            );
+            let mut ctx =
+                Context::new_for_chain(chain, dir.clone(), RemoteBackend::None, None, None);
+            ctx.install_node_alongside_connect = true;
+            ctx.connect_jwt = Some(zeroize::Zeroizing::new("synthetic-jwt".to_string()));
+            // Only exercise the completed-step handoff; no node is started.
+            let mut step = InternalBitcoindStep::new(&dir);
+            step.started = Some(Ok(()));
+            assert!(step.apply(&mut ctx));
+            let Some(BitcoinBackend::Esplora(config)) = &ctx.bitcoin_backend else {
+                panic!("Connect Esplora required")
+            };
+            assert_eq!(config.addr, crate::installer::connect_url(chain));
+            assert_eq!(config.token.as_deref(), Some("synthetic-jwt"));
+            assert!(config.fallback_addr.is_none());
+            assert!(config.secondary_fallback_addr.is_none());
+            assert!(!dir.path().exists());
+        }
+    }
 
     fn sha256_hex(bytes: &[u8]) -> String {
         sha256::Hash::hash(bytes).to_string()
