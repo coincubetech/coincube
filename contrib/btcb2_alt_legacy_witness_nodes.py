@@ -350,6 +350,12 @@ def main(argv=None) -> None:
         sha_tip = sha.rpc("getbestblockhash")
         blake_tip = blake.rpc("getbestblockhash")
         require(sha_tip == blake_tip, f"tips diverged: {sha_tip} vs {blake_tip}")
+        # The funding output is block 1's coinbase (paid to the 2-of-3 by
+        # generatetoaddress). A coinbase is spendable only after 100
+        # confirmations, so both chains must be at height >= 101 before
+        # testmempoolaccept sees the spends: the shared 101 blocks plus the
+        # one extra block generated on each node below put both at 102.
+        # Keep those two generatetoaddress calls before the verdicts.
         funding = sha.rpc("getblock", common[0], 2)["tx"][0]["hex"]
         signed = cargo_example(config["repo"], "sign", stdin=funding)
         sha.rpc("generatetoaddress", 1, template["address"])
@@ -424,6 +430,13 @@ def main(argv=None) -> None:
         )
         require(
             verdicts["same_keys_legacy"]["sha"].get("allowed") is True,
+            verdicts["same_keys_legacy"],
+        )
+        # An ordinary all-legacy SIGHASH_ALL witness is valid on both chains;
+        # leaving the BLAKE2b half unasserted would let a rejection there
+        # pass silently (the CR-1 failure class at full strength).
+        require(
+            verdicts["same_keys_legacy"]["blake"].get("allowed") is True,
             verdicts["same_keys_legacy"],
         )
         require(
