@@ -20,8 +20,11 @@ change signer replay classification or enable unsupported signing. Existing
 cryptographic verification under Wallet.chain remains authoritative for replay
 protection. Identity metadata alone is not spend authorization.
 
-LAN remains unchanged and BTCB2-gated pending chain-bound pairing v3 and signer
-prerequisites. The additive protobuf fields on the pre-identity LAN constructor
+LAN now has explicit BTCB2 refusal independent of the global dormant flag:
+pairing Start/Pick refuses, hardware discovery skips phone browsing/dialing,
+and PhoneSigner::sign_tx refuses before inspecting or sealing a PSBT. Switching
+between same-descriptor Bitcoin/BTCB2 twins revokes an active pairing run.
+These guards remain until chain-bound pairing v3 and signer prerequisites ship. The additive protobuf fields on the pre-identity LAN constructor
 remain empty; this PR does not pretend it implements the LAN identity contract.
 No Keychain repository changes or live service changes are included.
 

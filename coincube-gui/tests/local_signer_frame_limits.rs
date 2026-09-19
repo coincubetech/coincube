@@ -312,6 +312,7 @@ async fn signer_against_echo_phone() -> (PhoneSigner, tokio::task::JoinHandle<Op
         None,
         paired,
         large_psbt::TR_DESC.to_string(),
+        coincube_core::chain::ChainId::Regtest,
         Some(Arc::new(fresh_transport_key("desktop"))),
     );
     (signer, handle)

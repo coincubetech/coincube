@@ -108,6 +108,7 @@ async fn main() {
         None,
         paired,
         descriptor.into(),
+        coincube_core::chain::ChainId::Regtest,
         Some(Arc::new(key)),
     );
     let mut psbt = Psbt::deserialize(
