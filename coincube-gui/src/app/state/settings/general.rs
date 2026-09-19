@@ -140,8 +140,12 @@ mod tests {
     #[tokio::test]
     async fn btcb2_price_preferences_never_write_bitcoin_settings() {
         use crate::chain::ChainId;
-        let temp = tempfile::tempdir().unwrap();
-        let root = CoincubeDirectory::new(temp.path().to_path_buf());
+        let temp = std::env::temp_dir().join(format!(
+            "coincube-btcb2-price-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let root = CoincubeDirectory::new(temp.clone());
         for chain in [ChainId::Bitcoin, ChainId::BitcoinBlake2b] {
             let cube =
                 settings::CubeSettings::new_with_raw_id("same-id".into(), "Fixture".into(), chain);
@@ -176,6 +180,7 @@ mod tests {
         let price = persisted.cubes[0].fiat_price.as_ref().unwrap();
         assert_eq!(price.currency, Currency::EUR);
         assert_eq!(price.source, PriceSource::Coincube);
+        std::fs::remove_dir_all(temp).unwrap();
     }
 
     #[test]
