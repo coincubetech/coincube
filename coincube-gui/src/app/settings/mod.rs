@@ -26,7 +26,6 @@ use crate::{
     utils::serde::ok_or_none,
 };
 
-use coincube_core::miniscript::bitcoin::Network;
 
 pub const SETTINGS_FILE_NAME: &str = "settings.json";
 
