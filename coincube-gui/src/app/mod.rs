@@ -165,6 +165,7 @@ impl Panels {
         wallet: Option<Arc<Wallet>>,
         datadir: &CoincubeDirectory,
         network: bitcoin::Network,
+        chain: crate::chain::ChainId,
         cube_id: String,
         cube_name: String,
         cube_network: String,
@@ -214,21 +215,10 @@ impl Panels {
             spark_receive: state::SparkReceive::new(spark_backend.clone()),
             spark_transactions: state::SparkTransactions::new(spark_backend.clone()),
             spark_settings: state::SparkSettings::new(spark_backend.clone()),
-            global_settings: {
-                let network_dir = datadir.network_directory(network);
-                let settings_file = settings::Settings::from_file(&network_dir).ok();
-                let (price_setting, unit_setting) = settings_file
-                    .as_ref()
-                    .and_then(|s| s.cubes.iter().find(|c| c.id == cube_id))
-                    .map(|c| {
-                        (
-                            c.fiat_price.clone().unwrap_or_default(),
-                            c.unit_setting.clone(),
-                        )
-                    })
-                    .unwrap_or_default();
-                GeneralSettingsState::new(cube_id.clone(), price_setting, unit_setting)
-            },
+            global_settings: GeneralSettingsState::from_directory(
+                cube_id.clone(),
+                &datadir.network_directory(chain),
+            ),
             // All vault panels are None - no vault exists
             vault_overview: None,
             coins: None,
@@ -330,21 +320,10 @@ impl Panels {
             spark_receive: state::SparkReceive::new(spark_backend.clone()),
             spark_transactions: state::SparkTransactions::new(spark_backend.clone()),
             spark_settings: state::SparkSettings::new(spark_backend.clone()),
-            global_settings: {
-                let network_dir = data_dir.network_directory(cache.network);
-                let settings_file = settings::Settings::from_file(&network_dir).ok();
-                let (price_setting, unit_setting) = settings_file
-                    .as_ref()
-                    .and_then(|s| s.cubes.iter().find(|c| c.id == cube_id))
-                    .map(|c| {
-                        (
-                            c.fiat_price.clone().unwrap_or_default(),
-                            c.unit_setting.clone(),
-                        )
-                    })
-                    .unwrap_or_default();
-                GeneralSettingsState::new(cube_id.clone(), price_setting, unit_setting)
-            },
+            global_settings: GeneralSettingsState::from_directory(
+                cube_id.clone(),
+                &data_dir.network_directory(cache.fiat_chain),
+            ),
             coins: Some(CoinsPanel::new(
                 cache.coins(),
                 wallet.main_descriptor.first_timelock_value(),
@@ -2605,6 +2584,7 @@ impl App {
             None,
             &datadir,
             network,
+            cube_settings.network,
             cube_settings.id.clone(),
             cube_settings.name.clone(),
             settings::network_to_api_string(network),
