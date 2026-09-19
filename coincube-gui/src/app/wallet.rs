@@ -555,10 +555,11 @@ impl Wallet {
     pub fn load_hotsigners(
         self,
         datadir_path: &CoincubeDirectory,
-        network: bitcoin::Network,
+        chain: impl Into<ChainId>,
         cube_id: &str,
         password: Option<&str>,
     ) -> Result<Self, WalletError> {
+        let chain = chain.into();
         let keys = self.descriptor_keys();
 
         // Free when it hits: the signer the unlock already decrypted, with no
@@ -578,12 +579,12 @@ impl Wallet {
         }
 
         let Some(password) = password else {
-            return self.load_unencrypted_hotsigners(datadir_path, network, &keys);
+            return self.load_unencrypted_hotsigners(datadir_path, chain, &keys);
         };
 
         match crate::services::unlock::open_seed_for_any_of(
             datadir_path.path(),
-            network,
+            chain,
             &keys,
             password,
             cube_id,
@@ -624,24 +625,30 @@ impl Wallet {
     fn load_unencrypted_hotsigners(
         self,
         datadir_path: &CoincubeDirectory,
-        network: bitcoin::Network,
+        chain: impl Into<ChainId>,
         keys: &HashSet<Fingerprint>,
     ) -> Result<Self, WalletError> {
+        let chain = chain.into();
         // Load only Vault mnemonics, skip Liquid wallet mnemonics (managed by Breez SDK)
-        let master_signers =
-            match MasterSigner::from_datadir_vault_only(datadir_path.path(), network) {
-                Ok(signers) => signers,
-                Err(e) => match e {
-                    coincube_core::signer::SignerError::MnemonicStorage(e) => {
-                        if e.kind() == std::io::ErrorKind::NotFound {
-                            Vec::new()
-                        } else {
-                            return Err(WalletError::MasterSigner(e.to_string()));
-                        }
+        let master_signers = match MasterSigner::from_datadir_with_password_filtered_for_chain(
+            datadir_path.path(),
+            chain,
+            None,
+            "",
+            true,
+        ) {
+            Ok(signers) => signers,
+            Err(e) => match e {
+                coincube_core::signer::SignerError::MnemonicStorage(e) => {
+                    if e.kind() == std::io::ErrorKind::NotFound {
+                        Vec::new()
+                    } else {
+                        return Err(WalletError::MasterSigner(e.to_string()));
                     }
-                    _ => return Err(WalletError::MasterSigner(e.to_string())),
-                },
-            };
+                }
+                _ => return Err(WalletError::MasterSigner(e.to_string())),
+            },
+        };
 
         let curve = bitcoin::secp256k1::Secp256k1::signing_only();
         if let Some(master_signer) = master_signers
@@ -661,7 +668,7 @@ impl Wallet {
         // statement is "no credential to try", not "the credential failed".
         let mut this = self;
         this.locked_seed_keys =
-            crate::services::unlock::encrypted_seed_keys(datadir_path.path(), network, keys);
+            crate::services::unlock::encrypted_seed_keys(datadir_path.path(), chain, keys);
         Ok(this)
     }
 

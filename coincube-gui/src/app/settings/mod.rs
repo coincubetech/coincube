@@ -358,11 +358,12 @@ pub async fn mark_cube_synced(
 /// the result back.
 pub fn derive_master_signer_fingerprint(
     datadir_root: &std::path::Path,
-    network: Network,
+    chain: impl Into<crate::chain::ChainId>,
     pin: &str,
     cube_id: &str,
     cube_created_at: i64,
 ) -> Option<Fingerprint> {
+    let chain = chain.into();
     use coincube_core::signer::{
         MasterSigner, MnemonicFileName, MASTER_SEED_LABEL, MNEMONICS_FOLDER_NAME,
     };
@@ -376,7 +377,7 @@ pub fn derive_master_signer_fingerprint(
     const MASTER_SEED_CREATION_WINDOW_SECS: i64 = 2;
 
     let mnemonics_folder = datadir_root
-        .join(network.to_string())
+        .join(chain.dir_name())
         .join(MNEMONICS_FOLDER_NAME);
     let entries = std::fs::read_dir(&mnemonics_folder).ok()?;
 
@@ -406,8 +407,14 @@ pub fn derive_master_signer_fingerprint(
     candidates.sort_by_key(|(_, ts)| (ts - cube_created_at).abs());
 
     candidates.into_iter().map(|(fp, _)| fp).find(|&fp| {
-        MasterSigner::from_datadir_by_fingerprint(datadir_root, network, fp, Some(pin), cube_id)
-            .is_ok()
+        MasterSigner::from_datadir_by_fingerprint_for_chain(
+            datadir_root,
+            chain,
+            fp,
+            Some(pin),
+            cube_id,
+        )
+        .is_ok()
     })
 }
 
@@ -462,19 +469,20 @@ pub enum ConnectEncryptionKey {
 /// that have no session (v1/v2 only).
 pub fn derive_connect_encryption_pubkey(
     datadir_root: &std::path::Path,
-    network: Network,
+    chain: impl Into<crate::chain::ChainId>,
     fingerprint: Fingerprint,
     pin: &str,
     cube_id: &str,
 ) -> ConnectEncryptionKey {
+    let chain = chain.into();
     use crate::services::connect::crypto::CubeEncryptionKey;
     use coincube_core::signer::{MasterSigner, SignerError};
 
     let loaded = match crate::app::session::unlocked_signer(cube_id, fingerprint) {
         Some(signer) => Ok(signer),
-        None => MasterSigner::from_datadir_by_fingerprint(
+        None => MasterSigner::from_datadir_by_fingerprint_for_chain(
             datadir_root,
-            network,
+            chain,
             fingerprint,
             Some(pin),
             cube_id,
@@ -483,7 +491,7 @@ pub fn derive_connect_encryption_pubkey(
 
     match loaded {
         Ok(signer) => ConnectEncryptionKey::Derived(
-            CubeEncryptionKey::derive(&signer, network).public_key_hex(),
+            CubeEncryptionKey::derive(&signer, chain.bitcoin_network()).public_key_hex(),
         ),
         // No seed file for this fingerprint: nothing to derive, and nothing
         // wrong. Mapped the same way `load_breez_client` maps an absent signer.
@@ -2970,5 +2978,62 @@ mod chain_identity_tests {
             CubeSettings::new("x".to_string(), ChainId::BitcoinBlake2b).api_network_string(),
             "mainnet"
         );
+    }
+}
+
+#[cfg(test)]
+mod chain_seed_backfill_tests {
+    use super::*;
+    use coincube_core::signer::{MasterSigner, MASTER_SEED_LABEL};
+
+    #[test]
+    fn backfill_and_encryption_key_use_only_the_cube_chain() {
+        let secp = coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::signing_only();
+        for chain in [
+            crate::chain::ChainId::BitcoinBlake2b,
+            crate::chain::ChainId::BitcoinBlake2bTestnet4,
+        ] {
+            let root =
+                std::env::temp_dir().join(format!("chain-backfill-{}", uuid::Uuid::new_v4()));
+            let cube_id = format!("chain-backfill-{}", uuid::Uuid::new_v4());
+            let signer = MasterSigner::generate(chain.bitcoin_network()).unwrap();
+            let fp = signer.fingerprint(&secp);
+            let info = Some((MASTER_SEED_LABEL.to_string(), 1000));
+            signer
+                .store_encrypted(
+                    &root,
+                    chain.bitcoin_network(),
+                    &secp,
+                    info.clone(),
+                    "1234",
+                    &cube_id,
+                    None,
+                )
+                .unwrap();
+            assert_eq!(
+                derive_master_signer_fingerprint(&root, chain, "1234", &cube_id, 1000),
+                None
+            );
+            assert!(!matches!(
+                derive_connect_encryption_pubkey(&root, chain, fp, "1234", &cube_id),
+                ConnectEncryptionKey::Derived(_)
+            ));
+            signer
+                .store_encrypted_for_chain(&root, chain, &secp, info, "5678", &cube_id, None)
+                .unwrap();
+            assert_eq!(
+                derive_master_signer_fingerprint(&root, chain, "5678", &cube_id, 1000),
+                Some(fp)
+            );
+            assert!(matches!(
+                derive_connect_encryption_pubkey(&root, chain, fp, "5678", &cube_id),
+                ConnectEncryptionKey::Derived(_)
+            ));
+            assert!(!matches!(
+                derive_connect_encryption_pubkey(&root, chain, fp, "1234", &cube_id),
+                ConnectEncryptionKey::Derived(_)
+            ));
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 }
