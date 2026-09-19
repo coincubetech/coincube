@@ -70,6 +70,7 @@ pub fn custom_template_description(progress: (usize, usize)) -> Element<'static,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn custom_template<'a>(
     progress: (usize, usize),
     use_taproot: bool,
