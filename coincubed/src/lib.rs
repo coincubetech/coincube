@@ -1,6 +1,7 @@
 mod bitcoin;
 pub mod commands;
 pub mod config;
+pub mod connect;
 mod database;
 pub mod datadir;
 mod jsonrpc;
@@ -112,6 +113,7 @@ pub enum StartupError {
     Config(ConfigError),
     /// The configured chain has no runtime in this build. Refused before any I/O.
     ChainDormant(ChainId),
+    ConnectAdmission(connect::AdmissionError),
     /// The existing database belongs to another chain than the configuration names. Refused
     /// before the data directory, the watch-only wallet or any migration is touched.
     ChainMismatch {
@@ -136,6 +138,7 @@ pub enum StartupError {
 impl fmt::Display for StartupError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
+            Self::ConnectAdmission(e) => write!(f, "{}", e),
             Self::Io(e) => write!(f, "{}", e),
             Self::Config(e) => write!(f, "{}", e),
             Self::ChainDormant(chain) => write!(
@@ -641,6 +644,7 @@ fn setup_esplora(
     config: &Config,
     db: sync::Arc<sync::Mutex<dyn DatabaseInterface>>,
     scan_abort: sync::Arc<sync::atomic::AtomicBool>,
+    prepared_client: Option<crate::bitcoin::esplora::client::Client>,
 ) -> Result<Esplora, StartupError> {
     let esplora_config = match config.bitcoin_backend.as_ref() {
         Some(config::BitcoinBackend::Esplora(esplora_config)) => esplora_config,
@@ -650,8 +654,11 @@ fn setup_esplora(
         let chain_hash = ChainHash::using_genesis_block(config.bitcoin_config.network);
         BlockHash::from_byte_array(*chain_hash.as_bytes())
     };
-    let client = crate::bitcoin::esplora::client::Client::new(esplora_config, scan_abort)
-        .map_err(|e| StartupError::Esplora(EsploraError::Client(e)))?;
+    let client = match prepared_client {
+        Some(client) => client,
+        None => crate::bitcoin::esplora::client::Client::new(esplora_config, scan_abort)
+            .map_err(|e| StartupError::Esplora(EsploraError::Client(e)))?,
+    };
     let mut db_conn = db.connection();
     let tip = db_conn.chain_tip();
     let coins: Vec<_> = db_conn
@@ -783,6 +790,31 @@ impl DaemonHandle {
         db: Option<impl DatabaseInterface + 'static>,
         with_rpc_server: bool,
     ) -> Result<Self, StartupError> {
+        Self::start_inner(config, bitcoin, db, with_rpc_server, None)
+    }
+
+    /// Start with ephemeral authenticated Connect authority; never deserialize this authority.
+    pub fn start_with_connect(
+        config: Config,
+        backend: connect::ConnectBackend,
+        with_rpc_server: bool,
+    ) -> Result<Self, StartupError> {
+        Self::start_inner(
+            config,
+            Option::<BitcoinD>::None,
+            Option::<SqliteDb>::None,
+            with_rpc_server,
+            Some(backend),
+        )
+    }
+
+    fn start_inner(
+        config: Config,
+        bitcoin: Option<impl BitcoinInterface + 'static>,
+        db: Option<impl DatabaseInterface + 'static>,
+        with_rpc_server: bool,
+        connect: Option<connect::ConnectBackend>,
+    ) -> Result<Self, StartupError> {
         let secp = secp256k1::Secp256k1::verification_only();
 
         // Before touching anything: the configuration must be self-consistent, and this build
@@ -791,7 +823,37 @@ impl DaemonHandle {
             .bitcoin_config
             .check_chain_encoding()
             .map_err(StartupError::Config)?;
+        if let Some(backend) = connect.as_ref() {
+            if backend.chain() != config.bitcoin_config.chain
+                || bitcoin.is_some()
+                || !matches!(
+                    config.bitcoin_backend.as_ref(),
+                    Some(config::BitcoinBackend::Esplora(selection)) if backend.matches_selection(selection)
+                )
+            {
+                return Err(StartupError::ConnectAdmission(
+                    connect::AdmissionError::InvalidBackend,
+                ));
+            }
+        }
         chain_runtime_gate(config.bitcoin_config.chain)?;
+        // Authenticated admission precedes every filesystem/database/node write.
+        let scan_abort = sync::Arc::new(sync::atomic::AtomicBool::new(false));
+        let prepared_client = match connect {
+            Some(backend) => Some(
+                crate::bitcoin::esplora::client::Client::new_for_connect(
+                    backend,
+                    scan_abort.clone(),
+                )
+                .map_err(|e| StartupError::Esplora(EsploraError::Client(e)))?,
+            ),
+            None if config.bitcoin_config.chain.is_blake2b() => {
+                return Err(StartupError::ConnectAdmission(
+                    connect::AdmissionError::MissingAuth,
+                ))
+            }
+            None => None,
+        };
 
         // Then check the data directory. An existing database must belong to the configured
         // chain before we create anything, set up the watch-only wallet or migrate it.
@@ -850,7 +912,6 @@ impl DaemonHandle {
         // Shared abort flag: `stop` flips it so an in-flight Esplora scan stops
         // walking the provider chain and returns promptly, instead of the poller
         // (and the `stop` that joins it) blocking on dead/throttled providers.
-        let scan_abort = sync::Arc::new(sync::atomic::AtomicBool::new(false));
 
         // Finally set up the Bitcoin backend.
         let bit = match (bitcoin, &config.bitcoin_backend) {
@@ -862,9 +923,14 @@ impl DaemonHandle {
             (None, Some(config::BitcoinBackend::Electrum(..))) => {
                 sync::Arc::from(sync::Mutex::from(setup_electrum(&config, db.clone())?))
             }
-            (None, Some(config::BitcoinBackend::Esplora(..))) => sync::Arc::from(
-                sync::Mutex::from(setup_esplora(&config, db.clone(), scan_abort.clone())?),
-            ),
+            (None, Some(config::BitcoinBackend::Esplora(..))) => {
+                sync::Arc::from(sync::Mutex::from(setup_esplora(
+                    &config,
+                    db.clone(),
+                    scan_abort.clone(),
+                    prepared_client,
+                )?))
+            }
             (None, None) => Err(StartupError::MissingBitcoinBackendConfig)?,
         };
 
@@ -1618,6 +1684,39 @@ mod tests {
                 CoincubeDescriptor::from_str(DESC_STR).unwrap(),
                 DataDirectory::new(data_directory),
             )
+        }
+
+        #[test]
+        fn fork_persistence_drops_runtime_tokens_and_admission_stays_no_write() {
+            let tmp =
+                std::env::temp_dir().join(format!("connect-admission-{}", std::process::id()));
+            fs::create_dir_all(&tmp).unwrap();
+            let node = SilentNode::bind();
+            let data = tmp.join("new-wallet");
+            let mut config = config_for(ChainId::BitcoinBlake2b, &tmp, data.clone(), &node);
+            config.bitcoin_backend = Some(config::BitcoinBackend::Esplora(config::EsploraConfig {
+                addr: "https://fixture.invalid".into(),
+                token: Some("synthetic-jwt".into()),
+                fallback_addr: None,
+                fallback_token: Some("synthetic-fallback".into()),
+                secondary_fallback_addr: None,
+                secondary_fallback_token: Some("synthetic-second".into()),
+            }));
+            let encoded = toml::to_string(&config.for_persistence()).unwrap();
+            assert!(!encoded.contains("synthetic-"));
+            assert!(encoded.contains("fixture.invalid"));
+            assert!(matches!(
+                DaemonHandle::start_default(config.clone(), false),
+                Err(StartupError::ChainDormant(_))
+            ));
+            assert!(!data.exists());
+            node.assert_untouched();
+            config.bitcoin_config =
+                BitcoinConfig::new(ChainId::Bitcoin, time::Duration::from_secs(2));
+            assert!(toml::to_string(&config.for_persistence())
+                .unwrap()
+                .contains("synthetic-jwt"));
+            fs::remove_dir_all(tmp).unwrap();
         }
 
         /// A genuine version-8 database for `chain` in a fresh data directory.

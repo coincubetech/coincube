@@ -43,6 +43,7 @@ const TRANSPORT_FAILURE_COOLDOWN: Duration = Duration::from_secs(120);
 #[derive(Debug)]
 pub enum Error {
     Client(Box<esplora_client::Error>),
+    Admission(crate::connect::AdmissionError),
     /// Every configured provider is currently in a 402/429 cooldown,
     /// so no network call was actually attempted. This is a
     /// transient "wait" signal, not a fault — callers (the poller in
@@ -94,6 +95,7 @@ pub const SCAN_ABORTED_DISPLAY_MARKER: &str = "Esplora scan aborted";
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
+            Self::Admission(e) => write!(f, "{}", e),
             Error::Client(e) => write!(f, "Esplora client error: '{}'.", e),
             Error::AllCooling => write!(
                 f,
@@ -127,6 +129,7 @@ impl std::fmt::Display for Error {
 /// closure so the request can be rebuilt for each attempt — BDK's
 /// `SyncRequest` is consumed by the call and isn't trivially clonable.
 pub struct Client {
+    admission: Option<Arc<crate::connect::ConnectBackend>>,
     providers: Vec<Provider>,
     /// Set by `DaemonHandle::stop` so an in-flight scan stops walking the
     /// provider chain and returns [`Error::Aborted`] promptly, instead of the
@@ -255,6 +258,31 @@ impl Client {
     /// Errors from the actual sync calls still surface in the usual
     /// places, so a permanently broken config doesn't get silently
     /// swallowed — it just doesn't block launch.
+    pub(crate) fn new_for_connect(
+        backend: crate::connect::ConnectBackend,
+        abort: Arc<AtomicBool>,
+    ) -> Result<Self, Error> {
+        let config = backend.config();
+        let provider = Provider {
+            name: "authenticated Connect".to_string(),
+            client: build_blocking_client(&config.addr, config.token.as_deref()),
+            cooldown_until: Mutex::new(None),
+        };
+        backend
+            .validate(|height| {
+                provider
+                    .client
+                    .get_block_hash(height)
+                    .map_err(|_| crate::connect::AdmissionError::Unavailable)
+            })
+            .map_err(Error::Admission)?;
+        Ok(Self {
+            providers: vec![provider],
+            abort,
+            admission: Some(Arc::new(backend)),
+        })
+    }
+
     pub fn new(
         config: &crate::config::EsploraConfig,
         abort: Arc<AtomicBool>,
@@ -352,13 +380,24 @@ impl Client {
                  the poller will retry on its next tick"
             );
         }
-        Ok(Client { providers, abort })
+        Ok(Client {
+            providers,
+            abort,
+            admission: None,
+        })
     }
 
     /// Run `op` against each provider in order, skipping any that's in a
     /// 429/402 cooldown. See [`should_fall_back`] and [`is_throttled`] for
     /// the per-result decisions.
-    fn try_in_order<T, F>(&self, mut op: F) -> Result<T, Error>
+    fn try_in_order<T, F>(&self, op: F) -> Result<T, Error>
+    where
+        F: FnMut(&esplora_client::blocking::BlockingClient) -> Result<T, esplora_client::Error>,
+    {
+        self.try_in_order_checked(op, true)
+    }
+
+    fn try_in_order_checked<T, F>(&self, mut op: F, check_after: bool) -> Result<T, Error>
     where
         F: FnMut(&esplora_client::blocking::BlockingClient) -> Result<T, esplora_client::Error>,
     {
@@ -378,7 +417,32 @@ impl Client {
                 );
                 continue;
             }
+            let before = self
+                .admission
+                .as_ref()
+                .map(|guard| {
+                    guard.validate(|height| {
+                        provider
+                            .client
+                            .get_block_hash(height)
+                            .map_err(|_| crate::connect::AdmissionError::Unavailable)
+                    })
+                })
+                .transpose()
+                .map_err(Error::Admission)?;
             let result = op(&provider.client);
+            if result.is_ok() && check_after {
+                if let (Some(guard), Some(before)) = (&self.admission, before.as_ref()) {
+                    guard
+                        .revalidate(before, |height| {
+                            provider
+                                .client
+                                .get_block_hash(height)
+                                .map_err(|_| crate::connect::AdmissionError::Unavailable)
+                        })
+                        .map_err(Error::Admission)?;
+                }
+            }
             if result.is_ok() {
                 provider.clear_cooldown();
                 return result.map_err(|e| Error::Client(Box::new(e)));
@@ -511,7 +575,7 @@ impl Client {
 
     /// Broadcast a transaction to the network.
     pub fn broadcast_tx(&self, tx: &bitcoin::Transaction) -> Result<(), Error> {
-        self.try_in_order(|client| client.broadcast(tx))
+        self.try_in_order_checked(|client| client.broadcast(tx), false)
     }
 
     /// Perform a sync against the known SPKs.
@@ -559,6 +623,61 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connect_provider_checks_identity_before_and_after_an_operation() {
+        use crate::connect::{
+            AdmissionError, ConnectAnchorAuthority, ConnectBackend, TrustedChainAnchor,
+        };
+        use bitcoin::hashes::Hash;
+        use coincube_core::chain::ChainId;
+        struct Authority(Mutex<TrustedChainAnchor>);
+        impl ConnectAnchorAuthority for Authority {
+            fn fresh_anchor(&self) -> Result<TrustedChainAnchor, AdmissionError> {
+                Ok(self.0.lock().unwrap().clone())
+            }
+        }
+        let hash = bitcoin::BlockHash::from_byte_array([7; 32]);
+        let server = mock_esplora(StdHashMap::from([(
+            "/block-height/900000",
+            (200, hash.to_string()),
+        )]));
+        let authority = Arc::new(Authority(Mutex::new(TrustedChainAnchor {
+            chain: ChainId::BitcoinBlake2b,
+            height: 900000,
+            hash,
+            median_time_past: 1000,
+            observed_at: std::time::SystemTime::now(),
+        })));
+        let backend = ConnectBackend::new(
+            ChainId::BitcoinBlake2b,
+            server.base.clone(),
+            "synthetic-jwt".into(),
+            authority.clone(),
+        )
+        .unwrap();
+        let client = Client::new_for_connect(backend, Arc::new(AtomicBool::new(false))).unwrap();
+        assert_eq!(client.providers.len(), 1);
+        assert_eq!(client.try_in_order(|_| Ok(42)).unwrap(), 42);
+        let result = client.try_in_order(|_| {
+            authority.0.lock().unwrap().hash = bitcoin::BlockHash::from_byte_array([8; 32]);
+            Ok(42)
+        });
+        assert!(matches!(
+            result,
+            Err(Error::Admission(AdmissionError::HashMismatch))
+        ));
+        let result: Result<u32, Error> =
+            client.try_in_order(|_| panic!("wrong chain must refuse before operation"));
+        assert!(matches!(
+            result,
+            Err(Error::Admission(AdmissionError::HashMismatch))
+        ));
+        assert!(server
+            .requests()
+            .iter()
+            .all(|path| path == "/block-height/900000"));
+    }
 
     #[test]
     fn should_fall_back_classifies_correctly() {
@@ -627,6 +746,7 @@ mod tests {
     /// hitting an actual Esplora server.
     fn client_with(providers: Vec<Provider>) -> Client {
         Client {
+            admission: None,
             providers,
             abort: Arc::new(AtomicBool::new(false)),
         }
