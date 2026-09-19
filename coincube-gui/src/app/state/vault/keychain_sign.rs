@@ -2644,7 +2644,7 @@ mod tests {
     /// the server emits and the desktop never matched.
     #[test]
     fn an_unrecognised_unresolved_reason_carries_no_diagnosis() {
-        for reason in ["signer_app_outdated", "some_future_reason", ""] {
+        for reason in ["some_future_reason", ""] {
             let copy = friendly_unresolved_signer(&entry(reason));
             assert!(
                 !copy.contains(FALSE_DIAGNOSIS),
@@ -2661,6 +2661,16 @@ mod tests {
         let copy = friendly_unresolved_signer("garbage");
         assert!(!copy.contains(FALSE_DIAGNOSIS), "{}", copy);
         assert!(copy.contains("garbage"), "{}", copy);
+    }
+
+    #[test]
+    fn an_outdated_signer_has_the_known_update_diagnosis() {
+        let copy = friendly_unresolved_signer("Alice (signer_app_outdated)");
+        assert_eq!(
+            copy,
+            "Alice's Keychain needs updating before it can sign on Bitcoin Blake2b."
+        );
+        assert!(!copy.contains(FALSE_DIAGNOSIS));
     }
 
     #[test]
