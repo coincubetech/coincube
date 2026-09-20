@@ -1081,6 +1081,16 @@ impl ConnectAccountPanel {
         }
     }
 
+    pub fn revoke_admitted_client(&mut self) {
+        if self.admitted_client {
+            self.clear_session();
+            self.step = ConnectFlowStep::Login {
+                email: String::new(),
+                loading: false,
+            };
+        }
+    }
+
     pub fn install_admitted_client(&mut self, client: CoincubeClient) {
         self.session_generation = self.session_generation.wrapping_add(1);
         self.client = client;
@@ -2504,6 +2514,7 @@ impl ConnectAccountPanel {
     /// error screen, etc.). Shared by `LogOut` and the duress-gate 401 path so
     /// a rejected session can't leave stale state behind for the next `Init`.
     fn clear_session(&mut self) {
+        let owns_saved_session = !self.admitted_client;
         self.session_generation += 1;
         self.user = None;
         self.plan = None;
@@ -2533,7 +2544,9 @@ impl ConnectAccountPanel {
             d.zeroize_secrets();
         }
         self.scrub_recovery_passphrase();
-        self.clear_keyring_session();
+        if owns_saved_session {
+            self.clear_keyring_session();
+        }
         self.admitted_client = false;
         self.admitted_user_loading = false;
         self.client = CoincubeClient::new();

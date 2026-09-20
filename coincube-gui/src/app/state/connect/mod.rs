@@ -2,11 +2,17 @@ pub mod account;
 pub mod cube;
 pub mod cube_members;
 
+#[cfg(not(test))]
 pub(crate) const CONNECT_KEYRING_SERVICE: &str = if cfg!(debug_assertions) {
     "dev.coincube.Connect"
 } else {
     "io.coincube.Connect"
 };
+
+// Direct legacy keyring consumers also stay outside development/production
+// namespaces when linked into unit tests.
+#[cfg(test)]
+pub(crate) const CONNECT_KEYRING_SERVICE: &str = "dev.coincube.Connect.unit-tests";
 
 pub(crate) const CONNECT_KEYRING_USER: &str = "global_session";
 
@@ -19,9 +25,12 @@ pub(crate) const CONNECT_KEYRING_USER: &str = "global_session";
 // credential. Cache successful reads (and mirror writes / deletes) so
 // subsequent panel inits short-circuit before touching the OS.
 
+#[cfg(not(test))]
 use std::collections::HashMap;
+#[cfg(not(test))]
 use std::sync::Mutex;
 
+#[cfg(not(test))]
 fn connect_secret_cache() -> &'static Mutex<HashMap<String, Vec<u8>>> {
     static CACHE: std::sync::OnceLock<Mutex<HashMap<String, Vec<u8>>>> = std::sync::OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
@@ -30,6 +39,7 @@ fn connect_secret_cache() -> &'static Mutex<HashMap<String, Vec<u8>>> {
 /// Read a Connect keyring secret, consulting the process cache first.
 /// Caches successful reads so later callers don't trigger another OS
 /// prompt for the same credential.
+#[cfg(not(test))]
 pub(crate) fn read_connect_secret(user_key: &str) -> Option<Vec<u8>> {
     if let Some(bytes) = connect_secret_cache()
         .lock()
@@ -53,6 +63,7 @@ pub(crate) fn read_connect_secret(user_key: &str) -> Option<Vec<u8>> {
 /// every Init refresh produces a SetSession that calls this path, so
 /// short-circuiting when nothing changed prevents an "Allow access"
 /// prompt on each Cube open even though the token didn't rotate.
+#[cfg(not(test))]
 pub(crate) fn write_connect_secret(user_key: &str, bytes: &[u8]) -> Result<(), keyring::Error> {
     {
         let cache = connect_secret_cache().lock().unwrap();
@@ -74,11 +85,55 @@ pub(crate) fn write_connect_secret(user_key: &str, bytes: &[u8]) -> Result<(), k
 }
 
 /// Delete a Connect keyring secret and drop the cached copy.
+#[cfg(not(test))]
 pub(crate) fn delete_connect_secret(user_key: &str) {
     if let Ok(entry) = keyring::Entry::new(CONNECT_KEYRING_SERVICE, user_key) {
         let _ = entry.delete_credential();
     }
     connect_secret_cache().lock().unwrap().remove(user_key);
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_CONNECT_SECRETS: std::cell::RefCell<std::collections::HashMap<String, Vec<u8>>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+#[cfg(test)]
+pub(crate) fn read_connect_secret(user_key: &str) -> Option<Vec<u8>> {
+    TEST_CONNECT_SECRETS.with(|secrets| secrets.borrow().get(user_key).cloned())
+}
+
+#[cfg(test)]
+pub(crate) fn write_connect_secret(user_key: &str, bytes: &[u8]) -> Result<(), keyring::Error> {
+    TEST_CONNECT_SECRETS.with(|secrets| {
+        secrets
+            .borrow_mut()
+            .insert(user_key.to_string(), bytes.to_vec());
+    });
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn delete_connect_secret(user_key: &str) {
+    TEST_CONNECT_SECRETS.with(|secrets| {
+        secrets.borrow_mut().remove(user_key);
+    });
+}
+
+#[cfg(test)]
+mod secret_isolation_tests {
+    use super::*;
+    #[test]
+    fn unit_session_secrets_are_in_memory_and_thread_isolated() {
+        write_connect_secret("fixture", b"synthetic").unwrap();
+        std::thread::spawn(|| assert!(read_connect_secret("fixture").is_none()))
+            .join()
+            .unwrap();
+        assert_eq!(read_connect_secret("fixture"), Some(b"synthetic".to_vec()));
+        delete_connect_secret("fixture");
+        assert!(read_connect_secret("fixture").is_none());
+    }
 }
 
 pub use account::{
@@ -159,6 +214,11 @@ impl ConnectPanel {
     fn sync_active_cube_server_id(&mut self) {
         self.account
             .set_active_cube_server_id(self.cube.server_cube_id);
+    }
+
+    pub fn revoke_admitted_client(&mut self) {
+        self.account.revoke_admitted_client();
+        self.cube.clear_client();
     }
 
     pub fn install_admitted_client(&mut self, client: crate::services::coincube::CoincubeClient) {

@@ -41,3 +41,11 @@ before the initialization task runs. Its bootstrap loads user information from
 that exact endpoint/token and never restores a saved keyring session. Late user
 responses are generation-checked. Both generic App constructors return a typed
 refusal for fork Cube settings; a seed-only fork App cannot be constructed.
+
+A failed initial user bootstrap revokes authority immediately, even before the
+account reaches its dashboard. Explicit transient retries retain the admitted
+endpoint/token. Revocation also clears account/Cube consumers, not only the
+backend's authority. The admitted in-memory session never owns a separate saved
+keyring session, so its refusal does not delete unrelated saved credentials.
+Unit-test account secrets use thread-local memory; direct legacy test keyring
+consumers use a separate unit-test namespace.
