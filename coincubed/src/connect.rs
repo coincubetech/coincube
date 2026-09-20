@@ -16,6 +16,7 @@ pub struct TrustedChainAnchor {
     pub chain: ChainId,
     pub height: u32,
     pub hash: BlockHash,
+    /// Informational RPC metadata; never Claim/expiry authorization by itself.
     pub median_time_past: u32,
     pub observed_at: SystemTime,
 }
@@ -32,6 +33,9 @@ pub const MAX_ANCHOR_AGE: Duration = Duration::from_secs(90);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdmissionError {
     MissingAuth,
+    IndexerBehind,
+    Throttled,
+    Aborted,
     Unavailable,
     WrongChain,
     Stale,
@@ -104,13 +108,20 @@ impl ConnectBackend {
     }
     pub(crate) fn validate(
         &self,
+        hash_at: impl FnMut(u32) -> Result<BlockHash, AdmissionError>,
+    ) -> Result<TrustedChainAnchor, AdmissionError> {
+        self.validate_at(SystemTime::now(), hash_at)
+    }
+    fn validate_at(
+        &self,
+        now: SystemTime,
         mut hash_at: impl FnMut(u32) -> Result<BlockHash, AdmissionError>,
     ) -> Result<TrustedChainAnchor, AdmissionError> {
         let anchor = self.authority.fresh_anchor()?;
         if anchor.chain != self.chain {
             return Err(AdmissionError::WrongChain);
         }
-        let age = SystemTime::now()
+        let age = now
             .duration_since(anchor.observed_at)
             .map_err(|_| AdmissionError::Stale)?;
         if age > MAX_ANCHOR_AGE {
@@ -126,13 +137,27 @@ impl ConnectBackend {
         before: &TrustedChainAnchor,
         hash_at: impl FnMut(u32) -> Result<BlockHash, AdmissionError>,
     ) -> Result<(), AdmissionError> {
-        let after = self.validate(hash_at)?;
-        // A changing trusted tip may simply be new work; retrying is conservative
-        // and avoids releasing a scan spanning an unverified reorganization.
-        if before.chain != after.chain || before.height != after.height || before.hash != after.hash
-        {
+        self.revalidate_at(before, SystemTime::now(), hash_at)
+    }
+    fn revalidate_at(
+        &self,
+        before: &TrustedChainAnchor,
+        now: SystemTime,
+        mut hash_at: impl FnMut(u32) -> Result<BlockHash, AdmissionError>,
+    ) -> Result<(), AdmissionError> {
+        let after = self.validate_at(now, &mut hash_at)?;
+        if after.height < before.height {
             return Err(AdmissionError::ChangedDuringOperation);
         }
+        if after.height == before.height {
+            if after.hash != before.hash {
+                return Err(AdmissionError::ChangedDuringOperation);
+            }
+        } else if hash_at(before.height)? != before.hash {
+            return Err(AdmissionError::ChangedDuringOperation);
+        }
+        // The after observation must be fresh; the before observation may be old
+        // after a long scan. Growth is safe only while the old anchor remains.
         Ok(())
     }
 }
@@ -166,6 +191,49 @@ mod tests {
         .unwrap();
         (backend, source, hash)
     }
+    #[test]
+    fn long_operation_accepts_refreshed_growth_but_not_reorg_rollback_or_stale_authority() {
+        let (backend, source, old_hash) = fixture();
+        let start = SystemTime::now();
+        source.0.lock().unwrap().observed_at = start;
+        let before = backend.validate_at(start, |_| Ok(old_hash)).unwrap();
+        let end = start + Duration::from_secs(180);
+        let new_hash = BlockHash::from_byte_array([9; 32]);
+        {
+            let mut anchor = source.0.lock().unwrap();
+            anchor.height += 1;
+            anchor.hash = new_hash;
+            anchor.observed_at = end;
+        }
+        assert!(backend
+            .revalidate_at(&before, end, |height| Ok(if height == before.height {
+                old_hash
+            } else {
+                new_hash
+            }))
+            .is_ok());
+        assert_eq!(
+            backend.revalidate_at(&before, end, |_| Ok(new_hash)),
+            Err(AdmissionError::ChangedDuringOperation)
+        );
+        source.0.lock().unwrap().height = before.height - 1;
+        assert_eq!(
+            backend.revalidate_at(&before, end, |_| Ok(new_hash)),
+            Err(AdmissionError::ChangedDuringOperation)
+        );
+        source.0.lock().unwrap().height = before.height + 1;
+        source.0.lock().unwrap().observed_at = start;
+        assert_eq!(
+            backend.revalidate_at(&before, end, |_| Ok(new_hash)),
+            Err(AdmissionError::Stale)
+        );
+        source.0.lock().unwrap().chain = ChainId::BitcoinBlake2bTestnet4;
+        assert_eq!(
+            backend.revalidate_at(&before, end, |_| Ok(new_hash)),
+            Err(AdmissionError::WrongChain)
+        );
+    }
+
     #[test]
     fn admission_refuses_wrong_chain_stale_future_lag_and_hash() {
         let (backend, source, hash) = fixture();
