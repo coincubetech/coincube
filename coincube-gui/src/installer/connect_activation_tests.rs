@@ -266,7 +266,13 @@ async fn feature_refusals_precede_anchor_requests_and_all_fork_filesystem_writes
                     .await
                     .is_err()
             );
-            assert!(!root_path.exists(), "{chain:?} HTTP{status} flag{flag:?}");
+            assert!(
+                !root_path.exists(),
+                "{:?} HTTP{} flag{:?}",
+                chain,
+                status,
+                flag
+            );
             features.assert_hits_async(1).await;
             anchor.assert_hits_async(0).await;
         }
