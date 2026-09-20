@@ -407,7 +407,8 @@ mod tests {
                     client(&server).network_anchor(chain).await,
                     Err(NetworkStatusError::InvalidResponse)
                 ),
-                "{path}"
+                "{}",
+                path
             );
         }
         let server = MockServer::start_async().await;
@@ -482,6 +483,15 @@ mod tests {
             "{}/api/v1/esplora/bitcoin-blake2b/mainnet",
             server.base_url()
         );
+        let mut unauthenticated = client.clone();
+        unauthenticated.clear_token();
+        assert!(matches!(
+            unauthenticated
+                .authenticated_backend(chain, &endpoint)
+                .await,
+            Err(AdmissionError::MissingAuth)
+        ));
+        mock.assert_hits_async(0).await;
         let (backend, session) = client
             .authenticated_backend(chain, &endpoint)
             .await
