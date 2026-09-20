@@ -89,6 +89,7 @@ pub enum CommandError {
     OutpointNotRecoverable(bitcoin::OutPoint, /* timelock */ u16),
     /// Overflowing or unhardened derivation index.
     InvalidDerivationIndex,
+    ChangeReservation(crate::database::ReservationError),
     RbfError(RbfErrorInfo),
     EmptyFilterList,
 }
@@ -166,6 +167,7 @@ impl fmt::Display for CommandError {
             Self::InvalidDerivationIndex => {
                 write!(f, "Unhardened or overflowing BIP32 derivation index.")
             }
+            Self::ChangeReservation(e) => write!(f, "{}", e),
             Self::RbfError(e) => write!(f, "RBF error: '{}'.", e),
             Self::EmptyFilterList => write!(f, "Filter list is empty, should supply None instead."),
         }
@@ -490,26 +492,32 @@ impl DaemonControl {
         }
     }
 
-    // Get the change address for the next derivation index.
-    // The spend may not have a change output, so we don't update the DB value yet.
-    fn next_change_addr(&self, db_conn: &mut Box<dyn DatabaseConnection>) -> SpendOutputAddress {
-        let index = db_conn.change_index();
-        let next_index = index
-            .increment()
-            .expect("Must not get into hardened territory");
-        let desc = self
-            .config
-            .main_descriptor
+    /// Durably reserve a fresh local change index. Cancellation never releases it.
+    /// The binding is checked against persisted chain and descriptor identity.
+    pub fn reserve_change(&self) -> Result<crate::database::ChangeReservation, CommandError> {
+        self.db
+            .reserve_change(
+                self.config.bitcoin_config.chain,
+                &self.config.main_descriptor,
+                &self.secp,
+            )
+            .map_err(CommandError::ChangeReservation)
+    }
+
+    fn next_change_addr(&self) -> Result<SpendOutputAddress, CommandError> {
+        let reservation = self.reserve_change()?;
+        let index = reservation.index();
+        let desc = reservation
+            .descriptor()
             .change_descriptor()
-            .derive(next_index, &self.secp);
-        let addr = desc.address(self.config.bitcoin_config.network);
-        SpendOutputAddress {
-            addr,
+            .derive(index, &self.secp);
+        Ok(SpendOutputAddress {
+            addr: desc.address(reservation.chain().bitcoin_network()),
             info: Some(AddrInfo {
-                index: next_index,
+                index,
                 is_change: true,
             }),
-        }
+        })
     }
 
     // If we detect the given address as ours, and it has a higher derivation index than our last
@@ -945,12 +953,10 @@ impl DaemonControl {
         // The change address to be used if a change output needs to be created. It may be
         // specified by the caller (for instance for the purpose of a sweep, or to avoid us
         // creating a new change address on every call).
-        let change_address = change_address
-            .map(|addr| {
-                Ok::<_, CommandError>(self.spend_addr(&mut db_conn, self.validate_address(addr)?))
-            })
-            .transpose()?
-            .unwrap_or_else(|| self.next_change_addr(&mut db_conn));
+        let change_address = match change_address {
+            Some(addr) => self.spend_addr(&mut db_conn, self.validate_address(addr)?),
+            None => self.next_change_addr()?,
+        };
 
         // The candidate coins will be either all optional or all mandatory.
         // If no coins have been specified, then coins will be selected automatically for
@@ -1383,9 +1389,10 @@ impl DaemonControl {
         // If there was no previous change address, we set the change address for the replacement
         // to our next change address. This way, we won't increment the change index with each attempt
         // at creating the replacement PSBT below.
-        let change_address = prev_change_address
-            .map(|addr| self.spend_addr(&mut db_conn, addr))
-            .unwrap_or_else(|| self.next_change_addr(&mut db_conn));
+        let change_address = match prev_change_address {
+            Some(addr) => self.spend_addr(&mut db_conn, addr),
+            None => self.next_change_addr()?,
+        };
         // If `!is_cancel`, we take the previous coins as mandatory candidates and add confirmed coins as optional.
         // Otherwise, we take the previous coins as optional candidates and let coin selection find the
         // best solution that includes at least one of these. If there are insufficient funds to create the replacement
@@ -2358,6 +2365,24 @@ mod tests {
             }],
             output,
         }
+    }
+
+    #[test]
+    fn ordinary_fresh_change_uses_and_burns_reservations() {
+        let daemon = DummyCoincube::new(DummyBitcoind::new(), DummyDatabase::new());
+        let control = daemon.control();
+        let claim = control.reserve_change().unwrap();
+        assert_eq!(claim.index(), 1.into());
+        let ordinary = control.next_change_addr().unwrap();
+        assert_eq!(ordinary.info.unwrap().index, 2.into());
+        let missing = bitcoin::OutPoint::null();
+        assert!(matches!(
+            control.create_spend(&HashMap::new(), &[missing], 1, None),
+            Err(CommandError::UnknownOutpoint(_))
+        ));
+        // The failed builder attempt allocated index3 before discovering the missing coin.
+        // It cannot be handed to a later Claim or ordinary attempt.
+        assert_eq!(control.reserve_change().unwrap().index(), 4.into());
     }
 
     #[test]
