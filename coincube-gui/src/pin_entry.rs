@@ -240,7 +240,10 @@ impl PinEntry {
                             };
                             match result {
                                 Ok(PinOutcome::Unlock(signer)) => retain_unlocked_signer(
-                                    cube.network, &cube.id, &fork_signer, *signer,
+                                    cube.network,
+                                    &cube.id,
+                                    &fork_signer,
+                                    *signer,
                                 ),
                                 Ok(PinOutcome::Duress) => Ok(Verdict::Duress),
                                 Ok(PinOutcome::Wrong) => Ok(Verdict::Wrong),

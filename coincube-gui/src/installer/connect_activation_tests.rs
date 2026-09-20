@@ -135,6 +135,7 @@ async fn actual_fork_install_pin_unlock_and_authenticated_reopen_are_chain_bound
         .coincubed_data_directory(&settings.wallet_id())
         .path()
         .join("daemon.toml");
+    let database_path = cfg_path.with_file_name("coincubed.sqlite3");
     assert!(!std::fs::read_to_string(cfg_path)
         .unwrap()
         .contains("synthetic-activation-token"));
@@ -168,11 +169,22 @@ async fn actual_fork_install_pin_unlock_and_authenticated_reopen_are_chain_bound
     let messages = output(entry.update(crate::pin_entry::Message::Submit)).await;
     assert!(matches!(
         messages.as_slice(),
-        [crate::pin_entry::Message::Classified(Ok(
-            crate::pin_entry::Verdict::Unlock
-        ))]
+        [crate::pin_entry::Message::ForkClassified(
+            _,
+            Ok(crate::pin_entry::Verdict::Unlock)
+        )]
     ));
-    assert!(entry.take_fork_signer().is_some());
+    for message in messages {
+        assert!(matches!(
+            output(entry.update(message)).await.as_slice(),
+            [crate::pin_entry::Message::PinVerified]
+        ));
+    }
+    let unlocked = entry.take_fork_signer().unwrap();
+    assert_eq!(
+        unlocked.fingerprint(&bitcoin::secp256k1::Secp256k1::signing_only()),
+        fingerprint
+    );
     assert!(entry.take_fork_signer().is_none());
     let (daemon, node, info) = crate::loader::start_connect_daemon(
         root.clone(),
@@ -185,6 +197,8 @@ async fn actual_fork_install_pin_unlock_and_authenticated_reopen_are_chain_bound
     assert!(node.is_none());
     assert_eq!(info.network, bitcoin::Network::Bitcoin);
     daemon.stop().await.unwrap();
+    // Reopening exercises daemon preflight against the stored exact-chain identity.
+    assert!(database_path.is_file());
     features.assert_hits_async(3).await;
     forbidden_bitcoin.assert_hits_async(0).await;
     std::fs::remove_dir_all(root_path).unwrap();
@@ -235,7 +249,11 @@ async fn feature_refusals_precede_anchor_requests_and_all_fork_filesystem_writes
             installer.context.descriptor = Some(DESCRIPTOR.parse().unwrap());
             installer.context.bitcoin_backend =
                 Some(BitcoinBackend::Esplora(coincubed::config::EsploraConfig {
-                    addr: format!("{}{}", server.base_url(), connect_esplora_path(chain)),
+                    addr: format!(
+                        "{}/api/v1/esplora/{}",
+                        server.base_url(),
+                        connect_esplora_path(chain)
+                    ),
                     token: None,
                     fallback_addr: None,
                     fallback_token: None,

@@ -10,14 +10,13 @@
 //! launcher offers, the user-facing label and ticker, and whether this build
 //! can run a Cube on a chain at all ([`ChainIdExt`]).
 //!
-//! # Dormant in this slice
+//! # Explicit Connect capability
 //!
-//! Both BTCB2 identities exist so that settings, directories and Connect
-//! strings are distinct from day one — but nothing behind them is wired yet
-//! (no node flavour, no provider, no unified-sighash signing). Until those
-//! land, [`ChainIdExt::runtime_support`] reports [`RuntimeSupport::Dormant`]
-//! and every entry point that would start a daemon, node, SDK or signer
-//! refuses first. See `PLAN-bitcoin-blake2b.md` PR 2 and coincube-api#280.
+//! Generic runtime support remains dormant for BTCB2 so managed-node,
+//! migration and duress entry points stay closed. The separately checked
+//! authenticated Connect Vault path uses `authenticated_connect_support`;
+//! its account flag, exact-chain anchor and dedicated provider are all
+//! required before daemon writes. This does not enable generic startup.
 
 pub use coincube_core::chain::{ChainId, UnknownChainId};
 
@@ -29,8 +28,8 @@ pub enum RuntimeSupport {
     Supported,
     /// The identity is known (so its settings and directories are kept
     /// distinct and intact) but the runtime behind it is not in this build.
-    /// Every start path must refuse with `reason` before touching a daemon,
-    /// node, SDK or signer.
+    /// Generic start paths refuse with `reason`; separately authenticated
+    /// capabilities must enforce their own admission before writes.
     Dormant { reason: &'static str },
 }
 
@@ -83,10 +82,8 @@ pub(crate) async fn require_connect_feature(
 /// identity — and its wire encoding — stays the one type core defines; bring
 /// it into scope (`use crate::chain::ChainIdExt`) where these are called.
 pub trait ChainIdExt {
-    /// The chains the launcher offers for creating and opening Cubes today —
-    /// the Bitcoin family. The BTCB2 identities are deliberately absent: they
-    /// are [`RuntimeSupport::Dormant`] in this build, and a launcher entry
-    /// would be a partly working Cube.
+    /// Baseline Bitcoin-family launcher entries. Home adds BTCB2 only when
+    /// its current authenticated account explicitly enables the Connect path.
     const LAUNCHER: [ChainId; 5];
 
     /// Neutral, descriptive user-facing name (brand posture: no claim about
@@ -96,9 +93,8 @@ pub trait ChainIdExt {
     /// The unit ticker shown next to amounts.
     fn ticker(self) -> &'static str;
 
-    /// Whether this build can run a Cube on this chain. Both BTCB2 identities
-    /// are dormant until the node flavour, provider and unified-sighash
-    /// signing slices land; every start path checks this first.
+    /// Generic runtime capability. BTCB2 remains dormant here; only the
+    /// separately admitted authenticated Connect Vault route may run it.
     fn runtime_support(self) -> RuntimeSupport;
 }
 

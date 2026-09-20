@@ -32,10 +32,14 @@ Unlock credentials are cleared and the Cube must
 be reopened with the current session. Changing a backend likewise requires a new
 authenticated context.
 
-This slice depends on the authenticated admission/client and Vault-only App
-constructors. Production GUI runtime gates remain closed pending integrated
-synthetic create/reopen/failure validation and independent review. Existing
-Bitcoin paths keep their legacy constructors and SDK behavior.
+The narrow authenticated Connect capability uses the Vault-only App constructor.
+Home offers BTCB2 only after the current authenticated account reports its flag
+true; missing/unloaded/false flags refuse. Installer, PIN and Loader recheck the
+flag, then exact-chain anchor admission validates the backend before writes.
+Generic runtime support stays dormant for migration, duress and unmanaged node
+paths. Mainnet and developer-only testnet4 stay separate. Existing Bitcoin paths
+keep their legacy constructors and SDK behavior. Full synthetic create/reopen/
+failure validation and independent final-head review remain release gates.
 
 ## Operational acceptance
 

@@ -3786,7 +3786,7 @@ impl Home {
                                         for rc in self
                                             .remote_cubes
                                             .iter()
-                                            .filter(|rc| rc.network == current_net_str)
+                                            .filter(|rc| !self.network.is_blake2b() && rc.network == current_net_str)
                                         {
                                             col = col.push(remote_cube_list_item(rc));
                                         }
@@ -3841,7 +3841,7 @@ impl Home {
                                     let remote_for_net: Vec<_> = self
                                         .remote_cubes
                                         .iter()
-                                        .filter(|rc| rc.network == current_net_str)
+                                        .filter(|rc| !self.network.is_blake2b() && rc.network == current_net_str)
                                         .collect();
                                     let total_count = self.total_cube_count();
                                     let at_limit = total_count >= self.cube_limit();
