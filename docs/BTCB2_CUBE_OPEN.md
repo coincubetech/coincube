@@ -30,7 +30,10 @@ save never opens a PIN session; the current PIN screen owns that transition.
 Fork settings updates share a stable sibling writer lock and commit by atomic
 replacement after a complete synced temporary file. Cancellation before commit
 leaves the prior settings file intact; after commit it leaves the full new file.
-The installer merges into the locked current settings, preserving other writers.
+The installer applies its insert/update/remove delta to locked current settings.
+Touched records must still match the original snapshot (or the desired result);
+a conflicting concurrent edit refuses without writing. Unrelated records, wallet
+settings and preferences remain intact.
 The replacement Home executes its startup task; fork discovery is read-only.
 Unlock credentials are cleared and the Cube must
 be reopened with the current session. Changing a backend likewise requires a new
