@@ -3172,7 +3172,7 @@ mod fork_atomic_save_tests {
         for existing in [false, true] {
             let dir = directory();
             if existing {
-                update_settings_file(&dir, |s| Some(s)).await.unwrap();
+                update_settings_file(&dir, Some).await.unwrap();
             }
             let path = dir.path().join(SETTINGS_FILE_NAME);
             let before = std::fs::read(&path).ok();
