@@ -158,6 +158,9 @@ impl Step for CoincubeConnectStep {
         if self.skipped {
             ctx.use_coincube_connect = false;
             ctx.connect_jwt = None;
+            if let Some(client) = ctx.coincube_client.as_mut() {
+                client.clear_token();
+            }
             return true;
         }
         // Move the JWT out of the step into `Context`. The step won't
@@ -181,6 +184,11 @@ impl Step for CoincubeConnectStep {
     fn revert(&self, ctx: &mut Context) {
         ctx.use_coincube_connect = false;
         ctx.connect_jwt = None;
+        // Keep the selected API transport for a subsequent login, but remove
+        // both the bearer value and reqwest's default Authorization header.
+        if let Some(client) = ctx.coincube_client.as_mut() {
+            client.clear_token();
+        }
     }
 
     fn update(&mut self, _hws: &mut HardwareWallets, message: Message) -> Task<Message> {
@@ -405,6 +413,54 @@ mod chain_auth_tests {
                 ctx.connect_jwt.as_deref().map(|s| s.as_str()),
                 Some("synthetic-session")
             );
+        }
+    }
+
+    #[test]
+    fn reversing_or_skipping_auth_clears_context_bearer_and_keeps_endpoint() {
+        for chain in [
+            ChainId::Bitcoin,
+            ChainId::BitcoinBlake2b,
+            ChainId::BitcoinBlake2bTestnet4,
+        ] {
+            let mut ctx = Context::new_for_chain(
+                chain,
+                CoincubeDirectory::new(Default::default()),
+                RemoteBackend::None,
+                None,
+                None,
+            );
+            let mut client = CoincubeClient::for_test("http://127.0.0.1:1/custom-connect");
+            client.set_token("synthetic-revert-token");
+            ctx.coincube_client = Some(client);
+            let mut step = CoincubeConnectStep::new();
+            step.load_context(&ctx);
+            assert!(step.apply(&mut ctx));
+            assert!(ctx.coincube_client.as_ref().unwrap().token().is_some());
+            step.revert(&mut ctx);
+            assert!(!ctx.use_coincube_connect);
+            assert!(ctx.connect_jwt.is_none());
+            let client = ctx.coincube_client.as_ref().unwrap();
+            assert!(client.token().is_none());
+            assert_eq!(client.base_url, "http://127.0.0.1:1/custom-connect");
+
+            if !chain.is_blake2b() {
+                ctx.coincube_client
+                    .as_mut()
+                    .unwrap()
+                    .set_token("synthetic-skip-token");
+                ctx.connect_jwt = Some(Zeroizing::new("synthetic-skip-token".into()));
+                ctx.use_coincube_connect = true;
+                step.skipped = true;
+                assert!(step.apply(&mut ctx));
+                assert!(!ctx.use_coincube_connect);
+                assert!(ctx.connect_jwt.is_none());
+                assert!(ctx.coincube_client.as_ref().unwrap().token().is_none());
+                assert_eq!(
+                    ctx.coincube_client.as_ref().unwrap().base_url,
+                    "http://127.0.0.1:1/custom-connect"
+                );
+            }
         }
     }
 
