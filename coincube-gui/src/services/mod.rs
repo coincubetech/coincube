@@ -1,4 +1,5 @@
 pub mod branta;
+pub mod claim_observation;
 pub mod connect;
 pub mod feeestimation;
 pub mod fiat;
