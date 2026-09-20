@@ -729,6 +729,30 @@ impl Tab {
             }
             (State::Home(l), Message::Launch(msg)) => match msg {
                 home::Message::Install(datadir, network, init, coincube_client) => {
+                    // `coincube_client` is populated when the home
+                    // already holds an authenticated Connect session (today
+                    // the Recovery-Kit restore path forwards it so the
+                    // installer step can skip a redundant email+OTP). Other
+                    // home entry points pass `None` and the relevant
+                    // installer step runs its own auth form as before.
+                    let (install, command) = match Installer::try_new_for_chain(
+                        datadir.clone(),
+                        network,
+                        None,
+                        init,
+                        false,
+                        None,
+                        None,
+                        None,
+                        false,
+                        coincube_client,
+                    ) {
+                        Ok(result) => result,
+                        Err(error) => {
+                            l.set_error(error.to_string());
+                            return Task::none();
+                        }
+                    };
                     if !datadir.exists() {
                         // datadir is created right before launching the installer
                         // so logs can go in <datadir_path>/installer.log
@@ -741,24 +765,6 @@ impl Tab {
                             );
                         }
                     }
-                    // `coincube_client` is populated when the home
-                    // already holds an authenticated Connect session (today
-                    // the Recovery-Kit restore path forwards it so the
-                    // installer step can skip a redundant email+OTP). Other
-                    // home entry points pass `None` and the relevant
-                    // installer step runs its own auth form as before.
-                    let (install, command) = Installer::new(
-                        datadir,
-                        network,
-                        None,
-                        init,
-                        false,
-                        None,
-                        None,
-                        None,
-                        false,
-                        coincube_client,
-                    );
                     self.state = State::Installer(install);
                     command.map(Message::Install)
                 }
