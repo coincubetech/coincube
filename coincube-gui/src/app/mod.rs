@@ -7282,7 +7282,65 @@ mod tests {
                     .join("connect.json")
                     .exists());
             }
-            app.invalidate_fork_session();
+            let replacement = crate::services::coincube::LoginResponse {
+                requires_2fa: false,
+                token: "replacement-fixture".into(),
+                refresh_token: "replacement-refresh".into(),
+                user: crate::services::coincube::User {
+                    id: 8,
+                    email: "replacement@example.invalid".into(),
+                    email_verified: Some(true),
+                },
+            };
+            let saved_before =
+                state::connect::read_connect_secret(state::connect::CONNECT_KEYRING_USER);
+            // Cover initial 401, explicit logout, and token replacement through
+            // actual App dispatch. None may leave a login form on a dead backend.
+            if status == 200 {
+                drop(app.update(Message::View(view::Message::ConnectAccount(
+                    view::ConnectAccountMessage::LogOut,
+                ))));
+            } else if status == 503 {
+                drop(app.update(Message::View(view::Message::ConnectAccount(
+                    view::ConnectAccountMessage::SetSession(replacement.clone()),
+                ))));
+            }
+            assert!(app.panels.connect.account.requires_authenticated_reopen());
+            assert!(app.fork_connect_client.is_none());
+            assert_eq!(
+                state::connect::read_connect_secret(state::connect::CONNECT_KEYRING_USER),
+                saved_before
+            );
+            for message in [
+                view::ConnectAccountMessage::Init,
+                view::ConnectAccountMessage::SubmitLogin,
+                view::ConnectAccountMessage::VerifyOtp,
+                view::ConnectAccountMessage::SetSession(replacement.clone()),
+                view::ConnectAccountMessage::SessionLoaded {
+                    user: replacement.user.clone(),
+                    plan: None,
+                },
+                view::ConnectAccountMessage::AdmittedUserLoaded {
+                    user: Ok(replacement.user.clone()),
+                    generation: app.panels.connect.account.session_generation(),
+                },
+                view::ConnectAccountMessage::Retry(view::RetryAction::Session),
+            ] {
+                let task = app.update(Message::View(view::Message::ConnectAccount(message)));
+                assert!(iced_runtime::task::into_stream(task).is_none());
+                assert!(app.panels.connect.account.requires_authenticated_reopen());
+                assert!(app.panels.connect.account.authenticated_client().is_none());
+                assert!(!app.panels.connect.account.is_authenticated());
+                assert!(app.panels.connect.cube.client.is_none());
+                assert_eq!(
+                    authority.fresh_anchor(),
+                    Err(coincubed::connect::AdmissionError::Unavailable)
+                );
+                assert_eq!(
+                    state::connect::read_connect_secret(state::connect::CONNECT_KEYRING_USER),
+                    saved_before
+                );
+            }
             assert!(!app.cache.has_connect_session);
             assert!(app.panels.connect.account.authenticated_client().is_none());
             assert!(app.panels.connect.cube.client.is_none());
