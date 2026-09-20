@@ -51,6 +51,8 @@ pub struct CoincubeClient {
     /// but the outer `Option` is a wrapper we can freely reassign,
     /// and the inner `Zeroizing<String>` does the zeroing.
     token: Option<Zeroizing<String>>,
+    /// Snapshot once per client identity; never regenerate during token/anchor requests.
+    identity_headers: reqwest::header::HeaderMap,
 }
 
 impl std::fmt::Debug for CoincubeClient {
@@ -90,16 +92,18 @@ impl CoincubeClient {
         );
 
         let https_only = !base_url.starts_with("http://");
+        let identity_headers = device_headers();
 
         Self {
             client: reqwest::ClientBuilder::new()
                 .timeout(std::time::Duration::from_secs(20))
                 .https_only(https_only)
-                .default_headers(device_headers())
+                .default_headers(identity_headers.clone())
                 .build()
                 .unwrap(),
             base_url,
             token: None,
+            identity_headers,
         }
     }
 
@@ -110,7 +114,7 @@ impl CoincubeClient {
         // allocation before the new value takes its place.
         self.token = Some(Zeroizing::new(token.to_string()));
 
-        let mut headers = device_headers();
+        let mut headers = self.identity_headers.clone();
         headers.append(
             "Authorization",
             reqwest::header::HeaderValue::from_str(&format!("Bearer {}", token)).unwrap(),
@@ -142,9 +146,28 @@ impl CoincubeClient {
         self.client = reqwest::ClientBuilder::new()
             .timeout(std::time::Duration::from_secs(20))
             .https_only(https_only)
-            .default_headers(device_headers())
+            .default_headers(self.identity_headers.clone())
             .build()
             .unwrap();
+    }
+
+    /// A bounded anchor transport preserves this client's login identity while
+    /// refusing redirects. No device identity filesystem access occurs here.
+    pub(super) fn anchor_transport(&self) -> Result<reqwest::Client, CoincubeError> {
+        let mut headers = self.identity_headers.clone();
+        if let Some(token) = self.token() {
+            let mut value = reqwest::header::HeaderValue::from_str(&format!("Bearer {}", token))
+                .map_err(|_| CoincubeError::Api("Invalid authorization header".into()))?;
+            value.set_sensitive(true);
+            headers.insert(reqwest::header::AUTHORIZATION, value);
+        }
+        reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(10))
+            .https_only(!self.base_url.starts_with("http://"))
+            .default_headers(headers)
+            .build()
+            .map_err(CoincubeError::from)
     }
 
     pub fn token(&self) -> Option<&str> {
@@ -577,7 +600,22 @@ impl CoincubeClient {
                 .unwrap(),
             base_url: base_url.into(),
             token: None,
+            identity_headers: reqwest::header::HeaderMap::new(),
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn for_test_with_identity(
+        base_url: impl Into<String>,
+        identity_headers: reqwest::header::HeaderMap,
+    ) -> Self {
+        let mut client = Self::for_test(base_url);
+        client.client = reqwest::Client::builder()
+            .default_headers(identity_headers.clone())
+            .build()
+            .unwrap();
+        client.identity_headers = identity_headers;
+        client
     }
 
     // --- Cube-scoped endpoints (Lightning Address, Avatar) ---

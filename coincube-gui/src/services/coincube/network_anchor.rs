@@ -205,19 +205,7 @@ impl CoincubeClient {
         }
         // Anchor observations cannot redirect authentication or allocate an
         // unbounded response body. Other CoincubeClient routes are unchanged.
-        let mut headers = crate::utils::device::device_headers();
-        if let Some(token) = self.token() {
-            let mut value = reqwest::header::HeaderValue::from_str(&format!("Bearer {}", token))
-                .map_err(|_| NetworkStatusError::InvalidResponse)?;
-            value.set_sensitive(true);
-            headers.insert(reqwest::header::AUTHORIZATION, value);
-        }
-        let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(Duration::from_secs(10))
-            .default_headers(headers)
-            .build()
-            .map_err(CoincubeError::from)?;
+        let client = self.anchor_transport()?;
         let mut response = client
             .get(format!(
                 "{}/api/v1/connect/networks/{}/anchor",
@@ -428,6 +416,85 @@ mod tests {
                 .await,
             Err(NetworkStatusError::InvalidResponse)
         ));
+    }
+    #[tokio::test]
+    async fn anchor_and_ordinary_requests_share_frozen_identity_across_token_changes() {
+        let server = MockServer::start();
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            "X-Device-Fingerprint",
+            "synthetic-frozen-fingerprint".parse().unwrap(),
+        );
+        headers.insert("X-Device-Name", "synthetic-device".parse().unwrap());
+        let mut client = CoincubeClient::for_test_with_identity(server.base_url(), headers);
+        for (index, token) in [Some("first-token"), Some("replacement-token"), None]
+            .iter()
+            .copied()
+            .enumerate()
+        {
+            match token {
+                Some(token) => client.set_token(token),
+                None => client.clear_token(),
+            }
+            let mut anchor = server.mock(|when, then| {
+                let when = when
+                    .path("/api/v1/connect/networks/bitcoin-blake2b/anchor")
+                    .header("X-Device-Fingerprint", "synthetic-frozen-fingerprint")
+                    .header("X-Device-Name", "synthetic-device");
+                if let Some(token) = token {
+                    when.header("authorization", format!("Bearer {}", token));
+                } else {
+                    when.matches(|request| {
+                        request.headers.as_ref().is_none_or(|headers| {
+                            headers
+                                .iter()
+                                .all(|(name, _)| !name.eq_ignore_ascii_case("authorization"))
+                        })
+                    });
+                }
+                then.status(200).json_body(body(ChainId::BitcoinBlake2b));
+            });
+            let probe = server.mock(|when, then| {
+                let when = when
+                    .path(format!("/identity-check/{}", index))
+                    .header("X-Device-Fingerprint", "synthetic-frozen-fingerprint")
+                    .header("X-Device-Name", "synthetic-device");
+                if let Some(token) = token {
+                    when.header("authorization", format!("Bearer {}", token));
+                } else {
+                    when.matches(|request| {
+                        request.headers.as_ref().is_none_or(|headers| {
+                            headers
+                                .iter()
+                                .all(|(name, _)| !name.eq_ignore_ascii_case("authorization"))
+                        })
+                    });
+                }
+                then.status(200);
+            });
+            assert_eq!(
+                client
+                    .clone()
+                    .network_anchor(ChainId::BitcoinBlake2b)
+                    .await
+                    .unwrap()
+                    .state,
+                AnchorState::Available
+            );
+            assert_eq!(
+                client
+                    .client
+                    .get(format!("{}/identity-check/{}", server.base_url(), index))
+                    .send()
+                    .await
+                    .unwrap()
+                    .status(),
+                reqwest::StatusCode::OK
+            );
+            anchor.assert_hits(1);
+            probe.assert_hits(1);
+            anchor.delete();
+        }
     }
     fn body(chain: ChainId) -> Value {
         json!({"success":true,"data":{"network":chain.api_str(),"state":"available","anchor":{
