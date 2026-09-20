@@ -404,6 +404,8 @@ async fn run_local_duress_activation(root: &std::path::Path, account_id: Option<
 
 #[derive(Debug)]
 pub enum Message {
+    ForkAsync(u64, Box<Message>),
+    ForkTaskFinished(u64, u64),
     Launch(home::Message),
     Install(installer::Message),
     Load(loader::Message),
@@ -542,6 +544,8 @@ pub struct Tab {
     pending_unlock_warnings: Vec<String>,
     fork_session_generation: u64,
     fork_save_task: Option<iced::task::Handle>,
+    fork_tasks: HashMap<u64, iced::task::Handle>,
+    next_fork_task: u64,
 }
 
 impl Tab {
@@ -553,6 +557,8 @@ impl Tab {
             pending_unlock_warnings: Vec::new(),
             fork_session_generation: 0,
             fork_save_task: None,
+            fork_tasks: HashMap::new(),
+            next_fork_task: 0,
         }
     }
 
@@ -659,10 +665,14 @@ impl Tab {
             .map(|d| d >= Self::IDLE_LOCK_AFTER)
             .unwrap_or(false);
 
-        match &mut self.state {
+        let task = match &mut self.state {
             State::App(app) => {
                 if idle_expired {
-                    return Task::done(Message::LockCube);
+                    return if app.cube_settings().network.is_blake2b() {
+                        self.guard_fork_task(Task::done(Message::LockCube))
+                    } else {
+                        Task::done(Message::LockCube)
+                    };
                 }
                 app.on_tick().map(Message::Run)
             }
@@ -686,16 +696,34 @@ impl Tab {
                 Task::none()
             }
             _ => Task::none(),
+        };
+        if matches!(&self.state, State::App(app) if app.cube_settings().network.is_blake2b()) {
+            self.guard_fork_task(task)
+        } else {
+            task
         }
     }
 
     pub fn invalidate_fork_session(&mut self) -> Task<Message> {
         self.fork_session_generation = self.fork_session_generation.wrapping_add(1);
         self.fork_save_task.take();
+        self.fork_tasks.clear();
         let mut command = Task::none();
         let mut replacement = None;
         match &mut self.state {
-            State::App(app) => app.invalidate_fork_session(),
+            State::App(app) if app.cube_settings().network.is_blake2b() => {
+                let cube = app.cube_settings().clone();
+                let datadir = app.datadir().clone();
+                app.invalidate_fork_session();
+                app::session::close_cube(&cube.id);
+                // Dropping the fork App drops signing/export panels and its
+                // wallet. EmbeddedDaemon Drop uses fork-scoped safe cleanup;
+                // App::stop would also stop unrelated globally managed Tor.
+                let (mut home, startup) = Home::new_for_chain(datadir, Some(cube.network));
+                home.set_error("Connect session changed. Sign in again to reopen this Cube.");
+                command = startup.map(Message::Launch);
+                replacement = Some(State::Home(home));
+            }
             State::Loader(loader) if loader.cube_settings.network.is_blake2b() => {
                 loader.invalidate_fork_session()
             }
@@ -724,7 +752,61 @@ impl Tab {
         command
     }
 
+    pub(crate) fn accepts_fork_generation(&self, generation: u64) -> bool {
+        generation == self.fork_session_generation
+    }
+
+    fn guard_fork_task(&mut self, task: Task<Message>) -> Task<Message> {
+        if task.units() == 0 {
+            return task;
+        }
+        let generation = self.fork_session_generation;
+        let id = self.next_fork_task;
+        self.next_fork_task = self.next_fork_task.wrapping_add(1);
+        let (task, handle) = task
+            .map(move |message| Message::ForkAsync(generation, Box::new(message)))
+            .chain(Task::done(Message::ForkTaskFinished(generation, id)))
+            .abortable();
+        self.fork_tasks.insert(id, handle.abort_on_drop());
+        task
+    }
+
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        let message = match message {
+            Message::ForkAsync(generation, message) => {
+                if generation != self.fork_session_generation {
+                    return Task::none();
+                }
+                *message
+            }
+            Message::ForkTaskFinished(generation, id) => {
+                if generation == self.fork_session_generation {
+                    self.fork_tasks.remove(&id);
+                }
+                return Task::none();
+            }
+            message => message,
+        };
+        let was_fork_app =
+            matches!(&self.state, State::App(app) if app.cube_settings().network.is_blake2b());
+        let result = self.update_inner(message);
+        if matches!(&self.state, State::App(app) if app.cube_settings().network.is_blake2b() && app.authenticated_coincube_client().is_none())
+        {
+            drop(result);
+            return self.invalidate_fork_session();
+        }
+        if matches!(&self.state, State::App(app) if app.cube_settings().network.is_blake2b()) {
+            self.guard_fork_task(result)
+        } else {
+            if was_fork_app {
+                self.fork_session_generation = self.fork_session_generation.wrapping_add(1);
+                self.fork_tasks.clear();
+            }
+            result
+        }
+    }
+
+    fn update_inner(&mut self, message: Message) -> Task<Message> {
         use crate::app::settings::global::GlobalSettings;
         let message = match message {
             Message::ForkInstallCompleted(generation, msg) => {
@@ -2947,6 +3029,12 @@ impl Tab {
         match &self.state {
             State::Installer(v) => v.subscription().map(Message::Install),
             State::Loader(v) => v.subscription().map(Message::Load),
+            State::App(v) if v.cube_settings().network.is_blake2b() => {
+                let generation = self.fork_session_generation;
+                v.subscription().map(move |message| {
+                    Message::ForkAsync(generation, Box::new(Message::Run(message)))
+                })
+            }
             State::App(v) => v.subscription().map(Message::Run),
             State::Home(v) => v.subscription().map(Message::Launch),
             State::Login(_) => Subscription::none(),
@@ -2962,6 +3050,12 @@ impl Tab {
     pub fn view(&self) -> Element<Message> {
         match &self.state {
             State::Installer(v) => v.view().map(Message::Install),
+            State::App(v) if v.cube_settings().network.is_blake2b() => {
+                let generation = self.fork_session_generation;
+                v.view().map(move |message| {
+                    Message::ForkAsync(generation, Box::new(Message::Run(message)))
+                })
+            }
             State::App(v) => v.view().map(Message::Run),
             State::Home(v) => v.view().map(Message::Launch),
             State::Loader(v) => v.view().map(Message::Load),

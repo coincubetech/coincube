@@ -22,7 +22,12 @@ Loader-owned 30-second minimum interval; failed admission cannot lose that bound
 when its temporary provider is dropped.
 
 Home or App logout/token replacement invalidates every open fork tab before the
-account change propagates. Pending installer, metadata-save and Loader tasks are
+account change propagates. The fork App is dropped into a fresh Home, removing
+its wallet, signing/export panels and matching Cube PIN session. App tasks are
+owned and cancelled; task, subscription and view callbacks carry the session
+generation so stale signing results cannot affect a later reopened App. A CPU
+operation already running may finish, but its revoked completion is discarded.
+Pending installer, metadata-save and Loader tasks are
 aborted; their ephemeral authority is dropped. Save and PIN completions carry a
 session generation, so already queued results cannot revive a replaced session.
 A late blocking decrypt writes only to its detached old slot. The fork metadata

@@ -4643,12 +4643,12 @@ fn cubes_list_item<'a>(
                     .padding(10)
                     .on_press(ViewMessage::RenameCube(i)),
             )
-            .push(
+            .push_maybe((!cube.network.is_blake2b()).then(|| {
                 Button::new(icon::trash_icon())
                     .style(theme::button::secondary)
                     .padding(10)
-                    .on_press(ViewMessage::DeleteCube(DeleteCubeMessage::ShowModal(i))),
-            ),
+                    .on_press(ViewMessage::DeleteCube(DeleteCubeMessage::ShowModal(i)))
+            })),
     )
     .into()
 }
