@@ -353,6 +353,18 @@ impl Daemon for EmbeddedDaemon {
         .await
     }
 
+    async fn submit_verified_poison(
+        &self,
+        verified: &coincube_core::claim_finalize::VerifiedPoisonTransfer,
+    ) -> Result<coincubed::poison_broadcast::SubmissionOutcome, DaemonError> {
+        self.command(|daemon| {
+            daemon
+                .submit_verified_poison(verified)
+                .map_err(DaemonError::PoisonSubmission)
+        })
+        .await
+    }
+
     async fn start_rescan(&self, t: u32) -> Result<(), DaemonError> {
         self.command(|daemon| {
             daemon

@@ -5,6 +5,7 @@ pub mod connect;
 mod database;
 pub mod datadir;
 mod jsonrpc;
+pub mod poison_broadcast;
 #[cfg(test)]
 mod testutils;
 

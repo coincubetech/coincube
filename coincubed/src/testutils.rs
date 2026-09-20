@@ -27,6 +27,8 @@ use miniscript::{
 };
 
 pub struct DummyBitcoind {
+    pub broadcasted: sync::Mutex<Vec<Transaction>>,
+    pub broadcast_error: Option<String>,
     pub txs: HashMap<Txid, (Transaction, Option<Block>)>,
     /// What `chain_tip` reports. Defaults to the historical fixed value (height 100).
     pub tip: BlockChainTip,
@@ -66,6 +68,8 @@ impl DummyBitcoind {
         )
         .unwrap();
         Self {
+            broadcasted: sync::Mutex::new(Vec::new()),
+            broadcast_error: None,
             txs: HashMap::new(),
             tip: BlockChainTip { hash, height: 100 },
             in_chain: true,
@@ -162,8 +166,12 @@ impl BitcoinInterface for DummyBitcoind {
         self.walks_ancestors
     }
 
-    fn broadcast_tx(&self, _: &bitcoin::Transaction) -> Result<(), String> {
-        todo!()
+    fn broadcast_tx(&self, transaction: &bitcoin::Transaction) -> Result<(), String> {
+        self.broadcasted.lock().unwrap().push(transaction.clone());
+        match &self.broadcast_error {
+            Some(error) => Err(error.clone()),
+            None => Ok(()),
+        }
     }
 
     fn start_rescan(&mut self, _: &descriptors::CoincubeDescriptor, _: u32) -> Result<(), String> {
