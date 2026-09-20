@@ -964,6 +964,45 @@ pub fn daemon_check(cfg: coincubed::config::Config) -> Result<(), Error> {
     }
 }
 
+async fn daemon_check_authenticated(
+    cfg: coincubed::config::Config,
+    client: Option<crate::services::coincube::CoincubeClient>,
+) -> Result<(), Error> {
+    if !cfg.bitcoin_config.chain.is_blake2b() {
+        return daemon_check(cfg);
+    }
+    use crate::daemon::Daemon;
+    let client = client.ok_or_else(|| {
+        Error::Unexpected("Connect authentication is required for Bitcoin Blake2b".into())
+    })?;
+    let daemon = crate::daemon::embedded::EmbeddedDaemon::start_authenticated(cfg, client)
+        .await
+        .map_err(|e| Error::Unexpected(format!("Failed to admit Connect backend: {}", e)))?;
+    daemon
+        .stop()
+        .await
+        .map_err(|e| Error::Unexpected(format!("Failed to stop Connect validation daemon: {}", e)))
+}
+
+fn prepare_installer_data_directory(
+    chain: crate::chain::ChainId,
+    data_directory: &coincubed::datadir::DataDirectory,
+) -> Result<std::path::PathBuf, Error> {
+    if chain.is_blake2b() {
+        // Do not create/canonicalize a wallet before authenticated admission.
+        // absolute() is lexical and does not require the target to exist.
+        return std::path::absolute(data_directory.path())
+            .map_err(|e| Error::Unexpected(format!("Invalid datadir path: {}", e)));
+    }
+    data_directory
+        .init()
+        .map_err(|e| Error::CannotCreateDatadir(e.to_string()))?;
+    data_directory
+        .path()
+        .canonicalize()
+        .map_err(|e| Error::Unexpected(format!("Failed to canonicalize datadir path: {}", e)))
+}
+
 async fn with_wallet_id<F>(wallet_id: WalletId, res: F) -> (WalletId, Result<WalletSettings, Error>)
 where
     F: std::future::Future<Output = Result<WalletSettings, Error>>,
@@ -1110,9 +1149,11 @@ pub async fn install_local_wallet(
     let network_datadir = ctx
         .coincube_directory
         .network_directory(ctx.bitcoin_config.chain);
-    network_datadir
-        .init()
-        .map_err(|e| Error::Unexpected(format!("Failed to create datadir path: {}", e)))?;
+    if !ctx.bitcoin_config.chain.is_blake2b() {
+        network_datadir
+            .init()
+            .map_err(|e| Error::Unexpected(format!("Failed to create datadir path: {}", e)))?;
+    }
 
     let descriptor = ctx
         .descriptor
@@ -1146,7 +1187,12 @@ pub async fn install_local_wallet(
 
     let cfg: coincubed::config::Config = extract_daemon_config(&ctx, &wallet_settings)?;
 
-    daemon_check(cfg.clone())?;
+    daemon_check_authenticated(cfg.clone(), ctx.coincube_client.clone()).await?;
+    if ctx.bitcoin_config.chain.is_blake2b() {
+        network_datadir
+            .init()
+            .map_err(|e| Error::Unexpected(format!("Failed to create datadir path: {}", e)))?;
+    }
 
     info!("daemon checked");
 
@@ -1600,15 +1646,8 @@ pub fn extract_daemon_config(ctx: &Context, settings: &WalletSettings) -> Result
         .coincube_directory
         .network_directory(ctx.bitcoin_config.chain)
         .coincubed_data_directory(&settings.wallet_id());
-    data_directory
-        .init()
-        .map_err(|e| Error::CannotCreateDatadir(e.to_string()))?;
-
-    let data_directory = data_directory
-        .path()
-        .to_path_buf()
-        .canonicalize()
-        .map_err(|e| Error::Unexpected(format!("Failed to canonicalize datadir path: {}", e)))?;
+    let data_directory =
+        prepare_installer_data_directory(ctx.bitcoin_config.chain, &data_directory)?;
     let bitcoin_backend = if let Some(BitcoinBackend::Bitcoind(BitcoindConfig {
         rpc_auth: BitcoindRpcAuth::CookieFile(cookie_path),
         addr,
@@ -1850,6 +1889,46 @@ mod pending_rescan_tests {
             assert!(require_installable_chain(&context).is_err());
             assert!(!temp.exists());
         }
+    }
+
+    #[test]
+    fn fork_path_preparation_does_not_create_wallet_directory() {
+        for chain in [
+            crate::chain::ChainId::Bitcoin,
+            crate::chain::ChainId::BitcoinBlake2b,
+            crate::chain::ChainId::BitcoinBlake2bTestnet4,
+        ] {
+            let path =
+                std::env::temp_dir().join(format!("installer-admission-{}", uuid::Uuid::new_v4()));
+            let dir = coincubed::datadir::DataDirectory::new(path.clone());
+            assert!(prepare_installer_data_directory(chain, &dir)
+                .unwrap()
+                .is_absolute());
+            assert_eq!(path.exists(), !chain.is_blake2b());
+            if path.exists() {
+                std::fs::remove_dir(path).unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn fork_missing_startup_client_refuses_before_wallet_writes() {
+        let path = std::env::temp_dir().join(format!("installer-no-auth-{}", uuid::Uuid::new_v4()));
+        let cfg = coincubed::config::Config::new(
+            coincubed::config::BitcoinConfig::new(
+                crate::chain::ChainId::BitcoinBlake2bTestnet4,
+                std::time::Duration::from_secs(30),
+            ),
+            None,
+            log::LevelFilter::Info,
+            staged_with_descriptor(None).descriptor.unwrap(),
+            coincubed::datadir::DataDirectory::new(path.clone()),
+        );
+        let err = daemon_check_authenticated(cfg, None).await.unwrap_err();
+        assert!(
+            matches!(err, Error::Unexpected(reason) if reason.contains("authentication is required"))
+        );
+        assert!(!path.exists());
     }
 
     fn staged_with_descriptor(
