@@ -8,7 +8,7 @@ use coincube_core::{bip39, miniscript::bitcoin::Network};
 use coincube_ui::{
     component::{button, card, network_banner, notification, spinner, text::*},
     icon, image, theme,
-    widget::{modal::Modal, CheckBox, Column, Container, Element, Row},
+    widget::{modal::Modal, CheckBox, Column, Container, Element, Row, RowExt},
 };
 use coincubed::config::ConfigError;
 use tokio::runtime::Handle;
