@@ -344,6 +344,11 @@ where
     file.write_all(&bytes)
         .await
         .map_err(|e| SettingsError::WritingFile(e.to_string()))?;
+    // Surface an asynchronous write failure before syncing/committing. Tokio's
+    // sync_all drains in-flight writes but retains their error for flush.
+    file.flush()
+        .await
+        .map_err(|e| SettingsError::WritingFile(e.to_string()))?;
     file.sync_all()
         .await
         .map_err(|e| SettingsError::WritingFile(e.to_string()))?;
