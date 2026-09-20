@@ -1151,7 +1151,7 @@ pub async fn install_local_wallet(
     info!("daemon checked");
 
     // Step needed because of ValueAfterTable error in the toml serialize implementation.
-    let daemon_config_toml = toml::to_string_pretty(&cfg)
+    let daemon_config_toml = toml::to_string_pretty(&cfg.for_persistence())
         .map_err(|e| Error::Unexpected(format!("Failed to serialize daemon config: {}", e)))?;
 
     // create coincubed configuration file

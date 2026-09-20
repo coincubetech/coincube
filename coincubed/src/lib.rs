@@ -1,6 +1,7 @@
 mod bitcoin;
 pub mod commands;
 pub mod config;
+pub mod connect;
 mod database;
 pub mod datadir;
 mod jsonrpc;
@@ -112,6 +113,7 @@ pub enum StartupError {
     Config(ConfigError),
     /// The configured chain has no runtime in this build. Refused before any I/O.
     ChainDormant(ChainId),
+    ConnectAdmission(connect::AdmissionError),
     /// The existing database belongs to another chain than the configuration names. Refused
     /// before the data directory, the watch-only wallet or any migration is touched.
     ChainMismatch {
@@ -136,6 +138,7 @@ pub enum StartupError {
 impl fmt::Display for StartupError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
+            Self::ConnectAdmission(e) => write!(f, "{}", e),
             Self::Io(e) => write!(f, "{}", e),
             Self::Config(e) => write!(f, "{}", e),
             Self::ChainDormant(chain) => write!(
@@ -225,6 +228,16 @@ fn chain_runtime_gate(chain: ChainId) -> Result<(), StartupError> {
         return Err(StartupError::ChainDormant(chain));
     }
     Ok(())
+}
+
+fn connect_startup_error(error: crate::bitcoin::esplora::client::Error) -> StartupError {
+    use crate::bitcoin::esplora::client::Error;
+    match error {
+        Error::Admission(error) => StartupError::ConnectAdmission(error),
+        Error::AllCooling => StartupError::ConnectAdmission(connect::AdmissionError::Throttled),
+        Error::Aborted => StartupError::ConnectAdmission(connect::AdmissionError::Aborted),
+        other => StartupError::Esplora(EsploraError::Client(other)),
+    }
 }
 
 /// Establish, without modifying anything, that the database already in `data_dir` belongs to
@@ -641,6 +654,7 @@ fn setup_esplora(
     config: &Config,
     db: sync::Arc<sync::Mutex<dyn DatabaseInterface>>,
     scan_abort: sync::Arc<sync::atomic::AtomicBool>,
+    prepared_client: Option<crate::bitcoin::esplora::client::Client>,
 ) -> Result<Esplora, StartupError> {
     let esplora_config = match config.bitcoin_backend.as_ref() {
         Some(config::BitcoinBackend::Esplora(esplora_config)) => esplora_config,
@@ -650,8 +664,11 @@ fn setup_esplora(
         let chain_hash = ChainHash::using_genesis_block(config.bitcoin_config.network);
         BlockHash::from_byte_array(*chain_hash.as_bytes())
     };
-    let client = crate::bitcoin::esplora::client::Client::new(esplora_config, scan_abort)
-        .map_err(|e| StartupError::Esplora(EsploraError::Client(e)))?;
+    let client = match prepared_client {
+        Some(client) => client,
+        None => crate::bitcoin::esplora::client::Client::new(esplora_config, scan_abort)
+            .map_err(|e| StartupError::Esplora(EsploraError::Client(e)))?,
+    };
     let mut db_conn = db.connection();
     let tip = db_conn.chain_tip();
     let coins: Vec<_> = db_conn
@@ -783,6 +800,42 @@ impl DaemonHandle {
         db: Option<impl DatabaseInterface + 'static>,
         with_rpc_server: bool,
     ) -> Result<Self, StartupError> {
+        Self::start_inner(
+            config,
+            bitcoin,
+            db,
+            with_rpc_server,
+            None,
+            chain_runtime_gate,
+        )
+    }
+
+    /// Start with ephemeral authenticated Connect authority; never deserialize this authority.
+    pub fn start_with_connect(
+        config: Config,
+        backend: connect::ConnectBackend,
+        with_rpc_server: bool,
+    ) -> Result<Self, StartupError> {
+        Self::start_inner(
+            config,
+            Option::<BitcoinD>::None,
+            Option::<SqliteDb>::None,
+            with_rpc_server,
+            Some(backend),
+            chain_runtime_gate,
+        )
+    }
+
+    fn start_inner(
+        config: Config,
+        bitcoin: Option<impl BitcoinInterface + 'static>,
+        db: Option<impl DatabaseInterface + 'static>,
+        with_rpc_server: bool,
+        connect: Option<connect::ConnectBackend>,
+        // Production entry points always supply chain_runtime_gate. A private
+        // policy parameter lets tests exercise admission ordering while dormant.
+        runtime_gate: fn(ChainId) -> Result<(), StartupError>,
+    ) -> Result<Self, StartupError> {
         let secp = secp256k1::Secp256k1::verification_only();
 
         // Before touching anything: the configuration must be self-consistent, and this build
@@ -791,7 +844,37 @@ impl DaemonHandle {
             .bitcoin_config
             .check_chain_encoding()
             .map_err(StartupError::Config)?;
-        chain_runtime_gate(config.bitcoin_config.chain)?;
+        if let Some(backend) = connect.as_ref() {
+            if backend.chain() != config.bitcoin_config.chain
+                || bitcoin.is_some()
+                || !matches!(
+                    config.bitcoin_backend.as_ref(),
+                    Some(config::BitcoinBackend::Esplora(selection)) if backend.matches_selection(selection)
+                )
+            {
+                return Err(StartupError::ConnectAdmission(
+                    connect::AdmissionError::InvalidBackend,
+                ));
+            }
+        }
+        runtime_gate(config.bitcoin_config.chain)?;
+        // Authenticated admission precedes every filesystem/database/node write.
+        let scan_abort = sync::Arc::new(sync::atomic::AtomicBool::new(false));
+        let prepared_client = match connect {
+            Some(backend) => Some(
+                crate::bitcoin::esplora::client::Client::new_for_connect(
+                    backend,
+                    scan_abort.clone(),
+                )
+                .map_err(connect_startup_error)?,
+            ),
+            None if config.bitcoin_config.chain.is_blake2b() => {
+                return Err(StartupError::ConnectAdmission(
+                    connect::AdmissionError::MissingAuth,
+                ))
+            }
+            None => None,
+        };
 
         // Then check the data directory. An existing database must belong to the configured
         // chain before we create anything, set up the watch-only wallet or migrate it.
@@ -850,7 +933,6 @@ impl DaemonHandle {
         // Shared abort flag: `stop` flips it so an in-flight Esplora scan stops
         // walking the provider chain and returns promptly, instead of the poller
         // (and the `stop` that joins it) blocking on dead/throttled providers.
-        let scan_abort = sync::Arc::new(sync::atomic::AtomicBool::new(false));
 
         // Finally set up the Bitcoin backend.
         let bit = match (bitcoin, &config.bitcoin_backend) {
@@ -862,9 +944,14 @@ impl DaemonHandle {
             (None, Some(config::BitcoinBackend::Electrum(..))) => {
                 sync::Arc::from(sync::Mutex::from(setup_electrum(&config, db.clone())?))
             }
-            (None, Some(config::BitcoinBackend::Esplora(..))) => sync::Arc::from(
-                sync::Mutex::from(setup_esplora(&config, db.clone(), scan_abort.clone())?),
-            ),
+            (None, Some(config::BitcoinBackend::Esplora(..))) => {
+                sync::Arc::from(sync::Mutex::from(setup_esplora(
+                    &config,
+                    db.clone(),
+                    scan_abort.clone(),
+                    prepared_client,
+                )?))
+            }
             (None, None) => Err(StartupError::MissingBitcoinBackendConfig)?,
         };
 
@@ -968,6 +1055,54 @@ impl DaemonHandle {
         }
     }
 
+    /// Cleanup for ephemeral Connect ownership, including failed startup/Drop.
+    /// Closed channels and panicked workers become errors instead of unwinding.
+    /// Always joins both workers even when one failed. Existing stop semantics
+    /// remain unchanged for callers that do not opt into this cleanup path.
+    pub fn stop_for_cleanup(self) -> io::Result<()> {
+        fn failure() -> io::Error {
+            io::Error::other("Daemon worker failed during cleanup")
+        }
+        match self {
+            Self::Controller {
+                poller_sender,
+                poller_handle,
+                scan_abort,
+                ..
+            } => {
+                scan_abort.store(true, sync::atomic::Ordering::Relaxed);
+                let disconnected = poller_sender.send(poller::PollerMessage::Shutdown).is_err();
+                let panicked = poller_handle.join().is_err();
+                if disconnected || panicked {
+                    Err(failure())
+                } else {
+                    Ok(())
+                }
+            }
+            Self::Server {
+                poller_sender,
+                poller_handle,
+                rpcserver_shutdown,
+                rpcserver_handle,
+                scan_abort,
+            } => {
+                scan_abort.store(true, sync::atomic::Ordering::Relaxed);
+                rpcserver_shutdown.store(true, sync::atomic::Ordering::Relaxed);
+                let disconnected = poller_sender.send(poller::PollerMessage::Shutdown).is_err();
+                let rpc_result = rpcserver_handle
+                    .join()
+                    .map_err(|_| failure())
+                    .and_then(|result| result);
+                let poller_result = poller_handle.join().map_err(|_| failure());
+                rpc_result.and(poller_result).and(if disconnected {
+                    Err(failure())
+                } else {
+                    Ok(())
+                })
+            }
+        }
+    }
+
     /// Stop the Coincube daemon. This returns any error which may have occurred.
     pub fn stop(self) -> Result<(), Box<dyn error::Error>> {
         match self {
@@ -1005,6 +1140,57 @@ impl DaemonHandle {
                 Ok(())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+    #[test]
+    fn cleanup_joins_failed_workers_without_unwinding() {
+        for panic_worker in [false, true] {
+            let (sender, receiver) = mpsc::sync_channel(1);
+            drop(receiver);
+            let poller = thread::spawn(move || {
+                if panic_worker {
+                    panic!("synthetic poller failure");
+                }
+            });
+            let rpc = thread::spawn(|| -> io::Result<()> {
+                Err(io::Error::other("synthetic RPC failure"))
+            });
+            let abort = sync::Arc::new(sync::atomic::AtomicBool::new(false));
+            let shutdown = sync::Arc::new(sync::atomic::AtomicBool::new(false));
+            let handle = DaemonHandle::Server {
+                poller_sender: sender,
+                poller_handle: poller,
+                rpcserver_shutdown: shutdown.clone(),
+                rpcserver_handle: rpc,
+                scan_abort: abort.clone(),
+            };
+            assert!(handle.stop_for_cleanup().is_err());
+            assert!(abort.load(sync::atomic::Ordering::Relaxed));
+            assert!(shutdown.load(sync::atomic::Ordering::Relaxed));
+        }
+    }
+    #[test]
+    fn cleanup_delivers_shutdown_and_joins_healthy_workers() {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let poller = thread::spawn(move || {
+            assert!(matches!(
+                receiver.recv(),
+                Ok(poller::PollerMessage::Shutdown)
+            ));
+        });
+        let rpc = thread::spawn(|| -> io::Result<()> { Ok(()) });
+        let handle = DaemonHandle::Server {
+            poller_sender: sender,
+            poller_handle: poller,
+            rpcserver_shutdown: sync::Arc::new(sync::atomic::AtomicBool::new(false)),
+            rpcserver_handle: rpc,
+            scan_abort: sync::Arc::new(sync::atomic::AtomicBool::new(false)),
+        };
+        assert!(handle.stop_for_cleanup().is_ok());
     }
 }
 
@@ -1618,6 +1804,132 @@ mod tests {
                 CoincubeDescriptor::from_str(DESC_STR).unwrap(),
                 DataDirectory::new(data_directory),
             )
+        }
+
+        #[test]
+        fn fork_persistence_drops_tokens_and_dormant_gate_stays_no_write() {
+            let tmp =
+                std::env::temp_dir().join(format!("connect-admission-{}", std::process::id()));
+            fs::create_dir_all(&tmp).unwrap();
+            let node = SilentNode::bind();
+            let data = tmp.join("new-wallet");
+            let mut config = config_for(ChainId::BitcoinBlake2b, &tmp, data.clone(), &node);
+            config.bitcoin_backend = Some(config::BitcoinBackend::Esplora(config::EsploraConfig {
+                addr: "https://fixture.invalid".into(),
+                token: Some("synthetic-jwt".into()),
+                fallback_addr: None,
+                fallback_token: Some("synthetic-fallback".into()),
+                secondary_fallback_addr: None,
+                secondary_fallback_token: Some("synthetic-second".into()),
+            }));
+            let encoded = toml::to_string(&config.for_persistence()).unwrap();
+            assert!(!encoded.contains("synthetic-"));
+            assert!(encoded.contains("fixture.invalid"));
+            assert!(matches!(
+                DaemonHandle::start_default(config.clone(), false),
+                Err(StartupError::ChainDormant(_))
+            ));
+            assert!(!data.exists());
+            node.assert_untouched();
+            config.bitcoin_config =
+                BitcoinConfig::new(ChainId::Bitcoin, time::Duration::from_secs(2));
+            assert!(toml::to_string(&config.for_persistence())
+                .unwrap()
+                .contains("synthetic-jwt"));
+            fs::remove_dir_all(tmp).unwrap();
+        }
+
+        #[test]
+        fn failed_admission_is_typed_and_precedes_real_startup_writes() {
+            struct Authority(connect::TrustedChainAnchor);
+            impl connect::ConnectAnchorAuthority for Authority {
+                fn fresh_anchor(
+                    &self,
+                ) -> Result<connect::TrustedChainAnchor, connect::AdmissionError> {
+                    Ok(self.0.clone())
+                }
+            }
+            let tmp = std::env::temp_dir().join(format!("connect-ordering-{}", std::process::id()));
+            fs::create_dir_all(&tmp).unwrap();
+            let node = SilentNode::bind();
+            let data = tmp.join("must-not-exist");
+            let mut config = config_for(ChainId::BitcoinBlake2b, &tmp, data.clone(), &node);
+            let endpoint = format!("http://{}", node.addr);
+            config.bitcoin_backend = Some(config::BitcoinBackend::Esplora(config::EsploraConfig {
+                addr: endpoint.clone(),
+                token: None,
+                fallback_addr: None,
+                fallback_token: None,
+                secondary_fallback_addr: None,
+                secondary_fallback_token: None,
+            }));
+            // Only the private test invocation bypasses the unchanged production
+            // dormant policy; every real admission and startup statement runs.
+            let result = DaemonHandle::start_inner(
+                config.clone(),
+                Option::<BitcoinD>::None,
+                Option::<SqliteDb>::None,
+                false,
+                None,
+                |_| Ok(()),
+            );
+            assert!(matches!(
+                result,
+                Err(StartupError::ConnectAdmission(
+                    connect::AdmissionError::MissingAuth
+                ))
+            ));
+            assert!(!data.exists());
+            for (chain, observed_at, expected) in [
+                (
+                    ChainId::Bitcoin,
+                    time::SystemTime::now(),
+                    connect::AdmissionError::WrongChain,
+                ),
+                (
+                    ChainId::BitcoinBlake2b,
+                    time::SystemTime::now() - time::Duration::from_secs(120),
+                    connect::AdmissionError::Stale,
+                ),
+            ] {
+                let authority = sync::Arc::new(Authority(connect::TrustedChainAnchor {
+                    chain,
+                    height: 900000,
+                    hash: BlockHash::from_byte_array([7; 32]),
+                    median_time_past: 1000,
+                    observed_at,
+                }));
+                let backend = connect::ConnectBackend::new(
+                    ChainId::BitcoinBlake2b,
+                    endpoint.clone(),
+                    "synthetic-jwt".into(),
+                    authority,
+                )
+                .unwrap();
+                let result = DaemonHandle::start_inner(
+                    config.clone(),
+                    Option::<BitcoinD>::None,
+                    Option::<SqliteDb>::None,
+                    false,
+                    Some(backend),
+                    |_| Ok(()),
+                );
+                assert!(
+                    matches!(result,Err(StartupError::ConnectAdmission(actual)) if actual==expected)
+                );
+                assert!(!data.exists());
+            }
+            node.assert_untouched();
+            for error in [
+                connect::AdmissionError::HashMismatch,
+                connect::AdmissionError::IndexerBehind,
+                connect::AdmissionError::Unavailable,
+            ] {
+                assert!(
+                    matches!(connect_startup_error(crate::bitcoin::esplora::client::Error::Admission(error)),StartupError::ConnectAdmission(actual) if actual==error)
+                );
+            }
+            fs::remove_dir_all(tmp).unwrap();
         }
 
         /// A genuine version-8 database for `chain` in a fresh data directory.

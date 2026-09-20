@@ -395,6 +395,20 @@ pub struct Config {
 }
 
 impl Config {
+    /// Copy suitable for persistence: fork authentication is runtime-only.
+    /// Bitcoin persistence remains unchanged for compatibility.
+    pub fn for_persistence(&self) -> Self {
+        let mut config = self.clone();
+        if config.bitcoin_config.chain.is_blake2b() {
+            if let Some(BitcoinBackend::Esplora(ref mut backend)) = config.bitcoin_backend {
+                backend.token = None;
+                backend.fallback_token = None;
+                backend.secondary_fallback_token = None;
+            }
+        }
+        config
+    }
+
     pub fn new(
         bitcoin_config: BitcoinConfig,
         bitcoin_backend: Option<BitcoinBackend>,
