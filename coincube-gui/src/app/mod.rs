@@ -68,12 +68,12 @@ struct Panels {
     current: Menu,
     // Always available panels
     global_home: GlobalHome,
-    liquid_overview: LiquidOverview,
-    liquid_send: LiquidSend,
-    liquid_swap: LiquidSwap,
-    liquid_receive: LiquidReceive,
-    liquid_transactions: LiquidTransactions,
-    liquid_settings: LiquidSettings,
+    liquid_overview: Option<LiquidOverview>,
+    liquid_send: Option<LiquidSend>,
+    liquid_swap: Option<LiquidSwap>,
+    liquid_receive: Option<LiquidReceive>,
+    liquid_transactions: Option<LiquidTransactions>,
+    liquid_settings: Option<LiquidSettings>,
     /// Spark wallet Overview — Phase 3 placeholder. Always present so
     /// `current()` / `current_mut()` have a target; internally the
     /// panel checks whether the [`SparkBackend`] is wired and shows an
@@ -111,7 +111,7 @@ impl Panels {
     /// Read the cube's fiat currency preference from the settings file.
     fn default_fiat_currency(
         datadir: &CoincubeDirectory,
-        network: bitcoin::Network,
+        network: impl Into<crate::chain::ChainId>,
         cube_id: &str,
     ) -> Option<String> {
         let network_dir = datadir.network_directory(network);
@@ -131,7 +131,7 @@ impl Panels {
     /// per-network state.
     fn swaps_path(
         datadir: &CoincubeDirectory,
-        network: bitcoin::Network,
+        network: impl Into<crate::chain::ChainId>,
         cube_id: &str,
     ) -> std::path::PathBuf {
         datadir
@@ -143,7 +143,7 @@ impl Panels {
     /// Read the cube's persisted `balance_masked` eye-icon preference.
     fn initial_balance_masked(
         datadir: &CoincubeDirectory,
-        network: bitcoin::Network,
+        network: impl Into<crate::chain::ChainId>,
         cube_id: &str,
     ) -> bool {
         let network_dir = datadir.network_directory(network);
@@ -201,15 +201,18 @@ impl Panels {
                     initial_balance_masked,
                 )
             },
-            liquid_overview: LiquidOverview::new(liquid_backend.clone(), swaps_path.clone()),
-            liquid_send: LiquidSend::new(liquid_backend.clone()),
-            liquid_swap: LiquidSwap::new(liquid_backend.clone(), swaps_path.clone()),
-            liquid_receive: LiquidReceive::new(liquid_backend.clone()),
-            liquid_transactions: LiquidTransactions::new(
+            liquid_overview: Some(LiquidOverview::new(
                 liquid_backend.clone(),
                 swaps_path.clone(),
-            ),
-            liquid_settings: LiquidSettings::new(liquid_backend.clone()),
+            )),
+            liquid_send: Some(LiquidSend::new(liquid_backend.clone())),
+            liquid_swap: Some(LiquidSwap::new(liquid_backend.clone(), swaps_path.clone())),
+            liquid_receive: Some(LiquidReceive::new(liquid_backend.clone())),
+            liquid_transactions: Some(LiquidTransactions::new(
+                liquid_backend.clone(),
+                swaps_path.clone(),
+            )),
+            liquid_settings: Some(LiquidSettings::new(liquid_backend.clone())),
             spark_overview: state::SparkOverview::new(spark_backend.clone()),
             spark_send: state::SparkSend::new(spark_backend.clone()),
             spark_receive: state::SparkReceive::new(spark_backend.clone()),
@@ -261,7 +264,7 @@ impl Panels {
 
     #[allow(clippy::too_many_arguments)]
     fn new(
-        breez_client: Arc<BreezClient>,
+        breez_client: Option<Arc<BreezClient>>,
         spark_backend: Option<Arc<crate::app::wallets::SparkBackend>>,
         cache: &Cache,
         wallet: Arc<Wallet>,
@@ -274,13 +277,15 @@ impl Panels {
         cube_network: String,
     ) -> Panels {
         let needs_rescan_date =
-            needs_rescan_date(&data_dir, cache.network, &wallet, &daemon_backend);
+            needs_rescan_date(&data_dir, cache.chain(), &wallet, &daemon_backend);
 
-        let default_fiat_currency = Self::default_fiat_currency(&data_dir, cache.network, &cube_id);
-        let liquid_backend = Arc::new(LiquidBackend::new(breez_client.clone()));
-        let swaps_path = Self::swaps_path(&data_dir, cache.network, &cube_id);
+        let default_fiat_currency = Self::default_fiat_currency(&data_dir, cache.chain(), &cube_id);
+        let liquid_backend = breez_client
+            .as_ref()
+            .map(|client| Arc::new(LiquidBackend::new(client.clone())));
+        let swaps_path = Self::swaps_path(&data_dir, cache.chain(), &cube_id);
         let initial_balance_masked =
-            Self::initial_balance_masked(&data_dir, cache.network, &cube_id);
+            Self::initial_balance_masked(&data_dir, cache.chain(), &cube_id);
 
         Self {
             current: Menu::Cube(crate::app::menu::CubeSubMenu::Overview),
@@ -289,7 +294,7 @@ impl Panels {
                 liquid_backend.clone(),
                 spark_backend.clone(),
                 data_dir.clone(),
-                cache.network,
+                cache.chain(),
                 cube_id.clone(),
                 initial_balance_masked,
             ),
@@ -306,15 +311,24 @@ impl Panels {
                 cache.blockheight(),
                 needs_rescan_date,
             )),
-            liquid_overview: LiquidOverview::new(liquid_backend.clone(), swaps_path.clone()),
-            liquid_send: LiquidSend::new(liquid_backend.clone()),
-            liquid_swap: LiquidSwap::new(liquid_backend.clone(), swaps_path.clone()),
-            liquid_receive: LiquidReceive::new(liquid_backend.clone()),
-            liquid_transactions: LiquidTransactions::new(
-                liquid_backend.clone(),
-                swaps_path.clone(),
-            ),
-            liquid_settings: LiquidSettings::new(liquid_backend.clone()),
+            liquid_overview: liquid_backend
+                .as_ref()
+                .map(|backend| LiquidOverview::new(backend.clone(), swaps_path.clone())),
+            liquid_send: liquid_backend
+                .as_ref()
+                .map(|backend| LiquidSend::new(backend.clone())),
+            liquid_swap: liquid_backend
+                .as_ref()
+                .map(|backend| LiquidSwap::new(backend.clone(), swaps_path.clone())),
+            liquid_receive: liquid_backend
+                .as_ref()
+                .map(|backend| LiquidReceive::new(backend.clone())),
+            liquid_transactions: liquid_backend
+                .as_ref()
+                .map(|backend| LiquidTransactions::new(backend.clone(), swaps_path.clone())),
+            liquid_settings: liquid_backend
+                .as_ref()
+                .map(|backend| LiquidSettings::new(backend.clone())),
             spark_overview: state::SparkOverview::new(spark_backend.clone()),
             spark_send: state::SparkSend::new(spark_backend.clone()),
             spark_receive: state::SparkReceive::new(spark_backend.clone()),
@@ -381,13 +395,16 @@ impl Panels {
                 // `new` (vault constructor): this Cube has a Vault wallet.
                 true,
             ),
-            buy_sell: Some(crate::app::view::buysell::BuySellPanel::new(
-                cache.network,
-                wallet.clone(),
-                breez_client.clone(),
-            )),
+            buy_sell: breez_client.as_ref().map(|client| {
+                crate::app::view::buysell::BuySellPanel::new(
+                    cache.network,
+                    wallet.clone(),
+                    client.clone(),
+                )
+            }),
             p2p: match breez_client
-                .liquid_signer()
+                .as_ref()
+                .and_then(|client| client.liquid_signer())
                 .map(|s| s.lock().expect("signer lock").mnemonic_str())
             {
                 Some(mnemonic) if !mnemonic.is_empty() => {
@@ -418,7 +435,7 @@ impl Panels {
         data_dir: CoincubeDirectory,
         internal_bitcoind: Option<&Bitcoind>,
         config: Arc<Config>,
-        breez_client: Arc<BreezClient>,
+        breez_client: Option<Arc<BreezClient>>,
     ) {
         self.vault_overview = Some(VaultOverview::new(
             wallet.clone(),
@@ -431,7 +448,7 @@ impl Panels {
                 cache.last_poll_at_startup,
             ),
             cache.blockheight(),
-            needs_rescan_date(&data_dir, cache.network, &wallet, &daemon_backend),
+            needs_rescan_date(&data_dir, cache.chain(), &wallet, &daemon_backend),
         ));
         self.coins = Some(CoinsPanel::new(
             cache.coins(),
@@ -483,11 +500,9 @@ impl Panels {
             config.clone(),
         ));
 
-        self.buy_sell = Some(crate::app::view::buysell::BuySellPanel::new(
-            cache.network,
-            wallet,
-            breez_client,
-        ));
+        self.buy_sell = breez_client.map(|client| {
+            crate::app::view::buysell::BuySellPanel::new(cache.network, wallet, client)
+        });
     }
 
     fn current(&self) -> Option<&dyn State> {
@@ -497,12 +512,28 @@ impl Panels {
                 Some(&self.global_settings as &dyn State)
             }
             Menu::Liquid(submenu) => match submenu {
-                crate::app::menu::LiquidSubMenu::Overview => Some(&self.liquid_overview),
-                crate::app::menu::LiquidSubMenu::Send => Some(&self.liquid_send),
-                crate::app::menu::LiquidSubMenu::Swap => Some(&self.liquid_swap),
-                crate::app::menu::LiquidSubMenu::Receive => Some(&self.liquid_receive),
-                crate::app::menu::LiquidSubMenu::Transactions(_) => Some(&self.liquid_transactions),
-                crate::app::menu::LiquidSubMenu::Settings(_) => Some(&self.liquid_settings),
+                crate::app::menu::LiquidSubMenu::Overview => self
+                    .liquid_overview
+                    .as_ref()
+                    .map(|panel| panel as &dyn State),
+                crate::app::menu::LiquidSubMenu::Send => {
+                    self.liquid_send.as_ref().map(|panel| panel as &dyn State)
+                }
+                crate::app::menu::LiquidSubMenu::Swap => {
+                    self.liquid_swap.as_ref().map(|panel| panel as &dyn State)
+                }
+                crate::app::menu::LiquidSubMenu::Receive => self
+                    .liquid_receive
+                    .as_ref()
+                    .map(|panel| panel as &dyn State),
+                crate::app::menu::LiquidSubMenu::Transactions(_) => self
+                    .liquid_transactions
+                    .as_ref()
+                    .map(|panel| panel as &dyn State),
+                crate::app::menu::LiquidSubMenu::Settings(_) => self
+                    .liquid_settings
+                    .as_ref()
+                    .map(|panel| panel as &dyn State),
             },
             // Phase 4c ships all five real Spark panels. Send/Receive
             // use the bridge write-path RPCs added in this phase;
@@ -562,14 +593,30 @@ impl Panels {
                 Some(&mut self.global_settings as &mut dyn State)
             }
             Menu::Liquid(submenu) => match submenu {
-                crate::app::menu::LiquidSubMenu::Overview => Some(&mut self.liquid_overview),
-                crate::app::menu::LiquidSubMenu::Send => Some(&mut self.liquid_send),
-                crate::app::menu::LiquidSubMenu::Swap => Some(&mut self.liquid_swap),
-                crate::app::menu::LiquidSubMenu::Receive => Some(&mut self.liquid_receive),
-                crate::app::menu::LiquidSubMenu::Transactions(_) => {
-                    Some(&mut self.liquid_transactions)
-                }
-                crate::app::menu::LiquidSubMenu::Settings(_) => Some(&mut self.liquid_settings),
+                crate::app::menu::LiquidSubMenu::Overview => self
+                    .liquid_overview
+                    .as_mut()
+                    .map(|panel| panel as &mut dyn State),
+                crate::app::menu::LiquidSubMenu::Send => self
+                    .liquid_send
+                    .as_mut()
+                    .map(|panel| panel as &mut dyn State),
+                crate::app::menu::LiquidSubMenu::Swap => self
+                    .liquid_swap
+                    .as_mut()
+                    .map(|panel| panel as &mut dyn State),
+                crate::app::menu::LiquidSubMenu::Receive => self
+                    .liquid_receive
+                    .as_mut()
+                    .map(|panel| panel as &mut dyn State),
+                crate::app::menu::LiquidSubMenu::Transactions(_) => self
+                    .liquid_transactions
+                    .as_mut()
+                    .map(|panel| panel as &mut dyn State),
+                crate::app::menu::LiquidSubMenu::Settings(_) => self
+                    .liquid_settings
+                    .as_mut()
+                    .map(|panel| panel as &mut dyn State),
             },
             Menu::Spark(submenu) => match submenu {
                 crate::app::menu::SparkSubMenu::Overview => {
@@ -673,7 +720,8 @@ const BITCOIND_SYNC_POLL_INTERVAL: Duration = Duration::from_secs(10);
 pub struct App {
     cache: Cache,
     wallet: Option<Arc<Wallet>>,
-    breez_client: Arc<BreezClient>,
+    breez_client: Option<Arc<BreezClient>>,
+    fork_connect_client: Option<crate::services::coincube::CoincubeClient>,
     /// Wallet registry — owns the concrete wallet backends and exposes
     /// routing hooks. Holds a [`LiquidBackend`] and an optional
     /// [`SparkBackend`] (present when the cube has a Spark signer and
@@ -2121,7 +2169,7 @@ fn connect_stream_ready_task(
 /// next launch.
 fn pending_rescan(
     data_dir: &CoincubeDirectory,
-    network: bitcoin::Network,
+    network: impl Into<crate::chain::ChainId>,
     wallet: &Wallet,
 ) -> Option<settings::PendingRescan> {
     settings::WalletSettings::from_file(&data_dir.network_directory(network), |s| {
@@ -2144,7 +2192,7 @@ fn pending_rescan(
 /// told to rescan at all.
 fn needs_rescan_date(
     data_dir: &CoincubeDirectory,
-    network: bitcoin::Network,
+    network: impl Into<crate::chain::ChainId>,
     wallet: &Wallet,
     daemon_backend: &DaemonBackend,
 ) -> bool {
@@ -2347,8 +2395,113 @@ impl App {
             Arc<tokio::sync::RwLock<crate::services::connect::client::auth::AccessTokenResponse>>,
             String,
         )>,
+    ) -> Result<(App, Task<Message>), Error> {
+        if cube_settings.network.is_blake2b() {
+            return Err(Error::Daemon(DaemonError::ConnectAnchor(
+                coincubed::connect::AdmissionError::MissingAuth.into(),
+            )));
+        }
+        Ok(Self::new_inner(
+            cache,
+            wallet,
+            Some(breez_client),
+            spark_backend,
+            config,
+            daemon,
+            data_dir,
+            internal_bitcoind,
+            cube_settings,
+            connect_auth,
+        ))
+    }
+
+    /// Build an admitted fork Vault without constructing Liquid or Spark clients.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_for_chain(
+        mut cache: Cache,
+        wallet: Arc<Wallet>,
+        cube_encryption_key: Option<Arc<crate::services::connect::crypto::CubeEncryptionKey>>,
+        client: crate::services::coincube::CoincubeClient,
+        config: Config,
+        daemon: Arc<dyn Daemon + Sync + Send>,
+        data_dir: CoincubeDirectory,
+        cube_settings: settings::CubeSettings,
+    ) -> Result<(App, Task<Message>), Error> {
+        let chain = cube_settings.network;
+        if !chain.is_blake2b() || wallet.chain != chain || cache.chain() != chain {
+            return Err(Error::Daemon(DaemonError::ConnectAnchor(
+                coincubed::connect::AdmissionError::WrongChain.into(),
+            )));
+        }
+        if client.token().is_none_or(|token| token.trim().is_empty()) {
+            return Err(Error::Daemon(DaemonError::ConnectAnchor(
+                coincubed::connect::AdmissionError::MissingAuth.into(),
+            )));
+        }
+        let backend_config = daemon.config().ok_or_else(|| {
+            Error::Daemon(DaemonError::ConnectAnchor(
+                coincubed::connect::AdmissionError::InvalidBackend.into(),
+            ))
+        })?;
+        let endpoint = format!(
+            "{}/api/v1/esplora/{}",
+            client.base_url.trim_end_matches('/'),
+            crate::installer::connect_esplora_path(chain)
+        );
+        let correct_backend = matches!(&backend_config.bitcoin_backend,
+            Some(coincubed::config::BitcoinBackend::Esplora(esplora))
+                if esplora.addr == endpoint && esplora.fallback_addr.is_none()
+                    && esplora.secondary_fallback_addr.is_none());
+        if backend_config.bitcoin_config.chain != chain
+            || !daemon.backend().is_embedded()
+            || !correct_backend
+            || backend_config.pending_bitcoind.is_some()
+        {
+            return Err(Error::Daemon(DaemonError::ConnectAnchor(
+                coincubed::connect::AdmissionError::InvalidBackend.into(),
+            )));
+        }
+        cache.cube_encryption_key = cube_encryption_key;
+        let (mut app, task) = Self::new_inner(
+            cache,
+            wallet,
+            None,
+            None,
+            config,
+            daemon,
+            data_dir,
+            None,
+            cube_settings,
+            None,
+        );
+        app.panels.connect.install_admitted_client(client.clone());
+        app.cache.has_connect_session = true;
+        app.fork_connect_client = Some(client);
+        Ok((app, task))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_inner(
+        cache: Cache,
+        wallet: Arc<Wallet>,
+        breez_client: Option<Arc<BreezClient>>,
+        spark_backend: Option<Arc<crate::app::wallets::SparkBackend>>,
+        config: Config,
+        daemon: Arc<dyn Daemon + Sync + Send>,
+        data_dir: CoincubeDirectory,
+        internal_bitcoind: Option<Bitcoind>,
+        cube_settings: settings::CubeSettings,
+        connect_auth: Option<(
+            Arc<tokio::sync::RwLock<crate::services::connect::client::auth::AccessTokenResponse>>,
+            String,
+        )>,
     ) -> (App, Task<Message>) {
         let mut cache = cache;
+        let (breez_client, spark_backend) = if cube_settings.network.is_blake2b() {
+            (None, None)
+        } else {
+            (breez_client, spark_backend)
+        };
         cache.fiat_chain = cube_settings.network;
         if cache.fiat_chain.is_blake2b() {
             cache.clear_btcb2_fiat();
@@ -2356,26 +2509,30 @@ impl App {
         // Connect blinding (PR D3): derive the Cube's encryption key once from
         // the master signer the unlock already loaded, so every surface that
         // opens a Connect-served key can do so without re-prompting for a PIN.
-        cache.cube_encryption_key = derive_cube_encryption_key(&breez_client, cache.network);
+        if let Some(client) = &breez_client {
+            cache.cube_encryption_key = derive_cube_encryption_key(client, cache.network);
+        }
         // …and load (or mint) this device's signing-rail transport key. Not
         // seed-derived and not Cube-scoped — it comes up with the rail at login
         // (PR D4).
         cache.connect_transport_key =
-            load_connect_transport_key(&data_dir.network_directory(cache.network));
+            load_connect_transport_key(&data_dir.network_directory(cache.chain()));
         let cache = cache;
         let config_arc = Arc::new(config);
-        let liquid_backend = Arc::new(LiquidBackend::new(breez_client.clone()));
-        let wallet_registry = crate::app::wallets::WalletRegistry::with_spark(
-            liquid_backend.clone(),
-            spark_backend.clone(),
-        );
+        let wallet_registry = match &breez_client {
+            Some(client) => crate::app::wallets::WalletRegistry::with_spark(
+                Arc::new(LiquidBackend::new(client.clone())),
+                spark_backend.clone(),
+            ),
+            None => crate::app::wallets::WalletRegistry::vault_only(),
+        };
 
         // A Vault restored from a Recovery Kit lands its descriptors in a
         // watchonly wallet that has never scanned them, so it owes a rescan from
         // the kit's recorded birthday. Read off disk rather than threaded
         // through the loader messages: the rescan has to survive a quit or a
         // crash part-way through, which an in-memory flag would not.
-        let pending_rescan = pending_rescan(&data_dir, cache.network, &wallet);
+        let pending_rescan = pending_rescan(&data_dir, cache.chain(), &wallet);
         let mut panels = Panels::new(
             breez_client.clone(),
             spark_backend.clone(),
@@ -2387,7 +2544,7 @@ impl App {
             config_arc.clone(),
             cube_settings.id.clone(),
             cube_settings.name.clone(),
-            settings::network_to_api_string(cache.network),
+            cache.chain().api_str().to_string(),
         );
         // Connect blinding (PR D2): hand the panel the seed-derived encryption
         // pubkey persisted at unlock, so the registration wave can publish it.
@@ -2410,7 +2567,7 @@ impl App {
         if let Some(pending) = pending_rescan {
             tasks.push(settle_rescan_obligation(
                 daemon.clone(),
-                data_dir.network_directory(cache.network),
+                data_dir.network_directory(cache.chain()),
                 wallet.descriptor_checksum.clone(),
                 pending.timestamp(),
             ));
@@ -2430,7 +2587,9 @@ impl App {
         // repaired during startup, long before any of this existed to say so. The
         // sidecar carried the fact across; collect it here, where there is finally
         // a UI to show it in. Self-clearing, so it appears exactly once.
-        if crate::node::revalidate::ManagedNodeState::take_repair_notice(&data_dir) {
+        if !cache.chain().is_blake2b()
+            && crate::node::revalidate::ManagedNodeState::take_repair_notice(&data_dir)
+        {
             tasks.push(Task::done(Message::View(view::Message::ShowToast(
                 log::Level::Info,
                 crate::node::revalidate::CHAIN_REPAIRED_NOTICE.to_string(),
@@ -2463,8 +2622,11 @@ impl App {
         // would hide the rail entirely instead of showing it network-gated. The
         // probe is also what the discard's "failed delete → spurious nav entry"
         // fallback assumes. The server half is mirrored in separately later.
-        cache_with_vault.liquid_gate.local_state_exists =
-            crate::app::breez_liquid::local_state_exists(data_dir.path(), cache_with_vault.network);
+        cache_with_vault.liquid_gate.local_state_exists = !cache_with_vault.chain().is_blake2b()
+            && crate::app::breez_liquid::local_state_exists(
+                data_dir.path(),
+                cache_with_vault.network,
+            );
         cache_with_vault.connect_tokens = connect_auth_arc.clone();
         cache_with_vault.connect_email = connect_email.clone();
         // A restored on-disk session (or a threaded remote-backend one) means
@@ -2484,6 +2646,7 @@ impl App {
             daemon: Some(daemon),
             wallet: Some(wallet),
             breez_client,
+            fork_connect_client: None,
             wallet_registry,
             internal_bitcoind,
             cube_settings,
@@ -2531,7 +2694,12 @@ impl App {
         datadir: CoincubeDirectory,
         network: coincube_core::miniscript::bitcoin::Network,
         cube_settings: settings::CubeSettings,
-    ) -> (App, Task<Message>) {
+    ) -> Result<(App, Task<Message>), Error> {
+        if cube_settings.network.is_blake2b() {
+            return Err(Error::Daemon(DaemonError::ConnectAnchor(
+                coincubed::connect::AdmissionError::InvalidBackend.into(),
+            )));
+        }
         let config_arc = Arc::new(config);
         let liquid_backend = Arc::new(LiquidBackend::new(breez_client.clone()));
         let wallet_registry = crate::app::wallets::WalletRegistry::with_spark(
@@ -2621,13 +2789,14 @@ impl App {
             panels.global_home.reload(None, None),
         ]);
 
-        (
+        Ok((
             Self {
                 panels,
                 cache,
                 daemon: None,
                 wallet: None,
-                breez_client,
+                breez_client: Some(breez_client),
+                fork_connect_client: None,
                 wallet_registry,
                 internal_bitcoind: None,
                 cube_settings,
@@ -2661,7 +2830,7 @@ impl App {
                 connect_stream_config: None,
             },
             cmd,
-        )
+        ))
     }
 
     pub fn wallet_id(&self) -> Option<WalletId> {
@@ -2680,7 +2849,7 @@ impl App {
         &mut self.cache
     }
 
-    pub fn breez_client(&self) -> Arc<BreezClient> {
+    pub fn breez_client(&self) -> Option<Arc<BreezClient>> {
         self.breez_client.clone()
     }
 
@@ -2754,6 +2923,11 @@ impl App {
     /// `Task::none()` whenever no heartbeat applies (not authenticated,
     /// monitoring off, vault id not yet resolved, or no live wallet).
     fn recovery_heartbeat_task(&self) -> Task<Message> {
+        // The existing recovery-alert contract only accepts Bitcoin-family
+        // network IDs; never report a fork Vault under Bitcoin mainnet.
+        if self.cache.chain().is_blake2b() {
+            return Task::none();
+        }
         use crate::services::coincube::{VaultHeartbeatRequest, VaultMonitoringLevel};
         if !self.panels.connect.account.is_authenticated() {
             return Task::none();
@@ -2954,7 +3128,7 @@ impl App {
         let network_dir = self
             .cache
             .datadir_path
-            .network_directory(self.cache.network);
+            .network_directory(self.cache.chain());
         let cube_id = self.cube_settings.id.clone();
         let persist_task = Task::perform(
             async move {
@@ -2988,7 +3162,7 @@ impl App {
         let network_dir = self
             .cache
             .datadir_path
-            .network_directory(self.cache.network);
+            .network_directory(self.cache.chain());
         let cube_id = self.cube_settings.id.clone();
         Task::perform(
             async move {
@@ -3041,7 +3215,7 @@ impl App {
         let network_dir = self
             .cache
             .datadir_path
-            .network_directory(self.cache.network);
+            .network_directory(self.cache.chain());
         let cube_id = self.cube_settings.id.clone();
         Task::perform(
             async move {
@@ -3139,7 +3313,7 @@ impl App {
         let network_dir = self
             .cache
             .datadir_path
-            .network_directory(self.cache.network);
+            .network_directory(self.cache.chain());
         let cube_id = self.cache.cube_id.clone();
         Task::perform(
             async move {
@@ -3161,6 +3335,14 @@ impl App {
     }
 
     fn set_current_panel(&mut self, menu: Menu) -> Task<Message> {
+        if self.cache.chain().is_blake2b()
+            && matches!(
+                menu,
+                Menu::Liquid(_) | Menu::Spark(_) | Menu::Marketplace(_)
+            )
+        {
+            return Task::none();
+        }
         if let Some(panel) = self.panels.current_mut() {
             panel.interrupt();
         }
@@ -3402,7 +3584,9 @@ impl App {
         let mut subscriptions = vec![];
 
         // Always subscribe to Breez events (handles fee acceptance globally)
-        subscriptions.push(self.breez_client.subscription().map(Message::BreezEvent));
+        if let Some(client) = &self.breez_client {
+            subscriptions.push(client.subscription().map(Message::BreezEvent));
+        }
 
         // Subscribe to Spark bridge events when a Spark backend is
         // active. The backend is optional (cubes without a Spark signer
@@ -3766,7 +3950,9 @@ impl App {
             }
         }
         self.refundables_fetch_in_flight = true;
-        let client = self.breez_client.clone();
+        let Some(client) = self.breez_client.clone() else {
+            return Task::none();
+        };
         Task::perform(
             async move {
                 client.list_refundables().await.map(|v| {
@@ -3815,7 +4001,7 @@ impl App {
                 // right cursor. Best-effort — log and continue on error.
                 let seq = session_event.event_seq;
                 let persist_task = if let Some(email) = self.connect_email.clone() {
-                    let network_dir = self.datadir.network_directory(self.cache.network);
+                    let network_dir = self.datadir.network_directory(self.cache.chain());
                     Task::perform(
                         async move {
                             if let Err(e) =
@@ -5305,11 +5491,26 @@ impl App {
             msg @ Message::View(view::Message::ConnectAccount(_))
             | msg @ Message::View(view::Message::ConnectCube(_)) => {
                 let was_authenticated = self.cache.connect_authenticated;
+                let explicit_logout = matches!(
+                    &msg,
+                    Message::View(view::Message::ConnectAccount(
+                        view::ConnectAccountMessage::LogOut
+                    ))
+                );
                 let task = self
                     .panels
                     .connect
                     .update(self.daemon.clone(), &self.cache, msg);
                 self.cache.connect_authenticated = self.panels.connect.account.is_authenticated();
+                if let Some(bound) = &self.fork_connect_client {
+                    let current = self.panels.connect.account.authenticated_client();
+                    let changed = current.as_ref().is_some_and(|current| {
+                        current.base_url != bound.base_url || current.token() != bound.token()
+                    });
+                    if explicit_logout || changed || current.is_none() {
+                        self.invalidate_fork_session();
+                    }
+                }
                 // Mirror the server-controlled Marketplace flags so the nav
                 // rails and route guard reflect the latest `/connect/features`
                 // stance. Recomputed after every ConnectAccount/ConnectCube
@@ -5317,11 +5518,15 @@ impl App {
                 // `features` back to fail-closed OFF via the accessor).
                 self.cache.marketplace_flags =
                     self.panels.connect.account.marketplace_server_flags();
+                if self.cache.chain().is_blake2b() {
+                    self.cache.marketplace_flags = Default::default();
+                }
                 // Same mirror for the Liquid sunset grant. Only the server half
                 // is refreshed here — `local_state_exists` reflects whether the
                 // Liquid SDK actually connected at cube-open, and must survive a
                 // logout: losing the session must never hide an existing wallet.
-                let liquid_granted = self.panels.connect.account.liquid_server_enabled();
+                let liquid_granted = !self.cache.chain().is_blake2b()
+                    && self.panels.connect.account.liquid_server_enabled();
                 let grant_changed = self.cache.liquid_gate.server_enabled != liquid_granted;
                 self.cache.liquid_gate.server_enabled = liquid_granted;
                 // Persist the grant so the *next* cube open can act on it. The
@@ -5793,7 +5998,9 @@ impl App {
                 match event {
                     SdkEvent::PaymentWaitingFeeAcceptance { details } => {
                         log::info!("Payment waiting for fee acceptance: {:?}", details);
-                        let client = self.breez_client.clone();
+                        let Some(client) = self.breez_client.clone() else {
+                            return Task::none();
+                        };
 
                         return Task::perform(
                             async move {
@@ -6266,7 +6473,10 @@ impl App {
                         // reconciliation logic is origin-agnostic, so a poll
                         // result is converted to a `RefundablesLoaded` for
                         // it.
-                        return self.panels.liquid_transactions.update(
+                        let Some(panel) = self.panels.liquid_transactions.as_mut() else {
+                            return Task::none();
+                        };
+                        return panel.update(
                             self.daemon.clone(),
                             &self.cache,
                             Message::RefundablesLoaded(Ok(refundables)),
@@ -6290,11 +6500,10 @@ impl App {
                 }
             }
             msg @ Message::RefundablesLoaded(_) | msg @ Message::RefundCompleted { .. } => {
-                return self.panels.liquid_transactions.update(
-                    self.daemon.clone(),
-                    &self.cache,
-                    msg,
-                );
+                let Some(panel) = self.panels.liquid_transactions.as_mut() else {
+                    return Task::none();
+                };
+                return panel.update(self.daemon.clone(), &self.cache, msg);
             }
             msg => {
                 if let (Some(daemon), Some(panel)) =
@@ -6318,7 +6527,36 @@ impl App {
     /// `load_daemon_config`) froze the whole app on every backend switch. The
     /// blocking work now runs on a `spawn_blocking` task; the new daemon arrives
     /// via [`Message::DaemonRestarted`], which swaps it in on the UI thread.
+    /// Called before logout, account replacement or an API-provider change.
+    /// A new authenticated startup is required; an old authority is never reused.
+    pub fn invalidate_fork_session(&mut self) {
+        if self.cache.chain().is_blake2b() {
+            if let Some(daemon) = &self.daemon {
+                daemon.invalidate_connect_session();
+            }
+            self.fork_connect_client = None;
+            self.panels.connect.revoke_admitted_client();
+            self.cache.has_connect_session = false;
+            self.cache.connect_authenticated = false;
+            self.cache.connect_tokens = None;
+            self.cache.connect_email = None;
+            self.connect_auth = None;
+            self.connect_email = None;
+            self.connect_stream_config = None;
+            self.cache.cube_encryption_key = None;
+            self.cache.clear_btcb2_fiat();
+        }
+    }
+
     pub fn spawn_daemon_switch(&mut self, cfg: DaemonConfig) -> Task<Message> {
+        // A generic backend switch cannot carry fresh authenticated admission.
+        // Reopen the fork Cube through its authenticated startup route instead.
+        if self.cache.chain().is_blake2b() || cfg.bitcoin_config.chain.is_blake2b() {
+            return Task::done(Message::View(view::Message::ShowError(
+                "Reopen this Bitcoin Blake2b Cube to change its authenticated Connect backend."
+                    .into(),
+            )));
+        }
         // Mark a switch in flight so subsequent sync probes / triggers don't
         // re-fire it before it completes (the config only changes on success).
         self.daemon_switch_in_progress = true;
@@ -6428,7 +6666,7 @@ impl App {
             view::dashboard(&self.panels.current, &self.cache, celebration)
         } else if let Some(reason) = features::route_availability(
             &self.panels.current,
-            self.cache.network,
+            self.cache.chain(),
             self.cache.p2p_test_coordinator,
             self.cache.marketplace_flags,
             self.cache.liquid_gate,
@@ -6703,6 +6941,18 @@ fn restart_daemon_blocking(
     daemon_config_path: std::path::PathBuf,
 ) -> DaemonRestart {
     let recovery_cfg = old_daemon.as_ref().and_then(|d| d.config().cloned());
+    if cfg.bitcoin_config.chain.is_blake2b()
+        || recovery_cfg
+            .as_ref()
+            .is_some_and(|cfg| cfg.bitcoin_config.chain.is_blake2b())
+    {
+        return DaemonRestart::Failed {
+            error: Error::Daemon(DaemonError::ConnectAnchor(
+                coincubed::connect::AdmissionError::InvalidBackend.into(),
+            )),
+            recovered: old_daemon,
+        };
+    }
 
     if let Some(daemon) = &old_daemon {
         if let Err(e) = Handle::current().block_on(async { daemon.stop().await }) {
@@ -6749,8 +6999,8 @@ fn restart_daemon_blocking(
     // the persistence problem loudly; its only consequence is that the change
     // may not survive a restart (the stale on-disk config would reload).
     let persisted = (|| -> Result<(), Error> {
-        let content =
-            toml::to_string(&daemon.config()).map_err(|e| Error::Config(e.to_string()))?;
+        let content = toml::to_string(&daemon.config().map(|config| config.for_persistence()))
+            .map_err(|e| Error::Config(e.to_string()))?;
         OpenOptions::new()
             .write(true)
             .truncate(true)
@@ -6774,6 +7024,198 @@ fn restart_daemon_blocking(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fork_panels_construct_without_any_sdk_client_or_marketplace_panel() {
+        use std::str::FromStr;
+        let descriptor = coincube_core::descriptors::CoincubeDescriptor::from_str(
+            "wsh(or_d(pk([f5acc2fd]tpubD6NzVbkrYhZ4YgUx2ZLNt2rLYAMTdYysCRzKoLu2BeSHKvzqPaBDvf17GeBPnExUVPkuBpx4kniP964e2MxyzzazcXLptxLXModSVCVEV1T/<0;1>/*),and_v(v:pkh([8a64f2a9]tpubD6NzVbkrYhZ4WmzFjvQrp7sDa4ECUxTi9oby8K4FZkd3XCBtEdKwUiQyYJaxiJo5y42gyDWEczrFpozEjeLxMPxjf2WtkfcbpUdfvNnozWF/<0;1>/*),older(10))))#d72le4dr"
+        ).unwrap();
+        let chain = crate::chain::ChainId::BitcoinBlake2bTestnet4;
+        let wallet = Arc::new(Wallet::new(descriptor).with_chain(chain));
+        let root =
+            std::env::temp_dir().join(format!("coincube-vault-only-{}", uuid::Uuid::new_v4()));
+        let cache = Cache {
+            fiat_chain: chain,
+            network: chain.bitcoin_network(),
+            ..Cache::default()
+        };
+        let mut panels = Panels::new(
+            None,
+            None,
+            &cache,
+            wallet,
+            CoincubeDirectory::new(root.clone()),
+            DaemonBackend::EmbeddedCoincubed(Some(crate::node::NodeType::Esplora)),
+            None,
+            Arc::new(Config::new(false)),
+            "fixture".into(),
+            "Fixture".into(),
+            chain.api_str().into(),
+        );
+        assert!(panels.liquid_overview.is_none());
+        assert!(panels.liquid_send.is_none());
+        assert!(panels.liquid_swap.is_none());
+        assert!(panels.liquid_receive.is_none());
+        assert!(panels.liquid_transactions.is_none());
+        assert!(panels.liquid_settings.is_none());
+        assert!(panels.buy_sell.is_none() && panels.p2p.is_none());
+        assert!(panels.vault_overview.is_some());
+        panels.current = Menu::Liquid(crate::app::menu::LiquidSubMenu::Send);
+        assert!(panels.current().is_none() && panels.current_mut().is_none());
+        assert!(
+            !root.exists(),
+            "panel construction must not create a Bitcoin or fork datadir"
+        );
+    }
+
+    #[tokio::test]
+    async fn admitted_app_hands_exact_client_to_account_and_cube_consumers() {
+        use httpmock::prelude::*;
+        use iced::futures::StreamExt;
+        use std::str::FromStr;
+        for status in [200, 401, 503] {
+            let server = MockServer::start_async().await;
+            let user = server.mock_async(|when, then| {
+            when.method(GET).path("/api/v1/user").header("authorization", "Bearer admitted-fixture");
+            then.status(status).json_body(serde_json::json!({"id":7,"email":"fixture@example.invalid","email_verified":true}));
+        }).await;
+            let mut client = crate::services::coincube::CoincubeClient::new();
+            client.base_url = server.base_url();
+            client.set_token("admitted-fixture");
+            let chain = crate::chain::ChainId::BitcoinBlake2bTestnet4;
+            let desc = coincube_core::descriptors::CoincubeDescriptor::from_str(
+            "wsh(or_d(pk([f5acc2fd]tpubD6NzVbkrYhZ4YgUx2ZLNt2rLYAMTdYysCRzKoLu2BeSHKvzqPaBDvf17GeBPnExUVPkuBpx4kniP964e2MxyzzazcXLptxLXModSVCVEV1T/<0;1>/*),and_v(v:pkh([8a64f2a9]tpubD6NzVbkrYhZ4WmzFjvQrp7sDa4ECUxTi9oby8K4FZkd3XCBtEdKwUiQyYJaxiJo5y42gyDWEczrFpozEjeLxMPxjf2WtkfcbpUdfvNnozWF/<0;1>/*),older(10))))#d72le4dr"
+        ).unwrap();
+            let root =
+                std::env::temp_dir().join(format!("coincube-app-handoff-{}", uuid::Uuid::new_v4()));
+            let endpoint = format!(
+                "{}/api/v1/esplora/bitcoin-blake2b/testnet4",
+                server.base_url()
+            );
+            let cfg: coincubed::config::Config = toml::from_str(&format!(
+            "main_descriptor = '{}'\ndata_directory = '{}'\n[bitcoin_config]\nnetwork = '{}'\n[esplora_config]\naddr = '{}'\n", desc,root.display(),chain.api_str(),endpoint
+        )).unwrap();
+            // A GUI-only handoff fixture: no running daemon or live admission is claimed.
+            server.mock_async(|when, then| {
+            when.method(GET).path("/api/v1/connect/networks/bitcoin-blake2b-testnet4/anchor");
+            then.status(200).json_body(serde_json::json!({"success":true,"data":{
+                "network":"bitcoin-blake2b-testnet4","state":"available","anchor":{
+                    "tip_hash":"11".repeat(32),"tip_height":973029,"tip_median_time_past":1800000000,
+                    "observed_at":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
+                    "observation":{"tip_height":973029,"fork":{"height":972000,"active":true},
+                        "rdts":{"state":"flagday","flagday":{"height":972000,"expiry_time":1800010000_i64,"active":false}}}
+                }}}));
+        }).await;
+            let (_, authority) = client
+                .authenticated_backend(chain, &endpoint)
+                .await
+                .unwrap();
+            use coincubed::connect::ConnectAnchorAuthority;
+            assert!(authority.fresh_anchor().is_ok());
+            let daemon = Arc::new(EmbeddedDaemon::unstarted_for_test(
+                cfg,
+                Some(authority.clone()),
+            ));
+            let cache = Cache {
+                fiat_chain: chain,
+                network: chain.bitcoin_network(),
+                ..Cache::default()
+            };
+            let settings = settings::CubeSettings::new("Fixture".into(), chain);
+            let (mut app, startup_tasks) = App::new_for_chain(
+                cache,
+                Arc::new(Wallet::new(desc).with_chain(chain)),
+                None,
+                client.clone(),
+                Config::new(false),
+                daemon,
+                CoincubeDirectory::new(root.clone()),
+                settings,
+            )
+            .unwrap();
+            drop(startup_tasks);
+            assert!(app.breez_client().is_none());
+            assert!(app.spark_backend().is_none());
+            assert!(app.wallet_registry.route_lightning_address().is_none());
+            assert!(app.cache.has_connect_session);
+            let cube_client = app.panels.connect.cube.client.as_ref().unwrap();
+            assert_eq!(cube_client.base_url, server.base_url());
+            assert_eq!(cube_client.token(), Some("admitted-fixture"));
+            let handed = app.panels.connect.account.authenticated_client().unwrap();
+            assert_eq!(handed.base_url, server.base_url());
+            assert_eq!(handed.token(), Some("admitted-fixture"));
+            let task = app
+                .panels
+                .connect
+                .account
+                .update_message(view::ConnectAccountMessage::Init);
+            let mut stream = iced_runtime::task::into_stream(task).unwrap();
+            while let Some(action) = stream.next().await {
+                if let iced_runtime::Action::Output(Message::View(view::Message::ConnectAccount(
+                    message,
+                ))) = action
+                {
+                    let _ = app.update(Message::View(view::Message::ConnectAccount(message)));
+                }
+            }
+            user.assert_hits_async(1).await;
+            if status == 401 {
+                assert!(app.fork_connect_client.is_none());
+                assert!(app.panels.connect.account.authenticated_client().is_none());
+                assert_eq!(
+                    authority.fresh_anchor(),
+                    Err(coincubed::connect::AdmissionError::Unavailable)
+                );
+            } else {
+                let handed = app.panels.connect.account.authenticated_client().unwrap();
+                assert_eq!(handed.base_url, client.base_url);
+                assert_eq!(handed.token(), client.token());
+                assert!(authority.fresh_anchor().is_ok());
+                if status == 200 {
+                    assert_eq!(app.panels.connect.account.user.as_ref().unwrap().id, 7);
+                } else {
+                    assert!(app.panels.connect.account.error.is_some());
+                    let retry = app.update(Message::View(view::Message::ConnectAccount(
+                        view::ConnectAccountMessage::Retry(view::RetryAction::Session),
+                    )));
+                    let mut stream = iced_runtime::task::into_stream(retry).unwrap();
+                    while let Some(action) = stream.next().await {
+                        if let iced_runtime::Action::Output(Message::View(
+                            view::Message::ConnectAccount(message),
+                        )) = action
+                        {
+                            let _ =
+                                app.update(Message::View(view::Message::ConnectAccount(message)));
+                        }
+                    }
+                    user.assert_hits_async(2).await;
+                    assert_eq!(
+                        app.panels
+                            .connect
+                            .account
+                            .authenticated_client()
+                            .unwrap()
+                            .token(),
+                        client.token()
+                    );
+                }
+            }
+            app.invalidate_fork_session();
+            assert!(!app.cache.has_connect_session);
+            assert!(app.panels.connect.account.authenticated_client().is_none());
+            assert!(app.panels.connect.cube.client.is_none());
+            assert_eq!(
+                authority.fresh_anchor(),
+                Err(coincubed::connect::AdmissionError::Unavailable)
+            );
+            assert!(!root.join("bitcoin").exists());
+            drop(app);
+            if root.exists() {
+                std::fs::remove_dir_all(root).unwrap();
+            }
+        }
+    }
 
     /// The obligation is retired on *proof*, not on the daemon's acceptance.
     ///

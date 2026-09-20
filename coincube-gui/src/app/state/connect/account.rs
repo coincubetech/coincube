@@ -798,6 +798,11 @@ impl PanelError {
 }
 
 pub struct ConnectAccountPanel {
+    // An admitted fork startup carries its exact client instead of restoring
+    // potentially unrelated saved credentials from the global keyring.
+    admitted_client: bool,
+    admitted_user_loading: bool,
+
     pub step: ConnectFlowStep,
     pub active_sub: ConnectSubMenu,
     pub client: CoincubeClient,
@@ -880,6 +885,8 @@ pub struct ConnectAccountPanel {
 impl ConnectAccountPanel {
     pub fn new() -> Self {
         ConnectAccountPanel {
+            admitted_client: false,
+            admitted_user_loading: false,
             step: ConnectFlowStep::CheckingSession,
             active_sub: ConnectSubMenu::Overview,
             client: CoincubeClient::new(),
@@ -1074,10 +1081,31 @@ impl ConnectAccountPanel {
         }
     }
 
+    pub fn revoke_admitted_client(&mut self) {
+        if self.admitted_client {
+            self.clear_session();
+            self.step = ConnectFlowStep::Login {
+                email: String::new(),
+                loading: false,
+            };
+        }
+    }
+
+    pub fn install_admitted_client(&mut self, client: CoincubeClient) {
+        self.session_generation = self.session_generation.wrapping_add(1);
+        self.client = client;
+        self.admitted_client = true;
+        self.admitted_user_loading = false;
+        self.user = None;
+        self.plan = None;
+        self.features = None;
+        self.step = ConnectFlowStep::CheckingSession;
+    }
+
     /// Returns a clone of the authenticated client (with JWT set).
     /// Used by ConnectCubePanel to make API calls.
     pub fn authenticated_client(&self) -> Option<CoincubeClient> {
-        if self.user.is_some() {
+        if self.user.is_some() || self.admitted_client {
             Some(self.client.clone())
         } else {
             None
@@ -1240,6 +1268,27 @@ impl ConnectAccountPanel {
     pub fn update_message(&mut self, msg: ConnectAccountMessage) -> iced::Task<Message> {
         match msg {
             ConnectAccountMessage::Init => {
+                if self.admitted_client {
+                    if self.user.is_some() || self.admitted_user_loading {
+                        return iced::Task::none();
+                    }
+                    self.admitted_user_loading = true;
+                    let client = self.client.clone();
+                    let generation = self.session_generation;
+                    return iced::Task::perform(
+                        async move {
+                            client
+                                .get_user()
+                                .await
+                                .map_err(|error| ((&error).into(), error.is_auth_error()))
+                        },
+                        move |user| {
+                            Message::View(view::Message::ConnectAccount(
+                                ConnectAccountMessage::AdmittedUserLoaded { user, generation },
+                            ))
+                        },
+                    );
+                }
                 // Already authenticated (e.g. broadcast Init from a
                 // sibling tab that just signed in): nothing to do.
                 if matches!(self.step, ConnectFlowStep::Dashboard) {
@@ -1284,6 +1333,27 @@ impl ConnectAccountPanel {
                     email: String::new(),
                     loading: false,
                 };
+            }
+
+            ConnectAccountMessage::AdmittedUserLoaded { user, generation } => {
+                if !self.admitted_client || generation != self.session_generation {
+                    return iced::Task::none();
+                }
+                self.admitted_user_loading = false;
+                match user {
+                    Ok(user) => {
+                        return self.update_message(ConnectAccountMessage::SessionLoaded {
+                            user,
+                            plan: None,
+                        })
+                    }
+                    Err((error, auth_error)) => {
+                        if auth_error {
+                            return self.update_message(ConnectAccountMessage::LogOut);
+                        }
+                        self.error = Some(PanelError::retryable(error, RetryAction::Session));
+                    }
+                }
             }
 
             ConnectAccountMessage::RefreshSession { refresh_token } => {
@@ -2444,6 +2514,7 @@ impl ConnectAccountPanel {
     /// error screen, etc.). Shared by `LogOut` and the duress-gate 401 path so
     /// a rejected session can't leave stale state behind for the next `Init`.
     fn clear_session(&mut self) {
+        let owns_saved_session = !self.admitted_client;
         self.session_generation += 1;
         self.user = None;
         self.plan = None;
@@ -2473,7 +2544,11 @@ impl ConnectAccountPanel {
             d.zeroize_secrets();
         }
         self.scrub_recovery_passphrase();
-        self.clear_keyring_session();
+        if owns_saved_session {
+            self.clear_keyring_session();
+        }
+        self.admitted_client = false;
+        self.admitted_user_loading = false;
         self.client = CoincubeClient::new();
     }
 
@@ -7799,5 +7874,37 @@ mod retry_card_tests {
             "the user must stay on the code screen, got {:?}",
             panel.step
         );
+    }
+}
+
+#[cfg(test)]
+mod admitted_session_tests {
+    use super::*;
+
+    #[test]
+    fn a_late_admitted_user_cannot_replace_a_new_session() {
+        let mut panel = ConnectAccountPanel::new();
+        let mut first = CoincubeClient::new();
+        first.base_url = "http://127.0.0.1:1".into();
+        first.set_token("old-fixture");
+        panel.install_admitted_client(first);
+        let generation = panel.session_generation;
+        let mut second = CoincubeClient::new();
+        second.base_url = "http://127.0.0.1:2".into();
+        second.set_token("new-fixture");
+        panel.install_admitted_client(second);
+        let task = panel.update_message(ConnectAccountMessage::AdmittedUserLoaded {
+            user: Ok(crate::services::coincube::User {
+                id: 1,
+                email: "old@example.invalid".into(),
+                email_verified: Some(true),
+            }),
+            generation,
+        });
+        assert!(iced_runtime::task::into_stream(task).is_none());
+        assert!(panel.user.is_none());
+        let client = panel.authenticated_client().unwrap();
+        assert_eq!(client.base_url, "http://127.0.0.1:2");
+        assert_eq!(client.token(), Some("new-fixture"));
     }
 }

@@ -1305,14 +1305,27 @@ impl Tab {
                             .expect("BreezClient must exist for Seed-Only cube");
                         let spark = restored_spark_backend.or_else(|| i.spark_backend.clone());
 
-                        let (app, command) = app::App::new_without_wallet(
+                        let (app, command) = match app::App::new_without_wallet(
                             breez,
                             spark,
                             cfg,
                             i.datadir.clone(),
                             i.network,
                             cube.clone(),
-                        );
+                        ) {
+                            Ok(app) => app,
+                            Err(error) => {
+                                let error = match error {
+                                    app::error::Error::Daemon(error) => {
+                                        loader::Error::Daemon(error)
+                                    }
+                                    error => {
+                                        loader::Error::Unexpected(crate::user_error::report(&error))
+                                    }
+                                };
+                                return Task::done(Message::Load(loader::Message::App(Err(error))));
+                            }
+                        };
                         self.state = State::App(app);
                         command.map(Message::Run)
                     } else {
@@ -1361,14 +1374,29 @@ impl Tab {
                             )
                             .expect("A gui configuration file must be present");
 
-                            let (app, command) = app::App::new_without_wallet(
+                            let (app, command) = match app::App::new_without_wallet(
                                 breez.clone(),
                                 i.spark_backend.clone(),
                                 cfg,
                                 i.datadir.clone(),
                                 network,
                                 cube.clone(),
-                            );
+                            ) {
+                                Ok(app) => app,
+                                Err(error) => {
+                                    let error = match error {
+                                        app::error::Error::Daemon(error) => {
+                                            loader::Error::Daemon(error)
+                                        }
+                                        error => loader::Error::Unexpected(
+                                            crate::user_error::report(&error),
+                                        ),
+                                    };
+                                    return Task::done(Message::Load(loader::Message::App(Err(
+                                        error,
+                                    ))));
+                                }
+                            };
                             self.state = State::App(app);
                             command.map(Message::Run)
                         } else {
@@ -1531,7 +1559,7 @@ impl Tab {
                             )
                         });
 
-                    let (app, command) = App::new(
+                    let (app, command) = match App::new(
                         cache,
                         wallet,
                         breez,
@@ -1542,7 +1570,18 @@ impl Tab {
                         bitcoind,
                         cube_settings,
                         connect_auth,
-                    );
+                    ) {
+                        Ok(app) => app,
+                        Err(error) => {
+                            let error = match error {
+                                app::error::Error::Daemon(error) => loader::Error::Daemon(error),
+                                error => {
+                                    loader::Error::Unexpected(crate::user_error::report(&error))
+                                }
+                            };
+                            return Task::done(Message::Load(loader::Message::App(Err(error))));
+                        }
+                    };
                     self.state = State::App(app);
                     command.map(Message::Run)
                 }
@@ -1564,8 +1603,8 @@ impl Tab {
                             UserFlow::CreateWallet,
                             true,                              // launched from app
                             Some(app.cube_settings().clone()), // pass cube settings for returning
-                            Some(app.breez_client()), // pass breez_client to avoid re-entering PIN
-                            app.spark_backend(),      // preserve Spark bridge across vault setup
+                            app.breez_client(), // pass breez_client to avoid re-entering PIN
+                            app.spark_backend(), // preserve Spark bridge across vault setup
                             GlobalSettings::load_developer_mode(&GlobalSettings::path(
                                 app.datadir(),
                             )),
@@ -1585,7 +1624,7 @@ impl Tab {
                             UserFlow::RestoreVaultFromRecoveryKit,
                             true,
                             Some(app.cube_settings().clone()),
-                            Some(app.breez_client()),
+                            app.breez_client(),
                             app.spark_backend(),
                             GlobalSettings::load_developer_mode(&GlobalSettings::path(
                                 app.datadir(),
@@ -2664,14 +2703,25 @@ impl Tab {
                         command.map(Message::Load)
                     }
                 } else {
-                    let (app, command) = App::new_without_wallet(
+                    let (app, command) = match App::new_without_wallet(
                         breez,
                         spark_backend,
                         config,
                         datadir,
                         network,
                         cube,
-                    );
+                    ) {
+                        Ok(app) => app,
+                        Err(error) => {
+                            let error = match error {
+                                app::error::Error::Daemon(error) => loader::Error::Daemon(error),
+                                error => {
+                                    loader::Error::Unexpected(crate::user_error::report(&error))
+                                }
+                            };
+                            return Task::done(Message::Load(loader::Message::App(Err(error))));
+                        }
+                    };
                     self.state = State::App(app);
                     command.map(Message::Run)
                 }
@@ -3161,7 +3211,7 @@ pub fn create_app_with_remote_backend(
         remote_backend.user_email().to_string(),
     ));
 
-    Ok(App::new(
+    App::new(
         Cache {
             app_generation: crate::app::cache::AppGeneration::next(),
             connect_transport_key: None,
@@ -3272,7 +3322,8 @@ pub fn create_app_with_remote_backend(
         None,
         cube_settings,
         connect_auth,
-    ))
+    )
+    .map_err(|error| crate::user_error::report(&error))
 }
 
 /// The client the unlock handler falls back to when the Liquid load fails.

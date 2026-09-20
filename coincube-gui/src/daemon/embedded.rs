@@ -45,6 +45,21 @@ pub struct EmbeddedDaemon {
 }
 
 impl EmbeddedDaemon {
+    /// GUI construction tests inspect startup handoff without starting a poller.
+    #[cfg(test)]
+    pub(crate) fn unstarted_for_test(
+        config: Config,
+        connect_session: Option<
+            std::sync::Arc<crate::services::coincube::network_anchor::ConnectAnchorSession>,
+        >,
+    ) -> Self {
+        Self {
+            config,
+            handle: Mutex::new(None),
+            connect_session,
+        }
+    }
+
     pub fn start(config: Config) -> Result<EmbeddedDaemon, DaemonError> {
         let handle =
             DaemonHandle::start_default(config.clone(), false).map_err(DaemonError::Start)?;

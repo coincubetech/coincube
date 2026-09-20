@@ -1,11 +1,11 @@
 //! Registry that owns the app's wallet backends and exposes routing hooks.
 //!
-//! Holds one [`LiquidBackend`] (always present) and an optional
+//! Holds an optional [`LiquidBackend`] and an optional
 //! [`SparkBackend`] (present when the cube has a Spark signer and
 //! the bridge subprocess spawned successfully).
 //! [`WalletRegistry::route_lightning_address`] returns the backend that
 //! should fulfill the next incoming Lightning Address invoice: Spark
-//! when available, Liquid otherwise.
+//! when available, Liquid when configured, or no route for Vault-only Cubes.
 //!
 //! The registry is the single place the app decides *which* backend
 //! handles *which* payment type — keeping that logic in one module
@@ -29,7 +29,7 @@ pub enum LightningRoute {
 /// Cheap to clone — the backends live behind `Arc`s so clones share state.
 #[derive(Clone)]
 pub struct WalletRegistry {
-    liquid: Arc<LiquidBackend>,
+    liquid: Option<Arc<LiquidBackend>>,
     /// `None` if the cube has no Spark signer configured, or if the
     /// bridge subprocess failed to spawn / handshake. Panels code
     /// checks this and shows a "Spark unavailable" placeholder when
@@ -38,20 +38,31 @@ pub struct WalletRegistry {
 }
 
 impl WalletRegistry {
+    /// A Vault-only Cube has no Liquid or Spark backend and no Lightning route.
+    pub fn vault_only() -> Self {
+        Self {
+            liquid: None,
+            spark: None,
+        }
+    }
+
     pub fn new(liquid: Arc<LiquidBackend>) -> Self {
         Self {
-            liquid,
+            liquid: Some(liquid),
             spark: None,
         }
     }
 
     pub fn with_spark(liquid: Arc<LiquidBackend>, spark: Option<Arc<SparkBackend>>) -> Self {
-        Self { liquid, spark }
+        Self {
+            liquid: Some(liquid),
+            spark,
+        }
     }
 
     /// Access the Liquid backend.
-    pub fn liquid(&self) -> &Arc<LiquidBackend> {
-        &self.liquid
+    pub fn liquid(&self) -> Option<&Arc<LiquidBackend>> {
+        self.liquid.as_ref()
     }
 
     /// Access the Spark backend, if the bridge is up for this cube.
@@ -64,10 +75,22 @@ impl WalletRegistry {
     ///
     /// Falling back to Liquid keeps invoice requests answerable even when
     /// the Spark setup is broken (no signer, subprocess crashed, etc.).
-    pub fn route_lightning_address(&self) -> LightningRoute {
+    pub fn route_lightning_address(&self) -> Option<LightningRoute> {
         match self.spark.clone() {
-            Some(spark) => LightningRoute::Spark(spark),
-            None => LightningRoute::Liquid(self.liquid.clone()),
+            Some(spark) => Some(LightningRoute::Spark(spark)),
+            None => self.liquid.clone().map(LightningRoute::Liquid),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn vault_only_has_no_secondary_backend_or_lightning_fallback() {
+        let registry = WalletRegistry::vault_only();
+        assert!(registry.liquid().is_none());
+        assert!(registry.spark().is_none());
+        assert!(registry.route_lightning_address().is_none());
     }
 }
