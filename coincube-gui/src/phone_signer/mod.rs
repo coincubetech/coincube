@@ -86,6 +86,7 @@ pub struct PhoneSigner {
     /// `register_wallet` (the trait's one descriptor-shaped hook) is a no-op
     /// for this signer.
     pub(crate) descriptor: String,
+    pub(crate) chain: crate::chain::ChainId,
 
     /// `descriptor_id_fingerprint` of [`Self::descriptor`], 8 lowercase hex.
     ///
@@ -101,6 +102,14 @@ pub struct PhoneSigner {
     /// `creator_transport_pubkey`; the secret half opens it here.
     pub(crate) transport_key: Option<Arc<crate::services::connect::crypto::DeviceTransportKey>>,
 }
+
+/// The current LAN protocol cannot authenticate a BTCB2 pairing identity.
+/// Keep this gate independent of Cube/runtime exposure until pairing v3 ships.
+pub(crate) fn lan_signing_allowed(chain: crate::chain::ChainId) -> bool {
+    !chain.is_blake2b()
+}
+
+pub(crate) const BTCB2_LAN_UNAVAILABLE: &str = "Keychain signing over the local network is unavailable for Bitcoin Blake2b until chain-bound pairing is supported. Use a supported Connect signer.";
 
 impl std::fmt::Debug for PhoneSigner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -126,6 +135,7 @@ impl PhoneSigner {
         version: Option<Version>,
         paired_phone: PairedPhone,
         descriptor: String,
+        chain: crate::chain::ChainId,
         transport_key: Option<Arc<crate::services::connect::crypto::DeviceTransportKey>>,
     ) -> Self {
         let (reader, writer) = transport.split();
@@ -140,6 +150,7 @@ impl PhoneSigner {
             version,
             paired_phone,
             descriptor,
+            chain,
             descriptor_id,
             transport_key,
         }
@@ -204,6 +215,9 @@ impl HWI for PhoneSigner {
 
     async fn sign_tx(&self, psbt: &mut Psbt) -> Result<(), HwiError> {
         use crate::services::connect::grpc::connect_v1 as cv1;
+        if !lan_signing_allowed(self.chain) {
+            return Err(HwiError::Device(BTCB2_LAN_UNAVAILABLE.to_string()));
+        }
 
         let binding = self
             .paired_phone
@@ -279,6 +293,8 @@ impl HWI for PhoneSigner {
         };
 
         let session = cv1::SigningSession {
+            // LAN remains pre-identity and BTCB2-gated until pairing v3 lands.
+            network: String::new(),
             session_id: session_id.clone(),
             request_id: request_id.clone(),
             user_id: String::new(),
@@ -291,6 +307,7 @@ impl HWI for PhoneSigner {
             tx_summary: None,
             policy_summary: None,
             targets: vec![cv1::SignerTarget {
+                capabilities: Vec::new(),
                 device_id: String::new(),
                 key_fingerprint: binding.fingerprint.to_string(),
                 key_id: binding.key_id.clone(),

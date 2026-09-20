@@ -319,6 +319,7 @@ async fn sign_tx_rejects_unsigned_echo_through_fake_phone() {
         None,
         paired,
         TEST_DESCRIPTOR.to_string(),
+        coincube_core::chain::ChainId::Regtest,
         Some(Arc::new(fresh_transport_key("desktop"))),
     );
     let mut psbt = empty_psbt();
@@ -347,6 +348,13 @@ async fn sign_tx_rejects_unsigned_echo_through_fake_phone() {
 /// pointed at it, and return the signer so the caller can drive
 /// `sign_tx` and assert on the error variant.
 async fn signer_against_response(
+    response: FakeResponse,
+) -> (PhoneSigner, tokio::task::JoinHandle<()>) {
+    signer_against_chain_response(coincube_core::chain::ChainId::Regtest, response).await
+}
+
+async fn signer_against_chain_response(
+    chain: coincube_core::chain::ChainId,
     response: FakeResponse,
 ) -> (PhoneSigner, tokio::task::JoinHandle<()>) {
     let (desk_cert, desk_key) = mint_ed25519_cert("Coincube Desktop (test)");
@@ -397,6 +405,7 @@ async fn signer_against_response(
         None,
         paired,
         TEST_DESCRIPTOR.to_string(),
+        chain,
         Some(Arc::new(fresh_transport_key("desktop"))),
     );
     (signer, handle)
@@ -546,4 +555,39 @@ fn stale_or_wrong_exact_pairing_identity_is_not_a_capability() {
     phone.signer_binding = valid;
     phone.vault_fingerprint = Fingerprint::default();
     assert!(phone.exact_signer(TEST_DESCRIPTOR).is_err());
+}
+
+#[tokio::test]
+async fn btcb2_lan_refuses_before_a_session_is_sent() {
+    use coincube_core::chain::ChainId;
+    for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
+        let (signer, mut phone) = signer_against_chain_response(
+            chain,
+            FakeResponse::Error {
+                code: "UNEXPECTED_SESSION".into(),
+                message: "A BTCB2 session reached LAN".into(),
+            },
+        )
+        .await;
+        let mut psbt = empty_psbt();
+        let before = psbt.serialize();
+        let error = async_hwi::HWI::sign_tx(&signer, &mut psbt)
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("chain-bound pairing"),
+            "{}",
+            error
+        );
+        assert_eq!(psbt.serialize(), before);
+        // The fake phone completes immediately after processing PresentSession.
+        // It must remain waiting for a frame; the refusal happens in the caller.
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), &mut phone)
+                .await
+                .is_err()
+        );
+        phone.abort();
+        drop(signer);
+    }
 }

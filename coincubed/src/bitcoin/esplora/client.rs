@@ -61,6 +61,8 @@ pub enum Error {
     /// `u32` range every consumer of block times uses. Never defaulted — the
     /// callers map this to "unknown" (`Option::None`), not to a made-up time.
     TipMetadata(&'static str),
+    /// Height-zero JSON metadata is absent, ambiguous, or out of range.
+    GenesisMetadata(&'static str),
 }
 
 impl Error {
@@ -106,6 +108,9 @@ impl std::fmt::Display for Error {
                 )
             }
             Error::TipMetadata(what) => write!(f, "Esplora tip metadata is unusable: {}.", what),
+            Error::GenesisMetadata(what) => {
+                write!(f, "Esplora genesis metadata is unusable: {}.", what)
+            }
         }
     }
 }
@@ -455,9 +460,19 @@ impl Client {
 
     /// Get the timestamp of the genesis block (block 0).
     pub fn genesis_block_timestamp(&self) -> Result<u32, Error> {
-        let hash = self.genesis_block_hash()?;
-        let header = self.try_in_order(|client| client.get_header_by_hash(&hash))?;
-        Ok(header.time)
+        // Keep every Esplora timestamp read on JSON metadata, including the
+        // rescan lower bound. No header decoder belongs on the BTCB2 path.
+        let summaries = self.try_in_order(|client| client.get_blocks(Some(0)))?;
+        let genesis = match summaries.as_slice() {
+            [genesis] if genesis.time.height == 0 => genesis,
+            _ => {
+                return Err(Error::GenesisMetadata(
+                    "expected exactly one height-zero block",
+                ))
+            }
+        };
+        u32::try_from(genesis.time.timestamp)
+            .map_err(|_| Error::GenesisMetadata("genesis timestamp does not fit in u32"))
     }
 
     /// Get the timestamp of the current tip block.
@@ -1216,6 +1231,62 @@ mod tests {
         // request log rather than by a 404.
         m.insert("/blocks/tip/hash", (200, H2.to_string()));
         m
+    }
+
+    #[test]
+    fn genesis_time_reads_only_height_zero_json() {
+        let mut paths = StdHashMap::new();
+        paths.insert(
+            "/blocks/0",
+            (
+                200,
+                blocks_json(&[format!(
+                    r#"{{"id":"{H0}","height":0,"timestamp":1231006505,"merkle_root":"{MERKLE}"}}"#
+                )]),
+            ),
+        );
+        let mock = mock_esplora(paths);
+        let client = client_with(vec![mock.provider("connect")]);
+        assert_eq!(client.genesis_block_timestamp().unwrap(), 1_231_006_505);
+        assert_eq!(mock.requests(), vec!["/blocks/0".to_string()]);
+    }
+
+    #[test]
+    fn genesis_time_refuses_missing_wrong_height_and_ambiguous_metadata() {
+        for body in [
+            "[]".to_string(),
+            blocks_json(&[bitcoin_summary(H1, 1, 600, H0)]),
+            blocks_json(&[
+                bitcoin_summary(H0, 0, 600, H0),
+                bitcoin_summary(H1, 0, 601, H0),
+            ]),
+            blocks_json(&[bitcoin_summary(H0, 0, u64::from(u32::MAX) + 1, H0)]),
+        ] {
+            let mut paths = StdHashMap::new();
+            paths.insert("/blocks/0", (200, body));
+            let mock = mock_esplora(paths);
+            let client = client_with(vec![mock.provider("connect")]);
+            assert!(matches!(
+                client.genesis_block_timestamp(),
+                Err(Error::GenesisMetadata(_))
+            ));
+            assert_eq!(mock.requests(), vec!["/blocks/0".to_string()]);
+        }
+    }
+
+    #[test]
+    fn genesis_time_preserves_upstream_and_parse_errors() {
+        for (status, body) in [(503, "unavailable"), (200, "{malformed")] {
+            let mut paths = StdHashMap::new();
+            paths.insert("/blocks/0", (status, body.to_string()));
+            let mock = mock_esplora(paths);
+            let client = client_with(vec![mock.provider("connect")]);
+            assert!(matches!(
+                client.genesis_block_timestamp(),
+                Err(Error::Client(_))
+            ));
+            assert_eq!(mock.requests(), vec!["/blocks/0".to_string()]);
+        }
     }
 
     #[test]
