@@ -101,6 +101,9 @@ impl DaemonBackend {
 pub trait Daemon: Debug {
     fn backend(&self) -> DaemonBackend;
     fn config(&self) -> Option<&Config>;
+    /// Revoke ephemeral Connect authority before logout/account/provider changes.
+    /// Existing Bitcoin/external implementations have no such authority.
+    fn invalidate_connect_session(&self) {}
     async fn is_alive(
         &self,
         datadir: &crate::dir::CoincubeDirectory,

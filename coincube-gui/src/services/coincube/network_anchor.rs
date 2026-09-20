@@ -1,0 +1,547 @@
+//! Authenticated operator-trusted fork evidence. This is not a spend permission.
+use super::{
+    network_status::{NetworkObservation, NetworkStatusError, RdtsStatus},
+    CoincubeClient, CoincubeError,
+};
+use crate::services::http::ResponseExt;
+use coincube_core::{chain::ChainId, miniscript::bitcoin::BlockHash};
+use coincubed::connect::{
+    AdmissionError, ConnectAnchorAuthority, ConnectBackend, TrustedChainAnchor, MAX_ANCHOR_AGE,
+};
+use serde::Deserialize;
+use std::{
+    convert::TryFrom,
+    sync::{Arc, Mutex},
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnchorState {
+    Available,
+    NotConfigured,
+    ConfigurationError,
+    RpcUnavailable,
+    Malformed,
+    ForkAbsent,
+    ForkInactive,
+    RdtsAbsent,
+    RdtsUnsupported,
+    WrongChain,
+    Syncing,
+    InconsistentSnapshot,
+    ForkUnverified,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct NetworkAnchor {
+    pub tip_hash: BlockHash,
+    pub tip_height: u64,
+    pub tip_median_time_past: i64,
+    pub observed_at: i64,
+    pub observation: NetworkObservation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NetworkAnchorStatus {
+    pub network: ChainId,
+    pub state: AnchorState,
+    pub anchor: Option<NetworkAnchor>,
+}
+
+#[derive(Deserialize)]
+struct Envelope {
+    success: bool,
+    data: WireStatus,
+    error: Option<ErrorBody>,
+}
+#[derive(Deserialize)]
+struct WireStatus {
+    network: String,
+    state: AnchorState,
+    anchor: Option<NetworkAnchor>,
+}
+#[derive(Deserialize)]
+struct ErrorBody {
+    code: String,
+}
+
+impl NetworkAnchor {
+    fn consistent(&self) -> bool {
+        self.tip_median_time_past >= 0
+            && self.observed_at >= 0
+            && self.observation.tip_height == self.tip_height
+            && self
+                .observation
+                .fork
+                .as_ref()
+                .is_some_and(|fork| fork.active && self.tip_height >= fork.height)
+            && matches!(self.observation.rdts, RdtsStatus::Flagday { .. })
+    }
+
+    fn trusted(
+        &self,
+        chain: ChainId,
+        now: SystemTime,
+    ) -> Result<TrustedChainAnchor, AdmissionError> {
+        if !chain.is_blake2b() || !self.consistent() {
+            return Err(AdmissionError::WrongChain);
+        }
+        let observed_at = UNIX_EPOCH
+            .checked_add(Duration::from_secs(
+                u64::try_from(self.observed_at).map_err(|_| AdmissionError::Stale)?,
+            ))
+            .ok_or(AdmissionError::Stale)?;
+        if now
+            .duration_since(observed_at)
+            .map_err(|_| AdmissionError::Stale)?
+            > MAX_ANCHOR_AGE
+        {
+            return Err(AdmissionError::Stale);
+        }
+        Ok(TrustedChainAnchor {
+            chain,
+            height: u32::try_from(self.tip_height).map_err(|_| AdmissionError::Unavailable)?,
+            hash: self.tip_hash,
+            median_time_past: u32::try_from(self.tip_median_time_past)
+                .map_err(|_| AdmissionError::Unavailable)?,
+            observed_at,
+        })
+    }
+}
+
+impl CoincubeClient {
+    /// A successful authenticated endpoint response attests that Connect checked
+    /// an active post-fork version-2 header in a coherent, bracketed RPC snapshot.
+    /// The daemon must still match this hash against its exact selected indexer.
+    pub async fn network_anchor(
+        &self,
+        chain: ChainId,
+    ) -> Result<NetworkAnchorStatus, NetworkStatusError> {
+        if !chain.is_blake2b() {
+            return Err(NetworkStatusError::UnsupportedChain);
+        }
+        let response = self
+            .client
+            .get(format!(
+                "{}/api/v1/connect/networks/{}/anchor",
+                self.base_url,
+                chain.api_str()
+            ))
+            .send()
+            .await
+            .map_err(CoincubeError::from)?;
+        let http = response.status();
+        if http != reqwest::StatusCode::OK && http != reqwest::StatusCode::SERVICE_UNAVAILABLE {
+            response
+                .check_success()
+                .await
+                .map_err(CoincubeError::from)?;
+            return Err(NetworkStatusError::InvalidResponse);
+        }
+        let envelope: Envelope = response
+            .json()
+            .await
+            .map_err(|_| NetworkStatusError::InvalidResponse)?;
+        let available = envelope.data.state == AnchorState::Available;
+        let valid_payload = if available {
+            envelope
+                .data
+                .anchor
+                .as_ref()
+                .is_some_and(NetworkAnchor::consistent)
+                && envelope.error.is_none()
+        } else {
+            envelope.data.anchor.is_none()
+                && envelope
+                    .error
+                    .as_ref()
+                    .is_some_and(|e| e.code == "SERVICE_UNAVAILABLE")
+        };
+        if envelope.data.network != chain.api_str()
+            || envelope.success != available
+            || http.is_success() != available
+            || !valid_payload
+        {
+            return Err(NetworkStatusError::InvalidResponse);
+        }
+        Ok(NetworkAnchorStatus {
+            network: chain,
+            state: envelope.data.state,
+            anchor: envelope.data.anchor,
+        })
+    }
+
+    /// Creates one immutable chain/account/provider context. Caller must invalidate
+    /// the returned session on logout or account/provider changes, and restart the
+    /// daemon with a newly admitted context. Nothing here is serialized.
+    pub async fn authenticated_backend(
+        &self,
+        chain: ChainId,
+        selected_endpoint: &str,
+    ) -> Result<(ConnectBackend, Arc<ConnectAnchorSession>), AdmissionError> {
+        if !chain.is_blake2b() {
+            return Err(AdmissionError::WrongChain);
+        }
+        let token = self
+            .token()
+            .filter(|t| !t.trim().is_empty())
+            .ok_or(AdmissionError::MissingAuth)?;
+        let endpoint = format!(
+            "{}/api/v1/esplora/{}",
+            self.base_url.trim_end_matches('/'),
+            crate::installer::connect_esplora_path(chain)
+        );
+        if selected_endpoint != endpoint {
+            return Err(AdmissionError::InvalidBackend);
+        }
+        let initial = self
+            .network_anchor(chain)
+            .await
+            .map_err(|_| AdmissionError::Unavailable)?;
+        let initial = initial
+            .anchor
+            .ok_or(AdmissionError::Unavailable)?
+            .trusted(chain, SystemTime::now())?;
+        let session = Arc::new(ConnectAnchorSession {
+            snapshot: Mutex::new(SessionSnapshot {
+                active: true,
+                anchor: Some(initial),
+            }),
+            refresh: Mutex::new(None),
+        });
+        let weak = Arc::downgrade(&session);
+        let client = self.clone();
+        let task = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                let result = client
+                    .network_anchor(chain)
+                    .await
+                    .ok()
+                    .and_then(|s| s.anchor)
+                    .and_then(|anchor| anchor.trusted(chain, SystemTime::now()).ok());
+                let Some(session) = weak.upgrade() else {
+                    break;
+                };
+                if !session.apply_refresh(result) {
+                    break;
+                }
+            }
+        });
+        *session
+            .refresh
+            .lock()
+            .map_err(|_| AdmissionError::Unavailable)? = Some(task.abort_handle());
+        let backend = ConnectBackend::new(chain, endpoint, token.to_string(), session.clone())?;
+        Ok((backend, session))
+    }
+}
+
+struct SessionSnapshot {
+    active: bool,
+    anchor: Option<TrustedChainAnchor>,
+}
+
+/// No network I/O in the daemon's synchronous authority method. Refresh failures
+/// immediately clear evidence; an old success never survives a failed refresh.
+pub struct ConnectAnchorSession {
+    snapshot: Mutex<SessionSnapshot>,
+    refresh: Mutex<Option<tokio::task::AbortHandle>>,
+}
+impl ConnectAnchorSession {
+    fn apply_refresh(&self, anchor: Option<TrustedChainAnchor>) -> bool {
+        let Ok(mut snapshot) = self.snapshot.lock() else {
+            return false;
+        };
+        if !snapshot.active {
+            return false;
+        }
+        snapshot.anchor = anchor;
+        true
+    }
+    pub fn invalidate(&self) {
+        if let Ok(mut refresh) = self.refresh.lock() {
+            if let Some(task) = refresh.take() {
+                task.abort();
+            }
+        }
+        if let Ok(mut snapshot) = self.snapshot.lock() {
+            snapshot.active = false;
+            snapshot.anchor = None;
+        }
+    }
+}
+impl ConnectAnchorAuthority for ConnectAnchorSession {
+    fn fresh_anchor(&self) -> Result<TrustedChainAnchor, AdmissionError> {
+        let snapshot = self
+            .snapshot
+            .lock()
+            .map_err(|_| AdmissionError::Unavailable)?;
+        let anchor = snapshot
+            .anchor
+            .as_ref()
+            .ok_or(AdmissionError::Unavailable)?;
+        if SystemTime::now()
+            .duration_since(anchor.observed_at)
+            .map_err(|_| AdmissionError::Stale)?
+            > MAX_ANCHOR_AGE
+        {
+            return Err(AdmissionError::Stale);
+        }
+        Ok(anchor.clone())
+    }
+}
+impl Drop for ConnectAnchorSession {
+    fn drop(&mut self) {
+        self.invalidate();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use httpmock::prelude::*;
+    use serde_json::{json, Value};
+    fn body(chain: ChainId) -> Value {
+        json!({"success":true,"data":{"network":chain.api_str(),"state":"available","anchor":{
+            "tip_hash":"11".repeat(32),"tip_height":973029,"tip_median_time_past":1800000000,
+            "observed_at":SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+            "observation":{"tip_height":973029,"fork":{"height":972000,"active":true},
+                "rdts":{"state":"flagday","flagday":{"height":972000,"expiry_time":1800010000_i64,"active":false}}}
+        }}})
+    }
+    fn client(server: &MockServer) -> CoincubeClient {
+        let mut client = CoincubeClient::new();
+        client.base_url = server.base_url();
+        client.set_token("synthetic-test-token");
+        client
+    }
+    #[tokio::test]
+    async fn both_chains_use_authenticated_dedicated_anchor_and_preserve_inactive_rdts() {
+        for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
+            let server = MockServer::start_async().await;
+            let mock = server
+                .mock_async(|when, then| {
+                    when.method(GET)
+                        .path(format!(
+                            "/api/v1/connect/networks/{}/anchor",
+                            chain.api_str()
+                        ))
+                        .header("authorization", "Bearer synthetic-test-token");
+                    then.status(200).json_body(body(chain));
+                })
+                .await;
+            let status = client(&server).network_anchor(chain).await.unwrap();
+            assert_eq!(status.network, chain);
+            assert_eq!(status.state, AnchorState::Available);
+            let anchor = status.anchor.unwrap();
+            assert!(
+                matches!(anchor.observation.rdts, RdtsStatus::Flagday { flagday } if !flagday.active)
+            );
+            mock.assert_async().await;
+        }
+    }
+    #[tokio::test]
+    async fn unavailable_states_remain_distinct_and_never_contain_partial_evidence() {
+        for state in [
+            "not_configured",
+            "configuration_error",
+            "rpc_unavailable",
+            "malformed",
+            "fork_absent",
+            "fork_inactive",
+            "rdts_absent",
+            "rdts_unsupported",
+            "wrong_chain",
+            "syncing",
+            "inconsistent_snapshot",
+            "fork_unverified",
+        ] {
+            let server = MockServer::start_async().await;
+            server.mock_async(|when,then| {
+                when.method(GET);
+                then.status(503).json_body(json!({"success":false,"error":{"code":"SERVICE_UNAVAILABLE"},"data":{"network":"bitcoin-blake2b","state":state}}));
+            }).await;
+            let status = client(&server)
+                .network_anchor(ChainId::BitcoinBlake2b)
+                .await
+                .unwrap();
+            assert_eq!(
+                status.state,
+                serde_json::from_value::<AnchorState>(json!(state)).unwrap()
+            );
+            assert!(status.anchor.is_none());
+        }
+    }
+    #[tokio::test]
+    async fn malformed_identity_and_snapshot_matrix_refuses() {
+        let chain = ChainId::BitcoinBlake2b;
+        let mutations: Vec<(&str, Value)> = vec![
+            ("/data/network", json!("bitcoin")),
+            ("/data/network", json!("bitcoin_blake2b")),
+            ("/data/state", json!("unknown")),
+            ("/success", json!(false)),
+            ("/data/anchor", Value::Null),
+            ("/data/anchor/tip_hash", json!("bad")),
+            ("/data/anchor/tip_median_time_past", json!(-1)),
+            ("/data/anchor/observed_at", json!(-1)),
+            ("/data/anchor/observation/tip_height", json!(973028)),
+            ("/data/anchor/observation/fork", Value::Null),
+            ("/data/anchor/observation/fork/active", json!(false)),
+            ("/data/anchor/observation/fork/height", json!(973030)),
+            ("/data/anchor/observation/rdts", json!({"state":"absent"})),
+        ];
+        for (path, value) in mutations {
+            let server = MockServer::start_async().await;
+            let mut malformed = body(chain);
+            *malformed.pointer_mut(path).unwrap() = value;
+            server
+                .mock_async(|when, then| {
+                    when.method(GET);
+                    then.status(200).json_body(malformed);
+                })
+                .await;
+            assert!(
+                matches!(
+                    client(&server).network_anchor(chain).await,
+                    Err(NetworkStatusError::InvalidResponse)
+                ),
+                "{path}"
+            );
+        }
+        let server = MockServer::start_async().await;
+        let mut missing = body(chain);
+        missing["data"]["anchor"]["observation"]
+            .as_object_mut()
+            .unwrap()
+            .remove("fork");
+        server
+            .mock_async(|when, then| {
+                when.method(GET);
+                then.status(200).json_body(missing);
+            })
+            .await;
+        assert!(matches!(
+            client(&server).network_anchor(chain).await,
+            Err(NetworkStatusError::InvalidResponse)
+        ));
+    }
+    #[tokio::test]
+    async fn auth_gate_errors_and_bitcoin_refusal_are_not_converted_to_anchor_states() {
+        for code in [401, 404, 429] {
+            let server = MockServer::start_async().await;
+            server
+                .mock_async(|when, then| {
+                    when.method(GET);
+                    then.status(code).body("unavailable");
+                })
+                .await;
+            assert!(matches!(
+                client(&server)
+                    .network_anchor(ChainId::BitcoinBlake2b)
+                    .await,
+                Err(NetworkStatusError::Request(_))
+            ));
+        }
+        let server = MockServer::start_async().await;
+        let mock = server
+            .mock_async(|when, then| {
+                when.method(GET);
+                then.status(500);
+            })
+            .await;
+        assert!(matches!(
+            client(&server).network_anchor(ChainId::Bitcoin).await,
+            Err(NetworkStatusError::UnsupportedChain)
+        ));
+        mock.assert_hits_async(0).await;
+    }
+    #[tokio::test]
+    async fn backend_admission_binds_auth_endpoint_and_cancels_on_drop() {
+        let chain = ChainId::BitcoinBlake2b;
+        let server = MockServer::start_async().await;
+        let mock = server
+            .mock_async(|when, then| {
+                when.method(GET);
+                then.status(200).json_body(body(chain));
+            })
+            .await;
+        let client = client(&server);
+        assert!(matches!(
+            client
+                .authenticated_backend(
+                    chain,
+                    &format!("{}/api/v1/esplora/bitcoin/mainnet", server.base_url())
+                )
+                .await,
+            Err(AdmissionError::InvalidBackend)
+        ));
+        mock.assert_hits_async(0).await;
+        let endpoint = format!(
+            "{}/api/v1/esplora/bitcoin-blake2b/mainnet",
+            server.base_url()
+        );
+        let (backend, session) = client
+            .authenticated_backend(chain, &endpoint)
+            .await
+            .unwrap();
+        assert_eq!(session.fresh_anchor().unwrap().chain, chain);
+        session.invalidate();
+        assert!(matches!(
+            session.fresh_anchor(),
+            Err(AdmissionError::Unavailable)
+        ));
+        let weak = Arc::downgrade(&session);
+        drop(backend);
+        drop(session);
+        assert!(
+            weak.upgrade().is_none(),
+            "refresh must not retain its authority"
+        );
+        mock.assert_hits_async(1).await;
+    }
+    #[tokio::test]
+    async fn failed_refresh_clears_evidence_and_revocation_rejects_a_late_success() {
+        let chain = ChainId::BitcoinBlake2b;
+        let anchor: NetworkAnchor =
+            serde_json::from_value(body(chain)["data"]["anchor"].clone()).unwrap();
+        let trusted = anchor.trusted(chain, SystemTime::now()).unwrap();
+        let session = ConnectAnchorSession {
+            snapshot: Mutex::new(SessionSnapshot {
+                active: true,
+                anchor: Some(trusted.clone()),
+            }),
+            refresh: Mutex::new(None),
+        };
+        assert!(session.fresh_anchor().is_ok());
+        assert!(session.apply_refresh(None));
+        assert_eq!(session.fresh_anchor(), Err(AdmissionError::Unavailable));
+        assert!(session.apply_refresh(Some(trusted.clone())));
+        session.invalidate();
+        assert!(!session.apply_refresh(Some(trusted)));
+        assert_eq!(session.fresh_anchor(), Err(AdmissionError::Unavailable));
+    }
+
+    #[test]
+    fn expired_future_and_unrepresentable_anchor_fields_refuse_daemon_admission() {
+        let chain = ChainId::BitcoinBlake2b;
+        let mut anchor: NetworkAnchor =
+            serde_json::from_value(body(chain)["data"]["anchor"].clone()).unwrap();
+        let observed = UNIX_EPOCH + Duration::from_secs(anchor.observed_at as u64);
+        assert_eq!(
+            anchor.trusted(chain, observed + MAX_ANCHOR_AGE + Duration::from_secs(1)),
+            Err(AdmissionError::Stale)
+        );
+        assert_eq!(
+            anchor.trusted(chain, observed - Duration::from_secs(1)),
+            Err(AdmissionError::Stale)
+        );
+        anchor.tip_height = u64::from(u32::MAX) + 1;
+        anchor.observation.tip_height = anchor.tip_height;
+        assert_eq!(
+            anchor.trusted(chain, observed),
+            Err(AdmissionError::Unavailable)
+        );
+    }
+}
