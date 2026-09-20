@@ -2992,7 +2992,33 @@ async fn save_cube_settings(
     let cube_name = cube.name.clone();
     let settings_path = network_dir.path().join("settings.json");
 
-    let save_result = update_settings_file(network_dir, |_| Some(settings_data)).await;
+    let save_result = if network.is_blake2b() {
+        // Merge into the settings read under the stable writer lock. The
+        // installer snapshot may predate an unrelated Cube/settings update.
+        let saved_cube = cube.clone();
+        update_settings_file(network_dir, move |mut latest| {
+            if !latest
+                .cubes
+                .iter()
+                .any(|existing| existing.id == saved_cube.id)
+            {
+                latest.cubes.push(saved_cube);
+            }
+            for wallet in settings_data.wallets {
+                if !latest
+                    .wallets
+                    .iter()
+                    .any(|existing| existing.wallet_id() == wallet.wallet_id())
+                {
+                    latest.wallets.push(wallet);
+                }
+            }
+            Some(latest)
+        })
+        .await
+    } else {
+        update_settings_file(network_dir, |_| Some(settings_data)).await
+    };
 
     match save_result {
         Ok(_) => {
@@ -3889,6 +3915,38 @@ mod find_or_create_cube_tests {
     //! listed as recoverable and let the flow be repeated indefinitely).
     use super::*;
     use app::settings::WalletId;
+
+    #[tokio::test]
+    async fn fork_install_save_preserves_updates_after_its_snapshot() {
+        let root = std::env::temp_dir().join(format!("fork-save-{}", uuid::Uuid::new_v4()));
+        let dir = CoincubeDirectory::new(root.clone())
+            .network_directory(crate::chain::ChainId::BitcoinBlake2b);
+        let existing =
+            app::settings::CubeSettings::new("other".into(), crate::chain::ChainId::BitcoinBlake2b);
+        update_settings_file(&dir, |mut settings| {
+            settings.cubes.push(existing);
+            Some(settings)
+        })
+        .await
+        .unwrap();
+        let new_cube = app::settings::CubeSettings::new(
+            "installed".into(),
+            crate::chain::ChainId::BitcoinBlake2b,
+        );
+        save_cube_settings(
+            &dir,
+            new_cube,
+            crate::chain::ChainId::BitcoinBlake2b,
+            app::settings::Settings::default(),
+        )
+        .await
+        .unwrap();
+        let saved = reload(&dir);
+        assert_eq!(saved.cubes.len(), 2);
+        assert_eq!(saved.cubes[0].name, "other");
+        assert_eq!(saved.cubes[1].name, "installed");
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     /// Same hazard as `cleared_pending_rescan`: `update_settings_file` deletes
     /// `settings.json` when its updater returns `None`, so a Cube id that
