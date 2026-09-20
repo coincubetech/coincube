@@ -4,10 +4,7 @@ use std::sync::Arc;
 
 use iced::{Subscription, Task};
 
-use coincube_core::{
-    descriptors::CoincubeDescriptor,
-    miniscript::bitcoin::{bip32::Fingerprint, Network},
-};
+use coincube_core::{descriptors::CoincubeDescriptor, miniscript::bitcoin::bip32::Fingerprint};
 
 use coincube_ui::{
     component::form,
@@ -118,6 +115,7 @@ impl State for WalletSettingsState {
             &self.wallet.provider_keys,
             self.processing,
             self.updated,
+            !self.wallet.chain.is_blake2b(),
         );
 
         match &self.modal {
@@ -204,7 +202,6 @@ impl State for WalletSettingsState {
                 Task::perform(
                     update_aliases(
                         self.data_dir.clone(),
-                        cache.network,
                         self.wallet.clone(),
                         match self
                             .wallet
@@ -236,10 +233,15 @@ impl State for WalletSettingsState {
                 Task::none()
             }
             Message::View(view::Message::Settings(view::SettingsMessage::RegisterWallet)) => {
+                if self.wallet.chain.is_blake2b() {
+                    self.warning = Some(Error::Unexpected(
+                        "Hardware wallet registration is unavailable for Bitcoin Blake2b.".into(),
+                    ));
+                    return Task::none();
+                }
                 self.modal = Modal::RegisterWallet(RegisterWalletModal::new(
                     self.data_dir.clone(),
                     self.wallet.clone(),
-                    cache.network,
                 ));
                 Task::none()
             }
@@ -252,7 +254,6 @@ impl State for WalletSettingsState {
                 Task::perform(
                     update_aliases(
                         self.data_dir.clone(),
-                        cache.network,
                         self.wallet.clone(),
                         None,
                         aliases.into_iter().map(|(fg, ks)| (fg, ks.name)).collect(),
@@ -343,7 +344,7 @@ pub struct RegisterWalletModal {
 }
 
 impl RegisterWalletModal {
-    pub fn new(data_dir: CoincubeDirectory, wallet: Arc<Wallet>, network: Network) -> Self {
+    pub fn new(data_dir: CoincubeDirectory, wallet: Arc<Wallet>) -> Self {
         let mut registered = HashSet::new();
         for hw in &wallet.hardware_wallets {
             registered.insert(hw.fingerprint);
@@ -352,7 +353,8 @@ impl RegisterWalletModal {
             data_dir: data_dir.clone(),
             warning: None,
             chosen_hw: None,
-            hws: HardwareWallets::new(data_dir, network).with_wallet(wallet.clone()),
+            hws: HardwareWallets::new(data_dir, wallet.chain.bitcoin_network())
+                .with_wallet(wallet.clone()),
             wallet,
             processing: false,
             registered,
@@ -377,7 +379,7 @@ impl RegisterWalletModal {
     fn update(
         &mut self,
         daemon: Option<Arc<dyn Daemon + Sync + Send>>,
-        cache: &Cache,
+        _cache: &Cache,
         message: Message,
     ) -> Task<Message> {
         let Some(daemon) = daemon else {
@@ -432,7 +434,6 @@ impl RegisterWalletModal {
                     Task::perform(
                         register_wallet(
                             self.data_dir.clone(),
-                            cache.network,
                             device.clone(),
                             *fingerprint,
                             self.wallet.clone(),
@@ -451,12 +452,16 @@ impl RegisterWalletModal {
 
 async fn register_wallet(
     data_dir: CoincubeDirectory,
-    network: Network,
     hw: std::sync::Arc<dyn async_hwi::HWI + Send + Sync>,
     fingerprint: Fingerprint,
     wallet: Arc<Wallet>,
     daemon: Arc<dyn Daemon + Sync + Send>,
 ) -> Result<Arc<Wallet>, Error> {
+    if wallet.chain.is_blake2b() {
+        return Err(Error::Unexpected(
+            "Hardware wallet registration is unavailable for Bitcoin Blake2b.".into(),
+        ));
+    }
     let hmac = hw
         .register_wallet(&wallet.name, &wallet.main_descriptor.to_string())
         .await
@@ -471,7 +476,7 @@ async fn register_wallet(
         };
 
         if daemon.backend() != DaemonBackend::RemoteBackend {
-            let network_dir = data_dir.network_directory(network);
+            let network_dir = data_dir.network_directory(wallet.chain);
             let wallet_id = wallet.id();
             update_settings_file(&network_dir, |mut settings| {
                 if let Some(wallet_setting) = settings
@@ -516,7 +521,6 @@ async fn register_wallet(
 
 pub async fn update_aliases(
     data_dir: CoincubeDirectory,
-    network: Network,
     wallet: Arc<Wallet>,
     wallet_alias: Option<String>,
     keys_aliases: Vec<(Fingerprint, String)>,
@@ -526,7 +530,7 @@ pub async fn update_aliases(
 
     if let Some(wallet_alias) = wallet_alias.as_ref() {
         wallet = wallet.with_alias(Some(wallet_alias.clone()));
-        let network_dir = data_dir.network_directory(network);
+        let network_dir = data_dir.network_directory(wallet.chain);
         let wallet_id = wallet.id();
         update_settings_file(&network_dir, |mut settings| {
             if let Some(wallet_setting) = settings
@@ -543,7 +547,7 @@ pub async fn update_aliases(
     }
 
     if daemon.backend() != DaemonBackend::RemoteBackend {
-        let network_dir = data_dir.network_directory(network);
+        let network_dir = data_dir.network_directory(wallet.chain);
         let wallet_id = wallet.id();
         update_settings_file(&network_dir, |mut settings| {
             if let Some(wallet_setting) = settings
@@ -584,4 +588,102 @@ pub async fn update_aliases(
         .await?;
 
     Ok(Arc::new(wallet))
+}
+
+#[cfg(test)]
+mod chain_tests {
+    use super::*;
+    use crate::chain::ChainId;
+
+    #[tokio::test]
+    async fn alias_updates_touch_only_exact_chain_directory() {
+        let descriptor = crate::app::state::vault::test_support::unified::fixture().descriptor;
+        for chain in [
+            ChainId::BitcoinBlake2b,
+            ChainId::BitcoinBlake2bTestnet4,
+            ChainId::Bitcoin,
+        ] {
+            let root =
+                std::env::temp_dir().join(format!("coincube-settings-{}", uuid::Uuid::new_v4()));
+            let dir = CoincubeDirectory::new(root.clone());
+            let wallet = Arc::new(Wallet::new(descriptor.clone()).with_chain(chain));
+            let other = if chain.is_blake2b() {
+                ChainId::from(chain.bitcoin_network())
+            } else {
+                ChainId::BitcoinBlake2b
+            };
+            let settings = settings::Settings {
+                wallets: vec![settings::WalletSettings {
+                    name: wallet.name.clone(),
+                    alias: None,
+                    descriptor_checksum: wallet.descriptor_checksum.clone(),
+                    pinned_at: wallet.pinned_at,
+                    keys: vec![],
+                    hardware_wallets: vec![],
+                    remote_backend_auth: None,
+                    start_internal_bitcoind: None,
+                    pending_rescan: None,
+                }],
+                ..Default::default()
+            };
+            let original = serde_json::to_vec(&settings).unwrap();
+            for target in [chain, other] {
+                let path = dir.network_directory(target);
+                std::fs::create_dir_all(path.path()).unwrap();
+                std::fs::write(path.path().join(settings::SETTINGS_FILE_NAME), &original).unwrap();
+            }
+            let daemon = Arc::new(crate::daemon::client::Coincubed::new(
+                crate::utils::mock::Daemon::new(vec![]).run(),
+            ));
+            let fingerprint = Fingerprint::from([1, 2, 3, 4]);
+            let updated = update_aliases(
+                dir.clone(),
+                wallet,
+                Some("isolated".into()),
+                vec![(fingerprint, "synthetic key".into())],
+                daemon,
+            )
+            .await
+            .unwrap();
+            assert_eq!(updated.alias.as_deref(), Some("isolated"));
+            let stored = settings::Settings::from_file(&dir.network_directory(chain)).unwrap();
+            assert_eq!(stored.wallets[0].alias.as_deref(), Some("isolated"));
+            assert_eq!(stored.wallets[0].keys[0].master_fingerprint, fingerprint);
+            assert_eq!(
+                std::fs::read(
+                    dir.network_directory(other)
+                        .path()
+                        .join(settings::SETTINGS_FILE_NAME)
+                )
+                .unwrap(),
+                original
+            );
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn fork_hardware_registration_message_is_refused() {
+        let wallet = Arc::new(
+            Wallet::new(crate::app::state::vault::test_support::unified::fixture().descriptor)
+                .with_chain(ChainId::BitcoinBlake2b),
+        );
+        let dir = CoincubeDirectory::new(
+            std::env::temp_dir().join(format!("coincube-hw-refusal-{}", uuid::Uuid::new_v4())),
+        );
+        let mut state = WalletSettingsState::new(dir.clone(), wallet, Arc::new(Config::new(false)));
+        let daemon = Arc::new(crate::daemon::client::Coincubed::new(
+            crate::utils::mock::Daemon::new(vec![]).run(),
+        ));
+        let _task = state.update(
+            Some(daemon),
+            &Cache::default(),
+            Message::View(view::Message::Settings(
+                view::SettingsMessage::RegisterWallet,
+            )),
+        );
+        assert!(state.warning.is_some());
+        assert!(!matches!(state.modal, Modal::RegisterWallet(_)));
+        assert!(!dir.path().exists());
+    }
 }
