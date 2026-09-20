@@ -1686,8 +1686,8 @@ impl Home {
                 }
             }
             Message::View(ViewMessage::SelectNetwork(network)) => {
-                if !self.developer_mode
-                    && !(self.network.is_blake2b() && network == ChainId::Bitcoin)
+                if !(self.developer_mode
+                    || self.network.is_blake2b() && network == ChainId::Bitcoin)
                 {
                     tracing::debug!(
                         "Ignoring SelectNetwork action because developer mode is disabled"

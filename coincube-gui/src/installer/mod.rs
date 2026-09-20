@@ -254,6 +254,7 @@ pub struct Installer {
     steps: Vec<Box<dyn Step>>,
     hws: HardwareWallets,
     signer: Arc<Mutex<Signer>>,
+    fork_install_task: Option<iced::task::Handle>,
 
     /// Context is data passed through each step.
     pub context: Context,
@@ -303,6 +304,11 @@ impl Installer {
             step.revert(&mut self.context)
         }
         Task::none()
+    }
+
+    /// Public identifier of the generated Cube master signer.
+    pub fn master_signer_fingerprint(&self) -> bitcoin::bip32::Fingerprint {
+        self.signer.lock().unwrap().fingerprint()
     }
 
     /// Chain-aware entry point. Reject dormant chains before generating a
@@ -452,6 +458,13 @@ impl Installer {
             cube_settings.as_ref(),
             coincube_client,
         );
+        if chain.is_blake2b()
+            && cube_settings.is_none()
+            && matches!(user_flow, UserFlow::CreateWallet)
+        {
+            context.fresh_fork_cube = true;
+            context.cube_id = Some(uuid::Uuid::new_v4().to_string());
+        }
         // Inherit the open Cube's PIN when the installer was launched from
         // inside one (`SetupVault` from the app or the loader). Every seed the
         // installer writes is encrypted, so without this there is nothing to
@@ -501,6 +514,7 @@ impl Installer {
             network,
             datadir: destination_path.clone(),
             current: 0,
+            fork_install_task: None,
             hws: HardwareWallets::new(destination_path.clone(), network),
             launched_from_app,
             cube_settings,
@@ -516,6 +530,7 @@ impl Installer {
                 let network_str = chain.api_str().to_string();
                 match user_flow {
                     UserFlow::CreateWallet if chain.is_blake2b() => vec![
+                        RestorePinSetupStep::new().into(),
                         ChooseDescriptorTemplate::default().into(),
                         DescriptorTemplateDescription::default().into(),
                         DefineDescriptor::new(network, signer.clone()).into(),
@@ -811,6 +826,16 @@ impl Installer {
             Message::Next => self.next(),
             Message::Previous => self.previous(),
             Message::Install => {
+                if self.context.bitcoin_config.chain.is_blake2b()
+                    && (self.context.descriptor.is_none() || !self.context.remote_backend.is_none())
+                {
+                    return Task::done(Message::Installed(
+                        None,
+                        Err(Error::Unexpected(
+                            "Bitcoin Blake2b requires a local Connect-backed Vault".into(),
+                        )),
+                    ));
+                }
                 let _cmd = self
                     .steps
                     .get_mut(self.current)
@@ -820,7 +845,7 @@ impl Installer {
                     let wallet_id = WalletId::generate(descriptor);
                     let context = self.context.clone();
                     let signer = self.signer.clone();
-                    match &self.context.remote_backend {
+                    let task = match &self.context.remote_backend {
                         RemoteBackend::WithoutWallet(backend) => Task::perform(
                             with_wallet_id(
                                 wallet_id.clone(),
@@ -843,6 +868,13 @@ impl Installer {
                             |(id, res)| Message::Installed(Some(id), res.map(Some)),
                         ),
                         RemoteBackend::Undefined => unreachable!("Must be defined at this point"),
+                    };
+                    if self.context.bitcoin_config.chain.is_blake2b() {
+                        let (task, handle) = task.abortable();
+                        self.fork_install_task = Some(handle.abort_on_drop());
+                        task
+                    } else {
+                        task
                     }
                 } else {
                     let ctx = self.context.clone();
@@ -1122,7 +1154,20 @@ fn pending_rescan(ctx: &Context) -> Option<crate::app::settings::PendingRescan> 
     )
 }
 
+fn validate_fork_creation_material(ctx: &Context) -> Result<(), Error> {
+    if ctx.fresh_fork_cube
+        && (!ctx.bitcoin_config.chain.is_blake2b()
+            || ctx.seed_cube_id().is_empty()
+            || ctx.restore_pin.as_ref().is_none_or(|p| p.is_empty())
+            || !ctx.fresh_fork_seed_backed_up)
+    {
+        return Err(Error::Unexpected("Choose a Cube PIN and confirm the master seed backup before creating this Bitcoin Blake2b Vault".into()));
+    }
+    Ok(())
+}
+
 fn require_installable_chain(ctx: &Context) -> Result<(), Error> {
+    validate_fork_creation_material(ctx)?;
     use crate::chain::ChainIdExt;
     if let crate::chain::RuntimeSupport::Dormant { reason } =
         ctx.bitcoin_config.chain.runtime_support()
@@ -1195,6 +1240,19 @@ pub async fn install_local_wallet(
     }
 
     info!("daemon checked");
+    if ctx.fresh_fork_cube {
+        signer
+            .lock()
+            .unwrap()
+            .store_encrypted_seed_only_for_chain(
+                &ctx.coincube_directory,
+                ctx.bitcoin_config.chain,
+                seed_password(&ctx)?.as_str(),
+                ctx.seed_cube_id(),
+                seed_device_secret(&ctx)?.as_ref(),
+            )
+            .map_err(|e| Error::Unexpected(format!("Failed to store Cube master seed: {}", e)))?;
+    }
 
     // Step needed because of ValueAfterTable error in the toml serialize implementation.
     let daemon_config_toml = toml::to_string_pretty(&cfg.for_persistence())
@@ -1820,6 +1878,13 @@ mod pending_rescan_tests {
             assert!(installer.context.internal_bitcoind.is_none());
             assert!(installer.breez_client.is_none());
             assert!(installer.spark_backend.is_none());
+            assert!(installer.context.fresh_fork_cube);
+            assert!(installer.context.cube_id.is_some());
+            assert!(!installer.context.fresh_fork_seed_backed_up);
+            assert!(
+                !installer.steps[0].skip(&installer.context),
+                "fresh Cube must choose a PIN"
+            );
             assert!(!root.exists(), "construction must not touch a datadir");
             // The public entry still refuses this same chain while dormant.
             assert!(Installer::try_new_for_chain(
@@ -1889,6 +1954,24 @@ mod pending_rescan_tests {
             assert!(require_installable_chain(&context).is_err());
             assert!(!temp.exists());
         }
+    }
+
+    #[test]
+    fn fresh_fork_creation_refuses_missing_pin_identity_or_backup() {
+        let mut ctx = Context::new_for_chain(
+            crate::chain::ChainId::BitcoinBlake2b,
+            CoincubeDirectory::new(Default::default()),
+            RemoteBackend::None,
+            None,
+            None,
+        );
+        ctx.fresh_fork_cube = true;
+        assert!(validate_fork_creation_material(&ctx).is_err());
+        ctx.cube_id = Some("synthetic-new-cube".into());
+        ctx.restore_pin = Some(zeroize::Zeroizing::new("synthetic-pin".into()));
+        assert!(validate_fork_creation_material(&ctx).is_err());
+        ctx.fresh_fork_seed_backed_up = true;
+        assert!(validate_fork_creation_material(&ctx).is_ok());
     }
 
     #[test]

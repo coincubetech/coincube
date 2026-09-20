@@ -82,7 +82,7 @@ impl Step for RestorePinSetupStep {
         // to persist. If `recovered_signer` is absent, this is either
         // W15 (descriptor-only restore into an existing Cube) or a
         // misconfigured flow — either way, a PIN prompt doesn't belong.
-        ctx.recovered_signer.is_none()
+        ctx.recovered_signer.is_none() && !ctx.fresh_fork_cube
     }
 
     fn update(&mut self, _hws: &mut HardwareWallets, message: Message) -> Task<Message> {

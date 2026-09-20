@@ -176,6 +176,38 @@ impl GUI {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        let auth_change = match &message {
+            Message::Pane(
+                _,
+                pane::Message::Tab(
+                    _,
+                    tab::Message::Launch(home::Message::View(home::ViewMessage::ConnectAccount(
+                        msg,
+                    ))),
+                ),
+            )
+            | Message::Pane(
+                _,
+                pane::Message::Tab(
+                    _,
+                    tab::Message::Run(AppMessage::View(crate::app::view::Message::ConnectAccount(
+                        msg,
+                    ))),
+                ),
+            ) => matches!(
+                msg,
+                crate::app::view::ConnectAccountMessage::LogOut
+                    | crate::app::view::ConnectAccountMessage::SetSession(_)
+            ),
+            _ => false,
+        };
+        if auth_change {
+            for (_, pane) in self.panes.iter_mut() {
+                for tab in &mut pane.tabs {
+                    tab.invalidate_fork_session();
+                }
+            }
+        }
         match message {
             // we get this message only once at startup
             Message::Window(id) => {

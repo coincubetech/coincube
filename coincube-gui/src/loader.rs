@@ -92,6 +92,8 @@ pub struct Loader {
     pub wallet_settings: Option<WalletSettings>,
     pub cube_settings: CubeSettings,
     pub breez_client: Option<std::sync::Arc<BreezClient>>,
+    pub connect_client: Option<crate::services::coincube::CoincubeClient>,
+    pub cube_encryption_key: Option<Arc<crate::services::connect::crypto::CubeEncryptionKey>>,
     /// Optional Spark backend loaded alongside `breez_client` in the PIN
     /// flow. `None` when the cube has no Spark signer or when the bridge
     /// subprocess failed to spawn — panels that depend on Spark surface a
@@ -99,6 +101,8 @@ pub struct Loader {
     /// from [`Message::BreezClientLoadedAfterPin`] through
     /// [`Message::BreezLoaded`] into [`app::App::new`].
     pub spark_backend: Option<std::sync::Arc<app::wallets::SparkBackend>>,
+    fork_task: Option<iced::task::Handle>,
+    fork_retry_not_before: Option<std::time::Instant>,
     step: Step,
     quote_provider: QuoteProvider,
     current_quote: Quote,
@@ -184,6 +188,61 @@ impl Loader {
         breez_client: Option<std::sync::Arc<BreezClient>>,
         spark_backend: Option<std::sync::Arc<app::wallets::SparkBackend>>,
     ) -> (Self, Task<Message>) {
+        Self::build(
+            datadir_path,
+            gui_config,
+            network,
+            internal_bitcoind,
+            backup,
+            wallet_settings,
+            cube_settings,
+            breez_client,
+            spark_backend,
+            None,
+            None,
+        )
+    }
+
+    /// Fork startup uses the current authenticated client and the unlocked Cube's
+    /// encryption key, without constructing any Lightning SDK or external node.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_for_chain(
+        datadir_path: CoincubeDirectory,
+        gui_config: GUIConfig,
+        wallet_settings: WalletSettings,
+        cube_settings: CubeSettings,
+        client: crate::services::coincube::CoincubeClient,
+        cube_encryption_key: Arc<crate::services::connect::crypto::CubeEncryptionKey>,
+    ) -> (Self, Task<Message>) {
+        Self::build(
+            datadir_path,
+            gui_config,
+            cube_settings.network.bitcoin_network(),
+            None,
+            None,
+            Some(wallet_settings),
+            cube_settings,
+            None,
+            None,
+            Some(client),
+            Some(cube_encryption_key),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        datadir_path: CoincubeDirectory,
+        gui_config: GUIConfig,
+        network: bitcoin::Network,
+        internal_bitcoind: Option<Bitcoind>,
+        backup: Option<Backup>,
+        wallet_settings: Option<WalletSettings>,
+        cube_settings: CubeSettings,
+        breez_client: Option<Arc<BreezClient>>,
+        spark_backend: Option<Arc<app::wallets::SparkBackend>>,
+        connect_client: Option<crate::services::coincube::CoincubeClient>,
+        cube_encryption_key: Option<Arc<crate::services::connect::crypto::CubeEncryptionKey>>,
+    ) -> (Self, Task<Message>) {
         // A chain this build cannot run is refused here, before the daemon
         // socket is dialled — and its identity must agree with the encoding
         // the caller wants to load under, or the wallet directory, the
@@ -202,11 +261,44 @@ impl Loader {
                     network
                 )))
             }
+            crate::chain::RuntimeSupport::Supported
+                if cube_settings.network.is_blake2b()
+                    && (connect_client.as_ref().and_then(|c| c.token()).is_none()
+                        || cube_encryption_key.is_none()
+                        || internal_bitcoind.is_some()
+                        || breez_client.is_some()
+                        || spark_backend.is_some()
+                        || backup.is_some()
+                        || wallet_settings
+                            .as_ref()
+                            .is_none_or(|w| w.remote_backend_auth.is_some())) =>
+            {
+                Some(Error::Unexpected(
+                    "Bitcoin Blake2b requires an authenticated Connect Vault session".into(),
+                ))
+            }
+            crate::chain::RuntimeSupport::Supported
+                if !cube_settings.network.is_blake2b() && connect_client.is_some() =>
+            {
+                Some(Error::Unexpected(
+                    "The authenticated fork loader requires Bitcoin Blake2b".into(),
+                ))
+            }
             crate::chain::RuntimeSupport::Supported => None,
         };
 
         let task = if refusal.is_some() {
             Task::none()
+        } else if cube_settings.network.is_blake2b() {
+            Task::perform(
+                start_connect_daemon(
+                    datadir_path.clone(),
+                    cube_settings.network,
+                    wallet_settings.clone().expect("validated Vault settings"),
+                    connect_client.clone().expect("validated Connect client"),
+                ),
+                Message::Started,
+            )
         } else if let Some(ref wallet) = wallet_settings {
             let socket_path = datadir_path
                 .network_directory(cube_settings.network)
@@ -216,6 +308,13 @@ impl Loader {
         } else {
             // No vault configured - loader will show setup screen
             Task::none()
+        };
+
+        let (task, fork_task) = if cube_settings.network.is_blake2b() {
+            let (task, handle) = task.abortable();
+            (task, Some(handle.abort_on_drop()))
+        } else {
+            (task, None)
         };
 
         let mut quote_provider = QuoteProvider::new();
@@ -229,6 +328,9 @@ impl Loader {
         (
             Loader {
                 network,
+                fork_retry_not_before: (cube_settings.network.is_blake2b() && refusal.is_none())
+                    .then(|| std::time::Instant::now() + Duration::from_secs(30)),
+                fork_task,
                 datadir_path,
                 gui_config,
                 step: match refusal {
@@ -243,6 +345,8 @@ impl Loader {
                 backup,
                 breez_client,
                 spark_backend,
+                connect_client,
+                cube_encryption_key,
                 quote_provider,
                 current_quote,
                 current_image_handle,
@@ -296,6 +400,9 @@ impl Loader {
     }
 
     fn start_bitcoind(&self) -> bool {
+        if self.cube_settings.network.is_blake2b() {
+            return false;
+        }
         // If the vault's active RPC backend is the app-managed internal
         // bitcoind, always ensure it's running when the cube is opened. This is
         // independent of the `start_internal_bitcoind` flag (which only governs
@@ -333,7 +440,7 @@ impl Loader {
         // If the node is not Bitcoin Core or otherwise the wallet was previously synced (blockheight > 0),
         // load the application directly.
         if daemon.backend().node_type() != Some(NodeType::Bitcoind) || info.block_height > 0 {
-            return Task::perform(
+            let task = Task::perform(
                 load_application(LoadApplicationConfig {
                     wallet_settings,
                     cube_settings: self.cube_settings.clone(),
@@ -346,6 +453,12 @@ impl Loader {
                 }),
                 Message::Synced,
             );
+            if self.cube_settings.network.is_blake2b() {
+                let (task, handle) = task.abortable();
+                self.fork_task = Some(handle.abort_on_drop());
+                return task;
+            }
+            return task;
         }
         // Otherwise, show the sync progress on the loading screen.
         self.step = Step::Syncing {
@@ -419,6 +532,12 @@ impl Loader {
     }
 
     fn on_start(&mut self, res: StartedResult) -> Task<Message> {
+        if self.cube_settings.network.is_blake2b() && self.connect_client.is_none() {
+            if let Ok((daemon, _, _)) = res {
+                daemon.invalidate_connect_session();
+            }
+            return Task::none();
+        }
         match res {
             Ok((daemon, bitcoind, info)) => {
                 // bitcoind may have been already started and given to the loader
@@ -480,7 +599,27 @@ impl Loader {
         }
     }
 
+    pub fn invalidate_fork_session(&mut self) {
+        if !self.cube_settings.network.is_blake2b() {
+            return;
+        }
+        if let Step::Syncing { daemon, .. } = &self.step {
+            daemon.invalidate_connect_session();
+        }
+        if let Some(handle) = self.fork_task.take() {
+            handle.abort();
+        }
+        self.connect_client = None;
+        self.cube_encryption_key = None;
+        self.step = Step::Error(Box::new(Error::Unexpected(
+            "Connect session changed; reopen this Cube".into(),
+        )));
+    }
+
     pub fn stop(&mut self) {
+        if let Some(handle) = self.fork_task.take() {
+            handle.abort();
+        }
         info!("Close requested");
         if let Step::Syncing { daemon, .. } = &mut self.step {
             if daemon.backend().is_embedded() {
@@ -499,13 +638,26 @@ impl Loader {
             bitcoind.stop();
         }
         // Stop the managed Tor daemon (if inbound-over-Tor was running).
-        crate::node::tor::stop_managed_tor();
+        if !self.cube_settings.network.is_blake2b() {
+            crate::node::tor::stop_managed_tor();
+        }
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::View(ViewMessage::Retry) => {
-                let (loader, cmd) = Self::new(
+                if self.cube_settings.network.is_blake2b() {
+                    if let Some(deadline) = self.fork_retry_not_before {
+                        let remaining =
+                            deadline.saturating_duration_since(std::time::Instant::now());
+                        if !remaining.is_zero() {
+                            self.step = Step::Error(Box::new(Error::Unexpected(format!(
+                                "Connect startup can be retried in {} seconds. Wait for the backend to be ready, then Retry.", remaining.as_secs() + 1))));
+                            return Task::none();
+                        }
+                    }
+                }
+                let (loader, cmd) = Self::build(
                     self.datadir_path.clone(),
                     self.gui_config.clone(),
                     self.network,
@@ -515,6 +667,8 @@ impl Loader {
                     self.cube_settings.clone(),
                     self.breez_client.clone(),
                     self.spark_backend.clone(),
+                    self.connect_client.clone(),
+                    self.cube_encryption_key.clone(),
                 );
                 *self = loader;
                 cmd
@@ -951,6 +1105,49 @@ fn backend_is_internal_bitcoind(config_path: &Path, internal_datadir: &Path) -> 
     }
 }
 
+/// Dedicated authenticated fork restart path: no external socket, config
+/// migration, managed node, or fallback backend is attempted.
+async fn start_connect_daemon(
+    root: CoincubeDirectory,
+    chain: crate::chain::ChainId,
+    settings: WalletSettings,
+    client: crate::services::coincube::CoincubeClient,
+) -> StartedResult {
+    if let crate::chain::RuntimeSupport::Dormant { reason } = chain.runtime_support() {
+        return Err(Error::ChainUnavailable(reason));
+    }
+    if !chain.is_blake2b() || client.token().is_none() || settings.remote_backend_auth.is_some() {
+        return Err(Error::Unexpected(
+            "Authenticated Connect fork Vault required".into(),
+        ));
+    }
+    let expected_dir = root
+        .network_directory(chain)
+        .coincubed_data_directory(&settings.wallet_id());
+    let cfg =
+        Config::from_file(Some(expected_dir.path().join("daemon.toml"))).map_err(Error::Config)?;
+    if cfg.bitcoin_config.chain != chain {
+        return Err(Error::ChainMismatch {
+            cube: chain,
+            config: cfg.bitcoin_config.chain,
+        });
+    }
+    let expected =
+        std::path::absolute(expected_dir.path()).map_err(|e| Error::Unexpected(e.to_string()))?;
+    if cfg.data_directory().is_none_or(|d| d.path() != expected) {
+        return Err(Error::Unexpected(
+            "Connect daemon datadir differs from this Cube".into(),
+        ));
+    }
+    let daemon = Arc::new(
+        EmbeddedDaemon::start_authenticated(cfg, client)
+            .await
+            .map_err(Error::Daemon)?,
+    );
+    let info = daemon.get_info().await.map_err(Error::Daemon)?;
+    Ok((daemon, None, info))
+}
+
 pub async fn start_bitcoind_and_daemon(
     coincube_datadir_path: CoincubeDirectory,
     start_internal_bitcoind: bool,
@@ -1353,6 +1550,43 @@ mod tests {
             None,
         )
         .0
+    }
+
+    #[test]
+    fn fork_retry_is_user_triggered_and_rate_bounded() {
+        let mut loader = loader_without_wallet(false);
+        loader.cube_settings.network = crate::chain::ChainId::BitcoinBlake2b;
+        loader.fork_retry_not_before = Some(std::time::Instant::now() + Duration::from_secs(30));
+        let _ = loader.update(Message::View(ViewMessage::Retry));
+        assert!(
+            matches!(&loader.step, Step::Error(error) if error.to_string().contains("retried in"))
+        );
+        assert!(loader.fork_task.is_none());
+        assert!(!loader.daemon_started);
+    }
+
+    #[test]
+    fn fork_invalidation_clears_pending_auth_and_encryption_key() {
+        let mut loader = loader_without_wallet(false);
+        loader.cube_settings.network = crate::chain::ChainId::BitcoinBlake2b;
+        let mut client = crate::services::coincube::CoincubeClient::for_test("http://127.0.0.1:1");
+        client.set_token("synthetic-token");
+        loader.connect_client = Some(client);
+        let signer =
+            coincube_core::signer::MasterSigner::generate(bitcoin::Network::Bitcoin).unwrap();
+        loader.cube_encryption_key = Some(Arc::new(
+            crate::services::connect::crypto::CubeEncryptionKey::derive(
+                &signer,
+                bitcoin::Network::Bitcoin,
+            ),
+        ));
+        loader.invalidate_fork_session();
+        assert!(loader.connect_client.is_none());
+        assert!(loader.cube_encryption_key.is_none());
+        let _ = loader.on_start(Err(Error::Unexpected("late startup".into())));
+        assert!(
+            matches!(&loader.step, Step::Error(error) if error.to_string().contains("session changed"))
+        );
     }
 
     #[test]
