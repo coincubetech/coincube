@@ -376,9 +376,26 @@ impl MasterSigner {
         cube_id: &str,
         vault_only: bool,
     ) -> Result<Vec<Self>, SignerError> {
+        Self::from_datadir_with_password_filtered_for_chain(
+            datadir_root,
+            network.into(),
+            password,
+            cube_id,
+            vault_only,
+        )
+    }
+
+    /// Read only the selected chain directory, retaining the legacy filtering rules.
+    pub fn from_datadir_with_password_filtered_for_chain(
+        datadir_root: &path::Path,
+        chain: crate::chain::ChainId,
+        password: Option<&str>,
+        cube_id: &str,
+        vault_only: bool,
+    ) -> Result<Vec<Self>, SignerError> {
         let mut signers = Vec::new();
 
-        let mnemonics_folder = Self::mnemonics_folder(datadir_root, network);
+        let mnemonics_folder = Self::mnemonics_folder_for_chain(datadir_root, chain);
         let mnemonic_paths =
             fs::read_dir(mnemonics_folder).map_err(SignerError::MnemonicStorage)?;
 
@@ -403,7 +420,7 @@ impl MasterSigner {
             }
             let mnemonic_str = Self::read_mnemonic_bytes(data, password, cube_id)?;
 
-            signers.push(Self::from_str(network, &mnemonic_str)?);
+            signers.push(Self::from_str(chain.bitcoin_network(), &mnemonic_str)?);
         }
 
         Ok(signers)
