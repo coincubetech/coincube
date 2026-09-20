@@ -802,6 +802,7 @@ pub struct ConnectAccountPanel {
     // potentially unrelated saved credentials from the global keyring.
     admitted_client: bool,
     admitted_user_loading: bool,
+    admitted_reopen_required: bool,
 
     pub step: ConnectFlowStep,
     pub active_sub: ConnectSubMenu,
@@ -887,6 +888,7 @@ impl ConnectAccountPanel {
         ConnectAccountPanel {
             admitted_client: false,
             admitted_user_loading: false,
+            admitted_reopen_required: false,
             step: ConnectFlowStep::CheckingSession,
             active_sub: ConnectSubMenu::Overview,
             client: CoincubeClient::new(),
@@ -1084,17 +1086,21 @@ impl ConnectAccountPanel {
     pub fn revoke_admitted_client(&mut self) {
         if self.admitted_client {
             self.clear_session();
-            self.step = ConnectFlowStep::Login {
-                email: String::new(),
-                loading: false,
-            };
         }
+        // App calls this after auth failure too, when clear_session has already
+        // dropped the admitted flag. Revocation is sticky for this Cube instance.
+        self.admitted_reopen_required = true;
+    }
+
+    pub fn requires_authenticated_reopen(&self) -> bool {
+        self.admitted_reopen_required
     }
 
     pub fn install_admitted_client(&mut self, client: CoincubeClient) {
         self.session_generation = self.session_generation.wrapping_add(1);
         self.client = client;
         self.admitted_client = true;
+        self.admitted_reopen_required = false;
         self.admitted_user_loading = false;
         self.user = None;
         self.plan = None;
@@ -1105,7 +1111,7 @@ impl ConnectAccountPanel {
     /// Returns a clone of the authenticated client (with JWT set).
     /// Used by ConnectCubePanel to make API calls.
     pub fn authenticated_client(&self) -> Option<CoincubeClient> {
-        if self.user.is_some() || self.admitted_client {
+        if !self.admitted_reopen_required && (self.user.is_some() || self.admitted_client) {
             Some(self.client.clone())
         } else {
             None
@@ -1113,7 +1119,7 @@ impl ConnectAccountPanel {
     }
 
     pub fn is_authenticated(&self) -> bool {
-        matches!(self.step, ConnectFlowStep::Dashboard)
+        !self.admitted_reopen_required && matches!(self.step, ConnectFlowStep::Dashboard)
     }
 
     /// Returns `true` if a Connect session is stored in the OS keyring
@@ -1266,6 +1272,35 @@ impl ConnectAccountPanel {
     }
 
     pub fn update_message(&mut self, msg: ConnectAccountMessage) -> iced::Task<Message> {
+        if self.admitted_reopen_required {
+            return iced::Task::none();
+        }
+        if self.admitted_client
+            && matches!(
+                &msg,
+                ConnectAccountMessage::RefreshSession { .. }
+                    | ConnectAccountMessage::SetSession(_)
+                    | ConnectAccountMessage::SessionLoaded { .. }
+                    | ConnectAccountMessage::EmailChanged(_)
+                    | ConnectAccountMessage::SubmitLogin
+                    | ConnectAccountMessage::SubmitRegistration
+                    | ConnectAccountMessage::CreateAccount
+                    | ConnectAccountMessage::OtpRequested { .. }
+                    | ConnectAccountMessage::OtpChanged(_)
+                    | ConnectAccountMessage::ResendOtp
+                    | ConnectAccountMessage::VerifyOtp
+                    | ConnectAccountMessage::EmailNotVerified { .. }
+            )
+        {
+            // A replacement login needs backend admission, not merely a new
+            // panel token. Refuse before OTP I/O or global keyring persistence.
+            self.revoke_admitted_client();
+            return iced::Task::none();
+        }
+        self.dispatch_message(msg)
+    }
+
+    fn dispatch_message(&mut self, msg: ConnectAccountMessage) -> iced::Task<Message> {
         match msg {
             ConnectAccountMessage::Init => {
                 if self.admitted_client {
@@ -1342,7 +1377,7 @@ impl ConnectAccountPanel {
                 self.admitted_user_loading = false;
                 match user {
                     Ok(user) => {
-                        return self.update_message(ConnectAccountMessage::SessionLoaded {
+                        return self.dispatch_message(ConnectAccountMessage::SessionLoaded {
                             user,
                             plan: None,
                         })
