@@ -2587,7 +2587,9 @@ impl App {
         // repaired during startup, long before any of this existed to say so. The
         // sidecar carried the fact across; collect it here, where there is finally
         // a UI to show it in. Self-clearing, so it appears exactly once.
-        if crate::node::revalidate::ManagedNodeState::take_repair_notice(&data_dir) {
+        if !cache.chain().is_blake2b()
+            && crate::node::revalidate::ManagedNodeState::take_repair_notice(&data_dir)
+        {
             tasks.push(Task::done(Message::View(view::Message::ShowToast(
                 log::Level::Info,
                 crate::node::revalidate::CHAIN_REPAIRED_NOTICE.to_string(),
@@ -5505,7 +5507,7 @@ impl App {
                     let changed = current.as_ref().is_some_and(|current| {
                         current.base_url != bound.base_url || current.token() != bound.token()
                     });
-                    if explicit_logout || changed || (was_authenticated && current.is_none()) {
+                    if explicit_logout || changed || current.is_none() {
                         self.invalidate_fork_session();
                     }
                 }
@@ -6533,6 +6535,14 @@ impl App {
                 daemon.invalidate_connect_session();
             }
             self.fork_connect_client = None;
+            self.panels.connect.revoke_admitted_client();
+            self.cache.has_connect_session = false;
+            self.cache.connect_authenticated = false;
+            self.cache.connect_tokens = None;
+            self.cache.connect_email = None;
+            self.connect_auth = None;
+            self.connect_email = None;
+            self.connect_stream_config = None;
             self.cache.cube_encryption_key = None;
             self.cache.clear_btcb2_fiat();
         }
@@ -7064,80 +7074,146 @@ mod tests {
         use httpmock::prelude::*;
         use iced::futures::StreamExt;
         use std::str::FromStr;
-        let server = MockServer::start_async().await;
-        let user = server.mock_async(|when, then| {
+        for status in [200, 401, 503] {
+            let server = MockServer::start_async().await;
+            let user = server.mock_async(|when, then| {
             when.method(GET).path("/api/v1/user").header("authorization", "Bearer admitted-fixture");
-            then.status(200).json_body(serde_json::json!({"id":7,"email":"fixture@example.invalid","email_verified":true}));
+            then.status(status).json_body(serde_json::json!({"id":7,"email":"fixture@example.invalid","email_verified":true}));
         }).await;
-        let mut client = crate::services::coincube::CoincubeClient::new();
-        client.base_url = server.base_url();
-        client.set_token("admitted-fixture");
-        let chain = crate::chain::ChainId::BitcoinBlake2bTestnet4;
-        let desc = coincube_core::descriptors::CoincubeDescriptor::from_str(
+            let mut client = crate::services::coincube::CoincubeClient::new();
+            client.base_url = server.base_url();
+            client.set_token("admitted-fixture");
+            let chain = crate::chain::ChainId::BitcoinBlake2bTestnet4;
+            let desc = coincube_core::descriptors::CoincubeDescriptor::from_str(
             "wsh(or_d(pk([f5acc2fd]tpubD6NzVbkrYhZ4YgUx2ZLNt2rLYAMTdYysCRzKoLu2BeSHKvzqPaBDvf17GeBPnExUVPkuBpx4kniP964e2MxyzzazcXLptxLXModSVCVEV1T/<0;1>/*),and_v(v:pkh([8a64f2a9]tpubD6NzVbkrYhZ4WmzFjvQrp7sDa4ECUxTi9oby8K4FZkd3XCBtEdKwUiQyYJaxiJo5y42gyDWEczrFpozEjeLxMPxjf2WtkfcbpUdfvNnozWF/<0;1>/*),older(10))))#d72le4dr"
         ).unwrap();
-        let root =
-            std::env::temp_dir().join(format!("coincube-app-handoff-{}", uuid::Uuid::new_v4()));
-        let endpoint = format!(
-            "{}/api/v1/esplora/bitcoin-blake2b/testnet4",
-            server.base_url()
-        );
-        let cfg: coincubed::config::Config = toml::from_str(&format!(
+            let root =
+                std::env::temp_dir().join(format!("coincube-app-handoff-{}", uuid::Uuid::new_v4()));
+            let endpoint = format!(
+                "{}/api/v1/esplora/bitcoin-blake2b/testnet4",
+                server.base_url()
+            );
+            let cfg: coincubed::config::Config = toml::from_str(&format!(
             "main_descriptor = '{}'\ndata_directory = '{}'\n[bitcoin_config]\nnetwork = '{}'\n[esplora_config]\naddr = '{}'\n", desc,root.display(),chain.api_str(),endpoint
         )).unwrap();
-        // A GUI-only handoff fixture: no running daemon or live admission is claimed.
-        let daemon = Arc::new(EmbeddedDaemon::unstarted_for_test(cfg));
-        let cache = Cache {
-            fiat_chain: chain,
-            network: chain.bitcoin_network(),
-            ..Cache::default()
-        };
-        let settings = settings::CubeSettings::new("Fixture".into(), chain);
-        let (mut app, startup_tasks) = App::new_for_chain(
-            cache,
-            Arc::new(Wallet::new(desc).with_chain(chain)),
-            None,
-            client.clone(),
-            Config::new(false),
-            daemon,
-            CoincubeDirectory::new(root.clone()),
-            settings,
-        )
-        .unwrap();
-        drop(startup_tasks);
-        assert!(app.breez_client().is_none());
-        assert!(app.spark_backend().is_none());
-        assert!(app.wallet_registry.route_lightning_address().is_none());
-        assert!(app.cache.has_connect_session);
-        let cube_client = app.panels.connect.cube.client.as_ref().unwrap();
-        assert_eq!(cube_client.base_url, server.base_url());
-        assert_eq!(cube_client.token(), Some("admitted-fixture"));
-        let handed = app.panels.connect.account.authenticated_client().unwrap();
-        assert_eq!(handed.base_url, server.base_url());
-        assert_eq!(handed.token(), Some("admitted-fixture"));
-        let task = app
-            .panels
-            .connect
-            .account
-            .update_message(view::ConnectAccountMessage::Init);
-        let mut stream = iced_runtime::task::into_stream(task).unwrap();
-        while let Some(action) = stream.next().await {
-            if let iced_runtime::Action::Output(Message::View(view::Message::ConnectAccount(
-                message,
-            ))) = action
-            {
-                let _ = app.panels.connect.account.update_message(message);
+            // A GUI-only handoff fixture: no running daemon or live admission is claimed.
+            server.mock_async(|when, then| {
+            when.method(GET).path("/api/v1/connect/networks/bitcoin-blake2b-testnet4/anchor");
+            then.status(200).json_body(serde_json::json!({"success":true,"data":{
+                "network":"bitcoin-blake2b-testnet4","state":"available","anchor":{
+                    "tip_hash":"11".repeat(32),"tip_height":973029,"tip_median_time_past":1800000000,
+                    "observed_at":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
+                    "observation":{"tip_height":973029,"fork":{"height":972000,"active":true},
+                        "rdts":{"state":"flagday","flagday":{"height":972000,"expiry_time":1800010000_i64,"active":false}}}
+                }}}));
+        }).await;
+            let (_, authority) = client
+                .authenticated_backend(chain, &endpoint)
+                .await
+                .unwrap();
+            use coincubed::connect::ConnectAnchorAuthority;
+            assert!(authority.fresh_anchor().is_ok());
+            let daemon = Arc::new(EmbeddedDaemon::unstarted_for_test(
+                cfg,
+                Some(authority.clone()),
+            ));
+            let cache = Cache {
+                fiat_chain: chain,
+                network: chain.bitcoin_network(),
+                ..Cache::default()
+            };
+            let settings = settings::CubeSettings::new("Fixture".into(), chain);
+            let (mut app, startup_tasks) = App::new_for_chain(
+                cache,
+                Arc::new(Wallet::new(desc).with_chain(chain)),
+                None,
+                client.clone(),
+                Config::new(false),
+                daemon,
+                CoincubeDirectory::new(root.clone()),
+                settings,
+            )
+            .unwrap();
+            drop(startup_tasks);
+            assert!(app.breez_client().is_none());
+            assert!(app.spark_backend().is_none());
+            assert!(app.wallet_registry.route_lightning_address().is_none());
+            assert!(app.cache.has_connect_session);
+            let cube_client = app.panels.connect.cube.client.as_ref().unwrap();
+            assert_eq!(cube_client.base_url, server.base_url());
+            assert_eq!(cube_client.token(), Some("admitted-fixture"));
+            let handed = app.panels.connect.account.authenticated_client().unwrap();
+            assert_eq!(handed.base_url, server.base_url());
+            assert_eq!(handed.token(), Some("admitted-fixture"));
+            let task = app
+                .panels
+                .connect
+                .account
+                .update_message(view::ConnectAccountMessage::Init);
+            let mut stream = iced_runtime::task::into_stream(task).unwrap();
+            while let Some(action) = stream.next().await {
+                if let iced_runtime::Action::Output(Message::View(view::Message::ConnectAccount(
+                    message,
+                ))) = action
+                {
+                    let _ = app.update(Message::View(view::Message::ConnectAccount(message)));
+                }
             }
-        }
-        user.assert_async().await;
-        assert_eq!(app.panels.connect.account.user.as_ref().unwrap().id, 7);
-        let handed = app.panels.connect.account.authenticated_client().unwrap();
-        assert_eq!(handed.base_url, client.base_url);
-        assert_eq!(handed.token(), client.token());
-        assert!(!root.join("bitcoin").exists());
-        drop(app);
-        if root.exists() {
-            std::fs::remove_dir_all(root).unwrap();
+            user.assert_hits_async(1).await;
+            if status == 401 {
+                assert!(app.fork_connect_client.is_none());
+                assert!(app.panels.connect.account.authenticated_client().is_none());
+                assert_eq!(
+                    authority.fresh_anchor(),
+                    Err(coincubed::connect::AdmissionError::Unavailable)
+                );
+            } else {
+                let handed = app.panels.connect.account.authenticated_client().unwrap();
+                assert_eq!(handed.base_url, client.base_url);
+                assert_eq!(handed.token(), client.token());
+                assert!(authority.fresh_anchor().is_ok());
+                if status == 200 {
+                    assert_eq!(app.panels.connect.account.user.as_ref().unwrap().id, 7);
+                } else {
+                    assert!(app.panels.connect.account.error.is_some());
+                    let retry = app.update(Message::View(view::Message::ConnectAccount(
+                        view::ConnectAccountMessage::Retry(view::RetryAction::Session),
+                    )));
+                    let mut stream = iced_runtime::task::into_stream(retry).unwrap();
+                    while let Some(action) = stream.next().await {
+                        if let iced_runtime::Action::Output(Message::View(
+                            view::Message::ConnectAccount(message),
+                        )) = action
+                        {
+                            let _ =
+                                app.update(Message::View(view::Message::ConnectAccount(message)));
+                        }
+                    }
+                    user.assert_hits_async(2).await;
+                    assert_eq!(
+                        app.panels
+                            .connect
+                            .account
+                            .authenticated_client()
+                            .unwrap()
+                            .token(),
+                        client.token()
+                    );
+                }
+            }
+            app.invalidate_fork_session();
+            assert!(!app.cache.has_connect_session);
+            assert!(app.panels.connect.account.authenticated_client().is_none());
+            assert!(app.panels.connect.cube.client.is_none());
+            assert_eq!(
+                authority.fresh_anchor(),
+                Err(coincubed::connect::AdmissionError::Unavailable)
+            );
+            assert!(!root.join("bitcoin").exists());
+            drop(app);
+            if root.exists() {
+                std::fs::remove_dir_all(root).unwrap();
+            }
         }
     }
 

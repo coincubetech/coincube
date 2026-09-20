@@ -216,6 +216,11 @@ impl ConnectPanel {
             .set_active_cube_server_id(self.cube.server_cube_id);
     }
 
+    pub fn revoke_admitted_client(&mut self) {
+        self.account.revoke_admitted_client();
+        self.cube.clear_client();
+    }
+
     pub fn install_admitted_client(&mut self, client: crate::services::coincube::CoincubeClient) {
         self.account.install_admitted_client(client.clone());
         self.cube.set_client(client);
