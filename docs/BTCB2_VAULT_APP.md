@@ -35,3 +35,9 @@ This boundary alone does not activate the runtime gate. Authenticated unlock,
 create/reopen workflow evidence, exact-head review and dedicated live indexer
 acceptance are separate launch gates. Claim/Split, LAN pairing and unsupported
 external signers remain gated.
+
+The admitted client is installed into both Connect account and Cube consumers
+before the initialization task runs. Its bootstrap loads user information from
+that exact endpoint/token and never restores a saved keyring session. Late user
+responses are generation-checked. Both generic App constructors return a typed
+refusal for fork Cube settings; a seed-only fork App cannot be constructed.

@@ -161,12 +161,15 @@ impl ConnectPanel {
             .set_active_cube_server_id(self.cube.server_cube_id);
     }
 
+    pub fn install_admitted_client(&mut self, client: crate::services::coincube::CoincubeClient) {
+        self.account.install_admitted_client(client.clone());
+        self.cube.set_client(client);
+    }
+
     /// Sync the authenticated client from account panel to cube panel.
     fn sync_client(&mut self) {
-        if self.account.is_authenticated() {
-            if let Some(client) = self.account.authenticated_client() {
-                self.cube.set_client(client);
-            }
+        if let Some(client) = self.account.authenticated_client() {
+            self.cube.set_client(client);
         } else {
             self.cube.clear_client();
         }
