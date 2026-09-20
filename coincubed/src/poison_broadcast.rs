@@ -14,6 +14,7 @@ pub enum SubmissionError {
     BackendUnavailable,
     GateMismatch,
     Revoked,
+    Expired,
     AlreadyStarted,
     /// The backend may have accepted the transaction before returning an error.
     /// Reconcile this exact txid/wtxid; never silently retry or replace it.
@@ -30,6 +31,7 @@ impl std::fmt::Display for SubmissionError {
                 f.write_str("Bitcoin backend is unavailable before submission")
             }
             Self::GateMismatch => f.write_str("Submission gate belongs to another transaction"),
+            Self::Expired => f.write_str("Submission evidence expired before transport started"),
             Self::Revoked => f.write_str("Submission was revoked before transport started"),
             Self::AlreadyStarted => f.write_str("Submission gate was already consumed"),
             Self::DescriptorMismatch => {
@@ -55,12 +57,14 @@ pub enum SubmissionState {
     Pending,
     Revoked,
     Started,
+    Expired,
 }
 fn state(value: u8) -> SubmissionState {
     match value {
         0 => SubmissionState::Pending,
         1 => SubmissionState::Revoked,
-        _ => SubmissionState::Started,
+        2 => SubmissionState::Started,
+        _ => SubmissionState::Expired,
     }
 }
 /// One-use, transaction-bound transport gate. No reset or deserialization.
@@ -70,6 +74,7 @@ pub struct SubmissionGate {
     chain: ChainId,
     txid: Txid,
     wtxid: Wtxid,
+    not_after: std::time::Instant,
     #[cfg(test)]
     before_lock: Option<Arc<std::sync::Barrier>>,
 }
@@ -79,7 +84,11 @@ pub struct SubmissionRevoker {
     state: Arc<AtomicU8>,
 }
 impl SubmissionGate {
-    pub fn new(verified: &VerifiedPoisonTransfer) -> (Self, SubmissionRevoker) {
+    /// Required caller deadline; no default and no transport-defined freshness.
+    pub fn new(
+        verified: &VerifiedPoisonTransfer,
+        not_after: std::time::Instant,
+    ) -> (Self, SubmissionRevoker) {
         let state = Arc::new(AtomicU8::new(0));
         (
             Self {
@@ -87,6 +96,7 @@ impl SubmissionGate {
                 chain: verified.chain(),
                 txid: verified.transaction().compute_txid(),
                 wtxid: verified.transaction().compute_wtxid(),
+                not_after,
                 #[cfg(test)]
                 before_lock: None,
             },
@@ -97,20 +107,25 @@ impl SubmissionGate {
         state(self.state.load(Ordering::SeqCst))
     }
     fn enter(&self) -> Result<(), SubmissionError> {
-        self.state
-            .compare_exchange(0, 2, Ordering::SeqCst, Ordering::SeqCst)
-            .map(|_| ())
-            .map_err(|value| {
-                if value == 1 {
-                    SubmissionError::Revoked
-                } else {
-                    SubmissionError::AlreadyStarted
-                }
-            })
+        // The caller supplies a conservative monotonic lifetime from its
+        // evidence. Queue time consumes it; the transport invents no duration.
+        let expired = std::time::Instant::now() >= self.not_after;
+        let next = if expired { 3 } else { 2 };
+        match self
+            .state
+            .compare_exchange(0, next, Ordering::SeqCst, Ordering::SeqCst)
+        {
+            Ok(_) if expired => Err(SubmissionError::Expired),
+            Ok(_) => Ok(()),
+            Err(1) => Err(SubmissionError::Revoked),
+            Err(3) => Err(SubmissionError::Expired),
+            Err(_) => Err(SubmissionError::AlreadyStarted),
+        }
     }
 }
 impl SubmissionRevoker {
-    /// Returns Revoked when cancellation won, or Started when transport may run.
+    /// Returns Revoked when cancellation won, Started when transport may run,
+    /// or Expired when a previous entry attempt already refused the deadline.
     pub fn revoke(&self) -> SubmissionState {
         match self
             .state

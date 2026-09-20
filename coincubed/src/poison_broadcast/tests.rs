@@ -150,7 +150,14 @@ fn exact_final_witness_bytes_are_submitted_once_without_database_or_poller() {
     let wtxid = verified.transaction().compute_wtxid();
     assert_ne!(txid.to_string(), wtxid.to_string());
     assert_eq!(
-        daemon.submit_verified_poison(&verified, &SubmissionGate::new(&verified).0),
+        daemon.submit_verified_poison(
+            &verified,
+            &SubmissionGate::new(
+                &verified,
+                std::time::Instant::now() + Duration::from_secs(60)
+            )
+            .0
+        ),
         Ok(SubmissionOutcome::UpstreamAccepted { txid, wtxid })
     );
     let backend = backend.lock().unwrap();
@@ -173,8 +180,14 @@ fn binding_refusals_make_no_call_and_transport_failure_is_uncertain() {
     let backend = Arc::new(Mutex::new(DummyBitcoind::new()));
     for chain in [ChainId::BitcoinBlake2b, ChainId::Testnet4, ChainId::Testnet] {
         assert_eq!(
-            control(chain, built.descriptor().clone(), backend.clone())
-                .submit_verified_poison(&verified, &SubmissionGate::new(&verified).0),
+            control(chain, built.descriptor().clone(), backend.clone()).submit_verified_poison(
+                &verified,
+                &SubmissionGate::new(
+                    &verified,
+                    std::time::Instant::now() + Duration::from_secs(60)
+                )
+                .0
+            ),
             Err(SubmissionError::UnsupportedChain)
         );
     }
@@ -187,7 +200,14 @@ fn binding_refusals_make_no_call_and_transport_failure_is_uncertain() {
             built.descriptor().clone(),
             backend.clone()
         )
-        .submit_verified_poison(&testnet, &SubmissionGate::new(&testnet).0),
+        .submit_verified_poison(
+            &testnet,
+            &SubmissionGate::new(
+                &testnet,
+                std::time::Instant::now() + Duration::from_secs(60)
+            )
+            .0
+        ),
         Err(SubmissionError::UnsupportedChain)
     );
     // A structurally valid but different recovery delay is a different wallet.
@@ -203,8 +223,14 @@ fn binding_refusals_make_no_call_and_transport_failure_is_uncertain() {
     .unwrap();
     assert_ne!(&other, built.descriptor());
     assert_eq!(
-        control(ChainId::Bitcoin, other, backend.clone())
-            .submit_verified_poison(&verified, &SubmissionGate::new(&verified).0),
+        control(ChainId::Bitcoin, other, backend.clone()).submit_verified_poison(
+            &verified,
+            &SubmissionGate::new(
+                &verified,
+                std::time::Instant::now() + Duration::from_secs(60)
+            )
+            .0
+        ),
         Err(SubmissionError::DescriptorMismatch)
     );
     assert!(backend
@@ -222,7 +248,14 @@ fn binding_refusals_make_no_call_and_transport_failure_is_uncertain() {
         backend.clone(),
     );
     assert_eq!(
-        daemon.submit_verified_poison(&verified, &SubmissionGate::new(&verified).0),
+        daemon.submit_verified_poison(
+            &verified,
+            &SubmissionGate::new(
+                &verified,
+                std::time::Instant::now() + Duration::from_secs(60)
+            )
+            .0
+        ),
         Err(SubmissionError::Uncertain {
             txid: verified.transaction().compute_txid(),
             wtxid: verified.transaction().compute_wtxid()
@@ -240,7 +273,10 @@ fn revocation_while_waiting_for_backend_lock_prevents_submission() {
         &secp256k1::Secp256k1::verification_only(),
     )
     .unwrap();
-    let (mut gate, revoker) = SubmissionGate::new(&verified);
+    let (mut gate, revoker) = SubmissionGate::new(
+        &verified,
+        std::time::Instant::now() + Duration::from_secs(60),
+    );
     let barrier = Arc::new(std::sync::Barrier::new(2));
     gate.before_lock = Some(barrier.clone()); // test-only rendezvous before lock acquisition
     let backend = Arc::new(Mutex::new(DummyBitcoind::new()));
@@ -278,7 +314,10 @@ fn gates_bind_witness_identity_and_cannot_be_reused_or_reset() {
         verified.transaction().compute_wtxid(),
         alternate.transaction().compute_wtxid()
     );
-    let (gate, revoker) = SubmissionGate::new(&verified);
+    let (gate, revoker) = SubmissionGate::new(
+        &verified,
+        std::time::Instant::now() + Duration::from_secs(60),
+    );
     let backend = Arc::new(Mutex::new(DummyBitcoind::new()));
     let daemon = control(
         ChainId::Bitcoin,
@@ -309,7 +348,10 @@ fn poisoned_backend_lock_refuses_without_consuming_gate_or_calling_transport() {
         &secp256k1::Secp256k1::verification_only(),
     )
     .unwrap();
-    let (gate, _) = SubmissionGate::new(&verified);
+    let (gate, _) = SubmissionGate::new(
+        &verified,
+        std::time::Instant::now() + Duration::from_secs(60),
+    );
     let backend = Arc::new(Mutex::new(DummyBitcoind::new()));
     let poisoned = backend.clone();
     assert!(std::thread::spawn(move || {
@@ -337,4 +379,48 @@ fn poisoned_backend_lock_refuses_without_consuming_gate_or_calling_transport() {
         .lock()
         .unwrap()
         .is_empty());
+}
+
+#[test]
+fn deadline_expiring_behind_backend_lock_prevents_submission_and_reuse() {
+    let (built, signers) = fixture(ChainId::Bitcoin, false);
+    let verified = Arc::new(
+        finalize_poison_transfer(
+            &built,
+            &sign(&built, &signers[..2]),
+            &secp256k1::Secp256k1::verification_only(),
+        )
+        .unwrap(),
+    );
+    let deadline = std::time::Instant::now() + Duration::from_millis(50);
+    let (mut gate, revoker) = SubmissionGate::new(&verified, deadline);
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    gate.before_lock = Some(barrier.clone());
+    let gate = Arc::new(gate);
+    let backend = Arc::new(Mutex::new(DummyBitcoind::new()));
+    let daemon = control(
+        ChainId::Bitcoin,
+        built.descriptor().clone(),
+        backend.clone(),
+    );
+    let locked = backend.lock().unwrap();
+    let worker = daemon.clone();
+    let worker_gate = gate.clone();
+    let worker_tx = verified.clone();
+    let task = std::thread::spawn(move || worker.submit_verified_poison(&worker_tx, &worker_gate));
+    barrier.wait();
+    std::thread::sleep(deadline.saturating_duration_since(std::time::Instant::now()));
+    drop(locked);
+    assert_eq!(task.join().unwrap(), Err(SubmissionError::Expired));
+    assert_eq!(gate.state(), SubmissionState::Expired);
+    assert_eq!(revoker.revoke(), SubmissionState::Expired);
+    assert!(backend
+        .lock()
+        .unwrap()
+        .broadcasted
+        .lock()
+        .unwrap()
+        .is_empty());
+    // Exercise one-use terminal expiry without the test-only lock rendezvous.
+    assert_eq!(gate.enter(), Err(SubmissionError::Expired));
 }

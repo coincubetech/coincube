@@ -35,7 +35,7 @@ and no local GUI runtime/keyring tests are authorized.
 
 ## Revocation and the start boundary
 
-`SubmissionGate::new(&verified)` returns a one-use transaction-bound gate and a
+`SubmissionGate::new(&verified, not_after)` returns a one-use transaction-bound gate and a
 cloneable `SubmissionRevoker`. Neither is authorization. The coordinator keeps
 the gate private, binds its own context/generation and journals intent first,
 then revokes on logout/provider/context changes. Gate identity includes chain,
@@ -54,3 +54,10 @@ moves Arc-owned immutable artifact/gate into a blocking worker. Synchronous
 backend waits cannot block the executor's revocation task. Join failure is
 conservatively uncertain; a poisoned backend mutex refuses before gate entry.
 The generic daemon command and ordinary Bitcoin broadcast paths are unchanged.
+
+`not_after` is a required caller-supplied monotonic Instant computed
+conservatively from the accepted observations/preflight lifetime. Queue time
+consumes that lifetime. Immediately before gate entry under the backend lock,
+expiry closes a Pending gate as Expired and returns a definite zero-call refusal.
+Expired gates cannot reset or be reused; transport supplies no default duration.
+Pending alone is not a freshness claim: expiration is enforced on dispatch.
