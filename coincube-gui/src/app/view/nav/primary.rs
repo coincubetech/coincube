@@ -55,7 +55,9 @@ pub fn rail<'a>(menu: &Menu, ctx: &NavContext<'a>) -> Element<'a, Message> {
     // account will never have is not a "coming soon on this network" state, so
     // greying it with a popover would be a lie. Once shown, it's network-gated
     // like Spark.
-    let rails: &[TopLevel] = if ctx.liquid_gate.show() {
+    let rails: &[TopLevel] = if ctx.network.is_blake2b() {
+        &[TopLevel::Cube]
+    } else if ctx.liquid_gate.show() {
         &[TopLevel::Cube, TopLevel::Spark, TopLevel::Liquid]
     } else {
         &[TopLevel::Cube, TopLevel::Spark]

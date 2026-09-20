@@ -231,7 +231,7 @@ impl Labelled for ReceiveAddressInfo {
 
 #[derive(Debug)]
 pub struct GlobalHome {
-    breez_client: Arc<LiquidBackend>,
+    breez_client: Option<Arc<LiquidBackend>>,
     /// Optional Spark backend handle. `None` when the cube has no
     /// Spark signer or the bridge subprocess failed to spawn — the
     /// Home page simply hides the Spark card in that case.
@@ -374,7 +374,7 @@ pub struct GlobalHome {
     pending_liquid_receive_sats: u64,
     pending_usdt_receive_sats: u64,
     datadir_path: CoincubeDirectory,
-    network: coincube_core::miniscript::bitcoin::Network,
+    network: crate::chain::ChainId,
     cube_id: String,
 }
 
@@ -382,10 +382,10 @@ impl GlobalHome {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         wallet: Arc<Wallet>,
-        breez_client: Arc<LiquidBackend>,
+        breez_client: impl Into<Option<Arc<LiquidBackend>>>,
         spark_backend: Option<Arc<SparkBackend>>,
         datadir_path: CoincubeDirectory,
-        network: coincube_core::miniscript::bitcoin::Network,
+        network: impl Into<crate::chain::ChainId>,
         cube_id: String,
         balance_masked: bool,
     ) -> Self {
@@ -404,7 +404,7 @@ impl GlobalHome {
             usdt_balance: 0,
             usdt_balance_error: false,
             usdt_balance_loaded: false,
-            breez_client,
+            breez_client: breez_client.into(),
             spark_backend,
             balance_masked,
             transfer_direction: None,
@@ -444,16 +444,16 @@ impl GlobalHome {
             pending_liquid_receive_sats: 0,
             pending_usdt_receive_sats: 0,
             datadir_path,
-            network,
+            network: network.into(),
             cube_id,
         }
     }
 
     pub fn new_without_wallet(
-        breez_client: Arc<LiquidBackend>,
+        breez_client: impl Into<Option<Arc<LiquidBackend>>>,
         spark_backend: Option<Arc<SparkBackend>>,
         datadir_path: CoincubeDirectory,
-        network: coincube_core::miniscript::bitcoin::Network,
+        network: impl Into<crate::chain::ChainId>,
         cube_id: String,
         balance_masked: bool,
     ) -> Self {
@@ -472,7 +472,7 @@ impl GlobalHome {
             usdt_balance: 0,
             usdt_balance_error: false,
             usdt_balance_loaded: false,
-            breez_client,
+            breez_client: breez_client.into(),
             spark_backend,
             balance_masked,
             transfer_direction: None,
@@ -512,7 +512,7 @@ impl GlobalHome {
             pending_liquid_receive_sats: 0,
             pending_usdt_receive_sats: 0,
             datadir_path,
-            network,
+            network: network.into(),
             cube_id,
         }
     }
@@ -573,7 +573,7 @@ impl State for GlobalHome {
         // the SDK never connects, so a card with live Send/Receive buttons
         // would be a wallet the user can't actually use.
         let has_liquid =
-            crate::app::features::liquid_wallet_usable(cache.network, cache.liquid_gate);
+            crate::app::features::liquid_wallet_usable(cache.chain(), cache.liquid_gate);
         let vault_pending = cache.has_vault && cache.blockheight() <= 0;
         let total_balance_loading = total_balance_pending(BalanceReadiness {
             has_spark,
@@ -823,7 +823,9 @@ impl State for GlobalHome {
                             if !has_liquid {
                                 return Task::none();
                             }
-                            let breez_client = self.breez_client.clone();
+                            let Some(breez_client) = self.breez_client.clone() else {
+                                return Task::none();
+                            };
                             return Task::perform(
                                 async move { breez_client.fetch_onchain_limits().await },
                                 |limit| match limit {
@@ -879,7 +881,9 @@ impl State for GlobalHome {
                                         breez_sdk_liquid::bitcoin::Denomination::Satoshi
                                     },
                                 ) {
-                                    let breez_client = self.breez_client.clone();
+                                    let Some(breez_client) = self.breez_client.clone() else {
+                                        return Task::none();
+                                    };
                                     tasks.push(Task::perform(
                                         async move {
                                             breez_client
@@ -904,7 +908,9 @@ impl State for GlobalHome {
                                 Some(TransferDirection::VaultToLiquid)
                             ) {
                                 self.current_view.next();
-                                let breez_client = self.breez_client.clone();
+                                let Some(breez_client) = self.breez_client.clone() else {
+                                    return Task::none();
+                                };
                                 tasks.push(Task::perform(
                                     async move {
                                         let result = breez_client.receive_onchain(None).await;
@@ -1001,7 +1007,9 @@ impl State for GlobalHome {
                                         breez_sdk_liquid::bitcoin::Denomination::Satoshi
                                     },
                                 ) {
-                                    let breez_client = self.breez_client.clone();
+                                    let Some(breez_client) = self.breez_client.clone() else {
+                                        return Task::none();
+                                    };
                                     tasks.push(Task::perform(
                                         async move {
                                             breez_client
@@ -1046,7 +1054,9 @@ impl State for GlobalHome {
                                     )));
                                 };
                                 self.current_view.next();
-                                let breez_client = self.breez_client.clone();
+                                let Some(breez_client) = self.breez_client.clone() else {
+                                    return Task::none();
+                                };
                                 let amount_sat = amount.to_sat();
                                 tasks.push(Task::perform(
                                     async move {
@@ -1631,7 +1641,9 @@ impl State for GlobalHome {
                                             self.entered_amount.valid = false;
                                             return Task::none();
                                         };
-                                        let breez_client = self.breez_client.clone();
+                                        let Some(breez_client) = self.breez_client.clone() else {
+                                            return Task::none();
+                                        };
                                         self.is_sending = true;
                                         let destination_kind = transfer_direction.to_kind();
                                         return Task::perform(
@@ -2640,8 +2652,7 @@ impl State for GlobalHome {
         let mut tasks = Vec::new();
         if matches!(
             self.network,
-            coincube_core::miniscript::bitcoin::Network::Bitcoin
-                | coincube_core::miniscript::bitcoin::Network::Regtest
+            crate::chain::ChainId::Bitcoin | crate::chain::ChainId::Regtest
         ) {
             tasks.extend([
                 self.load_liquid_balance(),
@@ -2909,10 +2920,16 @@ impl GlobalHome {
     fn load_liquid_balance(&self) -> Task<Message> {
         // Networks without a Breez backend (Signet/Testnet) only ever return
         // `NetworkNotSupported` here — skip the RPC entirely to keep logs clean.
-        if !self.breez_client.is_supported() {
+        if !self
+            .breez_client
+            .as_ref()
+            .is_some_and(|client| client.is_supported())
+        {
             return Task::none();
         }
-        let breez_client = self.breez_client.clone();
+        let Some(breez_client) = self.breez_client.clone() else {
+            return Task::none();
+        };
         Task::perform(async move { breez_client.info().await }, |info| {
             if let Ok(info) = info {
                 let balance = Amount::from_sat(
@@ -2931,11 +2948,17 @@ impl GlobalHome {
 
     fn load_pending_sends(&self) -> Task<Message> {
         use crate::app::breez_liquid::assets::{asset_kind_for_id, AssetKind};
-        if !self.breez_client.is_supported() {
+        if !self
+            .breez_client
+            .as_ref()
+            .is_some_and(|client| client.is_supported())
+        {
             return Task::none();
         }
-        let breez_client = self.breez_client.clone();
-        let network = self.network;
+        let Some(breez_client) = self.breez_client.clone() else {
+            return Task::none();
+        };
+        let network = self.network.bitcoin_network();
         Task::perform(
             async move {
                 match breez_client.list_payments(Some(20), None, None).await {
@@ -3009,11 +3032,17 @@ impl GlobalHome {
 
     fn load_usdt_balance(&self) -> Task<Message> {
         use crate::app::breez_liquid::assets::{asset_kind_for_id, AssetKind};
-        if !self.breez_client.is_supported() {
+        if !self
+            .breez_client
+            .as_ref()
+            .is_some_and(|client| client.is_supported())
+        {
             return Task::none();
         }
-        let breez_client = self.breez_client.clone();
-        let network = self.network;
+        let Some(breez_client) = self.breez_client.clone() else {
+            return Task::none();
+        };
+        let network = self.network.bitcoin_network();
         Task::perform(
             async move {
                 breez_client.info().await.map(|info| {
@@ -3123,12 +3152,18 @@ impl GlobalHome {
         // is silent — `.ok()` swallows it and the swap falls through as
         // `Initiated` — so an unguarded restore would resurrect a stale settings
         // entry as a pending-transfer banner that can never progress.
-        if !self.breez_client.is_supported() {
+        if !self
+            .breez_client
+            .as_ref()
+            .is_some_and(|client| client.is_supported())
+        {
             return Task::none();
         }
         let network_dir = self.datadir_path.network_directory(self.network);
         let cube_id = self.cube_id.clone();
-        let breez_client = self.breez_client.clone();
+        let Some(breez_client) = self.breez_client.clone() else {
+            return Task::none();
+        };
         Task::perform(
             async move {
                 let settings = settings::Settings::from_file(&network_dir).ok();

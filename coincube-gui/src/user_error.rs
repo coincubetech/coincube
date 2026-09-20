@@ -1089,7 +1089,8 @@ fn anchor_startup_error(
         E::Admission(A::IndexerBehind) => ("Bitcoin Blake2b indexing is catching up", "Wait for indexing to reach the verified node tip, then try again.", true),
         E::Admission(A::Aborted) => ("Bitcoin Blake2b startup was canceled", "Open the Cube again when you are ready.", true),
         E::Admission(A::Throttled) | E::Http(429) => ("Connect is busy", "Wait before trying again.", true),
-        E::State(S::InconsistentSnapshot) | E::Admission(A::ChangedDuringOperation | A::Stale) => ("Bitcoin Blake2b chain information changed", "Try again to obtain a fresh verified chain observation.", true),
+        E::State(S::InconsistentSnapshot) | E::Admission(A::ChangedDuringOperation) => ("Bitcoin Blake2b chain information changed", "Try again to obtain a fresh verified chain observation.", true),
+        E::Admission(A::Stale) => ("Bitcoin Blake2b chain information is stale", "Check that the device and Connect server clocks are synchronized, then retry for a fresh observation.", true),
         E::Transport | E::Http(_) | E::State(S::RpcUnavailable) | E::Admission(A::Unavailable) => ("Bitcoin Blake2b is unavailable", "Check your connection and try again when the Connect backend is available.", true),
     };
     UserError::new(title, guidance, CC_DMN_START, retryable)
