@@ -4185,12 +4185,30 @@ impl App {
             // the string used at backup time (see `network_str` in
             // `state::settings::recovery_kit`). Any divergence here
             // would make every tick report a spurious drift.
-            let network = settings::network_to_api_string(self.cache.network);
-            rk::live_descriptor_fingerprint(w.as_ref(), &self.cube_settings.id, &network)
+            let network = self.cache.chain().api_str();
+            rk::live_descriptor_fingerprint(w.as_ref(), &self.cube_settings.id, network)
         });
     }
 
     fn update_dispatch(&mut self, message: Message) -> Task<Message> {
+        // Legacy signer bootstrap persists Bitcoin-family connect.json and uses
+        // unbound gRPC registration. A fork Cube must retain its admitted client;
+        // neither direct requests nor late completions may enter that pipeline.
+        if self.cache.chain().is_blake2b()
+            && matches!(
+                &message,
+                Message::InAppConnectLoginCompleted { .. }
+                    | Message::EnsureConnectReady
+                    | Message::TriggerConnectStreamReady { .. }
+                    | Message::ConnectStreamReady(_)
+                    | Message::ConnectStream(_)
+            )
+        {
+            return Task::done(Message::View(view::Message::ShowError(
+                "Connect signer bootstrap is unavailable for Bitcoin Blake2b. Reopen this Cube through authenticated Connect startup; use its local Cube key for signing."
+                    .into(),
+            )));
+        }
         match message {
             Message::View(view::Message::DismissToast(id)) => {
                 self.errors.retain(|(i, ..)| *i != id);
@@ -7135,6 +7153,23 @@ mod tests {
             )
             .unwrap();
             drop(startup_tasks);
+            app.sync_panel_derived_cache_fields();
+            let wallet = app.wallet.as_ref().unwrap();
+            let fork_fingerprint = state::settings::recovery_kit::live_descriptor_fingerprint(
+                wallet,
+                &app.cube_settings.id,
+                chain.api_str(),
+            );
+            assert!(fork_fingerprint.is_some());
+            assert_eq!(app.cache.current_descriptor_fingerprint, fork_fingerprint);
+            assert_ne!(
+                app.cache.current_descriptor_fingerprint,
+                state::settings::recovery_kit::live_descriptor_fingerprint(
+                    wallet,
+                    &app.cube_settings.id,
+                    "testnet4",
+                )
+            );
             assert!(app.breez_client().is_none());
             assert!(app.spark_backend().is_none());
             assert!(app.wallet_registry.route_lightning_address().is_none());
@@ -7201,7 +7236,111 @@ mod tests {
                     );
                 }
             }
-            app.invalidate_fork_session();
+            // Direct legacy bootstrap and a delayed Bitcoin-family completion
+            // cannot mutate the admitted client, write connect.json, or mount gRPC.
+            let bound_before = app.fork_connect_client.as_ref().map(|c| c.base_url.clone());
+            let token_before = app.cache.connect_tokens.is_some();
+            let legacy_tokens = Arc::new(tokio::sync::RwLock::new(
+                crate::services::connect::client::auth::AccessTokenResponse {
+                    access_token: "legacy-fixture".into(),
+                    refresh_token: "legacy-refresh".into(),
+                    expires_at: 1,
+                },
+            ));
+            for message in [
+                Message::InAppConnectLoginCompleted {
+                    token: "legacy-fixture".into(),
+                    refresh_token: "legacy-refresh".into(),
+                    email: "other@example.invalid".into(),
+                },
+                Message::EnsureConnectReady,
+                Message::TriggerConnectStreamReady {
+                    network: chain.bitcoin_network(),
+                    datadir: CoincubeDirectory::new(root.clone()),
+                    tokens: legacy_tokens,
+                    email: "other@example.invalid".into(),
+                    cube_uuid: None,
+                },
+                Message::ConnectStreamReady(None),
+            ] {
+                let mut stream = iced_runtime::task::into_stream(app.update(message)).unwrap();
+                assert!(matches!(
+                    stream.next().await,
+                    Some(iced_runtime::Action::Output(Message::View(view::Message::ShowError(text))))
+                        if text.contains("Reopen this Cube")
+                ));
+                assert!(stream.next().await.is_none());
+                assert_eq!(
+                    app.fork_connect_client.as_ref().map(|c| c.base_url.clone()),
+                    bound_before
+                );
+                assert_eq!(app.cache.connect_tokens.is_some(), token_before);
+                assert!(app.connect_stream_config.is_none());
+                assert!(!root.join("testnet4").join("connect.json").exists());
+                assert!(!root
+                    .join("bitcoin-blake2b-testnet4")
+                    .join("connect.json")
+                    .exists());
+            }
+            let replacement = crate::services::coincube::LoginResponse {
+                requires_2fa: false,
+                token: "replacement-fixture".into(),
+                refresh_token: "replacement-refresh".into(),
+                user: crate::services::coincube::User {
+                    id: 8,
+                    email: "replacement@example.invalid".into(),
+                    email_verified: Some(true),
+                },
+            };
+            let saved_before =
+                state::connect::read_connect_secret(state::connect::CONNECT_KEYRING_USER);
+            // Cover initial 401, explicit logout, and token replacement through
+            // actual App dispatch. None may leave a login form on a dead backend.
+            if status == 200 {
+                drop(app.update(Message::View(view::Message::ConnectAccount(
+                    view::ConnectAccountMessage::LogOut,
+                ))));
+            } else if status == 503 {
+                drop(app.update(Message::View(view::Message::ConnectAccount(
+                    view::ConnectAccountMessage::SetSession(replacement.clone()),
+                ))));
+            }
+            assert!(app.panels.connect.account.requires_authenticated_reopen());
+            assert!(app.fork_connect_client.is_none());
+            assert_eq!(
+                state::connect::read_connect_secret(state::connect::CONNECT_KEYRING_USER),
+                saved_before
+            );
+            for message in [
+                view::ConnectAccountMessage::Init,
+                view::ConnectAccountMessage::SubmitLogin,
+                view::ConnectAccountMessage::VerifyOtp,
+                view::ConnectAccountMessage::SetSession(replacement.clone()),
+                view::ConnectAccountMessage::SessionLoaded {
+                    user: replacement.user.clone(),
+                    plan: None,
+                },
+                view::ConnectAccountMessage::AdmittedUserLoaded {
+                    user: Ok(replacement.user.clone()),
+                    generation: app.panels.connect.account.session_generation(),
+                },
+                view::ConnectAccountMessage::Retry(view::RetryAction::Session),
+            ] {
+                let task = app.update(Message::View(view::Message::ConnectAccount(message)));
+                assert!(iced_runtime::task::into_stream(task).is_none());
+                assert!(app.panels.connect.account.requires_authenticated_reopen());
+                assert!(app.panels.connect.account.authenticated_client().is_none());
+                assert!(!app.panels.connect.account.is_authenticated());
+                assert!(app.panels.connect.cube.client.is_none());
+                assert_eq!(
+                    authority.fresh_anchor(),
+                    Err(coincubed::connect::AdmissionError::Unavailable)
+                );
+                assert_eq!(
+                    state::connect::read_connect_secret(state::connect::CONNECT_KEYRING_USER),
+                    saved_before
+                );
+            }
             assert!(!app.cache.has_connect_session);
             assert!(app.panels.connect.account.authenticated_client().is_none());
             assert!(app.panels.connect.cube.client.is_none());

@@ -77,7 +77,7 @@ impl State for AboutSettingsState {
                     ));
                     return Task::none();
                 };
-                let network_dir = cache.datadir_path.network_directory(cache.network);
+                let network_dir = cache.datadir_path.network_directory(cache.chain());
                 self.reregistering = true;
                 self.reregister_status = None;
                 let app_version = env!("CARGO_PKG_VERSION").to_string();
