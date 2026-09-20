@@ -436,3 +436,31 @@ fn public_admission_and_restart_revalidation_bind_the_opaque_artifact() {
     assert!(c.construction_verified);
     assert_eq!(c.status(), Status::Unchecked);
 }
+
+#[test]
+fn corrupted_unsigned_bytes_are_not_restored_as_valid_intent() {
+    let temp = Temp::new();
+    drop(controller(&temp));
+    let path = temp.0.join("intent.json");
+    let mut intent: Intent = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    intent.plan.step1.output[0].value = Amount::from_sat(1);
+    fs::write(&path, serde_json::to_vec(&intent).unwrap()).unwrap();
+    assert!(matches!(
+        Controller::reopen(&temp.0, &identity(), context()),
+        Err(Error::InvalidPlan)
+    ));
+}
+#[test]
+fn journal_symlink_is_rejected_without_touching_target() {
+    use std::os::unix::fs::symlink;
+    let temp = Temp::new();
+    let other = Temp::new();
+    drop(controller(&temp));
+    let path = temp.0.join("intent.json");
+    let target = other.0.join("original");
+    fs::rename(&path, &target).unwrap();
+    let bytes = fs::read(&target).unwrap();
+    symlink(&target, &path).unwrap();
+    assert!(Controller::reopen(&temp.0, &identity(), context()).is_err());
+    assert_eq!(fs::read(target).unwrap(), bytes);
+}

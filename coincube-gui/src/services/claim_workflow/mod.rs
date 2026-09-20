@@ -38,6 +38,7 @@ impl From<std::io::Error> for Error {
 pub enum Step2Authorization {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WalletIdentity {
     pub bitcoin_cube: String,
     pub fork_cube: String,
@@ -57,6 +58,7 @@ pub enum Phase {
     Tracking,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Intent {
     version: u32,
     identity: WalletIdentity,
@@ -448,5 +450,5 @@ impl Controller {
         Ok(())
     }
 }
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;
