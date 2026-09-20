@@ -44,7 +44,11 @@ impl GrpcDeviceClient {
             app_version,
             os_version,
             device_pubkey: String::new(), // Optional, for v2 assertions
-            capabilities: vec!["create_session".to_string(), "cancel_session".to_string()],
+            capabilities: vec![
+                "create_session".to_string(),
+                "cancel_session".to_string(),
+                "chain-identity-v1".to_string(),
+            ],
             transport_pubkey,
         };
         self.inner

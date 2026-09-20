@@ -74,10 +74,17 @@ fn general_section<'a>(
         .push(super::header("General", SettingsMessage::GeneralSection))
         .push(network_row(cache.network))
         .push(bitcoin_display_unit(new_unit_setting))
-        .push(display_mode_toggle(cache.display_mode))
+        .push(display_mode_toggle(
+            cache.display_mode,
+            cache.fiat_toggle_allowed(),
+        ))
         .push(direction_badges_toggle(show_direction_badges))
         .push(recipient_identity_checks_toggle())
-        .push(fiat_price(new_price_setting, currencies_list));
+        .push(fiat_price(
+            new_price_setting,
+            currencies_list,
+            cache.fiat_chain.is_blake2b(),
+        ));
 
     dashboard(menu, cache, col)
 }
@@ -1146,7 +1153,13 @@ fn recipient_identity_checks_toggle<'a>() -> Element<'a, Message> {
     ).width(Length::Fill).into()
 }
 
-fn display_mode_toggle<'a>(current: DisplayMode) -> Element<'a, Message> {
+fn display_mode_toggle<'a>(current: DisplayMode, allowed: bool) -> Element<'a, Message> {
+    let toggle = Toggler::new(matches!(current, DisplayMode::BitcoinNative));
+    let toggle = if allowed {
+        toggle.on_toggle(|_| Message::FlipDisplayMode)
+    } else {
+        toggle
+    };
     card::simple(
         Row::new()
             .spacing(20)
@@ -1154,12 +1167,7 @@ fn display_mode_toggle<'a>(current: DisplayMode) -> Element<'a, Message> {
             .push(text("Primary balance value:").bold())
             .push(Space::new().width(Length::Fill))
             .push(text("Fiat"))
-            .push(
-                Toggler::new(matches!(current, DisplayMode::BitcoinNative))
-                    .on_toggle(|_| Message::FlipDisplayMode)
-                    .width(50)
-                    .style(theme::toggler::orange),
-            )
+            .push(toggle.width(50).style(theme::toggler::orange))
             .push(text("Bitcoin")),
     )
     .width(Length::Fill)
@@ -1199,6 +1207,7 @@ pub fn bitcoin_display_unit<'a>(new_unit_setting: &'a UnitSetting) -> Element<'a
 pub fn fiat_price<'a>(
     new_price_setting: &'a PriceSetting,
     currencies_list: &'a [Currency],
+    btcb2: bool,
 ) -> Element<'a, Message> {
     card::simple(
         Column::new()
@@ -1230,8 +1239,8 @@ pub fn fiat_price<'a>(
                         .push(Space::new().width(Length::Fill))
                         .push(
                             pick_list(
-                                &ALL_PRICE_SOURCES[..],
-                                Some(new_price_setting.source),
+                                if btcb2 { &[crate::services::fiat::PriceSource::Coincube][..] } else { &ALL_PRICE_SOURCES[..] },
+                                Some(if btcb2 { crate::services::fiat::PriceSource::Coincube } else { new_price_setting.source }),
                                 |source| FiatMessage::SourceEdited(source).into(),
                             )
                             .style(theme::pick_list::primary)
@@ -1258,8 +1267,7 @@ pub fn fiat_price<'a>(
                 ),
             )
             .push_maybe(
-                new_price_setting
-                    .source
+                (if btcb2 { crate::services::fiat::PriceSource::Coincube } else { new_price_setting.source })
                     .attribution()
                     .filter(|_| new_price_setting.is_enabled)
                     .map(|s| {

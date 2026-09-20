@@ -58,6 +58,10 @@ message SignerTarget {
   // fail closed with "this keyholder's app needs updating" rather than
   // downgrade the session to plaintext.
   bytes transport_pubkey = 4;
+  // Capabilities the target device registered (RegisterDeviceRequest.capabilities).
+  // Populated by ResolveSigners only. The initiator uses it to fail closed before
+  // sealing when a target cannot take part in the session's chain.
+  repeated string capabilities = 5;
 }
 
 // PayloadScheme declares how a signing session's PSBT and signatures are
@@ -205,6 +209,14 @@ message SigningSession {
   // the same request_id-bound transport AAD as its PSBT and fresh randomness.
   // Signers decrypt, verify descriptor_id and their xpub membership locally.
   repeated PayloadEnvelope descriptor_envelopes = 20;
+  // Chain identity Connect verified at creation: the Cube's canonical network.
+  // A session created on a Connect that implements this contract ALWAYS stores
+  // it — when a pre-identity desktop omits the field, Connect derives it from
+  // the Cube (Bitcoin-family only; a Bitcoin Blake2b Cube refuses instead). It
+  // is empty only on historical rows that predate the column, or on a session
+  // relayed by a pre-identity Connect; either can only be Bitcoin-family. A
+  // signer never infers a chain from an empty value.
+  string network = 21;
 }
 
 message CreateSigningSessionRequest {
@@ -237,6 +249,13 @@ message CreateSigningSessionRequest {
   // Required for ECIES_V1: exactly one sealed descriptor per target. Same
   // recipient and request_id-bound AAD as the PSBT, independently sealed.
   repeated PayloadEnvelope descriptor_envelopes = 12;
+  // Chain identity of the Vault this session spends, as the Connect network id
+  // ("mainnet", "testnet4", "bitcoin-blake2b", ...). REQUIRED from clients that
+  // advertise chain-identity-v1. Connect refuses a value it does not know, a
+  // value that differs from the Cube's network, and an empty value on a Bitcoin
+  // Blake2b Cube. An empty value on a Bitcoin-family Cube is a pre-identity client
+  // (see docs/signing-identity-btcb2.md, "compatibility window").
+  string network = 13;
 }
 
 message CreateSigningSessionResponse {
@@ -293,6 +312,14 @@ message SubmitPartialSignatureRequest {
   // sealed to the session creator's desktop transport pubkey. Decided
   // 2026-08-03 — ALL rail payloads are envelopes, in both directions.
   PayloadEnvelope signature_envelope = 4;
+  // The chain the signer produced this signature for: its verified local key
+  // record's network. Must equal SigningSession.network when that is non-empty;
+  // on a historical row whose stored network is empty it must equal the Cube's
+  // canonical network (the row is not rewritten). Empty is accepted only inside
+  // the compatibility window — a Bitcoin-family session while
+  // SIGNING_REQUIRE_CHAIN_IDENTITY is off; it is required on every Bitcoin
+  // Blake2b session and on every session once that flag is on.
+  string network = 5;
 }
 
 message SubmitPartialSignatureResponse {
@@ -426,13 +453,24 @@ message ResolveSignersRequest {
 message ResolveSignersResponse {
   repeated SignerTarget targets = 1;
   repeated UnresolvedSigner unresolved = 2;
+  // The vault's Cube network. The initiator compares it with its own chain
+  // before creating any session (substituted-identity check, no sealing yet).
+  string network = 3;
 }
 
 message UnresolvedSigner {
   string key_id = 1;
   string key_fingerprint = 2;
   string owner_user_id = 3;
-  // Machine-readable reason: "no_device_registered" | "all_devices_revoked" | "owner_unknown".
+  // Machine-readable reason. Emitted by ResolveSigners today:
+  // "no_device_registered" | "all_devices_revoked" | "transport_key_stale" |
+  // "enrolled_device_unavailable" (the key is bound to a device Connect can no
+  // longer target — revoked, gone, or another account's; the owner opens
+  // Keychain on the handset holding the key, which re-claims it).
+  // Reserved by docs/signing-identity-btcb2.md §3.3 (emitted once that check
+  // ships): "signer_app_outdated" — a target device whose capabilities cannot
+  // take part in the session's chain. "owner_unknown" was documented here
+  // earlier and is matched by the desktop, but the server does not emit it.
   string reason = 4;
 }
 

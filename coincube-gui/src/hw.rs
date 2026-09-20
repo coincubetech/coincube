@@ -378,7 +378,7 @@ async fn unlock_bitbox(
 }
 
 /// State for hardware wallet refresh subscription.
-/// Implements Hash based only on network for subscription identity.
+/// Subscription identity includes the exact wallet and storage context.
 struct RefreshState {
     network: Network,
     keys_aliases: HashMap<Fingerprint, String>,
@@ -388,8 +388,12 @@ struct RefreshState {
 
 impl std::hash::Hash for RefreshState {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        // Only hash network for subscription identity
         self.network.hash(state);
+        self.wallet
+            .as_ref()
+            .map(|wallet| (wallet.chain, wallet.id_fingerprint()))
+            .hash(state);
+        self.datadir_path.path().hash(state);
     }
 }
 
@@ -729,7 +733,14 @@ fn refresh(mut state: State) -> impl Stream<Item = HardwareWalletMessage> {
         // paired but currently unreachable (mDNS silent or dial
         // failed) surface as `Unsupported(AppIsNotOpen)` so the user
         // sees "phone offline" rather than silence.
-        match crate::phone_signer::pairing_store::load(&state.datadir_path) {
+        let lan_chain = state.wallet.as_ref().map(|w| w.chain);
+        let phone_store = if lan_chain.is_some_and(crate::phone_signer::lan_signing_allowed) {
+            crate::phone_signer::pairing_store::load(&state.datadir_path)
+        } else {
+            // No discovery, identity creation or dial for an unsupported chain.
+            Ok(Default::default())
+        };
+        match phone_store {
             Ok(store) if !store.phones.is_empty() => {
                 let discovered = crate::phone_signer::mdns::browse();
                 let identity =
@@ -892,12 +903,16 @@ fn refresh(mut state: State) -> impl Stream<Item = HardwareWalletMessage> {
                                     continue;
                                 };
                                 let fingerprint = binding.fingerprint;
+                                let Some(lan_chain) = lan_chain else {
+                                    continue;
+                                };
                                 let signer = Arc::new(crate::phone_signer::PhoneSigner::new(
                                     t,
                                     fingerprint,
                                     None,
                                     paired.clone(),
                                     lan_descriptor.clone(),
+                                    lan_chain,
                                     lan_transport_key.clone(),
                                 ));
                                 // Stash a clone so the next refresh
@@ -1306,6 +1321,50 @@ mod tests {
     use crate::phone_signer::mdns::DiscoveredPhone;
     use crate::phone_signer::pairing_store::PairedPhone;
     use std::net::SocketAddr;
+
+    const DESC: &str = "wsh(or_d(multi(2,[ffd63c8d/48'/1'/0'/2']tpubDExA3EC3iAsPxPhFn4j6gMiVup6V2eH3qKyk69RcTc9TTNRfFYVPad8bJD5FCHVQxyBT4izKsvr7Btd2R4xmQ1hZkvsqGBaeE82J71uTK4N/<0;1>/*,[de6eb005/48'/1'/0'/2']tpubDFGuYfS2JwiUSEXiQuNGdT3R7WTDhbaE6jbUhgYSSdhmfQcSx7ZntMPPv7nrkvAqjpj3jX9wbhSGMeKVao4qAzhbNyBi7iQmv5xxQk6H6jz/<0;1>/*),and_v(v:pkh([ffd63c8d/48'/1'/0'/2']tpubDExA3EC3iAsPxPhFn4j6gMiVup6V2eH3qKyk69RcTc9TTNRfFYVPad8bJD5FCHVQxyBT4izKsvr7Btd2R4xmQ1hZkvsqGBaeE82J71uTK4N/<2;3>/*),older(3))))#p9ax3xxp";
+
+    fn refresh_hash(wallet: Option<Arc<Wallet>>, root: &str) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let state = RefreshState {
+            network: Network::Testnet4,
+            keys_aliases: HashMap::new(),
+            wallet,
+            datadir_path: CoincubeDirectory::new(root.into()),
+        };
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        state.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    #[test]
+    fn refresh_subscription_restarts_for_chain_descriptor_and_storage_changes() {
+        use coincube_core::{chain::ChainId, descriptors::CoincubeDescriptor};
+        use std::str::FromStr;
+        let descriptor = CoincubeDescriptor::from_str(DESC).unwrap();
+        let bitcoin = Arc::new(Wallet::new(descriptor.clone()).with_chain(ChainId::Testnet4));
+        let fork = Arc::new(Wallet::new(descriptor).with_chain(ChainId::BitcoinBlake2bTestnet4));
+        assert_eq!(
+            bitcoin.chain.bitcoin_network(),
+            fork.chain.bitcoin_network()
+        );
+        let baseline = refresh_hash(Some(bitcoin.clone()), "/synthetic/one");
+        assert_eq!(baseline, refresh_hash(Some(bitcoin), "/synthetic/one"));
+        let fork_hash = refresh_hash(Some(fork.clone()), "/synthetic/one");
+        assert_ne!(baseline, fork_hash);
+        let other_descriptor = DESC
+            .split('#')
+            .next()
+            .unwrap()
+            .replace("older(3)", "older(4)");
+        let other = Arc::new(
+            Wallet::new(CoincubeDescriptor::from_str(&other_descriptor).unwrap())
+                .with_chain(ChainId::BitcoinBlake2bTestnet4),
+        );
+        assert_ne!(fork_hash, refresh_hash(Some(other), "/synthetic/one"));
+        assert_ne!(fork_hash, refresh_hash(Some(fork), "/synthetic/two"));
+        assert_ne!(fork_hash, refresh_hash(None, "/synthetic/one"));
+    }
 
     fn phone_with_fallback(pin: [u8; 32], fallback: Option<&str>) -> PairedPhone {
         PairedPhone {

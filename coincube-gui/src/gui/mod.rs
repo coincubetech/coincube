@@ -263,6 +263,9 @@ impl GUI {
                 }
             }
             Message::Fiat(FiatMessage::GetPriceResult(price)) => {
+                if price.request.origin.is_some() {
+                    return Task::none();
+                }
                 if self
                     .global_cache
                     .pending_fiat_price_request(price.source(), price.currency())
@@ -426,6 +429,31 @@ impl GUI {
                             tracing::error!("Unexpected message type after unboxing");
                             return Task::none();
                         };
+                        // BTCB2 uses only Connect pricing. Currency preferences do not
+                        // authorize a Bitcoin/aggregator currency-list request either.
+                        let btcb2 = self
+                            .panes
+                            .get(i)
+                            .and_then(|pane| pane.tabs.iter().find(|tab| tab.id == tab_id))
+                            .and_then(|tab| tab.cube_settings())
+                            .is_some_and(|cube| cube.network.is_blake2b());
+                        if btcb2 {
+                            if let Some(pane) = self.panes.get_mut(i) {
+                                return pane
+                                    .update_tab_with_app_msg(
+                                        tab_id,
+                                        AppFiatMessage::ListCurrenciesResult(
+                                            source,
+                                            Ok(ListCurrenciesResult {
+                                                currencies: Currency::ALL.to_vec(),
+                                            }),
+                                        ),
+                                        &self.config,
+                                    )
+                                    .map(move |msg| Message::Pane(i, msg));
+                            }
+                            return Task::none();
+                        }
                         // If we already have a fresh list of currencies for this source, return it directly to the tab.
                         if let Some(fresh_list) = self.global_cache.fresh_currencies(source) {
                             tracing::debug!("Using cached currencies list for {}", source,);
@@ -528,6 +556,14 @@ impl GUI {
                 let mut need_usd_cached: Vec<(pane_grid::Pane, usize, FiatPrice)> = Vec::new();
                 for (&pane_id, pane) in self.panes.iter() {
                     for tab in pane.tabs.iter() {
+                        // BTCB2 has an authenticated, generation-bound poll in App.
+                        // Never insert its requests into the shared Bitcoin cache.
+                        if tab
+                            .cube_settings()
+                            .is_some_and(|cube| cube.network.is_blake2b())
+                        {
+                            continue;
+                        }
                         let fiat_sett = tab.cube_settings().and_then(|cs| cs.fiat_price.as_ref());
 
                         // When fiat display is enabled, fetch the user's selected currency.
