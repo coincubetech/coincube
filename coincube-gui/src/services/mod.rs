@@ -60,5 +60,5 @@ fn default_base_url() -> String {
     }
 }
 
-pub mod claim_workflow;
 pub mod claim_preflight;
+pub mod claim_workflow;
