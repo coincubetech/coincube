@@ -315,10 +315,20 @@ mod tests {
                 ))
                 .header("x-coincube-observation", "fresh")
                 .header("cache-control", "no-cache")
-                .header_missing("authorization")
-                .header_missing("cookie")
-                .header_missing("x-device-fingerprint")
-                .header_missing("x-device-name");
+                .matches(|request| {
+                    request.headers.as_ref().is_none_or(|headers| {
+                        headers.iter().all(|(name, _)| {
+                            ![
+                                "authorization",
+                                "cookie",
+                                "x-device-fingerprint",
+                                "x-device-name",
+                            ]
+                            .iter()
+                            .any(|forbidden| name.eq_ignore_ascii_case(forbidden))
+                        })
+                    })
+                });
             then.status(200)
                 .header("X-Coincube-Observation", "fresh")
                 .header("X-Cache", "BYPASS")
