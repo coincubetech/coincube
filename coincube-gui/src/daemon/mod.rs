@@ -41,6 +41,7 @@ pub enum DaemonError {
     // Error at start up.
     Start(StartupError),
     ConnectAnchor(crate::services::coincube::network_anchor::AnchorStartupError),
+    PoisonSubmission(coincubed::poison_broadcast::SubmissionError),
     // Error if the client is not supported.
     ClientNotSupported,
     /// Error when selecting coins for spend.
@@ -60,6 +61,7 @@ impl std::fmt::Display for DaemonError {
             Self::Unexpected(e) => write!(f, "Daemon unexpected error: {}", e),
             Self::Start(e) => write!(f, "Daemon did not start: {}", e),
             Self::ConnectAnchor(e) => write!(f, "{}", e),
+            Self::PoisonSubmission(e) => write!(f, "{}", e),
             Self::ClientNotSupported => write!(f, "Daemon communication is not supported"),
             Self::CoinSelectionError => write!(f, "Coin selection error"),
             Self::NotImplemented => write!(f, "This feature is not implemented for this backend"),
@@ -156,6 +158,16 @@ pub trait Daemon: Debug {
     async fn update_spend_tx(&self, psbt: &Psbt) -> Result<(), DaemonError>;
     async fn delete_spend_tx(&self, txid: &Txid) -> Result<(), DaemonError>;
     async fn broadcast_spend_tx(&self, txid: &Txid) -> Result<(), DaemonError>;
+    /// Embedded-only exact-byte transport, not Claim authorization. External
+    /// backends must not serialize or reconstruct the opaque verified artifact.
+    async fn submit_verified_poison(
+        &self,
+        _verified: std::sync::Arc<coincube_core::claim_finalize::VerifiedPoisonTransfer>,
+        _gate: std::sync::Arc<coincubed::poison_broadcast::SubmissionGate>,
+    ) -> Result<coincubed::poison_broadcast::SubmissionOutcome, DaemonError> {
+        Err(DaemonError::ClientNotSupported)
+    }
+
     async fn start_rescan(&self, t: u32) -> Result<(), DaemonError>;
     async fn list_confirmed_txs(
         &self,
