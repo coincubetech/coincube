@@ -48,3 +48,9 @@ when the submission was queued behind embedded/backend locks. Started cannot be
 reset or reused; revocation after it cannot retract submission. A dropped outer
 future after Started must remain uncertain in the journal. The test-only barrier
 makes queued-backend cancellation deterministic without a production callback.
+
+The embedded async adapter clones DaemonControl under a brief handle lock and
+moves Arc-owned immutable artifact/gate into a blocking worker. Synchronous
+backend waits cannot block the executor's revocation task. Join failure is
+conservatively uncertain; a poisoned backend mutex refuses before gate entry.
+The generic daemon command and ordinary Bitcoin broadcast paths are unchanged.

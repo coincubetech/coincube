@@ -299,3 +299,42 @@ fn gates_bind_witness_identity_and_cannot_be_reused_or_reset() {
     );
     assert_eq!(backend.lock().unwrap().broadcasted.lock().unwrap().len(), 1);
 }
+
+#[test]
+fn poisoned_backend_lock_refuses_without_consuming_gate_or_calling_transport() {
+    let (built, signers) = fixture(ChainId::Bitcoin, false);
+    let verified = finalize_poison_transfer(
+        &built,
+        &sign(&built, &signers[..2]),
+        &secp256k1::Secp256k1::verification_only(),
+    )
+    .unwrap();
+    let (gate, _) = SubmissionGate::new(&verified);
+    let backend = Arc::new(Mutex::new(DummyBitcoind::new()));
+    let poisoned = backend.clone();
+    assert!(std::thread::spawn(move || {
+        let _guard = poisoned.lock().unwrap();
+        panic!("synthetic poisoned mutex");
+    })
+    .join()
+    .is_err());
+    let daemon = control(
+        ChainId::Bitcoin,
+        built.descriptor().clone(),
+        backend.clone(),
+    );
+    assert_eq!(
+        daemon.submit_verified_poison(&verified, &gate),
+        Err(SubmissionError::BackendUnavailable)
+    );
+    assert_eq!(gate.state(), SubmissionState::Pending);
+    assert!(backend
+        .lock()
+        .err()
+        .unwrap()
+        .into_inner()
+        .broadcasted
+        .lock()
+        .unwrap()
+        .is_empty());
+}

@@ -15,6 +15,29 @@ use coincubed::{
     DaemonControl, DaemonHandle,
 };
 
+// Keep synchronous backend-lock waits and HTTP transport off the async executor.
+// Dropping this future does not stop a started blocking worker: the coordinator
+// must revoke its gate, and preserve uncertain intent after Started.
+async fn blocking_poison_submission(
+    txid: Txid,
+    wtxid: coincube_core::miniscript::bitcoin::Wtxid,
+    submit: impl FnOnce() -> Result<
+            coincubed::poison_broadcast::SubmissionOutcome,
+            coincubed::poison_broadcast::SubmissionError,
+        > + Send
+        + 'static,
+) -> Result<coincubed::poison_broadcast::SubmissionOutcome, DaemonError> {
+    tokio::task::spawn_blocking(submit)
+        .await
+        .map_err(|_| {
+            DaemonError::PoisonSubmission(coincubed::poison_broadcast::SubmissionError::Uncertain {
+                txid,
+                wtxid,
+            })
+        })?
+        .map_err(DaemonError::PoisonSubmission)
+}
+
 fn authenticated_startup_error(error: coincubed::StartupError) -> DaemonError {
     match error {
         coincubed::StartupError::ConnectAdmission(error) => {
@@ -355,13 +378,18 @@ impl Daemon for EmbeddedDaemon {
 
     async fn submit_verified_poison(
         &self,
-        verified: &coincube_core::claim_finalize::VerifiedPoisonTransfer,
-        gate: &coincubed::poison_broadcast::SubmissionGate,
+        verified: std::sync::Arc<coincube_core::claim_finalize::VerifiedPoisonTransfer>,
+        gate: std::sync::Arc<coincubed::poison_broadcast::SubmissionGate>,
     ) -> Result<coincubed::poison_broadcast::SubmissionOutcome, DaemonError> {
-        self.command(|daemon| {
-            daemon
-                .submit_verified_poison(verified, gate)
-                .map_err(DaemonError::PoisonSubmission)
+        let control = match self.handle.lock().await.as_ref() {
+            Some(DaemonHandle::Controller { control, .. }) => control.clone(),
+            Some(_) => return Err(DaemonError::ClientNotSupported),
+            None => return Err(DaemonError::DaemonStopped),
+        };
+        let txid = verified.transaction().compute_txid();
+        let wtxid = verified.transaction().compute_wtxid();
+        blocking_poison_submission(txid, wtxid, move || {
+            control.submit_verified_poison(&verified, &gate)
         })
         .await
     }
@@ -597,5 +625,72 @@ mod anchor_startup_tests {
                 DaemonError::ConnectAnchor(AnchorStartupError::Admission(actual)) if actual == expected
             ));
         }
+    }
+}
+
+#[cfg(test)]
+mod poison_submission_scheduling_tests {
+    use super::*;
+    use coincube_core::miniscript::bitcoin::{hashes::Hash, Wtxid};
+    use coincubed::poison_broadcast::SubmissionError;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex as BlockingMutex,
+    };
+
+    // A single-thread executor must remain free to run revocation while the
+    // production blocking adapter waits on a synchronous backend lock. The
+    // daemon test separately exercises the real gate under its actual lock.
+    #[tokio::test(flavor = "current_thread")]
+    async fn revocation_runs_while_submission_waits_on_a_backend_lock() {
+        let backend = Arc::new(BlockingMutex::new(()));
+        let held_backend = backend.clone();
+        let (locked, lock_ready) = tokio::sync::oneshot::channel();
+        let (release, release_wait) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let _guard = held_backend.lock().unwrap();
+            let _ = locked.send(());
+            // Hang guard also makes an accidental inline implementation fail
+            // instead of deadlocking the single-thread runtime indefinitely.
+            let _ = release_wait.recv_timeout(std::time::Duration::from_secs(5));
+        });
+        lock_ready.await.unwrap();
+        let worker_backend = backend.clone();
+        let revoked = Arc::new(AtomicBool::new(false));
+        let worker_revoked = revoked.clone();
+        let (started, received) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(blocking_poison_submission(
+            Txid::all_zeros(),
+            Wtxid::all_zeros(),
+            move || {
+                let _ = started.send(());
+                let _guard = worker_backend.lock().unwrap();
+                assert!(worker_revoked.load(Ordering::SeqCst));
+                Err(SubmissionError::Revoked)
+            },
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(5), received)
+            .await
+            .unwrap()
+            .unwrap();
+        revoked.store(true, Ordering::SeqCst); // executor must reach this while lock is held
+        let _ = release.send(());
+        holder.join().unwrap();
+        assert!(matches!(
+            task.await.unwrap(),
+            Err(DaemonError::PoisonSubmission(SubmissionError::Revoked))
+        ));
+    }
+    #[tokio::test]
+    async fn blocking_worker_failure_is_uncertain_not_success() {
+        assert!(matches!(
+            blocking_poison_submission(Txid::all_zeros(), Wtxid::all_zeros(), || panic!(
+                "synthetic worker failure"
+            ))
+            .await,
+            Err(DaemonError::PoisonSubmission(
+                SubmissionError::Uncertain { .. }
+            ))
+        ));
     }
 }

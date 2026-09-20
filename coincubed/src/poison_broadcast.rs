@@ -11,6 +11,7 @@ use std::sync::{
 pub enum SubmissionError {
     UnsupportedChain,
     DescriptorMismatch,
+    BackendUnavailable,
     GateMismatch,
     Revoked,
     AlreadyStarted,
@@ -25,6 +26,9 @@ impl std::fmt::Display for SubmissionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::UnsupportedChain => f.write_str("Poison submission requires Bitcoin mainnet"),
+            Self::BackendUnavailable => {
+                f.write_str("Bitcoin backend is unavailable before submission")
+            }
             Self::GateMismatch => f.write_str("Submission gate belongs to another transaction"),
             Self::Revoked => f.write_str("Submission was revoked before transport started"),
             Self::AlreadyStarted => f.write_str("Submission gate was already consumed"),
@@ -153,7 +157,10 @@ impl DaemonControl {
         if let Some(barrier) = &gate.before_lock {
             barrier.wait();
         }
-        let backend = self.bitcoin.lock().expect("Bitcoin backend mutex poisoned");
+        let backend = self
+            .bitcoin
+            .lock()
+            .map_err(|_| SubmissionError::BackendUnavailable)?;
         // Linearization point: cancellation wins before this atomic transition;
         // afterwards submission has started. No await or second lock before I/O.
         gate.enter()?;

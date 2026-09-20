@@ -162,8 +162,8 @@ pub trait Daemon: Debug {
     /// backends must not serialize or reconstruct the opaque verified artifact.
     async fn submit_verified_poison(
         &self,
-        _verified: &coincube_core::claim_finalize::VerifiedPoisonTransfer,
-        _gate: &coincubed::poison_broadcast::SubmissionGate,
+        _verified: std::sync::Arc<coincube_core::claim_finalize::VerifiedPoisonTransfer>,
+        _gate: std::sync::Arc<coincubed::poison_broadcast::SubmissionGate>,
     ) -> Result<coincubed::poison_broadcast::SubmissionOutcome, DaemonError> {
         Err(DaemonError::ClientNotSupported)
     }
