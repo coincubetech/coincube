@@ -33,3 +33,15 @@ handoff, App Vault-only initialization and installer validation are coordinated
 follow-on changes. Live server acceptance remains pending dedicated BTCB2
 indexer readiness, tailnet access and RPC infrastructure handoff. No real funds,
 wallets or services were used to validate this client.
+
+Startup retains typed `AnchorStartupError` values for service states, HTTP
+classification, malformed responses, transport failures and daemon admission.
+The UI maps those variants to fixed recovery instructions: sign in for missing
+or expired authentication, configure an unconfigured backend, wait for indexing
+or synchronization, and refuse wrong-chain evidence. No raw server error body
+is displayed. Indexer lag never selects a lower anchor or a Bitcoin fallback.
+
+Dead-poller detection revokes the refresh session before cleanup. Fork cleanup
+uses the daemon's nonpanicking shutdown helper and logs failures; the existing
+Bitcoin shutdown path is unchanged. Cleanup error tests belong to the daemon
+helper; GUI coverage verifies revocation even when the handle is already gone.

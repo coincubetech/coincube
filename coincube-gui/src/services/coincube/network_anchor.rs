@@ -33,6 +33,88 @@ pub enum AnchorState {
     ForkUnverified,
 }
 
+/// Startup preserves service state, HTTP classification and daemon admission
+/// separately so the loader can offer the correct recovery action.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AnchorStartupError {
+    State(AnchorState),
+    Http(u16),
+    Transport,
+    InvalidResponse,
+    Admission(AdmissionError),
+}
+impl From<AdmissionError> for AnchorStartupError {
+    fn from(error: AdmissionError) -> Self {
+        Self::Admission(error)
+    }
+}
+impl From<NetworkStatusError> for AnchorStartupError {
+    fn from(error: NetworkStatusError) -> Self {
+        match error {
+            NetworkStatusError::UnsupportedChain => Self::Admission(AdmissionError::WrongChain),
+            NetworkStatusError::InvalidResponse => Self::InvalidResponse,
+            NetworkStatusError::Request(CoincubeError::Unsuccessful(info)) => {
+                Self::Http(info.status_code)
+            }
+            NetworkStatusError::Request(CoincubeError::Network(_)) => Self::Transport,
+            NetworkStatusError::Request(_) => Self::InvalidResponse,
+        }
+    }
+}
+impl std::fmt::Display for AnchorStartupError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Http(401 | 403) => {
+                f.write_str("Sign in to Connect again to use Bitcoin Blake2b.")
+            }
+            Self::Http(404) => {
+                f.write_str("Bitcoin Blake2b is not enabled for this account or API.")
+            }
+            Self::Http(429) => f.write_str("Connect is rate limited. Wait before retrying."),
+            Self::Http(status) => write!(
+                f,
+                "Connect returned HTTP {}. Retry when it is available.",
+                status
+            ),
+            Self::Transport => {
+                f.write_str("Connect could not be reached. Check the connection and retry.")
+            }
+            Self::InvalidResponse => {
+                f.write_str("Connect returned malformed or inconsistent BTCB2 anchor data.")
+            }
+            Self::Admission(error) => write!(f, "{}", error),
+            Self::State(state) => f.write_str(match state {
+                AnchorState::NotConfigured => {
+                    "The BTCB2 node endpoint is not configured in Connect."
+                }
+                AnchorState::ConfigurationError => "Connect's BTCB2 node configuration is invalid.",
+                AnchorState::RpcUnavailable => {
+                    "Connect cannot reach its BTCB2 node. Retry when it is available."
+                }
+                AnchorState::Malformed => "The BTCB2 node returned malformed data to Connect.",
+                AnchorState::ForkAbsent => "The configured node does not report the BTCB2 fork.",
+                AnchorState::ForkInactive => "The BTCB2 fork is not active on the configured node.",
+                AnchorState::RdtsAbsent => "The configured BTCB2 node has no RDTS deployment.",
+                AnchorState::RdtsUnsupported => {
+                    "The configured BTCB2 node has an unsupported RDTS deployment."
+                }
+                AnchorState::WrongChain => "Connect's node is on a different chain.",
+                AnchorState::Syncing => {
+                    "The BTCB2 node is still syncing. Retry after synchronization."
+                }
+                AnchorState::InconsistentSnapshot => {
+                    "The BTCB2 tip changed during observation. Retry."
+                }
+                AnchorState::ForkUnverified => {
+                    "Connect could not verify the BTCB2 post-fork header."
+                }
+                AnchorState::Available => "Connect returned an incomplete available anchor.",
+            }),
+        }
+    }
+}
+impl std::error::Error for AnchorStartupError {}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct NetworkAnchor {
     pub tip_hash: BlockHash,
@@ -179,9 +261,9 @@ impl CoincubeClient {
         &self,
         chain: ChainId,
         selected_endpoint: &str,
-    ) -> Result<(ConnectBackend, Arc<ConnectAnchorSession>), AdmissionError> {
+    ) -> Result<(ConnectBackend, Arc<ConnectAnchorSession>), AnchorStartupError> {
         if !chain.is_blake2b() {
-            return Err(AdmissionError::WrongChain);
+            return Err(AdmissionError::WrongChain.into());
         }
         let token = self
             .token()
@@ -193,15 +275,18 @@ impl CoincubeClient {
             crate::installer::connect_esplora_path(chain)
         );
         if selected_endpoint != endpoint {
-            return Err(AdmissionError::InvalidBackend);
+            return Err(AdmissionError::InvalidBackend.into());
         }
         let initial = self
             .network_anchor(chain)
             .await
-            .map_err(|_| AdmissionError::Unavailable)?;
+            .map_err(AnchorStartupError::from)?;
+        if initial.state != AnchorState::Available {
+            return Err(AnchorStartupError::State(initial.state));
+        }
         let initial = initial
             .anchor
-            .ok_or(AdmissionError::Unavailable)?
+            .ok_or(AnchorStartupError::InvalidResponse)?
             .trusted(chain, SystemTime::now())?;
         let session = Arc::new(ConnectAnchorSession {
             snapshot: Mutex::new(SessionSnapshot {
@@ -476,7 +561,9 @@ mod tests {
                     &format!("{}/api/v1/esplora/bitcoin/mainnet", server.base_url())
                 )
                 .await,
-            Err(AdmissionError::InvalidBackend)
+            Err(AnchorStartupError::Admission(
+                AdmissionError::InvalidBackend
+            ))
         ));
         mock.assert_hits_async(0).await;
         let endpoint = format!(
@@ -489,7 +576,7 @@ mod tests {
             unauthenticated
                 .authenticated_backend(chain, &endpoint)
                 .await,
-            Err(AdmissionError::MissingAuth)
+            Err(AnchorStartupError::Admission(AdmissionError::MissingAuth))
         ));
         mock.assert_hits_async(0).await;
         let (backend, session) = client
