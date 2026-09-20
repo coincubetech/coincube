@@ -4185,8 +4185,8 @@ impl App {
             // the string used at backup time (see `network_str` in
             // `state::settings::recovery_kit`). Any divergence here
             // would make every tick report a spurious drift.
-            let network = settings::network_to_api_string(self.cache.network);
-            rk::live_descriptor_fingerprint(w.as_ref(), &self.cube_settings.id, &network)
+            let network = self.cache.chain().api_str();
+            rk::live_descriptor_fingerprint(w.as_ref(), &self.cube_settings.id, network)
         });
     }
 
@@ -7153,6 +7153,23 @@ mod tests {
             )
             .unwrap();
             drop(startup_tasks);
+            app.sync_panel_derived_cache_fields();
+            let wallet = app.wallet.as_ref().unwrap();
+            let fork_fingerprint = state::settings::recovery_kit::live_descriptor_fingerprint(
+                wallet,
+                &app.cube_settings.id,
+                chain.api_str(),
+            );
+            assert!(fork_fingerprint.is_some());
+            assert_eq!(app.cache.current_descriptor_fingerprint, fork_fingerprint);
+            assert_ne!(
+                app.cache.current_descriptor_fingerprint,
+                state::settings::recovery_kit::live_descriptor_fingerprint(
+                    wallet,
+                    &app.cube_settings.id,
+                    "testnet4",
+                )
+            );
             assert!(app.breez_client().is_none());
             assert!(app.spark_backend().is_none());
             assert!(app.wallet_registry.route_lightning_address().is_none());
