@@ -4191,6 +4191,24 @@ impl App {
     }
 
     fn update_dispatch(&mut self, message: Message) -> Task<Message> {
+        // Legacy signer bootstrap persists Bitcoin-family connect.json and uses
+        // unbound gRPC registration. A fork Cube must retain its admitted client;
+        // neither direct requests nor late completions may enter that pipeline.
+        if self.cache.chain().is_blake2b()
+            && matches!(
+                &message,
+                Message::InAppConnectLoginCompleted { .. }
+                    | Message::EnsureConnectReady
+                    | Message::TriggerConnectStreamReady { .. }
+                    | Message::ConnectStreamReady(_)
+                    | Message::ConnectStream(_)
+            )
+        {
+            return Task::done(Message::View(view::Message::ShowError(
+                "Connect signer bootstrap is unavailable for Bitcoin Blake2b. Reopen this Cube through authenticated Connect startup; use its local Cube key for signing."
+                    .into(),
+            )));
+        }
         match message {
             Message::View(view::Message::DismissToast(id)) => {
                 self.errors.retain(|(i, ..)| *i != id);
@@ -7200,6 +7218,52 @@ mod tests {
                         client.token()
                     );
                 }
+            }
+            // Direct legacy bootstrap and a delayed Bitcoin-family completion
+            // cannot mutate the admitted client, write connect.json, or mount gRPC.
+            let bound_before = app.fork_connect_client.as_ref().map(|c| c.base_url.clone());
+            let token_before = app.cache.connect_tokens.is_some();
+            let legacy_tokens = Arc::new(tokio::sync::RwLock::new(
+                crate::services::connect::client::auth::AccessTokenResponse {
+                    access_token: "legacy-fixture".into(),
+                    refresh_token: "legacy-refresh".into(),
+                    expires_at: 1,
+                },
+            ));
+            for message in [
+                Message::InAppConnectLoginCompleted {
+                    token: "legacy-fixture".into(),
+                    refresh_token: "legacy-refresh".into(),
+                    email: "other@example.invalid".into(),
+                },
+                Message::EnsureConnectReady,
+                Message::TriggerConnectStreamReady {
+                    network: chain.bitcoin_network(),
+                    datadir: CoincubeDirectory::new(root.clone()),
+                    tokens: legacy_tokens,
+                    email: "other@example.invalid".into(),
+                    cube_uuid: None,
+                },
+                Message::ConnectStreamReady(None),
+            ] {
+                let mut stream = iced_runtime::task::into_stream(app.update(message)).unwrap();
+                assert!(matches!(
+                    stream.next().await,
+                    Some(iced_runtime::Action::Output(Message::View(view::Message::ShowError(text))))
+                        if text.contains("Reopen this Cube")
+                ));
+                assert!(stream.next().await.is_none());
+                assert_eq!(
+                    app.fork_connect_client.as_ref().map(|c| c.base_url.clone()),
+                    bound_before
+                );
+                assert_eq!(app.cache.connect_tokens.is_some(), token_before);
+                assert!(app.connect_stream_config.is_none());
+                assert!(!root.join("testnet4").join("connect.json").exists());
+                assert!(!root
+                    .join("bitcoin-blake2b-testnet4")
+                    .join("connect.json")
+                    .exists());
             }
             app.invalidate_fork_session();
             assert!(!app.cache.has_connect_session);

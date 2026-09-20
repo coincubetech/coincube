@@ -49,3 +49,9 @@ backend's authority. The admitted in-memory session never owns a separate saved
 keyring session, so its refusal does not delete unrelated saved credentials.
 Unit-test account secrets use thread-local memory; direct legacy test keyring
 consumers use a separate unit-test namespace.
+
+Legacy Connect signer bootstrap is refused for BTCB2, including direct retry/login
+messages and delayed stream completions. It cannot persist Bitcoin-family
+`connect.json`, register a device through the legacy gRPC bootstrap, or replace
+the admitted session. Reopen the Cube through authenticated Connect startup to
+change its session; this launch uses local Cube keys for signing.
