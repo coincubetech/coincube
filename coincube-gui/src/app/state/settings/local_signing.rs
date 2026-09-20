@@ -118,6 +118,7 @@ pub struct LocalSigningState {
     /// so we defer the first store load to the first `update` tick
     /// where `cache` is available.
     initialised: bool,
+    wallet_chain: Option<crate::chain::ChainId>,
 }
 
 impl Default for LocalSigningState {
@@ -136,6 +137,7 @@ impl Default for LocalSigningState {
             pairing_run: Default::default(),
             tombstones: Arc::new(Mutex::new(HashSet::new())),
             initialised: false,
+            wallet_chain: None,
         }
     }
 }
@@ -182,6 +184,7 @@ impl LocalSigningState {
     /// two fields pointing at the previous vault, and the next
     /// pairing offer would target the wrong vault id.
     pub(crate) fn apply_wallet(&mut self, wallet: &Wallet) {
+        self.wallet_chain = Some(wallet.chain);
         use coincube_core::miniscript::DescriptorPublicKey;
         use sha2::{Digest, Sha256};
         let hash = hex::encode(Sha256::digest(
@@ -254,7 +257,8 @@ impl LocalSigningState {
     ///
     /// Returns `true` if the wizard was reset.
     pub(crate) fn apply_wallet_update(&mut self, wallet: &Wallet) -> bool {
-        let vault_changed = self.wallet_fingerprint != Some(wallet.id_fingerprint());
+        let vault_changed = self.wallet_fingerprint != Some(wallet.id_fingerprint())
+            || self.wallet_chain != Some(wallet.chain);
         self.apply_wallet(wallet);
         if vault_changed && !matches!(self.flow, PairingFlow::Idle) {
             self.start_pairing_run();
@@ -484,6 +488,20 @@ impl State for LocalSigningState {
             Message::View(view::Message::Settings(view::SettingsMessage::LocalSigning(m))) => m,
             _ => return Task::none(),
         };
+        if self
+            .wallet_chain
+            .is_some_and(|chain| !crate::phone_signer::lan_signing_allowed(chain))
+            && matches!(
+                msg,
+                LocalSigningMessage::StartPairing | LocalSigningMessage::PickPhone(_)
+            )
+        {
+            self.start_pairing_run();
+            self.flow = PairingFlow::Error(PairingError::InternalError(
+                crate::phone_signer::BTCB2_LAN_UNAVAILABLE.to_string(),
+            ));
+            return Task::none();
+        }
         match msg {
             LocalSigningMessage::SelectKey(key) => {
                 if matches!(self.flow, PairingFlow::Idle)
@@ -699,6 +717,7 @@ impl State for LocalSigningState {
             self.start_pairing_run();
             self.flow = PairingFlow::Idle;
             self.wallet_fingerprint = None;
+            self.wallet_chain = None;
             self.wallet_signer_fingerprints = Vec::new();
             self.vault_key_fingerprints = Vec::new();
         }
@@ -1304,6 +1323,43 @@ mod tests {
     /// non-`LocalSigningMessage` variant on the floor. A pairing
     /// offer generated afterwards then carried the wrong vault id.
     /// `apply_wallet` is the helper both paths now go through.
+    #[test]
+    fn bitcoin_twin_switch_revokes_pairing_and_btcb2_cannot_start_or_pick() {
+        use crate::chain::ChainId;
+        let bitcoin =
+            Wallet::new(CoincubeDescriptor::from_str(DESC_A).unwrap()).with_chain(ChainId::Bitcoin);
+        let btcb2 = Wallet::new(CoincubeDescriptor::from_str(DESC_A).unwrap())
+            .with_chain(ChainId::BitcoinBlake2b);
+        assert_eq!(bitcoin.id_fingerprint(), btcb2.id_fingerprint());
+        let mut state = LocalSigningState::default();
+        state.apply_wallet(&bitcoin);
+        state.flow = PairingFlow::PhonePicker { discovered: vec![] };
+        let old_id = state.pairing_id;
+        assert!(state.apply_wallet_update(&btcb2));
+        assert_ne!(state.pairing_id, old_id);
+        assert!(matches!(state.flow, PairingFlow::Idle));
+        state.initialised = true; // no fixture needs a real pairing-store read
+        for message in [
+            LocalSigningMessage::StartPairing,
+            LocalSigningMessage::PickPhone("fixture".into()),
+        ] {
+            let task = state.update(
+                None,
+                &Cache::default(),
+                Message::View(view::Message::Settings(
+                    view::SettingsMessage::LocalSigning(message),
+                )),
+            );
+            assert!(iced_runtime::task::into_stream(task).is_none());
+            match &state.flow {
+                PairingFlow::Error(PairingError::InternalError(error)) => {
+                    assert!(error.contains("chain-bound pairing"))
+                }
+                _ => panic!("BTCB2 pairing should be unavailable"),
+            }
+        }
+    }
+
     #[test]
     fn apply_wallet_overwrites_prior_vault_fingerprints() {
         let wallet_a = Wallet::new(CoincubeDescriptor::from_str(DESC_A).unwrap());
