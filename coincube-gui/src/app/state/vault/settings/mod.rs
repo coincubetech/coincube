@@ -70,6 +70,19 @@ impl State for SettingsState {
             tracing::warn!("SettingsState::update called without daemon");
             return Task::none();
         };
+        if self.wallet.chain.is_blake2b()
+            && matches!(
+                &message,
+                Message::View(view::Message::Settings(
+                    view::SettingsMessage::EditBitcoindSettings
+                        | view::SettingsMessage::EditRemoteBackendSettings
+                ))
+            )
+        {
+            return Task::done(Message::View(view::Message::ShowError(
+                "Bitcoin Blake2b requires its authenticated Connect backend; switching backends is unavailable.".into(),
+            )));
+        }
         match &message {
             Message::View(view::Message::Settings(view::SettingsMessage::EditBitcoindSettings)) => {
                 self.setting = Some(
@@ -247,7 +260,6 @@ impl State for ImportExportSettingsState {
                     return Task::perform(
                         update_aliases(
                             cache.datadir_path.clone(),
-                            cache.network,
                             self.wallet.clone(),
                             None,
                             aliases.into_iter().map(|(fg, ks)| (fg, ks.name)).collect(),
@@ -303,13 +315,12 @@ impl State for ImportExportSettingsState {
             Message::View(view::Message::Settings(view::SettingsMessage::ExportWallet)) => {
                 if self.modal.is_none() {
                     let datadir = cache.datadir_path.clone();
-                    let network = cache.network;
                     let config = self.config.clone();
                     let wallet = self.wallet.clone();
                     let daemon_clone = daemon.clone();
                     let modal = VaultExportModal::new(
                         Some(daemon_clone),
-                        ImportExportType::ExportProcessBackup(datadir, network, config, wallet),
+                        ImportExportType::ExportProcessBackup(datadir, config, wallet),
                     );
                     launch!(self, modal, true);
                 }
@@ -320,7 +331,7 @@ impl State for ImportExportSettingsState {
                 let modal = VaultExportModal::new(
                     Some(daemon.clone()),
                     ImportExportType::ImportBackup {
-                        network_dir: cache.datadir_path.network_directory(cache.network),
+                        network_dir: cache.datadir_path.network_directory(self.wallet.chain),
                         wallet: self.wallet.clone(),
                         overwrite_labels: None,
                         overwrite_aliases: None,
@@ -437,5 +448,43 @@ impl State for BackendSettingsState {
 impl From<BackendSettingsState> for Box<dyn State> {
     fn from(s: BackendSettingsState) -> Box<dyn State> {
         Box::new(s)
+    }
+}
+
+#[cfg(test)]
+mod chain_tests {
+    use super::*;
+
+    #[test]
+    fn fork_backend_settings_messages_refuse_before_side_effects() {
+        let wallet = Arc::new(
+            Wallet::new(crate::app::state::vault::test_support::unified::fixture().descriptor)
+                .with_chain(crate::chain::ChainId::BitcoinBlake2b),
+        );
+        let dir = CoincubeDirectory::new(
+            std::env::temp_dir().join(format!("coincube-backend-refusal-{}", uuid::Uuid::new_v4())),
+        );
+        let mut state = SettingsState::new(
+            dir.clone(),
+            wallet,
+            DaemonBackend::EmbeddedCoincubed(None),
+            false,
+            Arc::new(Config::new(false)),
+        );
+        let daemon = Arc::new(crate::daemon::client::Coincubed::new(
+            crate::utils::mock::Daemon::new(vec![]).run(),
+        ));
+        for message in [
+            view::SettingsMessage::EditBitcoindSettings,
+            view::SettingsMessage::EditRemoteBackendSettings,
+        ] {
+            let _task = state.update(
+                Some(daemon.clone()),
+                &Cache::default(),
+                Message::View(view::Message::Settings(message)),
+            );
+            assert!(state.setting.is_none());
+            assert!(!dir.path().exists());
+        }
     }
 }

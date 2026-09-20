@@ -25,6 +25,7 @@ use crate::{
         wallet::Wallet,
         Config,
     },
+    chain::ChainId,
     daemon::{model::HistoryTransaction, Daemon, DaemonBackend, DaemonError},
     dir::CoincubeDirectory,
     export::Progress,
@@ -45,6 +46,9 @@ pub struct Backup {
     pub alias: Option<String>,
     pub accounts: Vec<Account>,
     pub network: Network,
+    /// Exact chain identity. Legacy omission is Bitcoin-family only, never BTCB2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain: Option<ChainId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub date: Option<u64>,
     /// App proprietary metadata (settings, configuration, etc..)
@@ -66,11 +70,13 @@ pub enum Error {
     SettingsFromFile,
     Daemon(String),
     TxTimeMissing,
+    ChainIdentity,
 }
 
 impl Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Error::ChainIdentity => write!(f, "Backup chain identity does not match this wallet"),
             Error::DescriptorMissing => write!(f, "Backup: descriptor missing"),
             Error::NotSingleWallet => write!(f, "Backup: Zero or several wallets"),
             Error::Json => write!(f, "Backup: json error"),
@@ -101,7 +107,34 @@ impl Debug for Backup {
     }
 }
 
+/// Fork backups require the chain-bound embedded daemon; a projected Network
+/// from a generic external/remote backend cannot attest the fork identity.
+pub(crate) fn daemon_matches_chain(daemon: &dyn Daemon, chain: ChainId) -> bool {
+    if chain.is_blake2b() && !daemon.backend().is_embedded() {
+        return false;
+    }
+    match daemon.config() {
+        Some(config) => {
+            config.bitcoin_config.chain == chain
+                && config.bitcoin_config.network == chain.bitcoin_network()
+        }
+        None => !chain.is_blake2b(),
+    }
+}
+
 impl Backup {
+    pub fn chain_identity(&self) -> Result<ChainId, Error> {
+        let chain = self.chain.unwrap_or_else(|| self.network.into());
+        if chain.bitcoin_network() != self.network {
+            return Err(Error::ChainIdentity);
+        }
+        Ok(chain)
+    }
+
+    pub fn matches_chain(&self, chain: ChainId) -> bool {
+        matches!(self.chain_identity(), Ok(identity) if identity == chain)
+    }
+
     /// Create a Backup from a descriptor
     ///
     /// # Arguments
@@ -114,6 +147,7 @@ impl Backup {
             alias: None,
             accounts: vec![account],
             network,
+            chain: None,
             date: None,
             proprietary: Default::default(),
             version: default_version(),
@@ -123,12 +157,16 @@ impl Backup {
     /// Create a Backup from the Coincube App context
     pub async fn from_app(
         datadir: CoincubeDirectory,
-        network: Network,
         config: Arc<Config>,
         wallet: Arc<Wallet>,
         daemon: Arc<dyn Daemon + Sync + Send>,
         sender: &UnboundedSender<Progress>,
     ) -> Result<Self, Error> {
+        let chain = wallet.chain;
+        let network = chain.bitcoin_network();
+        if !daemon_matches_chain(daemon.as_ref(), chain) {
+            return Err(Error::ChainIdentity);
+        }
         let mut proprietary = serde_json::Map::new();
         proprietary.insert(COINCUBE_VERSION_KEY.to_string(), VERSION.0.into());
 
@@ -136,7 +174,7 @@ impl Backup {
         let descriptor = wallet.main_descriptor.to_string();
         let keys = wallet.keys();
 
-        let network_dir = datadir.network_directory(network);
+        let network_dir = datadir.network_directory(chain);
         let mut wallet_alias = wallet.alias.clone();
         if let Some(settings) =
             WalletSettings::from_file(&network_dir, |settings| wallet.id() == settings.wallet_id())
@@ -153,6 +191,9 @@ impl Backup {
         }
 
         let info = daemon.get_info().await?;
+        if info.network != network {
+            return Err(Error::ChainIdentity);
+        }
 
         let _ = sender.send(Progress::Progress(20.0));
 
@@ -230,6 +271,7 @@ impl Backup {
             alias: wallet_alias,
             accounts: vec![account],
             network,
+            chain: chain.is_blake2b().then_some(chain),
             proprietary: serde_json::Map::new(),
             date: Some(now().as_secs()),
             version: 0,
@@ -450,6 +492,28 @@ pub enum KeyType {
 mod test {
     use super::*;
 
+    #[test]
+    fn backup_chain_identity_is_explicit_and_encoding_checked() {
+        for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
+            let mut backup: Backup = serde_json::from_value(serde_json::json!({
+                "accounts": [], "network": chain.bitcoin_network()
+            }))
+            .unwrap();
+            assert!(!backup.matches_chain(chain));
+            assert!(backup.matches_chain(chain.bitcoin_network().into()));
+            backup.chain = Some(chain);
+            assert!(round_trip(&backup));
+            assert!(backup.matches_chain(chain));
+            assert!(!backup.matches_chain(chain.bitcoin_network().into()));
+            backup.network = Network::Regtest;
+            assert!(matches!(backup.chain_identity(), Err(Error::ChainIdentity)));
+        }
+        assert!(serde_json::from_value::<Backup>(serde_json::json!({
+            "accounts": [], "network": "bitcoin", "chain": "unknown-fork"
+        }))
+        .is_err());
+    }
+
     fn round_trip(backup: &Backup) -> bool {
         let serialized = serde_json::to_string(backup).unwrap();
         let parsed: Backup = serde_json::from_str(&serialized).unwrap();
@@ -463,6 +527,7 @@ mod test {
             alias: None,
             accounts: Vec::new(),
             network: Network::Signet,
+            chain: None,
             date: Some(0),
             proprietary: serde_json::Map::new(),
             version: 0,
