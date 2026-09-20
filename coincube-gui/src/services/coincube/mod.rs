@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 pub mod client;
+pub mod network_anchor;
 pub mod network_status;
 pub mod vault_reconcile;
 pub use client::CoincubeClient;

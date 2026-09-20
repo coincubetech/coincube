@@ -40,6 +40,7 @@ pub enum DaemonError {
     DaemonStopped,
     // Error at start up.
     Start(StartupError),
+    ConnectAnchor(crate::services::coincube::network_anchor::AnchorStartupError),
     // Error if the client is not supported.
     ClientNotSupported,
     /// Error when selecting coins for spend.
@@ -58,6 +59,7 @@ impl std::fmt::Display for DaemonError {
             Self::Http(kind, e) => write!(f, "Http error: [{:?}] {}", kind, e),
             Self::Unexpected(e) => write!(f, "Daemon unexpected error: {}", e),
             Self::Start(e) => write!(f, "Daemon did not start: {}", e),
+            Self::ConnectAnchor(e) => write!(f, "{}", e),
             Self::ClientNotSupported => write!(f, "Daemon communication is not supported"),
             Self::CoinSelectionError => write!(f, "Coin selection error"),
             Self::NotImplemented => write!(f, "This feature is not implemented for this backend"),
@@ -101,6 +103,9 @@ impl DaemonBackend {
 pub trait Daemon: Debug {
     fn backend(&self) -> DaemonBackend;
     fn config(&self) -> Option<&Config>;
+    /// Revoke ephemeral Connect authority before logout/account/provider changes.
+    /// Existing Bitcoin/external implementations have no such authority.
+    fn invalidate_connect_session(&self) {}
     async fn is_alive(
         &self,
         datadir: &crate::dir::CoincubeDirectory,
