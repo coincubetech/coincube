@@ -5004,16 +5004,30 @@ mod fork_completion_tests {
         std::fs::remove_dir_all(root_path).unwrap();
     }
 
-    #[tokio::test]
-    #[allow(clippy::await_holding_lock)] // serialize the process-global session for the whole ordering test
-    async fn invalidation_cancels_or_discards_real_post_install_completion_without_reopening_pin() {
+    #[test]
+    fn invalidation_cancels_or_discards_real_post_install_completion_without_reopening_pin() {
         let _guard = app::session::test_guard();
-        // Tab contains the full App enum. Keeping it inline in this coroutine
-        // overflowed the coverage runner's test-thread stack. Pin each finite
-        // ordering on the heap and keep its Tab there too; do not enlarge the
-        // thread stack or change the real update/task-completion assertions.
+        // This finite debug fixture moves several inline 31 KiB Tab/State
+        // values through the real update path. Measured by the independent
+        // reviewer: 2 MiB aborts, 2176 KiB passes (not recursive growth).
+        // Give only each fixture ordering 8 MiB, with coverage headroom;
+        // production State layout and the global test runner stay unchanged.
         for completed_before_logout in [false, true] {
-            Box::pin(post_install_completion_ordering(completed_before_logout)).await;
+            let result = std::thread::Builder::new()
+                .name(format!("fork-save-ordering-{completed_before_logout}"))
+                .stack_size(8 * 1024 * 1024)
+                .spawn(move || {
+                    tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap()
+                        .block_on(post_install_completion_ordering(completed_before_logout));
+                })
+                .unwrap()
+                .join();
+            if let Err(panic) = result {
+                std::panic::resume_unwind(panic);
+            }
         }
         app::session::close();
     }

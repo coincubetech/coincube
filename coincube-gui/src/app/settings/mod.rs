@@ -3251,7 +3251,7 @@ mod fork_atomic_save_tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn concurrent_fork_writers_read_latest_committed_settings() {
         let dir = directory();
         let (reached, ready) = tokio::sync::oneshot::channel();
@@ -3282,6 +3282,14 @@ mod fork_atomic_save_tests {
             })
             .await
         });
+        // Keep the first writer paused while the second has an opportunity
+        // to commit. Merely releasing immediately would also pass without
+        // the lock because filesystem awaits order the writers by accident.
+        tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+        assert!(
+            !second.is_finished(),
+            "the second fork writer committed while the first held the stable sibling lock"
+        );
         release.send(()).unwrap();
         first.await.unwrap().unwrap();
         second.await.unwrap().unwrap();
