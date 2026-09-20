@@ -3080,37 +3080,66 @@ impl Tab {
     }
 }
 
+/// Apply only the Cube changes selected by the installer. Each touched record
+/// must still match its read snapshot (or already match the desired result).
+/// Unrelated concurrent updates, wallet records and preferences remain intact.
+fn merge_fork_cube_changes(
+    mut latest: app::settings::Settings,
+    expected: &app::settings::Settings,
+    desired: &app::settings::Settings,
+) -> Result<app::settings::Settings, app::settings::SettingsError> {
+    let ids: std::collections::HashSet<_> = expected
+        .cubes
+        .iter()
+        .chain(&desired.cubes)
+        .map(|cube| cube.id.as_str())
+        .collect();
+    for id in ids {
+        let before = expected.cubes.iter().find(|cube| cube.id == id);
+        let after = desired.cubes.iter().find(|cube| cube.id == id);
+        let current = latest.cubes.iter().find(|cube| cube.id == id);
+        let encode = |cube: Option<&app::settings::CubeSettings>| {
+            serde_json::to_value(cube)
+                .map_err(|e| app::settings::SettingsError::WritingFile(e.to_string()))
+        };
+        let before_value = encode(before)?;
+        let after_value = encode(after)?;
+        if before_value == after_value {
+            continue;
+        }
+        let current_value = encode(current)?;
+        if current_value == after_value {
+            continue;
+        }
+        if current_value != before_value {
+            return Err(app::settings::SettingsError::WritingFile(
+                "Cube settings changed during installation; reopen and retry without overwriting them".into()));
+        }
+        match (latest.cubes.iter().position(|cube| cube.id == id), after) {
+            (Some(index), Some(cube)) => latest.cubes[index] = cube.clone(),
+            (Some(index), None) => {
+                latest.cubes.remove(index);
+            }
+            (None, Some(cube)) => latest.cubes.push(cube.clone()),
+            (None, None) => (),
+        }
+    }
+    Ok(latest)
+}
+
 async fn save_cube_settings(
     network_dir: &NetworkDirectory,
     cube: app::settings::CubeSettings,
     network: crate::chain::ChainId,
     settings_data: app::settings::Settings,
+    expected: app::settings::Settings,
 ) -> Result<app::settings::CubeSettings, String> {
     let cube_name = cube.name.clone();
     let settings_path = network_dir.path().join("settings.json");
 
     let save_result = if network.is_blake2b() {
-        // Merge into the settings read under the stable writer lock. The
-        // installer snapshot may predate an unrelated Cube/settings update.
-        let saved_cube = cube.clone();
-        update_settings_file(network_dir, move |mut latest| {
-            if !latest
-                .cubes
-                .iter()
-                .any(|existing| existing.id == saved_cube.id)
-            {
-                latest.cubes.push(saved_cube);
-            }
-            for wallet in settings_data.wallets {
-                if !latest
-                    .wallets
-                    .iter()
-                    .any(|existing| existing.wallet_id() == wallet.wallet_id())
-                {
-                    latest.wallets.push(wallet);
-                }
-            }
-            Some(latest)
+        app::settings::update_fork_settings_checked(network_dir, move |latest| {
+            merge_fork_cube_changes(latest, &expected, &settings_data).map(Some)
         })
         .await
     } else {
@@ -3245,6 +3274,7 @@ async fn find_or_create_cube<C: Into<crate::chain::ChainId>>(
 
     match app::settings::Settings::from_file(network_dir) {
         Ok(mut settings_data) => {
+            let expected = settings_data.clone();
             if settings_data
                 .cubes
                 .iter()
@@ -3319,7 +3349,8 @@ async fn find_or_create_cube<C: Into<crate::chain::ChainId>>(
                         cube.name, uuid, cube.vault_wallet_id, network
                     );
 
-                    return save_cube_settings(network_dir, cube, network, settings_data).await;
+                    return save_cube_settings(network_dir, cube, network, settings_data, expected)
+                        .await;
                 }
 
                 let mut base_cube = new_cube_base();
@@ -3332,7 +3363,8 @@ async fn find_or_create_cube<C: Into<crate::chain::ChainId>>(
                 );
 
                 settings_data.cubes.push(cube.clone());
-                return save_cube_settings(network_dir, cube, network, settings_data).await;
+                return save_cube_settings(network_dir, cube, network, settings_data, expected)
+                    .await;
             }
 
             // Second, if we have an originating cube ID, validate and use it
@@ -3363,8 +3395,14 @@ async fn find_or_create_cube<C: Into<crate::chain::ChainId>>(
                         cube_clone.vault_wallet_id, cube_name, network
                     );
 
-                    return save_cube_settings(network_dir, cube_clone, network, settings_data)
-                        .await;
+                    return save_cube_settings(
+                        network_dir,
+                        cube_clone,
+                        network,
+                        settings_data,
+                        expected,
+                    )
+                    .await;
                 } else {
                     return Err(format!(
                         "Cannot find originating cube with ID '{}'. Please restart the app and try again.",
@@ -3402,7 +3440,14 @@ async fn find_or_create_cube<C: Into<crate::chain::ChainId>>(
                     empty_cube.vault_wallet_id, cube_name, network
                 );
 
-                return save_cube_settings(network_dir, empty_cube, network, settings_data).await;
+                return save_cube_settings(
+                    network_dir,
+                    empty_cube,
+                    network,
+                    settings_data,
+                    expected,
+                )
+                .await;
             }
 
             // Finally, create a new cube for this wallet. `restored_cube` is
@@ -3419,7 +3464,7 @@ async fn find_or_create_cube<C: Into<crate::chain::ChainId>>(
             );
 
             settings_data.cubes.push(cube.clone());
-            save_cube_settings(network_dir, cube, network, settings_data).await
+            save_cube_settings(network_dir, cube, network, settings_data, expected).await
         }
         Err(_) => {
             // No settings file yet, create first cube. On the restore path
@@ -3437,7 +3482,14 @@ async fn find_or_create_cube<C: Into<crate::chain::ChainId>>(
             let mut new_settings = app::settings::Settings::default();
             new_settings.cubes.push(cube.clone());
 
-            save_cube_settings(network_dir, cube, network, new_settings).await
+            save_cube_settings(
+                network_dir,
+                cube,
+                network,
+                new_settings,
+                app::settings::Settings::default(),
+            )
+            .await
         }
     }
 }
@@ -4032,8 +4084,12 @@ mod find_or_create_cube_tests {
         );
         save_cube_settings(
             &dir,
-            new_cube,
+            new_cube.clone(),
             crate::chain::ChainId::BitcoinBlake2b,
+            app::settings::Settings {
+                cubes: vec![new_cube.clone()],
+                ..Default::default()
+            },
             app::settings::Settings::default(),
         )
         .await
@@ -4043,6 +4099,92 @@ mod find_or_create_cube_tests {
         assert_eq!(saved.cubes[0].name, "other");
         assert_eq!(saved.cubes[1].name, "installed");
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn fork_existing_attachment_empty_reuse_and_duplicate_reconciliation_persist() {
+        let chain = crate::chain::ChainId::BitcoinBlake2b;
+        for mode in ["originating", "empty", "restore_duplicate"] {
+            let root = std::env::temp_dir().join(format!("fork-attach-{}", uuid::Uuid::new_v4()));
+            let dir = CoincubeDirectory::new(root.clone()).network_directory(chain);
+            let target = app::settings::CubeSettings::new("target".into(), chain);
+            let target_id = target.id.clone();
+            let mut snapshot = app::settings::Settings {
+                cubes: vec![target],
+                ..Default::default()
+            };
+            if mode == "restore_duplicate" {
+                snapshot.cubes.push(
+                    app::settings::CubeSettings::new("duplicate".into(), chain)
+                        .with_vault(vault_identity()),
+                );
+            }
+            update_settings_file(&dir, |_| Some(snapshot))
+                .await
+                .unwrap();
+            let result = find_or_create_cube(
+                &dir,
+                Some(&vault_identity()),
+                &None,
+                chain,
+                (mode == "originating").then(|| target_id.clone()),
+                (mode == "restore_duplicate").then(|| RestoreCubeIdentity {
+                    uuid: target_id.clone(),
+                    name: "target".into(),
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(result.id, target_id);
+            let saved = reload(&dir);
+            assert_eq!(saved.cubes.len(), 1);
+            assert_eq!(saved.cubes[0].id, target_id);
+            assert_eq!(
+                saved.cubes[0].vault_wallet_id,
+                Some(vault_identity().wallet_id)
+            );
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn fork_delta_preserves_unrelated_edits_and_refuses_changed_target_without_write() {
+        let chain = crate::chain::ChainId::BitcoinBlake2b;
+        for conflicting in [false, true] {
+            let root = std::env::temp_dir().join(format!("fork-conflict-{}", uuid::Uuid::new_v4()));
+            let dir = CoincubeDirectory::new(root.clone()).network_directory(chain);
+            let target = app::settings::CubeSettings::new("target".into(), chain);
+            let other = app::settings::CubeSettings::new("other".into(), chain);
+            let expected = app::settings::Settings {
+                cubes: vec![target.clone(), other],
+                ..Default::default()
+            };
+            let mut desired = expected.clone();
+            desired.cubes[0].set_vault(vault_identity());
+            let mut latest = expected.clone();
+            latest.cubes[usize::from(!conflicting)].name = "concurrent edit".into();
+            update_settings_file(&dir, |_| Some(latest)).await.unwrap();
+            let before = std::fs::read(dir.path().join("settings.json")).unwrap();
+            let result =
+                save_cube_settings(&dir, desired.cubes[0].clone(), chain, desired, expected).await;
+            if conflicting {
+                assert!(result.is_err());
+                assert_eq!(
+                    std::fs::read(dir.path().join("settings.json")).unwrap(),
+                    before
+                );
+            } else {
+                result.unwrap();
+                let saved = reload(&dir);
+                assert_eq!(
+                    saved.cubes[0].vault_wallet_id,
+                    Some(vault_identity().wallet_id)
+                );
+                assert_eq!(saved.cubes[1].name, "concurrent edit");
+            }
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 
     /// Same hazard as `cleared_pending_rescan`: `update_settings_file` deletes

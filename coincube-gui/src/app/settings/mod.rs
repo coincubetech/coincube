@@ -290,6 +290,35 @@ where
     F: FnOnce(Settings) -> Option<Settings>,
     P: std::future::Future<Output = ()>,
 {
+    update_fork_settings_checked_with_hook(
+        network_dir,
+        |settings| Ok(updater(settings)),
+        before_commit,
+    )
+    .await
+}
+
+/// Apply a fallible fork mutation while holding the same stable writer lock.
+/// A conflict returns before creating a temporary replacement file.
+pub(crate) async fn update_fork_settings_checked<F>(
+    network_dir: &NetworkDirectory,
+    updater: F,
+) -> Result<(), SettingsError>
+where
+    F: FnOnce(Settings) -> Result<Option<Settings>, SettingsError>,
+{
+    update_fork_settings_checked_with_hook(network_dir, updater, std::future::ready(())).await
+}
+
+async fn update_fork_settings_checked_with_hook<F, P>(
+    network_dir: &NetworkDirectory,
+    updater: F,
+    before_commit: P,
+) -> Result<(), SettingsError>
+where
+    F: FnOnce(Settings) -> Result<Option<Settings>, SettingsError>,
+    P: std::future::Future<Output = ()>,
+{
     let dir = network_dir.path();
     tokio::fs::create_dir_all(dir)
         .await
@@ -313,7 +342,7 @@ where
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Settings::default(),
         Err(e) => return Err(SettingsError::ReadingFile(e.to_string())),
     };
-    let Some(updated) = updater(current) else {
+    let Some(updated) = updater(current)? else {
         before_commit.await;
         // No await from the commit through release of the stable writer lock.
         match std::fs::remove_file(&path) {
