@@ -15,6 +15,15 @@ use coincubed::{
     DaemonControl, DaemonHandle,
 };
 
+fn authenticated_startup_error(error: coincubed::StartupError) -> DaemonError {
+    match error {
+        coincubed::StartupError::ConnectAdmission(error) => {
+            DaemonError::ConnectAnchor(error.into())
+        }
+        error => DaemonError::Start(error),
+    }
+}
+
 // If an async caller abandons startup, the blocking result still owns cleanup.
 // DaemonHandle itself does not stop its poller on drop.
 struct PendingConnectDaemon(Option<DaemonHandle>);
@@ -89,7 +98,7 @@ impl EmbeddedDaemon {
             }),
             Err(error) => {
                 session.invalidate();
-                Err(DaemonError::Start(error))
+                Err(authenticated_startup_error(error))
             }
         }
     }
@@ -540,5 +549,25 @@ mod anchor_startup_tests {
         assert_eq!(session.fresh_anchor(), Err(AdmissionError::Unavailable));
         drop(daemon);
         assert!(!dir.exists());
+    }
+    #[test]
+    fn daemon_admission_results_keep_the_typed_startup_recovery_path() {
+        for expected in [
+            AdmissionError::MissingAuth,
+            AdmissionError::Unavailable,
+            AdmissionError::WrongChain,
+            AdmissionError::Stale,
+            AdmissionError::HashMismatch,
+            AdmissionError::ChangedDuringOperation,
+            AdmissionError::InvalidBackend,
+            AdmissionError::IndexerBehind,
+            AdmissionError::Throttled,
+            AdmissionError::Aborted,
+        ] {
+            assert!(matches!(
+                authenticated_startup_error(coincubed::StartupError::ConnectAdmission(expected)),
+                DaemonError::ConnectAnchor(AnchorStartupError::Admission(actual)) if actual == expected
+            ));
+        }
     }
 }
