@@ -467,12 +467,12 @@ impl Client {
                 })
                 .transpose()
                 .map_err(|error| admission_error(provider, error))?;
-            if self.abort.load(Ordering::Relaxed) {
+            if self.admission.is_some() && self.abort.load(Ordering::Relaxed) {
                 return Err(Error::Aborted);
             }
             let result = op(&provider.client);
             // A successful broadcast must not be retrospectively reported failed.
-            if check_after && self.abort.load(Ordering::Relaxed) {
+            if self.admission.is_some() && check_after && self.abort.load(Ordering::Relaxed) {
                 return Err(Error::Aborted);
             }
             if result.is_ok() && check_after {
@@ -769,6 +769,20 @@ mod tests {
         ));
         assert_eq!(lagging.requests().len(), requests);
     }
+    #[test]
+    fn bitcoin_keeps_successful_operation_result_when_abort_arrives_during_it() {
+        let client = client_with(vec![fake_provider("Bitcoin")]);
+        assert_eq!(
+            client
+                .try_in_order(|_| {
+                    client.abort.store(true, Ordering::Relaxed);
+                    Ok(42)
+                })
+                .unwrap(),
+            42
+        );
+    }
+
     #[test]
     fn admission_throttle_uses_existing_cooldown_and_abort_skips_remaining_calls() {
         use bitcoin::hashes::Hash;

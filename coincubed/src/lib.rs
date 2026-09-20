@@ -1055,6 +1055,54 @@ impl DaemonHandle {
         }
     }
 
+    /// Cleanup for ephemeral Connect ownership, including failed startup/Drop.
+    /// Closed channels and panicked workers become errors instead of unwinding.
+    /// Always joins both workers even when one failed. Existing stop semantics
+    /// remain unchanged for callers that do not opt into this cleanup path.
+    pub fn stop_for_cleanup(self) -> io::Result<()> {
+        fn failure() -> io::Error {
+            io::Error::other("Daemon worker failed during cleanup")
+        }
+        match self {
+            Self::Controller {
+                poller_sender,
+                poller_handle,
+                scan_abort,
+                ..
+            } => {
+                scan_abort.store(true, sync::atomic::Ordering::Relaxed);
+                let disconnected = poller_sender.send(poller::PollerMessage::Shutdown).is_err();
+                let panicked = poller_handle.join().is_err();
+                if disconnected || panicked {
+                    Err(failure())
+                } else {
+                    Ok(())
+                }
+            }
+            Self::Server {
+                poller_sender,
+                poller_handle,
+                rpcserver_shutdown,
+                rpcserver_handle,
+                scan_abort,
+            } => {
+                scan_abort.store(true, sync::atomic::Ordering::Relaxed);
+                rpcserver_shutdown.store(true, sync::atomic::Ordering::Relaxed);
+                let disconnected = poller_sender.send(poller::PollerMessage::Shutdown).is_err();
+                let rpc_result = rpcserver_handle
+                    .join()
+                    .map_err(|_| failure())
+                    .and_then(|result| result);
+                let poller_result = poller_handle.join().map_err(|_| failure());
+                rpc_result.and(poller_result).and(if disconnected {
+                    Err(failure())
+                } else {
+                    Ok(())
+                })
+            }
+        }
+    }
+
     /// Stop the Coincube daemon. This returns any error which may have occurred.
     pub fn stop(self) -> Result<(), Box<dyn error::Error>> {
         match self {
@@ -1092,6 +1140,57 @@ impl DaemonHandle {
                 Ok(())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+    #[test]
+    fn cleanup_joins_failed_workers_without_unwinding() {
+        for panic_worker in [false, true] {
+            let (sender, receiver) = mpsc::sync_channel(1);
+            drop(receiver);
+            let poller = thread::spawn(move || {
+                if panic_worker {
+                    panic!("synthetic poller failure");
+                }
+            });
+            let rpc = thread::spawn(|| -> io::Result<()> {
+                Err(io::Error::other("synthetic RPC failure"))
+            });
+            let abort = sync::Arc::new(sync::atomic::AtomicBool::new(false));
+            let shutdown = sync::Arc::new(sync::atomic::AtomicBool::new(false));
+            let handle = DaemonHandle::Server {
+                poller_sender: sender,
+                poller_handle: poller,
+                rpcserver_shutdown: shutdown.clone(),
+                rpcserver_handle: rpc,
+                scan_abort: abort.clone(),
+            };
+            assert!(handle.stop_for_cleanup().is_err());
+            assert!(abort.load(sync::atomic::Ordering::Relaxed));
+            assert!(shutdown.load(sync::atomic::Ordering::Relaxed));
+        }
+    }
+    #[test]
+    fn cleanup_delivers_shutdown_and_joins_healthy_workers() {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let poller = thread::spawn(move || {
+            assert!(matches!(
+                receiver.recv(),
+                Ok(poller::PollerMessage::Shutdown)
+            ));
+        });
+        let rpc = thread::spawn(|| -> io::Result<()> { Ok(()) });
+        let handle = DaemonHandle::Server {
+            poller_sender: sender,
+            poller_handle: poller,
+            rpcserver_shutdown: sync::Arc::new(sync::atomic::AtomicBool::new(false)),
+            rpcserver_handle: rpc,
+            scan_abort: sync::Arc::new(sync::atomic::AtomicBool::new(false)),
+        };
+        assert!(handle.stop_for_cleanup().is_ok());
     }
 }
 
