@@ -201,14 +201,20 @@ impl GUI {
             ),
             _ => false,
         };
+        let mut auth_tasks = Vec::new();
         if auth_change {
-            for (_, pane) in self.panes.iter_mut() {
+            for (&pane_id, pane) in self.panes.iter_mut() {
                 for tab in &mut pane.tabs {
-                    tab.invalidate_fork_session();
+                    let tab_id = tab.id;
+                    auth_tasks.push(
+                        tab.invalidate_fork_session().map(move |msg| {
+                            Message::Pane(pane_id, pane::Message::Tab(tab_id, msg))
+                        }),
+                    );
                 }
             }
         }
-        match message {
+        let result = match message {
             // we get this message only once at startup
             Message::Window(id) => {
                 self.window_id = id;
@@ -689,7 +695,9 @@ impl GUI {
                 Task::batch(tasks)
             }
             _ => Task::none(),
-        }
+        };
+        auth_tasks.push(result);
+        Task::batch(auth_tasks)
     }
 
     pub fn subscription(&self) -> Subscription<Message> {

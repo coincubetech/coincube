@@ -505,6 +505,25 @@ pub enum Message {
     /// seed resident until the process exited, and there was no idle re-lock at
     /// all.
     LockCube,
+    /// Completion of an authenticated fork installer generation.
+    ForkInstallCompleted(u64, installer::Message),
+}
+
+/// Resolve the Vault from its authoritative chain, never its address encoding.
+fn vault_settings_for_cube(
+    root: &CoincubeDirectory,
+    chain: crate::chain::ChainId,
+    cube: &app::settings::CubeSettings,
+) -> Option<WalletSettings> {
+    if cube.network != chain {
+        return None;
+    }
+    let vault_id = cube.vault_wallet_id.as_ref()?;
+    app::settings::Settings::from_file(&root.network_directory(chain))
+        .ok()?
+        .wallets
+        .into_iter()
+        .find(|wallet| wallet.wallet_id() == *vault_id)
 }
 
 pub struct Tab {
@@ -521,6 +540,8 @@ pub struct Tab {
     /// to show them. `Loader` and `Login` cannot toast, so anything raised
     /// before the Cube is up waits here.
     pending_unlock_warnings: Vec<String>,
+    fork_session_generation: u64,
+    fork_save_task: Option<iced::task::Handle>,
 }
 
 impl Tab {
@@ -530,6 +551,8 @@ impl Tab {
             state,
             theme_mode: coincube_ui::theme::palette::ThemeMode::default(),
             pending_unlock_warnings: Vec::new(),
+            fork_session_generation: 0,
+            fork_save_task: None,
         }
     }
 
@@ -666,7 +689,10 @@ impl Tab {
         }
     }
 
-    pub fn invalidate_fork_session(&mut self) {
+    pub fn invalidate_fork_session(&mut self) -> Task<Message> {
+        self.fork_session_generation = self.fork_session_generation.wrapping_add(1);
+        self.fork_save_task.take();
+        let mut command = Task::none();
         let mut replacement = None;
         match &mut self.state {
             State::App(app) => app.invalidate_fork_session(),
@@ -680,13 +706,14 @@ impl Tab {
                 pin.fail_open("Connect session changed. Return Home and sign in again.".into());
             }
             State::Installer(installer) if installer.context.bitcoin_config.chain.is_blake2b() => {
-                let (mut home, _) = Home::new_for_chain(
+                let (mut home, startup) = Home::new_for_chain(
                     installer.datadir.clone(),
                     Some(installer.context.bitcoin_config.chain),
                 );
                 home.set_error(
                     "Connect session changed; restart this Cube's installation after signing in",
                 );
+                command = startup.map(Message::Launch);
                 replacement = Some(State::Home(home));
             }
             _ => {}
@@ -694,10 +721,21 @@ impl Tab {
         if let Some(state) = replacement {
             self.state = state;
         }
+        command
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         use crate::app::settings::global::GlobalSettings;
+        let message = match message {
+            Message::ForkInstallCompleted(generation, msg) => {
+                if generation != self.fork_session_generation {
+                    return Task::none();
+                }
+                self.fork_save_task.take();
+                Message::Install(msg)
+            }
+            msg => msg,
+        };
 
         let result = match (&mut self.state, message) {
             (State::App(app), Message::LockCube) => {
@@ -920,17 +958,7 @@ impl Tab {
                     // wallet settings, the duress account id (PIN path only —
                     // a passkey Cube has no duress PIN), and where to go on
                     // success.
-                    let wallet_settings = cube.vault_wallet_id.as_ref().and_then(|vault_id| {
-                        let network_dir = datadir_path.network_directory(network);
-                        app::settings::Settings::from_file(&network_dir)
-                            .ok()
-                            .and_then(|s| {
-                                s.wallets
-                                    .iter()
-                                    .find(|w| w.wallet_id() == *vault_id)
-                                    .cloned()
-                            })
-                    });
+                    let wallet_settings = vault_settings_for_cube(&datadir_path, chain, &cube);
 
                     // Carry this device's enrolled Connect duress account id into
                     // the PIN-entry path so a duress trigger hands it to the
@@ -1123,7 +1151,8 @@ impl Tab {
                         _ => None,
                     };
 
-                    Task::perform(
+                    let generation = self.fork_session_generation;
+                    let task = Task::perform(
                         async move {
                             let cube = find_or_create_cube(
                                 &network_dir,
@@ -1153,8 +1182,13 @@ impl Tab {
                             // Only the restore flows reach here with a PIN of
                             // their own; a Vault installed inside an already-open
                             // Cube inherits that Cube's live session.
-                            if let Some(seed) = &restore_seed {
-                                app::session::open(cube.id.clone(), seed.pin.clone());
+                            // Fork installs always return to the PIN screen.
+                            // An async metadata save must never reopen their
+                            // session after logout or account replacement.
+                            if !chain.is_blake2b() {
+                                if let Some(seed) = &restore_seed {
+                                    app::session::open(cube.id.clone(), seed.pin.clone());
+                                }
                             }
 
                             // Getting here through a kit *is* proof the Cube has
@@ -1290,13 +1324,25 @@ impl Tab {
                             Ok((cube, breez_client, spark_backend))
                         },
                         move |result| {
-                            Message::Install(installer::Message::CubeSaved(
+                            let msg = installer::Message::CubeSaved(
                                 result,
                                 settings_opt.clone(),
                                 internal_bitcoind.clone(),
-                            ))
+                            );
+                            if chain.is_blake2b() {
+                                Message::ForkInstallCompleted(generation, msg)
+                            } else {
+                                Message::Install(msg)
+                            }
                         },
-                    )
+                    );
+                    if chain.is_blake2b() {
+                        let (task, handle) = task.abortable();
+                        self.fork_save_task = Some(handle.abort_on_drop());
+                        task
+                    } else {
+                        task
+                    }
                 } else if let installer::Message::CubeSaved(
                     result,
                     settings_opt,
@@ -4694,5 +4740,142 @@ mod unlock_routing_tests {
             matches!(state, State::PinEntry(_)),
             "a PIN Cube must still get PIN entry"
         );
+    }
+}
+
+#[cfg(test)]
+mod fork_completion_tests {
+    use super::*;
+    use crate::chain::ChainId;
+
+    async fn outputs(task: Task<Message>) -> Vec<Message> {
+        use iced_runtime::futures::futures::StreamExt;
+        match iced_runtime::task::into_stream(task) {
+            Some(stream) => {
+                stream
+                    .filter_map(|action| async move {
+                        match action {
+                            iced_runtime::Action::Output(msg) => Some(msg),
+                            _ => None,
+                        }
+                    })
+                    .collect()
+                    .await
+            }
+            None => Vec::new(),
+        }
+    }
+
+    fn wallet(alias: &str) -> WalletSettings {
+        serde_json::from_value(serde_json::json!({
+            "name":"synthetic", "alias":alias, "descriptor_checksum":"same-vault", "pinned_at":1700000000
+        })).unwrap()
+    }
+
+    #[tokio::test]
+    async fn production_reopen_lookup_selects_fork_wallet_over_bitcoin_encoding_twin() {
+        let root_path =
+            std::env::temp_dir().join(format!("fork-vault-lookup-{}", uuid::Uuid::new_v4()));
+        let root = CoincubeDirectory::new(root_path.clone());
+        for (chain, alias) in [
+            (ChainId::Bitcoin, "bitcoin-twin"),
+            (ChainId::BitcoinBlake2b, "fork-vault"),
+        ] {
+            let dir = root.network_directory(chain);
+            dir.init().unwrap();
+            app::settings::update_settings_file(&dir, |_| {
+                Some(app::settings::Settings {
+                    wallets: vec![wallet(alias)],
+                    ..Default::default()
+                })
+            })
+            .await
+            .unwrap();
+        }
+        let cube = app::settings::CubeSettings::new("Synthetic".into(), ChainId::BitcoinBlake2b)
+            .with_vault(VaultIdentity::new(wallet("fork-vault").wallet_id(), None));
+        assert_eq!(
+            vault_settings_for_cube(&root, cube.network, &cube)
+                .unwrap()
+                .alias
+                .as_deref(),
+            Some("fork-vault")
+        );
+        assert!(vault_settings_for_cube(&root, ChainId::Bitcoin, &cube).is_none());
+        std::fs::remove_dir_all(root.network_directory(ChainId::BitcoinBlake2b).path()).unwrap();
+        assert!(vault_settings_for_cube(&root, cube.network, &cube).is_none());
+        std::fs::remove_dir_all(root_path).unwrap();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // serialize the process-global session for the whole ordering test
+    async fn invalidation_cancels_or_discards_real_post_install_completion_without_reopening_pin() {
+        let _guard = app::session::test_guard();
+        for completed_before_logout in [false, true] {
+            app::session::close();
+            let root_path =
+                std::env::temp_dir().join(format!("fork-save-cancel-{}", uuid::Uuid::new_v4()));
+            let root = CoincubeDirectory::new(root_path.clone());
+            root.network_directory(ChainId::BitcoinBlake2b)
+                .init()
+                .unwrap();
+            // Stage an already-installed synthetic fork at the real Exit seam.
+            // No daemon or unlock/runtime gate is used to make this test pass.
+            let (mut installer, _) = Installer::new(
+                root.clone(),
+                bitcoin::Network::Bitcoin,
+                None,
+                installer::UserFlow::CreateWallet,
+                false,
+                None,
+                None,
+                None,
+                false,
+                None,
+            );
+            installer.context.bitcoin_config.chain = ChainId::BitcoinBlake2b;
+            installer.context.fresh_fork_cube = true;
+            installer.context.fresh_fork_seed_backed_up = true;
+            installer.context.cube_id = Some("synthetic-save-cube".into());
+            installer.context.restore_pin = Some(zeroize::Zeroizing::new("2468".to_string()));
+            let mut tab = Tab::new(1, State::Installer(installer));
+            let mut save = Some(tab.update(Message::Install(installer::Message::Exit(
+                Some(Box::new(wallet("fork-vault"))),
+                None,
+            ))));
+            let mut completed = if completed_before_logout {
+                outputs(save.take().unwrap()).await
+            } else {
+                Vec::new()
+            };
+            if completed_before_logout {
+                assert!(matches!(
+                    completed.as_slice(),
+                    [Message::ForkInstallCompleted(
+                        _,
+                        installer::Message::CubeSaved(Ok(_), _, _)
+                    )]
+                ));
+                assert!(app::session::pin_for("synthetic-save-cube").is_none());
+            }
+            let startup = tab.invalidate_fork_session();
+            // The Home task is preserved and its actual asynchronous directory
+            // result is consumed. Auth Init itself is not run by this fixture.
+            for result in outputs(startup).await {
+                if matches!(result, Message::Launch(home::Message::Checked { .. })) {
+                    let _ = tab.update(result);
+                }
+            }
+            if let Some(save) = save {
+                assert!(outputs(save).await.is_empty());
+            }
+            for result in completed.drain(..) {
+                assert!(outputs(tab.update(result)).await.is_empty());
+            }
+            assert!(matches!(&tab.state, State::Home(home) if home.is_checked_for_test()));
+            assert!(app::session::pin_for("synthetic-save-cube").is_none());
+            std::fs::remove_dir_all(root_path).unwrap();
+        }
+        app::session::close();
     }
 }

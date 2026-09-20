@@ -461,6 +461,11 @@ impl Home {
         )
     }
 
+    #[cfg(test)]
+    pub(crate) fn is_checked_for_test(&self) -> bool {
+        !matches!(self.state, State::Unchecked)
+    }
+
     pub fn reload(&self) -> Task<Message> {
         probe_network_datadir(
             self.network,

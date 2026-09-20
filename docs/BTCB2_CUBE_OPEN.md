@@ -22,8 +22,13 @@ Loader-owned 30-second minimum interval; failed admission cannot lose that bound
 when its temporary provider is dropped.
 
 Home or App logout/token replacement invalidates every open fork tab before the
-account change propagates. Pending installer and Loader tasks are aborted; their
-ephemeral authority is dropped. Unlock credentials are cleared and the Cube must
+account change propagates. Pending installer, metadata-save and Loader tasks are
+aborted; their ephemeral authority is dropped. Save and PIN completions carry a
+session generation, so already queued results cannot revive a replaced session.
+A late blocking decrypt writes only to its detached old slot. The fork metadata
+save never opens a PIN session; the current PIN screen owns that transition.
+The replacement Home executes its startup task; fork discovery is read-only.
+Unlock credentials are cleared and the Cube must
 be reopened with the current session. Changing a backend likewise requires a new
 authenticated context.
 
