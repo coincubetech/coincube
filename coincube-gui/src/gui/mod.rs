@@ -214,7 +214,14 @@ impl GUI {
                 }
             }
         }
-        let result = match message {
+        // Dispatch may return early (notably for in-App account messages).
+        // Keep those returns inside the helper so invalidation tasks always run.
+        auth_tasks.push(self.update_message(message));
+        Task::batch(auth_tasks)
+    }
+
+    fn update_message(&mut self, message: Message) -> Task<Message> {
+        match message {
             // we get this message only once at startup
             Message::Window(id) => {
                 self.window_id = id;
@@ -695,9 +702,7 @@ impl GUI {
                 Task::batch(tasks)
             }
             _ => Task::none(),
-        };
-        auth_tasks.push(result);
-        Task::batch(auth_tasks)
+        }
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
@@ -840,5 +845,159 @@ mod idle_activity_tests {
         assert!(!is_user_input(&Event::Window(
             iced::window::Event::CloseRequested
         )));
+    }
+}
+
+#[cfg(test)]
+mod fork_auth_dispatch_tests {
+    use super::*;
+    use crate::{
+        installer,
+        services::coincube::{LoginResponse, User},
+    };
+    use coincube_core::chain::ChainId;
+    use iced::futures::StreamExt;
+
+    fn installer_state(root: &CoincubeDirectory) -> tab::State {
+        let (mut installer, _) = installer::Installer::new(
+            root.clone(),
+            bitcoin::Network::Bitcoin,
+            None,
+            installer::UserFlow::CreateWallet,
+            false,
+            None,
+            None,
+            None,
+            false,
+            None,
+        );
+        installer.context.bitcoin_config.chain = ChainId::BitcoinBlake2b;
+        tab::State::Installer(installer)
+    }
+
+    #[test]
+    fn app_auth_dispatch_runs_home_startup_for_every_invalidated_installer() {
+        // Like the completion fixture, keep large inline GUI states off the
+        // default libtest stack without changing the runner configuration.
+        let result = std::thread::Builder::new()
+            .name("fork-auth-dispatch".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(check_auth_dispatch())
+            })
+            .unwrap()
+            .join();
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    async fn check_auth_dispatch() {
+        use crate::app::view::ConnectAccountMessage;
+        for auth in [
+            ConnectAccountMessage::LogOut,
+            ConnectAccountMessage::SetSession(LoginResponse {
+                requires_2fa: false,
+                token: "synthetic".into(),
+                refresh_token: "synthetic".into(),
+                user: User {
+                    id: 0,
+                    email: "synthetic@example.invalid".into(),
+                    email_verified: None,
+                },
+            }),
+        ] {
+            let root_path =
+                std::env::temp_dir().join(format!("fork-auth-dispatch-{}", uuid::Uuid::new_v4()));
+            let root = CoincubeDirectory::new(root_path.clone());
+            root.network_directory(ChainId::BitcoinBlake2b)
+                .init()
+                .unwrap();
+            // Inject the App message at the GUI seam. A Home source ignores
+            // Run, isolating dispatch from account storage and network calls.
+            let (home, _) = home::Home::new_for_chain(root.clone(), Some(ChainId::BitcoinBlake2b));
+            let mut pane = pane::Pane::new_with_tab(tab::State::Home(home));
+            pane.tabs.push(tab::Tab::new(2, installer_state(&root)));
+            pane.tabs.push(tab::Tab::new(3, installer_state(&root)));
+            let (mut panes, source) = pane_grid::State::new(pane);
+            panes
+                .split(
+                    pane_grid::Axis::Vertical,
+                    source,
+                    pane::Pane::new_with_tab(installer_state(&root)),
+                )
+                .unwrap();
+            let mut gui = GUI {
+                panes,
+                focus: Some(source),
+                config: Config::new(root.clone(), None),
+                window_id: None,
+                window_init: None,
+                window_config: None,
+                global_cache: GlobalCache::default(),
+                theme_mode: Default::default(),
+            };
+            let task = gui.update(Message::Pane(
+                source,
+                pane::Message::Tab(
+                    1,
+                    tab::Message::Run(AppMessage::View(crate::app::view::Message::ConnectAccount(
+                        auth,
+                    ))),
+                ),
+            ));
+            let mut checked = HashSet::new();
+            if let Some(mut stream) = iced_runtime::task::into_stream(task) {
+                while let Some(action) = stream.next().await {
+                    if let iced_runtime::Action::Output(
+                        message @ Message::Pane(
+                            _,
+                            pane::Message::Tab(
+                                _,
+                                tab::Message::Launch(home::Message::Checked { .. }),
+                            ),
+                        ),
+                    ) = action
+                    {
+                        if let Message::Pane(pane_id, pane::Message::Tab(tab_id, _)) = &message {
+                            checked.insert((*pane_id, *tab_id));
+                        }
+                        // Apply the real directory-probe completion through the
+                        // same GUI seam. Do not execute emitted account Init.
+                        let _ = gui.update(message);
+                    }
+                }
+            }
+            assert_eq!(
+                checked.len(),
+                3,
+                "every invalidated installer must receive its startup result"
+            );
+            for (pane_id, tab_id) in checked {
+                let tab = gui
+                    .panes
+                    .get(pane_id)
+                    .unwrap()
+                    .tabs
+                    .iter()
+                    .find(|tab| tab.id == tab_id)
+                    .unwrap();
+                assert!(matches!(&tab.state, tab::State::Home(home) if home.is_checked_for_test()));
+            }
+            // Ordinary pane dispatch still returns its task through the wrapper.
+            let task = gui.update(Message::Pane(
+                source,
+                pane::Message::View(pane::ViewMessage::OpenConnectSignIn),
+            ));
+            let mut stream = iced_runtime::task::into_stream(task).expect("pane task retained");
+            assert!(matches!(stream.next().await,
+                Some(iced_runtime::Action::Output(Message::Pane(id,
+                    pane::Message::Tab(1, tab::Message::Launch(_))))) if id == source));
+            std::fs::remove_dir_all(root_path).unwrap();
+        }
     }
 }
