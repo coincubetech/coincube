@@ -45,6 +45,16 @@ pub struct EmbeddedDaemon {
 }
 
 impl EmbeddedDaemon {
+    /// GUI construction tests inspect startup handoff without starting a poller.
+    #[cfg(test)]
+    pub(crate) fn unstarted_for_test(config: Config) -> Self {
+        Self {
+            config,
+            handle: Mutex::new(None),
+            connect_session: None,
+        }
+    }
+
     pub fn start(config: Config) -> Result<EmbeddedDaemon, DaemonError> {
         let handle =
             DaemonHandle::start_default(config.clone(), false).map_err(DaemonError::Start)?;

@@ -2395,8 +2395,13 @@ impl App {
             Arc<tokio::sync::RwLock<crate::services::connect::client::auth::AccessTokenResponse>>,
             String,
         )>,
-    ) -> (App, Task<Message>) {
-        Self::new_inner(
+    ) -> Result<(App, Task<Message>), Error> {
+        if cube_settings.network.is_blake2b() {
+            return Err(Error::Daemon(DaemonError::ConnectAnchor(
+                coincubed::connect::AdmissionError::MissingAuth.into(),
+            )));
+        }
+        Ok(Self::new_inner(
             cache,
             wallet,
             Some(breez_client),
@@ -2407,7 +2412,7 @@ impl App {
             internal_bitcoind,
             cube_settings,
             connect_auth,
-        )
+        ))
     }
 
     /// Build an admitted fork Vault without constructing Liquid or Spark clients.
@@ -2469,6 +2474,8 @@ impl App {
             cube_settings,
             None,
         );
+        app.panels.connect.install_admitted_client(client.clone());
+        app.cache.has_connect_session = true;
         app.fork_connect_client = Some(client);
         Ok((app, task))
     }
@@ -2685,7 +2692,12 @@ impl App {
         datadir: CoincubeDirectory,
         network: coincube_core::miniscript::bitcoin::Network,
         cube_settings: settings::CubeSettings,
-    ) -> (App, Task<Message>) {
+    ) -> Result<(App, Task<Message>), Error> {
+        if cube_settings.network.is_blake2b() {
+            return Err(Error::Daemon(DaemonError::ConnectAnchor(
+                coincubed::connect::AdmissionError::InvalidBackend.into(),
+            )));
+        }
         let config_arc = Arc::new(config);
         let liquid_backend = Arc::new(LiquidBackend::new(breez_client.clone()));
         let wallet_registry = crate::app::wallets::WalletRegistry::with_spark(
@@ -2775,7 +2787,7 @@ impl App {
             panels.global_home.reload(None, None),
         ]);
 
-        (
+        Ok((
             Self {
                 panels,
                 cache,
@@ -2816,7 +2828,7 @@ impl App {
                 connect_stream_config: None,
             },
             cmd,
-        )
+        ))
     }
 
     pub fn wallet_id(&self) -> Option<WalletId> {
@@ -7045,6 +7057,88 @@ mod tests {
             !root.exists(),
             "panel construction must not create a Bitcoin or fork datadir"
         );
+    }
+
+    #[tokio::test]
+    async fn admitted_app_hands_exact_client_to_account_and_cube_consumers() {
+        use httpmock::prelude::*;
+        use iced::futures::StreamExt;
+        use std::str::FromStr;
+        let server = MockServer::start_async().await;
+        let user = server.mock_async(|when, then| {
+            when.method(GET).path("/api/v1/user").header("authorization", "Bearer admitted-fixture");
+            then.status(200).json_body(serde_json::json!({"id":7,"email":"fixture@example.invalid","email_verified":true}));
+        }).await;
+        let mut client = crate::services::coincube::CoincubeClient::new();
+        client.base_url = server.base_url();
+        client.set_token("admitted-fixture");
+        let chain = crate::chain::ChainId::BitcoinBlake2bTestnet4;
+        let desc = coincube_core::descriptors::CoincubeDescriptor::from_str(
+            "wsh(or_d(pk([f5acc2fd]tpubD6NzVbkrYhZ4YgUx2ZLNt2rLYAMTdYysCRzKoLu2BeSHKvzqPaBDvf17GeBPnExUVPkuBpx4kniP964e2MxyzzazcXLptxLXModSVCVEV1T/<0;1>/*),and_v(v:pkh([8a64f2a9]tpubD6NzVbkrYhZ4WmzFjvQrp7sDa4ECUxTi9oby8K4FZkd3XCBtEdKwUiQyYJaxiJo5y42gyDWEczrFpozEjeLxMPxjf2WtkfcbpUdfvNnozWF/<0;1>/*),older(10))))#d72le4dr"
+        ).unwrap();
+        let root =
+            std::env::temp_dir().join(format!("coincube-app-handoff-{}", uuid::Uuid::new_v4()));
+        let endpoint = format!(
+            "{}/api/v1/esplora/bitcoin-blake2b/testnet4",
+            server.base_url()
+        );
+        let cfg: coincubed::config::Config = toml::from_str(&format!(
+            "main_descriptor = '{}'\ndata_directory = '{}'\n[bitcoin_config]\nnetwork = '{}'\n[esplora_config]\naddr = '{}'\n", desc,root.display(),chain.api_str(),endpoint
+        )).unwrap();
+        // A GUI-only handoff fixture: no running daemon or live admission is claimed.
+        let daemon = Arc::new(EmbeddedDaemon::unstarted_for_test(cfg));
+        let cache = Cache {
+            fiat_chain: chain,
+            network: chain.bitcoin_network(),
+            ..Cache::default()
+        };
+        let settings = settings::CubeSettings::new("Fixture".into(), chain);
+        let (mut app, startup_tasks) = App::new_for_chain(
+            cache,
+            Arc::new(Wallet::new(desc).with_chain(chain)),
+            None,
+            client.clone(),
+            Config::new(false),
+            daemon,
+            CoincubeDirectory::new(root.clone()),
+            settings,
+        )
+        .unwrap();
+        drop(startup_tasks);
+        assert!(app.breez_client().is_none());
+        assert!(app.spark_backend().is_none());
+        assert!(app.wallet_registry.route_lightning_address().is_none());
+        assert!(app.cache.has_connect_session);
+        let cube_client = app.panels.connect.cube.client.as_ref().unwrap();
+        assert_eq!(cube_client.base_url, server.base_url());
+        assert_eq!(cube_client.token(), Some("admitted-fixture"));
+        let handed = app.panels.connect.account.authenticated_client().unwrap();
+        assert_eq!(handed.base_url, server.base_url());
+        assert_eq!(handed.token(), Some("admitted-fixture"));
+        let task = app
+            .panels
+            .connect
+            .account
+            .update_message(view::ConnectAccountMessage::Init);
+        let mut stream = iced_runtime::task::into_stream(task).unwrap();
+        while let Some(action) = stream.next().await {
+            if let iced_runtime::Action::Output(Message::View(view::Message::ConnectAccount(
+                message,
+            ))) = action
+            {
+                let _ = app.panels.connect.account.update_message(message);
+            }
+        }
+        user.assert_async().await;
+        assert_eq!(app.panels.connect.account.user.as_ref().unwrap().id, 7);
+        let handed = app.panels.connect.account.authenticated_client().unwrap();
+        assert_eq!(handed.base_url, client.base_url);
+        assert_eq!(handed.token(), client.token());
+        assert!(!root.join("bitcoin").exists());
+        drop(app);
+        if root.exists() {
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 
     /// The obligation is retired on *proof*, not on the daemon's acceptance.

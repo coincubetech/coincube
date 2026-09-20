@@ -1510,6 +1510,10 @@ pub enum RetryAction {
 /// Account-level Connect messages (login/session, plan, security, etc.).
 #[derive(Debug, Clone)]
 pub enum ConnectAccountMessage {
+    AdmittedUserLoaded {
+        user: Result<crate::services::coincube::User, (crate::user_error::UserError, bool)>,
+        generation: u64,
+    },
     Init,
     RefreshSession {
         refresh_token: String,
