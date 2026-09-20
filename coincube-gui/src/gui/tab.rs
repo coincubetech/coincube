@@ -1564,8 +1564,8 @@ impl Tab {
                             UserFlow::CreateWallet,
                             true,                              // launched from app
                             Some(app.cube_settings().clone()), // pass cube settings for returning
-                            Some(app.breez_client()), // pass breez_client to avoid re-entering PIN
-                            app.spark_backend(),      // preserve Spark bridge across vault setup
+                            app.breez_client(), // pass breez_client to avoid re-entering PIN
+                            app.spark_backend(), // preserve Spark bridge across vault setup
                             GlobalSettings::load_developer_mode(&GlobalSettings::path(
                                 app.datadir(),
                             )),
@@ -1585,7 +1585,7 @@ impl Tab {
                             UserFlow::RestoreVaultFromRecoveryKit,
                             true,
                             Some(app.cube_settings().clone()),
-                            Some(app.breez_client()),
+                            app.breez_client(),
                             app.spark_backend(),
                             GlobalSettings::load_developer_mode(&GlobalSettings::path(
                                 app.datadir(),

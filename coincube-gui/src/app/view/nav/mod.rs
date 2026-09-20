@@ -265,10 +265,10 @@ fn connect_status_dot<'a>(status: &'a crate::app::ConnectionStatus) -> Element<'
 pub struct NavContext<'a> {
     pub has_vault: bool,
     pub has_p2p: bool,
-    /// Active Bitcoin network. Drives per-feature availability gating
+    /// Active chain identity. Drives per-feature availability gating
     /// (Spark/Liquid on the primary rail, Buy/Sell + P2P in Marketplace)
     /// via [`crate::app::features`].
-    pub network: coincube_core::miniscript::bitcoin::Network,
+    pub network: crate::chain::ChainId,
     /// Whether a non-mainnet Mostro coordinator is configured. Only
     /// affects P2P on test networks (mainnet P2P is always available).
     pub p2p_test_coordinator: bool,

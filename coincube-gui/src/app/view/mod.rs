@@ -221,7 +221,7 @@ pub fn dashboard_with_info<'a, T: Into<Element<'a, Message>>>(
     let nav_ctx = nav::NavContext {
         has_vault,
         has_p2p,
-        network: cache.network,
+        network: cache.chain(),
         p2p_test_coordinator: cache.p2p_test_coordinator,
         marketplace_flags: cache.marketplace_flags,
         liquid_gate: cache.liquid_gate,
