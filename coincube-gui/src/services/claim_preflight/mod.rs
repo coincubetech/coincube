@@ -307,9 +307,9 @@ fn parse(
     let envelope: Envelope = serde_json::from_slice(bytes).map_err(|_| Error::InvalidResponse)?;
     if status == StatusCode::SERVICE_UNAVAILABLE {
         if envelope.success
-            || !envelope
+            || envelope
                 .error
-                .is_some_and(|e| e.code == "SERVICE_UNAVAILABLE")
+                .is_none_or(|e| e.code != "SERVICE_UNAVAILABLE")
         {
             return Err(Error::InvalidResponse);
         }
