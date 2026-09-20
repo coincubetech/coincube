@@ -7327,7 +7327,16 @@ mod tests {
                 view::ConnectAccountMessage::Retry(view::RetryAction::Session),
             ] {
                 let task = app.update(Message::View(view::Message::ConnectAccount(message)));
-                assert!(iced_runtime::task::into_stream(task).is_none());
+                // App batches the refused account task with grant persistence.
+                // An empty batch can still have a stream; require no actions,
+                // not a particular representation of an empty Task.
+                if let Some(mut stream) = iced_runtime::task::into_stream(task) {
+                    let action =
+                        tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
+                            .await
+                            .expect("revoked account task must finish without actions");
+                    assert!(action.is_none(), "revoked account task emitted an action");
+                }
                 assert!(app.panels.connect.account.requires_authenticated_reopen());
                 assert!(app.panels.connect.account.authenticated_client().is_none());
                 assert!(!app.panels.connect.account.is_authenticated());
