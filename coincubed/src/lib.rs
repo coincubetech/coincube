@@ -215,14 +215,9 @@ impl From<BitcoindError> for StartupError {
     }
 }
 
-/// The one runtime-policy decision the daemon makes about a chain: whether this build can run a
-/// wallet on it at all. Both Bitcoin Blake2b identities are dormant — the daemon can name them
-/// (configuration, data directory, database) so that their state stays distinct and intact, but
-/// nothing behind them is wired: no node schedule check, no chain-keyed backend route, no
-/// checkpoint, no post-reorg revalidation, no unified-sighash signing. Until those gates exist
-/// this refuses before any I/O. The GUI keeps its own, user-facing copy of the same decision
-/// (`RuntimeSupport`); this is the daemon's, so a hand-written `daemon.toml` cannot reach a
-/// fork identity through the daemon alone.
+/// Configuration-only and injected-interface startup cannot admit fork wallets.
+/// The separate authenticated embedded entry point requires a native-P2WSH
+/// descriptor and ephemeral Connect authority before any wallet write.
 fn chain_runtime_gate(chain: ChainId) -> Result<(), StartupError> {
     if chain.is_blake2b() {
         return Err(StartupError::ChainDormant(chain));
@@ -810,19 +805,35 @@ impl DaemonHandle {
         )
     }
 
-    /// Start with ephemeral authenticated Connect authority; never deserialize this authority.
+    /// Start an embedded native-P2WSH fork wallet with ephemeral authenticated Connect
+    /// authority. Generic daemon startup and external JSON-RPC remain unavailable for forks.
+    /// Admission and existing database identity checks still precede every write.
     pub fn start_with_connect(
         config: Config,
         backend: connect::ConnectBackend,
         with_rpc_server: bool,
     ) -> Result<Self, StartupError> {
+        if !config.bitcoin_config.chain.is_blake2b()
+            || with_rpc_server
+            || config.pending_bitcoind.is_some()
+            || !matches!(
+                config.main_descriptor.descriptor(),
+                miniscript::Descriptor::Wsh(_)
+            )
+        {
+            return Err(StartupError::ConnectAdmission(
+                connect::AdmissionError::InvalidBackend,
+            ));
+        }
         Self::start_inner(
             config,
             Option::<BitcoinD>::None,
             Option::<SqliteDb>::None,
-            with_rpc_server,
+            false,
             Some(backend),
-            chain_runtime_gate,
+            // Only this authenticated, embedded, native-P2WSH entry point opens
+            // the fork runtime. start/start_default retain chain_runtime_gate.
+            |_| Ok(()),
         )
     }
 
@@ -832,8 +843,8 @@ impl DaemonHandle {
         db: Option<impl DatabaseInterface + 'static>,
         with_rpc_server: bool,
         connect: Option<connect::ConnectBackend>,
-        // Production entry points always supply chain_runtime_gate. A private
-        // policy parameter lets tests exercise admission ordering while dormant.
+        // Generic startup refuses forks. Authenticated embedded startup has its
+        // own narrow capability checks before entering this shared sequence.
         runtime_gate: fn(ChainId) -> Result<(), StartupError>,
     ) -> Result<Self, StartupError> {
         let secp = secp256k1::Secp256k1::verification_only();
@@ -1906,14 +1917,7 @@ mod tests {
                     authority,
                 )
                 .unwrap();
-                let result = DaemonHandle::start_inner(
-                    config.clone(),
-                    Option::<BitcoinD>::None,
-                    Option::<SqliteDb>::None,
-                    false,
-                    Some(backend),
-                    |_| Ok(()),
-                );
+                let result = DaemonHandle::start_with_connect(config.clone(), backend, false);
                 assert!(
                     matches!(result,Err(StartupError::ConnectAdmission(actual)) if actual==expected)
                 );
@@ -1929,6 +1933,211 @@ mod tests {
                     matches!(connect_startup_error(crate::bitcoin::esplora::client::Error::Admission(error)),StartupError::ConnectAdmission(actual) if actual==error)
                 );
             }
+            fs::remove_dir_all(tmp).unwrap();
+        }
+
+        #[test]
+        fn authenticated_fork_start_rejects_unsupported_capabilities_before_io() {
+            struct UnusedAuthority;
+            impl connect::ConnectAnchorAuthority for UnusedAuthority {
+                fn fresh_anchor(
+                    &self,
+                ) -> Result<connect::TrustedChainAnchor, connect::AdmissionError> {
+                    panic!("capability refusal must precede authority I/O");
+                }
+            }
+            let tmp =
+                std::env::temp_dir().join(format!("connect-capabilities-{}", std::process::id()));
+            fs::create_dir_all(&tmp).unwrap();
+            let node = SilentNode::bind();
+            let data = tmp.join("must-not-exist");
+            let endpoint = format!("http://{}", node.addr);
+            let mut original = config_for(ChainId::BitcoinBlake2b, &tmp, data.clone(), &node);
+            let local_node = original.bitcoin_backend.clone();
+            original.bitcoin_backend =
+                Some(config::BitcoinBackend::Esplora(config::EsploraConfig {
+                    addr: endpoint.clone(),
+                    token: None,
+                    fallback_addr: None,
+                    fallback_token: None,
+                    secondary_fallback_addr: None,
+                    secondary_fallback_token: None,
+                }));
+            for case in ["rpc", "local_node", "taproot", "bitcoin", "fallback"] {
+                let mut config = original.clone();
+                match case {
+                    "local_node" => {
+                        if let Some(config::BitcoinBackend::Bitcoind(node)) = local_node.clone() {
+                            config.pending_bitcoind = Some(node);
+                        }
+                    }
+                    "taproot" => config.main_descriptor = CoincubeDescriptor::from_str(
+                        "tr([abcdef01]xpub6Eze7yAT3Y1wGrnzedCNVYDXUqa9NmHVWck5emBaTbXtURbe1NWZbK9bsz1TiVE7Cz341PMTfYgFw1KdLWdzcM1UMFTcdQfCYhhXZ2HJvTW/<0;1>/*,and_v(v:pk([abcdef01]xpub688Hn4wScQAAiYJLPg9yH27hUpfZAUnmJejRQBCiwfP5PEDzjWMNW1wChcninxr5gyavFqbbDjdV1aK5USJz8NDVjUy7FRQaaqqXHh5SbXe/<0;1>/*),older(52560)))#0mt7e93c"
+                    ).unwrap(),
+                    "bitcoin" => config.bitcoin_config = BitcoinConfig::new(ChainId::Bitcoin, time::Duration::from_secs(2)),
+                    "fallback" => {
+                        if let Some(config::BitcoinBackend::Esplora(ref mut selection)) = config.bitcoin_backend {
+                            selection.fallback_addr = Some("http://bitcoin.invalid".into());
+                        }
+                    }
+                    _ => {}
+                }
+                let backend = connect::ConnectBackend::new(
+                    ChainId::BitcoinBlake2b,
+                    endpoint.clone(),
+                    "synthetic-jwt".into(),
+                    sync::Arc::new(UnusedAuthority),
+                )
+                .unwrap();
+                assert!(
+                    matches!(
+                        DaemonHandle::start_with_connect(config, backend, case == "rpc"),
+                        Err(StartupError::ConnectAdmission(
+                            connect::AdmissionError::InvalidBackend
+                        ))
+                    ),
+                    "{}",
+                    case
+                );
+                assert!(!data.exists(), "{}", case);
+            }
+            node.assert_untouched();
+            fs::remove_dir_all(tmp).unwrap();
+        }
+
+        #[test]
+        fn authenticated_fork_creates_and_reopens_a_synthetic_wallet() {
+            use std::io::{Read, Write};
+            use std::sync::atomic::{AtomicBool, Ordering};
+            struct Authority(connect::TrustedChainAnchor);
+            impl connect::ConnectAnchorAuthority for Authority {
+                fn fresh_anchor(
+                    &self,
+                ) -> Result<connect::TrustedChainAnchor, connect::AdmissionError> {
+                    Ok(self.0.clone())
+                }
+            }
+            let tmp = std::env::temp_dir().join(format!("connect-open-{}", std::process::id()));
+            fs::create_dir_all(&tmp).unwrap();
+            let node = SilentNode::bind();
+            let data = tmp.join("synthetic-wallet");
+            let mut config = config_for(ChainId::BitcoinBlake2b, &tmp, data.clone(), &node);
+            let listener = net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            let anchor_hash = BlockHash::from_byte_array([7; 32]);
+            let genesis = BlockHash::from_byte_array(
+                *ChainHash::using_genesis_block(bitcoin::Network::Bitcoin).as_bytes(),
+            );
+            let stop = sync::Arc::new(AtomicBool::new(false));
+            let requests = sync::Arc::new(sync::Mutex::new(Vec::new()));
+            let serving_stop = stop.clone();
+            let serving_requests = requests.clone();
+            let server = thread::spawn(move || {
+                while !serving_stop.load(Ordering::Relaxed) {
+                    let (mut stream, _) = match listener.accept() {
+                        Ok(peer) => peer,
+                        Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                            thread::sleep(time::Duration::from_millis(2));
+                            continue;
+                        }
+                        Err(e) => panic!("synthetic accept: {}", e),
+                    };
+                    stream
+                        .set_read_timeout(Some(time::Duration::from_millis(100)))
+                        .unwrap();
+                    stream
+                        .set_write_timeout(Some(time::Duration::from_secs(1)))
+                        .unwrap();
+                    let deadline = time::Instant::now() + time::Duration::from_secs(1);
+                    let mut head = Vec::new();
+                    while head.len() < 8192
+                        && time::Instant::now() < deadline
+                        && !head.windows(4).any(|x| x == b"\r\n\r\n")
+                    {
+                        let mut chunk = [0; 1024];
+                        match stream.read(&mut chunk) {
+                            Ok(0) => break,
+                            Ok(n) => head.extend_from_slice(&chunk[..n]),
+                            Err(_) => break,
+                        }
+                    }
+                    let head = String::from_utf8_lossy(&head);
+                    if !head.ends_with("\r\n\r\n") {
+                        continue;
+                    }
+                    assert!(head
+                        .to_ascii_lowercase()
+                        .contains("authorization: bearer synthetic-jwt"));
+                    let path = head.split_whitespace().nth(1).unwrap().to_string();
+                    serving_requests.lock().unwrap().push(path.clone());
+                    let (status, body) = match path.as_str() {
+                        "/block-height/0" => (200, genesis.to_string()),
+                        "/block-height/900000" | "/blocks/tip/hash" => {
+                            (200, anchor_hash.to_string())
+                        }
+                        path if path.ends_with("/status") => (
+                            200,
+                            "{\"in_best_chain\":true,\"height\":900000,\"next_best\":null}".into(),
+                        ),
+                        _ => (404, String::new()),
+                    };
+                    let response = format!(
+                        "HTTP/1.1 {} OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        status,
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                }
+            });
+            config.bitcoin_backend = Some(config::BitcoinBackend::Esplora(config::EsploraConfig {
+                addr: endpoint.clone(),
+                token: None,
+                fallback_addr: None,
+                fallback_token: None,
+                secondary_fallback_addr: None,
+                secondary_fallback_token: None,
+            }));
+            // Stop the synthetic HTTP thread even when startup fails; never leave
+            // a failed fixture serving in the background.
+            let result = (|| -> Result<(), StartupError> {
+                for _ in 0..2 {
+                    let backend = connect::ConnectBackend::new(
+                        ChainId::BitcoinBlake2b,
+                        endpoint.clone(),
+                        "synthetic-jwt".into(),
+                        sync::Arc::new(Authority(connect::TrustedChainAnchor {
+                            chain: ChainId::BitcoinBlake2b,
+                            height: 900000,
+                            hash: anchor_hash,
+                            median_time_past: 1_700_000_000,
+                            observed_at: time::SystemTime::now(),
+                        })),
+                    )
+                    .unwrap();
+                    let daemon = DaemonHandle::start_with_connect(config.clone(), backend, false)?;
+                    daemon.stop_for_cleanup().unwrap();
+                    let stored =
+                        preflight::read_stored_identity(&data.join("coincubed.sqlite3")).unwrap();
+                    assert_eq!(stored.chain, ChainId::BitcoinBlake2b);
+                    assert_eq!(stored.network, bitcoin::Network::Bitcoin);
+                }
+                Ok(())
+            })();
+            stop.store(true, Ordering::Relaxed);
+            server.join().unwrap();
+            result.unwrap();
+            assert!(
+                requests
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|p| *p == "/block-height/900000")
+                    .count()
+                    >= 2
+            );
+            node.assert_untouched();
             fs::remove_dir_all(tmp).unwrap();
         }
 

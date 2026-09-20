@@ -26,9 +26,11 @@ a successful send is not retroactively reported as failed by a later check.
 
 Admission is ordered before directory creation, SQLite setup/migration, and node
 writes. Generic configuration-only or injected-interface startup cannot admit a
-fork without the explicit authority. The production `ChainDormant` gate remains
-in place pending combined GUI/API acceptance. No live-server acceptance is
-claimed. This is trusted-service chain identification, not malicious-upstream SPV
+fork. Only `start_with_connect` admits a fork, and only for native P2WSH,
+embedded operation without a JSON-RPC server or pending managed node. Its
+explicit authority and exact provider selection must pass admission before any
+write. GUI launcher exposure remains separately gated pending combined GUI/API
+acceptance. No live-server acceptance is claimed. This is trusted-service chain identification, not malicious-upstream SPV
 verification, and it does not prove funds are chain-exclusive or safe to claim.
 
 A provider 404 at the trusted anchor is `IndexerBehind`: admission still refuses,
@@ -44,9 +46,13 @@ ignored and never used to construct the fork provider. The GUI adapter separatel
 retains sanitized config for backend-switch persistence. `median_time_past` is
 informational metadata here, not Claim or expiry authorization.
 
-The no-write admission test invokes the private startup body with a test runtime
-policy, exercising the real admission-before-filesystem ordering while the two
-public entry points retain the production dormant gate. Manually configuring a
+The no-write admission tests exercise the public authenticated entry for stale
+and wrong-chain authorities, and reject RPC exposure, pending managed nodes,
+Taproot, Bitcoin identity and fallback providers before I/O. The private startup
+body additionally tests missing authority. A synthetic loopback Esplora test
+creates and reopens a new BTCB2 SQLite wallet through the public authenticated
+entry and verifies its stored chain; it does not use a live node or existing
+wallet. Generic `start`/`start_default` retain their fork refusal. Manually configuring a
 Bitcoin backend with a fork endpoint remains a pre-existing provider-trust
 limitation. Operator acceptance must verify separate correct endpoints; generated
 Bitcoin and BTCB2 routes remain distinct. This does not introduce a new Bitcoin
