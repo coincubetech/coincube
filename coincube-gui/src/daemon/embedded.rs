@@ -356,10 +356,11 @@ impl Daemon for EmbeddedDaemon {
     async fn submit_verified_poison(
         &self,
         verified: &coincube_core::claim_finalize::VerifiedPoisonTransfer,
+        gate: &coincubed::poison_broadcast::SubmissionGate,
     ) -> Result<coincubed::poison_broadcast::SubmissionOutcome, DaemonError> {
         self.command(|daemon| {
             daemon
-                .submit_verified_poison(verified)
+                .submit_verified_poison(verified, gate)
                 .map_err(DaemonError::PoisonSubmission)
         })
         .await

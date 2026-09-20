@@ -303,6 +303,23 @@ impl From<&Error> for UserError {
                 ),
 
                 DaemonError::ConnectAnchor(error) => anchor_startup_error(error),
+                DaemonError::PoisonSubmission(error) => {
+                    if matches!(error, coincubed::poison_broadcast::SubmissionError::Uncertain { .. } | coincubed::poison_broadcast::SubmissionError::AlreadyStarted) {
+                        UserError::new(
+                            "Transaction submission is uncertain",
+                            "The transaction may have been submitted. Check its exact transaction status before taking another action.",
+                            CC_DMN_RPC,
+                            false,
+                        )
+                    } else {
+                        UserError::new(
+                            "Transaction was not submitted",
+                            "The submission context is no longer valid. Review the transaction state before continuing.",
+                            CC_DMN_RPC,
+                            false,
+                        )
+                    }
+                },
 
                 DaemonError::Start(_) => UserError::new(
                     "The wallet engine didn't start",

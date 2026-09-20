@@ -32,3 +32,19 @@ record exact submitted bytes, refuse wrong chains/descriptors before calls and
 retain uncertainty without retry on transport failure. Full daemon tests and
 strict clippy validate the daemon; GUI adapter compilation/pinned CI is separate,
 and no local GUI runtime/keyring tests are authorized.
+
+## Revocation and the start boundary
+
+`SubmissionGate::new(&verified)` returns a one-use transaction-bound gate and a
+cloneable `SubmissionRevoker`. Neither is authorization. The coordinator keeps
+the gate private, binds its own context/generation and journals intent first,
+then revokes on logout/provider/context changes. Gate identity includes chain,
+txid and wtxid, so another valid witness for the same txid cannot reuse it.
+
+The daemon acquires the actual Bitcoin backend mutex before atomically changing
+Pending to Started immediately before calling broadcast, with no await between.
+Revocation winning that transition yields Revoked and no transport call, even
+when the submission was queued behind embedded/backend locks. Started cannot be
+reset or reused; revocation after it cannot retract submission. A dropped outer
+future after Started must remain uncertain in the journal. The test-only barrier
+makes queued-backend cancellation deterministic without a production callback.

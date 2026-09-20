@@ -163,6 +163,7 @@ pub trait Daemon: Debug {
     async fn submit_verified_poison(
         &self,
         _verified: &coincube_core::claim_finalize::VerifiedPoisonTransfer,
+        _gate: &coincubed::poison_broadcast::SubmissionGate,
     ) -> Result<coincubed::poison_broadcast::SubmissionOutcome, DaemonError> {
         Err(DaemonError::ClientNotSupported)
     }
