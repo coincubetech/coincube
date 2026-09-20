@@ -11,7 +11,9 @@
 //! matrix lives in exactly one place. See `plans/PLAN-network-feature-gating.md`.
 
 use crate::app::menu::{MarketplaceSubMenu, Menu, P2PSubMenu};
-use crate::chain::{ChainId, ChainIdExt, RuntimeSupport};
+#[cfg(test)]
+use crate::chain::ChainIdExt;
+use crate::chain::{ChainId, RuntimeSupport};
 
 /// Whether a feature is usable on the current network, plus the human
 /// reason to show when it isn't.
@@ -391,7 +393,10 @@ impl BitcoinBlake2bServerFlag {
 /// even when the server has already enabled the account — a partly working
 /// Cube is worse than none.
 pub fn bitcoin_blake2b(flag: BitcoinBlake2bServerFlag) -> Availability {
-    bitcoin_blake2b_with(ChainId::BitcoinBlake2b.runtime_support(), flag)
+    bitcoin_blake2b_with(
+        crate::chain::authenticated_connect_support(ChainId::BitcoinBlake2b),
+        flag,
+    )
 }
 
 /// [`bitcoin_blake2b`] with the runtime support injected, so the full matrix
@@ -819,11 +824,11 @@ mod tests {
         const ON: BitcoinBlake2bServerFlag = BitcoinBlake2bServerFlag {
             server_enabled: true,
         };
-        // This build: dormant. The flag being on changes nothing — the answer
-        // is the dormant reason, so the UI never offers a partly working Cube.
+        // Explicit authenticated Connect capability is available; generic
+        // startup remains dormant and cannot consume this account flag.
         let verdict = bitcoin_blake2b(ON);
-        assert!(!verdict.is_available());
-        assert_eq!(verdict.reason(), Some(crate::chain::BTCB2_DORMANT_REASON));
+        assert!(verdict.is_available());
+        assert!(!ChainId::BitcoinBlake2b.runtime_support().is_supported());
         assert!(!bitcoin_blake2b(BitcoinBlake2bServerFlag::OFF).is_available());
         assert!(!bitcoin_blake2b(BitcoinBlake2bServerFlag::default()).is_available());
 

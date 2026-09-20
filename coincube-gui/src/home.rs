@@ -14,7 +14,7 @@ use coincubed::config::ConfigError;
 use tokio::runtime::Handle;
 
 use crate::app::state::settings::recovery_kit::encrypt_and_upload as recovery_kit_upload;
-use crate::chain::{ChainId, ChainIdExt, RuntimeSupport};
+use crate::chain::{ChainId, ChainIdExt};
 use crate::feature_flags;
 use crate::pin_input;
 use crate::recover_vault::{self, RecoverVaultMessage, RecoverVaultPanel};
@@ -615,7 +615,7 @@ impl Home {
         let remote_count = self
             .remote_cubes
             .iter()
-            .filter(|rc| rc.network == network_str)
+            .filter(|rc| !self.network.is_blake2b() && rc.network == network_str)
             .count();
         local_count + remote_count
     }
@@ -732,11 +732,93 @@ impl Home {
         Subscription::none()
     }
 
+    /// Account-scoped admission for the explicit Connect-only fork route.
+    pub(crate) fn connect_chain_availability(&self, chain: ChainId) -> app::features::Availability {
+        if !chain.is_blake2b() {
+            return app::features::Availability::Available;
+        }
+        app::features::bitcoin_blake2b(app::features::BitcoinBlake2bServerFlag {
+            server_enabled: self
+                .connect_account
+                .authenticated_client()
+                .is_some_and(|c| c.token().is_some())
+                && self
+                    .connect_account
+                    .features
+                    .as_ref()
+                    .and_then(|f| f.bitcoin_blake2b_enabled)
+                    == Some(true),
+        })
+    }
+
+    fn refresh_displayed_networks(&mut self) {
+        self.displayed_networks = if self.developer_mode {
+            NETWORKS.to_vec()
+        } else {
+            vec![ChainId::Bitcoin]
+        };
+        if self
+            .connect_chain_availability(ChainId::BitcoinBlake2b)
+            .is_available()
+        {
+            self.displayed_networks.push(ChainId::BitcoinBlake2b);
+            if self.developer_mode {
+                self.displayed_networks
+                    .push(ChainId::BitcoinBlake2bTestnet4);
+            }
+        }
+    }
+
     pub fn update(&mut self, message: Message) -> Task<Message> {
-        if let RuntimeSupport::Dormant { reason } = self.network.runtime_support() {
-            if !matches!(&message, Message::View(ViewMessage::SelectNetwork(_))) {
-                self.set_error(reason);
+        self.refresh_displayed_networks();
+        if self.network.is_blake2b() {
+            // Explicitly supported launcher actions only. No legacy seed-only,
+            // passkey, recovery, phone restore or duress completion route.
+            let allowed = match &message {
+                Message::View(view) => matches!(
+                    view,
+                    ViewMessage::CreateCube
+                        | ViewMessage::CreateWallet
+                        | ViewMessage::ShowCreateCube(_)
+                        | ViewMessage::SelectNetwork(_)
+                        | ViewMessage::Check
+                        | ViewMessage::Run(_)
+                        | ViewMessage::ConnectAccount(_)
+                        | ViewMessage::ToggleConnect
+                        | ViewMessage::ToggleDeveloperMode(_)
+                        | ViewMessage::ToggleTheme
+                        | ViewMessage::GoToSection(HomeSection::Cubes | HomeSection::Connect(_))
+                        | ViewMessage::OpenUrl(_)
+                        | ViewMessage::DismissAdvisoryNotice
+                ),
+                Message::Checked { .. }
+                | Message::CubeLimitsLoaded(_)
+                | Message::RemoteCubesLoaded { .. }
+                | Message::ConnectSignedInBubble
+                | Message::CatchUpSyncFinished(_)
+                | Message::CubeRemoteRegistered { .. }
+                | Message::CubeRemoteUpdated { .. } => true,
+                _ => false,
+            };
+            if !allowed {
+                self.set_error(
+                    "Bitcoin Blake2b supports only an authenticated Connect Vault with a PIN",
+                );
                 return Task::none();
+            }
+            if matches!(
+                &message,
+                Message::View(
+                    ViewMessage::CreateCube
+                        | ViewMessage::CreateWallet
+                        | ViewMessage::ShowCreateCube(true)
+                        | ViewMessage::Run(_)
+                )
+            ) {
+                if let Some(reason) = self.connect_chain_availability(self.network).reason() {
+                    self.set_error(reason.to_string());
+                    return Task::none();
+                }
             }
         }
         // BTCB2 Cubes use the Vault installer, never the seed-only Liquid/Spark flow.
@@ -1687,15 +1769,17 @@ impl Home {
             }
             Message::View(ViewMessage::SelectNetwork(network)) => {
                 if !(self.developer_mode
-                    || self.network.is_blake2b() && network == ChainId::Bitcoin)
+                    || network == ChainId::Bitcoin
+                    || network == ChainId::BitcoinBlake2b
+                        && self.connect_chain_availability(network).is_available())
                 {
                     tracing::debug!(
                         "Ignoring SelectNetwork action because developer mode is disabled"
                     );
                     return Task::none();
                 }
-                if let RuntimeSupport::Dormant { reason } = network.runtime_support() {
-                    self.set_error(reason);
+                if let Some(reason) = self.connect_chain_availability(network).reason() {
+                    self.set_error(reason.to_string());
                     return Task::none();
                 }
                 self.network = network;
@@ -1731,7 +1815,11 @@ impl Home {
                     self.error = None;
                 }
 
-                if !enabled && self.network != ChainId::Bitcoin {
+                self.refresh_displayed_networks();
+                if !enabled
+                    && self.network != ChainId::Bitcoin
+                    && self.network != ChainId::BitcoinBlake2b
+                {
                     self.network = ChainId::Bitcoin;
                     let network_dir = self.datadir_path.network_directory(self.network);
                     return probe_network_datadir(self.network, network_dir);
@@ -1853,8 +1941,7 @@ impl Home {
                             ));
                             return Task::none();
                         }
-                        if let crate::chain::RuntimeSupport::Dormant { reason } =
-                            cube.network.runtime_support()
+                        if let Some(reason) = self.connect_chain_availability(cube.network).reason()
                         {
                             self.error = Some(reason.to_string());
                             return Task::none();
@@ -2411,6 +2498,7 @@ impl Home {
                 let was_authenticated = self.connect_account.is_authenticated();
                 let task = map_connect_task(self.connect_account.update_message(msg));
                 let now_authenticated = self.connect_account.is_authenticated();
+                self.refresh_displayed_networks();
                 // Update cached keyring state on login/logout transitions
                 if was_authenticated != now_authenticated {
                     self.has_stored_session = now_authenticated;
@@ -3565,11 +3653,11 @@ impl Home {
     }
 
     pub fn view(&self) -> Element<Message> {
-        if let RuntimeSupport::Dormant { reason } = self.network.runtime_support() {
+        if let Some(reason) = self.connect_chain_availability(self.network).reason() {
             return Column::new()
                 .spacing(16)
                 .push(h3(self.network.label()))
-                .push(text(reason))
+                .push(text(reason.to_string()))
                 .push(
                     button::secondary(None, "Back to Bitcoin")
                         .on_press(Message::View(ViewMessage::SelectNetwork(ChainId::Bitcoin))),
@@ -3610,7 +3698,7 @@ impl Home {
                                         .style(theme::toggler::orange),
                                 ),
                         )
-                        .push(if self.developer_mode {
+                        .push(if self.developer_mode || self.connect_chain_availability(ChainId::BitcoinBlake2b).is_available() {
                             Some(
                                 pick_list(
                                     self.displayed_networks.as_slice(),
@@ -4162,7 +4250,7 @@ fn home_sidebar<'a>(home: &'a Home) -> Element<'a, Message> {
     // Heir "Recover a Vault" — global discovery surface (COIN-377 / PR 1).
     // Gated behind the capability flag (dark until the API's `recoverable`
     // endpoint + COIN-376 sweep ship) and only shown to a signed-in account.
-    if is_authenticated && feature_flags::RECOVER_VAULT_ENABLED {
+    if is_authenticated && !home.network.is_blake2b() && feature_flags::RECOVER_VAULT_ENABLED {
         let is_active = matches!(home.active_section, HomeSection::RecoverVault);
         let recover_button = if is_active {
             Row::new()
@@ -5837,6 +5925,18 @@ async fn check_network_datadir(
     source: crate::chain::ChainId,
     path: NetworkDirectory,
 ) -> Result<State, String> {
+    // Fork discovery is read-only. Admission, not browsing, creates its files.
+    if source.is_blake2b() {
+        if !path.path().join(settings::SETTINGS_FILE_NAME).exists() {
+            return Ok(State::NoCube { create_cube: false });
+        }
+        let settings = settings::Settings::from_file(&path).map_err(|e| e.to_string())?;
+        return Ok(State::Cubes {
+            cubes: settings.cubes,
+            create_cube: false,
+            source,
+        });
+    }
     // Ensure the network directory exists
     if let Err(e) = tokio::fs::create_dir_all(path.path()).await {
         return Err(format!(
@@ -8972,6 +9072,82 @@ mod chain_identity_open_tests {
     }
 
     #[test]
+    fn authenticated_flag_controls_fork_launcher_and_never_enables_restore() {
+        let dir = tmp_datadir("fork-feature-entry");
+        let mut home = Home::new(CoincubeDirectory::new(dir.clone()), Some(Network::Bitcoin)).0;
+        let mut client = CoincubeClient::new();
+        client.set_token("synthetic-feature-token");
+        home.connect_account.install_admitted_client(client);
+        for flag in [None, Some(false), Some(true)] {
+            home.connect_account.features = Some(
+                serde_json::from_value(serde_json::json!({
+                    "plans": [], "bitcoinBlake2bEnabled": flag
+                }))
+                .unwrap(),
+            );
+            home.refresh_displayed_networks();
+            assert_eq!(
+                home.displayed_networks.contains(&ChainId::BitcoinBlake2b),
+                flag == Some(true)
+            );
+            assert!(!home
+                .displayed_networks
+                .contains(&ChainId::BitcoinBlake2bTestnet4));
+            let messages = drain(home.update(Message::View(ViewMessage::SelectNetwork(
+                ChainId::BitcoinBlake2b,
+            ))));
+            if flag != Some(true) {
+                assert!(messages.is_empty());
+                assert_eq!(home.network, ChainId::Bitcoin);
+            } else {
+                for msg in messages {
+                    let _ = home.update(msg);
+                }
+                assert_eq!(home.network, ChainId::BitcoinBlake2b);
+                assert!(!dir.join("bitcoin-blake2b").exists());
+                assert!(matches!(
+                    drain(home.update(Message::View(ViewMessage::CreateWallet))).as_slice(),
+                    [Message::Install(
+                        _,
+                        ChainId::BitcoinBlake2b,
+                        UserFlow::CreateWallet,
+                        Some(_)
+                    )]
+                ));
+                for event in [
+                    ViewMessage::ImportWallet,
+                    ViewMessage::SubmitRecovery,
+                    ViewMessage::RestoreFromRecoveryKit("synthetic".into()),
+                    ViewMessage::TogglePasskeyMode(true),
+                    ViewMessage::CreationBackupBypassConfirmed,
+                ] {
+                    assert!(drain(home.update(Message::View(event))).is_empty());
+                }
+                home.developer_mode = true;
+                home.refresh_displayed_networks();
+                assert!(home
+                    .displayed_networks
+                    .contains(&ChainId::BitcoinBlake2bTestnet4));
+                let messages = drain(home.update(Message::View(ViewMessage::SelectNetwork(
+                    ChainId::BitcoinBlake2bTestnet4,
+                ))));
+                for msg in messages {
+                    let _ = home.update(msg);
+                }
+                assert_eq!(home.network, ChainId::BitcoinBlake2bTestnet4);
+                assert!(!dir.join("bitcoin-blake2b-testnet4").exists());
+            }
+        }
+        home.connect_account.features = None;
+        assert!(drain(home.update(Message::View(ViewMessage::CreateWallet))).is_empty());
+        assert!(home
+            .connect_chain_availability(home.network)
+            .reason()
+            .is_some());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn dormant_home_refuses_creation_and_recovery_before_side_effects() {
         for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
             let dir = tmp_datadir("dormant-home");
@@ -8987,7 +9163,7 @@ mod chain_identity_open_tests {
                 ViewMessage::TogglePasskeyMode(true),
             ] {
                 assert!(drain(home.update(Message::View(event))).is_empty());
-                assert_eq!(home.error(), Some(BTCB2_DORMANT_REASON));
+                assert!(home.error().is_some());
                 assert!(!home.creating_cube);
                 assert!(home.pending_cube_id.is_none());
                 assert!(home.creation_backup_words.is_none());
@@ -9012,7 +9188,7 @@ mod chain_identity_open_tests {
         ))))
         .is_empty());
         assert_eq!(home.network, ChainId::Bitcoin);
-        assert_eq!(home.error(), Some(BTCB2_DORMANT_REASON));
+        assert!(home.error().is_some());
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -9149,7 +9325,12 @@ mod chain_identity_open_tests {
             home.error = None;
             let (msgs, error) = click(&mut home, 0);
             assert!(msgs.is_empty(), "{:?}", chain);
-            assert_eq!(error.as_deref(), Some(BTCB2_DORMANT_REASON), "{:?}", chain);
+            assert_eq!(
+                error.as_deref(),
+                Some("Bitcoin Blake2b isn't enabled for this account."),
+                "{:?}",
+                chain
+            );
             assert!(
                 !dir.join(chain.dir_name()).exists(),
                 "no config was read or created"

@@ -761,6 +761,11 @@ impl Tab {
             }
             (State::Home(l), Message::Launch(msg)) => match msg {
                 home::Message::Install(datadir, network, init, coincube_client) => {
+                    if let Some(reason) = l.connect_chain_availability(network).reason() {
+                        l.set_error(reason.to_string());
+                        return Task::none();
+                    }
+
                     // `coincube_client` is populated when the home
                     // already holds an authenticated Connect session (today
                     // the Recovery-Kit restore path forwards it so the
@@ -785,7 +790,7 @@ impl Tab {
                             return Task::none();
                         }
                     };
-                    if !datadir.exists() {
+                    if !network.is_blake2b() && !datadir.exists() {
                         // datadir is created right before launching the installer
                         // so logs can go in <datadir_path>/installer.log
                         if let Err(e) = datadir.init() {
@@ -827,10 +832,8 @@ impl Tab {
                         ));
                         return Task::none();
                     }
-                    if let crate::chain::RuntimeSupport::Dormant { reason } =
-                        cube.network.runtime_support()
-                    {
-                        l.set_error(reason);
+                    if let Some(reason) = l.connect_chain_availability(cube.network).reason() {
+                        l.set_error(reason.to_string());
                         return Task::none();
                     }
                     let network = chain.bitcoin_network();

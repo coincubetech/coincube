@@ -491,6 +491,56 @@ pub fn unlock_blocking(loc: &CubeLocation, pin: &str) -> Result<PinOutcome, Unlo
     }
 }
 
+/// PIN-only unlock for an explicitly admitted Connect fork Cube. This does
+/// not enter legacy duress classification or perform seed migration. Plaintext
+/// and missing fingerprints refuse; filename and decrypted key must agree.
+pub(crate) fn unlock_connect_fork(
+    loc: &CubeLocation,
+    pin: &str,
+) -> Result<PinOutcome, UnlockError> {
+    if !loc.chain.is_blake2b() {
+        return Err(UnlockError::ChainUnavailable(
+            "A Bitcoin Blake2b Cube is required",
+        ));
+    }
+    let fingerprint = loc
+        .master_signer_fingerprint
+        .ok_or_else(|| UnlockError::Io("This Cube has no master signer identity".into()))?;
+    let paths =
+        seed_files(loc.datadir_root, loc.chain).map_err(|e| UnlockError::Io(e.to_string()))?;
+    let path = paths
+        .into_iter()
+        .find(|(_, fp)| *fp == fingerprint)
+        .map(|(path, _)| path)
+        .ok_or_else(|| {
+            UnlockError::Io("This Cube's encrypted master seed is unavailable".into())
+        })?;
+    let data = std::fs::read(&path).map_err(|e| UnlockError::Io(e.to_string()))?;
+    if !MasterSigner::is_encrypted(&data) {
+        return Err(UnlockError::NoPinConfigured);
+    }
+    // V2 does not need a keystore lookup. V3 reads its existing secret only;
+    // this entry never creates one, even after a successful PIN.
+    let secret = if seed_crypt::format_version(&data) == Some(3) {
+        device_secret::load_optional(loc.cube_id)?
+    } else {
+        None
+    };
+    match open_seed_at(
+        &path,
+        loc.network,
+        fingerprint,
+        pin,
+        loc.cube_id,
+        secret.as_ref(),
+    ) {
+        Ok(signer) => Ok(PinOutcome::Unlock(Box::new(signer))),
+        Err(SignerError::InvalidPassword) => Ok(PinOutcome::Wrong),
+        Err(SignerError::DeviceSecretRequired) => Err(UnlockError::DeviceSecretMissing),
+        Err(e) => Err(UnlockError::Io(e.to_string())),
+    }
+}
+
 /// Decrypt this Cube's master seed with `pin`.
 fn open_seed(
     loc: &CubeLocation,

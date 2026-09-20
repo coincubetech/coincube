@@ -174,11 +174,25 @@ impl PinEntry {
                 let cube = self.cube.clone();
                 let root = self.datadir_root.clone();
                 let fork_signer = self.fork_signer.clone();
+                let PinEntrySuccess::LoadApp { connect_client, .. } = &self.on_success;
+                let connect_client = connect_client.clone();
                 Task::perform(
                     async move {
+                        if cube.network.is_blake2b() {
+                            let client = connect_client.as_ref().ok_or_else(|| {
+                                "Sign in to Connect before unlocking this Bitcoin Blake2b Cube"
+                                    .to_string()
+                            })?;
+                            crate::chain::require_connect_feature(cube.network, client).await?;
+                        }
                         tokio::task::spawn_blocking(move || {
                             let loc = unlock::CubeLocation::new(&root, &cube);
-                            match unlock::unlock_blocking(&loc, &pin) {
+                            let result = if cube.network.is_blake2b() {
+                                unlock::unlock_connect_fork(&loc, &pin)
+                            } else {
+                                unlock::unlock_blocking(&loc, &pin)
+                            };
+                            match result {
                                 Ok(PinOutcome::Unlock(signer)) => {
                                     if cube.network.is_blake2b() {
                                         *fork_signer.lock().map_err(|_| "Unlock state unavailable".to_string())? = Some(std::sync::Arc::new(*signer));

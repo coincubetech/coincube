@@ -48,6 +48,36 @@ pub const BTCB2_DORMANT_REASON: &str = "This Cube is on Bitcoin Blake2b, which t
      Tenshu can't open yet. Its settings are untouched; update Tenshu to a version with \
      Bitcoin Blake2b support to use it.";
 
+/// Capability for the explicit authenticated Connect Vault path only.
+/// Generic startup, managed nodes, duress and migration still consult
+/// `runtime_support()` and remain dormant for the fork.
+pub(crate) fn authenticated_connect_support(chain: ChainId) -> RuntimeSupport {
+    if chain.is_blake2b() {
+        RuntimeSupport::Supported
+    } else {
+        chain.runtime_support()
+    }
+}
+
+/// Recheck the current account flag before a fork daemon may create files.
+/// The authenticated anchor subsequently validates the exact selected chain.
+pub(crate) async fn require_connect_feature(
+    chain: ChainId,
+    client: &crate::services::coincube::CoincubeClient,
+) -> Result<(), String> {
+    if !chain.is_blake2b() || client.token().is_none() {
+        return Err("An authenticated Bitcoin Blake2b Connect session is required".into());
+    }
+    let features = client
+        .get_connect_features()
+        .await
+        .map_err(|_| "Bitcoin Blake2b availability could not be verified".to_string())?;
+    if features.bitcoin_blake2b_enabled != Some(true) {
+        return Err("Bitcoin Blake2b isn't enabled for this account".into());
+    }
+    Ok(())
+}
+
 /// GUI policy over the shared [`ChainId`]: launcher selection, presentation
 /// and runtime support. An extension trait rather than a second enum so the
 /// identity — and its wire encoding — stays the one type core defines; bring
