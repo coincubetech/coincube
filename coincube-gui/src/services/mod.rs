@@ -58,3 +58,5 @@ fn default_base_url() -> String {
         env!("COINCUBE_API_URL").to_string()
     }
 }
+
+pub mod claim_workflow;
