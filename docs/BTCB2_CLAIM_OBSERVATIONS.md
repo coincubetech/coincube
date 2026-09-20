@@ -90,3 +90,9 @@ transaction lookups. No cache, retries or background collector is installed.
 
 Local HTTP fixture tests are compiled locally, executed only in ephemeral CI;
 no live endpoint or production flag is exercised.
+
+Device identity headers are captured once when CoincubeClient is constructed and
+reused across token replacement, clearing and bounded anchor requests. Anchor
+polling never regenerates a fingerprint or reads device identity from disk.
+A fresh client construction remains the explicit identity refresh boundary.
+Anonymous observation requests still use their own header-free transport.
