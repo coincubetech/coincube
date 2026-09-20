@@ -3,7 +3,7 @@ use super::{
     network_status::{NetworkObservation, NetworkStatusError, RdtsStatus},
     CoincubeClient, CoincubeError,
 };
-use crate::services::http::ResponseExt;
+use crate::services::http::NotSuccessResponseInfo;
 use coincube_core::{chain::ChainId, miniscript::bitcoin::BlockHash};
 use coincubed::connect::{
     AdmissionError, ConnectAnchorAuthority, ConnectBackend, TrustedChainAnchor, MAX_ANCHOR_AGE,
@@ -203,8 +203,22 @@ impl CoincubeClient {
         if !chain.is_blake2b() {
             return Err(NetworkStatusError::UnsupportedChain);
         }
-        let response = self
-            .client
+        // Anchor observations cannot redirect authentication or allocate an
+        // unbounded response body. Other CoincubeClient routes are unchanged.
+        let mut headers = crate::utils::device::device_headers();
+        if let Some(token) = self.token() {
+            let mut value = reqwest::header::HeaderValue::from_str(&format!("Bearer {}", token))
+                .map_err(|_| NetworkStatusError::InvalidResponse)?;
+            value.set_sensitive(true);
+            headers.insert(reqwest::header::AUTHORIZATION, value);
+        }
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(10))
+            .default_headers(headers)
+            .build()
+            .map_err(CoincubeError::from)?;
+        let mut response = client
             .get(format!(
                 "{}/api/v1/connect/networks/{}/anchor",
                 self.base_url,
@@ -214,17 +228,30 @@ impl CoincubeClient {
             .await
             .map_err(CoincubeError::from)?;
         let http = response.status();
-        if http != reqwest::StatusCode::OK && http != reqwest::StatusCode::SERVICE_UNAVAILABLE {
-            response
-                .check_success()
-                .await
-                .map_err(CoincubeError::from)?;
+        const MAX_BODY: usize = 64 * 1024;
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_BODY as u64)
+        {
             return Err(NetworkStatusError::InvalidResponse);
         }
-        let envelope: Envelope = response
-            .json()
-            .await
-            .map_err(|_| NetworkStatusError::InvalidResponse)?;
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(CoincubeError::from)? {
+            if chunk.len() > MAX_BODY.saturating_sub(bytes.len()) {
+                return Err(NetworkStatusError::InvalidResponse);
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        if http != reqwest::StatusCode::OK && http != reqwest::StatusCode::SERVICE_UNAVAILABLE {
+            return Err(NetworkStatusError::Request(CoincubeError::Unsuccessful(
+                NotSuccessResponseInfo {
+                    status_code: http.as_u16(),
+                    text: String::from_utf8_lossy(&bytes).into_owned(),
+                },
+            )));
+        }
+        let envelope: Envelope =
+            serde_json::from_slice(&bytes).map_err(|_| NetworkStatusError::InvalidResponse)?;
         let available = envelope.data.state == AnchorState::Available;
         let valid_payload = if available {
             envelope
@@ -388,6 +415,20 @@ mod tests {
     use super::*;
     use httpmock::prelude::*;
     use serde_json::{json, Value};
+    #[tokio::test]
+    async fn oversized_anchor_body_is_rejected() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.path("/api/v1/connect/networks/bitcoin-blake2b/anchor");
+            then.status(200).body("x".repeat(65 * 1024));
+        });
+        assert!(matches!(
+            client(&server)
+                .network_anchor(ChainId::BitcoinBlake2b)
+                .await,
+            Err(NetworkStatusError::InvalidResponse)
+        ));
+    }
     fn body(chain: ChainId) -> Value {
         json!({"success":true,"data":{"network":chain.api_str(),"state":"available","anchor":{
             "tip_hash":"11".repeat(32),"tip_height":973029,"tip_median_time_past":1800000000,

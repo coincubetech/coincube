@@ -1,5 +1,6 @@
-//! Dormant, observation-only Claim prerequisite. No production transport adapter
-//! or UI caller is installed. A complete assessment is never spend permission.
+//! Dormant, observation-only Claim prerequisite. No UI caller is installed. A complete assessment is never spend permission.
+pub mod http;
+
 use async_trait::async_trait;
 use coincube_core::{
     chain::ChainId,
@@ -116,7 +117,7 @@ pub enum TransactionObservation {
 /// must come from the existing authenticated typed endpoint. Transaction/indexer
 /// reads use the anonymous fresh-read contract, with no JWT/device linkage or
 /// fallback. Implementations must be cancellation-safe when their futures drop.
-/// No concrete HTTP implementation is supplied until that API contract lands.
+/// The HTTP adapter requires explicit fresh-response acknowledgement.
 #[async_trait]
 pub trait ObservationSource: Send + Sync {
     fn now(&self) -> i64;

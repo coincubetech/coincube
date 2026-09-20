@@ -1,8 +1,7 @@
 # Dormant Claim observation collector
 
 `services::claim_observation` collects supplied chain observations and invokes
-`coincube_core::claim::assess`. It has no production HTTP adapter or application
-caller, and performs no wallet writes, signing, broadcast, import or UI exposure.
+`coincube_core::claim::assess`. It includes an opt-in HTTP adapter but has no application caller, and performs no wallet writes, signing, broadcast, import or UI exposure.
 `ObservationsEligibleForPreflight` remains an observation assessment, never
 spend permission or a persistent Split label.
 
@@ -25,8 +24,7 @@ containing both `X-Cache: BYPASS` and a `Cache-Control: no-store` directive. The
 adapter must request `X-Coincube-Observation: fresh`, preserve explicit ChainId,
 use the exact configured Connect endpoint, and never substitute Bitcoin/public
 explorer data. Transaction lookups remain anonymous: no JWT or device headers.
-Clearing a CoincubeClient token alone does not remove its device headers. The
-concrete response-aware transport is deliberately pending the reviewed API fresh
+Clearing a CoincubeClient token alone does not remove its device headers. The response-aware `HttpObservationSource` requires the reviewed API fresh
 contract; ordinary cached Esplora methods are not fresh evidence.
 
 Collection reads Bitcoin tip and a fork anchor, checks indexer agreement at the
@@ -44,9 +42,9 @@ cryptographic proof constructor: fabricated source values can defeat any local
 observation evaluator. Full consensus, self-transfer ownership, fee/UTXO policy,
 final-witness replay validation and pre-broadcast acceptance remain separate.
 
-A future tip adapter must validate best-chain membership and require complete
-height/hash metadata. The value-only Esplora library methods do not expose the
-freshness headers, so the concrete adapter must inspect the HTTP response.
+The HTTP tip adapter validates best-chain membership and complete height/hash
+metadata using tip hash, block status, hash at height and a repeated tip hash.
+It only requests allowlisted fresh paths; it never reads raw headers.
 
 The caller owns a watch generation sender and increments it on logout, account,
 provider, Cube/chain replacement or explicit cancellation. Generation changes
@@ -67,3 +65,28 @@ The current API exposes Bitcoin mainnet and legacy Bitcoin testnet, not Bitcoin
 testnet4. The trait fixtures cover the exact testnet4 pair, but a future concrete
 adapter must refuse that unconfigured pair; it must never map Bitcoin testnet4
 to legacy testnet or mainnet. Testnet4 infrastructure remains deferred.
+
+## HTTP adapter boundary
+
+`HttpObservationSource::new` freezes the authenticated client/API origin and a
+revocable generation. Only the mainnet Bitcoin/BTCB2 pair currently constructs;
+unsupported pairs fail before I/O. Anonymous requests use a separately built
+client with no JWT, cookies or device headers, no redirects and a five-second
+request deadline. The origin must not contain userinfo, query, fragment or a
+path prefix. No alternate provider or chain fallback exists.
+
+Every anonymous response requires all three fresh acknowledgement markers.
+Bodies are streamed with a 256 KiB cap (oversized legitimate transactions remain
+unavailable). Request-start wall timestamps are retained conservatively. `/tx`
+responses must contain the requested txid and complete, consistent confirmation
+fields; `/tx/.../status` alone cannot establish that body binding. Only an explicit
+fresh 404 becomes absence. Other HTTP codes remain typed failures.
+
+The shared authenticated anchor reader now disables redirects, uses a ten-second
+HTTP timeout, and streams at most 64 KiB. Existing typed state/error parsing is
+reused. The adapter additionally bounds that call to five seconds and cancels
+all reads on generation revocation. Anchor auth remains separate from anonymous
+transaction lookups. No cache, retries or background collector is installed.
+
+Local HTTP fixture tests are compiled locally, executed only in ephemeral CI;
+no live endpoint or production flag is exercised.
