@@ -46,6 +46,13 @@ informational metadata here, not Claim or expiry authorization.
 
 The no-write admission test invokes the private startup body with a test runtime
 policy, exercising the real admission-before-filesystem ordering while the two
-public entry points retain the production dormant gate. Bitcoin pointing at a
-fork endpoint remains a separate symmetric-identity launch gate; this change does
-not alter Bitcoin backend behavior.
+public entry points retain the production dormant gate. Manually configuring a
+Bitcoin backend with a fork endpoint remains a pre-existing provider-trust
+limitation. Operator acceptance must verify separate correct endpoints; generated
+Bitcoin and BTCB2 routes remain distinct. This does not introduce a new Bitcoin
+identity architecture or an additional code-activation gate.
+
+`DaemonHandle::stop_for_cleanup` provides nonpanicking cleanup for abandoned fork
+startup and GUI drop paths. It sets abort/shutdown flags, attempts worker joins
+even after a closed control channel, and returns sanitized errors. The existing
+Bitcoin `stop` behavior is unchanged.
