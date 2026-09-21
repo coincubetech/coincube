@@ -289,6 +289,7 @@ impl SelectedKey {
 pub struct SelectKeySource {
     // state
     network: Network,
+    chain: crate::chain::ChainId,
     /// Whether keys must support tap-miniscript signing.
     taproot: bool,
     /// List of keys already in use, including metadata about spending
@@ -349,6 +350,7 @@ pub struct SelectKeySource {
 }
 
 impl SelectKeySource {
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         network: Network,
@@ -363,9 +365,38 @@ impl SelectKeySource {
             std::sync::Arc<crate::services::connect::crypto::CubeEncryptionKey>,
         >,
     ) -> Self {
+        Self::new_for_chain(
+            network.into(),
+            taproot,
+            actual_path,
+            keys,
+            accounts,
+            master_signer,
+            cube_id,
+            coincube_client,
+            cube_encryption_key,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_for_chain(
+        chain: crate::chain::ChainId,
+        taproot: bool,
+        actual_path: PathData,
+        keys: HashMap<Fingerprint, (Vec<(usize, usize)>, Key)>,
+        accounts: HashMap<Fingerprint, ChildNumber>,
+        master_signer: Arc<Mutex<Signer>>,
+        cube_id: Option<String>,
+        coincube_client: Option<crate::services::coincube::CoincubeClient>,
+        cube_encryption_key: Option<
+            std::sync::Arc<crate::services::connect::crypto::CubeEncryptionKey>,
+        >,
+    ) -> Self {
+        let network = chain.bitcoin_network();
         Self {
             network,
-            taproot,
+            chain,
+            taproot: taproot && !chain.is_blake2b(),
             keys,
             accounts,
             actual_path,
@@ -417,6 +448,9 @@ impl SelectKeySource {
     /// for both the row's disabled state and the caption explaining it —
     /// deriving those separately let them drift apart.
     fn key_unavailable_reason(&self, fg: Fingerprint, source: &KeySource) -> Option<String> {
+        if !source.available_for_creation(self.chain) {
+            return Some("This key source is not available for Bitcoin Blake2b yet".to_string());
+        }
         if let KeySource::Token(kind, _) = source {
             if !self.actual_path.token_kind.contains(kind) {
                 return Some("Token type not allowed in this path".to_string());
@@ -1596,6 +1630,40 @@ impl SelectKeySource {
             Some(|| Message::Close),
         );
 
+        if self.chain.is_blake2b() {
+            let master_fg = self.master_signer.lock().expect("poisoned").fingerprint();
+            let content = Column::new()
+                .spacing(10)
+                .push(header)
+                .push(
+                    self.view_card(
+                        icon::cube_icon(),
+                        "Cube Key",
+                        None,
+                        (!self.keys.contains_key(&master_fg))
+                            .then_some(SelectKeySourceMessage::SelectGenerateMasterKey),
+                    ),
+                )
+                .push(self.view_card(
+                    icon::key_icon(),
+                    "Import xpub",
+                    None,
+                    Some(SelectKeySourceMessage::SelectLoadXpub),
+                ))
+                .push(self.view_card(
+                    icon::key_icon(),
+                    "Paste xpub",
+                    None,
+                    Some(SelectKeySourceMessage::SelectEnterXpub),
+                ))
+                .push((!self.keys.is_empty()).then(|| self.view_keys()))
+                .width(modal::MODAL_WIDTH);
+            return Container::new(content)
+                .padding(15)
+                .style(theme::card::modal)
+                .into();
+        }
+
         // If the path is "safety-net-only" there's nothing to pick
         // *but* a safety-net token — surface just that widget and
         // skip the grid entirely (matches the pre-redesign flow).
@@ -2218,6 +2286,39 @@ impl super::DescriptorEditModal for SelectKeySource {
         self.processing
     }
     fn update(&mut self, hws: &mut HardwareWallets, message: Message) -> Task<Message> {
+        if self.chain.is_blake2b() {
+            if let Message::SelectKeySource(ref msg) = message {
+                let refused = match msg {
+                    SelectKeySourceMessage::ShowHardwareListen
+                    | SelectKeySourceMessage::ShowKeychainKeys
+                    | SelectKeySourceMessage::SelectDevice(_)
+                    | SelectKeySourceMessage::FetchFromDevice(_, _)
+                    | SelectKeySourceMessage::FetchCubeKeys
+                    | SelectKeySourceMessage::CubeKeysLoaded(_)
+                    | SelectKeySourceMessage::SelectKeychainKey(_)
+                    | SelectKeySourceMessage::SelectEnterSafetyNetToken
+                    | SelectKeySourceMessage::SelectEnterCosignerToken
+                    | SelectKeySourceMessage::PasteToken
+                    | SelectKeySourceMessage::Token(_)
+                    | SelectKeySourceMessage::ProviderKey(_)
+                    | SelectKeySourceMessage::SelectBorderWalletSafetyNet => true,
+                    SelectKeySourceMessage::LoadKey(Ok(key)) => {
+                        !key.source.available_for_creation(self.chain)
+                    }
+                    SelectKeySourceMessage::SelectKey(fp) => self
+                        .keys
+                        .get(fp)
+                        .is_some_and(|(_, key)| !key.source.available_for_creation(self.chain)),
+                    _ => false,
+                };
+                if refused {
+                    self.error = Some(
+                        "This key source is not available for Bitcoin Blake2b yet".to_string(),
+                    );
+                    return Task::none();
+                }
+            }
+        }
         // step back if selected device disconnected — pop back into
         // the HW listening sub-screen rather than all the way to the
         // grid so the user sees "Plug in a hardware device…" again.
@@ -2331,7 +2432,11 @@ impl super::DescriptorEditModal for SelectKeySource {
         }
     }
     fn subscription(&self, hws: &HardwareWallets) -> Subscription<Message> {
-        let hw = hws.refresh().map(Message::HardwareWallets);
+        let hw = if self.chain.is_blake2b() {
+            Subscription::none()
+        } else {
+            hws.refresh().map(Message::HardwareWallets)
+        };
         if let Some(modal) = self.modal.as_ref() {
             if let Some(sub) = modal.subscription() {
                 let import = sub.map(|m| {
@@ -2686,6 +2791,41 @@ mod tests {
     use std::path::PathBuf;
     use std::str::FromStr;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn fork_picker_refuses_external_source_events_before_work() {
+        for chain in [
+            crate::chain::ChainId::BitcoinBlake2b,
+            crate::chain::ChainId::BitcoinBlake2bTestnet4,
+        ] {
+            let mut picker = empty_picker();
+            picker.chain = chain;
+            picker.network = chain.bitcoin_network();
+            let mut hws = HardwareWallets::new(
+                CoincubeDirectory::new(PathBuf::new()),
+                chain.bitcoin_network(),
+            );
+            for event in [
+                SelectKeySourceMessage::ShowHardwareListen,
+                SelectKeySourceMessage::ShowKeychainKeys,
+                SelectKeySourceMessage::FetchCubeKeys,
+                SelectKeySourceMessage::SelectEnterSafetyNetToken,
+                SelectKeySourceMessage::Token("synthetic".to_string()),
+                SelectKeySourceMessage::SelectBorderWalletSafetyNet,
+            ] {
+                let _ = picker.update(&mut hws, SelectKeySource::route(event));
+                assert_eq!(picker.step, Step::Grid);
+                assert!(!picker.keychain_keys_loading);
+                assert!(!picker.processing);
+                assert!(picker.error.is_some());
+            }
+            let _ = picker.update(
+                &mut hws,
+                SelectKeySource::route(SelectKeySourceMessage::SelectEnterXpub),
+            );
+            assert_eq!(picker.step, Step::PasteXpubEntry);
+        }
+    }
 
     fn empty_picker() -> SelectKeySource {
         SelectKeySource::new(
