@@ -2221,6 +2221,67 @@ mod tests {
         std::fs::remove_dir_all(root_path).unwrap();
     }
 
+    /// `gather_cube_meta` is the `start_phone_seal` feed: its chain string goes
+    /// straight into the sealed phone recovery kit. The test above pins which
+    /// Cube is selected; this pins the label that travels with it. A fork Cube
+    /// spends on Bitcoin, so sourcing this from the address network yields
+    /// "mainnet" while still selecting the correct Cube — the wrong value is
+    /// sealed silently rather than refused.
+    #[tokio::test]
+    async fn gather_cube_meta_records_the_fork_chain_for_twin_cubes() {
+        use crate::{chain::ChainId, dir::CoincubeDirectory};
+        let root_path = std::env::temp_dir().join(format!("phone-meta-{}", uuid::Uuid::new_v4()));
+        let root = CoincubeDirectory::new(root_path.clone());
+        for chain in [ChainId::Bitcoin, ChainId::BitcoinBlake2b] {
+            let cube = settings::CubeSettings::new_with_raw_id(
+                "same-id".into(),
+                "Twin Cube".into(),
+                chain,
+            );
+            crate::app::settings::update_settings_file(
+                &root.network_directory(chain),
+                move |mut s| {
+                    s.cubes.push(cube);
+                    Some(s)
+                },
+            )
+            .await
+            .unwrap();
+        }
+        let mut cache = Cache {
+            datadir_path: root.clone(),
+            fiat_chain: ChainId::BitcoinBlake2b,
+            // Deliberately the default Bitcoin address network: the fixture only
+            // has teeth while the two possible sources disagree.
+            ..Cache::default()
+        };
+        assert_ne!(
+            ChainId::BitcoinBlake2b.api_str(),
+            ChainId::from(cache.network).api_str(),
+            "fixture is pointless unless the two sources disagree"
+        );
+        let (meta, uuid, network) =
+            gather_cube_meta(&cache, "same-id").expect("fork Cube is present in settings");
+        assert_eq!(uuid, "same-id");
+        assert_eq!(
+            meta.network,
+            ChainId::BitcoinBlake2b.api_str(),
+            "phone seal metadata recorded {} for a fork Cube",
+            meta.network
+        );
+        assert_eq!(
+            network, meta.network,
+            "the returned network string and the blob's must not diverge"
+        );
+        // The twin on the other chain is still reachable under its own chain,
+        // and carries its own label rather than the fork's.
+        cache.fiat_chain = ChainId::Bitcoin;
+        let (bitcoin_meta, _, _) =
+            gather_cube_meta(&cache, "same-id").expect("Bitcoin twin is present too");
+        assert_eq!(bitcoin_meta.network, ChainId::Bitcoin.api_str());
+        std::fs::remove_dir_all(root_path).unwrap();
+    }
+
     use crate::services::recovery::{
         DescriptorBlob, DescriptorBlobCube, DescriptorBlobSigner, DescriptorBlobVault,
     };
