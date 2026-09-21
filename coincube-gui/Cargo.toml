@@ -24,7 +24,15 @@ path = "src/main.rs"
 branta = { path = "../vendor/branta", version = "=3.2.1", default-features = false }
 async-trait = "0.1"
 async-hwi = "0.0.32"
-breez-sdk-liquid = { git = "https://github.com/breez/breez-sdk-liquid", tag = "0.12.2" }
+# breez/breez-sdk-liquid was force-purged upstream on 2026-09-20: every tag was
+# removed and the 0.12.2 commit 94e1e184 no longer exists there, so `tag = "0.12.2"`
+# fails to resolve and no build can fetch it. coincubetech/breez-sdk-liquid still
+# carries that exact commit (it is an ancestor of the fork's
+# coincube-tokio-wasm-relax-0.12.2 branch, so it stays ref-reachable). Pinning the
+# same SHA keeps the source tree byte-identical to what 0.12.2 resolved to; this is
+# a source repoint, not a version change. Same situation as the breez/breez-sdk
+# mirror patched in the root Cargo.toml. Drop this if upstream restores the tags.
+breez-sdk-liquid = { git = "https://github.com/coincubetech/breez-sdk-liquid", rev = "94e1e184ca9a0a0cfaa0a61a04d5c28cad45e991" }
 coincube-core = { path = "../coincube-core" }
 coincube-spark-protocol = { path = "../coincube-spark-protocol" }
 coincubed = { path = "../coincubed", default-features = false, features = [

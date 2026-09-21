@@ -225,6 +225,28 @@ pub struct DummyDatabase {
 }
 
 impl DatabaseInterface for DummyDatabase {
+    fn reserve_change(
+        &self,
+        chain: coincube_core::chain::ChainId,
+        descriptor: &coincube_core::descriptors::CoincubeDescriptor,
+        _: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
+    ) -> Result<crate::database::ChangeReservation, crate::database::ReservationError> {
+        let mut state = self.db.write().unwrap();
+        let index = state
+            .change_index
+            .increment()
+            .map_err(|_| crate::database::ReservationError::Exhausted)?;
+        if index.is_hardened() {
+            return Err(crate::database::ReservationError::Exhausted);
+        }
+        state.change_index = index;
+        Ok(crate::database::ChangeReservation {
+            chain,
+            descriptor: descriptor.clone(),
+            index,
+        })
+    }
+
     fn connection(&self) -> Box<dyn DatabaseConnection> {
         Box::new(DummyDatabase {
             db: self.db.clone(),
@@ -325,7 +347,8 @@ impl DatabaseConnection for DummyDatabase {
         index: bip32::ChildNumber,
         _: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
     ) {
-        self.db.write().unwrap().change_index = index;
+        let mut state = self.db.write().unwrap();
+        state.change_index = state.change_index.max(index);
     }
 
     fn coins(

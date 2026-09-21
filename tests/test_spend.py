@@ -258,9 +258,23 @@ def test_send_to_self(coincubed, bitcoind):
     # ... but it did use a new change address:
     assert info["change_index"] == 1
 
+    change_addresses = coincubed.rpc.listaddresses(1, 4)["addresses"]
+    change_scripts = [
+        bytes.fromhex(bitcoind.rpc.validateaddress(addr["change"])["scriptPubKey"])
+        for addr in change_addresses
+    ]
+    assert spend_psbt.tx.vout[0].scriptPubKey == change_scripts[0]
+
     # Note they may ask for an impossible send-to-self. In this case we'll report missing amount.
     huge_feerate = 50_000 if USE_TAPROOT else 40_500
     assert "missing" in coincubed.rpc.createspend({}, outpoints, huge_feerate)
+    # Fresh change is reserved before construction. Even this rejected attempt
+    # burns index 2, durably, without changing the earlier PSBT's index-1 output.
+    assert coincubed.rpc.getinfo()["change_index"] == 2
+    coincubed.stop()
+    coincubed.start()
+    assert coincubed.rpc.getinfo()["change_index"] == 2
+    assert spend_psbt.tx.vout[0].scriptPubKey == change_scripts[0]
 
     # Sign and broadcast the send-to-self transaction created above.
     signed_psbt = coincubed.signer.sign_psbt(spend_psbt)
@@ -283,9 +297,9 @@ def test_send_to_self(coincubed, bitcoind):
     wait_for(lambda: len(list(unspent_coins())) == 1)
 
     info = coincubed.rpc.getinfo()
-    # The indices have not changed:
+    # Confirming the earlier index-1 output cannot rewind the reservation.
     assert info["receive_index"] == 3
-    assert info["change_index"] == 1
+    assert info["change_index"] == 2
     # Create a new spend to the receive address with index 3.
     recv_addr = coincubed.rpc.listaddresses(3, 1)["addresses"][0]["receive"]
     res = coincubed.rpc.createspend(
@@ -294,9 +308,14 @@ def test_send_to_self(coincubed, bitcoind):
     assert "psbt" in res
     # Max(receive_index, change_index) is 3, so we return addresses 0, 1, 2, 3:
     assert len(coincubed.rpc.listaddresses()["addresses"]) == 4
-    # But the spend has no change:
+    # Index 3 is reserved even though coin selection produces no change output.
+    assert coincubed.rpc.getinfo()["change_index"] == 3
     psbt = PSBT.from_base64(res["psbt"])
-    assert len(psbt.o) == 1
+    assert len(psbt.o) == len(psbt.tx.vout) == 1
+    assert psbt.tx.vout[0].scriptPubKey == bytes.fromhex(
+        bitcoind.rpc.validateaddress(recv_addr)["scriptPubKey"]
+    )
+    assert psbt.tx.vout[0].scriptPubKey not in change_scripts
 
     # Now sign and broadcast the spend:
     signed_psbt = coincubed.signer.sign_psbt(psbt)
@@ -305,10 +324,25 @@ def test_send_to_self(coincubed, bitcoind):
     coincubed.rpc.broadcastspend(spend_txid)
     # Wait for coin to be detected by poller:
     wait_for(lambda: len(coincubed.rpc.listcoins([], [f"{spend_txid}:0"])["coins"]) == 1)
-    # The indices have not changed:
+    # Detection of the receive output does not undo the unused reservation.
     info = coincubed.rpc.getinfo()
     assert info["receive_index"] == 3
-    assert info["change_index"] == 1
+    assert info["change_index"] == 3
+    bitcoind.generate_block(1, wait_for_mempool=spend_txid)
+    wait_for(lambda: len(coincubed.rpc.listcoins(["confirmed"])["coins"]) == 1)
+    coincubed.stop()
+    coincubed.start()
+    assert coincubed.rpc.getinfo()["change_index"] == 3
+
+    # A later fresh spend must use index 4, never the failed index 2 or the
+    # changeless index 3. Check the actual output, not only the high-water mark.
+    res = coincubed.rpc.createspend({}, [f"{spend_txid}:0"], 2)
+    next_psbt = PSBT.from_base64(res["psbt"])
+    assert len(next_psbt.o) == len(next_psbt.tx.vout) == 1
+    assert next_psbt.tx.vout[0].scriptPubKey == change_scripts[3]
+    assert next_psbt.tx.vout[0].scriptPubKey not in change_scripts[:3]
+    assert coincubed.rpc.getinfo()["change_index"] == 4
+    assert coincubed.rpc.getinfo()["receive_index"] == 3
 
 
 def test_coin_selection(coincubed, bitcoind):

@@ -2,7 +2,10 @@
 //!
 //! Record wallet metadata, spent and unspent coins, ongoing transactions.
 
+pub mod reservation;
 pub mod sqlite;
+use coincube_core::{chain::ChainId, descriptors::CoincubeDescriptor};
+pub use reservation::{ChangeReservation, ReservationError};
 
 use crate::{
     bitcoin::BlockChainTip,
@@ -42,9 +45,31 @@ pub struct Wallet {
 
 pub trait DatabaseInterface: Send {
     fn connection(&self) -> Box<dyn DatabaseConnection>;
+
+    /// Atomically persist a fresh change allocation before returning. Implementations
+    /// without durable allocation refuse; a read followed by set_change_index is unsafe.
+    fn reserve_change(
+        &self,
+        _chain: ChainId,
+        _descriptor: &CoincubeDescriptor,
+        _secp: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
+    ) -> Result<ChangeReservation, ReservationError> {
+        Err(ReservationError::Unsupported)
+    }
 }
 
 impl DatabaseInterface for SqliteDb {
+    fn reserve_change(
+        &self,
+        chain: ChainId,
+        descriptor: &CoincubeDescriptor,
+        secp: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
+    ) -> Result<ChangeReservation, ReservationError> {
+        self.connection()
+            .map_err(|_| ReservationError::Storage)?
+            .reserve_change(chain, descriptor, secp)
+    }
+
     fn connection(&self) -> Box<dyn DatabaseConnection> {
         Box::new(self.connection().expect("Database must be available"))
     }
@@ -52,6 +77,17 @@ impl DatabaseInterface for SqliteDb {
 
 // FIXME: do we need to repeat the entire trait implementation? Isn't there a nicer way?
 impl DatabaseInterface for sync::Arc<sync::Mutex<dyn DatabaseInterface>> {
+    fn reserve_change(
+        &self,
+        chain: ChainId,
+        descriptor: &CoincubeDescriptor,
+        secp: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
+    ) -> Result<ChangeReservation, ReservationError> {
+        self.lock()
+            .map_err(|_| ReservationError::Storage)?
+            .reserve_change(chain, descriptor, secp)
+    }
+
     fn connection(&self) -> Box<dyn DatabaseConnection> {
         self.lock().unwrap().connection()
     }
