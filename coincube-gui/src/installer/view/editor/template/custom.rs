@@ -70,9 +70,11 @@ pub fn custom_template_description(progress: (usize, usize)) -> Element<'static,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn custom_template<'a>(
     progress: (usize, usize),
     use_taproot: bool,
+    allow_taproot: bool,
     primary_path: &'a Path,
     recovery_paths: &mut dyn Iterator<Item = (usize, &'a Path)>,
     safety_net_path: Option<(usize, &'a Path)>,
@@ -108,7 +110,7 @@ pub fn custom_template<'a>(
                     )
                     .style(theme::button::transparent)
                 },
-                move || define_descriptor_advanced_settings(use_taproot),
+                move || define_descriptor_advanced_settings(use_taproot, allow_taproot),
             ))
             .push(
                 path(

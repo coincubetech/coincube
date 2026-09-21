@@ -51,7 +51,13 @@ impl std::fmt::Display for DescriptorKind {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn define_descriptor_advanced_settings<'a>(use_taproot: bool) -> Element<'a, Message> {
+pub fn define_descriptor_advanced_settings<'a>(
+    use_taproot: bool,
+    allow_taproot: bool,
+) -> Element<'a, Message> {
+    if !allow_taproot {
+        return text("Bitcoin Blake2b Vaults use P2WSH").into();
+    }
     let col_wallet = Column::new()
         .spacing(10)
         .push(text("Descriptor type").bold())

@@ -252,6 +252,7 @@ pub fn multisig_inheritance_recovery_description(
 pub fn multisig_security_template<'a>(
     progress: (usize, usize),
     use_taproot: bool,
+    allow_taproot: bool,
     primary_path: &'a Path,
     recovery_path: &'a Path,
     valid: bool,
@@ -284,7 +285,7 @@ pub fn multisig_security_template<'a>(
                     )
                     .style(theme::button::transparent)
                 },
-                move || define_descriptor_advanced_settings(use_taproot),
+                move || define_descriptor_advanced_settings(use_taproot, allow_taproot),
             ))
             .push(
                 path(
@@ -518,6 +519,7 @@ pub fn expanding_multisig_inheritance_recovery_description(
 pub fn multisig_inheritance_recovery_template<'a>(
     progress: (usize, usize),
     use_taproot: bool,
+    allow_taproot: bool,
     primary_path: &'a Path,
     inheritance_path: &'a Path,
     recovery_path: &'a Path,
@@ -551,7 +553,7 @@ pub fn multisig_inheritance_recovery_template<'a>(
                     )
                     .style(theme::button::transparent)
                 },
-                move || define_descriptor_advanced_settings(use_taproot),
+                move || define_descriptor_advanced_settings(use_taproot, allow_taproot),
             ))
             .push(
                 path(
@@ -690,6 +692,7 @@ pub fn multisig_inheritance_recovery_template<'a>(
 pub fn expanding_multisig_inheritance_template<'a>(
     progress: (usize, usize),
     use_taproot: bool,
+    allow_taproot: bool,
     primary_path: &'a Path,
     inheritance_path: &'a Path,
     recovery_path: &'a Path,
@@ -723,7 +726,7 @@ pub fn expanding_multisig_inheritance_template<'a>(
                     )
                     .style(theme::button::transparent)
                 },
-                move || define_descriptor_advanced_settings(use_taproot),
+                move || define_descriptor_advanced_settings(use_taproot, allow_taproot),
             ))
             .push(
                 path(
