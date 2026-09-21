@@ -2,7 +2,8 @@
 
 Installer construction now retains ChainId from entry through Context, restore
 API filter strings and node selection. The existing Bitcoin constructor is a
-compatibility wrapper. The public chain-aware constructor requires the explicit
+compatibility wrapper over the same gate: a Cube on another chain is refused
+rather than built as a Bitcoin installer carrying that Cube. The public chain-aware constructor requires the explicit
 authenticated Connect capability and current client for fork creation. The
 installer rechecks the account flag before backend admission and persistence.
 

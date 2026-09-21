@@ -1083,7 +1083,9 @@ impl Tab {
                     command.map(Message::Launch)
                 }
                 login::Message::Install(remote_backend) => {
-                    let (install, command) = Installer::new(
+                    // Bitcoin family only and no Cube here, so the gate cannot
+                    // refuse; the arm still reports rather than unwraps.
+                    match Installer::new(
                         l.datadir.clone(),
                         l.network,
                         remote_backend,
@@ -1094,9 +1096,16 @@ impl Tab {
                         None, // No spark_backend from login screen
                         false,
                         None, // No coincube_client from login screen
-                    );
-                    self.state = State::Installer(install);
-                    command.map(Message::Install)
+                    ) {
+                        Ok((install, command)) => {
+                            self.state = State::Installer(install);
+                            command.map(Message::Install)
+                        }
+                        Err(error) => {
+                            error!("Installer refused from login: {}", error);
+                            Task::none()
+                        }
+                    }
                 }
                 login::Message::Run(Ok((backend_client, wallet, coins))) => {
                     let config = app::Config::from_file(
@@ -1636,9 +1645,11 @@ impl Tab {
                 }
                 loader::Message::View(loader::ViewMessage::SetupVault) => {
                     // Launch installer for vault setup from loader - should return to app on Previous
-                    let (install, command) = Installer::new(
+                    // Opened on the Cube's own chain through the admission gate,
+                    // like the App paths: `loader.network` cannot name a fork.
+                    match Installer::try_new_for_chain(
                         loader.datadir_path.clone(),
-                        loader.network,
+                        loader.cube_settings.network,
                         None,
                         UserFlow::CreateWallet,
                         true, // launched from app (loader is part of app flow)
@@ -1648,10 +1659,17 @@ impl Tab {
                         GlobalSettings::load_developer_mode(&GlobalSettings::path(
                             &loader.datadir_path,
                         )),
-                        None, // No coincube_client from loader path
-                    );
-                    self.state = State::Installer(install);
-                    command.map(Message::Install)
+                        loader.connect_client.clone(), // the fork gate needs the session it was admitted with
+                    ) {
+                        Ok((install, command)) => {
+                            self.state = State::Installer(install);
+                            command.map(Message::Install)
+                        }
+                        Err(error) => {
+                            loader.fail(loader::Error::Unexpected(error.to_string()));
+                            Task::none()
+                        }
+                    }
                 }
                 loader::Message::Synced(Ok((
                     wallet,
@@ -1833,10 +1851,14 @@ impl Tab {
             (State::App(app), Message::Run(msg)) => {
                 match msg {
                     app::Message::View(app::view::Message::SetupVault) => {
-                        // Launch installer for vault setup from app - should return to app on Previous
-                        let (install, command) = Installer::new(
+                        // Launch installer for vault setup from app - should return to app on Previous.
+                        // The installer is opened on the Cube's own chain through the
+                        // admission gate: `app.cache().network` is a `bitcoin::Network`
+                        // and cannot name a fork, so deriving the chain from it would
+                        // build a Bitcoin installer for a Bitcoin Blake2b Cube.
+                        match Installer::try_new_for_chain(
                             app.datadir().clone(),
-                            app.cache().network,
+                            app.cube_settings().network,
                             None,
                             UserFlow::CreateWallet,
                             true,                              // launched from app
@@ -1847,17 +1869,26 @@ impl Tab {
                                 app.datadir(),
                             )),
                             app.authenticated_coincube_client(), // authenticated API client for Keychain keys
-                        );
-                        self.state = State::Installer(install);
-                        command.map(Message::Install)
+                        ) {
+                            Ok((install, command)) => {
+                                self.state = State::Installer(install);
+                                command.map(Message::Install)
+                            }
+                            Err(error) => Task::done(Message::Run(app::Message::View(
+                                app::view::Message::ShowError(error.to_string()),
+                            ))),
+                        }
                     }
                     app::Message::View(app::view::Message::SetupVaultRestoreFromKit) => {
                         // W15 — same installer launch path as SetupVault,
                         // but starts in the Recovery-Kit restore flow
                         // instead of the new-vault descriptor editor.
-                        let (install, command) = Installer::new(
+                        // Same chain derivation and admission gate as `SetupVault`;
+                        // a Bitcoin Blake2b Cube is refused here because the fork
+                        // admits only the Connect-backed creation flow.
+                        match Installer::try_new_for_chain(
                             app.datadir().clone(),
-                            app.cache().network,
+                            app.cube_settings().network,
                             None,
                             UserFlow::RestoreVaultFromRecoveryKit,
                             true,
@@ -1868,9 +1899,15 @@ impl Tab {
                                 app.datadir(),
                             )),
                             app.authenticated_coincube_client(),
-                        );
-                        self.state = State::Installer(install);
-                        command.map(Message::Install)
+                        ) {
+                            Ok((install, command)) => {
+                                self.state = State::Installer(install);
+                                command.map(Message::Install)
+                            }
+                            Err(error) => Task::done(Message::Run(app::Message::View(
+                                app::view::Message::ShowError(error.to_string()),
+                            ))),
+                        }
                     }
                     app::Message::View(app::view::Message::ToggleTheme) => {
                         Task::done(Message::ToggleTheme)
@@ -5161,7 +5198,8 @@ mod fork_completion_tests {
             None,
             false,
             None,
-        );
+        )
+        .expect("a Bitcoin fixture installer");
         installer.context.bitcoin_config.chain = ChainId::BitcoinBlake2b;
         installer.context.fresh_fork_cube = true;
         installer.context.fresh_fork_seed_backed_up = true;

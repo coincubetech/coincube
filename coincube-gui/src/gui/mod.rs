@@ -925,7 +925,8 @@ mod fork_auth_dispatch_tests {
             None,
             false,
             None,
-        );
+        )
+        .expect("a Bitcoin fixture installer");
         installer.context.bitcoin_config.chain = ChainId::BitcoinBlake2b;
         tab::State::Installer(installer)
     }

@@ -648,6 +648,13 @@ impl Loader {
         }
     }
 
+    /// Surface a refusal raised by the tab on this Loader's behalf (for
+    /// example an installer the Cube's chain does not admit) without
+    /// starting anything.
+    pub(crate) fn fail(&mut self, error: Error) {
+        self.step = Step::Error(Box::new(error));
+    }
+
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::View(ViewMessage::Retry) => {
