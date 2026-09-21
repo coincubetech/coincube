@@ -2657,7 +2657,7 @@ pub fn restore_pin_setup<'a>(
     layout(
         progress,
         email,
-        "Create a PIN to secure your restored Cube",
+        "Create a PIN to secure your Cube",
         Column::new()
             .spacing(40)
             .push(p2_regular(

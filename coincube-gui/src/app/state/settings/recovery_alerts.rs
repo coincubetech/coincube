@@ -811,6 +811,107 @@ mod tests {
         std::fs::remove_dir_all(root_path).unwrap();
     }
 
+    /// The chain string that actually travels in the recovery kit. The test
+    /// above pins *which* Cube is looked up; this one pins what is written into
+    /// the blob. They are different fields with different sources: a fork
+    /// Cube's address network is Bitcoin, so reading `cache.network` here
+    /// yields "mainnet" and still finds the right Cube. `gather_cube_meta`
+    /// feeds this same string to `start_phone_seal`, so a wrong value is sealed
+    /// into the phone recovery kit rather than rejected.
+    #[tokio::test]
+    async fn seed_blob_cube_records_the_fork_chain_not_the_address_network() {
+        use crate::{chain::ChainId, dir::CoincubeDirectory};
+        let root_path = std::env::temp_dir().join(format!("blob-chain-{}", uuid::Uuid::new_v4()));
+        let root = CoincubeDirectory::new(root_path.clone());
+        for chain in [ChainId::Bitcoin, ChainId::BitcoinBlake2b] {
+            let cube =
+                settings::CubeSettings::new_with_raw_id("twin".into(), "Twin Cube".into(), chain);
+            crate::app::settings::update_settings_file(
+                &root.network_directory(chain),
+                move |mut s| {
+                    s.cubes.push(cube);
+                    Some(s)
+                },
+            )
+            .await
+            .unwrap();
+        }
+        let cache = Cache {
+            datadir_path: root.clone(),
+            fiat_chain: ChainId::BitcoinBlake2b,
+            // Left at the default Bitcoin address network on purpose: a fork
+            // Cube spends on Bitcoin, so this is the value that must *not* be
+            // the one recorded.
+            ..Cache::default()
+        };
+        assert_ne!(
+            ChainId::BitcoinBlake2b.api_str(),
+            crate::chain::ChainId::from(cache.network).api_str(),
+            "fixture is pointless unless the two sources disagree"
+        );
+        let blob = seed_blob_cube(&cache, "twin").expect("fork Cube is present in settings");
+        assert_eq!(
+            blob.network,
+            ChainId::BitcoinBlake2b.api_str(),
+            "recovery kit recorded {} for a fork Cube; a Bitcoin twin's label would \
+             be sealed into the phone kit",
+            blob.network
+        );
+        std::fs::remove_dir_all(root_path).unwrap();
+    }
+
+    /// `build_seed_blob_json` re-checks the identity it was handed rather than
+    /// trusting the caller. Refusal has to happen before the Argon2 unlock, so
+    /// this needs no seed file on disk.
+    #[test]
+    fn build_seed_blob_json_refuses_a_cube_labelled_with_another_chain() {
+        use crate::{chain::ChainId, dir::CoincubeDirectory};
+        let root_path = std::env::temp_dir().join(format!("blob-guard-{}", uuid::Uuid::new_v4()));
+        let root = CoincubeDirectory::new(root_path.clone());
+        let network_dir = root.network_directory(ChainId::BitcoinBlake2b);
+        let mismatched = SeedBlobCube {
+            uuid: "twin".to_string(),
+            name: "Twin Cube".to_string(),
+            network: ChainId::Bitcoin.api_str().to_string(),
+            created_at: "1970-01-01T00:00:00Z".to_string(),
+            lightning_address: None,
+        };
+        let err = build_seed_blob_json(
+            &network_dir,
+            root_path.as_path(),
+            ChainId::BitcoinBlake2b,
+            "twin",
+            "1234",
+            mismatched.clone(),
+        )
+        .expect_err("a Bitcoin-labelled Cube must not be escrowed as a fork Cube");
+        assert!(
+            err.contains("identity mismatch"),
+            "expected an identity refusal, got {}",
+            err
+        );
+        // The same Cube with the right label gets past the guard: the refusal is
+        // the chain check, not this fixture having no settings file.
+        let matching = SeedBlobCube {
+            network: ChainId::BitcoinBlake2b.api_str().to_string(),
+            ..mismatched
+        };
+        let err = build_seed_blob_json(
+            &network_dir,
+            root_path.as_path(),
+            ChainId::BitcoinBlake2b,
+            "twin",
+            "1234",
+            matching,
+        )
+        .expect_err("no settings file exists in this fixture");
+        assert!(
+            !err.contains("identity mismatch"),
+            "correct label still refused as a mismatch: {}",
+            err
+        );
+    }
+
     /// Monitoring on with the given escrowed-artifact kinds reported (new API).
     fn monitoring_on_with(artifacts: Option<Vec<&str>>) -> VaultMonitoringStatus {
         VaultMonitoringStatus {

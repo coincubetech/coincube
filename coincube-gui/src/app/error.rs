@@ -46,6 +46,7 @@ impl std::fmt::Display for Error {
                     }
                 }
                 DaemonError::ConnectAnchor(e) => write!(f, "{}", e),
+                DaemonError::PoisonSubmission(e) => write!(f, "{}", e),
                 DaemonError::Start(e) => {
                     write!(f, "Failed to start daemon: {}", e)
                 }

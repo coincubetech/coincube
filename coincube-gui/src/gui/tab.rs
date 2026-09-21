@@ -5108,75 +5108,97 @@ mod fork_completion_tests {
         std::fs::remove_dir_all(root_path).unwrap();
     }
 
-    #[tokio::test]
-    #[allow(clippy::await_holding_lock)] // serialize the process-global session for the whole ordering test
-    async fn invalidation_cancels_or_discards_real_post_install_completion_without_reopening_pin() {
+    #[test]
+    fn invalidation_cancels_or_discards_real_post_install_completion_without_reopening_pin() {
         let _guard = app::session::test_guard();
+        // This finite debug fixture moves several inline 31 KiB Tab/State
+        // values through the real update path. Measured by the independent
+        // reviewer: 2 MiB aborts, 2176 KiB passes (not recursive growth).
+        // Give only each fixture ordering 8 MiB, with coverage headroom;
+        // production State layout and the global test runner stay unchanged.
         for completed_before_logout in [false, true] {
-            app::session::close();
-            let root_path =
-                std::env::temp_dir().join(format!("fork-save-cancel-{}", uuid::Uuid::new_v4()));
-            let root = CoincubeDirectory::new(root_path.clone());
-            root.network_directory(ChainId::BitcoinBlake2b)
-                .init()
-                .unwrap();
-            // Stage an already-installed synthetic fork at the real Exit seam.
-            // No daemon or unlock/runtime gate is used to make this test pass.
-            let (mut installer, _) = Installer::new(
-                root.clone(),
-                bitcoin::Network::Bitcoin,
-                None,
-                installer::UserFlow::CreateWallet,
-                false,
-                None,
-                None,
-                None,
-                false,
-                None,
-            );
-            installer.context.bitcoin_config.chain = ChainId::BitcoinBlake2b;
-            installer.context.fresh_fork_cube = true;
-            installer.context.fresh_fork_seed_backed_up = true;
-            installer.context.cube_id = Some("synthetic-save-cube".into());
-            installer.context.restore_pin = Some(zeroize::Zeroizing::new("2468".to_string()));
-            let mut tab = Tab::new(1, State::Installer(installer));
-            let mut save = Some(tab.update(Message::Install(installer::Message::Exit(
-                Some(Box::new(wallet("fork-vault"))),
-                None,
-            ))));
-            let mut completed = if completed_before_logout {
-                outputs(save.take().unwrap()).await
-            } else {
-                Vec::new()
-            };
-            if completed_before_logout {
-                assert!(matches!(
-                    completed.as_slice(),
-                    [Message::ForkInstallCompleted(
-                        _,
-                        installer::Message::CubeSaved(Ok(_), _, _)
-                    )]
-                ));
-                assert!(app::session::pin_for("synthetic-save-cube").is_none());
+            let result = std::thread::Builder::new()
+                .name(format!("fork-save-ordering-{completed_before_logout}"))
+                .stack_size(8 * 1024 * 1024)
+                .spawn(move || {
+                    tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap()
+                        .block_on(post_install_completion_ordering(completed_before_logout));
+                })
+                .unwrap()
+                .join();
+            if let Err(panic) = result {
+                std::panic::resume_unwind(panic);
             }
-            let startup = tab.invalidate_fork_session();
-            // The Home task is preserved and its actual asynchronous directory
-            // result is consumed. Auth Init itself is not run by this fixture.
-            for result in outputs(startup).await {
-                if matches!(result, Message::Launch(home::Message::Checked { .. })) {
-                    let _ = tab.update(result);
-                }
-            }
-            if let Some(save) = save {
-                assert!(outputs(save).await.is_empty());
-            }
-            for result in completed.drain(..) {
-                assert!(outputs(tab.update(result)).await.is_empty());
-            }
-            assert!(matches!(&tab.state, State::Home(home) if home.is_checked_for_test()));
-            assert!(app::session::pin_for("synthetic-save-cube").is_none());
-            std::fs::remove_dir_all(root_path).unwrap();
         }
         app::session::close();
+    }
+
+    async fn post_install_completion_ordering(completed_before_logout: bool) {
+        app::session::close();
+        let root_path =
+            std::env::temp_dir().join(format!("fork-save-cancel-{}", uuid::Uuid::new_v4()));
+        let root = CoincubeDirectory::new(root_path.clone());
+        root.network_directory(ChainId::BitcoinBlake2b)
+            .init()
+            .unwrap();
+        // Stage an already-installed synthetic fork at the real Exit seam.
+        // No daemon or unlock/runtime gate is used to make this test pass.
+        let (mut installer, _) = Installer::new(
+            root.clone(),
+            bitcoin::Network::Bitcoin,
+            None,
+            installer::UserFlow::CreateWallet,
+            false,
+            None,
+            None,
+            None,
+            false,
+            None,
+        );
+        installer.context.bitcoin_config.chain = ChainId::BitcoinBlake2b;
+        installer.context.fresh_fork_cube = true;
+        installer.context.fresh_fork_seed_backed_up = true;
+        installer.context.cube_id = Some("synthetic-save-cube".into());
+        installer.context.restore_pin = Some(zeroize::Zeroizing::new("2468".to_string()));
+        let mut tab = Box::new(Tab::new(1, State::Installer(installer)));
+        let mut save = Some(tab.update(Message::Install(installer::Message::Exit(
+            Some(Box::new(wallet("fork-vault"))),
+            None,
+        ))));
+        let mut completed = if completed_before_logout {
+            outputs(save.take().unwrap()).await
+        } else {
+            Vec::new()
+        };
+        if completed_before_logout {
+            assert!(matches!(
+                completed.as_slice(),
+                [Message::ForkInstallCompleted(
+                    _,
+                    installer::Message::CubeSaved(Ok(_), _, _)
+                )]
+            ));
+            assert!(app::session::pin_for("synthetic-save-cube").is_none());
+        }
+        let startup = tab.invalidate_fork_session();
+        // The Home task is preserved and its actual asynchronous directory
+        // result is consumed. Auth Init itself is not run by this fixture.
+        for result in outputs(startup).await {
+            if matches!(result, Message::Launch(home::Message::Checked { .. })) {
+                let _ = tab.update(result);
+            }
+        }
+        if let Some(save) = save {
+            assert!(outputs(save).await.is_empty());
+        }
+        for result in completed.drain(..) {
+            assert!(outputs(tab.update(result)).await.is_empty());
+        }
+        assert!(matches!(&tab.state, State::Home(home) if home.is_checked_for_test()));
+        assert!(app::session::pin_for("synthetic-save-cube").is_none());
+        std::fs::remove_dir_all(root_path).unwrap();
     }
 }
