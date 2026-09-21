@@ -40,6 +40,9 @@ use crate::app::view::Message as ViewMessage;
 
 pub fn connect_panel<'a>(state: &'a ConnectPanel) -> Element<'a, ViewMessage> {
     let acct = &state.account;
+    if acct.requires_authenticated_reopen() {
+        return text::p1_regular("Connect authorization ended. Close and reopen this Cube through authenticated Connect startup to reconnect.").into();
+    }
 
     let header = Row::new()
         .push(coincube_wordmark::<ViewMessage>(20.0))
@@ -118,6 +121,9 @@ pub fn connect_panel<'a>(state: &'a ConnectPanel) -> Element<'a, ViewMessage> {
 pub fn connect_account_panel<'a>(
     acct: &'a ConnectAccountPanel,
 ) -> Element<'a, ConnectAccountMessage> {
+    if acct.requires_authenticated_reopen() {
+        return text::p1_regular("Connect authorization ended. Close and reopen this Cube through authenticated Connect startup to reconnect.").into();
+    }
     let header = Row::new()
         .push(coincube_wordmark::<ConnectAccountMessage>(20.0))
         .push(text::h5_regular(" | CONNECT").color(color::GREY_3))

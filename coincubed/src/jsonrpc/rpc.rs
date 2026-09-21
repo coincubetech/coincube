@@ -164,6 +164,10 @@ impl From<commands::CommandError> for Error {
             | commands::CommandError::UnifiedSpendValidation(..)
             | commands::CommandError::InsaneRescanTimestamp(..)
             | commands::CommandError::AlreadyRescanning
+            | commands::CommandError::ChangeReservation(
+                crate::database::ReservationError::IdentityMismatch
+                | crate::database::ReservationError::Exhausted,
+            )
             | commands::CommandError::InvalidDerivationIndex
             | commands::CommandError::RbfError(..)
             | commands::CommandError::EmptyFilterList
@@ -171,9 +175,11 @@ impl From<commands::CommandError> for Error {
             | commands::CommandError::OutpointNotRecoverable(..) => {
                 Error::new(ErrorCode::InvalidParams, e.to_string())
             }
-            commands::CommandError::RescanTrigger(..) => {
-                Error::new(ErrorCode::InternalError, e.to_string())
-            }
+            commands::CommandError::RescanTrigger(..)
+            | commands::CommandError::ChangeReservation(
+                crate::database::ReservationError::Storage
+                | crate::database::ReservationError::Unsupported,
+            ) => Error::new(ErrorCode::InternalError, e.to_string()),
             commands::CommandError::TxBroadcast(_) => {
                 Error::new(ErrorCode::ServerError(BROADCAST_ERROR), e.to_string())
             }

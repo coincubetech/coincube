@@ -1860,6 +1860,7 @@ mod pending_rescan_tests {
             alias: None,
             accounts,
             network: bitcoin::Network::Bitcoin,
+            chain: None,
             date: None,
             proprietary: serde_json::Map::new(),
             version: 0,

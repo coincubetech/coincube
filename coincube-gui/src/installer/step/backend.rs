@@ -545,6 +545,11 @@ impl Step for ImportRemoteWallet {
                 }
             }
             Message::Decrypt(Decrypt::Backup(mut backup)) => {
+                if !matches!(backup.chain_identity(), Ok(chain) if !chain.is_blake2b()) {
+                    self.modal = ImportDescriptorModal::None;
+                    self.error = Some(BACKUP_NETWORK_NOT_MATCH.into());
+                    return Task::none();
+                }
                 let descriptor = backup.accounts.first().map(|acc| acc.descriptor.clone());
                 if let Some(desc) = descriptor {
                     let network_matches = if self.network == Network::Bitcoin {
@@ -795,6 +800,35 @@ mod tests {
             "public-key".to_string(),
             email.to_string(),
         )
+    }
+
+    #[test]
+    fn remote_backup_messages_cannot_discard_fork_identity() {
+        use crate::{backup::Backup, chain::ChainId};
+        let descriptor = crate::app::state::vault::test_support::unified::fixture().descriptor;
+        let root =
+            std::env::temp_dir().join(format!("coincube-remote-import-{}", uuid::Uuid::new_v4()));
+        let mut hws = HardwareWallets::new(CoincubeDirectory::new(root.clone()), Network::Testnet4);
+        for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
+            let mut backup = Backup::from_descriptor(descriptor.clone(), chain.bitcoin_network());
+            backup.chain = Some(chain);
+            let mut step = ImportRemoteWallet::new(chain.bitcoin_network());
+            let _task = step.update(&mut hws, Message::Decrypt(Decrypt::Backup(backup)));
+            assert!(step.descriptor.is_none());
+            assert!(step.imported_descriptor.value.is_empty());
+            assert!(step.error.is_some());
+        }
+        let mut step = ImportRemoteWallet::new(Network::Testnet4);
+        let _task = step.update(
+            &mut hws,
+            Message::Decrypt(Decrypt::Backup(Backup::from_descriptor(
+                descriptor,
+                Network::Signet,
+            ))),
+        );
+        assert!(step.error.is_none());
+        assert!(step.descriptor.is_some());
+        assert!(!root.exists());
     }
 
     #[test]

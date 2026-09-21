@@ -116,6 +116,10 @@ impl Step for ImportDescriptor {
             }
             Message::ImportExport(ImportExportMessage::Progress(Progress::WalletFromBackup(r))) => {
                 let (descriptor, network, aliases, backup) = r;
+                if !matches!(backup.chain_identity(), Ok(chain) if !chain.is_blake2b()) {
+                    self.error = Some(BACKUP_NETWORK_NOT_MATCH.into());
+                    return Task::none();
+                }
                 if let Some(n) = network {
                     if self.network == n {
                         self.imported_backup = Some(backup);
@@ -158,6 +162,11 @@ impl Step for ImportDescriptor {
                 None
             }
             Message::Decrypt(Decrypt::Backup(mut backup)) => {
+                if !matches!(backup.chain_identity(), Ok(chain) if !chain.is_blake2b()) {
+                    self.modal = ImportDescriptorModal::None;
+                    self.error = Some(BACKUP_NETWORK_NOT_MATCH.into());
+                    return Task::none();
+                }
                 let descriptor = backup.accounts.first().map(|acc| acc.descriptor.clone());
                 if let Some(desc) = descriptor {
                     let network_matches = if self.network == Network::Bitcoin {
@@ -526,5 +535,53 @@ impl Step for BackupDescriptor {
 impl From<BackupDescriptor> for Box<dyn Step> {
     fn from(s: BackupDescriptor) -> Box<dyn Step> {
         Box::new(s)
+    }
+}
+
+#[cfg(test)]
+mod backup_chain_tests {
+    use super::*;
+    use crate::{chain::ChainId, dir::CoincubeDirectory};
+
+    #[test]
+    fn direct_backup_messages_cannot_drop_fork_identity() {
+        let descriptor = crate::app::state::vault::test_support::unified::fixture().descriptor;
+        let root =
+            std::env::temp_dir().join(format!("coincube-import-guard-{}", uuid::Uuid::new_v4()));
+        let mut hws = HardwareWallets::new(CoincubeDirectory::new(root.clone()), Network::Testnet4);
+        for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
+            let mut backup = Backup::from_descriptor(descriptor.clone(), chain.bitcoin_network());
+            backup.chain = Some(chain);
+            for progress in [false, true] {
+                let mut step = ImportDescriptor::new(chain.bitcoin_network());
+                let message = if progress {
+                    Message::ImportExport(ImportExportMessage::Progress(
+                        Progress::WalletFromBackup((
+                            descriptor.clone(),
+                            Some(chain.bitcoin_network()),
+                            HashMap::new(),
+                            backup.clone(),
+                        )),
+                    ))
+                } else {
+                    Message::Decrypt(Decrypt::Backup(backup.clone()))
+                };
+                let _task = step.update(&mut hws, message);
+                assert!(step.imported_backup.is_none());
+                assert!(step.imported_descriptor.value.is_empty());
+                assert!(step.error.is_some());
+            }
+        }
+        let mut step = ImportDescriptor::new(Network::Testnet4);
+        let _task = step.update(
+            &mut hws,
+            Message::Decrypt(Decrypt::Backup(Backup::from_descriptor(
+                descriptor,
+                Network::Signet,
+            ))),
+        );
+        assert!(step.error.is_none());
+        assert_eq!(step.imported_backup.unwrap().network, Network::Testnet4);
+        assert!(!root.exists());
     }
 }

@@ -150,6 +150,11 @@ pub fn decrypt_descriptor_with_pk(bytes: &[u8], pk: secp256k1::PublicKey) -> Opt
             Decrypted::WalletBackup(backup_bytes) => {
                 let backup_str = String::from_utf8(backup_bytes.clone()).ok()?;
                 let backup: Backup = serde_json::from_str(&backup_str).ok()?;
+                // The pinned decoder does not emit WalletBackup yet. Keep this
+                // future payload boundary fail-closed before generic restore.
+                if !matches!(backup.chain_identity(), Ok(chain) if !chain.is_blake2b()) {
+                    return Some(Decrypt::ContentNotSupported);
+                }
                 if backup.accounts.len() != 1 {
                     return None;
                 }
@@ -757,4 +762,50 @@ pub fn decrypt_view<'a>(state: &DecryptModal) -> Container<'a, installer::Messag
     card::simple(column)
         .width(Length::Fixed(modal::MODAL_WIDTH as f32))
         .height(Length::Fixed(450.0))
+}
+
+#[cfg(test)]
+mod chain_tests {
+    use super::*;
+    use crate::chain::ChainId;
+
+    #[test]
+    fn encrypted_descriptor_remains_bitcoin_and_wallet_json_is_not_a_payload() {
+        let descriptor = crate::app::state::vault::test_support::unified::fixture().descriptor;
+        let key = encrypted_backup::descriptor::dpk_to_pk(&descriptor.spendable_keys()[0]);
+        let bytes = EncryptedBackup::new()
+            .set_payload(descriptor.descriptor())
+            .unwrap()
+            .encrypt()
+            .unwrap();
+        let Some(Decrypt::Backup(decoded)) = decrypt_descriptor_with_pk(&bytes, key) else {
+            panic!("legacy encrypted descriptor must still decode");
+        };
+        assert!(decoded.chain.is_none());
+        assert_eq!(decoded.accounts[0].descriptor, descriptor.to_string());
+        assert!(!decoded.matches_chain(ChainId::BitcoinBlake2bTestnet4));
+
+        // Version0.0.2 emits Raw for arbitrary bytes; it cannot construct
+        // Decrypted::WalletBackup. Do not claim an encrypted-wallet exploit.
+        for chain in [
+            ChainId::Bitcoin,
+            ChainId::BitcoinBlake2b,
+            ChainId::BitcoinBlake2bTestnet4,
+        ] {
+            let mut backup = Backup::from_descriptor(descriptor.clone(), chain.bitcoin_network());
+            backup.chain = Some(chain);
+            let payload = serde_json::to_vec(&backup).unwrap();
+            let bytes = EncryptedBackup::new()
+                .set_payload(&payload)
+                .unwrap()
+                .set_content_type(encrypted_backup::Content::None)
+                .set_keys(vec![key])
+                .encrypt()
+                .unwrap();
+            assert!(matches!(
+                decrypt_descriptor_with_pk(&bytes, key),
+                Some(Decrypt::UnexpectedPayload(Decrypted::Raw(_)))
+            ));
+        }
+    }
 }
