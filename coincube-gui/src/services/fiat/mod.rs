@@ -1,4 +1,5 @@
 pub mod api;
+pub mod btcb2;
 pub mod client;
 pub mod currency;
 pub mod source;

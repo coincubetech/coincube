@@ -26,16 +26,18 @@ pub fn general_section<'a>(
     dashboard(
         menu,
         cache,
-        Column::new()
-            .spacing(20)
-            .push(header)
-            .push(fiat_price(new_price_setting, currencies_list)),
+        Column::new().spacing(20).push(header).push(fiat_price(
+            new_price_setting,
+            currencies_list,
+            cache.fiat_chain.is_blake2b(),
+        )),
     )
 }
 
 pub fn fiat_price<'a>(
     new_price_setting: &'a PriceSetting,
     currencies_list: &'a [Currency],
+    btcb2: bool,
 ) -> Element<'a, Message> {
     card::simple(
         Column::new()
@@ -61,8 +63,16 @@ pub fn fiat_price<'a>(
                         .push(Space::new().width(Length::Fill))
                         .push(
                             pick_list(
-                                &ALL_PRICE_SOURCES[..],
-                                Some(new_price_setting.source),
+                                if btcb2 {
+                                    &[crate::services::fiat::PriceSource::Coincube][..]
+                                } else {
+                                    &ALL_PRICE_SOURCES[..]
+                                },
+                                Some(if btcb2 {
+                                    crate::services::fiat::PriceSource::Coincube
+                                } else {
+                                    new_price_setting.source
+                                }),
                                 |source| FiatMessage::SourceEdited(source).into(),
                             )
                             .style(theme::pick_list::primary)
@@ -89,17 +99,20 @@ pub fn fiat_price<'a>(
                 ),
             )
             .push(
-                new_price_setting
-                    .source
-                    .attribution()
-                    .filter(|_| new_price_setting.is_enabled)
-                    .map(|s| {
-                        Row::new()
-                            .spacing(20)
-                            .align_y(Alignment::Center)
-                            .push(Space::new().width(Length::Fill))
-                            .push(text(s))
-                    }),
+                (if btcb2 {
+                    crate::services::fiat::PriceSource::Coincube
+                } else {
+                    new_price_setting.source
+                })
+                .attribution()
+                .filter(|_| new_price_setting.is_enabled)
+                .map(|s| {
+                    Row::new()
+                        .spacing(20)
+                        .align_y(Alignment::Center)
+                        .push(Space::new().width(Length::Fill))
+                        .push(text(s))
+                }),
             ),
     )
     .width(Length::Fill)
