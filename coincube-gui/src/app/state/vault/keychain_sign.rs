@@ -2544,7 +2544,11 @@ mod tests {
             Wallet::new(CoincubeDescriptor::from_str(RECOVERY_DESC).unwrap())
                 .with_chain(crate::chain::ChainId::BitcoinBlake2b),
         );
-        m.pending.push(pending(PendingSessionStatus::Idle));
+        let mut entry = pending(PendingSessionStatus::Idle);
+        // This target is freshly resolved, unlike the existing-session fixture.
+        entry.request_id.clear();
+        entry.session_id.clear();
+        m.pending.push(entry);
         let task = m.create_session_for(0);
         assert!(iced_runtime::task::into_stream(task).is_none());
         assert!(m.pending[0].request_id.is_empty());
