@@ -1087,9 +1087,31 @@ mod fork_auth_revocation_tests {
         }
     }
 
-    #[tokio::test]
+    #[test]
+    fn gui_auth_replacement_drops_open_signer_and_rejects_pending_signatures() {
+        // A full GUI + Vault App state in a debug frame exceeds libtest's
+        // default thread stack (the same shape as `fork_completion_tests` and
+        // `fork_auth_dispatch_tests`), so run the body on a thread with the
+        // 8 MiB the real main thread has, without changing the runner.
+        let result = std::thread::Builder::new()
+            .name("fork-auth-revocation".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(check_auth_replacement())
+            })
+            .unwrap()
+            .join();
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
     #[allow(clippy::await_holding_lock)] // serialize synthetic process-global PIN sessions
-    async fn gui_auth_replacement_drops_open_signer_and_rejects_pending_signatures() {
+    async fn check_auth_replacement() {
         let _guard = app::session::test_guard();
         for replace in [false, true] {
             let root_path =
@@ -1109,9 +1131,45 @@ mod fork_auth_revocation_tests {
             let mut client = crate::services::coincube::CoincubeClient::new();
             client.base_url = "http://127.0.0.1:9".into();
             client.set_token("synthetic-login");
-            let cfg: coincubed::config::Config = toml::from_str(&format!(
-                "main_descriptor = '{}'\ndata_directory = '{}'\n[bitcoin_config]\nnetwork = '{}'\n[esplora_config]\naddr = '{}/api/v1/esplora/bitcoin-blake2b/mainnet'\n",
-                fixture.descriptor, root_path.display(), chain.api_str(), client.base_url)).unwrap();
+            // Build the daemon config as a TOML value tree rather than a
+            // formatted document: the unified fixture descriptor carries
+            // hardened-derivation apostrophes (`48'/0'`), which a TOML literal
+            // string cannot contain, and a value tree needs no quoting rule.
+            let table = |entries: &[(&str, String)]| {
+                toml::Value::Table(
+                    entries
+                        .iter()
+                        .map(|(k, v)| (k.to_string(), toml::Value::String(v.clone())))
+                        .collect(),
+                )
+            };
+            let cfg: coincubed::config::Config = toml::Value::Table(
+                vec![
+                    (
+                        "main_descriptor".to_string(),
+                        toml::Value::String(fixture.descriptor.to_string()),
+                    ),
+                    (
+                        "data_directory".to_string(),
+                        toml::Value::String(root_path.display().to_string()),
+                    ),
+                    (
+                        "bitcoin_config".to_string(),
+                        table(&[("network", chain.api_str().to_string())]),
+                    ),
+                    (
+                        "esplora_config".to_string(),
+                        table(&[(
+                            "addr",
+                            format!("{}/api/v1/esplora/bitcoin-blake2b/mainnet", client.base_url),
+                        )]),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            )
+            .try_into()
+            .unwrap();
             // GUI-only fixture: no running daemon, HTTP, native keystore or SDK.
             let daemon = Arc::new(crate::daemon::embedded::EmbeddedDaemon::unstarted_for_test(
                 cfg, None,
