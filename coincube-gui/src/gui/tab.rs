@@ -3948,8 +3948,12 @@ mod migration_warning_tests {
     }
 
     /// A persisted Bitcoin Blake2b Cube is refused at the open gate: the tab
-    /// stays on Home with the dormant reason, and no unlock screen — the step
-    /// that loads the Liquid SDK and reads seed files — is ever built.
+    /// stays on Home, and no unlock screen — the step that loads the Liquid
+    /// SDK and reads seed files — is ever built. The fork route is admitted
+    /// only through an authenticated Connect account whose feature flag is
+    /// on; this fixture has neither, so the refusal names the account gate
+    /// (the same reason `home::a_dormant_chain_record_in_its_own_directory_is_refused_for_the_runtime`
+    /// pins), not the generic dormant-runtime copy.
     #[test]
     fn a_blake2b_cube_is_refused_before_any_unlock_screen() {
         for chain in [
@@ -3960,7 +3964,7 @@ mod migration_warning_tests {
             assert_eq!(state, "Home", "{:?}", chain);
             assert_eq!(
                 error.as_deref(),
-                Some(crate::chain::BTCB2_DORMANT_REASON),
+                Some("Bitcoin Blake2b isn't enabled for this account."),
                 "{:?}",
                 chain
             );
