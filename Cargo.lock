@@ -1522,7 +1522,7 @@ dependencies = [
 [[package]]
 name = "breez-sdk-liquid"
 version = "0.12.2"
-source = "git+https://github.com/breez/breez-sdk-liquid?tag=0.12.2#94e1e184ca9a0a0cfaa0a61a04d5c28cad45e991"
+source = "git+https://github.com/coincubetech/breez-sdk-liquid?rev=94e1e184ca9a0a0cfaa0a61a04d5c28cad45e991#94e1e184ca9a0a0cfaa0a61a04d5c28cad45e991"
 dependencies = [
  "aes 0.8.4",
  "aes-gcm 0.10.3",

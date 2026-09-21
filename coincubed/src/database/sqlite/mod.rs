@@ -8,6 +8,7 @@
 //! about it at https://sqlite.org/unlock_notify.html.
 
 pub mod preflight;
+mod reservation;
 pub mod schema;
 mod utils;
 
@@ -1301,6 +1302,172 @@ CREATE TABLE labels (
         let db = SqliteDb::new(db_path, Some(options.clone()), &secp).unwrap();
 
         (tmp_dir, options, secp, db)
+    }
+
+    #[test]
+    fn change_reservation_is_durable_and_identity_bound() {
+        use crate::database::{DatabaseInterface, ReservationError};
+        let (dir, options, secp, db) = dummy_db();
+        let desc = options.main_descriptor.clone();
+        let first = db.reserve_change(ChainId::Bitcoin, &desc, &secp).unwrap();
+        assert_eq!(first.chain(), ChainId::Bitcoin);
+        assert_eq!(first.descriptor(), &desc);
+        assert_eq!(first.index(), 1.into());
+        let different = CoincubeDescriptor::from_str(
+            &desc
+                .to_string()
+                .split('#')
+                .next()
+                .unwrap()
+                .replace("older(10000)", "older(9999)"),
+        )
+        .unwrap();
+        assert_ne!(different, desc);
+        assert_eq!(
+            db.reserve_change(ChainId::Bitcoin, &different, &secp),
+            Err(ReservationError::IdentityMismatch)
+        );
+        assert_eq!(
+            db.reserve_change(ChainId::BitcoinBlake2b, &desc, &secp),
+            Err(ReservationError::IdentityMismatch)
+        );
+        // Persisted identity mismatch must fail even though the encoding is identical.
+        let conn = db.connection().unwrap();
+        conn.conn
+            .execute("UPDATE wallets SET main_descriptor = 'malformed'", [])
+            .unwrap();
+        assert_eq!(
+            db.reserve_change(ChainId::Bitcoin, &desc, &secp),
+            Err(ReservationError::IdentityMismatch)
+        );
+        conn.conn
+            .execute(
+                "UPDATE wallets SET main_descriptor = ?1",
+                [desc.to_string()],
+            )
+            .unwrap();
+        drop(conn);
+        let reopened = SqliteDb::new(db.db_path.clone(), None, &secp).unwrap();
+        assert_eq!(
+            reopened
+                .reserve_change(ChainId::Bitcoin, &desc, &secp)
+                .unwrap()
+                .index(),
+            2.into()
+        );
+        // A late post-builder/poller update cannot lower the reserved high-water mark.
+        reopened
+            .connection()
+            .unwrap()
+            .set_derivation_index(1.into(), true, &secp);
+        assert_eq!(
+            reopened
+                .reserve_change(ChainId::Bitcoin, &desc, &secp)
+                .unwrap()
+                .index(),
+            3.into()
+        );
+        let mut conn = reopened.connection().unwrap();
+        let last: u32 = conn
+            .conn
+            .query_row("SELECT MAX(derivation_index) FROM addresses", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(last, 3 + LOOK_AHEAD_LIMIT - 1);
+        let address = desc
+            .change_descriptor()
+            .derive(3.into(), &secp)
+            .address(bitcoin::Network::Bitcoin);
+        assert_eq!(
+            conn.db_address(&address).unwrap().derivation_index,
+            3.into()
+        );
+        fs::remove_dir_all(dir).unwrap();
+        assert_eq!(
+            db.reserve_change(ChainId::Bitcoin, &desc, &secp),
+            Err(ReservationError::Storage)
+        );
+    }
+
+    #[test]
+    fn change_reservation_serializes_independent_connections() {
+        use crate::database::DatabaseInterface;
+        let (dir, options, _, db) = dummy_db();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let joins: Vec<_> = (0..8)
+            .map(|_| {
+                let db = db.clone();
+                let desc = options.main_descriptor.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    let secp = secp256k1::Secp256k1::verification_only();
+                    barrier.wait();
+                    // Each call opens an independent SQLite connection, without the daemon mutex.
+                    (0..4)
+                        .map(|_| {
+                            u32::from(
+                                db.reserve_change(ChainId::Bitcoin, &desc, &secp)
+                                    .unwrap()
+                                    .index(),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        let mut indexes: Vec<_> = joins.into_iter().flat_map(|j| j.join().unwrap()).collect();
+        indexes.sort_unstable();
+        assert_eq!(indexes, (1..=32).collect::<Vec<_>>());
+        assert_eq!(
+            db.connection().unwrap().db_wallet().change_derivation_index,
+            32.into()
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn change_reservation_rolls_back_errors_and_refuses_overflow() {
+        use crate::database::{DatabaseInterface, ReservationError};
+        let (dir, options, secp, db) = dummy_db();
+        let desc = options.main_descriptor;
+        let conn = db.connection().unwrap();
+        // Fail after the high-water update but before commit, during lookahead insertion.
+        conn.conn.execute_batch("CREATE TRIGGER fail_reservation BEFORE INSERT ON addresses BEGIN SELECT RAISE(ABORT, 'fixture failure'); END;").unwrap();
+        assert_eq!(
+            db.reserve_change(ChainId::Bitcoin, &desc, &secp),
+            Err(ReservationError::Storage)
+        );
+        assert_eq!(
+            db.connection().unwrap().db_wallet().change_derivation_index,
+            0.into()
+        );
+        conn.conn
+            .execute_batch("DROP TRIGGER fail_reservation;")
+            .unwrap();
+        assert_eq!(
+            db.reserve_change(ChainId::Bitcoin, &desc, &secp)
+                .unwrap()
+                .index(),
+            1.into()
+        );
+        for invalid in [u32::MAX, (1 << 31) - 1, (1 << 31) - LOOK_AHEAD_LIMIT] {
+            conn.conn
+                .execute("UPDATE wallets SET change_derivation_index = ?1", [invalid])
+                .unwrap();
+            assert_eq!(
+                db.reserve_change(ChainId::Bitcoin, &desc, &secp),
+                Err(ReservationError::Exhausted)
+            );
+            let stored: u32 = conn
+                .conn
+                .query_row("SELECT change_derivation_index FROM wallets", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(stored, invalid);
+        }
+        fs::remove_dir_all(dir).unwrap();
     }
 
     // All values required to store a coin in the V3 schema DB (including `id` column).

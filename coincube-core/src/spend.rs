@@ -784,6 +784,33 @@ pub fn create_spend(
     change_addr: SpendOutputAddress,
     locktime: LockTime,
 ) -> Result<CreateSpendRes, SpendCreationError> {
+    create_spend_with_poison(
+        main_descriptor,
+        secp,
+        tx_getter,
+        destinations,
+        candidate_coins,
+        fees,
+        change_addr,
+        locktime,
+        None,
+    )
+}
+
+// Only the bounded Claim builder supplies a poison script. Ordinary spend
+// construction keeps the exact historical path by passing None.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn create_spend_with_poison(
+    main_descriptor: &descriptors::CoincubeDescriptor,
+    secp: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
+    tx_getter: &mut impl TxGetter,
+    destinations: &[(SpendOutputAddress, bitcoin::Amount)],
+    candidate_coins: &[CandidateCoin],
+    fees: SpendTxFees,
+    change_addr: SpendOutputAddress,
+    locktime: LockTime,
+    poison: Option<bitcoin::ScriptBuf>,
+) -> Result<CreateSpendRes, SpendCreationError> {
     // This method does quite a few things. In addition, we support different modes (coin control
     // vs automated coin selection, self-spend, sweep, etc..) which make the logic a bit more
     // intricate. Here is a brief overview of what we're doing here:
@@ -840,6 +867,15 @@ pub fn create_spend(
         psbt_outs.push(psbt_out);
     }
     assert_eq!(tx.output.is_empty(), is_self_send);
+    let poison_count = usize::from(poison.is_some());
+    if let Some(script_pubkey) = poison {
+        // Included before selection: its full output weight contributes to fees.
+        tx.output.push(bitcoin::TxOut {
+            value: bitcoin::Amount::ZERO,
+            script_pubkey,
+        });
+        psbt_outs.push(PsbtOut::default());
+    }
 
     // Now compute whether we'll need a change output while automatically selecting coins to be
     // used as input if necessary.
@@ -867,7 +903,7 @@ pub fn create_spend(
         // At this point the transaction still has no input and no change output, as expected
         // by the coins selection helper function.
         assert!(tx.input.is_empty());
-        assert_eq!(tx.output.len(), destinations.len());
+        assert_eq!(tx.output.len(), destinations.len() + poison_count);
         // TODO: Introduce general conversion error type.
         let feerate_vb: f32 = {
             let fr: u16 = feerate_vb.try_into().map_err(|_| {

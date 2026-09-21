@@ -1,7 +1,9 @@
 pub mod branta;
+pub mod claim_observation;
 pub mod connect;
 pub mod feeestimation;
 pub mod fiat;
+pub mod foreign_scan;
 
 pub mod http;
 pub mod keys;
@@ -57,3 +59,6 @@ fn default_base_url() -> String {
         env!("COINCUBE_API_URL").to_string()
     }
 }
+
+pub mod claim_preflight;
+pub mod claim_workflow;
