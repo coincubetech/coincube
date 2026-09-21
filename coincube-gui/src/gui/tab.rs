@@ -3029,12 +3029,19 @@ impl Tab {
         match &self.state {
             State::Installer(v) => v.subscription().map(Message::Install),
             State::Loader(v) => v.subscription().map(Message::Load),
-            State::App(v) if v.cube_settings().network.is_blake2b() => {
-                let generation = self.fork_session_generation;
-                v.subscription().map(move |message| {
+            // `Subscription::map` requires a non-capturing closure, so the
+            // generation travels through `with` instead of being captured.
+            // `with` folds the value into the subscription's identity, which is
+            // safe here: the generation only ever changes as this arm stops
+            // being selected — `invalidate_fork_session` swaps the state to
+            // `Home`, and `update` bumps it only once the state is no longer a
+            // fork `App`. So it cannot restart a live subscription mid-session.
+            State::App(v) if v.cube_settings().network.is_blake2b() => v
+                .subscription()
+                .with(self.fork_session_generation)
+                .map(|(generation, message)| {
                     Message::ForkAsync(generation, Box::new(Message::Run(message)))
-                })
-            }
+                }),
             State::App(v) => v.subscription().map(Message::Run),
             State::Home(v) => v.subscription().map(Message::Launch),
             State::Login(_) => Subscription::none(),
