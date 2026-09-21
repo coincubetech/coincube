@@ -45,12 +45,31 @@ use crate::{
     daemon::{client, embedded::EmbeddedDaemon, model::GetInfoResult, Daemon, DaemonError},
     node::{
         bitcoind::{
-            internal_bitcoind_datadir, internal_bitcoind_debug_log_path, Bitcoind,
+            bitcoind_network_dir, internal_bitcoind_datadir_for, Bitcoind, NodeChainFamily,
             StartInternalBitcoindError,
         },
         NodeType,
     },
 };
+
+/// Managed-node resources follow chain family, not shared address encoding.
+fn managed_node_datadir(
+    root: &CoincubeDirectory,
+    chain: crate::chain::ChainId,
+) -> std::path::PathBuf {
+    internal_bitcoind_datadir_for(root, NodeChainFamily::from_chain(chain))
+}
+
+fn managed_node_log_path(
+    root: &CoincubeDirectory,
+    chain: crate::chain::ChainId,
+) -> std::path::PathBuf {
+    let mut path = managed_node_datadir(root, chain);
+    if let Some(network_dir) = bitcoind_network_dir(&chain.bitcoin_network()) {
+        path.push(network_dir);
+    }
+    path.join("debug.log")
+}
 
 type Coincubed = client::Coincubed<client::jsonrpc::JsonRPCClient>;
 type StartedResult = Result<
@@ -190,7 +209,7 @@ impl Loader {
             Task::none()
         } else if let Some(ref wallet) = wallet_settings {
             let socket_path = datadir_path
-                .network_directory(network)
+                .network_directory(cube_settings.network)
                 .coincubed_data_directory(&wallet.wallet_id())
                 .coincubed_rpc_socket_path();
             Task::perform(connect(socket_path), Message::Loaded)
@@ -240,7 +259,7 @@ impl Loader {
     fn is_first_esplora_scan(&self, wallet_settings: &WalletSettings) -> bool {
         let data_dir = self
             .datadir_path
-            .network_directory(self.network)
+            .network_directory(self.cube_settings.network)
             .coincubed_data_directory(&wallet_settings.wallet_id());
         let config_path = data_dir.path().join("daemon.toml");
         let is_esplora = match Config::from_file(Some(config_path)) {
@@ -266,11 +285,14 @@ impl Loader {
         };
         let config_path = self
             .datadir_path
-            .network_directory(self.network)
+            .network_directory(self.cube_settings.network)
             .coincubed_data_directory(&wallet.wallet_id())
             .path()
             .join("daemon.toml");
-        backend_is_internal_bitcoind(&config_path, &internal_bitcoind_datadir(&self.datadir_path))
+        backend_is_internal_bitcoind(
+            &config_path,
+            &managed_node_datadir(&self.datadir_path, self.cube_settings.network),
+        )
     }
 
     fn start_bitcoind(&self) -> bool {
@@ -533,7 +555,7 @@ impl Loader {
 
     pub fn subscription(&self) -> Subscription<Message> {
         let log_sub = if self.internal_bitcoind.is_some() {
-            let log_path = internal_bitcoind_debug_log_path(&self.datadir_path, self.network);
+            let log_path = managed_node_log_path(&self.datadir_path, self.cube_settings.network);
             iced::Subscription::run_with(log_path, |log_path| get_bitcoind_log(log_path.clone()))
                 .map(Message::BitcoindLog)
         } else {
@@ -660,7 +682,9 @@ pub async fn load_application(
         .map(|res| res.coins)?;
 
     let display_mode = crate::app::settings::Settings::from_file(
-        &config.datadir_path.network_directory(config.network),
+        &config
+            .datadir_path
+            .network_directory(config.cube_settings.network),
     )
     .ok()
     .map(|s| s.display_mode)
@@ -989,7 +1013,12 @@ pub async fn start_bitcoind_and_daemon(
                 .map_err(Error::Bitcoind)?;
             // A default-ON node self-provisions the Tor binary on first launch
             // (best-effort; failure just means inbound is unavailable this run).
-            crate::node::tor::ensure_tor_installed_if_wanted(&coincube_datadir_path).await;
+            // The managed Tor bundle/registry belongs to Bitcoin today. Never
+            // provision or stop it for a BTCB2 start; the chain-aware preparation
+            // below refuses that unsupported lifecycle before touching it.
+            if !chain.is_blake2b() {
+                crate::node::tor::ensure_tor_installed_if_wanted(&coincube_datadir_path).await;
+            }
             // Bring up inbound-over-Tor (if the user enabled it) and reconcile
             // bitcoin.conf *before* starting bitcoind, so bitcoind reads the
             // fresh onion/proxy config. Fail-safe on any Tor issue (the conf is
@@ -998,17 +1027,15 @@ pub async fn start_bitcoind_and_daemon(
             // replaced it may still name a Tor that is not running, so the
             // start is refused — retryably — rather than made from stale
             // privacy configuration.
-            let inbound_up = crate::node::tor::prepare_inbound_tor(
-                &coincube_datadir_path,
-                config.bitcoin_config.network,
-            )
-            .map_err(|e| {
-                Error::Bitcoind(
-                    crate::node::bitcoind::StartInternalBitcoindError::ConfigUnavailable(
-                        e.to_string(),
-                    ),
-                )
-            })?;
+            let inbound_up =
+                crate::node::tor::prepare_inbound_tor_for_chain(&coincube_datadir_path, chain)
+                    .map_err(|e| {
+                        Error::Bitcoind(
+                            crate::node::bitcoind::StartInternalBitcoindError::ConfigUnavailable(
+                                e.to_string(),
+                            ),
+                        )
+                    })?;
             // A fresh tor gets fresh control/SOCKS ports each run, which a
             // *reused* bitcoind (one that survived a previous session) wouldn't
             // pick up — `maybe_start` would just reattach to it. When inbound is
@@ -1036,7 +1063,7 @@ pub async fn start_bitcoind_and_daemon(
     // internal node, start it so it keeps syncing in the background.
     let bitcoind = if bitcoind.is_none() {
         if let Some(pending_cfg) = &config.pending_bitcoind {
-            let internal_datadir = internal_bitcoind_datadir(&coincube_datadir_path);
+            let internal_datadir = managed_node_datadir(&coincube_datadir_path, chain);
             let is_internal = match &pending_cfg.rpc_auth {
                 BitcoindRpcAuth::CookieFile(path) => path.starts_with(&internal_datadir),
                 _ => false,
@@ -1197,6 +1224,38 @@ mod tests {
         )
         .unwrap();
         path
+    }
+
+    #[test]
+    fn managed_paths_follow_chain_family_and_keep_bitcoin_layout() {
+        use crate::chain::ChainId;
+        let root = CoincubeDirectory::new(PathBuf::from("synthetic-root"));
+        for chain in ChainId::ALL {
+            let path = managed_node_datadir(&root, chain);
+            let log = managed_node_log_path(&root, chain);
+            if chain.is_blake2b() {
+                assert!(path.ends_with("bitcoind-blake2b/datadir"));
+                assert!(!path.starts_with(crate::node::bitcoind::internal_bitcoind_datadir(&root)));
+            } else {
+                assert_eq!(
+                    path,
+                    crate::node::bitcoind::internal_bitcoind_datadir(&root)
+                );
+                assert_eq!(
+                    log,
+                    crate::node::bitcoind::internal_bitcoind_debug_log_path(
+                        &root,
+                        chain.bitcoin_network()
+                    )
+                );
+            }
+            assert!(log.starts_with(path));
+            assert!(log.ends_with("debug.log"));
+        }
+        assert_ne!(
+            managed_node_log_path(&root, ChainId::BitcoinBlake2b),
+            managed_node_log_path(&root, ChainId::BitcoinBlake2bTestnet4)
+        );
     }
 
     #[test]
