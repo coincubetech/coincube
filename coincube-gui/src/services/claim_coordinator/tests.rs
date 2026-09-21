@@ -296,7 +296,7 @@ impl Harness {
             .unwrap()
             .as_secs() as i64;
         let tx = verified.transaction();
-        server.mock_async(|when,then| { when.method(POST).path("/api/v1/esplora/bitcoin/mainnet/tx/preflight"); then.status(200).header("cache-control","no-store").json_body(json!({"success":true,"data":{"network":"bitcoin","state":"available","result":{"txid":tx.compute_txid(),"wtxid":tx.compute_wtxid(),"tip_hash":hash(1),"observed_at":stamp,"allowed":accepted,"reject_reason":if accepted { serde_json::Value::Null } else { json!("policy-rejected") }}}})); }).await;
+        server.mock_async(|when,then| { when.method(POST).path("/api/v1/esplora/bitcoin/mainnet/tx/preflight"); then.status(200).header("cache-control","no-store").json_body(json!({"success":true,"data":{"network":"mainnet","state":"available","result":{"txid":tx.compute_txid(),"wtxid":tx.compute_wtxid(),"tip_hash":hash(1),"observed_at":stamp,"allowed":accepted,"reject_reason":if accepted { serde_json::Value::Null } else { json!("policy-rejected") }}}})); }).await;
         let clock = Arc::new(AtomicI64::new(stamp));
         let fault = Arc::new(AtomicUsize::new(0));
         let calls = Arc::new(AtomicUsize::new(0));
