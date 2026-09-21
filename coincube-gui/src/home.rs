@@ -461,6 +461,11 @@ impl Home {
         )
     }
 
+    #[cfg(test)]
+    pub(crate) fn is_checked_for_test(&self) -> bool {
+        !matches!(self.state, State::Unchecked)
+    }
+
     pub fn reload(&self) -> Task<Message> {
         probe_network_datadir(
             self.network,
@@ -734,7 +739,11 @@ impl Home {
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         if let RuntimeSupport::Dormant { reason } = self.network.runtime_support() {
-            if !matches!(&message, Message::View(ViewMessage::SelectNetwork(_))) {
+            if !matches!(
+                &message,
+                Message::View(ViewMessage::SelectNetwork(_) | ViewMessage::ConnectAccount(_))
+                    | Message::Checked { .. }
+            ) {
                 self.set_error(reason);
                 return Task::none();
             }
@@ -1686,8 +1695,8 @@ impl Home {
                 }
             }
             Message::View(ViewMessage::SelectNetwork(network)) => {
-                if !self.developer_mode
-                    && !(self.network.is_blake2b() && network == ChainId::Bitcoin)
+                if !(self.developer_mode
+                    || self.network.is_blake2b() && network == ChainId::Bitcoin)
                 {
                     tracing::debug!(
                         "Ignoring SelectNetwork action because developer mode is disabled"
@@ -5837,6 +5846,19 @@ async fn check_network_datadir(
     source: crate::chain::ChainId,
     path: NetworkDirectory,
 ) -> Result<State, String> {
+    // Discovery is read-only for a fork. Only authenticated installation may
+    // create its directory/configuration, including after session invalidation.
+    if source.is_blake2b() {
+        if !path.path().join(settings::SETTINGS_FILE_NAME).exists() {
+            return Ok(State::NoCube { create_cube: false });
+        }
+        let settings = settings::Settings::from_file(&path).map_err(|e| e.to_string())?;
+        return Ok(State::Cubes {
+            cubes: settings.cubes,
+            create_cube: false,
+            source,
+        });
+    }
     // Ensure the network directory exists
     if let Err(e) = tokio::fs::create_dir_all(path.path()).await {
         return Err(format!(

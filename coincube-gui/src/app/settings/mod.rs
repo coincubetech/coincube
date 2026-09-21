@@ -150,6 +150,15 @@ pub async fn update_settings_file<F>(
 where
     F: FnOnce(Settings) -> Option<Settings>,
 {
+    if matches!(
+        network_dir
+            .path()
+            .file_name()
+            .and_then(|name| name.to_str()),
+        Some("bitcoin-blake2b" | "bitcoin-blake2b-testnet4")
+    ) {
+        return update_fork_settings_file(network_dir, updater, std::future::ready(())).await;
+    }
     let path = network_dir.path().join(SETTINGS_FILE_NAME);
 
     // Whether settings.json already existed before we touch anything. Only a
@@ -266,6 +275,122 @@ where
 
     restrict_settings_permissions(&path).await;
 
+    Ok(())
+}
+
+/// Fork writers lock a stable sibling inode: replacing the data file must not
+/// let a waiter acquire an obsolete inode and overwrite a newer writer.
+/// The awaited hook is normally ready; tests pause at the last cancellable point.
+async fn update_fork_settings_file<F, P>(
+    network_dir: &NetworkDirectory,
+    updater: F,
+    before_commit: P,
+) -> Result<(), SettingsError>
+where
+    F: FnOnce(Settings) -> Option<Settings>,
+    P: std::future::Future<Output = ()>,
+{
+    update_fork_settings_checked_with_hook(
+        network_dir,
+        |settings| Ok(updater(settings)),
+        before_commit,
+    )
+    .await
+}
+
+/// Apply a fallible fork mutation while holding the same stable writer lock.
+/// A conflict returns before creating a temporary replacement file.
+pub(crate) async fn update_fork_settings_checked<F>(
+    network_dir: &NetworkDirectory,
+    updater: F,
+) -> Result<(), SettingsError>
+where
+    F: FnOnce(Settings) -> Result<Option<Settings>, SettingsError>,
+{
+    update_fork_settings_checked_with_hook(network_dir, updater, std::future::ready(())).await
+}
+
+async fn update_fork_settings_checked_with_hook<F, P>(
+    network_dir: &NetworkDirectory,
+    updater: F,
+    before_commit: P,
+) -> Result<(), SettingsError>
+where
+    F: FnOnce(Settings) -> Result<Option<Settings>, SettingsError>,
+    P: std::future::Future<Output = ()>,
+{
+    let dir = network_dir.path();
+    tokio::fs::create_dir_all(dir)
+        .await
+        .map_err(|e| SettingsError::WritingFile(e.to_string()))?;
+    let path = dir.join(SETTINGS_FILE_NAME);
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(dir.join("settings.lock"))
+        .await
+        .map_err(|e| SettingsError::WritingFile(e.to_string()))?
+        .lock_write()
+        .await
+        .map_err(|e| SettingsError::WritingFile(format!("Locking settings: {:?}", e)))?;
+    let current = match tokio::fs::read(&path).await {
+        Ok(bytes) => {
+            serde_json::from_slice(&bytes).map_err(|e| SettingsError::ReadingFile(e.to_string()))?
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Settings::default(),
+        Err(e) => return Err(SettingsError::ReadingFile(e.to_string())),
+    };
+    let Some(updated) = updater(current)? else {
+        before_commit.await;
+        // No await from the commit through release of the stable writer lock.
+        match std::fs::remove_file(&path) {
+            Ok(()) => (),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+            Err(e) => return Err(SettingsError::DeletingFile(e.to_string())),
+        }
+        drop(lock);
+        return Ok(());
+    };
+    let bytes = serde_json::to_vec_pretty(&updated)
+        .map_err(|e| SettingsError::WritingFile(e.to_string()))?;
+    struct PendingFile(std::path::PathBuf);
+    impl Drop for PendingFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+    let pending = PendingFile(dir.join(format!(".settings-{}.tmp", uuid::Uuid::new_v4())));
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options
+        .open(&pending.0)
+        .await
+        .map_err(|e| SettingsError::WritingFile(e.to_string()))?;
+    file.write_all(&bytes)
+        .await
+        .map_err(|e| SettingsError::WritingFile(e.to_string()))?;
+    // Surface an asynchronous write failure before syncing/committing. Tokio's
+    // sync_all drains in-flight writes but retains their error for flush.
+    file.flush()
+        .await
+        .map_err(|e| SettingsError::WritingFile(e.to_string()))?;
+    file.sync_all()
+        .await
+        .map_err(|e| SettingsError::WritingFile(e.to_string()))?;
+    drop(file);
+    before_commit.await;
+    // Synchronous rename is the commit point. Cancellation cannot release the
+    // lock while an asynchronous rename continues in a blocking worker.
+    std::fs::rename(&pending.0, &path).map_err(|e| SettingsError::WritingFile(e.to_string()))?;
+    #[cfg(unix)]
+    std::fs::File::open(dir)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|e| SettingsError::WritingFile(e.to_string()))?;
+    drop(lock);
     Ok(())
 }
 
@@ -3061,5 +3186,117 @@ mod chain_seed_backfill_tests {
             crate::app::session::close();
             std::fs::remove_dir_all(root).unwrap();
         }
+    }
+}
+
+#[cfg(test)]
+mod fork_atomic_save_tests {
+    use super::*;
+
+    fn directory() -> NetworkDirectory {
+        NetworkDirectory::new(
+            std::env::temp_dir()
+                .join(format!("fork-atomic-{}", uuid::Uuid::new_v4()))
+                .join("bitcoin-blake2b"),
+        )
+    }
+
+    #[tokio::test]
+    async fn cancellation_preserves_prior_file_and_removes_partial_temp() {
+        for existing in [false, true] {
+            let dir = directory();
+            if existing {
+                update_settings_file(&dir, Some).await.unwrap();
+            }
+            let path = dir.path().join(SETTINGS_FILE_NAME);
+            let before = std::fs::read(&path).ok();
+            let (reached, ready) = tokio::sync::oneshot::channel();
+            let paused = async move {
+                reached.send(()).unwrap();
+                std::future::pending::<()>().await;
+            };
+            let task_dir = dir.clone();
+            let task = tokio::spawn(async move {
+                update_fork_settings_file(
+                    &task_dir,
+                    |mut s| {
+                        s.cubes
+                            .push(CubeSettings::new("new".into(), ChainId::BitcoinBlake2b));
+                        Some(s)
+                    },
+                    paused,
+                )
+                .await
+            });
+            ready.await.unwrap();
+            task.abort();
+            assert!(task.await.unwrap_err().is_cancelled());
+            assert_eq!(std::fs::read(&path).ok(), before);
+            assert!(!std::fs::read_dir(dir.path()).unwrap().any(|e| e
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".tmp")));
+            // The cancelled writer released its stable lock; another writer
+            // can commit normally without losing an earlier complete file.
+            update_settings_file(&dir, |mut s| {
+                s.cubes
+                    .push(CubeSettings::new("after".into(), ChainId::BitcoinBlake2b));
+                Some(s)
+            })
+            .await
+            .unwrap();
+            assert_eq!(Settings::from_file(&dir).unwrap().cubes.len(), 1);
+            std::fs::remove_dir_all(dir.path().parent().unwrap()).unwrap();
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_fork_writers_read_latest_committed_settings() {
+        let dir = directory();
+        let (reached, ready) = tokio::sync::oneshot::channel();
+        let (release, wait) = tokio::sync::oneshot::channel();
+        let first_dir = dir.clone();
+        let first = tokio::spawn(async move {
+            update_fork_settings_file(
+                &first_dir,
+                |mut s| {
+                    s.cubes
+                        .push(CubeSettings::new("first".into(), ChainId::BitcoinBlake2b));
+                    Some(s)
+                },
+                async move {
+                    reached.send(()).unwrap();
+                    wait.await.unwrap();
+                },
+            )
+            .await
+        });
+        ready.await.unwrap();
+        let second_dir = dir.clone();
+        let second = tokio::spawn(async move {
+            update_settings_file(&second_dir, |mut s| {
+                s.cubes
+                    .push(CubeSettings::new("second".into(), ChainId::BitcoinBlake2b));
+                Some(s)
+            })
+            .await
+        });
+        // Keep the first writer paused while the second has an opportunity
+        // to commit. Merely releasing immediately would also pass without
+        // the lock because filesystem awaits order the writers by accident.
+        tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+        assert!(
+            !second.is_finished(),
+            "the second fork writer committed while the first held the stable sibling lock"
+        );
+        release.send(()).unwrap();
+        first.await.unwrap().unwrap();
+        second.await.unwrap().unwrap();
+        let saved = Settings::from_file(&dir).unwrap();
+        assert_eq!(saved.cubes.len(), 2);
+        assert_eq!(saved.cubes[0].name, "first");
+        assert_eq!(saved.cubes[1].name, "second");
+        std::fs::remove_dir_all(dir.path().parent().unwrap()).unwrap();
     }
 }
