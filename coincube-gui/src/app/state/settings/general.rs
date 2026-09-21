@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use coincube_core::miniscript::bitcoin::{bip32::Fingerprint, Network};
+use coincube_core::miniscript::bitcoin::bip32::Fingerprint;
 use coincube_core::signer::SignerError;
 use coincube_ui::widget::Element;
 use iced::Task;
@@ -96,7 +96,11 @@ async fn update_price_setting(
     let network_dir = data_dir.network_directory(network);
     let mut cube_found = false;
     let result = update_settings_file(&network_dir, |mut settings| {
-        if let Some(cube) = settings.cubes.iter_mut().find(|c| c.id == cube_id) {
+        if let Some(cube) = settings
+            .cubes
+            .iter_mut()
+            .find(|c| c.id == cube_id && c.network == network)
+        {
             cube.fiat_price = Some(new_price_setting);
             cube_found = true;
         } else {
@@ -131,11 +135,95 @@ async fn update_price_setting(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn backup_metadata_keeps_twin_cubes_separate() {
+        use crate::{chain::ChainId, dir::CoincubeDirectory};
+        let root_path = std::env::temp_dir().join(format!("backup-meta-{}", uuid::Uuid::new_v4()));
+        let root = CoincubeDirectory::new(root_path.clone());
+        for chain in [ChainId::Bitcoin, ChainId::BitcoinBlake2b] {
+            let cube = settings::CubeSettings::new_with_raw_id(
+                "same-id".into(),
+                chain.api_str().into(),
+                chain,
+            );
+            crate::app::settings::update_settings_file(
+                &root.network_directory(chain),
+                move |mut s| {
+                    s.cubes.push(cube);
+                    Some(s)
+                },
+            )
+            .await
+            .unwrap();
+        }
+        let mut cache = Cache {
+            datadir_path: root.clone(),
+            fiat_chain: ChainId::BitcoinBlake2b,
+            ..Cache::default()
+        };
+        let state = GeneralSettingsState::new(
+            "same-id".into(),
+            SettingsSection::General,
+            PriceSetting::default(),
+            UnitSetting::default(),
+            &root,
+        );
+        assert_eq!(
+            state.lookup_cube(&cache).map(|c| c.name).as_deref(),
+            Some("bitcoin-blake2b")
+        );
+        cache.fiat_chain = ChainId::BitcoinBlake2bTestnet4;
+        assert!(state.lookup_cube(&cache).map(|c| c.name).is_none());
+        std::fs::remove_dir_all(root_path).unwrap();
+    }
+
     use crate::services::fiat::{
         api::{ListCurrenciesResult, PriceApiError},
         PriceSource,
     };
     use coincube_ui::component::amount::BitcoinDisplayUnit;
+
+    #[test]
+    fn fork_backup_never_uses_bitcoin_session_or_seed() {
+        use crate::chain::ChainId;
+        use coincube_core::signer::MasterSigner;
+        let _guard = crate::app::session::test_guard();
+        crate::app::session::close();
+        let secp = coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::signing_only();
+        for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
+            let root = std::env::temp_dir().join(format!("backup-chain-{}", uuid::Uuid::new_v4()));
+            let id = uuid::Uuid::new_v4().to_string();
+            let signer = MasterSigner::generate(chain.bitcoin_network()).unwrap();
+            let fp = signer.fingerprint(&secp);
+            signer
+                .store_encrypted(
+                    &root,
+                    chain.bitcoin_network(),
+                    &secp,
+                    None,
+                    "1234",
+                    &id,
+                    None,
+                )
+                .unwrap();
+            crate::app::session::open(&id, zeroize::Zeroizing::new("1234".to_string()));
+            crate::app::session::store_unlocked_signer(&id, fp, signer.try_clone().unwrap());
+            assert!(load_mnemonic_words(&root, chain.bitcoin_network(), fp, "1234", &id).is_ok());
+            assert!(load_mnemonic_words(&root, chain, fp, "1234", &id).is_err());
+            signer
+                .store_encrypted_for_chain(&root, chain, &secp, None, "5678", &id, None)
+                .unwrap();
+            assert!(load_mnemonic_words(&root, chain, fp, "1234", &id).is_err());
+            assert_eq!(
+                load_mnemonic_words(&root, chain, fp, "5678", &id)
+                    .unwrap()
+                    .join(" "),
+                signer.words().join(" ")
+            );
+            crate::app::session::close();
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
 
     #[tokio::test]
     async fn btcb2_price_preferences_never_write_bitcoin_settings() {
@@ -812,14 +900,19 @@ mod tests {
 
 async fn update_unit_setting(
     data_dir: CoincubeDirectory,
-    network: Network,
+    network: impl Into<crate::chain::ChainId>,
     cube_id: String,
     new_unit_setting: UnitSetting,
 ) -> Result<(), Error> {
+    let network = network.into();
     let network_dir = data_dir.network_directory(network);
     let mut cube_found = false;
     let result = update_settings_file(&network_dir, |mut settings| {
-        if let Some(cube) = settings.cubes.iter_mut().find(|c| c.id == cube_id) {
+        if let Some(cube) = settings
+            .cubes
+            .iter_mut()
+            .find(|c| c.id == cube_id && c.network == network)
+        {
             cube.unit_setting = new_unit_setting;
             cube_found = true;
         } else {
@@ -921,9 +1014,12 @@ impl GeneralSettingsState {
     /// Returns the stored `CubeSettings` (which contains the master signer
     /// fingerprint and PIN hash) or `None` if the cube can't be found.
     fn lookup_cube(&self, cache: &Cache) -> Option<settings::CubeSettings> {
-        let network_dir = cache.datadir_path.network_directory(cache.network);
+        let network_dir = cache.datadir_path.network_directory(cache.chain());
         let settings = settings::Settings::from_file(&network_dir).ok()?;
-        settings.cubes.into_iter().find(|c| c.id == self.cube_id)
+        settings
+            .cubes
+            .into_iter()
+            .find(|c| c.id == self.cube_id && c.network == cache.chain())
     }
 
     /// Handle a single `BackupWalletMessage` — returns the task to dispatch.
@@ -1008,7 +1104,7 @@ impl GeneralSettingsState {
                 };
 
                 let datadir = cache.datadir_path.path().to_path_buf();
-                let network = cache.network;
+                let network = cache.chain();
                 let cube_id = cube.id.clone();
 
                 // This is the *second* door to the same secret, and it is the
@@ -1256,13 +1352,17 @@ impl GeneralSettingsState {
                         saving: true,
                     };
                     let cube_id = self.cube_id.clone();
-                    let network = cache.network;
+                    let network = cache.chain();
                     let datadir = cache.datadir_path.clone();
                     Task::perform(
                         async move {
                             let network_dir = datadir.network_directory(network);
                             update_settings_file(&network_dir, |mut s| {
-                                if let Some(cube) = s.cubes.iter_mut().find(|c| c.id == cube_id) {
+                                if let Some(cube) = s
+                                    .cubes
+                                    .iter_mut()
+                                    .find(|c| c.id == cube_id && c.network == network)
+                                {
                                     cube.backed_up = true;
                                 }
                                 Some(s)
@@ -1341,7 +1441,7 @@ impl GeneralSettingsState {
 ///
 /// # Where the words come from
 ///
-/// The session cache first, exactly as the Liquid and Spark loaders do. The
+/// Bitcoin uses the session cache first; BTCB2 always opens its chain-bound seed. The
 /// unlock that opened this Cube already paid the ~831 ms Argon2id pass and is
 /// holding the decrypted signer, so re-reading the seed file buys nothing.
 /// Reading from disk is the fallback for the entry points that have no session
@@ -1374,20 +1474,28 @@ impl GeneralSettingsState {
 /// gate already lives.
 pub(super) fn load_mnemonic_words(
     datadir: &std::path::Path,
-    network: Network,
+    network: impl Into<crate::chain::ChainId>,
     fingerprint: Fingerprint,
     pin: &str,
     cube_id: &str,
 ) -> Result<Vec<String>, SignerError> {
-    let signer =
+    let network = network.into();
+    // The legacy session is keyed by Cube ID and fingerprint, not chain.
+    // A fork must authenticate its own seed file even if a Bitcoin twin is unlocked.
+    let signer = if network.is_blake2b() {
+        crate::services::unlock::open_seed_by_fingerprint(
+            datadir,
+            network,
+            fingerprint,
+            pin,
+            cube_id,
+        )?
+    } else {
         crate::app::session::unlocked_signer_with_pin_verification(cube_id, fingerprint, pin)
             .or_else(|e| {
-                // A wrong PIN is a wrong PIN. Keep it, so the caller's throttle
-                // records the guess rather than reporting an operational fault.
                 if matches!(e, SignerError::InvalidPassword) {
                     return Err(e);
                 }
-                // No session, or none holding this key.
                 crate::services::unlock::open_seed_by_fingerprint(
                     datadir,
                     network,
@@ -1395,7 +1503,8 @@ pub(super) fn load_mnemonic_words(
                     pin,
                     cube_id,
                 )
-            })?;
+            })?
+    };
 
     Ok(signer.words().iter().map(|w| (*w).to_string()).collect())
 }
@@ -1497,11 +1606,7 @@ impl State for GeneralSettingsState {
                     self.new_price_setting
                 );
                 let price_setting = self.new_price_setting.clone();
-                let network = if cache.fiat_chain.is_blake2b() {
-                    cache.fiat_chain
-                } else {
-                    cache.network.into()
-                };
+                let network = cache.chain();
                 let datadir_path = cache.datadir_path.clone();
                 let cube_id = self.cube_id.clone();
                 Task::perform(
@@ -1518,14 +1623,7 @@ impl State for GeneralSettingsState {
                 tracing::info!("GeneralSettingsState: SettingsSaved received");
                 self.error = None;
                 // Reload unit setting from disk to sync toggle state with what was saved
-                let network_dir =
-                    cache
-                        .datadir_path
-                        .network_directory(if cache.fiat_chain.is_blake2b() {
-                            cache.fiat_chain
-                        } else {
-                            cache.network.into()
-                        });
+                let network_dir = cache.datadir_path.network_directory(cache.chain());
                 tracing::info!(
                     "GeneralSettingsState: Loading settings from {:?}",
                     network_dir.path()
@@ -1539,7 +1637,11 @@ impl State for GeneralSettingsState {
                         "GeneralSettingsState: Available cubes: {:?}",
                         settings.cubes.iter().map(|c| &c.id).collect::<Vec<_>>()
                     );
-                    if let Some(cube) = settings.cubes.iter().find(|c| c.id == self.cube_id) {
+                    if let Some(cube) = settings
+                        .cubes
+                        .iter()
+                        .find(|c| c.id == self.cube_id && c.network == cache.chain())
+                    {
                         tracing::info!(
                             "GeneralSettingsState: Found cube, reloading unit_setting: {:?}",
                             cube.unit_setting.display_unit
@@ -1566,16 +1668,13 @@ impl State for GeneralSettingsState {
                 // Show error in global toast
                 let toast_task = Task::done(Message::View(view::Message::ShowError(err_msg)));
                 // Reload settings from disk to revert toggle state to persisted value
-                let network_dir =
-                    cache
-                        .datadir_path
-                        .network_directory(if cache.fiat_chain.is_blake2b() {
-                            cache.fiat_chain
-                        } else {
-                            cache.network.into()
-                        });
+                let network_dir = cache.datadir_path.network_directory(cache.chain());
                 if let Ok(settings) = crate::app::settings::Settings::from_file(&network_dir) {
-                    if let Some(cube) = settings.cubes.iter().find(|c| c.id == self.cube_id) {
+                    if let Some(cube) = settings
+                        .cubes
+                        .iter()
+                        .find(|c| c.id == self.cube_id && c.network == cache.chain())
+                    {
                         tracing::info!(
                             "Reverting unit_setting to persisted value after save failure: {:?}",
                             cube.unit_setting.display_unit
@@ -1678,7 +1777,7 @@ impl State for GeneralSettingsState {
                 );
                 let cube_id = self.cube_id.clone();
                 let unit_setting = self.new_unit_setting.clone();
-                let network = cache.network;
+                let network = cache.chain();
                 let datadir_path = cache.datadir_path.clone();
 
                 // Save to disk - cache update will happen in App::update after this returns

@@ -115,7 +115,7 @@ pub struct Cache {
     pub last_poll_at_startup: Option<u32>,
     pub daemon_cache: DaemonCache,
     pub fiat_price: Option<FiatPrice>,
-    /// Pricing identity, retained separately from the address-encoding network.
+    /// Authoritative Cube chain for pricing and storage; `network` only encodes addresses.
     pub fiat_chain: crate::chain::ChainId,
     pub btcb2_price_request: Option<FiatPriceRequest>,
     /// Bitcoin display unit preference (BTC or Sats)
@@ -365,6 +365,11 @@ impl std::default::Default for Cache {
 }
 
 impl Cache {
+    /// Retain the Cube identity across storage and recovery boundaries.
+    pub fn chain(&self) -> crate::chain::ChainId {
+        self.fiat_chain
+    }
+
     /// The cached entanglement answer for a deposit, [`Entanglement::Unknown`]
     /// when none has been resolved yet. A stale negative still reads as
     /// *not entangled* here — the refresh is the sync task's job and the
