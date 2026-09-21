@@ -121,6 +121,24 @@ impl NetworkStatus {
         };
         let expected = match &observation.fork {
             None => ForkAbsent,
+            // `blake2b.active` is `DeploymentActiveAfter(tip, DEPLOYMENT_BLAKE2B)`:
+            // it reports whether the rules apply to the block AFTER `tip_height`.
+            // A single `getdeploymentinfo` response supplies both fields, so they
+            // describe one node snapshot and cannot race a block apart. An active
+            // fork therefore cannot activate later than `tip_height + 1`; a claim
+            // that it does is contradictory, not merely pending.
+            //
+            // `height == tip_height + 1` is the activating block and stays valid.
+            //
+            // The converse (`!active` with `height <= tip_height + 1`) is equally
+            // impossible, but is deliberately NOT rejected here: it resolves to
+            // `ForkInactive`, which already refuses the schedule, so rejecting it
+            // as malformed would trade one refusal for another while making a
+            // benign server bug fatal. Only the direction that could present an
+            // unactivated fork as usable is policed.
+            Some(fork) if fork.active && fork.height > observation.tip_height.saturating_add(1) => {
+                return false;
+            }
             Some(fork) if !fork.active => ForkInactive,
             Some(_) => match observation.rdts {
                 RdtsStatus::Absent => RdtsAbsent,
@@ -371,6 +389,66 @@ mod tests {
             .await,
             Err(NetworkStatusError::InvalidResponse)
         ));
+    }
+
+    /// `blake2b.active` describes the block after `tip_height`, and both fields
+    /// come from one `getdeploymentinfo` snapshot, so an active fork can activate
+    /// at most one block past the tip. The activating block itself is valid.
+    #[tokio::test]
+    async fn active_fork_scheduled_past_the_next_block_is_refused() {
+        let tip = 973029_u64;
+        for height in [0, 1, tip - 1, tip, tip + 1] {
+            let mut observed = observation();
+            observed["tip_height"] = json!(tip);
+            observed["fork"]["height"] = json!(height);
+            let status = fetch(
+                ChainId::BitcoinBlake2b,
+                200,
+                envelope("bitcoin-blake2b", "available", Some(observed)),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                status.state,
+                NetworkStatusState::Available,
+                "active fork at {height} with tip {tip} must stay valid"
+            );
+        }
+        // One past the activating block, and a value that would overflow a
+        // non-saturating add, are both contradictory rather than pending.
+        for height in [tip + 2, tip + 10_000, u64::MAX] {
+            let mut observed = observation();
+            observed["tip_height"] = json!(tip);
+            observed["fork"]["height"] = json!(height);
+            assert!(
+                matches!(
+                    fetch(
+                        ChainId::BitcoinBlake2b,
+                        200,
+                        envelope("bitcoin-blake2b", "available", Some(observed)),
+                    )
+                    .await,
+                    Err(NetworkStatusError::InvalidResponse)
+                ),
+                "active fork at {} with tip {} must be refused",
+                height,
+                tip
+            );
+        }
+        // The converse is impossible too, but is deliberately still accepted:
+        // it resolves to `ForkInactive`, which already refuses the schedule.
+        // This pins that asymmetry so it is not "completed" by accident.
+        let mut inactive = observation();
+        inactive["tip_height"] = json!(tip);
+        inactive["fork"] = json!({"height": tip - 1, "active": false});
+        let status = fetch(
+            ChainId::BitcoinBlake2b,
+            503,
+            envelope("bitcoin-blake2b", "fork_inactive", Some(inactive)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status.state, NetworkStatusState::ForkInactive);
     }
 
     #[tokio::test]
