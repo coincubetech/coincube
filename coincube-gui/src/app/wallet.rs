@@ -555,10 +555,11 @@ impl Wallet {
     pub fn load_hotsigners(
         self,
         datadir_path: &CoincubeDirectory,
-        network: bitcoin::Network,
+        chain: impl Into<ChainId>,
         cube_id: &str,
         password: Option<&str>,
     ) -> Result<Self, WalletError> {
+        let chain = chain.into();
         let keys = self.descriptor_keys();
 
         // Free when it hits: the signer the unlock already decrypted, with no
@@ -571,19 +572,23 @@ impl Wallet {
         // reads plaintext files only and this cache was never consulted. The
         // cache needs no password by construction: it is keyed on `cube_id` and
         // holds material the unlock already proved.
-        for fingerprint in &keys {
-            if let Some(signer) = crate::app::session::unlocked_signer(cube_id, *fingerprint) {
-                return Ok(self.with_signer(Signer::new(signer)));
+        // The legacy session is keyed by Cube ID and fingerprint, not ChainId.
+        // Until it is chain-bound, a fork must authenticate its own seed file.
+        if !chain.is_blake2b() {
+            for fingerprint in &keys {
+                if let Some(signer) = crate::app::session::unlocked_signer(cube_id, *fingerprint) {
+                    return Ok(self.with_signer(Signer::new(signer)));
+                }
             }
         }
 
         let Some(password) = password else {
-            return self.load_unencrypted_hotsigners(datadir_path, network, &keys);
+            return self.load_unencrypted_hotsigners(datadir_path, chain, &keys);
         };
 
         match crate::services::unlock::open_seed_for_any_of(
             datadir_path.path(),
-            network,
+            chain,
             &keys,
             password,
             cube_id,
@@ -624,24 +629,30 @@ impl Wallet {
     fn load_unencrypted_hotsigners(
         self,
         datadir_path: &CoincubeDirectory,
-        network: bitcoin::Network,
+        chain: impl Into<ChainId>,
         keys: &HashSet<Fingerprint>,
     ) -> Result<Self, WalletError> {
+        let chain = chain.into();
         // Load only Vault mnemonics, skip Liquid wallet mnemonics (managed by Breez SDK)
-        let master_signers =
-            match MasterSigner::from_datadir_vault_only(datadir_path.path(), network) {
-                Ok(signers) => signers,
-                Err(e) => match e {
-                    coincube_core::signer::SignerError::MnemonicStorage(e) => {
-                        if e.kind() == std::io::ErrorKind::NotFound {
-                            Vec::new()
-                        } else {
-                            return Err(WalletError::MasterSigner(e.to_string()));
-                        }
+        let master_signers = match MasterSigner::from_datadir_with_password_filtered_for_chain(
+            datadir_path.path(),
+            chain,
+            None,
+            "",
+            true,
+        ) {
+            Ok(signers) => signers,
+            Err(e) => match e {
+                coincube_core::signer::SignerError::MnemonicStorage(e) => {
+                    if e.kind() == std::io::ErrorKind::NotFound {
+                        Vec::new()
+                    } else {
+                        return Err(WalletError::MasterSigner(e.to_string()));
                     }
-                    _ => return Err(WalletError::MasterSigner(e.to_string())),
-                },
-            };
+                }
+                _ => return Err(WalletError::MasterSigner(e.to_string())),
+            },
+        };
 
         let curve = bitcoin::secp256k1::Secp256k1::signing_only();
         if let Some(master_signer) = master_signers
@@ -661,7 +672,7 @@ impl Wallet {
         // statement is "no credential to try", not "the credential failed".
         let mut this = self;
         this.locked_seed_keys =
-            crate::services::unlock::encrypted_seed_keys(datadir_path.path(), network, keys);
+            crate::services::unlock::encrypted_seed_keys(datadir_path.path(), chain, keys);
         Ok(this)
     }
 
@@ -1076,6 +1087,8 @@ mod tests {
     /// back, and `wallet.signer` was `None` on a Vault that owned a key.
     #[test]
     fn an_encrypted_hot_signer_is_loaded_with_the_cubes_credential() {
+        let _guard = crate::app::session::test_guard();
+        crate::app::session::close();
         use coincube_core::miniscript::bitcoin::bip32::DerivationPath;
 
         let secp = bitcoin::secp256k1::Secp256k1::signing_only();
@@ -1148,7 +1161,7 @@ mod tests {
 
         // A wrong credential must not hand back *some other* signer, and must
         // not fail the load either.
-        let wrong = Wallet::new(descriptor)
+        let wrong = Wallet::new(descriptor.clone())
             .load_hotsigners(&dir, net, &cube_id, Some("9999"))
             .unwrap();
         assert!(wrong.signer.is_none());
@@ -1163,6 +1176,21 @@ mod tests {
             "a credential was available, so this is not the locked case"
         );
 
+        crate::app::session::store_unlocked_signer(&cube_id, fp, signer.try_clone().unwrap());
+        assert!(Wallet::new(descriptor.clone())
+            .load_hotsigners(&dir, net, &cube_id, None)
+            .unwrap()
+            .signer
+            .is_some());
+        // Same Cube ID and seed fingerprint, but no fork file: the Bitcoin
+        // cache must not supply a hot signer to this fork wallet.
+        assert!(Wallet::new(descriptor)
+            .with_chain(ChainId::BitcoinBlake2bTestnet4)
+            .load_hotsigners(&dir, ChainId::BitcoinBlake2bTestnet4, &cube_id, Some(pin))
+            .unwrap()
+            .signer
+            .is_none());
+        crate::app::session::close();
         std::fs::remove_dir_all(root).unwrap();
     }
 

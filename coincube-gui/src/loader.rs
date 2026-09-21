@@ -672,7 +672,7 @@ pub async fn load_application(
         .load_from_settings(config.wallet_settings)?
         .load_hotsigners(
             &config.datadir_path,
-            config.network,
+            config.cube_settings.network,
             &config.cube_settings.id,
             seed_password.as_deref().map(|p| p.as_str()),
         )?;
