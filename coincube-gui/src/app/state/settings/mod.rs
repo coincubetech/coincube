@@ -46,6 +46,16 @@ pub struct SettingsState {
 }
 
 impl SettingsState {
+    /// Load the active Cube's preferences from its authenticated chain directory.
+    pub fn from_directory(cube_id: String, directory: &crate::dir::NetworkDirectory) -> Self {
+        let (price, unit) = crate::app::settings::Settings::from_file(directory)
+            .ok()
+            .and_then(|s| s.cubes.into_iter().find(|c| c.id == cube_id))
+            .map(|c| (c.fiat_price.unwrap_or_default(), c.unit_setting))
+            .unwrap_or_default();
+        Self::new(cube_id, price, unit)
+    }
+
     pub fn new(
         cube_id: String,
         price_setting: PriceSetting,
@@ -135,7 +145,13 @@ impl State for SettingsState {
             Message::SettingsSaved => {
                 // Update tracked price and unit settings when saved
                 if let Ok(settings) = crate::app::settings::Settings::from_file(
-                    &cache.datadir_path.network_directory(cache.network),
+                    &cache
+                        .datadir_path
+                        .network_directory(if cache.fiat_chain.is_blake2b() {
+                            cache.fiat_chain
+                        } else {
+                            cache.network.into()
+                        }),
                 ) {
                     if let Some(cube) = settings.cubes.iter().find(|c| c.id == self.cube_id) {
                         self.current_unit_setting = cube.unit_setting.clone();
@@ -222,5 +238,59 @@ impl State for SettingsState {
 impl From<SettingsState> for Box<dyn State> {
     fn from(s: SettingsState) -> Box<dyn State> {
         Box::new(s)
+    }
+}
+
+#[cfg(test)]
+mod btcb2_price_settings_tests {
+    use super::*;
+    use crate::{
+        app::settings::{self, CubeSettings},
+        chain::ChainId,
+        dir::CoincubeDirectory,
+        services::fiat::{currency::Currency, PriceSource},
+    };
+
+    #[tokio::test]
+    async fn reopening_and_save_refresh_load_only_the_cubes_chain_preferences() {
+        let path =
+            std::env::temp_dir().join(format!("coincube-price-reopen-{}", uuid::Uuid::new_v4()));
+        let root = CoincubeDirectory::new(path.clone());
+        for (chain, currency) in [
+            (ChainId::Bitcoin, Currency::USD),
+            (ChainId::BitcoinBlake2b, Currency::EUR),
+        ] {
+            let mut cube = CubeSettings::new_with_raw_id("same-id".into(), "Fixture".into(), chain);
+            cube.fiat_price = Some(PriceSetting {
+                currency,
+                source: PriceSource::Coincube,
+                is_enabled: true,
+            });
+            settings::update_settings_file(&root.network_directory(chain), move |mut s| {
+                s.cubes.push(cube);
+                Some(s)
+            })
+            .await
+            .unwrap();
+        }
+        let mut panel = SettingsState::from_directory(
+            "same-id".into(),
+            &root.network_directory(ChainId::BitcoinBlake2b),
+        );
+        assert_eq!(panel.current_price_setting.currency, Currency::EUR);
+        panel.current_price_setting.currency = Currency::USD;
+        let cache = Cache {
+            datadir_path: root.clone(),
+            fiat_chain: ChainId::BitcoinBlake2b,
+            ..Default::default()
+        };
+        let _ = panel.update(None, &cache, Message::SettingsSaved);
+        assert_eq!(panel.current_price_setting.currency, Currency::EUR);
+        let bitcoin = SettingsState::from_directory(
+            "same-id".into(),
+            &root.network_directory(ChainId::Bitcoin),
+        );
+        assert_eq!(bitcoin.current_price_setting.currency, Currency::USD);
+        std::fs::remove_dir_all(path).unwrap();
     }
 }

@@ -407,6 +407,7 @@ async fn full_pair_then_sign_flow_via_offer_trust_path() {
         None,
         paired_clone,
         DESC.to_string(),
+        coincube_core::chain::ChainId::Regtest,
         Some(Arc::new(fresh_transport_key("desktop"))),
     );
 

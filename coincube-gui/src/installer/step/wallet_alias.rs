@@ -35,13 +35,8 @@ impl Step for WalletAlias {
             }
             // No alias at all, we set a default value.
             (true, true) => {
-                self.wallet_alias.value = format!(
-                    "My Vault {} wallet",
-                    // Labels come from the chain identity (`ChainId::label`),
-                    // so a Bitcoin Blake2b Vault — when the installer learns
-                    // to make one — is never named "Bitcoin".
-                    crate::chain::ChainId::from(ctx.network).label()
-                );
+                self.wallet_alias.value =
+                    format!("My Vault {} wallet", ctx.bitcoin_config.chain.label());
                 self.wallet_alias.valid = true;
             }
             // We keep the current value.
@@ -79,5 +74,39 @@ impl Step for WalletAlias {
 impl From<WalletAlias> for Box<dyn Step> {
     fn from(s: WalletAlias) -> Box<dyn Step> {
         Box::new(s)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{chain::ChainId, dir::CoincubeDirectory, installer::context::RemoteBackend};
+
+    #[test]
+    fn default_alias_uses_chain_and_preserves_explicit_alias() {
+        for chain in [
+            ChainId::Bitcoin,
+            ChainId::Testnet4,
+            ChainId::BitcoinBlake2b,
+            ChainId::BitcoinBlake2bTestnet4,
+        ] {
+            let mut ctx = Context::new(
+                chain.bitcoin_network(),
+                CoincubeDirectory::new(Default::default()),
+                RemoteBackend::None,
+                None,
+                None,
+            );
+            ctx.bitcoin_config.chain = chain;
+            let mut step = WalletAlias::default();
+            step.load_context(&ctx);
+            assert_eq!(
+                step.wallet_alias.value,
+                format!("My Vault {} wallet", chain.label())
+            );
+            ctx.wallet_alias = "Family vault".to_string();
+            step.load_context(&ctx);
+            assert_eq!(step.wallet_alias.value, "Family vault");
+        }
     }
 }
