@@ -2861,10 +2861,18 @@ impl GlobalHome {
         let amount_sat = amount.to_sat();
         let mut destinations = HashMap::new();
         destinations.insert(address_info.address.as_unchecked().clone(), amount_sat);
+        // This PSBT only ever answers `fee()`. A fresh change address (`None`)
+        // would make the daemon reserve a change index durably on every valid
+        // keystroke of the feerate field; the wallet's fixed preview address
+        // sizes the change output identically and reserves nothing. The real
+        // transfer in `SignVaultToLiquidTx` still passes `None`.
+        let Some(preview_change) = self.wallet.as_ref().map(|w| w.preview_change_address()) else {
+            return Task::none();
+        };
         Task::perform(
             async move {
                 match daemon
-                    .create_spend_tx(&[], &destinations, feerate_vb, None)
+                    .create_spend_tx(&[], &destinations, feerate_vb, Some(preview_change))
                     .await
                 {
                     Ok(CreateSpendResult::Success { psbt, .. }) => {
@@ -3657,5 +3665,302 @@ mod tests {
             ),
             Some(42_000_000),
         );
+    }
+
+    /// The Vault→Liquid/Spark transfer preview exists only to read `psbt.fee()`,
+    /// and it re-runs on every valid keystroke of the feerate field with no
+    /// debounce. `createspend` reserves a change index durably whenever it is
+    /// asked for a fresh change address (`None`), so every one of those
+    /// previews used to burn an index the wallet would never use. The preview
+    /// must ask with the wallet's fixed sizing address instead, which reserves
+    /// nothing and sizes the change output identically.
+    mod transfer_preview_change_address {
+        use super::*;
+        use crate::app::view::global_home::TransferDirection;
+        use crate::daemon::{Daemon, DaemonBackend, DaemonError};
+        use crate::node::NodeType;
+        use coincube_core::{
+            descriptors::CoincubeDescriptor,
+            miniscript::bitcoin::{address, bip32::ChildNumber, psbt::Psbt, Address, Network},
+        };
+        use coincubed::{
+            bip329::Labels,
+            commands::{CoinStatus, LabelItem, UpdateDerivIndexesResult},
+        };
+        use std::collections::HashSet;
+        use std::sync::Mutex;
+
+        const DESC: &str = "wsh(or_d(pk([f5acc2fd]tpubD6NzVbkrYhZ4YgUx2ZLNt2rLYAMTdYysCRzKoLu2BeSHKvzqPaBDvf17GeBPnExUVPkuBpx4kniP964e2MxyzzazcXLptxLXModSVCVEV1T/<0;1>/*),and_v(v:pkh([8a64f2a9]tpubD6NzVbkrYhZ4WmzFjvQrp7sDa4ECUxTi9oby8K4FZkd3XCBtEdKwUiQyYJaxiJo5y42gyDWEczrFpozEjeLxMPxjf2WtkfcbpUdfvNnozWF/<0;1>/*),older(10))))#d72le4dr";
+
+        /// Records what the preview asks the daemon for. Everything else is off
+        /// limits: a preview that touched any other daemon call would be a
+        /// different bug.
+        #[derive(Debug, Default)]
+        struct RecordingDaemon {
+            calls: Mutex<Vec<(u64, Option<Address<address::NetworkUnchecked>>)>>,
+        }
+
+        #[async_trait::async_trait]
+        impl Daemon for RecordingDaemon {
+            fn backend(&self) -> DaemonBackend {
+                DaemonBackend::EmbeddedCoincubed(Some(NodeType::Bitcoind))
+            }
+
+            fn config(&self) -> Option<&coincubed::config::Config> {
+                None
+            }
+
+            async fn is_alive(
+                &self,
+                _datadir: &CoincubeDirectory,
+                _network: Network,
+            ) -> Result<(), DaemonError> {
+                unreachable!("test daemon should not be queried")
+            }
+
+            async fn stop(&self) -> Result<(), DaemonError> {
+                unreachable!("test daemon should not be queried")
+            }
+
+            async fn get_info(&self) -> Result<crate::daemon::model::GetInfoResult, DaemonError> {
+                unreachable!("test daemon should not be queried")
+            }
+
+            async fn request_sync(&self) -> Result<(), DaemonError> {
+                unreachable!("test daemon should not be queried")
+            }
+
+            async fn get_new_address(
+                &self,
+            ) -> Result<crate::daemon::model::GetAddressResult, DaemonError> {
+                unreachable!("test daemon should not be queried")
+            }
+
+            async fn list_revealed_addresses(
+                &self,
+                _is_change: bool,
+                _exclude_used: bool,
+                _limit: usize,
+                _start_index: Option<ChildNumber>,
+            ) -> Result<crate::daemon::model::ListRevealedAddressesResult, DaemonError>
+            {
+                unreachable!("test daemon should not be queried")
+            }
+
+            async fn update_deriv_indexes(
+                &self,
+                _receive: Option<u32>,
+                _change: Option<u32>,
+            ) -> Result<UpdateDerivIndexesResult, DaemonError> {
+                unreachable!("test daemon should not be queried")
+            }
+
+            async fn list_coins(
+                &self,
+                _statuses: &[CoinStatus],
+                _outpoints: &[OutPoint],
+            ) -> Result<crate::daemon::model::ListCoinsResult, DaemonError> {
+                unreachable!("test daemon should not be queried")
+            }
+
+            async fn list_spend_txs(
+                &self,
+            ) -> Result<crate::daemon::model::ListSpendResult, DaemonError> {
+                unreachable!("test daemon should not be queried")
+            }
+
+            async fn create_spend_tx(
+                &self,
+                _coins_outpoints: &[OutPoint],
+                _destinations: &HashMap<Address<address::NetworkUnchecked>, u64>,
+                feerate_vb: u64,
+                change_address: Option<Address<address::NetworkUnchecked>>,
+            ) -> Result<crate::daemon::model::CreateSpendResult, DaemonError> {
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push((feerate_vb, change_address));
+                let tx = coincube_core::miniscript::bitcoin::Transaction {
+                    version: coincube_core::miniscript::bitcoin::transaction::Version::TWO,
+                    lock_time: coincube_core::miniscript::bitcoin::absolute::LockTime::ZERO,
+                    input: vec![],
+                    output: vec![],
+                };
+                Ok(crate::daemon::model::CreateSpendResult::Success {
+                    psbt: Psbt::from_unsigned_tx(tx).expect("empty unsigned tx"),
+                    warnings: vec![],
+                })
+            }
+
+            async fn rbf_psbt(
+                &self,
+                _txid: &Txid,
+                _is_cancel: bool,
+                _feerate_vb: Option<u64>,
+            ) -> Result<crate::daemon::model::CreateSpendResult, DaemonError> {
+                unreachable!("test daemon should not be queried")
+            }
+
+            async fn update_spend_tx(&self, _psbt: &Psbt) -> Result<(), DaemonError> {
+                unreachable!("test daemon should not be queried")
+            }
+
+            async fn delete_spend_tx(&self, _txid: &Txid) -> Result<(), DaemonError> {
+                unreachable!("test daemon should not be queried")
+            }
+
+            async fn broadcast_spend_tx(&self, _txid: &Txid) -> Result<(), DaemonError> {
+                unreachable!("test daemon should not be queried")
+            }
+
+            async fn start_rescan(&self, _t: u32) -> Result<(), DaemonError> {
+                unreachable!("test daemon should not be queried")
+            }
+
+            async fn list_confirmed_txs(
+                &self,
+                _start: u32,
+                _end: u32,
+                _limit: u64,
+            ) -> Result<crate::daemon::model::ListTransactionsResult, DaemonError> {
+                unreachable!("test daemon should not be queried")
+            }
+
+            async fn create_recovery(
+                &self,
+                _address: Address<address::NetworkUnchecked>,
+                _coins_outpoints: &[OutPoint],
+                _feerate_vb: u64,
+                _sequence: Option<u16>,
+            ) -> Result<Psbt, DaemonError> {
+                unreachable!("test daemon should not be queried")
+            }
+
+            async fn list_txs(
+                &self,
+                _txid: &[Txid],
+            ) -> Result<crate::daemon::model::ListTransactionsResult, DaemonError> {
+                unreachable!("test daemon should not be queried")
+            }
+
+            async fn get_labels(
+                &self,
+                _labels: &HashSet<LabelItem>,
+            ) -> Result<HashMap<String, String>, DaemonError> {
+                unreachable!("test daemon should not be queried")
+            }
+
+            async fn update_labels(
+                &self,
+                _labels: &HashMap<LabelItem, Option<String>>,
+            ) -> Result<(), DaemonError> {
+                unreachable!("test daemon should not be queried")
+            }
+
+            async fn get_labels_bip329(
+                &self,
+                _offset: u32,
+                _limit: u32,
+            ) -> Result<Labels, DaemonError> {
+                unreachable!("test daemon should not be queried")
+            }
+        }
+
+        /// Execute the async work a message handed back, exactly as the iced
+        /// runtime would, so the daemon call actually happens.
+        fn drain(task: Task<Message>) {
+            use iced_runtime::futures::futures::StreamExt;
+            let Some(stream) = iced_runtime::task::into_stream(task) else {
+                return;
+            };
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async move { stream.for_each(|_| async {}).await });
+        }
+
+        /// A wallet-backed home sitting on the Vault→Liquid confirm screen with a
+        /// valid amount and destination, the state in which the feerate field
+        /// previews on every keystroke.
+        fn home_on_transfer_screen() -> (GlobalHome, Arc<Wallet>) {
+            let wallet = Arc::new(Wallet::new(CoincubeDescriptor::from_str(DESC).unwrap()));
+            let network = coincube_core::miniscript::bitcoin::Network::Bitcoin;
+            let mut home = GlobalHome::new(
+                wallet.clone(),
+                Arc::new(LiquidBackend::new(Arc::new(
+                    crate::app::breez_liquid::BreezClient::disconnected(network),
+                ))),
+                None,
+                CoincubeDirectory::new(std::path::PathBuf::from("/nonexistent")),
+                crate::chain::ChainId::Bitcoin,
+                "cube".to_string(),
+                false,
+            );
+            home.transfer_direction = Some(TransferDirection::VaultToLiquid);
+            home.receive_address_info = Some(ReceiveAddressInfo {
+                address: Address::from_str(MAINNET_ADDR).unwrap().assume_checked(),
+                index: ChildNumber::from(0),
+                labels: HashMap::new(),
+            });
+            home.entered_amount = form::Value {
+                value: "100000".to_string(),
+                warning: None,
+                valid: true,
+            };
+            (home, wallet)
+        }
+
+        #[test]
+        fn feerate_edits_preview_with_the_fixed_sizing_address_never_a_fresh_one() {
+            let (mut home, wallet) = home_on_transfer_screen();
+            let daemon = Arc::new(RecordingDaemon::default());
+            let as_daemon: Arc<dyn Daemon + Sync + Send> = daemon.clone();
+            // Type a two-digit feerate one keystroke at a time, then correct it:
+            // four valid intermediate values, four previews, four PSBTs thrown away.
+            for keystroke in ["2", "25", "2", "20"] {
+                drain(home.update(
+                    Some(as_daemon.clone()),
+                    &Cache::default(),
+                    Message::View(view::Message::Home(HomeMessage::SetTransferFeerate(
+                        keystroke.to_string(),
+                    ))),
+                ));
+            }
+            let calls = daemon.calls.lock().unwrap();
+            assert_eq!(
+                calls
+                    .iter()
+                    .map(|(feerate, _)| *feerate)
+                    .collect::<Vec<_>>(),
+                vec![2, 25, 2, 20],
+                "every valid keystroke previews once"
+            );
+            let sizing = wallet.preview_change_address();
+            for (feerate, change) in calls.iter() {
+                assert_eq!(
+                    change.as_ref(),
+                    Some(&sizing),
+                    "preview at {feerate} sat/vb asked the daemon for a fresh change address; \
+                     that reserves a change index the wallet will never use"
+                );
+            }
+        }
+
+        #[test]
+        fn the_sizing_address_is_the_wallet_own_change_index_zero() {
+            let wallet = Wallet::new(CoincubeDescriptor::from_str(DESC).unwrap());
+            let secp =
+                coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::verification_only();
+            let expected = wallet
+                .main_descriptor
+                .change_descriptor()
+                .derive(0.into(), &secp)
+                .address(coincube_core::miniscript::bitcoin::Network::Bitcoin);
+            assert_eq!(
+                wallet.preview_change_address(),
+                expected.as_unchecked().clone()
+            );
+        }
     }
 }

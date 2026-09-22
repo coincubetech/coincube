@@ -2385,6 +2385,61 @@ mod tests {
         assert_eq!(control.reserve_change().unwrap().index(), 4.into());
     }
 
+    /// The contract the GUI's transfer preview relies on: a change address the
+    /// wallet already owns never reserves an index, while a fresh one (`None`)
+    /// reserves exactly one. A preview that only reads `psbt.fee()` can therefore
+    /// pass its fixed sizing address and leave the change index alone.
+    #[test]
+    fn supplied_own_change_address_reserves_nothing_fresh_reserves_once() {
+        const COIN_VALUE: u64 = 100_000;
+        let ms = DummyCoincube::new(DummyBitcoind::new(), DummyDatabase::new());
+        let control = &ms.control();
+        let mut db_conn = control.db().lock().unwrap().connection();
+        let dummy_tx = funding_tx(control, &[(0, COIN_VALUE, 13, false)]);
+        let dummy_op = bitcoin::OutPoint::new(dummy_tx.compute_txid(), 0);
+        db_conn.new_txs(std::slice::from_ref(&dummy_tx));
+        db_conn.new_unspent_coins(&[Coin {
+            outpoint: dummy_op,
+            is_immature: false,
+            block_info: None,
+            amount: bitcoin::Amount::from_sat(COIN_VALUE),
+            derivation_index: bip32::ChildNumber::from(13),
+            is_change: false,
+            spend_txid: None,
+            spend_block: None,
+            is_from_self: false,
+        }]);
+        let mut destinations = <HashMap<bitcoin::Address<address::NetworkUnchecked>, u64>>::new();
+        destinations.insert(
+            bitcoin::Address::from_str("bc1qnsexk3gnuyayu92fc3tczvc7k62u22a22ua2kv").unwrap(),
+            10_000,
+        );
+        let sizing = control
+            .config
+            .main_descriptor
+            .change_descriptor()
+            .derive(0.into(), &control.secp)
+            .address(control.config.bitcoin_config.network)
+            .as_unchecked()
+            .clone();
+        let before = db_conn.change_index();
+        // Three previews with the wallet's own change address, each producing a
+        // change output the caller discards: nothing reserved.
+        for _ in 0..3 {
+            assert!(matches!(
+                control.create_spend(&destinations, &[dummy_op], 1, Some(sizing.clone())),
+                Ok(CreateSpendResult::Success { .. })
+            ));
+            assert_eq!(db_conn.change_index(), before);
+        }
+        // The real spend asks for a fresh change address and reserves exactly one.
+        assert!(matches!(
+            control.create_spend(&destinations, &[dummy_op], 1, None),
+            Ok(CreateSpendResult::Success { .. })
+        ));
+        assert_eq!(db_conn.change_index(), before.increment().unwrap());
+    }
+
     #[test]
     fn create_spend() {
         const COIN_VALUE: u64 = 100_000;
