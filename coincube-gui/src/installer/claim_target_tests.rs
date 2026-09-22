@@ -1271,6 +1271,30 @@ async fn an_install_interrupted_between_the_wallet_and_the_cube_stays_retryable(
         "so the claim must still be offered — a wallet with no Cube is nothing \
          the user can open"
     );
+
+    // Home is the other consumer and it answers from its own refresh. Driven
+    // through `Home::update` into the state a real listing produces; the
+    // account gate in front of the refresh is an optimisation, so the refresh
+    // is called directly rather than faked through a Connect session.
+    let mut source_cube = source.cube.clone();
+    source_cube.vault_wallet_id = Some(WalletId::new(checksum.clone(), Some(1)));
+    let (mut home, _) = crate::home::Home::new(root.clone(), Some(Network::Bitcoin));
+    let _ = home.update(crate::home::Message::Checked {
+        for_chain: ChainId::Bitcoin,
+        res: Ok(crate::home::State::Cubes {
+            cubes: vec![source_cube],
+            create_cube: false,
+            source: ChainId::Bitcoin,
+        }),
+    });
+    home.refresh_claim_targets();
+    assert!(
+        !home
+            .claim_source_cube(0)
+            .expect("the source Cube is in Home's list")
+            .already_claimed,
+        "Home must offer the claim too — a wallet with no Cube is not a claim"
+    );
     assert!(
         crate::app::features::claim_blake2b(crate::app::features::ClaimSourceCube {
             chain: ChainId::Bitcoin,
@@ -1315,6 +1339,47 @@ async fn an_install_interrupted_between_the_wallet_and_the_cube_stays_retryable(
         crate::app::claim_target_exists(&root, &checksum),
         "and only now is the source Cube claimed"
     );
+
+    // Home asks the same question its own way. It read `settings.wallets`
+    // while the App read `settings.cubes`, so the two disagreed across exactly
+    // this window — Home hiding the card for a target that did not exist. They
+    // now share one definition, and this drives Home's refresh, not the App's.
+    home.refresh_claim_targets();
+    assert!(
+        home.claim_source_cube(0)
+            .expect("the source Cube is in Home's list")
+            .already_claimed,
+        "Home must see the completed claim"
+    );
+
+    // Finish where the user would: the Cube reloaded from disk, and the seed
+    // opened under *that* persisted identity rather than the one the installer
+    // held in memory.
+    let persisted =
+        crate::app::settings::Settings::from_file(&root.network_directory(ChainId::BitcoinBlake2b))
+            .unwrap()
+            .cubes
+            .into_iter()
+            .find(|c| c.id == cube.id)
+            .expect("the target Cube is on disk");
+    let seed_path = coincube_core::signer::MasterSigner::mnemonics_folder_for_chain(
+        root.path(),
+        ChainId::BitcoinBlake2b,
+    )
+    .join(
+        coincube_core::signer::MnemonicFileName {
+            fingerprint: exit_seed.master_signer_fingerprint,
+            descriptor_info: None,
+        }
+        .to_string(),
+    );
+    coincube_core::seed_crypt::decrypt_with(
+        &std::fs::read(&seed_path).unwrap(),
+        exit_seed.pin.as_str(),
+        &persisted.id,
+        None,
+    )
+    .expect("the persisted Cube's own id opens the seed the install wrote");
     let _ = std::fs::remove_dir_all(root.path());
 }
 

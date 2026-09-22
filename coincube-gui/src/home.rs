@@ -770,17 +770,26 @@ impl Home {
     /// the Cube's own record and the fork chain's settings file. Home never
     /// unlocks anything, so "already claimed" is read from disk.
     pub(crate) fn claim_availability(&self, index: usize) -> app::features::Availability {
+        match self.claim_source_cube(index) {
+            Some(source) => app::features::claim_blake2b(source),
+            None => app::features::Availability::Unavailable {
+                reason: "No Cube selected.".to_string(),
+            },
+        }
+    }
+
+    /// The Cube at `index` as a candidate claim source — the input
+    /// [`claim_availability`](Self::claim_availability) answers from.
+    ///
+    /// Separate so the disk-derived half (`already_claimed`, refreshed by
+    /// [`Self::refresh_claim_targets`]) can be asserted without an
+    /// authenticated Connect session standing in front of it.
+    pub(crate) fn claim_source_cube(&self, index: usize) -> Option<app::features::ClaimSourceCube> {
         let State::Cubes { cubes, .. } = &self.state else {
-            return app::features::Availability::Unavailable {
-                reason: "No Cube selected.".to_string(),
-            };
+            return None;
         };
-        let Some(cube) = cubes.get(index) else {
-            return app::features::Availability::Unavailable {
-                reason: "No Cube selected.".to_string(),
-            };
-        };
-        app::features::claim_blake2b(app::features::ClaimSourceCube {
+        let cube = cubes.get(index)?;
+        Some(app::features::ClaimSourceCube {
             chain: cube.network,
             has_vault: cube.vault_wallet_id.is_some(),
             server_enabled: self
@@ -808,22 +817,24 @@ impl Home {
                 self.displayed_networks
                     .push(ChainId::BitcoinBlake2bTestnet4);
             }
-            // Only accounts with the fork grant pay for this read at all, and
-            // only once per update rather than once per rendered row.
-            self.btcb2_claim_targets = app::settings::Settings::from_file(
-                &self.datadir_path.network_directory(ChainId::BitcoinBlake2b),
-            )
-            .map(|settings| {
-                settings
-                    .wallets
-                    .into_iter()
-                    .map(|w| w.descriptor_checksum)
-                    .collect()
-            })
-            .unwrap_or_default();
+            self.refresh_claim_targets();
         } else {
             self.btcb2_claim_targets.clear();
         }
+    }
+
+    /// Which descriptors already have a claim target on this device.
+    ///
+    /// Shares [`app::claim_target_checksums`] with the running app rather than
+    /// reading the settings file its own way: the two answered the same
+    /// question from different fields once, and an install interrupted between
+    /// the wallet write and the Cube write made them disagree — Home hid the
+    /// card for a target that did not exist.
+    ///
+    /// Only accounts with the fork grant pay for the read, and only once per
+    /// update rather than once per rendered row.
+    pub(crate) fn refresh_claim_targets(&mut self) {
+        self.btcb2_claim_targets = app::claim_target_checksums(&self.datadir_path);
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {

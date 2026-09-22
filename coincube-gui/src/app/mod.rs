@@ -2406,7 +2406,9 @@ fn settle_rescan_obligation(
 /// not look absent because the API is unreachable. An unreadable or absent
 /// settings file means "no target", which is the same answer a device that has
 /// never claimed gives.
-pub(crate) fn claim_target_exists(datadir: &CoincubeDirectory, descriptor_checksum: &str) -> bool {
+pub(crate) fn claim_target_checksums(
+    datadir: &CoincubeDirectory,
+) -> std::collections::HashSet<String> {
     let fork_dir = datadir.network_directory(crate::chain::ChainId::BitcoinBlake2b);
     settings::Settings::from_file(&fork_dir)
         .map(|s| {
@@ -2416,13 +2418,27 @@ pub(crate) fn claim_target_exists(datadir: &CoincubeDirectory, descriptor_checks
             // wallet would hide the claim entry (nothing to retry with) while
             // Home shows no Cube (nothing to open), stranding the user between
             // two screens that each think the other has it.
-            s.cubes.iter().any(|cube| {
-                cube.vault_wallet_id
-                    .as_ref()
-                    .is_some_and(|id| id.descriptor_checksum == descriptor_checksum)
-            })
+            s.cubes
+                .iter()
+                .filter_map(|cube| {
+                    cube.vault_wallet_id
+                        .as_ref()
+                        .map(|id| id.descriptor_checksum.clone())
+                })
+                .collect()
         })
-        .unwrap_or(false)
+        .unwrap_or_default()
+}
+
+/// Whether a claim target already exists for this descriptor.
+///
+/// One definition, two consumers: the running app asks per Cube
+/// ([`App::claim_source_cube`]) and Home asks for the whole set at refresh
+/// ([`crate::home::Home::claim_availability`]). They were separate reads once
+/// and the two drifted — the App was repaired to key on the Cube while Home
+/// went on counting wallets — so they now share [`claim_target_checksums`].
+pub(crate) fn claim_target_exists(datadir: &CoincubeDirectory, descriptor_checksum: &str) -> bool {
+    claim_target_checksums(datadir).contains(descriptor_checksum)
 }
 
 impl App {
