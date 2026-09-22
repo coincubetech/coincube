@@ -180,7 +180,7 @@ pub enum ImportExportType {
     ExportPsbt(String),
     ExportXpub(String),
     ExportEncryptedDescriptor(Box<CoincubeDescriptor>),
-    ExportProcessBackup(CoincubeDirectory, Network, Arc<Config>, Arc<Wallet>),
+    ExportProcessBackup(CoincubeDirectory, Arc<Config>, Arc<Wallet>),
     ImportBackup {
         network_dir: NetworkDirectory,
         wallet: Arc<Wallet>,
@@ -336,10 +336,9 @@ impl Export {
                 export_encrypted_descriptor(&sender, path, *descr).await
             }
             ImportExportType::ExportXpub(xpub_str) => export_string(&sender, path, xpub_str).await,
-            ImportExportType::ExportProcessBackup(datadir, network, config, wallet) => {
+            ImportExportType::ExportProcessBackup(datadir, config, wallet) => {
                 app_backup_export(
                     datadir,
-                    network,
                     config,
                     wallet,
                     daemon.clone().expect("cannot fail"),
@@ -1097,6 +1096,13 @@ pub async fn import_backup(
     daemon: Option<Arc<dyn Daemon + Sync + Send>>,
 ) -> Result<(), Error> {
     let daemon = daemon.ok_or(Error::DaemonMissing)?;
+    if network_dir.path().file_name() != Some(std::ffi::OsStr::new(wallet.chain.dir_name()))
+        || !backup::daemon_matches_chain(daemon.as_ref(), wallet.chain)
+    {
+        return Err(Error::BackupImport(
+            "Backup target chain does not match this wallet".into(),
+        ));
+    }
 
     // TODO: drop after support for restore to liana-connect
     if matches!(daemon.backend(), DaemonBackend::RemoteBackend) {
@@ -1119,6 +1125,12 @@ pub async fn import_backup(
             return Err(Error::BackupImport(format!("{:?}", e)));
         }
     };
+
+    if !backup.matches_chain(wallet.chain) {
+        return Err(Error::BackupImport(
+            "Backup chain does not match this wallet".into(),
+        ));
+    }
 
     // get backend info
     let info = match daemon.get_info().await {
@@ -1443,6 +1455,13 @@ pub async fn from_backup(sender: &UnboundedSender<Progress>, path: PathBuf) -> R
         }
     };
 
+    let chain = backup.chain_identity().map_err(Error::Backup)?;
+    if chain.is_blake2b() {
+        return Err(Error::BackupImport(
+            "Restore this Bitcoin Blake2b backup from the matching wallet's settings; generic wallet creation is unavailable.".into(),
+        ));
+    }
+
     let network = if backup.network == Network::Bitcoin {
         Some(backup.network)
     } else {
@@ -1525,6 +1544,14 @@ pub async fn import_backup_at_launch(
     // TODO: drop after support for restore to liana-connect
     if matches!(daemon.backend(), DaemonBackend::RemoteBackend) {
         return Err(RestoreBackupError::LianaConnectNotSupported);
+    }
+
+    if wallet.chain.is_blake2b()
+        || cache.chain() != wallet.chain
+        || !backup.matches_chain(wallet.chain)
+        || !backup::daemon_matches_chain(daemon.as_ref(), wallet.chain)
+    {
+        return Err(RestoreBackupError::Network);
     }
 
     // get backend info
@@ -1655,26 +1682,24 @@ pub async fn get_path(filename: String, write: bool) -> Option<PathBuf> {
 
 pub async fn app_backup(
     datadir: CoincubeDirectory,
-    network: Network,
     config: Arc<Config>,
     wallet: Arc<Wallet>,
     daemon: Arc<dyn Daemon + Sync + Send>,
     sender: &UnboundedSender<Progress>,
 ) -> Result<String, backup::Error> {
-    let backup = Backup::from_app(datadir, network, config, wallet, daemon, sender).await?;
+    let backup = Backup::from_app(datadir, config, wallet, daemon, sender).await?;
     serde_json::to_string_pretty(&backup).map_err(|_| backup::Error::Json)
 }
 
 pub async fn app_backup_export(
     datadir: CoincubeDirectory,
-    network: Network,
     config: Arc<Config>,
     wallet: Arc<Wallet>,
     daemon: Arc<dyn Daemon + Sync + Send>,
     path: PathBuf,
     sender: &UnboundedSender<Progress>,
 ) -> Result<(), Error> {
-    let backup = app_backup(datadir.clone(), network, config, wallet, daemon, sender)
+    let backup = app_backup(datadir.clone(), config, wallet, daemon, sender)
         .await
         .map_err(Error::Backup)?;
     export_string(sender, path, backup).await
@@ -1714,6 +1739,58 @@ mod tests {
         ));
         let path = root.join(label);
         (root, path)
+    }
+
+    #[tokio::test]
+    async fn wrong_chain_backup_imports_refuse_without_writes_or_rpc() {
+        let descriptor = crate::app::state::vault::test_support::unified::fixture().descriptor;
+        let wallet =
+            Arc::new(Wallet::new(descriptor.clone()).with_chain(crate::chain::ChainId::Bitcoin));
+        let (root, path) = unique_temp_dir("backup.json");
+        std::fs::create_dir_all(&root).unwrap();
+        let dir = CoincubeDirectory::new(root.clone());
+        let bitcoin_dir = dir.network_directory(crate::chain::ChainId::Bitcoin);
+        std::fs::create_dir_all(bitcoin_dir.path()).unwrap();
+        let sentinel = bitcoin_dir.path().join("settings.json");
+        std::fs::write(&sentinel, b"unchanged Bitcoin settings").unwrap();
+        let daemon: Arc<dyn Daemon + Send + Sync> = Arc::new(
+            crate::daemon::client::Coincubed::new(crate::utils::mock::Daemon::new(vec![]).run()),
+        );
+        let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        // A misrouted destination is refused even before the source file exists.
+        let result = import_backup(
+            &dir.network_directory(crate::chain::ChainId::BitcoinBlake2b),
+            wallet.clone(),
+            &sender,
+            path.clone(),
+            Some(daemon.clone()),
+        )
+        .await;
+        assert!(matches!(result, Err(Error::BackupImport(_))));
+        let mut backup = Backup::from_descriptor(descriptor, Network::Bitcoin);
+        backup.chain = Some(crate::chain::ChainId::BitcoinBlake2b);
+        std::fs::write(&path, serde_json::to_vec(&backup).unwrap()).unwrap();
+        let result = import_backup(&bitcoin_dir, wallet, &sender, path.clone(), Some(daemon)).await;
+        assert!(matches!(result, Err(Error::BackupImport(_))));
+        // The generic installer must not erase the fork identity either.
+        assert!(matches!(
+            from_backup(&sender, path.clone()).await,
+            Err(Error::BackupImport(_))
+        ));
+        // Legacy Bitcoin-family backups still enter the generic installer.
+        backup.chain = None;
+        backup.network = Network::Testnet4;
+        std::fs::write(&path, serde_json::to_vec(&backup).unwrap()).unwrap();
+        assert!(from_backup(&sender, path).await.is_ok());
+        assert_eq!(
+            std::fs::read(sentinel).unwrap(),
+            b"unchanged Bitcoin settings"
+        );
+        assert!(!dir
+            .network_directory(crate::chain::ChainId::BitcoinBlake2b)
+            .path()
+            .exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

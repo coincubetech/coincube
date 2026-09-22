@@ -1,5 +1,4 @@
-//! PIN-setup step for the full Recovery Kit restore flow
-//! (`UserFlow::RestoreFromRecoveryKit`).
+//! PIN-setup step for full Recovery Kit restore and fresh BTCB2 Cube creation.
 //!
 //! # Why this step exists
 //!
@@ -21,12 +20,9 @@
 //!
 //! # Scope note
 //!
-//! This step only runs in `RestoreFromRecoveryKit`. The
-//! `RestoreVaultFromRecoveryKit` flow (W15) restores a descriptor
-//! into an existing Cube whose mnemonic + PIN are already on disk, so
-//! re-prompting there would be wrong. The `skip()` hook checks for
-//! `ctx.recovered_signer.is_some()` — if there's no new seed to
-//! persist, we skip ahead.
+//! This step runs when a recovered seed or fresh fork Cube needs a new PIN.
+//! `RestoreVaultFromRecoveryKit` restores only a descriptor into an existing
+//! Cube and skips this prompt, preserving its existing unlock credentials.
 
 use iced::Task;
 
@@ -78,11 +74,9 @@ impl RestorePinSetupStep {
 
 impl Step for RestorePinSetupStep {
     fn skip(&self, ctx: &Context) -> bool {
-        // Only run when we actually have a freshly-restored mnemonic
-        // to persist. If `recovered_signer` is absent, this is either
-        // W15 (descriptor-only restore into an existing Cube) or a
-        // misconfigured flow — either way, a PIN prompt doesn't belong.
-        ctx.recovered_signer.is_none()
+        // New recovered seeds and fresh fork Cubes need a PIN. Descriptor-only
+        // restores into an existing Cube retain its existing credentials.
+        ctx.recovered_signer.is_none() && !ctx.fresh_fork_cube
     }
 
     fn update(&mut self, _hws: &mut HardwareWallets, message: Message) -> Task<Message> {

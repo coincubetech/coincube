@@ -333,6 +333,17 @@ pub fn close() {
     *lock_session() = None;
 }
 
+/// Revoke one Cube without clearing a newer or unrelated Cube's session.
+pub(crate) fn close_cube(cube_id: &str) {
+    let mut session = lock_session();
+    if session
+        .as_ref()
+        .is_some_and(|session| session.cube_id == cube_id)
+    {
+        *session = None;
+    }
+}
+
 /// Serialises every test that touches the process-global session — this
 /// module's and any other that stores or reads a signer through it — so they
 /// never interleave on the one slot.
@@ -347,6 +358,16 @@ pub(crate) fn test_guard() -> std::sync::MutexGuard<'static, ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scoped_close_preserves_a_different_cube_session() {
+        let _guard = test_guard();
+        open("other-synthetic-cube", Zeroizing::new("2468".into()));
+        close_cube("revoked-synthetic-cube");
+        assert!(pin_for("other-synthetic-cube").is_some());
+        close_cube("other-synthetic-cube");
+        assert!(!is_open());
+    }
 
     // These share one process-global, so they run under a mutex of their own
     // rather than being allowed to interleave.

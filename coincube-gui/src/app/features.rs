@@ -11,7 +11,9 @@
 //! matrix lives in exactly one place. See `plans/PLAN-network-feature-gating.md`.
 
 use crate::app::menu::{MarketplaceSubMenu, Menu, P2PSubMenu};
-use crate::chain::{ChainId, ChainIdExt, RuntimeSupport};
+#[cfg(test)]
+use crate::chain::ChainIdExt;
+use crate::chain::{ChainId, RuntimeSupport};
 
 /// Whether a feature is usable on the current network, plus the human
 /// reason to show when it isn't.
@@ -365,8 +367,8 @@ fn unavailable(feature: &str, net: ChainId) -> Availability {
 /// verdict**. It says Connect will accept BTCB2 keychains, keys and Cubes for
 /// this account; it says nothing about whether *this build* can run one. The
 /// verdict is [`bitcoin_blake2b`], which AND's this with
-/// [`ChainId::runtime_support`] and stays unavailable while the runtime is
-/// dormant — whatever the flag says.
+/// the explicit authenticated Connect capability. It does not grant generic
+/// runtime, managed-node, migration or duress support.
 ///
 /// Fails **closed**, like the Marketplace flags: absent, unloaded or an
 /// unreachable API all read as `false`.
@@ -385,17 +387,18 @@ impl BitcoinBlake2bServerFlag {
 /// Whether a Bitcoin Blake2b Cube may be created, opened or signed with in
 /// this build for this account. The only place that question is answered.
 ///
-/// Both inputs are necessary and neither is sufficient: the runtime must be
-/// [`RuntimeSupport::Supported`] *and* the server flag on. In this build the
-/// runtime is dormant, so the answer is `Unavailable` with the dormant reason
-/// even when the server has already enabled the account — a partly working
-/// Cube is worse than none.
+/// Both the explicit Connect capability and the authenticated server flag
+/// are required. Generic runtime support remains dormant. Installer, PIN and
+/// Loader boundaries recheck the current flag before admission/decryption.
 pub fn bitcoin_blake2b(flag: BitcoinBlake2bServerFlag) -> Availability {
-    bitcoin_blake2b_with(ChainId::BitcoinBlake2b.runtime_support(), flag)
+    bitcoin_blake2b_with(
+        crate::chain::authenticated_connect_support(ChainId::BitcoinBlake2b),
+        flag,
+    )
 }
 
 /// [`bitcoin_blake2b`] with the runtime support injected, so the full matrix
-/// is testable while the build's own answer is fixed at dormant.
+/// is testable independently of the narrower production capability.
 fn bitcoin_blake2b_with(support: RuntimeSupport, flag: BitcoinBlake2bServerFlag) -> Availability {
     match support {
         RuntimeSupport::Dormant { reason } => Availability::Unavailable {
@@ -819,11 +822,11 @@ mod tests {
         const ON: BitcoinBlake2bServerFlag = BitcoinBlake2bServerFlag {
             server_enabled: true,
         };
-        // This build: dormant. The flag being on changes nothing — the answer
-        // is the dormant reason, so the UI never offers a partly working Cube.
+        // Explicit authenticated Connect capability is available; generic
+        // startup remains dormant and cannot consume this account flag.
         let verdict = bitcoin_blake2b(ON);
-        assert!(!verdict.is_available());
-        assert_eq!(verdict.reason(), Some(crate::chain::BTCB2_DORMANT_REASON));
+        assert!(verdict.is_available());
+        assert!(!ChainId::BitcoinBlake2b.runtime_support().is_supported());
         assert!(!bitcoin_blake2b(BitcoinBlake2bServerFlag::OFF).is_available());
         assert!(!bitcoin_blake2b(BitcoinBlake2bServerFlag::default()).is_available());
 

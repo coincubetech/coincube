@@ -176,6 +176,106 @@ impl GUI {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        // Validate session-tagged App callbacks before inspecting global auth
+        // actions. A queued event from an old App cannot affect a reopened one.
+        let message = match message {
+            Message::Pane(
+                pane_id,
+                pane::Message::Tab(tab_id, tab::Message::ForkAsync(generation, message)),
+            ) => {
+                let current = self
+                    .panes
+                    .get(pane_id)
+                    .and_then(|pane| pane.tabs.iter().find(|tab| tab.id == tab_id))
+                    .is_some_and(|tab| tab.accepts_fork_generation(generation));
+                if !current {
+                    return Task::none();
+                }
+                Message::Pane(pane_id, pane::Message::Tab(tab_id, *message))
+            }
+            message => message,
+        };
+        let auth_change = match &message {
+            Message::Pane(
+                _,
+                pane::Message::Tab(
+                    _,
+                    tab::Message::Launch(home::Message::View(home::ViewMessage::ConnectAccount(
+                        msg,
+                    ))),
+                ),
+            )
+            | Message::Pane(
+                _,
+                pane::Message::Tab(
+                    _,
+                    tab::Message::Run(AppMessage::View(crate::app::view::Message::ConnectAccount(
+                        msg,
+                    ))),
+                ),
+            ) => matches!(
+                msg,
+                crate::app::view::ConnectAccountMessage::LogOut
+                    | crate::app::view::ConnectAccountMessage::SetSession(_)
+            ),
+            _ => false,
+        };
+        let auth_from_fork_app = if auth_change {
+            match &message {
+                Message::Pane(pane_id, pane::Message::Tab(tab_id, _)) => self.panes.get(*pane_id)
+                    .and_then(|pane| pane.tabs.iter().find(|tab| tab.id == *tab_id))
+                    .is_some_and(|tab| matches!(&tab.state, tab::State::App(app) if app.cube_settings().network.is_blake2b())),
+                _ => false,
+            }
+        } else {
+            false
+        };
+        let mut auth_tasks = Vec::new();
+        if auth_change {
+            for (&pane_id, pane) in self.panes.iter_mut() {
+                for tab in &mut pane.tabs {
+                    let tab_id = tab.id;
+                    auth_tasks.push(
+                        tab.invalidate_fork_session().map(move |msg| {
+                            Message::Pane(pane_id, pane::Message::Tab(tab_id, msg))
+                        }),
+                    );
+                }
+            }
+        }
+        // The old fork App is gone. Apply its auth operation to the replacement
+        // Home so logout clears saved login state instead of being discarded.
+        let message = if auth_from_fork_app {
+            match message {
+                Message::Pane(
+                    pane_id,
+                    pane::Message::Tab(
+                        tab_id,
+                        tab::Message::Run(AppMessage::View(
+                            crate::app::view::Message::ConnectAccount(msg),
+                        )),
+                    ),
+                ) => Message::Pane(
+                    pane_id,
+                    pane::Message::Tab(
+                        tab_id,
+                        tab::Message::Launch(home::Message::View(
+                            home::ViewMessage::ConnectAccount(msg),
+                        )),
+                    ),
+                ),
+                message => message,
+            }
+        } else {
+            message
+        };
+        // Dispatch may return early (notably for in-App account messages).
+        // Keep those returns inside the helper so invalidation tasks always run.
+        auth_tasks.push(self.update_message(message));
+        Task::batch(auth_tasks)
+    }
+
+    fn update_message(&mut self, message: Message) -> Task<Message> {
         match message {
             // we get this message only once at startup
             Message::Window(id) => {
@@ -800,5 +900,369 @@ mod idle_activity_tests {
         assert!(!is_user_input(&Event::Window(
             iced::window::Event::CloseRequested
         )));
+    }
+}
+
+#[cfg(test)]
+mod fork_auth_dispatch_tests {
+    use super::*;
+    use crate::{
+        installer,
+        services::coincube::{LoginResponse, User},
+    };
+    use coincube_core::chain::ChainId;
+    use iced::futures::StreamExt;
+
+    fn installer_state(root: &CoincubeDirectory) -> tab::State {
+        let (mut installer, _) = installer::Installer::new(
+            root.clone(),
+            bitcoin::Network::Bitcoin,
+            None,
+            installer::UserFlow::CreateWallet,
+            false,
+            None,
+            None,
+            None,
+            false,
+            None,
+        )
+        .expect("a Bitcoin fixture installer");
+        installer.context.bitcoin_config.chain = ChainId::BitcoinBlake2b;
+        tab::State::Installer(installer)
+    }
+
+    #[test]
+    fn app_auth_dispatch_runs_home_startup_for_every_invalidated_installer() {
+        // Like the completion fixture, keep large inline GUI states off the
+        // default libtest stack without changing the runner configuration.
+        let result = std::thread::Builder::new()
+            .name("fork-auth-dispatch".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(check_auth_dispatch())
+            })
+            .unwrap()
+            .join();
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    async fn check_auth_dispatch() {
+        use crate::app::view::ConnectAccountMessage;
+        for auth in [
+            ConnectAccountMessage::LogOut,
+            ConnectAccountMessage::SetSession(LoginResponse {
+                requires_2fa: false,
+                token: "synthetic".into(),
+                refresh_token: "synthetic".into(),
+                user: User {
+                    id: 0,
+                    email: "synthetic@example.invalid".into(),
+                    email_verified: None,
+                },
+            }),
+        ] {
+            let root_path =
+                std::env::temp_dir().join(format!("fork-auth-dispatch-{}", uuid::Uuid::new_v4()));
+            let root = CoincubeDirectory::new(root_path.clone());
+            root.network_directory(ChainId::BitcoinBlake2b)
+                .init()
+                .unwrap();
+            // Inject the App message at the GUI seam. A Home source ignores
+            // Run, isolating dispatch from account storage and network calls.
+            let (home, _) = home::Home::new_for_chain(root.clone(), Some(ChainId::BitcoinBlake2b));
+            let mut pane = pane::Pane::new_with_tab(tab::State::Home(home));
+            pane.tabs.push(tab::Tab::new(2, installer_state(&root)));
+            pane.tabs.push(tab::Tab::new(3, installer_state(&root)));
+            let (mut panes, source) = pane_grid::State::new(pane);
+            panes
+                .split(
+                    pane_grid::Axis::Vertical,
+                    source,
+                    pane::Pane::new_with_tab(installer_state(&root)),
+                )
+                .unwrap();
+            let mut gui = GUI {
+                panes,
+                focus: Some(source),
+                config: Config::new(root.clone(), None),
+                window_id: None,
+                window_init: None,
+                window_config: None,
+                global_cache: GlobalCache::default(),
+                theme_mode: Default::default(),
+            };
+            let task = gui.update(Message::Pane(
+                source,
+                pane::Message::Tab(
+                    1,
+                    tab::Message::Run(AppMessage::View(crate::app::view::Message::ConnectAccount(
+                        auth,
+                    ))),
+                ),
+            ));
+            let mut checked = HashSet::new();
+            if let Some(mut stream) = iced_runtime::task::into_stream(task) {
+                while let Some(action) = stream.next().await {
+                    if let iced_runtime::Action::Output(
+                        message @ Message::Pane(
+                            _,
+                            pane::Message::Tab(
+                                _,
+                                tab::Message::Launch(home::Message::Checked { .. }),
+                            ),
+                        ),
+                    ) = action
+                    {
+                        if let Message::Pane(pane_id, pane::Message::Tab(tab_id, _)) = &message {
+                            checked.insert((*pane_id, *tab_id));
+                        }
+                        // Apply the real directory-probe completion through the
+                        // same GUI seam. Do not execute emitted account Init.
+                        let _ = gui.update(message);
+                    }
+                }
+            }
+            assert_eq!(
+                checked.len(),
+                3,
+                "every invalidated installer must receive its startup result"
+            );
+            for (pane_id, tab_id) in checked {
+                let tab = gui
+                    .panes
+                    .get(pane_id)
+                    .unwrap()
+                    .tabs
+                    .iter()
+                    .find(|tab| tab.id == tab_id)
+                    .unwrap();
+                assert!(matches!(&tab.state, tab::State::Home(home) if home.is_checked_for_test()));
+            }
+            // Ordinary pane dispatch still returns its task through the wrapper.
+            let task = gui.update(Message::Pane(
+                source,
+                pane::Message::View(pane::ViewMessage::OpenConnectSignIn),
+            ));
+            let mut stream = iced_runtime::task::into_stream(task).expect("pane task retained");
+            assert!(matches!(stream.next().await,
+                Some(iced_runtime::Action::Output(Message::Pane(id,
+                    pane::Message::Tab(1, tab::Message::Launch(_))))) if id == source));
+            std::fs::remove_dir_all(root_path).unwrap();
+        }
+    }
+}
+
+#[cfg(test)]
+mod fork_auth_revocation_tests {
+    use super::*;
+    use crate::app::{
+        self,
+        menu::{Menu, VaultSubMenu},
+        view::{self, ConnectAccountMessage},
+        wallet::Wallet,
+    };
+    use crate::chain::ChainId;
+    use std::sync::Arc;
+
+    async fn outputs<T: Send + 'static>(task: Task<T>) -> Vec<T> {
+        use iced::futures::StreamExt;
+        match iced_runtime::task::into_stream(task) {
+            Some(stream) => {
+                stream
+                    .filter_map(|action| async move {
+                        match action {
+                            iced_runtime::Action::Output(msg) => Some(msg),
+                            _ => None,
+                        }
+                    })
+                    .collect()
+                    .await
+            }
+            None => Vec::new(),
+        }
+    }
+
+    #[test]
+    fn gui_auth_replacement_drops_open_signer_and_rejects_pending_signatures() {
+        // A full GUI + Vault App state in a debug frame exceeds libtest's
+        // default thread stack (the same shape as `fork_completion_tests` and
+        // `fork_auth_dispatch_tests`), so run the body on a thread with the
+        // 8 MiB the real main thread has, without changing the runner.
+        let result = std::thread::Builder::new()
+            .name("fork-auth-revocation".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(check_auth_replacement())
+            })
+            .unwrap()
+            .join();
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    #[allow(clippy::await_holding_lock)] // serialize synthetic process-global PIN sessions
+    async fn check_auth_replacement() {
+        let _guard = app::session::test_guard();
+        for replace in [false, true] {
+            let root_path =
+                std::env::temp_dir().join(format!("fork-auth-revoke-{}", uuid::Uuid::new_v4()));
+            let root = CoincubeDirectory::new(root_path.clone());
+            let chain = ChainId::BitcoinBlake2b;
+            let fixture = app::state::vault::test_support::unified::fixture();
+            let wallet = Arc::new(
+                Wallet::new(fixture.descriptor.clone())
+                    .with_chain(chain)
+                    .with_signer(crate::signer::Signer::new(
+                        app::state::vault::test_support::unified::signer(21),
+                    )),
+            );
+            let weak_wallet = Arc::downgrade(&wallet);
+            let weak_signer = Arc::downgrade(wallet.signer.as_ref().unwrap());
+            let mut client = crate::services::coincube::CoincubeClient::new();
+            client.base_url = "http://127.0.0.1:9".into();
+            client.set_token("synthetic-login");
+            // Build the daemon config as a TOML value tree rather than a
+            // formatted document: the unified fixture descriptor carries
+            // hardened-derivation apostrophes (`48'/0'`), which a TOML literal
+            // string cannot contain, and a value tree needs no quoting rule.
+            let table = |entries: &[(&str, String)]| {
+                toml::Value::Table(
+                    entries
+                        .iter()
+                        .map(|(k, v)| (k.to_string(), toml::Value::String(v.clone())))
+                        .collect(),
+                )
+            };
+            let cfg: coincubed::config::Config = toml::Value::Table(
+                vec![
+                    (
+                        "main_descriptor".to_string(),
+                        toml::Value::String(fixture.descriptor.to_string()),
+                    ),
+                    (
+                        "data_directory".to_string(),
+                        toml::Value::String(root_path.display().to_string()),
+                    ),
+                    (
+                        "bitcoin_config".to_string(),
+                        table(&[("network", chain.api_str().to_string())]),
+                    ),
+                    (
+                        "esplora_config".to_string(),
+                        table(&[(
+                            "addr",
+                            format!("{}/api/v1/esplora/bitcoin-blake2b/mainnet", client.base_url),
+                        )]),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            )
+            .try_into()
+            .unwrap();
+            // GUI-only fixture: no running daemon, HTTP, native keystore or SDK.
+            let daemon = Arc::new(crate::daemon::embedded::EmbeddedDaemon::unstarted_for_test(
+                cfg, None,
+            ));
+            let cube = app::settings::CubeSettings::new("fixture".into(), chain);
+            let cube_id = cube.id.clone();
+            let (mut app, startup) = app::App::new_for_chain(
+                app::cache::Cache {
+                    fiat_chain: chain,
+                    network: bitcoin::Network::Bitcoin,
+                    ..Default::default()
+                },
+                wallet,
+                None,
+                client,
+                app::Config::new(false),
+                daemon,
+                root.clone(),
+                cube,
+            )
+            .unwrap();
+            drop(startup);
+            drop(app.update(AppMessage::View(view::Message::Menu(Menu::Vault(
+                VaultSubMenu::PSBTs(None),
+            )))));
+            let tx = crate::daemon::model::SpendTx::new(
+                None,
+                fixture.psbt,
+                Vec::new(),
+                &fixture.descriptor,
+                &bitcoin::secp256k1::Secp256k1::new(),
+                bitcoin::Network::Bitcoin,
+            );
+            drop(app.update(AppMessage::SpendTxs(Ok(vec![tx]))));
+            drop(app.update(AppMessage::View(view::Message::Select(0))));
+            drop(app.update(AppMessage::View(view::Message::Spend(
+                view::SpendTxMessage::Sign,
+            ))));
+            let pane = pane::Pane::new_with_tab(tab::State::App(app));
+            let (panes, pane_id) = pane_grid::State::new(pane);
+            let mut gui = GUI {
+                panes,
+                focus: Some(pane_id),
+                config: Config::new(root, None),
+                window_id: None,
+                window_init: None,
+                window_config: None,
+                global_cache: GlobalCache::default(),
+                theme_mode: Default::default(),
+            };
+            app::session::open(cube_id.clone(), zeroize::Zeroizing::new("2468".into()));
+            let select = || {
+                tab::Message::Run(AppMessage::View(view::Message::Spend(
+                    view::SpendTxMessage::SelectMasterSigner,
+                )))
+            };
+            let tab = &mut gui.panes.get_mut(pane_id).unwrap().tabs[0];
+            let signed = outputs(tab.update(select())).await;
+            assert!(signed.iter().any(|msg| matches!(msg,
+                tab::Message::ForkAsync(_, inner) if matches!(inner.as_ref(), tab::Message::Run(AppMessage::Signed(_, Ok(_)))))));
+            let pending = tab.update(select());
+            let auth = if replace {
+                ConnectAccountMessage::SetSession(serde_json::from_value(serde_json::json!({
+                    "requires_2fa":false,"token":"replacement","refresh_token":"replacement-refresh",
+                    "user":{"id":8,"email":"fixture@example.invalid","email_verified":true}
+                })).unwrap())
+            } else {
+                ConnectAccountMessage::LogOut
+            };
+            // Actual GUI auth broadcaster, with the signing picker still open.
+            drop(gui.update(Message::Pane(
+                pane_id,
+                pane::Message::Tab(
+                    1,
+                    tab::Message::Run(AppMessage::View(view::Message::ConnectAccount(auth))),
+                ),
+            )));
+            assert!(outputs(pending).await.is_empty());
+            let tab = &mut gui.panes.get_mut(pane_id).unwrap().tabs[0];
+            assert!(matches!(tab.state, tab::State::Home(_)));
+            assert!(tab.wallet().is_none());
+            assert!(app::session::pin_for(&cube_id).is_none());
+            assert!(weak_wallet.upgrade().is_none());
+            assert!(weak_signer.upgrade().is_none());
+            assert!(outputs(tab.update(select())).await.is_empty());
+            for stale in signed {
+                assert!(outputs(tab.update(stale)).await.is_empty());
+            }
+            if root_path.exists() {
+                std::fs::remove_dir_all(root_path).unwrap();
+            }
+        }
+        app::session::close();
     }
 }

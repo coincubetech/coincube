@@ -17,11 +17,10 @@
 //! 4. When every `PendingSession` reaches a terminal-success state, the
 //!    modal closes itself and the existing BroadcastModal takes over.
 //!
-//! Encryption note: the design doc envisions per-session PSBT encryption
-//! using each signer's device pubkey. Until `coincube-api` PR 3 lands,
-//! PSBTs are sent plaintext to the API; we still get end-to-end
-//! confidentiality from TLS but the API can technically inspect the
-//! transaction. The Final-step PR description should call this out.
+//! PSBTs and descriptors travel only in request-bound ECIES envelopes.
+//! BTCB2 uses standard PSBT signature records on that wire and validated
+//! internal records for local storage. Import accepts older internal-form
+//! returns too, but rejects conflicting namespaces without a parse fallback.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -75,6 +74,29 @@ use crate::{
 /// superseded, vault-scope mismatch, …). Kept conservative — the realtime
 /// stream is the primary channel; this just guarantees eventual delivery.
 const SESSION_POLL_INTERVAL_SECS: u64 = 4;
+
+// The authenticated wallet chain selects the wire codec, never remote bytes.
+fn signing_wire_psbt(chain: crate::chain::ChainId, psbt: Psbt) -> Result<Vec<u8>, String> {
+    if chain.is_blake2b() {
+        let internal =
+            coincube_core::psbt_unified::UnifiedPsbt::from_psbt(psbt).map_err(|e| e.to_string())?;
+        coincube_core::psbt_unified::export_standard(&internal).map_err(|e| e.to_string())
+    } else {
+        Ok(psbt.serialize())
+    }
+}
+
+fn returned_wire_psbt(chain: crate::chain::ChainId, bytes: &[u8]) -> Result<Psbt, String> {
+    if chain.is_blake2b() {
+        // This strict importer accepts standard 0x21 and legacy internal records;
+        // it rejects duplicate/conflicting namespaces. Never retry a failed parse.
+        coincube_core::psbt_unified::import_standard(bytes)
+            .map(|internal| internal.psbt().clone())
+            .map_err(|e| e.to_string())
+    } else {
+        Psbt::deserialize(bytes).map_err(|e| e.to_string())
+    }
+}
 
 /// Per-Keychain-signer state tracked while the user waits for them to
 /// approve and sign on their phone.
@@ -1048,7 +1070,16 @@ impl KeychainSignModal {
                 return Task::none();
             }
         };
-        let psbt_bytes = psbt_to_sign.serialize();
+        let psbt_bytes = match signing_wire_psbt(self.wallet.chain, psbt_to_sign) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                if let Some(entry) = self.pending.get_mut(index) {
+                    entry.status = PendingSessionStatus::Failed;
+                    entry.error = Some(format!("Could not prepare PSBT for signing: {e}"));
+                }
+                return Task::none();
+            }
+        };
 
         // Seal the PSBT and descriptor to this signer's transport key so Connect
         // relays ciphertext it cannot read. The `request_id` minted here binds
@@ -1632,7 +1663,7 @@ impl KeychainSignModal {
                     return Task::none();
                 }
             };
-            match Psbt::deserialize(&bytes) {
+            match returned_wire_psbt(self.wallet.chain, &bytes) {
                 Ok(psbt) => {
                     if let Err(e) = super::psbt::merge_signatures_pub(
                         self.wallet.chain,
@@ -3535,7 +3566,11 @@ mod tests {
         /// `psbt` sealed to this desktop's transport key under the session's
         /// request id, as a signer submits it (plaintext field empty).
         fn sealed(key: &DeviceTransportKey, psbt: &Psbt) -> SubmittedSignature {
-            let s = seal_to_device(&key.public_key(), REQUEST_ID, &psbt.serialize()).unwrap();
+            sealed_wire(key, &psbt.serialize())
+        }
+
+        fn sealed_wire(key: &DeviceTransportKey, bytes: &[u8]) -> SubmittedSignature {
+            let s = seal_to_device(&key.public_key(), REQUEST_ID, bytes).unwrap();
             SubmittedSignature {
                 device_id: "phone-1".to_string(),
                 signed_psbt: Vec::new(),
@@ -3656,6 +3691,166 @@ mod tests {
                 assert!(modal.pending[0].cancel_requested);
                 assert_refused(&modal, &tx, &before, "cancelled");
             }
+        }
+
+        #[test]
+        fn outgoing_codec_is_standard_for_btcb2_and_byte_preserving_for_bitcoin() {
+            let f = fixture();
+            let signed = unified(&f.psbt, &f.signers[0]);
+            for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
+                let wire = signing_wire_psbt(chain, signed.clone()).unwrap();
+                assert_ne!(wire, signed.serialize());
+                assert!(Psbt::deserialize(&wire).is_err());
+                let imported = returned_wire_psbt(chain, &wire).unwrap();
+                assert_eq!(imported.serialize(), signed.serialize());
+            }
+            let bitcoin = legacy(&f.psbt, &f.signers[0]);
+            assert_eq!(
+                signing_wire_psbt(ChainId::Bitcoin, bitcoin.clone()).unwrap(),
+                bitcoin.serialize()
+            );
+            assert_eq!(
+                returned_wire_psbt(ChainId::Bitcoin, &bitcoin.serialize())
+                    .unwrap()
+                    .serialize(),
+                bitcoin.serialize()
+            );
+            let wire = signing_wire_psbt(ChainId::BitcoinBlake2b, signed).unwrap();
+            assert!(returned_wire_psbt(ChainId::Bitcoin, &wire).is_err());
+        }
+
+        #[tokio::test]
+        async fn standard_returns_refuse_invalid_conflicting_and_wrong_chain_inputs_atomically() {
+            let f = fixture();
+            let key = Arc::new(test_transport_key());
+            let valid = unified(&f.psbt, &f.signers[0]);
+            let valid_wire = signing_wire_psbt(ChainId::BitcoinBlake2b, valid.clone()).unwrap();
+            for case in [
+                "invalid-signature",
+                "conflict",
+                "ambiguous-namespace",
+                "wrong-chain",
+                "trailing-bytes",
+            ] {
+                let local = if case == "conflict" {
+                    valid.clone()
+                } else {
+                    f.psbt.clone()
+                };
+                let mut modal = modal_on(&f, ChainId::BitcoinBlake2b, &local, &key);
+                let mut tx = spend_tx(&f, &local);
+                let before = tx.psbt.serialize();
+                let (wire, needle) = match case {
+                    "invalid-signature" | "conflict" => {
+                        let signer = if case == "conflict" {
+                            &f.signers[0]
+                        } else {
+                            &f.signers[1]
+                        };
+                        let mut invalid = sparse(&f.psbt);
+                        invalid.inputs[0].proprietary = unified(&other_transaction(&f), signer)
+                            .inputs[0]
+                            .proprietary
+                            .clone();
+                        (
+                            signing_wire_psbt(ChainId::BitcoinBlake2b, invalid).unwrap(),
+                            if case == "conflict" {
+                                "conflicting signature"
+                            } else {
+                                "cryptographically invalid"
+                            },
+                        )
+                    }
+                    "ambiguous-namespace" => {
+                        let mut ambiguous = legacy(&f.psbt, &f.signers[0]);
+                        ambiguous.inputs[0].proprietary = valid.inputs[0].proprietary.clone();
+                        // Deliberately bypass the strict exporter to model hostile bytes.
+                        assert!(
+                            signing_wire_psbt(ChainId::BitcoinBlake2b, ambiguous.clone()).is_err()
+                        );
+                        (ambiguous.serialize(), "Malformed signed PSBT")
+                    }
+                    "trailing-bytes" => {
+                        let mut malformed = valid_wire.clone();
+                        malformed.push(0);
+                        (malformed, "Malformed signed PSBT")
+                    }
+                    _ => (valid_wire.clone(), "cancelled"),
+                };
+                let mut response = fetched(
+                    ChainId::BitcoinBlake2b,
+                    vec![sealed_wire(&key, &valid_wire), sealed_wire(&key, &wire)],
+                )
+                .unwrap();
+                if case == "wrong-chain" {
+                    response.session.as_mut().unwrap().network = "mainnet".into();
+                }
+                let task = modal.on_session_fetched(
+                    refusing_daemon(),
+                    &mut tx,
+                    SESSION_ID.into(),
+                    Ok(response),
+                    false,
+                );
+                assert_refused(&modal, &tx, &before, needle);
+                // Wrong-chain cancellation is deliberately queued; no merge or save.
+                if case != "wrong-chain" {
+                    assert!(drive(task).await.is_empty(), "{}", case);
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn standard_unified_encrypted_return_imports_and_persists_internal_records() {
+            let f = fixture();
+            let key = Arc::new(test_transport_key());
+            let signed = unified(&f.psbt, &f.signers[0]);
+            let wire = coincube_core::psbt_unified::export_standard(
+                &UnifiedPsbt::from_psbt(signed.clone()).unwrap(),
+            )
+            .unwrap();
+            assert!(Psbt::deserialize(&wire).is_err());
+            let mut expected = f.psbt.clone();
+            crate::app::state::vault::psbt::merge_signatures_pub(
+                ChainId::BitcoinBlake2b,
+                &mut expected,
+                &signed,
+            )
+            .unwrap();
+            let mut modal = modal_on(&f, ChainId::BitcoinBlake2b, &f.psbt, &key);
+            let mut tx = spend_tx(&f, &f.psbt);
+            let daemon: Arc<dyn Daemon + Sync + Send> =
+                Arc::new(crate::daemon::client::Coincubed::new(
+                    MockDaemon::new(vec![(
+                        Some(json!({"method":"updatespend","params":vec![expected.to_string()]})),
+                        Ok(json!({})),
+                    )])
+                    .run(),
+                ));
+            let task = modal.on_session_fetched(
+                daemon,
+                &mut tx,
+                SESSION_ID.into(),
+                fetched(ChainId::BitcoinBlake2b, vec![sealed_wire(&key, &wire)]),
+                false,
+            );
+            assert!(
+                modal.pending[0].signed_psbt_merged,
+                "{:?}",
+                modal.pending[0].error
+            );
+            assert_eq!(tx.psbt.serialize(), expected.serialize());
+            assert_eq!(unified_records(&tx.psbt), 1);
+            verify_all_signatures(
+                &UnifiedPsbt::from_psbt(tx.psbt.clone()).unwrap(),
+                &secp256k1::Secp256k1::verification_only(),
+            )
+            .unwrap();
+            let messages = drive(task).await;
+            assert!(messages.iter().any(|m| matches!(
+                m,
+                Message::KeychainSign(KeychainSignMessage::Persisted { result: Ok(()), .. })
+            )));
         }
 
         #[tokio::test]

@@ -302,6 +302,25 @@ impl From<&Error> for UserError {
                     true,
                 ),
 
+                DaemonError::ConnectAnchor(error) => anchor_startup_error(error),
+                DaemonError::PoisonSubmission(error) => {
+                    if matches!(error, coincubed::poison_broadcast::SubmissionError::Uncertain { .. } | coincubed::poison_broadcast::SubmissionError::AlreadyStarted) {
+                        UserError::new(
+                            "Transaction submission is uncertain",
+                            "The transaction may have been submitted. Check its exact transaction status before taking another action.",
+                            CC_DMN_RPC,
+                            false,
+                        )
+                    } else {
+                        UserError::new(
+                            "Transaction was not submitted",
+                            "The submission context is no longer valid. Review the transaction state before continuing.",
+                            CC_DMN_RPC,
+                            false,
+                        )
+                    }
+                },
+
                 DaemonError::Start(_) => UserError::new(
                     "The wallet engine didn't start",
                     "Restart the app. If it still won't start, check that no other Tenshu instance is running.",
@@ -1067,5 +1086,52 @@ mod tests {
         // The raw detail must not ride along into anything the UI renders.
         assert!(!e.title.contains("internal detail"));
         assert!(!e.guidance.contains("internal detail"));
+    }
+}
+
+fn anchor_startup_error(
+    error: &crate::services::coincube::network_anchor::AnchorStartupError,
+) -> UserError {
+    use crate::services::coincube::network_anchor::{AnchorStartupError as E, AnchorState as S};
+    use coincubed::connect::AdmissionError as A;
+    let (title, guidance, retryable) = match error {
+        E::Http(401 | 403) | E::Admission(A::MissingAuth) => ("Sign in to Connect", "Sign in again to open this Bitcoin Blake2b Cube.", false),
+        E::Http(404) => ("Bitcoin Blake2b is not enabled", "This account or Connect service does not have Bitcoin Blake2b enabled.", false),
+        E::State(S::NotConfigured) => ("Bitcoin Blake2b is not configured", "The Connect operator must configure the Bitcoin Blake2b backend.", false),
+        E::State(S::ConfigurationError) | E::Admission(A::InvalidBackend) => ("Bitcoin Blake2b configuration needs attention", "Check the dedicated Connect backend configuration before trying again.", false),
+        E::State(S::Syncing) => ("Bitcoin Blake2b is syncing", "Wait for the node to finish syncing, then try again.", true),
+        E::State(S::WrongChain) | E::Admission(A::WrongChain | A::HashMismatch) => ("Bitcoin Blake2b chain verification failed", "The configured backend does not match this Cube. Check the backend with the Connect operator.", false),
+        E::State(S::ForkAbsent | S::ForkInactive | S::ForkUnverified | S::RdtsAbsent | S::RdtsUnsupported) => ("Bitcoin Blake2b is not ready", "The Connect operator must verify the fork and deployment configuration before this Cube can open.", false),
+        E::InvalidResponse | E::State(S::Malformed | S::Available) => ("Connect returned invalid chain information", "Try again. If this persists, contact support with the reference below.", true),
+        E::Admission(A::IndexerBehind) => ("Bitcoin Blake2b indexing is catching up", "Wait for indexing to reach the verified node tip, then try again.", true),
+        E::Admission(A::Aborted) => ("Bitcoin Blake2b startup was canceled", "Open the Cube again when you are ready.", true),
+        E::Admission(A::Throttled) | E::Http(429) => ("Connect is busy", "Wait before trying again.", true),
+        E::State(S::InconsistentSnapshot) | E::Admission(A::ChangedDuringOperation) => ("Bitcoin Blake2b chain information changed", "Try again to obtain a fresh verified chain observation.", true),
+        E::Admission(A::Stale) => ("Bitcoin Blake2b chain information is stale", "Check that the device and Connect server clocks are synchronized, then retry for a fresh observation.", true),
+        E::Transport | E::Http(_) | E::State(S::RpcUnavailable) | E::Admission(A::Unavailable) => ("Bitcoin Blake2b is unavailable", "Check your connection and try again when the Connect backend is available.", true),
+    };
+    UserError::new(title, guidance, CC_DMN_START, retryable)
+}
+
+#[cfg(test)]
+mod anchor_error_tests {
+    use super::*;
+    use crate::services::coincube::network_anchor::{AnchorStartupError as E, AnchorState as S};
+    use coincubed::connect::AdmissionError as A;
+
+    #[test]
+    fn anchor_recovery_copy_distinguishes_auth_configuration_lag_and_chain_failure() {
+        let auth = anchor_startup_error(&E::Http(401));
+        let disabled = anchor_startup_error(&E::Http(404));
+        let unconfigured = anchor_startup_error(&E::State(S::NotConfigured));
+        let syncing = anchor_startup_error(&E::State(S::Syncing));
+        let lag = anchor_startup_error(&E::Admission(A::IndexerBehind));
+        let wrong = anchor_startup_error(&E::State(S::WrongChain));
+        assert_ne!(auth.title, disabled.title);
+        assert_ne!(disabled.title, unconfigured.title);
+        assert_ne!(syncing.title, lag.title);
+        assert!(syncing.retryable && lag.retryable);
+        assert!(!auth.retryable && !unconfigured.retryable && !wrong.retryable);
+        assert!(!wrong.guidance.contains("Bitcoin endpoint"));
     }
 }

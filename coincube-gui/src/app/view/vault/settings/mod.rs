@@ -23,7 +23,7 @@ use coincube_ui::{
     component::{badge, button, card, form, separation, text::*},
     icon,
     theme::{self},
-    widget::{Button, Container, Element, ProgressBar, Row, TextInput},
+    widget::{Button, Container, Element, ProgressBar, Row, RowExt, TextInput},
 };
 
 use crate::{
@@ -1078,6 +1078,7 @@ pub fn wallet_settings<'a>(
     provider_keys: &'a HashMap<Fingerprint, ProviderKey>,
     processing: bool,
     updated: bool,
+    hardware_registration_allowed: bool,
 ) -> Element<'a, Message> {
     let header = header("Wallet", SettingsMessage::EditWalletSettings);
     let r = Row::new().spacing(10).align_y(Vertical::Center)
@@ -1144,10 +1145,10 @@ pub fn wallet_settings<'a>(
                         button::secondary(Some(icon::clipboard_icon()), "Copy")
                             .on_press(Message::Clipboard(descriptor.to_string())),
                     )
-                    .push(
+                    .push_maybe(hardware_registration_allowed.then(|| {
                         button::secondary(Some(icon::chip_icon()), "Register on hardware device")
-                            .on_press(Message::Settings(SettingsMessage::RegisterWallet)),
-                    ),
+                            .on_press(Message::Settings(SettingsMessage::RegisterWallet))
+                    })),
             )
             .spacing(10),
     )

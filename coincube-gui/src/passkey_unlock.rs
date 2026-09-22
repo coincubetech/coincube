@@ -515,6 +515,7 @@ mod tests {
                 internal_bitcoind: None,
                 backup: None,
                 wallet_settings: None,
+                connect_client: None,
             },
         )
     }

@@ -27,6 +27,8 @@ use miniscript::{
 };
 
 pub struct DummyBitcoind {
+    pub broadcasted: sync::Mutex<Vec<Transaction>>,
+    pub broadcast_error: Option<String>,
     pub txs: HashMap<Txid, (Transaction, Option<Block>)>,
     /// What `chain_tip` reports. Defaults to the historical fixed value (height 100).
     pub tip: BlockChainTip,
@@ -66,6 +68,8 @@ impl DummyBitcoind {
         )
         .unwrap();
         Self {
+            broadcasted: sync::Mutex::new(Vec::new()),
+            broadcast_error: None,
             txs: HashMap::new(),
             tip: BlockChainTip { hash, height: 100 },
             in_chain: true,
@@ -162,8 +166,12 @@ impl BitcoinInterface for DummyBitcoind {
         self.walks_ancestors
     }
 
-    fn broadcast_tx(&self, _: &bitcoin::Transaction) -> Result<(), String> {
-        todo!()
+    fn broadcast_tx(&self, transaction: &bitcoin::Transaction) -> Result<(), String> {
+        self.broadcasted.lock().unwrap().push(transaction.clone());
+        match &self.broadcast_error {
+            Some(error) => Err(error.clone()),
+            None => Ok(()),
+        }
     }
 
     fn start_rescan(&mut self, _: &descriptors::CoincubeDescriptor, _: u32) -> Result<(), String> {
@@ -217,6 +225,28 @@ pub struct DummyDatabase {
 }
 
 impl DatabaseInterface for DummyDatabase {
+    fn reserve_change(
+        &self,
+        chain: coincube_core::chain::ChainId,
+        descriptor: &coincube_core::descriptors::CoincubeDescriptor,
+        _: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
+    ) -> Result<crate::database::ChangeReservation, crate::database::ReservationError> {
+        let mut state = self.db.write().unwrap();
+        let index = state
+            .change_index
+            .increment()
+            .map_err(|_| crate::database::ReservationError::Exhausted)?;
+        if index.is_hardened() {
+            return Err(crate::database::ReservationError::Exhausted);
+        }
+        state.change_index = index;
+        Ok(crate::database::ChangeReservation {
+            chain,
+            descriptor: descriptor.clone(),
+            index,
+        })
+    }
+
     fn connection(&self) -> Box<dyn DatabaseConnection> {
         Box::new(DummyDatabase {
             db: self.db.clone(),
@@ -317,7 +347,8 @@ impl DatabaseConnection for DummyDatabase {
         index: bip32::ChildNumber,
         _: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
     ) {
-        self.db.write().unwrap().change_index = index;
+        let mut state = self.db.write().unwrap();
+        state.change_index = state.change_index.max(index);
     }
 
     fn coins(

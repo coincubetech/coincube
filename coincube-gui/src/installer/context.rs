@@ -121,6 +121,9 @@ pub struct Context {
     // In case a user entered a mnemonic,
     // we dont want to override the generated signer with it.
     pub recovered_signer: Option<Arc<Signer>>,
+    /// A new fork Cube needs its own PIN-bound master seed, even for a watch-only Vault.
+    pub fresh_fork_cube: bool,
+    pub fresh_fork_seed_backed_up: bool,
     /// How the descriptor being installed was restored, if it was.
     ///
     /// Not derivable from the other fields. A `Full` restore leaves
@@ -389,6 +392,8 @@ impl Context {
             network,
             hw_is_used: false,
             recovered_signer: None,
+            fresh_fork_cube: false,
+            fresh_fork_seed_backed_up: false,
             restore_source: None,
             restored_wallet_birthday: None,
             bitcoind_is_external: true,

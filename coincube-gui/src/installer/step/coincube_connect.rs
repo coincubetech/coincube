@@ -99,10 +99,26 @@ impl Step for CoincubeConnectStep {
     ///     override their in-progress auth.
     ///   * `self.preauthenticated` — only adopt once; avoids re-arming
     ///     the auto-advance if `load_context` runs again.
-    ///   * `client.token().is_some()` — an unauthenticated client is
-    ///     useless here and would just 401 downstream.
+    ///   * Only a client with a token auto-advances; an unauthenticated
+    ///     client still supplies the configured endpoint for the OTP flow.
     fn load_context(&mut self, ctx: &Context) {
         self.required = ctx.bitcoin_config.chain.is_blake2b();
+        // load_context is called when entering this step, not between an OTP
+        // response and apply. Re-entering after auth was undone must not reuse
+        // a pending token or auto-advance from the previous visit.
+        if ctx.connect_jwt.is_none()
+            && ctx
+                .coincube_client
+                .as_ref()
+                .and_then(|client| client.token())
+                .is_none()
+        {
+            self.jwt = None;
+            self.preauthenticated = false;
+            self.otp_sent = false;
+            self.processing = false;
+            self.client.clear_token();
+        }
         if self.required {
             self.skipped = false;
         }
@@ -112,6 +128,11 @@ impl Step for CoincubeConnectStep {
         let Some(client) = &ctx.coincube_client else {
             return;
         };
+        // Retain the configured transport even when this step must perform login.
+        self.client = client.clone();
+        // OTP requests use this transport without an existing account bearer.
+        // Only Context receives an authenticated clone after apply succeeds.
+        self.client.clear_token();
         let Some(token) = client.token() else {
             return;
         };
@@ -119,7 +140,6 @@ impl Step for CoincubeConnectStep {
         // HTTP plumbing the app already configured. Stash the JWT in
         // `Zeroizing` so it's scrubbed on drop — same handling as the
         // in-step OTP path. `apply()` moves it into `ctx.connect_jwt`.
-        self.client = client.clone();
         self.jwt = Some(Zeroizing::new(token.to_string()));
         self.preauthenticated = true;
     }
@@ -154,8 +174,14 @@ impl Step for CoincubeConnectStep {
             return false;
         }
         if self.skipped {
+            self.client.clear_token();
+            self.jwt = None;
+            self.preauthenticated = false;
             ctx.use_coincube_connect = false;
             ctx.connect_jwt = None;
+            if let Some(client) = ctx.coincube_client.as_mut() {
+                client.clear_token();
+            }
             return true;
         }
         // Move the JWT out of the step into `Context`. The step won't
@@ -164,7 +190,13 @@ impl Step for CoincubeConnectStep {
         // keeping a duplicate `Zeroizing<String>` alive on the step.
         if let Some(token) = self.jwt.take() {
             ctx.use_coincube_connect = true;
+            let mut client = self.client.clone();
+            if client.token() != Some(token.as_str()) {
+                client.set_token(token.as_str());
+            }
+            ctx.coincube_client = Some(client);
             ctx.connect_jwt = Some(token);
+            self.preauthenticated = false;
             true
         } else {
             false
@@ -174,6 +206,11 @@ impl Step for CoincubeConnectStep {
     fn revert(&self, ctx: &mut Context) {
         ctx.use_coincube_connect = false;
         ctx.connect_jwt = None;
+        // Keep the selected API transport for a subsequent login, but remove
+        // both the bearer value and reqwest's default Authorization header.
+        if let Some(client) = ctx.coincube_client.as_mut() {
+            client.clear_token();
+        }
     }
 
     fn update(&mut self, _hws: &mut HardwareWallets, message: Message) -> Task<Message> {
@@ -358,6 +395,128 @@ impl Step for CoincubeConnectStep {
 mod chain_auth_tests {
     use super::*;
     use crate::{chain::ChainId, dir::CoincubeDirectory, installer::context::RemoteBackend};
+
+    #[test]
+    fn login_and_retained_sessions_keep_authenticated_client_for_startup() {
+        for retained in [false, true] {
+            let dir = CoincubeDirectory::new(Default::default());
+            let mut ctx = Context::new_for_chain(
+                ChainId::BitcoinBlake2b,
+                dir.clone(),
+                RemoteBackend::None,
+                None,
+                None,
+            );
+            let mut client = CoincubeClient::for_test("http://127.0.0.1:1/custom-connect");
+            if retained {
+                client.set_token("synthetic-session");
+            }
+            ctx.coincube_client = Some(client);
+            let mut step = CoincubeConnectStep::new();
+            step.load_context(&ctx);
+            assert_eq!(step.preauthenticated, retained);
+            if !retained {
+                let mut hws = HardwareWallets::new(dir, ChainId::BitcoinBlake2b.bitcoin_network());
+                let _ = step.update(
+                    &mut hws,
+                    Message::CoincubeConnect(CoincubeConnectMsg::OtpVerified(Ok(Zeroizing::new(
+                        "synthetic-session".into(),
+                    )))),
+                );
+            }
+            assert!(step.apply(&mut ctx));
+            let client = ctx
+                .coincube_client
+                .as_ref()
+                .expect("startup client retained");
+            assert_eq!(client.base_url, "http://127.0.0.1:1/custom-connect");
+            assert_eq!(client.token(), Some("synthetic-session"));
+            assert_eq!(
+                ctx.connect_jwt.as_deref().map(|s| s.as_str()),
+                Some("synthetic-session")
+            );
+        }
+    }
+
+    #[test]
+    fn reversing_or_skipping_auth_clears_context_bearer_and_keeps_endpoint() {
+        for chain in [
+            ChainId::Bitcoin,
+            ChainId::BitcoinBlake2b,
+            ChainId::BitcoinBlake2bTestnet4,
+        ] {
+            let mut ctx = Context::new_for_chain(
+                chain,
+                CoincubeDirectory::new(Default::default()),
+                RemoteBackend::None,
+                None,
+                None,
+            );
+            let mut client = CoincubeClient::for_test("http://127.0.0.1:1/custom-connect");
+            client.set_token("synthetic-revert-token");
+            ctx.coincube_client = Some(client);
+            let mut step = CoincubeConnectStep::new();
+            step.load_context(&ctx);
+            assert!(step.client.token().is_none());
+            assert!(step.apply(&mut ctx));
+            assert!(step.client.token().is_none());
+            assert!(ctx.coincube_client.as_ref().unwrap().token().is_some());
+            step.revert(&mut ctx);
+            assert!(!ctx.use_coincube_connect);
+            assert!(ctx.connect_jwt.is_none());
+            let client = ctx.coincube_client.as_ref().unwrap();
+            assert!(client.token().is_none());
+            assert_eq!(client.base_url, "http://127.0.0.1:1/custom-connect");
+            step.load_context(&ctx);
+            assert!(!step.preauthenticated);
+            assert!(step.jwt.is_none());
+            assert!(step.client.token().is_none());
+            assert_eq!(step.client.base_url, "http://127.0.0.1:1/custom-connect");
+
+            if !chain.is_blake2b() {
+                ctx.coincube_client
+                    .as_mut()
+                    .unwrap()
+                    .set_token("synthetic-skip-token");
+                ctx.connect_jwt = Some(Zeroizing::new("synthetic-skip-token".into()));
+                ctx.use_coincube_connect = true;
+                step.skipped = true;
+                assert!(step.apply(&mut ctx));
+                assert!(!ctx.use_coincube_connect);
+                assert!(ctx.connect_jwt.is_none());
+                assert!(ctx.coincube_client.as_ref().unwrap().token().is_none());
+                assert_eq!(
+                    ctx.coincube_client.as_ref().unwrap().base_url,
+                    "http://127.0.0.1:1/custom-connect"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn reentering_after_revert_drops_pending_token_and_auto_advance() {
+        let mut ctx = Context::new_for_chain(
+            ChainId::BitcoinBlake2b,
+            CoincubeDirectory::new(Default::default()),
+            RemoteBackend::None,
+            None,
+            None,
+        );
+        let mut client = CoincubeClient::for_test("http://127.0.0.1:1/custom-connect");
+        client.set_token("synthetic-pending-token");
+        ctx.coincube_client = Some(client);
+        let mut step = CoincubeConnectStep::new();
+        step.load_context(&ctx);
+        assert!(step.jwt.is_some());
+        assert!(step.preauthenticated);
+        step.revert(&mut ctx);
+        step.load_context(&ctx);
+        assert!(step.jwt.is_none());
+        assert!(!step.preauthenticated);
+        assert!(step.client.token().is_none());
+        assert!(iced_runtime::task::into_stream(step.load()).is_none());
+        assert!(!step.apply(&mut ctx));
+    }
 
     #[test]
     fn fork_connect_cannot_be_skipped_but_bitcoin_can() {

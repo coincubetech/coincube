@@ -7,6 +7,9 @@ use coincube_ui::icon::{arrow_down_up_icon, home_icon, receipt_icon, receive_ico
 /// Settings is omitted for now — the panel currently has no content
 /// worth surfacing in the rail.
 pub fn items(ctx: &NavContext) -> Vec<SubItem> {
+    if ctx.network.is_blake2b() {
+        return Vec::new();
+    }
     let mut items = vec![
         SubItem::new(
             "Overview",
@@ -22,7 +25,7 @@ pub fn items(ctx: &NavContext) -> Vec<SubItem> {
     // Cross-asset swaps go through SideSwap, which is mainnet-only, so the
     // Swap rail item is hidden off-mainnet (same gate as the Overview
     // entry point and the quote engine).
-    if swap_supported(ctx.network) {
+    if swap_supported(ctx.network.bitcoin_network()) {
         items.push(SubItem::new(
             "Swap",
             arrow_down_up_icon,

@@ -254,6 +254,7 @@ pub struct Installer {
     steps: Vec<Box<dyn Step>>,
     hws: HardwareWallets,
     signer: Arc<Mutex<Signer>>,
+    fork_install_task: Option<iced::task::Handle>,
 
     /// Context is data passed through each step.
     pub context: Context,
@@ -305,6 +306,11 @@ impl Installer {
         Task::none()
     }
 
+    /// Public identifier of the generated Cube master signer.
+    pub fn master_signer_fingerprint(&self) -> bitcoin::bip32::Fingerprint {
+        self.signer.lock().unwrap().fingerprint()
+    }
+
     /// Chain-aware entry point. Reject dormant chains before generating a
     /// signer or constructing any backend; an encoding twin is never a fallback.
     #[allow(clippy::too_many_arguments)]
@@ -320,9 +326,15 @@ impl Installer {
         developer_mode: bool,
         coincube_client: Option<crate::services::coincube::CoincubeClient>,
     ) -> Result<(Installer, Task<Message>), Error> {
-        use crate::chain::ChainIdExt;
-        if let crate::chain::RuntimeSupport::Dormant { reason } = chain.runtime_support() {
+        if let crate::chain::RuntimeSupport::Dormant { reason } =
+            crate::chain::authenticated_connect_support(chain)
+        {
             return Err(Error::Unexpected(reason.to_string()));
+        }
+        if chain.is_blake2b() && coincube_client.as_ref().and_then(|c| c.token()).is_none() {
+            return Err(Error::Unexpected(
+                "Connect authentication is required for Bitcoin Blake2b".into(),
+            ));
         }
         if cube_settings
             .as_ref()
@@ -356,6 +368,10 @@ impl Installer {
         ))
     }
 
+    /// Bitcoin-family compatibility wrapper over [`Self::try_new_for_chain`].
+    /// It goes through the same gate, so a Cube on another chain — which a
+    /// `bitcoin::Network` cannot name — is refused rather than built as a
+    /// Bitcoin installer carrying a fork Cube.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         destination_path: CoincubeDirectory,
@@ -368,8 +384,8 @@ impl Installer {
         spark_backend: Option<std::sync::Arc<crate::app::wallets::SparkBackend>>,
         developer_mode: bool,
         coincube_client: Option<crate::services::coincube::CoincubeClient>,
-    ) -> (Installer, Task<Message>) {
-        Self::build_for_chain(
+    ) -> Result<(Installer, Task<Message>), Error> {
+        Self::try_new_for_chain(
             destination_path,
             network.into(),
             remote_backend,
@@ -452,6 +468,13 @@ impl Installer {
             cube_settings.as_ref(),
             coincube_client,
         );
+        if chain.is_blake2b()
+            && cube_settings.is_none()
+            && matches!(user_flow, UserFlow::CreateWallet)
+        {
+            context.fresh_fork_cube = true;
+            context.cube_id = Some(uuid::Uuid::new_v4().to_string());
+        }
         // Inherit the open Cube's PIN when the installer was launched from
         // inside one (`SetupVault` from the app or the loader). Every seed the
         // installer writes is encrypted, so without this there is nothing to
@@ -501,6 +524,7 @@ impl Installer {
             network,
             datadir: destination_path.clone(),
             current: 0,
+            fork_install_task: None,
             hws: HardwareWallets::new(destination_path.clone(), network),
             launched_from_app,
             cube_settings,
@@ -516,6 +540,7 @@ impl Installer {
                 let network_str = chain.api_str().to_string();
                 match user_flow {
                     UserFlow::CreateWallet if chain.is_blake2b() => vec![
+                        RestorePinSetupStep::new().into(),
                         ChooseDescriptorTemplate::default().into(),
                         DescriptorTemplateDescription::default().into(),
                         DefineDescriptor::new(network, signer.clone()).into(),
@@ -811,6 +836,16 @@ impl Installer {
             Message::Next => self.next(),
             Message::Previous => self.previous(),
             Message::Install => {
+                if self.context.bitcoin_config.chain.is_blake2b()
+                    && (self.context.descriptor.is_none() || !self.context.remote_backend.is_none())
+                {
+                    return Task::done(Message::Installed(
+                        None,
+                        Err(Error::Unexpected(
+                            "Bitcoin Blake2b requires a local Connect-backed Vault".into(),
+                        )),
+                    ));
+                }
                 let _cmd = self
                     .steps
                     .get_mut(self.current)
@@ -820,7 +855,7 @@ impl Installer {
                     let wallet_id = WalletId::generate(descriptor);
                     let context = self.context.clone();
                     let signer = self.signer.clone();
-                    match &self.context.remote_backend {
+                    let task = match &self.context.remote_backend {
                         RemoteBackend::WithoutWallet(backend) => Task::perform(
                             with_wallet_id(
                                 wallet_id.clone(),
@@ -843,6 +878,13 @@ impl Installer {
                             |(id, res)| Message::Installed(Some(id), res.map(Some)),
                         ),
                         RemoteBackend::Undefined => unreachable!("Must be defined at this point"),
+                    };
+                    if self.context.bitcoin_config.chain.is_blake2b() {
+                        let (task, handle) = task.abortable();
+                        self.fork_install_task = Some(handle.abort_on_drop());
+                        task
+                    } else {
+                        task
                     }
                 } else {
                     let ctx = self.context.clone();
@@ -964,6 +1006,48 @@ pub fn daemon_check(cfg: coincubed::config::Config) -> Result<(), Error> {
     }
 }
 
+async fn daemon_check_authenticated(
+    cfg: coincubed::config::Config,
+    client: Option<crate::services::coincube::CoincubeClient>,
+) -> Result<(), Error> {
+    if !cfg.bitcoin_config.chain.is_blake2b() {
+        return daemon_check(cfg);
+    }
+    use crate::daemon::Daemon;
+    let client = client.ok_or_else(|| {
+        Error::Unexpected("Connect authentication is required for Bitcoin Blake2b".into())
+    })?;
+    crate::chain::require_connect_feature(cfg.bitcoin_config.chain, &client)
+        .await
+        .map_err(Error::Unexpected)?;
+    let daemon = crate::daemon::embedded::EmbeddedDaemon::start_authenticated(cfg, client)
+        .await
+        .map_err(|e| Error::Unexpected(format!("Failed to admit Connect backend: {}", e)))?;
+    daemon
+        .stop()
+        .await
+        .map_err(|e| Error::Unexpected(format!("Failed to stop Connect validation daemon: {}", e)))
+}
+
+fn prepare_installer_data_directory(
+    chain: crate::chain::ChainId,
+    data_directory: &coincubed::datadir::DataDirectory,
+) -> Result<std::path::PathBuf, Error> {
+    if chain.is_blake2b() {
+        // Do not create/canonicalize a wallet before authenticated admission.
+        // absolute() is lexical and does not require the target to exist.
+        return std::path::absolute(data_directory.path())
+            .map_err(|e| Error::Unexpected(format!("Invalid datadir path: {}", e)));
+    }
+    data_directory
+        .init()
+        .map_err(|e| Error::CannotCreateDatadir(e.to_string()))?;
+    data_directory
+        .path()
+        .canonicalize()
+        .map_err(|e| Error::Unexpected(format!("Failed to canonicalize datadir path: {}", e)))
+}
+
 async fn with_wallet_id<F>(wallet_id: WalletId, res: F) -> (WalletId, Result<WalletSettings, Error>)
 where
     F: std::future::Future<Output = Result<WalletSettings, Error>>,
@@ -1006,6 +1090,11 @@ fn seed_password(ctx: &Context) -> Result<zeroize::Zeroizing<String>, Error> {
 fn seed_device_secret(
     ctx: &Context,
 ) -> Result<Option<coincube_core::seed_crypt::DeviceSecret>, Error> {
+    // Fresh fork Cubes use PIN encryption plus the mandatory mnemonic backup.
+    // Device sealing/migration is not enabled by this Connect-only capability.
+    if ctx.fresh_fork_cube {
+        return Ok(None);
+    }
     let cube_id = ctx.seed_cube_id();
     if cube_id.is_empty() {
         return Ok(None);
@@ -1083,12 +1172,35 @@ fn pending_rescan(ctx: &Context) -> Option<crate::app::settings::PendingRescan> 
     )
 }
 
+fn validate_fork_creation_material(ctx: &Context) -> Result<(), Error> {
+    if ctx.fresh_fork_cube
+        && (!ctx.bitcoin_config.chain.is_blake2b()
+            || ctx.seed_cube_id().is_empty()
+            || ctx.restore_pin.as_ref().is_none_or(|p| p.is_empty())
+            || !ctx.fresh_fork_seed_backed_up)
+    {
+        return Err(Error::Unexpected("Choose a Cube PIN and confirm the master seed backup before creating this Bitcoin Blake2b Vault".into()));
+    }
+    Ok(())
+}
+
 fn require_installable_chain(ctx: &Context) -> Result<(), Error> {
-    use crate::chain::ChainIdExt;
+    validate_fork_creation_material(ctx)?;
     if let crate::chain::RuntimeSupport::Dormant { reason } =
-        ctx.bitcoin_config.chain.runtime_support()
+        crate::chain::authenticated_connect_support(ctx.bitcoin_config.chain)
     {
         return Err(Error::Unexpected(reason.to_string()));
+    }
+    if ctx.bitcoin_config.chain.is_blake2b()
+        && ctx
+            .coincube_client
+            .as_ref()
+            .and_then(|c| c.token())
+            .is_none()
+    {
+        return Err(Error::Unexpected(
+            "Connect authentication is required for Bitcoin Blake2b".into(),
+        ));
     }
     ctx.bitcoin_config
         .check_chain_encoding()
@@ -1110,9 +1222,11 @@ pub async fn install_local_wallet(
     let network_datadir = ctx
         .coincube_directory
         .network_directory(ctx.bitcoin_config.chain);
-    network_datadir
-        .init()
-        .map_err(|e| Error::Unexpected(format!("Failed to create datadir path: {}", e)))?;
+    if !ctx.bitcoin_config.chain.is_blake2b() {
+        network_datadir
+            .init()
+            .map_err(|e| Error::Unexpected(format!("Failed to create datadir path: {}", e)))?;
+    }
 
     let descriptor = ctx
         .descriptor
@@ -1146,12 +1260,27 @@ pub async fn install_local_wallet(
 
     let cfg: coincubed::config::Config = extract_daemon_config(&ctx, &wallet_settings)?;
 
-    daemon_check(cfg.clone())?;
+    daemon_check_authenticated(cfg.clone(), ctx.coincube_client.clone()).await?;
+    if ctx.bitcoin_config.chain.is_blake2b() {
+        network_datadir
+            .init()
+            .map_err(|e| Error::Unexpected(format!("Failed to create datadir path: {}", e)))?;
+    }
 
     info!("daemon checked");
+    if ctx.fresh_fork_cube {
+        persist_cube_master_seed(
+            &signer.lock().unwrap(),
+            &ctx.coincube_directory,
+            ctx.bitcoin_config.chain,
+            seed_password(&ctx)?.as_str(),
+            ctx.seed_cube_id(),
+            seed_device_secret(&ctx)?.as_ref(),
+        )?;
+    }
 
     // Step needed because of ValueAfterTable error in the toml serialize implementation.
-    let daemon_config_toml = toml::to_string_pretty(&cfg)
+    let daemon_config_toml = toml::to_string_pretty(&cfg.for_persistence())
         .map_err(|e| Error::Unexpected(format!("Failed to serialize daemon config: {}", e)))?;
 
     // create coincubed configuration file
@@ -1488,19 +1617,63 @@ pub async fn import_remote_wallet(
     Ok(wallet_settings)
 }
 
-/// Persist a seed-only (Vault-less) install: store the recovered signer's
-/// mnemonic encrypted under the restore PIN, then make sure `gui.toml` exists
-/// so the `CubeSaved` finish line has a config to load.
-///
-/// On a retried restore the encrypted seed file may already be on disk
-/// (`AlreadyExists`). That's only acceptable when the existing file decrypts to
-/// the *same* master-signer fingerprint under the *same* PIN — verified via
-/// `from_datadir_by_fingerprint`. A mismatch means the on-disk seed conflicts
-/// with the new recovery credentials, so we surface an error rather than
-/// silently continuing against a seed the new PIN can't open.
-///
-/// Extracted from the inline installer closure so the seed-conflict arm is unit
-/// testable.
+/// A failed wallet install preserves the Cube's seed-only file. Retry only
+/// when that exact file decrypts to the same complete mnemonic; a fingerprint
+/// match (or a descriptor-specific sibling) is not proof of seed identity.
+fn persist_cube_master_seed(
+    signer: &Signer,
+    coincube_directory: &CoincubeDirectory,
+    chain: crate::chain::ChainId,
+    password: &str,
+    cube_id: &str,
+    device_secret: Option<&coincube_core::seed_crypt::DeviceSecret>,
+) -> Result<(), Error> {
+    match signer.store_encrypted_seed_only_for_chain(
+        coincube_directory,
+        chain,
+        password,
+        cube_id,
+        device_secret,
+    ) {
+        Ok(()) => Ok(()),
+        Err(coincube_core::signer::SignerError::MnemonicStorage(ref error))
+            if error.kind() == std::io::ErrorKind::AlreadyExists =>
+        {
+            let filename = coincube_core::signer::MnemonicFileName {
+                fingerprint: signer.fingerprint(),
+                descriptor_info: None,
+            };
+            let path = coincube_core::signer::MasterSigner::mnemonics_folder_for_chain(
+                coincube_directory.path(),
+                chain,
+            )
+            .join(filename.to_string());
+            let bytes = std::fs::read(path).map_err(|e| {
+                Error::Unexpected(format!("Failed to read existing Cube master seed: {e}"))
+            })?;
+            let plaintext =
+                coincube_core::seed_crypt::decrypt_with(&bytes, password, cube_id, device_secret)
+                    .map_err(|e| {
+                    Error::Unexpected(format!(
+                        "Existing seed file conflicted with unlock credentials: {e}"
+                    ))
+                })?;
+            let expected = zeroize::Zeroizing::new(signer.mnemonic().join(" "));
+            if plaintext.as_slice() != expected.as_bytes() {
+                return Err(Error::Unexpected(
+                    "Existing Cube master seed does not match this installation".into(),
+                ));
+            }
+            Ok(())
+        }
+        Err(error) => Err(Error::Unexpected(format!(
+            "Failed to store Cube master seed: {error}"
+        ))),
+    }
+}
+
+/// Persist a seed-only (Vault-less) restore and ensure its GUI config exists.
+/// Retries use the same exact-file credential and mnemonic check as fresh Cubes.
 fn persist_seed_only_install(
     recovered: &Signer,
     coincube_directory: &CoincubeDirectory,
@@ -1510,40 +1683,14 @@ fn persist_seed_only_install(
     device_secret: Option<&coincube_core::seed_crypt::DeviceSecret>,
 ) -> Result<(), Error> {
     let chain = chain.into();
-    if let Err(e) = recovered.store_encrypted_seed_only_for_chain(
+    persist_cube_master_seed(
+        recovered,
         coincube_directory,
         chain,
         password,
         cube_id,
         device_secret,
-    ) {
-        match e {
-            coincube_core::signer::SignerError::MnemonicStorage(ref io_err)
-                if io_err.kind() == std::io::ErrorKind::AlreadyExists =>
-            {
-                if let Err(verify_err) =
-                    coincube_core::signer::MasterSigner::from_datadir_by_fingerprint_for_chain(
-                        coincube_directory.path(),
-                        chain,
-                        recovered.fingerprint(),
-                        Some(password),
-                        cube_id,
-                    )
-                {
-                    return Err(Error::Unexpected(format!(
-                        "Existing seed file conflicted with new recovery PIN or was invalid: {}",
-                        verify_err
-                    )));
-                }
-                log::info!(
-                    "Seed already exists on disk from a previous attempt and matches. Continuing."
-                );
-            }
-            _ => {
-                return Err(Error::Unexpected(format!("Failed to store seed: {}", e)));
-            }
-        }
-    }
+    )?;
 
     // Write `gui.toml` ourselves — the three wallet installers create it, but
     // the seed-only path never did, so a fresh (non-post-wipe) datadir reached
@@ -1600,15 +1747,8 @@ pub fn extract_daemon_config(ctx: &Context, settings: &WalletSettings) -> Result
         .coincube_directory
         .network_directory(ctx.bitcoin_config.chain)
         .coincubed_data_directory(&settings.wallet_id());
-    data_directory
-        .init()
-        .map_err(|e| Error::CannotCreateDatadir(e.to_string()))?;
-
-    let data_directory = data_directory
-        .path()
-        .to_path_buf()
-        .canonicalize()
-        .map_err(|e| Error::Unexpected(format!("Failed to canonicalize datadir path: {}", e)))?;
+    let data_directory =
+        prepare_installer_data_directory(ctx.bitcoin_config.chain, &data_directory)?;
     let bitcoin_backend = if let Some(BitcoinBackend::Bitcoind(BitcoindConfig {
         rpc_auth: BitcoindRpcAuth::CookieFile(cookie_path),
         addr,
@@ -1748,11 +1888,59 @@ mod pending_rescan_tests {
             alias: None,
             accounts,
             network: bitcoin::Network::Bitcoin,
+            chain: None,
             date: None,
             proprietary: serde_json::Map::new(),
             version: 0,
         });
         ctx
+    }
+
+    /// A `bitcoin::Network` cannot name a fork, so the Bitcoin constructor
+    /// paired with a Bitcoin Blake2b Cube used to build a Bitcoin installer
+    /// carrying that Cube. It now goes through the gate and refuses.
+    #[test]
+    fn the_bitcoin_constructor_refuses_a_cube_on_another_chain() {
+        let root = std::env::temp_dir().join(format!("cube-chain-{}", uuid::Uuid::new_v4()));
+        let build = |cube: crate::app::settings::CubeSettings| {
+            Installer::new(
+                CoincubeDirectory::new(root.clone()),
+                bitcoin::Network::Bitcoin,
+                None,
+                UserFlow::CreateWallet,
+                true,
+                Some(cube),
+                None,
+                None,
+                false,
+                None,
+            )
+        };
+        let error = build(crate::app::settings::CubeSettings::new(
+            "fork".into(),
+            crate::chain::ChainId::BitcoinBlake2b,
+        ))
+        .err()
+        .expect("a Bitcoin installer must not be built for a Bitcoin Blake2b Cube");
+        assert!(
+            error
+                .to_string()
+                .contains("Installer chain differs from the Cube chain"),
+            "{}",
+            error
+        );
+        // The same constructor still serves a Bitcoin Cube, so the refusal is
+        // the chain check and not the constructor refusing every Cube.
+        let (installer, _) = build(crate::app::settings::CubeSettings::new(
+            "bitcoin".into(),
+            crate::chain::ChainId::Bitcoin,
+        ))
+        .expect("a Bitcoin Cube builds a Bitcoin installer");
+        assert_eq!(
+            installer.context.bitcoin_config.chain,
+            crate::chain::ChainId::Bitcoin
+        );
+        assert!(!root.exists(), "construction must not touch a datadir");
     }
 
     #[test]
@@ -1781,6 +1969,13 @@ mod pending_rescan_tests {
             assert!(installer.context.internal_bitcoind.is_none());
             assert!(installer.breez_client.is_none());
             assert!(installer.spark_backend.is_none());
+            assert!(installer.context.fresh_fork_cube);
+            assert!(installer.context.cube_id.is_some());
+            assert!(!installer.context.fresh_fork_seed_backed_up);
+            assert!(
+                !installer.steps[0].skip(&installer.context),
+                "fresh Cube must choose a PIN"
+            );
             assert!(!root.exists(), "construction must not touch a datadir");
             // The public entry still refuses this same chain while dormant.
             assert!(Installer::try_new_for_chain(
@@ -1850,6 +2045,64 @@ mod pending_rescan_tests {
             assert!(require_installable_chain(&context).is_err());
             assert!(!temp.exists());
         }
+    }
+
+    #[test]
+    fn fresh_fork_creation_refuses_missing_pin_identity_or_backup() {
+        let mut ctx = Context::new_for_chain(
+            crate::chain::ChainId::BitcoinBlake2b,
+            CoincubeDirectory::new(Default::default()),
+            RemoteBackend::None,
+            None,
+            None,
+        );
+        ctx.fresh_fork_cube = true;
+        assert!(validate_fork_creation_material(&ctx).is_err());
+        ctx.cube_id = Some("synthetic-new-cube".into());
+        ctx.restore_pin = Some(zeroize::Zeroizing::new("synthetic-pin".into()));
+        assert!(validate_fork_creation_material(&ctx).is_err());
+        ctx.fresh_fork_seed_backed_up = true;
+        assert!(validate_fork_creation_material(&ctx).is_ok());
+    }
+
+    #[test]
+    fn fork_path_preparation_does_not_create_wallet_directory() {
+        for chain in [
+            crate::chain::ChainId::Bitcoin,
+            crate::chain::ChainId::BitcoinBlake2b,
+            crate::chain::ChainId::BitcoinBlake2bTestnet4,
+        ] {
+            let path =
+                std::env::temp_dir().join(format!("installer-admission-{}", uuid::Uuid::new_v4()));
+            let dir = coincubed::datadir::DataDirectory::new(path.clone());
+            assert!(prepare_installer_data_directory(chain, &dir)
+                .unwrap()
+                .is_absolute());
+            assert_eq!(path.exists(), !chain.is_blake2b());
+            if path.exists() {
+                std::fs::remove_dir(path).unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn fork_missing_startup_client_refuses_before_wallet_writes() {
+        let path = std::env::temp_dir().join(format!("installer-no-auth-{}", uuid::Uuid::new_v4()));
+        let cfg = coincubed::config::Config::new(
+            coincubed::config::BitcoinConfig::new(
+                crate::chain::ChainId::BitcoinBlake2bTestnet4,
+                std::time::Duration::from_secs(30),
+            ),
+            None,
+            log::LevelFilter::Info,
+            staged_with_descriptor(None).descriptor.unwrap(),
+            coincubed::datadir::DataDirectory::new(path.clone()),
+        );
+        let err = daemon_check_authenticated(cfg, None).await.unwrap_err();
+        assert!(
+            matches!(err, Error::Unexpected(reason) if reason.contains("authentication is required"))
+        );
+        assert!(!path.exists());
     }
 
     fn staged_with_descriptor(
@@ -2241,7 +2494,7 @@ mod seed_only_install_tests {
 
         // First attempt stores the seed; a retry (same signer + PIN, e.g. after
         // a mid-flow kill) hits `AlreadyExists` and must succeed because the
-        // on-disk seed verifies against the recovery fingerprint.
+        // exact on-disk seed verifies against the complete recovered mnemonic.
         persist_seed_only_install(&signer, &dir, Network::Bitcoin, "246810", "cube-a", None)
             .unwrap();
         persist_seed_only_install(&signer, &dir, Network::Bitcoin, "246810", "cube-a", None)
@@ -2254,7 +2507,7 @@ mod seed_only_install_tests {
         let signer = Signer::generate(Network::Bitcoin).unwrap();
 
         // Seed stored under one PIN; retry under a *different* PIN hits
-        // `AlreadyExists`, the fingerprint verification fails to decrypt, and we
+        // `AlreadyExists`, the exact-file verification fails to decrypt, and we
         // surface an actionable conflict error rather than continuing.
         persist_seed_only_install(&signer, &dir, Network::Bitcoin, "246810", "cube-a", None)
             .unwrap();
@@ -2357,3 +2610,133 @@ mod chain_provider_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod fresh_fork_seed_retry_tests {
+    use super::*;
+    use coincube_core::{
+        chain::ChainId,
+        seed_crypt,
+        signer::{MasterSigner, MnemonicFileName},
+    };
+
+    fn seed_path(root: &CoincubeDirectory, signer: &Signer) -> std::path::PathBuf {
+        MasterSigner::mnemonics_folder_for_chain(root.path(), ChainId::BitcoinBlake2b).join(
+            MnemonicFileName {
+                fingerprint: signer.fingerprint(),
+                descriptor_info: None,
+            }
+            .to_string(),
+        )
+    }
+
+    #[test]
+    fn fresh_master_seed_retry_preserves_exact_file_with_and_without_device_secret() {
+        for secret in [None, Some(zeroize::Zeroizing::new([42; 32]))] {
+            let root = CoincubeDirectory::new(
+                std::env::temp_dir().join(format!("fork-seed-retry-{}", uuid::Uuid::new_v4())),
+            );
+            let signer = Signer::generate(Network::Bitcoin).unwrap();
+            let cube = uuid::Uuid::new_v4().to_string();
+            // This is the same helper the fresh-fork install calls before the
+            // fallible daemon/config writes. A retry must retain its bytes.
+            persist_cube_master_seed(
+                &signer,
+                &root,
+                ChainId::BitcoinBlake2b,
+                "2468",
+                &cube,
+                secret.as_ref(),
+            )
+            .unwrap();
+            let before = std::fs::read(seed_path(&root, &signer)).unwrap();
+            persist_cube_master_seed(
+                &signer,
+                &root,
+                ChainId::BitcoinBlake2b,
+                "2468",
+                &cube,
+                secret.as_ref(),
+            )
+            .unwrap();
+            assert_eq!(std::fs::read(seed_path(&root, &signer)).unwrap(), before);
+            assert!(!root.network_directory(ChainId::Bitcoin).path().exists());
+            std::fs::remove_dir_all(root.path()).unwrap();
+        }
+    }
+
+    #[test]
+    fn fresh_master_seed_retry_refuses_conflicts_without_changing_bytes() {
+        for case in ["pin", "cube", "seed", "invalid", "device"] {
+            let root = CoincubeDirectory::new(
+                std::env::temp_dir().join(format!("fork-seed-conflict-{}", uuid::Uuid::new_v4())),
+            );
+            let signer = Signer::generate(Network::Bitcoin).unwrap();
+            let other = Signer::generate(Network::Bitcoin).unwrap();
+            let cube = uuid::Uuid::new_v4().to_string();
+            let secret = zeroize::Zeroizing::new([42; 32]);
+            let supplied_secret = zeroize::Zeroizing::new([43; 32]);
+            let mnemonic = zeroize::Zeroizing::new(
+                if case == "seed" {
+                    other.mnemonic()
+                } else {
+                    signer.mnemonic()
+                }
+                .join(" "),
+            );
+            let bytes = if case == "invalid" {
+                b"invalid synthetic seed".to_vec()
+            } else {
+                seed_crypt::encrypt(
+                    mnemonic.as_bytes(),
+                    "2468",
+                    &cube,
+                    (case == "device").then_some(&secret),
+                )
+                .unwrap()
+            };
+            let path = seed_path(&root, &signer);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, &bytes).unwrap();
+            // A matching descriptor-linked sibling must not authorize reusing
+            // a conflicting master file with the same fingerprint in its name.
+            signer
+                .store_encrypted_for_chain(
+                    &root,
+                    ChainId::BitcoinBlake2b,
+                    "synthetic-vault",
+                    1,
+                    "2468",
+                    &cube,
+                    None,
+                )
+                .unwrap();
+            assert!(
+                persist_cube_master_seed(
+                    &signer,
+                    &root,
+                    ChainId::BitcoinBlake2b,
+                    if case == "pin" { "9999" } else { "2468" },
+                    if case == "cube" {
+                        "other-synthetic-cube"
+                    } else {
+                        &cube
+                    },
+                    (case == "device").then_some(&supplied_secret)
+                )
+                .is_err(),
+                "conflict {}",
+                case
+            );
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                bytes,
+                "conflict {case} must preserve bytes"
+            );
+            std::fs::remove_dir_all(root.path()).unwrap();
+        }
+    }
+}
+
+#[cfg(test)]
+mod connect_activation_tests;

@@ -4209,7 +4209,7 @@ impl State for P2PPanel {
                                     &view::nav::NavContext {
                                         has_vault,
                                         has_p2p: cache.has_p2p,
-                                        network: cache.network,
+                                        network: cache.chain(),
                                         p2p_test_coordinator: cache.p2p_test_coordinator,
                                         marketplace_flags: cache.marketplace_flags,
                                         liquid_gate: cache.liquid_gate,
@@ -4374,7 +4374,7 @@ impl State for P2PPanel {
                                         &view::nav::NavContext {
                                             has_vault,
                                             has_p2p: cache.has_p2p,
-                                            network: cache.network,
+                                            network: cache.chain(),
                                             p2p_test_coordinator: cache.p2p_test_coordinator,
                                             marketplace_flags: cache.marketplace_flags,
                                             liquid_gate: cache.liquid_gate,
@@ -4435,7 +4435,7 @@ impl State for P2PPanel {
                                         &view::nav::NavContext {
                                             has_vault,
                                             has_p2p: cache.has_p2p,
-                                            network: cache.network,
+                                            network: cache.chain(),
                                             p2p_test_coordinator: cache.p2p_test_coordinator,
                                             marketplace_flags: cache.marketplace_flags,
                                             liquid_gate: cache.liquid_gate,
@@ -4568,7 +4568,7 @@ impl State for P2PPanel {
                                         &view::nav::NavContext {
                                             has_vault,
                                             has_p2p: cache.has_p2p,
-                                            network: cache.network,
+                                            network: cache.chain(),
                                             p2p_test_coordinator: cache.p2p_test_coordinator,
                                             marketplace_flags: cache.marketplace_flags,
                                             liquid_gate: cache.liquid_gate,
@@ -4626,7 +4626,7 @@ impl State for P2PPanel {
                                         &view::nav::NavContext {
                                             has_vault,
                                             has_p2p: cache.has_p2p,
-                                            network: cache.network,
+                                            network: cache.chain(),
                                             p2p_test_coordinator: cache.p2p_test_coordinator,
                                             marketplace_flags: cache.marketplace_flags,
                                             liquid_gate: cache.liquid_gate,
