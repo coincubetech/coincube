@@ -2103,6 +2103,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "coincube-keychain-ffi"
+version = "0.1.0"
+dependencies = [
+ "coincube-core",
+ "serde_json",
+]
+
+[[package]]
 name = "coincube-spark-protocol"
 version = "0.1.0"
 dependencies = [
