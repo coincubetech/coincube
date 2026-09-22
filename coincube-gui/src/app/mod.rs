@@ -735,7 +735,13 @@ pub struct App {
     cube_settings: settings::CubeSettings,
     config: Arc<Config>,
     datadir: CoincubeDirectory,
-    panels: Panels,
+    /// Boxed so that `App` — and therefore `gui::tab::State`, whose size is
+    /// set by this variant — stays small. `Panels` holds every panel's state
+    /// inline (~30 KiB); carried by value it made each `self.state = ...`
+    /// transition in `Tab::update_inner` materialise a ~32 KiB temporary, and
+    /// unoptimised builds give every temporary its own stack slot, so the
+    /// function's frame alone approached the 2 MiB test-thread stack.
+    panels: Box<Panels>,
     errors: Vec<(usize, std::time::Instant, log::Level, String)>,
     current_error_id: usize,
     /// True while a check_bitcoind_sync_progress probe is in flight; prevents
@@ -2641,7 +2647,7 @@ impl App {
             .as_ref()
             .is_some_and(|p| p.has_test_coordinator());
         let mut app = Self {
-            panels,
+            panels: Box::new(panels),
             cache: cache_with_vault,
             daemon: Some(daemon),
             wallet: Some(wallet),
@@ -2791,7 +2797,7 @@ impl App {
 
         Ok((
             Self {
-                panels,
+                panels: Box::new(panels),
                 cache,
                 daemon: None,
                 wallet: None,
