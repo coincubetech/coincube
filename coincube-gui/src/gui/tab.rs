@@ -1577,6 +1577,26 @@ impl Tab {
                                     .find(|w| w.descriptor_checksum == id.descriptor_checksum)
                             })
                         });
+                        // A remote-backed source has no local daemon to start:
+                        // its ordinary unlock goes to `CoincubeLiteLogin`, and
+                        // handing it to the Loader would try to bring up a
+                        // daemon for a Vault that lives on the backend. Cancel
+                        // has to restore the backend the source actually uses,
+                        // not the one most sources use.
+                        if let Some(settings) = wallet_settings
+                            .clone()
+                            .filter(|w| w.remote_backend_auth.is_some())
+                        {
+                            let (login, command) = login::CoincubeLiteLogin::new(
+                                i.datadir.clone(),
+                                source.settings.network.bitcoin_network(),
+                                settings,
+                                source.breez_client.clone(),
+                                source.spark_backend.clone(),
+                            );
+                            self.state = State::Login(login);
+                            return command.map(Message::Login);
+                        }
                         let (loader, command) = Loader::new(
                             i.datadir.clone(),
                             cfg,
@@ -3409,7 +3429,7 @@ fn marked_kit_backed_up(
     settings
 }
 
-async fn find_or_create_cube<C: Into<crate::chain::ChainId>>(
+pub(crate) async fn find_or_create_cube<C: Into<crate::chain::ChainId>>(
     network_dir: &NetworkDirectory,
     // Both halves of the Vault's identity, or `None` when the installer exited
     // without one. Deliberately not a bare `WalletId`: every attach site below

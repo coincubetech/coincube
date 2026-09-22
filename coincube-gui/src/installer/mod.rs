@@ -1437,7 +1437,8 @@ pub async fn install_local_wallet(
             seed_password(&ctx)?.as_str(),
             ctx.seed_cube_id(),
             seed_device_secret(&ctx)?.as_ref(),
-        )?;
+        )
+        .map_err(claim_seed_error)?;
     } else if ctx.fresh_fork_cube {
         persist_cube_master_seed(
             &signer.lock().unwrap(),
@@ -1785,6 +1786,38 @@ pub async fn import_remote_wallet(
     }
 
     Ok(wallet_settings)
+}
+
+/// The claim path's version of a seed-storage failure.
+///
+/// The storage layer's message ("Existing Cube master seed does not match this
+/// installation") is accurate and tells a user nothing. On the claim path there
+/// is exactly one way to reach it: another Cube on this device already holds a
+/// Bitcoin Blake2b target for this same master seed — one recovery phrase
+/// restored into two Cubes, each claiming. Refusing is right (the alternative
+/// is one Cube's seed answering for another); leaving the user without the
+/// reason is not.
+pub(crate) fn claim_seed_error(error: Error) -> Error {
+    // Two distinct storage messages reach here, and the first one is the one a
+    // test written from the code alone would miss: the existing file is opened
+    // with *this* attempt's credentials before its contents are compared, so a
+    // file sealed under another Cube's id fails at the decrypt
+    // ("Existing seed file conflicted with unlock credentials") rather than at
+    // the mnemonic comparison ("does not match this installation"). Both mean
+    // the same thing on this path.
+    match error {
+        Error::Unexpected(message)
+            if message.contains("does not match")
+                || message.contains("conflicted with unlock credentials") =>
+        {
+            Error::Unexpected(
+                "Another Cube on this device already has a Bitcoin Blake2b claim for this \
+                 recovery phrase. Open that Cube to use it, or claim from the Cube that made it."
+                    .to_string(),
+            )
+        }
+        other => other,
+    }
 }
 
 /// A failed wallet install preserves the Cube's seed-only file. Retry only

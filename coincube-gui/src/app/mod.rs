@@ -2410,9 +2410,17 @@ pub(crate) fn claim_target_exists(datadir: &CoincubeDirectory, descriptor_checks
     let fork_dir = datadir.network_directory(crate::chain::ChainId::BitcoinBlake2b);
     settings::Settings::from_file(&fork_dir)
         .map(|s| {
-            s.wallets
-                .iter()
-                .any(|w| w.descriptor_checksum == descriptor_checksum)
+            // A **Cube**, not a wallet record. The install writes the wallet
+            // before the exit seam writes the Cube, so an interruption between
+            // the two leaves a checksum with nothing to open: keying on the
+            // wallet would hide the claim entry (nothing to retry with) while
+            // Home shows no Cube (nothing to open), stranding the user between
+            // two screens that each think the other has it.
+            s.cubes.iter().any(|cube| {
+                cube.vault_wallet_id
+                    .as_ref()
+                    .is_some_and(|id| id.descriptor_checksum == descriptor_checksum)
+            })
         })
         .unwrap_or(false)
 }

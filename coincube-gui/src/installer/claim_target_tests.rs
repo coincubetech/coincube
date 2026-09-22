@@ -458,12 +458,40 @@ fn an_existing_target_is_found_by_descriptor_on_the_fork_chain_only() {
         "the Bitcoin Cube's own Vault is the source, not a target"
     );
 
-    // The same descriptor on the fork chain is one.
+    // A wallet record on the fork chain with **no Cube** is an interrupted
+    // install, not a claim: `install_local_wallet` writes the wallet before the
+    // exit seam writes the Cube. Treating it as claimed would hide the retry
+    // while Home shows no Cube to open — the user stranded between two screens
+    // that each think the other has it.
     std::fs::write(
         fork_dir
             .path()
             .join(crate::app::settings::SETTINGS_FILE_NAME),
         serde_json::to_vec(&settings).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        !crate::app::claim_target_exists(&root, &checksum),
+        "a stranded wallet record must leave the claim retryable"
+    );
+
+    // The Cube that can actually be opened is what counts.
+    let mut target = crate::app::settings::CubeSettings::new_with_raw_id(
+        uuid::Uuid::new_v4().to_string(),
+        "Savings · BTCB2".to_string(),
+        ChainId::BitcoinBlake2b,
+    );
+    target.vault_wallet_id = Some(WalletId::new(checksum.clone(), Some(1)));
+    let with_cube = crate::app::settings::Settings {
+        wallets: vec![wallet],
+        cubes: vec![target],
+        ..Default::default()
+    };
+    std::fs::write(
+        fork_dir
+            .path()
+            .join(crate::app::settings::SETTINGS_FILE_NAME),
+        serde_json::to_vec(&with_cube).unwrap(),
     )
     .unwrap();
     assert!(crate::app::claim_target_exists(&root, &checksum));
@@ -1119,6 +1147,33 @@ fn two_claims_meeting_on_one_seed_path_reuse_or_refuse_but_never_adopt() {
         refused.is_err(),
         "a second Cube must not adopt or overwrite the first target's seed"
     );
+    // And the claim path replaces the generic storage message with one that
+    // says what happened and what to do.
+    // The production mapper the claim install calls, not a copy of it. Both
+    // storage messages must map: which one a collision produces depends on
+    // whether the existing file decrypts at all under this attempt's
+    // credentials, and only one of the two is obvious from reading the code.
+    let raw = refused.unwrap_err().to_string();
+    let claim_facing = claim_seed_error(crate::installer::Error::Unexpected(raw.clone()));
+    assert!(
+        claim_facing
+            .to_string()
+            .contains("already has a Bitcoin Blake2b claim"),
+        "unmapped storage message reached the user: {}",
+        raw
+    );
+    for message in [
+        "Existing seed file conflicted with unlock credentials: Invalid password",
+        "Existing Cube master seed does not match this installation",
+    ] {
+        assert!(
+            claim_seed_error(crate::installer::Error::Unexpected(message.to_string()))
+                .to_string()
+                .contains("already has a Bitcoin Blake2b claim"),
+            "{}",
+            message
+        );
+    }
     // And the first target's file is untouched.
     let path = coincube_core::signer::MasterSigner::mnemonics_folder_for_chain(
         root.path(),
@@ -1140,6 +1195,207 @@ fn two_claims_meeting_on_one_seed_path_reuse_or_refuse_but_never_adopt() {
         )
         .is_ok(),
         "the first target still opens its own seed"
+    );
+    let _ = std::fs::remove_dir_all(root.path());
+}
+
+/// **The write boundary itself**, not a proxy for it. `install_local_wallet`
+/// persists the wallet; the exit seam persists the Cube. An interruption
+/// between the two used to leave the claim entry hidden (a wallet checksum is
+/// present, so "already claimed") while fork Home had no Cube to open — locked
+/// out in both directions, and the derived identity could not help because
+/// admission refuses before the id is ever consulted.
+#[tokio::test]
+async fn an_install_interrupted_between_the_wallet_and_the_cube_stays_retryable() {
+    let _guard = crate::app::session::test_guard();
+    let (server, esplora) = fork_install_server().await;
+    let (source, _) = source("Savings");
+    let root = temp_root("write-boundary");
+    let backend = BitcoinBackend::Esplora(coincubed::config::EsploraConfig {
+        addr: esplora,
+        token: None,
+        fallback_addr: None,
+        fallback_token: None,
+        secondary_fallback_addr: None,
+        secondary_fallback_token: None,
+    });
+    let build = |src: ClaimSource| {
+        let (mut installer, _) = Installer::try_new_for_chain(
+            root.clone(),
+            ChainId::BitcoinBlake2b,
+            None,
+            UserFlow::ClaimBlake2b {
+                from_cube: Box::new(src),
+            },
+            true,
+            None,
+            None,
+            None,
+            false,
+            Some(authenticated_client(&server)),
+        )
+        .unwrap();
+        installer.context.bitcoin_backend = Some(backend.clone());
+        installer
+    };
+
+    // Stop here: the wallet is written, the Cube is not.
+    let first = build(source.clone());
+    let checksum = first.context.descriptor.as_ref().unwrap();
+    let checksum = WalletId::generate(checksum).descriptor_checksum;
+    let anchor = register_anchor(&server).await;
+    install_local_wallet(
+        first.context.clone(),
+        WalletId::generate(first.context.descriptor.as_ref().unwrap()),
+        first.signer.clone(),
+    )
+    .await
+    .unwrap();
+
+    let fork_settings =
+        crate::app::settings::Settings::from_file(&root.network_directory(ChainId::BitcoinBlake2b))
+            .unwrap();
+    assert!(
+        fork_settings
+            .wallets
+            .iter()
+            .any(|w| w.descriptor_checksum == checksum),
+        "the wallet is on disk — this is the state an interruption leaves"
+    );
+    assert!(
+        fork_settings.cubes.is_empty(),
+        "and no Cube yet: that is the boundary under test"
+    );
+    assert!(
+        !crate::app::claim_target_exists(&root, &checksum),
+        "so the claim must still be offered — a wallet with no Cube is nothing \
+         the user can open"
+    );
+    assert!(
+        crate::app::features::claim_blake2b(crate::app::features::ClaimSourceCube {
+            chain: ChainId::Bitcoin,
+            has_vault: true,
+            server_enabled: true,
+            already_claimed: crate::app::claim_target_exists(&root, &checksum),
+        })
+        .is_available()
+    );
+
+    // Restart and complete: same derived identity, and now a Cube exists.
+    anchor.delete_async().await;
+    let _anchor = register_anchor(&server).await;
+    let second = build(source);
+    let identity = crate::gui::tab::installer_exit_identity(&second).unwrap();
+    let exit_seed = crate::gui::tab::installer_exit_seed(&second).unwrap();
+    let wallet_id = WalletId::generate(second.context.descriptor.as_ref().unwrap());
+    install_local_wallet(
+        second.context.clone(),
+        wallet_id.clone(),
+        second.signer.clone(),
+    )
+    .await
+    .expect("the retry completes");
+    let cube = crate::gui::tab::find_or_create_cube(
+        &root.network_directory(ChainId::BitcoinBlake2b),
+        Some(&crate::app::settings::VaultIdentity {
+            wallet_id,
+            fingerprint: None,
+        }),
+        &Some(second.context.wallet_alias.clone()),
+        ChainId::BitcoinBlake2b,
+        None,
+        Some(identity),
+        Some(&exit_seed),
+    )
+    .await
+    .expect("the exit seam mints the Cube");
+
+    assert_eq!(cube.id, second.context.seed_cube_id());
+    assert!(
+        crate::app::claim_target_exists(&root, &checksum),
+        "and only now is the source Cube claimed"
+    );
+    let _ = std::fs::remove_dir_all(root.path());
+}
+
+/// Cancel must restore the backend the source Cube actually uses. A
+/// remote-backed source opens through `CoincubeLiteLogin`, never a local
+/// daemon, so returning it through the Loader would try to bring up a daemon
+/// for a Vault that lives on the backend.
+#[tokio::test]
+async fn cancelling_a_claim_from_a_remote_backed_source_returns_to_its_own_backend() {
+    let _guard = crate::app::session::test_guard();
+    let server = MockServer::start_async().await;
+    let (mut source, _) = source("Connect Cube");
+    let root = temp_root("cancel-remote");
+    let source_dir = root.network_directory(ChainId::Bitcoin);
+    std::fs::create_dir_all(source_dir.path()).unwrap();
+    std::fs::write(
+        source_dir
+            .path()
+            .join(crate::app::config::DEFAULT_FILE_NAME),
+        b"",
+    )
+    .unwrap();
+
+    // A Vault served by the remote backend, recorded the way the source Cube's
+    // own settings record it.
+    let wallet_id = WalletId::generate(&source.descriptor);
+    source.cube.vault_wallet_id = Some(wallet_id.clone());
+    let mut wallet = crate::app::settings::WalletSettings {
+        name: "Vault".to_string(),
+        alias: None,
+        descriptor_checksum: wallet_id.descriptor_checksum.clone(),
+        pinned_at: wallet_id.timestamp,
+        keys: Vec::new(),
+        hardware_wallets: Vec::new(),
+        remote_backend_auth: None,
+        start_internal_bitcoind: None,
+        pending_rescan: None,
+    };
+    wallet.remote_backend_auth = Some(crate::app::settings::AuthConfig::new(
+        "user@example.test".to_string(),
+        "remote-wallet-id".to_string(),
+    ));
+    std::fs::write(
+        source_dir
+            .path()
+            .join(crate::app::settings::SETTINGS_FILE_NAME),
+        serde_json::to_vec(&crate::app::settings::Settings {
+            wallets: vec![wallet],
+            cubes: vec![source.cube.clone()],
+            ..Default::default()
+        })
+        .unwrap(),
+    )
+    .unwrap();
+
+    let (installer, _) = Installer::try_new_for_chain(
+        root.clone(),
+        ChainId::BitcoinBlake2b,
+        None,
+        UserFlow::ClaimBlake2b {
+            from_cube: Box::new(source),
+        },
+        true,
+        None,
+        Some(Arc::new(
+            crate::app::breez_liquid::BreezClient::disconnected(Network::Bitcoin),
+        )),
+        None,
+        false,
+        Some(authenticated_client(&server)),
+    )
+    .unwrap();
+
+    let mut tab = crate::gui::tab::Tab::new(0, crate::gui::tab::State::Installer(installer));
+    let _ = tab.update(crate::gui::tab::Message::Install(Message::BackToApp(
+        Network::Bitcoin,
+    )));
+    assert!(
+        matches!(tab.state, crate::gui::tab::State::Login(_)),
+        "a Connect-backed source must come back through its own login, not a \
+         local daemon startup"
     );
     let _ = std::fs::remove_dir_all(root.path());
 }
