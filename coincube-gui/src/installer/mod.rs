@@ -266,6 +266,12 @@ pub enum UserFlow {
 }
 
 /// What a claim needs to put the user back in the Cube they started from.
+///
+/// Deliberately **not** `Clone`: it owns `Arc`s to the source Cube's live SDK
+/// clients, and the last release of the Spark one shuts its bridge subprocess
+/// down. One owner at a time means the cancel path has to `take()` it — a
+/// second copy left behind in the installer is a compile error rather than a
+/// bridge that outlives the flow.
 pub struct SourceCube {
     pub settings: crate::app::settings::CubeSettings,
     pub breez_client: Option<std::sync::Arc<crate::app::breez_liquid::BreezClient>>,
@@ -585,7 +591,10 @@ impl Installer {
         // there is nothing for the user to enter that the source Cube does not
         // already answer.
         if let UserFlow::ClaimBlake2b { from_cube } = &user_flow {
-            context.cube_id = Some(uuid::Uuid::new_v4().to_string());
+            // Derived from the source Cube, not minted: an install that fails
+            // after the seed write leaves a file bound to this id, and a retry
+            // with a fresh one could never open it. See `claim::target_cube_id`.
+            context.cube_id = Some(claim::target_cube_id(from_cube));
             // Named here as well as minted: the installer's exit seam mints the
             // Cube from `(cube_id, cube_name)` and falls back to a *fresh*
             // UUID when either is absent — which would leave the target's seed
@@ -1781,7 +1790,7 @@ pub async fn import_remote_wallet(
 /// A failed wallet install preserves the Cube's seed-only file. Retry only
 /// when that exact file decrypts to the same complete mnemonic; a fingerprint
 /// match (or a descriptor-specific sibling) is not proof of seed identity.
-fn persist_cube_master_seed(
+pub(crate) fn persist_cube_master_seed(
     signer: &Signer,
     coincube_directory: &CoincubeDirectory,
     chain: crate::chain::ChainId,

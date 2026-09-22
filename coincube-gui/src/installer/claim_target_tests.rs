@@ -36,6 +36,64 @@ fn authenticated_client(server: &MockServer) -> CoincubeClient {
     client
 }
 
+/// The Connect surface `install_local_wallet` actually calls on the fork
+/// chain: the account flag, the chain anchor, and the Esplora endpoints the
+/// daemon check probes. Mirrors `connect_activation_tests`, which is the
+/// fixture that proves the fork install path end to end.
+async fn fork_install_server() -> (MockServer, String) {
+    let server = MockServer::start_async().await;
+    server
+        .mock_async(|when, then| {
+            when.method(GET).path("/api/v1/connect/features");
+            then.status(200).json_body(serde_json::json!(
+                {"success":true,"data":{"plans":[],"bitcoinBlake2bEnabled":true}}
+            ));
+        })
+        .await;
+    let prefix = "/api/v1/esplora/bitcoin-blake2b/mainnet";
+    for (path, body) in [
+        (
+            format!("{prefix}/block-height/0"),
+            "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f".to_string(),
+        ),
+        (format!("{prefix}/block-height/973029"), "11".repeat(32)),
+        (format!("{prefix}/blocks/tip/hash"), "11".repeat(32)),
+        (
+            format!("{prefix}/block/{}/status", "11".repeat(32)),
+            "{\"in_best_chain\":true,\"height\":973029,\"next_best\":null}".to_string(),
+        ),
+    ] {
+        server
+            .mock_async(|when, then| {
+                when.method(GET).path(path);
+                then.status(200).body(body);
+            })
+            .await;
+    }
+    let base = server.base_url();
+    (server, format!("{base}{prefix}"))
+}
+
+/// The anchor mock, registered with a timestamp read **now**.
+///
+/// `then.json_body(...)` is static — the body is built at registration and
+/// replayed verbatim — while production refuses an anchor older than
+/// `MAX_ANCHOR_AGE` (90 s, `coincubed/src/connect.rs:31`). A test that
+/// registers once and then spends an Argon2id unlock and two installs against
+/// it passes on an idle machine and fails under load, which is a time bomb
+/// rather than a test. So each install re-registers immediately before it runs.
+async fn register_anchor(server: &MockServer) -> httpmock::Mock<'_> {
+    server.mock_async(|when, then| {
+        when.method(GET).path("/api/v1/connect/networks/bitcoin-blake2b/anchor");
+        then.status(200).json_body(serde_json::json!({"success":true,"data":{"network":"bitcoin-blake2b","state":"available","anchor":{
+            "tip_hash":"11".repeat(32),"tip_height":973029,"tip_median_time_past":1800000000,
+            "observed_at":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
+            "observation":{"tip_height":973029,"fork":{"height":972000,"active":true},
+                "rdts":{"state":"flagday","flagday":{"height":972000,"expiry_time":1800010000_i64,"active":false}}}
+        }}}));
+    }).await
+}
+
 /// A source Cube with an open session, which is what a claim launches from —
 /// `try_new_for_chain` refuses one without a PIN in this session.
 fn source(name: &str) -> (ClaimSource, Fingerprint) {
@@ -711,5 +769,377 @@ async fn backing_out_of_a_claim_returns_to_the_source_cube_not_to_home() {
             std::mem::discriminant(other)
         ),
     }
+    let _ = std::fs::remove_dir_all(root.path());
+}
+
+/// **The production install, not a rehearsal of it.** Drives
+/// `install_local_wallet` — the function the user's last click calls — and
+/// then opens the seed file it wrote with the credential the exit seam
+/// reports, which is the pair that has to agree for the target to be openable.
+///
+/// This is the test that would have caught P1a. The earlier one asked the
+/// context for a password and then supplied it to the writer itself; this one
+/// never names a credential, so if the installer cannot obtain one the install
+/// fails here exactly as it would for the user.
+#[tokio::test]
+async fn the_real_install_writes_a_target_the_exit_seams_credential_opens() {
+    let _guard = crate::app::session::test_guard();
+    let (server, esplora) = fork_install_server().await;
+    let (source, source_fingerprint) = source("Savings");
+    let root = temp_root("real-install");
+    let root_path = root.path().to_path_buf();
+
+    let (mut installer, _) = Installer::try_new_for_chain(
+        root.clone(),
+        ChainId::BitcoinBlake2b,
+        None,
+        UserFlow::ClaimBlake2b {
+            from_cube: Box::new(source),
+        },
+        true,
+        None,
+        None,
+        None,
+        false,
+        Some(authenticated_client(&server)),
+    )
+    .unwrap();
+    installer.context.bitcoin_backend =
+        Some(BitcoinBackend::Esplora(coincubed::config::EsploraConfig {
+            addr: esplora,
+            token: None,
+            fallback_addr: None,
+            fallback_token: None,
+            secondary_fallback_addr: None,
+            secondary_fallback_token: None,
+        }));
+
+    // Read before the install so the assertions below cannot be written from
+    // its output.
+    let identity = crate::gui::tab::installer_exit_identity(&installer)
+        .expect("the claim target's own identity reaches the exit seam");
+    let exit_seed = crate::gui::tab::installer_exit_seed(&installer)
+        .expect("the exit seam records which master signer the target holds");
+    let wallet_id = WalletId::generate(installer.context.descriptor.as_ref().unwrap());
+
+    let _anchor = register_anchor(&server).await;
+    let settings = install_local_wallet(
+        installer.context.clone(),
+        wallet_id,
+        installer.signer.clone(),
+    )
+    .await
+    .expect("a claim install must complete on the production path");
+
+    // The target is a Cube of the fork chain's own, with the reused descriptor.
+    assert_eq!(
+        settings.descriptor_checksum,
+        WalletId::generate(installer.context.descriptor.as_ref().unwrap()).descriptor_checksum
+    );
+    assert!(root_path.join("bitcoin-blake2b").exists());
+    assert!(
+        !root_path.join("bitcoin").exists(),
+        "a claim must not write into the Bitcoin family's directory"
+    );
+
+    // And the seed it wrote opens with the credential the exit seam hands the
+    // Cube it is about to mint — the two ends of the defect, checked against
+    // each other rather than against a literal.
+    let path = coincube_core::signer::MasterSigner::mnemonics_folder_for_chain(
+        root.path(),
+        ChainId::BitcoinBlake2b,
+    )
+    .join(
+        coincube_core::signer::MnemonicFileName {
+            fingerprint: exit_seed.master_signer_fingerprint,
+            descriptor_info: None,
+        }
+        .to_string(),
+    );
+    let plaintext = coincube_core::seed_crypt::decrypt_with(
+        &std::fs::read(&path).expect("the install wrote the target's master seed"),
+        exit_seed.pin.as_str(),
+        &identity.uuid,
+        None,
+    )
+    .expect("the minted Cube's credential must open the seed the install wrote");
+    assert_eq!(exit_seed.master_signer_fingerprint, source_fingerprint);
+    assert!(
+        !plaintext.is_empty(),
+        "and it decrypts to the source Cube's mnemonic"
+    );
+    let _ = std::fs::remove_dir_all(&root_path);
+}
+
+/// The parked source handle is a new `Arc` owner, created by this repair. Every
+/// exit has to release it: hold it and the Spark bridge outlives the flow,
+/// release it early and cancel loses what it needs to rebuild the source Cube.
+///
+/// Measured rather than argued — the last handle-lifetime claim in this PR was
+/// wrong because nobody traced the owner.
+#[tokio::test]
+async fn every_exit_from_a_claim_releases_the_parked_source_handle() {
+    let _guard = crate::app::session::test_guard();
+    let server = MockServer::start_async().await;
+    let breez = Arc::new(crate::app::breez_liquid::BreezClient::disconnected(
+        Network::Bitcoin,
+    ));
+
+    let build = |source: ClaimSource, root: CoincubeDirectory| {
+        Installer::try_new_for_chain(
+            root,
+            ChainId::BitcoinBlake2b,
+            None,
+            UserFlow::ClaimBlake2b {
+                from_cube: Box::new(source),
+            },
+            true,
+            None,
+            Some(breez.clone()),
+            None,
+            false,
+            Some(authenticated_client(&server)),
+        )
+        .unwrap()
+    };
+
+    // 1. Success / teardown: the installer is replaced by the target's screen,
+    //    so dropping it must return the handle to its single caller-side owner.
+    let (first, _) = source("Savings");
+    let (installer, _) = build(first, temp_root("release-success"));
+    assert_eq!(
+        Arc::strong_count(&breez),
+        2,
+        "parked while the flow is live"
+    );
+    drop(installer);
+    assert_eq!(
+        Arc::strong_count(&breez),
+        1,
+        "a dropped installer must not keep the source Cube's SDK client alive"
+    );
+
+    // 2. Cancel: ownership moves to the Loader that rebuilds the source Cube —
+    //    still exactly one extra owner, and it is the one that needs it.
+    let (second, _) = source("Savings");
+    let root = temp_root("release-cancel");
+    let source_dir = root.network_directory(ChainId::Bitcoin);
+    std::fs::create_dir_all(source_dir.path()).unwrap();
+    std::fs::write(
+        source_dir
+            .path()
+            .join(crate::app::config::DEFAULT_FILE_NAME),
+        b"",
+    )
+    .unwrap();
+    let (installer, _) = build(second, root.clone());
+    let mut tab = crate::gui::tab::Tab::new(0, crate::gui::tab::State::Installer(installer));
+    let _ = tab.update(crate::gui::tab::Message::Install(Message::BackToApp(
+        Network::Bitcoin,
+    )));
+    assert_eq!(
+        Arc::strong_count(&breez),
+        2,
+        "the Loader rebuilding the source Cube owns it now"
+    );
+    drop(tab);
+    assert_eq!(
+        Arc::strong_count(&breez),
+        1,
+        "and closing that screen releases it"
+    );
+    let _ = std::fs::remove_dir_all(root.path());
+}
+
+/// **Failure after the seed write, then a restart.** The requested regression
+/// for the identity-recovery finding.
+///
+/// An install that dies after `persist_cube_master_seed` leaves a seed file on
+/// disk named by fingerprint alone and encrypted bound to that attempt's Cube
+/// id. If the retry minted a fresh id it would find that file, fail to decrypt
+/// it, and refuse — and so would every attempt after it, permanently blocking
+/// claims from that source Cube on that device. Here the first attempt fails
+/// for a reason the user cannot control (the daemon config cannot be written),
+/// and the second — a fresh installer, as a restart would build — completes.
+#[tokio::test]
+async fn a_claim_interrupted_after_the_seed_write_can_be_retried_after_a_restart() {
+    let _guard = crate::app::session::test_guard();
+    let (server, esplora) = fork_install_server().await;
+    let (source, source_fingerprint) = source("Savings");
+    let source_cube_id = source.cube_id().to_string();
+    let root = temp_root("interrupted");
+
+    let backend = BitcoinBackend::Esplora(coincubed::config::EsploraConfig {
+        addr: esplora,
+        token: None,
+        fallback_addr: None,
+        fallback_token: None,
+        secondary_fallback_addr: None,
+        secondary_fallback_token: None,
+    });
+    let build = |src: ClaimSource| {
+        let (mut installer, _) = Installer::try_new_for_chain(
+            root.clone(),
+            ChainId::BitcoinBlake2b,
+            None,
+            UserFlow::ClaimBlake2b {
+                from_cube: Box::new(src),
+            },
+            true,
+            None,
+            None,
+            None,
+            false,
+            Some(authenticated_client(&server)),
+        )
+        .unwrap();
+        installer.context.bitcoin_backend = Some(backend.clone());
+        installer
+    };
+
+    // Attempt 1: make the post-seed daemon-config write fail by occupying its
+    // path with a directory. Nothing about the seed write itself is touched.
+    let first = build(source.clone());
+    let wallet_id = WalletId::generate(first.context.descriptor.as_ref().unwrap());
+    let daemon_toml = root
+        .network_directory(ChainId::BitcoinBlake2b)
+        .coincubed_data_directory(&wallet_id)
+        .path()
+        .join("daemon.toml");
+    std::fs::create_dir_all(&daemon_toml).unwrap();
+    // Registered immediately before the install, never once at the top: see
+    // `register_anchor`.
+    let anchor = register_anchor(&server).await;
+    let failed = install_local_wallet(
+        first.context.clone(),
+        wallet_id.clone(),
+        first.signer.clone(),
+    )
+    .await;
+    assert!(
+        failed.is_err(),
+        "the injected failure must land after the seed write"
+    );
+    let seed_path = coincube_core::signer::MasterSigner::mnemonics_folder_for_chain(
+        root.path(),
+        ChainId::BitcoinBlake2b,
+    )
+    .join(
+        coincube_core::signer::MnemonicFileName {
+            fingerprint: source_fingerprint,
+            descriptor_info: None,
+        }
+        .to_string(),
+    );
+    assert!(
+        seed_path.exists(),
+        "the failed attempt left its seed file behind — that is the condition \
+         under test, not an accident of this fixture"
+    );
+
+    // Attempt 2: what a restart builds. Clear the injected failure first.
+    std::fs::remove_dir(&daemon_toml).unwrap();
+    let second = build(source);
+    assert_eq!(
+        second.context.seed_cube_id(),
+        first.context.seed_cube_id(),
+        "a retry must land on the identity the leftover seed file was written \
+         for, or that file blocks every future attempt"
+    );
+    let identity = crate::gui::tab::installer_exit_identity(&second).unwrap();
+    let exit_seed = crate::gui::tab::installer_exit_seed(&second).unwrap();
+    anchor.delete_async().await;
+    let _anchor = register_anchor(&server).await;
+    install_local_wallet(
+        second.context.clone(),
+        WalletId::generate(second.context.descriptor.as_ref().unwrap()),
+        second.signer.clone(),
+    )
+    .await
+    .expect("the retry must complete rather than refuse the leftover seed");
+
+    // And the Cube the retry mints still opens that file.
+    coincube_core::seed_crypt::decrypt_with(
+        &std::fs::read(&seed_path).unwrap(),
+        exit_seed.pin.as_str(),
+        &identity.uuid,
+        None,
+    )
+    .expect("the retried Cube's credential opens the seed the first attempt wrote");
+    assert_ne!(identity.uuid, source_cube_id, "still its own Cube (I7)");
+    let _ = std::fs::remove_dir_all(root.path());
+}
+
+/// The seed file is named by `(chain, fingerprint)` with no Cube component, so
+/// two claims can meet on one path. Both meetings are pinned here.
+///
+/// *Same source Cube twice* — a retry, or a second claim — derives the same
+/// target identity, so the second attempt opens the first's file and continues.
+/// *Two different source Cubes that share one master seed* — restoring one
+/// mnemonic into two Cubes — derive different identities, so the second is
+/// **refused** rather than allowed to overwrite or adopt the first target's
+/// only seed. A refusal is the right outcome: the alternative is one Cube's
+/// seed file answering for another Cube.
+#[test]
+fn two_claims_meeting_on_one_seed_path_reuse_or_refuse_but_never_adopt() {
+    let _guard = crate::app::session::test_guard();
+    let root = temp_root("collision");
+    let (first, fingerprint) = source("Savings");
+
+    // Same source, second attempt: same identity, same credentials, accepted.
+    let again = first.clone();
+    assert_eq!(
+        claim::target_cube_id(&first),
+        claim::target_cube_id(&again),
+        "a second attempt from one Cube is the same target"
+    );
+    let seed = claim::target_master_seed(&first).unwrap();
+    let id = claim::target_cube_id(&first);
+    persist_cube_master_seed(&seed, &root, ChainId::BitcoinBlake2b, SOURCE_PIN, &id, None).unwrap();
+    persist_cube_master_seed(&seed, &root, ChainId::BitcoinBlake2b, SOURCE_PIN, &id, None)
+        .expect("the same target may re-open its own seed file");
+
+    // A different Cube holding the same seed: different identity, refused.
+    let mut sibling = first.clone();
+    sibling.cube = crate::app::settings::CubeSettings::new_with_raw_id(
+        uuid::Uuid::new_v4().to_string(),
+        "Restored twin".to_string(),
+        ChainId::Bitcoin,
+    );
+    assert_ne!(claim::target_cube_id(&sibling), id);
+    let refused = persist_cube_master_seed(
+        &claim::target_master_seed(&sibling).unwrap(),
+        &root,
+        ChainId::BitcoinBlake2b,
+        SOURCE_PIN,
+        &claim::target_cube_id(&sibling),
+        None,
+    );
+    assert!(
+        refused.is_err(),
+        "a second Cube must not adopt or overwrite the first target's seed"
+    );
+    // And the first target's file is untouched.
+    let path = coincube_core::signer::MasterSigner::mnemonics_folder_for_chain(
+        root.path(),
+        ChainId::BitcoinBlake2b,
+    )
+    .join(
+        coincube_core::signer::MnemonicFileName {
+            fingerprint,
+            descriptor_info: None,
+        }
+        .to_string(),
+    );
+    assert!(
+        coincube_core::seed_crypt::decrypt_with(
+            &std::fs::read(&path).unwrap(),
+            SOURCE_PIN,
+            &id,
+            None
+        )
+        .is_ok(),
+        "the first target still opens its own seed"
+    );
     let _ = std::fs::remove_dir_all(root.path());
 }

@@ -6,6 +6,7 @@
 //! Step two of the claim (`services::claim_workflow::Step2Authorization`)
 //! stays uninhabited.
 
+use coincube_core::chain::ChainId;
 use coincube_core::miniscript::bitcoin::bip32::Fingerprint;
 use std::sync::Arc;
 
@@ -74,6 +75,40 @@ impl ClaimSource {
     }
 }
 
+/// The Cube id a claim target gets, derived from the source Cube rather than
+/// minted fresh.
+///
+/// Determinism is a **recovery** property, not a cryptographic one. The target's
+/// seed file is encrypted bound to its Cube id ([`coincube_core::seed_crypt`]),
+/// and the file is named by fingerprint alone — so if an install fails *after*
+/// the seed write (a failed daemon-config write, a full disk, a crash), a retry
+/// that minted a fresh id would find that file, be unable to decrypt it with
+/// the new id, and refuse. Every subsequent attempt would refuse the same way:
+/// one interrupted claim would block that source Cube on that device forever.
+///
+/// Deriving the id from the source Cube instead makes a retry land on exactly
+/// the identity the leftover file was written for, so
+/// [`super::persist_cube_master_seed`]'s existing same-credentials check passes
+/// and the install continues. It also matches the rule the entry points already
+/// enforce — one target per source Cube — so the stable id is not a constraint
+/// being added, it is one being made explicit.
+pub fn target_cube_id(source: &ClaimSource) -> String {
+    use coincube_core::miniscript::bitcoin::hashes::{sha256, Hash};
+    // Domain-separated so this can never collide with another derivation over
+    // the same inputs.
+    let digest = sha256::Hash::hash(
+        format!(
+            "coincube/btcb2-claim-target/v1/{}/{}",
+            ChainId::BitcoinBlake2b.api_str(),
+            source.cube_id(),
+        )
+        .as_bytes(),
+    );
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    uuid::Uuid::from_bytes(bytes).to_string()
+}
+
 /// **The claim target's seed decision, and the only place it is made.**
 ///
 /// The target is created from the source Cube's descriptor, whose keys derive
@@ -109,17 +144,41 @@ mod tests {
     const DESC: &str = "tr([abcdef01]xpub6Eze7yAT3Y1wGrnzedCNVYDXUqa9NmHVWck5emBaTbXtURbe1NWZbK9bsz1TiVE7Cz341PMTfYgFw1KdLWdzcM1UMFTcdQfCYhhXZ2HJvTW/<0;1>/*,and_v(v:pk([abcdef01]xpub688Hn4wScQAAiYJLPg9yH27hUpfZAUnmJejRQBCiwfP5PEDzjWMNW1wChcninxr5gyavFqbbDjdV1aK5USJz8NDVjUy7FRQaaqqXHh5SbXe/<0;1>/*),older(52560)))#0mt7e93c";
 
     fn source(name: &str) -> ClaimSource {
+        source_with_id("cube-1", name)
+    }
+
+    fn source_with_id(id: &str, name: &str) -> ClaimSource {
         use std::str::FromStr;
         let signer = Signer::generate(Network::Bitcoin).unwrap();
         ClaimSource {
             cube: crate::app::settings::CubeSettings::new_with_raw_id(
-                "cube-1".into(),
+                id.into(),
                 name.into(),
                 coincube_core::chain::ChainId::Bitcoin,
             ),
             descriptor: coincube_core::descriptors::CoincubeDescriptor::from_str(DESC).unwrap(),
             signer: Arc::new(signer),
         }
+    }
+
+    /// A retry after an interrupted install must land on the same identity the
+    /// leftover seed file was written for, or that file blocks every future
+    /// attempt.
+    #[test]
+    fn the_target_cube_id_is_stable_per_source_cube() {
+        let a = source_with_id("cube-a", "Savings");
+        let b = source_with_id("cube-b", "Savings");
+        assert_eq!(
+            target_cube_id(&a),
+            target_cube_id(&a),
+            "stable across calls"
+        );
+        assert_ne!(
+            target_cube_id(&a),
+            target_cube_id(&b),
+            "and distinct per source Cube — two Cubes must not claim into one"
+        );
+        assert!(uuid::Uuid::parse_str(&target_cube_id(&a)).is_ok());
     }
 
     #[test]
