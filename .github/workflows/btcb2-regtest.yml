@@ -140,7 +140,11 @@ jobs:
           mkdir -p "$TEST_DIR"
           "$KNOTS_LEGACY_PATH" --version | head -1
           "$KNOTS_BLAKE2B_PATH" --version | head -1
-          pytest tests/test_btcb2_harness.py -vvv
+          # B4.1 proves the harness; B4.2 runs the QA matrices on it.
+          # Both modules are named explicitly: a bare `pytest tests/`
+          # here would also pull in the functional suite, which this job
+          # does not set up.
+          pytest tests/test_btcb2_harness.py tests/test_btcb2_b42_matrices.py -vvv
 
       - name: Collect logs from failed tests
         if: failure()
