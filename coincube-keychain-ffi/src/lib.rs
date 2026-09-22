@@ -52,8 +52,9 @@ use std::{panic, slice};
 use coincube_core::{
     bip39,
     miniscript::bitcoin::{consensus::deserialize, secp256k1, Network, Script, Transaction, TxOut},
-    psbt_unified::{export_standard, import_standard},
+    psbt_unified::{export_standard, import_standard, UnifiedPsbt},
     signer::MasterSigner,
+    spend::authenticate_previous_output,
     unified_sighash::{
         unified_sighash, UnifiedSighashCache, UnifiedSighashError, SCRIPT_TYPE_WITNESS_V0,
     },
@@ -556,21 +557,32 @@ fn network_from_code(code: u8) -> Result<Network, Failure> {
 
 /// The output spent by every input, in input order.
 ///
-/// `witness_utxo` is present on every input `verify_p2wsh_all_unified` accepted
-/// — it authenticates the prevout for a native-P2WSH spend — so a missing one
-/// here would mean core's contract changed rather than a caller error.
-fn spent_outputs_of(
-    psbt: &coincube_core::psbt_unified::UnifiedPsbt,
-) -> Result<Vec<TxOut>, Failure> {
-    psbt.psbt()
-        .inputs
+/// This calls core's own [`authenticate_previous_output`] rather than reading
+/// `witness_utxo` directly, because the two are not interchangeable and the
+/// difference is easy to get backwards: core **requires** the full
+/// `non_witness_utxo` (absent it, `InputAuthError::MissingPreviousTransaction`)
+/// and treats `witness_utxo` as an optional cross-check that must agree with it.
+/// Reading `witness_utxo` here would refuse a PSBT that `unified_signing` had
+/// just accepted, and would also skip the txid, vout and amount checks that make
+/// the prevout *authenticated* rather than merely asserted.
+fn spent_outputs_of(psbt: &UnifiedPsbt) -> Result<Vec<TxOut>, Failure> {
+    let inner = psbt.psbt();
+    inner
+        .unsigned_tx
+        .input
         .iter()
+        .zip(&inner.inputs)
         .enumerate()
-        .map(|(index, input)| {
-            input.witness_utxo.clone().ok_or_else(|| {
+        .map(|(index, (txin, input))| {
+            authenticate_previous_output(
+                &txin.previous_output,
+                input.non_witness_utxo.as_ref(),
+                input.witness_utxo.as_ref(),
+            )
+            .map_err(|reason| {
                 Failure::with_message(
                     CC_ERR_PSBT_VALIDATION,
-                    format!("input {index} has no witness utxo"),
+                    format!("input {index} previous output is not authenticated: {reason}"),
                 )
             })
         })

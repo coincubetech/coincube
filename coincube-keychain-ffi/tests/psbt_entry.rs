@@ -426,6 +426,62 @@ fn second_signer_accumulates() {
     assert_eq!(verified, 2, "both signers' records should be present");
 }
 
+/// A PSBT carrying only `non_witness_utxo` still produces a digest.
+///
+/// Regression test. The first version of this crate built its spent-output
+/// vector by reading `witness_utxo` from each input, which looks right and is
+/// backwards: core's `authenticate_previous_output` *requires* the full
+/// `non_witness_utxo` and treats `witness_utxo` as an optional cross-check. So a
+/// PSBT that `unified_signing` accepts — this one — was refused at the boundary
+/// with "has no witness utxo". Going through core's own authentication fixed
+/// that and picked up its txid/vout/amount checks at the same time.
+#[test]
+fn witness_utxo_is_not_required_when_the_previous_transaction_is_present() {
+    let fixture = fixture(2);
+    let mut stripped = fixture.psbt.clone();
+    for input in stripped.psbt_mut().inputs.iter_mut() {
+        assert!(
+            input.non_witness_utxo.is_some(),
+            "core requires the full previous transaction"
+        );
+        input.witness_utxo = None;
+    }
+    let bytes = export_standard(&stripped).unwrap();
+
+    for index in 0..stripped.psbt().inputs.len() {
+        let (result, digest) = psbt_digest_through_ffi(&bytes, index as u32);
+        assert_eq!(
+            result.code, CC_OK,
+            "input {index}: {} ({})",
+            result.code, result.message
+        );
+        // Same message as the fully-populated fixture: dropping an optional
+        // cross-check must not change what gets signed.
+        assert_eq!(
+            digest,
+            core_digest(&fixture.psbt, index),
+            "input {index}: digest changed when witness_utxo was dropped"
+        );
+    }
+}
+
+/// Dropping the previous transaction *is* refused, because core needs it to
+/// authenticate the prevout at all.
+#[test]
+fn missing_previous_transaction_is_refused() {
+    let fixture = fixture(1);
+    let mut broken = fixture.psbt.clone();
+    broken.psbt_mut().inputs[0].non_witness_utxo = None;
+    let bytes = export_standard(&broken).unwrap();
+
+    let (result, _) = psbt_digest_through_ffi(&bytes, 0);
+    assert_eq!(
+        result.code, CC_ERR_PSBT_VALIDATION,
+        "expected a validation refusal, got {} ({})",
+        result.code, result.message
+    );
+}
+
 /// Core owns the refusal: an input missing its witness script is rejected by
 /// `unified_signing`, and the boundary reports it rather than computing a digest
 /// over a script it guessed.
