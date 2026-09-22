@@ -6,7 +6,10 @@
 //! unlock runs, and the freshly built `App` consumes it.
 //!
 //! One Cube id, not a queue: a second press replaces the first, and opening
-//! any other Cube clears it. It holds no secret — only which Cube the user
+//! any other Cube clears it — *every* open consumes, including a Cube that
+//! turns out to have no Vault (`App::new_without_wallet`), because an intent
+//! that survived an unrelated open would fire on a later one the user did not
+//! ask a claim for. It holds no secret — only which Cube the user
 //! pressed the card on — and it is never permission: `App` re-checks
 //! [`crate::app::features::claim_blake2b`] before the installer starts, and
 //! `Installer::try_new_for_chain` re-checks the account gate after that.
@@ -37,7 +40,8 @@ pub fn take(cube_id: &str) -> bool {
     }
 }
 
-/// Drop any armed intent. Called on lock and duress alongside the session.
+/// Drop any armed intent. Called on lock, on duress, and on the per-Cube
+/// revocation path alongside the session it was armed with.
 pub fn clear() {
     if let Ok(mut slot) = cell().lock() {
         *slot = None;

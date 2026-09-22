@@ -2747,6 +2747,13 @@ impl App {
         network: coincube_core::miniscript::bitcoin::Network,
         cube_settings: settings::CubeSettings,
     ) -> Result<(App, Task<Message>), Error> {
+        // A Cube opening without a Vault still *consumes* any armed claim
+        // intent: "opening any other Cube clears it" has to hold for every
+        // open, or an intent armed for Cube A survives this one and fires on a
+        // later open of A that the user did not ask a claim for. Discarded
+        // rather than acted on — a Cube with no Vault has no descriptor to
+        // claim with.
+        let _ = claim_intent::take(&cube_settings.id);
         if cube_settings.network.is_blake2b() {
             return Err(Error::Daemon(DaemonError::ConnectAnchor(
                 coincubed::connect::AdmissionError::InvalidBackend.into(),

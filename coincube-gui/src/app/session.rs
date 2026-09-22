@@ -338,6 +338,13 @@ pub fn close() {
 
 /// Revoke one Cube without clearing a newer or unrelated Cube's session.
 pub(crate) fn close_cube(cube_id: &str) {
+    // Defensive, not a demonstrated defect: arming requires Home and any Cube
+    // open consumes, so no sequence I could construct leaves an intent armed
+    // here. But this is a *revocation* path — `invalidate_fork_session` calls
+    // it when a fork session stops being trustworthy — and an intent surviving
+    // a revocation is the one shape that would be wrong, so it goes with the
+    // session it was armed alongside.
+    super::claim_intent::clear();
     let mut session = lock_session();
     if session
         .as_ref()

@@ -21,11 +21,12 @@ use crate::signer::Signer;
 /// it.
 #[derive(Clone)]
 pub struct ClaimSource {
-    /// The source Cube's id, for the settings the target records and for the
-    /// session lookup that produced [`Self::signer`].
-    pub cube_id: String,
-    /// The source Cube's name — the target's alias defaults to `"<name> · BTCB2"`.
-    pub cube_name: String,
+    /// The source Cube itself, carried whole rather than field by field: the
+    /// installer needs its id (session lookup), its name (the target's alias),
+    /// its backup state (inherited by the target, which shares the mnemonic)
+    /// **and** the settings themselves, to rebuild the source Cube if the user
+    /// backs out of the claim.
+    pub cube: crate::app::settings::CubeSettings,
     /// The descriptor the target reuses, verbatim. The whole point of a claim:
     /// a different string would watch different addresses.
     pub descriptor: coincube_core::descriptors::CoincubeDescriptor,
@@ -40,15 +41,30 @@ impl std::fmt::Debug for ClaimSource {
     /// Deliberately opaque: this type owns an unlocked master signer.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ClaimSource")
-            .field("cube_id", &self.cube_id)
+            .field("cube_id", &self.cube.id)
             .finish_non_exhaustive()
     }
 }
 
 impl ClaimSource {
+    /// The source Cube's id — what the session PIN and the unlocked signer are
+    /// keyed by.
+    pub fn cube_id(&self) -> &str {
+        &self.cube.id
+    }
+
     /// The default alias for the target Cube.
     pub fn default_target_alias(&self) -> String {
-        format!("{} · BTCB2", self.cube_name)
+        format!("{} · BTCB2", self.cube.name)
+    }
+
+    /// Whether the source Cube's seed is recorded as backed up. Inherited
+    /// rather than reset: the target's seed *is* the source's, so a mnemonic
+    /// the user has already written down does not become un-backed-up because
+    /// a second Cube now shares it — and the claim flow deliberately does not
+    /// show it again.
+    pub fn seed_backed_up(&self) -> bool {
+        self.cube.backed_up
     }
 
     /// The fingerprint the target's descriptor keys derive from — the source
@@ -96,8 +112,11 @@ mod tests {
         use std::str::FromStr;
         let signer = Signer::generate(Network::Bitcoin).unwrap();
         ClaimSource {
-            cube_id: "cube-1".into(),
-            cube_name: name.into(),
+            cube: crate::app::settings::CubeSettings::new_with_raw_id(
+                "cube-1".into(),
+                name.into(),
+                coincube_core::chain::ChainId::Bitcoin,
+            ),
             descriptor: coincube_core::descriptors::CoincubeDescriptor::from_str(DESC).unwrap(),
             signer: Arc::new(signer),
         }
