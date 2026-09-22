@@ -1184,24 +1184,37 @@ mod tests {
         assert_eq!(seen_non_protected, original.len());
         assert!(original.len() >= 64, "record too short to be a signature");
 
-        // The same for a legacy `partial_sigs` entry: a corrupted DER signature
-        // cannot finalise into a protected transaction either.
+        // The same for a legacy `partial_sigs` entry. Here `!= Protected` would
+        // prove nothing: a legacy-only input is never replay-protected to begin
+        // with, so that assertion holds identically on the untampered PSBT.
+        // Assert what the corruption actually changes — the model verifies the
+        // signature, so a well-formed one that does not verify moves the whole
+        // PSBT from `Replayable` to a refusal that names the reason.
         let legacy_signed = legacy(&legacy(&f.psbt, &f.signers[0]), &f.signers[1]);
         let pk = *legacy_signed.inputs[0].partial_sigs.keys().next().unwrap();
         let mut bad_legacy = legacy_signed.clone();
         let sig = bad_legacy.inputs[0].partial_sigs.get_mut(&pk).unwrap();
         let mut bytes = sig.signature.serialize_der().to_vec();
         bytes[10] ^= 0x01;
-        if let Ok(parsed) = secp256k1::ecdsa::Signature::from_der(&bytes) {
-            *sig = ecdsa::Signature {
-                signature: parsed,
-                sighash_type: EcdsaSighashType::All,
-            };
-            assert_ne!(
-                replay_status(&bad_legacy, &secp, None),
-                ReplayStatus::Protected
-            );
-        }
+        let parsed = secp256k1::ecdsa::Signature::from_der(&bytes)
+            .expect("flipping one byte of the DER body keeps it parseable");
+        *sig = ecdsa::Signature {
+            signature: parsed,
+            sighash_type: EcdsaSighashType::All,
+        };
+        let clean = replay_status(&legacy_signed, &secp, None);
+        let tampered = replay_status(&bad_legacy, &secp, None);
+        assert_eq!(clean, ReplayStatus::Replayable { inputs: vec![0] });
+        assert!(
+            matches!(
+                &tampered,
+                ReplayStatus::Unknown(UnknownReason::Refused(reason))
+                    if reason.contains("does not verify")
+            ),
+            "{:?}",
+            tampered
+        );
+        assert_ne!(clean, tampered);
     }
 
     #[test]
