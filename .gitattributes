@@ -1,3 +1,10 @@
 # Knots BIP-110: byte-exact OpenPGP-signed fixtures/keys (no EOL translation).
 coincube-gui/assets/knots_signing_key.asc -text
 coincube-gui/src/installer/step/node/test_fixtures/** -text
+
+# Branta SDK vendor drop (#368): coincube-gui's `vendor_integrity` test hashes
+# these files byte-for-byte against vendor/branta/UPSTREAM_SHA256.json. With
+# Git for Windows' default core.autocrlf=true the CI checkout rewrote LF -> CRLF
+# and every hash changed (master `unit_tests (windows-latest, pinned)` red since
+# 2026-09-11). No end-of-line translation on checkin or checkout.
+vendor/branta/** -text
