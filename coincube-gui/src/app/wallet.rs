@@ -404,6 +404,25 @@ impl Wallet {
         WalletId::new(self.descriptor_checksum.clone(), self.pinned_at)
     }
 
+    /// A fixed change address, change index 0, for sizing a change output in a
+    /// draft or preview whose PSBT is never signed.
+    ///
+    /// Supply it as `createspend`'s change address instead of `None`: a fresh
+    /// change address makes the daemon reserve a change index durably, and a
+    /// preview that is thrown away burns that index for nothing. An address the
+    /// wallet already knows reserves nothing, and it sizes the change output
+    /// exactly like a fresh one would. Never use it for a spend that will be
+    /// signed — that spend must let the daemon allocate a fresh index.
+    pub fn preview_change_address(&self) -> bitcoin::Address<bitcoin::address::NetworkUnchecked> {
+        let secp = bitcoin::secp256k1::Secp256k1::verification_only();
+        self.main_descriptor
+            .change_descriptor()
+            .derive(0.into(), &secp)
+            .address(self.chain.bitcoin_network())
+            .as_unchecked()
+            .clone()
+    }
+
     pub fn with_pinned_at(mut self, pinned_at: Option<i64>) -> Self {
         self.pinned_at = pinned_at;
         self
