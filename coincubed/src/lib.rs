@@ -1615,6 +1615,10 @@ mod tests {
             );
             match server.accept() {
                 Ok((mut stream, _)) => {
+                    // Same macOS inheritance as the synthetic Connect server
+                    // below: the accepted socket must block, or read_line
+                    // fails with WouldBlock before the RPC bytes arrive.
+                    stream.set_nonblocking(false).unwrap();
                     read_til_json_end(&mut stream);
                     stream.write_all(sync_resp).unwrap();
                     stream.flush().unwrap();
@@ -2044,6 +2048,14 @@ mod tests {
                         }
                         Err(e) => panic!("synthetic accept: {}", e),
                     };
+                    // macOS hands accept(2) callers a socket that inherits the
+                    // listener's O_NONBLOCK (Linux's accept4 does not). Left
+                    // that way, the first read returns WouldBlock before the
+                    // client's request bytes land and the connection is
+                    // dropped unanswered; the client then sees a reset. Wait
+                    // for the request like a server: blocking reads sliced by
+                    // the read timeout, bounded only by the deadline below.
+                    stream.set_nonblocking(false).unwrap();
                     stream
                         .set_read_timeout(Some(time::Duration::from_millis(100)))
                         .unwrap();
@@ -2060,6 +2072,11 @@ mod tests {
                         match stream.read(&mut chunk) {
                             Ok(0) => break,
                             Ok(n) => head.extend_from_slice(&chunk[..n]),
+                            // A read slice elapsed with nothing new: keep
+                            // waiting until the deadline, do not give up.
+                            Err(e)
+                                if e.kind() == io::ErrorKind::WouldBlock
+                                    || e.kind() == io::ErrorKind::TimedOut => {}
                             Err(_) => break,
                         }
                     }
