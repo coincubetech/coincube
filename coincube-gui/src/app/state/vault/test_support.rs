@@ -144,6 +144,90 @@ pub mod unified {
         }
     }
 
+    /// The same Vault as [`fixture`], spending **two** coins of it in one
+    /// PSBT (indices 3 and 4 of the receive descriptor).
+    ///
+    /// The single-input fixture cannot express the per-input question the
+    /// replay model answers: [`crate::app::state::vault::replay::ReplayStatus`]
+    /// is `Replayable` when *any* input lacks a replay-capable signature, and a
+    /// one-input PSBT makes "this input" and "the transaction" the same thing.
+    pub fn two_input_fixture() -> Fixture {
+        let secp = secp256k1::Secp256k1::new();
+        let signers = vec![signer(21), signer(22), signer(23)];
+        let primary = PathInfo::Multi(
+            2,
+            vec![
+                descriptor_key(&signers[0], 0, &secp),
+                descriptor_key(&signers[1], 0, &secp),
+                descriptor_key(&signers[2], 0, &secp),
+            ],
+        );
+        let recovery = PathInfo::Single(descriptor_key(&signers[2], 1, &secp));
+        let descriptor = CoincubeDescriptor::new(
+            CoincubePolicy::new_legacy(primary, [(46, recovery)].iter().cloned().collect())
+                .unwrap(),
+        );
+
+        // Two coins of the same Vault at different derivation indices, each in
+        // its own funding transaction, so the two inputs are independent.
+        let mut previous_txs = Vec::new();
+        let mut outputs = Vec::new();
+        for (index, sats) in [(3u32, 50_000u64), (4, 60_000)] {
+            let derived = descriptor.receive_descriptor().derive(index.into(), &secp);
+            let output = TxOut {
+                value: Amount::from_sat(sats),
+                script_pubkey: derived.script_pubkey(),
+            };
+            previous_txs.push(Transaction {
+                version: transaction::Version::TWO,
+                lock_time: absolute::LockTime::ZERO,
+                input: vec![TxIn {
+                    previous_output: OutPoint::null(),
+                    script_sig: ScriptBuf::new(),
+                    sequence: Sequence(7 + index),
+                    witness: btc::Witness::new(),
+                }],
+                output: vec![output.clone()],
+            });
+            outputs.push((index, output));
+        }
+
+        let unsigned_tx = Transaction {
+            version: transaction::Version::TWO,
+            lock_time: absolute::LockTime::ZERO,
+            input: previous_txs
+                .iter()
+                .map(|tx| TxIn {
+                    previous_output: OutPoint {
+                        txid: tx.compute_txid(),
+                        vout: 0,
+                    },
+                    script_sig: ScriptBuf::new(),
+                    sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                    witness: btc::Witness::new(),
+                })
+                .collect(),
+            output: vec![TxOut {
+                value: Amount::from_sat(100_000),
+                script_pubkey: ScriptBuf::new_p2wsh(&ScriptBuf::new().wscript_hash()),
+            }],
+        };
+        let mut psbt = Psbt::from_unsigned_tx(unsigned_tx).unwrap();
+        for (input_index, (deriv_index, output)) in outputs.into_iter().enumerate() {
+            let derived = descriptor
+                .receive_descriptor()
+                .derive(deriv_index.into(), &secp);
+            derived.update_psbt_in(&mut psbt.inputs[input_index]);
+            psbt.inputs[input_index].non_witness_utxo = Some(previous_txs[input_index].clone());
+            psbt.inputs[input_index].witness_utxo = Some(output);
+        }
+        Fixture {
+            descriptor,
+            signers,
+            psbt,
+        }
+    }
+
     /// `psbt` with `signer`'s unified signatures added (proprietary records).
     pub fn unified(psbt: &Psbt, signer: &MasterSigner) -> Psbt {
         let secp = secp256k1::Secp256k1::new();

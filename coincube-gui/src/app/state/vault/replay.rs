@@ -562,7 +562,9 @@ pub fn bitcoin_cube_unswept_notice(chain: ChainId, unswept: Option<bool>) -> Opt
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::state::vault::test_support::unified::{fixture, legacy, unified};
+    use crate::app::state::vault::test_support::unified::{
+        fixture, legacy, two_input_fixture, unified,
+    };
     use coincube_core::miniscript::bitcoin::{ecdsa, sighash::EcdsaSighashType};
 
     fn secp() -> secp256k1::Secp256k1<secp256k1::VerifyOnly> {
@@ -1065,6 +1067,139 @@ mod tests {
                 None,
                 "{:?}",
                 chain
+            );
+        }
+    }
+
+    /// B4.2 Bitcoin-regression matrix, row I5 — a Bitcoin-family Cube still
+    /// signs `SIGHASH_ALL` and nothing else, and the BTCB2 machinery is inert
+    /// on it. The account-level `bitcoin_blake2b_enabled` feature is not an
+    /// input to any of this: signing takes the descriptor and the PSBT, and
+    /// the fork-specific paths key off [`ChainId`], so an account with the
+    /// feature on cannot change what a Bitcoin Cube produces.
+    #[test]
+    fn a_bitcoin_cube_still_signs_sighash_all_and_carries_no_unified_records() {
+        let f = fixture();
+        let secp = secp();
+        let signed = legacy(&legacy(&f.psbt, &f.signers[0]), &f.signers[1]);
+
+        assert_eq!(signed.inputs[0].partial_sigs.len(), 2);
+        for (pubkey, sig) in &signed.inputs[0].partial_sigs {
+            assert_eq!(
+                sig.sighash_type,
+                EcdsaSighashType::All,
+                "key {pubkey} signed with {:?}",
+                sig.sighash_type
+            );
+        }
+        // No unified record is added on the Bitcoin path, and the reserved
+        // proprietary namespace is untouched.
+        assert!(signed.inputs[0].proprietary.is_empty());
+        assert!(signed.inputs[0].tap_script_sigs.is_empty());
+        assert!(signed.inputs[0].tap_key_sig.is_none());
+
+        // The spend analysis a Bitcoin Cube renders is the unchanged one.
+        assert_eq!(
+            spend_info_for_chain(ChainId::Bitcoin, &f.descriptor, &signed).unwrap(),
+            f.descriptor.partial_spend_info(&signed).unwrap()
+        );
+        // And the pre-dispatch refusal is a Blake2b-only gate: an ordinary
+        // Bitcoin PSBT passes it untouched.
+        assert!(refuse_before_dispatch(&signed).is_ok());
+        let _ = &secp;
+    }
+
+    /// B4.2 replay matrix — the mixed-input row. One unified signature *per
+    /// input* is what protects a transaction; a PSBT whose inputs disagree must
+    /// report the unprotected ones by index and must never read `Protected`.
+    #[test]
+    fn a_mixed_input_psbt_names_the_unprotected_input_and_is_never_protected() {
+        let f = two_input_fixture();
+        let secp = secp();
+        assert_eq!(f.psbt.unsigned_tx.input.len(), 2);
+
+        // Both inputs signed by two keys the unified way: protected.
+        let both = unified(&unified(&f.psbt, &f.signers[0]), &f.signers[1]);
+        assert_eq!(replay_status(&both, &secp, None), ReplayStatus::Protected);
+
+        // Now assemble a PSBT whose inputs disagree: input 0 keeps its unified
+        // signatures, input 1 carries legacy ones only. Built per input rather
+        // than by re-signing the whole PSBT, because an input holding *both*
+        // encodings for one key is a different case the model refuses outright.
+        let legacy_both = legacy(&legacy(&f.psbt, &f.signers[0]), &f.signers[1]);
+        let mut mixed = both.clone();
+        mixed.inputs[1] = legacy_both.inputs[1].clone();
+        assert!(mixed.inputs[0].partial_sigs.is_empty());
+        assert!(mixed.inputs[1].proprietary.is_empty());
+        assert_eq!(mixed.inputs[1].partial_sigs.len(), 2);
+        assert_eq!(
+            replay_status(&mixed, &secp, None),
+            ReplayStatus::Replayable { inputs: vec![1] }
+        );
+        assert!(!matches!(
+            replay_status(&mixed, &secp, None),
+            ReplayStatus::Protected
+        ));
+
+        // The copy names the input the user has to act on, not just "some".
+        let (copy, tone) = pill_copy(&replay_status(&mixed, &secp, None), &[]);
+        assert!(copy.contains("input 1"), "{}", copy);
+        assert_eq!(tone, PillTone::Warning);
+
+        // And the acknowledgement gate follows the same per-input answer.
+        assert!(replay_status(&mixed, &secp, None).needs_acknowledgement());
+        assert!(!replay_status(&both, &secp, None).needs_acknowledgement());
+    }
+
+    /// B4.2 replay matrix — the tampered-signature row. A signature that is
+    /// well-formed but does not verify must fall to unknown or replayable;
+    /// `Protected` is the one answer it may never produce, because that is the
+    /// answer the user acts on.
+    #[test]
+    fn a_wellformed_but_invalid_unified_signature_never_reads_protected() {
+        let f = fixture();
+        let secp = secp();
+        let signed = unified(&unified(&f.psbt, &f.signers[0]), &f.signers[1]);
+        assert_eq!(replay_status(&signed, &secp, None), ReplayStatus::Protected);
+
+        // Flip bits inside the signature bytes of one unified record, leaving
+        // the record's shape and the PSBT's structure intact. Every byte offset
+        // is tried: whichever way the tamper lands — a parse refusal, a
+        // verification failure, or a record that no longer satisfies the
+        // threshold — the answer must not be `Protected`.
+        let key = signed.inputs[0].proprietary.keys().next().cloned().unwrap();
+        let original = signed.inputs[0].proprietary.get(&key).unwrap().clone();
+        let mut seen_non_protected = 0usize;
+        for offset in 0..original.len() {
+            let mut tampered = signed.clone();
+            tampered.inputs[0].proprietary.get_mut(&key).unwrap()[offset] ^= 0x01;
+            let status = replay_status(&tampered, &secp, None);
+            assert_ne!(
+                status,
+                ReplayStatus::Protected,
+                "tampering byte {offset} of a unified record still read Protected"
+            );
+            seen_non_protected += 1;
+        }
+        assert_eq!(seen_non_protected, original.len());
+        assert!(original.len() >= 64, "record too short to be a signature");
+
+        // The same for a legacy `partial_sigs` entry: a corrupted DER signature
+        // cannot finalise into a protected transaction either.
+        let legacy_signed = legacy(&legacy(&f.psbt, &f.signers[0]), &f.signers[1]);
+        let pk = *legacy_signed.inputs[0].partial_sigs.keys().next().unwrap();
+        let mut bad_legacy = legacy_signed.clone();
+        let sig = bad_legacy.inputs[0].partial_sigs.get_mut(&pk).unwrap();
+        let mut bytes = sig.signature.serialize_der().to_vec();
+        bytes[10] ^= 0x01;
+        if let Ok(parsed) = secp256k1::ecdsa::Signature::from_der(&bytes) {
+            *sig = ecdsa::Signature {
+                signature: parsed,
+                sighash_type: EcdsaSighashType::All,
+            };
+            assert_ne!(
+                replay_status(&bad_legacy, &secp, None),
+                ReplayStatus::Protected
             );
         }
     }
