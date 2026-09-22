@@ -140,6 +140,14 @@ pub fn rpcserver_loop(
                 continue;
             }
         };
+        // The listener is non-blocking so this loop can poll `shutdown`, and on
+        // macOS `accept(2)` hands back a socket that inherits that flag (Linux's
+        // `accept4` does not). Left inherited, the handler's first `read` returns
+        // `WouldBlock` for any client whose bytes have not landed yet, which
+        // `read_command` propagates and which closes the connection with the
+        // request unread. Each connection is served by its own blocking thread;
+        // only the accept loop needs to poll.
+        connection.set_nonblocking(false)?;
         log::trace!("New JSONRPC connection");
 
         while connections_counter.load(atomic::Ordering::Relaxed) >= MAX_CONNECTIONS {
@@ -219,7 +227,7 @@ mod tests {
     use std::{env, fs, process};
 
     #[cfg(not(windows))]
-    use std::io::Write;
+    use std::io::{Read, Write};
 
     fn read_one_command(socket_path: &path::Path) -> thread::JoinHandle<Option<Request>> {
         let listener = rpcserver_setup(socket_path).unwrap();
@@ -250,6 +258,82 @@ mod tests {
                 }
             }
         })
+    }
+
+    /// A client that connects and then stays silent past the accept loop's
+    /// 100 ms tick before sending its request — losing the race the real
+    /// clients normally win. The server must still read the request when it
+    /// eventually arrives.
+    ///
+    /// This is the deterministic form of the macOS defect in #478: `accept(2)`
+    /// there hands back a socket that inherits the listener's `O_NONBLOCK`
+    /// (Linux's `accept4` does not), so the handler's first `read` returns
+    /// `WouldBlock`, `read_command`'s `?` propagates it out of
+    /// `connection_handler`, and the connection is closed with the request
+    /// unread. A client that writes immediately usually wins; one that pauses
+    /// never does.
+    #[test]
+    fn a_slow_client_request_is_read_not_dropped() {
+        let ms = crate::testutils::DummyCoincube::new(
+            crate::testutils::DummyBitcoind::new(),
+            crate::testutils::DummyDatabase::new(),
+        );
+        let socket_path = env::temp_dir().join(format!("cc-slow-client-{}.sock", process::id()));
+        let _ = fs::remove_file(&socket_path);
+        let listener = rpcserver_setup(&socket_path).unwrap();
+        let shutdown = sync::Arc::new(atomic::AtomicBool::new(false));
+        let server = thread::spawn({
+            let control = ms.control().clone();
+            let shutdown = shutdown.clone();
+            move || rpcserver_loop(listener, control, shutdown)
+        });
+
+        let mut client = net::UnixStream::connect(&socket_path).unwrap();
+        // Longer than the accept loop's 100 ms sleep, so the handler thread is
+        // already blocked on its first read before a single byte is written.
+        thread::sleep(time::Duration::from_millis(300));
+        let req = Request {
+            jsonrpc: "2.0".to_string(),
+            method: "getinfo".to_string(),
+            params: None,
+            id: ReqId::Num(1),
+        };
+        client
+            .write_all(&serde_json::to_vec(&req).unwrap())
+            .unwrap();
+        client.write_all(b"\n").unwrap();
+        client.flush().unwrap();
+
+        client
+            .set_read_timeout(Some(time::Duration::from_secs(10)))
+            .unwrap();
+        let mut response = Vec::new();
+        let mut chunk = [0u8; 1024];
+        loop {
+            let read = client
+                .read(&mut chunk)
+                .expect("the daemon closed the connection with the request unread (#478)");
+            assert!(read > 0, "connection closed before a response (#478)");
+            response.extend_from_slice(&chunk[..read]);
+            if serde_json::from_slice::<serde_json::Value>(&response).is_ok() {
+                break;
+            }
+        }
+        let decoded: serde_json::Value = serde_json::from_slice(&response).unwrap();
+        assert_eq!(decoded["id"], 1, "response: {}", decoded);
+        assert!(
+            decoded.get("result").is_some(),
+            "expected a getinfo result, got: {}",
+            decoded
+        );
+
+        shutdown.store(true, atomic::Ordering::Relaxed);
+        drop(client);
+        // Unblock the accept loop so the thread observes the shutdown flag.
+        let _ = net::UnixStream::connect(&socket_path);
+        let _ = server.join();
+        let _ = fs::remove_file(&socket_path);
+        ms.shutdown();
     }
 
     fn write_messages(socket_path: &path::Path, messages: &[&[u8]]) {
