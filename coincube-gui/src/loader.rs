@@ -248,7 +248,12 @@ impl Loader {
         // the caller wants to load under, or the wallet directory, the
         // daemon config and the Cube's own settings would disagree with each
         // other from this point on.
-        let refusal = match cube_settings.network.runtime_support() {
+        let support = if connect_client.is_some() {
+            crate::chain::authenticated_connect_support(cube_settings.network)
+        } else {
+            cube_settings.network.runtime_support()
+        };
+        let refusal = match support {
             crate::chain::RuntimeSupport::Dormant { reason } => {
                 Some(Error::ChainUnavailable(reason))
             }
@@ -641,6 +646,13 @@ impl Loader {
         if !self.cube_settings.network.is_blake2b() {
             crate::node::tor::stop_managed_tor();
         }
+    }
+
+    /// Surface a refusal raised by the tab on this Loader's behalf (for
+    /// example an installer the Cube's chain does not admit) without
+    /// starting anything.
+    pub(crate) fn fail(&mut self, error: Error) {
+        self.step = Step::Error(Box::new(error));
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
@@ -1107,13 +1119,15 @@ fn backend_is_internal_bitcoind(config_path: &Path, internal_datadir: &Path) -> 
 
 /// Dedicated authenticated fork restart path: no external socket, config
 /// migration, managed node, or fallback backend is attempted.
-async fn start_connect_daemon(
+pub(crate) async fn start_connect_daemon(
     root: CoincubeDirectory,
     chain: crate::chain::ChainId,
     settings: WalletSettings,
     client: crate::services::coincube::CoincubeClient,
 ) -> StartedResult {
-    if let crate::chain::RuntimeSupport::Dormant { reason } = chain.runtime_support() {
+    if let crate::chain::RuntimeSupport::Dormant { reason } =
+        crate::chain::authenticated_connect_support(chain)
+    {
         return Err(Error::ChainUnavailable(reason));
     }
     if !chain.is_blake2b() || client.token().is_none() || settings.remote_backend_auth.is_some() {
@@ -1121,6 +1135,9 @@ async fn start_connect_daemon(
             "Authenticated Connect fork Vault required".into(),
         ));
     }
+    crate::chain::require_connect_feature(chain, &client)
+        .await
+        .map_err(Error::Unexpected)?;
     let expected_dir = root
         .network_directory(chain)
         .coincubed_data_directory(&settings.wallet_id());

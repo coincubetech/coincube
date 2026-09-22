@@ -22,7 +22,12 @@ Loader-owned 30-second minimum interval; failed admission cannot lose that bound
 when its temporary provider is dropped.
 
 Home or App logout/token replacement invalidates every open fork tab before the
-account change propagates. Pending installer, metadata-save and Loader tasks are
+account change propagates. The fork App is dropped into a fresh Home, removing
+its wallet, signing/export panels and matching Cube PIN session. App tasks are
+owned and cancelled; task, subscription and view callbacks carry the session
+generation so stale signing results cannot affect a later reopened App. A CPU
+operation already running may finish, but its revoked completion is discarded.
+Pending installer, metadata-save and Loader tasks are
 aborted; their ephemeral authority is dropped. Save and PIN completions carry a
 session generation, so already queued results cannot revive a replaced session.
 A late blocking decrypt writes only to its detached old slot. The fork metadata
@@ -39,10 +44,14 @@ Unlock credentials are cleared and the Cube must
 be reopened with the current session. Changing a backend likewise requires a new
 authenticated context.
 
-This slice depends on the authenticated admission/client and Vault-only App
-constructors. Production GUI runtime gates remain closed pending integrated
-synthetic create/reopen/failure validation and independent review. Existing
-Bitcoin paths keep their legacy constructors and SDK behavior.
+The narrow authenticated Connect capability uses the Vault-only App constructor.
+Home offers BTCB2 only after the current authenticated account reports its flag
+true; missing/unloaded/false flags refuse. Installer, PIN and Loader recheck the
+flag, then exact-chain anchor admission validates the backend before writes.
+Generic runtime support stays dormant for migration, duress and unmanaged node
+paths. Mainnet and developer-only testnet4 stay separate. Existing Bitcoin paths
+keep their legacy constructors and SDK behavior. Full synthetic create/reopen/
+failure validation and independent final-head review remain release gates.
 
 ## Operational acceptance
 

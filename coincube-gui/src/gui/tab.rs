@@ -404,6 +404,8 @@ async fn run_local_duress_activation(root: &std::path::Path, account_id: Option<
 
 #[derive(Debug)]
 pub enum Message {
+    ForkAsync(u64, Box<Message>),
+    ForkTaskFinished(u64, u64),
     Launch(home::Message),
     Install(installer::Message),
     Load(loader::Message),
@@ -542,6 +544,8 @@ pub struct Tab {
     pending_unlock_warnings: Vec<String>,
     fork_session_generation: u64,
     fork_save_task: Option<iced::task::Handle>,
+    fork_tasks: HashMap<u64, iced::task::Handle>,
+    next_fork_task: u64,
 }
 
 impl Tab {
@@ -553,6 +557,8 @@ impl Tab {
             pending_unlock_warnings: Vec::new(),
             fork_session_generation: 0,
             fork_save_task: None,
+            fork_tasks: HashMap::new(),
+            next_fork_task: 0,
         }
     }
 
@@ -659,10 +665,14 @@ impl Tab {
             .map(|d| d >= Self::IDLE_LOCK_AFTER)
             .unwrap_or(false);
 
-        match &mut self.state {
+        let task = match &mut self.state {
             State::App(app) => {
                 if idle_expired {
-                    return Task::done(Message::LockCube);
+                    return if app.cube_settings().network.is_blake2b() {
+                        self.guard_fork_task(Task::done(Message::LockCube))
+                    } else {
+                        Task::done(Message::LockCube)
+                    };
                 }
                 app.on_tick().map(Message::Run)
             }
@@ -686,16 +696,34 @@ impl Tab {
                 Task::none()
             }
             _ => Task::none(),
+        };
+        if matches!(&self.state, State::App(app) if app.cube_settings().network.is_blake2b()) {
+            self.guard_fork_task(task)
+        } else {
+            task
         }
     }
 
     pub fn invalidate_fork_session(&mut self) -> Task<Message> {
         self.fork_session_generation = self.fork_session_generation.wrapping_add(1);
         self.fork_save_task.take();
+        self.fork_tasks.clear();
         let mut command = Task::none();
         let mut replacement = None;
         match &mut self.state {
-            State::App(app) => app.invalidate_fork_session(),
+            State::App(app) if app.cube_settings().network.is_blake2b() => {
+                let cube = app.cube_settings().clone();
+                let datadir = app.datadir().clone();
+                app.invalidate_fork_session();
+                app::session::close_cube(&cube.id);
+                // Dropping the fork App drops signing/export panels and its
+                // wallet. EmbeddedDaemon Drop uses fork-scoped safe cleanup;
+                // App::stop would also stop unrelated globally managed Tor.
+                let (mut home, startup) = Home::new_for_chain(datadir, Some(cube.network));
+                home.set_error("Connect session changed. Sign in again to reopen this Cube.");
+                command = startup.map(Message::Launch);
+                replacement = Some(State::Home(home));
+            }
             State::Loader(loader) if loader.cube_settings.network.is_blake2b() => {
                 loader.invalidate_fork_session()
             }
@@ -724,7 +752,61 @@ impl Tab {
         command
     }
 
+    pub(crate) fn accepts_fork_generation(&self, generation: u64) -> bool {
+        generation == self.fork_session_generation
+    }
+
+    fn guard_fork_task(&mut self, task: Task<Message>) -> Task<Message> {
+        if task.units() == 0 {
+            return task;
+        }
+        let generation = self.fork_session_generation;
+        let id = self.next_fork_task;
+        self.next_fork_task = self.next_fork_task.wrapping_add(1);
+        let (task, handle) = task
+            .map(move |message| Message::ForkAsync(generation, Box::new(message)))
+            .chain(Task::done(Message::ForkTaskFinished(generation, id)))
+            .abortable();
+        self.fork_tasks.insert(id, handle.abort_on_drop());
+        task
+    }
+
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        let message = match message {
+            Message::ForkAsync(generation, message) => {
+                if generation != self.fork_session_generation {
+                    return Task::none();
+                }
+                *message
+            }
+            Message::ForkTaskFinished(generation, id) => {
+                if generation == self.fork_session_generation {
+                    self.fork_tasks.remove(&id);
+                }
+                return Task::none();
+            }
+            message => message,
+        };
+        let was_fork_app =
+            matches!(&self.state, State::App(app) if app.cube_settings().network.is_blake2b());
+        let result = self.update_inner(message);
+        if matches!(&self.state, State::App(app) if app.cube_settings().network.is_blake2b() && app.authenticated_coincube_client().is_none())
+        {
+            drop(result);
+            return self.invalidate_fork_session();
+        }
+        if matches!(&self.state, State::App(app) if app.cube_settings().network.is_blake2b()) {
+            self.guard_fork_task(result)
+        } else {
+            if was_fork_app {
+                self.fork_session_generation = self.fork_session_generation.wrapping_add(1);
+                self.fork_tasks.clear();
+            }
+            result
+        }
+    }
+
+    fn update_inner(&mut self, message: Message) -> Task<Message> {
         use crate::app::settings::global::GlobalSettings;
         let message = match message {
             Message::ForkInstallCompleted(generation, msg) => {
@@ -799,6 +881,11 @@ impl Tab {
             }
             (State::Home(l), Message::Launch(msg)) => match msg {
                 home::Message::Install(datadir, network, init, coincube_client) => {
+                    if let Some(reason) = l.connect_chain_availability(network).reason() {
+                        l.set_error(reason.to_string());
+                        return Task::none();
+                    }
+
                     // `coincube_client` is populated when the home
                     // already holds an authenticated Connect session (today
                     // the Recovery-Kit restore path forwards it so the
@@ -823,7 +910,7 @@ impl Tab {
                             return Task::none();
                         }
                     };
-                    if !datadir.exists() {
+                    if !network.is_blake2b() && !datadir.exists() {
                         // datadir is created right before launching the installer
                         // so logs can go in <datadir_path>/installer.log
                         if let Err(e) = datadir.init() {
@@ -865,10 +952,8 @@ impl Tab {
                         ));
                         return Task::none();
                     }
-                    if let crate::chain::RuntimeSupport::Dormant { reason } =
-                        cube.network.runtime_support()
-                    {
-                        l.set_error(reason);
+                    if let Some(reason) = l.connect_chain_availability(cube.network).reason() {
+                        l.set_error(reason.to_string());
                         return Task::none();
                     }
                     let network = chain.bitcoin_network();
@@ -998,7 +1083,9 @@ impl Tab {
                     command.map(Message::Launch)
                 }
                 login::Message::Install(remote_backend) => {
-                    let (install, command) = Installer::new(
+                    // Bitcoin family only and no Cube here, so the gate cannot
+                    // refuse; the arm still reports rather than unwraps.
+                    match Installer::new(
                         l.datadir.clone(),
                         l.network,
                         remote_backend,
@@ -1009,9 +1096,16 @@ impl Tab {
                         None, // No spark_backend from login screen
                         false,
                         None, // No coincube_client from login screen
-                    );
-                    self.state = State::Installer(install);
-                    command.map(Message::Install)
+                    ) {
+                        Ok((install, command)) => {
+                            self.state = State::Installer(install);
+                            command.map(Message::Install)
+                        }
+                        Err(error) => {
+                            error!("Installer refused from login: {}", error);
+                            Task::none()
+                        }
+                    }
                 }
                 login::Message::Run(Ok((backend_client, wallet, coins))) => {
                     let config = app::Config::from_file(
@@ -1551,9 +1645,11 @@ impl Tab {
                 }
                 loader::Message::View(loader::ViewMessage::SetupVault) => {
                     // Launch installer for vault setup from loader - should return to app on Previous
-                    let (install, command) = Installer::new(
+                    // Opened on the Cube's own chain through the admission gate,
+                    // like the App paths: `loader.network` cannot name a fork.
+                    match Installer::try_new_for_chain(
                         loader.datadir_path.clone(),
-                        loader.network,
+                        loader.cube_settings.network,
                         None,
                         UserFlow::CreateWallet,
                         true, // launched from app (loader is part of app flow)
@@ -1563,10 +1659,17 @@ impl Tab {
                         GlobalSettings::load_developer_mode(&GlobalSettings::path(
                             &loader.datadir_path,
                         )),
-                        None, // No coincube_client from loader path
-                    );
-                    self.state = State::Installer(install);
-                    command.map(Message::Install)
+                        loader.connect_client.clone(), // the fork gate needs the session it was admitted with
+                    ) {
+                        Ok((install, command)) => {
+                            self.state = State::Installer(install);
+                            command.map(Message::Install)
+                        }
+                        Err(error) => {
+                            loader.fail(loader::Error::Unexpected(error.to_string()));
+                            Task::none()
+                        }
+                    }
                 }
                 loader::Message::Synced(Ok((
                     wallet,
@@ -1748,10 +1851,14 @@ impl Tab {
             (State::App(app), Message::Run(msg)) => {
                 match msg {
                     app::Message::View(app::view::Message::SetupVault) => {
-                        // Launch installer for vault setup from app - should return to app on Previous
-                        let (install, command) = Installer::new(
+                        // Launch installer for vault setup from app - should return to app on Previous.
+                        // The installer is opened on the Cube's own chain through the
+                        // admission gate: `app.cache().network` is a `bitcoin::Network`
+                        // and cannot name a fork, so deriving the chain from it would
+                        // build a Bitcoin installer for a Bitcoin Blake2b Cube.
+                        match Installer::try_new_for_chain(
                             app.datadir().clone(),
-                            app.cache().network,
+                            app.cube_settings().network,
                             None,
                             UserFlow::CreateWallet,
                             true,                              // launched from app
@@ -1762,17 +1869,26 @@ impl Tab {
                                 app.datadir(),
                             )),
                             app.authenticated_coincube_client(), // authenticated API client for Keychain keys
-                        );
-                        self.state = State::Installer(install);
-                        command.map(Message::Install)
+                        ) {
+                            Ok((install, command)) => {
+                                self.state = State::Installer(install);
+                                command.map(Message::Install)
+                            }
+                            Err(error) => Task::done(Message::Run(app::Message::View(
+                                app::view::Message::ShowError(error.to_string()),
+                            ))),
+                        }
                     }
                     app::Message::View(app::view::Message::SetupVaultRestoreFromKit) => {
                         // W15 — same installer launch path as SetupVault,
                         // but starts in the Recovery-Kit restore flow
                         // instead of the new-vault descriptor editor.
-                        let (install, command) = Installer::new(
+                        // Same chain derivation and admission gate as `SetupVault`;
+                        // a Bitcoin Blake2b Cube is refused here because the fork
+                        // admits only the Connect-backed creation flow.
+                        match Installer::try_new_for_chain(
                             app.datadir().clone(),
-                            app.cache().network,
+                            app.cube_settings().network,
                             None,
                             UserFlow::RestoreVaultFromRecoveryKit,
                             true,
@@ -1783,9 +1899,15 @@ impl Tab {
                                 app.datadir(),
                             )),
                             app.authenticated_coincube_client(),
-                        );
-                        self.state = State::Installer(install);
-                        command.map(Message::Install)
+                        ) {
+                            Ok((install, command)) => {
+                                self.state = State::Installer(install);
+                                command.map(Message::Install)
+                            }
+                            Err(error) => Task::done(Message::Run(app::Message::View(
+                                app::view::Message::ShowError(error.to_string()),
+                            ))),
+                        }
                     }
                     app::Message::View(app::view::Message::ToggleTheme) => {
                         Task::done(Message::ToggleTheme)
@@ -2944,6 +3066,19 @@ impl Tab {
         match &self.state {
             State::Installer(v) => v.subscription().map(Message::Install),
             State::Loader(v) => v.subscription().map(Message::Load),
+            // `Subscription::map` requires a non-capturing closure, so the
+            // generation travels through `with` instead of being captured.
+            // `with` folds the value into the subscription's identity, which is
+            // safe here: the generation only ever changes as this arm stops
+            // being selected — `invalidate_fork_session` swaps the state to
+            // `Home`, and `update` bumps it only once the state is no longer a
+            // fork `App`. So it cannot restart a live subscription mid-session.
+            State::App(v) if v.cube_settings().network.is_blake2b() => v
+                .subscription()
+                .with(self.fork_session_generation)
+                .map(|(generation, message)| {
+                    Message::ForkAsync(generation, Box::new(Message::Run(message)))
+                }),
             State::App(v) => v.subscription().map(Message::Run),
             State::Home(v) => v.subscription().map(Message::Launch),
             State::Login(_) => Subscription::none(),
@@ -2959,6 +3094,12 @@ impl Tab {
     pub fn view(&self) -> Element<Message> {
         match &self.state {
             State::Installer(v) => v.view().map(Message::Install),
+            State::App(v) if v.cube_settings().network.is_blake2b() => {
+                let generation = self.fork_session_generation;
+                v.view().map(move |message| {
+                    Message::ForkAsync(generation, Box::new(Message::Run(message)))
+                })
+            }
             State::App(v) => v.view().map(Message::Run),
             State::Home(v) => v.view().map(Message::Launch),
             State::Loader(v) => v.view().map(Message::Load),
@@ -3844,8 +3985,12 @@ mod migration_warning_tests {
     }
 
     /// A persisted Bitcoin Blake2b Cube is refused at the open gate: the tab
-    /// stays on Home with the dormant reason, and no unlock screen — the step
-    /// that loads the Liquid SDK and reads seed files — is ever built.
+    /// stays on Home, and no unlock screen — the step that loads the Liquid
+    /// SDK and reads seed files — is ever built. The fork route is admitted
+    /// only through an authenticated Connect account whose feature flag is
+    /// on; this fixture has neither, so the refusal names the account gate
+    /// (the same reason `home::a_dormant_chain_record_in_its_own_directory_is_refused_for_the_runtime`
+    /// pins), not the generic dormant-runtime copy.
     #[test]
     fn a_blake2b_cube_is_refused_before_any_unlock_screen() {
         for chain in [
@@ -3856,7 +4001,7 @@ mod migration_warning_tests {
             assert_eq!(state, "Home", "{:?}", chain);
             assert_eq!(
                 error.as_deref(),
-                Some(crate::chain::BTCB2_DORMANT_REASON),
+                Some("Bitcoin Blake2b isn't enabled for this account."),
                 "{:?}",
                 chain
             );
@@ -5053,7 +5198,8 @@ mod fork_completion_tests {
             None,
             false,
             None,
-        );
+        )
+        .expect("a Bitcoin fixture installer");
         installer.context.bitcoin_config.chain = ChainId::BitcoinBlake2b;
         installer.context.fresh_fork_cube = true;
         installer.context.fresh_fork_seed_backed_up = true;

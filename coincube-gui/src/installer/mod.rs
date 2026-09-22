@@ -326,9 +326,15 @@ impl Installer {
         developer_mode: bool,
         coincube_client: Option<crate::services::coincube::CoincubeClient>,
     ) -> Result<(Installer, Task<Message>), Error> {
-        use crate::chain::ChainIdExt;
-        if let crate::chain::RuntimeSupport::Dormant { reason } = chain.runtime_support() {
+        if let crate::chain::RuntimeSupport::Dormant { reason } =
+            crate::chain::authenticated_connect_support(chain)
+        {
             return Err(Error::Unexpected(reason.to_string()));
+        }
+        if chain.is_blake2b() && coincube_client.as_ref().and_then(|c| c.token()).is_none() {
+            return Err(Error::Unexpected(
+                "Connect authentication is required for Bitcoin Blake2b".into(),
+            ));
         }
         if cube_settings
             .as_ref()
@@ -362,6 +368,10 @@ impl Installer {
         ))
     }
 
+    /// Bitcoin-family compatibility wrapper over [`Self::try_new_for_chain`].
+    /// It goes through the same gate, so a Cube on another chain — which a
+    /// `bitcoin::Network` cannot name — is refused rather than built as a
+    /// Bitcoin installer carrying a fork Cube.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         destination_path: CoincubeDirectory,
@@ -374,8 +384,8 @@ impl Installer {
         spark_backend: Option<std::sync::Arc<crate::app::wallets::SparkBackend>>,
         developer_mode: bool,
         coincube_client: Option<crate::services::coincube::CoincubeClient>,
-    ) -> (Installer, Task<Message>) {
-        Self::build_for_chain(
+    ) -> Result<(Installer, Task<Message>), Error> {
+        Self::try_new_for_chain(
             destination_path,
             network.into(),
             remote_backend,
@@ -1007,6 +1017,9 @@ async fn daemon_check_authenticated(
     let client = client.ok_or_else(|| {
         Error::Unexpected("Connect authentication is required for Bitcoin Blake2b".into())
     })?;
+    crate::chain::require_connect_feature(cfg.bitcoin_config.chain, &client)
+        .await
+        .map_err(Error::Unexpected)?;
     let daemon = crate::daemon::embedded::EmbeddedDaemon::start_authenticated(cfg, client)
         .await
         .map_err(|e| Error::Unexpected(format!("Failed to admit Connect backend: {}", e)))?;
@@ -1077,6 +1090,11 @@ fn seed_password(ctx: &Context) -> Result<zeroize::Zeroizing<String>, Error> {
 fn seed_device_secret(
     ctx: &Context,
 ) -> Result<Option<coincube_core::seed_crypt::DeviceSecret>, Error> {
+    // Fresh fork Cubes use PIN encryption plus the mandatory mnemonic backup.
+    // Device sealing/migration is not enabled by this Connect-only capability.
+    if ctx.fresh_fork_cube {
+        return Ok(None);
+    }
     let cube_id = ctx.seed_cube_id();
     if cube_id.is_empty() {
         return Ok(None);
@@ -1168,11 +1186,21 @@ fn validate_fork_creation_material(ctx: &Context) -> Result<(), Error> {
 
 fn require_installable_chain(ctx: &Context) -> Result<(), Error> {
     validate_fork_creation_material(ctx)?;
-    use crate::chain::ChainIdExt;
     if let crate::chain::RuntimeSupport::Dormant { reason } =
-        ctx.bitcoin_config.chain.runtime_support()
+        crate::chain::authenticated_connect_support(ctx.bitcoin_config.chain)
     {
         return Err(Error::Unexpected(reason.to_string()));
+    }
+    if ctx.bitcoin_config.chain.is_blake2b()
+        && ctx
+            .coincube_client
+            .as_ref()
+            .and_then(|c| c.token())
+            .is_none()
+    {
+        return Err(Error::Unexpected(
+            "Connect authentication is required for Bitcoin Blake2b".into(),
+        ));
     }
     ctx.bitcoin_config
         .check_chain_encoding()
@@ -1866,6 +1894,53 @@ mod pending_rescan_tests {
             version: 0,
         });
         ctx
+    }
+
+    /// A `bitcoin::Network` cannot name a fork, so the Bitcoin constructor
+    /// paired with a Bitcoin Blake2b Cube used to build a Bitcoin installer
+    /// carrying that Cube. It now goes through the gate and refuses.
+    #[test]
+    fn the_bitcoin_constructor_refuses_a_cube_on_another_chain() {
+        let root = std::env::temp_dir().join(format!("cube-chain-{}", uuid::Uuid::new_v4()));
+        let build = |cube: crate::app::settings::CubeSettings| {
+            Installer::new(
+                CoincubeDirectory::new(root.clone()),
+                bitcoin::Network::Bitcoin,
+                None,
+                UserFlow::CreateWallet,
+                true,
+                Some(cube),
+                None,
+                None,
+                false,
+                None,
+            )
+        };
+        let error = build(crate::app::settings::CubeSettings::new(
+            "fork".into(),
+            crate::chain::ChainId::BitcoinBlake2b,
+        ))
+        .err()
+        .expect("a Bitcoin installer must not be built for a Bitcoin Blake2b Cube");
+        assert!(
+            error
+                .to_string()
+                .contains("Installer chain differs from the Cube chain"),
+            "{}",
+            error
+        );
+        // The same constructor still serves a Bitcoin Cube, so the refusal is
+        // the chain check and not the constructor refusing every Cube.
+        let (installer, _) = build(crate::app::settings::CubeSettings::new(
+            "bitcoin".into(),
+            crate::chain::ChainId::Bitcoin,
+        ))
+        .expect("a Bitcoin Cube builds a Bitcoin installer");
+        assert_eq!(
+            installer.context.bitcoin_config.chain,
+            crate::chain::ChainId::Bitcoin
+        );
+        assert!(!root.exists(), "construction must not touch a datadir");
     }
 
     #[test]
@@ -2662,3 +2737,6 @@ mod fresh_fork_seed_retry_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod connect_activation_tests;

@@ -13,8 +13,9 @@ successful startup check. Bitcoin retains its existing directory preparation
 and daemon startup path.
 
 This change depends on the authenticated embedded client in PR430 and daemon
-admission/cleanup in PR428. It does not change the production dormant runtime
-gate or enable Claim, external signing, local nodes, or Lightning SDKs.
+admission/cleanup in PR428. The explicit Connect capability also rechecks the
+current account feature flag before admission. Generic runtime support remains
+dormant; Claim, external signing, local nodes and Lightning SDKs stay closed.
 
 Synthetic regression checks cover new OTP and retained-session handoff, fork
 path preparation without writes with a Bitcoin positive control, and missing
