@@ -123,6 +123,10 @@ pub enum VaultSubMenu {
     Transactions(Option<Txid>),
     PSBTs(Option<Txid>),
     Recovery,
+    /// Bitcoin Blake2b claim entry (Lane B1.4). An *action*, not a panel: the
+    /// rail item starts the claim-target installer and the menu never settles
+    /// here, which is why [`crate::app::Panels`] has no state for it.
+    Claim,
     Settings(Option<SettingsOption>),
 }
 

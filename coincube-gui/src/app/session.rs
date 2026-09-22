@@ -330,6 +330,9 @@ pub fn is_open() -> bool {
 ///
 /// Called on lock, on returning to the launcher, and on duress activation.
 pub fn close() {
+    // An unstarted Home claim intent is session state too: it must not
+    // survive a lock, an idle auto-lock or a duress activation.
+    super::claim_intent::clear();
     *lock_session() = None;
 }
 

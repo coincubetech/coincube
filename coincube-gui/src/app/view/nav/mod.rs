@@ -292,4 +292,21 @@ pub struct NavContext<'a> {
     /// under the cube name in [`identity_block`]. `Inactive` renders
     /// no dot (e.g. local-daemon installs without Connect).
     pub connect_stream_status: &'a crate::app::ConnectionStatus,
+    /// Account-scoped Bitcoin Blake2b grant, mirrored from `/connect/features`
+    /// into [`crate::app::cache::Cache::btcb2_server_enabled`].
+    pub btcb2_server_enabled: bool,
+    /// Whether a Bitcoin Blake2b Cube already reuses this Cube's descriptor.
+    pub btcb2_already_claimed: bool,
+}
+
+impl NavContext<'_> {
+    /// This Cube as a candidate Bitcoin Blake2b claim source.
+    pub fn claim_source_cube(&self) -> crate::app::features::ClaimSourceCube {
+        crate::app::features::ClaimSourceCube {
+            chain: self.network,
+            has_vault: self.has_vault,
+            server_enabled: self.btcb2_server_enabled,
+            already_claimed: self.btcb2_already_claimed,
+        }
+    }
 }

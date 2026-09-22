@@ -225,6 +225,8 @@ pub fn dashboard_with_info<'a, T: Into<Element<'a, Message>>>(
         p2p_test_coordinator: cache.p2p_test_coordinator,
         marketplace_flags: cache.marketplace_flags,
         liquid_gate: cache.liquid_gate,
+        btcb2_server_enabled: cache.btcb2_server_enabled,
+        btcb2_already_claimed: cache.btcb2_already_claimed,
         cube_name,
         lightning_address,
         avatar: avatar_handle,

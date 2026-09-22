@@ -1879,6 +1879,72 @@ impl Tab {
                             ))),
                         }
                     }
+                    app::Message::View(app::view::Message::StartClaimBlake2b) => {
+                        // B1.4 claim target. The source Cube is the one running
+                        // here; its descriptor and its unlocked master signer
+                        // are what the target is built from, so both are read
+                        // from this `App` rather than collected by a step.
+                        //
+                        // Creates the target only — see `installer::claim`.
+                        let cube = app.cube_settings().clone();
+                        let Some(wallet) = app.wallet() else {
+                            return Task::done(Message::Run(app::Message::View(
+                                app::view::Message::ShowError(
+                                    "This Cube has no Vault to claim.".to_string(),
+                                ),
+                            )));
+                        };
+                        let Some(fingerprint) = cube.master_signer_fingerprint else {
+                            return Task::done(Message::Run(app::Message::View(
+                                app::view::Message::ShowError(
+                                    "This Cube's master key isn't available in this session."
+                                        .to_string(),
+                                ),
+                            )));
+                        };
+                        let Some(signer) = app::session::unlocked_signer(&cube.id, fingerprint)
+                        else {
+                            return Task::done(Message::Run(app::Message::View(
+                                app::view::Message::ShowError(
+                                    "Unlock this Cube again to start a claim.".to_string(),
+                                ),
+                            )));
+                        };
+                        let source = installer::ClaimSource {
+                            cube_id: cube.id.clone(),
+                            cube_name: cube.name.clone(),
+                            descriptor: wallet.main_descriptor.clone(),
+                            signer: std::sync::Arc::new(crate::signer::Signer::new(signer)),
+                        };
+                        match Installer::try_new_for_chain(
+                            app.datadir().clone(),
+                            crate::chain::ChainId::BitcoinBlake2b,
+                            None,
+                            UserFlow::ClaimBlake2b {
+                                from_cube: Box::new(source),
+                            },
+                            true,
+                            // Deliberately not the source Cube's settings: the
+                            // installer is building a Bitcoin Blake2b Cube, and
+                            // `try_new_for_chain` refuses settings from another
+                            // chain. The source travels in the flow instead.
+                            None,
+                            app.breez_client(),
+                            app.spark_backend(),
+                            GlobalSettings::load_developer_mode(&GlobalSettings::path(
+                                app.datadir(),
+                            )),
+                            app.authenticated_coincube_client(),
+                        ) {
+                            Ok((install, command)) => {
+                                self.state = State::Installer(install);
+                                command.map(Message::Install)
+                            }
+                            Err(error) => Task::done(Message::Run(app::Message::View(
+                                app::view::Message::ShowError(error.to_string()),
+                            ))),
+                        }
+                    }
                     app::Message::View(app::view::Message::SetupVaultRestoreFromKit) => {
                         // W15 — same installer launch path as SetupVault,
                         // but starts in the Recovery-Kit restore flow
@@ -3658,6 +3724,10 @@ pub fn create_app_with_remote_backend(
             // Fail-closed until `/connect/features` loads and the account panel
             // mirrors the real flags in (see `App::update`'s ConnectAccount arm).
             marketplace_flags: crate::app::features::MarketplaceServerFlags::OFF,
+            // Same fail-closed stance for the fork account grant.
+            btcb2_server_enabled: false,
+            // Resolved from disk in `App::new_inner`.
+            btcb2_already_claimed: false,
             // Liquid sunset gate. Both halves are filled in later: the local
             // half in `App::new` (from whether the Liquid SDK actually
             // connected), the server half when `/connect/features` loads.

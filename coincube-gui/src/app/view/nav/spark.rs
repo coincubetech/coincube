@@ -53,6 +53,8 @@ mod tests {
             theme_mode: coincube_ui::theme::palette::ThemeMode::default(),
             connect_authenticated: false,
             connect_stream_status: status,
+            btcb2_server_enabled: false,
+            btcb2_already_claimed: false,
         }
     }
 

@@ -190,6 +190,23 @@ pub struct Cache {
     /// wallet stays reachable when Connect is down. See
     /// [`crate::app::features::LiquidGate`].
     pub liquid_gate: crate::app::features::LiquidGate,
+    /// Whether this Cube can start a Bitcoin Blake2b **claim** — mirrored
+    /// from the Connect account alongside [`Self::marketplace_flags`].
+    ///
+    /// The account half only. The rest of the visibility matrix (this Cube is
+    /// on Bitcoin mainnet, it has a Vault, and no claim target already reuses
+    /// its descriptor) is answered where it is known; see
+    /// [`crate::app::features::claim_blake2b`]. Fails closed until
+    /// `/connect/features` answers, like every other server-controlled gate.
+    pub btcb2_server_enabled: bool,
+    /// Whether a Bitcoin Blake2b Cube on this device already reuses this
+    /// Cube's Vault descriptor — i.e. this Cube has already been claimed.
+    ///
+    /// Resolved once at cube-open by [`crate::app::claim_target_exists`], the
+    /// same way the Liquid gate's local half is: it is a fact about the disk,
+    /// not about the session, and a Connect outage must not make an existing
+    /// claim target look absent.
+    pub btcb2_already_claimed: bool,
     /// Entangled-deposit answers for a Bitcoin Blake2b Cube (`#276` I13),
     /// keyed by the deposit's txid: whether the same transaction exists on
     /// the twin Bitcoin chain, and when that was resolved. Only *resolved*
@@ -342,6 +359,8 @@ impl std::default::Default for Cache {
             has_p2p: false,
             p2p_test_coordinator: false,
             marketplace_flags: crate::app::features::MarketplaceServerFlags::OFF,
+            btcb2_server_enabled: false,
+            btcb2_already_claimed: false,
             liquid_gate: crate::app::features::LiquidGate::HIDDEN,
             entangled: std::collections::HashMap::new(),
             theme_mode: coincube_ui::theme::palette::ThemeMode::default(),
@@ -1108,5 +1127,57 @@ mod btcb2_fiat_tests {
         );
         let client = crate::services::coincube::CoincubeClient::for_test("http://127.0.0.1:1");
         assert!(testnet.send_connect(client).await.res.is_err());
+    }
+
+    /// **The only live pricing path today.** Both approved exchanges refused
+    /// read-only access on 2026-09-19 (`docs/BTCB2_PRICING.md`), so no adapter
+    /// exists and the Connect route answers 503 on an empty cache. A BTCB2
+    /// Cube must render in `BitcoinNative` and keep the toggle inert — and
+    /// must never fall back to a *Bitcoin* quote, which is a different coin.
+    #[tokio::test]
+    async fn a_503_from_the_unbuilt_price_route_leaves_the_cube_in_bitcoin_native() {
+        use httpmock::prelude::*;
+        let server = MockServer::start_async().await;
+        let route = server
+            .mock_async(|when, then| {
+                when.method(GET).path_contains("price");
+                then.status(503).json_body(serde_json::json!({
+                    "success": false,
+                    "message": "BTCB2 pricing is unavailable"
+                }));
+            })
+            .await;
+
+        let mut cache = cache();
+        // A stale mainnet quote in hand is the dangerous starting state: it is
+        // the thing a fork Cube must not silently render.
+        cache.btc_usd_price = Some(99_999.0);
+        cache.display_mode = DisplayMode::FiatNative;
+
+        let request = FiatPriceRequest::for_btcb2(
+            Currency::USD,
+            LookupOrigin {
+                app: cache.app_generation,
+                chain: cache.fiat_chain,
+            },
+        );
+        cache.btcb2_price_request = Some(request);
+        let client = crate::services::coincube::CoincubeClient::for_test(server.base_url());
+        let answer = request.send_connect(client).await;
+        assert!(answer.res.is_err(), "503 is not a price");
+        route.assert_async().await;
+
+        assert!(cache.accept_btcb2_price(answer));
+        assert_eq!(cache.display_mode, DisplayMode::BitcoinNative);
+        assert!(cache.fiat_price.is_none());
+        assert_eq!(cache.btc_usd_price, None, "never a Bitcoin quote on BTCB2");
+        assert!(
+            !cache.fiat_toggle_allowed(),
+            "FlipDisplayMode must be inert while the feed has nothing to show"
+        );
+        // And the handler's contract on top of that predicate: a flip attempt
+        // clears rather than flips (`App::update`, `FlipDisplayMode`).
+        assert!(cache.clear_btcb2_fiat() || cache.display_mode == DisplayMode::BitcoinNative);
+        assert_eq!(cache.display_mode, DisplayMode::BitcoinNative);
     }
 }
