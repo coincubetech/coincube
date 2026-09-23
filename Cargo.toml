@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "fuzz",
     "coincube-core",
+    "coincube-keychain-ffi",
     "coincubed",
     "coincube-gui",
     "coincube-ui",
@@ -18,6 +19,7 @@ members = [
 exclude = ["coincube-spark-bridge", "vendor/branta"]
 default-members = [
     "coincube-core",
+    "coincube-keychain-ffi",
     "coincubed",
     "coincube-gui",
     "coincube-ui",
