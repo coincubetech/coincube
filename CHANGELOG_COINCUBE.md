@@ -72,6 +72,63 @@ These Liana components were significantly adapted for Coincube:
 
 ### Unreleased (v1.1.0 — target: May 2026)
 
+Everything below shipped after the March 2026 section and is not recorded there.
+Entries are grouped by what changed for the user; PR numbers are the coincube
+repository's. Internal refactors, test-only work and CI are collapsed at the end.
+
+#### Features
+
+**Recipient identity on send (Branta)**
+
+Sources: `coincube-gui/src/services/branta.rs`, `vendor/branta/`
+- Addresses you send to are checked against Branta's Strict recipient list before you confirm, for both Vault and Spark sends, so a substituted address in a pasted invoice or a compromised clipboard shows as an unknown recipient rather than going out silently (#368).
+- Recipient logos and Lightning URI handling were corrected shortly after, and the vendored SDK is pinned and hash-checked so a tampered drop fails the build (#371, #373).
+
+**Spark: stablecoin send and SideShift receive**
+- Spark can send stablecoin balances, and receiving into Spark now goes through SideShift, which replaced the Liquid swap path (#276).
+- Cross-chain addresses are validated before you commit, and the conversion fee is shown in sats rather than left implicit (#278).
+- A circuit breaker stops the stable-balance display flapping when the rate source is unavailable, and shared preparation failures use payment wording instead of protocol wording (#366, #379).
+
+**Liquid sunset**
+- The Liquid wallet is no longer offered. Existing accounts that already hold a Liquid balance keep it and can still move it; new Cubes do not get a Liquid wallet, and Spark plus SideShift covers what Liquid was there for (#276).
+
+**COINCUBE | Tenshu**
+- The desktop app is now COINCUBE | Tenshu throughout, with its own icon on all three platforms and its own bundle identifier (#273, #275, #314).
+
+**macOS signing and notarization**
+- Release builds are signed and notarized as a bundle, and CI now checks that the provisioning profile actually authorises the signing certificate rather than discovering the mismatch at notarization time (#316).
+
+**Node resource settings**
+- The managed local node's disk and memory footprint is configurable, with a Small computer preset, and the app states what a local node actually costs in disk rather than leaving you to find out during the initial sync (#277).
+- The bundled node moved from Bitcoin Core to Bitcoin Knots, with a migration path for existing local nodes (#225, #302).
+
+**Inbound Tor**
+- The managed node can accept inbound connections over Tor, off by default (#267).
+
+**Cube unlock hardening**
+- Unlocking a Cube was hardened: the seed file is bound to the device and to the Cube it belongs to, so a copied data directory does not open elsewhere, and wallet descriptors are encrypted at rest (#313, #353).
+- Passkey unlock is available and is the default where the platform supports it (#318, #319, #320).
+
+**Recovery alerts** (Coming soon)
+- Alert recipients are read from the Vault rather than from Cube membership, so the people a Vault actually names are the people who get told (#334), and an owner is no longer sent an alert about their own key (#397).
+
+**COINCUBE | Connect blinding**
+
+Sources: `coincube-gui/src/services/coincube/`, `coincubed/src/connect.rs`
+- Connect no longer sees your extended public keys or your transaction drafts. Keys are sealed to your own devices' keys (ECIES) before they leave the app, and signing requests travel end-to-end encrypted between COINCUBE | Tenshu and COINCUBE | Keychain; Connect stores and routes that ciphertext and holds no key that can open it (#249, #315).
+
+**Billing**
+- Plans, the plan picker and the checkout flow are in the desktop app, with the Estate launch offer applied automatically on account creation (#153, #163, #209, #222, #226, #227, #229).
+
+**Bitcoin Blake2b (BTCB2) — flag-gated; ships ON only if Lane B4 passes**
+- COINCUBE can run a Vault-only Cube on Bitcoin Blake2b, the BLAKE2b proof-of-work fork, served by Connect's BTCB2 Esplora or a managed Knots node. Chain identity is carried end to end — storage, seed persistence, backups, Cube registration, signing sessions and fiat quotes are all isolated per chain, so a BTCB2 Cube can never read or write a Bitcoin Cube's material (#370, #374, #382, #383, #410–#446).
+- Replay protection is the point of the feature: a unified sighash makes a BTCB2 signature invalid on Bitcoin, per-input replay status is shown before you broadcast, and signatures that cannot be verified read as unknown rather than protected (#369, #372, #381, #392, #400).
+- The Claim machinery — observation, preflight, poison self-transfer, change reservation and submission — is merged but not user-reachable in this release (#423–#466).
+- Fiat for a BTCB2 Vault comes from BTCB2 listings only and falls back to native units; it never shows the Bitcoin price (#413).
+
+**Liana Connect is no longer offered when you create a Cube**
+- Creating a Cube, and every restore and recovery flow, is local-first: the old "Use Liana Connect" backend choice is gone from those paths. It remains on the Add wallet flow for mainnet and signet (`installer/mod.rs:722`).
+
 #### Fixes
 
 **Spark wallet now works in installed builds**
@@ -81,6 +138,21 @@ Sources: `.github/workflows/{main,nightly,releases}.yml`, `contrib/release/wix/m
 - All three platforms now build and ship the bridge alongside the app: in `Tenshu.app/Contents/MacOS/` (signed and notarized with the bundle), in the MSI's `bin` directory, and in the Linux `.tar.gz`. Each workflow asserts the packaged artifact contains it, is the right architecture, is covered by the signature, and answers a JSON-RPC round trip — the failure is invisible to `codesign`, notarization and `spctl`, so only an explicit check catches a recurrence.
 - The Linux release asset keeps its `tenshu-<version>-<target>.tar.gz` name but now extracts to a directory holding both binaries; the nightly Linux artifact changes from a bare binary to that same archive.
 - The bridge's 15 unit tests and its clippy lints now run in CI (`bridge_tests` job); a bare `cargo test` at the root never reached them.
+
+**Other fixes**
+
+- Recovery Kit and phone recovery: sealing a seed-only kit with a phone, owner COINCUBE | Keychain recovery, inherited-Vault recovery and the Recovery Kit screens were substantially reworked and fixed (#246, #253, #271, #279, #286, #291, #294, #324, #325, #354, #355, #358, #359).
+- Duress mode (Coming soon — gated per account by Connect's `duressEnabled` flag, `services/coincube/mod.rs:817`): the PIN is restricted to four digits, a decoy Recovery Kit password returns the locked response, Cube material is not left behind when a wipe hits a filesystem error, and the Vault gate covers the duress case (#256, #285, #292, #299, #301).
+- Hardware wallets: advisories for the Coldcard RNG issue and the BitBox firmware issue are shown in-app, used key sources are disabled in the picker, and multi-signature ordering was corrected (#296, #329, #332, #340).
+- Windows and Linux: an unmovable window on Ubuntu, a sizing problem on Windows, and vault key labels overflowing their card were fixed (#348, #349, #367, #375).
+- Transfers: the fee preview no longer reserves a change address on every keystroke, so a transfer no longer burns change indices it never uses (#474).
+- Spark: wallet timeouts, loading failures and several UI problems (#203, #304, #357).
+- Vault: unconfirmed and pending transaction states, live confirmation counts, an insufficient-funds error that misreported the cause, resync and rescan behaviour, and self-healing of Vault members (#211, #212, #218, #328, #344, #345, #347).
+- Error messages no longer leak backend or SDK wording to the user (#384, #385).
+
+#### Internal and CI
+
+- Test coverage, CI cost controls, toolchain pinning, static-analysis cleanup, dependency mirroring and cross-platform test-harness fixes, none user-visible (#147, #156–#161, #170–#177, #238–#243, #272, #287, #300, #317, #337–#339, #350, #352, #361, #365, #386–#388, #399, #418, #467–#469, #472, #476, #481, #490, #493).
 
 ### March 2026
 
