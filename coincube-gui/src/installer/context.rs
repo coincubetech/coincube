@@ -262,6 +262,13 @@ pub struct Context {
     /// holds no master signer — which fails the same loud way rather than
     /// inventing a password no later unlock could rederive.
     pub passkey_seed_password: Option<zeroize::Zeroizing<String>>,
+    /// Set for [`super::UserFlow::ClaimBlake2b`]: the Bitcoin Cube this claim
+    /// target reuses the descriptor and master seed of.
+    ///
+    /// Not `cube_settings` — those describe the Cube being built, and a claim
+    /// builds a fork Cube from inside a Bitcoin one. See
+    /// [`super::claim::target_master_seed`] for the seed decision.
+    pub claim_source: Option<super::claim::ClaimSource>,
 }
 
 impl Context {
@@ -422,6 +429,7 @@ impl Context {
             // installer is launched from inside an open Cube.
             cube_pin: None,
             passkey_seed_password: None,
+            claim_source: None,
         }
     }
 }

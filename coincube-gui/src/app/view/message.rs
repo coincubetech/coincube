@@ -181,6 +181,10 @@ pub enum Message {
     ExportPsbt,
     ImportPsbt,
     OpenUrl(String),
+    /// Start the Bitcoin Blake2b claim-target installer from this Cube
+    /// (Lane B1.4). Creates the target Cube only — nothing is claimed,
+    /// poisoned, swept or broadcast by this flow.
+    StartClaimBlake2b,
     /// Collapse the firmware-advisory detail panel on one device row. Carries
     /// the device fingerprint and the advisory id; the badge itself stays.
     DismissHwAdvisory(Fingerprint, &'static str),

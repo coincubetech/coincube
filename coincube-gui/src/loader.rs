@@ -869,6 +869,10 @@ pub async fn load_application(
         // Fail-closed until `/connect/features` loads and the account panel
         // mirrors the real flags in (see `App::update`'s ConnectAccount arm).
         marketplace_flags: crate::app::features::MarketplaceServerFlags::OFF,
+        // Same fail-closed stance for the fork account grant.
+        btcb2_server_enabled: false,
+        // Resolved from disk in `App::new_inner`.
+        btcb2_already_claimed: false,
         // Liquid sunset gate. Both halves are filled in later: the local half
         // in `App::new` (from whether the Liquid SDK actually connected), the
         // server half when `/connect/features` loads.

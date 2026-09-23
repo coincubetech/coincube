@@ -253,6 +253,11 @@ struct PendingRemoteRename {
 pub struct Home {
     state: State,
     displayed_networks: Vec<ChainId>,
+    /// Descriptor checksums that already have a Bitcoin Blake2b claim target
+    /// on this device. Resolved from the fork chain's settings file when the
+    /// network list is refreshed — never from the view, which would put a file
+    /// read in every frame.
+    btcb2_claim_targets: std::collections::HashSet<String>,
     network: ChainId,
     pub datadir_path: CoincubeDirectory,
     error: Option<String>,
@@ -398,6 +403,8 @@ impl Home {
         let network_dir = datadir_path.network_directory(network);
         (
             Self {
+                // Resolved on the first `refresh_displayed_networks`.
+                btcb2_claim_targets: std::collections::HashSet::new(),
                 state: State::Unchecked,
                 displayed_networks: NETWORKS.to_vec(),
                 network,
@@ -756,6 +763,45 @@ impl Home {
         })
     }
 
+    /// Whether the Cube at `index` may start a Bitcoin Blake2b claim.
+    ///
+    /// The same predicate the Vault rail uses inside a running Cube
+    /// ([`app::features::claim_blake2b`]), answered from what Home can see:
+    /// the Cube's own record and the fork chain's settings file. Home never
+    /// unlocks anything, so "already claimed" is read from disk.
+    pub(crate) fn claim_availability(&self, index: usize) -> app::features::Availability {
+        match self.claim_source_cube(index) {
+            Some(source) => app::features::claim_blake2b(source),
+            None => app::features::Availability::Unavailable {
+                reason: "No Cube selected.".to_string(),
+            },
+        }
+    }
+
+    /// The Cube at `index` as a candidate claim source — the input
+    /// [`claim_availability`](Self::claim_availability) answers from.
+    ///
+    /// Separate so the disk-derived half (`already_claimed`, refreshed by
+    /// [`Self::refresh_claim_targets`]) can be asserted without an
+    /// authenticated Connect session standing in front of it.
+    pub(crate) fn claim_source_cube(&self, index: usize) -> Option<app::features::ClaimSourceCube> {
+        let State::Cubes { cubes, .. } = &self.state else {
+            return None;
+        };
+        let cube = cubes.get(index)?;
+        Some(app::features::ClaimSourceCube {
+            chain: cube.network,
+            has_vault: cube.vault_wallet_id.is_some(),
+            server_enabled: self
+                .connect_chain_availability(ChainId::BitcoinBlake2b)
+                .is_available(),
+            already_claimed: cube
+                .vault_wallet_id
+                .as_ref()
+                .is_some_and(|id| self.btcb2_claim_targets.contains(&id.descriptor_checksum)),
+        })
+    }
+
     fn refresh_displayed_networks(&mut self) {
         self.displayed_networks = if self.developer_mode {
             NETWORKS.to_vec()
@@ -771,7 +817,24 @@ impl Home {
                 self.displayed_networks
                     .push(ChainId::BitcoinBlake2bTestnet4);
             }
+            self.refresh_claim_targets();
+        } else {
+            self.btcb2_claim_targets.clear();
         }
+    }
+
+    /// Which descriptors already have a claim target on this device.
+    ///
+    /// Shares [`app::claim_target_checksums`] with the running app rather than
+    /// reading the settings file its own way: the two answered the same
+    /// question from different fields once, and an install interrupted between
+    /// the wallet write and the Cube write made them disagree — Home hid the
+    /// card for a target that did not exist.
+    ///
+    /// Only accounts with the fork grant pay for the read, and only once per
+    /// update rather than once per rendered row.
+    pub(crate) fn refresh_claim_targets(&mut self) {
+        self.btcb2_claim_targets = app::claim_target_checksums(&self.datadir_path);
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
@@ -1926,6 +1989,24 @@ impl Home {
                     Task::none()
                 }
             },
+            Message::View(ViewMessage::ClaimBlake2b(index)) => {
+                // Home cannot start a claim: it needs the source Cube's
+                // descriptor and master seed, and both arrive with the unlock.
+                // So record the intent and open the Cube the ordinary way; the
+                // running `App` re-checks the gate and starts the installer.
+                if let Some(reason) = self.claim_availability(index).reason() {
+                    self.error = Some(reason.to_string());
+                    return Task::none();
+                }
+                let State::Cubes { cubes, .. } = &self.state else {
+                    return Task::none();
+                };
+                let Some(cube) = cubes.get(index) else {
+                    return Task::none();
+                };
+                app::claim_intent::arm(cube.id.clone());
+                Task::done(Message::View(ViewMessage::Run(index)))
+            }
             Message::View(ViewMessage::Run(index)) => {
                 if let State::Cubes { cubes, source, .. } = &self.state {
                     if let Some(cube) = cubes.get(index) {
@@ -3779,6 +3860,11 @@ impl Home {
                                                         i,
                                                         signed_in,
                                                         self.cube_sync_hint(cube),
+                                                        self.claim_availability(i)
+                                                            .is_available()
+                                                            .then_some(
+                                                                "Claim Bitcoin Blake2b",
+                                                            ),
                                                     ))
                                                 },
                                             );
@@ -4568,6 +4654,10 @@ fn cubes_list_item<'a>(
     i: usize,
     signed_in: bool,
     sync_error: Option<String>,
+    // Whether this Cube may start a Bitcoin Blake2b claim. `None` hides the
+    // card entirely — an account without the fork has no BTCB2 at all, which
+    // is not a per-Cube state the user can act on.
+    claim: Option<&'a str>,
 ) -> Element<'a, ViewMessage> {
     // Single tri-state cube icon (Phase 1, duress mode): the Cube's
     // relationship to Connect — Sovereign (outline) → Registered (filled,
@@ -4643,6 +4733,12 @@ fn cubes_list_item<'a>(
                     .padding(10)
                     .on_press(ViewMessage::RenameCube(i)),
             )
+            .push_maybe(claim.map(|label| {
+                Button::new(p1_regular(label))
+                    .style(theme::button::secondary)
+                    .padding(10)
+                    .on_press(ViewMessage::ClaimBlake2b(i))
+            }))
             .push_maybe((!cube.network.is_blake2b()).then(|| {
                 Button::new(icon::trash_icon())
                     .style(theme::button::secondary)
@@ -5451,6 +5547,10 @@ pub enum ViewMessage {
     /// Toggle passkey mode for Cube creation (no PIN when enabled).
     TogglePasskeyMode(bool),
     /// Open a URL in the default browser
+    /// Press on the "Claim Bitcoin Blake2b" card of the Cube at this index:
+    /// arm the claim intent and open that Cube. The claim itself starts once
+    /// it is unlocked (`app::claim_intent`).
+    ClaimBlake2b(usize),
     OpenUrl(String),
     /// Acknowledge the one-time firmware-advisory incident notice. Persisted,
     /// so the notice never fires again on this install.
@@ -7080,16 +7180,16 @@ mod tests {
     #[test]
     fn pure_home_view_helpers_build_for_local_remote_and_form_variants() {
         let mut local = cube("local-a", "Local A", Network::Bitcoin);
-        let _ = cubes_list_item(&local, 0, false, None);
+        let _ = cubes_list_item(&local, 0, false, None, None);
         // Sovereign + signed in, with the server's refusal recorded: the
         // warning variant of the sync tooltip.
-        let _ = cubes_list_item(&local, 0, true, Some("Out of Cube slots".to_string()));
+        let _ = cubes_list_item(&local, 0, true, Some("Out of Cube slots".to_string()), None);
 
         local.remote_synced = true;
-        let _ = cubes_list_item(&local, 1, true, None);
+        let _ = cubes_list_item(&local, 1, true, None, None);
 
         local.recovery_kit_last_backed_up_descriptor_fingerprint = Some("hash".to_string());
-        let _ = cubes_list_item(&local, 2, true, None);
+        let _ = cubes_list_item(&local, 2, true, None, None);
 
         let mut remote = remote_cube("remote-a", "Remote A", Network::Bitcoin);
         let _ = remote_cube_list_item(&remote);

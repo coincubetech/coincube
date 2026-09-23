@@ -1,3 +1,4 @@
+mod claim;
 pub(crate) mod connect_vault;
 mod context;
 mod decrypt;
@@ -191,6 +192,7 @@ use crate::{
     signer::Signer,
 };
 
+pub use claim::ClaimSource;
 pub use descriptor::{KeySource, KeySourceKind, KeychainKeyOwner, PathKind, PathSequence};
 pub use message::Message;
 use step::{
@@ -244,6 +246,36 @@ pub enum UserFlow {
         cube_id: u64,
         full_cube: bool,
     },
+    /// Bitcoin Blake2b **Claim target** creation (Lane B1.4). Builds a fork
+    /// Cube from a Bitcoin Cube's Vault descriptor so it watches — and can
+    /// spend — the same addresses on the fork chain.
+    ///
+    /// Shares the descriptor-reuse shape of `RestoreVaultFromRecoveryKit`: the
+    /// descriptor is settled before the flow starts, so there is no editor, no
+    /// template picker and no mnemonic backup. It is *not* a restore — nothing
+    /// is being recovered — and it creates a second Cube rather than filling in
+    /// the running one, which is why it is its own flow rather than a flag on
+    /// that one.
+    ///
+    /// Creates the target only. Nothing in this flow claims, poisons, sweeps or
+    /// broadcasts; `services::claim_workflow::Step2Authorization` stays
+    /// uninhabited.
+    ClaimBlake2b {
+        from_cube: Box<ClaimSource>,
+    },
+}
+
+/// What a claim needs to put the user back in the Cube they started from.
+///
+/// Deliberately **not** `Clone`: it owns `Arc`s to the source Cube's live SDK
+/// clients, and the last release of the Spark one shuts its bridge subprocess
+/// down. One owner at a time means the cancel path has to `take()` it — a
+/// second copy left behind in the installer is a compile error rather than a
+/// bridge that outlives the flow.
+pub struct SourceCube {
+    pub settings: crate::app::settings::CubeSettings,
+    pub breez_client: Option<std::sync::Arc<crate::app::breez_liquid::BreezClient>>,
+    pub spark_backend: Option<std::sync::Arc<crate::app::wallets::SparkBackend>>,
 }
 
 pub struct Installer {
@@ -265,6 +297,17 @@ pub struct Installer {
     /// Cube settings when launched from app (for returning to the same cube)
     pub cube_settings: Option<crate::app::settings::CubeSettings>,
 
+    /// The Cube this installer was launched *from*, when that is a different
+    /// Cube from the one being built — today only a Bitcoin Blake2b claim.
+    ///
+    /// Two jobs, and they are deliberately separate from [`Self::breez_client`]
+    /// / [`Self::spark_backend`]: those are inputs to the Cube being *built*
+    /// and must stay `None` on the fork chain, while this is what the source
+    /// Cube is rebuilt from if the user backs out. Parking the handles here
+    /// also keeps them alive across the round trip — `State` holds one screen
+    /// at a time, so the source `App` is dropped at the transition, and the
+    /// last `Arc` release is what shuts the Spark bridge subprocess down.
+    pub source_cube: Option<SourceCube>,
     /// Pre-loaded BreezClient when launched from app (avoids re-entering PIN)
     pub breez_client: Option<std::sync::Arc<crate::app::breez_liquid::BreezClient>>,
 
@@ -344,15 +387,78 @@ impl Installer {
                 "Installer chain differs from the Cube chain".to_string(),
             ));
         }
+        // A claim target is opened with the source Cube's PIN (its seed file is
+        // the source Cube's mnemonic). No PIN in this session means either a
+        // passkey source Cube — which the fork refuses to unlock at all — or a
+        // session that has gone; both would mint a Cube nothing can open, so
+        // the refusal belongs here rather than at the seed write.
+        if let UserFlow::ClaimBlake2b { from_cube } = &user_flow {
+            if crate::app::session::pin_for(from_cube.cube_id()).is_none() {
+                // Two audiences behind one condition, and only one of them has
+                // something to do about it. A passkey Cube has no PIN by
+                // design, so telling its owner to reopen it would send them
+                // round a loop that cannot end — and a fork Cube cannot be
+                // unlocked by passkey at all (`gui::tab::unlock_state`), so the
+                // target would be unopenable. A PIN Cube whose session lapsed
+                // gets the advice that actually works.
+                return Err(Error::Unexpected(if from_cube.cube.is_passkey_cube() {
+                    "Bitcoin Blake2b Cubes unlock with a PIN, and this Cube uses a passkey. \
+                         Claiming from a passkey Cube isn't supported yet."
+                        .to_string()
+                } else {
+                    "Reopen this Cube and try again — its PIN isn't available in this session."
+                        .to_string()
+                }));
+            }
+        }
         if chain.is_blake2b()
             && (remote_backend.is_some()
-                || breez_client.is_some()
-                || spark_backend.is_some()
-                || !matches!(user_flow, UserFlow::CreateWallet))
+                || !matches!(
+                    user_flow,
+                    UserFlow::CreateWallet | UserFlow::ClaimBlake2b { .. }
+                ))
         {
             return Err(Error::Unexpected(
-                "Bitcoin Blake2b supports only a Connect-backed Vault creation flow".to_string(),
+                "Bitcoin Blake2b supports only a Connect-backed Vault creation or claim flow"
+                    .to_string(),
             ));
+        }
+        let (parked_breez, parked_spark) = (breez_client.clone(), spark_backend.clone());
+        // The invariant is that a Bitcoin Blake2b Cube is never *given* a Breez
+        // or Spark client, not that the caller may not hold one. Refusing on
+        // the caller's handles made the claim flow unanswerable — it launches
+        // from a running Bitcoin Cube, which holds both — so the refusal moves
+        // to what is handed into the fork construction path. The source Cube
+        // keeps its live handles, which is also what stops the Spark bridge
+        // subprocess being killed and re-spawned across the round trip.
+        let (breez_client, spark_backend) = if chain.is_blake2b() {
+            (None, None)
+        } else {
+            (breez_client, spark_backend)
+        };
+        if let UserFlow::ClaimBlake2b { from_cube } = &user_flow {
+            // Parked, not handed in: the source Cube's own settings and SDK
+            // handles, so backing out of a claim returns to that Cube rather
+            // than to Home, and so the handles outlive the state transition.
+            let source = SourceCube {
+                settings: from_cube.cube.clone(),
+                breez_client: parked_breez,
+                spark_backend: parked_spark,
+            };
+            let (mut installer, task) = Self::build_for_chain(
+                destination_path,
+                chain,
+                remote_backend,
+                user_flow,
+                launched_from_app,
+                cube_settings,
+                None,
+                None,
+                developer_mode,
+                coincube_client,
+            );
+            installer.source_cube = Some(source);
+            return Ok((installer, task));
         }
         Ok(Self::build_for_chain(
             destination_path,
@@ -455,7 +561,11 @@ impl Installer {
                         // this match arm `ctx.remote_backend` stays at
                         // `Undefined` and the `Message::Install` match panics
                         // with `unreachable!("Must be defined at this point")`.
-                        (UserFlow::RestoreFromRecoveryKit { .. }, _)
+                        // A claim target is always local + Connect Esplora;
+                        // `try_new_for_chain` refuses a remote backend on the
+                        // fork chain outright.
+                        (UserFlow::ClaimBlake2b { .. }, _)
+                        | (UserFlow::RestoreFromRecoveryKit { .. }, _)
                         | (UserFlow::RestoreVaultFromRecoveryKit, _)
                         | (UserFlow::RecoverInheritedVault { .. }, _)
                         | (UserFlow::RecoverOwnCubeWithPhone { .. }, _) => RemoteBackend::None,
@@ -475,6 +585,25 @@ impl Installer {
             context.fresh_fork_cube = true;
             context.cube_id = Some(uuid::Uuid::new_v4().to_string());
         }
+        // A claim target is a Cube of its own — its own id, its own Connect
+        // Cube, its own datadir (I7) — built from the source Cube's descriptor
+        // and seed. Both are settled here rather than collected by a step:
+        // there is nothing for the user to enter that the source Cube does not
+        // already answer.
+        if let UserFlow::ClaimBlake2b { from_cube } = &user_flow {
+            // Derived from the source Cube, not minted: an install that fails
+            // after the seed write leaves a file bound to this id, and a retry
+            // with a fresh one could never open it. See `claim::target_cube_id`.
+            context.cube_id = Some(claim::target_cube_id(from_cube));
+            // Named here as well as minted: the installer's exit seam mints the
+            // Cube from `(cube_id, cube_name)` and falls back to a *fresh*
+            // UUID when either is absent — which would leave the target's seed
+            // file bound to a Cube id no Cube has, and nothing able to open it.
+            context.cube_name = Some(from_cube.default_target_alias());
+            context.descriptor = Some(from_cube.descriptor.clone());
+            context.wallet_alias = from_cube.default_target_alias();
+            context.claim_source = Some((**from_cube).clone());
+        }
         // Inherit the open Cube's PIN when the installer was launched from
         // inside one (`SetupVault` from the app or the loader). Every seed the
         // installer writes is encrypted, so without this there is nothing to
@@ -485,6 +614,15 @@ impl Installer {
         context.cube_pin = cube_settings
             .as_ref()
             .and_then(|cs| crate::app::session::pin_for(&cs.id));
+        // A claim runs inside the *source* Cube, not the Cube being built, so
+        // the line above — which reads the Cube the installer is building —
+        // finds nothing. The target's seed file is the source Cube's mnemonic
+        // and must be encrypted under the source Cube's PIN, so it comes from
+        // the same session resolver, keyed by the source Cube id. Admission
+        // has already refused a source with no PIN in this session.
+        if let UserFlow::ClaimBlake2b { from_cube } = &user_flow {
+            context.cube_pin = crate::app::session::pin_for(from_cube.cube_id());
+        }
         // A passkey Cube has no PIN, so the line above is `None` for it *by
         // design* — `session::pin_for` refuses rather than hand back an empty
         // string. Its seed files are encrypted under a key derived from the
@@ -522,6 +660,7 @@ impl Installer {
 
         let mut installer = Installer {
             network,
+            source_cube: None,
             datadir: destination_path.clone(),
             current: 0,
             fork_install_task: None,
@@ -539,6 +678,19 @@ impl Installer {
                 // server-side cube on mainnet.
                 let network_str = chain.api_str().to_string();
                 match user_flow {
+                    // Claim target: the descriptor is the source Cube's and is
+                    // already in the context, so the editor, the template
+                    // picker and `BackupMnemonic` are all absent. The mnemonic
+                    // is by construction already backed up by the source Cube;
+                    // showing it again would produce a second physical copy of
+                    // one secret for no recovery benefit.
+                    UserFlow::ClaimBlake2b { .. } => vec![
+                        RegisterDescriptor::new_import_wallet().into(),
+                        CoincubeConnectStep::new().into(),
+                        SelectBitcoindTypeStep::new().into(),
+                        WalletAlias::default().into(),
+                        Final::new().into(),
+                    ],
                     UserFlow::CreateWallet if chain.is_blake2b() => vec![
                         RestorePinSetupStep::new().into(),
                         ChooseDescriptorTemplate::default().into(),
@@ -1268,7 +1420,26 @@ pub async fn install_local_wallet(
     }
 
     info!("daemon checked");
-    if ctx.fresh_fork_cube {
+    // Every fork Cube gets a master seed file of its own in the fork chain's
+    // own `mnemonics` folder. Which seed goes in it is the one thing that
+    // differs between creating a fresh fork Cube and creating a claim target,
+    // and `claim::target_master_seed` is where that is decided — see the
+    // invariant recorded there.
+    let claim_target_seed = ctx
+        .claim_source
+        .as_ref()
+        .and_then(claim::target_master_seed);
+    if let Some(seed) = &claim_target_seed {
+        persist_cube_master_seed(
+            seed,
+            &ctx.coincube_directory,
+            ctx.bitcoin_config.chain,
+            seed_password(&ctx)?.as_str(),
+            ctx.seed_cube_id(),
+            seed_device_secret(&ctx)?.as_ref(),
+        )
+        .map_err(claim_seed_error)?;
+    } else if ctx.fresh_fork_cube {
         persist_cube_master_seed(
             &signer.lock().unwrap(),
             &ctx.coincube_directory,
@@ -1617,10 +1788,42 @@ pub async fn import_remote_wallet(
     Ok(wallet_settings)
 }
 
+/// The claim path's version of a seed-storage failure.
+///
+/// The storage layer's message ("Existing Cube master seed does not match this
+/// installation") is accurate and tells a user nothing. On the claim path there
+/// is exactly one way to reach it: another Cube on this device already holds a
+/// Bitcoin Blake2b target for this same master seed — one recovery phrase
+/// restored into two Cubes, each claiming. Refusing is right (the alternative
+/// is one Cube's seed answering for another); leaving the user without the
+/// reason is not.
+pub(crate) fn claim_seed_error(error: Error) -> Error {
+    // Two distinct storage messages reach here, and the first one is the one a
+    // test written from the code alone would miss: the existing file is opened
+    // with *this* attempt's credentials before its contents are compared, so a
+    // file sealed under another Cube's id fails at the decrypt
+    // ("Existing seed file conflicted with unlock credentials") rather than at
+    // the mnemonic comparison ("does not match this installation"). Both mean
+    // the same thing on this path.
+    match error {
+        Error::Unexpected(message)
+            if message.contains("does not match")
+                || message.contains("conflicted with unlock credentials") =>
+        {
+            Error::Unexpected(
+                "Another Cube on this device already has a Bitcoin Blake2b claim for this \
+                 recovery phrase. Open that Cube to use it, or claim from the Cube that made it."
+                    .to_string(),
+            )
+        }
+        other => other,
+    }
+}
+
 /// A failed wallet install preserves the Cube's seed-only file. Retry only
 /// when that exact file decrypts to the same complete mnemonic; a fingerprint
 /// match (or a descriptor-specific sibling) is not proof of seed identity.
-fn persist_cube_master_seed(
+pub(crate) fn persist_cube_master_seed(
     signer: &Signer,
     coincube_directory: &CoincubeDirectory,
     chain: crate::chain::ChainId,
@@ -2740,3 +2943,6 @@ mod fresh_fork_seed_retry_tests {
 
 #[cfg(test)]
 mod connect_activation_tests;
+
+#[cfg(test)]
+mod claim_target_tests;

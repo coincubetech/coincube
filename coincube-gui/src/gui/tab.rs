@@ -1194,19 +1194,7 @@ impl Tab {
                     // the `originating_cube_id` path owns that association, and
                     // `context.cube_id` there is that existing Cube's identity —
                     // not a restore target — so we deliberately skip it.
-                    let restored_cube = if i.cube_settings.is_none() {
-                        i.context
-                            .cube_id
-                            .clone()
-                            .zip(i.context.cube_name.clone().or_else(|| {
-                                i.context
-                                    .fresh_fork_cube
-                                    .then(|| i.context.wallet_alias.clone())
-                            }))
-                            .map(|(uuid, name)| RestoreCubeIdentity { uuid, name })
-                    } else {
-                        None
-                    };
+                    let restored_cube = installer_exit_identity(i);
 
                     // Capture restore-flow state up-front. Cloning the
                     // `Zeroizing<String>` here means the PIN copy
@@ -1222,25 +1210,7 @@ impl Tab {
                         i.context.restore_source,
                         Some(installer::RestoreSource::PasswordKit)
                     );
-                    let restore_seed = match (
-                        i.context.restore_pin.clone(),
-                        i.context
-                            .recovered_signer
-                            .as_ref()
-                            .map(|s| s.fingerprint())
-                            .or_else(|| {
-                                i.context
-                                    .fresh_fork_cube
-                                    .then(|| i.master_signer_fingerprint())
-                            }),
-                    ) {
-                        (Some(pin), Some(fp)) => Some(RestoreCubeSeed {
-                            pin,
-                            master_signer_fingerprint: fp,
-                            seed_backed_up: i.context.fresh_fork_seed_backed_up,
-                        }),
-                        _ => None,
-                    };
+                    let restore_seed = installer_exit_seed(i);
 
                     let generation = self.fork_session_generation;
                     let task = Task::perform(
@@ -1474,6 +1444,17 @@ impl Tab {
                             wallet_settings: settings_opt.map(|s| *s),
                             connect_client: i.context.coincube_client.clone(),
                         };
+                        // Leaving the source Cube: a completed claim opens the
+                        // *target*, so the source's unlocked signer and PIN
+                        // must not outlive the transition. `close_cube` is the
+                        // primitive the ordinary App→Home path uses (`:718`),
+                        // and it is scoped to that Cube — a newer or unrelated
+                        // session is untouched. The target's own unlock does not
+                        // read it: `PinEntry` verifies by decrypting the
+                        // target's seed file with the PIN the user types.
+                        if let Some(source) = &i.source_cube {
+                            app::session::close_cube(&source.settings.id);
+                        }
                         self.state =
                             unlock_state(cube, i.datadir.path().to_path_buf(), on_success, None);
                         return Task::none();
@@ -1580,6 +1561,66 @@ impl Tab {
                         command.map(Message::Load)
                     }
                 } else if let installer::Message::BackToApp(network) = msg {
+                    // A claim was launched from a *different* Cube than the one
+                    // being built, so there is no `cube_settings` to go back to
+                    // — without this the user who backs out of a claim lands on
+                    // Home instead of the Cube they started in. Routed through
+                    // the Loader rather than `new_without_wallet` because the
+                    // source Cube has a Vault (that is what a claim reuses) and
+                    // rebuilding it Vault-less would hide it until relaunch.
+                    if let Some(source) = i.source_cube.take() {
+                        let cfg = app::Config::from_file(
+                            &i.datadir
+                                .network_directory(source.settings.network)
+                                .path()
+                                .join(app::config::DEFAULT_FILE_NAME),
+                        )
+                        .expect("A gui configuration file must be present");
+                        // The same lookup the ordinary open path uses (`:1043`),
+                        // and for the same reason: `WalletId` is the checksum
+                        // *and* the timestamp, so matching on the checksum alone
+                        // can select a different Vault of the same descriptor —
+                        // a re-created one, or a pinned sibling. Cancel must
+                        // restore the Vault the Cube actually points at.
+                        let wallet_settings = vault_settings_for_cube(
+                            &i.datadir,
+                            source.settings.network,
+                            &source.settings,
+                        );
+                        // A remote-backed source has no local daemon to start:
+                        // its ordinary unlock goes to `CoincubeLiteLogin`, and
+                        // handing it to the Loader would try to bring up a
+                        // daemon for a Vault that lives on the backend. Cancel
+                        // has to restore the backend the source actually uses,
+                        // not the one most sources use.
+                        if let Some(settings) = wallet_settings
+                            .clone()
+                            .filter(|w| w.remote_backend_auth.is_some())
+                        {
+                            let (login, command) = login::CoincubeLiteLogin::new(
+                                i.datadir.clone(),
+                                source.settings.network.bitcoin_network(),
+                                settings,
+                                source.breez_client.clone(),
+                                source.spark_backend.clone(),
+                            );
+                            self.state = State::Login(login);
+                            return command.map(Message::Login);
+                        }
+                        let (loader, command) = Loader::new(
+                            i.datadir.clone(),
+                            cfg,
+                            source.settings.network.bitcoin_network(),
+                            None,
+                            None,
+                            wallet_settings,
+                            source.settings.clone(),
+                            source.breez_client.clone(),
+                            source.spark_backend.clone(),
+                        );
+                        self.state = State::Loader(loader);
+                        return command.map(Message::Load);
+                    }
                     // Go back to app without vault using stored cube settings and breez_client
                     if let Some(cube) = &i.cube_settings {
                         if let Some(breez) = &i.breez_client {
@@ -1869,6 +1910,76 @@ impl Tab {
                                 app.datadir(),
                             )),
                             app.authenticated_coincube_client(), // authenticated API client for Keychain keys
+                        ) {
+                            Ok((install, command)) => {
+                                self.state = State::Installer(install);
+                                command.map(Message::Install)
+                            }
+                            Err(error) => Task::done(Message::Run(app::Message::View(
+                                app::view::Message::ShowError(error.to_string()),
+                            ))),
+                        }
+                    }
+                    app::Message::View(app::view::Message::StartClaimBlake2b) => {
+                        // B1.4 claim target. The source Cube is the one running
+                        // here; its descriptor and its unlocked master signer
+                        // are what the target is built from, so both are read
+                        // from this `App` rather than collected by a step.
+                        //
+                        // Creates the target only — see `installer::claim`.
+                        let cube = app.cube_settings().clone();
+                        let Some(wallet) = app.wallet() else {
+                            return Task::done(Message::Run(app::Message::View(
+                                app::view::Message::ShowError(
+                                    "This Cube has no Vault to claim.".to_string(),
+                                ),
+                            )));
+                        };
+                        let Some(fingerprint) = cube.master_signer_fingerprint else {
+                            return Task::done(Message::Run(app::Message::View(
+                                app::view::Message::ShowError(
+                                    "This Cube's master key isn't available in this session."
+                                        .to_string(),
+                                ),
+                            )));
+                        };
+                        let Some(signer) = app::session::unlocked_signer(&cube.id, fingerprint)
+                        else {
+                            return Task::done(Message::Run(app::Message::View(
+                                app::view::Message::ShowError(
+                                    "Unlock this Cube again to start a claim.".to_string(),
+                                ),
+                            )));
+                        };
+                        let source = installer::ClaimSource {
+                            // The whole Cube: the installer needs its id and
+                            // name, its backup state (inherited by the target,
+                            // which shares the mnemonic), and the settings
+                            // themselves to rebuild this Cube if the user backs
+                            // out of the claim.
+                            cube: cube.clone(),
+                            descriptor: wallet.main_descriptor.clone(),
+                            signer: std::sync::Arc::new(crate::signer::Signer::new(signer)),
+                        };
+                        match Installer::try_new_for_chain(
+                            app.datadir().clone(),
+                            crate::chain::ChainId::BitcoinBlake2b,
+                            None,
+                            UserFlow::ClaimBlake2b {
+                                from_cube: Box::new(source),
+                            },
+                            true,
+                            // Deliberately not the source Cube's settings: the
+                            // installer is building a Bitcoin Blake2b Cube, and
+                            // `try_new_for_chain` refuses settings from another
+                            // chain. The source travels in the flow instead.
+                            None,
+                            app.breez_client(),
+                            app.spark_backend(),
+                            GlobalSettings::load_developer_mode(&GlobalSettings::path(
+                                app.datadir(),
+                            )),
+                            app.authenticated_coincube_client(),
                         ) {
                             Ok((install, command)) => {
                                 self.state = State::Installer(install);
@@ -3213,10 +3324,10 @@ async fn save_cube_settings(
 /// produces: a PIN hash + master-signer fingerprint. Populated only
 /// for `UserFlow::RestoreFromRecoveryKit` after `RestorePinSetupStep`;
 /// `None` for every other flow preserves the previous behaviour.
-struct RestoreCubeSeed {
-    pin: zeroize::Zeroizing<String>,
-    master_signer_fingerprint: bitcoin::bip32::Fingerprint,
-    seed_backed_up: bool,
+pub(crate) struct RestoreCubeSeed {
+    pub(crate) pin: zeroize::Zeroizing<String>,
+    pub(crate) master_signer_fingerprint: bitcoin::bip32::Fingerprint,
+    pub(crate) seed_backed_up: bool,
 }
 
 /// The deleted Cube's original identity, carried out of the decrypted
@@ -3225,12 +3336,78 @@ struct RestoreCubeSeed {
 /// original identity or it isn't a seed restore at all — which is why
 /// `find_or_create_cube` takes `Option<RestoreCubeIdentity>` rather than a
 /// struct of `Option`s.
-struct RestoreCubeIdentity {
+/// The Cube identity the installer's exit seam mints from.
+///
+/// `find_or_create_cube` falls back to a **fresh UUID** when this is `None`, so
+/// any flow that minted its own `cube_id` — and bound a seed file to it — must
+/// be recognised here or the Cube that lands is one nothing can open.
+///
+/// `None` when a Cube shell already exists locally (`cube_settings.is_some()`,
+/// e.g. AddWallet inside a Cube): there the `originating_cube_id` path owns the
+/// association and `context.cube_id` is that existing Cube's identity.
+pub(crate) fn installer_exit_identity(i: &Installer) -> Option<RestoreCubeIdentity> {
+    if i.cube_settings.is_some() {
+        return None;
+    }
+    i.context
+        .cube_id
+        .clone()
+        .zip(i.context.cube_name.clone().or_else(|| {
+            i.context
+                .fresh_fork_cube
+                .then(|| i.context.wallet_alias.clone())
+        }))
+        .map(|(uuid, name)| RestoreCubeIdentity { uuid, name })
+}
+
+/// The seed credentials the freshly minted Cube records: which master signer
+/// its seed file belongs to, the PIN that file was written under, and whether
+/// that seed is backed up.
+///
+/// Three flows reach this seam and each answers from a different place — a
+/// Recovery-Kit restore from `restore_pin` + `recovered_signer`, a fresh fork
+/// Cube from the installer's own signer, and a Bitcoin Blake2b **claim** from
+/// the source Cube it reuses. A flow missing here mints a Cube with no master
+/// signer recorded.
+pub(crate) fn installer_exit_seed(i: &Installer) -> Option<RestoreCubeSeed> {
+    if let Some(source) = &i.context.claim_source {
+        // The claim target's seed file is the source Cube's mnemonic, written
+        // under the source Cube's PIN (`Context::cube_pin`, resolved from the
+        // source session at admission) — not a `restore_pin`, because nothing
+        // was restored and no PIN was chosen.
+        return i.context.cube_pin.clone().map(|pin| RestoreCubeSeed {
+            pin,
+            master_signer_fingerprint: source.master_signer_fingerprint(),
+            seed_backed_up: source.seed_backed_up(),
+        });
+    }
+    match (
+        i.context.restore_pin.clone(),
+        i.context
+            .recovered_signer
+            .as_ref()
+            .map(|s| s.fingerprint())
+            .or_else(|| {
+                i.context
+                    .fresh_fork_cube
+                    .then(|| i.master_signer_fingerprint())
+            }),
+    ) {
+        (Some(pin), Some(fp)) => Some(RestoreCubeSeed {
+            pin,
+            master_signer_fingerprint: fp,
+            seed_backed_up: i.context.fresh_fork_seed_backed_up,
+        }),
+        _ => None,
+    }
+}
+
+pub(crate) struct RestoreCubeIdentity {
     /// Original UUID, preserved verbatim (see `CubeSettings::new_with_raw_id`).
-    uuid: String,
+    pub(crate) uuid: String,
     /// Original display name, so the revived Cube doesn't inherit the
     /// wallet-alias default.
-    name: String,
+    pub(crate) name: String,
 }
 
 /// Attach `vault` to `cube`, or leave the Cube vaultless when the installer
@@ -3262,7 +3439,7 @@ fn marked_kit_backed_up(
     settings
 }
 
-async fn find_or_create_cube<C: Into<crate::chain::ChainId>>(
+pub(crate) async fn find_or_create_cube<C: Into<crate::chain::ChainId>>(
     network_dir: &NetworkDirectory,
     // Both halves of the Vault's identity, or `None` when the installer exited
     // without one. Deliberately not a bare `WalletId`: every attach site below
@@ -3658,6 +3835,10 @@ pub fn create_app_with_remote_backend(
             // Fail-closed until `/connect/features` loads and the account panel
             // mirrors the real flags in (see `App::update`'s ConnectAccount arm).
             marketplace_flags: crate::app::features::MarketplaceServerFlags::OFF,
+            // Same fail-closed stance for the fork account grant.
+            btcb2_server_enabled: false,
+            // Resolved from disk in `App::new_inner`.
+            btcb2_already_claimed: false,
             // Liquid sunset gate. Both halves are filled in later: the local
             // half in `App::new` (from whether the Liquid SDK actually
             // connected), the server half when `/connect/features` loads.

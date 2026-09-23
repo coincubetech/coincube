@@ -411,6 +411,53 @@ fn bitcoin_blake2b_with(support: RuntimeSupport, flag: BitcoinBlake2bServerFlag)
     }
 }
 
+/// Everything a Cube must be for a Bitcoin Blake2b **claim** to start from it.
+///
+/// Deliberately one predicate rather than a condition spread over the Home
+/// card and the Vault rail: the two surfaces must agree, and "the card was
+/// shown" is not a permission the installer can check later.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClaimSourceCube {
+    /// The chain the candidate source Cube is on. Only Bitcoin mainnet has
+    /// coins a fork claim can be about.
+    pub chain: ChainId,
+    /// Whether it has a Vault. The descriptor *is* what a claim reuses, so a
+    /// Cube without one has nothing to claim with.
+    pub has_vault: bool,
+    /// The account-scoped `/connect/features` grant, mirrored into the Cache.
+    pub server_enabled: bool,
+    /// Whether a Bitcoin Blake2b Cube already reuses this Cube's descriptor.
+    /// A second target would watch the same addresses twice.
+    pub already_claimed: bool,
+}
+
+/// Whether a claim may be started from this Cube. Both halves of the gate —
+/// [`bitcoin_blake2b`] for the build/account, and the source Cube's own shape.
+pub fn claim_blake2b(source: ClaimSourceCube) -> Availability {
+    let account = bitcoin_blake2b(BitcoinBlake2bServerFlag {
+        server_enabled: source.server_enabled,
+    });
+    if !account.is_available() {
+        return account;
+    }
+    if source.chain != ChainId::Bitcoin {
+        return Availability::Unavailable {
+            reason: "Only a Bitcoin Cube can be claimed onto Bitcoin Blake2b.".to_string(),
+        };
+    }
+    if !source.has_vault {
+        return Availability::Unavailable {
+            reason: "This Cube has no Vault to claim.".to_string(),
+        };
+    }
+    if source.already_claimed {
+        return Availability::Unavailable {
+            reason: "This Cube already has a Bitcoin Blake2b claim.".to_string(),
+        };
+    }
+    Availability::Available
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -423,6 +470,83 @@ mod tests {
         Network::Signet,
         Network::Regtest,
     ];
+
+    fn claim_source(chain: ChainId) -> ClaimSourceCube {
+        ClaimSourceCube {
+            chain,
+            has_vault: true,
+            server_enabled: true,
+            already_claimed: false,
+        }
+    }
+
+    /// The claim card's visibility matrix, in one place. Every `false` here is
+    /// a surface the user must not be offered, and each has a distinct reason
+    /// because the popover shows it verbatim.
+    #[test]
+    fn claim_visibility_matrix() {
+        assert!(claim_blake2b(claim_source(ChainId::Bitcoin)).is_available());
+
+        // Not a Bitcoin Cube: nothing on the fork chain to claim.
+        for chain in [
+            ChainId::Testnet,
+            ChainId::Testnet4,
+            ChainId::Signet,
+            ChainId::Regtest,
+            ChainId::BitcoinBlake2b,
+            ChainId::BitcoinBlake2bTestnet4,
+        ] {
+            assert!(
+                !claim_blake2b(claim_source(chain)).is_available(),
+                "{:?} must not offer a claim",
+                chain
+            );
+        }
+
+        // No Vault: the descriptor is what a claim reuses.
+        assert!(!claim_blake2b(ClaimSourceCube {
+            has_vault: false,
+            ..claim_source(ChainId::Bitcoin)
+        })
+        .is_available());
+
+        // Already claimed: a second target would watch the same addresses.
+        assert!(!claim_blake2b(ClaimSourceCube {
+            already_claimed: true,
+            ..claim_source(ChainId::Bitcoin)
+        })
+        .is_available());
+
+        // Account half absent — fails closed, and keeps the account-level
+        // wording rather than a per-Cube one.
+        let without_grant = claim_blake2b(ClaimSourceCube {
+            server_enabled: false,
+            ..claim_source(ChainId::Bitcoin)
+        });
+        assert!(!without_grant.is_available());
+        assert_eq!(
+            without_grant.reason(),
+            bitcoin_blake2b(BitcoinBlake2bServerFlag::OFF).reason(),
+            "the account gate answers for itself"
+        );
+
+        // Distinct reasons: the popover renders them verbatim.
+        let reasons: std::collections::HashSet<String> = [
+            claim_blake2b(claim_source(ChainId::Testnet)),
+            claim_blake2b(ClaimSourceCube {
+                has_vault: false,
+                ..claim_source(ChainId::Bitcoin)
+            }),
+            claim_blake2b(ClaimSourceCube {
+                already_claimed: true,
+                ..claim_source(ChainId::Bitcoin)
+            }),
+        ]
+        .iter()
+        .filter_map(|a| a.reason().map(str::to_string))
+        .collect();
+        assert_eq!(reasons.len(), 3);
+    }
 
     /// Regression guard for the §2 support matrix. If a decision changes,
     /// this is the one place to update alongside the matching `fn`.

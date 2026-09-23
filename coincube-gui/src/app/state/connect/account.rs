@@ -4424,6 +4424,23 @@ impl ConnectAccountPanel {
             .unwrap_or(false)
     }
 
+    /// The account-scoped Bitcoin Blake2b flag from `GET /connect/features`
+    /// (`bitcoinBlake2bEnabled`) — the server half of
+    /// [`crate::app::features::bitcoin_blake2b`], read here so a running Cube
+    /// can answer the same question Home answers before unlock.
+    ///
+    /// Fails closed while features are unloaded, exactly like
+    /// [`Self::marketplace_server_flags`], and reverts on logout because
+    /// `clear_session` drops `features`.
+    pub fn bitcoin_blake2b_server_enabled(&self) -> bool {
+        self.is_authenticated()
+            && self
+                .features
+                .as_ref()
+                .and_then(|f| f.bitcoin_blake2b_enabled)
+                .unwrap_or(false)
+    }
+
     /// The per-user duress launch flag from `GET /connect/features`
     /// (`duressEnabled`) — the server half of [`Self::duress_gate`].
     ///

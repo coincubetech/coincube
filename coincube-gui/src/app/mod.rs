@@ -1,6 +1,7 @@
 pub mod breez_liquid;
 pub mod breez_spark;
 pub mod cache;
+pub mod claim_intent;
 pub mod config;
 pub mod error;
 pub mod features;
@@ -576,6 +577,10 @@ impl Panels {
                 crate::app::menu::VaultSubMenu::Settings(_) => {
                     self.vault_settings.as_ref().map(|v| v as &dyn State)
                 }
+                // The claim item starts the installer; the menu never settles
+                // on it, so there is no panel to return. See
+                // `VaultSubMenu::Claim`.
+                crate::app::menu::VaultSubMenu::Claim => None,
             },
             Menu::Marketplace(MarketplaceSubMenu::BuySell) => {
                 self.buy_sell.as_ref().map(|v| v as &dyn State)
@@ -660,6 +665,8 @@ impl Panels {
                 crate::app::menu::VaultSubMenu::Settings(_) => {
                     self.vault_settings.as_mut().map(|v| v as &mut dyn State)
                 }
+                // See `Panels::current`: an action, not a panel.
+                crate::app::menu::VaultSubMenu::Claim => None,
             },
             Menu::Marketplace(MarketplaceSubMenu::BuySell) => {
                 self.buy_sell.as_mut().map(|v| v as &mut dyn State)
@@ -735,6 +742,11 @@ pub struct App {
     cube_settings: settings::CubeSettings,
     config: Arc<Config>,
     datadir: CoincubeDirectory,
+    /// A Home claim card was pressed for this Cube and the claim has not
+    /// started yet. Held rather than acted on at construction because the
+    /// account's Bitcoin Blake2b grant arrives with `/connect/features`, well
+    /// after the Cube is open — see the `ConnectAccount` mirror in `update`.
+    pending_claim: bool,
     /// Boxed so that `App` — and therefore `gui::tab::State`, whose size is
     /// set by this variant — stays small. `Panels` holds every panel's state
     /// inline (~30 KiB); carried by value it made each `self.state = ...`
@@ -2385,6 +2397,61 @@ fn settle_rescan_obligation(
     )
 }
 
+/// Whether a Bitcoin Blake2b Cube on this device already holds a Vault built
+/// from `descriptor_checksum` — i.e. this Bitcoin Cube has already been
+/// claimed.
+///
+/// Read from the fork chain's own settings file, so it is a fact about the
+/// disk rather than about the Connect session: a claim target that exists must
+/// not look absent because the API is unreachable. An unreadable or absent
+/// settings file means "no target", which is the same answer a device that has
+/// never claimed gives.
+pub(crate) fn claim_target_checksums(
+    datadir: &CoincubeDirectory,
+) -> std::collections::HashSet<String> {
+    let fork_dir = datadir.network_directory(crate::chain::ChainId::BitcoinBlake2b);
+    // No file, no targets — and no retry. `Settings::from_file` treats
+    // `NotFound` as possibly-transient and sleeps between five attempts (at
+    // least 300 ms) because the paths that call it are reading a file that is
+    // *supposed* to exist. This one asks a question whose ordinary answer is
+    // "there is nothing here yet": the fork settings file does not exist until
+    // the first claim completes, so every caller before then would pay the
+    // whole retry budget for a file whose absence is the answer. Home asks on
+    // every message.
+    if !fork_dir.path().join(settings::SETTINGS_FILE_NAME).is_file() {
+        return std::collections::HashSet::new();
+    }
+    settings::Settings::from_file(&fork_dir)
+        .map(|s| {
+            // A **Cube**, not a wallet record. The install writes the wallet
+            // before the exit seam writes the Cube, so an interruption between
+            // the two leaves a checksum with nothing to open: keying on the
+            // wallet would hide the claim entry (nothing to retry with) while
+            // Home shows no Cube (nothing to open), stranding the user between
+            // two screens that each think the other has it.
+            s.cubes
+                .iter()
+                .filter_map(|cube| {
+                    cube.vault_wallet_id
+                        .as_ref()
+                        .map(|id| id.descriptor_checksum.clone())
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Whether a claim target already exists for this descriptor.
+///
+/// One definition, two consumers: the running app asks per Cube
+/// ([`App::claim_source_cube`]) and Home asks for the whole set at refresh
+/// ([`crate::home::Home::claim_availability`]). They were separate reads once
+/// and the two drifted — the App was repaired to key on the Cube while Home
+/// went on counting wallets — so they now share [`claim_target_checksums`].
+pub(crate) fn claim_target_exists(datadir: &CoincubeDirectory, descriptor_checksum: &str) -> bool {
+    claim_target_checksums(datadir).contains(descriptor_checksum)
+}
+
 impl App {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -2512,6 +2579,15 @@ impl App {
         if cache.fiat_chain.is_blake2b() {
             cache.clear_btcb2_fiat();
         }
+        // Resolved once per cube-open, from the fork chain's settings file.
+        // Only a Bitcoin Cube can be a claim source, so the question is not
+        // asked on any other chain.
+        cache.btcb2_already_claimed = cube_settings.network == crate::chain::ChainId::Bitcoin
+            && claim_target_exists(&data_dir, &wallet.descriptor_checksum);
+        // A Home claim card pressed before unlock lands here. Taken on every
+        // open so a stale intent cannot fire on an unrelated Cube later; the
+        // gate below is re-checked rather than inherited from the card.
+        let claim_intent = claim_intent::take(&cube_settings.id);
         // Connect blinding (PR D3): derive the Cube's encryption key once from
         // the master signer the unlock already loaded, so every surface that
         // opens a Connect-served key can do so without re-prompting for a PIN.
@@ -2647,6 +2723,7 @@ impl App {
             .as_ref()
             .is_some_and(|p| p.has_test_coordinator());
         let mut app = Self {
+            pending_claim: claim_intent,
             panels: Box::new(panels),
             cache: cache_with_vault,
             daemon: Some(daemon),
@@ -2690,7 +2767,11 @@ impl App {
         // converge both the local settings and Connect
         // (PLAN-vault-identity-unification D4).
         let backfill = app.vault_fingerprint_backfill_task();
-        (app, Task::batch([cmd, backfill]))
+        // The Home claim card's intent, honoured only if this Cube is still a
+        // valid claim source now that its Vault and the account grant are
+        // known. A card press is a request, not a permission.
+        let claim = app.start_pending_claim();
+        (app, Task::batch([cmd, backfill, claim]))
     }
 
     pub fn new_without_wallet(
@@ -2701,6 +2782,13 @@ impl App {
         network: coincube_core::miniscript::bitcoin::Network,
         cube_settings: settings::CubeSettings,
     ) -> Result<(App, Task<Message>), Error> {
+        // A Cube opening without a Vault still *consumes* any armed claim
+        // intent: "opening any other Cube clears it" has to hold for every
+        // open, or an intent armed for Cube A survives this one and fires on a
+        // later open of A that the user did not ask a claim for. Discarded
+        // rather than acted on — a Cube with no Vault has no descriptor to
+        // claim with.
+        let _ = claim_intent::take(&cube_settings.id);
         if cube_settings.network.is_blake2b() {
             return Err(Error::Daemon(DaemonError::ConnectAnchor(
                 coincubed::connect::AdmissionError::InvalidBackend.into(),
@@ -2797,6 +2885,9 @@ impl App {
 
         Ok((
             Self {
+                // A Vault-less Cube has no descriptor to claim with, so the
+                // Home card is never offered for one.
+                pending_claim: false,
                 panels: Box::new(panels),
                 cache,
                 daemon: None,
@@ -3295,6 +3386,35 @@ impl App {
 
     pub fn cube_settings(&self) -> &settings::CubeSettings {
         &self.cube_settings
+    }
+
+    /// Start a claim the Home card asked for, if this Cube is still a valid
+    /// source. A card press is a request, not a permission: the gate is
+    /// re-checked here, and `Installer::try_new_for_chain` re-checks the
+    /// account half again after that.
+    ///
+    /// Called both when the Cube opens and when `/connect/features` answers,
+    /// because the account grant usually arrives second.
+    fn start_pending_claim(&mut self) -> Task<Message> {
+        if !self.pending_claim
+            || !crate::app::features::claim_blake2b(self.claim_source_cube()).is_available()
+        {
+            return Task::none();
+        }
+        self.pending_claim = false;
+        Task::done(Message::View(view::Message::StartClaimBlake2b))
+    }
+
+    /// This Cube as a candidate Bitcoin Blake2b claim source — the single
+    /// input to [`crate::app::features::claim_blake2b`], so the Vault rail and
+    /// the message handler cannot drift apart.
+    pub(crate) fn claim_source_cube(&self) -> crate::app::features::ClaimSourceCube {
+        crate::app::features::ClaimSourceCube {
+            chain: self.cube_settings.network,
+            has_vault: self.wallet.is_some(),
+            server_enabled: self.cache.btcb2_server_enabled,
+            already_claimed: self.cache.btcb2_already_claimed,
+        }
     }
 
     pub fn config(&self) -> &Config {
@@ -5492,6 +5612,17 @@ impl App {
                 }
                 return vault_fp_task;
             }
+            // The claim rail item is an action: it starts the claim-target
+            // installer rather than switching panels, so it is re-dispatched
+            // here instead of reaching `set_current_panel` (which has no panel
+            // for it). Re-checked against the same predicate the rail used —
+            // the item having been rendered is not a permission.
+            Message::View(view::Message::Menu(Menu::Vault(menu::VaultSubMenu::Claim))) => {
+                if crate::app::features::claim_blake2b(self.claim_source_cube()).is_available() {
+                    return Task::done(Message::View(view::Message::StartClaimBlake2b));
+                }
+                return Task::none();
+            }
             Message::View(view::Message::Menu(menu)) => {
                 // Always honor the navigation even when the current
                 // panel has no instance (e.g. the user landed on an
@@ -5542,6 +5673,12 @@ impl App {
                 // `features` back to fail-closed OFF via the accessor).
                 self.cache.marketplace_flags =
                     self.panels.connect.account.marketplace_server_flags();
+                // Same mirror for the fork account grant, so the Vault rail can
+                // answer "can this Cube start a claim?" without reaching into
+                // the Connect panel from the view layer.
+                self.cache.btcb2_server_enabled =
+                    self.panels.connect.account.bitcoin_blake2b_server_enabled();
+                let pending_claim = self.start_pending_claim();
                 if self.cache.chain().is_blake2b() {
                     self.cache.marketplace_flags = Default::default();
                 }
@@ -5644,9 +5781,9 @@ impl App {
                             view::NodeSettingsMessage::SwitchToConnect,
                         ),
                     )));
-                    return Task::batch([task, persist_grant, nav, switch]);
+                    return Task::batch([task, persist_grant, pending_claim, nav, switch]);
                 }
-                return Task::batch([task, persist_grant]);
+                return Task::batch([task, persist_grant, pending_claim]);
             }
             Message::View(view::Message::DismissReceivedCelebration) => {
                 self.show_received_celebration = false;
