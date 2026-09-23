@@ -7,7 +7,7 @@ use super::{
     claim_workflow::{self, Context, Controller, Phase, Status, WalletIdentity},
     coincube::CoincubeClient,
 };
-use crate::daemon::{embedded::EmbeddedDaemon, Daemon, DaemonError};
+use crate::daemon::{Daemon, DaemonError};
 use async_trait::async_trait;
 use coincube_core::{
     chain::ChainId,
@@ -126,18 +126,32 @@ trait Services: Send + Sync {
 pub struct Production {
     source: HttpObservationSource,
     preflight: PreflightClient,
-    daemon: Arc<EmbeddedDaemon>,
+    /// The trait object, not `Arc<EmbeddedDaemon>`: every call this type makes
+    /// — `config()` and `submit_verified_poison()` — is a `Daemon` trait
+    /// method, and the GUI holds its daemon as `Arc<dyn Daemon>`. The concrete
+    /// type used to be what encoded "embedded only"; [`Production::new`] now
+    /// says so explicitly, and says it *before* anything is journaled.
+    daemon: Arc<dyn Daemon + Send + Sync>,
     context: Context,
     generation: watch::Receiver<u64>,
 }
 impl Production {
     pub fn new(
         client: CoincubeClient,
-        daemon: Arc<EmbeddedDaemon>,
+        daemon: Arc<dyn Daemon + Send + Sync>,
         account: String,
         expected_generation: u64,
         generation: watch::Receiver<u64>,
     ) -> Result<Self, Error> {
+        // Refused here, before any journal write, and not left to fail at the
+        // submit call. `confirm_and_submit` records the broadcast intent
+        // *before* it submits, so a backend that answers `config()` but cannot
+        // carry the verified artifact would journal a durable intent and then
+        // take `ClientNotSupported` — an `Uncertain` outcome that can never be
+        // retried, for a case that should never have been admitted.
+        if !daemon.backend().is_embedded() {
+            return Err(Error::Unsupported);
+        }
         let config = daemon.config().ok_or(Error::Unsupported)?;
         let coincubed::config::BitcoinBackend::Esplora(selection) =
             config.bitcoin_backend.as_ref().ok_or(Error::Unsupported)?
