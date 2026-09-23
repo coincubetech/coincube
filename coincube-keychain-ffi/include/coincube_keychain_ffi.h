@@ -29,6 +29,8 @@
  *     again. Reading message_len bytes unconditionally overruns your own buffer
  *     whenever the message was truncated (this library's write is always bounded
  *     by message_cap, so the overrun would be your read, not our write).
+ *   - Truncation is by bytes, so a short read can end mid-UTF-8-sequence.
+ *     Decode leniently, or resize to message_len and call again.
  *
  * What this boundary does NOT do: it applies no spend policy. It does not
  * refuse SIGHASH_ANYONECANPAY — 70 of the 142 supported upstream vectors set

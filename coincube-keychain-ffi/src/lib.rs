@@ -53,6 +53,11 @@
 //! caller's own buffer whenever the message was truncated — the write from this
 //! side is always bounded by `message_cap`, so that overrun is the caller's read,
 //! not a write from here.
+//!
+//! Truncation is by bytes, not by characters, so a short read can end in the
+//! middle of a multi-byte UTF-8 sequence. Decode leniently (Rust's
+//! `String::from_utf8_lossy`, Dart's `utf8.decode(..., allowMalformed: true)`) or
+//! resize to `message_len` and call again for the whole message.
 
 use std::{panic, slice};
 
@@ -169,7 +174,8 @@ pub struct CcErrorDetail {
     /// NUL-terminated.
     ///
     /// Read `min(message_cap, message_len)` bytes, or resize to `message_len`
-    /// and call again. Do not read `message_len` bytes unconditionally.
+    /// and call again. Do not read `message_len` bytes unconditionally. A short
+    /// read may end mid-UTF-8-sequence, so decode leniently or resize.
     pub message_len: usize,
 }
 
