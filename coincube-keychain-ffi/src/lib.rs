@@ -155,7 +155,8 @@ pub const CC_ERR_INVALID_MNEMONIC: i32 = 32;
 /// So a PSBT the digest and verify entries refuse with
 /// [`CC_ERR_PSBT_VALIDATION`] is refused by the sign entry with this code
 /// instead — same PSBT, same reason, different number. Branch on the code to
-/// decide whether signing was attempted, not to decide whether the PSBT was
+/// decide whether the sign operation returned an error, not whether
+/// cryptographic signing began or whether the PSBT was
 /// well-formed; `message_out` carries core's own reason text and is accurate in
 /// both cases.
 ///
