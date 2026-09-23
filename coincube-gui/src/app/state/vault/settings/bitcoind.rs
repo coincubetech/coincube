@@ -849,48 +849,6 @@ impl State for BitcoindSettingsState {
                     NodeSettingsMessage::CopyToClipboard(value) => {
                         return clipboard::write(value);
                     }
-                    NodeSettingsMessage::RepairNodeChain => {
-                        // Manual counterpart to the automatic check in
-                        // `Bitcoind::maybe_start`. Idempotent and non-destructive:
-                        // `reconsiderblock` only clears rejection flags and lets the
-                        // node re-activate the most-work chain, so the worst case is
-                        // that it does nothing — with one exception, which
-                        // `clear_failure_flags` handles by claiming the node first: a
-                        // replay in progress is holding the chain down with an
-                        // `invalidateblock` mark that this would clear.
-                        let Some(settings) = self.bitcoind_settings.as_ref() else {
-                            return Task::none();
-                        };
-                        let cfg = settings.bitcoind_config.clone();
-                        let network = cache.network;
-                        let coincube_datadir = cache.datadir_path.clone();
-                        return Task::perform(
-                            async move {
-                                tokio::task::spawn_blocking(move || {
-                                    repair_managed_node_chain(&coincube_datadir, &cfg, network)
-                                })
-                                .await
-                                .unwrap_or_else(|e| Err(e.to_string()))
-                            },
-                            |res| {
-                                match res {
-                                Ok(msg) => {
-                                    Message::View(view::Message::ShowToast(log::Level::Info, msg))
-                                }
-                                Err(e) => Message::View(view::Message::ShowError(
-                                    crate::user_error::UserError::logged(
-                                        "Couldn't reach your node",
-                                        "Check that it's running and that the connection details in Settings are right, then try again.",
-                                        crate::user_error::CC_DMN_DOWN,
-                                        true,
-                                        e,
-                                    )
-                                    .toast(),
-                                )),
-                            }
-                            },
-                        );
-                    }
                     NodeSettingsMessage::RestartNodeToApply => {
                         // Restart the managed node now so freshly-toggled
                         // inbound-over-Tor settings take effect, reusing the setup
@@ -1282,29 +1240,6 @@ impl State for BitcoindSettingsState {
                     );
                 }
 
-                // "Chain repair": manual `reconsiderblock` at the BIP-110 anchor.
-                // Managed node, mainnet only (the only chain the fork reached), and
-                // hidden during a setup/flavour switch. The automatic check on node
-                // start covers the normal case; this is the escape hatch for when
-                // the state that drives it has been lost.
-                if crate::node::revalidate::rdts_anchor_height(cache.network).is_some()
-                    && self.pending_node_setup.is_none()
-                    && self
-                        .bitcoind_settings
-                        .as_ref()
-                        .and_then(|s| s.managed_flavor)
-                        .is_some()
-                    && matches!(
-                        self.full_config
-                            .as_ref()
-                            .and_then(|c| c.bitcoin_backend.as_ref()),
-                        Some(BitcoinBackend::Bitcoind(_))
-                    )
-                {
-                    setting_panels
-                        .push(view::vault::settings::chain_repair_section().map(map_node_msg));
-                }
-
                 // "Node resources": prune target + mempool cap for the internal
                 // managed node. All networks (unlike inbound-Tor), the managed
                 // node only, and hidden during a setup/flavour switch/restart.
@@ -1513,41 +1448,6 @@ fn write_internal_bitcoind_config(
 /// installed from those bytes. Returns the `BitcoindConfig` and the live
 /// `Bitcoind` handle (which keeps the lock file alive) to be stored by the
 /// caller.
-/// Clear the block-index rejection flags below the BIP-110 anchor on the managed
-/// node, so it can follow the most-work chain again.
-///
-/// Blocking (opens an RPC connection), so callers must run it off the UI thread.
-/// The `reconsiderblock` itself is fire-and-forget: re-activating the chain can
-/// reconnect many blocks and outlast the RPC socket timeout, so we return as soon
-/// as the request is away and let the node get on with it. Progress shows up in
-/// the usual sync indicators.
-fn repair_managed_node_chain(
-    coincube_datadir: &CoincubeDirectory,
-    cfg: &BitcoindConfig,
-    network: Network,
-) -> Result<String, String> {
-    let anchor_height = crate::node::revalidate::rdts_anchor_height(network)
-        .ok_or_else(|| "There is nothing to repair on this network.".to_string())?;
-    // An unreadable state sidecar is set aside by `clear_failure_flags` itself, once it
-    // owns the node and knows the repair is going ahead — not here. Doing it before the
-    // identity is settled would discard the one record telling the next start that
-    // something may still be pending, in exactly the case where the repair is then
-    // refused.
-    //
-    // Re-attempt the identity here too, so a start that could not settle it does not
-    // leave the user with a button that can never work — this is the "explicit repair"
-    // retry. It still refuses rather than repairing under a provisional identity, and
-    // `clear_failure_flags` turns that into a message the user can act on.
-    let identity = crate::node::bitcoind::establish_node_identity(cfg);
-    crate::node::revalidate::clear_failure_flags(
-        coincube_datadir,
-        cfg,
-        &identity,
-        crate::node::revalidate::RevalidationPlan::ClearFailureFlags { anchor_height },
-    )?;
-    Ok("Asked the node to re-check its chain. This may take a few minutes.".to_string())
-}
-
 fn configure_and_start_internal_bitcoind(
     coincube_datadir: CoincubeDirectory,
     network: Network,
@@ -2696,17 +2596,6 @@ mod tests {
             )),
         );
         assert_eq!(state.pending_flavor_switch, None);
-
-        // The chain-repair escape hatch dispatches its work to a blocking task and
-        // must not disturb any settings state on the way (in particular it must not
-        // open a flavour-switch modal or a node-setup panel).
-        let _ = state.update(
-            Some(daemon.clone()),
-            &cache,
-            node_message(view::NodeSettingsMessage::RepairNodeChain),
-        );
-        assert_eq!(state.pending_flavor_switch, None);
-        assert!(state.pending_node_setup.is_none());
 
         let _ = state.update(
             Some(daemon.clone()),
