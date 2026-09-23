@@ -2410,6 +2410,17 @@ pub(crate) fn claim_target_checksums(
     datadir: &CoincubeDirectory,
 ) -> std::collections::HashSet<String> {
     let fork_dir = datadir.network_directory(crate::chain::ChainId::BitcoinBlake2b);
+    // No file, no targets — and no retry. `Settings::from_file` treats
+    // `NotFound` as possibly-transient and sleeps between five attempts (at
+    // least 300 ms) because the paths that call it are reading a file that is
+    // *supposed* to exist. This one asks a question whose ordinary answer is
+    // "there is nothing here yet": the fork settings file does not exist until
+    // the first claim completes, so every caller before then would pay the
+    // whole retry budget for a file whose absence is the answer. Home asks on
+    // every message.
+    if !fork_dir.path().join(settings::SETTINGS_FILE_NAME).is_file() {
+        return std::collections::HashSet::new();
+    }
     settings::Settings::from_file(&fork_dir)
         .map(|s| {
             // A **Cube**, not a wallet record. The install writes the wallet

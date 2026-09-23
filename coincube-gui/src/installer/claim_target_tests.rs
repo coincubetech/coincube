@@ -1464,3 +1464,206 @@ async fn cancelling_a_claim_from_a_remote_backed_source_returns_to_its_own_backe
     );
     let _ = std::fs::remove_dir_all(root.path());
 }
+
+/// Cancel must restore the Vault the source Cube actually points at.
+///
+/// `WalletId` is the descriptor checksum **and** the timestamp, so two Vaults
+/// built from one descriptor — a re-created one, a pinned sibling — share a
+/// checksum and differ only in `pinned_at`. Matching on the checksum alone
+/// selected whichever came first in the file; the ordinary open path has always
+/// matched the whole id (`vault_settings_for_cube`, used at `tab.rs:1043`), and
+/// cancel now uses the same helper.
+#[tokio::test]
+async fn cancelling_a_claim_restores_the_vault_the_source_cube_points_at() {
+    let _guard = crate::app::session::test_guard();
+    let server = MockServer::start_async().await;
+    let (mut source, _) = source("Savings");
+    let root = temp_root("cancel-walletid");
+    let source_dir = root.network_directory(ChainId::Bitcoin);
+    std::fs::create_dir_all(source_dir.path()).unwrap();
+    std::fs::write(
+        source_dir
+            .path()
+            .join(crate::app::config::DEFAULT_FILE_NAME),
+        b"",
+    )
+    .unwrap();
+
+    // Two Vaults, one descriptor: the decoy is written first, so a
+    // checksum-only lookup returns it.
+    let checksum = WalletId::generate(&source.descriptor).descriptor_checksum;
+    let wanted = WalletId::new(checksum.clone(), Some(222));
+    let decoy = WalletId::new(checksum.clone(), Some(111));
+    let wallet = |id: &WalletId, name: &str| crate::app::settings::WalletSettings {
+        name: name.to_string(),
+        alias: None,
+        descriptor_checksum: id.descriptor_checksum.clone(),
+        pinned_at: id.timestamp,
+        keys: Vec::new(),
+        hardware_wallets: Vec::new(),
+        remote_backend_auth: None,
+        start_internal_bitcoind: None,
+        pending_rescan: None,
+    };
+    source.cube.vault_wallet_id = Some(wanted.clone());
+    std::fs::write(
+        source_dir
+            .path()
+            .join(crate::app::settings::SETTINGS_FILE_NAME),
+        serde_json::to_vec(&crate::app::settings::Settings {
+            wallets: vec![wallet(&decoy, "Decoy"), wallet(&wanted, "Wanted")],
+            cubes: vec![source.cube.clone()],
+            ..Default::default()
+        })
+        .unwrap(),
+    )
+    .unwrap();
+
+    let (installer, _) = Installer::try_new_for_chain(
+        root.clone(),
+        ChainId::BitcoinBlake2b,
+        None,
+        UserFlow::ClaimBlake2b {
+            from_cube: Box::new(source),
+        },
+        true,
+        None,
+        Some(Arc::new(
+            crate::app::breez_liquid::BreezClient::disconnected(Network::Bitcoin),
+        )),
+        None,
+        false,
+        Some(authenticated_client(&server)),
+    )
+    .unwrap();
+
+    let mut tab = crate::gui::tab::Tab::new(0, crate::gui::tab::State::Installer(installer));
+    let _ = tab.update(crate::gui::tab::Message::Install(Message::BackToApp(
+        Network::Bitcoin,
+    )));
+    match &tab.state {
+        crate::gui::tab::State::Loader(loader) => {
+            let restored = loader
+                .wallet_settings
+                .as_ref()
+                .expect("cancel restores the source Cube's Vault");
+            assert_eq!(
+                restored.wallet_id(),
+                wanted,
+                "cancel selected a different Vault of the same descriptor"
+            );
+            assert_eq!(restored.name, "Wanted");
+        }
+        other => panic!(
+            "expected the source Loader, got {:?}",
+            std::mem::discriminant(other)
+        ),
+    }
+    let _ = std::fs::remove_dir_all(root.path());
+}
+
+/// A completed claim opens the **target**, so the source Cube's session must
+/// not survive the handoff.
+///
+/// The source is unlocked by construction (a claim cannot start otherwise), and
+/// its signer sits in the process-global session. Without this the source's
+/// unlocked master signer and PIN outlive the screen that justified them, on a
+/// Cube the user has navigated away from. `close_cube` is the primitive the
+/// ordinary App→Home path uses and is scoped to that Cube alone.
+#[tokio::test]
+async fn completing_a_claim_revokes_the_source_cubes_session() {
+    let _guard = crate::app::session::test_guard();
+    let server = MockServer::start_async().await;
+    let (source, source_fingerprint) = source("Savings");
+    let source_id = source.cube_id().to_string();
+    let root = temp_root("session-handoff");
+    let fork_dir = root.network_directory(ChainId::BitcoinBlake2b);
+    std::fs::create_dir_all(fork_dir.path()).unwrap();
+    std::fs::write(
+        fork_dir.path().join(crate::app::config::DEFAULT_FILE_NAME),
+        b"",
+    )
+    .unwrap();
+
+    // The unlocked signer a live source Cube holds.
+    crate::app::session::store_unlocked_signer(
+        &source_id,
+        source_fingerprint,
+        coincube_core::signer::MasterSigner::generate(Network::Bitcoin).unwrap(),
+    );
+    assert!(
+        crate::app::session::unlocked_signer(&source_id, source_fingerprint).is_some(),
+        "the source Cube is unlocked before the claim completes"
+    );
+
+    let (installer, _) = Installer::try_new_for_chain(
+        root.clone(),
+        ChainId::BitcoinBlake2b,
+        None,
+        UserFlow::ClaimBlake2b {
+            from_cube: Box::new(source),
+        },
+        true,
+        None,
+        None,
+        None,
+        false,
+        Some(authenticated_client(&server)),
+    )
+    .unwrap();
+
+    let target = crate::app::settings::CubeSettings::new_with_raw_id(
+        installer.context.seed_cube_id().to_string(),
+        "Savings · BTCB2".to_string(),
+        ChainId::BitcoinBlake2b,
+    );
+    let mut tab = crate::gui::tab::Tab::new(0, crate::gui::tab::State::Installer(installer));
+    let _ = tab.update(crate::gui::tab::Message::Install(Message::CubeSaved(
+        Ok((target, None, None)),
+        None,
+        None,
+    )));
+
+    assert!(
+        matches!(tab.state, crate::gui::tab::State::PinEntry(_)),
+        "the claim hands off to the target's unlock screen"
+    );
+    assert!(
+        crate::app::session::unlocked_signer(&source_id, source_fingerprint).is_none(),
+        "the source Cube's unlocked signer must not outlive the handoff"
+    );
+    let _ = std::fs::remove_dir_all(root.path());
+}
+
+/// `claim_target_checksums` runs on every Home message, and the fork settings
+/// file does not exist until the first claim completes.
+///
+/// `Settings::from_file` treats `NotFound` as possibly-transient and sleeps
+/// between five attempts — right for a file that is supposed to exist, wrong
+/// for a question whose ordinary answer is "nothing here yet". The retry floor
+/// is 20+40+60+80 ms = 300 ms by construction, so a run under 100 ms can only
+/// mean the retry was not entered.
+#[test]
+fn an_absent_fork_settings_file_answers_immediately_rather_than_retrying() {
+    let root = temp_root("no-fork-settings");
+    assert!(
+        !root
+            .network_directory(ChainId::BitcoinBlake2b)
+            .path()
+            .join(crate::app::settings::SETTINGS_FILE_NAME)
+            .is_file(),
+        "the fork settings file does not exist before the first claim"
+    );
+
+    let started = std::time::Instant::now();
+    let answered = crate::app::claim_target_checksums(&root);
+    let elapsed = started.elapsed();
+
+    assert!(answered.is_empty());
+    assert!(
+        elapsed < std::time::Duration::from_millis(100),
+        "answering \"no targets\" took {:?} — the NotFound retry budget is at \
+         least 300 ms, so this went through it",
+        elapsed
+    );
+}

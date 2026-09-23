@@ -1444,6 +1444,17 @@ impl Tab {
                             wallet_settings: settings_opt.map(|s| *s),
                             connect_client: i.context.coincube_client.clone(),
                         };
+                        // Leaving the source Cube: a completed claim opens the
+                        // *target*, so the source's unlocked signer and PIN
+                        // must not outlive the transition. `close_cube` is the
+                        // primitive the ordinary App→Home path uses (`:718`),
+                        // and it is scoped to that Cube — a newer or unrelated
+                        // session is untouched. The target's own unlock does not
+                        // read it: `PinEntry` verifies by decrypting the
+                        // target's seed file with the PIN the user types.
+                        if let Some(source) = &i.source_cube {
+                            app::session::close_cube(&source.settings.id);
+                        }
                         self.state =
                             unlock_state(cube, i.datadir.path().to_path_buf(), on_success, None);
                         return Task::none();
@@ -1565,18 +1576,17 @@ impl Tab {
                                 .join(app::config::DEFAULT_FILE_NAME),
                         )
                         .expect("A gui configuration file must be present");
-                        let wallet_settings = app::settings::Settings::from_file(
-                            &i.datadir.network_directory(source.settings.network),
-                        )
-                        .ok()
-                        .and_then(|settings| {
-                            source.settings.vault_wallet_id.as_ref().and_then(|id| {
-                                settings
-                                    .wallets
-                                    .into_iter()
-                                    .find(|w| w.descriptor_checksum == id.descriptor_checksum)
-                            })
-                        });
+                        // The same lookup the ordinary open path uses (`:1043`),
+                        // and for the same reason: `WalletId` is the checksum
+                        // *and* the timestamp, so matching on the checksum alone
+                        // can select a different Vault of the same descriptor —
+                        // a re-created one, or a pinned sibling. Cancel must
+                        // restore the Vault the Cube actually points at.
+                        let wallet_settings = vault_settings_for_cube(
+                            &i.datadir,
+                            source.settings.network,
+                            &source.settings,
+                        );
                         // A remote-backed source has no local daemon to start:
                         // its ordinary unlock goes to `CoincubeLiteLogin`, and
                         // handing it to the Loader would try to bring up a
