@@ -73,6 +73,15 @@ static const uint8_t prevouts[] = {
 #define SCRIPT_TYPE 0      /* bare / P2SH */
 #define EXPECTED    "4a84224afd272deeaa13972fb03ea70c738d78e50b53a63af3b3a9decfb548f5"
 
+/* The read rule the ABI documents: message_len is the length *required*, so a
+ * caller must bound its read by its own capacity. Reading message_len bytes out
+ * of a smaller buffer is a stack overflow in the caller — AddressSanitizer flags
+ * it as a stack-buffer-overflow READ. Every print of a message below goes
+ * through this. */
+static size_t msg_read_len(const CcErrorDetail *err, size_t cap) {
+    return err->message_len < cap ? err->message_len : cap;
+}
+
 int main(void) {
     printf("abi_version=%d digest_len=%zu\n",
            coincube_keychain_ffi_abi_version(),
@@ -89,12 +98,13 @@ int main(void) {
         digest, sizeof digest, &err, msg, sizeof msg);
 
     char hex[2 * CC_DIGEST_LEN + 1];
-    for (int i = 0; i < CC_DIGEST_LEN; i++) sprintf(hex + 2 * i, "%02x", digest[i]);
+    for (int i = 0; i < CC_DIGEST_LEN; i++)
+        snprintf(hex + 2 * i, 3, "%02x", digest[i]);
     hex[2 * CC_DIGEST_LEN] = 0;
     printf("rc=%d digest=%s\n", rc, hex);
 
     if (rc != CC_OK) {
-        printf("FAIL: rc=%d msg=%.*s\n", rc, (int)err.message_len, msg);
+        printf("FAIL: rc=%d msg=%.*s\n", rc, (int)msg_read_len(&err, sizeof msg), msg);
         return 1;
     }
     if (strcmp(hex, EXPECTED) != 0) {
@@ -109,12 +119,46 @@ int main(void) {
         prevouts, PREVOUTS_LEN, script_code, SCRIPT_CODE_LEN,
         digest, sizeof digest, &err, msg, sizeof msg);
     printf("script_type=2 -> rc=%d detail_a=%llu msg=%.*s\n",
-           rc, (unsigned long long)err.detail_a, (int)err.message_len, msg);
+           rc, (unsigned long long)err.detail_a,
+           (int)msg_read_len(&err, sizeof msg), msg);
     if (rc != CC_ERR_UNSUPPORTED_SCRIPT_TYPE || err.detail_a != 2) {
         printf("FAIL: wrong refusal\n");
         return 1;
     }
 
-    printf("OK: vector 1 reproduced and the typed refusal observed, from C\n");
+    /* Truncation, checked explicitly so B3.1b does not inherit the wrong read.
+     * `0x01` omits the unified flag, so core returns a ~43-byte message that
+     * cannot fit a 4-byte buffer: message_len must come back larger than the
+     * capacity, and the safe read is the capacity. */
+    {
+        uint8_t tiny[4];
+        CcErrorDetail terr;
+        memset(tiny, 0, sizeof tiny);
+        rc = coincube_unified_sighash_digest(
+            raw_tx, RAW_TX_LEN, IN_IDX, 0x01, SCRIPT_TYPE,
+            prevouts, PREVOUTS_LEN, script_code, SCRIPT_CODE_LEN,
+            digest, sizeof digest, &terr, tiny, sizeof tiny);
+        size_t safe = msg_read_len(&terr, sizeof tiny);
+        printf("truncation -> rc=%d required=%zu safe_read=%zu msg=%.*s\n",
+               rc, terr.message_len, safe, (int)safe, tiny);
+
+        if (rc != CC_ERR_MISSING_UNIFIED_FLAG) {
+            printf("FAIL: expected CC_ERR_MISSING_UNIFIED_FLAG, got %d\n", rc);
+            return 1;
+        }
+        if (terr.message_len <= sizeof tiny) {
+            printf("FAIL: message_len (%zu) should exceed the %zu-byte capacity, "
+                   "otherwise this is not testing truncation\n",
+                   terr.message_len, sizeof tiny);
+            return 1;
+        }
+        if (safe != sizeof tiny) {
+            printf("FAIL: the safe read should be the capacity, got %zu\n", safe);
+            return 1;
+        }
+    }
+
+    printf("OK: vector 1 reproduced, typed refusal observed, truncation bounded, "
+           "from C\n");
     return 0;
 }

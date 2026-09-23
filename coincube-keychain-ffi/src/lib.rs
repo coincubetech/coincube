@@ -44,8 +44,15 @@
 //! capacity first.
 //!
 //! `error_out` and `message_out` are optional; pass null to ignore them. The
-//! message is core's own `Display` text, UTF-8, **not** NUL-terminated — take
-//! `CcErrorDetail::message_len` bytes.
+//! message is core's own `Display` text, UTF-8, **not** NUL-terminated.
+//!
+//! `CcErrorDetail::message_len` is the length **required**, not the length
+//! written: when the message did not fit, it is larger than `message_cap`. So
+//! read `min(message_cap, message_len)` bytes, or resize to `message_len` and
+//! call again. Reading `message_len` bytes unconditionally overruns the
+//! caller's own buffer whenever the message was truncated — the write from this
+//! side is always bounded by `message_cap`, so that overrun is the caller's read,
+//! not a write from here.
 
 use std::{panic, slice};
 
@@ -157,8 +164,12 @@ pub struct CcErrorDetail {
     pub detail_a: u64,
     /// Second numeric field, where the error has one; otherwise zero.
     pub detail_b: u64,
-    /// UTF-8 bytes written to `message_out`, or the length required when the
-    /// supplied capacity was too small. Never NUL-terminated.
+    /// Length of core's message in bytes: the length **required**, which is
+    /// larger than `message_cap` when the message was truncated. Never
+    /// NUL-terminated.
+    ///
+    /// Read `min(message_cap, message_len)` bytes, or resize to `message_len`
+    /// and call again. Do not read `message_len` bytes unconditionally.
     pub message_len: usize,
 }
 
@@ -676,8 +687,10 @@ unsafe fn report(
         *error_out = CcErrorDetail {
             detail_a: failure.detail_a,
             detail_b: failure.detail_b,
-            // The full length, so a caller that got a truncated message can
-            // size a buffer and ask again.
+            // The length *required*, so a caller that got a truncated message
+            // can size a buffer and ask again. It therefore exceeds
+            // `message_cap` on truncation, which is why the documented read rule
+            // is `min(message_cap, message_len)` and not `message_len`.
             message_len: if written < message.len() {
                 message.len()
             } else {

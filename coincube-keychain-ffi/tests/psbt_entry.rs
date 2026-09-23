@@ -480,6 +480,14 @@ fn missing_previous_transaction_is_refused() {
         "expected a validation refusal, got {} ({})",
         result.code, result.message
     );
+    // Pinned so this test and the P2WSH-gate one above cannot quietly swap
+    // reasons: both return the same coarse code, and only the text tells them
+    // apart.
+    assert!(
+        result.message.contains("not authenticated"),
+        "expected a prevout-authentication refusal; got: {}",
+        result.message
+    );
 }
 
 /// Core owns the refusal: an input missing its witness script is rejected by
@@ -504,24 +512,56 @@ fn missing_witness_script_is_refused_with_cores_reason() {
     );
 }
 
-/// A prevout that is not native P2WSH is refused.
+/// A prevout that is **authenticated** but not native P2WSH is refused by the
+/// P2WSH gate itself.
+///
+/// The first version of this test cleared `non_witness_utxo` as well, so
+/// `authenticate_previous_output` failed with `MissingPreviousTransaction` at
+/// `unified_signing.rs:296-304` and execution never reached the
+/// `!is_p2wsh()` check at `:305`. It asserted only the coarse
+/// `CC_ERR_PSBT_VALIDATION` code, so it passed for the wrong reason and would
+/// have kept passing if the P2WSH gate were removed entirely.
+///
+/// So the prevout here is funded by a real transaction whose output is P2WPKH:
+/// authentication succeeds, and the reason text pins which gate refused.
 #[test]
-fn non_p2wsh_prevout_is_refused() {
-    let fixture = fixture(1);
-    let mut broken = fixture.psbt.clone();
-    let mut spent = broken.psbt().inputs[0].witness_utxo.clone().unwrap();
-    spent.script_pubkey = ScriptBuf::new_p2wpkh(
-        &bitcoin::PublicKey::from_slice(&[
-            0x02, 0xc6, 0x04, 0x7f, 0x94, 0x41, 0xed, 0x7d, 0x6d, 0x30, 0x45, 0x40, 0x6e, 0x95,
-            0xc0, 0x7c, 0xd8, 0x5c, 0x77, 0x8e, 0x4b, 0x8c, 0xef, 0x3c, 0xa7, 0xab, 0xac, 0x09,
-            0xb9, 0x5c, 0x70, 0x9e, 0xe5,
-        ])
-        .unwrap()
-        .wpubkey_hash()
-        .unwrap(),
-    );
-    broken.psbt_mut().inputs[0].witness_utxo = Some(spent);
-    broken.psbt_mut().inputs[0].non_witness_utxo = None;
+fn authenticated_non_p2wsh_prevout_is_refused_by_the_p2wsh_gate() {
+    let public_key = bitcoin::PublicKey::from_slice(&[
+        0x02, 0xc6, 0x04, 0x7f, 0x94, 0x41, 0xed, 0x7d, 0x6d, 0x30, 0x45, 0x40, 0x6e, 0x95, 0xc0,
+        0x7c, 0xd8, 0x5c, 0x77, 0x8e, 0x4b, 0x8c, 0xef, 0x3c, 0xa7, 0xab, 0xac, 0x09, 0xb9, 0x5c,
+        0x70, 0x9e, 0xe5,
+    ])
+    .unwrap();
+    let output = TxOut {
+        value: Amount::from_sat(50_000),
+        script_pubkey: ScriptBuf::new_p2wpkh(&public_key.wpubkey_hash().unwrap()),
+    };
+    assert!(!output.script_pubkey.is_p2wsh(), "the point of the fixture");
+
+    // A real funding transaction, so the outpoint, vout and amount all check out
+    // and the only thing wrong with this input is the script type.
+    let previous_tx = funding_transaction(output.clone(), 1);
+    let unsigned_tx = Transaction {
+        version: transaction::Version::TWO,
+        lock_time: absolute::LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint {
+                txid: previous_tx.compute_txid(),
+                vout: 0,
+            },
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+            witness: bitcoin::Witness::new(),
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(40_000),
+            script_pubkey: ScriptBuf::new_p2wsh(&ScriptBuf::new().wscript_hash()),
+        }],
+    };
+    let mut psbt = Psbt::from_unsigned_tx(unsigned_tx).unwrap();
+    psbt.inputs[0].non_witness_utxo = Some(previous_tx);
+    psbt.inputs[0].witness_utxo = Some(output);
+    let broken = UnifiedPsbt::from_psbt(psbt).unwrap();
     let bytes = export_standard(&broken).unwrap();
 
     let (result, _) = psbt_digest_through_ffi(&bytes, 0);
@@ -529,6 +569,18 @@ fn non_p2wsh_prevout_is_refused() {
         result.code, CC_ERR_PSBT_VALIDATION,
         "expected a validation refusal, got {} ({})",
         result.code, result.message
+    );
+    assert!(
+        result.message.contains("does not spend native P2WSH"),
+        "the P2WSH gate should be what refused, not prevout authentication; \
+         got: {}",
+        result.message
+    );
+    assert!(
+        !result.message.contains("not authenticated"),
+        "this fixture authenticates cleanly, so a refusal for that reason means \
+         the test is no longer exercising the P2WSH gate; got: {}",
+        result.message
     );
 }
 

@@ -22,8 +22,13 @@
  *     pass a zero capacity first to learn the length from
  *     CC_ERR_BUFFER_TOO_SMALL's detail_a.
  *   - error_out and message_out are optional; pass NULL to ignore them. The
- *     message is core's own text, UTF-8, NOT NUL-terminated — read exactly
- *     CcErrorDetail.message_len bytes.
+ *     message is core's own text, UTF-8, NOT NUL-terminated.
+ *   - CcErrorDetail.message_len is the length REQUIRED, not the length written:
+ *     on truncation it is larger than message_cap. Read
+ *     min(message_cap, message_len) bytes, or resize to message_len and call
+ *     again. Reading message_len bytes unconditionally overruns your own buffer
+ *     whenever the message was truncated (this library's write is always bounded
+ *     by message_cap, so the overrun would be your read, not our write).
  *
  * What this boundary does NOT do: it applies no spend policy. It does not
  * refuse SIGHASH_ANYONECANPAY — 70 of the 142 supported upstream vectors set
@@ -82,8 +87,10 @@ extern "C" {
 typedef struct CcErrorDetail {
   uint64_t detail_a;
   uint64_t detail_b;
-  /* UTF-8 bytes written to message_out, or the length required when the
-   * supplied capacity was too small. Never NUL-terminated. */
+  /* Length of core's message in bytes: the length REQUIRED, which is larger
+   * than message_cap when the message was truncated. Never NUL-terminated.
+   * Read min(message_cap, message_len) bytes, or resize to message_len and call
+   * again. Do not read message_len bytes unconditionally. */
   size_t message_len;
 } CcErrorDetail;
 
