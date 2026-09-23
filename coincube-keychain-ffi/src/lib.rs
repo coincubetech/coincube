@@ -147,7 +147,21 @@ pub const CC_ERR_INVALID_PSBT: i32 = 30;
 pub const CC_ERR_PSBT_VALIDATION: i32 = 31;
 /// The mnemonic was not a valid BIP39 phrase.
 pub const CC_ERR_INVALID_MNEMONIC: i32 = 32;
-/// Signing failed after validation.
+/// Any refusal from core's signing operation, **including the input validation
+/// that operation performs itself**.
+///
+/// `sign_p2wsh_all_unified` validates every input before it signs anything, and
+/// this boundary maps every `UnifiedSigningError` it returns to this one code.
+/// So a PSBT the digest and verify entries refuse with
+/// [`CC_ERR_PSBT_VALIDATION`] is refused by the sign entry with this code
+/// instead — same PSBT, same reason, different number. Branch on the code to
+/// decide whether the sign operation returned an error, not whether
+/// cryptographic signing began or whether the PSBT was
+/// well-formed; `message_out` carries core's own reason text and is accurate in
+/// both cases.
+///
+/// Splitting this into a per-variant typed mapping is Lane B3.2's, as noted on
+/// the group comment above, rather than something to add here as a rider.
 pub const CC_ERR_SIGNING: i32 = 33;
 /// The signed PSBT could not be exported as standard bytes.
 pub const CC_ERR_EXPORT: i32 = 34;
