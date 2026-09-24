@@ -240,17 +240,14 @@ fn coins_detail(coins: &CoinSet, cache: &Cache) -> String {
         format_amount(total, cache),
     );
     if coins.post_fork > 0 {
+        // A coin confirmed after the fork is not split by this step; a
+        // transaction can still be replayed onto the fork, so it may remain
+        // entangled — nothing here says otherwise.
         detail.push_str(&format!(
-            " {} newer coin{} stay{} as {} — only Bitcoin knows {}.",
+            " {} newer coin{} {} left out of this step and may still be entangled.",
             coins.post_fork,
             if coins.post_fork == 1 { "" } else { "s" },
-            if coins.post_fork == 1 { "s" } else { "" },
-            if coins.post_fork == 1 {
-                "it is"
-            } else {
-                "they are"
-            },
-            if coins.post_fork == 1 { "it" } else { "them" },
+            if coins.post_fork == 1 { "is" } else { "are" },
         ));
     }
     detail
