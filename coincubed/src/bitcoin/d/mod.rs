@@ -1568,35 +1568,6 @@ impl BitcoinD {
             .unwrap_or_default())
     }
 
-    /// Status of the softfork deployment named `name` per `getdeploymentinfo`
-    /// (e.g. `"reduced_data"` for BIP-110 / RDTS).
-    ///
-    /// TODO(PR4): the RDTS sunset left the desktop's `rdts_abandoned` probe as the
-    /// only caller. Delete both together once the revalidation machinery goes —
-    /// see `plans/PLAN-rdts-sunset.md`, PR 4.
-    ///
-    /// `None` when the RPC is unavailable or the deployment does not exist on this
-    /// network — Knots only ships `reduced_data` on mainnet and testnet4, so on
-    /// regtest and signet this is always `None`.
-    pub fn deployment_status(&self, name: &str) -> Option<DeploymentStatus> {
-        let info = self
-            .make_fallible_node_request("getdeploymentinfo", None)
-            .ok()?;
-        let deployment = info.get("deployments")?.get(name)?;
-        Some(DeploymentStatus {
-            active: deployment
-                .get("active")
-                .and_then(Json::as_bool)
-                .unwrap_or(false),
-            status: deployment
-                .get("bip9")
-                .and_then(|bip9| bip9.get("status"))
-                .and_then(Json::as_str)
-                .unwrap_or_default()
-                .to_string(),
-        })
-    }
-
     /// Opt-in, read-only probe of the Bitcoin Blake2b hardfork schedule and the
     /// RDTS (BIP-110 `reduced_data`) flag-day schedule per `getdeploymentinfo`,
     /// as emitted by Knots `v29.4.1.knots20260508` (`src/rpc/blockchain.cpp`:
@@ -1964,29 +1935,6 @@ impl ChainTipEntry {
     /// Whether this entry is the active chain's tip.
     pub fn is_active(&self) -> bool {
         self.status == "active"
-    }
-}
-
-/// Status of a softfork deployment, from `getdeploymentinfo`.
-#[derive(Debug, Clone)]
-pub struct DeploymentStatus {
-    /// Whether the deployment's rules are being enforced right now.
-    pub active: bool,
-    /// The BIP-9 state: `defined`, `started`, `locked_in`, `active`, or `failed`.
-    pub status: String,
-}
-
-impl DeploymentStatus {
-    /// Whether the deployment is dead: it timed out without locking in, so its rules
-    /// will never be enforced and nothing can diverge over them.
-    ///
-    /// Deliberately NOT the inverse of "locked in or active". BIP-110 rejects
-    /// non-signalling blocks throughout the mandatory-signalling window while the
-    /// deployment is still `started`, and only reaches `locked_in` afterwards — so
-    /// treating `started` as "not yet live" would skip precisely the window in which
-    /// an enforcing and a non-enforcing node first disagree.
-    pub fn has_failed(&self) -> bool {
-        !self.active && self.status == "failed"
     }
 }
 
@@ -2591,26 +2539,6 @@ mod tests {
         assert!(!rpc_err(-5).is_transient());
         assert!(!rpc_err(-5).is_unauthorized());
         assert!(!rpc_err(-5).is_timeout());
-    }
-
-    // The liveness gate exists only to rule out a deployment that will never
-    // activate. Anything else must fall through to the height check, which is the
-    // real divergence condition.
-    #[test]
-    fn only_an_abandoned_deployment_is_ruled_out() {
-        let status = |s: &str, active: bool| DeploymentStatus {
-            active,
-            status: s.to_string(),
-        };
-        // Only an abandoned deployment can be ruled out. `started` in particular
-        // must NOT be: BIP-110's mandatory-signalling window rejects non-signalling
-        // blocks while still in that state, which is exactly when the enforcing and
-        // non-enforcing chains first diverge.
-        assert!(!status("defined", false).has_failed());
-        assert!(!status("started", false).has_failed());
-        assert!(!status("locked_in", false).has_failed());
-        assert!(!status("active", true).has_failed());
-        assert!(status("failed", false).has_failed());
     }
 
     // ── BTCB2 typed fork/RDTS schedule probe (coincube-api#288) ─────────────────

@@ -232,30 +232,6 @@ impl Drop for MaintenanceGuard {
     }
 }
 
-/// The floor of a rollback we deliberately caused, which the poller may therefore
-/// apply even though it is deeper than its limit.
-///
-/// The depth guard exists to distrust the *backend*: past a few hundred blocks, a
-/// node claiming that much history was undone is far likelier to be misreporting
-/// than right. A managed-node repair breaks that assumption — we asked for the
-/// rewind and we chose how deep it went — and without an exception the guard is
-/// permanent: maintenance ends, every later poll sees the same over-deep reorg,
-/// refuses it, and the Vault stays pinned to a chain the node no longer has.
-///
-/// A floor rather than a single block, because the fork point is not knowable in
-/// advance. A repair rewinds to this block and lets the node reconnect from there;
-/// where the two chains part company is wherever the node first refuses a block,
-/// which can be anywhere above the floor. Rewinding to 961,631 and rejecting
-/// 966,000 leaves the chains sharing everything up to 965,999, and it is *that*
-/// block the poller will find — so pinning the exception to the floor would refuse
-/// every realistic outcome and authorise only the one where nothing replayed.
-///
-/// The floor's hash is still carried and still checked, but it cannot carry the
-/// scoping on its own: the blocks a repair names are public, and every healthy node
-/// on the same chain contains them. So the exception is addressed to a specific
-/// node — see [`SanctionedRollback::node`].
-static SANCTIONED_ROLLBACK: sync::Mutex<Option<SanctionedRollback>> = sync::Mutex::new(None);
-
 /// Which `bitcoind` a backend talks to.
 ///
 /// The socket alone is a *location*, not an identity: a different node, or the same
@@ -280,37 +256,6 @@ impl BackendId {
         use miniscript::bitcoin::hashes::{sha256, Hash};
         sha256::Hash::hash(descriptor.as_bytes()).to_string()
     }
-}
-
-/// An over-deep rollback the poller may apply, and the node it applies to.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SanctionedRollback {
-    /// Deepest block a repair-induced rollback may reach. See
-    /// [`SANCTIONED_ROLLBACK`] for why this is a floor and not a fork point.
-    pub floor: BlockChainTip,
-    /// The node the repair was performed on.
-    ///
-    /// Load-bearing, because this slot is process-wide and the floor block is
-    /// public. Without it, a Vault pointed at an entirely different `bitcoind` —
-    /// an external one the user configured, which never underwent the repair —
-    /// would find the floor in its own chain, satisfy the exception, and lose the
-    /// depth guard for every rollback above it.
-    pub node: BackendId,
-}
-
-/// Authorise (or withdraw) over-deep rollbacks on one node.
-pub fn set_sanctioned_rollback(sanction: Option<SanctionedRollback>) {
-    *SANCTIONED_ROLLBACK
-        .lock()
-        .expect("sanctioned rollback lock poisoned") = sanction;
-}
-
-/// The rollback the poller is currently allowed to apply past its depth limit.
-pub fn sanctioned_rollback() -> Option<SanctionedRollback> {
-    SANCTIONED_ROLLBACK
-        .lock()
-        .expect("sanctioned rollback lock poisoned")
-        .clone()
 }
 
 /// Our Bitcoin backend.
