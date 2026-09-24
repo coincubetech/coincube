@@ -6,6 +6,13 @@
 //! and submission is `services::claim_coordinator`, which journals the
 //! intent before it hands the verified transaction to the embedded daemon.
 //!
+//! A claim's context can end under it — a Connect sign-out or account
+//! change, a node backend switch — and the App revokes the coordinator
+//! synchronously when it does. A journaled intent is never abandoned by that:
+//! the panel keeps the construction and the signatures, and re-binds the
+//! journal under the new context (`Coordinator::resume`, the same account and
+//! provider) on the next sign-in or return to the panel.
+//!
 //! What this slice does *not* do: input poison (the journal only represents
 //! `Poison::OpReturn`), step 2 (`Step2Authorization` stays uninhabited), and
 //! resuming a journaled intent after a restart.
@@ -62,7 +69,7 @@ use crate::{
             http::HttpObservationSource, project_anchor, CollectionContext, ObservationSource,
         },
         claim_preflight::FreshnessPolicy,
-        claim_workflow::{Context, Phase, Status},
+        claim_workflow::{self, Context, Phase, Status},
         coincube::CoincubeClient,
         feeestimation::fee_estimation::FeeEstimator,
     },
@@ -91,6 +98,28 @@ pub const CHECK_POLICY: CheckPolicy = CheckPolicy {
     },
     collection_budget: Duration::from_secs(20),
 };
+
+/// The session the coordinator was created under is gone — a sign-out, an
+/// account or client change, a node backend switch — and the intent is
+/// journaled. Said at Review and Track until a re-bind succeeds.
+pub const SESSION_ENDED: &str = "The claim session ended (signed out, or the node backend changed). The claim is recorded on this device: sign in again, or come back here, to continue.";
+/// A fully signed construction is waiting for a session to be recorded under.
+pub const SIGNED_OUT_AT_SIGN: &str =
+    "Signed out of Connect. Sign in again to record and submit the claim.";
+/// The session ended between the last signature and the journal write: the
+/// construction and every signature are kept, nothing was recorded.
+pub const SIGNED_OUT_BEFORE_RECORD: &str =
+    "Signed out of Connect before the claim was recorded. Sign in again to record and submit it.";
+/// The journal belongs to another Connect account than the one signed in.
+pub const OTHER_ACCOUNT: &str = "This claim was recorded under a different Connect account. Sign in with that account to continue.";
+/// A step that reads or writes through the Vault's daemon was asked for
+/// while the App has none (a failed backend switch leaves it that way).
+pub const NODE_UNAVAILABLE: &str = "The Vault's node isn't available right now, so this step can't run. Check Vault → Settings → Node, then try again.";
+/// The claim target's Cube left this device while a claim was journaled.
+pub const TARGET_GONE: &str =
+    "The claim target is no longer on this device. Create it again, then come back.";
+/// `Production::new`'s backend refusal, in the words a user can act on.
+const BACKEND_UNSUPPORTED: &str = "This Vault must use Coincube's Bitcoin service as its node backend for a claim. Change it under Vault → Settings → Node, then come back.";
 
 /// Where the build's fee rate comes from. The estimator asks public fee
 /// APIs; a fixed rate is for tests, which must never reach the network.
@@ -169,20 +198,30 @@ pub struct Refusal {
     pub retry: bool,
 }
 
-/// A live coordinator plus everything a task needs to drive it. Moved into
+/// A journaled claim plus everything a task needs to drive it. Moved into
 /// each async step and handed back with the result, so exactly one owner
 /// ever touches the coordinator. The revoker is cloned out before the move,
 /// so revocation never waits for a task to return.
 pub struct ClaimSession {
-    coordinator: Coordinator,
+    /// `None` between a re-bind that released a revoked coordinator (it
+    /// holds the journal's lock) and the next successful one; the journal on
+    /// disk is the record either way.
+    coordinator: Option<Coordinator>,
     context: Context,
     review: Option<Review>,
+    /// Kept for a re-bind: `Coordinator::resume` re-validates the
+    /// construction against the journal and re-verifies the signatures.
+    built: Box<PoisonSelfTransfer>,
+    signed: Psbt,
+    /// The journal phase as last read through a live coordinator.
+    phase: Phase,
 }
 
 impl fmt::Debug for ClaimSession {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ClaimSession")
-            .field("phase", &self.coordinator.phase())
+            .field("phase", &self.phase())
+            .field("bound", &self.coordinator.is_some())
             .field("reviewed", &self.review.is_some())
             .finish_non_exhaustive()
     }
@@ -190,7 +229,15 @@ impl fmt::Debug for ClaimSession {
 
 impl ClaimSession {
     pub fn phase(&self) -> Phase {
-        self.coordinator.phase()
+        self.coordinator
+            .as_ref()
+            .map_or(self.phase, |coordinator| coordinator.phase())
+    }
+
+    /// Whether a coordinator is bound. A bound coordinator may still be
+    /// revoked; only its own calls say so.
+    pub fn is_bound(&self) -> bool {
+        self.coordinator.is_some()
     }
 }
 
@@ -205,8 +252,15 @@ pub enum ClaimEvent {
     Built(Result<Box<PoisonSelfTransfer>, String>),
     /// The signed construction was finalised and journaled as an intent —
     /// or refused, in which case the construction comes back so the user can
-    /// keep signing.
-    Ready(Result<Box<ClaimSession>, (Box<PoisonSelfTransfer>, String)>),
+    /// keep signing. The number names the finalisation attempt it answers.
+    Ready(
+        u64,
+        Result<Box<ClaimSession>, (Box<PoisonSelfTransfer>, String)>,
+    ),
+    /// A revoked session was re-bound under the current context — or could
+    /// not be, in which case it comes back unbound with the reason. The
+    /// number is the panel's revocation count when the re-bind was sent.
+    Rebound(u64, Box<ClaimSession>, Result<(), String>),
     /// `prepare_review` finished; the review lives inside the session.
     Reviewed(Box<ClaimSession>, Result<ReviewSnapshot, String>),
     /// `confirm_and_submit` finished.
@@ -222,11 +276,11 @@ enum Stage {
         built: Box<PoisonSelfTransfer>,
     },
     /// In the Vault's signing flow. `built` is `None` only while the
-    /// finalise task holds it.
+    /// finalise task holds it, and `finalizing` names that task.
     Sign {
         built: Option<Box<PoisonSelfTransfer>>,
         psbt: Box<PsbtState>,
-        finalizing: bool,
+        finalizing: Option<FinalizeAttempt>,
         error: Option<String>,
     },
     /// Journaled as an intent; preparing or showing the review. `session` is
@@ -245,6 +299,17 @@ enum Stage {
         busy: bool,
         error: Option<String>,
     },
+}
+
+/// One finalisation in flight: which attempt, and the context it was sent
+/// under. Its result is authorised only if that context is still the
+/// panel's when it arrives — the App may have signed out, or revoked, in
+/// between, and the task has no coordinator to revoke until it returns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FinalizeAttempt {
+    id: u64,
+    generation: u64,
+    revocations: u64,
 }
 
 /// Read-only view of the panel's stage, for rendering.
@@ -281,7 +346,16 @@ pub struct ClaimStep1Panel {
     /// The live coordinator's revoker, kept outside the session so a
     /// revocation lands synchronously even while a task holds the session.
     revoker: Option<Revoker>,
+    /// Set by [`Self::revoke`] and by a completion that arrived after its
+    /// context ended; cleared when a coordinator is bound under the current
+    /// context. While set, a journaled session is re-bound rather than
+    /// driven.
+    revoked: bool,
+    /// Counts every [`Self::revoke`], so a task sent before a revocation is
+    /// told apart from one sent after it.
+    revocations: u64,
     check_seq: u64,
+    finalize_attempts: u64,
     feerate: FeerateSource,
 }
 
@@ -302,7 +376,10 @@ impl ClaimStep1Panel {
             pre: Preconditions::default(),
             stage: Stage::Preconditions,
             revoker: None,
+            revoked: false,
+            revocations: 0,
             check_seq: 0,
+            finalize_attempts: 0,
             feerate: FeerateSource::Estimator,
         };
         panel.refresh_static_preconditions();
@@ -315,22 +392,37 @@ impl ClaimStep1Panel {
         self
     }
 
-    /// The App's hook for a Connect session change. A sign-out revokes any
-    /// live coordinator (the App also advances the generation, which every
-    /// in-flight coordinator call checks); a sign-in only makes the next
-    /// probe possible.
-    pub fn set_connect(&mut self, connect: Option<ConnectSession>) {
-        let signed_out = connect.is_none() && self.connect.is_some();
+    /// The App's hook for a Connect session change. Returns whether a
+    /// session the panel was working under was removed or replaced — a
+    /// sign-out, or a different account or client identity — in which case
+    /// any live coordinator has been revoked synchronously and the App
+    /// advances the generation (which every in-flight coordinator call
+    /// checks). A first sign-in only makes the next step possible; the App
+    /// then calls [`Self::recover`].
+    pub fn set_connect(&mut self, connect: Option<ConnectSession>) -> bool {
+        let replaced = match (&self.connect, &connect) {
+            (Some(_), None) => true,
+            (Some(old), Some(new)) => !same_session(old, new),
+            (None, _) => false,
+        };
+        let signed_out = replaced && connect.is_none();
         self.connect = connect;
-        if signed_out {
+        if replaced {
             self.revoke();
+            self.note_session_ended(signed_out);
         }
+        replaced
     }
 
     /// Revoke the live coordinator, synchronously. Called by the App before
     /// it replaces the context the coordinator was created under (Connect
-    /// sign-out, Cube lock or close), and by `Drop`. Idempotent.
+    /// sign-out or account change, node backend switch, Cube lock or close),
+    /// and by `Drop`. Idempotent. A finalisation in flight has no
+    /// coordinator yet: the count advanced here tells its result apart from
+    /// one sent after the revocation.
     pub fn revoke(&mut self) {
+        self.revoked = true;
+        self.revocations = self.revocations.wrapping_add(1);
         if let Some(revoker) = &self.revoker {
             revoker.revoke();
         }
@@ -342,9 +434,107 @@ impl ClaimStep1Panel {
             | Stage::Track {
                 session: Some(session),
                 ..
-            } => session.coordinator.invalidate(),
+            } => {
+                if let Some(coordinator) = &mut session.coordinator {
+                    coordinator.invalidate();
+                }
+            }
             _ => {}
         }
+    }
+
+    /// Say on the current stage that the session it was working under
+    /// ended. A review that was on screen is withdrawn: it can only be
+    /// confirmed under the session it was prepared under.
+    fn note_session_ended(&mut self, signed_out: bool) {
+        match &mut self.stage {
+            Stage::Sign {
+                finalizing: None,
+                error,
+                ..
+            } if signed_out => *error = Some(SIGNED_OUT_AT_SIGN.to_string()),
+            Stage::Review {
+                snapshot, error, ..
+            } => {
+                *snapshot = None;
+                *error = Some(SESSION_ENDED.to_string());
+            }
+            Stage::Track { error, .. } => *error = Some(SESSION_ENDED.to_string()),
+            _ => {}
+        }
+    }
+
+    /// Whether a task sent under `generation` and `revocations` may still
+    /// act on this panel: the same context, a session present, and no
+    /// revocation since.
+    fn authorized(&self, generation: u64, revocations: u64) -> bool {
+        self.connect.is_some()
+            && *self.generation.borrow() == generation
+            && self.revocations == revocations
+    }
+
+    /// After the Connect session or the daemon changed: at Sign, finalise
+    /// the construction if it is ready and a session is back; at Review or
+    /// Track with a revoked coordinator, re-bind the journaled claim under
+    /// the current context. Called by the App after every session change
+    /// and on entry, so a claim revoked by a sign-out or a backend switch
+    /// continues once its context is back. Nothing to do without a daemon.
+    pub fn recover(&mut self, daemon: Option<Arc<dyn Daemon + Sync + Send>>) -> Task<Message> {
+        let Some(daemon) = daemon else {
+            return Task::none();
+        };
+        match &self.stage {
+            Stage::Sign { .. } => self.maybe_finalize(daemon),
+            Stage::Review { .. } | Stage::Track { .. } if self.revoked => self.rebind(daemon),
+            _ => Task::none(),
+        }
+    }
+
+    /// Re-bind a revoked session: a new `Production` under the current
+    /// generation and Connect session, `Coordinator::resume` on the journal
+    /// the first coordinator wrote — the same account and provider reopen
+    /// it, a different account is refused by the journal's own identity
+    /// check — with the construction re-validated and the signatures
+    /// re-verified. The revoked coordinator is released first (it holds the
+    /// journal's lock), so a refused re-bind leaves the session unbound,
+    /// to be tried again on the next sign-in or return to the panel.
+    fn rebind(&mut self, daemon: Arc<dyn Daemon + Sync + Send>) -> Task<Message> {
+        self.refresh_static_preconditions();
+        let Some(connect) = self.connect.clone() else {
+            return Task::none();
+        };
+        let Some(target) = self.pre.target.clone() else {
+            if let Stage::Review { error, .. } | Stage::Track { error, .. } = &mut self.stage {
+                *error = Some(TARGET_GONE.to_string());
+            }
+            return Task::none();
+        };
+        let Some(mut session) = self.take_session() else {
+            return Task::none();
+        };
+        let expected = *self.generation.borrow();
+        let revocations = self.revocations;
+        let generation = self.generation.clone();
+        let directory = journal_directory(&self.datadir, &self.wallet);
+        let bitcoin_cube = self.bitcoin_cube.clone();
+        Task::perform(
+            async move {
+                let result = rebind_session(
+                    &mut session,
+                    daemon,
+                    connect,
+                    bitcoin_cube,
+                    target,
+                    directory,
+                    expected,
+                    generation,
+                );
+                (session, result)
+            },
+            move |(session, result)| {
+                Message::Claim(ClaimEvent::Rebound(revocations, session, result))
+            },
+        )
     }
 
     pub fn stage(&self) -> StageView<'_> {
@@ -358,7 +548,7 @@ impl ClaimStep1Panel {
                 ..
             } => StageView::Sign {
                 psbt,
-                finalizing: *finalizing,
+                finalizing: finalizing.is_some(),
                 error: error.as_deref(),
             },
             Stage::Review {
@@ -552,7 +742,7 @@ impl ClaimStep1Panel {
         self.stage = Stage::Sign {
             built: Some(built),
             psbt: Box::new(psbt),
-            finalizing: false,
+            finalizing: None,
             error: None,
         };
     }
@@ -565,7 +755,14 @@ impl ClaimStep1Panel {
         let connect = self.connect.clone();
         let directory = journal_directory(&self.datadir, &self.wallet);
         let bitcoin_cube = self.bitcoin_cube.clone();
+        // The context this attempt is sent under, read here and not in the
+        // task: a sign-out between dispatch and the task's first poll
+        // advances the generation, and the old client must not be bound to
+        // the new one.
+        let expected = *self.generation.borrow();
+        let revocations = self.revocations;
         let generation = self.generation.clone();
+        let id = self.finalize_attempts.wrapping_add(1);
         let Stage::Sign {
             built,
             psbt,
@@ -575,7 +772,10 @@ impl ClaimStep1Panel {
         else {
             return Task::none();
         };
-        if *finalizing || built.is_none() || psbt.modal.is_some() || psbt.tx.path_ready().is_none()
+        if finalizing.is_some()
+            || built.is_none()
+            || psbt.modal.is_some()
+            || psbt.tx.path_ready().is_none()
         {
             return Task::none();
         }
@@ -584,9 +784,9 @@ impl ClaimStep1Panel {
             // signature, and say what is needed. The App hands a new session
             // in as soon as the account signs in again.
             let missing = if self.pre.target.is_none() {
-                "The claim target is no longer on this device. Create it again, then come back."
+                TARGET_GONE
             } else {
-                "Signed out of Connect. Sign in again to record and submit the claim."
+                SIGNED_OUT_AT_SIGN
             };
             if error.as_deref() != Some(missing) {
                 *error = Some(missing.to_string());
@@ -594,8 +794,13 @@ impl ClaimStep1Panel {
             return Task::none();
         };
         let built = built.take().expect("checked above");
-        *finalizing = true;
+        *finalizing = Some(FinalizeAttempt {
+            id,
+            generation: expected,
+            revocations,
+        });
         *error = None;
+        self.finalize_attempts = id;
         let signed = psbt.tx.psbt.clone();
         Task::perform(
             async move {
@@ -607,11 +812,12 @@ impl ClaimStep1Panel {
                     bitcoin_cube,
                     target,
                     directory,
+                    expected,
                     generation,
                 )
                 .await
             },
-            |ready| Message::Claim(ClaimEvent::Ready(ready)),
+            move |ready| Message::Claim(ClaimEvent::Ready(id, ready)),
         )
     }
 
@@ -635,14 +841,16 @@ impl ClaimStep1Panel {
         Task::perform(
             async move {
                 let context = session.context.clone();
-                let result = session.coordinator.prepare_review(&context).await;
-                let result = match result {
-                    Ok(review) => {
-                        let snapshot = review.snapshot().clone();
-                        session.review = Some(review);
-                        Ok(snapshot)
-                    }
-                    Err(error) => Err(describe(error)),
+                let result = match session.coordinator.as_mut() {
+                    Some(coordinator) => match coordinator.prepare_review(&context).await {
+                        Ok(review) => {
+                            let snapshot = review.snapshot().clone();
+                            session.review = Some(review);
+                            Ok(snapshot)
+                        }
+                        Err(error) => Err(describe(error)),
+                    },
+                    None => Err(SESSION_ENDED.to_string()),
                 };
                 (session, result)
             },
@@ -651,6 +859,12 @@ impl ClaimStep1Panel {
     }
 
     fn confirm(&mut self) -> Task<Message> {
+        // A review is confirmed under the session it was prepared under; a
+        // sign-out withdraws it (`note_session_ended`), so this is the guard
+        // for a session that went missing some other way.
+        if self.connect.is_none() {
+            return Task::none();
+        }
         if !matches!(
             &self.stage,
             Stage::Review {
@@ -667,13 +881,13 @@ impl ClaimStep1Panel {
         Task::perform(
             async move {
                 let context = session.context.clone();
-                let result = match session.review.take() {
-                    Some(review) => session
-                        .coordinator
+                let result = match (session.coordinator.as_mut(), session.review.take()) {
+                    (Some(coordinator), Some(review)) => coordinator
                         .confirm_and_submit(review, &context)
                         .await
                         .map_err(describe),
-                    None => Err(
+                    (None, _) => Err(SESSION_ENDED.to_string()),
+                    (Some(_), None) => Err(
                         "There is no review to confirm. Review the transaction again.".to_string(),
                     ),
                 };
@@ -693,11 +907,10 @@ impl ClaimStep1Panel {
         Task::perform(
             async move {
                 let context = session.context.clone();
-                let result = session
-                    .coordinator
-                    .reconcile(&context)
-                    .await
-                    .map_err(describe);
+                let result = match session.coordinator.as_mut() {
+                    Some(coordinator) => coordinator.reconcile(&context).await.map_err(describe),
+                    None => Err(SESSION_ENDED.to_string()),
+                };
                 (session, result)
             },
             |(session, result)| Message::Claim(ClaimEvent::Tracked(session, result)),
@@ -705,9 +918,15 @@ impl ClaimStep1Panel {
     }
 
     /// Abandon an attempt that has not been journaled. A journaled intent is
-    /// never abandoned from here: it is reconciled.
+    /// never abandoned from here: it is reconciled. Nothing is abandoned
+    /// while a finalisation holds the construction either: its result
+    /// decides whether the attempt was journaled.
     fn cancel(&mut self) {
         match &self.stage {
+            Stage::Sign {
+                finalizing: Some(_),
+                ..
+            } => {}
             Stage::Plan { .. } | Stage::Sign { .. } => {
                 self.stage = Stage::Preconditions;
                 // The reserved change index is not reused: the daemon's
@@ -718,12 +937,9 @@ impl ClaimStep1Panel {
         }
     }
 
-    fn apply(
-        &mut self,
-        daemon: Arc<dyn Daemon + Sync + Send>,
-        cache: &Cache,
-        event: ClaimEvent,
-    ) -> Task<Message> {
+    /// Every completion carries what it needs; none needs the daemon, so a
+    /// session travelling inside one is never dropped for want of it.
+    fn apply(&mut self, event: ClaimEvent) -> Task<Message> {
         match event {
             ClaimEvent::Checked(seq, checked) => {
                 if seq != self.check_seq {
@@ -748,32 +964,113 @@ impl ClaimStep1Panel {
                 }
                 Task::none()
             }
-            ClaimEvent::Ready(result) => match result {
-                Ok(session) => {
-                    self.revoker = Some(session.coordinator.revoker());
-                    self.stage = Stage::Review {
-                        session: Some(session),
-                        snapshot: None,
-                        busy: false,
-                        error: None,
-                    };
-                    self.prepare_review()
-                }
-                Err((built, reason)) => {
-                    if let Stage::Sign {
-                        built: slot,
-                        finalizing,
-                        error,
+            ClaimEvent::Ready(id, result) => {
+                let attempt = match &self.stage {
+                    Stage::Sign {
+                        finalizing: Some(attempt),
                         ..
-                    } = &mut self.stage
-                    {
-                        *slot = Some(built);
-                        *finalizing = false;
-                        *error = Some(reason.clone());
+                    } if attempt.id == id => Some(*attempt),
+                    _ => None,
+                };
+                match result {
+                    Ok(mut session) => {
+                        // The intent is journaled, so from here the session
+                        // is the record whether or not it may be driven: a
+                        // result whose context ended in flight is installed
+                        // revoked, to be re-bound, never reviewed.
+                        let authorized =
+                            attempt.is_some_and(|a| self.authorized(a.generation, a.revocations));
+                        if !authorized {
+                            if let Some(coordinator) = &mut session.coordinator {
+                                coordinator.invalidate();
+                            }
+                        }
+                        self.revoker = session.coordinator.as_ref().map(|c| c.revoker());
+                        self.revoked = !authorized;
+                        self.stage = Stage::Review {
+                            session: Some(session),
+                            snapshot: None,
+                            busy: false,
+                            error: (!authorized).then(|| SESSION_ENDED.to_string()),
+                        };
+                        if authorized {
+                            self.prepare_review()
+                        } else {
+                            Task::none()
+                        }
                     }
-                    Task::done(Message::View(view::Message::ShowError(reason)))
+                    Err((built, reason)) => {
+                        // A refusal for a superseded attempt has nothing to
+                        // restore into (unreachable while cancel is refused
+                        // during a finalisation; kept as the guard).
+                        if attempt.is_none() {
+                            return Task::none();
+                        }
+                        if let Stage::Sign {
+                            built: slot,
+                            finalizing,
+                            error,
+                            ..
+                        } = &mut self.stage
+                        {
+                            *slot = Some(built);
+                            *finalizing = None;
+                            *error = Some(reason.clone());
+                        }
+                        Task::done(Message::View(view::Message::ShowError(reason)))
+                    }
                 }
-            },
+            }
+            ClaimEvent::Rebound(revocations, mut session, result) => {
+                let bound = result.is_ok();
+                let authorized = bound && self.authorized(session.context.generation, revocations);
+                if bound && !authorized {
+                    // Bound under a context that ended while the re-bind ran.
+                    if let Some(coordinator) = &mut session.coordinator {
+                        coordinator.invalidate();
+                    }
+                }
+                if bound {
+                    self.revoker = session.coordinator.as_ref().map(|c| c.revoker());
+                }
+                let error = match result {
+                    Err(reason) => Some(reason),
+                    Ok(()) if authorized => None,
+                    Ok(()) => Some(SESSION_ENDED.to_string()),
+                };
+                match &mut self.stage {
+                    Stage::Review {
+                        session: slot,
+                        snapshot,
+                        busy,
+                        error: slot_error,
+                    } => {
+                        *slot = Some(session);
+                        *snapshot = None;
+                        *busy = false;
+                        *slot_error = error;
+                    }
+                    Stage::Track {
+                        session: slot,
+                        busy,
+                        error: slot_error,
+                        ..
+                    } => {
+                        *slot = Some(session);
+                        *busy = false;
+                        *slot_error = error;
+                    }
+                    _ => return Task::none(),
+                }
+                if !authorized {
+                    return Task::none();
+                }
+                self.revoked = false;
+                match &self.stage {
+                    Stage::Review { .. } => self.prepare_review(),
+                    _ => self.reconcile(),
+                }
+            }
             ClaimEvent::Reviewed(session, result) => {
                 if let Stage::Review {
                     session: slot,
@@ -847,7 +1144,6 @@ impl ClaimStep1Panel {
                         Err(reason) => *error = Some(reason),
                     }
                 }
-                let _ = (daemon, cache);
                 Task::none()
             }
         }
@@ -878,23 +1174,41 @@ impl State for ClaimStep1Panel {
         }
     }
 
+    /// The App may have no daemon (a backend switch that failed without
+    /// recovery leaves it so). A completion is processed regardless — a
+    /// session travels inside it — and an intent that needs the daemon is
+    /// refused with the reason, never with a panic.
     fn update(
         &mut self,
         daemon: Option<Arc<dyn Daemon + Sync + Send>>,
         cache: &Cache,
         message: Message,
     ) -> Task<Message> {
-        let daemon = daemon.expect("Daemon required for the claim panel");
+        let node_unavailable = || {
+            Task::done(Message::View(view::Message::ShowError(
+                NODE_UNAVAILABLE.to_string(),
+            )))
+        };
         match message {
             Message::View(view::Message::Claim(intent)) => match intent {
-                view::ClaimMessage::Recheck => self.probe(daemon),
-                view::ClaimMessage::Build => self.build(daemon),
+                view::ClaimMessage::Recheck => match daemon {
+                    Some(daemon) => self.probe(daemon),
+                    None => node_unavailable(),
+                },
+                view::ClaimMessage::Build => match daemon {
+                    Some(daemon) => self.build(daemon),
+                    None => node_unavailable(),
+                },
                 view::ClaimMessage::Sign => {
                     self.start_signing();
                     Task::none()
                 }
                 view::ClaimMessage::Confirm => self.confirm(),
                 view::ClaimMessage::Refresh => match &self.stage {
+                    Stage::Review { .. } | Stage::Track { .. } if self.revoked => match daemon {
+                        Some(daemon) => self.recover(Some(daemon)),
+                        None => node_unavailable(),
+                    },
                     Stage::Review { .. } => self.prepare_review(),
                     _ => self.reconcile(),
                 },
@@ -903,9 +1217,17 @@ impl State for ClaimStep1Panel {
                     Task::none()
                 }
             },
-            Message::Claim(event) => self.apply(daemon, cache, event),
+            Message::Claim(event) => self.apply(event),
             other => {
-                let Stage::Sign { psbt, .. } = &mut self.stage else {
+                let Stage::Sign { psbt, error, .. } = &mut self.stage else {
+                    return Task::none();
+                };
+                let Some(daemon) = daemon else {
+                    // The signing flow cannot be driven without a daemon;
+                    // the construction and every signature are kept.
+                    if error.as_deref() != Some(NODE_UNAVAILABLE) {
+                        *error = Some(NODE_UNAVAILABLE.to_string());
+                    }
                     return Task::none();
                 };
                 // The signing flow talks to a daemon that cannot store or
@@ -933,11 +1255,28 @@ impl State for ClaimStep1Panel {
         };
         match &self.stage {
             Stage::Preconditions => self.probe(daemon),
-            Stage::Sign { psbt, .. } => psbt.load(Arc::new(SigningOnlyDaemon(daemon))),
+            Stage::Sign { psbt, .. } => {
+                let load = psbt.load(Arc::new(SigningOnlyDaemon(daemon.clone())));
+                // A construction signed while the session was missing is
+                // finalised now that one may be back.
+                Task::batch([load, self.maybe_finalize(daemon)])
+            }
+            // A session revoked by a sign-out or a backend switch is
+            // re-bound on entry, under whatever context is current now.
+            Stage::Review { .. } | Stage::Track { .. } if self.revoked => {
+                self.recover(Some(daemon))
+            }
             Stage::Track { .. } => self.reconcile(),
             Stage::Plan { .. } | Stage::Review { .. } => Task::none(),
         }
     }
+}
+
+/// The same Connect session: account, endpoint and credential.
+fn same_session(a: &ConnectSession, b: &ConnectSession) -> bool {
+    a.account == b.account
+        && a.client.base_url == b.client.base_url
+        && a.client.token() == b.client.token()
 }
 
 impl From<ClaimStep1Panel> for Box<dyn State> {
@@ -1094,13 +1433,7 @@ async fn probe(
         generation.clone(),
     )
     .map(|_| ())
-    .map_err(|error| match error {
-        claim_coordinator::Error::Unsupported => {
-            "This Vault must use Coincube's Bitcoin service as its node backend for a claim. Change it under Vault → Settings → Node, then come back."
-                .to_string()
-        }
-        other => describe(other),
-    });
+    .map_err(describe_production);
     let window = async {
         let source = HttpObservationSource::new(
             connect.client.clone(),
@@ -1249,6 +1582,11 @@ pub fn journal_directory(datadir: &CoincubeDirectory, wallet: &Wallet) -> PathBu
         .join("claim")
 }
 
+/// Finalise and journal under the context captured at dispatch (`expected`).
+/// If the generation moved in between — the App signed out — the attempt is
+/// refused here, before the journal directory is touched, and the
+/// construction goes back with every signature; `Coordinator::open` would
+/// refuse the same binding, this just says why first.
 #[allow(clippy::too_many_arguments)]
 async fn finalize_and_journal(
     built: Box<PoisonSelfTransfer>,
@@ -1258,8 +1596,12 @@ async fn finalize_and_journal(
     bitcoin_cube: String,
     fork_cube: String,
     directory: PathBuf,
+    expected: u64,
     generation: watch::Receiver<u64>,
 ) -> Result<Box<ClaimSession>, (Box<PoisonSelfTransfer>, String)> {
+    if *generation.borrow() != expected || generation.has_changed().is_err() {
+        return Err((built, SIGNED_OUT_BEFORE_RECORD.to_string()));
+    }
     let secp = secp256k1::Secp256k1::verification_only();
     let verified = match finalize_poison_transfer(&built, &signed, &secp) {
         Ok(verified) => verified,
@@ -1271,7 +1613,6 @@ async fn finalize_and_journal(
             format!("couldn't prepare the claim journal: {error}"),
         ));
     }
-    let expected = *generation.borrow();
     let production = match Production::new(
         connect.client,
         daemon,
@@ -1280,7 +1621,7 @@ async fn finalize_and_journal(
         generation,
     ) {
         Ok(production) => production,
-        Err(error) => return Err((built, describe(error))),
+        Err(error) => return Err((built, describe_production(error))),
     };
     let context = production.context().clone();
     match Coordinator::create(
@@ -1293,11 +1634,76 @@ async fn finalize_and_journal(
         CHECK_POLICY,
     ) {
         Ok(coordinator) => Ok(Box::new(ClaimSession {
-            coordinator,
+            phase: coordinator.phase(),
+            coordinator: Some(coordinator),
             context,
             review: None,
+            built,
+            signed,
         })),
         Err(error) => Err((built, describe(error))),
+    }
+}
+
+/// Re-bind `session` to the journal it wrote, under the current context.
+/// Synchronous — file reads, signature verification, no network.
+#[allow(clippy::too_many_arguments)]
+fn rebind_session(
+    session: &mut ClaimSession,
+    daemon: Arc<dyn Daemon + Sync + Send>,
+    connect: ConnectSession,
+    bitcoin_cube: String,
+    fork_cube: String,
+    directory: PathBuf,
+    expected: u64,
+    generation: watch::Receiver<u64>,
+) -> Result<(), String> {
+    // The revoked coordinator holds the journal's lock: release it first.
+    // Nothing of it is needed again; the journal on disk is the record.
+    if let Some(old) = session.coordinator.take() {
+        session.phase = old.phase();
+        drop(old);
+    }
+    session.review = None;
+    let production = Production::new(
+        connect.client,
+        daemon,
+        connect.account,
+        expected,
+        generation,
+    )
+    .map_err(describe_production)?;
+    let context = production.context().clone();
+    let secp = secp256k1::Secp256k1::verification_only();
+    let verified = finalize_poison_transfer(&session.built, &session.signed, &secp)
+        .map_err(|error| error.to_string())?;
+    let coordinator = Coordinator::resume(
+        &directory,
+        bitcoin_cube,
+        fork_cube,
+        &session.built,
+        verified,
+        production,
+        CHECK_POLICY,
+    )
+    .map_err(|error| match error {
+        claim_coordinator::Error::Journal(claim_workflow::Error::WrongIdentity) => {
+            OTHER_ACCOUNT.to_string()
+        }
+        other => describe(other),
+    })?;
+    session.phase = coordinator.phase();
+    session.context = context;
+    session.coordinator = Some(coordinator);
+    Ok(())
+}
+
+/// Copy for a `Production::new` refusal: the backend constraint gets the
+/// wording a user can act on; the rest is [`describe`].
+fn describe_production(error: claim_coordinator::Error) -> String {
+    match error {
+        claim_coordinator::Error::Unsupported => BACKEND_UNSUPPORTED.to_string(),
+        other => describe(other),
     }
 }
 
@@ -1321,9 +1727,7 @@ pub fn describe(error: claim_coordinator::Error) -> String {
             "The claim's chain binding didn't match this Vault. Reopen the Cube and try again."
                 .to_string()
         }
-        E::Revoked => {
-            "The claim session ended (signed out, or the Cube changed). Start again.".to_string()
-        }
+        E::Revoked => SESSION_ENDED.to_string(),
         E::InvalidReview | E::ChangedReview => {
             "What you reviewed has changed since. Review the transaction again.".to_string()
         }

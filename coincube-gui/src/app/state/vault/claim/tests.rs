@@ -436,6 +436,25 @@ async fn the_signing_daemon_forwards_reads_and_swallows_spend_store_writes() {
     assert_eq!(*inner.hits.lock().unwrap(), vec!["list_coins", "list_txs"]);
 }
 
+/// Gandalf's reviewer regression (#518 review, finding 4): the App has no
+/// daemon after a failed backend switch, and the direct Claim route delivers
+/// completions with whatever it has. A completion must be processed, not
+/// panic — a session may travel inside it.
+#[test]
+fn reviewer_claim_completion_without_daemon_must_not_panic() {
+    let mut p = panel(SINGLE_WSH);
+    let seq = p.check_seq;
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        drop(p.update(
+            None,
+            &Cache::default(),
+            Message::Claim(ClaimEvent::Checked(seq, Box::new(checked_ok(1_000_000)))),
+        ));
+    }));
+    assert!(result.is_ok(), "claim completion panics in daemon-less App");
+    assert!(p.coins().is_some(), "and the completion was applied");
+}
+
 /// The whole slice, end to end, through the real panel: a fake embedded
 /// daemon answers the wallet reads and carries the submission, an httpmock
 /// Connect answers the anchor, the Esplora reads and the preflight, and the
@@ -786,8 +805,10 @@ mod flow {
     }
 
     /// Preconditions → build → sign (the hot key through the panel's own
-    /// `PsbtState`) → finalise → journal → review, asserting each stage.
-    async fn reach_review() -> Flow {
+    /// `PsbtState`), asserting each stage, up to the finalise task — handed
+    /// back unpolled, so a test can change the panel's context between its
+    /// dispatch and its result, as a sign-out does.
+    async fn reach_signed() -> (Flow, Task<Message>) {
         let f = fixture();
         let server = MockServer::start_async().await;
         let now = unix_now();
@@ -951,6 +972,10 @@ mod flow {
             daemon.hits(),
             vec!["list_coins", "get_info", "reserve_change", "list_txs"]
         );
+        // The plan renders (Gandalf's reviewer probe: `every_stage_renders`
+        // reaches Plan and Sign only through here).
+        let menu = Menu::Vault(crate::app::menu::VaultSubMenu::Claim);
+        drop(view::vault::claim::view(&menu, &cache, &p));
 
         // Sign: the Vault's own flow. Open the picker, then merge the hot
         // key's signature exactly as the picker would receive it.
@@ -975,6 +1000,7 @@ mod flow {
             }
             _ => panic!("expected the sign stage"),
         };
+        drop(view::vault::claim::view(&menu, &cache, &p));
         let signed = wallet.signer.as_ref().unwrap().sign_psbt(unsigned).unwrap();
         // The preflight answers for exactly the transaction that will be
         // submitted, so it is registered once the witness is known.
@@ -1023,61 +1049,210 @@ mod flow {
             "the claim PSBT never reaches the spend store: {:?}",
             daemon.hits()
         );
-        // Threshold met, picker closed: finalise, journal, coordinator.
+        // Threshold met, picker closed: the finalise task is out, holding
+        // the construction; the stage says so.
+        assert!(
+            matches!(
+                &p.stage,
+                Stage::Sign {
+                    finalizing: Some(_),
+                    built: None,
+                    ..
+                }
+            ),
+            "the finalise task holds the construction"
+        );
+        (
+            Flow {
+                p,
+                daemon,
+                dyn_daemon,
+                cache,
+                _server: server,
+                datadir,
+                wallet,
+                root,
+                sender,
+                unsigned_txid,
+            },
+            ready,
+        )
+    }
+
+    /// `reach_signed`, then finalise → journal → review, asserting each.
+    async fn reach_review() -> Flow {
+        let (mut f, ready) = reach_signed().await;
         let mut produced = outputs(ready).await;
         assert_eq!(produced.len(), 1, "{:?}", produced);
         assert!(
-            matches!(&produced[0], Message::Claim(ClaimEvent::Ready(Ok(_)))),
+            matches!(&produced[0], Message::Claim(ClaimEvent::Ready(_, Ok(_)))),
             "{:?}",
             produced[0]
         );
-        let review = p.update(Some(dyn_daemon.clone()), &cache, produced.remove(0));
-        let journal = journal_directory(&datadir, &wallet);
+        let review =
+            f.p.update(Some(f.dyn_daemon.clone()), &f.cache, produced.remove(0));
         assert!(
-            journal.join("intent.json").is_file(),
+            journal_directory(&f.datadir, &f.wallet)
+                .join("intent.json")
+                .is_file(),
             "the intent is journaled before any review"
         );
-        assert!(p.revoker.is_some());
+        assert!(f.p.revoker.is_some());
+        assert!(!f.p.revoked);
 
         // Review: the snapshot is what the user confirms.
         let mut produced = outputs(review).await;
         assert_eq!(produced.len(), 1, "{:?}", produced);
-        let _ = p.update(Some(dyn_daemon.clone()), &cache, produced.remove(0));
-        let snapshot = match &p.stage {
+        let _ =
+            f.p.update(Some(f.dyn_daemon.clone()), &f.cache, produced.remove(0));
+        let snapshot = review_snapshot(&f.p);
+        assert_eq!(snapshot.txid, f.unsigned_txid);
+        assert_eq!(snapshot.observations.bitcoin.tip.height, 105);
+        assert_eq!(snapshot.observations.fork.tip.height, 100);
+        f
+    }
+
+    /// `reach_review`, then confirm → submit → track, asserting each.
+    async fn reach_track(f: &mut Flow) {
+        let submit = f.p.update(
+            Some(f.dyn_daemon.clone()),
+            &f.cache,
+            Message::View(view::Message::Claim(view::ClaimMessage::Confirm)),
+        );
+        let mut produced = outputs(submit).await;
+        assert_eq!(produced.len(), 1, "{:?}", produced);
+        assert!(
+            matches!(
+                &produced[0],
+                Message::Claim(ClaimEvent::Submitted(
+                    _,
+                    Ok(Outcome::UpstreamAccepted { .. })
+                ))
+            ),
+            "{:?}",
+            produced[0]
+        );
+        let track =
+            f.p.update(Some(f.dyn_daemon.clone()), &f.cache, produced.remove(0));
+        let mut produced = outputs(track).await;
+        assert_eq!(produced.len(), 1, "{:?}", produced);
+        let _ =
+            f.p.update(Some(f.dyn_daemon.clone()), &f.cache, produced.remove(0));
+        assert!(matches!(
+            &f.p.stage,
+            Stage::Track {
+                status: Some(Status::Observation(Assessment::WaitingForConfirmation)),
+                busy: false,
+                error: None,
+                ..
+            }
+        ));
+        assert_eq!(submissions(f), 1);
+    }
+
+    /// The review on screen, or a panic that says what the stage is.
+    fn review_snapshot(p: &ClaimStep1Panel) -> ReviewSnapshot {
+        match &p.stage {
             Stage::Review {
                 snapshot: Some(s),
                 busy: false,
                 error: None,
                 ..
             } => s.clone(),
-            other => panic!(
-                "expected a review: {:?}",
-                match other {
-                    Stage::Review {
-                        snapshot,
-                        busy,
-                        error,
-                        ..
-                    } => format!("{snapshot:?} busy={busy} error={error:?}"),
-                    _ => "other stage".to_string(),
-                }
+            Stage::Review {
+                snapshot,
+                busy,
+                error,
+                ..
+            } => panic!(
+                "expected a review: {:?} busy={} error={:?}",
+                snapshot, busy, error
             ),
-        };
-        assert_eq!(snapshot.txid, unsigned_txid);
-        assert_eq!(snapshot.observations.bitcoin.tip.height, 105);
-        assert_eq!(snapshot.observations.fork.tip.height, 100);
-        Flow {
-            p,
-            daemon,
-            dyn_daemon,
-            cache,
-            _server: server,
-            datadir,
-            wallet,
-            root,
-            sender,
-            unsigned_txid,
+            _ => panic!("expected the review stage"),
         }
+    }
+
+    /// (has a snapshot, error, busy, session bound) at Review or Track.
+    fn session_state(p: &ClaimStep1Panel) -> (bool, Option<String>, bool, bool) {
+        match &p.stage {
+            Stage::Review {
+                snapshot,
+                error,
+                busy,
+                session,
+            } => (
+                snapshot.is_some(),
+                error.clone(),
+                *busy,
+                session.as_ref().is_some_and(|s| s.is_bound()),
+            ),
+            Stage::Track {
+                error,
+                busy,
+                session,
+                ..
+            } => (
+                false,
+                error.clone(),
+                *busy,
+                session.as_ref().is_some_and(|s| s.is_bound()),
+            ),
+            _ => panic!("expected the review or track stage"),
+        }
+    }
+
+    /// The journal's recorded phase, as written.
+    fn journaled_phase(f: &Flow) -> String {
+        let journal = journal_directory(&f.datadir, &f.wallet);
+        let journaled: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(journal.join("intent.json")).unwrap()).unwrap();
+        journaled["phase"].as_str().unwrap().to_string()
+    }
+
+    fn submissions(f: &Flow) -> usize {
+        f.daemon
+            .hits()
+            .iter()
+            .filter(|h| **h == "submit_verified_poison")
+            .count()
+    }
+
+    /// The fixture's Connect session for `account`: the same endpoint and
+    /// credential `reach_signed` signed in with.
+    fn session(f: &Flow, account: &str) -> ConnectSession {
+        let mut client = CoincubeClient::for_test(f._server.base_url());
+        client.set_token("flow-token");
+        ConnectSession {
+            client,
+            account: account.into(),
+        }
+    }
+
+    /// What the App does at a Connect sign-out, in its order: the panel
+    /// loses its session (which revokes), then the App revokes and advances
+    /// the generation.
+    fn sign_out(f: &mut Flow) {
+        f.p.set_connect(None);
+        f.p.revoke();
+        f.sender.send_modify(|g| *g += 1);
+    }
+
+    /// Run one panel task to completion and apply everything it produced,
+    /// returning what was applied.
+    async fn drive(f: &mut Flow, task: Task<Message>) -> Vec<Message> {
+        let produced = outputs(task).await;
+        let mut applied = Vec::new();
+        for message in produced {
+            let next = f.p.update(Some(f.dyn_daemon.clone()), &f.cache, message);
+            applied.push(next);
+        }
+        let mut seen = Vec::new();
+        for next in applied {
+            for message in outputs(next).await {
+                seen.push(message);
+            }
+        }
+        seen
     }
 
     #[tokio::test]
@@ -1159,62 +1334,373 @@ mod flow {
     }
 
     /// A Connect sign-out between the review and the confirmation — the App
-    /// calls `set_connect(None)` and bumps the generation — refuses the
-    /// submission: the coordinator is revoked synchronously, the daemon is
-    /// never asked to submit, and the journal stays at intent.
+    /// hands the panel no session and bumps the generation — withdraws the
+    /// review at once: the coordinator is revoked synchronously, a
+    /// confirmation has nothing to act on, the daemon is never asked to
+    /// submit, and the journal stays at intent. With and without the bump.
     #[tokio::test]
     async fn a_sign_out_between_review_and_confirm_refuses_the_submission() {
         for bump_generation in [false, true] {
-            let Flow {
-                mut p,
-                daemon,
-                dyn_daemon,
-                cache,
-                datadir,
-                wallet,
-                root,
-                sender,
-                ..
-            } = reach_review().await;
-            // What the App does at sign-out, in this order.
-            p.set_connect(None);
+            let mut f = reach_review().await;
+            assert!(f.p.set_connect(None), "a sign-out replaces the session");
             if bump_generation {
-                sender.send_modify(|g| *g += 1);
+                f.sender.send_modify(|g| *g += 1);
             }
-            let submit = p.update(
-                Some(dyn_daemon.clone()),
-                &cache,
+            assert_eq!(
+                session_state(&f.p),
+                (false, Some(SESSION_ENDED.to_string()), false, true),
+                "the review is withdrawn, the session stays (bound, revoked)"
+            );
+            assert!(f.p.revoked);
+            let submit = f.p.update(
+                Some(f.dyn_daemon.clone()),
+                &f.cache,
                 Message::View(view::Message::Claim(view::ClaimMessage::Confirm)),
             );
-            let mut produced = outputs(submit).await;
-            assert_eq!(produced.len(), 1, "{:?}", produced);
-            match &produced[0] {
-                Message::Claim(ClaimEvent::Submitted(_, Err(reason))) => {
-                    assert!(reason.contains("session ended"), "{}", reason);
-                }
-                other => panic!("expected a refused submission, got {:?}", other),
+            let produced = outputs(submit).await;
+            assert!(produced.is_empty(), "{:?}", produced);
+            assert_eq!(submissions(&f), 0, "{:?}", f.daemon.hits());
+            assert_eq!(journaled_phase(&f), "Intent");
+            let _ = std::fs::remove_dir_all(&f.root);
+        }
+    }
+
+    /// Gandalf's reviewer regression (#518 review, finding 1): the App signs
+    /// out after the finalise task is dispatched and before it is first
+    /// polled. The task must not bind the old client under the new
+    /// generation: it is refused before anything is journaled, the
+    /// construction and its signatures come back to the Sign stage, and a
+    /// confirmation has nothing to submit. Signing in again records it.
+    #[tokio::test]
+    async fn reviewer_logout_before_finalize_must_not_reauthorize_submission() {
+        let (mut f, ready) = reach_signed().await;
+        sign_out(&mut f);
+        assert!(f.p.connect.is_none());
+        let mut produced = outputs(ready).await;
+        assert_eq!(produced.len(), 1, "{:?}", produced);
+        match &produced[0] {
+            Message::Claim(ClaimEvent::Ready(_, Err((_, reason)))) => {
+                assert_eq!(reason, SIGNED_OUT_BEFORE_RECORD);
             }
-            let _ = p.update(Some(dyn_daemon.clone()), &cache, produced.remove(0));
-            assert!(
-                !daemon.hits().contains(&"submit_verified_poison"),
-                "nothing was submitted: {:?}",
-                daemon.hits()
-            );
-            let journal = journal_directory(&datadir, &wallet);
-            let journaled: serde_json::Value =
-                serde_json::from_slice(&std::fs::read(journal.join("intent.json")).unwrap())
-                    .unwrap();
-            assert_eq!(journaled["phase"], "Intent");
-            assert!(matches!(
-                &p.stage,
-                Stage::Review {
-                    snapshot: None,
+            other => panic!("expected a refused finalisation, got {:?}", other),
+        }
+        let journal = journal_directory(&f.datadir, &f.wallet);
+        assert!(
+            !journal.join("intent.json").exists(),
+            "refused before the journal write"
+        );
+        let _ =
+            f.p.update(Some(f.dyn_daemon.clone()), &f.cache, produced.remove(0));
+        assert!(
+            matches!(
+                &f.p.stage,
+                Stage::Sign {
+                    built: Some(_),
+                    finalizing: None,
                     error: Some(_),
-                    busy: false,
                     ..
                 }
-            ));
-            let _ = std::fs::remove_dir_all(&root);
+            ),
+            "the construction is back at Sign, with its signatures"
+        );
+        let task = f.p.update(
+            Some(f.dyn_daemon.clone()),
+            &f.cache,
+            Message::View(view::Message::Claim(view::ClaimMessage::Confirm)),
+        );
+        let output = outputs(task).await;
+        assert_eq!(
+            submissions(&f),
+            0,
+            "signed out before finalization was polled, yet submitted: {output:?}"
+        );
+
+        // Signing in again: the App hands the session in and calls
+        // `recover`, which finalises under the new generation.
+        assert!(!f.p.set_connect(Some(session(&f, "7"))));
+        let finalize = f.p.recover(Some(f.dyn_daemon.clone()));
+        let mut produced = outputs(finalize).await;
+        assert_eq!(produced.len(), 1, "{:?}", produced);
+        assert!(
+            matches!(&produced[0], Message::Claim(ClaimEvent::Ready(_, Ok(_)))),
+            "{:?}",
+            produced[0]
+        );
+        let review =
+            f.p.update(Some(f.dyn_daemon.clone()), &f.cache, produced.remove(0));
+        assert!(journal.join("intent.json").is_file());
+        assert!(!f.p.revoked);
+        let mut produced = outputs(review).await;
+        assert_eq!(produced.len(), 1, "{:?}", produced);
+        let _ =
+            f.p.update(Some(f.dyn_daemon.clone()), &f.cache, produced.remove(0));
+        assert_eq!(review_snapshot(&f.p).txid, f.unsigned_txid);
+        let _ = std::fs::remove_dir_all(&f.root);
+    }
+
+    /// Finding 1, the other window: the finalise task has already journaled
+    /// the intent when the App signs out, and its result is applied after.
+    /// The session is installed revoked — the journal is the record — with
+    /// no review to confirm and none prepared; a confirmation, and a "review
+    /// again" without a session, submit nothing.
+    #[tokio::test]
+    async fn a_sign_out_after_the_intent_is_journaled_installs_a_revoked_review() {
+        let (mut f, ready) = reach_signed().await;
+        let mut produced = outputs(ready).await;
+        assert!(matches!(
+            &produced[0],
+            Message::Claim(ClaimEvent::Ready(_, Ok(_)))
+        ));
+        assert_eq!(journaled_phase(&f), "Intent");
+        sign_out(&mut f);
+        let after =
+            f.p.update(Some(f.dyn_daemon.clone()), &f.cache, produced.remove(0));
+        assert!(
+            outputs(after).await.is_empty(),
+            "no review is prepared for a revoked session"
+        );
+        assert!(f.p.revoked);
+        assert_eq!(
+            session_state(&f.p),
+            (false, Some(SESSION_ENDED.to_string()), false, true)
+        );
+        for intent in [view::ClaimMessage::Confirm, view::ClaimMessage::Refresh] {
+            let task = f.p.update(
+                Some(f.dyn_daemon.clone()),
+                &f.cache,
+                Message::View(view::Message::Claim(intent)),
+            );
+            let produced = outputs(task).await;
+            assert!(produced.is_empty(), "{:?}", produced);
+        }
+        assert_eq!(submissions(&f), 0, "{:?}", f.daemon.hits());
+        assert_eq!(journaled_phase(&f), "Intent");
+        let _ = std::fs::remove_dir_all(&f.root);
+    }
+
+    /// Finding 5: after an ordinary sign-out at Review, signing in again
+    /// with the same account re-binds the journaled intent under the new
+    /// generation — `Coordinator::resume` reopens it (the journal's identity
+    /// digest is account and provider, not generation), the construction is
+    /// re-validated, the signatures re-verified — and the claim goes on to
+    /// a fresh review and a submission, exactly once.
+    #[tokio::test]
+    async fn signing_in_again_with_the_same_account_rebinds_and_submits() {
+        let mut f = reach_review().await;
+        sign_out(&mut f);
+        assert_eq!(journaled_phase(&f), "Intent");
+        // Signing in again: the App hands the session in and calls `recover`.
+        assert!(
+            !f.p.set_connect(Some(session(&f, "7"))),
+            "a first sign-in replaces nothing"
+        );
+        let rebind = f.p.recover(Some(f.dyn_daemon.clone()));
+        let mut produced = outputs(rebind).await;
+        assert_eq!(produced.len(), 1, "{:?}", produced);
+        assert!(
+            matches!(
+                &produced[0],
+                Message::Claim(ClaimEvent::Rebound(_, _, Ok(())))
+            ),
+            "{:?}",
+            produced[0]
+        );
+        let review =
+            f.p.update(Some(f.dyn_daemon.clone()), &f.cache, produced.remove(0));
+        assert!(!f.p.revoked);
+        // Busy: the re-bound session is out with the review task it started.
+        assert_eq!(session_state(&f.p), (false, None, true, false));
+        let mut produced = outputs(review).await;
+        assert_eq!(produced.len(), 1, "{:?}", produced);
+        let _ =
+            f.p.update(Some(f.dyn_daemon.clone()), &f.cache, produced.remove(0));
+        assert_eq!(review_snapshot(&f.p).txid, f.unsigned_txid);
+        reach_track(&mut f).await;
+        assert_eq!(journaled_phase(&f), "BroadcastUncertain");
+        let _ = std::fs::remove_dir_all(&f.root);
+    }
+
+    /// Finding 5, refused: another account cannot take over the journal —
+    /// the re-bind is refused by the journal's identity check, the session
+    /// stays unbound and the intent untouched; the right account then
+    /// continues.
+    #[tokio::test]
+    async fn signing_in_with_another_account_is_refused() {
+        let mut f = reach_review().await;
+        sign_out(&mut f);
+        assert!(!f.p.set_connect(Some(session(&f, "8"))));
+        let rebind = f.p.recover(Some(f.dyn_daemon.clone()));
+        let mut produced = outputs(rebind).await;
+        assert_eq!(produced.len(), 1, "{:?}", produced);
+        match &produced[0] {
+            Message::Claim(ClaimEvent::Rebound(_, _, Err(reason))) => {
+                assert_eq!(reason, OTHER_ACCOUNT);
+            }
+            other => panic!("expected a refused re-bind, got {:?}", other),
+        }
+        let after =
+            f.p.update(Some(f.dyn_daemon.clone()), &f.cache, produced.remove(0));
+        assert!(outputs(after).await.is_empty());
+        assert!(f.p.revoked);
+        assert_eq!(
+            session_state(&f.p),
+            (false, Some(OTHER_ACCOUNT.to_string()), false, false),
+            "unbound: the refused re-bind released the revoked coordinator"
+        );
+        let task = f.p.update(
+            Some(f.dyn_daemon.clone()),
+            &f.cache,
+            Message::View(view::Message::Claim(view::ClaimMessage::Confirm)),
+        );
+        assert!(outputs(task).await.is_empty());
+        assert_eq!(submissions(&f), 0);
+        assert_eq!(journaled_phase(&f), "Intent");
+
+        // The account the claim was recorded under replaces the other one:
+        // revoked (nothing to revoke), bumped by the App, then re-bound.
+        assert!(f.p.set_connect(Some(session(&f, "7"))));
+        f.sender.send_modify(|g| *g += 1);
+        let rebind = f.p.recover(Some(f.dyn_daemon.clone()));
+        let mut produced = outputs(rebind).await;
+        assert!(
+            matches!(
+                &produced[0],
+                Message::Claim(ClaimEvent::Rebound(_, _, Ok(())))
+            ),
+            "{:?}",
+            produced[0]
+        );
+        let review =
+            f.p.update(Some(f.dyn_daemon.clone()), &f.cache, produced.remove(0));
+        let mut produced = outputs(review).await;
+        let _ =
+            f.p.update(Some(f.dyn_daemon.clone()), &f.cache, produced.remove(0));
+        assert_eq!(review_snapshot(&f.p).txid, f.unsigned_txid);
+        let _ = std::fs::remove_dir_all(&f.root);
+    }
+
+    /// Finding 2's Some→Some half, at the panel: a session replaced by
+    /// another credential revokes the coordinator and withdraws the review;
+    /// the same session again replaces nothing.
+    #[tokio::test]
+    async fn a_replaced_session_revokes_and_withdraws_the_review() {
+        let mut f = reach_review().await;
+        assert!(
+            !f.p.set_connect(Some(session(&f, "7"))),
+            "same account, endpoint and credential"
+        );
+        review_snapshot(&f.p);
+        let mut other = session(&f, "7");
+        other.client.set_token("another-token");
+        assert!(f.p.set_connect(Some(other)), "another credential");
+        assert!(f.p.revoked);
+        assert_eq!(
+            session_state(&f.p),
+            (false, Some(SESSION_ENDED.to_string()), false, true)
+        );
+        let task = f.p.update(
+            Some(f.dyn_daemon.clone()),
+            &f.cache,
+            Message::View(view::Message::Claim(view::ClaimMessage::Confirm)),
+        );
+        assert!(outputs(task).await.is_empty());
+        assert_eq!(submissions(&f), 0);
+        assert_eq!(journaled_phase(&f), "Intent");
+        let _ = std::fs::remove_dir_all(&f.root);
+    }
+
+    /// Finding 5 at Track: a sign-out after the submission, then the same
+    /// account back — re-bound and reconciled, never resubmitted (the
+    /// coordinator refuses a review once a submission is recorded).
+    #[tokio::test]
+    async fn signing_in_again_at_tracking_reconciles_without_resubmitting() {
+        let mut f = reach_review().await;
+        reach_track(&mut f).await;
+        sign_out(&mut f);
+        assert_eq!(
+            session_state(&f.p),
+            (false, Some(SESSION_ENDED.to_string()), false, true)
+        );
+        assert!(!f.p.set_connect(Some(session(&f, "7"))));
+        let rebind = f.p.recover(Some(f.dyn_daemon.clone()));
+        let seen = drive(&mut f, rebind).await;
+        assert!(
+            matches!(&seen[..], [Message::Claim(ClaimEvent::Tracked(_, Ok(_)))]),
+            "{:?}",
+            seen
+        );
+        // (`drive` applied the re-bind and ran the reconcile it started; the
+        // tracked status is applied here.)
+        let mut seen = seen;
+        let _ =
+            f.p.update(Some(f.dyn_daemon.clone()), &f.cache, seen.remove(0));
+        assert!(!f.p.revoked);
+        match &f.p.stage {
+            Stage::Track {
+                status,
+                session: Some(session),
+                busy: false,
+                error: None,
+                ..
+            } => {
+                assert_eq!(
+                    *status,
+                    Some(Status::Observation(Assessment::WaitingForConfirmation))
+                );
+                assert_eq!(session.phase(), Phase::BroadcastUncertain);
+                assert!(session.is_bound());
+            }
+            _ => panic!("expected tracking"),
+        }
+        assert_eq!(submissions(&f), 1, "{:?}", f.daemon.hits());
+        assert_eq!(journaled_phase(&f), "BroadcastUncertain");
+        let _ = std::fs::remove_dir_all(&f.root);
+    }
+
+    /// A cancel while the finalise task holds the construction is refused:
+    /// the result decides whether the attempt was journaled.
+    #[tokio::test]
+    async fn cancel_is_refused_while_finalising() {
+        let (mut f, ready) = reach_signed().await;
+        let _ = f.p.update(
+            Some(f.dyn_daemon.clone()),
+            &f.cache,
+            Message::View(view::Message::Claim(view::ClaimMessage::Cancel)),
+        );
+        assert!(matches!(
+            &f.p.stage,
+            Stage::Sign {
+                finalizing: Some(_),
+                ..
+            }
+        ));
+        let mut produced = outputs(ready).await;
+        let _ =
+            f.p.update(Some(f.dyn_daemon.clone()), &f.cache, produced.remove(0));
+        assert!(matches!(&f.p.stage, Stage::Review { .. }));
+        let _ = std::fs::remove_dir_all(&f.root);
+    }
+
+    /// Finding 4, the intents: a step that needs the daemon is refused with
+    /// the reason, visibly, never with a panic.
+    #[tokio::test]
+    async fn daemon_needing_intents_without_a_daemon_refuse_visibly() {
+        let mut p = panel(SINGLE_WSH);
+        for intent in [view::ClaimMessage::Recheck, view::ClaimMessage::Build] {
+            let task = p.update(
+                None,
+                &Cache::default(),
+                Message::View(view::Message::Claim(intent)),
+            );
+            let produced = outputs(task).await;
+            assert!(
+                matches!(
+                    &produced[..],
+                    [Message::View(view::Message::ShowError(reason))] if reason == NODE_UNAVAILABLE
+                ),
+                "{:?}",
+                produced
+            );
         }
     }
 
@@ -1252,10 +1738,12 @@ mod flow {
     }
 
     /// Every stage renders: the view functions build their element trees for
-    /// preconditions (checking, refused, ready), the plan, the signing flow
-    /// with the picker open, the review with and without a snapshot, and
-    /// tracking with each outcome. Not a pixel test — a guard against a view
-    /// that panics on a state the panel can reach.
+    /// preconditions (checking, refused, ready), the review with and without
+    /// a snapshot, and tracking with each outcome; the plan and the signing
+    /// flow with the picker open are rendered inside `reach_signed`, on the
+    /// way (Gandalf's reviewer probe: this test had only traversed them).
+    /// Not a pixel test — a guard against a view that panics on a state the
+    /// panel can reach.
     #[tokio::test]
     async fn every_stage_renders() {
         let menu = Menu::Vault(crate::app::menu::VaultSubMenu::Claim);
