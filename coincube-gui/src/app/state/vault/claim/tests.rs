@@ -435,3 +435,911 @@ async fn the_signing_daemon_forwards_reads_and_swallows_spend_store_writes() {
     signing.list_txs(&[]).await.unwrap();
     assert_eq!(*inner.hits.lock().unwrap(), vec!["list_coins", "list_txs"]);
 }
+
+/// The whole slice, end to end, through the real panel: a fake embedded
+/// daemon answers the wallet reads and carries the submission, an httpmock
+/// Connect answers the anchor, the Esplora reads and the preflight, and the
+/// Vault's hot key signs through the panel's own `PsbtState`. Every stage
+/// transition is the panel's; every async step is the task the panel
+/// returned, run to completion and fed back.
+mod flow {
+    use super::*;
+    use crate::{daemon::model::GetInfoResult, signer::Signer};
+    use coincube_core::{
+        bip39::Mnemonic,
+        claim_finalize::finalize_poison_transfer,
+        descriptors::{CoincubeDescriptor, CoincubePolicy, PathInfo},
+        miniscript::{
+            bitcoin::{
+                absolute, bip32::DerivationPath, transaction, Amount, OutPoint, TxIn, TxOut,
+            },
+            DescriptorPublicKey,
+        },
+        signer::MasterSigner,
+    };
+    use coincubed::commands::GetInfoDescriptors;
+    use coincubed::poison_broadcast::{SubmissionGate, SubmissionOutcome};
+    use httpmock::prelude::*;
+    use iced::futures::StreamExt;
+    use serde_json::json;
+    use std::{path::PathBuf, sync::Mutex};
+
+    fn signer(byte: u8) -> MasterSigner {
+        MasterSigner::from_mnemonic(
+            Network::Bitcoin,
+            Mnemonic::from_entropy(&[byte; 16]).unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn key(s: &MasterSigner, secp: &secp256k1::Secp256k1<secp256k1::All>) -> DescriptorPublicKey {
+        DescriptorPublicKey::from_str(&format!(
+            "[{}]{}/<0;1>/*",
+            s.fingerprint(secp),
+            s.xpub_at(&DerivationPath::default(), secp)
+        ))
+        .unwrap()
+    }
+
+    /// A single-key P2WSH Vault (primary: the hot key; recovery: another key
+    /// after 46 blocks) and one 100 000-sat coin it received at height 50.
+    struct Fixture {
+        descriptor: CoincubeDescriptor,
+        hot: MasterSigner,
+        previous: Transaction,
+        coin: Coin,
+    }
+
+    fn fixture() -> Fixture {
+        let secp = secp256k1::Secp256k1::new();
+        let hot = signer(40);
+        let recovery = signer(42);
+        let descriptor = CoincubeDescriptor::new(
+            CoincubePolicy::new_legacy(
+                PathInfo::Single(key(&hot, &secp)),
+                std::iter::once((46, PathInfo::Single(key(&recovery, &secp)))).collect(),
+            )
+            .unwrap(),
+        );
+        let verify = secp256k1::Secp256k1::verification_only();
+        let script_pubkey = descriptor
+            .receive_descriptor()
+            .derive(0.into(), &verify)
+            .script_pubkey();
+        let previous = Transaction {
+            version: transaction::Version::TWO,
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![TxIn::default()],
+            output: vec![TxOut {
+                value: Amount::from_sat(100_000),
+                script_pubkey: script_pubkey.clone(),
+            }],
+        };
+        let coin = Coin {
+            amount: Amount::from_sat(100_000),
+            outpoint: OutPoint::new(previous.compute_txid(), 0),
+            address: Address::from_script(&script_pubkey, Network::Bitcoin).unwrap(),
+            block_height: Some(50),
+            derivation_index: ChildNumber::from_normal_idx(0).unwrap(),
+            spend_info: None,
+            is_immature: false,
+            is_change: false,
+            is_from_self: false,
+        };
+        Fixture {
+            descriptor,
+            hot,
+            previous,
+            coin,
+        }
+    }
+
+    /// The embedded daemon as the panel sees it: wallet reads answered from
+    /// the fixture, a change reservation, and the exact-byte submission.
+    /// Records every write so the test can prove which reached it.
+    #[derive(Debug)]
+    struct FlowDaemon {
+        config: coincubed::config::Config,
+        coin: Coin,
+        previous: Transaction,
+        hits: Mutex<Vec<&'static str>>,
+    }
+    impl FlowDaemon {
+        fn hit(&self, name: &'static str) {
+            self.hits.lock().unwrap().push(name);
+        }
+        fn hits(&self) -> Vec<&'static str> {
+            self.hits.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Daemon for FlowDaemon {
+        fn backend(&self) -> DaemonBackend {
+            DaemonBackend::EmbeddedCoincubed(Some(crate::node::NodeType::Esplora))
+        }
+        fn config(&self) -> Option<&coincubed::config::Config> {
+            Some(&self.config)
+        }
+        async fn is_alive(&self, _: &CoincubeDirectory, _: Network) -> Result<(), DaemonError> {
+            Ok(())
+        }
+        async fn stop(&self) -> Result<(), DaemonError> {
+            unreachable!()
+        }
+        async fn get_info(&self) -> Result<model::GetInfoResult, DaemonError> {
+            self.hit("get_info");
+            Ok(GetInfoResult {
+                version: String::new(),
+                network: Network::Bitcoin,
+                block_height: 105,
+                sync: 1.0,
+                descriptors: GetInfoDescriptors {
+                    main: self.config.main_descriptor.clone(),
+                },
+                rescan_progress: None,
+                refused_reorg_depth: None,
+                chain_divergence: false,
+                timestamp: 0,
+                last_poll_timestamp: None,
+                receive_index: 1,
+                change_index: 0,
+            })
+        }
+        async fn request_sync(&self) -> Result<(), DaemonError> {
+            Ok(())
+        }
+        async fn get_new_address(&self) -> Result<model::GetAddressResult, DaemonError> {
+            unreachable!()
+        }
+        async fn list_revealed_addresses(
+            &self,
+            _: bool,
+            _: bool,
+            _: usize,
+            _: Option<ChildNumber>,
+        ) -> Result<model::ListRevealedAddressesResult, DaemonError> {
+            unreachable!()
+        }
+        async fn update_deriv_indexes(
+            &self,
+            _: Option<u32>,
+            _: Option<u32>,
+        ) -> Result<UpdateDerivIndexesResult, DaemonError> {
+            unreachable!()
+        }
+        async fn list_coins(
+            &self,
+            statuses: &[CoinStatus],
+            _: &[OutPoint],
+        ) -> Result<model::ListCoinsResult, DaemonError> {
+            self.hit("list_coins");
+            assert_eq!(statuses, &[CoinStatus::Confirmed]);
+            Ok(model::ListCoinsResult {
+                coins: vec![self.coin.clone()],
+            })
+        }
+        async fn list_spend_txs(&self) -> Result<model::ListSpendResult, DaemonError> {
+            self.hit("list_spend_txs");
+            Ok(model::ListSpendResult {
+                spend_txs: Vec::new(),
+            })
+        }
+        async fn create_spend_tx(
+            &self,
+            _: &[OutPoint],
+            _: &HashMap<Address<address::NetworkUnchecked>, u64>,
+            _: u64,
+            _: Option<Address<address::NetworkUnchecked>>,
+        ) -> Result<model::CreateSpendResult, DaemonError> {
+            unreachable!()
+        }
+        async fn rbf_psbt(
+            &self,
+            _: &Txid,
+            _: bool,
+            _: Option<u64>,
+        ) -> Result<model::CreateSpendResult, DaemonError> {
+            unreachable!()
+        }
+        async fn update_spend_tx(&self, _: &Psbt) -> Result<(), DaemonError> {
+            self.hit("update_spend_tx");
+            Ok(())
+        }
+        async fn delete_spend_tx(&self, _: &Txid) -> Result<(), DaemonError> {
+            self.hit("delete_spend_tx");
+            Ok(())
+        }
+        async fn broadcast_spend_tx(&self, _: &Txid) -> Result<(), DaemonError> {
+            self.hit("broadcast_spend_tx");
+            Ok(())
+        }
+        async fn reserve_change(&self) -> Result<ChildNumber, DaemonError> {
+            self.hit("reserve_change");
+            Ok(ChildNumber::from_normal_idx(12).unwrap())
+        }
+        async fn submit_verified_poison(
+            &self,
+            verified: Arc<coincube_core::claim_finalize::VerifiedPoisonTransfer>,
+            _gate: Arc<SubmissionGate>,
+        ) -> Result<SubmissionOutcome, DaemonError> {
+            self.hit("submit_verified_poison");
+            Ok(SubmissionOutcome::UpstreamAccepted {
+                txid: verified.transaction().compute_txid(),
+                wtxid: verified.transaction().compute_wtxid(),
+            })
+        }
+        async fn start_rescan(&self, _: u32) -> Result<(), DaemonError> {
+            unreachable!()
+        }
+        async fn list_confirmed_txs(
+            &self,
+            _: u32,
+            _: u32,
+            _: u64,
+        ) -> Result<model::ListTransactionsResult, DaemonError> {
+            unreachable!()
+        }
+        async fn create_recovery(
+            &self,
+            _: Address<address::NetworkUnchecked>,
+            _: &[OutPoint],
+            _: u64,
+            _: Option<u16>,
+        ) -> Result<Psbt, DaemonError> {
+            unreachable!()
+        }
+        async fn list_txs(
+            &self,
+            txids: &[Txid],
+        ) -> Result<model::ListTransactionsResult, DaemonError> {
+            self.hit("list_txs");
+            assert_eq!(txids, &[self.previous.compute_txid()]);
+            Ok(model::ListTransactionsResult {
+                transactions: vec![coincubed::commands::TransactionInfo {
+                    tx: self.previous.clone(),
+                    height: Some(50),
+                    time: None,
+                }],
+            })
+        }
+        async fn get_labels(
+            &self,
+            _: &HashSet<LabelItem>,
+        ) -> Result<HashMap<String, String>, DaemonError> {
+            Ok(HashMap::new())
+        }
+        async fn update_labels(
+            &self,
+            _: &HashMap<LabelItem, Option<String>>,
+        ) -> Result<(), DaemonError> {
+            self.hit("update_labels");
+            Ok(())
+        }
+        async fn get_labels_bip329(&self, _: u32, _: u32) -> Result<Labels, DaemonError> {
+            unreachable!()
+        }
+    }
+
+    /// Put a claim target for `wallet` on the fork chain's settings file, as
+    /// the target installer leaves it.
+    fn write_claim_target(root: &CoincubeDirectory, wallet: &Wallet) {
+        use crate::app::settings::{CubeSettings, Settings, WalletId, SETTINGS_FILE_NAME};
+        let fork_dir = root.network_directory(ChainId::BitcoinBlake2b);
+        std::fs::create_dir_all(fork_dir.path()).unwrap();
+        let mut target = CubeSettings::new_with_raw_id(
+            "fork-cube".to_string(),
+            "Fixture · BTCB2".to_string(),
+            ChainId::BitcoinBlake2b,
+        );
+        target.vault_wallet_id = Some(WalletId::new(wallet.descriptor_checksum.clone(), Some(1)));
+        let settings = Settings {
+            cubes: vec![target],
+            ..Default::default()
+        };
+        std::fs::write(
+            fork_dir.path().join(SETTINGS_FILE_NAME),
+            serde_json::to_vec(&settings).unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// Run a task the panel returned and hand back everything it produced.
+    async fn outputs(task: Task<Message>) -> Vec<Message> {
+        let mut out = Vec::new();
+        let Some(mut stream) = iced_runtime::task::into_stream(task) else {
+            return out;
+        };
+        while let Some(action) = stream.next().await {
+            if let iced_runtime::Action::Output(message) = action {
+                out.push(message);
+            }
+        }
+        out
+    }
+
+    fn fresh(then: httpmock::Then) -> httpmock::Then {
+        then.header("X-Coincube-Observation", "fresh")
+            .header("X-Cache", "BYPASS")
+            .header("Cache-Control", "no-store")
+    }
+
+    fn unix_now() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+    }
+
+    /// Everything the flow needs after the panel has reached the review.
+    struct Flow {
+        p: ClaimStep1Panel,
+        daemon: Arc<FlowDaemon>,
+        dyn_daemon: Arc<dyn Daemon + Sync + Send>,
+        cache: Cache,
+        _server: MockServer,
+        datadir: CoincubeDirectory,
+        wallet: Arc<Wallet>,
+        root: PathBuf,
+        sender: watch::Sender<u64>,
+        unsigned_txid: Txid,
+    }
+
+    /// Preconditions → build → sign (the hot key through the panel's own
+    /// `PsbtState`) → finalise → journal → review, asserting each stage.
+    async fn reach_review() -> Flow {
+        let f = fixture();
+        let server = MockServer::start_async().await;
+        let now = unix_now();
+        let fork_hash = "07".repeat(32);
+        let fork_tip_hash = "02".repeat(32);
+        let btc_tip_hash = "01".repeat(32);
+
+        // Connect: the authenticated anchor, then the anonymous Esplora reads.
+        server.mock_async(|when, then| {
+            when.method(GET).path("/api/v1/connect/networks/bitcoin-blake2b/anchor")
+                .header("authorization", "Bearer flow-token");
+            then.status(200).json_body(json!({"success":true,"data":{
+                "network":"bitcoin-blake2b","state":"available","anchor":{
+                    "tip_hash":fork_tip_hash,"tip_height":100,"tip_median_time_past":now,
+                    "observed_at":now,
+                    "observation":{"tip_height":100,"fork":{"height":90,"active":true},
+                        "rdts":{"state":"flagday","flagday":{"height":90,"expiry_time":now + EXPIRY_MARGIN_SECONDS + 3600,"active":true}}}
+                }}}));
+        }).await;
+        server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/api/v1/esplora/bitcoin-blake2b/mainnet/block-height/90");
+                fresh(then.status(200)).body(&fork_hash);
+            })
+            .await;
+        server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/api/v1/esplora/bitcoin-blake2b/mainnet/block-height/100");
+                fresh(then.status(200)).body(&fork_tip_hash);
+            })
+            .await;
+        server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/api/v1/esplora/bitcoin/mainnet/blocks/tip/hash");
+                fresh(then.status(200)).body(&btc_tip_hash);
+            })
+            .await;
+        server
+            .mock_async(|when, then| {
+                when.method(GET).path(format!(
+                    "/api/v1/esplora/bitcoin/mainnet/block/{btc_tip_hash}/status"
+                ));
+                fresh(then.status(200)).json_body(json!({"in_best_chain":true,"height":105}));
+            })
+            .await;
+        server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/api/v1/esplora/bitcoin/mainnet/block-height/105");
+                fresh(then.status(200)).body(&btc_tip_hash);
+            })
+            .await;
+        // The transaction is on neither chain before submission — and, with
+        // an upstream acknowledgement but no mined block, after it either.
+        server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path_contains("/api/v1/esplora/bitcoin/mainnet/tx/");
+                fresh(then.status(404));
+            })
+            .await;
+        server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path_contains("/api/v1/esplora/bitcoin-blake2b/mainnet/tx/");
+                fresh(then.status(404));
+            })
+            .await;
+
+        let endpoint = format!("{}/api/v1/esplora/bitcoin/mainnet", server.base_url());
+        let root = std::env::temp_dir().join(format!("claim-flow-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let config: coincubed::config::Config = toml::from_str(&format!(
+            "main_descriptor = '{}'\ndata_directory = '{}'\n[bitcoin_config]\nnetwork = 'bitcoin'\n[esplora_config]\naddr = '{}'\n",
+            f.descriptor,
+            root.display(),
+            endpoint
+        ))
+        .unwrap();
+        let daemon = Arc::new(FlowDaemon {
+            config,
+            coin: f.coin.clone(),
+            previous: f.previous.clone(),
+            hits: Mutex::new(Vec::new()),
+        });
+        let dyn_daemon: Arc<dyn Daemon + Sync + Send> = daemon.clone();
+        let mut wallet = Wallet::new(f.descriptor.clone());
+        wallet.signer = Some(Arc::new(Signer::new(f.hot)));
+        let wallet = Arc::new(wallet);
+        let datadir = CoincubeDirectory::new(root.clone());
+        let mut client = CoincubeClient::for_test(server.base_url());
+        client.set_token("flow-token");
+        let cache = Cache {
+            network: Network::Bitcoin,
+            fiat_chain: ChainId::Bitcoin,
+            ..Cache::default()
+        };
+        let (sender, generation) = watch::channel(1);
+
+        let mut p = ClaimStep1Panel::new(
+            wallet.clone(),
+            datadir.clone(),
+            "bitcoin-cube".into(),
+            generation,
+            Some(ConnectSession {
+                client,
+                account: "7".into(),
+            }),
+        )
+        .with_feerate_source(FeerateSource::Fixed(5));
+        // The target, as the installer leaves it on disk: a Bitcoin Blake2b
+        // Cube in the fork chain's settings file reusing this descriptor. The
+        // probe re-reads it on every entry, so a poked field would not do.
+        write_claim_target(&datadir, &wallet);
+
+        // Preconditions: the probe runs on entry.
+        let probe = p.reload(Some(dyn_daemon.clone()), Some(wallet.clone()));
+        let mut produced = outputs(probe).await;
+        assert_eq!(produced.len(), 1, "one probe result");
+        let _ = p.update(Some(dyn_daemon.clone()), &cache, produced.remove(0));
+        assert_eq!(p.refusal(), None, "{:?}", p.pre.checked);
+        assert!(p.can_build());
+        let coins = p.coins().unwrap();
+        assert_eq!(coins.pre_fork.len(), 1);
+        assert_eq!(
+            p.window().unwrap().fork_hash,
+            BlockHash::from_str(&fork_hash).unwrap()
+        );
+
+        // Build: the change index is the daemon's reservation, the marker is
+        // an OP_RETURN over BIP-110's 83 bytes.
+        let build = p.update(
+            Some(dyn_daemon.clone()),
+            &cache,
+            Message::View(view::Message::Claim(view::ClaimMessage::Build)),
+        );
+        let mut produced = outputs(build).await;
+        assert_eq!(produced.len(), 1);
+        let _ = p.update(Some(dyn_daemon.clone()), &cache, produced.remove(0));
+        let (unsigned_txid, marker_len, change_index) = match &p.stage {
+            Stage::Plan { built } => (
+                built.psbt().unsigned_tx.compute_txid(),
+                built
+                    .psbt()
+                    .unsigned_tx
+                    .output
+                    .iter()
+                    .find(|o| o.script_pubkey.is_op_return())
+                    .map(|o| o.script_pubkey.len())
+                    .unwrap(),
+                built.change_index(),
+            ),
+            _ => panic!("expected the plan stage"),
+        };
+        assert_eq!(change_index, ChildNumber::from_normal_idx(12).unwrap());
+        assert!(marker_len > 83, "{}", marker_len);
+        assert_eq!(
+            daemon.hits(),
+            vec!["list_coins", "get_info", "reserve_change", "list_txs"]
+        );
+
+        // Sign: the Vault's own flow. Open the picker, then merge the hot
+        // key's signature exactly as the picker would receive it.
+        let _ = p.update(
+            Some(dyn_daemon.clone()),
+            &cache,
+            Message::View(view::Message::Claim(view::ClaimMessage::Sign)),
+        );
+        let opened = p.update(
+            Some(dyn_daemon.clone()),
+            &cache,
+            Message::View(view::Message::Spend(view::SpendTxMessage::Sign)),
+        );
+        drop(opened);
+        let (unsigned, fingerprint) = match &p.stage {
+            Stage::Sign { psbt, .. } => {
+                assert!(psbt.modal.is_some(), "the picker is open");
+                (
+                    psbt.tx.psbt.clone(),
+                    wallet.signer.as_ref().unwrap().fingerprint(),
+                )
+            }
+            _ => panic!("expected the sign stage"),
+        };
+        let signed = wallet.signer.as_ref().unwrap().sign_psbt(unsigned).unwrap();
+        // The preflight answers for exactly the transaction that will be
+        // submitted, so it is registered once the witness is known.
+        let final_tx = match &p.stage {
+            Stage::Sign {
+                built: Some(built), ..
+            } => {
+                finalize_poison_transfer(built, &signed, &secp256k1::Secp256k1::verification_only())
+                    .unwrap()
+                    .transaction()
+                    .clone()
+            }
+            _ => panic!("the construction is still in the stage"),
+        };
+        assert_eq!(final_tx.compute_txid(), unsigned_txid);
+        server.mock_async(|when, then| {
+            when.method(POST).path("/api/v1/esplora/bitcoin/mainnet/tx/preflight");
+            then.status(200).header("cache-control", "no-store").json_body(json!({
+                "success":true,"data":{"network":"mainnet","state":"available","result":{
+                    "txid":final_tx.compute_txid(),"wtxid":final_tx.compute_wtxid(),
+                    "tip_hash":btc_tip_hash,"observed_at":unix_now(),"allowed":true,"reject_reason":null}}}));
+        }).await;
+
+        let merged = p.update(
+            Some(dyn_daemon.clone()),
+            &cache,
+            Message::Signed(fingerprint, Ok(signed)),
+        );
+        // The persist the picker asks for goes to the signing-only daemon:
+        // it answers, and nothing reaches the real one.
+        let mut produced = outputs(merged).await;
+        assert!(
+            produced
+                .iter()
+                .any(|m| matches!(m, Message::Updated(Ok(())))),
+            "{:?}",
+            produced
+        );
+        let updated = produced
+            .iter()
+            .position(|m| matches!(m, Message::Updated(Ok(()))))
+            .unwrap();
+        let ready = p.update(Some(dyn_daemon.clone()), &cache, produced.remove(updated));
+        assert!(
+            !daemon.hits().contains(&"update_spend_tx"),
+            "the claim PSBT never reaches the spend store: {:?}",
+            daemon.hits()
+        );
+        // Threshold met, picker closed: finalise, journal, coordinator.
+        let mut produced = outputs(ready).await;
+        assert_eq!(produced.len(), 1, "{:?}", produced);
+        assert!(
+            matches!(&produced[0], Message::Claim(ClaimEvent::Ready(Ok(_)))),
+            "{:?}",
+            produced[0]
+        );
+        let review = p.update(Some(dyn_daemon.clone()), &cache, produced.remove(0));
+        let journal = journal_directory(&datadir, &wallet);
+        assert!(
+            journal.join("intent.json").is_file(),
+            "the intent is journaled before any review"
+        );
+        assert!(p.revoker.is_some());
+
+        // Review: the snapshot is what the user confirms.
+        let mut produced = outputs(review).await;
+        assert_eq!(produced.len(), 1, "{:?}", produced);
+        let _ = p.update(Some(dyn_daemon.clone()), &cache, produced.remove(0));
+        let snapshot = match &p.stage {
+            Stage::Review {
+                snapshot: Some(s),
+                busy: false,
+                error: None,
+                ..
+            } => s.clone(),
+            other => panic!(
+                "expected a review: {:?}",
+                match other {
+                    Stage::Review {
+                        snapshot,
+                        busy,
+                        error,
+                        ..
+                    } => format!("{snapshot:?} busy={busy} error={error:?}"),
+                    _ => "other stage".to_string(),
+                }
+            ),
+        };
+        assert_eq!(snapshot.txid, unsigned_txid);
+        assert_eq!(snapshot.observations.bitcoin.tip.height, 105);
+        assert_eq!(snapshot.observations.fork.tip.height, 100);
+        Flow {
+            p,
+            daemon,
+            dyn_daemon,
+            cache,
+            _server: server,
+            datadir,
+            wallet,
+            root,
+            sender,
+            unsigned_txid,
+        }
+    }
+
+    #[tokio::test]
+    async fn step_one_runs_from_preconditions_to_tracking_through_the_panel() {
+        // `sender` stays alive: closing the generation channel is itself a
+        // revocation (the coordinator treats a closed watch as cancelled).
+        let Flow {
+            mut p,
+            daemon,
+            dyn_daemon,
+            cache,
+            datadir,
+            wallet,
+            root,
+            sender: _sender,
+            unsigned_txid,
+            ..
+        } = reach_review().await;
+        let journal = journal_directory(&datadir, &wallet);
+
+        // Submit: explicit confirmation; the journal records the intent
+        // before the daemon carries the exact bytes; the outcome is tracked.
+        let submit = p.update(
+            Some(dyn_daemon.clone()),
+            &cache,
+            Message::View(view::Message::Claim(view::ClaimMessage::Confirm)),
+        );
+        let mut produced = outputs(submit).await;
+        assert_eq!(produced.len(), 1, "{:?}", produced);
+        assert!(
+            matches!(
+                &produced[0],
+                Message::Claim(ClaimEvent::Submitted(
+                    _,
+                    Ok(Outcome::UpstreamAccepted { .. })
+                ))
+            ),
+            "{:?}",
+            produced[0]
+        );
+        let track = p.update(Some(dyn_daemon.clone()), &cache, produced.remove(0));
+        assert_eq!(
+            daemon
+                .hits()
+                .iter()
+                .filter(|h| **h == "submit_verified_poison")
+                .count(),
+            1
+        );
+        assert!(!daemon.hits().contains(&"broadcast_spend_tx"));
+        let journaled: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(journal.join("intent.json")).unwrap()).unwrap();
+        assert_eq!(journaled["phase"], "BroadcastUncertain");
+        assert_eq!(journaled["signed_txid"], unsigned_txid.to_string());
+
+        let mut produced = outputs(track).await;
+        assert_eq!(produced.len(), 1, "{:?}", produced);
+        let _ = p.update(Some(dyn_daemon.clone()), &cache, produced.remove(0));
+        match &p.stage {
+            Stage::Track {
+                outcome,
+                status,
+                busy: false,
+                error: None,
+                session: Some(session),
+            } => {
+                assert!(
+                    matches!(outcome, Outcome::UpstreamAccepted { txid, .. } if *txid == unsigned_txid)
+                );
+                assert_eq!(
+                    *status,
+                    Some(Status::Observation(Assessment::WaitingForConfirmation))
+                );
+                assert_eq!(session.phase(), Phase::BroadcastUncertain);
+            }
+            _ => panic!("expected tracking"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A Connect sign-out between the review and the confirmation — the App
+    /// calls `set_connect(None)` and bumps the generation — refuses the
+    /// submission: the coordinator is revoked synchronously, the daemon is
+    /// never asked to submit, and the journal stays at intent.
+    #[tokio::test]
+    async fn a_sign_out_between_review_and_confirm_refuses_the_submission() {
+        for bump_generation in [false, true] {
+            let Flow {
+                mut p,
+                daemon,
+                dyn_daemon,
+                cache,
+                datadir,
+                wallet,
+                root,
+                sender,
+                ..
+            } = reach_review().await;
+            // What the App does at sign-out, in this order.
+            p.set_connect(None);
+            if bump_generation {
+                sender.send_modify(|g| *g += 1);
+            }
+            let submit = p.update(
+                Some(dyn_daemon.clone()),
+                &cache,
+                Message::View(view::Message::Claim(view::ClaimMessage::Confirm)),
+            );
+            let mut produced = outputs(submit).await;
+            assert_eq!(produced.len(), 1, "{:?}", produced);
+            match &produced[0] {
+                Message::Claim(ClaimEvent::Submitted(_, Err(reason))) => {
+                    assert!(reason.contains("session ended"), "{}", reason);
+                }
+                other => panic!("expected a refused submission, got {:?}", other),
+            }
+            let _ = p.update(Some(dyn_daemon.clone()), &cache, produced.remove(0));
+            assert!(
+                !daemon.hits().contains(&"submit_verified_poison"),
+                "nothing was submitted: {:?}",
+                daemon.hits()
+            );
+            let journal = journal_directory(&datadir, &wallet);
+            let journaled: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(journal.join("intent.json")).unwrap())
+                    .unwrap();
+            assert_eq!(journaled["phase"], "Intent");
+            assert!(matches!(
+                &p.stage,
+                Stage::Review {
+                    snapshot: None,
+                    error: Some(_),
+                    busy: false,
+                    ..
+                }
+            ));
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    /// Control for the test above: with the session intact the same
+    /// confirmation submits (the full flow proves it), and `revoke` alone —
+    /// what Cube lock, tab close and `Drop` call — is enough to refuse.
+    #[tokio::test]
+    async fn revoke_alone_refuses_the_submission() {
+        let Flow {
+            mut p,
+            daemon,
+            dyn_daemon,
+            cache,
+            root,
+            sender: _sender,
+            ..
+        } = reach_review().await;
+        p.revoke();
+        let submit = p.update(
+            Some(dyn_daemon.clone()),
+            &cache,
+            Message::View(view::Message::Claim(view::ClaimMessage::Confirm)),
+        );
+        let produced = outputs(submit).await;
+        assert!(
+            matches!(
+                &produced[..],
+                [Message::Claim(ClaimEvent::Submitted(_, Err(_)))]
+            ),
+            "{:?}",
+            produced
+        );
+        assert!(!daemon.hits().contains(&"submit_verified_poison"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Every stage renders: the view functions build their element trees for
+    /// preconditions (checking, refused, ready), the plan, the signing flow
+    /// with the picker open, the review with and without a snapshot, and
+    /// tracking with each outcome. Not a pixel test — a guard against a view
+    /// that panics on a state the panel can reach.
+    #[tokio::test]
+    async fn every_stage_renders() {
+        let menu = Menu::Vault(crate::app::menu::VaultSubMenu::Claim);
+        let render = |p: &ClaimStep1Panel, cache: &Cache| {
+            let _element = view::vault::claim::view(&menu, cache, p);
+        };
+        // Preconditions: nothing checked, then refused, then ready.
+        let mut fresh = panel(SINGLE_WSH);
+        let cache = Cache {
+            network: Network::Bitcoin,
+            fiat_chain: ChainId::Bitcoin,
+            ..Cache::default()
+        };
+        render(&fresh, &cache);
+        fresh.pre.target = Some("fork-cube".into());
+        fresh.connect = Some(ConnectSession {
+            client: CoincubeClient::new(),
+            account: "7".into(),
+        });
+        let mut refused = checked_ok(1_000_000);
+        refused.backend = Err("wrong backend".into());
+        fresh.pre.checked = Some(refused);
+        render(&fresh, &cache);
+        fresh.pre.checked = Some(checked_ok(1_000_000));
+        render(&fresh, &cache);
+
+        // The live stages, reached through the real flow.
+        let Flow {
+            mut p,
+            dyn_daemon,
+            cache,
+            root,
+            ..
+        } = reach_review().await;
+        render(&p, &cache);
+        // Review without a snapshot (a refused review) and while busy.
+        if let Stage::Review {
+            snapshot, error, ..
+        } = &mut p.stage
+        {
+            *snapshot = None;
+            *error = Some("What you reviewed has changed since.".into());
+        }
+        render(&p, &cache);
+        if let Stage::Review { busy, .. } = &mut p.stage {
+            *busy = true;
+        }
+        render(&p, &cache);
+        // Tracking, each outcome, each status.
+        let txid = Txid::from_byte_array([5; 32]);
+        let wtxid = coincube_core::miniscript::bitcoin::Wtxid::from_byte_array([6; 32]);
+        for outcome in [
+            Outcome::UpstreamAccepted { txid, wtxid },
+            Outcome::Uncertain { txid, wtxid },
+        ] {
+            for status in [
+                None,
+                Some(Status::Unchecked),
+                Some(Status::Unavailable),
+                Some(Status::Observation(Assessment::WaitingForConfirmation)),
+                Some(Status::Observation(Assessment::WaitingForDepth {
+                    confirmations: 2,
+                })),
+                Some(Status::Observation(Assessment::Reorged)),
+                Some(Status::Observation(Assessment::Step1AlreadyOnFork)),
+                Some(Status::Observation(
+                    Assessment::ObservationsEligibleForPreflight,
+                )),
+            ] {
+                let session = match std::mem::replace(&mut p.stage, Stage::Preconditions) {
+                    Stage::Review { session, .. } | Stage::Track { session, .. } => session,
+                    _ => None,
+                };
+                p.stage = Stage::Track {
+                    session,
+                    outcome,
+                    status,
+                    busy: false,
+                    error: None,
+                };
+                render(&p, &cache);
+            }
+        }
+        drop(dyn_daemon);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}

@@ -8980,3 +8980,204 @@ mod duress_chain_identity_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 }
+
+/// Claim step 1 entry and routing (Lane B1.5), at the App level.
+#[cfg(test)]
+mod claim_step1_tests {
+    use super::*;
+    use crate::app::state::vault::claim::{Checked, ClaimEvent, CoinSet, ForkWindow};
+    use coincube_core::miniscript::bitcoin::hashes::Hash;
+    use iced::futures::StreamExt;
+    use std::str::FromStr;
+
+    const DESC: &str = "wsh(or_d(pk([f5acc2fd]tpubD6NzVbkrYhZ4YgUx2ZLNt2rLYAMTdYysCRzKoLu2BeSHKvzqPaBDvf17GeBPnExUVPkuBpx4kniP964e2MxyzzazcXLptxLXModSVCVEV1T/<0;1>/*),and_v(v:pkh([8a64f2a9]tpubD6NzVbkrYhZ4WmzFjvQrp7sDa4ECUxTi9oby8K4FZkd3XCBtEdKwUiQyYJaxiJo5y42gyDWEczrFpozEjeLxMPxjf2WtkfcbpUdfvNnozWF/<0;1>/*),older(10))))#d72le4dr";
+
+    /// A Bitcoin Cube with a Vault and an embedded (unstarted) daemon,
+    /// with the account grant on so the claim entry is available.
+    fn bitcoin_app(root: &std::path::Path) -> (App, Arc<Wallet>) {
+        let descriptor = coincube_core::descriptors::CoincubeDescriptor::from_str(DESC).unwrap();
+        let wallet = Arc::new(Wallet::new(descriptor.clone()));
+        let cfg: coincubed::config::Config = toml::from_str(&format!(
+                "main_descriptor = '{}'\ndata_directory = '{}'\n[bitcoin_config]\nnetwork = 'bitcoin'\n[esplora_config]\naddr = 'https://api.example.invalid/api/v1/esplora/bitcoin/mainnet'\n",
+                descriptor,
+                root.display()
+            ))
+            .unwrap();
+        let daemon: Arc<dyn Daemon + Sync + Send> =
+            Arc::new(EmbeddedDaemon::unstarted_for_test(cfg, None));
+        let chain = crate::chain::ChainId::Bitcoin;
+        let cache = Cache {
+            fiat_chain: chain,
+            network: chain.bitcoin_network(),
+            btcb2_server_enabled: true,
+            ..Cache::default()
+        };
+        let (mut app, startup) = App::new_inner(
+            cache,
+            wallet.clone(),
+            None,
+            None,
+            Config::new(false),
+            daemon,
+            CoincubeDirectory::new(root.to_path_buf()),
+            None,
+            settings::CubeSettings::new("Fixture".into(), chain),
+            None,
+        );
+        drop(startup);
+        app.cache.btcb2_server_enabled = true;
+        (app, wallet)
+    }
+
+    /// Put a claim target for `wallet` on the fork chain's settings file,
+    /// as another App instance would.
+    fn write_claim_target(root: &CoincubeDirectory, wallet: &Wallet) {
+        let fork_dir = root.network_directory(crate::chain::ChainId::BitcoinBlake2b);
+        std::fs::create_dir_all(fork_dir.path()).unwrap();
+        let mut target = settings::CubeSettings::new_with_raw_id(
+            uuid::Uuid::new_v4().to_string(),
+            "Fixture · BTCB2".to_string(),
+            crate::chain::ChainId::BitcoinBlake2b,
+        );
+        target.vault_wallet_id = Some(crate::app::settings::WalletId::new(
+            wallet.descriptor_checksum.clone(),
+            Some(1),
+        ));
+        let with_cube = settings::Settings {
+            cubes: vec![target],
+            ..Default::default()
+        };
+        std::fs::write(
+            fork_dir.path().join(settings::SETTINGS_FILE_NAME),
+            serde_json::to_vec(&with_cube).unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// Every message a task produces, in order.
+    async fn outputs(task: Task<Message>) -> Vec<Message> {
+        let mut out = Vec::new();
+        let Some(mut stream) = iced_runtime::task::into_stream(task) else {
+            return out;
+        };
+        while let Some(action) = stream.next().await {
+            if let iced_runtime::Action::Output(message) = action {
+                out.push(message);
+            }
+        }
+        out
+    }
+
+    fn starts_installer(messages: &[Message]) -> bool {
+        messages
+            .iter()
+            .any(|m| matches!(m, Message::View(view::Message::StartClaimBlake2b)))
+    }
+
+    /// #503: the entry is decided from the disk on arrival, never from
+    /// the cached flag. The App was built while no target existed (cache
+    /// says `false`); a target then appears on disk; taking the rail entry
+    /// opens the step-1 panel — not a second target installer — and the
+    /// cache is corrected. Control: with nothing on disk the same entry
+    /// starts the installer and no panel is switched.
+    #[tokio::test]
+    async fn a_stale_not_claimed_cache_opens_the_panel_once_a_target_exists_on_disk() {
+        let root_path = std::env::temp_dir().join(format!("claim-503-{}", uuid::Uuid::new_v4()));
+        let root = CoincubeDirectory::new(root_path.clone());
+        // The process-global session slot is only touched while the App is
+        // built (its `claim_intent::take`); the guard is a std mutex, so it
+        // is not held across the awaits below.
+        let (mut app, wallet) = {
+            let _guard = crate::app::session::test_guard();
+            bitcoin_app(&root_path)
+        };
+        assert!(!app.cache.btcb2_already_claimed);
+        assert!(
+            app.panels.claim.is_some(),
+            "a Bitcoin Cube with a Vault has the panel"
+        );
+        let entry = || Message::View(view::Message::Menu(Menu::Vault(menu::VaultSubMenu::Claim)));
+
+        // Control: nothing on disk — the installer, and no panel switch.
+        let before = app.panels.current.clone();
+        let produced = outputs(app.update(entry())).await;
+        assert!(
+            starts_installer(&produced),
+            "no target: the installer starts"
+        );
+        assert_eq!(app.panels.current, before);
+        assert!(!app.cache.btcb2_already_claimed);
+
+        // Another App instance creates the target; this one's cache is stale.
+        write_claim_target(&root, &wallet);
+        assert!(!app.cache.btcb2_already_claimed, "stale by construction");
+        let produced = outputs(app.update(entry())).await;
+        assert!(
+            !starts_installer(&produced),
+            "a second installer must not start"
+        );
+        assert_eq!(app.panels.current, Menu::Vault(menu::VaultSubMenu::Claim));
+        assert!(app.cache.btcb2_already_claimed, "corrected from the disk");
+        assert!(
+            app.panels.current().is_some(),
+            "the panel is what renders now"
+        );
+
+        let _ = std::fs::remove_dir_all(&root_path);
+    }
+
+    fn checked() -> Checked {
+        Checked {
+            window: Ok(ForkWindow {
+                fork_height: 90,
+                fork_hash: coincube_core::miniscript::bitcoin::BlockHash::from_byte_array([7; 32]),
+                tip_height: 100,
+                median_time_past: 1_000_000,
+                expires_at: 2_000_000,
+                rdts: Ok(()),
+            }),
+            coins: Ok(CoinSet::default()),
+            feerate_vb: Ok(5),
+            backend: Ok(()),
+        }
+    }
+
+    /// A `Message::Claim` result carries the coordinator session; it must
+    /// reach the claim panel whether or not that panel is on screen.
+    /// Through `App::update` it does. Control: the generic route — the
+    /// message handed to whichever panel is current — loses it.
+    #[test]
+    fn claim_results_reach_the_claim_panel_while_another_panel_is_current() {
+        let _guard = crate::app::session::test_guard();
+        let root_path = std::env::temp_dir().join(format!("claim-route-{}", uuid::Uuid::new_v4()));
+        let (mut app, _wallet) = bitcoin_app(&root_path);
+        assert_eq!(
+            app.panels.current,
+            Menu::Cube(crate::app::menu::CubeSubMenu::Overview),
+            "another panel is current"
+        );
+        assert!(app.panels.claim.as_ref().unwrap().coins().is_none());
+
+        // Control first: the generic route hands the result to the current
+        // panel, which is not the claim panel, and it is gone.
+        let daemon = app.daemon.clone();
+        let cache = app.cache.clone();
+        let _ = app.panels.current_mut().unwrap().update(
+            daemon,
+            &cache,
+            Message::Claim(ClaimEvent::Checked(0, Box::new(checked()))),
+        );
+        assert!(
+            app.panels.claim.as_ref().unwrap().coins().is_none(),
+            "the generic route loses a claim result"
+        );
+
+        // The App's route: the same result reaches the claim panel.
+        let _ = app.update(Message::Claim(ClaimEvent::Checked(0, Box::new(checked()))));
+        assert!(
+            app.panels.claim.as_ref().unwrap().coins().is_some(),
+            "routed to the claim panel while Overview is current"
+        );
+        let _ = std::fs::remove_dir_all(&root_path);
+    }
+}

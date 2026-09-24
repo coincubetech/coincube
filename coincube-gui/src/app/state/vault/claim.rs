@@ -92,6 +92,14 @@ pub const CHECK_POLICY: CheckPolicy = CheckPolicy {
     collection_budget: Duration::from_secs(20),
 };
 
+/// Where the build's fee rate comes from. The estimator asks public fee
+/// APIs; a fixed rate is for tests, which must never reach the network.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FeerateSource {
+    Estimator,
+    Fixed(u64),
+}
+
 /// The Connect session the panel works under: the account's authenticated
 /// client and its opaque account id. Handed in by the App, which owns the
 /// Connect panel; refreshed on every Connect message so a sign-in made while
@@ -274,6 +282,7 @@ pub struct ClaimStep1Panel {
     /// revocation lands synchronously even while a task holds the session.
     revoker: Option<Revoker>,
     check_seq: u64,
+    feerate: FeerateSource,
 }
 
 impl ClaimStep1Panel {
@@ -294,9 +303,16 @@ impl ClaimStep1Panel {
             stage: Stage::Preconditions,
             revoker: None,
             check_seq: 0,
+            feerate: FeerateSource::Estimator,
         };
         panel.refresh_static_preconditions();
         panel
+    }
+
+    /// Replace the fee-rate source (tests: a fixed rate, no network).
+    pub fn with_feerate_source(mut self, feerate: FeerateSource) -> Self {
+        self.feerate = feerate;
+        self
     }
 
     /// The App's hook for a Connect session change. A sign-out revokes any
@@ -489,8 +505,9 @@ impl ClaimStep1Panel {
         self.pre.checking = true;
         let wallet = self.wallet.clone();
         let generation = self.generation.clone();
+        let feerate = self.feerate;
         Task::perform(
-            async move { Box::new(probe(daemon, connect, wallet, generation).await) },
+            async move { Box::new(probe(daemon, connect, wallet, generation, feerate).await) },
             move |checked| Message::Claim(ClaimEvent::Checked(seq, checked)),
         )
     }
@@ -1064,6 +1081,7 @@ async fn probe(
     connect: ConnectSession,
     wallet: Arc<Wallet>,
     generation: watch::Receiver<u64>,
+    feerate: FeerateSource,
 ) -> Checked {
     let expected = *generation.borrow();
     // The backend and endpoint constraints, decided by the one function that
@@ -1125,11 +1143,14 @@ async fn probe(
         Ok::<_, String>((coins, tip))
     };
     let feerate = async {
-        FeeEstimator::new()
-            .get_mid_priority_rate()
-            .await
-            .map(|rate| rate as u64)
-            .map_err(|e| e.to_string())
+        match feerate {
+            FeerateSource::Fixed(rate) => Ok(rate),
+            FeerateSource::Estimator => FeeEstimator::new()
+                .get_mid_priority_rate()
+                .await
+                .map(|rate| rate as u64)
+                .map_err(|e| e.to_string()),
+        }
     };
     let (window, coins, feerate_vb) = tokio::join!(window, coins, feerate);
     let coins = match (&window, coins) {
