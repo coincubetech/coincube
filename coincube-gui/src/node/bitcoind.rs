@@ -779,22 +779,23 @@ pub fn allocate_managed_ports<E: fmt::Display>(
 ///
 /// Written beside the cookie file, i.e. inside the node's own network datadir, and
 /// read back by `coincubed` as part of [`coincubed::BackendId`]. That placement is the
-/// whole point: a chain repair authorises a deep rollback on one specific node, and
-/// the things that would otherwise identify it — the RPC port, the cookie path — both
-/// outlive the datadir being deleted and recreated beneath them. An authorisation from
-/// the old datadir would then be honoured against the new one. This marker goes with
-/// the datadir, so the replacement gets a fresh identity and the stale authorisation
-/// stops matching.
+/// whole point: anything scoped to one specific node must not carry over to its
+/// replacement, and the things that would otherwise identify it — the RPC port, the
+/// cookie path — both outlive the datadir being deleted and recreated beneath them.
+/// This marker goes with the datadir, so the replacement gets a fresh identity and
+/// stale records stop matching. (It was introduced for the chain repair's rollback
+/// authorisation, deleted in RDTS sunset PR 4; the identity it provides is now used
+/// by the daemon's `BackendId` and by the flavour-ledger gate.)
 ///
 /// Generated once and never rewritten, so it is stable across restarts, node upgrades
 /// and flavour switches — all of which leave the datadir in place.
 ///
 /// Installed atomically, and that matters more than it looks. Creating the final name
 /// and *then* writing into it leaves a window in which the marker exists but is empty:
-/// a second caller sees it, reports success, and connects — so a repair can be
-/// recorded against an identity derived from an empty marker while every later reader
-/// derives a different one from the finished file, and the authorisation stops
-/// matching for good. So the contents are staged under a private name, flushed, and
+/// a second caller sees it, reports success, and connects — so anything recorded
+/// against an identity derived from an empty marker stops matching every later reader,
+/// which derives a different one from the finished file. So the contents are staged
+/// under a private name, flushed, and
 /// linked into place in one step. A reader sees either no marker or a complete one.
 ///
 /// Returns the identity now in force, which may be another caller's if it got there
@@ -875,14 +876,13 @@ pub(crate) fn with_quick_marker_lock_bound<T>(body: impl FnOnce() -> T) -> T {
 /// the identity it derives. That is fine when the marker is there, and fine when none is
 /// expected — but not when one is expected and merely *late*: everything built in the
 /// meantime reports the endpoint-and-cookie-path identity, and everything built after the
-/// marker lands reports a different one. A repair recorded in that window names an
-/// identity that no later client agrees with, and the authorisation it depends on stops
-/// matching — which is the failure the marker was introduced to prevent, reached by
-/// another route.
+/// marker lands reports a different one. Anything recorded in that window names an
+/// identity that no later client agrees with — which is the failure the marker was
+/// introduced to prevent, reached by another route.
 ///
 /// So the answer to a failed marker install is not "carry on with the weaker identity".
-/// It is to let the node start and sync, and to refuse anything that would write a repair
-/// down until the identity is settled.
+/// It is to let the node start and sync, and to refuse the identity-gated writes until
+/// the identity is settled.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NodeIdentity {
     /// Settled: either the marker is installed and validated, or none is expected here,
@@ -1642,12 +1642,10 @@ impl InternalBitcoindConfig {
     pub fn to_ini(&self) -> ini::Ini {
         let mut conf_ini = ini::Ini::new();
 
-        // No `consensusrules` line: we ship no build that enforces BIP-110, the
-        // key only ever recorded consent, and the pinned build may not accept it
-        // at all. Because the file is rebuilt from this struct rather than
-        // edited, every rewrite also *strips* a legacy line an older release
-        // left behind — which is the point. `self.enforce_rdts` is read-only
-        // legacy state and is deliberately not consulted here.
+        // No `consensusrules` line: the key only ever recorded consent to a
+        // deployment no shipped build enforces, and the pinned build may not
+        // accept it at all. The file is rebuilt from this struct rather than
+        // edited, so nothing an older release wrote survives a rewrite.
 
         // Inbound-over-Tor. All of these are global (non-network-scoped)
         // bitcoind options, so they belong in the section-less general part of
@@ -3234,7 +3232,7 @@ mod tests {
             None
         );
 
-        // Coexists with the inbound-over-Tor keys and RDTS: every preference
+        // Coexists with the inbound-over-Tor keys: every preference
         // round-trips together.
         let mut both =
             InternalBitcoindConfig::for_flavor(NodeFlavor::Knots).with_inbound_tor_defaults();
@@ -3324,8 +3322,9 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
     }
 
-    // An RDTS-enforcing Knots build already on disk must not satisfy the Knots
-    // flavour, or the update would keep running the binary that stranded the node
+    // A Knots build that enforces the stalled fork, already on disk, must not
+    // satisfy the Knots flavour, or the update would keep running the binary that
+    // stranded the node
     // instead of downloading the pinned one. Both "is it installed?" checks — the
     // launcher's and the installer's — key on the pinned version list, so a
     // 20260508 directory is simply not a candidate.

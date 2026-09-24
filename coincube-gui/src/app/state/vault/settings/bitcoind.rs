@@ -1424,11 +1424,11 @@ fn write_internal_bitcoind_config(
     .logged("writing the managed bitcoin.conf from settings");
 
     let cookie_path = internal_bitcoind_cookie_path(&bitcoind_datadir, &network);
-    // Stamp the datadir with an identity, if it does not already carry one. This is
-    // what lets a chain repair be scoped to the node it was performed on: the RPC port
-    // and the cookie path both survive the datadir being wiped and rebuilt underneath
-    // them, and a repair authorisation left over from the old one would then apply to
-    // the new. The marker lives inside the datadir, so it goes when the datadir goes.
+    // Stamp the datadir with an identity, if it does not already carry one. The RPC
+    // port and the cookie path both survive the datadir being wiped and rebuilt
+    // underneath them, so anything scoped to the node by those alone would carry over
+    // to its replacement. The marker lives inside the datadir, so it goes when the
+    // datadir goes.
     if let Err(e) = crate::node::bitcoind::ensure_node_instance_marker(&cookie_path) {
         // Not fatal: without it, identity falls back to the endpoint and cookie path,
         // which is where it stood before the marker existed.
@@ -1610,10 +1610,9 @@ impl BitcoindSettings {
         // For the internal managed node, recover its flavour so the node card can
         // show a Core/Knots switcher.
         //
-        // Deliberately *not* from the on-disk `bitcoin.conf`: that file no longer
-        // records the flavour at all (the `consensusrules=rdts` line it used to be
-        // inferred from is not written any more), so reading `conf.flavor` reports
-        // Core for every managed node, Knots included.
+        // Deliberately *not* from the on-disk `bitcoin.conf`: that file does not
+        // record the flavour, so reading `conf.flavor` reports the `Core`
+        // placeholder for every managed node, Knots included.
         //
         // Observed before configured. The card states what the node *is*, and the
         // two can honestly disagree: `select_managed_bitcoind_exe` falls back to

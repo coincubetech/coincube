@@ -3796,9 +3796,8 @@ impl App {
         // Stream the internal bitcoind's debug.log for UpdateTip lines.
         //
         // Prefer a pending node (one being set up or switched to), but fall back to
-        // the active managed node: a chain repair after a Core↔Knots swap reconnects
-        // blocks on a node that is already live, with nothing pending, and until now
-        // that progress was invisible.
+        // the active managed node, so sync progress on a node that is already live,
+        // with nothing pending, is visible too.
         if let Some(pending_cfg) = self.daemon.as_ref().and_then(|d| d.config()).and_then(|c| {
             c.pending_bitcoind.clone().or_else(|| {
                 match c.bitcoin_backend.as_ref() {

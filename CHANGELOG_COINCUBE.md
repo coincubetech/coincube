@@ -72,6 +72,15 @@ These Liana components were significantly adapted for Coincube:
 
 ### Unreleased (v1.1.0 — target: May 2026)
 
+#### Removed
+
+**RDTS / BIP-110 fork-repair machinery (sunset PR 4, #510)**
+
+Sources: `coincube-gui/src/node/revalidate.rs`, `coincube-gui/src/node/bitcoind.rs`, `coincube-gui/src/app/state/vault/settings/bitcoind.rs`, `coincubed/src/bitcoin/{mod.rs,d/mod.rs,poller/looper.rs}`
+- The managed node no longer carries any fork-repair logic: the "Re-check chain" button in node settings, the automatic flag-clearing repair on start, the Core → Knots rewind-and-replay, the sanctioned-rollback exception in the daemon's deep-reorg guard, and the one-time "your node had been following the BIP-110 fork chain" notice are all gone. No Knots build we ship enforces the deployment; the managed Knots pin stays on `29.3.knots20260507`, and a `29.3.knots20260508` binary on disk is still never launched.
+- The `bitcoin.conf` read-compat for the legacy `consensusrules=rdts` line, and the start-path migration that stripped it, are gone; a conf still carrying the line is refused with the key named rather than handed to the node. The flavour ledger (`managed_node_state.json`) keeps only the configured and last-observed flavour; older sidecars still load and drop the retired fields on their next write.
+- The typed `getdeploymentinfo` reader behind the Blake2b chain-health probe is unchanged.
+
 #### Fixes
 
 **Spark wallet now works in installed builds**

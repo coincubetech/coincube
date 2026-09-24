@@ -697,8 +697,8 @@ mod tests {
             other => panic!("expected the reorg to be refused, got {:?}", other),
         }
 
-        // And so is the 10k-block rewind an `invalidateblock` at the RDTS anchor
-        // would produce. Here the walk stops at its bound rather than paying for
+        // And so is a 10k-block rewind, the shape a deep `invalidateblock` on the
+        // node would produce. Here the walk stops at its bound rather than paying for
         // 10k round-trips, so we know only that the fork is at least that deep —
         // and crucially this must NOT come back as a failed lookup to be retried.
         let bit = forked_backend(&our_tip, 10_000);
@@ -861,9 +861,9 @@ mod tests {
         ]
     }
 
-    /// The acceptance test for this guard: a 10k-block rewind — what an `invalidateblock`
-    /// at the RDTS anchor looks like to the poller — must not roll our tip back and must
-    /// not delete a single coin row.
+    /// The acceptance test for this guard: a 10k-block rewind — what a deep
+    /// `invalidateblock` on the node looks like to the poller — must not roll our tip
+    /// back and must not delete a single coin row.
     #[test]
     fn deep_reorg_leaves_coins_and_tip_untouched() {
         let our_tip = tip(20_000, 0xaa);
