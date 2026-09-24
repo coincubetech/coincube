@@ -1473,6 +1473,12 @@ fn write_internal_bitcoind_config(
             // the old marker.
             crate::node::revalidate::ManagedNodeState::record_configured(coincube_datadir, flavor);
             conf.enforce_rdts = false;
+            // The Bitcoin family's node relays claim step 1's 90-byte OP_RETURN
+            // marker; the Bitcoin Blake2b family's node must reject it, so its
+            // file never gets the line.
+            if flavor.chain_family() == crate::node::bitcoind::NodeChainFamily::Bitcoin {
+                conf.data_carrier_size = Some(crate::node::bitcoind::DATA_CARRIER_SIZE);
+            }
 
             let mut network_conf = existing.unwrap_or(InternalBitcoindNetworkConfig {
                 rpc_port,
@@ -3297,6 +3303,15 @@ mod tests {
                 p
             );
         }
+        // The Bitcoin family's file carries the OP_RETURN relay cap claim
+        // step 1 needs; the other family's file does not gain it.
+        assert_eq!(
+            after.data_carrier_size,
+            Some(crate::node::bitcoind::DATA_CARRIER_SIZE)
+        );
+        assert!(!fs::read_to_string(&blake2b_conf)
+            .unwrap()
+            .contains("datacarriersize"));
         // The existing section and the other family's file are untouched.
         let t4 = after.networks.get(&Network::Testnet4).unwrap();
         assert_eq!((t4.rpc_port, t4.p2p_port), (45011, 45012));

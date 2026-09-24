@@ -1448,6 +1448,15 @@ pub struct InternalBitcoindConfig {
     /// bandwidth caps above it is *not* gated on `inbound_tor`; it is emitted
     /// whenever set, and an untouched (`None`) config stays byte-identical.
     pub max_mempool_mb: Option<u32>,
+    /// OP_RETURN relay cap emitted as `datacarriersize` (bytes). Bitcoin
+    /// Core's default of 83 rejects the ~90-byte poison marker claim step 1
+    /// puts in its Bitcoin self-transfer (`coincube_core::claim_spend`), so
+    /// the Bitcoin family's managed node is told to carry
+    /// [`DATA_CARRIER_SIZE`]. A standalone general-section key like
+    /// `maxmempool`: emitted whenever set, parsed back whenever present, and
+    /// `None` — an untouched file, or the Bitcoin Blake2b family's node, which
+    /// needs no such line — stays byte-identical (invariant I2).
+    pub data_carrier_size: Option<u32>,
     /// Local control port of the managed `tor` daemon. Injected by the Tor
     /// lifecycle manager once Tor is up (see `node/tor.rs`); needed to emit
     /// `torcontrol=127.0.0.1:<port>`. Runtime-only — re-derived each start.
@@ -1515,6 +1524,7 @@ impl InternalBitcoindConfig {
             max_upload_target_mb_day: None,
             max_connections: None,
             max_mempool_mb: None,
+            data_carrier_size: None,
             tor_control_port: None,
             tor_socks_port: None,
         }
@@ -1551,6 +1561,7 @@ impl InternalBitcoindConfig {
             max_upload_target_mb_day: None,
             max_connections: None,
             max_mempool_mb: None,
+            data_carrier_size: None,
             tor_control_port: None,
             tor_socks_port: None,
         }
@@ -1577,6 +1588,7 @@ impl InternalBitcoindConfig {
         let mut max_upload_target_mb_day = None;
         let mut max_connections = None;
         let mut max_mempool_mb = None;
+        let mut data_carrier_size = None;
         let mut tor_control_port = None;
         let mut tor_socks_port = None;
         for (maybe_sec, prop) in ini {
@@ -1666,6 +1678,13 @@ impl InternalBitcoindConfig {
                                 InternalBitcoindConfigError::CouldNotParseValue(e.to_string())
                             })?);
                         }
+                        // Standalone relay-policy key (claim step 1's OP_RETURN
+                        // marker); parsed back whether or not it is ours.
+                        "datacarriersize" => {
+                            data_carrier_size = Some(value.parse::<u32>().map_err(|e| {
+                                InternalBitcoindConfigError::CouldNotParseValue(e.to_string())
+                            })?);
+                        }
                         _ => {
                             return Err(InternalBitcoindConfigError::UnexpectedSection(format!(
                                 "Unexpected key in general section: {key}"
@@ -1694,6 +1713,7 @@ impl InternalBitcoindConfig {
             max_upload_target_mb_day,
             max_connections,
             max_mempool_mb,
+            data_carrier_size,
             tor_control_port,
             tor_socks_port,
         })
@@ -1780,6 +1800,16 @@ impl InternalBitcoindConfig {
             conf_ini
                 .with_general_section()
                 .set("maxmempool", mb.to_string());
+        }
+
+        // OP_RETURN relay cap — the same shape as `maxmempool`: a standalone
+        // general-section key, emitted whenever set, `None` omitted so an
+        // untouched config (and the Bitcoin Blake2b family's, which never sets
+        // it) produces a byte-identical file.
+        if let Some(bytes) = self.data_carrier_size {
+            conf_ini
+                .with_general_section()
+                .set("datacarriersize", bytes.to_string());
         }
 
         for (network, network_conf) in &self.networks {
@@ -1922,6 +1952,52 @@ pub fn configured_managed_flavor(coincube_datadir: &CoincubeDirectory) -> Option
 /// Runs on the start path rather than only where the config is rewritten, because
 /// the loader starts the managed node without going through a rewrite: a datadir
 /// set up by a release that enforced RDTS would otherwise hand the key straight to
+/// `datacarriersize` for the Bitcoin family's managed node: the largest OP_RETURN
+/// script (in bytes) it relays. Claim step 1's poison marker is a 90-byte
+/// OP_RETURN script (`coincube_core::claim_spend`), over BIP-110's 83-byte limit
+/// by design and over Bitcoin Core's 83-byte relay default by accident of the
+/// same number; 100 clears it with room and stays far under Core 30's 100 000.
+/// The Bitcoin Blake2b family's node never gets the line: it must *reject* the
+/// marker, which is the whole point.
+pub const DATA_CARRIER_SIZE: u32 = 100;
+
+/// Give an existing Bitcoin-family managed `bitcoin.conf` the `datacarriersize`
+/// line it predates, under the datadir-wide conf lock on a fresh read. New
+/// files get it from `write_internal_bitcoind_config`; this is for datadirs
+/// written before claim step 1 existed. Bitcoin family only, by construction:
+/// the other family's file is never opened.
+///
+/// Best-effort and idempotent, like [`migrate_legacy_rdts_conf`]: a file that
+/// cannot be read or written is left alone and retried on the next start, and
+/// a file that already carries the value is not rewritten.
+fn ensure_data_carrier_size(coincube_datadir: &CoincubeDirectory) {
+    use crate::node::managed_conf::{update_managed_conf, ManagedConfError};
+    let result = update_managed_conf(coincube_datadir, NodeChainFamily::Bitcoin, |txn| {
+        let Some(mut conf) = txn.conf.clone() else {
+            return Ok((false, None));
+        };
+        if conf.data_carrier_size == Some(DATA_CARRIER_SIZE) {
+            return Ok((false, None));
+        }
+        info!(
+            "managed bitcoin.conf carries datacarriersize={:?}; setting {} so the node relays \
+             claim step 1's OP_RETURN marker",
+            conf.data_carrier_size, DATA_CARRIER_SIZE
+        );
+        conf.data_carrier_size = Some(DATA_CARRIER_SIZE);
+        Ok((true, Some(conf)))
+    });
+    match result {
+        Ok(outcome) => {
+            outcome.logged("setting `datacarriersize` in the managed bitcoin.conf");
+        }
+        Err(ManagedConfError::Lock(e)) => {
+            warn!("not setting `datacarriersize` in the managed bitcoin.conf this start: {e}")
+        }
+        Err(e) => warn!("could not set `datacarriersize` in the managed bitcoin.conf: {e}"),
+    }
+}
+
 /// the pinned build. Whether that build ignores or rejects the key is exactly the
 /// kind of thing not worth depending on.
 ///
@@ -2120,6 +2196,9 @@ impl Bitcoind {
         // Drop any `consensusrules=rdts` an earlier release persisted before the
         // node — of either flavour — is handed the file.
         migrate_legacy_rdts_conf(coincube_datadir);
+        // And give a file written before claim step 1 the OP_RETURN relay cap
+        // the step's marker needs (Bitcoin family only).
+        ensure_data_carrier_size(coincube_datadir);
         // Launch the binary the user asked for. Nothing in the conf forces our
         // hand any more (it no longer carries a Knots-only key), but the choice
         // is still theirs: a machine with both flavours installed must launch the
@@ -3585,6 +3664,105 @@ mod tests {
             select_managed_bitcoind_exe(&datadir, NodeFlavor::Knots),
             Some(pinned)
         );
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    // `datacarriersize` is emitted only when set, round-trips, and an untouched
+    // (`None`) config stays byte-identical — the same contract as `maxmempool`.
+    #[test]
+    fn data_carrier_size_emission() {
+        let net = InternalBitcoindNetworkConfig {
+            rpc_port: 12345,
+            p2p_port: 12346,
+            prune: PRUNE_MINIMAL_MB,
+            rpc_auth: None,
+        };
+        let mut off = InternalBitcoindConfig::for_flavor(NodeFlavor::Core);
+        off.networks.insert(Network::Bitcoin, net.clone());
+        assert_eq!(off.data_carrier_size, None);
+        let off_ini = off.to_ini();
+        assert!(off_ini.general_section().get("datacarriersize").is_none());
+        assert!(off_ini.general_section().is_empty());
+
+        let mut on = InternalBitcoindConfig::for_flavor(NodeFlavor::Knots);
+        on.data_carrier_size = Some(DATA_CARRIER_SIZE);
+        on.networks.insert(Network::Bitcoin, net);
+        let on_ini = on.to_ini();
+        assert_eq!(on_ini.general_section().get("datacarriersize"), Some("100"));
+        let parsed = InternalBitcoindConfig::from_ini(&on_ini).expect("parse datacarriersize conf");
+        assert_eq!(parsed.data_carrier_size, Some(DATA_CARRIER_SIZE));
+        // Nothing else rides along with the key.
+        assert_eq!(parsed.max_mempool_mb, None);
+        assert!(!parsed.inbound_tor);
+        assert_eq!(parsed.networks.len(), 1);
+    }
+
+    // A managed bitcoin.conf written before claim step 1 gains the OP_RETURN
+    // relay cap on the next start, keeps everything else, and is not rewritten
+    // again once it has it. The Bitcoin Blake2b family's file — the node that
+    // must *reject* the marker — is never touched: same bytes before and after.
+    #[test]
+    fn existing_bitcoin_confs_gain_the_data_carrier_size_and_blake2b_confs_do_not() {
+        use std::fs;
+
+        let base = std::env::temp_dir().join(format!(
+            "coincube-datacarrier-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        let datadir = CoincubeDirectory::new(base.clone());
+        let bitcoin_conf = internal_bitcoind_config_path(&internal_bitcoind_datadir(&datadir));
+        fs::create_dir_all(bitcoin_conf.parent().unwrap()).unwrap();
+        fs::write(
+            &bitcoin_conf,
+            "maxmempool=300\n[main]\nrpcport=12345\nport=12346\nprune=15000\n",
+        )
+        .unwrap();
+        let blake2b_conf = internal_bitcoind_config_path(&internal_bitcoind_datadir_for(
+            &datadir,
+            NodeChainFamily::BitcoinBlake2b,
+        ));
+        fs::create_dir_all(blake2b_conf.parent().unwrap()).unwrap();
+        let blake2b_bytes = "[main]\nrpcport=22345\nport=22346\nprune=15000\n";
+        fs::write(&blake2b_conf, blake2b_bytes).unwrap();
+
+        ensure_data_carrier_size(&datadir);
+
+        let after = InternalBitcoindConfig::from_file(&bitcoin_conf).expect("conf still loads");
+        assert_eq!(after.data_carrier_size, Some(DATA_CARRIER_SIZE));
+        assert_eq!(
+            after.max_mempool_mb,
+            Some(300),
+            "the rest of the file is kept"
+        );
+        assert_eq!(
+            after.networks.get(&Network::Bitcoin).map(|n| n.rpc_port),
+            Some(12345)
+        );
+        assert_eq!(
+            fs::read_to_string(&blake2b_conf).unwrap(),
+            blake2b_bytes,
+            "the Bitcoin Blake2b family's file is never touched"
+        );
+
+        // Idempotent: a second start rewrites nothing.
+        let written = fs::metadata(&bitcoin_conf).unwrap().modified().unwrap();
+        let first_bytes = fs::read_to_string(&bitcoin_conf).unwrap();
+        ensure_data_carrier_size(&datadir);
+        assert_eq!(fs::read_to_string(&bitcoin_conf).unwrap(), first_bytes);
+        assert_eq!(
+            fs::metadata(&bitcoin_conf).unwrap().modified().unwrap(),
+            written
+        );
+
+        // Control: with no Bitcoin-family file at all there is nothing to
+        // upgrade, and none is invented.
+        fs::remove_file(&bitcoin_conf).unwrap();
+        ensure_data_carrier_size(&datadir);
+        assert!(!bitcoin_conf.exists());
+        assert_eq!(fs::read_to_string(&blake2b_conf).unwrap(), blake2b_bytes);
 
         let _ = fs::remove_dir_all(&base);
     }

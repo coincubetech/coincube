@@ -274,6 +274,14 @@ impl Revoker {
     }
 }
 
+/// The Vault shapes step one admits: native P2WSH with a single-key primary
+/// path. The one definition — `Coordinator::open` refuses everything else
+/// with it, and the wizard asks it before a build so the user is told rather
+/// than refused after signing. Widening it (#519) is a product decision.
+pub fn admits_descriptor(descriptor: &coincube_core::descriptors::CoincubeDescriptor) -> bool {
+    !descriptor.is_taproot() && matches!(descriptor.policy().primary_path(), PathInfo::Single(_))
+}
+
 static NEXT: AtomicU64 = AtomicU64::new(1);
 pub struct Coordinator {
     id: u64,
@@ -376,11 +384,7 @@ impl Coordinator {
     ) -> Result<Self, Error> {
         if !policy.valid()
             || construction.chain() != ChainId::Bitcoin
-            || construction.descriptor().is_taproot()
-            || !matches!(
-                construction.descriptor().policy().primary_path(),
-                PathInfo::Single(_)
-            )
+            || !admits_descriptor(construction.descriptor())
             || construction
                 .psbt()
                 .unsigned_tx

@@ -27,7 +27,6 @@ use coincube_core::{
     claim::{self, Assessment, ForkTransactionPresence, Policy},
     claim_finalize::finalize_poison_transfer,
     claim_spend::{create_poison_self_transfer, PoisonSelfTransfer},
-    descriptors::PathInfo,
     miniscript::bitcoin::{
         absolute::LockTime, address, bip32::ChildNumber, hashes::Hash, psbt::Psbt, secp256k1,
         Address, BlockHash, Network, OutPoint, Transaction, Txid,
@@ -935,19 +934,17 @@ impl From<ClaimStep1Panel> for Box<dyn State> {
 /// journal write; saying so here saves the user a build and a signature.
 pub fn vault_shape_refusal(wallet: &Wallet) -> Option<String> {
     let descriptor = &wallet.main_descriptor;
-    if descriptor.is_taproot() {
-        return Some(
-            "Claim step 1 supports native SegWit (P2WSH) Vaults for now; this Vault is Taproot."
-                .to_string(),
-        );
+    if claim_coordinator::admits_descriptor(descriptor) {
+        return None;
     }
-    if !matches!(descriptor.policy().primary_path(), PathInfo::Single(_)) {
-        return Some(
-            "Claim step 1 supports a single-key primary spending path for now; this Vault's primary path needs several signatures."
-                .to_string(),
-        );
-    }
-    None
+    // The verdict is the coordinator's; only the wording is chosen here.
+    Some(if descriptor.is_taproot() {
+        "Claim step 1 supports native SegWit (P2WSH) Vaults for now; this Vault is Taproot."
+            .to_string()
+    } else {
+        "Claim step 1 supports a single-key primary spending path for now; this Vault's primary path needs several signatures."
+            .to_string()
+    })
 }
 
 /// Copy for an RDTS window that refuses the OP_RETURN poison.
