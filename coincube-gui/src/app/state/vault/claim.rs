@@ -99,10 +99,22 @@ pub const CHECK_POLICY: CheckPolicy = CheckPolicy {
     collection_budget: Duration::from_secs(20),
 };
 
-/// The session the coordinator was created under is gone — a sign-out, an
-/// account or client change, a node backend switch — and the intent is
-/// journaled. Said at Review and Track until a re-bind succeeds.
-pub const SESSION_ENDED: &str = "The claim session ended (signed out, or the node backend changed). The claim is recorded on this device: sign in again, or come back here, to continue.";
+/// The context the coordinator was created under ended while a task held
+/// it, or the coordinator refused for that reason; the intent is journaled.
+/// The generic wording — a sign-out and a backend switch have their own.
+pub const SESSION_ENDED: &str =
+    "The claim session ended. This claim is recorded on this device; read again to continue.";
+/// Signed out of Connect at Review or Track. Only a sign-in in this tab
+/// continues the claim: not returning to the panel, not a cached account
+/// callback — a sign-out in another tab revokes the claim here too, and the
+/// account this tab still shows is not a session.
+pub const SIGNED_OUT_AT_REVIEW: &str = "Signed out of Connect. This claim is recorded on this device; sign in again in this tab to continue.";
+/// The node backend is being replaced: nothing is probed, built, finalised
+/// or re-bound until the App reports how the switch settled.
+pub const BACKEND_SWITCHING: &str = "The Bitcoin node backend is switching. This claim is recorded on this device and continues once the switch completes.";
+/// The switch task panicked: the App keeps the pre-switch daemon in an
+/// unknown state, and the claim is not re-bound to it.
+pub const BACKEND_UNKNOWN: &str = "The node backend switch did not complete and the node's state is unknown. This claim is recorded on this device; switch the backend again under Vault → Settings → Node to continue.";
 /// A fully signed construction is waiting for a session to be recorded under.
 pub const SIGNED_OUT_AT_SIGN: &str =
     "Signed out of Connect. Sign in again to record and submit the claim.";
@@ -161,8 +173,10 @@ pub struct ForkWindow {
 pub struct CoinSet {
     /// Confirmed, unspent, mature, and confirmed **below** the fork height.
     pub pre_fork: Vec<Coin>,
-    /// Confirmed at or above the fork height — Bitcoin-only coins. Counted
-    /// for the copy; slice 2's input poison is where they become useful.
+    /// Confirmed at or above the fork height: left out of this step, and
+    /// not known to be Bitcoin-only — a transaction can be replayed onto the
+    /// fork, so they may still be entangled. Counted for the copy; slice 2's
+    /// input poison is where they become useful.
     pub post_fork: usize,
     pub tip_height: i32,
 }
@@ -301,6 +315,33 @@ enum Stage {
     },
 }
 
+/// What the App's daemon is, as far as a claim may bind to it. Set by the
+/// App around a node backend switch; only `Ready` lets the panel probe,
+/// build, finalise or re-bind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendState {
+    Ready,
+    /// A switch is in flight: the App still holds the daemon being replaced.
+    Switching,
+    /// The switch failed and nothing was recovered: the App has no daemon.
+    Unavailable,
+    /// The switch task panicked: the App keeps the pre-switch daemon in an
+    /// unknown state. A later successful switch is the only way back.
+    Unknown,
+}
+
+impl BackendState {
+    /// The stage copy for a state that holds the claim, `None` for `Ready`.
+    fn copy(self) -> Option<&'static str> {
+        match self {
+            BackendState::Ready => None,
+            BackendState::Switching => Some(BACKEND_SWITCHING),
+            BackendState::Unavailable => Some(NODE_UNAVAILABLE),
+            BackendState::Unknown => Some(BACKEND_UNKNOWN),
+        }
+    }
+}
+
 /// One finalisation in flight: which attempt, and the context it was sent
 /// under. Its result is authorised only if that context is still the
 /// panel's when it arrives — the App may have signed out, or revoked, in
@@ -354,6 +395,8 @@ pub struct ClaimStep1Panel {
     /// Counts every [`Self::revoke`], so a task sent before a revocation is
     /// told apart from one sent after it.
     revocations: u64,
+    /// The App's daemon as a claim may bind to it; see [`Self::set_backend`].
+    backend: BackendState,
     check_seq: u64,
     finalize_attempts: u64,
     feerate: FeerateSource,
@@ -378,6 +421,7 @@ impl ClaimStep1Panel {
             revoker: None,
             revoked: false,
             revocations: 0,
+            backend: BackendState::Ready,
             check_seq: 0,
             finalize_attempts: 0,
             feerate: FeerateSource::Estimator,
@@ -447,21 +491,79 @@ impl ClaimStep1Panel {
     /// ended. A review that was on screen is withdrawn: it can only be
     /// confirmed under the session it was prepared under.
     fn note_session_ended(&mut self, signed_out: bool) {
+        if signed_out {
+            self.note(Some(SIGNED_OUT_AT_SIGN), SIGNED_OUT_AT_REVIEW);
+        } else {
+            self.note(None, SESSION_ENDED);
+        }
+    }
+
+    /// Put `at_review` on a Review (withdrawing its snapshot) or Track, and
+    /// `at_sign` on a Sign stage that is not finalising.
+    fn note(&mut self, at_sign: Option<&str>, at_review: &str) {
         match &mut self.stage {
             Stage::Sign {
                 finalizing: None,
                 error,
                 ..
-            } if signed_out => *error = Some(SIGNED_OUT_AT_SIGN.to_string()),
+            } => {
+                if let Some(copy) = at_sign {
+                    *error = Some(copy.to_string());
+                }
+            }
             Stage::Review {
                 snapshot, error, ..
             } => {
                 *snapshot = None;
-                *error = Some(SESSION_ENDED.to_string());
+                *error = Some(at_review.to_string());
             }
-            Stage::Track { error, .. } => *error = Some(SESSION_ENDED.to_string()),
+            Stage::Track { error, .. } => *error = Some(at_review.to_string()),
             _ => {}
         }
+    }
+
+    /// The copy for a completion whose context ended while its task ran.
+    fn ended_copy(&self) -> String {
+        if self.connect.is_none() {
+            SIGNED_OUT_AT_REVIEW.to_string()
+        } else {
+            self.backend.copy().unwrap_or(SESSION_ENDED).to_string()
+        }
+    }
+
+    /// The App's hook around a node backend switch. `Switching` revokes the
+    /// live coordinator — it is bound to the daemon being replaced — and
+    /// holds every route that could bind a new one (probe, build, finalise,
+    /// re-bind) until the App reports how the switch settled. `Ready` lets
+    /// them run again, and the App calls [`Self::recover`] right after with
+    /// the daemon it installed or recovered. `Unavailable` and `Unknown`
+    /// keep holding, each with its own copy; `Unknown` in particular is not
+    /// re-bound to the pre-switch daemon the App keeps, whose state nobody
+    /// knows.
+    pub fn set_backend(&mut self, state: BackendState) {
+        self.backend = state;
+        if state == BackendState::Switching {
+            self.revoke();
+        }
+        match state.copy() {
+            Some(copy) => self.note(Some(copy), copy),
+            None => {
+                let held = [BACKEND_SWITCHING, NODE_UNAVAILABLE, BACKEND_UNKNOWN];
+                if let Stage::Sign { error, .. }
+                | Stage::Review { error, .. }
+                | Stage::Track { error, .. } = &mut self.stage
+                {
+                    if error.as_deref().is_some_and(|e| held.contains(&e)) {
+                        *error = None;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Whether the App's daemon may be bound to right now.
+    fn backend_ready(&self) -> bool {
+        self.backend == BackendState::Ready
     }
 
     /// Whether a task sent under `generation` and `revocations` may still
@@ -483,6 +585,11 @@ impl ClaimStep1Panel {
         let Some(daemon) = daemon else {
             return Task::none();
         };
+        // Not while the App's daemon is being replaced, or is in a state no
+        // claim should bind to: the App calls again once it settles.
+        if !self.backend_ready() {
+            return Task::none();
+        }
         match &self.stage {
             Stage::Sign { .. } => self.maybe_finalize(daemon),
             Stage::Review { .. } | Stage::Track { .. } if self.revoked => self.rebind(daemon),
@@ -499,6 +606,9 @@ impl ClaimStep1Panel {
     /// journal's lock), so a refused re-bind leaves the session unbound,
     /// to be tried again on the next sign-in or return to the panel.
     fn rebind(&mut self, daemon: Arc<dyn Daemon + Sync + Send>) -> Task<Message> {
+        if !self.backend_ready() {
+            return Task::none();
+        }
         self.refresh_static_preconditions();
         let Some(connect) = self.connect.clone() else {
             return Task::none();
@@ -634,6 +744,9 @@ impl ClaimStep1Panel {
                 false,
             );
         }
+        if let Some(copy) = self.backend.copy() {
+            return refuse(copy, self.backend != BackendState::Unknown);
+        }
         let Some(checked) = &self.pre.checked else {
             return None;
         };
@@ -690,8 +803,9 @@ impl ClaimStep1Panel {
 
     fn probe(&mut self, daemon: Arc<dyn Daemon + Sync + Send>) -> Task<Message> {
         self.refresh_static_preconditions();
-        // A refusal no probe can change: don't spend the network on it.
-        if self.pre.target.is_none() || self.pre.shape.is_some() {
+        // A refusal no probe can change: don't spend the network on it. Nor
+        // a daemon that is being replaced: `refusal` says so.
+        if self.pre.target.is_none() || self.pre.shape.is_some() || !self.backend_ready() {
             return Task::none();
         }
         let Some(connect) = self.connect.clone() else {
@@ -758,6 +872,21 @@ impl ClaimStep1Panel {
     /// satisfied and the picker has closed, finalise and journal. The
     /// construction leaves with the task and comes back if anything refuses.
     fn maybe_finalize(&mut self, daemon: Arc<dyn Daemon + Sync + Send>) -> Task<Message> {
+        // A finalisation binds the daemon it is given: not one being
+        // replaced. The construction and its signatures wait.
+        if let Some(copy) = self.backend.copy() {
+            if let Stage::Sign {
+                finalizing: None,
+                error,
+                ..
+            } = &mut self.stage
+            {
+                if error.as_deref() != Some(copy) {
+                    *error = Some(copy.to_string());
+                }
+            }
+            return Task::none();
+        }
         let target = self.pre.target.clone();
         let connect = self.connect.clone();
         let directory = journal_directory(&self.datadir, &self.wallet);
@@ -994,11 +1123,12 @@ impl ClaimStep1Panel {
                         }
                         self.revoker = session.coordinator.as_ref().map(|c| c.revoker());
                         self.revoked = !authorized;
+                        let ended = self.ended_copy();
                         self.stage = Stage::Review {
                             session: Some(session),
                             snapshot: None,
                             busy: false,
-                            error: (!authorized).then(|| SESSION_ENDED.to_string()),
+                            error: (!authorized).then_some(ended),
                         };
                         if authorized {
                             self.prepare_review()
@@ -1043,7 +1173,7 @@ impl ClaimStep1Panel {
                 let error = match result {
                     Err(reason) => Some(reason),
                     Ok(()) if authorized => None,
-                    Ok(()) => Some(SESSION_ENDED.to_string()),
+                    Ok(()) => Some(self.ended_copy()),
                 };
                 match &mut self.stage {
                     Stage::Review {
@@ -1212,10 +1342,16 @@ impl State for ClaimStep1Panel {
                 }
                 view::ClaimMessage::Confirm => self.confirm(),
                 view::ClaimMessage::Refresh => match &self.stage {
-                    Stage::Review { .. } | Stage::Track { .. } if self.revoked => match daemon {
-                        Some(daemon) => self.recover(Some(daemon)),
-                        None => node_unavailable(),
-                    },
+                    Stage::Review { .. } | Stage::Track { .. } if self.revoked => {
+                        match (self.backend.copy(), daemon) {
+                            // Held by the App's backend state: say so, bind nothing.
+                            (Some(copy), _) => Task::done(Message::View(view::Message::ShowError(
+                                copy.to_string(),
+                            ))),
+                            (None, Some(daemon)) => self.recover(Some(daemon)),
+                            (None, None) => node_unavailable(),
+                        }
+                    }
                     Stage::Review { .. } => self.prepare_review(),
                     _ => self.reconcile(),
                 },
@@ -1351,8 +1487,9 @@ pub fn describe_duration(seconds: i64) -> String {
 
 /// Partition the Vault's confirmed, unspent, mature coins against the fork
 /// height. A coin confirmed **below** the fork height exists on both chains
-/// (the fork block is the first block the chains disagree on); anything at or
-/// above it is Bitcoin-only.
+/// (the fork block is the first block the chains disagree on) and is what
+/// this step splits; anything at or above it is left out — not known to be
+/// Bitcoin-only, since a transaction can be replayed onto the fork.
 pub fn partition_coins(coins: Vec<Coin>, fork_height: u64, tip_height: i32) -> CoinSet {
     let mut set = CoinSet {
         pre_fork: Vec::new(),

@@ -1348,7 +1348,7 @@ mod flow {
             }
             assert_eq!(
                 session_state(&f.p),
-                (false, Some(SESSION_ENDED.to_string()), false, true),
+                (false, Some(SIGNED_OUT_AT_REVIEW.to_string()), false, true),
                 "the review is withdrawn, the session stays (bound, revoked)"
             );
             assert!(f.p.revoked);
@@ -1462,7 +1462,7 @@ mod flow {
         assert!(f.p.revoked);
         assert_eq!(
             session_state(&f.p),
-            (false, Some(SESSION_ENDED.to_string()), false, true)
+            (false, Some(SIGNED_OUT_AT_REVIEW.to_string()), false, true)
         );
         for intent in [view::ClaimMessage::Confirm, view::ClaimMessage::Refresh] {
             let task = f.p.update(
@@ -1619,7 +1619,7 @@ mod flow {
         sign_out(&mut f);
         assert_eq!(
             session_state(&f.p),
-            (false, Some(SESSION_ENDED.to_string()), false, true)
+            (false, Some(SIGNED_OUT_AT_REVIEW.to_string()), false, true)
         );
         assert!(!f.p.set_connect(Some(session(&f, "7"))));
         let rebind = f.p.recover(Some(f.dyn_daemon.clone()));
@@ -1829,5 +1829,458 @@ mod flow {
         }
         drop(dyn_daemon);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ── Gandalf's round-2 reviewer probes (#518 issuecomment-5823628746),
+    // adopted verbatim as regressions: two safety assertions that failed at
+    // 8da96462 (global logout undone by Refresh; a pending backend switch
+    // re-bound to the old daemon) and two controls that passed (a dead
+    // bearer refuses before submit; a late Rebound stays revoked). The App
+    // helpers build a Bitcoin App around the flow fixture's panel.
+    fn reviewer_blank_app() -> crate::app::App {
+        let root = std::env::temp_dir().join(format!("reviewer-app-{}", uuid::Uuid::new_v4()));
+        let (app, _) = {
+            let _guard = crate::app::session::test_guard();
+            crate::app::claim_step1_tests::bitcoin_app(&root)
+        };
+        let _ = std::fs::remove_dir_all(&root);
+        app
+    }
+
+    fn reviewer_app(f: &mut Flow, mut app: crate::app::App) -> crate::app::App {
+        app.wallet = Some(f.wallet.clone());
+        app.daemon = Some(f.dyn_daemon.clone());
+        app.datadir = f.datadir.clone();
+        app.cache.datadir_path = f.datadir.clone();
+        app.cube_settings.id = "bitcoin-cube".into();
+        app.panels.claim_generation = f.sender.clone();
+        app.panels.claim = Some(std::mem::replace(&mut f.p, panel(SINGLE_WSH)));
+        app.panels.current = Menu::Vault(crate::app::menu::VaultSubMenu::Claim);
+        app.panels.connect.account.client = session(f, "7").client;
+        app.panels.connect.account.user = Some(crate::services::coincube::User {
+            id: 7,
+            email: "fixture@example.invalid".into(),
+            email_verified: Some(true),
+        });
+        app.panels.connect.account.step =
+            crate::app::state::connect::account::ConnectFlowStep::Dashboard;
+        app.cache.connect_authenticated = true;
+        app
+    }
+
+    async fn reviewer_drive_app(app: &mut crate::app::App, task: Task<Message>) {
+        let mut queue = std::collections::VecDeque::from(outputs(task).await);
+        let mut count = 0;
+        while let Some(message) = queue.pop_front() {
+            count += 1;
+            assert!(count < 30, "unexpected task cycle");
+            let task = app.update(message);
+            queue.extend(outputs(task).await);
+        }
+    }
+
+    #[tokio::test]
+    async fn reviewer_global_logout_then_refresh_must_require_new_signin() {
+        // App setup may wait on the suite's session guard. Observe only after it.
+        let app = reviewer_blank_app();
+        let mut f = reach_review().await;
+        let app = reviewer_app(&mut f, app);
+        let mut tab = crate::gui::tab::Tab::new(1, crate::gui::tab::State::App(app));
+        // This is the exact operation GUI::update broadcasts on another tab's LogOut.
+        drop(tab.invalidate_fork_session());
+        let crate::gui::tab::State::App(app) = &mut tab.state else {
+            panic!("Bitcoin App must remain open")
+        };
+        assert!(app.panels.claim.as_ref().unwrap().revoked);
+        // No SetSession, no sign-in. The local logout doesn't revoke a bearer at the server.
+        assert!(
+            app.panels.connect.account.is_authenticated(),
+            "documents retained sibling state"
+        );
+        let refresh = app.update(Message::View(view::Message::Claim(
+            view::ClaimMessage::Refresh,
+        )));
+        reviewer_drive_app(app, refresh).await;
+        let state = session_state(app.panels.claim.as_ref().unwrap());
+        eprintln!("after sibling logout + refresh: {:?}", state);
+        assert!(
+            !state.1.as_deref().unwrap_or("").contains("Stale"),
+            "stale fixture masks the auth path"
+        );
+        let submit = app.update(Message::View(view::Message::Claim(
+            view::ClaimMessage::Confirm,
+        )));
+        reviewer_drive_app(app, submit).await;
+        let count = submissions(&f);
+        let _ = std::fs::remove_dir_all(&f.root);
+        assert_eq!(
+            count, 0,
+            "global logout was undone by Refresh using the old cached client, with no sign-in"
+        );
+    }
+
+    #[tokio::test]
+    async fn reviewer_dead_bearer_rebind_refuses_before_submit() {
+        let mut f = reach_review().await;
+        f.p.revoke();
+        f.sender.send_modify(|g| *g += 1);
+        // The old token now gets 401: explicit control for hypothesis 4(b).
+        let mut dead = session(&f, "7");
+        dead.client.set_token("dead-token");
+        f.p.set_connect(Some(dead));
+        f._server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/api/v1/connect/networks/bitcoin-blake2b/anchor")
+                    .header("authorization", "Bearer dead-token");
+                then.status(401);
+            })
+            .await;
+        let task = f.p.recover(Some(f.dyn_daemon.clone()));
+        let mut seen = drive(&mut f, task).await;
+        assert!(
+            matches!(&seen[..], [Message::Claim(ClaimEvent::Reviewed(_, Err(_)))]),
+            "{:?}",
+            seen
+        );
+        drop(f.p.update(Some(f.dyn_daemon.clone()), &f.cache, seen.remove(0)));
+        let (snapshot, error, busy, _) = session_state(&f.p);
+        assert!(!snapshot && !busy && error.is_some());
+        let task = f.p.update(
+            Some(f.dyn_daemon.clone()),
+            &f.cache,
+            Message::View(view::Message::Claim(view::ClaimMessage::Confirm)),
+        );
+        assert!(outputs(task).await.is_empty());
+        assert_eq!(submissions(&f), 0);
+        let _ = std::fs::remove_dir_all(&f.root);
+    }
+
+    #[tokio::test]
+    async fn reviewer_rebound_arriving_after_logout_stays_revoked() {
+        let mut f = reach_review().await;
+        sign_out(&mut f);
+        f.p.set_connect(Some(session(&f, "7")));
+        let expected = *f.sender.borrow();
+        let task = f.p.recover(Some(f.dyn_daemon.clone()));
+        let mut produced = outputs(task).await;
+        match &produced[0] {
+            Message::Claim(ClaimEvent::Rebound(_, session, Ok(()))) => {
+                assert_eq!(session.context.generation, expected)
+            }
+            other => panic!("{:?}", other),
+        }
+        sign_out(&mut f);
+        let task =
+            f.p.update(Some(f.dyn_daemon.clone()), &f.cache, produced.remove(0));
+        assert!(outputs(task).await.is_empty());
+        assert!(f.p.revoked);
+        assert_eq!(
+            session_state(&f.p),
+            (false, Some(SIGNED_OUT_AT_REVIEW.into()), false, true)
+        );
+        assert_eq!(submissions(&f), 0);
+        let _ = std::fs::remove_dir_all(&f.root);
+    }
+
+    #[tokio::test]
+    async fn reviewer_backend_switch_inflight_must_not_rebind_old_daemon() {
+        let app = reviewer_blank_app();
+        let mut f = reach_review().await;
+        let mut app = reviewer_app(&mut f, app);
+        let mut cfg = f.daemon.config.clone();
+        if let Some(coincubed::config::BitcoinBackend::Esplora(selection)) =
+            cfg.bitcoin_backend.as_mut()
+        {
+            selection.addr =
+                "https://replacement.example.invalid/api/v1/esplora/bitcoin/mainnet".into();
+        }
+        // Keep restart unpolled to model its queue before it stops the old daemon.
+        let restart = app.spawn_daemon_switch(cfg);
+        assert!(app.daemon_switch_in_progress);
+        let refresh = app.update(Message::View(view::Message::Claim(
+            view::ClaimMessage::Refresh,
+        )));
+        reviewer_drive_app(&mut app, refresh).await;
+        let state = session_state(app.panels.claim.as_ref().unwrap());
+        eprintln!("after pending switch + refresh: {:?}", state);
+        assert!(
+            !state.1.as_deref().unwrap_or("").contains("Stale"),
+            "stale fixture masks the provider path"
+        );
+        let submit = app.update(Message::View(view::Message::Claim(
+            view::ClaimMessage::Confirm,
+        )));
+        reviewer_drive_app(&mut app, submit).await;
+        drop(restart);
+        let count = submissions(&f);
+        let _ = std::fs::remove_dir_all(&f.root);
+        assert_eq!(
+            count, 0,
+            "provider switch was in progress, but recovery rebound and submitted through its old daemon"
+        );
+    }
+
+    // ── Round-2 acceptance beyond the probes.
+
+    /// Drive an App task, applying only the claim panel's own completions
+    /// (`Message::Claim`); an App's cache refresh would ask the fake daemon
+    /// for reads the fixture does not answer, and is not under test here.
+    async fn drive_claim_messages(app: &mut crate::app::App, task: Task<Message>) -> Vec<Message> {
+        let mut queue = std::collections::VecDeque::from(outputs(task).await);
+        let mut seen = Vec::new();
+        let mut count = 0;
+        while let Some(message) = queue.pop_front() {
+            count += 1;
+            assert!(count < 30, "unexpected task cycle");
+            if !matches!(message, Message::Claim(_)) {
+                seen.push(message);
+                continue;
+            }
+            let task = app.update(message);
+            queue.extend(outputs(task).await);
+        }
+        seen
+    }
+
+    fn app_claim_state(app: &crate::app::App) -> (bool, Option<String>, bool, bool) {
+        session_state(app.panels.claim.as_ref().unwrap())
+    }
+
+    fn intent(message: view::ClaimMessage) -> Message {
+        Message::View(view::Message::Claim(message))
+    }
+
+    /// Round-2 finding 1: after the global auth boundary, nothing this tab
+    /// does with the account it still shows re-binds the claim — not
+    /// re-entering the panel, not a cached features or plan callback, not
+    /// Refresh — and a confirmation submits nothing. Only a session
+    /// established in this tab (`SessionLoaded` through its own Connect
+    /// panel) lifts the hold; the next account message then re-binds, and
+    /// the claim submits exactly once.
+    #[tokio::test]
+    async fn a_global_sign_out_holds_the_claim_until_a_sign_in_in_this_tab() {
+        let app = reviewer_blank_app();
+        let mut f = reach_review().await;
+        let mut app = reviewer_app(&mut f, app);
+        app.invalidate_claim_session();
+        assert!(app.claim_session_invalidated);
+        assert_eq!(
+            app_claim_state(&app),
+            (false, Some(SIGNED_OUT_AT_REVIEW.into()), false, true),
+            "the review is withdrawn at the boundary, with the sign-out copy"
+        );
+        let generation = app.panels.connect.account.session_generation();
+
+        // Re-entry: the rail item, decided from the disk on every arrival.
+        app.panels.current = Menu::Cube(crate::app::menu::CubeSubMenu::Overview);
+        let entry = app.update(Message::View(view::Message::Menu(Menu::Vault(
+            crate::app::menu::VaultSubMenu::Claim,
+        ))));
+        drive_claim_messages(&mut app, entry).await;
+        assert_eq!(
+            app.panels.current,
+            Menu::Vault(crate::app::menu::VaultSubMenu::Claim),
+            "the entry happened"
+        );
+        // Cached account callbacks through the hook, then Refresh.
+        for message in [
+            Message::View(view::Message::ConnectAccount(
+                view::ConnectAccountMessage::FeaturesLoaded(None, generation),
+            )),
+            Message::View(view::Message::ConnectAccount(
+                view::ConnectAccountMessage::PlanLoaded(None, generation),
+            )),
+            intent(view::ClaimMessage::Refresh),
+        ] {
+            let task = app.update(message);
+            drive_claim_messages(&mut app, task).await;
+            assert!(app.claim_session_invalidated, "still held");
+            assert!(app.panels.claim.as_ref().unwrap().revoked);
+            assert!(!app_claim_state(&app).0, "no review");
+            let submit = app.update(intent(view::ClaimMessage::Confirm));
+            drive_claim_messages(&mut app, submit).await;
+            assert_eq!(submissions(&f), 0, "{:?}", f.daemon.hits());
+        }
+        assert_eq!(journaled_phase(&f), "Intent");
+
+        // A sign-in in this tab: the account panel's own `SessionLoaded`
+        // (its network follow-ups are dropped; they are not under test),
+        // then the dashboard, then any account message re-binds.
+        drop(app.update(Message::View(view::Message::ConnectAccount(
+            view::ConnectAccountMessage::SessionLoaded {
+                user: crate::services::coincube::User {
+                    id: 7,
+                    email: "fixture@example.invalid".into(),
+                    email_verified: Some(true),
+                },
+                plan: None,
+            },
+        ))));
+        assert!(
+            !app.claim_session_invalidated,
+            "lifted by a session established here"
+        );
+        app.panels.connect.account.step =
+            crate::app::state::connect::account::ConnectFlowStep::Dashboard;
+        let rebind = app.update(Message::View(view::Message::ConnectAccount(
+            view::ConnectAccountMessage::PlanLoaded(None, 0),
+        )));
+        drive_claim_messages(&mut app, rebind).await;
+        assert!(!app.panels.claim.as_ref().unwrap().revoked);
+        assert_eq!(
+            app_claim_state(&app),
+            (true, None, false, true),
+            "a fresh review"
+        );
+        let submit = app.update(intent(view::ClaimMessage::Confirm));
+        drive_claim_messages(&mut app, submit).await;
+        assert_eq!(submissions(&f), 1, "{:?}", f.daemon.hits());
+        assert_eq!(journaled_phase(&f), "BroadcastUncertain");
+        let _ = std::fs::remove_dir_all(&f.root);
+    }
+
+    fn replacement_config(f: &Flow) -> coincubed::config::Config {
+        let mut cfg = f.daemon.config.clone();
+        if let Some(coincubed::config::BitcoinBackend::Esplora(selection)) =
+            cfg.bitcoin_backend.as_mut()
+        {
+            selection.addr =
+                "https://replacement.example.invalid/api/v1/esplora/bitcoin/mainnet".into();
+        }
+        cfg
+    }
+
+    /// Round-2 finding 2, settlement: a switch holds the claim (Refresh says
+    /// so and binds nothing); `DaemonRestarted(Started)` installs the new
+    /// daemon and the claim re-binds to it — a fresh review, one submission
+    /// through the installed daemon, none through the superseded one.
+    #[tokio::test]
+    async fn a_settled_backend_switch_rebinds_to_the_installed_daemon() {
+        let app = reviewer_blank_app();
+        let mut f = reach_review().await;
+        let mut app = reviewer_app(&mut f, app);
+        let restart = app.spawn_daemon_switch(replacement_config(&f));
+        assert_eq!(
+            app_claim_state(&app),
+            (false, Some(BACKEND_SWITCHING.into()), false, true),
+            "held, review withdrawn"
+        );
+        let refresh = app.update(intent(view::ClaimMessage::Refresh));
+        let seen = drive_claim_messages(&mut app, refresh).await;
+        assert!(
+            matches!(&seen[..], [Message::View(view::Message::ShowError(copy))] if copy == BACKEND_SWITCHING),
+            "{:?}",
+            seen
+        );
+        drop(restart);
+
+        // The switch settles: a new daemon on the same (admitted) backend.
+        let installed = Arc::new(FlowDaemon {
+            config: f.daemon.config.clone(),
+            coin: f.daemon.coin.clone(),
+            previous: f.daemon.previous.clone(),
+            hits: Mutex::new(Vec::new()),
+        });
+        let installed_dyn: Arc<dyn Daemon + Sync + Send> = installed.clone();
+        let settle = app.update(Message::DaemonRestarted(
+            crate::app::DaemonRestart::Started(installed_dyn),
+        ));
+        drive_claim_messages(&mut app, settle).await;
+        assert!(!app.daemon_switch_in_progress);
+        assert!(!app.panels.claim.as_ref().unwrap().revoked);
+        assert_eq!(
+            app_claim_state(&app),
+            (true, None, false, true),
+            "a fresh review"
+        );
+        let submit = app.update(intent(view::ClaimMessage::Confirm));
+        drive_claim_messages(&mut app, submit).await;
+        assert_eq!(
+            installed
+                .hits()
+                .iter()
+                .filter(|h| **h == "submit_verified_poison")
+                .count(),
+            1,
+            "{:?}",
+            installed.hits()
+        );
+        assert_eq!(submissions(&f), 0, "nothing through the superseded daemon");
+        assert_eq!(journaled_phase(&f), "BroadcastUncertain");
+        let _ = std::fs::remove_dir_all(&f.root);
+    }
+
+    /// Round-2 finding 2, the other arms: a failed switch that recovered
+    /// the previous daemon re-binds to it (it is live); one that recovered
+    /// nothing leaves the claim held with the node-unavailable copy; a
+    /// panicked switch leaves it held with the unknown-state copy and no
+    /// re-bind to the daemon the App keeps. Refresh binds nothing in the
+    /// held states; a confirmation submits nothing.
+    #[tokio::test]
+    async fn failed_and_panicked_backend_switches_hold_or_recover_truthfully() {
+        use crate::app::{error::Error, DaemonRestart};
+        type Outcome = fn(&Flow) -> DaemonRestart;
+        // (outcome, expected copy when held; None = recovered and re-bound)
+        let cases: Vec<(Outcome, Option<&str>)> = vec![
+            (
+                |f| DaemonRestart::Failed {
+                    error: Error::Config("fixture".into()),
+                    recovered: Some(f.dyn_daemon.clone()),
+                },
+                None,
+            ),
+            (
+                |_| DaemonRestart::Failed {
+                    error: Error::Config("fixture".into()),
+                    recovered: None,
+                },
+                Some(NODE_UNAVAILABLE),
+            ),
+            (
+                |_| DaemonRestart::Panicked(Error::Config("fixture".into())),
+                Some(BACKEND_UNKNOWN),
+            ),
+        ];
+        for (outcome, held) in cases {
+            let app = reviewer_blank_app();
+            let mut f = reach_review().await;
+            let mut app = reviewer_app(&mut f, app);
+            drop(app.spawn_daemon_switch(replacement_config(&f)));
+            let settle = app.update(Message::DaemonRestarted(outcome(&f)));
+            drive_claim_messages(&mut app, settle).await;
+            assert!(!app.daemon_switch_in_progress);
+            match held {
+                None => {
+                    assert!(app.daemon.is_some());
+                    assert!(!app.panels.claim.as_ref().unwrap().revoked);
+                    assert_eq!(app_claim_state(&app), (true, None, false, true));
+                    let submit = app.update(intent(view::ClaimMessage::Confirm));
+                    drive_claim_messages(&mut app, submit).await;
+                    assert_eq!(submissions(&f), 1, "{:?}", f.daemon.hits());
+                }
+                Some(copy) => {
+                    assert!(app.panels.claim.as_ref().unwrap().revoked);
+                    assert_eq!(
+                        app_claim_state(&app),
+                        (false, Some(copy.into()), false, true),
+                        "{copy}"
+                    );
+                    let refresh = app.update(intent(view::ClaimMessage::Refresh));
+                    let seen = drive_claim_messages(&mut app, refresh).await;
+                    assert!(
+                        matches!(&seen[..], [Message::View(view::Message::ShowError(c))] if c == copy),
+                        "{:?}",
+                        seen
+                    );
+                    assert!(app.panels.claim.as_ref().unwrap().revoked);
+                    let submit = app.update(intent(view::ClaimMessage::Confirm));
+                    drive_claim_messages(&mut app, submit).await;
+                    assert_eq!(submissions(&f), 0, "{:?}", f.daemon.hits());
+                    assert_eq!(journaled_phase(&f), "Intent");
+                }
+            }
+            let _ = std::fs::remove_dir_all(&f.root);
+        }
     }
 }

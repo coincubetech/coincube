@@ -812,6 +812,14 @@ pub struct App {
     /// Guards the active-node net-stats poll (connections/upload/onion) so ticks
     /// don't stack concurrent RPCs.
     node_net_stats_probe_in_progress: bool,
+    /// Set at the global Connect auth boundary (`Tab::invalidate_fork_session`,
+    /// through [`Self::invalidate_claim_session`]): the session this tab's
+    /// Connect panel still shows is not one a claim may work under. Only a
+    /// session established in this tab — `SetSession` or `SessionLoaded`
+    /// through its own Connect panel — clears it; a cached account callback,
+    /// re-entering the panel or a Refresh cannot. Claim-scoped: the Connect
+    /// panel itself is not synchronised across tabs here.
+    claim_session_invalidated: bool,
     /// True while an off-thread daemon backend switch ([`Self::spawn_daemon_switch`])
     /// is in flight. The config isn't updated until the switch completes, so
     /// without this guard the next sync probe would keep re-firing the switch
@@ -2808,6 +2816,7 @@ impl App {
             current_error_id: 256,
             bitcoind_sync_probe_in_progress: false,
             node_net_stats_probe_in_progress: false,
+            claim_session_invalidated: false,
             daemon_switch_in_progress: false,
             auto_switch_suppressed: false,
             entangled_in_flight: HashSet::new(),
@@ -2972,6 +2981,7 @@ impl App {
                 current_error_id: 256,
                 bitcoind_sync_probe_in_progress: false,
                 node_net_stats_probe_in_progress: false,
+                claim_session_invalidated: false,
                 daemon_switch_in_progress: false,
                 auto_switch_suppressed: false,
                 entangled_in_flight: HashSet::new(),
@@ -3523,6 +3533,9 @@ impl App {
     /// authenticated client and its id. `None` until the account is signed
     /// in and known.
     fn claim_connect_session(&self) -> Option<state::vault::claim::ConnectSession> {
+        if self.claim_session_invalidated {
+            return None;
+        }
         let client = self.authenticated_coincube_client()?;
         let account = self.panels.connect.account.user.as_ref()?.id.to_string();
         Some(state::vault::claim::ConnectSession { client, account })
@@ -3543,6 +3556,20 @@ impl App {
         self.panels
             .claim_generation
             .send_modify(|generation| *generation = generation.wrapping_add(1));
+    }
+
+    /// The global Connect auth boundary for a Bitcoin App: a log-out or a
+    /// session replacement in any tab. The claim panel loses its session
+    /// (which revokes and withdraws a review), the generation advances, and
+    /// the account this tab's Connect panel still shows stops counting as a
+    /// session for the claim until a new one is established here (see
+    /// `claim_session_invalidated`). The Bitcoin wallet itself stays open.
+    pub fn invalidate_claim_session(&mut self) {
+        if let Some(panel) = &mut self.panels.claim {
+            panel.set_connect(None);
+        }
+        self.revoke_claim();
+        self.claim_session_invalidated = true;
     }
 
     /// This Cube as a candidate Bitcoin Blake2b claim source — the single
@@ -5537,12 +5564,16 @@ impl App {
                 // Non-blocking toast emitted on top of the normal result (e.g. a
                 // switch that succeeded but couldn't be persisted to disk).
                 let mut extra = Task::none();
+                // How the claim panel may treat `self.daemon` from here:
+                // bound again (installed or recovered), absent, or unknown.
+                let claim_backend;
                 let result = match outcome {
                     DaemonRestart::Started(daemon) => {
                         self.daemon = Some(daemon);
                         // A fresh successful switch (adopt / manual) re-arms
                         // auto-promotion that a prior failure had suppressed.
                         self.auto_switch_suppressed = false;
+                        claim_backend = state::vault::claim::BackendState::Ready;
                         Ok(())
                     }
                     DaemonRestart::StartedNotPersisted(daemon) => {
@@ -5551,6 +5582,7 @@ impl App {
                         // but warn that it may not survive a restart.
                         self.daemon = Some(daemon);
                         self.auto_switch_suppressed = false;
+                        claim_backend = state::vault::claim::BackendState::Ready;
                         extra = Task::done(Message::View(view::Message::ShowToast(
                             log::Level::Warn,
                             "Switched Bitcoin backend, but couldn't save the change to disk — \
@@ -5568,12 +5600,16 @@ impl App {
                             // switch re-firing every poll. A later user-initiated
                             // switch re-arms it (see the Started arms).
                             self.auto_switch_suppressed = true;
+                            // A recovered provider is a live daemon the claim
+                            // may bind to again (its own admission decides).
+                            claim_backend = state::vault::claim::BackendState::Ready;
                         } else {
                             // The old daemon was already stopped during the switch
                             // and recovery couldn't bring one back. Drop it rather
                             // than keep referencing a dead daemon that ticks and
                             // config loads would keep poking.
                             self.daemon = None;
+                            claim_backend = state::vault::claim::BackendState::Unavailable;
                         }
                         error!("Daemon backend switch failed: {}", error);
                         Err(error)
@@ -5586,9 +5622,24 @@ impl App {
                         // so a still-armed config can't re-trigger the same panic
                         // every poll; a manual switch re-arms it.
                         self.auto_switch_suppressed = true;
+                        // Not for a claim, though: whether that daemon was
+                        // stopped is unknown, and a submission through a
+                        // stopped daemon would journal an attempt that can
+                        // never be resolved. The claim waits for a switch
+                        // that settles.
+                        claim_backend = state::vault::claim::BackendState::Unknown;
                         error!("Daemon backend switch panicked; keeping previous daemon: {error}");
                         Err(error)
                     }
+                };
+                // Settle the claim against the daemon the App now holds.
+                let claim_daemon = self.daemon.clone();
+                let claim_task = match &mut self.panels.claim {
+                    Some(panel) => {
+                        panel.set_backend(claim_backend);
+                        panel.recover(claim_daemon)
+                    }
+                    None => Task::none(),
                 };
                 // A successful switch clears the pending local-node sync card.
                 if result.is_ok() {
@@ -5598,7 +5649,12 @@ impl App {
                     self.cache.node_bitcoind_last_log = None;
                 }
                 let cfg_task = self.update_dispatch(Message::DaemonConfigLoaded(result));
-                return Task::batch([cfg_task, extra, Task::done(Message::CacheUpdated)]);
+                return Task::batch([
+                    cfg_task,
+                    extra,
+                    Task::done(Message::CacheUpdated),
+                    claim_task,
+                ]);
             }
             Message::WalletUpdated(Ok(wallet)) => {
                 // Check if we're transitioning from no-vault to has-vault state
@@ -5800,6 +5856,18 @@ impl App {
                         view::ConnectAccountMessage::LogOut
                     ))
                 );
+                // The two messages that establish a session in this tab:
+                // a login or refresh result, and the user it loads. Nothing
+                // else — not a features, plan, flags or activity load, not
+                // a re-entry — lifts a global invalidation of the claim's
+                // session (see `claim_session_invalidated`).
+                let establishes_session = matches!(
+                    &msg,
+                    Message::View(view::Message::ConnectAccount(
+                        view::ConnectAccountMessage::SetSession(_)
+                            | view::ConnectAccountMessage::SessionLoaded { .. }
+                    ))
+                );
                 let task = self
                     .panels
                     .connect
@@ -5832,6 +5900,9 @@ impl App {
                 // on the change, and advances the generation; a sign-in lets
                 // the panel continue — a signed construction is finalised, a
                 // journaled claim re-bound under the new session.
+                if establishes_session {
+                    self.claim_session_invalidated = false;
+                }
                 let claim_signed_in =
                     !explicit_logout && self.panels.connect.account.is_authenticated();
                 let claim_session = if claim_signed_in {
@@ -6901,9 +6972,14 @@ impl App {
             )));
         }
         // A claim in flight is bound to the daemon being replaced (#509 item
-        // 7): revoke it, synchronously, before the switch is dispatched. The
-        // panel re-binds the journaled claim on its next entry if the new
-        // backend admits one.
+        // 7): revoke it, synchronously, before the switch is dispatched, and
+        // hold every route that could bind a claim to `self.daemon` — which
+        // stays the superseded daemon until `DaemonRestarted` — for the whole
+        // switch. The settlement arms there re-bind against what was
+        // installed or recovered.
+        if let Some(panel) = &mut self.panels.claim {
+            panel.set_backend(state::vault::claim::BackendState::Switching);
+        }
         self.revoke_claim();
         // Mark a switch in flight so subsequent sync probes / triggers don't
         // re-fire it before it completes (the config only changes on success).
@@ -9027,7 +9103,7 @@ mod claim_step1_tests {
 
     /// A Bitcoin Cube with a Vault and an embedded (unstarted) daemon,
     /// with the account grant on so the claim entry is available.
-    fn bitcoin_app(root: &std::path::Path) -> (App, Arc<Wallet>) {
+    pub(super) fn bitcoin_app(root: &std::path::Path) -> (App, Arc<Wallet>) {
         let descriptor = coincube_core::descriptors::CoincubeDescriptor::from_str(DESC).unwrap();
         let wallet = Arc::new(Wallet::new(descriptor.clone()));
         let cfg: coincubed::config::Config = toml::from_str(&format!(
