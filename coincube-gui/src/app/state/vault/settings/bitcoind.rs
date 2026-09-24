@@ -1401,13 +1401,10 @@ fn write_internal_bitcoind_config(
                 )?,
             };
 
-            // Nothing in the file records the flavour any more, and rebuilding
-            // it from the struct drops any legacy `consensusrules=rdts` a
-            // previous release wrote — so the ledger is where the choice has
-            // to be kept, and it has to be kept before the write that erases
-            // the old marker.
+            // Nothing in the file records the flavour, so the ledger is where the
+            // choice has to be kept — and kept before the write, so a write that
+            // then fails still leaves the choice on record.
             crate::node::revalidate::ManagedNodeState::record_configured(coincube_datadir, flavor);
-            conf.enforce_rdts = false;
 
             let mut network_conf = existing.unwrap_or(InternalBitcoindNetworkConfig {
                 rpc_port,
@@ -2828,9 +2825,11 @@ mod tests {
         assert_eq!(net.rpc_auth, Some(rpc_auth)); // preserved
         assert_eq!(after.max_mempool_mb, Some(100)); // updated
 
-        // No `consensusrules` is written, and the flavour is kept in the ledger
-        // instead of the file — a write must not leave the legacy line behind.
-        assert!(!after.enforce_rdts);
+        // No `consensusrules` is written; the flavour is kept in the ledger
+        // instead of the file.
+        assert!(!std::fs::read_to_string(&config_path)
+            .unwrap()
+            .contains("consensusrules"));
         assert_eq!(
             crate::node::bitcoind::configured_managed_flavor(&datadir),
             Some(NodeFlavor::Knots),
@@ -3356,6 +3355,80 @@ mod tests {
         assert_eq!(
             entries,
             vec![crate::node::managed_conf::MANAGED_CONF_LOCK_FILE]
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // The settings writer is a locked read-modify-write on a fresh read: a
+    // section another writer added while holding the lock survives the rewrite
+    // that follows its release. Handshake, not wall-clock: contention is proven
+    // (a quick bounded acquire is `Busy` while the writer holds), the writer
+    // persists and releases on signal, and only then does the settings write run
+    // its fresh read. Ported from the legacy-conf migration test that RDTS sunset
+    // PR 4 deleted, so the lock's end-to-end contention coverage does not drop
+    // with it; the Busy half lives in `settings_refuse_on_a_busy_conf_lock_before_any_write`.
+    #[test]
+    fn a_settings_write_reads_fresh_after_a_concurrent_writer_releases_the_lock() {
+        use crate::node::managed_conf::ManagedConfLock;
+        let (base, datadir) = a_temp_datadir("fresh-read");
+        let conf_path = internal_bitcoind_config_path(&internal_bitcoind_datadir(&datadir));
+        std::fs::create_dir_all(conf_path.parent().unwrap()).unwrap();
+        // An existing conf with a mainnet section, as a previous setup left it.
+        std::fs::write(
+            &conf_path,
+            "[main]\nrpcport=41001\nport=41002\nprune=15000\n",
+        )
+        .unwrap();
+
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel::<()>();
+        let (persist_tx, persist_rx) = std::sync::mpsc::channel::<()>();
+        let writer = {
+            let datadir = datadir.clone();
+            let conf_path = conf_path.clone();
+            std::thread::spawn(move || {
+                let held = ManagedConfLock::acquire(&datadir).unwrap();
+                locked_tx.send(()).unwrap();
+                persist_rx.recv().unwrap();
+                // Append a section (an older writer that rewrites nothing else).
+                let mut text = std::fs::read_to_string(&conf_path).unwrap();
+                text.push_str("\n[testnet4]\nrpcport=41003\nport=41004\nprune=15000\n");
+                std::fs::write(&conf_path, text).unwrap();
+                drop(held);
+            })
+        };
+        locked_rx.recv().unwrap();
+        assert!(
+            matches!(
+                ManagedConfLock::acquire_with_bound(
+                    &datadir,
+                    2,
+                    std::time::Duration::from_millis(5)
+                ),
+                Err(crate::node::managed_conf::ManagedConfLockError::Busy { .. })
+            ),
+            "the writer must be holding the lock at this point"
+        );
+        persist_tx.send(()).unwrap();
+        writer.join().unwrap();
+
+        let cfg =
+            write_internal_bitcoind_config(&datadir, Network::Bitcoin, NodeFlavor::Knots, None)
+                .unwrap();
+        assert_eq!(
+            cfg.addr.port(),
+            41001,
+            "the existing mainnet ports are kept"
+        );
+        let after = InternalBitcoindConfig::from_file(&conf_path).unwrap();
+        assert_eq!(after.networks.len(), 2, "{:?}", after.networks.keys());
+        assert_eq!(
+            after.networks.get(&Network::Testnet4).map(|n| n.rpc_port),
+            Some(41003),
+            "the section the other writer added did not survive the fresh read"
+        );
+        assert_eq!(
+            crate::node::revalidate::ManagedNodeState::load(&datadir).configured_flavor,
+            Some(NodeFlavor::Knots)
         );
         let _ = std::fs::remove_dir_all(&base);
     }

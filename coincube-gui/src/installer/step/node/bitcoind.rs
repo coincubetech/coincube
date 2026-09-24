@@ -1255,11 +1255,6 @@ impl Step for InternalBitcoindStep {
                                 // binary takes over the same port.
                                 Some(mut conf) => {
                                     conf.flavor = flavor;
-                                    // Drop any legacy `consensusrules=rdts`: no
-                                    // build we ship enforces BIP-110, and the
-                                    // write below rebuilds the file from this
-                                    // struct.
-                                    conf.enforce_rdts = false;
                                     conf
                                 }
                                 // Fresh install: build for the chosen flavour
