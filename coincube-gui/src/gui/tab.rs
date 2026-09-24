@@ -831,6 +831,10 @@ impl Tab {
                 let datadir = app.datadir().clone();
                 let network = app.cache().network;
                 let chain = cube.network;
+                // A claim in flight is revoked before the Cube's context goes:
+                // the `App` is dropped a few lines down, and a queued
+                // submission must not outlive the session it was confirmed in.
+                app.revoke_claim();
                 crate::app::session::close();
 
                 let config = app::Config::from_file(

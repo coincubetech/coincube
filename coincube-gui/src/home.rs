@@ -778,6 +778,15 @@ impl Home {
         }
     }
 
+    /// Which claim entry the Cube at `index` offers, if any: the target
+    /// installer, or step 1 once the target exists. Same source as
+    /// [`claim_availability`](Self::claim_availability); the card's label is
+    /// derived from this, never the other way round.
+    pub(crate) fn claim_entry(&self, index: usize) -> Option<app::features::ClaimEntry> {
+        self.claim_source_cube(index)
+            .and_then(app::features::claim_entry)
+    }
+
     /// The Cube at `index` as a candidate claim source — the input
     /// [`claim_availability`](Self::claim_availability) answers from.
     ///
@@ -3860,11 +3869,12 @@ impl Home {
                                                         i,
                                                         signed_in,
                                                         self.cube_sync_hint(cube),
-                                                        self.claim_availability(i)
-                                                            .is_available()
-                                                            .then_some(
-                                                                "Claim Bitcoin Blake2b",
-                                                            ),
+                                                        self.claim_entry(i).map(|entry| {
+                                                            match entry {
+                                                                app::features::ClaimEntry::CreateTarget => "Claim Bitcoin Blake2b",
+                                                                app::features::ClaimEntry::Step1 => "Continue Bitcoin Blake2b claim",
+                                                            }
+                                                        }),
                                                     ))
                                                 },
                                             );

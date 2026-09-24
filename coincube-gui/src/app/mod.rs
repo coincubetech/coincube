@@ -102,6 +102,15 @@ struct Panels {
     receive: Option<VaultReceivePanel>,
     create_spend: Option<CreateSpendPanel>,
     vault_settings: Option<VaultSettingsState>,
+    /// Claim step 1 (Lane B1.5). Built for a Bitcoin Cube with a Vault; the
+    /// rail item routes here only once a claim target exists on disk
+    /// (`Message::View(Menu(Vault(Claim)))` decides, from the disk, on every
+    /// arrival).
+    claim: Option<state::vault::claim::ClaimStep1Panel>,
+    /// The claim generation every coordinator call checks. Advanced by
+    /// [`App::revoke_claim`] after the synchronous revocation; the panel
+    /// subscribes to it when a coordinator is created.
+    claim_generation: tokio::sync::watch::Sender<u64>,
     // remaining panels
     buy_sell: Option<crate::app::view::buysell::BuySellPanel>,
     connect: ConnectPanel,
@@ -232,6 +241,8 @@ impl Panels {
             receive: None,
             create_spend: None,
             vault_settings: None,
+            claim: None,
+            claim_generation: tokio::sync::watch::channel(1).0,
             // remaining panels
             buy_sell: None,
             connect: ConnectPanel::new(
@@ -287,6 +298,14 @@ impl Panels {
         let swaps_path = Self::swaps_path(&data_dir, cache.chain(), &cube_id);
         let initial_balance_masked =
             Self::initial_balance_masked(&data_dir, cache.chain(), &cube_id);
+        let claim_generation = tokio::sync::watch::channel(1).0;
+        let claim = Self::claim_panel(
+            &wallet,
+            &data_dir,
+            cache.chain(),
+            &cube_id,
+            &claim_generation,
+        );
 
         Self {
             current: Menu::Cube(crate::app::menu::CubeSubMenu::Overview),
@@ -388,6 +407,8 @@ impl Panels {
                 internal_bitcoind.is_some(),
                 config.clone(),
             )),
+            claim,
+            claim_generation,
             connect: ConnectPanel::new(
                 spark_backend.as_ref().map(|b| b.client().clone()),
                 cube_id.clone(),
@@ -425,11 +446,33 @@ impl Panels {
         }
     }
 
+    /// Claim step 1 exists for a Bitcoin Cube with a Vault. Only a Bitcoin
+    /// Cube can be a claim source (`features::claim_blake2b`), so no other
+    /// chain gets a panel at all — not a hidden one.
+    fn claim_panel(
+        wallet: &Arc<Wallet>,
+        data_dir: &CoincubeDirectory,
+        chain: crate::chain::ChainId,
+        cube_id: &str,
+        claim_generation: &tokio::sync::watch::Sender<u64>,
+    ) -> Option<state::vault::claim::ClaimStep1Panel> {
+        (chain == crate::chain::ChainId::Bitcoin).then(|| {
+            state::vault::claim::ClaimStep1Panel::new(
+                wallet.clone(),
+                data_dir.clone(),
+                cube_id.to_string(),
+                claim_generation.subscribe(),
+                None,
+            )
+        })
+    }
+
     /// Rebuilds all vault-specific panels when a vault wallet is added to an app that didn't have one.
     /// This is called when transitioning from no-vault to has-vault state.
     #[allow(clippy::too_many_arguments)]
     fn build_vault_panels(
         &mut self,
+        cube_id: &str,
         wallet: Arc<Wallet>,
         cache: &Cache,
         daemon_backend: DaemonBackend,
@@ -500,6 +543,13 @@ impl Panels {
             internal_bitcoind.is_some(),
             config.clone(),
         ));
+        self.claim = Self::claim_panel(
+            &wallet,
+            &data_dir,
+            cache.chain(),
+            cube_id,
+            &self.claim_generation,
+        );
 
         self.buy_sell = breez_client.map(|client| {
             crate::app::view::buysell::BuySellPanel::new(cache.network, wallet, client)
@@ -577,10 +627,9 @@ impl Panels {
                 crate::app::menu::VaultSubMenu::Settings(_) => {
                     self.vault_settings.as_ref().map(|v| v as &dyn State)
                 }
-                // The claim item starts the installer; the menu never settles
-                // on it, so there is no panel to return. See
-                // `VaultSubMenu::Claim`.
-                crate::app::menu::VaultSubMenu::Claim => None,
+                crate::app::menu::VaultSubMenu::Claim => {
+                    self.claim.as_ref().map(|v| v as &dyn State)
+                }
             },
             Menu::Marketplace(MarketplaceSubMenu::BuySell) => {
                 self.buy_sell.as_ref().map(|v| v as &dyn State)
@@ -665,8 +714,9 @@ impl Panels {
                 crate::app::menu::VaultSubMenu::Settings(_) => {
                     self.vault_settings.as_mut().map(|v| v as &mut dyn State)
                 }
-                // See `Panels::current`: an action, not a panel.
-                crate::app::menu::VaultSubMenu::Claim => None,
+                crate::app::menu::VaultSubMenu::Claim => {
+                    self.claim.as_mut().map(|v| v as &mut dyn State)
+                }
             },
             Menu::Marketplace(MarketplaceSubMenu::BuySell) => {
                 self.buy_sell.as_mut().map(|v| v as &mut dyn State)
@@ -2409,6 +2459,25 @@ fn settle_rescan_obligation(
 pub(crate) fn claim_target_checksums(
     datadir: &CoincubeDirectory,
 ) -> std::collections::HashSet<String> {
+    claim_targets(datadir).into_keys().collect()
+}
+
+/// The claim target Cube for `descriptor_checksum`, if one exists on this
+/// device: its Cube id, which the claim journal's identity is keyed by.
+/// Same read as [`claim_target_checksums`].
+pub(crate) fn claim_target_cube_id(
+    datadir: &CoincubeDirectory,
+    descriptor_checksum: &str,
+) -> Option<String> {
+    claim_targets(datadir).remove(descriptor_checksum)
+}
+
+/// Every claim target on this device: descriptor checksum → the Bitcoin
+/// Blake2b Cube that reuses it. The one reader behind
+/// [`claim_target_checksums`], [`claim_target_exists`] and
+/// [`claim_target_cube_id`], so the three can never disagree about what is
+/// on disk.
+fn claim_targets(datadir: &CoincubeDirectory) -> std::collections::HashMap<String, String> {
     let fork_dir = datadir.network_directory(crate::chain::ChainId::BitcoinBlake2b);
     // No file, no targets — and no retry. `Settings::from_file` treats
     // `NotFound` as possibly-transient and sleeps between five attempts (at
@@ -2419,7 +2488,7 @@ pub(crate) fn claim_target_checksums(
     // whole retry budget for a file whose absence is the answer. Home asks on
     // every message.
     if !fork_dir.path().join(settings::SETTINGS_FILE_NAME).is_file() {
-        return std::collections::HashSet::new();
+        return std::collections::HashMap::new();
     }
     settings::Settings::from_file(&fork_dir)
         .map(|s| {
@@ -2434,7 +2503,7 @@ pub(crate) fn claim_target_checksums(
                 .filter_map(|cube| {
                     cube.vault_wallet_id
                         .as_ref()
-                        .map(|id| id.descriptor_checksum.clone())
+                        .map(|id| (id.descriptor_checksum.clone(), cube.id.clone()))
                 })
                 .collect()
         })
@@ -2449,7 +2518,7 @@ pub(crate) fn claim_target_checksums(
 /// and the two drifted — the App was repaired to key on the Cube while Home
 /// went on counting wallets — so they now share [`claim_target_checksums`].
 pub(crate) fn claim_target_exists(datadir: &CoincubeDirectory, descriptor_checksum: &str) -> bool {
-    claim_target_checksums(datadir).contains(descriptor_checksum)
+    claim_targets(datadir).contains_key(descriptor_checksum)
 }
 
 impl App {
@@ -3402,7 +3471,68 @@ impl App {
             return Task::none();
         }
         self.pending_claim = false;
-        Task::done(Message::View(view::Message::StartClaimBlake2b))
+        Task::done(Message::View(view::Message::Menu(Menu::Vault(
+            menu::VaultSubMenu::Claim,
+        ))))
+    }
+
+    /// Where a claim entry goes: the target installer (Lane B1.4) or claim
+    /// step 1 (Lane B1.5). Decided from the **disk** on every arrival (#503),
+    /// so a stale cached `false` cannot start a second target installer and a
+    /// stale `true` cannot hide the panel; the cache is corrected in passing.
+    /// Re-checked against the same predicate the rail used — the item having
+    /// been rendered is not a permission.
+    fn enter_claim(&mut self) -> Task<Message> {
+        let Some(wallet) = self.wallet.as_ref() else {
+            return Task::none();
+        };
+        self.cache.btcb2_already_claimed = self.cube_settings.network
+            == crate::chain::ChainId::Bitcoin
+            && claim_target_exists(&self.datadir, &wallet.descriptor_checksum);
+        match crate::app::features::claim_entry(self.claim_source_cube()) {
+            None => Task::none(),
+            Some(crate::app::features::ClaimEntry::CreateTarget) => {
+                Task::done(Message::View(view::Message::StartClaimBlake2b))
+            }
+            Some(crate::app::features::ClaimEntry::Step1) => {
+                let connect = self.claim_connect_session();
+                if let Some(panel) = &mut self.panels.claim {
+                    panel.set_connect(connect);
+                }
+                let close_task = self
+                    .panels
+                    .current_mut()
+                    .map(|p| p.close())
+                    .unwrap_or_else(Task::none);
+                Task::batch([
+                    close_task,
+                    self.set_current_panel(Menu::Vault(menu::VaultSubMenu::Claim)),
+                ])
+            }
+        }
+    }
+
+    /// The Connect session claim step 1 works under: the account's
+    /// authenticated client and its id. `None` until the account is signed
+    /// in and known.
+    fn claim_connect_session(&self) -> Option<state::vault::claim::ConnectSession> {
+        let client = self.authenticated_coincube_client()?;
+        let account = self.panels.connect.account.user.as_ref()?.id.to_string();
+        Some(state::vault::claim::ConnectSession { client, account })
+    }
+
+    /// Revoke any live claim coordinator, synchronously, and advance the
+    /// claim generation. Called before the context a coordinator was created
+    /// under is replaced: Connect sign-out, Cube lock, Cube/tab close. The
+    /// revocation is the barrier; the generation bump is the notification
+    /// every in-flight coordinator call also checks.
+    pub fn revoke_claim(&mut self) {
+        if let Some(panel) = &mut self.panels.claim {
+            panel.revoke();
+        }
+        self.panels
+            .claim_generation
+            .send_modify(|generation| *generation = generation.wrapping_add(1));
     }
 
     /// This Cube as a candidate Bitcoin Blake2b claim source — the single
@@ -3856,6 +3986,8 @@ impl App {
 
     pub fn stop(&mut self) {
         info!("Close requested");
+        // Before the daemon that would carry a claim submission goes away.
+        self.revoke_claim();
         if self.daemon_backend().is_embedded() {
             if let Some(daemon) = &self.daemon {
                 if let Err(e) = Handle::current().block_on(async { daemon.stop().await }) {
@@ -5476,6 +5608,7 @@ impl App {
                 if was_vaultless {
                     if let Some(daemon) = &self.daemon {
                         self.panels.build_vault_panels(
+                            &self.cube_settings.id,
                             wallet.clone(),
                             &self.cache,
                             daemon.backend(),
@@ -5612,14 +5745,19 @@ impl App {
                 }
                 return vault_fp_task;
             }
-            // The claim rail item is an action: it starts the claim-target
-            // installer rather than switching panels, so it is re-dispatched
-            // here instead of reaching `set_current_panel` (which has no panel
-            // for it). Re-checked against the same predicate the rail used —
-            // the item having been rendered is not a permission.
+            // The claim rail item and the Home card's armed intent both land
+            // here; `enter_claim` decides between the target installer and
+            // the step-1 panel from what is on disk.
             Message::View(view::Message::Menu(Menu::Vault(menu::VaultSubMenu::Claim))) => {
-                if crate::app::features::claim_blake2b(self.claim_source_cube()).is_available() {
-                    return Task::done(Message::View(view::Message::StartClaimBlake2b));
+                return self.enter_claim();
+            }
+            // Claim step 1's own results go to the claim panel whether or not
+            // it is the one on screen: a coordinator session travels inside
+            // them, and a result handed to whichever panel is current would
+            // drop that session on the floor.
+            Message::Claim(_) => {
+                if let Some(panel) = &mut self.panels.claim {
+                    return panel.update(self.daemon.clone(), &self.cache, message);
                 }
                 return Task::none();
             }
@@ -5678,6 +5816,22 @@ impl App {
                 // the Connect panel from the view layer.
                 self.cache.btcb2_server_enabled =
                     self.panels.connect.account.bitcoin_blake2b_server_enabled();
+                // Claim step 1 works under the account's session: a sign-out
+                // revokes its coordinator here, synchronously, before anything
+                // else acts on the change; a sign-in lets its next probe run.
+                let claim_signed_in =
+                    !explicit_logout && self.panels.connect.account.is_authenticated();
+                if !claim_signed_in {
+                    self.revoke_claim();
+                }
+                let claim_session = if claim_signed_in {
+                    self.claim_connect_session()
+                } else {
+                    None
+                };
+                if let Some(panel) = &mut self.panels.claim {
+                    panel.set_connect(claim_session);
+                }
                 let pending_claim = self.start_pending_claim();
                 if self.cache.chain().is_blake2b() {
                     self.cache.marketplace_flags = Default::default();

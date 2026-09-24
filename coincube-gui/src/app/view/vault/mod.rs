@@ -1,5 +1,6 @@
 mod label;
 
+pub mod claim;
 pub mod coins;
 pub mod export;
 pub mod fiat;

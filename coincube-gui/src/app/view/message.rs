@@ -185,6 +185,9 @@ pub enum Message {
     /// (Lane B1.4). Creates the target Cube only — nothing is claimed,
     /// poisoned, swept or broadcast by this flow.
     StartClaimBlake2b,
+    /// Claim step 1 — the poison self-transfer on Bitcoin (Lane B1.5),
+    /// handled by `state::vault::claim::ClaimStep1Panel`.
+    Claim(ClaimMessage),
     /// Collapse the firmware-advisory detail panel on one device row. Carries
     /// the device fingerprint and the advisory id; the badge itself stays.
     DismissHwAdvisory(Fingerprint, &'static str),
@@ -2670,4 +2673,22 @@ mod duress_message_debug_tests {
             "DisableMethodProbed(Err(\"settings unreadable\"), 5)"
         );
     }
+}
+
+/// User intents on the claim step-1 panel. Every one is re-checked by the
+/// panel against its current stage; none is a permission on its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimMessage {
+    /// Run the preconditions again (after a refusal, or to refresh them).
+    Recheck,
+    /// Build the poison self-transfer from the pre-fork coins shown.
+    Build,
+    /// Hand the built transaction to the Vault's own signing flow.
+    Sign,
+    /// Explicit confirmation of the review on screen: submit step 1.
+    Confirm,
+    /// Re-read the chains for the submitted transaction.
+    Refresh,
+    /// Abandon an unsubmitted attempt and return to the preconditions.
+    Cancel,
 }
