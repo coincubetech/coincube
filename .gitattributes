@@ -8,3 +8,9 @@ coincube-gui/src/installer/step/node/test_fixtures/** -text
 # and every hash changed (master `unit_tests (windows-latest, pinned)` red since
 # 2026-09-11). No end-of-line translation on checkin or checkout.
 vendor/branta/** -text
+
+# Unified-sighash KAT corpus (#498, #505): coincube-keychain-ffi's
+# `corpus_is_the_pinned_one` embeds coincube-core/tests/data/unified_sighash.json
+# with include_str! and asserts its byte length and SHA-256. The same autocrlf
+# rewrite turned 75340 bytes into 75509 on the Windows leg (one CR per line).
+coincube-core/tests/data/** -text
