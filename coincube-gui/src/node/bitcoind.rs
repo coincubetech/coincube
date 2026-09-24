@@ -515,37 +515,24 @@ pub fn node_version_label(subversion: &str) -> Option<String> {
 }
 
 /// What a running managed node actually *is*, as opposed to what it was
-/// configured to be: its flavour and whether its build enforces BIP-110.
-///
-/// The two travel together because the chain-repair planner needs both and they
-/// come from the same one source of truth — the node's own subversion. Splitting
-/// them across parameters is how a caller ends up pairing one node's flavour with
-/// another's enforcement.
+/// configured to be: the flavour read off the node's own subversion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ObservedBuild {
     pub flavor: NodeFlavor,
-    /// Whether this build enforces RDTS. See [`build_enforces_rdts`].
-    pub enforces_rdts: bool,
 }
 
 impl ObservedBuild {
-    /// Read both facts off a node's `getnetworkinfo.subversion`.
+    /// Read the flavour off a node's `getnetworkinfo.subversion`.
     pub fn from_subversion(subversion: &str) -> Self {
         Self {
             flavor: NodeFlavor::from_subversion(subversion),
-            enforces_rdts: build_enforces_rdts(subversion),
         }
     }
 
     /// Fall back to the configured flavour when the node would not tell us what it
-    /// is. Knots is assumed enforcing here for the same reason an undatable Knots
-    /// build is: with no evidence, the option that cannot loop is to leave the
-    /// chain alone.
+    /// is.
     pub fn assumed(flavor: NodeFlavor) -> Self {
-        Self {
-            flavor,
-            enforces_rdts: matches!(flavor, NodeFlavor::Knots),
-        }
+        Self { flavor }
     }
 }
 
@@ -2167,13 +2154,10 @@ impl Bitcoind {
                 // other. `running_flavor` is read from the node's own subversion.
                 crate::node::revalidate::reconcile_after_start(
                     coincube_datadir,
-                    &running,
-                    &config,
                     &identity,
                     crate::chain::ChainId::from(network),
                     ObservedBuild {
                         flavor: running_flavor,
-                        enforces_rdts: running_enforces_rdts,
                     },
                 );
                 return Ok(Bitcoind {
@@ -2287,8 +2271,6 @@ impl Bitcoind {
                         .unwrap_or_else(|| ObservedBuild::assumed(configured_flavor));
                     crate::node::revalidate::reconcile_after_start(
                         coincube_datadir,
-                        &started,
-                        &config,
                         &identity,
                         crate::chain::ChainId::from(network),
                         observed,
@@ -2654,10 +2636,9 @@ mod tests {
 
     // The timeout path, which is the one the bounded lock introduced. A holder that is
     // slow but not wedged makes a second caller give up — and a caller that then carried
-    // on would build a `BitcoinD` caching the endpoint-and-cookie-path identity, record a
-    // repair against it, and watch that authorisation stop matching the moment the marker
-    // finally landed. So giving up has to mean "no repair", not "repair under whatever
-    // identity we have".
+    // on would build a `BitcoinD` caching the endpoint-and-cookie-path identity and act
+    // on it, only to watch it stop matching the moment the marker finally landed. So
+    // giving up has to mean "unstable", not "settled on whatever identity we have".
     #[test]
     fn a_timed_out_caller_gets_an_unstable_identity_and_recovers_on_retry() {
         use fs4::fs_std::FileExt;
@@ -2702,58 +2683,21 @@ mod tests {
         );
         assert!(!timed_out.permits_chain_repair());
 
-        // ...and with that, no chain operation can be claimed, so nothing can issue
-        // `invalidateblock` or `reconsiderblock`, record a rollback floor, or reconcile.
-        // The identity is checked before the maintenance guard is even reached, so this
-        // says nothing about whether some other test happens to hold it.
-        let (state_dir, datadir) = {
-            let d = dir.join("coincube");
-            (d.clone(), crate::dir::CoincubeDirectory::new(d))
-        };
-        assert!(matches!(
-            crate::node::revalidate::probe_chain_operation(&datadir, &timed_out),
-            Err(crate::node::revalidate::ClaimRefused::UnstableIdentity)
-        ));
-        // Nor can the manual "Re-check chain" repair, which surfaces it to the user.
-        let refusal = crate::node::revalidate::clear_failure_flags(
-            &datadir,
-            &config,
-            &timed_out,
-            crate::node::revalidate::RevalidationPlan::ClearFailureFlags {
-                anchor_height: crate::node::revalidate::RDTS_ANCHOR_MAINNET,
-            },
-        )
-        .expect_err("must refuse");
-        assert!(
-            refusal.contains("identity"),
-            "the refusal should say why: {}",
-            refusal
-        );
-        // Refused before anything was written down, so there is no half-recorded repair
-        // for a later start to trip over.
-        assert_eq!(
-            crate::node::revalidate::ManagedNodeState::load(&datadir).sanctioned_rollback,
-            None
-        );
-        let _ = std::fs::remove_dir_all(&state_dir);
-
         // The original holder now finishes and releases, which is the "late successful
         // installation" the timed-out caller has to pick up.
         let installed = establish_node_instance(&network_dir).expect("installed");
         let _ = FileExt::unlock(&held);
 
-        // A later start — or an explicit repair — settles on the marker that landed, and
-        // repairs are permitted again.
+        // A later start settles on the marker that landed, and the identity-gated
+        // write is permitted again.
         let retried = establish_node_identity(&config);
         assert_eq!(retried, NodeIdentity::Stable);
         assert!(retried.permits_chain_repair());
         assert_eq!(std::fs::read_to_string(&marker).unwrap(), installed);
-        // Deliberately not asserting that a claim now succeeds: that also depends on the
-        // process-wide maintenance guard other tests take, and taking it here to look
-        // would make *their* assertions flaky in return. `permits_chain_repair` above is
-        // the identity-level property this test owns; that the gate then opens is
-        // asserted under the serialising lock in
-        // `revalidate::tests::an_unsettled_identity_permits_no_chain_operation`.
+        // `permits_chain_repair` is the identity-level property this test owns; what
+        // that gate protects — the flavour ledger advancing only under a settled
+        // identity — is asserted in
+        // `revalidate::tests::an_unsettled_identity_leaves_the_ledger_alone`.
 
         let _ = std::fs::remove_dir_all(&dir);
     }
