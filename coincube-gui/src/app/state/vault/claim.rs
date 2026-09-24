@@ -581,6 +581,13 @@ impl ClaimStep1Panel {
         &self.wallet
     }
 
+    /// The account of the session the panel works under, for tests at the
+    /// App level (the field itself is the panel's).
+    #[cfg(test)]
+    pub(crate) fn connect_account(&self) -> Option<&str> {
+        self.connect.as_ref().map(|c| c.account.as_str())
+    }
+
     pub fn coins(&self) -> Option<&CoinSet> {
         self.pre
             .checked

@@ -3496,9 +3496,16 @@ impl App {
             }
             Some(crate::app::features::ClaimEntry::Step1) => {
                 let connect = self.claim_connect_session();
-                if let Some(panel) = &mut self.panels.claim {
-                    panel.set_connect(connect);
+                let replaced = self
+                    .panels
+                    .claim
+                    .as_mut()
+                    .is_some_and(|panel| panel.set_connect(connect));
+                if replaced {
+                    self.revoke_claim();
                 }
+                // `set_current_panel` reloads the panel: a revoked session is
+                // re-bound there, under the session just handed in.
                 let close_task = self
                     .panels
                     .current_mut()
@@ -3523,9 +3530,12 @@ impl App {
 
     /// Revoke any live claim coordinator, synchronously, and advance the
     /// claim generation. Called before the context a coordinator was created
-    /// under is replaced: Connect sign-out, Cube lock, Cube/tab close. The
-    /// revocation is the barrier; the generation bump is the notification
-    /// every in-flight coordinator call also checks.
+    /// under is replaced: Connect sign-out or account change (from this tab
+    /// or, through `Tab::invalidate_fork_session`, any other), a node
+    /// backend switch, Cube lock, Cube/tab close. The revocation is the
+    /// barrier; the generation bump is the notification every in-flight
+    /// coordinator call also checks. The journaled claim itself survives:
+    /// the panel re-binds it under the next context.
     pub fn revoke_claim(&mut self) {
         if let Some(panel) = &mut self.panels.claim {
             panel.revoke();
@@ -5816,22 +5826,33 @@ impl App {
                 // the Connect panel from the view layer.
                 self.cache.btcb2_server_enabled =
                     self.panels.connect.account.bitcoin_blake2b_server_enabled();
-                // Claim step 1 works under the account's session: a sign-out
-                // revokes its coordinator here, synchronously, before anything
-                // else acts on the change; a sign-in lets its next probe run.
+                // Claim step 1 works under the account's session. A sign-out,
+                // or a different account or client identity, revokes its
+                // coordinator here, synchronously, before anything else acts
+                // on the change, and advances the generation; a sign-in lets
+                // the panel continue — a signed construction is finalised, a
+                // journaled claim re-bound under the new session.
                 let claim_signed_in =
                     !explicit_logout && self.panels.connect.account.is_authenticated();
-                if !claim_signed_in {
-                    self.revoke_claim();
-                }
                 let claim_session = if claim_signed_in {
                     self.claim_connect_session()
                 } else {
                     None
                 };
-                if let Some(panel) = &mut self.panels.claim {
-                    panel.set_connect(claim_session);
+                let claim_replaced = self
+                    .panels
+                    .claim
+                    .as_mut()
+                    .is_some_and(|panel| panel.set_connect(claim_session));
+                if !claim_signed_in || claim_replaced {
+                    self.revoke_claim();
                 }
+                let claim_daemon = self.daemon.clone();
+                let claim_task = self
+                    .panels
+                    .claim
+                    .as_mut()
+                    .map_or_else(Task::none, |panel| panel.recover(claim_daemon));
                 let pending_claim = self.start_pending_claim();
                 if self.cache.chain().is_blake2b() {
                     self.cache.marketplace_flags = Default::default();
@@ -5935,9 +5956,16 @@ impl App {
                             view::NodeSettingsMessage::SwitchToConnect,
                         ),
                     )));
-                    return Task::batch([task, persist_grant, pending_claim, nav, switch]);
+                    return Task::batch([
+                        task,
+                        persist_grant,
+                        pending_claim,
+                        claim_task,
+                        nav,
+                        switch,
+                    ]);
                 }
-                return Task::batch([task, persist_grant, pending_claim]);
+                return Task::batch([task, persist_grant, pending_claim, claim_task]);
             }
             Message::View(view::Message::DismissReceivedCelebration) => {
                 self.show_received_celebration = false;
@@ -6872,6 +6900,11 @@ impl App {
                     .into(),
             )));
         }
+        // A claim in flight is bound to the daemon being replaced (#509 item
+        // 7): revoke it, synchronously, before the switch is dispatched. The
+        // panel re-binds the journaled claim on its next entry if the new
+        // backend admits one.
+        self.revoke_claim();
         // Mark a switch in flight so subsequent sync probes / triggers don't
         // re-fire it before it completes (the config only changes on success).
         self.daemon_switch_in_progress = true;
@@ -9179,5 +9212,150 @@ mod claim_step1_tests {
             "routed to the claim panel while Overview is current"
         );
         let _ = std::fs::remove_dir_all(&root_path);
+    }
+
+    /// Gandalf's reviewer regression (#518 review, finding 2): the GUI
+    /// broadcasts a Connect log-out or session replacement to every tab
+    /// through `Tab::invalidate_fork_session`; a Bitcoin App holding a claim
+    /// must have it revoked there, whether or not it originated the change.
+    #[test]
+    fn reviewer_global_auth_invalidation_must_revoke_bitcoin_claim() {
+        let _guard = crate::app::session::test_guard();
+        let root = std::env::temp_dir().join(format!("reviewer-auth-{}", uuid::Uuid::new_v4()));
+        let (app, _) = bitcoin_app(&root);
+        let generation = app.panels.claim_generation.subscribe();
+        let before = *generation.borrow();
+        let mut tab = crate::gui::tab::Tab::new(1, crate::gui::tab::State::App(app));
+        // GUI::update broadcasts this to every tab on global LogOut/SetSession.
+        drop(tab.invalidate_fork_session());
+        let after = *generation.borrow();
+        assert!(
+            matches!(&tab.state, crate::gui::tab::State::App(_)),
+            "the Bitcoin App itself stays open"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        assert_ne!(
+            before, after,
+            "global auth invalidation left the Bitcoin claim generation unchanged"
+        );
+    }
+
+    /// Finding 2's Some→Some half through the App's own hook: a replacement
+    /// session (another account) revokes the claim and advances the
+    /// generation; a first sign-in, and the same session again, do not. The
+    /// account panel is put in its signed-in state directly — the hook reads
+    /// it, it does not drive it.
+    #[test]
+    fn a_replacement_session_through_the_hook_revokes_and_bumps() {
+        let _guard = crate::app::session::test_guard();
+        let root = std::env::temp_dir().join(format!("claim-replace-{}", uuid::Uuid::new_v4()));
+        let (mut app, _) = bitcoin_app(&root);
+        let generation = app.panels.claim_generation.subscribe();
+        let sign_in = |app: &mut App, id: u32| {
+            let mut client = crate::services::coincube::CoincubeClient::for_test(
+                "https://connect.example.invalid",
+            );
+            client.set_token("fixture-token");
+            app.panels.connect.account.client = client;
+            app.panels.connect.account.user = Some(crate::services::coincube::User {
+                id,
+                email: format!("{id}@example.invalid"),
+                email_verified: Some(true),
+            });
+            app.panels.connect.account.step =
+                crate::app::state::connect::account::ConnectFlowStep::Dashboard;
+        };
+        // Any account message runs the hook; this one changes nothing else.
+        let poke = |app: &mut App| {
+            drop(app.update(Message::View(view::Message::ConnectAccount(
+                view::ConnectAccountMessage::PlanLoaded(None, 0),
+            ))))
+        };
+        let account = |app: &App| {
+            app.panels
+                .claim
+                .as_ref()
+                .unwrap()
+                .connect_account()
+                .map(str::to_string)
+        };
+
+        sign_in(&mut app, 7);
+        let before = *generation.borrow();
+        poke(&mut app);
+        assert_eq!(
+            *generation.borrow(),
+            before,
+            "a first sign-in replaces nothing"
+        );
+        assert_eq!(account(&app).as_deref(), Some("7"));
+        poke(&mut app);
+        assert_eq!(
+            *generation.borrow(),
+            before,
+            "the same session again replaces nothing"
+        );
+
+        sign_in(&mut app, 8);
+        poke(&mut app);
+        assert_ne!(
+            *generation.borrow(),
+            before,
+            "another account replaces the session: revoked and bumped"
+        );
+        assert_eq!(account(&app).as_deref(), Some("8"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Gandalf's reviewer regression (#518 review, finding 3): a backend
+    /// switch replaces the daemon a reviewed claim is bound to, so the claim
+    /// is revoked before the switch is dispatched (#509 item 7).
+    #[test]
+    fn reviewer_backend_switch_must_revoke_claim_before_dispatch() {
+        let _guard = crate::app::session::test_guard();
+        let root = std::env::temp_dir().join(format!("reviewer-provider-{}", uuid::Uuid::new_v4()));
+        let (mut app, _) = bitcoin_app(&root);
+        let generation = app.panels.claim_generation.subscribe();
+        let before = *generation.borrow();
+        let mut cfg = app.daemon.as_ref().unwrap().config().unwrap().clone();
+        if let Some(coincubed::config::BitcoinBackend::Esplora(selection)) =
+            cfg.bitcoin_backend.as_mut()
+        {
+            selection.addr =
+                "https://replacement.example.invalid/api/v1/esplora/bitcoin/mainnet".into();
+        }
+        // Do not poll: the revocation must precede dispatch of the switch.
+        drop(app.spawn_daemon_switch(cfg));
+        let after = *generation.borrow();
+        assert!(app.daemon_switch_in_progress);
+        let _ = std::fs::remove_dir_all(&root);
+        assert_ne!(
+            before, after,
+            "backend switch left the claim generation unchanged"
+        );
+    }
+
+    /// Control for the test above: the Blake2b refusal dispatches no switch
+    /// and revokes nothing.
+    #[tokio::test]
+    async fn a_refused_blake2b_backend_switch_revokes_nothing() {
+        let root = std::env::temp_dir().join(format!("claim-provider-{}", uuid::Uuid::new_v4()));
+        let (mut app, _) = {
+            let _guard = crate::app::session::test_guard();
+            bitcoin_app(&root)
+        };
+        let generation = app.panels.claim_generation.subscribe();
+        let before = *generation.borrow();
+        let mut cfg = app.daemon.as_ref().unwrap().config().unwrap().clone();
+        cfg.bitcoin_config.chain = crate::chain::ChainId::BitcoinBlake2b;
+        let produced = outputs(app.spawn_daemon_switch(cfg)).await;
+        assert!(
+            matches!(&produced[..], [Message::View(view::Message::ShowError(_))]),
+            "{:?}",
+            produced
+        );
+        assert_eq!(*generation.borrow(), before, "the refusal revokes nothing");
+        assert!(!app.daemon_switch_in_progress);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

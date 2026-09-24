@@ -724,6 +724,12 @@ impl Tab {
                 command = startup.map(Message::Launch);
                 replacement = Some(State::Home(home));
             }
+            // A Bitcoin App stays open across a Connect change — its wallet
+            // does not depend on the session — but a claim in flight does:
+            // revoke it here, at the global auth boundary, whether or not
+            // this tab originated the change. The App's own hook re-binds it
+            // when a session is back.
+            State::App(app) => app.revoke_claim(),
             State::Loader(loader) if loader.cube_settings.network.is_blake2b() => {
                 loader.invalidate_fork_session()
             }
