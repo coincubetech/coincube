@@ -132,6 +132,15 @@ Sources: `coincube-gui/src/services/coincube/`, `coincubed/src/connect.rs`
 **Remote backend choice**
 - Creating a Cube, and every restore and recovery flow, is local-first and no longer offers a remote-backend choice. Add wallet still offers COINCUBE | Connect as the backend on mainnet and signet (`installer/mod.rs:722`); that option's inherited "Liana Connect" label is retired separately.
 
+#### Removed
+
+**RDTS / BIP-110 fork-repair machinery (sunset PR 4, #510)**
+
+Sources: `coincube-gui/src/node/revalidate.rs`, `coincube-gui/src/node/bitcoind.rs`, `coincube-gui/src/app/state/vault/settings/bitcoind.rs`, `coincubed/src/bitcoin/{mod.rs,d/mod.rs,poller/looper.rs}`
+- The managed node no longer carries any fork-repair logic: the "Re-check chain" button in node settings, the automatic flag-clearing repair on start, the Core → Knots rewind-and-replay, the sanctioned-rollback exception in the daemon's deep-reorg guard, and the one-time "your node had been following the BIP-110 fork chain" notice are all gone. No Knots build we ship enforces the deployment; the managed Knots pin stays on `29.3.knots20260507`, and a `29.3.knots20260508` binary on disk is still never launched.
+- The `bitcoin.conf` read-compat for the legacy `consensusrules=rdts` line, and the start-path migration that inferred a flavour from it, are gone. A conf still carrying the line (v1.0.1-rc1 wrote it for every managed Knots node) still parses: the line is dropped on read, nothing is recorded from it, and the managed node's start rewrites the file without it before the binary reads it. The flavour ledger (`managed_node_state.json`) keeps only the configured and last-observed flavour; older sidecars still load and drop the retired fields on their next write.
+- The typed `getdeploymentinfo` reader behind the Blake2b chain-health probe is unchanged.
+
 #### Fixes
 
 **Spark wallet now works in installed builds**

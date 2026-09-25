@@ -4,7 +4,7 @@ Scope: coincube-api#288, the first of the gates listed in
 `docs/BTCB2_MANAGED_NODE.md` ("coincubed chain health"). Read that document
 first; this one covers only the typed probe `coincubed` now offers and what it
 does and does not establish. Nothing here activates the fork, starts a node,
-or changes how the Bitcoin-family RDTS probe behaves.
+or touches the managed-node start path.
 
 ## What the node reports
 
@@ -85,22 +85,20 @@ a missing `active` is `Malformed`, not `false`.
   establishes no chain authentication and no spend safety. Those remain
   separate gates (`docs/BTCB2_MANAGED_NODE.md`, "Gates before the provider can
   be un-dormant").
-- **No BIP9 interpretation.** `DeploymentStatus::has_failed` is not consulted;
-  on the tagged build it is always `false` for `reduced_data` (no `bip9`
-  object), so it can say nothing about flag-day expiry.
+- **No BIP9 interpretation.** On the tagged build `reduced_data` carries no
+  `bip9` object, so a BIP9 state could say nothing about flag-day expiry; the
+  reader does not look for one.
 - **Unknown fields are tolerated** everywhere (root, `blake2b`, `reduced_data`,
   other deployments), so a future node can extend the result without breaking
   the probe; only the fields the reader uses are validated strictly.
 
-### The Bitcoin-family RDTS probe is unchanged
+### The Bitcoin-family RDTS probe is gone
 
-`BitcoinD::deployment_status(name)` and `DeploymentStatus::has_failed()` — and
-their sole caller, the managed-node revalidation's `rdts_abandoned` input
-(`coincube-gui/src/node/revalidate.rs`) — are not modified. That probe
-intentionally maps "RPC failed / no such deployment" to `None` and a missing
-`active` to `false`, which is correct for its purpose (absence is not evidence
-of failure on a Core swap). The new reader is a separate, opt-in API with no
-callers yet.
+`BitcoinD::deployment_status(name)` and `DeploymentStatus::has_failed()`, and
+their sole caller (the managed-node revalidation's `rdts_abandoned` input),
+were deleted in RDTS sunset PR 4 (#510). This reader is the only
+`getdeploymentinfo` consumer left in the workspace; it is a separate, opt-in
+API whose consumer is Connect (coincube-api#288), with no in-repo Rust caller.
 
 ## Fixtures covered by the unit tests
 

@@ -86,16 +86,16 @@ records anything: conf *and* ledger are untouched. A **write failure**
 (`NotReplaced`) happens after the edit ran: the conf still holds its previous
 bytes, but whatever the edit recorded on its way — for the installer and
 settings writers, the flavour ledger (`record_configured` runs inside the
-edit, deliberately before the write that would erase a legacy marker) —
-stays recorded. The two files are not one transaction and no rollback is
-attempted; the next successful write brings the conf in line with the ledger.
+edit, ahead of the conf write) — stays recorded. The two files are not one
+transaction and no rollback is attempted; the next successful write brings
+the conf in line with the ledger.
 
 | Writer | When | Early refusal (`Busy` / unreadable / no port) | Write failure (`NotReplaced`) |
 |---|---|---|---|
 | installer `DefineConfig` | node setup | step error; conf and ledger untouched | step error; conf unchanged, ledger may already name the flavour |
 | settings `write_internal_bitcoind_config` | setup, flavour switch, restart-to-apply, resources apply | `Err` before the ledger; nothing started | `Err`; nothing started; conf unchanged, ledger may already name the flavour |
 | `tor::prepare_inbound_tor` (outbound-only reset, then the inbound merge once Tor is up) | every managed start | **start refused** (`StartInternalBitcoindError::ConfigUnavailable`) — the file may still name a Tor that is not running, and a node must not be started from stale privacy configuration | same refusal; it records nothing else |
-| `bitcoind::migrate_legacy_rdts_conf` | every `maybe_start` | skipped this start (retried next start, as before) | logged; ledger already names Knots, the marker line stays until the next start |
+| `bitcoind::maybe_start` (rewrite of the parsed conf before the spawn; drops the legacy `consensusrules` line `from_ini` tolerates) | every spawn of a managed Bitcoin-family node: after the same-flavour reuse check (which takes no lock) and before a mismatched running node is stopped for a flavour switch | **start refused** (`ConfigUnavailable`, the Tor preparation's class); the file is untouched, so a legacy line stays until the next start, and a running node the call would have switched away from is left running. Two routes stop the node *before* reaching any locked rewrite and can therefore be left with no node until the retry: the loader when inbound-over-Tor is being applied (`loader.rs`, after the Tor preparation's own locked rewrite) and the settings "restart to apply" (`settings/bitcoind.rs`, which stops before the Tor preparation; pre-existing) | same refusal; it records nothing else |
 
 Because each rewrite reads under the lock, a section another setup persisted
 a moment earlier is never erased by a stale snapshot. Tor's bootstrap — the
@@ -176,11 +176,11 @@ a Bitcoin chain never resolves a Blake2b binary and the Blake2b provider has no
 Bitcoin fallback. `InternalBitcoindConfig` never emits `consensusrules` for any
 flavour.
 
-The RDTS repair planner (`node/revalidate.rs`) answers
-`Skip(NotABitcoinChain)` for a Blake2b chain, or a Blake2b provider on any
-chain, **before** consulting heights, flavours or prune state; and
-`reconcile_after_start` returns before loading the ledger, so a Blake2b start
-can neither read nor rewrite the Bitcoin node's repair records.
+`reconcile_after_start` (`node/revalidate.rs`; the flavour-ledger record is
+all that remains of the RDTS repair machinery after sunset PR 4, #510) refuses
+a Blake2b chain, or a Blake2b provider on any chain, **before** loading the
+ledger, so a Blake2b start can neither read nor rewrite the Bitcoin node's
+flavour ledger.
 
 ### Release verification
 
@@ -240,9 +240,7 @@ fields below are taken from Knots tag `v29.4.1.knots20260508`
   `RdtsExpiryTime`, and `active` is `RdtsActiveAt(height + 1, parent MTP)` —
   it turns **`false` again once the parent's median-time-past reaches
   `expiry_time`**. It is omitted entirely when unscheduled. There is no `bip9`
-  sub-object: the desktop's `DeploymentStatus.status` (read from `bip9.status`)
-  is always empty on this build, so `has_failed()` (`!active && status ==
-  "failed"`) is always `false` — including after expiry.
+  sub-object on this build.
   RDTS previously activated via versionbits; that deployment was removed after
   the stall at 961633 (`chainparams.cpp`, mainnet comment).
 
@@ -285,14 +283,11 @@ unscheduled — not a failed deployment, and not "unscheduled" either.
 Flipping `RuntimeSupport` alone would not produce a working Blake2b node. The
 integration work that remains, in the order it is needed:
 
-1. **coincubed chain health** — a reader keyed on the top-level
-   `blake2b.{height,active}` object rather than on `deployments.reduced_data`;
-   the existing `deployment_status("reduced_data")` probe is a Bitcoin-chain
-   RDTS repair input and does not describe the hardfork. And a reading of
-   `reduced_data.active` that understands expiry: `false` after `expiry_time`
-   is the designed end of RDTS enforcement, not a failed deployment (today's
-   `has_failed()` is always `false` on this build, so nothing would even
-   notice).
+1. **coincubed chain health** — done (#376, `docs/BTCB2_CHAIN_HEALTH.md`):
+   a reader keyed on the top-level `blake2b.{height,active}` object and on
+   `deployments.reduced_data` as a flag-day schedule with an expiry. The old
+   Bitcoin-chain `deployment_status("reduced_data")` probe was a repair input,
+   never a hardfork reader, and was deleted in RDTS sunset PR 4 (#510).
 2. **Concurrent port allocation** — done: allocate-and-persist and every
    conf rewriter are serialised by the datadir-wide lock and persisted
    atomically (see *Serialisation and atomic persistence*), within the limits

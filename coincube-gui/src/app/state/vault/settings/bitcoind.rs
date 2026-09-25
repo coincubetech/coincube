@@ -849,48 +849,6 @@ impl State for BitcoindSettingsState {
                     NodeSettingsMessage::CopyToClipboard(value) => {
                         return clipboard::write(value);
                     }
-                    NodeSettingsMessage::RepairNodeChain => {
-                        // Manual counterpart to the automatic check in
-                        // `Bitcoind::maybe_start`. Idempotent and non-destructive:
-                        // `reconsiderblock` only clears rejection flags and lets the
-                        // node re-activate the most-work chain, so the worst case is
-                        // that it does nothing — with one exception, which
-                        // `clear_failure_flags` handles by claiming the node first: a
-                        // replay in progress is holding the chain down with an
-                        // `invalidateblock` mark that this would clear.
-                        let Some(settings) = self.bitcoind_settings.as_ref() else {
-                            return Task::none();
-                        };
-                        let cfg = settings.bitcoind_config.clone();
-                        let network = cache.network;
-                        let coincube_datadir = cache.datadir_path.clone();
-                        return Task::perform(
-                            async move {
-                                tokio::task::spawn_blocking(move || {
-                                    repair_managed_node_chain(&coincube_datadir, &cfg, network)
-                                })
-                                .await
-                                .unwrap_or_else(|e| Err(e.to_string()))
-                            },
-                            |res| {
-                                match res {
-                                Ok(msg) => {
-                                    Message::View(view::Message::ShowToast(log::Level::Info, msg))
-                                }
-                                Err(e) => Message::View(view::Message::ShowError(
-                                    crate::user_error::UserError::logged(
-                                        "Couldn't reach your node",
-                                        "Check that it's running and that the connection details in Settings are right, then try again.",
-                                        crate::user_error::CC_DMN_DOWN,
-                                        true,
-                                        e,
-                                    )
-                                    .toast(),
-                                )),
-                            }
-                            },
-                        );
-                    }
                     NodeSettingsMessage::RestartNodeToApply => {
                         // Restart the managed node now so freshly-toggled
                         // inbound-over-Tor settings take effect, reusing the setup
@@ -1282,29 +1240,6 @@ impl State for BitcoindSettingsState {
                     );
                 }
 
-                // "Chain repair": manual `reconsiderblock` at the BIP-110 anchor.
-                // Managed node, mainnet only (the only chain the fork reached), and
-                // hidden during a setup/flavour switch. The automatic check on node
-                // start covers the normal case; this is the escape hatch for when
-                // the state that drives it has been lost.
-                if crate::node::revalidate::rdts_anchor_height(cache.network).is_some()
-                    && self.pending_node_setup.is_none()
-                    && self
-                        .bitcoind_settings
-                        .as_ref()
-                        .and_then(|s| s.managed_flavor)
-                        .is_some()
-                    && matches!(
-                        self.full_config
-                            .as_ref()
-                            .and_then(|c| c.bitcoin_backend.as_ref()),
-                        Some(BitcoinBackend::Bitcoind(_))
-                    )
-                {
-                    setting_panels
-                        .push(view::vault::settings::chain_repair_section().map(map_node_msg));
-                }
-
                 // "Node resources": prune target + mempool cap for the internal
                 // managed node. All networks (unlike inbound-Tor), the managed
                 // node only, and hidden during a setup/flavour switch/restart.
@@ -1466,13 +1401,10 @@ fn write_internal_bitcoind_config(
                 )?,
             };
 
-            // Nothing in the file records the flavour any more, and rebuilding
-            // it from the struct drops any legacy `consensusrules=rdts` a
-            // previous release wrote — so the ledger is where the choice has
-            // to be kept, and it has to be kept before the write that erases
-            // the old marker.
+            // Nothing in the file records the flavour, so the ledger is where the
+            // choice has to be kept — and kept before the write, so a write that
+            // then fails still leaves the choice on record.
             crate::node::revalidate::ManagedNodeState::record_configured(coincube_datadir, flavor);
-            conf.enforce_rdts = false;
 
             let mut network_conf = existing.unwrap_or(InternalBitcoindNetworkConfig {
                 rpc_port,
@@ -1492,11 +1424,11 @@ fn write_internal_bitcoind_config(
     .logged("writing the managed bitcoin.conf from settings");
 
     let cookie_path = internal_bitcoind_cookie_path(&bitcoind_datadir, &network);
-    // Stamp the datadir with an identity, if it does not already carry one. This is
-    // what lets a chain repair be scoped to the node it was performed on: the RPC port
-    // and the cookie path both survive the datadir being wiped and rebuilt underneath
-    // them, and a repair authorisation left over from the old one would then apply to
-    // the new. The marker lives inside the datadir, so it goes when the datadir goes.
+    // Stamp the datadir with an identity, if it does not already carry one. The RPC
+    // port and the cookie path both survive the datadir being wiped and rebuilt
+    // underneath them, so anything scoped to the node by those alone would carry over
+    // to its replacement. The marker lives inside the datadir, so it goes when the
+    // datadir goes.
     if let Err(e) = crate::node::bitcoind::ensure_node_instance_marker(&cookie_path) {
         // Not fatal: without it, identity falls back to the endpoint and cookie path,
         // which is where it stood before the marker existed.
@@ -1513,41 +1445,6 @@ fn write_internal_bitcoind_config(
 /// installed from those bytes. Returns the `BitcoindConfig` and the live
 /// `Bitcoind` handle (which keeps the lock file alive) to be stored by the
 /// caller.
-/// Clear the block-index rejection flags below the BIP-110 anchor on the managed
-/// node, so it can follow the most-work chain again.
-///
-/// Blocking (opens an RPC connection), so callers must run it off the UI thread.
-/// The `reconsiderblock` itself is fire-and-forget: re-activating the chain can
-/// reconnect many blocks and outlast the RPC socket timeout, so we return as soon
-/// as the request is away and let the node get on with it. Progress shows up in
-/// the usual sync indicators.
-fn repair_managed_node_chain(
-    coincube_datadir: &CoincubeDirectory,
-    cfg: &BitcoindConfig,
-    network: Network,
-) -> Result<String, String> {
-    let anchor_height = crate::node::revalidate::rdts_anchor_height(network)
-        .ok_or_else(|| "There is nothing to repair on this network.".to_string())?;
-    // An unreadable state sidecar is set aside by `clear_failure_flags` itself, once it
-    // owns the node and knows the repair is going ahead — not here. Doing it before the
-    // identity is settled would discard the one record telling the next start that
-    // something may still be pending, in exactly the case where the repair is then
-    // refused.
-    //
-    // Re-attempt the identity here too, so a start that could not settle it does not
-    // leave the user with a button that can never work — this is the "explicit repair"
-    // retry. It still refuses rather than repairing under a provisional identity, and
-    // `clear_failure_flags` turns that into a message the user can act on.
-    let identity = crate::node::bitcoind::establish_node_identity(cfg);
-    crate::node::revalidate::clear_failure_flags(
-        coincube_datadir,
-        cfg,
-        &identity,
-        crate::node::revalidate::RevalidationPlan::ClearFailureFlags { anchor_height },
-    )?;
-    Ok("Asked the node to re-check its chain. This may take a few minutes.".to_string())
-}
-
 fn configure_and_start_internal_bitcoind(
     coincube_datadir: CoincubeDirectory,
     network: Network,
@@ -1713,10 +1610,9 @@ impl BitcoindSettings {
         // For the internal managed node, recover its flavour so the node card can
         // show a Core/Knots switcher.
         //
-        // Deliberately *not* from the on-disk `bitcoin.conf`: that file no longer
-        // records the flavour at all (the `consensusrules=rdts` line it used to be
-        // inferred from is not written any more), so reading `conf.flavor` reports
-        // Core for every managed node, Knots included.
+        // Deliberately *not* from the on-disk `bitcoin.conf`: that file does not
+        // record the flavour, so reading `conf.flavor` reports the `Core`
+        // placeholder for every managed node, Knots included.
         //
         // Observed before configured. The card states what the node *is*, and the
         // two can honestly disagree: `select_managed_bitcoind_exe` falls back to
@@ -2697,17 +2593,6 @@ mod tests {
         );
         assert_eq!(state.pending_flavor_switch, None);
 
-        // The chain-repair escape hatch dispatches its work to a blocking task and
-        // must not disturb any settings state on the way (in particular it must not
-        // open a flavour-switch modal or a node-setup panel).
-        let _ = state.update(
-            Some(daemon.clone()),
-            &cache,
-            node_message(view::NodeSettingsMessage::RepairNodeChain),
-        );
-        assert_eq!(state.pending_flavor_switch, None);
-        assert!(state.pending_node_setup.is_none());
-
         let _ = state.update(
             Some(daemon.clone()),
             &cache,
@@ -2939,9 +2824,11 @@ mod tests {
         assert_eq!(net.rpc_auth, Some(rpc_auth)); // preserved
         assert_eq!(after.max_mempool_mb, Some(100)); // updated
 
-        // No `consensusrules` is written, and the flavour is kept in the ledger
-        // instead of the file — a write must not leave the legacy line behind.
-        assert!(!after.enforce_rdts);
+        // No `consensusrules` is written; the flavour is kept in the ledger
+        // instead of the file.
+        assert!(!std::fs::read_to_string(&config_path)
+            .unwrap()
+            .contains("consensusrules"));
         assert_eq!(
             crate::node::bitcoind::configured_managed_flavor(&datadir),
             Some(NodeFlavor::Knots),
@@ -3467,6 +3354,80 @@ mod tests {
         assert_eq!(
             entries,
             vec![crate::node::managed_conf::MANAGED_CONF_LOCK_FILE]
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // The settings writer is a locked read-modify-write on a fresh read: a
+    // section another writer added while holding the lock survives the rewrite
+    // that follows its release. Handshake, not wall-clock: contention is proven
+    // (a quick bounded acquire is `Busy` while the writer holds), the writer
+    // persists and releases on signal, and only then does the settings write run
+    // its fresh read. Ported from the legacy-conf migration test that RDTS sunset
+    // PR 4 deleted, so the lock's end-to-end contention coverage does not drop
+    // with it; the Busy half lives in `settings_refuse_on_a_busy_conf_lock_before_any_write`.
+    #[test]
+    fn a_settings_write_reads_fresh_after_a_concurrent_writer_releases_the_lock() {
+        use crate::node::managed_conf::ManagedConfLock;
+        let (base, datadir) = a_temp_datadir("fresh-read");
+        let conf_path = internal_bitcoind_config_path(&internal_bitcoind_datadir(&datadir));
+        std::fs::create_dir_all(conf_path.parent().unwrap()).unwrap();
+        // An existing conf with a mainnet section, as a previous setup left it.
+        std::fs::write(
+            &conf_path,
+            "[main]\nrpcport=41001\nport=41002\nprune=15000\n",
+        )
+        .unwrap();
+
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel::<()>();
+        let (persist_tx, persist_rx) = std::sync::mpsc::channel::<()>();
+        let writer = {
+            let datadir = datadir.clone();
+            let conf_path = conf_path.clone();
+            std::thread::spawn(move || {
+                let held = ManagedConfLock::acquire(&datadir).unwrap();
+                locked_tx.send(()).unwrap();
+                persist_rx.recv().unwrap();
+                // Append a section (an older writer that rewrites nothing else).
+                let mut text = std::fs::read_to_string(&conf_path).unwrap();
+                text.push_str("\n[testnet4]\nrpcport=41003\nport=41004\nprune=15000\n");
+                std::fs::write(&conf_path, text).unwrap();
+                drop(held);
+            })
+        };
+        locked_rx.recv().unwrap();
+        assert!(
+            matches!(
+                ManagedConfLock::acquire_with_bound(
+                    &datadir,
+                    2,
+                    std::time::Duration::from_millis(5)
+                ),
+                Err(crate::node::managed_conf::ManagedConfLockError::Busy { .. })
+            ),
+            "the writer must be holding the lock at this point"
+        );
+        persist_tx.send(()).unwrap();
+        writer.join().unwrap();
+
+        let cfg =
+            write_internal_bitcoind_config(&datadir, Network::Bitcoin, NodeFlavor::Knots, None)
+                .unwrap();
+        assert_eq!(
+            cfg.addr.port(),
+            41001,
+            "the existing mainnet ports are kept"
+        );
+        let after = InternalBitcoindConfig::from_file(&conf_path).unwrap();
+        assert_eq!(after.networks.len(), 2, "{:?}", after.networks.keys());
+        assert_eq!(
+            after.networks.get(&Network::Testnet4).map(|n| n.rpc_port),
+            Some(41003),
+            "the section the other writer added did not survive the fresh read"
+        );
+        assert_eq!(
+            crate::node::revalidate::ManagedNodeState::load(&datadir).configured_flavor,
+            Some(NodeFlavor::Knots)
         );
         let _ = std::fs::remove_dir_all(&base);
     }

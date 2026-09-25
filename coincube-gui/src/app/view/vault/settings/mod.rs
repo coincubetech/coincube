@@ -644,54 +644,6 @@ pub fn flavor_switch_confirm<'a>(target: NodeFlavor) -> Element<'a, NodeSettings
     .into()
 }
 
-/// "Chain repair" card: a manual `reconsiderblock` at the BIP-110 anchor.
-///
-/// A build that enforced BIP-110 recorded its rejections in the block index, and
-/// those marks persist into whatever binary opens the datadir next — which would
-/// otherwise keep following the stalled fork rather than the chain with the most
-/// work. The app repairs that automatically whenever the node starts, so this
-/// button only matters when the state driving that check has been lost (a datadir
-/// carried between machines, a wiped sidecar). The call is idempotent and clears
-/// flags rather than discarding anything.
-///
-/// Slated for removal once every datadir is confirmed migrated — see
-/// `plans/PLAN-rdts-sunset.md`, PR 4.
-///
-/// Not, however, safe to fire *concurrently with a chain replay*: `reconsiderblock`
-/// at the anchor clears the `BLOCK_FAILED_*` marks on its descendants, and the
-/// replay's own `invalidateblock` mark is one of them, so it would release the chain
-/// the replay is holding down. The handler claims the node before issuing anything
-/// and reports a busy node back to the user instead — see
-/// `node::revalidate::clear_failure_flags`.
-pub fn chain_repair_section<'a>() -> Element<'a, NodeSettingsMessage> {
-    card::simple(Container::new(
-        Column::new()
-            .spacing(15)
-            .push(
-                Row::new()
-                    .push(badge::badge(icon::bitcoin_icon()))
-                    .push(text("Chain repair").bold())
-                    .spacing(20)
-                    .align_y(Alignment::Center),
-            )
-            .push(
-                text(
-                    "If your node is stuck behind a chain it knows has more work, this \
-                     asks it to re-check those blocks. Nothing is deleted, and it's safe \
-                     to run more than once.",
-                )
-                .size(14)
-                .style(theme::text::secondary),
-            )
-            .push(
-                button::secondary(None, "Re-check chain")
-                    .on_press(NodeSettingsMessage::RepairNodeChain),
-            ),
-    ))
-    .width(Length::Fill)
-    .into()
-}
-
 /// What switching *to* `target` actually changes.
 ///
 /// Policy only. Neither build we ship enforces consensus rules the other does
@@ -2587,7 +2539,6 @@ mod tests {
         let _ = inbound_tor_section(false, true, true, false, false, false, None);
         let _ = inbound_tor_section(true, true, true, true, true, true, Some(&stats));
         let _ = inbound_tor_section(true, false, false, true, false, true, Some(&stats));
-        let _ = chain_repair_section();
     }
 
     // The copy names what actually differs — relay policy — and, in both
