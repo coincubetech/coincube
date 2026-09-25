@@ -1991,22 +1991,25 @@ impl Bitcoind {
         // rather than whichever is found first.
         let selected_exe = select_managed_bitcoind_exe(coincube_datadir, configured_flavor);
 
-        // Is a managed node already running on this RPC endpoint?
-        if let Ok(running) =
-            coincubed::BitcoinD::new(&config, "internal_bitcoind_start".to_string())
-        {
+        // Is a managed node already running on this RPC endpoint? Its flavour
+        // is read from its own subversion; `configured_flavor` is assumed when
+        // it does not say.
+        let running = coincubed::BitcoinD::new(&config, "internal_bitcoind_start".to_string())
+            .ok()
+            .map(|running| {
+                let running_flavor = running
+                    .subversion()
+                    .as_deref()
+                    .map(NodeFlavor::from_subversion)
+                    .unwrap_or(configured_flavor);
+                (running, running_flavor)
+            });
+        if let Some((_, running_flavor)) = &running {
             // The managed node is shared by every Vault, so flavour is global.
             // If the running node already matches the configured flavour, reuse
-            // it. If it doesn't (a global flavour switch — e.g. Core is up for
-            // existing Vaults and the user just picked Knots), stop it so we can
-            // relaunch the configured binary on the same datadir/port; every
-            // Vault then reconnects to the new flavour on the same RPC port.
-            let running_subversion = running.subversion();
-            let running_flavor = running_subversion
-                .as_deref()
-                .map(NodeFlavor::from_subversion)
-                .unwrap_or(configured_flavor);
-            if running_flavor == configured_flavor {
+            // it: it has read its file already, so no conf rewrite and no lock
+            // taken on this path.
+            if *running_flavor == configured_flavor {
                 info!("Internal bitcoind is already running ({running_flavor:?})");
                 // Reconcile here too: this vault may be attaching to a node another
                 // vault swapped the flavour of, so this is a start path like any
@@ -2016,7 +2019,7 @@ impl Bitcoind {
                     &identity,
                     crate::chain::ChainId::from(network),
                     ObservedBuild {
-                        flavor: running_flavor,
+                        flavor: *running_flavor,
                     },
                 );
                 return Ok(Bitcoind {
@@ -2025,12 +2028,6 @@ impl Bitcoind {
                         .map_err(|e| StartInternalBitcoindError::Lock(format!("{:?}", e)))?,
                 });
             }
-            info!(
-                "Managed node flavour switch {running_flavor:?} → {configured_flavor:?}; \
-                 stopping the running node so the configured binary can take over"
-            );
-            running.stop();
-            wait_for_internal_bitcoind_shutdown(&config);
         }
         // Rewrite the conf from its parsed form before the binary reads it.
         // `from_ini` accepts and drops the legacy `consensusrules` line older
@@ -2043,6 +2040,9 @@ impl Bitcoind {
         // refusal — lock busy, unreadable, not replaceable — is the same
         // `ConfigUnavailable` the Tor preparation returns for the same
         // reasons: no node is spawned on a file this build could not settle.
+        // It runs before the first irreversible step below — stopping a
+        // mismatched running node — so a refusal leaves that node running
+        // rather than stopped with no replacement started.
         crate::node::managed_conf::update_managed_conf(
             coincube_datadir,
             NodeChainFamily::Bitcoin,
@@ -2050,6 +2050,18 @@ impl Bitcoind {
         )
         .map(|outcome| outcome.logged("rewriting the managed bitcoin.conf before the spawn"))
         .map_err(|e| StartInternalBitcoindError::ConfigUnavailable(e.to_string()))?;
+        if let Some((running, running_flavor)) = running {
+            // A global flavour switch — e.g. Core is up for existing Vaults and
+            // the user just picked Knots: stop it so we can relaunch the
+            // configured binary on the same datadir/port; every Vault then
+            // reconnects to the new flavour on the same RPC port.
+            info!(
+                "Managed node flavour switch {running_flavor:?} → {configured_flavor:?}; \
+                 stopping the running node so the configured binary can take over"
+            );
+            running.stop();
+            wait_for_internal_bitcoind_shutdown(&config);
+        }
         let bitcoind_exe_path =
             selected_exe.ok_or(StartInternalBitcoindError::ExecutableNotFound)?;
         info!(
@@ -4054,6 +4066,178 @@ mod tests {
         // Canonical already: the next start's rewrite is byte-identical.
         expect_absent_binary(Bitcoind::maybe_start(Network::Bitcoin, config, &root));
         assert_eq!(std::fs::read_to_string(&conf_path).unwrap(), rewritten);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A stand-in for a managed node that is already up on the endpoint:
+    /// answers `echo` on both the node and the wallet URL, `getnetworkinfo`
+    /// with the given `subversion`, and `stop` — after which it closes its
+    /// listener, so the shutdown wait sees the endpoint go away as it would
+    /// for a real node. Records every method it was asked, in order. One
+    /// request per connection, which is how the client talks to it.
+    struct MockNode {
+        addr: std::net::SocketAddr,
+        methods: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl MockNode {
+        fn serve(subversion: &'static str) -> Self {
+            use std::io::{Read, Write};
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let methods = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let seen = methods.clone();
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    let Ok(mut stream) = stream else { break };
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    let (body_start, body_len) = loop {
+                        let n = stream.read(&mut chunk).unwrap_or(0);
+                        if n == 0 {
+                            break (None, 0);
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                            let head = String::from_utf8_lossy(&buf[..pos]).into_owned();
+                            let len = head
+                                .lines()
+                                .filter_map(|l| l.split_once(':'))
+                                .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+                                .and_then(|(_, v)| v.trim().parse::<usize>().ok())
+                                .unwrap_or(0);
+                            break (Some(pos + 4), len);
+                        }
+                    };
+                    let Some(start) = body_start else { continue };
+                    while buf.len() < start + body_len {
+                        let n = stream.read(&mut chunk).unwrap_or(0);
+                        if n == 0 {
+                            break;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                    }
+                    let req: serde_json::Value =
+                        serde_json::from_slice(&buf[start..]).unwrap_or(serde_json::Value::Null);
+                    let method = req
+                        .get("method")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    let id = req.get("id").cloned().unwrap_or(serde_json::Value::Null);
+                    seen.lock().unwrap().push(method.clone());
+                    let result = match method.as_str() {
+                        "echo" => serde_json::json!([]),
+                        "getnetworkinfo" => {
+                            serde_json::json!({ "version": 290000, "subversion": subversion })
+                        }
+                        "stop" => serde_json::json!("stopping"),
+                        _ => serde_json::Value::Null,
+                    };
+                    let body = serde_json::json!({ "result": result, "error": null, "id": id })
+                        .to_string();
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.flush();
+                    let _ = stream.shutdown(std::net::Shutdown::Write);
+                    if method == "stop" {
+                        break;
+                    }
+                }
+                // The listener drops here: every later connection is refused,
+                // which is what a stopped node looks like to the shutdown wait.
+            });
+            Self { addr, methods }
+        }
+
+        fn methods(&self) -> Vec<String> {
+            self.methods.lock().unwrap().clone()
+        }
+    }
+
+    // A flavour switch (the ledger names Knots, a Core node is up on the
+    // endpoint) settles the conf before it tells the running node to stop: with
+    // the conf lock held the start is refused as `ConfigUnavailable`, the node
+    // has not been asked to stop, is still reachable, and the file is
+    // byte-identical; with the lock free the file is rewritten, the node is
+    // stopped exactly once, and the start then fails on the absent binary as
+    // the other start tests do.
+    #[test]
+    fn a_flavour_switch_settles_the_conf_before_stopping_the_running_node() {
+        use crate::node::managed_conf::{with_quick_lock_bound, ManagedConfLock};
+        use crate::node::revalidate::ManagedNodeState;
+        let (base, root) = a_temp_coincube_datadir("switch");
+        let bitcoin_datadir = internal_bitcoind_datadir(&root);
+        let conf_path = internal_bitcoind_config_path(&bitcoin_datadir);
+        let cookie_path = internal_bitcoind_cookie_path(&bitcoin_datadir, &Network::Bitcoin);
+        std::fs::create_dir_all(cookie_path.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(&bitcoin_datadir).unwrap();
+        std::fs::write(&cookie_path, "__cookie__:not-a-secret").unwrap();
+        let legacy = "consensusrules=rdts\n[main]\nrpcport=12345\nport=12346\nprune=15000\n";
+        std::fs::write(&conf_path, legacy).unwrap();
+        ManagedNodeState {
+            configured_flavor: Some(NodeFlavor::Knots),
+            ..Default::default()
+        }
+        .save(&root)
+        .unwrap();
+        let node = MockNode::serve("/Satoshi:29.0.0/");
+        let config = BitcoindConfig {
+            rpc_auth: coincubed::config::BitcoindRpcAuth::CookieFile(cookie_path),
+            addr: node.addr,
+        };
+
+        // Lock held: refused before the running node is told to stop.
+        let held = ManagedConfLock::acquire(&root).unwrap();
+        let refused = with_quick_lock_bound(|| {
+            Bitcoind::maybe_start(Network::Bitcoin, config.clone(), &root)
+        });
+        drop(held);
+        match refused {
+            Err(StartInternalBitcoindError::ConfigUnavailable(e)) => {
+                assert!(e.contains("another setup is updating"), "{}", e)
+            }
+            other => panic!("expected ConfigUnavailable, got {:?}", other.map(|_| ())),
+        }
+        let methods = node.methods();
+        assert!(
+            !methods.iter().any(|m| m == "stop"),
+            "the running node was stopped on a refused start: {:?}",
+            methods
+        );
+        assert!(
+            methods.iter().any(|m| m == "getnetworkinfo"),
+            "{:?}",
+            methods
+        );
+        assert_eq!(std::fs::read_to_string(&conf_path).unwrap(), legacy);
+        // ... and it is still there to be reused or switched on the retry.
+        assert!(
+            coincubed::BitcoinD::new(&config, "liveness".to_string()).is_ok(),
+            "the running node went away on a refused start"
+        );
+
+        // Lock free: the conf is settled, then the node is stopped once, then
+        // the spawn fails on the absent binary.
+        match Bitcoind::maybe_start(Network::Bitcoin, config, &root) {
+            Err(StartInternalBitcoindError::ExecutableNotFound) => {}
+            other => panic!("expected ExecutableNotFound, got {:?}", other.map(|_| ())),
+        }
+        let methods = node.methods();
+        assert_eq!(
+            methods.iter().filter(|m| *m == "stop").count(),
+            1,
+            "{:?}",
+            methods
+        );
+        let rewritten = std::fs::read_to_string(&conf_path).unwrap();
+        assert!(!rewritten.contains("consensusrules"), "{}", rewritten);
 
         let _ = std::fs::remove_dir_all(&base);
     }
