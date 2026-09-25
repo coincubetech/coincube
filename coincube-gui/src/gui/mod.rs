@@ -196,7 +196,13 @@ impl GUI {
             message => message,
         };
         // A log-out or a sign-in from any tab reaches every tab, with its kind
-        // and where it came from (`Tab::invalidate_fork_session`).
+        // and where it came from (`Tab::invalidate_fork_session`). A
+        // `SetSession` counts as a sign-in only if the tab it came from will
+        // accept it: its account panel drops a completion of an operation
+        // begun before that tab's last auth invalidation
+        // (`ConnectAccountPanel::stale_completion`), and a completion the
+        // panel is about to drop must not tell the other tabs anything — this
+        // is the first reader of the variant, ahead of that dispatch.
         let auth_change = match &message {
             Message::Pane(
                 pane_id,
@@ -219,13 +225,29 @@ impl GUI {
                 crate::app::view::ConnectAccountMessage::LogOut => {
                     Some((tab::AuthChange::LogOut, *pane_id, *tab_id))
                 }
-                crate::app::view::ConnectAccountMessage::SetSession(login, _) => Some((
-                    tab::AuthChange::SignIn {
-                        user_id: login.user.id,
-                    },
-                    *pane_id,
-                    *tab_id,
-                )),
+                crate::app::view::ConnectAccountMessage::SetSession(login, epoch) => {
+                    let origin_epoch = self
+                        .panes
+                        .get(*pane_id)
+                        .and_then(|pane| pane.tabs.iter().find(|tab| tab.id == *tab_id))
+                        .and_then(|tab| match &tab.state {
+                            tab::State::App(app) => Some(app.connect_auth_epoch()),
+                            tab::State::Home(home) => Some(home.connect_account.auth_epoch()),
+                            _ => None,
+                        });
+                    match origin_epoch {
+                        Some(current) if *epoch >= current => Some((
+                            tab::AuthChange::SignIn {
+                                user_id: login.user.id,
+                            },
+                            *pane_id,
+                            *tab_id,
+                        )),
+                        // Stale for its own tab (dropped there on dispatch), or
+                        // no account panel to judge it: not a sign-in.
+                        _ => None,
+                    }
+                }
                 _ => None,
             },
             _ => None,

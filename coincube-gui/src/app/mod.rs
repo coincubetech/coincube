@@ -3452,6 +3452,13 @@ impl App {
         )
     }
 
+    /// This tab's Connect account panel's authentication epoch
+    /// (`ConnectAccountPanel::auth_epoch`): the GUI reads it before it
+    /// treats a `SetSession` completion from this tab as a sign-in.
+    pub fn connect_auth_epoch(&self) -> u64 {
+        self.panels.connect.account.auth_epoch()
+    }
+
     /// True when this tab's ConnectAccountPanel either already holds an
     /// authenticated session or can pull one out of the shared keyring
     /// entry. Lets the tab-level OpenConnectSignIn handler short-circuit

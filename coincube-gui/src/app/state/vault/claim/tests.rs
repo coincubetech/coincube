@@ -3192,4 +3192,98 @@ mod flow {
             let _ = std::fs::remove_dir_all(&f.root);
         }
     }
+
+    // ── Gandalf's round-5 reviewer probe (#518 issuecomment-5839188682),
+    // adopted as a regression with its assertions unchanged (its `eprintln!`
+    // dropped): a `SetSession` completion of a refresh begun before a
+    // log-out, arriving after both tabs freshly signed in as another
+    // account, is dropped by its own panel — and, since round 6, never
+    // broadcast as a sign-in to the sibling either.
+    #[tokio::test]
+    async fn round5_stale_setsession_must_not_broadcast_a_discarded_account() {
+        let first = reviewer_blank_app();
+        let mut second = reviewer_blank_app();
+        let mut f = reach_review().await;
+        sign_in_account(&mut second, &f, 7);
+        let first = reviewer_app(&mut f, first);
+        let mut gui = crate::gui::GUI::reviewer_claim_gui(first, second);
+        let old_login = f
+            ._server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/api/v1/auth/token/refresh")
+                    .json_body(json!({"refreshToken":"old-broadcast"}));
+                then.status(200).json_body(json!({
+                    "requires_2fa": false, "token":"old-seven", "refresh_token":"old-broadcast",
+                    "user":{"id":7,"email":"fixture@example.invalid","email_verified":true}
+                }));
+            })
+            .await;
+        let pending = gui.reviewer_account(
+            1,
+            view::ConnectAccountMessage::RefreshSession {
+                refresh_token: "old-broadcast".into(),
+            },
+        );
+        let stale = gui_outputs(pending)
+            .await
+            .into_iter()
+            .find(crate::gui::GUI::reviewer_is_set_session)
+            .expect("real old refresh must produce SetSession");
+        old_login.assert_hits_async(1).await;
+        drop(gui.reviewer_account(1, view::ConnectAccountMessage::LogOut));
+        gui.reviewer_app_mut(0).panels.connect.account.client =
+            CoincubeClient::for_test(f._server.base_url());
+        round4_sign_in_with_distinct_token(gui.reviewer_app_mut(0), &f, 8).await;
+        round4_sign_in_with_distinct_token(gui.reviewer_app_mut(1), &f, 8).await;
+        for index in [0, 1] {
+            assert_eq!(
+                gui.reviewer_app_mut(index)
+                    .panels
+                    .connect
+                    .account
+                    .user
+                    .as_ref()
+                    .unwrap()
+                    .id,
+                8
+            );
+            assert!(gui
+                .reviewer_app_mut(index)
+                .panels
+                .connect
+                .account
+                .is_authenticated());
+            assert!(!gui.reviewer_app_mut(index).claim_session_invalidated);
+        }
+        let ignored = gui.update(stale);
+        drive_account_messages(&mut gui, ignored).await;
+        let origin_user = gui
+            .reviewer_app_mut(0)
+            .panels
+            .connect
+            .account
+            .user
+            .as_ref()
+            .unwrap()
+            .id;
+        let sibling_user = gui
+            .reviewer_app_mut(1)
+            .panels
+            .connect
+            .account
+            .user
+            .as_ref()
+            .unwrap()
+            .id;
+        let sibling_held = gui.reviewer_app_mut(1).claim_session_invalidated;
+        assert_eq!(origin_user, 8, "panel guard must discard the old account");
+        assert_eq!(sibling_user, 8);
+        assert_eq!(submissions(&f), 0);
+        let _ = std::fs::remove_dir_all(&f.root);
+        assert!(
+            !sibling_held,
+            "GUI broadcast a stale SetSession before its panel dropped it"
+        );
+    }
 }
