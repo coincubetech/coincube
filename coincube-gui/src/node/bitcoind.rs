@@ -1590,6 +1590,18 @@ impl InternalBitcoindConfig {
                                 InternalBitcoindConfigError::CouldNotParseValue(e.to_string())
                             })?);
                         }
+                        // The legacy line: v1.0.1-rc1 and the other builds
+                        // between 2026-06-09 and 2026-08-10 wrote
+                        // `consensusrules=rdts` into every managed Knots node's
+                        // file, and this build neither reads nor writes the
+                        // key. Accepted and dropped: nothing is recorded from
+                        // it (no field, no ledger write, no flavour
+                        // inference), and `to_ini` never emits it, so the
+                        // next rewrite from the parsed form — the Tor
+                        // preparation on the loader and settings routes,
+                        // `maybe_start`'s pre-spawn rewrite on every route —
+                        // takes it off the disk before a node reads the file.
+                        "consensusrules" => {}
                         _ => {
                             return Err(InternalBitcoindConfigError::UnexpectedSection(format!(
                                 "Unexpected key in general section: {key}"
@@ -2020,6 +2032,24 @@ impl Bitcoind {
             running.stop();
             wait_for_internal_bitcoind_shutdown(&config);
         }
+        // Rewrite the conf from its parsed form before the binary reads it.
+        // `from_ini` accepts and drops the legacy `consensusrules` line older
+        // releases wrote, and `to_ini` never emits it, so an identity edit
+        // under the conf lock is what takes it off the disk. The loader and
+        // the settings restart already rewrite the file this way through
+        // `tor::prepare_inbound_tor` before they get here; the loader's
+        // pending-node route does not, and this is the only rewrite it gets.
+        // A file last written by `to_ini` comes back byte-identical. A
+        // refusal — lock busy, unreadable, not replaceable — is the same
+        // `ConfigUnavailable` the Tor preparation returns for the same
+        // reasons: no node is spawned on a file this build could not settle.
+        crate::node::managed_conf::update_managed_conf(
+            coincube_datadir,
+            NodeChainFamily::Bitcoin,
+            |txn| Ok(((), txn.conf.clone())),
+        )
+        .map(|outcome| outcome.logged("rewriting the managed bitcoin.conf before the spawn"))
+        .map_err(|e| StartInternalBitcoindError::ConfigUnavailable(e.to_string()))?;
         let bitcoind_exe_path =
             selected_exe.ok_or(StartInternalBitcoindError::ExecutableNotFound)?;
         info!(
@@ -3043,13 +3073,16 @@ mod tests {
         assert_eq!(node_version_label("/Satoshi:/"), None);
     }
 
-    // `consensusrules` is never written — not for either flavour — and a file that
-    // still carries one is refused rather than handed to the node. The read-compat
-    // and the start-path migration that stripped the line went with RDTS sunset
-    // PR 4: every start under the releases in between removed it, so no datadir
-    // should still carry it, and one that does fails closed with the key named.
+    // `consensusrules` is never written — not for either flavour — and a file
+    // that still carries one parses as if the line were absent. The read-compat
+    // that inferred a flavour from it and the start-path migration that wrote
+    // the ledger from it went with RDTS sunset PR 4; what remains is tolerance:
+    // v1.0.1-rc1 wrote the line into every managed Knots node's file, and such
+    // a datadir must still start. Nothing is recorded from the line, and the
+    // parsed form re-serialises without it, which is what the pre-spawn
+    // rewrite in `maybe_start` relies on to strip it.
     #[test]
-    fn consensusrules_is_never_written_and_no_longer_read() {
+    fn consensusrules_is_never_written_and_is_dropped_on_read() {
         let net = InternalBitcoindNetworkConfig {
             rpc_port: 12345,
             p2p_port: 12346,
@@ -3070,16 +3103,34 @@ mod tests {
             );
         }
 
-        // A legacy file no longer parses: the key is unexpected like any other,
-        // and the refusal names it.
+        // A legacy file parses to the same config as the same file without the
+        // line: the key is dropped, not recorded, and the canonical form the
+        // next rewrite persists no longer carries it.
         let legacy = "consensusrules=rdts\n[main]\nrpcport=12345\nport=12346\nprune=15000\n";
+        let stripped = "[main]\nrpcport=12345\nport=12346\nprune=15000\n";
+        let canonical = |text: &str| {
+            let conf = InternalBitcoindConfig::from_ini(
+                &ini::Ini::load_from_str(text).expect("conf parses as ini"),
+            )
+            .expect("the conf parses");
+            let mut bytes = Vec::new();
+            conf.to_ini().write_to(&mut bytes).unwrap();
+            String::from_utf8(bytes).unwrap()
+        };
+        let from_legacy = canonical(legacy);
+        assert_eq!(from_legacy, canonical(stripped));
+        assert!(!from_legacy.contains("consensusrules"), "{}", from_legacy);
+
+        // The tolerance is for that one key: a near miss is still refused
+        // like any other unknown general-section key, with the key named.
+        let unknown = "consensusrule=1\n[main]\nrpcport=12345\nport=12346\nprune=15000\n";
         match InternalBitcoindConfig::from_ini(
-            &ini::Ini::load_from_str(legacy).expect("legacy conf parses as ini"),
+            &ini::Ini::load_from_str(unknown).expect("conf parses as ini"),
         ) {
             Err(InternalBitcoindConfigError::UnexpectedSection(msg)) => {
-                assert!(msg.contains("consensusrules"), "{}", msg)
+                assert!(msg.contains("consensusrule"), "{}", msg)
             }
-            other => panic!("expected the legacy key to be refused, got {:?}", other),
+            other => panic!("expected the unknown key to be refused, got {:?}", other),
         }
     }
 
@@ -3920,6 +3971,89 @@ mod tests {
         }
         assert!(cookie_path.parent().unwrap().exists());
         assert!(!internal_bitcoind_directory_for(&root, NodeChainFamily::BitcoinBlake2b).exists());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // A conf still carrying the legacy `consensusrules` line — what v1.0.1-rc1
+    // wrote for every managed Knots node — reaches `maybe_start` and is
+    // rewritten without the line before the binary is resolved, which is what
+    // the one route with no Tor preparation ahead of it (the loader's pending
+    // node) relies on. The spawn itself is refused past that point on the
+    // absent binary, as the other start tests do. A busy conf lock refuses the
+    // start in the Tor preparation's class (`ConfigUnavailable`) with the file
+    // untouched; a file already in canonical form is rewritten byte-identically;
+    // no conf is created where there was none.
+    #[test]
+    fn start_strips_a_legacy_consensusrules_line_before_the_spawn() {
+        use crate::node::managed_conf::{with_quick_lock_bound, ManagedConfLock};
+        use crate::node::revalidate::ManagedNodeState;
+        let (base, root) = a_temp_coincube_datadir("strip");
+        let bitcoin_datadir = internal_bitcoind_datadir(&root);
+        let conf_path = internal_bitcoind_config_path(&bitcoin_datadir);
+        let cookie_path = internal_bitcoind_cookie_path(&bitcoin_datadir, &Network::Bitcoin);
+        let config = BitcoindConfig {
+            rpc_auth: coincubed::config::BitcoindRpcAuth::CookieFile(cookie_path),
+            addr: std::net::SocketAddr::from(([127, 0, 0, 1], 1)),
+        };
+        ManagedNodeState {
+            configured_flavor: Some(NodeFlavor::Knots),
+            ..Default::default()
+        }
+        .save(&root)
+        .unwrap();
+        let expect_absent_binary =
+            |result: Result<Bitcoind, StartInternalBitcoindError>| match result {
+                Err(StartInternalBitcoindError::ExecutableNotFound) => {}
+                other => panic!("expected ExecutableNotFound, got {:?}", other.map(|_| ())),
+            };
+
+        // No conf: the start gets as far as the binary without inventing one.
+        expect_absent_binary(Bitcoind::maybe_start(
+            Network::Bitcoin,
+            config.clone(),
+            &root,
+        ));
+        assert!(!conf_path.exists(), "a start invented a conf");
+
+        // The legacy file, as an older release left it.
+        std::fs::create_dir_all(&bitcoin_datadir).unwrap();
+        let legacy = "consensusrules=rdts\n[main]\nrpcport=12345\nport=12346\nprune=15000\n";
+        std::fs::write(&conf_path, legacy).unwrap();
+
+        // Busy lock: refused in the Tor preparation's class, file untouched.
+        let held = ManagedConfLock::acquire(&root).unwrap();
+        let refused = with_quick_lock_bound(|| {
+            Bitcoind::maybe_start(Network::Bitcoin, config.clone(), &root)
+        });
+        drop(held);
+        match refused {
+            Err(StartInternalBitcoindError::ConfigUnavailable(e)) => {
+                assert!(e.contains("another setup is updating"), "{}", e)
+            }
+            other => panic!("expected ConfigUnavailable, got {:?}", other.map(|_| ())),
+        }
+        assert_eq!(std::fs::read_to_string(&conf_path).unwrap(), legacy);
+
+        // Lock free: the line is gone from disk before the binary is looked
+        // for, and the rest of the file survives the rewrite.
+        expect_absent_binary(Bitcoind::maybe_start(
+            Network::Bitcoin,
+            config.clone(),
+            &root,
+        ));
+        let rewritten = std::fs::read_to_string(&conf_path).unwrap();
+        assert!(!rewritten.contains("consensusrules"), "{}", rewritten);
+        let reloaded = InternalBitcoindConfig::from_file(&conf_path).unwrap();
+        let main = &reloaded.networks[&Network::Bitcoin];
+        assert_eq!(
+            (main.rpc_port, main.p2p_port, main.prune),
+            (12345, 12346, 15000)
+        );
+
+        // Canonical already: the next start's rewrite is byte-identical.
+        expect_absent_binary(Bitcoind::maybe_start(Network::Bitcoin, config, &root));
+        assert_eq!(std::fs::read_to_string(&conf_path).unwrap(), rewritten);
 
         let _ = std::fs::remove_dir_all(&base);
     }
