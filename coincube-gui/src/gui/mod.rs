@@ -195,32 +195,42 @@ impl GUI {
             }
             message => message,
         };
+        // A log-out or a sign-in from any tab reaches every tab, with its kind
+        // and where it came from (`Tab::invalidate_fork_session`).
         let auth_change = match &message {
             Message::Pane(
-                _,
+                pane_id,
                 pane::Message::Tab(
-                    _,
+                    tab_id,
                     tab::Message::Launch(home::Message::View(home::ViewMessage::ConnectAccount(
                         msg,
                     ))),
                 ),
             )
             | Message::Pane(
-                _,
+                pane_id,
                 pane::Message::Tab(
-                    _,
+                    tab_id,
                     tab::Message::Run(AppMessage::View(crate::app::view::Message::ConnectAccount(
                         msg,
                     ))),
                 ),
-            ) => matches!(
-                msg,
-                crate::app::view::ConnectAccountMessage::LogOut
-                    | crate::app::view::ConnectAccountMessage::SetSession(_)
-            ),
-            _ => false,
+            ) => match msg {
+                crate::app::view::ConnectAccountMessage::LogOut => {
+                    Some((tab::AuthChange::LogOut, *pane_id, *tab_id))
+                }
+                crate::app::view::ConnectAccountMessage::SetSession(login, _) => Some((
+                    tab::AuthChange::SignIn {
+                        user_id: login.user.id,
+                    },
+                    *pane_id,
+                    *tab_id,
+                )),
+                _ => None,
+            },
+            _ => None,
         };
-        let auth_from_fork_app = if auth_change {
+        let auth_from_fork_app = if auth_change.is_some() {
             match &message {
                 Message::Pane(pane_id, pane::Message::Tab(tab_id, _)) => self.panes.get(*pane_id)
                     .and_then(|pane| pane.tabs.iter().find(|tab| tab.id == *tab_id))
@@ -231,14 +241,16 @@ impl GUI {
             false
         };
         let mut auth_tasks = Vec::new();
-        if auth_change {
+        if let Some((change, origin_pane, origin_tab)) = auth_change {
             for (&pane_id, pane) in self.panes.iter_mut() {
                 for tab in &mut pane.tabs {
                     let tab_id = tab.id;
+                    let originated = pane_id == origin_pane && tab_id == origin_tab;
                     auth_tasks.push(
-                        tab.invalidate_fork_session().map(move |msg| {
-                            Message::Pane(pane_id, pane::Message::Tab(tab_id, msg))
-                        }),
+                        tab.invalidate_fork_session(change, originated)
+                            .map(move |msg| {
+                                Message::Pane(pane_id, pane::Message::Tab(tab_id, msg))
+                            }),
                     );
                 }
             }
@@ -956,16 +968,19 @@ mod fork_auth_dispatch_tests {
         use crate::app::view::ConnectAccountMessage;
         for auth in [
             ConnectAccountMessage::LogOut,
-            ConnectAccountMessage::SetSession(LoginResponse {
-                requires_2fa: false,
-                token: "synthetic".into(),
-                refresh_token: "synthetic".into(),
-                user: User {
-                    id: 0,
-                    email: "synthetic@example.invalid".into(),
-                    email_verified: None,
+            ConnectAccountMessage::SetSession(
+                LoginResponse {
+                    requires_2fa: false,
+                    token: "synthetic".into(),
+                    refresh_token: "synthetic".into(),
+                    user: User {
+                        id: 0,
+                        email: "synthetic@example.invalid".into(),
+                        email_verified: None,
+                    },
                 },
-            }),
+                0,
+            ),
         ] {
             let root_path =
                 std::env::temp_dir().join(format!("fork-auth-dispatch-{}", uuid::Uuid::new_v4()));
@@ -1233,10 +1248,14 @@ mod fork_auth_revocation_tests {
                 tab::Message::ForkAsync(_, inner) if matches!(inner.as_ref(), tab::Message::Run(AppMessage::Signed(_, Ok(_)))))));
             let pending = tab.update(select());
             let auth = if replace {
-                ConnectAccountMessage::SetSession(serde_json::from_value(serde_json::json!({
-                    "requires_2fa":false,"token":"replacement","refresh_token":"replacement-refresh",
-                    "user":{"id":8,"email":"fixture@example.invalid","email_verified":true}
-                })).unwrap())
+                ConnectAccountMessage::SetSession(
+                    serde_json::from_value(serde_json::json!({
+                        "requires_2fa":false,"token":"replacement","refresh_token":"replacement-refresh",
+                        "user":{"id":8,"email":"fixture@example.invalid","email_verified":true}
+                    }))
+                    .unwrap(),
+                    0,
+                )
             } else {
                 ConnectAccountMessage::LogOut
             };
@@ -1264,5 +1283,67 @@ mod fork_auth_revocation_tests {
             }
         }
         app::session::close();
+    }
+}
+
+// Gandalf's round-3 reviewer seam (#518 issuecomment-5824706295), adopted:
+// a real GUI with two Bitcoin App tabs, its real auth broadcaster and
+// originating-tab dispatch. Test-only.
+#[cfg(test)]
+impl GUI {
+    pub(crate) fn reviewer_claim_gui(first: crate::app::App, second: crate::app::App) -> Self {
+        let root = first.datadir().clone();
+        let mut pane = pane::Pane::new_with_tab(tab::State::App(first));
+        pane.tabs.push(tab::Tab::new(2, tab::State::App(second)));
+        let (panes, pane_id) = pane_grid::State::new(pane);
+        Self {
+            panes,
+            focus: Some(pane_id),
+            config: Config::new(root, None),
+            window_id: None,
+            window_init: None,
+            window_config: None,
+            global_cache: GlobalCache::default(),
+            theme_mode: Default::default(),
+        }
+    }
+    pub(crate) fn reviewer_app_mut(&mut self, index: usize) -> &mut crate::app::App {
+        let pane = self.panes.get_mut(self.focus.unwrap()).unwrap();
+        let tab::State::App(app) = &mut pane.tabs[index].state else {
+            panic!("Bitcoin App closed")
+        };
+        app
+    }
+    pub(crate) fn reviewer_account(
+        &mut self,
+        id: usize,
+        account: crate::app::view::ConnectAccountMessage,
+    ) -> Task<Message> {
+        self.update(Message::Pane(
+            self.focus.unwrap(),
+            pane::Message::Tab(
+                id,
+                tab::Message::Run(AppMessage::View(crate::app::view::Message::ConnectAccount(
+                    account,
+                ))),
+            ),
+        ))
+    }
+    /// Whether a GUI message is a tab's `SetSession` completion — what a
+    /// real refresh or login operation hands back — so a test can route the
+    /// real completion through the real broadcaster.
+    pub(crate) fn reviewer_is_set_session(message: &Message) -> bool {
+        matches!(
+            message,
+            Message::Pane(
+                _,
+                pane::Message::Tab(
+                    _,
+                    tab::Message::Run(AppMessage::View(crate::app::view::Message::ConnectAccount(
+                        crate::app::view::ConnectAccountMessage::SetSession(..),
+                    ))),
+                ),
+            )
+        )
     }
 }

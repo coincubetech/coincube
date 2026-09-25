@@ -1887,7 +1887,7 @@ mod flow {
         let app = reviewer_app(&mut f, app);
         let mut tab = crate::gui::tab::Tab::new(1, crate::gui::tab::State::App(app));
         // This is the exact operation GUI::update broadcasts on another tab's LogOut.
-        drop(tab.invalidate_fork_session());
+        drop(tab.invalidate_fork_session(crate::gui::tab::AuthChange::LogOut, false));
         let crate::gui::tab::State::App(app) = &mut tab.state else {
             panic!("Bitcoin App must remain open")
         };
@@ -2104,29 +2104,15 @@ mod flow {
         }
         assert_eq!(journaled_phase(&f), "Intent");
 
-        // A sign-in in this tab: the account panel's own `SessionLoaded`
-        // (its network follow-ups are dropped; they are not under test),
-        // then the dashboard, then any account message re-binds.
-        drop(app.update(Message::View(view::Message::ConnectAccount(
-            view::ConnectAccountMessage::SessionLoaded {
-                user: crate::services::coincube::User {
-                    id: 7,
-                    email: "fixture@example.invalid".into(),
-                    email_verified: Some(true),
-                },
-                plan: None,
-            },
-        ))));
+        // A sign-in in this tab, through the real refresh path: an
+        // operation begun here after the hold, whose completion carries an
+        // epoch at least the hold's, lifts it; the dashboard follows and the
+        // next account message re-binds.
+        sign_in_here_by_refresh(&mut app, &f, 7).await;
         assert!(
             !app.claim_session_invalidated,
-            "lifted by a session established here"
+            "lifted by an operation begun here after the hold"
         );
-        app.panels.connect.account.step =
-            crate::app::state::connect::account::ConnectFlowStep::Dashboard;
-        let rebind = app.update(Message::View(view::Message::ConnectAccount(
-            view::ConnectAccountMessage::PlanLoaded(None, 0),
-        )));
-        drive_claim_messages(&mut app, rebind).await;
         assert!(!app.panels.claim.as_ref().unwrap().revoked);
         assert_eq!(
             app_claim_state(&app),
@@ -2138,6 +2124,75 @@ mod flow {
         assert_eq!(submissions(&f), 1, "{:?}", f.daemon.hits());
         assert_eq!(journaled_phase(&f), "BroadcastUncertain");
         let _ = std::fs::remove_dir_all(&f.root);
+    }
+
+    /// A real sign-in in this tab: the account panel's `RefreshSession`
+    /// against an HTTP fixture answering the refresh for `user_id`; its
+    /// `SetSession` completion (carrying the epoch of an operation begun
+    /// now) is applied; the queued `SessionLoaded` it produced is applied;
+    /// the real post-sign-in duress gate reveals the dashboard, and that
+    /// account message runs the hook, which re-binds a revoked claim. Every
+    /// claim completion is driven; the panel's other network follow-ups
+    /// (features, plan) are dropped.
+    async fn sign_in_here_by_refresh(app: &mut crate::app::App, f: &Flow, user_id: u32) {
+        f._server
+            .mock_async(|when, then| {
+                when.method(POST).path("/api/v1/auth/token/refresh");
+                then.status(200).json_body(serde_json::json!({
+                    "requires_2fa": false, "token": "flow-token", "refresh_token": "fixture-refresh",
+                    "user": {"id": user_id, "email": "fixture@example.invalid", "email_verified": true}
+                }));
+            })
+            .await;
+        let refresh = app.update(Message::View(view::Message::ConnectAccount(
+            view::ConnectAccountMessage::RefreshSession {
+                refresh_token: "fixture-refresh".into(),
+            },
+        )));
+        let set_session = outputs(refresh)
+            .await
+            .into_iter()
+            .find(|m| {
+                matches!(
+                    m,
+                    Message::View(view::Message::ConnectAccount(
+                        view::ConnectAccountMessage::SetSession(..)
+                    ))
+                )
+            })
+            .expect("the real refresh produces SetSession");
+        // The hook on `SetSession` may already re-bind (the account panel is
+        // still at Dashboard); every claim completion is driven, as iced
+        // would deliver it, and the queued `SessionLoaded` is applied after.
+        let mut session_loaded = None;
+        for message in outputs(app.update(set_session)).await {
+            match message {
+                Message::View(view::Message::ConnectAccount(
+                    view::ConnectAccountMessage::SessionLoaded { .. },
+                )) => session_loaded = Some(message),
+                Message::Claim(_) => {
+                    let task = app.update(message);
+                    drive_claim_messages(app, task).await;
+                }
+                _ => {}
+            }
+        }
+        let session_loaded = session_loaded.expect("a real SetSession queues SessionLoaded");
+        let loaded = app.update(session_loaded);
+        drive_claim_messages(app, loaded).await;
+        let generation = app.panels.connect.account.session_generation();
+        let duress = crate::services::coincube::DuressCheckOutcome::Ok(
+            crate::services::coincube::DuressState {
+                active: false,
+                unlock_at: None,
+                enrolled: false,
+                this_device_registered: false,
+            },
+        );
+        let gate = app.update(Message::View(view::Message::ConnectAccount(
+            view::ConnectAccountMessage::DuressStateChecked(duress, generation, 0),
+        )));
+        drive_claim_messages(app, gate).await;
     }
 
     fn replacement_config(f: &Flow) -> coincubed::config::Config {
@@ -2282,5 +2337,366 @@ mod flow {
             }
             let _ = std::fs::remove_dir_all(&f.root);
         }
+    }
+
+    // ── Gandalf's round-3 reviewer probes (#518 issuecomment-5824706295),
+    // adopted as regressions: the two safety assertions that failed at
+    // c2f81660 (a `SessionLoaded` queued before the global log-out lifted the
+    // hold; a sibling same-account `SetSession` falsely signed the claim out)
+    // and three passing controls (originating-tab ordering through the real
+    // GUI, late Ready after settlement, manual retry after Panicked).
+    // Adaptations, stated: `SetSession` now carries the authentication epoch
+    // of the operation that produced it — a pre-hold completion carries the
+    // epoch current then; the originating-tab control's sibling is the same
+    // account and its completion comes from a real refresh, per the
+    // corrected acceptance (issuecomment-5824789768).
+    /// Every GUI-level message a GUI task produces, in order.
+    async fn gui_outputs(task: Task<crate::gui::Message>) -> Vec<crate::gui::Message> {
+        let mut out = Vec::new();
+        let Some(mut stream) = iced_runtime::task::into_stream(task) else {
+            return out;
+        };
+        while let Some(action) = stream.next().await {
+            if let iced_runtime::Action::Output(message) = action {
+                out.push(message);
+            }
+        }
+        out
+    }
+
+    fn reviewer_login() -> crate::services::coincube::LoginResponse {
+        serde_json::from_value(serde_json::json!({
+            "requires_2fa": false, "token": "token", "refresh_token": "fixture-refresh",
+            "user": {"id": 7, "email": "fixture@example.invalid", "email_verified": true}
+        }))
+        .unwrap()
+    }
+
+    /// The Connect user this tab's account shows, made authenticated, for a
+    /// sibling built blank.
+    fn sign_in_account(app: &mut crate::app::App, f: &Flow, user_id: u32) {
+        app.panels.connect.account.client = session(f, "7").client;
+        app.panels.connect.account.user = Some(crate::services::coincube::User {
+            id: user_id,
+            email: "fixture@example.invalid".into(),
+            email_verified: Some(true),
+        });
+        app.panels.connect.account.step =
+            crate::app::state::connect::account::ConnectFlowStep::Dashboard;
+        app.cache.connect_authenticated = true;
+    }
+
+    #[tokio::test]
+    async fn reviewer_sibling_setsession_must_not_require_spurious_logout() {
+        let first = reviewer_blank_app();
+        let second = reviewer_blank_app();
+        let mut f = reach_review().await;
+        let first = reviewer_app(&mut f, first);
+        let mut gui = crate::gui::GUI::reviewer_claim_gui(first, second);
+        // Real GUI broadcaster, same-account SetSession from the other Bitcoin tab.
+        // SetSession is also what a successful keyring refresh emits at Cube open.
+        // Drop only async bootstrap work from the originating tab, not dispatch.
+        // (The epoch is the originating tab's own, as its refresh would carry.)
+        drop(gui.reviewer_account(
+            2,
+            view::ConnectAccountMessage::SetSession(reviewer_login(), 0),
+        ));
+        let app = gui.reviewer_app_mut(0);
+        assert!(app.panels.connect.account.is_authenticated());
+        let init = app.update(Message::View(view::Message::ConnectAccount(
+            view::ConnectAccountMessage::Init,
+        )));
+        drive_claim_messages(app, init).await;
+        let refresh = app.update(intent(view::ClaimMessage::Refresh));
+        drive_claim_messages(app, refresh).await;
+        let state = app_claim_state(app);
+        eprintln!(
+            "sibling same-account SetSession -> own Init + Refresh: {:?}, invalidated={}",
+            state, app.claim_session_invalidated
+        );
+        assert!(!state.1.as_deref().unwrap_or("").contains("Stale"));
+        let confirm = app.update(intent(view::ClaimMessage::Confirm));
+        drive_claim_messages(app, confirm).await;
+        let count = submissions(&f);
+        let _ = std::fs::remove_dir_all(&f.root);
+        assert_eq!(
+            count, 1,
+            "same-account sibling login/refresh must not force an unrelated authenticated tab to log out and back in"
+        );
+    }
+
+    #[tokio::test]
+    async fn reviewer_originating_setsession_lifts_hold_after_gui_broadcast() {
+        let first = reviewer_blank_app();
+        let mut second = reviewer_blank_app();
+        let mut f = reach_review().await;
+        sign_in_account(&mut second, &f, 7);
+        let first = reviewer_app(&mut f, first);
+        let mut gui = crate::gui::GUI::reviewer_claim_gui(first, second);
+        gui.reviewer_app_mut(0).invalidate_claim_session();
+        assert!(gui.reviewer_app_mut(0).claim_session_invalidated);
+        // A real operation begun in the held tab after the hold: its refresh
+        // against the HTTP fixture, whose SetSession completion is then
+        // routed through the real GUI broadcaster.
+        f._server
+            .mock_async(|when, then| {
+                when.method(POST).path("/api/v1/auth/token/refresh");
+                then.status(200).json_body(serde_json::json!({
+                    "requires_2fa": false, "token": "flow-token", "refresh_token": "fixture-refresh",
+                    "user": {"id": 7, "email": "fixture@example.invalid", "email_verified": true}
+                }));
+            })
+            .await;
+        let refresh = gui.reviewer_account(
+            1,
+            view::ConnectAccountMessage::RefreshSession {
+                refresh_token: "fixture-refresh".into(),
+            },
+        );
+        let mut routed = 0;
+        for message in gui_outputs(refresh).await {
+            if crate::gui::GUI::reviewer_is_set_session(&message) {
+                routed += 1;
+                drop(gui.update(message));
+            }
+        }
+        assert_eq!(routed, 1, "the real refresh handed back one SetSession");
+        assert!(
+            !gui.reviewer_app_mut(0).claim_session_invalidated,
+            "same-tab hook must run AFTER broadcast so it lifts that tab's hold"
+        );
+        assert!(
+            !gui.reviewer_app_mut(1).claim_session_invalidated,
+            "a same-account SetSession leaves the sibling's hold state unchanged (it was not held)"
+        );
+        assert_eq!(
+            submissions(&f),
+            0,
+            "setting a session alone is not confirmation"
+        );
+        let _ = std::fs::remove_dir_all(&f.root);
+    }
+
+    #[tokio::test]
+    async fn reviewer_late_ready_after_switch_settlement_rebinds_only_installed_daemon() {
+        let blank = reviewer_blank_app();
+        let (mut f, ready) = reach_signed().await;
+        let mut ready_messages = outputs(ready).await;
+        assert_eq!(ready_messages.len(), 1);
+        // The finalisation has journaled but the GUI has not applied Ready yet.
+        let mut app = reviewer_app(&mut f, blank);
+        drop(app.spawn_daemon_switch(replacement_config(&f)));
+        let installed = Arc::new(FlowDaemon {
+            config: f.daemon.config.clone(),
+            coin: f.daemon.coin.clone(),
+            previous: f.daemon.previous.clone(),
+            hits: Mutex::new(Vec::new()),
+        });
+        let installed_dyn: Arc<dyn Daemon + Sync + Send> = installed.clone();
+        let settle = app.update(Message::DaemonRestarted(
+            crate::app::DaemonRestart::Started(installed_dyn),
+        ));
+        drive_claim_messages(&mut app, settle).await;
+        let late = app.update(ready_messages.remove(0));
+        drive_claim_messages(&mut app, late).await;
+        assert_eq!(
+            app_claim_state(&app),
+            (false, Some(SESSION_ENDED.into()), false, true)
+        );
+        let submit = app.update(intent(view::ClaimMessage::Confirm));
+        drive_claim_messages(&mut app, submit).await;
+        assert_eq!(submissions(&f), 0);
+        assert!(!installed.hits().contains(&"submit_verified_poison"));
+        let refresh = app.update(intent(view::ClaimMessage::Refresh));
+        drive_claim_messages(&mut app, refresh).await;
+        assert_eq!(app_claim_state(&app), (true, None, false, true));
+        let submit = app.update(intent(view::ClaimMessage::Confirm));
+        drive_claim_messages(&mut app, submit).await;
+        assert_eq!(submissions(&f), 0);
+        assert_eq!(
+            installed
+                .hits()
+                .iter()
+                .filter(|h| **h == "submit_verified_poison")
+                .count(),
+            1
+        );
+        let _ = std::fs::remove_dir_all(&f.root);
+    }
+
+    #[tokio::test]
+    async fn reviewer_panicked_switch_can_be_retried_through_settings_message() {
+        let blank = reviewer_blank_app();
+        let mut f = reach_review().await;
+        let mut app = reviewer_app(&mut f, blank);
+        drop(app.spawn_daemon_switch(replacement_config(&f)));
+        let settle = app.update(Message::DaemonRestarted(
+            crate::app::DaemonRestart::Panicked(crate::app::error::Error::Config(
+                "fixture panic".into(),
+            )),
+        ));
+        drive_claim_messages(&mut app, settle).await;
+        assert_eq!(
+            app.panels.claim.as_ref().unwrap().backend,
+            BackendState::Unknown
+        );
+        assert!(!app.daemon_switch_in_progress);
+        // The actual message emitted by node settings: admitted again after Panicked.
+        drop(app.update(Message::LoadDaemonConfig(Box::new(replacement_config(&f)))));
+        assert!(app.daemon_switch_in_progress);
+        assert_eq!(
+            app.panels.claim.as_ref().unwrap().backend,
+            BackendState::Switching
+        );
+        assert_eq!(submissions(&f), 0);
+        let _ = std::fs::remove_dir_all(&f.root);
+    }
+
+    #[tokio::test]
+    async fn reviewer_sessionloaded_queued_before_logout_must_not_lift_hold() {
+        let blank = reviewer_blank_app();
+        let mut f = reach_review().await;
+        let mut app = reviewer_app(&mut f, blank);
+        let mut login = reviewer_login();
+        login.token = "flow-token".into();
+        // A session refresh BEFORE the logout, with its SessionLoaded output
+        // queued: it carries the epoch current when that refresh began.
+        let epoch_then = app.panels.connect.account.auth_epoch();
+        let established = app.update(Message::View(view::Message::ConnectAccount(
+            view::ConnectAccountMessage::SetSession(login, epoch_then),
+        )));
+        let queued = outputs(established)
+            .await
+            .into_iter()
+            .find(|m| {
+                matches!(
+                    m,
+                    Message::View(view::Message::ConnectAccount(
+                        view::ConnectAccountMessage::SessionLoaded { .. }
+                    ))
+                )
+            })
+            .expect("real SetSession produces SessionLoaded");
+        let mut tab = crate::gui::tab::Tab::new(1, crate::gui::tab::State::App(app));
+        drop(tab.invalidate_fork_session(crate::gui::tab::AuthChange::LogOut, false));
+        let crate::gui::tab::State::App(app) = &mut tab.state else {
+            panic!("Bitcoin App closed")
+        };
+        assert!(app.claim_session_invalidated);
+        // Delayed pre-logout completion, with no SetSession or sign-in since logout.
+        drop(app.update(queued));
+        let generation = app.panels.connect.account.session_generation();
+        let duress = crate::services::coincube::DuressCheckOutcome::Ok(
+            crate::services::coincube::DuressState {
+                active: false,
+                unlock_at: None,
+                enrolled: false,
+                this_device_registered: false,
+            },
+        );
+        let gate = app.update(Message::View(view::Message::ConnectAccount(
+            view::ConnectAccountMessage::DuressStateChecked(duress, generation, 0),
+        )));
+        drive_claim_messages(app, gate).await;
+        let refresh = app.update(intent(view::ClaimMessage::Refresh));
+        drive_claim_messages(app, refresh).await;
+        let state = app_claim_state(app);
+        eprintln!(
+            "queued SessionLoaded after logout: {:?}, invalidated={}",
+            state, app.claim_session_invalidated
+        );
+        assert!(!state.1.as_deref().unwrap_or("").contains("Stale"));
+        let submit = app.update(intent(view::ClaimMessage::Confirm));
+        drive_claim_messages(app, submit).await;
+        let count = submissions(&f);
+        let _ = std::fs::remove_dir_all(&f.root);
+        assert_eq!(
+            count, 0,
+            "a login completion queued before the logout must not count as fresh authority afterwards"
+        );
+    }
+
+    // ── Round-3 acceptance beyond the probes.
+
+    /// A sibling same-account `SetSession` after a log-out leaves the hold
+    /// in place: nothing this tab does re-binds, zero submissions, the
+    /// sign-out copy stays. (P2: a sibling sign-in never lifts a hold.)
+    #[tokio::test]
+    async fn a_sibling_same_account_sign_in_after_a_log_out_leaves_the_hold() {
+        let first = reviewer_blank_app();
+        let second = reviewer_blank_app();
+        let mut f = reach_review().await;
+        let first = reviewer_app(&mut f, first);
+        let mut gui = crate::gui::GUI::reviewer_claim_gui(first, second);
+        gui.reviewer_app_mut(0).invalidate_claim_session();
+        drop(gui.reviewer_account(
+            2,
+            view::ConnectAccountMessage::SetSession(reviewer_login(), 0),
+        ));
+        let app = gui.reviewer_app_mut(0);
+        assert!(app.claim_session_invalidated, "the hold stands");
+        for message in [
+            Message::View(view::Message::ConnectAccount(
+                view::ConnectAccountMessage::Init,
+            )),
+            intent(view::ClaimMessage::Refresh),
+            intent(view::ClaimMessage::Confirm),
+        ] {
+            let task = app.update(message);
+            drive_claim_messages(app, task).await;
+        }
+        assert!(app.claim_session_invalidated);
+        assert_eq!(
+            app_claim_state(app),
+            (false, Some(SIGNED_OUT_AT_REVIEW.into()), false, true)
+        );
+        let count = submissions(&f);
+        let _ = std::fs::remove_dir_all(&f.root);
+        assert_eq!(count, 0);
+    }
+
+    /// A sibling sign-in of another Connect account holds the claim here,
+    /// says why, and binds nothing; a real sign-in in this tab afterwards
+    /// re-binds and submits once. (P2: another account, and the P1 lift.)
+    #[tokio::test]
+    async fn a_sibling_sign_in_of_another_account_holds_until_this_tab_signs_in() {
+        let first = reviewer_blank_app();
+        let second = reviewer_blank_app();
+        let mut f = reach_review().await;
+        let first = reviewer_app(&mut f, first);
+        let mut gui = crate::gui::GUI::reviewer_claim_gui(first, second);
+        let mut other = reviewer_login();
+        other.user.id = 8;
+        drop(gui.reviewer_account(2, view::ConnectAccountMessage::SetSession(other, 0)));
+        let app = gui.reviewer_app_mut(0);
+        assert!(
+            app.claim_session_invalidated,
+            "held: another account signed in elsewhere"
+        );
+        assert_eq!(
+            app_claim_state(app),
+            (false, Some(SIGNED_IN_ELSEWHERE.into()), false, true)
+        );
+        for message in [
+            intent(view::ClaimMessage::Refresh),
+            intent(view::ClaimMessage::Confirm),
+        ] {
+            let task = app.update(message);
+            drive_claim_messages(app, task).await;
+        }
+        assert_eq!(submissions(&f), 0);
+        // This tab signs in (the account the claim was recorded under).
+        sign_in_here_by_refresh(app, &f, 7).await;
+        assert!(!app.claim_session_invalidated);
+        assert_eq!(
+            app_claim_state(app),
+            (true, None, false, true),
+            "a fresh review"
+        );
+        let submit = app.update(intent(view::ClaimMessage::Confirm));
+        drive_claim_messages(app, submit).await;
+        let count = submissions(&f);
+        let _ = std::fs::remove_dir_all(&f.root);
+        assert_eq!(count, 1);
     }
 }

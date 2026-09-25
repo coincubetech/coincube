@@ -812,14 +812,22 @@ pub struct App {
     /// Guards the active-node net-stats poll (connections/upload/onion) so ticks
     /// don't stack concurrent RPCs.
     node_net_stats_probe_in_progress: bool,
-    /// Set at the global Connect auth boundary (`Tab::invalidate_fork_session`,
-    /// through [`Self::invalidate_claim_session`]): the session this tab's
-    /// Connect panel still shows is not one a claim may work under. Only a
-    /// session established in this tab — `SetSession` or `SessionLoaded`
-    /// through its own Connect panel — clears it; a cached account callback,
-    /// re-entering the panel or a Refresh cannot. Claim-scoped: the Connect
-    /// panel itself is not synchronised across tabs here.
+    /// Set at the global Connect auth boundary (`Tab::invalidate_fork_session`
+    /// → [`Self::on_global_auth_change`]): the session this tab's Connect
+    /// panel still shows is not one a claim may work under. Lifted only by
+    /// a completion (`SetSession` or `SessionLoaded`) of an authentication
+    /// operation this tab's own Connect panel began *after* the hold — the
+    /// completion carries the panel's authentication epoch from when the
+    /// operation was spawned, compared with `claim_hold_epoch`. A cached
+    /// account callback, re-entering the panel, a Refresh, a sibling tab's
+    /// sign-in, or a completion of an operation begun before the hold cannot
+    /// lift it. Claim-scoped: the Connect panel itself is not synchronised
+    /// across tabs here.
     claim_session_invalidated: bool,
+    /// The account panel's authentication epoch as advanced by the most
+    /// recent hold; a completion lifts the hold only if its epoch is at
+    /// least this.
+    claim_hold_epoch: u64,
     /// True while an off-thread daemon backend switch ([`Self::spawn_daemon_switch`])
     /// is in flight. The config isn't updated until the switch completes, so
     /// without this guard the next sync probe would keep re-firing the switch
@@ -2817,6 +2825,7 @@ impl App {
             bitcoind_sync_probe_in_progress: false,
             node_net_stats_probe_in_progress: false,
             claim_session_invalidated: false,
+            claim_hold_epoch: 0,
             daemon_switch_in_progress: false,
             auto_switch_suppressed: false,
             entangled_in_flight: HashSet::new(),
@@ -2982,6 +2991,7 @@ impl App {
                 bitcoind_sync_probe_in_progress: false,
                 node_net_stats_probe_in_progress: false,
                 claim_session_invalidated: false,
+                claim_hold_epoch: 0,
                 daemon_switch_in_progress: false,
                 auto_switch_suppressed: false,
                 entangled_in_flight: HashSet::new(),
@@ -3558,18 +3568,62 @@ impl App {
             .send_modify(|generation| *generation = generation.wrapping_add(1));
     }
 
-    /// The global Connect auth boundary for a Bitcoin App: a log-out or a
-    /// session replacement in any tab. The claim panel loses its session
-    /// (which revokes and withdraws a review), the generation advances, and
-    /// the account this tab's Connect panel still shows stops counting as a
-    /// session for the claim until a new one is established here (see
-    /// `claim_session_invalidated`). The Bitcoin wallet itself stays open.
-    pub fn invalidate_claim_session(&mut self) {
+    /// Hold the claim: the panel loses its session (which revokes and
+    /// withdraws a review, with the sign-out copy unless `copy` says
+    /// otherwise), the generation advances, the account panel's
+    /// authentication epoch advances and is recorded as the hold's, and the
+    /// account this tab's Connect panel still shows stops counting as a
+    /// session for the claim until an operation begun here after this
+    /// completes (see `claim_session_invalidated`). The Bitcoin wallet
+    /// itself stays open.
+    fn hold_claim(&mut self, copy: Option<&str>) {
         if let Some(panel) = &mut self.panels.claim {
             panel.set_connect(None);
+            if let Some(copy) = copy {
+                panel.note_hold(copy);
+            }
         }
         self.revoke_claim();
+        self.claim_hold_epoch = self.panels.connect.account.invalidate_auth();
         self.claim_session_invalidated = true;
+    }
+
+    /// The global Connect auth boundary for a log-out in any tab: hold.
+    pub fn invalidate_claim_session(&mut self) {
+        self.hold_claim(None);
+    }
+
+    /// The global Connect auth boundary for a Bitcoin App, as broadcast by
+    /// `GUI::update` to every tab (`Tab::invalidate_fork_session`).
+    /// - A log-out from any tab holds the claim (`invalidate_claim_session`).
+    /// - A sign-in this tab originated is its own hook's business
+    ///   (`claim_replaced`, and the epoch-correlated lift): nothing here.
+    /// - A sibling sign-in never lifts an existing hold, and adds nothing to it.
+    /// - A sibling sign-in or refresh of the *same* Connect user as this
+    ///   tab's account leaves this tab's session standing: the claim is
+    ///   revoked for a re-read (its coordinator was bound before that
+    ///   sign-in) and re-binds under this tab's session on the next Refresh
+    ///   or entry — no sign-out copy, no log-out needed.
+    /// - A sibling sign-in of another account, or while this tab has none,
+    ///   holds the claim, and says why.
+    pub fn on_global_auth_change(&mut self, change: crate::gui::tab::AuthChange, originated: bool) {
+        use crate::gui::tab::AuthChange;
+        match change {
+            AuthChange::LogOut => self.invalidate_claim_session(),
+            AuthChange::SignIn { .. } if originated => {}
+            AuthChange::SignIn { .. } if self.claim_session_invalidated => {}
+            AuthChange::SignIn { user_id } => {
+                let mine = self.panels.connect.account.user.as_ref().map(|u| u.id);
+                if mine == Some(user_id) {
+                    if let Some(panel) = &mut self.panels.claim {
+                        panel.revoke_and_withdraw();
+                    }
+                    self.revoke_claim();
+                } else {
+                    self.hold_claim(Some(state::vault::claim::SIGNED_IN_ELSEWHERE));
+                }
+            }
+        }
     }
 
     /// This Cube as a candidate Bitcoin Blake2b claim source — the single
@@ -5856,18 +5910,20 @@ impl App {
                         view::ConnectAccountMessage::LogOut
                     ))
                 );
-                // The two messages that establish a session in this tab:
-                // a login or refresh result, and the user it loads. Nothing
-                // else — not a features, plan, flags or activity load, not
-                // a re-entry — lifts a global invalidation of the claim's
-                // session (see `claim_session_invalidated`).
-                let establishes_session = matches!(
-                    &msg,
+                // The two completions that establish a session in this tab —
+                // a login or refresh result, and the user it loads — carry the
+                // authentication epoch of the operation that produced them.
+                // Nothing else (a features, plan, flags or activity load, a
+                // re-entry) lifts a hold on the claim's session, and neither
+                // does a completion of an operation begun before the hold
+                // (see `claim_session_invalidated`).
+                let session_epoch = match &msg {
                     Message::View(view::Message::ConnectAccount(
-                        view::ConnectAccountMessage::SetSession(_)
-                            | view::ConnectAccountMessage::SessionLoaded { .. }
-                    ))
-                );
+                        view::ConnectAccountMessage::SetSession(_, epoch)
+                        | view::ConnectAccountMessage::SessionLoaded { epoch, .. },
+                    )) => Some(*epoch),
+                    _ => None,
+                };
                 let task = self
                     .panels
                     .connect
@@ -5900,7 +5956,7 @@ impl App {
                 // on the change, and advances the generation; a sign-in lets
                 // the panel continue — a signed construction is finalised, a
                 // journaled claim re-bound under the new session.
-                if establishes_session {
+                if session_epoch.is_some_and(|epoch| epoch >= self.claim_hold_epoch) {
                     self.claim_session_invalidated = false;
                 }
                 let claim_signed_in =
@@ -7708,7 +7764,7 @@ mod tests {
                 ))));
             } else if status == 503 {
                 drop(app.update(Message::View(view::Message::ConnectAccount(
-                    view::ConnectAccountMessage::SetSession(replacement.clone()),
+                    view::ConnectAccountMessage::SetSession(replacement.clone(), 0),
                 ))));
             }
             assert!(app.panels.connect.account.requires_authenticated_reopen());
@@ -7721,14 +7777,16 @@ mod tests {
                 view::ConnectAccountMessage::Init,
                 view::ConnectAccountMessage::SubmitLogin,
                 view::ConnectAccountMessage::VerifyOtp,
-                view::ConnectAccountMessage::SetSession(replacement.clone()),
+                view::ConnectAccountMessage::SetSession(replacement.clone(), 0),
                 view::ConnectAccountMessage::SessionLoaded {
                     user: replacement.user.clone(),
                     plan: None,
+                    epoch: 0,
                 },
                 view::ConnectAccountMessage::AdmittedUserLoaded {
                     user: Ok(replacement.user.clone()),
                     generation: app.panels.connect.account.session_generation(),
+                    epoch: 0,
                 },
                 view::ConnectAccountMessage::Retry(view::RetryAction::Session),
             ] {
@@ -9302,8 +9360,8 @@ mod claim_step1_tests {
         let generation = app.panels.claim_generation.subscribe();
         let before = *generation.borrow();
         let mut tab = crate::gui::tab::Tab::new(1, crate::gui::tab::State::App(app));
-        // GUI::update broadcasts this to every tab on global LogOut/SetSession.
-        drop(tab.invalidate_fork_session());
+        // GUI::update broadcasts this to every tab on a global LogOut.
+        drop(tab.invalidate_fork_session(crate::gui::tab::AuthChange::LogOut, false));
         let after = *generation.borrow();
         assert!(
             matches!(&tab.state, crate::gui::tab::State::App(_)),

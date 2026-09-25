@@ -1520,15 +1520,25 @@ pub enum ConnectAccountMessage {
     AdmittedUserLoaded {
         user: Result<crate::services::coincube::User, (crate::user_error::UserError, bool)>,
         generation: u64,
+        /// The panel's authentication epoch when the load was spawned
+        /// (`ConnectAccountPanel::auth_epoch`).
+        epoch: u64,
     },
     Init,
     RefreshSession {
         refresh_token: String,
     },
-    SetSession(crate::services::coincube::LoginResponse),
+    /// A login or refresh result. The number is the panel's authentication
+    /// epoch when the operation that produced it was spawned: a completion
+    /// of an operation begun before a global auth invalidation carries an
+    /// older epoch than one begun after, whatever order they arrive in.
+    SetSession(crate::services::coincube::LoginResponse, u64),
     SessionLoaded {
         user: crate::services::coincube::User,
         plan: Option<crate::services::coincube::ConnectPlan>,
+        /// Inherited from the `SetSession` (or admitted-user load) that
+        /// produced this, never the epoch current when it is processed.
+        epoch: u64,
     },
     PlanLoaded(Option<crate::services::coincube::ConnectPlan>, u64),
     /// Lightweight Account Overview counts (contacts, cubes), fetched on

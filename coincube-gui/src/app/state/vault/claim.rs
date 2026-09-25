@@ -109,6 +109,9 @@ pub const SESSION_ENDED: &str =
 /// callback — a sign-out in another tab revokes the claim here too, and the
 /// account this tab still shows is not a session.
 pub const SIGNED_OUT_AT_REVIEW: &str = "Signed out of Connect. This claim is recorded on this device; sign in again in this tab to continue.";
+/// Another Connect account signed in from another tab (or one signed in
+/// while this tab had none). The claim is held here until this tab signs in.
+pub const SIGNED_IN_ELSEWHERE: &str = "Connect signed in with a different account in another tab. This claim is recorded on this device; sign in again in this tab to continue.";
 /// The node backend is being replaced: nothing is probed, built, finalised
 /// or re-bound until the App reports how the switch settled.
 pub const BACKEND_SWITCHING: &str = "The Bitcoin node backend is switching. This claim is recorded on this device and continues once the switch completes.";
@@ -496,6 +499,21 @@ impl ClaimStep1Panel {
         } else {
             self.note(None, SESSION_ENDED);
         }
+    }
+
+    /// Revoke the live coordinator and withdraw a review on screen for a
+    /// re-read under this panel's own session, which stands: the App's
+    /// answer to a sibling tab's same-account sign-in or refresh. The next
+    /// Refresh or entry re-binds.
+    pub fn revoke_and_withdraw(&mut self) {
+        self.revoke();
+        self.note(None, SESSION_ENDED);
+    }
+
+    /// Put `copy` on the current stage after the App holds the claim for a
+    /// reason of its own (see `App::on_global_auth_change`).
+    pub fn note_hold(&mut self, copy: &str) {
+        self.note(Some(copy), copy);
     }
 
     /// Put `at_review` on a Review (withdrawing its snapshot) or Track, and

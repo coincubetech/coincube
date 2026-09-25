@@ -828,6 +828,17 @@ pub struct ConnectAccountPanel {
     pub error: Option<PanelError>,
     /// Incremented on each login/logout so stale async completions can be discarded.
     session_generation: u64,
+    /// Per-tab authentication epoch. Every authentication operation this
+    /// panel spawns — a keyring refresh, an OTP verification, the
+    /// admitted-user load — captures it, and the completion it produces
+    /// (`SetSession`, `SessionLoaded`, `AdmittedUserLoaded`) carries it. The
+    /// App advances it at a global Connect auth invalidation
+    /// (`App::invalidate_claim_session`), so a completion of an operation
+    /// begun before that invalidation can be told from one begun after it,
+    /// whatever order they arrive in. Not `session_generation`: that one is
+    /// advanced by `SessionLoaded` itself, so it cannot say when the
+    /// operation began.
+    auth_epoch: u64,
     // ── Plan & Billing ──
     /// Cached plan features from GET /connect/features.
     pub features: Option<FeaturesResponse>,
@@ -902,6 +913,7 @@ impl ConnectAccountPanel {
             contacts_state: ContactsState::new(),
             error: None,
             session_generation: 0,
+            auth_epoch: 0,
             features: None,
             selected_billing_cycle: BillingCycle::Monthly,
             checkout: None,
@@ -1137,6 +1149,19 @@ impl ConnectAccountPanel {
         self.session_generation
     }
 
+    /// See the `auth_epoch` field.
+    pub fn auth_epoch(&self) -> u64 {
+        self.auth_epoch
+    }
+
+    /// Advance the authentication epoch: every operation spawned from here
+    /// on carries the new value. Returns it. Called by the App at a global
+    /// Connect auth invalidation.
+    pub fn invalidate_auth(&mut self) -> u64 {
+        self.auth_epoch = self.auth_epoch.wrapping_add(1);
+        self.auth_epoch
+    }
+
     /// Set the active Cube's network, used by the invite-form and
     /// add-to-cube flows to filter candidate cubes to network-matching
     /// ones. Called by the parent `ConnectPanel` when it wires up or
@@ -1247,7 +1272,9 @@ impl ConnectAccountPanel {
         delete_connect_secret(CONNECT_KEYRING_USER);
     }
 
-    fn post_login_tasks(&mut self, session: StoredSession) -> iced::Task<Message> {
+    /// `epoch` is the one the `SetSession` that produced this session
+    /// carried; the `SessionLoaded` it queues inherits it.
+    fn post_login_tasks(&mut self, session: StoredSession, epoch: u64) -> iced::Task<Message> {
         self.save_session_to_keyring(&session);
         self.client.set_token(&session.login.token);
 
@@ -1261,7 +1288,11 @@ impl ConnectAccountPanel {
         // "Sign via Keychain" unreachable until a full app restart.
         iced::Task::batch([
             iced::Task::done(Message::View(view::Message::ConnectAccount(
-                ConnectAccountMessage::SessionLoaded { user, plan: None },
+                ConnectAccountMessage::SessionLoaded {
+                    user,
+                    plan: None,
+                    epoch,
+                },
             ))),
             iced::Task::done(Message::InAppConnectLoginCompleted {
                 token: session.login.token.clone(),
@@ -1279,7 +1310,7 @@ impl ConnectAccountPanel {
             && matches!(
                 &msg,
                 ConnectAccountMessage::RefreshSession { .. }
-                    | ConnectAccountMessage::SetSession(_)
+                    | ConnectAccountMessage::SetSession(..)
                     | ConnectAccountMessage::SessionLoaded { .. }
                     | ConnectAccountMessage::EmailChanged(_)
                     | ConnectAccountMessage::SubmitLogin
@@ -1310,6 +1341,7 @@ impl ConnectAccountPanel {
                     self.admitted_user_loading = true;
                     let client = self.client.clone();
                     let generation = self.session_generation;
+                    let epoch = self.auth_epoch;
                     return iced::Task::perform(
                         async move {
                             client
@@ -1319,7 +1351,11 @@ impl ConnectAccountPanel {
                         },
                         move |user| {
                             Message::View(view::Message::ConnectAccount(
-                                ConnectAccountMessage::AdmittedUserLoaded { user, generation },
+                                ConnectAccountMessage::AdmittedUserLoaded {
+                                    user,
+                                    generation,
+                                    epoch,
+                                },
                             ))
                         },
                     );
@@ -1370,7 +1406,11 @@ impl ConnectAccountPanel {
                 };
             }
 
-            ConnectAccountMessage::AdmittedUserLoaded { user, generation } => {
+            ConnectAccountMessage::AdmittedUserLoaded {
+                user,
+                generation,
+                epoch,
+            } => {
                 if !self.admitted_client || generation != self.session_generation {
                     return iced::Task::none();
                 }
@@ -1380,6 +1420,7 @@ impl ConnectAccountPanel {
                         return self.dispatch_message(ConnectAccountMessage::SessionLoaded {
                             user,
                             plan: None,
+                            epoch,
                         })
                     }
                     Err((error, auth_error)) => {
@@ -1393,11 +1434,12 @@ impl ConnectAccountPanel {
 
             ConnectAccountMessage::RefreshSession { refresh_token } => {
                 let client = self.client.clone();
+                let epoch = self.auth_epoch;
                 return iced::Task::perform(
                     async move { client.refresh_login(&refresh_token).await },
-                    |res| match res {
+                    move |res| match res {
                         Ok(login) => Message::View(view::Message::ConnectAccount(
-                            ConnectAccountMessage::SetSession(login),
+                            ConnectAccountMessage::SetSession(login, epoch),
                         )),
                         Err(e) => {
                             if e.is_auth_error() {
@@ -1428,12 +1470,18 @@ impl ConnectAccountPanel {
                 };
             }
 
-            ConnectAccountMessage::SetSession(login) => {
+            ConnectAccountMessage::SetSession(login, epoch) => {
                 let session = StoredSession { login };
-                return self.post_login_tasks(session);
+                return self.post_login_tasks(session, epoch);
             }
 
-            ConnectAccountMessage::SessionLoaded { user, plan } => {
+            // The epoch is the App's to read (its claim hold); the panel's
+            // own session handling is the same whichever operation produced it.
+            ConnectAccountMessage::SessionLoaded {
+                user,
+                plan,
+                epoch: _,
+            } => {
                 self.session_generation += 1;
                 self.user = Some(user);
                 self.plan = plan;
@@ -1746,6 +1794,7 @@ impl ConnectAccountPanel {
                 };
                 let is_signup = *is_signup;
                 let client = self.client.clone();
+                let epoch = self.auth_epoch;
                 return iced::Task::perform(
                     async move {
                         if is_signup {
@@ -1754,9 +1803,9 @@ impl ConnectAccountPanel {
                             client.login_verify_otp(req).await
                         }
                     },
-                    |res| match res {
+                    move |res| match res {
                         Ok(login) => Message::View(view::Message::ConnectAccount(
-                            ConnectAccountMessage::SetSession(login),
+                            ConnectAccountMessage::SetSession(login, epoch),
                         )),
                         Err(e) => Message::View(view::Message::ConnectAccount(
                             ConnectAccountMessage::Error((&e).into()),
@@ -7011,7 +7060,11 @@ mod plan_lifecycle_tests {
             email: "founder@example.com".into(),
             email_verified: Some(true),
         };
-        let _ = panel.update_message(ConnectAccountMessage::SessionLoaded { user, plan: None });
+        let _ = panel.update_message(ConnectAccountMessage::SessionLoaded {
+            user,
+            plan: None,
+            epoch: 0,
+        });
         assert!(panel.pending_campaign_code.is_none(), "code consumed");
         assert!(panel.campaign_redeem.submitting, "redeem in flight");
         assert_eq!(
@@ -7952,6 +8005,7 @@ mod admitted_session_tests {
                 email_verified: Some(true),
             }),
             generation,
+            epoch: 0,
         });
         assert!(iced_runtime::task::into_stream(task).is_none());
         assert!(panel.user.is_none());

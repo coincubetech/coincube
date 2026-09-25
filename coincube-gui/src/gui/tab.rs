@@ -528,6 +528,16 @@ fn vault_settings_for_cube(
         .find(|wallet| wallet.wallet_id() == *vault_id)
 }
 
+/// A Connect authentication change `GUI::update` broadcasts to every tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthChange {
+    /// A log-out from any tab.
+    LogOut,
+    /// A login or refresh result (`SetSession`) from any tab, for this
+    /// Connect user.
+    SignIn { user_id: u32 },
+}
+
 pub struct Tab {
     pub id: usize,
     pub state: State,
@@ -704,7 +714,17 @@ impl Tab {
         }
     }
 
-    pub fn invalidate_fork_session(&mut self) -> Task<Message> {
+    /// The global Connect auth boundary, broadcast by `GUI::update` to every
+    /// tab for a log-out or a sign-in (`SetSession`) from any tab. The fork
+    /// arms tear down or refuse regardless of the kind; the Bitcoin App arm
+    /// decides from it — hold on a log-out, revoke for a re-read on a sibling
+    /// same-account sign-in, hold on another account — and leaves its own
+    /// sign-in to its own hook (`originated`).
+    pub fn invalidate_fork_session(
+        &mut self,
+        change: AuthChange,
+        originated: bool,
+    ) -> Task<Message> {
         self.fork_session_generation = self.fork_session_generation.wrapping_add(1);
         self.fork_save_task.take();
         self.fork_tasks.clear();
@@ -725,12 +745,10 @@ impl Tab {
                 replacement = Some(State::Home(home));
             }
             // A Bitcoin App stays open across a Connect change — its wallet
-            // does not depend on the session — but a claim in flight does:
-            // it is revoked here, at the global auth boundary, whether or not
-            // this tab originated the change, and the session this tab's
-            // Connect panel still shows stops counting for the claim until a
-            // new one is established here. Only that re-binds it.
-            State::App(app) => app.invalidate_claim_session(),
+            // does not depend on the session — but a claim in flight does.
+            // The App decides from the kind of change and who made it: see
+            // `App::on_global_auth_change`.
+            State::App(app) => app.on_global_auth_change(change, originated),
             State::Loader(loader) if loader.cube_settings.network.is_blake2b() => {
                 loader.invalidate_fork_session()
             }
@@ -800,7 +818,9 @@ impl Tab {
         if matches!(&self.state, State::App(app) if app.cube_settings().network.is_blake2b() && app.authenticated_coincube_client().is_none())
         {
             drop(result);
-            return self.invalidate_fork_session();
+            // A fork App that lost its client: its own arm tears it down; the
+            // kind and origin only matter to the Bitcoin arm, not reached here.
+            return self.invalidate_fork_session(AuthChange::LogOut, true);
         }
         if matches!(&self.state, State::App(app) if app.cube_settings().network.is_blake2b()) {
             self.guard_fork_task(result)
@@ -5417,7 +5437,7 @@ mod fork_completion_tests {
             ));
             assert!(app::session::pin_for("synthetic-save-cube").is_none());
         }
-        let startup = tab.invalidate_fork_session();
+        let startup = tab.invalidate_fork_session(AuthChange::LogOut, false);
         // The Home task is preserved and its actual asynchronous directory
         // result is consumed. Auth Init itself is not run by this fixture.
         for result in outputs(startup).await {
