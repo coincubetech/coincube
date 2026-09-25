@@ -64,6 +64,10 @@ pub enum Message {
     Fiat(FiatMessage),
     UpdatePanelCache(/* is current panel */ bool),
     View(view::Message),
+    /// Results of the claim step-1 panel's own async work (preconditions
+    /// probe, build, finalise, review, submit, track). Carries the panel's
+    /// coordinator session back and forth, so no other handler ever sees it.
+    Claim(super::state::vault::claim::ClaimEvent),
     LoadDaemonConfig(Box<DaemonConfig>),
     DaemonConfigLoaded(Result<(), Error>),
     /// Result of an off-UI-thread daemon restart (a backend switch). Carries the

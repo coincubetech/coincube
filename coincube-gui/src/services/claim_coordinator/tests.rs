@@ -608,3 +608,210 @@ async fn dispatch_deadline_uses_oldest_evidence_and_never_extends_for_skew() {
         Err(Error::ExpiredEvidence)
     ));
 }
+
+/// `Production` is embedded-only, and it says so **at construction** rather
+/// than at the submit call.
+///
+/// The type used to encode that by taking `Arc<EmbeddedDaemon>`. It now takes
+/// the trait object — every call it makes is a trait method — so the rule has
+/// to be stated. It matters where it is stated: `confirm_and_submit` records
+/// the broadcast intent *before* submitting, so a backend that answers
+/// `config()` but cannot carry the verified artifact would journal a durable
+/// intent and then take `ClientNotSupported`, an `Uncertain` outcome that can
+/// never be retried.
+///
+/// The stub below is deliberately shaped to defeat the *other* checks: it
+/// returns a config that satisfies every endpoint, chain and token constraint
+/// in `Production::new`. Only `backend()` is wrong. If the guard is removed,
+/// construction succeeds and this test fails.
+#[tokio::test]
+async fn production_refuses_a_non_embedded_backend_at_construction() {
+    let server = MockServer::start_async().await;
+    let root = std::env::temp_dir().join(format!("claim-prod-guard-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let endpoint = format!("{}/api/v1/esplora/bitcoin/mainnet", server.base_url());
+    // A real mainnet descriptor: `Production::new` compares it against nothing,
+    // but the config must parse.
+    let desc = "tr([abcdef01]xpub6Eze7yAT3Y1wGrnzedCNVYDXUqa9NmHVWck5emBaTbXtURbe1NWZbK9bsz1TiVE7Cz341PMTfYgFw1KdLWdzcM1UMFTcdQfCYhhXZ2HJvTW/<0;1>/*,and_v(v:pk([abcdef01]xpub688Hn4wScQAAiYJLPg9yH27hUpfZAUnmJejRQBCiwfP5PEDzjWMNW1wChcninxr5gyavFqbbDjdV1aK5USJz8NDVjUy7FRQaaqqXHh5SbXe/<0;1>/*),older(52560)))#0mt7e93c";
+    let cfg: coincubed::config::Config = toml::from_str(&format!(
+        "main_descriptor = '{}'\ndata_directory = '{}'\n[bitcoin_config]\nnetwork = 'bitcoin'\n[esplora_config]\naddr = '{}'\n",
+        desc,
+        root.display(),
+        endpoint
+    ))
+    .unwrap();
+
+    #[derive(Debug)]
+    struct ExternalWithGoodConfig(coincubed::config::Config);
+
+    #[async_trait::async_trait]
+    impl Daemon for ExternalWithGoodConfig {
+        fn backend(&self) -> crate::daemon::DaemonBackend {
+            // The only thing wrong with this daemon.
+            crate::daemon::DaemonBackend::ExternalCoincubed
+        }
+
+        fn config(&self) -> Option<&coincubed::config::Config> {
+            Some(&self.0)
+        }
+
+        async fn is_alive(
+            &self,
+            _datadir: &crate::dir::CoincubeDirectory,
+            _network: coincube_core::miniscript::bitcoin::Network,
+        ) -> Result<(), DaemonError> {
+            unreachable!("_is_alive: construction is refused before any call")
+        }
+        async fn stop(&self) -> Result<(), DaemonError> {
+            unreachable!("_stop: construction is refused before any call")
+        }
+        async fn get_info(&self) -> Result<crate::daemon::model::GetInfoResult, DaemonError> {
+            unreachable!("_get_info: construction is refused before any call")
+        }
+        async fn request_sync(&self) -> Result<(), DaemonError> {
+            unreachable!("_request_sync: construction is refused before any call")
+        }
+        async fn get_new_address(
+            &self,
+        ) -> Result<crate::daemon::model::GetAddressResult, DaemonError> {
+            unreachable!("_get_new_address: construction is refused before any call")
+        }
+        async fn list_revealed_addresses(
+            &self,
+            _is_change: bool,
+            _exclude_used: bool,
+            _limit: usize,
+            _start_index: Option<coincube_core::miniscript::bitcoin::bip32::ChildNumber>,
+        ) -> Result<crate::daemon::model::ListRevealedAddressesResult, DaemonError> {
+            unreachable!("_list_revealed_addresses: construction is refused before any call")
+        }
+        async fn update_deriv_indexes(
+            &self,
+            _receive: Option<u32>,
+            _change: Option<u32>,
+        ) -> Result<coincubed::commands::UpdateDerivIndexesResult, DaemonError> {
+            unreachable!("_update_deriv_indexes: construction is refused before any call")
+        }
+        async fn list_coins(
+            &self,
+            _statuses: &[coincubed::commands::CoinStatus],
+            _outpoints: &[coincube_core::miniscript::bitcoin::OutPoint],
+        ) -> Result<crate::daemon::model::ListCoinsResult, DaemonError> {
+            unreachable!("_list_coins: construction is refused before any call")
+        }
+        async fn list_spend_txs(
+            &self,
+        ) -> Result<crate::daemon::model::ListSpendResult, DaemonError> {
+            unreachable!("_list_spend_txs: construction is refused before any call")
+        }
+        async fn create_spend_tx(
+            &self,
+            _coins_outpoints: &[coincube_core::miniscript::bitcoin::OutPoint],
+            _destinations: &std::collections::HashMap<
+                coincube_core::miniscript::bitcoin::Address<
+                    coincube_core::miniscript::bitcoin::address::NetworkUnchecked,
+                >,
+                u64,
+            >,
+            _feerate_vb: u64,
+            _change_address: Option<
+                coincube_core::miniscript::bitcoin::Address<
+                    coincube_core::miniscript::bitcoin::address::NetworkUnchecked,
+                >,
+            >,
+        ) -> Result<crate::daemon::model::CreateSpendResult, DaemonError> {
+            unreachable!("_create_spend_tx: construction is refused before any call")
+        }
+        async fn rbf_psbt(
+            &self,
+            _txid: &coincube_core::miniscript::bitcoin::Txid,
+            _is_cancel: bool,
+            _feerate_vb: Option<u64>,
+        ) -> Result<crate::daemon::model::CreateSpendResult, DaemonError> {
+            unreachable!("_rbf_psbt: construction is refused before any call")
+        }
+        async fn update_spend_tx(
+            &self,
+            _psbt: &coincube_core::miniscript::bitcoin::psbt::Psbt,
+        ) -> Result<(), DaemonError> {
+            unreachable!("_update_spend_tx: construction is refused before any call")
+        }
+        async fn delete_spend_tx(
+            &self,
+            _txid: &coincube_core::miniscript::bitcoin::Txid,
+        ) -> Result<(), DaemonError> {
+            unreachable!("_delete_spend_tx: construction is refused before any call")
+        }
+        async fn broadcast_spend_tx(
+            &self,
+            _txid: &coincube_core::miniscript::bitcoin::Txid,
+        ) -> Result<(), DaemonError> {
+            unreachable!("_broadcast_spend_tx: construction is refused before any call")
+        }
+        async fn start_rescan(&self, _t: u32) -> Result<(), DaemonError> {
+            unreachable!("_start_rescan: construction is refused before any call")
+        }
+        async fn list_confirmed_txs(
+            &self,
+            _start: u32,
+            _end: u32,
+            _limit: u64,
+        ) -> Result<crate::daemon::model::ListTransactionsResult, DaemonError> {
+            unreachable!("_list_confirmed_txs: construction is refused before any call")
+        }
+        async fn create_recovery(
+            &self,
+            _address: coincube_core::miniscript::bitcoin::Address<
+                coincube_core::miniscript::bitcoin::address::NetworkUnchecked,
+            >,
+            _coins_outpoints: &[coincube_core::miniscript::bitcoin::OutPoint],
+            _feerate_vb: u64,
+            _sequence: Option<u16>,
+        ) -> Result<coincube_core::miniscript::bitcoin::psbt::Psbt, DaemonError> {
+            unreachable!("_create_recovery: construction is refused before any call")
+        }
+        async fn list_txs(
+            &self,
+            _txid: &[coincube_core::miniscript::bitcoin::Txid],
+        ) -> Result<crate::daemon::model::ListTransactionsResult, DaemonError> {
+            unreachable!("_list_txs: construction is refused before any call")
+        }
+        async fn get_labels(
+            &self,
+            _labels: &std::collections::HashSet<coincubed::commands::LabelItem>,
+        ) -> Result<std::collections::HashMap<String, String>, DaemonError> {
+            unreachable!("_get_labels: construction is refused before any call")
+        }
+        async fn update_labels(
+            &self,
+            _labels: &std::collections::HashMap<coincubed::commands::LabelItem, Option<String>>,
+        ) -> Result<(), DaemonError> {
+            unreachable!("_update_labels: construction is refused before any call")
+        }
+        async fn get_labels_bip329(
+            &self,
+            _offset: u32,
+            _limit: u32,
+        ) -> Result<coincubed::bip329::Labels, DaemonError> {
+            unreachable!("_get_labels_bip329: construction is refused before any call")
+        }
+    }
+
+    let mut client = CoincubeClient::new();
+    client.base_url = server.base_url();
+    let (_tx, generation) = tokio::sync::watch::channel(7u64);
+    let daemon: Arc<dyn Daemon + Send + Sync> = Arc::new(ExternalWithGoodConfig(cfg));
+
+    let refused = Production::new(
+        client,
+        daemon,
+        "synthetic-account".to_string(),
+        7,
+        generation,
+    );
+    assert!(
+        matches!(refused, Err(Error::Unsupported)),
+        "an external backend must be refused before anything is journaled"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}

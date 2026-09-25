@@ -376,6 +376,18 @@ impl Daemon for EmbeddedDaemon {
         .await
     }
 
+    async fn reserve_change(
+        &self,
+    ) -> Result<coincube_core::miniscript::bitcoin::bip32::ChildNumber, DaemonError> {
+        self.command(|daemon| {
+            daemon
+                .reserve_change()
+                .map(|reservation| reservation.index())
+                .map_err(|e| DaemonError::Unexpected(e.to_string()))
+        })
+        .await
+    }
+
     async fn submit_verified_poison(
         &self,
         verified: std::sync::Arc<coincube_core::claim_finalize::VerifiedPoisonTransfer>,

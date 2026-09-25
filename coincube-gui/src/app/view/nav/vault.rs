@@ -144,8 +144,10 @@ mod tests {
             ]
         );
 
-        // Already claimed, and a non-Bitcoin Cube: same absence, different
-        // reasons — both answered by `features::claim_blake2b`.
+        // Already claimed: the item stays — the claim itself (step 1, the
+        // poison self-transfer) happens after the target exists, and the App
+        // routes the item to the step-1 panel instead of the installer
+        // (`features::claim_entry`).
         assert_eq!(
             labels(&items(&ctx(
                 &status,
@@ -153,8 +155,10 @@ mod tests {
                 true,
                 true
             ))),
-            labels(&ungranted)
+            labels(&granted)
         );
+        // A non-Bitcoin Cube: no claim surface, answered by
+        // `features::claim_blake2b`.
         assert_eq!(
             labels(&items(&ctx(
                 &status,

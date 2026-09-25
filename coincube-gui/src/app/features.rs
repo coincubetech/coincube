@@ -431,8 +431,12 @@ pub struct ClaimSourceCube {
     pub already_claimed: bool,
 }
 
-/// Whether a claim may be started from this Cube. Both halves of the gate —
-/// [`bitcoin_blake2b`] for the build/account, and the source Cube's own shape.
+/// Whether this Cube may take part in a Bitcoin Blake2b claim at all. Both
+/// halves of the gate — [`bitcoin_blake2b`] for the build/account, and the
+/// source Cube's own shape. What the entry *does* is [`claim_entry`]'s call:
+/// a Cube that already has a claim target is still a claim source, because
+/// the claim itself (step 1, the poison self-transfer) happens after the
+/// target exists.
 pub fn claim_blake2b(source: ClaimSourceCube) -> Availability {
     let account = bitcoin_blake2b(BitcoinBlake2bServerFlag {
         server_enabled: source.server_enabled,
@@ -450,12 +454,33 @@ pub fn claim_blake2b(source: ClaimSourceCube) -> Availability {
             reason: "This Cube has no Vault to claim.".to_string(),
         };
     }
-    if source.already_claimed {
-        return Availability::Unavailable {
-            reason: "This Cube already has a Bitcoin Blake2b claim.".to_string(),
-        };
-    }
     Availability::Available
+}
+
+/// What the claim entry does for this Cube, once [`claim_blake2b`] admits it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimEntry {
+    /// No Bitcoin Blake2b Cube reuses this descriptor yet: start the
+    /// claim-target installer (Lane B1.4).
+    CreateTarget,
+    /// The target exists: open claim step 1, the poison self-transfer on
+    /// Bitcoin (Lane B1.5). A second target would watch the same addresses
+    /// twice, so the installer is never offered again.
+    Step1,
+}
+
+/// Which entry a claim from this Cube takes, or `None` when
+/// [`claim_blake2b`] refuses. One decision, made where the App and the rail
+/// can both ask it — never by comparing the card's copy.
+pub fn claim_entry(source: ClaimSourceCube) -> Option<ClaimEntry> {
+    if !claim_blake2b(source).is_available() {
+        return None;
+    }
+    Some(if source.already_claimed {
+        ClaimEntry::Step1
+    } else {
+        ClaimEntry::CreateTarget
+    })
 }
 
 #[cfg(test)]
@@ -510,12 +535,19 @@ mod tests {
         })
         .is_available());
 
-        // Already claimed: a second target would watch the same addresses.
-        assert!(!claim_blake2b(ClaimSourceCube {
+        // Already claimed: still a claim source (step 1 happens after the
+        // target exists), but the entry is the step-1 panel, never a second
+        // target — that would watch the same addresses twice.
+        let claimed = ClaimSourceCube {
             already_claimed: true,
             ..claim_source(ChainId::Bitcoin)
-        })
-        .is_available());
+        };
+        assert!(claim_blake2b(claimed).is_available());
+        assert_eq!(claim_entry(claimed), Some(ClaimEntry::Step1));
+        assert_eq!(
+            claim_entry(claim_source(ChainId::Bitcoin)),
+            Some(ClaimEntry::CreateTarget)
+        );
 
         // Account half absent — fails closed, and keeps the account-level
         // wording rather than a per-Cube one.
@@ -538,7 +570,7 @@ mod tests {
                 ..claim_source(ChainId::Bitcoin)
             }),
             claim_blake2b(ClaimSourceCube {
-                already_claimed: true,
+                server_enabled: false,
                 ..claim_source(ChainId::Bitcoin)
             }),
         ]
