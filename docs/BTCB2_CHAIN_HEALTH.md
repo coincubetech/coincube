@@ -4,7 +4,7 @@ Scope: coincube-api#288, the first of the gates listed in
 `docs/BTCB2_MANAGED_NODE.md` ("coincubed chain health"). Read that document
 first; this one covers only the typed probe `coincubed` now offers and what it
 does and does not establish. Nothing here activates the fork, starts a node,
-or changes how the Bitcoin-family RDTS probe behaves.
+or touches the managed-node start path.
 
 ## What the node reports
 

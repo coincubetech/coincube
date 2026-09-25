@@ -11,8 +11,8 @@
 //! 2. **Read-modify-write.** Every writer of the file rebuilds it from a struct
 //!    it read moments earlier. A writer that read before another one persisted
 //!    a new section erases that section when it writes ("last writer wins").
-//!    The inbound-Tor preparation and the legacy `consensusrules` migration do
-//!    exactly this on every start.
+//!    The inbound-Tor preparation and `bitcoind::maybe_start`'s pre-spawn
+//!    rewrite do exactly this on every start.
 //!
 //! Both are closed by one datadir-wide, OS-backed exclusive lock
 //! ([`ManagedConfLock`]) held across the whole read → decide → write span

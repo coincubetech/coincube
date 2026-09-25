@@ -1574,11 +1574,12 @@ impl BitcoinD {
     /// top-level `blake2b` at L2029-2037, `RdtsFlagDayDescPushBack` at
     /// L1948-1963). See `docs/BTCB2_CHAIN_HEALTH.md`.
     ///
-    /// This is deliberately NOT [`Self::deployment_status`]: that probe folds
-    /// "RPC failed", "no such deployment" and "no `deployments` object" into one
-    /// `None` and defaults a missing `active` to `false`, which is exactly right
-    /// for the Bitcoin-chain RDTS repair input it serves and exactly wrong for
-    /// deciding whether a node is a scheduled BLAKE2b fork. Here the three
+    /// This is deliberately not the shape of the `deployment_status` probe the
+    /// Bitcoin-chain RDTS repair used (deleted with it in sunset PR 4, #510):
+    /// that one folded "RPC failed", "no such deployment" and "no
+    /// `deployments` object" into one `None` and defaulted a missing `active`
+    /// to `false`, which was right for the repair input it served and wrong
+    /// for deciding whether a node is a scheduled BLAKE2b fork. Here the three
     /// outcomes stay apart:
     ///
     /// - `Err(DeploymentProbeError::Rpc(_))` — the request failed; the original

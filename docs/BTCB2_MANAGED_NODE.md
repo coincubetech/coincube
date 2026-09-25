@@ -86,16 +86,16 @@ records anything: conf *and* ledger are untouched. A **write failure**
 (`NotReplaced`) happens after the edit ran: the conf still holds its previous
 bytes, but whatever the edit recorded on its way — for the installer and
 settings writers, the flavour ledger (`record_configured` runs inside the
-edit, deliberately before the write that would erase a legacy marker) —
-stays recorded. The two files are not one transaction and no rollback is
-attempted; the next successful write brings the conf in line with the ledger.
+edit, ahead of the conf write) — stays recorded. The two files are not one
+transaction and no rollback is attempted; the next successful write brings
+the conf in line with the ledger.
 
 | Writer | When | Early refusal (`Busy` / unreadable / no port) | Write failure (`NotReplaced`) |
 |---|---|---|---|
 | installer `DefineConfig` | node setup | step error; conf and ledger untouched | step error; conf unchanged, ledger may already name the flavour |
 | settings `write_internal_bitcoind_config` | setup, flavour switch, restart-to-apply, resources apply | `Err` before the ledger; nothing started | `Err`; nothing started; conf unchanged, ledger may already name the flavour |
 | `tor::prepare_inbound_tor` (outbound-only reset, then the inbound merge once Tor is up) | every managed start | **start refused** (`StartInternalBitcoindError::ConfigUnavailable`) — the file may still name a Tor that is not running, and a node must not be started from stale privacy configuration | same refusal; it records nothing else |
-| `bitcoind::migrate_legacy_rdts_conf` | every `maybe_start` | skipped this start (retried next start, as before) | logged; ledger already names Knots, the marker line stays until the next start |
+| `bitcoind::maybe_start` (rewrite of the parsed conf before the spawn; drops the legacy `consensusrules` line `from_ini` tolerates) | every spawn of a managed Bitcoin-family node, after the running-node reuse check | **start refused** (`ConfigUnavailable`, the Tor preparation's class); the file is untouched, so a legacy line stays until the next start | same refusal; it records nothing else |
 
 Because each rewrite reads under the lock, a section another setup persisted
 a moment earlier is never erased by a stale snapshot. Tor's bootstrap — the
