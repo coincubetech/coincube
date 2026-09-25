@@ -127,9 +127,7 @@ pub const CORE_VERSION: &str = CORE_VERSIONS[0];
 /// `29.3.knots20260508` on enforce BIP-110 (RDTS) on their own deployment
 /// schedule — enforcement is a property of the build, with no runtime
 /// off-switch — and that fork stalled two blocks in. A node running one of those
-/// builds follows a dead chain, so they are not offered: see
-/// [`RDTS_ENFORCING_KNOTS_BUILD`] and `node::revalidate` for the repair that
-/// un-strands datadirs they left behind.
+/// builds follows a dead chain, so they are not offered.
 ///
 /// Listing only the pinned build is also what makes an update *replace* an
 /// installed enforcing binary rather than reuse it: every "is it installed?"
@@ -159,18 +157,6 @@ pub const KNOTS_BLAKE2B_VERSIONS: [&str; 1] = ["29.4.1.knots20260508"];
 
 /// Current managed Knots version for a Bitcoin Blake2b node.
 pub const KNOTS_BLAKE2B_VERSION: &str = KNOTS_BLAKE2B_VERSIONS[0];
-
-/// First Knots build date that enforces BIP-110 (RDTS).
-///
-/// Knots subversions carry a `Knots:<YYYYMMDD>` build segment
-/// (`/Satoshi:29.3.0/Knots:20260508/`). Enforcement shipped in mainline from
-/// `knots20260508`; every earlier build — including the pinned
-/// [`KNOTS_VERSION`] — and every Bitcoin Core build ignore RDTS entirely.
-///
-/// This is the *observable* property the chain-repair planner keys on, because
-/// it, not the flavour, decides whether a node trailing the most-work chain is
-/// doing so deliberately. See [`build_enforces_rdts`].
-pub const RDTS_ENFORCING_KNOTS_BUILD: u32 = 20_260_508;
 
 // Pinned SHA-256 of the Bitcoin Core archive for the current `CORE_VERSION`, per
 // platform. Knots is verified against its published `SHA256SUMS` manifest instead
@@ -420,35 +406,6 @@ impl NodeFlavor {
     }
 }
 
-/// Whether the build behind `subversion` enforces BIP-110 (RDTS).
-///
-/// Enforcement is a build property, not a configuration one: `consensusrules=rdts`
-/// only ever recorded the user's consent, and an enforcing build enforces with or
-/// without it. So the only honest way to ask the question of a *running* node is
-/// to read the build date out of its `getnetworkinfo.subversion`. Knots publishes
-/// that as its own segment — `/Satoshi:29.3.0/Knots:20260508/` → `20260508` →
-/// enforcing.
-///
-/// The separator between `Knots` and the date is skipped rather than assumed:
-/// getting it wrong reads every Knots build as undatable, and the fallback below
-/// then calls all of them enforcing — which silently disables the repair this
-/// exists to trigger *and* makes every start replace a perfectly good binary.
-///
-/// Core is never enforcing. A Knots build whose date we cannot read is treated as
-/// enforcing, which is the conservative answer for the one caller that moves a
-/// chain: dragging a genuinely enforcing node back onto the majority chain just
-/// re-rejects the same blocks on every start, forever.
-pub fn build_enforces_rdts(subversion: &str) -> bool {
-    if !matches!(NodeFlavor::from_subversion(subversion), NodeFlavor::Knots) {
-        return false;
-    }
-    match knots_build_date(subversion) {
-        Some(build) => build >= RDTS_ENFORCING_KNOTS_BUILD,
-        // A Knots build we can't date. Assume the worst and leave its chain alone.
-        None => true,
-    }
-}
-
 /// The `YYYYMMDD` build date out of a Knots subversion, or `None` for Core and
 /// for a Knots build that doesn't carry one where we can find it.
 ///
@@ -515,37 +472,24 @@ pub fn node_version_label(subversion: &str) -> Option<String> {
 }
 
 /// What a running managed node actually *is*, as opposed to what it was
-/// configured to be: its flavour and whether its build enforces BIP-110.
-///
-/// The two travel together because the chain-repair planner needs both and they
-/// come from the same one source of truth — the node's own subversion. Splitting
-/// them across parameters is how a caller ends up pairing one node's flavour with
-/// another's enforcement.
+/// configured to be: the flavour read off the node's own subversion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ObservedBuild {
     pub flavor: NodeFlavor,
-    /// Whether this build enforces RDTS. See [`build_enforces_rdts`].
-    pub enforces_rdts: bool,
 }
 
 impl ObservedBuild {
-    /// Read both facts off a node's `getnetworkinfo.subversion`.
+    /// Read the flavour off a node's `getnetworkinfo.subversion`.
     pub fn from_subversion(subversion: &str) -> Self {
         Self {
             flavor: NodeFlavor::from_subversion(subversion),
-            enforces_rdts: build_enforces_rdts(subversion),
         }
     }
 
     /// Fall back to the configured flavour when the node would not tell us what it
-    /// is. Knots is assumed enforcing here for the same reason an undatable Knots
-    /// build is: with no evidence, the option that cannot loop is to leave the
-    /// chain alone.
+    /// is.
     pub fn assumed(flavor: NodeFlavor) -> Self {
-        Self {
-            flavor,
-            enforces_rdts: matches!(flavor, NodeFlavor::Knots),
-        }
+        Self { flavor }
     }
 }
 
@@ -835,22 +779,23 @@ pub fn allocate_managed_ports<E: fmt::Display>(
 ///
 /// Written beside the cookie file, i.e. inside the node's own network datadir, and
 /// read back by `coincubed` as part of [`coincubed::BackendId`]. That placement is the
-/// whole point: a chain repair authorises a deep rollback on one specific node, and
-/// the things that would otherwise identify it — the RPC port, the cookie path — both
-/// outlive the datadir being deleted and recreated beneath them. An authorisation from
-/// the old datadir would then be honoured against the new one. This marker goes with
-/// the datadir, so the replacement gets a fresh identity and the stale authorisation
-/// stops matching.
+/// whole point: anything scoped to one specific node must not carry over to its
+/// replacement, and the things that would otherwise identify it — the RPC port, the
+/// cookie path — both outlive the datadir being deleted and recreated beneath them.
+/// This marker goes with the datadir, so the replacement gets a fresh identity and
+/// stale records stop matching. (It was introduced for the chain repair's rollback
+/// authorisation, deleted in RDTS sunset PR 4; the identity it provides is now used
+/// by the daemon's `BackendId` and by the flavour-ledger gate.)
 ///
 /// Generated once and never rewritten, so it is stable across restarts, node upgrades
 /// and flavour switches — all of which leave the datadir in place.
 ///
 /// Installed atomically, and that matters more than it looks. Creating the final name
 /// and *then* writing into it leaves a window in which the marker exists but is empty:
-/// a second caller sees it, reports success, and connects — so a repair can be
-/// recorded against an identity derived from an empty marker while every later reader
-/// derives a different one from the finished file, and the authorisation stops
-/// matching for good. So the contents are staged under a private name, flushed, and
+/// a second caller sees it, reports success, and connects — so anything recorded
+/// against an identity derived from an empty marker stops matching every later reader,
+/// which derives a different one from the finished file. So the contents are staged
+/// under a private name, flushed, and
 /// linked into place in one step. A reader sees either no marker or a complete one.
 ///
 /// Returns the identity now in force, which may be another caller's if it got there
@@ -931,26 +876,26 @@ pub(crate) fn with_quick_marker_lock_bound<T>(body: impl FnOnce() -> T) -> T {
 /// the identity it derives. That is fine when the marker is there, and fine when none is
 /// expected — but not when one is expected and merely *late*: everything built in the
 /// meantime reports the endpoint-and-cookie-path identity, and everything built after the
-/// marker lands reports a different one. A repair recorded in that window names an
-/// identity that no later client agrees with, and the authorisation it depends on stops
-/// matching — which is the failure the marker was introduced to prevent, reached by
-/// another route.
+/// marker lands reports a different one. Anything recorded in that window names an
+/// identity that no later client agrees with — which is the failure the marker was
+/// introduced to prevent, reached by another route.
 ///
 /// So the answer to a failed marker install is not "carry on with the weaker identity".
-/// It is to let the node start and sync, and to refuse anything that would write a repair
-/// down until the identity is settled.
+/// It is to let the node start and sync, and to refuse the identity-gated writes until
+/// the identity is settled.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NodeIdentity {
     /// Settled: either the marker is installed and validated, or none is expected here,
     /// so what a `BitcoinD` reports now is what it will keep reporting.
     Stable,
     /// A marker is expected and is not there. Any identity derived right now is
-    /// provisional, so no chain repair may be started or recorded against it.
+    /// provisional, so nothing identity-gated may be recorded against it.
     Unstable,
 }
 
 impl NodeIdentity {
-    /// Whether a chain repair may be started or recorded.
+    /// Whether identity-gated records — today, the flavour ledger — may be
+    /// written. Keeps the name it had while the chain repair was the gated write.
     pub fn permits_chain_repair(&self) -> bool {
         matches!(self, Self::Stable)
     }
@@ -959,9 +904,9 @@ impl NodeIdentity {
 /// Settle the managed node's identity, installing its marker if that has not happened
 /// yet.
 ///
-/// Called before the first `BitcoinD` of a managed-node start, and again on an explicit
-/// repair — so a start that could not establish it does not poison later attempts, it
-/// just declines to repair until one of them succeeds.
+/// Called before the first `BitcoinD` of a managed-node start — so a start that could
+/// not establish it does not poison later attempts, it just declines the identity-gated
+/// writes until one of them succeeds.
 pub fn establish_node_identity(config: &BitcoindConfig) -> NodeIdentity {
     match &config.rpc_auth {
         coincubed::config::BitcoindRpcAuth::CookieFile(cookie_path) => {
@@ -973,7 +918,7 @@ pub fn establish_node_identity(config: &BitcoindConfig) -> NodeIdentity {
                 Err(e) => {
                     warn!(
                         "could not establish the managed node's identity ({e}); it will start \
-                         and sync as usual, but chain repairs are declined until this succeeds"
+                         and sync as usual, but its flavour is not recorded until this succeeds"
                     );
                     NodeIdentity::Unstable
                 }
@@ -982,7 +927,7 @@ pub fn establish_node_identity(config: &BitcoindConfig) -> NodeIdentity {
         // No cookie file for a marker to sit beside, so none is expected and none will
         // ever appear. The endpoint-and-username identity such a node reports is already
         // settled — weaker than a marker, but it does not change under us, which is what
-        // matters here. Repairs may proceed.
+        // matters here. Identity-gated writes may proceed.
         coincubed::config::BitcoindRpcAuth::UserPass(..) => NodeIdentity::Stable,
     }
 }
@@ -1409,22 +1354,11 @@ pub struct InternalBitcoindConfig {
     /// Which managed node flavour this config is for.
     ///
     /// **Not persisted here.** bitcoind rejects unknown options, so the file has
-    /// no room for a key of our own, and the one marker it used to be recovered
-    /// from (`consensusrules=rdts`) is no longer written. A config parsed off
-    /// disk therefore only reports `Knots` when it still carries that legacy
-    /// line; the durable answer lives in the flavour ledger
+    /// no room for a key of our own. A config parsed off disk always reports the
+    /// `Core` placeholder; the durable answer lives in the flavour ledger
     /// (`revalidate::ManagedNodeState::configured_flavor`) and, once a node is
     /// up, in its subversion. See [`configured_managed_flavor`].
     pub flavor: NodeFlavor,
-    /// Legacy: a `consensusrules=rdts` line left in the file by a release that
-    /// still asked the node to enforce BIP-110.
-    ///
-    /// Parsed, never written. It survives only so an existing datadir can be
-    /// recognised as Knots' once, on the first start after the update, and have
-    /// the line stripped — the pinned build does not enforce RDTS, and a key it
-    /// may not even accept has no business staying in the file. Deleted once no
-    /// datadir can still carry it.
-    pub enforce_rdts: bool,
     /// Opt-in inbound connectivity over Tor. When true, [`Self::to_ini`] emits
     /// `listen=1`, `listenonion=1`, `discover=0` (and `torcontrol` once
     /// [`Self::tor_control_port`] is known), so bitcoind advertises itself as a
@@ -1518,7 +1452,6 @@ impl InternalBitcoindConfig {
         Self {
             networks: BTreeMap::new(),
             flavor: NodeFlavor::Core,
-            enforce_rdts: false,
             inbound_tor: false,
             outbound_via_tor: false,
             max_upload_target_mb_day: None,
@@ -1555,7 +1488,6 @@ impl InternalBitcoindConfig {
         Self {
             networks: BTreeMap::new(),
             flavor,
-            enforce_rdts: false,
             inbound_tor: false,
             outbound_via_tor: false,
             max_upload_target_mb_day: None,
@@ -1582,7 +1514,6 @@ impl InternalBitcoindConfig {
 
     pub fn from_ini(ini: &ini::Ini) -> Result<Self, InternalBitcoindConfigError> {
         let mut networks = BTreeMap::new();
-        let mut enforce_rdts = false;
         let mut inbound_tor = false;
         let mut outbound_via_tor = false;
         let mut max_upload_target_mb_day = None;
@@ -1640,13 +1571,6 @@ impl InternalBitcoindConfig {
                 // else is unexpected.
                 for (key, value) in prop.iter() {
                     match key {
-                        // Read-only legacy: written by releases that asked Knots
-                        // to enforce BIP-110. Parsed so an existing datadir still
-                        // loads (and so the line can be recognised and dropped on
-                        // the next write), never emitted again.
-                        "consensusrules" => {
-                            enforce_rdts = value.split(',').any(|rule| rule.trim() == "rdts");
-                        }
                         // `listenonion=1` is the marker that inbound-over-Tor is
                         // enabled; `listen`/`discover` are implied companions.
                         "listenonion" => inbound_tor = value.trim() == "1",
@@ -1685,6 +1609,18 @@ impl InternalBitcoindConfig {
                                 InternalBitcoindConfigError::CouldNotParseValue(e.to_string())
                             })?);
                         }
+                        // The legacy line: v1.0.1-rc1 and the other builds
+                        // between 2026-06-09 and 2026-08-10 wrote
+                        // `consensusrules=rdts` into every managed Knots node's
+                        // file, and this build neither reads nor writes the
+                        // key. Accepted and dropped: nothing is recorded from
+                        // it (no field, no ledger write, no flavour
+                        // inference), and `to_ini` never emits it, so the
+                        // next rewrite from the parsed form — the Tor
+                        // preparation on the loader and settings routes,
+                        // `maybe_start`'s pre-spawn rewrite on every route —
+                        // takes it off the disk before a node reads the file.
+                        "consensusrules" => {}
                         _ => {
                             return Err(InternalBitcoindConfigError::UnexpectedSection(format!(
                                 "Unexpected key in general section: {key}"
@@ -1694,20 +1630,12 @@ impl InternalBitcoindConfig {
                 }
             }
         }
-        // A legacy `consensusrules=rdts` still identifies the file as a Knots
-        // node's, and nothing else in it can. Absent the line the answer is
-        // simply not in this file — callers resolve it from the flavour ledger
-        // instead (see [`configured_managed_flavor`]), so the `Core` here is a
-        // placeholder, not a finding.
-        let flavor = if enforce_rdts {
-            NodeFlavor::Knots
-        } else {
-            NodeFlavor::Core
-        };
+        // Nothing in the file records the flavour: callers resolve it from the
+        // flavour ledger instead (see [`configured_managed_flavor`]), so the
+        // `Core` here is a placeholder, not a finding.
         Ok(Self {
             networks,
-            flavor,
-            enforce_rdts,
+            flavor: NodeFlavor::Core,
             inbound_tor,
             outbound_via_tor,
             max_upload_target_mb_day,
@@ -1746,12 +1674,10 @@ impl InternalBitcoindConfig {
     pub fn to_ini(&self) -> ini::Ini {
         let mut conf_ini = ini::Ini::new();
 
-        // No `consensusrules` line: we ship no build that enforces BIP-110, the
-        // key only ever recorded consent, and the pinned build may not accept it
-        // at all. Because the file is rebuilt from this struct rather than
-        // edited, every rewrite also *strips* a legacy line an older release
-        // left behind — which is the point. `self.enforce_rdts` is read-only
-        // legacy state and is deliberately not consulted here.
+        // No `consensusrules` line: the key only ever recorded consent to a
+        // deployment no shipped build enforces, and the pinned build may not
+        // accept it at all. The file is rebuilt from this struct rather than
+        // edited, so nothing an older release wrote survives a rewrite.
 
         // Inbound-over-Tor. All of these are global (non-network-scoped)
         // bitcoind options, so they belong in the section-less general part of
@@ -1924,10 +1850,7 @@ pub struct Bitcoind {
 ///
 /// 1. the flavour ledger's `configured_flavor`, written by whichever surface last
 ///    wrote the managed config;
-/// 2. a legacy `consensusrules=rdts` line, the marker releases before the RDTS
-///    sunset used (see [`migrate_legacy_rdts_conf`], which converts it to 1 and
-///    removes it);
-/// 3. the flavour the node was last *observed* running as, for a datadir whose
+/// 2. the flavour the node was last *observed* running as, for a datadir whose
 ///    ledger predates `configured_flavor`.
 ///
 /// A `None` is now cheap: with no `consensusrules` in the file, either binary can
@@ -1939,19 +1862,9 @@ pub fn configured_managed_flavor(coincube_datadir: &CoincubeDirectory) -> Option
     if let Some(flavor) = state.configured_flavor {
         return Some(flavor);
     }
-    let conf_path = internal_bitcoind_config_path(&internal_bitcoind_datadir(coincube_datadir));
-    if InternalBitcoindConfig::from_file(&conf_path).is_ok_and(|conf| conf.enforce_rdts) {
-        return Some(NodeFlavor::Knots);
-    }
     state.last_run_flavor
 }
 
-/// Strip a legacy `consensusrules=rdts` line from the managed `bitcoin.conf`,
-/// recording the flavour it stood for in the ledger first so nothing is lost.
-///
-/// Runs on the start path rather than only where the config is rewritten, because
-/// the loader starts the managed node without going through a rewrite: a datadir
-/// set up by a release that enforced RDTS would otherwise hand the key straight to
 /// `datacarriersize` for the Bitcoin family's managed node: the largest OP_RETURN
 /// script (in bytes) it relays. Claim step 1's poison marker is a 90-byte
 /// OP_RETURN script (`coincube_core::claim_spend`), over BIP-110's 83-byte limit
@@ -1967,7 +1880,7 @@ pub const DATA_CARRIER_SIZE: u32 = 100;
 /// written before claim step 1 existed. Bitcoin family only, by construction:
 /// the other family's file is never opened.
 ///
-/// Best-effort and idempotent, like [`migrate_legacy_rdts_conf`]: a file that
+/// Best-effort and idempotent: a file that
 /// cannot be read or written is left alone and retried on the next start, and
 /// a file that already carries the value is not rewritten.
 fn ensure_data_carrier_size(coincube_datadir: &CoincubeDirectory) {
@@ -1998,51 +1911,6 @@ fn ensure_data_carrier_size(coincube_datadir: &CoincubeDirectory) {
     }
 }
 
-/// the pinned build. Whether that build ignores or rejects the key is exactly the
-/// kind of thing not worth depending on.
-///
-/// Best-effort and idempotent — a file we cannot read or write is left alone and
-/// retried on the next start.
-fn migrate_legacy_rdts_conf(coincube_datadir: &CoincubeDirectory) {
-    use crate::node::managed_conf::{update_managed_conf, ManagedConfError};
-    // Under the datadir-wide conf lock, on a fresh read: a rebuild from a
-    // snapshot taken moments earlier would erase a network section another
-    // setup persisted in between.
-    let result = update_managed_conf(coincube_datadir, NodeChainFamily::Bitcoin, |txn| {
-        let Some(mut conf) = txn.conf.clone() else {
-            return Ok((false, None));
-        };
-        if !conf.enforce_rdts {
-            return Ok((false, None));
-        }
-        info!(
-            "managed bitcoin.conf still carries `consensusrules=rdts`; recording the node as \
-             Bitcoin Knots and removing the line — no build we ship enforces BIP-110"
-        );
-        // Ledger first: losing the line before its meaning is recorded would leave the
-        // datadir with no flavour at all.
-        crate::node::revalidate::ManagedNodeState::record_configured(
-            coincube_datadir,
-            NodeFlavor::Knots,
-        );
-        conf.flavor = NodeFlavor::Knots;
-        conf.enforce_rdts = false;
-        Ok((true, Some(conf)))
-    });
-    match result {
-        Ok(outcome) => {
-            outcome.logged("stripping `consensusrules` from the managed bitcoin.conf");
-        }
-        // Busy or unreadable: leave the line for the next start, as before. The
-        // pinned build is handed the file as it is, which is what happened on
-        // every start before the migration existed.
-        Err(ManagedConfError::Lock(e)) => {
-            warn!("not stripping `consensusrules` from the managed bitcoin.conf this start: {e}")
-        }
-        Err(e) => warn!("could not strip `consensusrules` from the managed bitcoin.conf: {e}"),
-    }
-}
-
 /// Pick the managed `bitcoind` binary to launch for `configured_flavor`,
 /// preferring that flavour's versions (newest first) and falling back to the
 /// other flavour's only if none are installed. Returns the first existing
@@ -2050,8 +1918,8 @@ fn migrate_legacy_rdts_conf(coincube_datadir: &CoincubeDirectory) {
 /// when nothing is installed.
 ///
 /// Only versions in [`CORE_VERSIONS`] / [`KNOTS_VERSIONS`] are candidates, so a
-/// Knots build we no longer ship — the RDTS-enforcing `29.3.knots20260508` — is
-/// never launched, however it got onto the disk.
+/// Knots build we no longer ship — `29.3.knots20260508`, which enforces a stalled
+/// fork — is never launched, however it got onto the disk.
 fn select_managed_bitcoind_exe(
     coincube_datadir: &CoincubeDirectory,
     configured_flavor: NodeFlavor,
@@ -2185,74 +2053,52 @@ impl Bitcoind {
         // Every managed-node start comes through here — the loader with a config it read
         // off disk, the installer with one it just wrote, the settings switch — and each
         // goes on to build a `BitcoinD`, which reads the marker once at construction and
-        // caches what it derives. Establishing it later means a repair can be recorded
-        // against the endpoint-and-cookie-path identity and then stop matching the moment
-        // the marker appears.
+        // caches what it derives. Establishing it later means anything recorded against
+        // the endpoint-and-cookie-path identity stops matching the moment the marker
+        // appears.
         //
         // Not fatal if it fails: the node still starts and syncs, which is what the user
-        // is waiting for. What it does cost is chain reconciliation — every repair path
-        // declines while the answer is provisional, and the next start tries again.
+        // is waiting for. What it does cost is the flavour-ledger record — declined while
+        // the answer is provisional, and written on the next start instead.
         let identity = establish_node_identity(&config);
-        // Drop any `consensusrules=rdts` an earlier release persisted before the
-        // node — of either flavour — is handed the file.
-        migrate_legacy_rdts_conf(coincube_datadir);
         // And give a file written before claim step 1 the OP_RETURN relay cap
         // the step's marker needs (Bitcoin family only).
         ensure_data_carrier_size(coincube_datadir);
         // Launch the binary the user asked for. Nothing in the conf forces our
-        // hand any more (it no longer carries a Knots-only key), but the choice
-        // is still theirs: a machine with both flavours installed must launch the
-        // configured one rather than whichever is found first.
+        // hand (it carries no Knots-only key), but the choice is still theirs: a
+        // machine with both flavours installed must launch the configured one
+        // rather than whichever is found first.
         let selected_exe = select_managed_bitcoind_exe(coincube_datadir, configured_flavor);
 
-        // Is a managed node already running on this RPC endpoint?
-        if let Ok(running) =
-            coincubed::BitcoinD::new(&config, "internal_bitcoind_start".to_string())
-        {
+        // Is a managed node already running on this RPC endpoint? Its flavour
+        // is read from its own subversion; `configured_flavor` is assumed when
+        // it does not say.
+        let running = coincubed::BitcoinD::new(&config, "internal_bitcoind_start".to_string())
+            .ok()
+            .map(|running| {
+                let running_flavor = running
+                    .subversion()
+                    .as_deref()
+                    .map(NodeFlavor::from_subversion)
+                    .unwrap_or(configured_flavor);
+                (running, running_flavor)
+            });
+        if let Some((_, running_flavor)) = &running {
             // The managed node is shared by every Vault, so flavour is global.
             // If the running node already matches the configured flavour, reuse
-            // it. If it doesn't (a global flavour switch — e.g. Core is up for
-            // existing Vaults and the user just picked Knots), stop it so we can
-            // relaunch the configured binary on the same datadir/port; every
-            // Vault then reconnects to the new flavour on the same RPC port.
-            let running_subversion = running.subversion();
-            let running_flavor = running_subversion
-                .as_deref()
-                .map(NodeFlavor::from_subversion)
-                .unwrap_or(configured_flavor);
-            // A matching flavour is not enough on its own: an RDTS-enforcing Knots
-            // build left over from before the sunset is still "Knots", and reusing
-            // it would keep the node on the stalled BIP-110 fork indefinitely —
-            // the auto-repair declines to drag an enforcing node anywhere. Replace
-            // it, but only if there is something to replace it *with*; stopping the
-            // only node on the machine to then find no binary would be worse than
-            // running the wrong one, and the download path can supply the pinned
-            // build on the next attempt.
-            let running_enforces_rdts = running_subversion
-                .as_deref()
-                .is_some_and(build_enforces_rdts);
-            let replaceable = running_enforces_rdts && selected_exe.is_some();
-            if running_flavor == configured_flavor && !replaceable {
-                if running_enforces_rdts {
-                    warn!(
-                        "Managed node is running an RDTS-enforcing build and no replacement \
-                         binary is installed; reusing it. Its chain cannot be repaired until \
-                         the pinned build is downloaded."
-                    );
-                }
+            // it: it has read its file already, so no conf rewrite and no lock
+            // taken on this path.
+            if *running_flavor == configured_flavor {
                 info!("Internal bitcoind is already running ({running_flavor:?})");
                 // Reconcile here too: this vault may be attaching to a node another
                 // vault swapped the flavour of, so this is a start path like any
                 // other. `running_flavor` is read from the node's own subversion.
                 crate::node::revalidate::reconcile_after_start(
                     coincube_datadir,
-                    &running,
-                    &config,
                     &identity,
                     crate::chain::ChainId::from(network),
                     ObservedBuild {
-                        flavor: running_flavor,
-                        enforces_rdts: running_enforces_rdts,
+                        flavor: *running_flavor,
                     },
                 );
                 return Ok(Bitcoind {
@@ -2261,18 +2107,37 @@ impl Bitcoind {
                         .map_err(|e| StartInternalBitcoindError::Lock(format!("{:?}", e)))?,
                 });
             }
-            if replaceable {
-                info!(
-                    "Managed node is running an RDTS-enforcing build ({}); stopping it so the \
-                     pinned {KNOTS_VERSION} build can take over",
-                    running_subversion.as_deref().unwrap_or("unknown"),
-                );
-            } else {
-                info!(
-                    "Managed node flavour switch {running_flavor:?} → {configured_flavor:?}; \
-                     stopping the running node so the configured binary can take over"
-                );
-            }
+        }
+        // Rewrite the conf from its parsed form before the binary reads it.
+        // `from_ini` accepts and drops the legacy `consensusrules` line older
+        // releases wrote, and `to_ini` never emits it, so an identity edit
+        // under the conf lock is what takes it off the disk. The loader and
+        // the settings restart already rewrite the file this way through
+        // `tor::prepare_inbound_tor` before they get here; the loader's
+        // pending-node route does not, and this is the only rewrite it gets.
+        // A file last written by `to_ini` comes back byte-identical. A
+        // refusal — lock busy, unreadable, not replaceable — is the same
+        // `ConfigUnavailable` the Tor preparation returns for the same
+        // reasons: no node is spawned on a file this build could not settle.
+        // It runs before the first irreversible step below — stopping a
+        // mismatched running node — so a refusal leaves that node running
+        // rather than stopped with no replacement started.
+        crate::node::managed_conf::update_managed_conf(
+            coincube_datadir,
+            NodeChainFamily::Bitcoin,
+            |txn| Ok(((), txn.conf.clone())),
+        )
+        .map(|outcome| outcome.logged("rewriting the managed bitcoin.conf before the spawn"))
+        .map_err(|e| StartInternalBitcoindError::ConfigUnavailable(e.to_string()))?;
+        if let Some((running, running_flavor)) = running {
+            // A global flavour switch — e.g. Core is up for existing Vaults and
+            // the user just picked Knots: stop it so we can relaunch the
+            // configured binary on the same datadir/port; every Vault then
+            // reconnects to the new flavour on the same RPC port.
+            info!(
+                "Managed node flavour switch {running_flavor:?} → {configured_flavor:?}; \
+                 stopping the running node so the configured binary can take over"
+            );
             running.stop();
             wait_for_internal_bitcoind_shutdown(&config);
         }
@@ -2366,8 +2231,6 @@ impl Bitcoind {
                         .unwrap_or_else(|| ObservedBuild::assumed(configured_flavor));
                     crate::node::revalidate::reconcile_after_start(
                         coincube_datadir,
-                        &started,
-                        &config,
                         &identity,
                         crate::chain::ChainId::from(network),
                         observed,
@@ -2733,10 +2596,9 @@ mod tests {
 
     // The timeout path, which is the one the bounded lock introduced. A holder that is
     // slow but not wedged makes a second caller give up — and a caller that then carried
-    // on would build a `BitcoinD` caching the endpoint-and-cookie-path identity, record a
-    // repair against it, and watch that authorisation stop matching the moment the marker
-    // finally landed. So giving up has to mean "no repair", not "repair under whatever
-    // identity we have".
+    // on would build a `BitcoinD` caching the endpoint-and-cookie-path identity and act
+    // on it, only to watch it stop matching the moment the marker finally landed. So
+    // giving up has to mean "unstable", not "settled on whatever identity we have".
     #[test]
     fn a_timed_out_caller_gets_an_unstable_identity_and_recovers_on_retry() {
         use fs4::fs_std::FileExt;
@@ -2781,58 +2643,21 @@ mod tests {
         );
         assert!(!timed_out.permits_chain_repair());
 
-        // ...and with that, no chain operation can be claimed, so nothing can issue
-        // `invalidateblock` or `reconsiderblock`, record a rollback floor, or reconcile.
-        // The identity is checked before the maintenance guard is even reached, so this
-        // says nothing about whether some other test happens to hold it.
-        let (state_dir, datadir) = {
-            let d = dir.join("coincube");
-            (d.clone(), crate::dir::CoincubeDirectory::new(d))
-        };
-        assert!(matches!(
-            crate::node::revalidate::probe_chain_operation(&datadir, &timed_out),
-            Err(crate::node::revalidate::ClaimRefused::UnstableIdentity)
-        ));
-        // Nor can the manual "Re-check chain" repair, which surfaces it to the user.
-        let refusal = crate::node::revalidate::clear_failure_flags(
-            &datadir,
-            &config,
-            &timed_out,
-            crate::node::revalidate::RevalidationPlan::ClearFailureFlags {
-                anchor_height: crate::node::revalidate::RDTS_ANCHOR_MAINNET,
-            },
-        )
-        .expect_err("must refuse");
-        assert!(
-            refusal.contains("identity"),
-            "the refusal should say why: {}",
-            refusal
-        );
-        // Refused before anything was written down, so there is no half-recorded repair
-        // for a later start to trip over.
-        assert_eq!(
-            crate::node::revalidate::ManagedNodeState::load(&datadir).sanctioned_rollback,
-            None
-        );
-        let _ = std::fs::remove_dir_all(&state_dir);
-
         // The original holder now finishes and releases, which is the "late successful
         // installation" the timed-out caller has to pick up.
         let installed = establish_node_instance(&network_dir).expect("installed");
         let _ = FileExt::unlock(&held);
 
-        // A later start — or an explicit repair — settles on the marker that landed, and
-        // repairs are permitted again.
+        // A later start settles on the marker that landed, and the identity-gated
+        // write is permitted again.
         let retried = establish_node_identity(&config);
         assert_eq!(retried, NodeIdentity::Stable);
         assert!(retried.permits_chain_repair());
         assert_eq!(std::fs::read_to_string(&marker).unwrap(), installed);
-        // Deliberately not asserting that a claim now succeeds: that also depends on the
-        // process-wide maintenance guard other tests take, and taking it here to look
-        // would make *their* assertions flaky in return. `permits_chain_repair` above is
-        // the identity-level property this test owns; that the gate then opens is
-        // asserted under the serialising lock in
-        // `revalidate::tests::an_unsettled_identity_permits_no_chain_operation`.
+        // `permits_chain_repair` is the identity-level property this test owns; what
+        // that gate protects — the flavour ledger advancing only under a settled
+        // identity — is asserted in
+        // `revalidate::tests::an_unsettled_identity_leaves_the_ledger_alone`.
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3235,49 +3060,53 @@ mod tests {
         assert_eq!(NodeFlavor::from_version("29.0"), NodeFlavor::Core);
     }
 
-    // The pin is the last non-enforcing Knots release, and the enforcement
-    // predicate agrees with it. If these two ever disagree, the managed node
-    // enforces a stalled fork and the repair path refuses to pull it back off.
+    // The pin is the last Knots release that does not enforce the stalled fork.
+    // If it ever moves onto `20260508` or later, the managed node follows a dead
+    // chain and nothing in this tree pulls it back off.
     #[test]
-    fn the_pinned_knots_build_does_not_enforce_rdts() {
+    fn the_knots_pin_stays_below_the_enforcing_release() {
         assert_eq!(KNOTS_VERSION, "29.3.knots20260507");
-        // Built the way the real binary reports it, so the pin and the parser are
-        // checked against each other rather than against a hand-written string.
-        assert!(!build_enforces_rdts(&format!(
-            "/Satoshi:29.3.0/Knots:{}/",
-            KNOTS_VERSION.trim_start_matches("29.3.knots")
-        )));
         // No enforcing build is offered for installation or reuse, so an
         // already-installed one never satisfies the Knots flavour.
         assert!(!KNOTS_VERSIONS.contains(&"29.3.knots20260508"));
     }
 
-    // Enforcement is read off the build date, not the flavour: the two Knots
-    // builds either side of the RDTS release answer differently.
-    //
-    // The two verbatim strings are what the real binaries report — captured from
-    // `getnetworkinfo` on both builds. They are the point of this test: an earlier
-    // version of the parser assumed `(knots20260508)` and so could not read the
-    // date out of *either* real subversion, which made every Knots build look
-    // enforcing — no repair would ever run, and every start would stop and replace
-    // a correctly-pinned node.
+    // The build date is read off whatever Knots puts between its name and the
+    // date, and only off a Knots subversion. The two verbatim `Knots:` strings are
+    // what the real binaries either side of the 20260508 release report, captured
+    // from `getnetworkinfo`; an earlier parser assumed `(knots20260508)` and could
+    // read neither.
     #[test]
-    fn rdts_enforcement_is_read_from_the_subversion() {
-        assert!(!build_enforces_rdts("/Satoshi:29.3.0/Knots:20260507/"));
-        assert!(build_enforces_rdts("/Satoshi:29.3.0/Knots:20260508/"));
-        // Later builds keep enforcing.
-        assert!(build_enforces_rdts("/Satoshi:29.4.0/Knots:20260601/"));
-        // Core never does, whatever the version.
-        assert!(!build_enforces_rdts("/Satoshi:29.0.0/"));
-        // Other ways the date could be attached, so a future Knots build that
-        // punctuates it differently doesn't silently disable the repair again.
-        assert!(!build_enforces_rdts("/Satoshi:29.3.0(knots20260507)/"));
-        assert!(!build_enforces_rdts("/Satoshi:29.3.0/Knots-20260507/"));
-        // A Knots build we cannot date is assumed enforcing: the cost of being
-        // wrong the other way is a repair that loops on every start.
-        assert!(build_enforces_rdts("/Satoshi:29.3.0/Knots:custom/"));
+    fn the_knots_build_date_is_read_whatever_separates_it() {
+        assert_eq!(
+            knots_build_date("/Satoshi:29.3.0/Knots:20260507/"),
+            Some(20_260_507)
+        );
+        assert_eq!(
+            knots_build_date("/Satoshi:29.3.0/Knots:20260508/"),
+            Some(20_260_508)
+        );
+        assert_eq!(
+            knots_build_date("/Satoshi:29.4.0/Knots:20260601/"),
+            Some(20_260_601)
+        );
+        // Other ways the date could be attached.
+        assert_eq!(
+            knots_build_date("/Satoshi:29.3.0(knots20260507)/"),
+            Some(20_260_507)
+        );
+        assert_eq!(
+            knots_build_date("/Satoshi:29.3.0/Knots-20260507/"),
+            Some(20_260_507)
+        );
         // Case is not load-bearing.
-        assert!(build_enforces_rdts("/SATOSHI:29.3.0/KNOTS:20260508/"));
+        assert_eq!(
+            knots_build_date("/SATOSHI:29.3.0/KNOTS:20260508/"),
+            Some(20_260_508)
+        );
+        // Core carries no date, and a Knots build without a readable one is `None`.
+        assert_eq!(knots_build_date("/Satoshi:29.0.0/"), None);
+        assert_eq!(knots_build_date("/Satoshi:29.3.0/Knots:custom/"), None);
     }
 
     // Naming a node to the user requires recognising its client, which is a
@@ -3335,11 +3164,16 @@ mod tests {
         assert_eq!(node_version_label("/Satoshi:/"), None);
     }
 
-    // `consensusrules` is never written again — not for either flavour, and not
-    // even for a config parsed from a file that still carries it. Parsing it back
-    // is retained only so such a file is still recognised as a Knots node's.
+    // `consensusrules` is never written — not for either flavour — and a file
+    // that still carries one parses as if the line were absent. The read-compat
+    // that inferred a flavour from it and the start-path migration that wrote
+    // the ledger from it went with RDTS sunset PR 4; what remains is tolerance:
+    // v1.0.1-rc1 wrote the line into every managed Knots node's file, and such
+    // a datadir must still start. Nothing is recorded from the line, and the
+    // parsed form re-serialises without it, which is what the pre-spawn
+    // rewrite in `maybe_start` relies on to strip it.
     #[test]
-    fn consensusrules_is_read_but_never_written() {
+    fn consensusrules_is_never_written_and_is_dropped_on_read() {
         let net = InternalBitcoindNetworkConfig {
             rpc_port: 12345,
             p2p_port: 12346,
@@ -3349,7 +3183,6 @@ mod tests {
 
         for flavor in [NodeFlavor::Core, NodeFlavor::Knots] {
             let mut conf = InternalBitcoindConfig::for_flavor(flavor);
-            assert!(!conf.enforce_rdts, "{:?} must not opt into RDTS", flavor);
             conf.networks.insert(Network::Bitcoin, net.clone());
             assert!(
                 conf.to_ini()
@@ -3361,23 +3194,35 @@ mod tests {
             );
         }
 
-        // A legacy file still parses, and still identifies itself as Knots'.
+        // A legacy file parses to the same config as the same file without the
+        // line: the key is dropped, not recorded, and the canonical form the
+        // next rewrite persists no longer carries it.
         let legacy = "consensusrules=rdts\n[main]\nrpcport=12345\nport=12346\nprune=15000\n";
-        let parsed = InternalBitcoindConfig::from_ini(
-            &ini::Ini::load_from_str(legacy).expect("legacy conf parses"),
-        )
-        .expect("legacy conf loads");
-        assert!(parsed.enforce_rdts);
-        assert_eq!(parsed.flavor, NodeFlavor::Knots);
+        let stripped = "[main]\nrpcport=12345\nport=12346\nprune=15000\n";
+        let canonical = |text: &str| {
+            let conf = InternalBitcoindConfig::from_ini(
+                &ini::Ini::load_from_str(text).expect("conf parses as ini"),
+            )
+            .expect("the conf parses");
+            let mut bytes = Vec::new();
+            conf.to_ini().write_to(&mut bytes).unwrap();
+            String::from_utf8(bytes).unwrap()
+        };
+        let from_legacy = canonical(legacy);
+        assert_eq!(from_legacy, canonical(stripped));
+        assert!(!from_legacy.contains("consensusrules"), "{}", from_legacy);
 
-        // …and rewriting it drops the line, because the file is rebuilt from the
-        // struct rather than edited. That is what keeps the key away from a build
-        // that may not accept it.
-        assert!(parsed
-            .to_ini()
-            .general_section()
-            .get("consensusrules")
-            .is_none());
+        // The tolerance is for that one key: a near miss is still refused
+        // like any other unknown general-section key, with the key named.
+        let unknown = "consensusrule=1\n[main]\nrpcport=12345\nport=12346\nprune=15000\n";
+        match InternalBitcoindConfig::from_ini(
+            &ini::Ini::load_from_str(unknown).expect("conf parses as ini"),
+        ) {
+            Err(InternalBitcoindConfigError::UnexpectedSection(msg)) => {
+                assert!(msg.contains("consensusrule"), "{}", msg)
+            }
+            other => panic!("expected the unknown key to be refused, got {:?}", other),
+        }
     }
 
     // Inbound-over-Tor global options are emitted only when enabled, and every
@@ -3438,10 +3283,10 @@ mod tests {
         assert_eq!(parsed.max_connections, Some(20));
         assert_eq!(parsed.tor_control_port, Some(9151));
         assert_eq!(parsed.tor_socks_port, Some(9150));
-        // Nothing in the file marks the flavour any more, so a Knots config that
+        // Nothing in the file marks the flavour, so a Knots config that
         // round-trips comes back reporting the placeholder — the flavour ledger is
         // what carries it (see `configured_managed_flavor`).
-        assert!(!parsed.enforce_rdts);
+        assert_eq!(parsed.flavor, NodeFlavor::Core);
 
         // "Unlimited" upload omits the cap key and parses back to `None`.
         let mut unlimited =
@@ -3529,7 +3374,7 @@ mod tests {
             None
         );
 
-        // Coexists with the inbound-over-Tor keys and RDTS: every preference
+        // Coexists with the inbound-over-Tor keys: every preference
         // round-trips together.
         let mut both =
             InternalBitcoindConfig::for_flavor(NodeFlavor::Knots).with_inbound_tor_defaults();
@@ -3619,8 +3464,9 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
     }
 
-    // An RDTS-enforcing Knots build already on disk must not satisfy the Knots
-    // flavour, or the update would keep running the binary that stranded the node
+    // A Knots build that enforces the stalled fork, already on disk, must not
+    // satisfy the Knots flavour, or the update would keep running the binary that
+    // stranded the node
     // instead of downloading the pinned one. Both "is it installed?" checks — the
     // launcher's and the installer's — key on the pinned version list, so a
     // 20260508 directory is simply not a candidate.
@@ -3763,55 +3609,6 @@ mod tests {
         ensure_data_carrier_size(&datadir);
         assert!(!bitcoin_conf.exists());
         assert_eq!(fs::read_to_string(&blake2b_conf).unwrap(), blake2b_bytes);
-
-        let _ = fs::remove_dir_all(&base);
-    }
-
-    // The flavour survives the loss of its only marker in `bitcoin.conf`: a
-    // datadir written by a release that enforced RDTS is recognised as Knots',
-    // recorded in the ledger, and the legacy line is stripped from the file.
-    #[test]
-    fn a_legacy_rdts_conf_is_migrated_to_the_flavour_ledger() {
-        use std::fs;
-
-        let base =
-            std::env::temp_dir().join(format!("coincube-rdts-migration-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&base);
-        let datadir = CoincubeDirectory::new(base.clone());
-        let config_path = internal_bitcoind_config_path(&internal_bitcoind_datadir(&datadir));
-        fs::create_dir_all(config_path.parent().unwrap()).unwrap();
-        fs::write(
-            &config_path,
-            "consensusrules=rdts\n[main]\nrpcport=12345\nport=12346\nprune=15000\n",
-        )
-        .unwrap();
-
-        // Before: the legacy line is the only thing saying "Knots".
-        assert_eq!(configured_managed_flavor(&datadir), Some(NodeFlavor::Knots));
-
-        migrate_legacy_rdts_conf(&datadir);
-
-        // After: the line is gone from the file the node will be handed…
-        let migrated = InternalBitcoindConfig::from_file(&config_path).expect("conf still loads");
-        assert!(!migrated.enforce_rdts);
-        assert!(!fs::read_to_string(&config_path)
-            .unwrap()
-            .contains("consensusrules"));
-        // …the ports it carried are untouched…
-        assert_eq!(
-            migrated.networks.get(&Network::Bitcoin).map(|n| n.rpc_port),
-            Some(12345)
-        );
-        // …and the flavour it stood for survives in the ledger.
-        assert_eq!(
-            crate::node::revalidate::ManagedNodeState::load(&datadir).configured_flavor,
-            Some(NodeFlavor::Knots)
-        );
-        assert_eq!(configured_managed_flavor(&datadir), Some(NodeFlavor::Knots));
-
-        // Idempotent: running it again on the migrated datadir changes nothing.
-        migrate_legacy_rdts_conf(&datadir);
-        assert_eq!(configured_managed_flavor(&datadir), Some(NodeFlavor::Knots));
 
         let _ = fs::remove_dir_all(&base);
     }
@@ -4368,6 +4165,261 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    // A conf still carrying the legacy `consensusrules` line — what v1.0.1-rc1
+    // wrote for every managed Knots node — reaches `maybe_start` and is
+    // rewritten without the line before the binary is resolved, which is what
+    // the one route with no Tor preparation ahead of it (the loader's pending
+    // node) relies on. The spawn itself is refused past that point on the
+    // absent binary, as the other start tests do. A busy conf lock refuses the
+    // start in the Tor preparation's class (`ConfigUnavailable`) with the file
+    // untouched; a file already in canonical form is rewritten byte-identically;
+    // no conf is created where there was none.
+    #[test]
+    fn start_strips_a_legacy_consensusrules_line_before_the_spawn() {
+        use crate::node::managed_conf::{with_quick_lock_bound, ManagedConfLock};
+        use crate::node::revalidate::ManagedNodeState;
+        let (base, root) = a_temp_coincube_datadir("strip");
+        let bitcoin_datadir = internal_bitcoind_datadir(&root);
+        let conf_path = internal_bitcoind_config_path(&bitcoin_datadir);
+        let cookie_path = internal_bitcoind_cookie_path(&bitcoin_datadir, &Network::Bitcoin);
+        let config = BitcoindConfig {
+            rpc_auth: coincubed::config::BitcoindRpcAuth::CookieFile(cookie_path),
+            addr: std::net::SocketAddr::from(([127, 0, 0, 1], 1)),
+        };
+        ManagedNodeState {
+            configured_flavor: Some(NodeFlavor::Knots),
+            ..Default::default()
+        }
+        .save(&root)
+        .unwrap();
+        let expect_absent_binary =
+            |result: Result<Bitcoind, StartInternalBitcoindError>| match result {
+                Err(StartInternalBitcoindError::ExecutableNotFound) => {}
+                other => panic!("expected ExecutableNotFound, got {:?}", other.map(|_| ())),
+            };
+
+        // No conf: the start gets as far as the binary without inventing one.
+        expect_absent_binary(Bitcoind::maybe_start(
+            Network::Bitcoin,
+            config.clone(),
+            &root,
+        ));
+        assert!(!conf_path.exists(), "a start invented a conf");
+
+        // The legacy file, as an older release left it.
+        std::fs::create_dir_all(&bitcoin_datadir).unwrap();
+        let legacy = "consensusrules=rdts\n[main]\nrpcport=12345\nport=12346\nprune=15000\n";
+        std::fs::write(&conf_path, legacy).unwrap();
+
+        // Busy lock: refused in the Tor preparation's class, file untouched.
+        let held = ManagedConfLock::acquire(&root).unwrap();
+        let refused = with_quick_lock_bound(|| {
+            Bitcoind::maybe_start(Network::Bitcoin, config.clone(), &root)
+        });
+        drop(held);
+        match refused {
+            Err(StartInternalBitcoindError::ConfigUnavailable(e)) => {
+                assert!(e.contains("another setup is updating"), "{}", e)
+            }
+            other => panic!("expected ConfigUnavailable, got {:?}", other.map(|_| ())),
+        }
+        assert_eq!(std::fs::read_to_string(&conf_path).unwrap(), legacy);
+
+        // Lock free: the line is gone from disk before the binary is looked
+        // for, and the rest of the file survives the rewrite.
+        expect_absent_binary(Bitcoind::maybe_start(
+            Network::Bitcoin,
+            config.clone(),
+            &root,
+        ));
+        let rewritten = std::fs::read_to_string(&conf_path).unwrap();
+        assert!(!rewritten.contains("consensusrules"), "{}", rewritten);
+        let reloaded = InternalBitcoindConfig::from_file(&conf_path).unwrap();
+        let main = &reloaded.networks[&Network::Bitcoin];
+        assert_eq!(
+            (main.rpc_port, main.p2p_port, main.prune),
+            (12345, 12346, 15000)
+        );
+
+        // Canonical already: the next start's rewrite is byte-identical.
+        expect_absent_binary(Bitcoind::maybe_start(Network::Bitcoin, config, &root));
+        assert_eq!(std::fs::read_to_string(&conf_path).unwrap(), rewritten);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A stand-in for a managed node that is already up on the endpoint:
+    /// answers `echo` on both the node and the wallet URL, `getnetworkinfo`
+    /// with the given `subversion`, and `stop` — after which it closes its
+    /// listener, so the shutdown wait sees the endpoint go away as it would
+    /// for a real node. Records every method it was asked, in order. One
+    /// request per connection, which is how the client talks to it.
+    struct MockNode {
+        addr: std::net::SocketAddr,
+        methods: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl MockNode {
+        fn serve(subversion: &'static str) -> Self {
+            use std::io::{Read, Write};
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let methods = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let seen = methods.clone();
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    let Ok(mut stream) = stream else { break };
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    let (body_start, body_len) = loop {
+                        let n = stream.read(&mut chunk).unwrap_or(0);
+                        if n == 0 {
+                            break (None, 0);
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                            let head = String::from_utf8_lossy(&buf[..pos]).into_owned();
+                            let len = head
+                                .lines()
+                                .filter_map(|l| l.split_once(':'))
+                                .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+                                .and_then(|(_, v)| v.trim().parse::<usize>().ok())
+                                .unwrap_or(0);
+                            break (Some(pos + 4), len);
+                        }
+                    };
+                    let Some(start) = body_start else { continue };
+                    while buf.len() < start + body_len {
+                        let n = stream.read(&mut chunk).unwrap_or(0);
+                        if n == 0 {
+                            break;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                    }
+                    let req: serde_json::Value =
+                        serde_json::from_slice(&buf[start..]).unwrap_or(serde_json::Value::Null);
+                    let method = req
+                        .get("method")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    let id = req.get("id").cloned().unwrap_or(serde_json::Value::Null);
+                    seen.lock().unwrap().push(method.clone());
+                    let result = match method.as_str() {
+                        "echo" => serde_json::json!([]),
+                        "getnetworkinfo" => {
+                            serde_json::json!({ "version": 290000, "subversion": subversion })
+                        }
+                        "stop" => serde_json::json!("stopping"),
+                        _ => serde_json::Value::Null,
+                    };
+                    let body = serde_json::json!({ "result": result, "error": null, "id": id })
+                        .to_string();
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.flush();
+                    let _ = stream.shutdown(std::net::Shutdown::Write);
+                    if method == "stop" {
+                        break;
+                    }
+                }
+                // The listener drops here: every later connection is refused,
+                // which is what a stopped node looks like to the shutdown wait.
+            });
+            Self { addr, methods }
+        }
+
+        fn methods(&self) -> Vec<String> {
+            self.methods.lock().unwrap().clone()
+        }
+    }
+
+    // A flavour switch (the ledger names Knots, a Core node is up on the
+    // endpoint) settles the conf before it tells the running node to stop: with
+    // the conf lock held the start is refused as `ConfigUnavailable`, the node
+    // has not been asked to stop, is still reachable, and the file is
+    // byte-identical; with the lock free the file is rewritten, the node is
+    // stopped exactly once, and the start then fails on the absent binary as
+    // the other start tests do.
+    #[test]
+    fn a_flavour_switch_settles_the_conf_before_stopping_the_running_node() {
+        use crate::node::managed_conf::{with_quick_lock_bound, ManagedConfLock};
+        use crate::node::revalidate::ManagedNodeState;
+        let (base, root) = a_temp_coincube_datadir("switch");
+        let bitcoin_datadir = internal_bitcoind_datadir(&root);
+        let conf_path = internal_bitcoind_config_path(&bitcoin_datadir);
+        let cookie_path = internal_bitcoind_cookie_path(&bitcoin_datadir, &Network::Bitcoin);
+        std::fs::create_dir_all(cookie_path.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(&bitcoin_datadir).unwrap();
+        std::fs::write(&cookie_path, "__cookie__:not-a-secret").unwrap();
+        let legacy = "consensusrules=rdts\n[main]\nrpcport=12345\nport=12346\nprune=15000\n";
+        std::fs::write(&conf_path, legacy).unwrap();
+        ManagedNodeState {
+            configured_flavor: Some(NodeFlavor::Knots),
+            ..Default::default()
+        }
+        .save(&root)
+        .unwrap();
+        let node = MockNode::serve("/Satoshi:29.0.0/");
+        let config = BitcoindConfig {
+            rpc_auth: coincubed::config::BitcoindRpcAuth::CookieFile(cookie_path),
+            addr: node.addr,
+        };
+
+        // Lock held: refused before the running node is told to stop.
+        let held = ManagedConfLock::acquire(&root).unwrap();
+        let refused = with_quick_lock_bound(|| {
+            Bitcoind::maybe_start(Network::Bitcoin, config.clone(), &root)
+        });
+        drop(held);
+        match refused {
+            Err(StartInternalBitcoindError::ConfigUnavailable(e)) => {
+                assert!(e.contains("another setup is updating"), "{}", e)
+            }
+            other => panic!("expected ConfigUnavailable, got {:?}", other.map(|_| ())),
+        }
+        let methods = node.methods();
+        assert!(
+            !methods.iter().any(|m| m == "stop"),
+            "the running node was stopped on a refused start: {:?}",
+            methods
+        );
+        assert!(
+            methods.iter().any(|m| m == "getnetworkinfo"),
+            "{:?}",
+            methods
+        );
+        assert_eq!(std::fs::read_to_string(&conf_path).unwrap(), legacy);
+        // ... and it is still there to be reused or switched on the retry.
+        assert!(
+            coincubed::BitcoinD::new(&config, "liveness".to_string()).is_ok(),
+            "the running node went away on a refused start"
+        );
+
+        // Lock free: the conf is settled, then the node is stopped once, then
+        // the spawn fails on the absent binary.
+        match Bitcoind::maybe_start(Network::Bitcoin, config, &root) {
+            Err(StartInternalBitcoindError::ExecutableNotFound) => {}
+            other => panic!("expected ExecutableNotFound, got {:?}", other.map(|_| ())),
+        }
+        let methods = node.methods();
+        assert_eq!(
+            methods.iter().filter(|m| *m == "stop").count(),
+            1,
+            "{:?}",
+            methods
+        );
+        let rewritten = std::fs::read_to_string(&conf_path).unwrap();
+        assert!(!rewritten.contains("consensusrules"), "{}", rewritten);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     /// Makes `dir` non-traversable for the duration and restores it on drop
     /// (including on a panic), so a failing assertion never leaves a fixture
     /// behind that `remove_dir_all` cannot delete.
@@ -4466,88 +4518,6 @@ mod tests {
                 Ok(vec![51001, 51002])
             );
         }
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    // The legacy `consensusrules` migration is a locked read-modify-write on
-    // a fresh read: it strips the line from what is on disk *after* another
-    // writer released the lock, so a section that writer added survives; and
-    // while the lock is busy it skips this start rather than write a stale
-    // snapshot (the line is retried next start, as before).
-    #[test]
-    fn legacy_rdts_migration_runs_under_the_conf_lock() {
-        use crate::node::managed_conf::ManagedConfLock;
-        use crate::node::revalidate::ManagedNodeState;
-        let (base, root) = a_temp_coincube_datadir("legacy-lock");
-        let conf_path = internal_bitcoind_config_path(&internal_bitcoind_datadir(&root));
-        std::fs::create_dir_all(conf_path.parent().unwrap()).unwrap();
-        // A conf as an enforcing release left it: the marker line plus a
-        // mainnet section.
-        std::fs::write(
-            &conf_path,
-            "consensusrules=rdts\n\n[main]\nrpcport=41001\nport=41002\nprune=15000\n",
-        )
-        .unwrap();
-        let before = std::fs::read(&conf_path).unwrap();
-        assert!(
-            InternalBitcoindConfig::from_file(&conf_path)
-                .unwrap()
-                .enforce_rdts
-        );
-
-        // Busy for the whole bounded wait: skipped, byte-identical, no ledger.
-        let held = ManagedConfLock::acquire(&root).unwrap();
-        crate::node::managed_conf::with_quick_lock_bound(|| migrate_legacy_rdts_conf(&root));
-        drop(held);
-        assert_eq!(std::fs::read(&conf_path).unwrap(), before);
-        assert!(!ManagedNodeState::path(&root).exists());
-
-        // Another writer adds a section while holding the lock, then
-        // releases; the migration then strips the line from the file *with*
-        // that section in it. Handshake, not wall-clock: contention is proven
-        // (a quick bounded acquire is `Busy` while the writer holds), the
-        // writer persists and releases on signal, and only then does the
-        // migration run its fresh read.
-        let (locked_tx, locked_rx) = std::sync::mpsc::channel::<()>();
-        let (persist_tx, persist_rx) = std::sync::mpsc::channel::<()>();
-        let writer = {
-            let root = root.clone();
-            let conf_path = conf_path.clone();
-            std::thread::spawn(move || {
-                let held = ManagedConfLock::acquire(&root).unwrap();
-                locked_tx.send(()).unwrap();
-                persist_rx.recv().unwrap();
-                // Append a section without touching the marker line (an
-                // older writer that knows nothing of the migration).
-                let mut text = std::fs::read_to_string(&conf_path).unwrap();
-                text.push_str("\n[testnet4]\nrpcport=41003\nport=41004\nprune=15000\n");
-                std::fs::write(&conf_path, text).unwrap();
-                drop(held);
-            })
-        };
-        locked_rx.recv().unwrap();
-        assert!(
-            matches!(
-                ManagedConfLock::acquire_with_bound(&root, 2, std::time::Duration::from_millis(5)),
-                Err(crate::node::managed_conf::ManagedConfLockError::Busy { .. })
-            ),
-            "the writer must be holding the lock at this point"
-        );
-        persist_tx.send(()).unwrap();
-        writer.join().unwrap();
-        migrate_legacy_rdts_conf(&root);
-        let after = InternalBitcoindConfig::from_file(&conf_path).unwrap();
-        assert!(!after.enforce_rdts);
-        assert!(!std::fs::read_to_string(&conf_path)
-            .unwrap()
-            .contains("consensusrules"));
-        assert_eq!(after.networks.len(), 2, "{:?}", after.networks.keys());
-        assert!(after.networks.contains_key(&Network::Testnet4));
-        assert_eq!(
-            ManagedNodeState::load(&root).configured_flavor,
-            Some(NodeFlavor::Knots),
-            "the ledger was recorded before the marker was erased"
-        );
         let _ = std::fs::remove_dir_all(&base);
     }
 

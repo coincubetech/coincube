@@ -2750,18 +2750,6 @@ impl App {
                 .reload(Some(daemon.clone()), Some(wallet.clone())),
         );
         tasks.push(panels.connect.ensure_session_check());
-        // A managed node that came up stranded on the stalled BIP-110 fork was
-        // repaired during startup, long before any of this existed to say so. The
-        // sidecar carried the fact across; collect it here, where there is finally
-        // a UI to show it in. Self-clearing, so it appears exactly once.
-        if !cache.chain().is_blake2b()
-            && crate::node::revalidate::ManagedNodeState::take_repair_notice(&data_dir)
-        {
-            tasks.push(Task::done(Message::View(view::Message::ShowToast(
-                log::Level::Info,
-                crate::node::revalidate::CHAIN_REPAIRED_NOTICE.to_string(),
-            ))));
-        }
         let (connect_auth_arc, connect_email) = match connect_auth {
             Some((a, e)) => (Some(a), Some(e)),
             None => (None, None),
@@ -4038,9 +4026,8 @@ impl App {
         // Stream the internal bitcoind's debug.log for UpdateTip lines.
         //
         // Prefer a pending node (one being set up or switched to), but fall back to
-        // the active managed node: a chain repair after a Core↔Knots swap reconnects
-        // blocks on a node that is already live, with nothing pending, and until now
-        // that progress was invisible.
+        // the active managed node, so sync progress on a node that is already live,
+        // with nothing pending, is visible too.
         if let Some(pending_cfg) = self.daemon.as_ref().and_then(|d| d.config()).and_then(|c| {
             c.pending_bitcoind.clone().or_else(|| {
                 match c.bitcoin_backend.as_ref() {

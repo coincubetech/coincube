@@ -960,6 +960,11 @@ mod tests {
             },
         );
         conf.to_file(&config_path).unwrap();
+        // The file also carries the legacy `consensusrules` line an older
+        // release wrote: the outbound-only reset parses past it, and its
+        // rewrite is what takes the line off the disk on this route.
+        let written = std::fs::read_to_string(&config_path).unwrap();
+        std::fs::write(&config_path, format!("consensusrules=rdts\n{written}")).unwrap();
         InboundTorPreference::default_enabled()
             .save(&datadir)
             .unwrap();
@@ -974,8 +979,15 @@ mod tests {
         let reloaded = InternalBitcoindConfig::from_file(&config_path).unwrap();
         assert!(!reloaded.inbound_tor, "no listen/listenonion emitted");
         assert!(reloaded.tor_control_port.is_none());
-        // The base config is preserved.
+        // The base config is preserved, and the legacy line is not carried
+        // back to disk.
         assert_eq!(reloaded.networks.len(), 1);
+        assert!(
+            !std::fs::read_to_string(&config_path)
+                .unwrap()
+                .contains("consensusrules"),
+            "the reset must not carry the legacy line back to disk"
+        );
         // The user's preference is NOT clobbered by the failure — retried next launch.
         assert!(InboundTorPreference::load(&datadir).enabled);
 
