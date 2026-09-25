@@ -837,7 +837,10 @@ pub struct ConnectAccountPanel {
     /// begun before that invalidation can be told from one begun after it,
     /// whatever order they arrive in. Not `session_generation`: that one is
     /// advanced by `SessionLoaded` itself, so it cannot say when the
-    /// operation began.
+    /// operation began. A completion whose epoch is older than the current
+    /// one installs nothing here — no session, no keyring write, no client
+    /// token, no user — and a refresh failure from such an operation logs
+    /// nothing out (`stale_completion`).
     auth_epoch: u64,
     // ── Plan & Billing ──
     /// Cached plan features from GET /connect/features.
@@ -1162,6 +1165,23 @@ impl ConnectAccountPanel {
         self.auth_epoch
     }
 
+    /// Whether a completion carrying `epoch` comes from an operation begun
+    /// before the most recent invalidation. Such a completion is dropped
+    /// whole: after a sign-out, or a newer sign-in, it must neither install
+    /// the old credentials nor relabel the account the newer operation
+    /// established.
+    fn stale_completion(&self, epoch: u64, what: &str) -> bool {
+        if epoch < self.auth_epoch {
+            log::info!(
+                "[CONNECT] dropping {what} from an authentication operation begun before the last invalidation (epoch {epoch} < {})",
+                self.auth_epoch
+            );
+            true
+        } else {
+            false
+        }
+    }
+
     /// Set the active Cube's network, used by the invite-form and
     /// add-to-cube flows to filter candidate cubes to network-matching
     /// ones. Called by the parent `ConnectPanel` when it wires up or
@@ -1411,7 +1431,10 @@ impl ConnectAccountPanel {
                 generation,
                 epoch,
             } => {
-                if !self.admitted_client || generation != self.session_generation {
+                if !self.admitted_client
+                    || generation != self.session_generation
+                    || self.stale_completion(epoch, "AdmittedUserLoaded")
+                {
                     return iced::Task::none();
                 }
                 self.admitted_user_loading = false;
@@ -1443,8 +1466,10 @@ impl ConnectAccountPanel {
                         )),
                         Err(e) => {
                             if e.is_auth_error() {
+                                // Whether this logs out is decided against the
+                                // epoch current when it arrives, not here.
                                 Message::View(view::Message::ConnectAccount(
-                                    ConnectAccountMessage::LogOut,
+                                    ConnectAccountMessage::RefreshRejected { epoch },
                                 ))
                             } else {
                                 Message::View(view::Message::ConnectAccount(
@@ -1454,6 +1479,17 @@ impl ConnectAccountPanel {
                         }
                     },
                 );
+            }
+
+            ConnectAccountMessage::RefreshRejected { epoch } => {
+                if self.stale_completion(epoch, "a refresh's authentication failure") {
+                    return iced::Task::none();
+                }
+                // A current refresh was refused: the session is gone. Dispatched
+                // as the message it always was, so the GUI broadcasts it.
+                return iced::Task::done(Message::View(view::Message::ConnectAccount(
+                    ConnectAccountMessage::LogOut,
+                )));
             }
 
             ConnectAccountMessage::RefreshFailed(err) => {
@@ -1471,17 +1507,21 @@ impl ConnectAccountPanel {
             }
 
             ConnectAccountMessage::SetSession(login, epoch) => {
+                if self.stale_completion(epoch, "SetSession") {
+                    return iced::Task::none();
+                }
                 let session = StoredSession { login };
                 return self.post_login_tasks(session, epoch);
             }
 
-            // The epoch is the App's to read (its claim hold); the panel's
-            // own session handling is the same whichever operation produced it.
-            ConnectAccountMessage::SessionLoaded {
-                user,
-                plan,
-                epoch: _,
-            } => {
+            // A completion of an operation begun before the last invalidation
+            // installs nothing (the App reads the epoch too, for its claim
+            // hold); a current one is handled the same whichever operation
+            // produced it.
+            ConnectAccountMessage::SessionLoaded { user, plan, epoch } => {
+                if self.stale_completion(epoch, "SessionLoaded") {
+                    return iced::Task::none();
+                }
                 self.session_generation += 1;
                 self.user = Some(user);
                 self.plan = plan;

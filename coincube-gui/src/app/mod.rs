@@ -3619,8 +3619,10 @@ impl App {
                         panel.revoke_and_withdraw();
                     }
                     self.revoke_claim();
-                } else {
+                } else if mine.is_some() {
                     self.hold_claim(Some(state::vault::claim::SIGNED_IN_ELSEWHERE));
+                } else {
+                    self.hold_claim(Some(state::vault::claim::SIGNED_IN_ELSEWHERE_NO_SESSION));
                 }
             }
         }

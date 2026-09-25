@@ -1554,6 +1554,13 @@ pub enum ConnectAccountMessage {
     /// (a timeout, an offline device, a 5xx). Carries presentation-ready copy
     /// rather than a raw error string — see [`crate::user_error`].
     RefreshFailed(UserError),
+    /// A refresh's authentication failure (401/403), with the epoch of the
+    /// refresh operation. A current one logs out — re-dispatched as `LogOut`
+    /// so the GUI broadcasts it — an obsolete one, begun before an
+    /// invalidation and completed after a newer sign-in, is dropped.
+    RefreshRejected {
+        epoch: u64,
+    },
     LogOut,
     EmailChanged(String),
     SubmitLogin,

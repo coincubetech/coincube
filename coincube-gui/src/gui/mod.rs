@@ -1329,6 +1329,23 @@ impl GUI {
             ),
         ))
     }
+    /// Whether a GUI message is a tab's Connect account message of any
+    /// kind (a completion, a re-dispatched `LogOut`), so a test can drive
+    /// exactly those through the real GUI and leave network bootstrap alone.
+    pub(crate) fn reviewer_is_account_message(message: &Message) -> bool {
+        matches!(
+            message,
+            Message::Pane(
+                _,
+                pane::Message::Tab(
+                    _,
+                    tab::Message::Run(AppMessage::View(crate::app::view::Message::ConnectAccount(
+                        _
+                    ))),
+                ),
+            )
+        )
+    }
     /// Whether a GUI message is a tab's `SetSession` completion — what a
     /// real refresh or login operation hands back — so a test can route the
     /// real completion through the real broadcaster.

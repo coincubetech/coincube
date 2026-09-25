@@ -109,9 +109,12 @@ pub const SESSION_ENDED: &str =
 /// callback — a sign-out in another tab revokes the claim here too, and the
 /// account this tab still shows is not a session.
 pub const SIGNED_OUT_AT_REVIEW: &str = "Signed out of Connect. This claim is recorded on this device; sign in again in this tab to continue.";
-/// Another Connect account signed in from another tab (or one signed in
-/// while this tab had none). The claim is held here until this tab signs in.
+/// Another Connect account signed in from another tab. The claim is held
+/// here until this tab signs in.
 pub const SIGNED_IN_ELSEWHERE: &str = "Connect signed in with a different account in another tab. This claim is recorded on this device; sign in again in this tab to continue.";
+/// A Connect sign-in happened in another tab while this tab had no session
+/// of its own. The claim is held here until this tab signs in.
+pub const SIGNED_IN_ELSEWHERE_NO_SESSION: &str = "Connect signed in in another tab while this tab had no session. This claim is recorded on this device; sign in in this tab to continue.";
 /// The node backend is being replaced: nothing is probed, built, finalised
 /// or re-bound until the App reports how the switch settled.
 pub const BACKEND_SWITCHING: &str = "The Bitcoin node backend is switching. This claim is recorded on this device and continues once the switch completes.";
@@ -278,12 +281,14 @@ pub enum ClaimEvent {
     /// not be, in which case it comes back unbound with the reason. The
     /// number is the panel's revocation count when the re-bind was sent.
     Rebound(u64, Box<ClaimSession>, Result<(), String>),
-    /// `prepare_review` finished; the review lives inside the session.
-    Reviewed(Box<ClaimSession>, Result<ReviewSnapshot, String>),
+    /// `prepare_review` finished; the review lives inside the session. The
+    /// number is the panel's revocation count when the review was sent: a
+    /// review whose context ended while it ran is not shown as actionable.
+    Reviewed(u64, Box<ClaimSession>, Result<ReviewSnapshot, String>),
     /// `confirm_and_submit` finished.
     Submitted(Box<ClaimSession>, Result<Outcome, String>),
-    /// `reconcile` finished.
-    Tracked(Box<ClaimSession>, Result<Status, String>),
+    /// `reconcile` finished; the number as for `Reviewed`.
+    Tracked(u64, Box<ClaimSession>, Result<Status, String>),
 }
 
 enum Stage {
@@ -992,6 +997,7 @@ impl ClaimStep1Panel {
         let Some(mut session) = self.take_session() else {
             return Task::none();
         };
+        let revocations = self.revocations;
         Task::perform(
             async move {
                 let context = session.context.clone();
@@ -1008,7 +1014,9 @@ impl ClaimStep1Panel {
                 };
                 (session, result)
             },
-            |(session, result)| Message::Claim(ClaimEvent::Reviewed(session, result)),
+            move |(session, result)| {
+                Message::Claim(ClaimEvent::Reviewed(revocations, session, result))
+            },
         )
     }
 
@@ -1058,6 +1066,7 @@ impl ClaimStep1Panel {
         let Some(mut session) = self.take_session() else {
             return Task::none();
         };
+        let revocations = self.revocations;
         Task::perform(
             async move {
                 let context = session.context.clone();
@@ -1067,7 +1076,9 @@ impl ClaimStep1Panel {
                 };
                 (session, result)
             },
-            |(session, result)| Message::Claim(ClaimEvent::Tracked(session, result)),
+            move |(session, result)| {
+                Message::Claim(ClaimEvent::Tracked(revocations, session, result))
+            },
         )
     }
 
@@ -1226,7 +1237,16 @@ impl ClaimStep1Panel {
                     _ => self.reconcile(),
                 }
             }
-            ClaimEvent::Reviewed(session, result) => {
+            ClaimEvent::Reviewed(revocations, mut session, result) => {
+                // A review whose context ended while it ran (a sign-out, a
+                // revocation) is never shown as something to confirm, and
+                // never erases what the stage says about that end: the
+                // session comes back, the review token inside it goes.
+                let authorized = self.authorized(session.context.generation, revocations);
+                let ended = self.ended_copy();
+                if !authorized {
+                    session.review = None;
+                }
                 if let Stage::Review {
                     session: slot,
                     snapshot,
@@ -1237,13 +1257,21 @@ impl ClaimStep1Panel {
                     *slot = Some(session);
                     *busy = false;
                     match result {
-                        Ok(fresh) => {
+                        Ok(fresh) if authorized => {
                             *snapshot = Some(fresh);
                             *error = None;
                         }
+                        Ok(_) => {
+                            *snapshot = None;
+                            if error.is_none() {
+                                *error = Some(ended);
+                            }
+                        }
                         Err(reason) => {
                             *snapshot = None;
-                            *error = Some(reason);
+                            if authorized || error.is_none() {
+                                *error = Some(reason);
+                            }
                         }
                     }
                 }
@@ -1280,7 +1308,10 @@ impl ClaimStep1Panel {
                 }
                 Task::none()
             }
-            ClaimEvent::Tracked(session, result) => {
+            ClaimEvent::Tracked(revocations, session, result) => {
+                // A status read is information whichever context it came
+                // from; what the stage says about a context that ended stays.
+                let authorized = self.authorized(session.context.generation, revocations);
                 if let Stage::Track {
                     session: slot,
                     status,
@@ -1294,9 +1325,15 @@ impl ClaimStep1Panel {
                     match result {
                         Ok(fresh) => {
                             *status = Some(fresh);
-                            *error = None;
+                            if authorized {
+                                *error = None;
+                            }
                         }
-                        Err(reason) => *error = Some(reason),
+                        Err(reason) => {
+                            if authorized || error.is_none() {
+                                *error = Some(reason);
+                            }
+                        }
                     }
                 }
                 Task::none()
