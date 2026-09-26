@@ -175,14 +175,10 @@ fn key_subtitle(key: &PairableKey) -> Option<String> {
 }
 
 fn key_row<'a>(key: &'a PairableKey, selected: bool, show_details: bool) -> Element<'a, Message> {
-    let mut title = Row::new()
-        .spacing(8)
-        .align_y(Alignment::Center)
-        .push(text(key_title(key)).bold().width(Length::Fill));
-    if selected {
-        title = title.push(text("Selected").style(theme::text::success));
-    }
-    let mut content = Column::new().spacing(2).push(title);
+    let mut content = Column::new()
+        .spacing(2)
+        .width(Length::Fill)
+        .push(text(key_title(key)).bold());
     if let Some(subtitle) = key_subtitle(key) {
         content = content.push(text(subtitle).style(theme::text::secondary));
     }
@@ -195,11 +191,45 @@ fn key_row<'a>(key: &'a PairableKey, selected: bool, show_details: bool) -> Elem
                 .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
         );
     }
-    iced::widget::Button::new(content.width(Length::Fill))
+    let mut row = Row::new()
+        .spacing(12)
+        .align_y(Alignment::Center)
+        .push(content);
+    if selected {
+        row = row.push(
+            Row::new()
+                .spacing(6)
+                .align_y(Alignment::Center)
+                .push(icon::check_icon())
+                .push(text("Selected")),
+        );
+    }
+    // The button styles are fully rounded, so the text needs room to clear
+    // the corners. The orange outline marks the choice, as it does for the
+    // fee presets on the Send screen.
+    iced::widget::Button::new(row)
         .width(Length::Fill)
-        .style(theme::button::secondary)
+        .padding([12, 20])
+        .style(if selected {
+            theme::button::orange_outline
+        } else {
+            theme::button::secondary
+        })
         .on_press(Message::Settings(SettingsMessage::LocalSigning(
             LocalSigningMessage::SelectKey(key.xpub.clone()),
+        )))
+        .into()
+}
+
+/// Leaves the pairing steps for key selection, keeping the chosen key.
+/// Every step past key selection starts with it, so there is always a way
+/// back, including from an error that can't be retried. Fixed width as on
+/// the SideShift screens: `button::secondary` otherwise fills the card.
+fn back_button<'a>() -> Element<'a, Message> {
+    button::secondary(Some(icon::previous_icon()), "Back")
+        .width(Length::Fixed(150.0))
+        .on_press(Message::Settings(SettingsMessage::LocalSigning(
+            LocalSigningMessage::CancelPairing,
         )))
         .into()
 }
@@ -216,8 +246,7 @@ fn waiting_body<'a>(
         "Pairing offer expired.".to_string()
     };
 
-    let mut body = Column::new()
-        .padding(10)
+    let mut offer_col = Column::new()
         .spacing(10)
         .align_x(Alignment::Center)
         .push(text(countdown))
@@ -227,16 +256,16 @@ fn waiting_body<'a>(
             phone.cert_fp8, phone.addr,
         )));
     if let Some(qr) = qr {
-        body = body.push(
+        offer_col = offer_col.push(
             Container::new(QRCode::<coincube_ui::theme::Theme>::new(qr).cell_size(4)).padding(10),
         );
     }
-    body = body.push(
-        button::secondary(None, "Cancel").on_press(Message::Settings(
-            SettingsMessage::LocalSigning(LocalSigningMessage::CancelPairing),
-        )),
-    );
-    body.into()
+    Column::new()
+        .padding(10)
+        .spacing(10)
+        .push(back_button())
+        .push(offer_col)
+        .into()
 }
 
 fn picker_body<'a>(
@@ -246,22 +275,19 @@ fn picker_body<'a>(
         return Column::new()
             .padding(10)
             .spacing(8)
+            .push(back_button())
             .push(text("Looking for phones…").bold())
             .push(text(
                 "No phones found on this Wi-Fi yet. Open the Keychain \
                  app on a phone on the same network and make sure it's \
                  unlocked, then wait a few seconds.",
             ))
-            .push(
-                button::secondary(None, "Cancel").on_press(Message::Settings(
-                    SettingsMessage::LocalSigning(LocalSigningMessage::CancelPairing),
-                )),
-            )
             .into();
     }
     let mut col = Column::new()
         .padding(10)
         .spacing(8)
+        .push(back_button())
         .push(text("Pick a phone to pair with").bold())
         .push(text(
             "These are the Keychain phones currently advertising on \
@@ -284,12 +310,6 @@ fn picker_body<'a>(
             )));
         col = col.push(row);
     }
-    col = col.push(separation().width(Length::Fill));
-    col = col.push(
-        button::secondary(None, "Cancel").on_press(Message::Settings(
-            SettingsMessage::LocalSigning(LocalSigningMessage::CancelPairing),
-        )),
-    );
     col.into()
 }
 
@@ -317,8 +337,8 @@ fn error_body<'a>(err: &'a PairingError) -> Element<'a, Message> {
         ),
         PairingError::ReplayRefused => (
             "QR already used",
-            "This pairing QR has already completed a pairing. Cancel \
-             and start a fresh offer rather than re-using it."
+            "This pairing QR has already completed a pairing. Go \
+             back and start a fresh offer rather than re-using it."
                 .to_string(),
         ),
         PairingError::PhoneVerificationFailed => (
@@ -351,6 +371,7 @@ fn error_body<'a>(err: &'a PairingError) -> Element<'a, Message> {
     let mut col = Column::new()
         .padding(10)
         .spacing(8)
+        .push(back_button())
         .push(text(title).bold().style(theme::text::error))
         .push(text(body).style(theme::text::error));
     if err.is_retriable() {
@@ -540,5 +561,21 @@ mod tests {
         state.vault_keys = vec![key(Some("My iPhone"), true)];
         state.show_key_details = true;
         let _ = idle_body(&state);
+
+        state.selected_key = Some(state.vault_keys[0].xpub.clone());
+        let _ = idle_body(&state);
+    }
+
+    #[test]
+    fn every_pairing_step_renders() {
+        let phone = crate::phone_signer::mdns::DiscoveredPhone {
+            cert_fp8: "65647abe".into(),
+            addr: "192.168.100.95:54502".parse().unwrap(),
+            instance_name: "x".into(),
+        };
+        let _ = picker_body(&[]);
+        let _ = picker_body(std::slice::from_ref(&phone));
+        let _ = error_body(&PairingError::ReplayRefused);
+        let _ = error_body(&PairingError::OfferExpired);
     }
 }

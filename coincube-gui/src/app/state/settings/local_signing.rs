@@ -1648,6 +1648,50 @@ mod tests {
         assert_eq!(state.selected_key, Some(xpub_of(&state, PHONE_FP)));
     }
 
+    #[test]
+    fn back_returns_to_key_selection_from_every_pairing_step() {
+        let mut state = LocalSigningState::default();
+        state.initialised = true;
+        state.apply_wallet(&named_wallet(&[(PHONE_FP, 42)], true));
+        let chosen = state.selected_key.clone();
+        assert!(chosen.is_some());
+
+        let steps = [
+            PairingFlow::PhonePicker { discovered: vec![] },
+            PairingFlow::Waiting {
+                phone: crate::phone_signer::mdns::DiscoveredPhone {
+                    cert_fp8: "01010101".into(),
+                    addr: "127.0.0.1:0".parse().unwrap(),
+                    instance_name: "x".into(),
+                },
+                offer: crate::phone_signer::pairing::PairingOffer {
+                    signer_xpub: String::new(),
+                    descriptor_sha256: String::new(),
+                    version: 1,
+                    cert_der_b64: String::new(),
+                    cert_fp: String::new(),
+                    service_name: String::new(),
+                    wallet_fingerprint: Fingerprint::default(),
+                    expires_at_unix: 0,
+                    psk_b64: String::new(),
+                },
+                qr: None,
+            },
+            // Not retriable, so Back is the only way out of it.
+            PairingFlow::Error(PairingError::ReplayRefused),
+        ];
+        for step in steps {
+            state.flow = step;
+            let _ = send(
+                &mut state,
+                &Cache::default(),
+                LocalSigningMessage::CancelPairing,
+            );
+            assert!(matches!(state.flow, PairingFlow::Idle));
+            assert_eq!(state.selected_key, chosen, "Back keeps the chosen key");
+        }
+    }
+
     fn send(
         state: &mut LocalSigningState,
         cache: &Cache,
