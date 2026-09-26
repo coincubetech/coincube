@@ -1,8 +1,11 @@
+import hashlib
+import json
 import logging
 import os
+import socket
 
 from ephemeral_port_reserve import reserve
-from test_framework.utils import BitcoinBackend, TailableProc, ELECTRS_PATH, TIMEOUT
+from test_framework.utils import BitcoinBackend, TailableProc, ELECTRS_PATH, TIMEOUT, wait_for
 
 
 class Electrs(BitcoinBackend):
@@ -63,6 +66,24 @@ class Electrs(BitcoinBackend):
         except Exception:
             self.stop()
             raise
+
+    def tip_hash(self):
+        """Read the indexed tip via Electrum, independent of the wallet poller."""
+        with socket.create_connection(("127.0.0.1", self.rpcport), timeout=5) as sock:
+            sock.sendall(b'{"jsonrpc":"2.0","id":0,"method":"blockchain.headers.subscribe","params":[]}\n')
+            with sock.makefile("rb") as stream:
+                response = json.loads(stream.readline(4096))
+        if response.get("id") != 0 or response.get("error") is not None:
+            raise ValueError(f"Electrs tip request failed: {response}")
+        header = bytes.fromhex(response["result"]["hex"])
+        if len(header) != 80:
+            raise ValueError("Electrs returned an invalid Bitcoin header")
+        return hashlib.sha256(hashlib.sha256(header).digest()).digest()[::-1].hex()
+
+    def wait_for_tip(self, expected_hash):
+        # Exact hash, not just height: successive reorgs may have equal heights.
+        # No restart/retry-on-timeout: an unhealthy indexer must still fail CI.
+        wait_for(lambda: self.tip_hash() == expected_hash)
 
     def stop(self):
         return TailableProc.stop(self)

@@ -73,6 +73,8 @@ class Bitcoind(BitcoinBackend):
         self.rpcport = rpcport
         self.p2pport = reserve()
         self.prefix = "bitcoind"
+        # The Electrs fixture installs a barrier before destructive chain edits.
+        self.before_reorg = None
 
         regtestdir = os.path.join(bitcoin_dir, "regtest")
         if not os.path.exists(regtestdir):
@@ -170,6 +172,8 @@ class Bitcoind(BitcoinBackend):
             self.rpc.generateblock(addr, [])
 
     def invalidate_remine(self, height):
+        if self.before_reorg is not None:
+            self.before_reorg()
         delta = self.rpc.getblockcount() - height + 1
         h = self.rpc.getblockhash(height)
         self.rpc.invalidateblock(h)
@@ -195,6 +199,8 @@ class Bitcoind(BitcoinBackend):
             be pulled forward to h1.
         2. Set {height}=h2 and {shift}= h1-h2
         """
+        if self.before_reorg is not None:
+            self.before_reorg()
         orig_len = self.rpc.getblockcount()
         old_hash = self.rpc.getblockhash(height)
         if height + shift > orig_len:
