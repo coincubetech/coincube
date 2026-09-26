@@ -226,10 +226,16 @@ jobs:
           mkdir -p ~/.local/share/keyrings
           printf '[keyring]\ndisplay-name=login\nctime=0\nmtime=0\nlock-on-idle=false\nlock-after=false\n' > ~/.local/share/keyrings/login.keyring
           printf 'login' > ~/.local/share/keyrings/default
-          dbus-run-session -- bash -c '
-            echo -n "" | gnome-keyring-daemon --daemonize --unlock --components=secrets >/dev/null
-            cargo test --color always -- --nocapture
-          '
+          python3 contrib/test_keyring_supervision.py
+          python3 contrib/test_keyring_supervision.py --live-kill
+          dbus-run-session -- python3 contrib/with_test_keyring.py -- cargo test --color always -- --nocapture
+      - name: Preserve Secret Service fixture diagnostics
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: keyring-fixture-${{ matrix.toolchain }}
+          path: test-logs/gnome-keyring.log
+          if-no-files-found: ignore
 
   # Explicit package/filter: default workspace members must not determine this
   # security boundary's coverage. No OS credentials or repository secrets.
