@@ -1126,6 +1126,7 @@ mod flow {
                 &produced[0],
                 Message::Claim(ClaimEvent::Submitted(
                     _,
+                    _,
                     Ok(Outcome::UpstreamAccepted { .. })
                 ))
             ),
@@ -1286,6 +1287,7 @@ mod flow {
             matches!(
                 &produced[0],
                 Message::Claim(ClaimEvent::Submitted(
+                    _,
                     _,
                     Ok(Outcome::UpstreamAccepted { .. })
                 ))
@@ -1731,7 +1733,7 @@ mod flow {
         assert!(
             matches!(
                 &produced[..],
-                [Message::Claim(ClaimEvent::Submitted(_, Err(_)))]
+                [Message::Claim(ClaimEvent::Submitted(_, _, Err(_)))]
             ),
             "{:?}",
             produced
@@ -3285,5 +3287,119 @@ mod flow {
             !sibling_held,
             "GUI broadcast a stale SetSession before its panel dropped it"
         );
+    }
+    #[tokio::test]
+    async fn round7_late_submitted_refusal_preserves_signout_instruction() {
+        let blank = reviewer_blank_app();
+        let mut f = reach_review().await;
+        let mut app = reviewer_app(&mut f, blank);
+        let pending = app.update(intent(view::ClaimMessage::Confirm));
+        app.invalidate_claim_session();
+        assert_eq!(
+            app_claim_state(&app).1.as_deref(),
+            Some(SIGNED_OUT_AT_REVIEW)
+        );
+        let mut completed = outputs(pending).await;
+        assert_eq!(completed.len(), 1);
+        assert!(
+            matches!(&completed[0], Message::Claim(ClaimEvent::Submitted(_, _, Err(reason))) if reason == SESSION_ENDED)
+        );
+        let followup = app.update(completed.remove(0));
+        drive_claim_messages(&mut app, followup).await;
+        let displayed = app_claim_state(&app);
+        let refresh = app.update(intent(view::ClaimMessage::Refresh));
+        drive_claim_messages(&mut app, refresh).await;
+        let after_refresh = app_claim_state(&app);
+        assert!(app.claim_session_invalidated);
+        assert!(app.panels.claim.as_ref().unwrap().connect.is_none());
+        assert_eq!(submissions(&f), 0);
+        eprintln!("round7 Submitted Err after signout: displayed={displayed:?}; after_refresh={after_refresh:?}; submissions={}", submissions(&f));
+        let _ = std::fs::remove_dir_all(&f.root);
+        assert_eq!(
+            displayed.1.as_deref(),
+            Some(SIGNED_OUT_AT_REVIEW),
+            "late Submitted refusal erased the sign-in instruction"
+        );
+    }
+
+    #[tokio::test]
+    async fn round7_late_submitted_success_preserves_signout_instruction() {
+        let blank = reviewer_blank_app();
+        let mut f = reach_review().await;
+        let mut app = reviewer_app(&mut f, blank);
+        let pending = app.update(intent(view::ClaimMessage::Confirm));
+        let mut completed = outputs(pending).await;
+        assert_eq!(completed.len(), 1);
+        assert!(matches!(
+            &completed[0],
+            Message::Claim(ClaimEvent::Submitted(
+                _,
+                _,
+                Ok(Outcome::UpstreamAccepted { .. })
+            ))
+        ));
+        assert_eq!(submissions(&f), 1);
+        app.invalidate_claim_session();
+        assert_eq!(
+            app_claim_state(&app).1.as_deref(),
+            Some(SIGNED_OUT_AT_REVIEW)
+        );
+        let followup = app.update(completed.remove(0));
+        assert!(
+            outputs(followup).await.is_empty(),
+            "revoked coordinator must not reconcile"
+        );
+        let displayed = match &app.panels.claim.as_ref().unwrap().stage {
+            Stage::Track { error, .. } => error.clone(),
+            _ => panic!("recorded submission must remain tracked"),
+        };
+        let refresh = app.update(intent(view::ClaimMessage::Refresh));
+        drive_claim_messages(&mut app, refresh).await;
+        assert_eq!(
+            app_claim_state(&app).1.as_deref(),
+            Some(SIGNED_OUT_AT_REVIEW)
+        );
+        assert!(app.claim_session_invalidated);
+        assert!(app.panels.claim.as_ref().unwrap().connect.is_none());
+        assert_eq!(submissions(&f), 1, "no second submission after revocation");
+        eprintln!(
+            "round7 Submitted Ok after signout: displayed={displayed:?}; submissions={}",
+            submissions(&f)
+        );
+        let _ = std::fs::remove_dir_all(&f.root);
+        assert_eq!(
+            displayed.as_deref(),
+            Some(SIGNED_OUT_AT_REVIEW),
+            "late Submitted success erased the sign-in instruction"
+        );
+    }
+    #[tokio::test]
+    async fn late_submitted_after_revocation_preserves_hold_with_connect_present() {
+        for hold in [Some(SIGNED_IN_ELSEWHERE), None] {
+            let mut f = reach_review().await;
+            let pending = f.p.confirm();
+            let mut completed = outputs(pending).await;
+            assert_eq!(completed.len(), 1);
+            assert_eq!(submissions(&f), 1);
+            // No generation change or sign-out: the dispatch revocation count
+            // must independently prevent reconciliation of the old coordinator.
+            f.p.revoke();
+            if let Some(copy) = hold {
+                f.p.note_hold(copy);
+            }
+            assert!(f.p.connect.is_some());
+            let followup =
+                f.p.update(Some(f.dyn_daemon.clone()), &f.cache, completed.remove(0));
+            assert!(outputs(followup).await.is_empty());
+            match &f.p.stage {
+                Stage::Track { error, busy, .. } => {
+                    assert!(!busy);
+                    assert_eq!(error.as_deref(), Some(hold.unwrap_or(SESSION_ENDED)));
+                }
+                _ => panic!("recorded submission must remain tracked"),
+            }
+            assert_eq!(submissions(&f), 1);
+            let _ = std::fs::remove_dir_all(&f.root);
+        }
     }
 }

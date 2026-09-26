@@ -286,7 +286,7 @@ pub enum ClaimEvent {
     /// review whose context ended while it ran is not shown as actionable.
     Reviewed(u64, Box<ClaimSession>, Result<ReviewSnapshot, String>),
     /// `confirm_and_submit` finished.
-    Submitted(Box<ClaimSession>, Result<Outcome, String>),
+    Submitted(u64, Box<ClaimSession>, Result<Outcome, String>),
     /// `reconcile` finished; the number as for `Reviewed`.
     Tracked(u64, Box<ClaimSession>, Result<Status, String>),
 }
@@ -1040,6 +1040,7 @@ impl ClaimStep1Panel {
         let Some(mut session) = self.take_session() else {
             return Task::none();
         };
+        let revocations = self.revocations;
         Task::perform(
             async move {
                 let context = session.context.clone();
@@ -1055,7 +1056,9 @@ impl ClaimStep1Panel {
                 };
                 (session, result)
             },
-            |(session, result)| Message::Claim(ClaimEvent::Submitted(session, result)),
+            move |(session, result)| {
+                Message::Claim(ClaimEvent::Submitted(revocations, session, result))
+            },
         )
     }
 
@@ -1277,7 +1280,21 @@ impl ClaimStep1Panel {
                 }
                 Task::none()
             }
-            ClaimEvent::Submitted(session, result) => {
+            ClaimEvent::Submitted(revocations, session, result) => {
+                let authorized = self.authorized(session.context.generation, revocations);
+                // A recorded submission still belongs in Track, even when
+                // its context ended while the completion was queued. Keep
+                // the current hold instruction and wait for a rebind before
+                // asking the revoked coordinator for status.
+                let held = if authorized {
+                    None
+                } else {
+                    let current = match &self.stage {
+                        Stage::Review { error, .. } | Stage::Track { error, .. } => error.clone(),
+                        _ => None,
+                    };
+                    Some(current.unwrap_or_else(|| self.ended_copy()))
+                };
                 match result {
                     Ok(outcome) => {
                         self.stage = Stage::Track {
@@ -1285,9 +1302,11 @@ impl ClaimStep1Panel {
                             outcome,
                             status: None,
                             busy: false,
-                            error: None,
+                            error: held,
                         };
-                        return self.reconcile();
+                        if authorized {
+                            return self.reconcile();
+                        }
                     }
                     Err(reason) => {
                         if let Stage::Review {
@@ -1302,7 +1321,7 @@ impl ClaimStep1Panel {
                             *slot = Some(session);
                             *snapshot = None;
                             *busy = false;
-                            *error = Some(reason);
+                            *error = held.or(Some(reason));
                         }
                     }
                 }
