@@ -71,6 +71,14 @@ pub struct FreshRead<T> {
     observed_at: i64,
 }
 impl<T> FreshRead<T> {
+    /// The value read, once the fresh-read contract has been acknowledged.
+    pub fn value(&self) -> &T {
+        &self.value
+    }
+    /// When the read was made, as the responder stamped it (UNIX seconds).
+    pub fn observed_at(&self) -> i64 {
+        self.observed_at
+    }
     pub fn from_response(
         chain: ChainId,
         value: T,

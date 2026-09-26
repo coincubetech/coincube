@@ -185,6 +185,9 @@ pub enum Message {
     /// (Lane B1.4). Creates the target Cube only — nothing is claimed,
     /// poisoned, swept or broadcast by this flow.
     StartClaimBlake2b,
+    /// Claim step 1 — the poison self-transfer on Bitcoin (Lane B1.5),
+    /// handled by `state::vault::claim::ClaimStep1Panel`.
+    Claim(ClaimMessage),
     /// Collapse the firmware-advisory detail panel on one device row. Carries
     /// the device fingerprint and the advisory id; the badge itself stays.
     DismissHwAdvisory(Fingerprint, &'static str),
@@ -1510,15 +1513,25 @@ pub enum ConnectAccountMessage {
     AdmittedUserLoaded {
         user: Result<crate::services::coincube::User, (crate::user_error::UserError, bool)>,
         generation: u64,
+        /// The panel's authentication epoch when the load was spawned
+        /// (`ConnectAccountPanel::auth_epoch`).
+        epoch: u64,
     },
     Init,
     RefreshSession {
         refresh_token: String,
     },
-    SetSession(crate::services::coincube::LoginResponse),
+    /// A login or refresh result. The number is the panel's authentication
+    /// epoch when the operation that produced it was spawned: a completion
+    /// of an operation begun before a global auth invalidation carries an
+    /// older epoch than one begun after, whatever order they arrive in.
+    SetSession(crate::services::coincube::LoginResponse, u64),
     SessionLoaded {
         user: crate::services::coincube::User,
         plan: Option<crate::services::coincube::ConnectPlan>,
+        /// Inherited from the `SetSession` (or admitted-user load) that
+        /// produced this, never the epoch current when it is processed.
+        epoch: u64,
     },
     PlanLoaded(Option<crate::services::coincube::ConnectPlan>, u64),
     /// Lightweight Account Overview counts (contacts, cubes), fetched on
@@ -1534,6 +1547,13 @@ pub enum ConnectAccountMessage {
     /// (a timeout, an offline device, a 5xx). Carries presentation-ready copy
     /// rather than a raw error string — see [`crate::user_error`].
     RefreshFailed(UserError),
+    /// A refresh's authentication failure (401/403), with the epoch of the
+    /// refresh operation. A current one logs out — re-dispatched as `LogOut`
+    /// so the GUI broadcasts it — an obsolete one, begun before an
+    /// invalidation and completed after a newer sign-in, is dropped.
+    RefreshRejected {
+        epoch: u64,
+    },
     LogOut,
     EmailChanged(String),
     SubmitLogin,
@@ -2663,4 +2683,22 @@ mod duress_message_debug_tests {
             "DisableMethodProbed(Err(\"settings unreadable\"), 5)"
         );
     }
+}
+
+/// User intents on the claim step-1 panel. Every one is re-checked by the
+/// panel against its current stage; none is a permission on its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimMessage {
+    /// Run the preconditions again (after a refusal, or to refresh them).
+    Recheck,
+    /// Build the poison self-transfer from the pre-fork coins shown.
+    Build,
+    /// Hand the built transaction to the Vault's own signing flow.
+    Sign,
+    /// Explicit confirmation of the review on screen: submit step 1.
+    Confirm,
+    /// Re-read the chains for the submitted transaction.
+    Refresh,
+    /// Abandon an unsubmitted attempt and return to the preconditions.
+    Cancel,
 }

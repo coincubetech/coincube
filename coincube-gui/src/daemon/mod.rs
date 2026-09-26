@@ -158,6 +158,26 @@ pub trait Daemon: Debug {
     async fn update_spend_tx(&self, psbt: &Psbt) -> Result<(), DaemonError>;
     async fn delete_spend_tx(&self, txid: &Txid) -> Result<(), DaemonError>;
     async fn broadcast_spend_tx(&self, txid: &Txid) -> Result<(), DaemonError>;
+    /// Durably reserve a fresh local change index for this wallet.
+    ///
+    /// Embedded-only, and deliberately **not** on the JSON-RPC surface: the
+    /// reservation is a durable local write bound to the persisted chain and
+    /// descriptor identity, so an external `coincubed` cannot serve one for a
+    /// wallet this process is not the owner of. A claim needs it because
+    /// `coincube_core::claim_spend` builds the poison self-transfer against a
+    /// change index the caller has already reserved — reusing a live index
+    /// would put the poison's change on an address another spend may also use.
+    /// Returns the reserved index only. The reservation object itself stays
+    /// inside the daemon: `DaemonControl::reserve_change` binds it to the
+    /// persisted chain and descriptor before returning, so the check that
+    /// matters has already happened where the state lives, and the GUI needs
+    /// nothing but the index to hand to `coincube_core::claim_spend`.
+    async fn reserve_change(
+        &self,
+    ) -> Result<coincube_core::miniscript::bitcoin::bip32::ChildNumber, DaemonError> {
+        Err(DaemonError::ClientNotSupported)
+    }
+
     /// Embedded-only exact-byte transport, not Claim authorization. External
     /// backends must not serialize or reconstruct the opaque verified artifact.
     async fn submit_verified_poison(

@@ -163,6 +163,62 @@ fn fresh(observed_at: i64, now: i64, max_age: i64) -> bool {
             .is_some_and(|age| age >= 0 && age <= max_age)
 }
 
+/// The RDTS deployment gate on its own: whether the fork's observed
+/// deployment state admits an OP_RETURN poison *now*.
+///
+/// `Ok(())` when RDTS is active on the fork with more than
+/// `policy.expiry_margin_seconds` left before its expiry (measured against
+/// the fork's median-time-past at `fork.tip`, never a local clock);
+/// otherwise the [`Assessment`] that refuses. This is exactly the check
+/// [`assess`] applies before it looks at the Bitcoin-side transaction, split
+/// out so a caller that has no transaction yet — a wizard deciding whether
+/// to build one — gets the same answer it would get later, from the same
+/// code, rather than a hard-coded margin of its own. Freshness of the two
+/// observations is the caller's to have checked; `assess` does so first.
+pub fn assess_deployment(
+    fork: &ForkObservation,
+    deployment: &DeploymentObservation,
+    policy: Policy,
+) -> Result<(), Assessment> {
+    if policy.expiry_margin_seconds <= 0 {
+        return Err(Assessment::InvalidPlan);
+    }
+    match deployment.state {
+        DeploymentState::Flagday {
+            height,
+            expiry_time,
+            active,
+        } => {
+            let Some(next_height) = fork.tip.height.checked_add(1) else {
+                return Err(Assessment::Unknown);
+            };
+            // Contradictory "active" claims are malformed, not permission.
+            if expiry_time <= 0
+                || (active && (next_height < height || fork.median_time_past >= expiry_time))
+            {
+                return Err(Assessment::Deployment(DeploymentState::Malformed));
+            }
+            if !active {
+                return Err(if fork.median_time_past >= expiry_time {
+                    Assessment::RdtsExpired
+                } else if next_height < height {
+                    Assessment::RdtsScheduled
+                } else {
+                    Assessment::RdtsInactive
+                });
+            }
+            if expiry_time
+                .checked_sub(fork.median_time_past)
+                .is_none_or(|remaining| remaining <= policy.expiry_margin_seconds)
+            {
+                return Err(Assessment::ExpiryMargin);
+            }
+            Ok(())
+        }
+        state => Err(Assessment::Deployment(state)),
+    }
+}
+
 /// Evaluate from scratch. Stale/reorg/unknown results must replace any previous
 /// eligibility in the caller; never cache eligibility as completed split proof.
 pub fn assess(
@@ -229,38 +285,8 @@ pub fn assess(
         ForkTransactionPresence::Present => return Assessment::Step1AlreadyOnFork,
         ForkTransactionPresence::NotObserved => {}
     }
-    match deployment.state {
-        DeploymentState::Flagday {
-            height,
-            expiry_time,
-            active,
-        } => {
-            let Some(next_height) = fork.tip.height.checked_add(1) else {
-                return Assessment::Unknown;
-            };
-            // Contradictory "active" claims are malformed, not permission.
-            if expiry_time <= 0
-                || (active && (next_height < height || fork.median_time_past >= expiry_time))
-            {
-                return Assessment::Deployment(DeploymentState::Malformed);
-            }
-            if !active {
-                return if fork.median_time_past >= expiry_time {
-                    Assessment::RdtsExpired
-                } else if next_height < height {
-                    Assessment::RdtsScheduled
-                } else {
-                    Assessment::RdtsInactive
-                };
-            }
-            if expiry_time
-                .checked_sub(fork.median_time_past)
-                .is_none_or(|remaining| remaining <= policy.expiry_margin_seconds)
-            {
-                return Assessment::ExpiryMargin;
-            }
-        }
-        state => return Assessment::Deployment(state),
+    if let Err(refused) = assess_deployment(&fork, &deployment, policy) {
+        return refused;
     }
     let block = match bitcoin.location {
         TransactionLocation::Unknown => return Assessment::Unknown,
