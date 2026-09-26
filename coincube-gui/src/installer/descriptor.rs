@@ -157,6 +157,15 @@ impl KeySource {
         }
     }
 
+    /// The Connect id of this COINCUBE Keychain key. `None` for every other
+    /// kind of key.
+    pub fn keychain_key_id(&self) -> Option<u64> {
+        match self {
+            Self::KeychainKey { key_id, .. } => Some(*key_id),
+            _ => None,
+        }
+    }
+
     pub fn provider_key(&self) -> Option<ProviderKey> {
         if let KeySource::Token(_, provider_key) = self {
             Some(provider_key.clone())

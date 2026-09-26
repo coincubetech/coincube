@@ -614,6 +614,7 @@ mod tests {
             remote_backend_auth: Some(AuthConfig::new(email.to_string(), wallet_id.to_string())),
             start_internal_bitcoind: None,
             pending_rescan: None,
+            keychain_keys_recorded: false,
         }
     }
 

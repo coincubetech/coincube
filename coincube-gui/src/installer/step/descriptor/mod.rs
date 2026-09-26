@@ -221,6 +221,8 @@ impl Step for ImportDescriptor {
         if let Some(aliases) = &self.imported_aliases {
             ctx.keys = aliases.clone();
         }
+        // An imported descriptor's keys carry no Keychain provenance.
+        ctx.keychain_keys_recorded = false;
 
         if let Some(wallet_alias) = self.imported_backup.as_ref().and_then(|b| b.alias.clone()) {
             ctx.wallet_alias = wallet_alias;
@@ -230,6 +232,7 @@ impl Step for ImportDescriptor {
 
     fn revert(&self, ctx: &mut Context) {
         ctx.keys = HashMap::new();
+        ctx.keychain_keys_recorded = false;
         ctx.backup = None;
         ctx.descriptor = None;
         ctx.wallet_alias = String::new();

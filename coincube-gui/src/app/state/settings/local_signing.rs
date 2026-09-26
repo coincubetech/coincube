@@ -61,8 +61,37 @@ pub struct RowDraft {
     pub fallback: String,
 }
 
+/// One vault key the Pair panel offers, as the user should see it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PairableKey {
+    /// Account xpub, the identity the pairing offer carries.
+    pub xpub: String,
+    /// The key exactly as written in the descriptor, origin included.
+    pub descriptor_key: String,
+    /// Origin (master) fingerprint, when the descriptor records one.
+    pub fingerprint: Option<Fingerprint>,
+    /// The name the user gave this key, if any.
+    pub name: Option<String>,
+    /// Whether this key is known to come from the COINCUBE Keychain.
+    pub keychain: bool,
+}
+
 pub struct LocalSigningState {
-    pub vault_keys: Vec<(String, String)>,
+    /// Keys a phone can be paired for. Only the Vault's Keychain keys when
+    /// [`Self::keychain_keys_recorded`], every spendable key otherwise.
+    pub vault_keys: Vec<PairableKey>,
+    /// Whether the loaded Vault recorded which of its keys came from the
+    /// Keychain. When set and [`Self::vault_keys`] is empty, the Vault has
+    /// no Keychain key and there is nothing a phone could pair for.
+    pub keychain_keys_recorded: bool,
+    /// Whether each key's full descriptor string is shown under its name.
+    pub show_key_details: bool,
+    /// The loaded Vault, kept so a Keychain lookup's answer is applied to the
+    /// latest version of it rather than to the one the lookup started from.
+    wallet: Option<Arc<Wallet>>,
+    /// Descriptor checksum of the Vault a Keychain lookup was started for
+    /// in this panel, so a Vault is asked about at most once per visit.
+    keychain_lookup_started: Option<String>,
     /// Origin (master) fingerprint of each entry in [`Self::vault_keys`],
     /// keyed by the same xpub string.
     ///
@@ -125,6 +154,10 @@ impl Default for LocalSigningState {
     fn default() -> Self {
         Self {
             vault_keys: Vec::new(),
+            keychain_keys_recorded: false,
+            show_key_details: false,
+            wallet: None,
+            keychain_lookup_started: None,
             vault_key_fingerprints: Vec::new(),
             selected_key: None,
             descriptor_sha256: String::new(),
@@ -216,10 +249,44 @@ impl LocalSigningState {
             .iter()
             .filter_map(|(xpub, _, origin)| origin.as_ref().map(|(fp, _)| (xpub.clone(), *fp)))
             .collect();
+        // A phone can only pair for a key it holds, and only Keychain keys
+        // are held by a phone. Where the Vault never recorded which keys
+        // those are, offer them all rather than guess.
+        self.keychain_keys_recorded = wallet.keychain_keys_recorded;
         self.vault_keys = spendable
             .into_iter()
-            .map(|(xpub, label, _)| (xpub, label))
+            .map(|(xpub, descriptor_key, origin)| {
+                let fingerprint = origin.map(|(fp, _)| fp);
+                PairableKey {
+                    xpub,
+                    descriptor_key,
+                    fingerprint,
+                    name: fingerprint
+                        .and_then(|fp| wallet.keys_aliases.get(&fp))
+                        .filter(|name| !name.trim().is_empty())
+                        .cloned(),
+                    keychain: fingerprint
+                        .is_some_and(|fp| wallet.keychain_key_ids.contains_key(&fp)),
+                }
+            })
+            .filter(|key| key.keychain || !wallet.keychain_keys_recorded)
             .collect();
+        // The same key can sit on several paths; offer it once.
+        let mut seen = HashSet::new();
+        self.vault_keys.retain(|key| seen.insert(key.xpub.clone()));
+        if !self
+            .selected_key
+            .as_ref()
+            .is_some_and(|selected| self.vault_keys.iter().any(|k| k.xpub == *selected))
+        {
+            // With a single Keychain key there is nothing to choose. An
+            // unrecorded Vault's one key may not be a Keychain key, so the
+            // user still picks it.
+            self.selected_key = match self.vault_keys.as_slice() {
+                [only] if self.keychain_keys_recorded => Some(only.xpub.clone()),
+                _ => None,
+            };
+        }
         // Identify the **vault as a whole**, not one of its signers
         // — `id_fingerprint` is a stable 4-byte digest of the
         // descriptor, unique per vault and distinct from any signer
@@ -230,6 +297,55 @@ impl LocalSigningState {
         let mut v: Vec<_> = wallet.descriptor_keys().into_iter().collect();
         v.sort();
         self.wallet_signer_fingerprints = v;
+    }
+
+    /// Ask Connect which of an unrecorded Vault's keys are Keychain keys.
+    ///
+    /// Only when signed in, and at most once per Vault per visit; a Vault
+    /// that already records its Keychain keys is never asked about. See
+    /// [`super::keychain_backfill`].
+    fn keychain_lookup(
+        &mut self,
+        daemon: Option<&Arc<dyn Daemon + Sync + Send>>,
+        cache: &Cache,
+    ) -> Task<Message> {
+        let Some(wallet) = self.wallet.clone() else {
+            return Task::none();
+        };
+        if wallet.keychain_keys_recorded
+            || self.keychain_lookup_started.as_ref() == Some(&wallet.descriptor_checksum)
+        {
+            return Task::none();
+        }
+        let Some(tokens) = cache.connect_tokens.clone() else {
+            return Task::none();
+        };
+        if cache.cube_id.is_empty() {
+            return Task::none();
+        }
+        let checksum = wallet.descriptor_checksum.clone();
+        self.keychain_lookup_started = Some(checksum.clone());
+        // A remote-backend Vault keeps its keys on the backend, not in the
+        // local settings file, so its answer lasts for this session only.
+        let persist =
+            daemon.is_some_and(|d| d.backend() != crate::daemon::DaemonBackend::RemoteBackend);
+        Task::perform(
+            super::keychain_backfill::lookup(
+                cache.datadir_path.clone(),
+                wallet,
+                tokens,
+                cache.cube_id.clone(),
+                persist,
+            ),
+            move |res| {
+                Message::View(view::Message::Settings(
+                    view::SettingsMessage::LocalSigning(LocalSigningMessage::KeychainKeysFound(
+                        checksum.clone(),
+                        res,
+                    )),
+                ))
+            },
+        )
     }
 
     /// Handle a `WalletUpdated` arriving while this panel is active.
@@ -463,7 +579,7 @@ impl State for LocalSigningState {
 
     fn update(
         &mut self,
-        _daemon: Option<Arc<dyn Daemon + Sync + Send>>,
+        daemon: Option<Arc<dyn Daemon + Sync + Send>>,
         cache: &Cache,
         message: Message,
     ) -> Task<Message> {
@@ -481,8 +597,9 @@ impl State for LocalSigningState {
         // vault. A switch mid-pairing also invalidates the on-screen
         // offer (see `apply_wallet_update`).
         if let Message::WalletUpdated(Ok(wallet)) = &message {
+            self.wallet = Some(wallet.clone());
             self.apply_wallet_update(wallet);
-            return Task::none();
+            return self.keychain_lookup(daemon.as_ref(), cache);
         }
         let msg = match message {
             Message::View(view::Message::Settings(view::SettingsMessage::LocalSigning(m))) => m,
@@ -505,10 +622,35 @@ impl State for LocalSigningState {
         match msg {
             LocalSigningMessage::SelectKey(key) => {
                 if matches!(self.flow, PairingFlow::Idle)
-                    && self.vault_keys.iter().any(|(xpub, _)| *xpub == key)
+                    && self.vault_keys.iter().any(|k| k.xpub == key)
                 {
                     self.selected_key = Some(key);
                 }
+                Task::none()
+            }
+            LocalSigningMessage::LookupKeychainKeys => self.keychain_lookup(daemon.as_ref(), cache),
+            LocalSigningMessage::KeychainKeysFound(checksum, res) => {
+                let Some(wallet) = self
+                    .wallet
+                    .as_ref()
+                    .filter(|w| w.descriptor_checksum == checksum && !w.keychain_keys_recorded)
+                else {
+                    return Task::none();
+                };
+                match res {
+                    // Through `WalletUpdated`, so every panel holding the
+                    // Vault sees the record, this one included.
+                    Ok(found) => Task::done(Message::WalletUpdated(Ok(Arc::new(
+                        super::keychain_backfill::apply_to_wallet(wallet, &found),
+                    )))),
+                    Err(e) => {
+                        tracing::warn!("Keychain key lookup for the Pair panel failed: {}", e);
+                        Task::none()
+                    }
+                }
+            }
+            LocalSigningMessage::ToggleKeyDetails => {
+                self.show_key_details = !self.show_key_details;
                 Task::none()
             }
             LocalSigningMessage::StartPairing => {
@@ -532,7 +674,7 @@ impl State for LocalSigningState {
                 let Some(selected_key) = self
                     .selected_key
                     .clone()
-                    .filter(|key| self.vault_keys.iter().any(|(xpub, _)| xpub == key))
+                    .filter(|key| self.vault_keys.iter().any(|k| k.xpub == *key))
                 else {
                     self.flow = PairingFlow::Error(PairingError::InternalError(
                         "Select the exact vault key held by this phone before pairing.".into(),
@@ -711,15 +853,27 @@ impl State for LocalSigningState {
         wallet: Option<Arc<Wallet>>,
     ) -> Task<Message> {
         if let Some(w) = wallet.as_ref() {
+            self.wallet = Some(w.clone());
             self.apply_wallet_update(w);
             tracing::debug!("local-signer reload with wallet {}", w.name);
+            if !w.keychain_keys_recorded {
+                // `reload` has no `Cache`, so the sign-in check and the
+                // lookup itself happen in `update`.
+                return Task::done(Message::View(view::Message::Settings(
+                    view::SettingsMessage::LocalSigning(LocalSigningMessage::LookupKeychainKeys),
+                )));
+            }
         } else {
+            self.wallet = None;
             self.start_pairing_run();
             self.flow = PairingFlow::Idle;
             self.wallet_fingerprint = None;
             self.wallet_chain = None;
             self.wallet_signer_fingerprints = Vec::new();
             self.vault_key_fingerprints = Vec::new();
+            self.vault_keys = Vec::new();
+            self.keychain_keys_recorded = false;
+            self.selected_key = None;
         }
         // Cache isn't passed to reload; the panel reads it on the
         // first update tick instead.
@@ -1358,6 +1512,275 @@ mod tests {
                 _ => panic!("BTCB2 pairing should be unavailable"),
             }
         }
+    }
+
+    const PHONE_FP: &str = "f714c228";
+    const LEDGER_FP: &str = "2522f23c";
+
+    fn fp(hex: &str) -> Fingerprint {
+        Fingerprint::from_str(hex).unwrap()
+    }
+
+    /// `DESC_B` with both keys named, and the Keychain record as given.
+    fn named_wallet(keychain: &[(&str, u64)], recorded: bool) -> Wallet {
+        Wallet::new(CoincubeDescriptor::from_str(DESC_B).unwrap())
+            .with_key_aliases(HashMap::from([
+                (fp(PHONE_FP), "My iPhone".to_string()),
+                (fp(LEDGER_FP), "Ledger".to_string()),
+            ]))
+            .with_keychain_keys(
+                keychain.iter().map(|(hex, id)| (fp(hex), *id)).collect(),
+                recorded,
+            )
+    }
+
+    fn xpub_of(state: &LocalSigningState, hex: &str) -> String {
+        state
+            .vault_keys
+            .iter()
+            .find(|k| k.fingerprint == Some(fp(hex)))
+            .unwrap_or_else(|| panic!("{} not offered", hex))
+            .xpub
+            .clone()
+    }
+
+    #[test]
+    fn a_recorded_vault_offers_only_its_keychain_keys_by_name() {
+        let mut state = LocalSigningState::default();
+        state.apply_wallet(&named_wallet(&[(PHONE_FP, 42)], true));
+
+        assert!(state.keychain_keys_recorded);
+        assert_eq!(state.vault_keys.len(), 1, "{:?}", state.vault_keys);
+        let key = &state.vault_keys[0];
+        assert_eq!(key.fingerprint, Some(fp(PHONE_FP)));
+        assert_eq!(key.name.as_deref(), Some("My iPhone"));
+        assert!(key.keychain);
+        // The one candidate is chosen for the user.
+        assert_eq!(state.selected_key.as_ref(), Some(&key.xpub));
+    }
+
+    #[test]
+    fn a_recorded_vault_without_keychain_keys_offers_nothing() {
+        let mut state = LocalSigningState::default();
+        state.apply_wallet(&named_wallet(&[], true));
+
+        assert!(state.keychain_keys_recorded);
+        assert!(state.vault_keys.is_empty());
+        assert_eq!(state.selected_key, None);
+        // Vault identity is still loaded; only the key list is empty.
+        assert!(state.wallet_fingerprint.is_some());
+    }
+
+    #[test]
+    fn an_unrecorded_vault_offers_every_key_by_name_and_selects_none() {
+        let mut state = LocalSigningState::default();
+        state.apply_wallet(&named_wallet(&[], false));
+
+        assert!(!state.keychain_keys_recorded);
+        let mut names: Vec<_> = state
+            .vault_keys
+            .iter()
+            .map(|k| k.name.clone().unwrap())
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["Ledger", "My iPhone"]);
+        assert!(state.vault_keys.iter().all(|k| !k.keychain));
+        assert_eq!(state.selected_key, None, "two candidates: the user chooses");
+    }
+
+    #[test]
+    fn an_unrecorded_single_key_vault_selects_nothing() {
+        let key = "[f714c228/48'/1'/0'/2']tpubDEwJnTwfKoMvu8AXXBPydBVWDpzNP5tatjjZ56q4TQioGL7iL9xzTbMoCCQ3tfGihtff7vtR4xsjcRuhZ7HWARVAkGZ1HZcpBhVdou76k7j";
+        let desc = format!("wsh(or_d(pk({key}/<0;1>/*),and_v(v:pkh({key}/<2;3>/*),older(3))))");
+        let wallet = |recorded| {
+            Wallet::new(CoincubeDescriptor::from_str(&desc).unwrap()).with_keychain_keys(
+                if recorded {
+                    HashMap::from([(fp(PHONE_FP), 42)])
+                } else {
+                    HashMap::new()
+                },
+                recorded,
+            )
+        };
+
+        let mut state = LocalSigningState::default();
+        state.apply_wallet(&wallet(false));
+        assert_eq!(state.vault_keys.len(), 1, "{:?}", state.vault_keys);
+        assert_eq!(state.selected_key, None, "may not be a Keychain key");
+
+        // Once recorded as a Keychain key, it is chosen for the user.
+        state.apply_wallet(&wallet(true));
+        assert_eq!(state.selected_key, Some(xpub_of(&state, PHONE_FP)));
+    }
+
+    #[test]
+    fn a_non_keychain_key_cannot_be_selected_once_recorded() {
+        let mut unrecorded = LocalSigningState::default();
+        unrecorded.apply_wallet(&named_wallet(&[], false));
+        let ledger_xpub = xpub_of(&unrecorded, LEDGER_FP);
+
+        let mut state = LocalSigningState::default();
+        state.initialised = true;
+        state.apply_wallet(&named_wallet(&[(PHONE_FP, 42)], true));
+        let phone_xpub = xpub_of(&state, PHONE_FP);
+        let _ = state.update(
+            None,
+            &Cache::default(),
+            Message::View(view::Message::Settings(
+                view::SettingsMessage::LocalSigning(LocalSigningMessage::SelectKey(ledger_xpub)),
+            )),
+        );
+        assert_eq!(state.selected_key, Some(phone_xpub));
+    }
+
+    #[test]
+    fn a_selection_survives_reload_while_the_key_is_still_offered() {
+        let mut state = LocalSigningState::default();
+        state.apply_wallet(&named_wallet(&[], false));
+        let ledger_xpub = xpub_of(&state, LEDGER_FP);
+        state.selected_key = Some(ledger_xpub.clone());
+        state.apply_wallet(&named_wallet(&[], false));
+        assert_eq!(state.selected_key, Some(ledger_xpub));
+
+        // Once the Vault records that the Ledger is not a Keychain key, the
+        // stale choice gives way to the only real candidate.
+        state.apply_wallet(&named_wallet(&[(PHONE_FP, 42)], true));
+        assert_eq!(state.selected_key, Some(xpub_of(&state, PHONE_FP)));
+    }
+
+    fn send(
+        state: &mut LocalSigningState,
+        cache: &Cache,
+        msg: LocalSigningMessage,
+    ) -> Task<Message> {
+        state.update(
+            None,
+            cache,
+            Message::View(view::Message::Settings(
+                view::SettingsMessage::LocalSigning(msg),
+            )),
+        )
+    }
+
+    fn found_phone() -> HashMap<Fingerprint, super::super::keychain_backfill::FoundKeychainKey> {
+        HashMap::from([(
+            fp(PHONE_FP),
+            super::super::keychain_backfill::FoundKeychainKey {
+                key_id: 42,
+                name: "My iPhone".to_string(),
+            },
+        )])
+    }
+
+    /// Loads an unrecorded `DESC_B` Vault the way the app does.
+    fn unrecorded_state() -> (LocalSigningState, Arc<Wallet>) {
+        let wallet = Arc::new(named_wallet(&[], false));
+        let mut state = LocalSigningState::default();
+        state.initialised = true;
+        let task = state.reload(None, Some(wallet.clone()));
+        // `reload` hands the lookup to `update`, which has the `Cache`.
+        assert!(iced_runtime::task::into_stream(task).is_some());
+        (state, wallet)
+    }
+
+    #[test]
+    fn no_lookup_while_signed_out() {
+        let (mut state, _) = unrecorded_state();
+        let task = send(
+            &mut state,
+            &Cache::default(),
+            LocalSigningMessage::LookupKeychainKeys,
+        );
+        assert!(iced_runtime::task::into_stream(task).is_none());
+        assert_eq!(state.keychain_lookup_started, None);
+    }
+
+    #[test]
+    fn a_signed_in_lookup_starts_once_per_vault() {
+        let (mut state, wallet) = unrecorded_state();
+        let cache = Cache {
+            connect_tokens: Some(crate::app::state::vault::test_support::tokens()),
+            cube_id: "cube-local".to_string(),
+            ..Cache::default()
+        };
+        // The returned task is never polled, so no request is made.
+        let first = send(&mut state, &cache, LocalSigningMessage::LookupKeychainKeys);
+        assert!(iced_runtime::task::into_stream(first).is_some());
+        assert_eq!(
+            state.keychain_lookup_started.as_ref(),
+            Some(&wallet.descriptor_checksum)
+        );
+        let again = send(&mut state, &cache, LocalSigningMessage::LookupKeychainKeys);
+        assert!(iced_runtime::task::into_stream(again).is_none());
+    }
+
+    #[test]
+    fn a_recorded_vault_is_never_looked_up() {
+        let wallet = Arc::new(named_wallet(&[], true));
+        let mut state = LocalSigningState::default();
+        state.initialised = true;
+        let task = state.reload(None, Some(wallet));
+        assert!(iced_runtime::task::into_stream(task).is_none());
+    }
+
+    #[tokio::test]
+    async fn a_found_answer_updates_the_vault_and_filters_the_list() {
+        use iced::futures::StreamExt;
+        let (mut state, wallet) = unrecorded_state();
+        assert_eq!(state.vault_keys.len(), 2, "unrecorded: every key offered");
+
+        let task = send(
+            &mut state,
+            &Cache::default(),
+            LocalSigningMessage::KeychainKeysFound(
+                wallet.descriptor_checksum.clone(),
+                Ok(found_phone()),
+            ),
+        );
+        let mut stream = iced_runtime::task::into_stream(task).expect("WalletUpdated");
+        let updated = loop {
+            match stream.next().await {
+                Some(iced_runtime::Action::Output(Message::WalletUpdated(Ok(w)))) => break w,
+                Some(_) => continue,
+                None => panic!("no WalletUpdated emitted"),
+            }
+        };
+        assert!(updated.keychain_keys_recorded);
+        assert_eq!(
+            updated.keychain_key_ids,
+            HashMap::from([(fp(PHONE_FP), 42)])
+        );
+
+        // The app hands it back to the panel like any other Vault update.
+        let _ = state.update(None, &Cache::default(), Message::WalletUpdated(Ok(updated)));
+        assert_eq!(state.vault_keys.len(), 1);
+        assert_eq!(state.vault_keys[0].name.as_deref(), Some("My iPhone"));
+    }
+
+    #[test]
+    fn a_failed_or_stale_answer_changes_nothing() {
+        let (mut state, wallet) = unrecorded_state();
+        let before = state.vault_keys.clone();
+
+        let failed = send(
+            &mut state,
+            &Cache::default(),
+            LocalSigningMessage::KeychainKeysFound(
+                wallet.descriptor_checksum.clone(),
+                Err("offline".to_string()),
+            ),
+        );
+        assert!(iced_runtime::task::into_stream(failed).is_none());
+
+        let other_vault = send(
+            &mut state,
+            &Cache::default(),
+            LocalSigningMessage::KeychainKeysFound("othervault".to_string(), Ok(found_phone())),
+        );
+        assert!(iced_runtime::task::into_stream(other_vault).is_none());
+
+        assert!(!state.keychain_keys_recorded);
+        assert_eq!(state.vault_keys, before);
     }
 
     #[test]

@@ -1,6 +1,7 @@
 pub mod about;
 pub mod general;
 mod install_stats;
+pub mod keychain_backfill;
 pub mod local_signing;
 pub mod recovery_alerts;
 pub mod recovery_kit;
