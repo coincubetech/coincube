@@ -1365,6 +1365,17 @@ fn require_installable_chain(ctx: &Context) -> Result<(), Error> {
     Ok(())
 }
 
+/// Remote wallet creation/import cannot represent a Bitcoin Blake2b Vault.
+/// Keep this check at both side-effect boundaries, independent of constructors.
+fn require_remote_installable_chain(ctx: &Context) -> Result<(), Error> {
+    if ctx.bitcoin_config.chain.is_blake2b() {
+        return Err(Error::Unexpected(
+            "Bitcoin Blake2b requires a local Vault with an authenticated Connect backend".into(),
+        ));
+    }
+    require_installable_chain(ctx)
+}
+
 pub async fn install_local_wallet(
     ctx: Context,
     wallet_id: WalletId,
@@ -1542,7 +1553,7 @@ pub async fn create_remote_wallet(
     signer: Arc<Mutex<Signer>>,
     remote_backend: BackendClient,
 ) -> Result<WalletSettings, Error> {
-    require_installable_chain(&ctx)?;
+    require_remote_installable_chain(&ctx)?;
     let network_datadir = ctx
         .coincube_directory
         .network_directory(ctx.bitcoin_config.chain);
@@ -1701,7 +1712,7 @@ pub async fn import_remote_wallet(
     wallet_id: WalletId,
     backend: BackendWalletClient,
 ) -> Result<WalletSettings, Error> {
-    require_installable_chain(&ctx)?;
+    require_remote_installable_chain(&ctx)?;
     tracing::info!("Importing wallet from remote backend");
 
     if let Some(signer) = &ctx.recovered_signer {
@@ -2221,6 +2232,37 @@ mod pending_rescan_tests {
                 matches!(result, Err(Error::Unexpected(reason)) if reason.contains("Bitcoin Blake2b"))
             );
             assert!(!temp.exists());
+        }
+    }
+
+    #[test]
+    fn remote_install_boundary_refuses_fork_even_with_valid_local_context() {
+        for chain in crate::chain::ChainId::ALL {
+            let root = std::env::temp_dir()
+                .join(format!("remote-chain-boundary-{}", uuid::Uuid::new_v4()));
+            let mut client = crate::services::coincube::CoincubeClient::new();
+            client.set_token("synthetic-boundary-token");
+            let ctx = Context::new_for_chain(
+                chain,
+                CoincubeDirectory::new(root.clone()),
+                RemoteBackend::None,
+                None,
+                Some(client),
+            );
+            assert!(
+                require_installable_chain(&ctx).is_ok(),
+                "valid local context for {:?}",
+                chain
+            );
+            let result = require_remote_installable_chain(&ctx);
+            if chain.is_blake2b() {
+                assert!(
+                    matches!(result, Err(Error::Unexpected(reason)) if reason.contains("requires a local Vault"))
+                );
+            } else {
+                assert!(result.is_ok());
+            }
+            assert!(!root.exists(), "boundary checks must not perform file IO");
         }
     }
 
