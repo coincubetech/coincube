@@ -177,6 +177,8 @@ jobs:
         run: |
           choco install protoc --yes --no-progress
           cargo test --no-default-features -- --test-threads=2
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python contrib/check_windows_binary.py target/debug/coincube.exe
       # TMPDIR is redirected off `/var/folders/.../T`, macOS's per-user temp
       # directory, which the OS purges under disk pressure. Two tests that write
       # a datadir there failed on this runner and nowhere else, and the

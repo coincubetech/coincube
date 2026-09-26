@@ -252,7 +252,6 @@ integration-tests = []
 dotenvy = "0.15.7"
 tonic-build = "0.13"
 
-[target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"
 
 [lints.rust]
