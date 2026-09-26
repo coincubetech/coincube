@@ -49,7 +49,7 @@ impl Poller {
         desc: descriptors::CoincubeDescriptor,
         sync_cache: sync::Arc<crate::bitcoin::SyncProgressCache>,
         reorg_alert: sync::Arc<crate::bitcoin::ReorgAlertCache>,
-    ) -> Poller {
+    ) -> Result<Poller, crate::bitcoin::GenesisError> {
         let secp = secp256k1::Secp256k1::verification_only();
         let descs = [
             desc.receive_descriptor().clone(),
@@ -57,7 +57,7 @@ impl Poller {
         ];
 
         // On first startup the tip may be NULL. Make sure it's set as the poller relies on it.
-        looper::maybe_initialize_tip(&bit, &db);
+        looper::maybe_initialize_tip(&bit, &db)?;
 
         // NB: we deliberately do NOT read `sync_progress` here to seed the
         // cache. That would add a backend RPC during construction (which the
@@ -66,14 +66,14 @@ impl Poller {
         // "still syncing", and the poll loop — whose first tick has no initial
         // delay — publishes the real value immediately.
 
-        Poller {
+        Ok(Poller {
             bit,
             db,
             secp,
             descs,
             sync_cache,
             reorg_alert,
-        }
+        })
     }
 
     /// Shared body for the immediate-poll message arms

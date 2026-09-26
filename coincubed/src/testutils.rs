@@ -29,6 +29,7 @@ use miniscript::{
 pub struct DummyBitcoind {
     pub broadcasted: sync::Mutex<Vec<Transaction>>,
     pub broadcast_error: Option<String>,
+    pub genesis_error: Option<crate::connect::AdmissionError>,
     pub txs: HashMap<Txid, (Transaction, Option<Block>)>,
     /// What `chain_tip` reports. Defaults to the historical fixed value (height 100).
     pub tip: BlockChainTip,
@@ -70,6 +71,7 @@ impl DummyBitcoind {
         Self {
             broadcasted: sync::Mutex::new(Vec::new()),
             broadcast_error: None,
+            genesis_error: None,
             txs: HashMap::new(),
             tip: BlockChainTip { hash, height: 100 },
             in_chain: true,
@@ -86,12 +88,17 @@ impl BitcoinInterface for DummyBitcoind {
         1231006505
     }
 
-    fn genesis_block(&self) -> BlockChainTip {
+    fn genesis_block(&self) -> Result<BlockChainTip, crate::bitcoin::GenesisError> {
+        if let Some(error) = self.genesis_error {
+            return Err(crate::bitcoin::GenesisError::Esplora(Box::new(
+                crate::bitcoin::esplora::client::Error::Admission(error),
+            )));
+        }
         let hash = bitcoin::BlockHash::from_str(
             "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f",
         )
         .unwrap();
-        BlockChainTip { hash, height: 0 }
+        Ok(BlockChainTip { hash, height: 0 })
     }
 
     fn sync_progress(&self) -> SyncProgress {

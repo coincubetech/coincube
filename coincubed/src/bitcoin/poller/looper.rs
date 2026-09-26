@@ -601,13 +601,17 @@ fn rescan_check(
 }
 
 /// If the database chain tip is NULL (first startup), initialize it.
-pub fn maybe_initialize_tip(bit: &impl BitcoinInterface, db: &impl DatabaseInterface) {
+pub fn maybe_initialize_tip(
+    bit: &impl BitcoinInterface,
+    db: &impl DatabaseInterface,
+) -> Result<(), crate::bitcoin::GenesisError> {
     let mut db_conn = db.connection();
 
     if db_conn.chain_tip().is_none() {
         // TODO: be smarter. We can use the timestamp of the descriptor to get a newer block hash.
-        db_conn.update_tip(&bit.genesis_block());
+        db_conn.update_tip(&bit.genesis_block()?);
     }
+    Ok(())
 }
 
 pub fn sync_poll_interval() -> time::Duration {
@@ -654,6 +658,36 @@ mod tests {
         bitcoin::{bip32, hashes::Hash},
         descriptor,
     };
+
+    #[test]
+    fn genesis_failure_preserves_uninitialized_tip_and_recovers_on_retry() {
+        use crate::{bitcoin::GenesisError, connect::AdmissionError, StartupError};
+        for error in [
+            AdmissionError::Unavailable,
+            AdmissionError::Throttled,
+            AdmissionError::IndexerBehind,
+        ] {
+            let db = DummyDatabase::new();
+            let mut bit = DummyBitcoind::new();
+            bit.genesis_error = Some(error);
+            let result = maybe_initialize_tip(&bit, &db).unwrap_err();
+            assert!(matches!(&result, GenesisError::Esplora(_)));
+            assert!(
+                matches!(StartupError::from(result), StartupError::ConnectAdmission(actual) if actual == error)
+            );
+            assert!(db.connection().chain_tip().is_none());
+            bit.genesis_error = None;
+            maybe_initialize_tip(&bit, &db).unwrap();
+            assert_eq!(
+                db.connection().chain_tip(),
+                Some(bit.genesis_block().unwrap())
+            );
+            // An initialized wallet need not reach a temporarily failed backend.
+            bit.genesis_error = Some(error);
+            maybe_initialize_tip(&bit, &db).unwrap();
+            assert_eq!(db.connection().chain_tip().unwrap().height, 0);
+        }
+    }
 
     fn tip(height: i32, seed: u8) -> BlockChainTip {
         BlockChainTip {

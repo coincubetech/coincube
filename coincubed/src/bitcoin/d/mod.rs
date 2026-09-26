@@ -1221,13 +1221,19 @@ impl BitcoinD {
     }
 
     pub fn get_block_hash(&self, height: i32) -> Option<bitcoin::BlockHash> {
-        Some(
-            self.make_fallible_node_request("getblockhash", params!(Json::Number(height.into()),))
-                .ok()?
-                .as_str()
-                .and_then(|s| bitcoin::BlockHash::from_str(s).ok())
-                .expect("bitcoind must send valid block hashes"),
-        )
+        self.get_block_hash_result(height).ok()
+    }
+
+    /// Preserve RPC errors for callers that can surface or retry the failure.
+    pub fn get_block_hash_result(&self, height: i32) -> Result<bitcoin::BlockHash, BitcoindError> {
+        self.make_fallible_node_request("getblockhash", params!(Json::Number(height.into()),))?
+            .as_str()
+            .and_then(|s| bitcoin::BlockHash::from_str(s).ok())
+            .ok_or_else(|| {
+                BitcoindError::MalformedResponse(
+                    "getblockhash returned an invalid block hash".into(),
+                )
+            })
     }
 
     pub fn list_since_block(&self, block_hash: &bitcoin::BlockHash) -> LSBlockRes {
