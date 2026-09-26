@@ -721,7 +721,6 @@ impl Wallet {
     }
 }
 
-#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum WalletError {
     WrongWalletLoaded,

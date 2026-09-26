@@ -5362,7 +5362,6 @@ fn map_connect_task(task: Task<app::message::Message>) -> Task<Message> {
     })
 }
 
-#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum Message {
     View(ViewMessage),

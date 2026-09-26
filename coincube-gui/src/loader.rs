@@ -1323,7 +1323,6 @@ async fn sync(
     daemon.get_info().await
 }
 
-#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum Error {
     Wallet(WalletError),
