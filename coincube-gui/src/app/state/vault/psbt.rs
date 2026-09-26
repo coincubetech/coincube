@@ -129,8 +129,8 @@ pub struct PsbtState {
     recipient_identities: Option<RecipientIdentities>,
     pub modal: Option<PsbtModal>,
     /// The replay-protection review of this spend. `Some` only on a Bitcoin
-    /// Blake2b Cube; `None` leaves every Bitcoin-family screen and gate
-    /// exactly as before. Recomputed from the verified witness after every
+    /// Blake2b Cube; Bitcoin-family readiness uses its ordinary finalizer.
+    /// Recomputed from the verified witness after every
     /// signature merge ([`Self::refresh_replay`]).
     pub replay: Option<ReplayReview>,
     /// The spend screen's own re-check of a replayable spend's inputs
@@ -141,6 +141,9 @@ pub struct PsbtState {
     /// The PSBT digest the last re-check was started for, so each new set of
     /// signatures gets exactly one re-check.
     revalidated_for: Option<[u8; 32]>,
+    /// Finalization is cryptographic work: reuse it only for the identical PSBT,
+    /// including signatures, prevouts, scripts and transaction bytes.
+    bitcoin_finalization: std::sync::Mutex<Option<([u8; 32], bool)>>,
 }
 
 /// State of the spend screen's entanglement re-check ([`PsbtState::entangled_check`]).
@@ -202,6 +205,7 @@ impl PsbtState {
             replay,
             entangled_check: EntangledCheck::Idle,
             revalidated_for: None,
+            bitcoin_finalization: std::sync::Mutex::new(None),
         }
     }
 
@@ -347,10 +351,13 @@ impl PsbtState {
         }
     }
 
-    /// Why this spend is not ready, in the copy the spend screen already
-    /// shows. `None` on a Bitcoin-family Cube.
+    /// Why this spend is not ready for a broadcast attempt.
     fn not_ready_reason(&self, cache: &Cache) -> Option<String> {
-        let review = self.replay.as_ref()?;
+        let Some(review) = self.replay.as_ref() else {
+            return (!self.bitcoin_signatures_complete()).then(||
+                "This transaction needs valid signatures for every input before it can be broadcast.".to_string()
+            );
+        };
         Some(replay::not_ready_reason(
             review,
             &self.entangled_inputs(cache),
@@ -389,14 +396,39 @@ impl PsbtState {
         replay::entangled_inputs(&self.tx.psbt, |txid| cache.entanglement_of(txid))
     }
 
+    /// Presence-based signature counts are progress hints, not authorization.
+    /// Verify the Bitcoin witness using the same finalizer as the daemon and
+    /// the interpreter-backed extractor, without mutating the stored PSBT.
+    fn bitcoin_signatures_complete(&self) -> bool {
+        use coincube_core::miniscript::psbt::PsbtExt;
+        if self.wallet.chain.is_blake2b() || self.tx.path_ready().is_none() {
+            return false;
+        }
+        let digest = replay::psbt_digest(&self.tx.psbt);
+        let mut cached = self
+            .bitcoin_finalization
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some((previous, ready)) = *cached {
+            if previous == digest {
+                return ready;
+            }
+        }
+        let secp = secp256k1::Secp256k1::verification_only();
+        let mut candidate = self.tx.psbt.clone();
+        let ready = candidate.finalize_mut(&secp).is_ok() && candidate.extract(&secp).is_ok();
+        *cached = Some((digest, ready));
+        ready
+    }
+
     /// Whether this spend may be broadcast now — the one definition the
     /// Broadcast handler and the view share ([`replay::broadcast_ready`]):
-    /// the path threshold on a Bitcoin-family Cube; on Bitcoin Blake2b the
-    /// finaliser's verdict, the I13 requirement on known-entangled inputs,
+    /// verified finalization on a Bitcoin-family Cube; on Bitcoin Blake2b the
+    /// unified finalizer's verdict, the I13 requirement on known-entangled inputs,
     /// and the acknowledgement.
     pub fn broadcast_ready(&self, cache: &Cache) -> bool {
         replay::broadcast_ready(
-            self.tx.path_ready().is_some(),
+            self.bitcoin_signatures_complete(),
             self.replay.as_ref(),
             &self.entangled_inputs(cache),
         ) && !self.entangled_check.in_flight()
@@ -443,6 +475,7 @@ impl PsbtState {
         // the per-key rows and the "X of N collected" badge can't diverge.
         let counted = self.tx.signers();
         let entangled = self.entangled_inputs(cache);
+        let bitcoin_complete = self.bitcoin_signatures_complete();
         let close = match self.modal.as_mut() {
             Some(PsbtModal::Sign(sign)) => {
                 sign.set_counted_signers(counted);
@@ -459,7 +492,7 @@ impl PsbtState {
                 // (`ReplayReview::signatures_complete`); the acknowledgement is
                 // asked for at Broadcast, not here.
                 let path_satisfied = match &self.replay {
-                    None => self.tx.path_ready().is_some(),
+                    None => bitcoin_complete,
                     Some(review) => review.signatures_complete(&entangled),
                 };
                 (path_satisfied && !sign.keychain_persistence_pending())
@@ -3257,11 +3290,9 @@ mod tests {
             .await;
     }
 
-    /// The Bitcoin regression the lane requires (`#276`, "flag off"): every
-    /// chain-keyed entry point this slice added is byte for byte the prior
-    /// code on every Bitcoin-family chain, and the replay model does not
-    /// exist there at all.
-    mod bitcoin_paths_are_unchanged {
+    /// Bitcoin keeps its signing and merge formats and has no replay review.
+    /// Its completion/broadcast gates additionally verify the final witness.
+    mod bitcoin_paths {
         use super::super::*;
         use crate::app::state::vault::{
             replay,
@@ -3360,7 +3391,7 @@ mod tests {
         }
 
         #[test]
-        fn a_bitcoin_wallet_has_no_replay_review_and_gates_on_the_path_threshold() {
+        fn a_bitcoin_wallet_has_no_replay_review_and_requires_verified_finalization() {
             let f = fixture();
             for chain in BITCOIN_FAMILY {
                 let wallet = Arc::new(Wallet::new(f.descriptor.clone()).with_chain(chain));
@@ -3384,6 +3415,57 @@ mod tests {
                 );
             }
             let _ = replay::REPLAYABLE_ACKNOWLEDGEMENT;
+        }
+
+        #[test]
+        fn tampered_bitcoin_signatures_never_enable_broadcast_or_close_the_picker() {
+            use crate::app::state::vault::test_support::unified::taproot_fixture;
+            for f in [fixture(), taproot_fixture()] {
+                let signed = legacy(&legacy(&f.psbt, &f.signers[0]), &f.signers[1]);
+                let wallet =
+                    Arc::new(Wallet::new(f.descriptor.clone()).with_chain(ChainId::Bitcoin));
+                let tx = SpendTx::new(
+                    None,
+                    signed.clone(),
+                    Vec::new(),
+                    &f.descriptor,
+                    &secp256k1::Secp256k1::new(),
+                    Network::Bitcoin,
+                );
+                let mut state = PsbtState::new(wallet, tx, true);
+                assert!(state.broadcast_ready(&Cache::default()));
+                // Keep every claimed signer present, but invalidate their digests.
+                state.tx.psbt.unsigned_tx.output[0].value =
+                    coincube_core::miniscript::bitcoin::Amount::from_sat(40_001);
+                assert!(
+                    state.tx.path_ready().is_some(),
+                    "claimed threshold remains complete"
+                );
+                assert!(
+                    !state.broadcast_ready(&Cache::default()),
+                    "cached validity must be invalidated"
+                );
+                assert!(state.not_ready_reason(&Cache::default()).is_some());
+                state.modal = Some(PsbtModal::Sign(SignModal::new(
+                    HashSet::new(),
+                    state.wallet.clone(),
+                    CoincubeDirectory::new(PathBuf::new()),
+                    Network::Bitcoin,
+                    false,
+                    None,
+                    None,
+                    false,
+                )));
+                let _ = state.reconcile_and_maybe_close(&Cache::default());
+                assert!(matches!(state.modal, Some(PsbtModal::Sign(_))));
+                state.tx.psbt = signed;
+                let _ = state.reconcile_and_maybe_close(&Cache::default());
+                assert!(
+                    state.modal.is_none(),
+                    "valid signatures complete the picker"
+                );
+                assert!(state.broadcast_ready(&Cache::default()));
+            }
         }
 
         #[test]
