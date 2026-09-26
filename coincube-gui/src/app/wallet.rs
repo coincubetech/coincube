@@ -156,6 +156,12 @@ pub struct Wallet {
     /// ([`settings::KeySetting::replay_protected`]). Sparse; only device
     /// signers are read through it.
     pub replay_marks: HashMap<Fingerprint, bool>,
+    /// Connect ids of the keys that came from the COINCUBE Keychain
+    /// ([`settings::KeySetting::keychain_key_id`]). Sparse; only complete
+    /// when [`Self::keychain_keys_recorded`] is set.
+    pub keychain_key_ids: HashMap<Fingerprint, u64>,
+    /// See [`settings::WalletSettings::keychain_keys_recorded`].
+    pub keychain_keys_recorded: bool,
     pub hardware_wallets: Vec<HardwareWalletConfig>,
     pub signer: Option<Arc<Signer>>,
     /// Descriptor keys whose seed file is on this machine but which this
@@ -202,6 +208,8 @@ impl Wallet {
             border_wallet_fingerprints: HashSet::new(),
             border_wallet_grid_seed: HashMap::new(),
             replay_marks: HashMap::new(),
+            keychain_key_ids: HashMap::new(),
+            keychain_keys_recorded: false,
             hardware_wallets: Vec::new(),
             signer: None,
             unopenable_seed_keys: HashSet::new(),
@@ -467,6 +475,18 @@ impl Wallet {
         self
     }
 
+    /// Record which keys came from the COINCUBE Keychain, and whether that
+    /// record is complete for this Vault.
+    pub fn with_keychain_keys(
+        mut self,
+        keychain_key_ids: HashMap<Fingerprint, u64>,
+        recorded: bool,
+    ) -> Self {
+        self.keychain_key_ids = keychain_key_ids;
+        self.keychain_keys_recorded = recorded;
+        self
+    }
+
     /// The chain the Cube lives on. Set once by the loader from
     /// `CubeSettings::network`; a `Wallet` never changes chain.
     pub fn with_chain<C: Into<ChainId>>(mut self, chain: C) -> Self {
@@ -523,6 +543,10 @@ impl Wallet {
                 .with_border_wallet_fingerprints(wallet_settings.border_wallet_fingerprints())
                 .with_border_wallet_grid_seed(wallet_settings.border_wallet_grid_seed_sources())
                 .with_replay_marks(wallet_settings.replay_marks())
+                .with_keychain_keys(
+                    wallet_settings.keychain_key_ids(),
+                    wallet_settings.keychain_keys_recorded,
+                )
                 .with_alias(wallet_settings.alias)
                 .with_name(wallet_settings.name)
                 .with_pinned_at(wallet_settings.pinned_at)
@@ -707,6 +731,7 @@ impl Wallet {
                     is_border_wallet: self.border_wallet_fingerprints.contains(fg),
                     grid_seed_source: self.border_wallet_grid_seed.get(fg).copied(),
                     replay_protected: self.replay_marks.get(fg).copied(),
+                    keychain_key_id: self.keychain_key_ids.get(fg).copied(),
                 },
             );
         });
@@ -1036,6 +1061,73 @@ mod tests {
         assert_eq!(keys.get(&unrecorded).and_then(|k| k.grid_seed_source), None);
     }
 
+    /// Keychain provenance (`KeySetting::keychain_key_id` plus the Vault's
+    /// `keychain_keys_recorded` flag) round-trips through `Wallet`, and a
+    /// Vault without it writes exactly the bytes it did before it existed.
+    #[test]
+    fn keychain_provenance_round_trips_and_stays_absent_when_unset() {
+        let phone = Fingerprint::from_str("f714c228").unwrap();
+        let ledger = Fingerprint::from_str("2522f23c").unwrap();
+        let wallet = Wallet::new(CoincubeDescriptor::from_str(DESC).unwrap())
+            .with_key_aliases(HashMap::from([
+                (phone, "My iPhone".to_string()),
+                (ledger, "Ledger".to_string()),
+            ]))
+            .with_keychain_keys(HashMap::from([(phone, 42)]), true);
+        let keys = wallet.keys();
+        assert_eq!(keys[&phone].keychain_key_id, Some(42));
+        assert_eq!(keys[&ledger].keychain_key_id, None);
+
+        let json = serde_json::to_string(&keys[&phone]).unwrap();
+        assert!(json.contains("\"keychain_key_id\":42"), "{}", json);
+        let json = serde_json::to_string(&keys[&ledger]).unwrap();
+        assert!(!json.contains("keychain_key_id"), "{}", json);
+
+        let wallet_settings = |recorded| settings::WalletSettings {
+            name: wallet.name.clone(),
+            alias: None,
+            descriptor_checksum: wallet.descriptor_checksum.clone(),
+            pinned_at: None,
+            keys: keys.values().cloned().collect(),
+            hardware_wallets: Vec::new(),
+            remote_backend_auth: None,
+            start_internal_bitcoind: None,
+            pending_rescan: None,
+            keychain_keys_recorded: recorded,
+        };
+        let recorded = wallet_settings(true);
+        assert_eq!(recorded.keychain_key_ids(), HashMap::from([(phone, 42)]));
+        let json = serde_json::to_string(&recorded).unwrap();
+        assert!(json.contains("\"keychain_keys_recorded\":true"), "{}", json);
+        assert!(!serde_json::to_string(&wallet_settings(false))
+            .unwrap()
+            .contains("keychain_keys_recorded"));
+
+        let loaded = Wallet::new(CoincubeDescriptor::from_str(DESC).unwrap())
+            .load_from_settings(recorded)
+            .unwrap();
+        assert!(loaded.keychain_keys_recorded);
+        assert_eq!(loaded.keychain_key_ids, HashMap::from([(phone, 42)]));
+
+        // Files written before the fields existed read as unrecorded.
+        let parsed: settings::KeySetting = serde_json::from_str(
+            r#"{"name":"Coldcard","master_fingerprint":"8a64f2a9","provider_key":null}"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.keychain_key_id, None);
+        let parsed: settings::WalletSettings = serde_json::from_str(&format!(
+            r#"{{"name":"w","alias":null,"descriptor_checksum":"{}","pinned_at":null,"remote_backend_auth":null,"start_internal_bitcoind":null}}"#,
+            wallet.descriptor_checksum
+        ))
+        .unwrap();
+        assert!(!parsed.keychain_keys_recorded);
+        let loaded = Wallet::new(CoincubeDescriptor::from_str(DESC).unwrap())
+            .load_from_settings(parsed)
+            .unwrap();
+        assert!(!loaded.keychain_keys_recorded);
+        assert!(loaded.keychain_key_ids.is_empty());
+    }
+
     /// The replay mark (`KeySetting::replay_protected`) is sparse on disk and
     /// survives the alias-edit rewrite, and a Cube that never marked a signer
     /// writes exactly the bytes it did before the field existed.
@@ -1079,6 +1171,7 @@ mod tests {
             remote_backend_auth: None,
             start_internal_bitcoind: None,
             pending_rescan: None,
+            keychain_keys_recorded: false,
         };
         assert_eq!(
             wallet_settings.replay_marks(),

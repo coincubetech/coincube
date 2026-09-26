@@ -518,6 +518,22 @@ pub enum RecoveryAlertsMessage {
 pub enum LocalSigningMessage {
     /// Explicit vault key choice; no default based on descriptor ordering.
     SelectKey(String),
+    /// Show or hide each key's full descriptor string under its name.
+    ToggleKeyDetails,
+    /// Ask Connect which of an older Vault's keys are Keychain keys.
+    LookupKeychainKeys,
+    /// Answer to [`Self::LookupKeychainKeys`] for the Vault with this
+    /// descriptor checksum, already saved to the settings file on success.
+    KeychainKeysFound(
+        String,
+        Result<
+            std::collections::HashMap<
+                coincube_core::miniscript::bitcoin::bip32::Fingerprint,
+                crate::app::state::settings::keychain_backfill::FoundKeychainKey,
+            >,
+            String,
+        >,
+    ),
     /// "Pair phone" button → settings state browses mDNS and shows
     /// the phone picker. The user then picks one with `PickPhone`.
     StartPairing,

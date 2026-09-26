@@ -3919,6 +3919,10 @@ pub fn create_app_with_remote_backend(
                 .with_border_wallet_fingerprints(wallet_settings.border_wallet_fingerprints())
                 .with_border_wallet_grid_seed(wallet_settings.border_wallet_grid_seed_sources())
                 .with_replay_marks(wallet_settings.replay_marks())
+                .with_keychain_keys(
+                    wallet_settings.keychain_key_ids(),
+                    wallet_settings.keychain_keys_recorded,
+                )
                 .with_hardware_wallets(hws)
                 .load_hotsigners(
                     &coincube_dir,

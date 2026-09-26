@@ -438,6 +438,7 @@ fn an_existing_target_is_found_by_descriptor_on_the_fork_chain_only() {
         remote_backend_auth: None,
         start_internal_bitcoind: None,
         pending_rescan: None,
+        keychain_keys_recorded: false,
     };
     for dir in [&bitcoin_dir, &fork_dir] {
         std::fs::create_dir_all(dir.path()).unwrap();
@@ -1417,6 +1418,7 @@ async fn cancelling_a_claim_from_a_remote_backed_source_returns_to_its_own_backe
         remote_backend_auth: None,
         start_internal_bitcoind: None,
         pending_rescan: None,
+        keychain_keys_recorded: false,
     };
     wallet.remote_backend_auth = Some(crate::app::settings::AuthConfig::new(
         "user@example.test".to_string(),
@@ -1504,6 +1506,7 @@ async fn cancelling_a_claim_restores_the_vault_the_source_cube_points_at() {
         remote_backend_auth: None,
         start_internal_bitcoind: None,
         pending_rescan: None,
+        keychain_keys_recorded: false,
     };
     source.cube.vault_wallet_id = Some(wanted.clone());
     std::fs::write(
