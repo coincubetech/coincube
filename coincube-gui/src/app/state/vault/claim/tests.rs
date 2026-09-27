@@ -506,6 +506,7 @@ fn reviewer_claim_completion_without_daemon_must_not_panic() {
 mod flow {
     #[cfg(feature = "regtest-harness")]
     mod live_regtest;
+    mod preferred;
     use super::*;
     use crate::{daemon::model::GetInfoResult, signer::Signer};
     use coincube_core::{
@@ -619,6 +620,7 @@ mod flow {
         submitted: Mutex<Option<Transaction>>,
         hits: Mutex<Vec<&'static str>>,
         queried_txs: Mutex<Vec<Txid>>,
+        ancestry_coin: Option<Coin>,
         #[cfg(feature = "regtest-harness")]
         live: Option<live_regtest::LiveTransport>,
     }
@@ -654,7 +656,11 @@ mod flow {
             Ok(GetInfoResult {
                 version: String::new(),
                 network: Network::Bitcoin,
-                block_height: 105,
+                block_height: self
+                    .ancestry_coin
+                    .as_ref()
+                    .and_then(|c| c.block_height)
+                    .map_or(105, |h| h + 200),
                 sync: 1.0,
                 descriptors: GetInfoDescriptors {
                     main: self.config.main_descriptor.clone(),
@@ -721,7 +727,11 @@ mod flow {
                     });
                 }
             }
-            Ok(model::ListCoinsResult { coins: vec![coin] })
+            let mut coins = vec![coin];
+            if let Some(ancestry) = &self.ancestry_coin {
+                coins.push(ancestry.clone());
+            }
+            Ok(model::ListCoinsResult { coins })
         }
         async fn list_spend_txs(&self) -> Result<model::ListSpendResult, DaemonError> {
             self.hit("list_spend_txs");
@@ -1024,6 +1034,7 @@ mod flow {
             submitted: Mutex::new(None),
             hits: Mutex::new(Vec::new()),
             queried_txs: Mutex::new(Vec::new()),
+            ancestry_coin: None,
             #[cfg(feature = "regtest-harness")]
             live: None,
         });
@@ -1733,6 +1744,7 @@ mod flow {
             submitted: Mutex::new(None),
             hits: Mutex::new(Vec::new()),
             queried_txs: Mutex::new(Vec::new()),
+            ancestry_coin: None,
             #[cfg(feature = "regtest-harness")]
             live: None,
         });
@@ -3250,6 +3262,7 @@ mod flow {
             submitted: Mutex::new(None),
             hits: Mutex::new(Vec::new()),
             queried_txs: Mutex::new(Vec::new()),
+            ancestry_coin: None,
             #[cfg(feature = "regtest-harness")]
             live: None,
         });
@@ -3513,6 +3526,7 @@ mod flow {
             submitted: Mutex::new(None),
             hits: Mutex::new(Vec::new()),
             queried_txs: Mutex::new(Vec::new()),
+            ancestry_coin: None,
             #[cfg(feature = "regtest-harness")]
             live: None,
         });

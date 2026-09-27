@@ -23,6 +23,7 @@ use construction::Construction;
 pub mod fork_load;
 pub mod fork_panel;
 pub mod pairing;
+mod preferred;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -285,7 +286,7 @@ pub enum ClaimEvent {
     /// the request that started it; a reply to an older request is dropped.
     Checked(u64, Box<Checked>),
     /// The poison self-transfer was (or could not be) built.
-    Built(Result<Box<Construction>, String>),
+    Built(u64, Result<Box<Construction>, String>),
     /// The signed construction was finalised and journaled as an intent —
     /// or refused, in which case the construction comes back so the user can
     /// keep signing. The number names the finalisation attempt it answers.
@@ -434,6 +435,7 @@ pub struct ClaimStep1Panel {
     backend: BackendState,
     check_seq: u64,
     finalize_attempts: u64,
+    building: Option<FinalizeAttempt>,
     feerate: FeerateSource,
     restart_pending: bool,
     handoff_pending: bool,
@@ -467,6 +469,7 @@ impl ClaimStep1Panel {
             backend: BackendState::Ready,
             check_seq: 0,
             finalize_attempts: 0,
+            building: None,
             feerate: FeerateSource::Estimator,
             restart_pending,
             handoff_pending: false,
@@ -515,6 +518,9 @@ impl ClaimStep1Panel {
     pub fn revoke(&mut self) {
         self.revoked = true;
         self.revocations = self.revocations.wrapping_add(1);
+        if self.building.take().is_some() {
+            self.pre.checking = false;
+        }
         if let Some(revoker) = &self.revoker {
             revoker.revoke();
         }
@@ -996,6 +1002,8 @@ impl ClaimStep1Panel {
         let Some(connect) = self.connect.clone() else {
             return Task::none();
         };
+        // A new inventory invalidates any construction still being collected.
+        self.building = None;
         self.check_seq += 1;
         let seq = self.check_seq;
         self.pre.checking = true;
@@ -1018,12 +1026,29 @@ impl ClaimStep1Panel {
             return Task::none();
         };
         let coins = coins.clone();
-        let fork_hash = window.fork_hash;
+        let window = window.clone();
         let wallet = self.wallet.clone();
+        let Some(connect) = self.connect.clone() else {
+            return Task::none();
+        };
+        let expected = *self.generation.borrow();
+        let generation = self.generation.clone();
+        self.finalize_attempts = self.finalize_attempts.wrapping_add(1);
+        let id = self.finalize_attempts;
+        self.building = Some(FinalizeAttempt {
+            id,
+            generation: expected,
+            revocations: self.revocations,
+        });
         self.pre.checking = true;
         Task::perform(
-            async move { build(daemon, wallet, coins, feerate_vb, fork_hash).await },
-            |built| Message::Claim(ClaimEvent::Built(built)),
+            async move {
+                preferred::build_preferred(
+                    daemon, wallet, coins, feerate_vb, window, connect, expected, generation,
+                )
+                .await
+            },
+            move |built| Message::Claim(ClaimEvent::Built(id, built)),
         )
     }
 
@@ -1512,8 +1537,17 @@ impl ClaimStep1Panel {
                 self.pre.checked = Some(*checked);
                 Task::none()
             }
-            ClaimEvent::Built(result) => {
+            ClaimEvent::Built(id, result) => {
+                let Some(attempt) = self.building.filter(|attempt| attempt.id == id) else {
+                    return Task::none();
+                };
+                self.building = None;
                 self.pre.checking = false;
+                if !self.authorized(attempt.generation, attempt.revocations)
+                    || !self.backend_ready()
+                {
+                    return Task::none();
+                }
                 match result {
                     Ok(built) if matches!(self.stage, Stage::Preconditions) => {
                         self.stage = Stage::Plan { built };
