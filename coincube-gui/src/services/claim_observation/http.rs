@@ -10,6 +10,7 @@ use std::{
 };
 
 const BODY_LIMIT: usize = 256 * 1024;
+const TRANSACTION_HEX_LIMIT: usize = 2 * coincube_core::claim_ancestry::MAX_TRANSACTION_BYTES;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Immutable snapshot. Recreate on account/provider change; revoke its generation
@@ -98,32 +99,43 @@ impl HttpObservationSource {
         chain: ChainId,
         path: &str,
     ) -> Result<(u16, Vec<u8>, HeaderMap, i64), FailureKind> {
+        self.get_body(chain, path, true, BODY_LIMIT).await
+    }
+    async fn get_body(
+        &self,
+        chain: ChainId,
+        path: &str,
+        fresh: bool,
+        body_limit: usize,
+    ) -> Result<(u16, Vec<u8>, HeaderMap, i64), FailureKind> {
         let prefix = Self::prefix(chain)?;
         self.bounded(async {
             let stamp = self.now();
-            let mut response = self
+            let mut request = self
                 .anonymous
                 .get(format!("{}/api/v1/esplora/{}/{}", self.base, prefix, path))
-                .header("X-Coincube-Observation", "fresh")
-                .header(CACHE_CONTROL, "no-cache")
-                .send()
-                .await
-                .map_err(|_| FailureKind::Unavailable)?;
+                .header(CACHE_CONTROL, "no-cache");
+            if fresh {
+                request = request.header("X-Coincube-Observation", "fresh");
+            }
+            let mut response = request.send().await.map_err(|_| FailureKind::Unavailable)?;
             let status = response.status().as_u16();
             if status != 200 && status != 404 {
                 return Err(FailureKind::Http(status));
             }
             let headers = response.headers().clone();
-            let mut markers = headers.get_all("x-coincube-observation").iter();
-            if markers.next().and_then(|v| v.to_str().ok()) != Some("fresh")
-                || markers.next().is_some()
-            {
-                return Err(FailureKind::FreshnessUnverified);
+            if fresh {
+                let mut markers = headers.get_all("x-coincube-observation").iter();
+                if markers.next().and_then(|v| v.to_str().ok()) != Some("fresh")
+                    || markers.next().is_some()
+                {
+                    return Err(FailureKind::FreshnessUnverified);
+                }
+                FreshRead::from_response(chain, (), stamp, &headers)?;
             }
-            FreshRead::from_response(chain, (), stamp, &headers)?;
             if response
                 .content_length()
-                .is_some_and(|n| n > BODY_LIMIT as u64)
+                .is_some_and(|n| n > body_limit as u64)
             {
                 return Err(FailureKind::Malformed);
             }
@@ -133,7 +145,7 @@ impl HttpObservationSource {
                 .await
                 .map_err(|_| FailureKind::Unavailable)?
             {
-                if chunk.len() > BODY_LIMIT.saturating_sub(bytes.len()) {
+                if chunk.len() > body_limit.saturating_sub(bytes.len()) {
                     return Err(FailureKind::Malformed);
                 }
                 bytes.extend_from_slice(&chunk);
@@ -141,6 +153,36 @@ impl HttpObservationSource {
             Ok((status, bytes, headers, stamp))
         })
         .await
+    }
+    /// Fetch one bounded ancestry link using the anonymous immutable-data route.
+    /// Txid authentication permits cache hits, but proves neither canonical
+    /// inclusion nor witness validity. These bytes must never become FreshRead
+    /// evidence; the complete path and current chain views need separate checks.
+    pub async fn ancestry_transaction(
+        &self,
+        chain: ChainId,
+        txid: Txid,
+    ) -> Result<Vec<u8>, FailureKind> {
+        let (status, bytes, _, _) = self
+            .get_body(
+                chain,
+                &format!("tx/{}/hex", txid),
+                false,
+                TRANSACTION_HEX_LIMIT,
+            )
+            .await?;
+        if status != 200 {
+            return Err(FailureKind::Http(status));
+        }
+        // Strict hex without whitespace keeps the wire and decoded bounds exact.
+        let raw = hex::decode(bytes).map_err(|_| FailureKind::Malformed)?;
+        let transaction: coincube_core::miniscript::bitcoin::Transaction =
+            coincube_core::miniscript::bitcoin::consensus::deserialize(&raw)
+                .map_err(|_| FailureKind::Malformed)?;
+        if transaction.compute_txid() != txid {
+            return Err(FailureKind::Malformed);
+        }
+        Ok(raw)
     }
     /// Six-block fee estimate from the paired fork provider, without account
     /// headers or Bitcoin-provider fallback. A quote never authorizes a spend.
@@ -364,6 +406,192 @@ mod tests {
             ));
             mock.assert_hits(1);
         }
+    }
+    fn ancestry_fixture() -> (Txid, Vec<u8>) {
+        use coincube_core::miniscript::bitcoin::{
+            absolute, consensus::serialize, transaction, Amount, Transaction, TxIn, TxOut,
+        };
+        let tx = Transaction {
+            version: transaction::Version::TWO,
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![TxIn::default()],
+            output: vec![TxOut {
+                value: Amount::from_sat(5000),
+                script_pubkey: Default::default(),
+            }],
+        };
+        (tx.compute_txid(), serialize(&tx))
+    }
+    #[tokio::test]
+    async fn ancestry_bytes_are_anonymous_cached_and_txid_authenticated() {
+        let (txid, raw) = ancestry_fixture();
+        for chain in [ChainId::Bitcoin, ChainId::BitcoinBlake2b] {
+            let server = MockServer::start();
+            let (source, sender) = source(&server);
+            let mock = server.mock(|when, then| {
+                when.method(GET)
+                    .path(format!(
+                        "/api/v1/esplora/{}/tx/{}/hex",
+                        HttpObservationSource::prefix(chain).unwrap(),
+                        txid
+                    ))
+                    .matches(|request| {
+                        request.headers.as_ref().is_none_or(|headers| {
+                            headers.iter().all(|(name, _)| {
+                                ![
+                                    "authorization",
+                                    "cookie",
+                                    "x-device-fingerprint",
+                                    "x-device-name",
+                                    "x-coincube-observation",
+                                ]
+                                .iter()
+                                .any(|forbidden| name.eq_ignore_ascii_case(forbidden))
+                            })
+                        })
+                    });
+                then.status(200)
+                    .header("x-cache", "HIT")
+                    .body(hex::encode(&raw));
+            });
+            assert_eq!(source.ancestry_transaction(chain, txid).await.unwrap(), raw);
+            sender.send_replace(5);
+            assert_eq!(
+                source.ancestry_transaction(chain, txid).await,
+                Err(FailureKind::Cancelled)
+            );
+            mock.assert_hits(1);
+        }
+    }
+    #[tokio::test]
+    async fn ancestry_bytes_reject_bad_identity_encoding_size_and_status() {
+        let (txid, raw) = ancestry_fixture();
+        let mut trailing = raw.clone();
+        trailing.push(0);
+        for (requested, status, body) in [
+            (id(), 200, hex::encode(&raw)),
+            (txid, 200, hex::encode(trailing)),
+            (txid, 200, "not hex".to_owned()),
+            (txid, 200, format!("{}\n", hex::encode(&raw))),
+            (txid, 200, "0".repeat(TRANSACTION_HEX_LIMIT + 1)),
+            (txid, 404, hex::encode(&raw)),
+            (txid, 503, hex::encode(&raw)),
+        ] {
+            let server = MockServer::start();
+            let (source, _sender) = source(&server);
+            let mock = server.mock(|when, then| {
+                when.method(GET).path(format!(
+                    "/api/v1/esplora/bitcoin/mainnet/tx/{}/hex",
+                    requested
+                ));
+                then.status(status).body(body);
+            });
+            let expected = if status == 200 {
+                FailureKind::Malformed
+            } else {
+                FailureKind::Http(status)
+            };
+            assert_eq!(
+                source
+                    .ancestry_transaction(ChainId::Bitcoin, requested)
+                    .await,
+                Err(expected)
+            );
+            mock.assert_hits(1);
+        }
+        let server = MockServer::start();
+        let (source, _sender) = source(&server);
+        assert_eq!(
+            source.ancestry_transaction(ChainId::Testnet4, txid).await,
+            Err(FailureKind::WrongChain)
+        );
+    }
+    #[tokio::test]
+    async fn ancestry_redirect_does_not_contact_another_provider() {
+        let (txid, raw) = ancestry_fixture();
+        let server = MockServer::start();
+        let target = MockServer::start();
+        let target_mock = target.mock(|when, then| {
+            when.method(GET);
+            then.status(200).body(hex::encode(raw));
+        });
+        let (source, _sender) = source(&server);
+        let redirect = server.mock(|when, then| {
+            when.method(GET);
+            then.status(302).header("location", target.base_url());
+        });
+        assert_eq!(
+            source
+                .ancestry_transaction(ChainId::BitcoinBlake2b, txid)
+                .await,
+            Err(FailureKind::Http(302))
+        );
+        redirect.assert_hits(1);
+        target_mock.assert_hits(0);
+    }
+    #[tokio::test]
+    async fn ancestry_txid_does_not_authenticate_witness_and_size_bound_is_inclusive() {
+        use coincube_core::miniscript::bitcoin::{
+            consensus::{deserialize, serialize},
+            ScriptBuf, Transaction,
+        };
+        let (txid, raw) = ancestry_fixture();
+        let mut witness_tx: Transaction = deserialize(&raw).unwrap();
+        witness_tx.input[0].witness.push([42]);
+        assert_eq!(witness_tx.compute_txid(), txid);
+        assert_ne!(serialize(&witness_tx), raw);
+        let mut limit_tx = witness_tx.clone();
+        limit_tx.output[0].script_pubkey = ScriptBuf::from_bytes(vec![0; 399_900]);
+        let size = serialize(&limit_tx).len();
+        limit_tx.output[0].script_pubkey = ScriptBuf::from_bytes(vec![
+            0;
+            399_900 + coincube_core::claim_ancestry::MAX_TRANSACTION_BYTES
+                - size
+        ]);
+        assert_eq!(
+            serialize(&limit_tx).len(),
+            coincube_core::claim_ancestry::MAX_TRANSACTION_BYTES
+        );
+        for tx in [witness_tx, limit_tx] {
+            let bytes = serialize(&tx);
+            let server = MockServer::start();
+            let (source, _sender) = source(&server);
+            server.mock(|when, then| {
+                when.method(GET);
+                then.status(200).body(hex::encode(&bytes));
+            });
+            assert_eq!(
+                source
+                    .ancestry_transaction(ChainId::Bitcoin, tx.compute_txid())
+                    .await
+                    .unwrap(),
+                bytes
+            );
+        }
+    }
+    #[tokio::test]
+    async fn ancestry_cancellation_drops_inflight_read() {
+        let server = MockServer::start();
+        let (source, sender) = source(&server);
+        let mock = server.mock(|when, then| {
+            when.path(format!("/api/v1/esplora/bitcoin/mainnet/tx/{}/hex", id()));
+            then.status(200).delay(Duration::from_secs(2));
+        });
+        let request = source.ancestry_transaction(ChainId::Bitcoin, id());
+        tokio::pin!(request);
+        tokio::select! {
+            result = &mut request => panic!("request completed before revocation: {:?}", result),
+            reached_server = tokio::time::timeout(Duration::from_secs(1), async {
+                while mock.hits_async().await == 0 {
+                    tokio::task::yield_now().await;
+                }
+            }) => reached_server.expect("request must reach the server"),
+        }
+        sender.send(5).unwrap();
+        let result = tokio::time::timeout(Duration::from_millis(500), request)
+            .await
+            .expect("revocation must not wait for the delayed response");
+        assert_eq!(result.unwrap_err(), FailureKind::Cancelled);
     }
     fn id() -> Txid {
         Txid::from_str(&"11".repeat(32)).unwrap()
