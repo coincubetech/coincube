@@ -28,12 +28,14 @@ impl Coordinator {
     ) -> Result<(ReviewSnapshot, CollectedAssessment), Error> {
         self.current(context)?;
         let first = self.collect().await?;
-        self.controller.check_resubmission(
-            first,
-            self.verified.transaction(),
-            self.policy.observations,
-            self.services.source().now(),
-        )?;
+        self.controller
+            .check_resubmission(
+                first,
+                self.verified.transaction(),
+                self.policy.observations,
+                self.services.source().now(),
+            )
+            .map_err(|error| recovery_check_error(error, first.assessment))?;
         let evidence = self
             .services
             .preflight(
@@ -48,12 +50,14 @@ impl Coordinator {
         if !same_view(first.observations, last.observations) {
             return Err(Error::ChangedReview);
         }
-        self.controller.check_resubmission(
-            last,
-            self.verified.transaction(),
-            self.policy.observations,
-            self.services.source().now(),
-        )?;
+        self.controller
+            .check_resubmission(
+                last,
+                self.verified.transaction(),
+                self.policy.observations,
+                self.services.source().now(),
+            )
+            .map_err(|error| recovery_check_error(error, last.assessment))?;
         self.fresh_evidence(&evidence, last.observations.bitcoin.tip.hash)?;
         let not_after = evidence_deadline(
             self.policy,

@@ -1221,3 +1221,46 @@ async fn cancelled_resubmission_retains_the_attempt_without_an_automatic_retry()
     assert_eq!(c.bitcoin_submission_attempts().len(), 2);
     assert_eq!(c.status(), Status::Unchecked);
 }
+
+#[tokio::test]
+async fn recovery_ineligibility_is_not_a_journal_failure() {
+    let mut resend = submitted_harness().await;
+    resend.fault.store(8, Ordering::SeqCst); // transaction is still in Bitcoin's mempool
+    let before = std::fs::read(resend.temp.0.join("intent.json")).unwrap();
+    let error = match resend.coordinator.prepare_resubmission(&context()).await {
+        Err(error) => error,
+        Ok(_) => panic!("mempool presence must refuse resend"),
+    };
+    assert!(matches!(
+        error,
+        Error::NotReady(Assessment::WaitingForConfirmation)
+    ));
+    let description = crate::app::state::vault::claim::describe(error);
+    assert!(description.contains("Not ready"));
+    assert!(!description.contains("record the claim"));
+    assert_eq!(
+        std::fs::read(resend.temp.0.join("intent.json")).unwrap(),
+        before
+    );
+    assert_eq!(resend.calls.load(Ordering::SeqCst), 1);
+
+    let mut reorg = reorg_harness().await;
+    reorg.fault.store(0, Ordering::SeqCst); // absent, not re-mined
+    let before = std::fs::read(reorg.temp.0.join("intent.json")).unwrap();
+    assert!(matches!(
+        reorg.coordinator.prepare_reconfirmation(&context()).await,
+        Err(Error::NotReady(Assessment::Reorged))
+    ));
+    assert_eq!(
+        std::fs::read(reorg.temp.0.join("intent.json")).unwrap(),
+        before
+    );
+    assert_eq!(reorg.calls.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        recovery_check_error(
+            claim_workflow::Error::Io(std::io::Error::other("disk failure")),
+            Assessment::Reorged
+        ),
+        Error::Journal(claim_workflow::Error::Io(_))
+    ));
+}

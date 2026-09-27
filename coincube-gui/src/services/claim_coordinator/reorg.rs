@@ -30,9 +30,10 @@ impl Coordinator {
         let collected = self.collect().await?;
         self.current(context)?;
         let now = self.services.source().now();
-        let inclusion =
-            self.controller
-                .check_reconfirmation(collected, self.policy.observations, now)?;
+        let inclusion = self
+            .controller
+            .check_reconfirmation(collected, self.policy.observations, now)
+            .map_err(|error| recovery_check_error(error, collected.assessment))?;
         let not_after = evidence_deadline(
             self.policy,
             collected.observations,
@@ -72,11 +73,15 @@ impl Coordinator {
             return Err(Error::ExpiredEvidence);
         }
         if !same_view(review.observations, collected.observations)
-            || self.controller.check_reconfirmation(
-                collected,
-                self.policy.observations,
-                self.services.source().now(),
-            )? != review.inclusion
+            || self
+                .controller
+                .check_reconfirmation(
+                    collected,
+                    self.policy.observations,
+                    self.services.source().now(),
+                )
+                .map_err(|error| recovery_check_error(error, collected.assessment))?
+                != review.inclusion
         {
             return Err(Error::ChangedReview);
         }
