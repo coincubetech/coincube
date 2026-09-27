@@ -3436,10 +3436,13 @@ mod tests {
                     self.0.push(text.to_owned());
                 }
             }
-            let renderer =
-                iced::Renderer::new(iced::Font::DEFAULT, iced::Pixels(16.0), Some("tiny-skia"))
-                    .await
-                    .expect("software renderer available for view regression");
+            let renderer = <iced::Renderer as Headless>::new(
+                iced::Font::DEFAULT,
+                iced::Pixels(16.0),
+                Some("tiny-skia"),
+            )
+            .await
+            .expect("software renderer available for view regression");
             let labels = |state: &PsbtState| {
                 let cache = Cache::default();
                 let mut element = state.view(&cache);
