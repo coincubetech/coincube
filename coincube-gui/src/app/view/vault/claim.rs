@@ -75,7 +75,7 @@ pub fn view<'a>(
                 busy,
                 error,
                 panel.can_continue_on_fork(),
-                panel.reconfirmation(),
+                (panel.reconfirmation(), panel.resubmission()),
             ),
         ),
     }
@@ -474,10 +474,15 @@ fn track_view<'a>(
     busy: bool,
     error: Option<&'a str>,
     can_continue: bool,
-    reconfirmation: Option<crate::services::claim_workflow::Reconfirmation>,
+    recovery: (
+        Option<crate::services::claim_workflow::Reconfirmation>,
+        Option<(ReviewSnapshot, usize)>,
+    ),
 ) -> Element<'a, Message> {
+    let (reconfirmation, resubmission) = recovery;
+    let has_resubmission = resubmission.is_some();
     let (txid, submitted) = match outcome {
-        Outcome::Recorded { txid } => (txid, "A submission is recorded on this device. Its transaction has not been recovered and verified yet; it will not be retried.".into()),
+        Outcome::Recorded { txid } => (txid, "A submission is recorded on this device. Its transaction has not been recovered and verified yet; it will not be retried automatically.".into()),
         Outcome::UpstreamAccepted { txid, .. } => (
             txid,
             "Accepted by the Bitcoin node. Waiting for it to confirm.".to_string(),
@@ -485,7 +490,7 @@ fn track_view<'a>(
         Outcome::Uncertain { txid, .. } => (
             txid,
             "The submission's outcome is uncertain: the intent was recorded, but the node's answer \
-             did not arrive. It is being reconciled from the chain; it will not be retried."
+             did not arrive. It is being reconciled from the chain; it will not be retried automatically."
                 .to_string(),
         ),
     };
@@ -539,7 +544,7 @@ fn track_view<'a>(
                         p1_regular(match phase {
                             Some(Phase::Intent) => "intent",
                             Some(Phase::BroadcastUncertain) => "broadcast (unconfirmed)",
-                            Some(Phase::Tracking) => "confirmed, tracking depth",
+                            Some(Phase::Tracking) => "previously confirmed, checking current depth",
                             None => "—",
                         }),
                     ))
@@ -559,6 +564,18 @@ fn track_view<'a>(
                     .on_press_maybe((!busy).then_some(Message::Claim(ClaimMessage::Refresh))),
             ),
         )
+        .push_maybe(resubmission.map(|(snapshot, attempts)| {
+            Column::new().spacing(10)
+                .push(p1_regular("The original transaction was not found in the fresh Bitcoin checks. This resends the verified transaction shown below using its recorded inputs and fee. Older records may not identify the witness used in the first attempt. A previous attempt may still have reached the network; confirmation is not guaranteed."))
+                .push(row("Transaction", p2_regular(snapshot.txid.to_string())))
+                .push(row("Witness ID", p2_regular(snapshot.wtxid.to_string())))
+                .push(row("Fee", p2_regular(format!("{} sats", snapshot.fee_sats))))
+                .push(row("Previous attempts", p2_regular(attempts.to_string())))
+                .push(button::primary(None, "Confirm resend of original transaction").on_press_maybe((!busy).then_some(Message::Claim(ClaimMessage::ConfirmResubmission))))
+        }))
+        .push_maybe((!has_resubmission && matches!(status, Some(Status::Observation(Assessment::Reorged | Assessment::WaitingForConfirmation)))).then(|| {
+            button::secondary(None, "Review resend of original transaction").on_press_maybe((!busy).then_some(Message::Claim(ClaimMessage::ReviewResubmission)))
+        }))
         .push_maybe(reconfirmation.map(|inclusion| {
             Column::new().spacing(10)
                 .push(p1_regular("The same Bitcoin transaction has confirmed in a different block. Acknowledging this keeps its submission history and checks its confirmation depth again."))

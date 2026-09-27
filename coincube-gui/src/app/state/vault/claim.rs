@@ -237,6 +237,7 @@ pub struct ClaimSession {
     context: Context,
     review: Option<Review>,
     reconfirmation: Option<claim_coordinator::ReconfirmationReview>,
+    resubmission: Option<claim_coordinator::ResubmissionReview>,
     /// Kept for a re-bind: `Coordinator::resume` re-validates the
     /// construction against the journal and re-verifies the signatures.
     built: Box<PoisonSelfTransfer>,
@@ -300,6 +301,7 @@ pub enum ClaimEvent {
     /// `reconcile` finished; the number as for `Reviewed`.
     Tracked(u64, Box<ClaimSession>, Result<Status, String>),
     Reconfirmed(u64, Box<ClaimSession>, Result<(), String>, bool),
+    Resubmitted(u64, Box<ClaimSession>, Result<Option<Outcome>, String>),
 }
 
 #[derive(Debug)]
@@ -524,6 +526,7 @@ impl ClaimStep1Panel {
                 ..
             } => {
                 session.reconfirmation = None;
+                session.resubmission = None;
                 if let Some(coordinator) = &mut session.coordinator {
                     coordinator.invalidate();
                 }
@@ -1238,6 +1241,77 @@ impl ClaimStep1Panel {
         }
     }
 
+    pub fn resubmission(&self) -> Option<(ReviewSnapshot, usize)> {
+        if self.revoked {
+            return None;
+        }
+        match &self.stage {
+            Stage::Track {
+                session: Some(session),
+                busy: false,
+                ..
+            } => session
+                .resubmission
+                .as_ref()
+                .map(|review| (review.snapshot().clone(), review.previous_attempts())),
+            _ => None,
+        }
+    }
+
+    fn resubmit(&mut self, confirm: bool) -> Task<Message> {
+        if self.revoked
+            || self.connect.is_none()
+            || !self.backend_ready()
+            || !matches!(
+                &self.stage,
+                Stage::Track {
+                    busy: false,
+                    status: Some(Status::Observation(
+                        claim::Assessment::Reorged | claim::Assessment::WaitingForConfirmation
+                    )),
+                    ..
+                }
+            )
+        {
+            return Task::none();
+        }
+        let Some(mut session) = self.take_session() else {
+            return Task::none();
+        };
+        session.reconfirmation = None;
+        let revocations = self.revocations;
+        Task::perform(
+            async move {
+                let context = session.context.clone();
+                let result = match session.coordinator.as_mut() {
+                    None => Err(SESSION_ENDED.to_string()),
+                    Some(coordinator) if confirm => match session.resubmission.take() {
+                        Some(review) => coordinator
+                            .confirm_resubmission(review, &context)
+                            .await
+                            .map(Some)
+                            .map_err(describe),
+                        None => Err("Review the original transaction before resending it.".into()),
+                    },
+                    Some(coordinator) => {
+                        session.resubmission = None;
+                        match coordinator.prepare_resubmission(&context).await {
+                            Ok(review) => {
+                                session.resubmission = Some(review);
+                                Ok(None)
+                            }
+                            Err(error) => Err(describe(error)),
+                        }
+                    }
+                };
+                (session, result)
+            },
+            move |(session, result)| {
+                Message::Claim(ClaimEvent::Resubmitted(revocations, session, result))
+            },
+        )
+    }
+
     fn reconfirm(&mut self, confirm: bool) -> Task<Message> {
         if self.revoked
             || self.connect.is_none()
@@ -1271,6 +1345,7 @@ impl ClaimStep1Panel {
                     },
                     Some(coordinator) => {
                         session.reconfirmation = None;
+                        session.resubmission = None;
                         match coordinator.prepare_reconfirmation(&context).await {
                             Ok(review) => {
                                 session.reconfirmation = Some(review);
@@ -1301,6 +1376,7 @@ impl ClaimStep1Panel {
             return Task::none();
         };
         session.reconfirmation = None;
+        session.resubmission = None;
         let revocations = self.revocations;
         Task::perform(
             async move {
@@ -1566,6 +1642,7 @@ impl ClaimStep1Panel {
                 if !authorized {
                     session.review = None;
                     session.reconfirmation = None;
+                    session.resubmission = None;
                 }
                 if let Stage::Review {
                     session: slot,
@@ -1644,12 +1721,52 @@ impl ClaimStep1Panel {
                 }
                 Task::none()
             }
+            ClaimEvent::Resubmitted(revocations, mut session, result) => {
+                let authorized = self.authorized(session.context.generation, revocations);
+                let submitted = matches!(&result, Ok(Some(_)));
+                let ended = self.ended_copy();
+                if !authorized {
+                    session.resubmission = None;
+                }
+                if let Stage::Track {
+                    session: slot,
+                    busy,
+                    status,
+                    error,
+                    outcome,
+                } = &mut self.stage
+                {
+                    *slot = Some(session);
+                    *busy = false;
+                    match result {
+                        Ok(Some(sent)) => {
+                            *outcome = sent;
+                            *status = None;
+                            if authorized {
+                                *error = None;
+                            }
+                        }
+                        Ok(None) if authorized => *error = None,
+                        Err(reason) if authorized => *error = Some(reason),
+                        _ => {}
+                    }
+                    if !authorized && error.is_none() {
+                        *error = Some(ended);
+                    }
+                }
+                if submitted && authorized {
+                    self.reconcile()
+                } else {
+                    Task::none()
+                }
+            }
             ClaimEvent::Reconfirmed(revocations, mut session, result, confirmed) => {
                 let authorized = self.authorized(session.context.generation, revocations);
                 let success = authorized && confirmed && result.is_ok();
                 let ended = self.ended_copy();
                 if !authorized {
                     session.reconfirmation = None;
+                    session.resubmission = None;
                 }
                 if let Stage::Track {
                     session: slot,
@@ -1768,6 +1885,8 @@ impl State for ClaimStep1Panel {
                         Task::none()
                     }
                     view::ClaimMessage::Confirm => self.confirm(),
+                    view::ClaimMessage::ReviewResubmission => self.resubmit(false),
+                    view::ClaimMessage::ConfirmResubmission => self.resubmit(true),
                     view::ClaimMessage::ReviewReconfirmation => self.reconfirm(false),
                     view::ClaimMessage::ConfirmReconfirmation => self.reconfirm(true),
                     view::ClaimMessage::Refresh if self.restart_pending => match daemon {
@@ -2284,6 +2403,7 @@ async fn restore_recorded_claim(
             context,
             review: None,
             reconfirmation: None,
+            resubmission: None,
             built,
             signed,
             recovered: Some(transaction),
@@ -2463,6 +2583,7 @@ async fn finalize_and_journal(
             context,
             review: None,
             reconfirmation: None,
+            resubmission: None,
             built,
             signed,
             recovered: None,
@@ -2492,6 +2613,7 @@ fn rebind_session(
     }
     session.review = None;
     session.reconfirmation = None;
+    session.resubmission = None;
     let production = Production::new(
         connect.client,
         daemon,

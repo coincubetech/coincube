@@ -4211,6 +4211,46 @@ mod flow {
     }
     #[cfg(unix)]
     #[tokio::test]
+    async fn resubmission_panel_requires_review_refresh_withdraws_and_logout_drops_late_review() {
+        let mut f = reach_review().await;
+        reach_track(&mut f).await;
+        settle_recovery(&mut f, view::ClaimMessage::Refresh).await;
+        settle_recovery(&mut f, view::ClaimMessage::ConfirmResubmission).await;
+        assert_eq!(submissions(&f), 1);
+        settle_recovery(&mut f, view::ClaimMessage::ReviewResubmission).await;
+        let (snapshot, attempts) = f.p.resubmission().expect("explicit resend review");
+        assert_eq!(snapshot.txid, f.unsigned_txid);
+        assert_eq!(attempts, 1);
+        settle_recovery(&mut f, view::ClaimMessage::Refresh).await;
+        assert!(f.p.resubmission().is_none());
+        settle_recovery(&mut f, view::ClaimMessage::ConfirmResubmission).await;
+        assert_eq!(submissions(&f), 1);
+        settle_recovery(&mut f, view::ClaimMessage::ReviewResubmission).await;
+        settle_recovery(&mut f, view::ClaimMessage::ConfirmResubmission).await;
+        assert_eq!(submissions(&f), 2);
+        assert!(f.p.resubmission().is_none());
+        settle_recovery(&mut f, view::ClaimMessage::ConfirmResubmission).await;
+        assert_eq!(submissions(&f), 2);
+        let task = f.p.resubmit(false);
+        let messages = outputs(task).await;
+        assert!(!messages.is_empty());
+        f.p.set_connect(None);
+        for message in messages {
+            assert!(
+                outputs(f.p.update(Some(f.dyn_daemon.clone()), &f.cache, message))
+                    .await
+                    .is_empty()
+            );
+        }
+        assert!(f.p.resubmission().is_none());
+        settle_recovery(&mut f, view::ClaimMessage::ConfirmResubmission).await;
+        assert_eq!(submissions(&f), 2);
+        drop(f.p);
+        let _ = std::fs::remove_dir_all(f.root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn reconfirmation_panel_requires_review_and_keeps_one_submission() {
         let mut f = reach_review().await;
         reach_track(&mut f).await;

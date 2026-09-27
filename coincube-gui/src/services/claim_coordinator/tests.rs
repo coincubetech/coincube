@@ -238,6 +238,8 @@ impl ObservationSource for Fixture {
                     hash: hash(fault as u8),
                 },
             }
+        } else if (chain == ChainId::Bitcoin && fault == 8) || (chain.is_blake2b() && fault == 9) {
+            TransactionObservation::Unconfirmed { txid }
         } else {
             TransactionObservation::Absent
         };
@@ -284,7 +286,14 @@ impl Services for Fixture {
         let journal: serde_json::Value =
             serde_json::from_slice(&std::fs::read(self.directory.join("intent.json")).unwrap())
                 .unwrap();
-        assert_eq!(journal["phase"], "BroadcastUncertain");
+        assert!(matches!(
+            journal["phase"].as_str(),
+            Some("BroadcastUncertain" | "Tracking")
+        ));
+        assert_eq!(
+            journal["bitcoin_attempts"].as_array().unwrap().len(),
+            self.calls.load(Ordering::SeqCst) + 1
+        );
         assert_eq!(
             journal["signed_txid"],
             tx.transaction().compute_txid().to_string()
@@ -972,4 +981,243 @@ async fn review_view_distinguishes_absence_from_mempool_presence() {
     let mut later = absent;
     later.bitcoin.observed_at += 1;
     assert!(same_view(absent, later));
+}
+
+async fn submitted_harness() -> Harness {
+    let mut h = Harness::new().await;
+    let review = h.coordinator.prepare_review(&context()).await.unwrap();
+    h.coordinator
+        .confirm_and_submit(review, &context())
+        .await
+        .unwrap();
+    h
+}
+
+#[tokio::test]
+async fn resubmission_requires_a_new_explicit_review_and_records_before_transport() {
+    let mut h = submitted_harness().await;
+    h.coordinator.reconcile(&context()).await.unwrap();
+    assert_eq!(h.calls.load(Ordering::SeqCst), 1);
+    let review = h
+        .coordinator
+        .prepare_resubmission(&context())
+        .await
+        .unwrap();
+    assert_eq!(review.previous_attempts(), 1);
+    assert_eq!(
+        review.snapshot().transaction,
+        *h.coordinator.verified.transaction()
+    );
+    assert_eq!(h.calls.load(Ordering::SeqCst), 1);
+    let outcome = h
+        .coordinator
+        .confirm_resubmission(review, &context())
+        .await
+        .unwrap();
+    assert!(matches!(outcome, Outcome::UpstreamAccepted { .. }));
+    assert_eq!(h.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        h.coordinator.controller.bitcoin_submission_attempts().len(),
+        2
+    );
+    h.coordinator.reconcile(&context()).await.unwrap();
+    assert_eq!(h.calls.load(Ordering::SeqCst), 2);
+    let identity = h.coordinator.controller.identity().clone();
+    drop(h.coordinator);
+    let c = Controller::reopen(&h.temp.0, &identity, context()).unwrap();
+    assert_eq!(c.status(), Status::Unchecked);
+    assert_eq!(c.bitcoin_submission_attempts().len(), 2);
+}
+
+#[tokio::test]
+async fn resubmission_refuses_changed_presence_deployment_and_unavailable_reads() {
+    for fault in [1, 2, 3, 6, 7, 8, 9] {
+        let mut h = submitted_harness().await;
+        let review = h
+            .coordinator
+            .prepare_resubmission(&context())
+            .await
+            .unwrap();
+        h.fault.store(fault, Ordering::SeqCst);
+        assert!(h
+            .coordinator
+            .confirm_resubmission(review, &context())
+            .await
+            .is_err());
+        assert_eq!(h.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            h.coordinator.controller.bitcoin_submission_attempts().len(),
+            1
+        );
+    }
+}
+
+#[tokio::test]
+async fn resubmission_tokens_expire_and_cannot_cross_coordinators_or_revisions() {
+    let mut h = submitted_harness().await;
+    let old = h
+        .coordinator
+        .prepare_resubmission(&context())
+        .await
+        .unwrap();
+    let mut fresh = h
+        .coordinator
+        .prepare_resubmission(&context())
+        .await
+        .unwrap();
+    assert!(matches!(
+        h.coordinator.confirm_resubmission(old, &context()).await,
+        Err(Error::InvalidReview)
+    ));
+    fresh.expire_for_test();
+    assert!(matches!(
+        h.coordinator.confirm_resubmission(fresh, &context()).await,
+        Err(Error::ExpiredEvidence)
+    ));
+    let foreign = h
+        .coordinator
+        .prepare_resubmission(&context())
+        .await
+        .unwrap();
+    let mut other = submitted_harness().await;
+    assert!(matches!(
+        other
+            .coordinator
+            .confirm_resubmission(foreign, &context())
+            .await,
+        Err(Error::InvalidReview)
+    ));
+    let revoked = h
+        .coordinator
+        .prepare_resubmission(&context())
+        .await
+        .unwrap();
+    h.coordinator.revoker().revoke();
+    assert!(matches!(
+        h.coordinator
+            .confirm_resubmission(revoked, &context())
+            .await,
+        Err(Error::Revoked)
+    ));
+    assert_eq!(h.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(other.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn resubmission_storage_failure_never_reaches_transport() {
+    let mut h = submitted_harness().await;
+    let review = h
+        .coordinator
+        .prepare_resubmission(&context())
+        .await
+        .unwrap();
+    let moved = h.temp.0.with_extension("moved");
+    std::fs::rename(&h.temp.0, &moved).unwrap();
+    assert!(matches!(
+        h.coordinator.confirm_resubmission(review, &context()).await,
+        Err(Error::Journal(_))
+    ));
+    assert_eq!(h.calls.load(Ordering::SeqCst), 1);
+    std::fs::rename(moved, &h.temp.0).unwrap();
+}
+
+#[tokio::test]
+async fn lost_resubmission_response_stays_uncertain_and_never_retries_on_refresh() {
+    let mut h = submitted_harness().await;
+    let review = h
+        .coordinator
+        .prepare_resubmission(&context())
+        .await
+        .unwrap();
+    h.fault.store(4, Ordering::SeqCst);
+    assert!(matches!(
+        h.coordinator
+            .confirm_resubmission(review, &context())
+            .await
+            .unwrap(),
+        Outcome::Uncertain { .. }
+    ));
+    h.coordinator.reconcile(&context()).await.unwrap();
+    assert_eq!(h.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        h.coordinator.controller.bitcoin_submission_attempts().len(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn resubmission_rechecks_exact_node_policy_and_preserves_old_inclusion() {
+    let mut h = submitted_harness().await;
+    h.fault.store(6, Ordering::SeqCst);
+    h.coordinator.reconcile(&context()).await.unwrap();
+    let inclusion = h.coordinator.controller.last_inclusion();
+    assert!(inclusion.is_some());
+    h.fault.store(0, Ordering::SeqCst);
+    let review = h
+        .coordinator
+        .prepare_resubmission(&context())
+        .await
+        .unwrap();
+    h.coordinator
+        .confirm_resubmission(review, &context())
+        .await
+        .unwrap();
+    assert_eq!(h.coordinator.controller.last_inclusion(), inclusion);
+    assert_eq!(h.coordinator.phase(), Phase::Tracking);
+    let review = h
+        .coordinator
+        .prepare_resubmission(&context())
+        .await
+        .unwrap();
+    reqwest::Client::new()
+        .delete(format!("{}/__httpmock__/mocks", h._server.base_url()))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    let tx = h.coordinator.verified.transaction();
+    let stamp = h.clock.load(Ordering::SeqCst);
+    h._server.mock_async(|when,then| { when.method(POST).path("/api/v1/esplora/bitcoin/mainnet/tx/preflight"); then.status(200).header("cache-control","no-store").json_body(json!({"success":true,"data":{"network":"mainnet","state":"available","result":{"txid":tx.compute_txid(),"wtxid":tx.compute_wtxid(),"tip_hash":hash(1),"observed_at":stamp,"allowed":false,"reject_reason":"bad-txns-inputs-missingorspent"}}})); }).await;
+    assert!(matches!(
+        h.coordinator.confirm_resubmission(review, &context()).await,
+        Err(Error::PolicyRejected(_))
+    ));
+    assert_eq!(h.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        h.coordinator.controller.bitcoin_submission_attempts().len(),
+        2
+    );
+    assert_eq!(h.coordinator.controller.last_inclusion(), inclusion);
+}
+
+#[tokio::test]
+async fn cancelled_resubmission_retains_the_attempt_without_an_automatic_retry() {
+    let mut h = submitted_harness().await;
+    h.reached.notified().await; // Consume the initial submission notification.
+    let review = h
+        .coordinator
+        .prepare_resubmission(&context())
+        .await
+        .unwrap();
+    h.fault.store(5, Ordering::SeqCst);
+    let reached = h.reached.clone();
+    let sender = h.sender.clone();
+    let cancel = async move {
+        reached.notified().await;
+        sender.send(8).unwrap();
+    };
+    let current = context();
+    let (outcome, ()) = tokio::join!(h.coordinator.confirm_resubmission(review, &current), cancel);
+    assert!(matches!(outcome.unwrap(), Outcome::Uncertain { .. }));
+    assert_eq!(h.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        h.coordinator.controller.bitcoin_submission_attempts().len(),
+        2
+    );
+    let identity = h.coordinator.controller.identity().clone();
+    drop(h.coordinator);
+    let c = Controller::reopen(&h.temp.0, &identity, context()).unwrap();
+    assert_eq!(c.bitcoin_submission_attempts().len(), 2);
+    assert_eq!(c.status(), Status::Unchecked);
 }

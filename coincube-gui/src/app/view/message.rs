@@ -2693,6 +2693,8 @@ mod duress_message_debug_tests {
 pub enum ClaimMessage {
     /// Review the original transaction being re-mined after a reorg.
     ReviewReconfirmation,
+    ReviewResubmission,
+    ConfirmResubmission,
     /// Explicitly acknowledge the freshly reviewed replacement inclusion.
     ConfirmReconfirmation,
     /// Run the preconditions again (after a refusal, or to refresh them).

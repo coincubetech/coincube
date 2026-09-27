@@ -1,5 +1,6 @@
 //! Owned Claim coordination. Signing keys and explicit user consent stay with callers.
 pub mod fork;
+mod recovery;
 mod reorg;
 use super::{
     claim_observation::{
@@ -23,6 +24,7 @@ use coincube_core::{
     },
 };
 use coincubed::poison_broadcast::{SubmissionGate, SubmissionOutcome, SubmissionRevoker};
+pub use recovery::ResubmissionReview;
 pub use reorg::ReconfirmationReview;
 use std::{
     path::Path,
@@ -656,6 +658,15 @@ impl Coordinator {
             self.policy.observations,
             self.services.source().now(),
         )?;
+        self.submit_recorded(context, refreshed).await
+    }
+    // Both initial submission and an explicitly reviewed resend arrive here only
+    // after their durable attempt record has been written.
+    async fn submit_recorded(
+        &mut self,
+        context: &Context,
+        refreshed: ReviewSnapshot,
+    ) -> Result<Outcome, Error> {
         let uncertain = Outcome::Uncertain {
             txid: refreshed.txid,
             wtxid: refreshed.wtxid,

@@ -866,6 +866,28 @@ fn fork_plan_requires_fresh_depth_and_survives_restart_without_authority() {
         c.record_fork_broadcast_intent(&context(), &signed, policy(), 10000),
         Err(Error::Conflict)
     ));
+    let history = c.intent.inclusion_history.clone();
+    let absent = real_observation(&c, 0);
+    let ticket = c.begin_check(&context()).unwrap();
+    c.record_resubmission(
+        ticket,
+        &context(),
+        absent,
+        verified.transaction(),
+        policy(),
+        10000,
+    )
+    .unwrap();
+    assert_eq!(c.phase(), Phase::Tracking);
+    assert_eq!(c.recorded_fork_submission(), Some(recorded));
+    assert_eq!(c.recorded_fork_sweep().cloned(), before_sweep);
+    assert_eq!(c.intent.inclusion_history, history);
+    assert_eq!(c.bitcoin_submission_attempts().len(), 2);
+    assert_eq!(c.bitcoin_submission_attempts()[0].wtxid(), None);
+    assert_eq!(
+        c.bitcoin_submission_attempts()[1].wtxid(),
+        Some(verified.transaction().compute_wtxid())
+    );
 }
 
 fn remined() -> CollectedAssessment {

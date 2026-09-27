@@ -96,3 +96,78 @@ impl Controller {
         Ok(())
     }
 }
+
+impl Controller {
+    pub(crate) fn check_resubmission(
+        &self,
+        collected: CollectedAssessment,
+        signed: &Transaction,
+        policy: Policy,
+        now: i64,
+    ) -> Result<(), Error> {
+        use crate::services::claim_observation::TransactionObservation;
+        if !self.construction_verified
+            || collected.generation != self.context.generation
+            || self.intent.phase == Phase::Intent
+            || self.intent.bitcoin_transaction.as_ref() != Some(signed)
+            || self.intent.bitcoin_attempts.len() >= MAX_BITCOIN_ATTEMPTS
+            || collected.observations.bitcoin_transaction != TransactionObservation::Absent
+        {
+            return Err(Error::Unchecked);
+        }
+        let o = collected.observations;
+        if o.bitcoin.location != TransactionLocation::Unconfirmed
+            || o.preflight.bitcoin != o.bitcoin.tip
+            || o.preflight.fork != o.fork.tip
+        {
+            return Err(Error::Unchecked);
+        }
+        let mut plan = self.intent.plan.clone();
+        // Ignore the old inclusion only for this fresh absence assessment. The
+        // persisted inclusion and any fork submission remain unchanged.
+        plan.previous_confirmation = None;
+        if claim::assess(
+            &plan,
+            o.bitcoin,
+            o.fork,
+            o.deployment,
+            policy,
+            now,
+            Some(o.preflight),
+        ) != Assessment::WaitingForConfirmation
+        {
+            return Err(Error::Unchecked);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn record_resubmission(
+        &mut self,
+        ticket: Ticket,
+        current: &Context,
+        collected: CollectedAssessment,
+        signed: &Transaction,
+        policy: Policy,
+        now: i64,
+    ) -> Result<(), Error> {
+        self.ensure_context(current)?;
+        let matches = ticket.controller == self.id
+            && self.pending
+            && ticket.revision == self.revision
+            && ticket.context == self.context
+            && ticket.digest == self.intent.unsigned_digest;
+        self.clear_check();
+        if !matches {
+            return Err(Error::LateObservation);
+        }
+        self.check_resubmission(collected, signed, policy, now)?;
+        let mut next = self.intent.clone();
+        next.bitcoin_attempts.push(BitcoinSubmissionAttempt {
+            wtxid: Some(signed.compute_wtxid()),
+        });
+        validate(&next)?;
+        self.journal.store(&next)?;
+        self.intent = next;
+        Ok(())
+    }
+}
