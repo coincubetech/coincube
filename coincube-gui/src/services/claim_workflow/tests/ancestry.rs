@@ -32,6 +32,19 @@ fn material(
     Getter,
     Vec<CandidateCoin>,
 ) {
+    material_with_branch(change, large, descriptor, false)
+}
+fn material_with_branch(
+    change: u32,
+    large: bool,
+    descriptor: CoincubeDescriptor,
+    selected_change: bool,
+) -> (
+    AncestrySelfTransfer,
+    RetainedPath,
+    Getter,
+    Vec<CandidateCoin>,
+) {
     let secp = secp256k1::Secp256k1::verification_only();
     let mut ancestors = Vec::<Transaction>::new();
     if large {
@@ -70,17 +83,20 @@ fn material(
             input: vec![input],
             output: vec![TxOut {
                 value: Amount::from_sat(100_000),
-                script_pubkey: descriptor
-                    .receive_descriptor()
-                    .derive(deriv_index, &secp)
-                    .script_pubkey(),
+                script_pubkey: (if i == 0 && selected_change {
+                    descriptor.change_descriptor()
+                } else {
+                    descriptor.receive_descriptor()
+                })
+                .derive(deriv_index, &secp)
+                .script_pubkey(),
             }],
         };
         coins.push(CandidateCoin {
             outpoint: OutPoint::new(tx.compute_txid(), 0),
             amount: tx.output[0].value,
             deriv_index,
-            is_change: false,
+            is_change: i == 0 && selected_change,
             must_select: true,
             sequence: None,
             ancestor_info: None,
@@ -373,5 +389,115 @@ fn restore_ancestry_fork_uses_only_shared_inputs_and_rejects_saved_output_tamper
         assert!(!c.construction_verified);
         assert_eq!(c.status(), Status::Unchecked);
         assert_eq!(fs::read(&file).unwrap(), before);
+    }
+}
+
+#[test]
+fn selected_input_hint_restores_owned_metadata_without_fork_transaction_lookup() {
+    for is_change in [false, true] {
+        let descriptor = CoincubeDescriptor::from_str(WSH_DESC).unwrap();
+        let (built, path, mut getter, mut coins) =
+            material_with_branch(10, false, descriptor.clone(), is_change);
+        let temp = Temp::new();
+        let c = create(&temp, &built, &path);
+        let identity = c.identity().clone();
+        drop(c);
+        let file = temp.0.join("intent.json");
+        let before = fs::read(&file).unwrap();
+        let mut c = Controller::reopen(&temp.0, &identity, context()).unwrap();
+        // The fork-side material has only the shared inputs. The excluded
+        // transaction must come from the reverified retained path instead.
+        let expected = coins.remove(0);
+        getter.0.remove(&expected.outpoint.txid).unwrap();
+        assert!(getter.get_tx(&expected.outpoint.txid).is_none());
+        let (coin, transaction) = c
+            .recorded_ancestry_input(&context(), &descriptor)
+            .unwrap()
+            .unwrap();
+        assert_eq!(coin, expected);
+        assert_eq!(coin.is_change, is_change);
+        assert_eq!(transaction.compute_txid(), coin.outpoint.txid);
+        coins.push(coin);
+        getter.0.insert(transaction.compute_txid(), transaction);
+        let (restored, signed) = c
+            .restore_ancestry(&context(), &descriptor, &mut getter, &coins)
+            .unwrap();
+        assert_eq!(restored.psbt().unsigned_tx, built.psbt().unsigned_tx);
+        assert_eq!(restored.poison_derivation(), built.poison_derivation());
+        assert!(signed.is_none());
+        // Reordering is allowed, but incomplete, repeated, extra or substituted
+        // owned metadata must never be silently discarded during reconstruction.
+        let mut duplicate = coins.clone();
+        duplicate[0] = duplicate[1];
+        let mut extra = coins.clone();
+        extra.push(coins[0]);
+        let mut substituted = coins.clone();
+        substituted[0].outpoint.vout += 1;
+        for invalid in [coins[..1].to_vec(), duplicate, extra, substituted] {
+            assert!(c
+                .restore_ancestry(&context(), &descriptor, &mut getter, &invalid)
+                .is_err());
+            assert!(!c.construction_verified);
+        }
+        assert_eq!(c.status(), Status::Unchecked);
+        assert_eq!(fs::read(file).unwrap(), before);
+    }
+}
+
+#[test]
+fn selected_input_hint_refuses_tampering_and_does_not_invent_legacy_ownership() {
+    for mode in ["missing", "index", "branch", "hardened", "descriptor"] {
+        let temp = Temp::new();
+        let (built, path) = fixture(10, false);
+        let c = create(&temp, &built, &path);
+        let identity = c.identity().clone();
+        drop(c);
+        let file = temp.0.join("intent.json");
+        let mut stored: serde_json::Value =
+            serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+        match mode {
+            "missing" => {
+                stored["ancestry"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("derivation");
+            }
+            "index" => stored["ancestry"]["derivation"]["index"] = serde_json::json!(1),
+            "branch" => stored["ancestry"]["derivation"]["is_change"] = serde_json::json!(true),
+            "hardened" => stored["ancestry"]["derivation"]["index"] = serde_json::json!(u32::MAX),
+            _ => {}
+        }
+        fs::write(&file, serde_json::to_vec(&stored).unwrap()).unwrap();
+        let before = fs::read(&file).unwrap();
+        let reopened = Controller::reopen(&temp.0, &identity, context());
+        if mode == "hardened" {
+            assert!(reopened.is_err());
+        } else {
+            let mut c = reopened.unwrap();
+            let wrong = CoincubeDescriptor::from_str(
+                &WSH_DESC
+                    .split('#')
+                    .next()
+                    .unwrap()
+                    .replace("older(1000)", "older(1001)"),
+            )
+            .unwrap();
+            let result = c.recorded_ancestry_input(
+                &context(),
+                if mode == "descriptor" {
+                    &wrong
+                } else {
+                    built.descriptor()
+                },
+            );
+            if mode == "missing" {
+                assert!(result.unwrap().is_none());
+            } else {
+                assert!(result.is_err());
+            }
+            assert!(!c.construction_verified);
+            assert_eq!(c.status(), Status::Unchecked);
+        }
+        assert_eq!(fs::read(file).unwrap(), before);
     }
 }

@@ -222,6 +222,7 @@ fn create_self_transfer(
 pub struct AncestrySelfTransfer {
     transfer: PoisonSelfTransfer,
     poison_input: bitcoin::OutPoint,
+    poison_derivation: (ChildNumber, bool),
     claimed_prevouts: Vec<bitcoin::OutPoint>,
 }
 impl AncestrySelfTransfer {
@@ -242,6 +243,11 @@ impl AncestrySelfTransfer {
     }
     pub fn poison_input(&self) -> bitcoin::OutPoint {
         self.poison_input
+    }
+    /// Owned selected-input index and change branch, authenticated by construction.
+    /// Persisted copies are hints: rederive the script before restoring metadata.
+    pub fn poison_derivation(&self) -> (ChildNumber, bool) {
+        self.poison_derivation
     }
     pub fn claimed_prevouts(&self) -> &[bitcoin::OutPoint] {
         &self.claimed_prevouts
@@ -299,9 +305,14 @@ pub fn create_ancestry_self_transfer(
         .map(|input| input.previous_output)
         .filter(|outpoint| *outpoint != poison_input)
         .collect();
+    let selected = coins
+        .iter()
+        .find(|coin| coin.outpoint == poison_input)
+        .ok_or(Error::InvalidRequest("Selected ancestry input is missing"))?;
     Ok(AncestrySelfTransfer {
         transfer,
         poison_input,
+        poison_derivation: (selected.deriv_index, selected.is_change),
         claimed_prevouts,
     })
 }
@@ -786,6 +797,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(built.poison_input(), selected);
+        assert_eq!(
+            built.poison_derivation(),
+            (coins[0].deriv_index, coins[0].is_change)
+        );
         assert_eq!(built.claimed_prevouts(), &[coins[1].outpoint]);
         assert_eq!(built.psbt().unsigned_tx.input.len(), 2);
         assert_eq!(

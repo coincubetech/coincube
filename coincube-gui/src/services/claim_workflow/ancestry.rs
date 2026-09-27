@@ -18,10 +18,23 @@ use std::collections::BTreeSet;
 pub(super) struct StoredAncestry {
     selected: OutPoint,
     raw: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    derivation: Option<StoredDerivation>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredDerivation {
+    index: u32,
+    is_change: bool,
 }
 impl StoredAncestry {
     fn decode(&self) -> Result<RetainedPath, Error> {
-        if self.raw.len() > 2 * MAX_ENCODED_BYTES {
+        if self.raw.len() > 2 * MAX_ENCODED_BYTES
+            || self
+                .derivation
+                .as_ref()
+                .is_some_and(|hint| hint.index >= (1 << 31))
+        {
             return Err(Error::InvalidJournal);
         }
         let raw = hex::decode(&self.raw).map_err(|_| Error::InvalidJournal)?;
@@ -99,6 +112,10 @@ impl Controller {
             Some(StoredAncestry {
                 selected: path.selected(),
                 raw: hex::encode(path.encode()),
+                derivation: Some(StoredDerivation {
+                    index: u32::from(artifact.poison_derivation().0),
+                    is_change: artifact.poison_derivation().1,
+                }),
             }),
         )
     }
@@ -111,6 +128,67 @@ impl Controller {
             .map(StoredAncestry::decode)
             .transpose()
     }
+    /// Restore only the excluded input's owned metadata without a fork lookup.
+    /// The persisted hint is checked against the descriptor and txid-verified
+    /// retained prevout. Missing legacy hints return None. This establishes no
+    /// maturity, unspentness, chain exclusivity, signature or spending authority.
+    pub fn recorded_ancestry_input(
+        &mut self,
+        current: &Context,
+        descriptor: &CoincubeDescriptor,
+    ) -> Result<Option<(CandidateCoin, Transaction)>, Error> {
+        self.ensure_context(current)?;
+        self.clear_check();
+        if sha256::Hash::hash(descriptor.to_string().as_bytes())
+            != self.intent.identity.descriptor_digest
+        {
+            return Err(Error::WrongIdentity);
+        }
+        let Some(stored) = self.intent.ancestry.as_ref() else {
+            return Ok(None);
+        };
+        let path = stored.decode()?;
+        let Some(hint) = stored.derivation.as_ref() else {
+            return Ok(None);
+        };
+        let index =
+            coincube_core::miniscript::bitcoin::bip32::ChildNumber::from_normal_idx(hint.index)
+                .map_err(|_| Error::InvalidJournal)?;
+        let raw = path.links().first().ok_or(Error::InvalidJournal)?;
+        let transaction: Transaction =
+            coincube_core::miniscript::bitcoin::consensus::deserialize(&raw.transaction)
+                .map_err(|_| Error::InvalidJournal)?;
+        if transaction.compute_txid() != stored.selected.txid {
+            return Err(Error::InvalidJournal);
+        }
+        let output = transaction
+            .output
+            .get(stored.selected.vout as usize)
+            .ok_or(Error::InvalidJournal)?;
+        let derived = if hint.is_change {
+            descriptor.change_descriptor()
+        } else {
+            descriptor.receive_descriptor()
+        }
+        .derive(
+            index,
+            &coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::verification_only(),
+        );
+        if derived.script_pubkey() != output.script_pubkey {
+            return Err(Error::InvalidJournal);
+        }
+        let coin = CandidateCoin {
+            outpoint: stored.selected,
+            amount: output.value,
+            deriv_index: index,
+            is_change: hint.is_change,
+            must_select: true,
+            sequence: None,
+            ancestor_info: None,
+        };
+        Ok(Some((coin, transaction)))
+    }
+
     /// Bind a new positive ancestry collection to the saved intent. This clears
     /// prior checks and never makes the controller eligible by itself.
     pub fn validate_ancestry_observation(
@@ -164,12 +242,33 @@ impl Controller {
         let index = coincube_core::miniscript::bitcoin::bip32::ChildNumber::from_normal_idx(index)
             .map_err(|_| Error::InvalidJournal)?;
         let secp = coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::verification_only();
+        // Fork-side reconstruction combines shared wallet metadata with the
+        // excluded input's retained metadata. Bind by outpoint, then preserve
+        // the recorded input order without silently dropping extra/duplicate data.
+        let by_outpoint: std::collections::BTreeMap<_, _> =
+            coins.iter().map(|coin| (coin.outpoint, coin)).collect();
+        if by_outpoint.len() != coins.len() || coins.len() != self.intent.plan.step1.input.len() {
+            return Err(Error::InvalidPlan);
+        }
+        let ordered = self
+            .intent
+            .plan
+            .step1
+            .input
+            .iter()
+            .map(|input| {
+                by_outpoint
+                    .get(&input.previous_output)
+                    .map(|coin| **coin)
+                    .ok_or(Error::InvalidPlan)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let built = reconstruct_ancestry_self_transfer(
             self.intent.plan.bitcoin_chain,
             descriptor,
             &secp,
             tx_getter,
-            coins,
+            &ordered,
             index,
             &dependency,
             &self.intent.plan.step1,
