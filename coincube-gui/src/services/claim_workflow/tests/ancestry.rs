@@ -8,8 +8,30 @@ use coincube_core::{
 };
 use std::{collections::HashMap, str::FromStr};
 
+struct Getter(HashMap<Txid, Transaction>);
+impl TxGetter for Getter {
+    fn get_tx(&mut self, id: &Txid) -> Option<Transaction> {
+        self.0.get(id).cloned()
+    }
+}
 fn fixture(change: u32, large: bool) -> (AncestrySelfTransfer, RetainedPath) {
-    let descriptor = CoincubeDescriptor::from_str(WSH_DESC).unwrap();
+    let (built, path, _, _) = material(
+        change,
+        large,
+        CoincubeDescriptor::from_str(WSH_DESC).unwrap(),
+    );
+    (built, path)
+}
+fn material(
+    change: u32,
+    large: bool,
+    descriptor: CoincubeDescriptor,
+) -> (
+    AncestrySelfTransfer,
+    RetainedPath,
+    Getter,
+    Vec<CandidateCoin>,
+) {
     let secp = secp256k1::Secp256k1::verification_only();
     let mut ancestors = Vec::<Transaction>::new();
     if large {
@@ -77,17 +99,11 @@ fn fixture(change: u32, large: bool) -> (AncestrySelfTransfer, RetainedPath) {
         });
     }
     let path = RetainedPath::new(selected, links).unwrap();
-    struct Getter(HashMap<Txid, Transaction>);
-    impl TxGetter for Getter {
-        fn get_tx(&mut self, id: &Txid) -> Option<Transaction> {
-            self.0.get(id).cloned()
-        }
-    }
     let built = create_ancestry_self_transfer(
         ChainId::Bitcoin,
         &descriptor,
         &secp,
-        &mut Getter(txs),
+        &mut Getter(txs.clone()),
         &coins,
         ChildNumber::from_normal_idx(change).unwrap(),
         5,
@@ -95,7 +111,7 @@ fn fixture(change: u32, large: bool) -> (AncestrySelfTransfer, RetainedPath) {
         &path.reverify().unwrap(),
     )
     .unwrap();
-    (built, path)
+    (built, path, Getter(txs), coins)
 }
 fn create(temp: &Temp, built: &AncestrySelfTransfer, path: &RetainedPath) -> Controller {
     Controller::create_ancestry(
@@ -202,4 +218,70 @@ fn larger_ancestry_allowance_does_not_relax_legacy_journal_limit() {
         Err(Error::InvalidJournal)
     ));
     assert_eq!(fs::read(file).unwrap(), bytes);
+}
+
+#[test]
+fn restore_ancestry_rebuilds_intent_and_authenticates_recorded_witness_without_writes() {
+    use coincube_core::claim_finalize::finalize_ancestry_transfer;
+    let (owned, _) = real_artifact(ChainId::Bitcoin, true, 10);
+    let (built, path, mut getter, coins) = material(10, false, owned.descriptor().clone());
+    let curve = secp256k1::Secp256k1::new();
+    let mut signed = built.psbt().clone();
+    for byte in [40, 41] {
+        let signer = MasterSigner::from_mnemonic(
+            Network::Bitcoin,
+            Mnemonic::from_entropy(&[byte; 16]).unwrap(),
+        )
+        .unwrap();
+        signed = signer.sign_psbt(signed, &curve).unwrap();
+    }
+    let verified = finalize_ancestry_transfer(&built, &signed, &curve).unwrap();
+    for mode in 0..3 {
+        let temp = Temp::new();
+        let c = create(&temp, &built, &path);
+        let identity = c.identity().clone();
+        let mut intent = c.intent.clone();
+        drop(c);
+        if mode > 0 {
+            intent.phase = Phase::BroadcastUncertain;
+            intent.signed_txid = Some(verified.transaction().compute_txid());
+            let mut transaction = verified.transaction().clone();
+            if mode == 2 {
+                // Still structurally nonempty and identical unsigned txid, but
+                // not a valid script satisfaction. Journal parsing isn't proof.
+                transaction.input[0].witness = Witness::from_slice(&[vec![1; 64]]);
+            }
+            intent.bitcoin_attempts = vec![BitcoinSubmissionAttempt {
+                wtxid: Some(transaction.compute_wtxid()),
+            }];
+            intent.bitcoin_transaction = Some(transaction);
+            fs::write(
+                temp.0.join("intent.json"),
+                serde_json::to_vec(&intent).unwrap(),
+            )
+            .unwrap();
+        }
+        let before = fs::read(temp.0.join("intent.json")).unwrap();
+        let mut c = Controller::reopen(&temp.0, &identity, context()).unwrap();
+        let restored = c.restore_ancestry(&context(), built.descriptor(), &mut getter, &coins);
+        if mode == 2 {
+            assert!(matches!(restored, Err(Error::InvalidJournal)));
+            assert!(!c.construction_verified);
+        } else {
+            let (restored, signature) = restored.unwrap();
+            assert_eq!(restored.psbt(), built.psbt());
+            assert_eq!(
+                signature.as_ref().map(|v| v.transaction()),
+                (mode == 1).then_some(verified.transaction())
+            );
+            assert!(c.construction_verified);
+            // A failed new reconstruction withdraws the successful check.
+            assert!(c
+                .restore_ancestry(&context(), built.descriptor(), &mut getter, &coins[..1])
+                .is_err());
+            assert!(!c.construction_verified);
+        }
+        assert_eq!(c.status(), Status::Unchecked);
+        assert_eq!(fs::read(temp.0.join("intent.json")).unwrap(), before);
+    }
 }

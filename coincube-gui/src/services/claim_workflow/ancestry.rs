@@ -2,8 +2,11 @@
 use super::*;
 use coincube_core::{
     claim_ancestry::retained::{RetainedPath, MAX_ENCODED_BYTES},
-    claim_spend::AncestrySelfTransfer,
+    claim_finalize::{verify_ancestry_transaction, VerifiedAncestryTransfer},
+    claim_spend::{reconstruct_ancestry_self_transfer, AncestrySelfTransfer},
+    descriptors::CoincubeDescriptor,
     miniscript::bitcoin::OutPoint,
+    spend::{CandidateCoin, TxGetter},
 };
 use std::collections::BTreeSet;
 
@@ -135,6 +138,52 @@ impl Controller {
             )
             .map_err(|_| Error::Unchecked)
     }
+    /// Rebuild a reopened intent from current owned metadata and authenticate
+    /// any recorded witness. No address is reserved, journal rewritten, or fresh
+    /// chain eligibility restored. Callers must requalify the ancestry and check
+    /// maturity/spendability before signing or resuming a submission workflow.
+    pub fn restore_ancestry(
+        &mut self,
+        current: &Context,
+        descriptor: &CoincubeDescriptor,
+        tx_getter: &mut impl TxGetter,
+        coins: &[CandidateCoin],
+    ) -> Result<(AncestrySelfTransfer, Option<VerifiedAncestryTransfer>), Error> {
+        self.ensure_context(current)?;
+        self.clear_check();
+        self.construction_verified = false;
+        let path = self.recorded_ancestry()?.ok_or(Error::WrongIdentity)?;
+        let dependency = path.reverify().map_err(|_| Error::InvalidJournal)?;
+        let index = self
+            .intent
+            .bitcoin_change_index
+            .ok_or(Error::InvalidJournal)?;
+        let index = coincube_core::miniscript::bitcoin::bip32::ChildNumber::from_normal_idx(index)
+            .map_err(|_| Error::InvalidJournal)?;
+        let secp = coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::verification_only();
+        let built = reconstruct_ancestry_self_transfer(
+            self.intent.plan.bitcoin_chain,
+            descriptor,
+            &secp,
+            tx_getter,
+            coins,
+            index,
+            &dependency,
+            &self.intent.plan.step1,
+        )
+        .map_err(|_| Error::InvalidPlan)?;
+        let signed = self
+            .intent
+            .bitcoin_transaction
+            .as_ref()
+            .map(|tx| {
+                verify_ancestry_transaction(&built, tx, &secp).map_err(|_| Error::InvalidJournal)
+            })
+            .transpose()?;
+        self.revalidate_ancestry_construction(current, &built)?;
+        Ok((built, signed))
+    }
+
     pub fn revalidate_ancestry_construction(
         &mut self,
         current: &Context,
