@@ -100,8 +100,10 @@ jobs:
       - name: Build headless Claim panel test driver
         env:
           BREEZ_API_KEY: DUMMY_BREEZ_API_KEY
+          # Release compilation requires a default; harness clients inject their local server.
+          COINCUBE_API_URL: https://claim-harness.invalid
         run: |
-          cargo test --release --locked --package coincube-gui --lib --features regtest-harness --no-run --message-format=json > claim-gui-build.json
+          cargo test --release --locked --package coincube-gui --lib --features regtest-harness --no-run --message-format=json-render-diagnostics > claim-gui-build.json
           driver="$(jq -ser '[.[] | select(.reason == "compiler-artifact" and .target.name == "coincube_gui" and .profile.test == true and .executable != null) | .executable] | unique | if length == 1 then .[0] else error("expected one GUI test executable") end' claim-gui-build.json)"
           test -x "$driver"
           echo "CLAIM_GUI_REGTEST_TEST_PATH=$driver" >> "$GITHUB_ENV"
