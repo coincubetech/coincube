@@ -2660,13 +2660,9 @@ fn describe_production(error: claim_coordinator::Error) -> String {
 }
 
 fn prepare_journal_directory(directory: &std::path::Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(directory)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))?;
-    }
-    Ok(())
+    claim_workflow::prepare_directory(directory).map_err(|error| {
+        std::io::Error::other(format!("Private Claim journal unavailable: {error:?}"))
+    })
 }
 
 /// User-facing copy for a coordinator refusal. Never a retry instruction for
