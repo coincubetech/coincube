@@ -166,7 +166,7 @@ async fn ancestry_fork_admission_binds_journal_and_requires_proof_before_signing
             ));
             assert!(matches!(
                 coordinator.checked_sweep(&current).await,
-                Err(Error::Unsupported)
+                Err(Error::InvalidBinding)
             ));
             if mode == 4 {
                 sender.send_replace(8);
@@ -180,3 +180,5 @@ async fn ancestry_fork_admission_binds_journal_and_requires_proof_before_signing
         assert_eq!(std::fs::read(&file).unwrap(), before);
     }
 }
+
+mod http;

@@ -455,6 +455,11 @@ impl Coordinator {
         // Confirmed conflicting spends separate the chains even after RDTS
         // expires. This is historical metadata, never signing authority.
         let plan = self.controller.plan();
+        // Read-only ancestry reconciliation is available, but completion
+        // metadata awaits independent acceptance of the full integration.
+        if plan.poison == coincube_core::claim::Poison::InputAncestry {
+            return Ok(None);
+        }
         let observations = checked.assessment().observations;
         if !completion_bitcoin_confirmed(&plan, observations.bitcoin)
             || observations.fork.chain != plan.fork_chain
@@ -515,29 +520,40 @@ impl Coordinator {
         self.completion_revoker.revoke();
         self.completion_revoker = Revoker::new();
         self.current(context)?;
-        // Completion needs a combined ancestry and sweep-inclusion collection.
-        // The ordinary sweep collector alone must not establish ancestry safety.
-        if self.controller.recorded_ancestry()?.is_some() {
-            return Err(Error::Unsupported);
-        }
         let submission = self
             .controller
             .recorded_fork_submission()
             .ok_or(Error::InvalidBinding)?;
         let ticket = self.controller.begin_check(context)?;
-        let collected = claim_observation::collect_sweep(
-            self.services.source(),
-            &self.controller.plan(),
-            submission.txid(),
-            self.policy.observations,
-            self.policy.collection_budget,
-            CollectionContext {
-                expected_generation: context.generation,
-                generation: self.generation.clone(),
-            },
-        )
-        .await
-        .map_err(Error::Observation)?;
+        let collected = if let Some(path) = self.controller.recorded_ancestry()? {
+            self.services
+                .ancestry_source()
+                .ok_or(Error::Unsupported)?
+                .collect_ancestry_sweep(
+                    &path,
+                    &self.controller.plan(),
+                    submission.txid(),
+                    self.policy.observations,
+                    self.policy.collection_budget,
+                )
+                .await
+                .map_err(Error::Observation)?
+                .sweep()
+        } else {
+            claim_observation::collect_sweep(
+                self.services.source(),
+                &self.controller.plan(),
+                submission.txid(),
+                self.policy.observations,
+                self.policy.collection_budget,
+                CollectionContext {
+                    expected_generation: context.generation,
+                    generation: self.generation.clone(),
+                },
+            )
+            .await
+            .map_err(Error::Observation)?
+        };
         self.current(context)?;
         let status = self
             .controller
@@ -1239,6 +1255,10 @@ impl Coordinator {
         };
         let origin = Instant::now();
         let plan = self.controller.plan();
+        if plan.poison == coincube_core::claim::Poison::InputAncestry {
+            self.current(context)?;
+            return Err(Error::Unsupported);
+        }
         let (status, checked) = self.checked_sweep(context).await?;
         let bitcoin_loss =
             completion_bitcoin_loss(&plan, checked.assessment().observations.bitcoin);
