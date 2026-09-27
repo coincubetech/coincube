@@ -61,7 +61,7 @@ fn artifact(
     change: u32,
 ) -> (PoisonSelfTransfer, VerifiedPoisonTransfer) {
     let secp = secp256k1::Secp256k1::new();
-    let signers: Vec<_> = (40..43)
+    let signers: Vec<_> = (40..44)
         .map(|b| {
             MasterSigner::from_mnemonic(Network::Bitcoin, Mnemonic::from_entropy(&[b; 16]).unwrap())
                 .unwrap()
@@ -79,14 +79,18 @@ fn artifact(
         })
         .collect();
     let primary = if multi {
-        PathInfo::Multi(1, keys[..2].to_vec())
+        PathInfo::Multi(2, keys[..3].to_vec())
     } else {
         PathInfo::Single(keys[0].clone())
     };
     let desc = CoincubeDescriptor::new(
         CoincubePolicy::new_legacy(
             primary,
-            std::iter::once((46, PathInfo::Single(keys[2].clone()))).collect(),
+            std::iter::once((
+                46,
+                PathInfo::Single(keys[if multi { 3 } else { 2 }].clone()),
+            ))
+            .collect(),
         )
         .unwrap(),
     );
@@ -131,6 +135,11 @@ fn artifact(
     )
     .unwrap();
     let signed = signers[0].sign_psbt(built.psbt().clone(), &secp).unwrap();
+    let signed = if multi {
+        signers[1].sign_psbt(signed, &secp).unwrap()
+    } else {
+        signed
+    };
     let final_tx = finalize_poison_transfer(&built, &signed, &verify).unwrap();
     (built, final_tx)
 }
@@ -457,7 +466,7 @@ async fn a_review_from_another_intent_is_not_confirmation() {
     assert_eq!(second.calls.load(Ordering::SeqCst), 0);
 }
 #[tokio::test]
-async fn unsupported_multisig_and_testnet_refuse_before_journal_creation() {
+async fn testnet_refuses_and_multisig_mainnet_is_admitted() {
     for (chain, multi) in [(ChainId::Testnet4, false), (ChainId::Bitcoin, true)] {
         let h = Harness::new().await;
         let (built, verified) = artifact(chain, multi, 12);
@@ -474,8 +483,13 @@ async fn unsupported_multisig_and_testnet_refuse_before_journal_creation() {
             policy(),
             false,
         );
-        assert!(matches!(result, Err(Error::Unsupported)));
-        assert!(!temp.0.join("intent.json").exists());
+        if chain == ChainId::Bitcoin {
+            assert!(result.is_ok());
+            assert!(temp.0.join("intent.json").exists());
+        } else {
+            assert!(matches!(result, Err(Error::Unsupported)));
+            assert!(!temp.0.join("intent.json").exists());
+        }
     }
 }
 

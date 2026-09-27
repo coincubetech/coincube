@@ -68,10 +68,9 @@ fn pre_fork_coins_are_those_confirmed_below_the_fork_height() {
 }
 
 #[test]
-fn vault_shape_refusal_admits_single_key_p2wsh_only() {
+fn vault_shape_refusal_admits_single_and_multi_key_p2wsh() {
     assert_eq!(vault_shape_refusal(&wallet(SINGLE_WSH)), None);
-    let multi = vault_shape_refusal(&wallet(MULTI_WSH)).expect("multisig primary refused");
-    assert!(multi.contains("single-key"), "{}", multi);
+    assert_eq!(vault_shape_refusal(&wallet(MULTI_WSH)), None);
     let taproot = vault_shape_refusal(&wallet(TAPROOT)).expect("taproot refused");
     assert!(taproot.contains("Taproot"), "{}", taproot);
 }
@@ -183,7 +182,7 @@ fn checked_ok(now: i64) -> Checked {
 /// probe can change never offers a retry.
 #[test]
 fn refusals_come_in_actionable_order() {
-    let mut p = panel(MULTI_WSH);
+    let mut p = panel(TAPROOT);
     let target = p.refusal().unwrap();
     assert!(
         target.reason.contains("Create the claim target"),
@@ -194,7 +193,7 @@ fn refusals_come_in_actionable_order() {
 
     p.pre.target = Some("fork-cube".into());
     let shape = p.refusal().unwrap();
-    assert!(shape.reason.contains("single-key"), "{}", shape.reason);
+    assert!(shape.reason.contains("Taproot"), "{}", shape.reason);
     assert!(!shape.retry);
 
     let mut p = panel(SINGLE_WSH);
@@ -504,22 +503,33 @@ mod flow {
         .unwrap()
     }
 
-    /// A single-key P2WSH Vault (primary: the hot key; recovery: another key
+    /// A P2WSH Vault (primary: one key or 2-of-3; recovery: a distinct key
     /// after 46 blocks) and one 100 000-sat coin it received at height 50.
     struct Fixture {
         descriptor: CoincubeDescriptor,
         hot: MasterSigner,
+        second: Option<MasterSigner>,
         previous: Transaction,
         coin: Coin,
     }
 
-    fn fixture() -> Fixture {
+    fn fixture_with_multisig(multi: bool) -> Fixture {
         let secp = secp256k1::Secp256k1::new();
         let hot = signer(40);
         let recovery = signer(42);
+        let second = signer(41);
+        let spare = signer(43);
+        let primary = if multi {
+            PathInfo::Multi(
+                2,
+                vec![key(&hot, &secp), key(&second, &secp), key(&spare, &secp)],
+            )
+        } else {
+            PathInfo::Single(key(&hot, &secp))
+        };
         let descriptor = CoincubeDescriptor::new(
             CoincubePolicy::new_legacy(
-                PathInfo::Single(key(&hot, &secp)),
+                primary,
                 std::iter::once((46, PathInfo::Single(key(&recovery, &secp)))).collect(),
             )
             .unwrap(),
@@ -552,6 +562,7 @@ mod flow {
         Fixture {
             descriptor,
             hot,
+            second: multi.then_some(second),
             previous,
             coin,
         }
@@ -813,7 +824,12 @@ mod flow {
     /// back unpolled, so a test can change the panel's context between its
     /// dispatch and its result, as a sign-out does.
     async fn reach_signed() -> (Flow, Task<Message>) {
-        let f = fixture();
+        reach_signed_with_multisig(false).await
+    }
+
+    async fn reach_signed_with_multisig(multi: bool) -> (Flow, Task<Message>) {
+        let f = fixture_with_multisig(multi);
+        let second = f.second;
         let server = MockServer::start_async().await;
         let now = unix_now();
         let fork_hash = "07".repeat(32);
@@ -994,7 +1010,7 @@ mod flow {
             Message::View(view::Message::Spend(view::SpendTxMessage::Sign)),
         );
         drop(opened);
-        let (unsigned, fingerprint) = match &p.stage {
+        let (unsigned, mut fingerprint) = match &p.stage {
             Stage::Sign { psbt, .. } => {
                 assert!(psbt.modal.is_some(), "the picker is open");
                 (
@@ -1006,6 +1022,56 @@ mod flow {
         };
         drop(view::vault::claim::view(&menu, &cache, &p));
         let signed = wallet.signer.as_ref().unwrap().sign_psbt(unsigned).unwrap();
+        let signed = if let Some(second) = second {
+            if let Stage::Sign {
+                built: Some(built), ..
+            } = &p.stage
+            {
+                assert!(
+                    finalize_poison_transfer(
+                        built,
+                        &signed,
+                        &secp256k1::Secp256k1::verification_only()
+                    )
+                    .is_err(),
+                    "one signature cannot satisfy 2-of-3"
+                );
+            } else {
+                panic!("construction retained before threshold");
+            }
+            let first = p.update(
+                Some(dyn_daemon.clone()),
+                &cache,
+                Message::Signed(fingerprint, Ok(signed)),
+            );
+            for result in outputs(first).await {
+                assert!(outputs(p.update(Some(dyn_daemon.clone()), &cache, result))
+                    .await
+                    .is_empty());
+            }
+            assert!(!journal_directory(&datadir, &wallet)
+                .join("intent.json")
+                .exists());
+            assert!(!daemon.hits().contains(&"submit_verified_poison"));
+            let psbt = match &p.stage {
+                Stage::Sign {
+                    psbt,
+                    built: Some(_),
+                    finalizing: None,
+                    ..
+                } => {
+                    assert!(psbt.modal.is_some(), "picker stays open below threshold");
+                    psbt.tx.psbt.clone()
+                }
+                _ => panic!("one signature must remain at Sign"),
+            };
+            fingerprint = second.fingerprint(&secp256k1::Secp256k1::new());
+            second
+                .sign_psbt(psbt, &secp256k1::Secp256k1::new())
+                .unwrap()
+        } else {
+            signed
+        };
         // The preflight answers for exactly the transaction that will be
         // submitted, so it is registered once the witness is known.
         let final_tx = match &p.stage {
@@ -1116,6 +1182,31 @@ mod flow {
         let _ = outputs(confirm).await;
         assert_eq!(submissions(&f), 0);
         assert!(!journal.join("intent.json").exists());
+        let _ = std::fs::remove_dir_all(&f.root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn two_of_three_signs_through_psbt_state_then_finalizes_and_journals() {
+        let (mut f, ready) = reach_signed_with_multisig(true).await;
+        let mut produced = outputs(ready).await;
+        assert_eq!(produced.len(), 1);
+        assert!(
+            matches!(&produced[0], Message::Claim(ClaimEvent::Ready(_, Ok(_)))),
+            "{:?}",
+            produced
+        );
+        let review =
+            f.p.update(Some(f.dyn_daemon.clone()), &f.cache, produced.remove(0));
+        assert!(journal_directory(&f.datadir, &f.wallet)
+            .join("intent.json")
+            .is_file());
+        for result in outputs(review).await {
+            let _ = f.p.update(Some(f.dyn_daemon.clone()), &f.cache, result);
+        }
+        assert!(matches!(&f.p.stage, Stage::Review { .. }));
+        assert_eq!(submissions(&f), 0);
+        drop(f.p);
         let _ = std::fs::remove_dir_all(&f.root);
     }
 

@@ -274,12 +274,17 @@ impl Revoker {
     }
 }
 
-/// The Vault shapes step one admits: native P2WSH with a single-key primary
-/// path. The one definition — `Coordinator::open` refuses everything else
-/// with it, and the wizard asks it before a build so the user is told rather
-/// than refused after signing. Widening it (#519) is a product decision.
+/// Step one supports native P2WSH primary paths, including k-of-n multisig.
+/// The panel and coordinator share this admission rule; Taproot remains unsupported.
 pub fn admits_descriptor(descriptor: &coincube_core::descriptors::CoincubeDescriptor) -> bool {
-    !descriptor.is_taproot() && matches!(descriptor.policy().primary_path(), PathInfo::Single(_))
+    !descriptor.is_taproot()
+}
+
+fn primary_threshold(descriptor: &coincube_core::descriptors::CoincubeDescriptor) -> usize {
+    match descriptor.policy().primary_path() {
+        PathInfo::Single(_) => 1,
+        PathInfo::Multi(threshold, _) => *threshold,
+    }
 }
 
 static NEXT: AtomicU64 = AtomicU64::new(1);
@@ -391,7 +396,10 @@ impl Coordinator {
                 .input
                 .iter()
                 .any(|i| i.sequence.is_relative_lock_time())
-            || verified.signatures_per_input().iter().any(|n| *n != 1)
+            || verified
+                .signatures_per_input()
+                .iter()
+                .any(|n| *n != primary_threshold(construction.descriptor()))
         {
             return Err(Error::Unsupported);
         }

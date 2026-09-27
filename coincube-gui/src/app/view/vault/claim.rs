@@ -125,7 +125,7 @@ fn preconditions_view<'a>(
             Some(pre.shape.is_none()),
             match &pre.shape {
                 Some(reason) => reason.clone(),
-                None => "Native SegWit, single-key primary path.".to_string(),
+                None => "Native SegWit Vault.".to_string(),
             },
         ))
         .push(check_row(

@@ -1515,8 +1515,7 @@ pub fn vault_shape_refusal(wallet: &Wallet) -> Option<String> {
         "Claim step 1 supports native SegWit (P2WSH) Vaults for now; this Vault is Taproot."
             .to_string()
     } else {
-        "Claim step 1 supports a single-key primary spending path for now; this Vault's primary path needs several signatures."
-            .to_string()
+        "This Vault’s primary spending path is not supported for Claim step 1.".to_string()
     })
 }
 
