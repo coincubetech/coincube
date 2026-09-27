@@ -424,3 +424,212 @@ fn deadline_expiring_behind_backend_lock_prevents_submission_and_reuse() {
     // Exercise one-use terminal expiry without the test-only lock rendezvous.
     assert_eq!(gate.enter(), Err(SubmissionError::Expired));
 }
+
+fn fork_fixture(
+    chain: ChainId,
+) -> (
+    coincube_core::claim_spend::ClaimForkSweep,
+    Vec<MasterSigner>,
+) {
+    let (source, signers) = fixture(chain, false);
+    let mut getter = Getter(HashMap::new());
+    let coins: Vec<_> = source
+        .psbt()
+        .inputs
+        .iter()
+        .enumerate()
+        .map(|(i, input)| {
+            let previous = input.non_witness_utxo.clone().unwrap();
+            getter.0.insert(previous.compute_txid(), previous);
+            CandidateCoin {
+                outpoint: source.psbt().unsigned_tx.input[i].previous_output,
+                amount: input.witness_utxo.as_ref().unwrap().value,
+                deriv_index: ChildNumber::from_normal_idx(7 + i as u32).unwrap(),
+                is_change: false,
+                must_select: false,
+                sequence: None,
+                ancestor_info: None,
+            }
+        })
+        .collect();
+    let fork = if chain == ChainId::Bitcoin {
+        ChainId::BitcoinBlake2b
+    } else {
+        ChainId::BitcoinBlake2bTestnet4
+    };
+    let sweep = coincube_core::claim_spend::create_claim_fork_sweep(
+        &source,
+        fork,
+        &secp256k1::Secp256k1::verification_only(),
+        &mut getter,
+        &coins,
+        ChildNumber::from_normal_idx(20).unwrap(),
+        3,
+        absolute::LockTime::ZERO,
+    )
+    .unwrap();
+    (sweep, signers)
+}
+
+fn verified_fork(chain: ChainId, signer_indices: &[usize]) -> VerifiedClaimForkSweep {
+    let (sweep, signers) = fork_fixture(chain);
+    let secp = secp256k1::Secp256k1::new();
+    let signed = signer_indices.iter().fold(sweep.psbt().clone(), |psbt, i| {
+        signers[*i].sign_psbt(psbt, &secp).unwrap()
+    });
+    coincube_core::claim_finalize::finalize_claim_fork_sweep(
+        &sweep,
+        &coincube_core::psbt_unified::UnifiedPsbt::from_psbt(signed).unwrap(),
+        &secp,
+    )
+    .unwrap()
+}
+
+#[test]
+fn fork_transport_binds_chain_descriptor_and_exact_witness_then_sends_once() {
+    let verified = verified_fork(ChainId::Bitcoin, &[0, 1]);
+    let backend = Arc::new(Mutex::new(DummyBitcoind::new()));
+    let fresh_gate = || {
+        SubmissionGate::for_claim_fork(
+            &verified,
+            std::time::Instant::now() + Duration::from_secs(60),
+        )
+        .0
+    };
+    for chain in [
+        ChainId::Bitcoin,
+        ChainId::Testnet4,
+        ChainId::BitcoinBlake2bTestnet4,
+    ] {
+        assert_eq!(
+            control(chain, verified.descriptor().clone(), backend.clone())
+                .submit_verified_claim_fork(&verified, &fresh_gate()),
+            Err(SubmissionError::UnsupportedChain),
+        );
+    }
+    let other = CoincubeDescriptor::from_str(
+        &verified
+            .descriptor()
+            .to_string()
+            .split('#')
+            .next()
+            .unwrap()
+            .replace("older(46)", "older(47)"),
+    )
+    .unwrap();
+    assert_eq!(
+        control(ChainId::BitcoinBlake2b, other, backend.clone())
+            .submit_verified_claim_fork(&verified, &fresh_gate()),
+        Err(SubmissionError::DescriptorMismatch),
+    );
+    let daemon = control(
+        ChainId::BitcoinBlake2b,
+        verified.descriptor().clone(),
+        backend.clone(),
+    );
+    let other_witness = verified_fork(ChainId::Bitcoin, &[1, 2]);
+    assert_eq!(
+        verified.transaction().compute_txid(),
+        other_witness.transaction().compute_txid()
+    );
+    assert_ne!(
+        verified.transaction().compute_wtxid(),
+        other_witness.transaction().compute_wtxid()
+    );
+    let gate = fresh_gate();
+    assert_eq!(
+        daemon.submit_verified_claim_fork(&other_witness, &gate),
+        Err(SubmissionError::GateMismatch)
+    );
+    assert_eq!(gate.state(), SubmissionState::Pending);
+    assert!(backend
+        .lock()
+        .unwrap()
+        .broadcasted
+        .lock()
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        daemon.submit_verified_claim_fork(&verified, &gate),
+        Ok(SubmissionOutcome::UpstreamAccepted {
+            txid: verified.transaction().compute_txid(),
+            wtxid: verified.transaction().compute_wtxid(),
+        })
+    );
+    assert_eq!(
+        daemon.submit_verified_claim_fork(&verified, &gate),
+        Err(SubmissionError::AlreadyStarted)
+    );
+    let backend = backend.lock().unwrap();
+    let sent = backend.broadcasted.lock().unwrap();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(
+        bitcoin::consensus::serialize(&sent[0]),
+        bitcoin::consensus::serialize(verified.transaction())
+    );
+}
+
+#[test]
+fn fork_transport_revocation_expiry_testnet_refusal_and_uncertain_response() {
+    let verified = verified_fork(ChainId::Bitcoin, &[0, 1]);
+    let backend = Arc::new(Mutex::new(DummyBitcoind::new()));
+    let daemon = control(
+        ChainId::BitcoinBlake2b,
+        verified.descriptor().clone(),
+        backend.clone(),
+    );
+    let (gate, revoker) = SubmissionGate::for_claim_fork(
+        &verified,
+        std::time::Instant::now() + Duration::from_secs(60),
+    );
+    assert_eq!(revoker.revoke(), SubmissionState::Revoked);
+    assert_eq!(
+        daemon.submit_verified_claim_fork(&verified, &gate),
+        Err(SubmissionError::Revoked)
+    );
+    let (gate, _) = SubmissionGate::for_claim_fork(&verified, std::time::Instant::now());
+    assert_eq!(
+        daemon.submit_verified_claim_fork(&verified, &gate),
+        Err(SubmissionError::Expired)
+    );
+    let testnet = verified_fork(ChainId::Testnet4, &[0, 1]);
+    let (gate, _) = SubmissionGate::for_claim_fork(
+        &testnet,
+        std::time::Instant::now() + Duration::from_secs(60),
+    );
+    assert_eq!(
+        control(
+            ChainId::BitcoinBlake2bTestnet4,
+            testnet.descriptor().clone(),
+            backend.clone()
+        )
+        .submit_verified_claim_fork(&testnet, &gate),
+        Err(SubmissionError::UnsupportedChain),
+    );
+    assert!(backend
+        .lock()
+        .unwrap()
+        .broadcasted
+        .lock()
+        .unwrap()
+        .is_empty());
+    backend.lock().unwrap().broadcast_error =
+        Some("response lost after possible submission".into());
+    let (gate, _) = SubmissionGate::for_claim_fork(
+        &verified,
+        std::time::Instant::now() + Duration::from_secs(60),
+    );
+    assert_eq!(
+        daemon.submit_verified_claim_fork(&verified, &gate),
+        Err(SubmissionError::Uncertain {
+            txid: verified.transaction().compute_txid(),
+            wtxid: verified.transaction().compute_wtxid(),
+        })
+    );
+    assert_eq!(gate.state(), SubmissionState::Started);
+    assert_eq!(
+        daemon.submit_verified_claim_fork(&verified, &gate),
+        Err(SubmissionError::AlreadyStarted)
+    );
+    assert_eq!(backend.lock().unwrap().broadcasted.lock().unwrap().len(), 1);
+}

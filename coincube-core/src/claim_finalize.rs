@@ -172,6 +172,7 @@ pub struct VerifiedClaimForkSweep {
     finalized: crate::unified_finalize::FinalizedSpend,
     chain: ChainId,
     bitcoin_step1: Txid,
+    descriptor: CoincubeDescriptor,
     fee: Amount,
 }
 impl VerifiedClaimForkSweep {
@@ -186,6 +187,9 @@ impl VerifiedClaimForkSweep {
     }
     pub fn bitcoin_step1(&self) -> Txid {
         self.bitcoin_step1
+    }
+    pub fn descriptor(&self) -> &CoincubeDescriptor {
+        &self.descriptor
     }
     pub fn fee(&self) -> Amount {
         self.fee
@@ -251,6 +255,7 @@ pub fn finalize_claim_fork_sweep<C: secp256k1::Verification>(
         finalized,
         chain: construction.chain(),
         bitcoin_step1: construction.bitcoin_step1(),
+        descriptor: construction.descriptor().clone(),
         fee,
     })
 }

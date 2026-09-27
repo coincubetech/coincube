@@ -1,7 +1,11 @@
 //! Exact-byte transport only. This module grants no Claim/broadcast authorization.
 use crate::DaemonControl;
-use coincube_core::{chain::ChainId, claim_finalize::VerifiedPoisonTransfer};
-use miniscript::bitcoin::{Txid, Wtxid};
+use coincube_core::{
+    chain::ChainId,
+    claim_finalize::{VerifiedClaimForkSweep, VerifiedPoisonTransfer},
+    descriptors::CoincubeDescriptor,
+};
+use miniscript::bitcoin::{Transaction, Txid, Wtxid};
 use std::sync::{
     atomic::{AtomicU8, Ordering},
     Arc,
@@ -26,19 +30,21 @@ pub enum SubmissionError {
 impl std::fmt::Display for SubmissionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::UnsupportedChain => f.write_str("Poison submission requires Bitcoin mainnet"),
+            Self::UnsupportedChain => {
+                f.write_str("Claim submission chain is unsupported or mismatched")
+            }
             Self::BackendUnavailable => {
-                f.write_str("Bitcoin backend is unavailable before submission")
+                f.write_str("Chain backend is unavailable before submission")
             }
             Self::GateMismatch => f.write_str("Submission gate belongs to another transaction"),
             Self::Expired => f.write_str("Submission evidence expired before transport started"),
             Self::Revoked => f.write_str("Submission was revoked before transport started"),
             Self::AlreadyStarted => f.write_str("Submission gate was already consumed"),
             Self::DescriptorMismatch => {
-                f.write_str("Poison construction belongs to another descriptor")
+                f.write_str("Claim construction belongs to another descriptor")
             }
             Self::Uncertain { .. } => f.write_str(
-                "Poison submission may have been accepted; reconcile the exact transaction",
+                "Claim submission may have been accepted; reconcile the exact transaction",
             ),
         }
     }
@@ -89,13 +95,28 @@ impl SubmissionGate {
         verified: &VerifiedPoisonTransfer,
         not_after: std::time::Instant,
     ) -> (Self, SubmissionRevoker) {
+        Self::for_transaction(verified.chain(), verified.transaction(), not_after)
+    }
+    /// Fork transport gate only. Fresh split evidence, approval and durable
+    /// submission intent remain the coordinator's responsibility.
+    pub fn for_claim_fork(
+        verified: &VerifiedClaimForkSweep,
+        not_after: std::time::Instant,
+    ) -> (Self, SubmissionRevoker) {
+        Self::for_transaction(verified.chain(), verified.transaction(), not_after)
+    }
+    fn for_transaction(
+        chain: ChainId,
+        transaction: &Transaction,
+        not_after: std::time::Instant,
+    ) -> (Self, SubmissionRevoker) {
         let state = Arc::new(AtomicU8::new(0));
         (
             Self {
                 state: state.clone(),
-                chain: verified.chain(),
-                txid: verified.transaction().compute_txid(),
-                wtxid: verified.transaction().compute_wtxid(),
+                chain,
+                txid: transaction.compute_txid(),
+                wtxid: transaction.compute_wtxid(),
                 not_after,
                 #[cfg(test)]
                 before_lock: None,
@@ -159,13 +180,50 @@ impl DaemonControl {
         {
             return Err(SubmissionError::UnsupportedChain);
         }
-        if &self.config.main_descriptor != verified.descriptor() {
+        self.submit_exact_claim_transaction(
+            verified.chain(),
+            verified.descriptor(),
+            verified.transaction(),
+            gate,
+        )
+    }
+
+    /// Dormant embedded fork transport; no RPC exposes this opaque artifact.
+    /// The caller must first verify fresh Bitcoin poison confirmation, fork
+    /// inputs and tips, obtain approval and persist uncertain submission intent.
+    /// Verified signatures alone do not prove replay safety or grant permission.
+    /// Like step one, testnet transport remains disabled pending route testing.
+    pub fn submit_verified_claim_fork(
+        &self,
+        verified: &VerifiedClaimForkSweep,
+        gate: &SubmissionGate,
+    ) -> Result<SubmissionOutcome, SubmissionError> {
+        if self.config.bitcoin_config.chain != ChainId::BitcoinBlake2b
+            || verified.chain() != ChainId::BitcoinBlake2b
+        {
+            return Err(SubmissionError::UnsupportedChain);
+        }
+        self.submit_exact_claim_transaction(
+            verified.chain(),
+            verified.descriptor(),
+            verified.transaction(),
+            gate,
+        )
+    }
+
+    fn submit_exact_claim_transaction(
+        &self,
+        chain: ChainId,
+        descriptor: &CoincubeDescriptor,
+        transaction: &Transaction,
+        gate: &SubmissionGate,
+    ) -> Result<SubmissionOutcome, SubmissionError> {
+        if &self.config.main_descriptor != descriptor {
             return Err(SubmissionError::DescriptorMismatch);
         }
-        let transaction = verified.transaction();
         let txid = transaction.compute_txid();
         let wtxid = transaction.compute_wtxid();
-        if gate.chain != verified.chain() || gate.txid != txid || gate.wtxid != wtxid {
+        if gate.chain != chain || gate.txid != txid || gate.wtxid != wtxid {
             return Err(SubmissionError::GateMismatch);
         }
         #[cfg(test)]
