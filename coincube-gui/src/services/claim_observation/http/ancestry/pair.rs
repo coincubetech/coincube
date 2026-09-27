@@ -324,7 +324,7 @@ mod tests {
                 max_observation_age_seconds: if case == "policy" { 0 } else { 60 },
                 expiry_margin_seconds: 600,
             };
-            fresh_mock(&server, &format!("/api/v1/esplora/bitcoin/mainnet/tx/{}", bitcoin.compute_txid()),
+            let root_status = fresh_mock(&server, &format!("/api/v1/esplora/bitcoin/mainnet/tx/{}", bitcoin.compute_txid()),
                 json!({"txid":bitcoin.compute_txid(),"status":{"confirmed":true,"block_height":root_height,"block_hash":bitcoin_block}}).to_string());
             let collect = source.coinbase_pair(&dependency, root_height, policy);
             let result = if matches!(case, "anchor-change" | "bitcoin-reorg" | "revoked") {
@@ -425,6 +425,22 @@ mod tests {
                             bitcoin.compute_txid()
                         );
                         assert_eq!(restored.links()[0].parent_input, Some(1));
+                        let renewed = source.requalify_ancestry(&restored, policy).await.unwrap();
+                        assert_eq!(renewed.pair().bitcoin().txid, bitcoin.compute_txid());
+                        assert_eq!(renewed.generation(), 4);
+                        root_status.delete_async().await;
+                        server.mock(|when, then| {
+                            when.method(GET).path(format!(
+                                "/api/v1/esplora/bitcoin/mainnet/tx/{}",
+                                bitcoin.compute_txid()
+                            ));
+                            then.status(404)
+                                .header("x-cache", "BYPASS")
+                                .header("cache-control", "no-store")
+                                .header("x-coincube-observation", "fresh");
+                        });
+                        assert!(matches!(source.requalify_ancestry(&restored, policy).await,
+                            Err(crate::services::claim_observation::http::DiscoveryError::Observation(FailureKind::Changed))));
                         assert_eq!(discovered.generation(), 4);
                         assert!(discovered.observed_at() <= source.now());
                         let links: Vec<_> = discovered

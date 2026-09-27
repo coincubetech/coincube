@@ -88,6 +88,65 @@ impl HttpObservationSource {
             ),
         }
     }
+    async fn qualify_dependency(
+        &self,
+        dependency: &claim_ancestry::CoinbaseDependency,
+        policy: Policy,
+    ) -> Result<(CoinbasePair, i64), FailureKind> {
+        let (root, stamp) = super::super::read(
+            self.transaction(ChainId::Bitcoin, dependency.root().txid)
+                .await?,
+            ChainId::Bitcoin,
+            self,
+            policy,
+            Stage::BitcoinInclusion,
+        )
+        .map_err(|error| error.kind)?;
+        let TransactionObservation::Confirmed { block, .. } = root else {
+            return Err(FailureKind::Changed);
+        };
+        let height = u32::try_from(block.height).map_err(|_| FailureKind::Malformed)?;
+        let pair = self.coinbase_pair(dependency, height, policy).await?;
+        if pair.bitcoin().block != block {
+            return Err(FailureKind::Changed);
+        }
+        let oldest = pair.observed_at().min(stamp);
+        if !super::super::fresh(oldest, self.now(), policy.max_observation_age_seconds) {
+            return Err(FailureKind::Stale);
+        }
+        Ok((pair, oldest))
+    }
+    /// Reverify a restored raw path and obtain entirely new chain observations.
+    /// Decode the record against the intent's selected outpoint first. This does
+    /// not check ownership, maturity or spendability and cannot authorize spending.
+    pub async fn requalify_ancestry(
+        &self,
+        path: &claim_ancestry::retained::RetainedPath,
+        policy: Policy,
+    ) -> Result<DiscoveredAncestry, DiscoveryError> {
+        if policy.max_observation_age_seconds <= 0 || policy.expiry_margin_seconds <= 0 {
+            return Err(DiscoveryError::Observation(FailureKind::InvalidPlan));
+        }
+        let dependency = path.reverify().map_err(DiscoveryError::Structural)?;
+        let snapshot = self.discovery_snapshot();
+        let (pair, observed_at) = tokio::time::timeout(
+            MAX_COLLECTION_TIME,
+            snapshot.qualify_dependency(&dependency, policy),
+        )
+        .await
+        .map_err(|_| DiscoveryError::Observation(FailureKind::Deadline))?
+        .map_err(DiscoveryError::Observation)?;
+        if *snapshot.generation.borrow() != snapshot.expected
+            || snapshot.generation.has_changed().is_err()
+        {
+            return Err(DiscoveryError::Observation(FailureKind::Cancelled));
+        }
+        Ok(DiscoveredAncestry {
+            links: path.links().to_vec(),
+            pair,
+            observed_at,
+        })
+    }
     /// Discover one qualifying mainnet dependency with shared graph, response,
     /// request and 30s time limits. None means no qualifying candidate was found,
     /// never proof of replay safety. Persisted links require re-verification;
@@ -114,48 +173,19 @@ impl HttpObservationSource {
                         search.provide(raw).map_err(DiscoveryError::Structural)?;
                     }
                     Step::Candidate(candidate) => {
-                        let (root, stamp) = super::super::read(
-                            snapshot
-                                .transaction(ChainId::Bitcoin, candidate.dependency.root().txid)
-                                .await
-                                .map_err(observation)?,
-                            ChainId::Bitcoin,
-                            &snapshot,
-                            policy,
-                            Stage::BitcoinInclusion,
-                        )
-                        .map_err(|error| observation(error.kind))?;
-                        let TransactionObservation::Confirmed { block, .. } = root else {
-                            // A coinbase cannot legitimately be a mempool transaction.
-                            // Treat absent/inconsistent provider data as unavailable evidence.
-                            return Err(observation(FailureKind::Changed));
-                        };
-                        let height = u32::try_from(block.height)
-                            .map_err(|_| observation(FailureKind::Malformed))?;
                         match snapshot
-                            .coinbase_pair(&candidate.dependency, height, policy)
+                            .qualify_dependency(&candidate.dependency, policy)
                             .await
                         {
-                            // Only a positively disqualified shared/out-of-range root can be skipped.
+                            // Only positively disqualified roots allow another branch.
                             Err(FailureKind::UnsupportedPoison) => continue,
                             Err(error) => return Err(observation(error)),
-                            Ok(pair) => {
-                                if pair.bitcoin().block != block {
-                                    return Err(observation(FailureKind::Changed));
-                                }
-                                let oldest = pair.observed_at().min(stamp);
-                                if !super::super::fresh(
-                                    oldest,
-                                    snapshot.now(),
-                                    policy.max_observation_age_seconds,
-                                ) {
-                                    return Err(observation(FailureKind::Stale));
-                                }
+                            Ok((pair, observed_at)) => {
                                 return Ok(Some(DiscoveredAncestry {
                                     links: candidate.links,
                                     pair,
-                                    observed_at: oldest,
-                                }));
+                                    observed_at,
+                                }))
                             }
                         }
                     }
@@ -217,6 +247,18 @@ mod tests {
             nested
                 .discover_ancestry(OutPoint::new(txid, 0), policy())
                 .await,
+            Err(DiscoveryError::Observation(FailureKind::CollectionLimit))
+        ));
+        let retained = claim_ancestry::retained::RetainedPath::new(
+            OutPoint::new(txid, 0),
+            vec![OwnedLink {
+                transaction: raw.clone(),
+                parent_input: None,
+            }],
+        )
+        .unwrap();
+        assert!(matches!(
+            nested.requalify_ancestry(&retained, policy()).await,
             Err(DiscoveryError::Observation(FailureKind::CollectionLimit))
         ));
         mock.assert_hits(1);
