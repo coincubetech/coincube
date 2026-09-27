@@ -9429,7 +9429,7 @@ mod duress_chain_identity_tests {
 
 /// Claim step 1 entry and routing (Lane B1.5), at the App level.
 #[cfg(test)]
-mod claim_step1_tests {
+pub(crate) mod claim_step1_tests {
     use super::*;
     use crate::app::state::vault::claim::{Checked, ClaimEvent, CoinSet, ForkWindow};
     use coincube_core::miniscript::bitcoin::hashes::Hash;
@@ -9500,14 +9500,13 @@ mod claim_step1_tests {
         .unwrap();
     }
 
-    #[test]
-    fn returning_claim_reuses_only_the_matching_open_bitcoin_wallet() {
+    /// Caller holds session::test_guard through routing and teardown.
+    pub(crate) fn returning_claim_fixture(
+        wrong_wallet: bool,
+    ) -> (App, claim_intent::ForkHandoff, std::path::PathBuf) {
         let path = std::env::temp_dir().join(format!("claim-return-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&path).unwrap();
-        let (mut app, wallet) = {
-            let _guard = crate::app::session::test_guard();
-            bitcoin_app(&path)
-        };
+        let (mut app, wallet) = bitcoin_app(&path);
         let identity = settings::VaultIdentity {
             wallet_id: wallet.id(),
             fingerprint: Some("12345678".into()),
@@ -9538,6 +9537,18 @@ mod claim_step1_tests {
             "target".into(),
         )
         .unwrap();
+        if wrong_wallet {
+            let mut different = (*wallet).clone();
+            different.descriptor_checksum = "different".into();
+            app.wallet = Some(Arc::new(different));
+        }
+        (app, pair, path)
+    }
+
+    #[test]
+    fn returning_claim_reuses_only_the_matching_open_bitcoin_wallet() {
+        let _guard = crate::app::session::test_guard();
+        let (mut app, pair, path) = returning_claim_fixture(false);
         assert!(app.resume_returned_bitcoin_claim(&pair).is_ok());
         let wrong_root = claim_intent::ForkHandoff::new(
             &CoincubeDirectory::new(path.join("other")),
