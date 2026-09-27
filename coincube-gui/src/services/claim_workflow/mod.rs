@@ -70,6 +70,8 @@ struct Intent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     fork_sweep: Option<Transaction>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    fork_change_index: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     fork_submission: Option<RecordedForkSubmission>,
 }
 /// A possible submission, not evidence of acceptance or confirmation. Reading
@@ -138,8 +140,12 @@ fn context_digest(context: &Context) -> sha256::Hash {
 fn validate(intent: &Intent) -> Result<(), Error> {
     let p = &intent.plan;
     if !matches!(
-        (intent.version, intent.fork_sweep.is_some()),
-        (1, false) | (2, true)
+        (
+            intent.version,
+            intent.fork_sweep.is_some(),
+            intent.fork_change_index
+        ),
+        (1, false, None) | (2, true, None) | (3, true, Some(0..=0x7fff_ffff))
     ) || intent.identity.bitcoin_cube.is_empty()
         || intent.identity.fork_cube.is_empty()
         || intent.identity.bitcoin_cube.len() > 256
@@ -291,6 +297,7 @@ impl Controller {
             signed_txid: None,
             phase: Phase::Intent,
             fork_sweep: None,
+            fork_change_index: None,
             fork_submission: None,
         };
         validate(&intent)?;
@@ -494,16 +501,26 @@ impl Controller {
             return Err(Error::Conflict);
         }
         let transaction = &sweep.psbt().unsigned_tx;
+        let change_index = u32::from(sweep.change_index());
         if let Some(recorded) = &self.intent.fork_sweep {
-            return if recorded == transaction {
-                Ok(())
-            } else {
-                Err(Error::Conflict)
-            };
+            if recorded != transaction
+                || self
+                    .intent
+                    .fork_change_index
+                    .is_some_and(|index| index != change_index)
+            {
+                return Err(Error::Conflict);
+            }
+            if self.intent.fork_change_index.is_some() {
+                return Ok(());
+            }
+            // Upgrade a v2 plan only after the same fresh observations and
+            // authenticated construction required for initial admission.
         }
         let mut next = self.intent.clone();
-        next.version = 2;
+        next.version = 3;
         next.fork_sweep = Some(transaction.clone());
+        next.fork_change_index = Some(change_index);
         validate(&next)?;
         self.journal.store(&next)?;
         self.intent = next;
@@ -513,6 +530,18 @@ impl Controller {
     /// checks must reconstruct/revalidate it before use; this returns no authority.
     pub fn recorded_fork_sweep(&self) -> Option<&Transaction> {
         self.intent.fork_sweep.as_ref()
+    }
+
+    /// An untrusted derivation hint for rebuilding the recorded fork output.
+    /// Recovery must derive the script and match the complete transaction; this
+    /// index is not evidence of ownership or permission to reuse an address.
+    /// Older v2 records have no hint and require wallet-based discovery.
+    pub fn recorded_fork_change_index(
+        &self,
+    ) -> Option<coincube_core::miniscript::bitcoin::bip32::ChildNumber> {
+        self.intent.fork_change_index.and_then(|index| {
+            coincube_core::miniscript::bitcoin::bip32::ChildNumber::from_normal_idx(index).ok()
+        })
     }
 
     /// Durably mark a fork submission as uncertain before the coordinator can

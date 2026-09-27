@@ -652,7 +652,33 @@ fn fork_plan_requires_fresh_depth_and_survives_restart_without_authority() {
     c.prepare_fork_sweep(&context(), &sweep, policy(), 10000)
         .unwrap();
     assert_eq!(c.recorded_fork_sweep(), Some(&sweep.psbt().unsigned_tx));
+    assert_eq!(c.recorded_fork_change_index(), Some(20.into()));
+    assert_eq!(c.intent.version, 3);
     assert!(c.fresh.is_none());
+    // Older v2 records remain readable, but acquire a derivation hint only
+    // after authenticated construction and fresh depth checks.
+    c.intent.version = 2;
+    c.intent.fork_change_index = None;
+    validate(&c.intent).unwrap();
+    c.journal.store(&c.intent).unwrap();
+    assert!(c.recorded_fork_change_index().is_none());
+    assert!(matches!(
+        c.prepare_fork_sweep(&context(), &sweep, policy(), 10000),
+        Err(Error::Unchecked)
+    ));
+    let obs = real_observation(&c, 6);
+    refresh(&mut c, obs, 10000);
+    c.prepare_fork_sweep(&context(), &sweep, policy(), 10000)
+        .unwrap();
+    assert_eq!(c.intent.version, 3);
+    let mut bad = c.intent.clone();
+    bad.fork_change_index = None;
+    assert!(matches!(validate(&bad), Err(Error::InvalidPlan)));
+    bad.fork_change_index = Some(0x8000_0000);
+    assert!(matches!(validate(&bad), Err(Error::InvalidPlan)));
+    bad.version = 2;
+    bad.fork_change_index = Some(20);
+    assert!(matches!(validate(&bad), Err(Error::InvalidPlan)));
     let obs = real_observation(&c, 6);
     refresh(&mut c, obs, 10000);
     assert!(matches!(
@@ -662,6 +688,7 @@ fn fork_plan_requires_fresh_depth_and_survives_restart_without_authority() {
     drop(c);
     let mut c = Controller::reopen(&temp.0, &wallet, context()).unwrap();
     assert_eq!(c.recorded_fork_sweep(), Some(&sweep.psbt().unsigned_tx));
+    assert_eq!(c.recorded_fork_change_index(), Some(20.into()));
     assert_eq!(c.status(), Status::Unchecked);
     let obs = real_observation(&c, 6);
     refresh(&mut c, obs, 10000);
