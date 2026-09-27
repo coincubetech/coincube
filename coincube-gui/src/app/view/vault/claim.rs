@@ -75,6 +75,7 @@ pub fn view<'a>(
                 busy,
                 error,
                 panel.can_continue_on_fork(),
+                panel.reconfirmation(),
             ),
         ),
     }
@@ -473,6 +474,7 @@ fn track_view<'a>(
     busy: bool,
     error: Option<&'a str>,
     can_continue: bool,
+    reconfirmation: Option<crate::services::claim_workflow::Reconfirmation>,
 ) -> Element<'a, Message> {
     let (txid, submitted) = match outcome {
         Outcome::Recorded { txid } => (txid, "A submission is recorded on this device. Its transaction has not been recovered and verified yet; it will not be retried.".into()),
@@ -505,8 +507,7 @@ fn track_view<'a>(
                 )
             }
             Assessment::Reorged => {
-                "A reorganisation dropped this transaction from the chain. Read again; if it stays \
-                 out, step 1 must be run again."
+                "A reorganisation changed this transaction’s confirmation. Read again or review its new confirmation before continuing."
                     .to_string()
             }
             Assessment::Step1AlreadyOnFork => {
@@ -558,6 +559,16 @@ fn track_view<'a>(
                     .on_press_maybe((!busy).then_some(Message::Claim(ClaimMessage::Refresh))),
             ),
         )
+        .push_maybe(reconfirmation.map(|inclusion| {
+            Column::new().spacing(10)
+                .push(p1_regular("The same Bitcoin transaction has confirmed in a different block. Acknowledging this keeps its submission history and checks its confirmation depth again."))
+                .push(row("Previous block", p2_regular(format!("{} — {}", inclusion.previous.height, inclusion.previous.hash))))
+                .push(row("New block", p2_regular(format!("{} — {}", inclusion.confirmed.height, inclusion.confirmed.hash))))
+                .push(button::primary(None, "Acknowledge new confirmation").on_press_maybe((!busy).then_some(Message::Claim(ClaimMessage::ConfirmReconfirmation))))
+        }))
+        .push_maybe((status == Some(Status::Observation(Assessment::Reorged)) && reconfirmation.is_none()).then(|| {
+            button::secondary(None, "Review new confirmation").on_press_maybe((!busy).then_some(Message::Claim(ClaimMessage::ReviewReconfirmation)))
+        }))
         .push(
             button::primary(None, "Continue in Bitcoin Blake2b")
                 .on_press_maybe(can_continue.then_some(Message::ContinueForkClaim)),

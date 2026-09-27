@@ -809,4 +809,136 @@ fn fork_plan_requires_fresh_depth_and_survives_restart_without_authority() {
         c.prepare_fork_sweep(&context(), &sweep, policy(), 10000),
         Err(Error::Conflict)
     ));
+    let before_sweep = c.recorded_fork_sweep().cloned();
+    let mut new_inclusion = real_observation(&c, 6);
+    if let TransactionLocation::Confirmed {
+        block,
+        best_chain_hash_at_height,
+        ..
+    } = &mut new_inclusion.observations.bitcoin.location
+    {
+        block.hash = hash(8);
+        *best_chain_hash_at_height = hash(8);
+    }
+    let ticket = c.begin_check(&context()).unwrap();
+    c.acknowledge_reconfirmation(ticket, &context(), new_inclusion, policy(), 10000)
+        .unwrap();
+    assert_eq!(c.recorded_fork_submission(), Some(recorded));
+    assert_eq!(c.recorded_fork_sweep().cloned(), before_sweep);
+    drop(c);
+    let mut c = Controller::reopen(&temp.0, &wallet, context()).unwrap();
+    c.revalidate_construction(&context(), &source).unwrap();
+    assert_eq!(c.recorded_fork_submission(), Some(recorded));
+    assert_eq!(c.recorded_fork_sweep().cloned(), before_sweep);
+    refresh(&mut c, new_inclusion, 10000);
+    assert!(matches!(
+        c.record_fork_broadcast_intent(&context(), &signed, policy(), 10000),
+        Err(Error::Conflict)
+    ));
+}
+
+fn remined() -> CollectedAssessment {
+    let mut o = observation(true);
+    if let TransactionLocation::Confirmed {
+        block,
+        best_chain_hash_at_height,
+        ..
+    } = &mut o.observations.bitcoin.location
+    {
+        block.hash = hash(8);
+        *best_chain_hash_at_height = hash(8);
+    }
+    o
+}
+fn tracked(temp: &Temp) -> Controller {
+    let mut c = controller(temp);
+    refresh(&mut c, observation(false), 10000);
+    c.record_broadcast_intent(&context(), &signed(), policy(), 10000)
+        .unwrap();
+    refresh(&mut c, observation(true), 10000);
+    c
+}
+#[test]
+fn explicit_reconfirmation_preserves_history_and_never_restores_submission() {
+    let temp = Temp::new();
+    let mut c = tracked(&temp);
+    let old = c.last_inclusion().unwrap();
+    let id = c.signed_txid();
+    assert_eq!(
+        refresh(&mut c, remined(), 10000),
+        Status::Observation(Assessment::Reorged)
+    );
+    let ticket = c.begin_check(&context()).unwrap();
+    c.acknowledge_reconfirmation(ticket, &context(), remined(), policy(), 10000)
+        .unwrap();
+    assert_eq!(c.status(), Status::Unchecked);
+    assert!(c.fresh.is_none());
+    assert_eq!(c.signed_txid(), id);
+    assert_eq!(c.phase(), Phase::Tracking);
+    assert_eq!(
+        c.intent.inclusion_history,
+        vec![Reconfirmation {
+            previous: old,
+            confirmed: c.last_inclusion().unwrap()
+        }]
+    );
+    assert!(matches!(
+        c.record_broadcast_intent(&context(), &signed(), policy(), 10000),
+        Err(Error::Unchecked)
+    ));
+    drop(c);
+    let mut c = Controller::reopen(&temp.0, &identity(), context()).unwrap();
+    assert_eq!(c.intent.version, 5);
+    assert_eq!(c.intent.inclusion_history.len(), 1);
+    assert_eq!(c.status(), Status::Unchecked);
+    assert_eq!(
+        refresh(&mut c, remined(), 10000),
+        Status::Observation(Assessment::ObservationsEligibleForPreflight)
+    );
+    assert!(c
+        .record_broadcast_intent(&context(), &signed(), policy(), 10000)
+        .is_err());
+}
+#[test]
+fn reconfirmation_rejects_unconfirmed_stale_wrong_chain_and_changed_context() {
+    let temp = Temp::new();
+    let mut c = tracked(&temp);
+    let original = fs::read(temp.0.join("intent.json")).unwrap();
+    let mut noncanonical = remined();
+    if let TransactionLocation::Confirmed {
+        best_chain_hash_at_height,
+        ..
+    } = &mut noncanonical.observations.bitcoin.location
+    {
+        *best_chain_hash_at_height = hash(9);
+    }
+    let mut wrong_chain = remined();
+    wrong_chain.observations.bitcoin.chain = ChainId::BitcoinBlake2b;
+    let mut wrong_txid = remined();
+    if let TransactionLocation::Confirmed { txid, .. } =
+        &mut wrong_txid.observations.bitcoin.location
+    {
+        *txid = Txid::from_byte_array([99; 32]);
+    }
+    for (o, now) in [
+        (observation(false), 10000),
+        (observation(true), 10000),
+        (remined(), 10061),
+        (noncanonical, 10000),
+        (wrong_chain, 10000),
+        (wrong_txid, 10000),
+    ] {
+        let ticket = c.begin_check(&context()).unwrap();
+        assert!(c
+            .acknowledge_reconfirmation(ticket, &context(), o, policy(), now)
+            .is_err());
+        assert_eq!(fs::read(temp.0.join("intent.json")).unwrap(), original);
+    }
+    let ticket = c.begin_check(&context()).unwrap();
+    let mut other = context();
+    other.generation += 1;
+    assert!(c
+        .acknowledge_reconfirmation(ticket, &other, remined(), policy(), 10000)
+        .is_err());
+    assert_eq!(fs::read(temp.0.join("intent.json")).unwrap(), original);
 }

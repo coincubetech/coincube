@@ -227,16 +227,38 @@ impl ObservationSource for Fixture {
     async fn transaction(
         &self,
         chain: ChainId,
-        _txid: Txid,
+        txid: Txid,
     ) -> Result<FreshRead<TransactionObservation>, FailureKind> {
-        self.read(chain, TransactionObservation::Absent)
+        let fault = self.fault.load(Ordering::SeqCst);
+        let observation = if chain == ChainId::Bitcoin && matches!(fault, 6 | 7) {
+            TransactionObservation::Confirmed {
+                txid,
+                block: BlockRef {
+                    height: 100,
+                    hash: hash(fault as u8),
+                },
+            }
+        } else {
+            TransactionObservation::Absent
+        };
+        self.read(chain, observation)
     }
     async fn hash_at_height(
         &self,
         chain: ChainId,
         _height: u64,
     ) -> Result<FreshRead<BlockHash>, FailureKind> {
-        self.read(chain, hash(if chain.is_blake2b() { 2 } else { 1 }))
+        let fault = self.fault.load(Ordering::SeqCst);
+        self.read(
+            chain,
+            hash(if chain.is_blake2b() {
+                2
+            } else if matches!(fault, 6 | 7) {
+                fault as u8
+            } else {
+                1
+            }),
+        )
     }
 }
 #[async_trait]
@@ -828,4 +850,109 @@ async fn production_refuses_a_non_embedded_backend_at_construction() {
         "an external backend must be refused before anything is journaled"
     );
     let _ = std::fs::remove_dir_all(&root);
+}
+
+async fn reorg_harness() -> Harness {
+    let mut h = Harness::new().await;
+    let context = h.coordinator.context().clone();
+    let review = h.coordinator.prepare_review(&context).await.unwrap();
+    h.coordinator
+        .confirm_and_submit(review, &context)
+        .await
+        .unwrap();
+    h.fault.store(6, Ordering::SeqCst);
+    assert_eq!(
+        h.coordinator.reconcile(&context).await.unwrap(),
+        Status::Observation(Assessment::ObservationsEligibleForPreflight)
+    );
+    h.fault.store(7, Ordering::SeqCst);
+    assert_eq!(
+        h.coordinator.reconcile(&context).await.unwrap(),
+        Status::Observation(Assessment::Reorged)
+    );
+    h
+}
+
+#[tokio::test]
+async fn reconfirmation_requires_explicit_fresh_review_without_a_second_submission() {
+    let mut h = reorg_harness().await;
+    let context = h.coordinator.context().clone();
+    let old = std::fs::read(h.temp.0.join("intent.json")).unwrap();
+    let review = h
+        .coordinator
+        .prepare_reconfirmation(&context)
+        .await
+        .unwrap();
+    assert_eq!(review.inclusion().previous.hash, hash(6));
+    assert_eq!(review.inclusion().confirmed.hash, hash(7));
+    assert_eq!(std::fs::read(h.temp.0.join("intent.json")).unwrap(), old);
+    h.coordinator
+        .confirm_reconfirmation(review, &context)
+        .await
+        .unwrap();
+    assert_eq!(h.coordinator.controller.status(), Status::Unchecked);
+    assert_eq!(h.calls.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        h.coordinator.prepare_review(&context).await,
+        Err(Error::SubmissionAlreadyRecorded)
+    ));
+    assert_eq!(
+        h.coordinator.reconcile(&context).await.unwrap(),
+        Status::Observation(Assessment::ObservationsEligibleForPreflight)
+    );
+}
+#[tokio::test]
+async fn reconfirmation_rejects_superseded_expired_and_revoked_reviews() {
+    let mut h = reorg_harness().await;
+    let context = h.coordinator.context().clone();
+    let old = std::fs::read(h.temp.0.join("intent.json")).unwrap();
+    let first = h
+        .coordinator
+        .prepare_reconfirmation(&context)
+        .await
+        .unwrap();
+    let mut second = h
+        .coordinator
+        .prepare_reconfirmation(&context)
+        .await
+        .unwrap();
+    assert!(matches!(
+        h.coordinator.confirm_reconfirmation(first, &context).await,
+        Err(Error::InvalidReview)
+    ));
+    second.expire_for_test();
+    assert!(matches!(
+        h.coordinator.confirm_reconfirmation(second, &context).await,
+        Err(Error::ExpiredEvidence)
+    ));
+    let review = h
+        .coordinator
+        .prepare_reconfirmation(&context)
+        .await
+        .unwrap();
+    h.coordinator.revoker().revoke();
+    assert!(matches!(
+        h.coordinator.confirm_reconfirmation(review, &context).await,
+        Err(Error::Revoked)
+    ));
+    assert_eq!(std::fs::read(h.temp.0.join("intent.json")).unwrap(), old);
+    assert_eq!(h.calls.load(Ordering::SeqCst), 1);
+}
+#[tokio::test]
+async fn reconfirmation_recollects_and_refuses_changed_inclusion() {
+    let mut h = reorg_harness().await;
+    let context = h.coordinator.context().clone();
+    let old = std::fs::read(h.temp.0.join("intent.json")).unwrap();
+    let review = h
+        .coordinator
+        .prepare_reconfirmation(&context)
+        .await
+        .unwrap();
+    h.fault.store(6, Ordering::SeqCst);
+    assert!(matches!(
+        h.coordinator.confirm_reconfirmation(review, &context).await,
+        Err(Error::ChangedReview)
+    ));
+    assert_eq!(std::fs::read(h.temp.0.join("intent.json")).unwrap(), old);
+    assert_eq!(h.calls.load(Ordering::SeqCst), 1);
 }

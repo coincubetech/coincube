@@ -236,6 +236,7 @@ pub struct ClaimSession {
     coordinator: Option<Coordinator>,
     context: Context,
     review: Option<Review>,
+    reconfirmation: Option<claim_coordinator::ReconfirmationReview>,
     /// Kept for a re-bind: `Coordinator::resume` re-validates the
     /// construction against the journal and re-verifies the signatures.
     built: Box<PoisonSelfTransfer>,
@@ -298,6 +299,7 @@ pub enum ClaimEvent {
     Submitted(u64, Box<ClaimSession>, Result<Outcome, String>),
     /// `reconcile` finished; the number as for `Reviewed`.
     Tracked(u64, Box<ClaimSession>, Result<Status, String>),
+    Reconfirmed(u64, Box<ClaimSession>, Result<(), String>, bool),
 }
 
 #[derive(Debug)]
@@ -521,6 +523,7 @@ impl ClaimStep1Panel {
                 session: Some(session),
                 ..
             } => {
+                session.reconfirmation = None;
                 if let Some(coordinator) = &mut session.coordinator {
                     coordinator.invalidate();
                 }
@@ -1212,6 +1215,78 @@ impl ClaimStep1Panel {
         )
     }
 
+    pub fn reconfirmation(&self) -> Option<claim_workflow::Reconfirmation> {
+        if self.revoked {
+            return None;
+        }
+        match &self.stage {
+            Stage::Track {
+                session: Some(session),
+                busy: false,
+                ..
+            } => session
+                .reconfirmation
+                .as_ref()
+                .map(|review| review.inclusion()),
+            _ => None,
+        }
+    }
+
+    fn reconfirm(&mut self, confirm: bool) -> Task<Message> {
+        if self.revoked
+            || self.connect.is_none()
+            || !self.backend_ready()
+            || !matches!(
+                &self.stage,
+                Stage::Track {
+                    status: Some(Status::Observation(claim::Assessment::Reorged)),
+                    busy: false,
+                    ..
+                }
+            )
+        {
+            return Task::none();
+        }
+        let Some(mut session) = self.take_session() else {
+            return Task::none();
+        };
+        let revocations = self.revocations;
+        Task::perform(
+            async move {
+                let context = session.context.clone();
+                let result = match session.coordinator.as_mut() {
+                    None => Err(SESSION_ENDED.to_string()),
+                    Some(coordinator) if confirm => match session.reconfirmation.take() {
+                        Some(review) => coordinator
+                            .confirm_reconfirmation(review, &context)
+                            .await
+                            .map_err(describe),
+                        None => Err("Review the new confirmation first.".into()),
+                    },
+                    Some(coordinator) => {
+                        session.reconfirmation = None;
+                        match coordinator.prepare_reconfirmation(&context).await {
+                            Ok(review) => {
+                                session.reconfirmation = Some(review);
+                                Ok(())
+                            }
+                            Err(error) => Err(describe(error)),
+                        }
+                    }
+                };
+                (session, result)
+            },
+            move |(session, result)| {
+                Message::Claim(ClaimEvent::Reconfirmed(
+                    revocations,
+                    session,
+                    result,
+                    confirm,
+                ))
+            },
+        )
+    }
+
     fn reconcile(&mut self) -> Task<Message> {
         if !matches!(&self.stage, Stage::Track { .. }) {
             return Task::none();
@@ -1219,6 +1294,7 @@ impl ClaimStep1Panel {
         let Some(mut session) = self.take_session() else {
             return Task::none();
         };
+        session.reconfirmation = None;
         let revocations = self.revocations;
         Task::perform(
             async move {
@@ -1483,6 +1559,7 @@ impl ClaimStep1Panel {
                 let ended = self.ended_copy();
                 if !authorized {
                     session.review = None;
+                    session.reconfirmation = None;
                 }
                 if let Stage::Review {
                     session: slot,
@@ -1560,6 +1637,38 @@ impl ClaimStep1Panel {
                     }
                 }
                 Task::none()
+            }
+            ClaimEvent::Reconfirmed(revocations, mut session, result, confirmed) => {
+                let authorized = self.authorized(session.context.generation, revocations);
+                let success = authorized && confirmed && result.is_ok();
+                let ended = self.ended_copy();
+                if !authorized {
+                    session.reconfirmation = None;
+                }
+                if let Stage::Track {
+                    session: slot,
+                    busy,
+                    status,
+                    error,
+                    ..
+                } = &mut self.stage
+                {
+                    *slot = Some(session);
+                    *busy = false;
+                    if authorized {
+                        *error = result.err();
+                        if success {
+                            *status = Some(Status::Unchecked);
+                        }
+                    } else if error.is_none() {
+                        *error = Some(ended);
+                    }
+                }
+                if success {
+                    self.reconcile()
+                } else {
+                    Task::none()
+                }
             }
             ClaimEvent::Tracked(revocations, session, result) => {
                 // A status read is information whichever context it came
@@ -1653,6 +1762,8 @@ impl State for ClaimStep1Panel {
                         Task::none()
                     }
                     view::ClaimMessage::Confirm => self.confirm(),
+                    view::ClaimMessage::ReviewReconfirmation => self.reconfirm(false),
+                    view::ClaimMessage::ConfirmReconfirmation => self.reconfirm(true),
                     view::ClaimMessage::Refresh if self.restart_pending => match daemon {
                         Some(daemon) => self.recover(Some(daemon)),
                         None => node_unavailable(),
@@ -2161,6 +2272,7 @@ async fn restore_recorded_claim(
             coordinator: Some(coordinator),
             context,
             review: None,
+            reconfirmation: None,
             built,
             signed,
             recovered: Some(transaction),
@@ -2339,6 +2451,7 @@ async fn finalize_and_journal(
             coordinator: Some(coordinator),
             context,
             review: None,
+            reconfirmation: None,
             built,
             signed,
             recovered: None,
@@ -2367,6 +2480,7 @@ fn rebind_session(
         drop(old);
     }
     session.review = None;
+    session.reconfirmation = None;
     let production = Production::new(
         connect.client,
         daemon,

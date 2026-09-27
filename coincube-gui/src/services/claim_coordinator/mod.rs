@@ -1,5 +1,6 @@
 //! Owned Claim coordination. Signing keys and explicit user consent stay with callers.
 pub mod fork;
+mod reorg;
 use super::{
     claim_observation::{
         self, http::HttpObservationSource, CollectionContext, ObservationBundle, ObservationSource,
@@ -22,6 +23,7 @@ use coincube_core::{
     },
 };
 use coincubed::poison_broadcast::{SubmissionGate, SubmissionOutcome, SubmissionRevoker};
+pub use reorg::ReconfirmationReview;
 use std::{
     path::Path,
     sync::{
