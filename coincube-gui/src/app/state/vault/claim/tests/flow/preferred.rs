@@ -165,6 +165,71 @@ async fn automatic_ancestry_build_prefers_owned_input_and_never_falls_back_on_pr
         .lock()
         .unwrap()
         .contains(&selected.outpoint.txid));
+    for route in ["bitcoin/mainnet", "bitcoin-blake2b/mainnet"] {
+        server.mock(|when, then| {
+            when.method(GET).path(format!(
+                "/api/v1/esplora/{route}/tx/{}",
+                built.psbt().unsigned_tx.compute_txid()
+            ));
+            fresh(then.status(404));
+        });
+    }
+    let proof_reads = fork_position.as_ref().unwrap().hits();
+    let check = super::super::super::signing::check(
+        &built,
+        daemon.clone(),
+        wallet.clone(),
+        connect.clone(),
+        1,
+        generation.clone(),
+    )
+    .await;
+    assert!(check.unwrap_err().contains("not available yet"));
+    assert!(
+        fork_position.as_ref().unwrap().hits() > proof_reads,
+        "signing must recollect the proof"
+    );
+    let root_dir = std::env::temp_dir().join(format!("ancestry-signing-{}", uuid::Uuid::new_v4()));
+    let mut panel = ClaimStep1Panel::new(
+        wallet.clone(),
+        CoincubeDirectory::new(root_dir.clone()),
+        "bitcoin-cube".into(),
+        generation.clone(),
+        Some(connect.clone()),
+    );
+    panel.stage = Stage::Plan { built: bounded };
+    let cache = Cache::default();
+    let menu = Menu::Vault(crate::app::menu::VaultSubMenu::Claim);
+    let check_task = panel.request_signing(daemon.clone());
+    assert!(matches!(panel.stage, Stage::CheckingSign(_)));
+    drop(view::vault::claim::view(&menu, &cache, &panel));
+    let signer = panel.update(
+        Some(daemon.clone()),
+        &cache,
+        Message::View(view::Message::Spend(
+            view::SpendTxMessage::SelectMasterSigner,
+        )),
+    );
+    assert!(outputs(signer).await.is_empty());
+    assert!(matches!(panel.stage, Stage::CheckingSign(_)));
+    let mut notices = Vec::new();
+    for message in outputs(check_task).await {
+        notices.extend(outputs(panel.update(Some(daemon.clone()), &cache, message)).await);
+    }
+    assert!(matches!(panel.stage, Stage::Plan { .. }));
+    assert!(notices.iter().any(|m| matches!(m, Message::View(view::Message::ShowError(e)) if e.contains("not available yet"))));
+    let late = panel.request_signing(daemon.clone());
+    panel.cancel();
+    for message in outputs(late).await {
+        assert!(outputs(panel.update(Some(daemon.clone()), &cache, message))
+            .await
+            .is_empty());
+    }
+    assert!(matches!(panel.stage, Stage::Preconditions));
+    assert!(
+        !root_dir.exists(),
+        "checking must not create a journal or wallet directory"
+    );
     let mut immature = selected.clone();
     immature.is_immature = true;
     let changed = Arc::new(FlowDaemon {
@@ -192,6 +257,53 @@ async fn automatic_ancestry_build_prefers_owned_input_and_never_falls_back_on_pr
     .is_err());
     assert!(!changed.hits().contains(&"reserve_change"));
     // A locally recorded broadcast must also win over a lagging daemon UTXO view.
+    let before = fork_position.as_ref().unwrap().hits();
+    assert!(super::super::super::signing::check(
+        &built,
+        changed.clone(),
+        wallet.clone(),
+        connect.clone(),
+        1,
+        generation.clone()
+    )
+    .await
+    .unwrap_err()
+    .contains("not yet mature"));
+    assert_eq!(fork_position.as_ref().unwrap().hits(), before);
+    for derivation in [
+        ChildNumber::from_hardened_idx(0).unwrap(),
+        ChildNumber::from_normal_idx(0).unwrap(),
+    ] {
+        let mut bad_coin = selected.clone();
+        bad_coin.derivation_index = derivation;
+        let bad = Arc::new(FlowDaemon {
+            config: daemon.config.clone(),
+            coin: daemon.coin.clone(),
+            previous: daemon.previous.clone(),
+            submitted: Mutex::new(None),
+            hits: Mutex::new(Vec::new()),
+            queried_txs: Mutex::new(Vec::new()),
+            ancestry_coin: Some(bad_coin),
+            #[cfg(feature = "regtest-harness")]
+            live: None,
+        });
+        let refusal = super::super::super::signing::check(
+            &built,
+            bad,
+            wallet.clone(),
+            connect.clone(),
+            1,
+            generation.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert!(refusal.contains(if derivation.is_hardened() {
+            "derivation is invalid"
+        } else {
+            "metadata changed"
+        }));
+        assert_eq!(fork_position.as_ref().unwrap().hits(), before);
+    }
     let spent_wallet = Arc::new(Wallet::new(wallet.main_descriptor.clone()));
     spent_wallet.record_broadcast(
         built.psbt().unsigned_tx.clone(),

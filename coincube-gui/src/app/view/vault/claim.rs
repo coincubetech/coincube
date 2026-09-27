@@ -48,6 +48,17 @@ pub fn view<'a>(
             dashboard(menu, cache, preconditions_view(cache, panel, pre, refusal))
         }
         StageView::Plan(built) => dashboard(menu, cache, plan_view(cache, panel, built)),
+        StageView::CheckingSign => dashboard(
+            menu,
+            cache,
+            Column::new()
+                .spacing(20)
+                .push(header("Checking the Claim inputs before signing…"))
+                .push(
+                    button::secondary(None, "Cancel")
+                        .on_press(Message::Claim(ClaimMessage::Cancel)),
+                ),
+        ),
         StageView::Sign {
             psbt: state,
             finalizing,

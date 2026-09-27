@@ -24,6 +24,7 @@ pub mod fork_load;
 pub mod fork_panel;
 pub mod pairing;
 mod preferred;
+mod signing;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -287,6 +288,7 @@ pub enum ClaimEvent {
     Checked(u64, Box<Checked>),
     /// The poison self-transfer was (or could not be) built.
     Built(u64, Result<Box<Construction>, String>),
+    SigningChecked(u64, Box<Construction>, Result<Vec<Coin>, String>),
     /// The signed construction was finalised and journaled as an intent —
     /// or refused, in which case the construction comes back so the user can
     /// keep signing. The number names the finalisation attempt it answers.
@@ -325,6 +327,7 @@ enum Stage {
     Plan {
         built: Box<Construction>,
     },
+    CheckingSign(FinalizeAttempt),
     /// In the Vault's signing flow. `built` is `None` only while the
     /// finalise task holds it, and `finalizing` names that task.
     Sign {
@@ -393,6 +396,7 @@ struct FinalizeAttempt {
 pub enum StageView<'a> {
     Preconditions(&'a Preconditions, Option<Refusal>),
     Plan(&'a Construction),
+    CheckingSign,
     Sign {
         psbt: &'a PsbtState,
         finalizing: bool,
@@ -728,6 +732,7 @@ impl ClaimStep1Panel {
         match &self.stage {
             Stage::Preconditions => StageView::Preconditions(&self.pre, self.refusal()),
             Stage::Plan { built } => StageView::Plan(built),
+            Stage::CheckingSign(_) => StageView::CheckingSign,
             Stage::Sign {
                 psbt,
                 finalizing,
@@ -1052,6 +1057,52 @@ impl ClaimStep1Panel {
         )
     }
 
+    fn request_signing(&mut self, daemon: Arc<dyn Daemon + Send + Sync>) -> Task<Message> {
+        let Stage::Plan { built } = &self.stage else {
+            return Task::none();
+        };
+        if built.selected_ancestry_input().is_none() {
+            self.start_signing();
+            return Task::none();
+        }
+        let Some(connect) = self.connect.clone() else {
+            return Task::none();
+        };
+        if !self.backend_ready() {
+            return Task::none();
+        }
+        self.finalize_attempts = self.finalize_attempts.wrapping_add(1);
+        let attempt = FinalizeAttempt {
+            id: self.finalize_attempts,
+            generation: *self.generation.borrow(),
+            revocations: self.revocations,
+        };
+        let Stage::Plan { built } =
+            std::mem::replace(&mut self.stage, Stage::CheckingSign(attempt))
+        else {
+            unreachable!()
+        };
+        let wallet = self.wallet.clone();
+        let generation = self.generation.clone();
+        Task::perform(
+            async move {
+                let result = signing::check(
+                    &built,
+                    daemon,
+                    wallet,
+                    connect,
+                    attempt.generation,
+                    generation,
+                )
+                .await;
+                (built, result)
+            },
+            move |(built, result)| {
+                Message::Claim(ClaimEvent::SigningChecked(attempt.id, built, result))
+            },
+        )
+    }
+
     fn start_signing(&mut self) {
         let Stage::Plan { .. } = &self.stage else {
             return;
@@ -1077,6 +1128,10 @@ impl ClaimStep1Panel {
                     .collect()
             })
             .unwrap_or_default();
+        self.install_signing(built, coins);
+    }
+
+    fn install_signing(&mut self, built: Box<Construction>, coins: Vec<Coin>) {
         let secp = secp256k1::Secp256k1::verification_only();
         let tx = SpendTx::new(
             None,
@@ -1449,7 +1504,7 @@ impl ClaimStep1Panel {
                 finalizing: Some(_),
                 ..
             } => {}
-            Stage::Plan { .. } | Stage::Sign { .. } => {
+            Stage::Plan { .. } | Stage::CheckingSign(_) | Stage::Sign { .. } => {
                 if self.resuming {
                     self.restart_pending = true;
                 }
@@ -1536,6 +1591,35 @@ impl ClaimStep1Panel {
                 self.pre.checking = false;
                 self.pre.checked = Some(*checked);
                 Task::none()
+            }
+            ClaimEvent::SigningChecked(id, built, result) => {
+                let Stage::CheckingSign(attempt) = self.stage else {
+                    return Task::none();
+                };
+                if attempt.id != id {
+                    return Task::none();
+                }
+                let authorized = self.authorized(attempt.generation, attempt.revocations)
+                    && self.backend_ready();
+                self.stage = Stage::Plan { built };
+                if !authorized {
+                    return Task::done(Message::View(view::Message::ShowError(
+                        SESSION_ENDED.into(),
+                    )));
+                }
+                match result {
+                    Ok(coins) => {
+                        // No live ancestry checker currently grants this result.
+                        let Stage::Plan { built } =
+                            std::mem::replace(&mut self.stage, Stage::Preconditions)
+                        else {
+                            unreachable!()
+                        };
+                        self.install_signing(built, coins);
+                        Task::none()
+                    }
+                    Err(error) => Task::done(Message::View(view::Message::ShowError(error))),
+                }
             }
             ClaimEvent::Built(id, result) => {
                 let Some(attempt) = self.building.filter(|attempt| attempt.id == id) else {
@@ -1935,10 +2019,10 @@ impl State for ClaimStep1Panel {
                         Some(daemon) => self.build(daemon),
                         None => node_unavailable(),
                     },
-                    view::ClaimMessage::Sign => {
-                        self.start_signing();
-                        Task::none()
-                    }
+                    view::ClaimMessage::Sign => match daemon {
+                        Some(daemon) => self.request_signing(daemon),
+                        None => node_unavailable(),
+                    },
                     view::ClaimMessage::Confirm => self.confirm(),
                     view::ClaimMessage::ReviewResubmission => self.resubmit(false),
                     view::ClaimMessage::ConfirmResubmission => self.resubmit(true),
@@ -2022,7 +2106,7 @@ impl State for ClaimStep1Panel {
                 self.recover(Some(daemon))
             }
             Stage::Track { .. } => self.reconcile(),
-            Stage::Plan { .. } | Stage::Review { .. } => Task::none(),
+            Stage::Plan { .. } | Stage::CheckingSign(_) | Stage::Review { .. } => Task::none(),
         }
     }
 }
