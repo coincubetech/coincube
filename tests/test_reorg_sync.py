@@ -11,7 +11,7 @@ from test_framework.bitcoind import Bitcoind
 from test_framework.electrs import Electrs
 
 
-@pytest.mark.parametrize("method", ["simple_reorg", "invalidate_remine"])
+@pytest.mark.parametrize("method", ["simple_reorg", "invalidate_remine", "invalidate_block"])
 def test_reorg_waits_before_invalidating_and_propagates_failure(method):
     node = Bitcoind.__new__(Bitcoind)
     events = []

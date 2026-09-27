@@ -171,12 +171,16 @@ class Bitcoind(BitcoinBackend):
         for _ in range(n):
             self.rpc.generateblock(addr, [])
 
-    def invalidate_remine(self, height):
+    def invalidate_block(self, block_hash):
+        """Invalidate only after the indexer has finished fetching the old chain."""
         if self.before_reorg is not None:
             self.before_reorg()
+        self.rpc.invalidateblock(block_hash)
+
+    def invalidate_remine(self, height):
         delta = self.rpc.getblockcount() - height + 1
         h = self.rpc.getblockhash(height)
-        self.rpc.invalidateblock(h)
+        self.invalidate_block(h)
         self.generate_empty_blocks(delta)
 
     def simple_reorg(self, height, shift=0):
@@ -199,8 +203,6 @@ class Bitcoind(BitcoinBackend):
             be pulled forward to h1.
         2. Set {height}=h2 and {shift}= h1-h2
         """
-        if self.before_reorg is not None:
-            self.before_reorg()
         orig_len = self.rpc.getblockcount()
         old_hash = self.rpc.getblockhash(height)
         if height + shift > orig_len:
@@ -208,7 +210,7 @@ class Bitcoind(BitcoinBackend):
         else:
             final_len = 1 + orig_len
 
-        self.rpc.invalidateblock(old_hash)
+        self.invalidate_block(old_hash)
         self.wait_for_log(
             r"InvalidChainFound: invalid block=.*  height={}".format(height)
         )
