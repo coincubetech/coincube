@@ -52,6 +52,13 @@ pub enum Error {
     ExpiredEvidence,
     CompletionPersistence(String),
 }
+fn recovery_check_error(error: claim_workflow::Error, assessment: Assessment) -> Error {
+    match error {
+        claim_workflow::Error::Unchecked => Error::NotReady(assessment),
+        other => Error::Journal(other),
+    }
+}
+
 impl From<claim_workflow::Error> for Error {
     fn from(e: claim_workflow::Error) -> Self {
         Self::Journal(e)
