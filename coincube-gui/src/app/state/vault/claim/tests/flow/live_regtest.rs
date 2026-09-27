@@ -257,6 +257,19 @@ async fn claim_gui_regtest_driver() {
             "confirm_reconfirmation" => Message::View(view::Message::Claim(
                 view::ClaimMessage::ConfirmReconfirmation,
             )),
+            "fork_refuse_early" => {
+                let journal = journal_directory(&datadir, &panel.wallet).join("intent.json");
+                let before = std::fs::read(&journal).unwrap();
+                let error = panel
+                    .take_fork_handoff()
+                    .expect_err("early handoff must refuse");
+                assert_eq!(std::fs::read(journal).unwrap(), before);
+                assert!(fork_panel.is_none());
+                emit(json!({"event":action,"error":error,
+                    "bitcoin_submission_calls":daemon.hits().iter().filter(|h| **h == "submit_verified_poison").count(),
+                    "fork_submission_calls":fork_daemon.hits().iter().filter(|h| **h == "submit_verified_claim_fork").count()}));
+                continue;
+            }
             "fork_open" => {
                 let handoff = panel.take_fork_handoff().unwrap();
                 assert_eq!(handoff.fork_cube(), "fork-cube");

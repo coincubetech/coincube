@@ -20,6 +20,7 @@ from urllib.error import HTTPError
 import pytest
 
 from test_framework.btcb2 import TwoChainRegtest, missing_binaries
+from test_framework.authproxy import JSONRPCException
 
 
 class Child:
@@ -228,10 +229,44 @@ def test_gui_claims_both_chains_and_recovers_remined_bitcoin(tmp_path, record_pr
         actual = node.rpc.getrawtransaction(submitted["txid"], True)
         assert actual["hex"] == submitted["raw"] and actual["hash"] == submitted["wtxid"]
         assert submitted["txid"] in node.rpc.getrawmempool()
-        assert not harness.blake2b.rpc.testmempoolaccept([submitted["raw"]])[0]["allowed"]
+        fork_rejection = harness.blake2b.rpc.testmempoolaccept([submitted["raw"]])[0]
+        assert not fork_rejection["allowed"], fork_rejection
+        assert fork_rejection.get("reject-reason"), fork_rejection
+        record_property("step1_fork_rejection", fork_rejection["reject-reason"])
+        # Claim uses the current Bitcoin height for anti-fee-sniping locktime.
+        # Make that locktime final on the fork so it cannot mask the poison rule.
+        lock_height = actual["locktime"]
+        assert 0 <= lock_height < 500_000_000, actual
+        advance = max(0, lock_height - harness.blake2b.rpc.getblockcount())
+        if advance:
+            harness.blake2b.generate_block(advance)
+            harness.electrs_blake2b.wait_for_tip(harness.blake2b.rpc.getbestblockhash())
+        fork_tip = harness.blake2b.rpc.getbestblockhash()
+        with pytest.raises(JSONRPCException) as invalid_block:
+            harness.blake2b.rpc.generateblock(harness.blake2b.rpc.getnewaddress(), [submitted["raw"]])
+        block_error = invalid_block.value.error
+        assert block_error["code"] == -25, block_error
+        assert block_error["message"].startswith("TestBlockValidity failed: bad-txns-vout-script-toolarge,"), block_error
+        assert submitted["txid"] in block_error["message"], block_error
+        assert harness.blake2b.rpc.getbestblockhash() == fork_tip
+        record_property("step1_fork_consensus_rejection", block_error)
         again = child.send({"command": "confirm"})
         assert again["submission_calls"] == 1, again
-        node.generate_block(6, wait_for_mempool=submitted["txid"])
+        for depth, added in ((1, 1), (5, 4)):
+            node.generate_block(added, wait_for_mempool=submitted["txid"] if depth == 1 else None)
+            harness.electrs_legacy.wait_for_tip(node.rpc.getbestblockhash())
+            shallow = child.send({"command": "refresh"})
+            assert shallow["tracking"] == {
+                "status": f"Some(Observation(WaitingForDepth {{ confirmations: {depth} }}))",
+                "busy": False, "error": None}, shallow
+            assert shallow["submission_calls"] == 1
+            journal = shallow["journal"]
+            refused = child.send({"command": "fork_refuse_early"})
+            assert "six Bitcoin confirmations" in refused["error"], refused
+            assert refused["bitcoin_submission_calls"] == 1 and refused["fork_submission_calls"] == 0
+            unchanged = child.send({"command": "refresh"})
+            assert unchanged["journal"] == journal and unchanged["tracking"] == shallow["tracking"]
+        node.generate_block(1)
         harness.electrs_legacy.wait_for_tip(node.rpc.getbestblockhash())
         tracked = child.send({"command": "refresh"})
         assert tracked["stage"] == "track" and tracked["submission_calls"] == 1
@@ -253,7 +288,10 @@ def test_gui_claims_both_chains_and_recovers_remined_bitcoin(tmp_path, record_pr
         fork_node = harness.blake2b
         fork_actual = fork_node.rpc.getrawtransaction(fork_tx["txid"], True)
         assert fork_actual["hex"] == fork_tx["raw"] and fork_actual["hash"] == fork_tx["wtxid"]
-        assert not node.rpc.testmempoolaccept([fork_tx["raw"]])[0]["allowed"]
+        bitcoin_rejection = node.rpc.testmempoolaccept([fork_tx["raw"]])[0]
+        assert not bitcoin_rejection["allowed"], bitcoin_rejection
+        assert bitcoin_rejection.get("reject-reason"), bitcoin_rejection
+        record_property("step2_bitcoin_rejection", bitcoin_rejection["reject-reason"])
         repeated = child.send({"command": "fork_confirm"})
         assert repeated["submission_calls"] == 1
         fork_node.generate_block(1, wait_for_mempool=fork_tx["txid"])

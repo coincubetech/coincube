@@ -97,7 +97,11 @@ pytest tests/test_btcb2_claim_consensus.py -vvv --junitxml=claim-consensus.xml
 A separate headless GUI test drives the production Claim panel's build, signer
 picker, software signing, review, explicit confirmation and confirmation tracking.
 It sends through the opt-in gated regtest transport and independently checks the
-exact transaction and witness on the real node. Build and select the lib-test
+exact transaction and witness on the real node. It checks one- and five-confirmation
+handoff refusals without journal changes, then proceeds at six. A fork-node
+candidate block containing the exact GUI-signed poison must fail consensus with
+`bad-txns-vout-script-toolarge`; mempool rejection alone is not that proof.
+Build and select the lib-test
 executable (not the GUI application):
 
 ```sh
