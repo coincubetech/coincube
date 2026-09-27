@@ -431,6 +431,137 @@ mod tests {
                         let renewed = source.requalify_ancestry(&restored, policy).await.unwrap();
                         assert_eq!(renewed.pair().bitcoin().txid, bitcoin.compute_txid());
                         assert_eq!(renewed.generation(), 4);
+                        let plan = super::binding_tests::plan(&restored);
+                        let mut step_reads = Vec::new();
+                        for chain in [ChainId::Bitcoin, ChainId::BitcoinBlake2b] {
+                            step_reads.push(server.mock(|when, then| {
+                                when.method(GET).path(format!(
+                                    "/api/v1/esplora/{}/tx/{}",
+                                    HttpObservationSource::prefix(chain).unwrap(),
+                                    plan.step1.compute_txid()
+                                ));
+                                then.status(404)
+                                    .header("x-cache", "BYPASS")
+                                    .header("cache-control", "no-store")
+                                    .header("x-coincube-observation", "fresh");
+                            }));
+                        }
+                        let combined = source
+                            .collect_ancestry(&restored, &plan, policy, MAX_COLLECTION_TIME)
+                            .await
+                            .unwrap();
+                        assert_eq!(
+                            combined.assessment().assessment,
+                            Assessment::InputProofUnsupported
+                        );
+                        assert_eq!(
+                            combined.assessment().observations.bitcoin_transaction,
+                            TransactionObservation::Absent
+                        );
+                        assert_eq!(combined.ancestry().pair().selected(), selected);
+                        assert_eq!(
+                            combined.observed_at(),
+                            combined.assessment().observations.bitcoin.observed_at
+                        );
+                        assert_eq!(
+                            combined.observed_at(),
+                            combined.assessment().observations.fork.observed_at
+                        );
+                        for mock in &step_reads {
+                            mock.assert_hits(2);
+                        }
+                        let before = root_status.hits();
+                        let mut invalid = plan.clone();
+                        invalid.claimed_prevouts.push(selected);
+                        assert!(matches!(
+                            source
+                                .collect_ancestry(&restored, &invalid, policy, MAX_COLLECTION_TIME)
+                                .await,
+                            Err(Failure {
+                                stage: Stage::Plan,
+                                kind: FailureKind::InvalidPlan
+                            })
+                        ));
+                        assert!(matches!(
+                            source
+                                .collect_ancestry(&restored, &plan, policy, Duration::ZERO)
+                                .await,
+                            Err(Failure {
+                                stage: Stage::Plan,
+                                kind: FailureKind::InvalidPlan
+                            })
+                        ));
+                        root_status.assert_hits(before);
+                        // Change only fork activation metadata between the two
+                        // passes, keeping both tips, MTP and RDTS unchanged.
+                        anchor.delete_async().await;
+                        let slow_anchor = server.mock(|when, then| {
+                            when.method(GET)
+                                .path("/api/v1/connect/networks/bitcoin-blake2b/anchor");
+                            then.status(200)
+                                .delay(Duration::from_millis(50))
+                                .json_body(body.clone());
+                        });
+                        let change_anchor = async {
+                            tokio::time::timeout(Duration::from_secs(3), async {
+                                while slow_anchor.hits_async().await < 2 {
+                                    tokio::task::yield_now().await;
+                                }
+                            })
+                            .await
+                            .unwrap();
+                            slow_anchor.delete_async().await;
+                            let mut changed = body.clone();
+                            changed["data"]["anchor"]["observation"]["fork"]["height"] =
+                                json!(FIRST_FORK_HEIGHT + 1);
+                            server.mock(|when, then| {
+                                when.method(GET)
+                                    .path("/api/v1/connect/networks/bitcoin-blake2b/anchor");
+                                then.status(200).json_body(changed);
+                            })
+                        };
+                        let (result, changed_anchor) = tokio::join!(
+                            source.collect_ancestry(&restored, &plan, policy, MAX_COLLECTION_TIME),
+                            change_anchor
+                        );
+                        assert!(matches!(
+                            result,
+                            Err(Failure {
+                                stage: Stage::Preflight,
+                                kind: FailureKind::Changed
+                            })
+                        ));
+                        changed_anchor.assert_hits(2);
+                        changed_anchor.delete_async().await;
+                        server.mock(|when, then| {
+                            when.method(GET)
+                                .path("/api/v1/connect/networks/bitcoin-blake2b/anchor");
+                            then.status(200).json_body(body.clone());
+                        });
+                        // A delayed transaction read happens only after ancestry
+                        // requalification. The one outer budget includes both phases.
+                        step_reads[0].delete_async().await;
+                        let delayed = server.mock(|when, then| {
+                            when.method(GET).path(format!(
+                                "/api/v1/esplora/bitcoin/mainnet/tx/{}",
+                                plan.step1.compute_txid()
+                            ));
+                            then.status(404)
+                                .delay(Duration::from_secs(2))
+                                .header("x-cache", "BYPASS")
+                                .header("cache-control", "no-store")
+                                .header("x-coincube-observation", "fresh");
+                        });
+                        assert!(matches!(
+                            source
+                                .collect_ancestry(&restored, &plan, policy, Duration::from_secs(1))
+                                .await,
+                            Err(Failure {
+                                kind: FailureKind::Deadline,
+                                ..
+                            })
+                        ));
+                        delayed.assert_hits(1);
                         root_status.delete_async().await;
                         server.mock(|when, then| {
                             when.method(GET).path(format!(

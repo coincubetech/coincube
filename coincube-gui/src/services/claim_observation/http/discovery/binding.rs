@@ -65,30 +65,37 @@ impl DiscoveredAncestry {
             return Err(FailureKind::Changed);
         }
         path.reverify().map_err(|_| FailureKind::Malformed)?;
-        let mut inputs: BTreeSet<_> = plan
-            .step1
-            .input
-            .iter()
-            .map(|input| input.previous_output)
-            .collect();
-        let claimed: BTreeSet<_> = plan.claimed_prevouts.iter().copied().collect();
-        if plan.poison != Poison::InputAncestry
-            || inputs.len() != plan.step1.input.len()
-            || claimed.len() != plan.claimed_prevouts.len()
-            || claimed.is_empty()
-            || !inputs.remove(&path.selected())
-            || inputs != claimed
-            || plan.step1.input.iter().any(|input| {
-                input.previous_output.is_null()
-                    || !input.script_sig.is_empty()
-                    || !input.witness.is_empty()
-            })
-            || plan.step1.output.len() != 1
-            || !plan.step1.output[0].script_pubkey.is_p2wsh()
-            || plan.step1.output[0].value == coincube_core::miniscript::bitcoin::Amount::ZERO
-        {
-            return Err(FailureKind::InvalidPlan);
-        }
-        Ok(())
+        validate_partition(path, plan)
     }
+}
+
+pub(super) fn validate_partition(path: &RetainedPath, plan: &ClaimPlan) -> Result<(), FailureKind> {
+    if plan.bitcoin_chain != ChainId::Bitcoin || plan.fork_chain != ChainId::BitcoinBlake2b {
+        return Err(FailureKind::WrongChain);
+    }
+    let mut inputs: BTreeSet<_> = plan
+        .step1
+        .input
+        .iter()
+        .map(|input| input.previous_output)
+        .collect();
+    let claimed: BTreeSet<_> = plan.claimed_prevouts.iter().copied().collect();
+    if plan.poison != Poison::InputAncestry
+        || inputs.len() != plan.step1.input.len()
+        || claimed.len() != plan.claimed_prevouts.len()
+        || claimed.is_empty()
+        || !inputs.remove(&path.selected())
+        || inputs != claimed
+        || plan.step1.input.iter().any(|input| {
+            input.previous_output.is_null()
+                || !input.script_sig.is_empty()
+                || !input.witness.is_empty()
+        })
+        || plan.step1.output.len() != 1
+        || !plan.step1.output[0].script_pubkey.is_p2wsh()
+        || plan.step1.output[0].value == coincube_core::miniscript::bitcoin::Amount::ZERO
+    {
+        return Err(FailureKind::InvalidPlan);
+    }
+    Ok(())
 }

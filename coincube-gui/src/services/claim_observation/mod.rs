@@ -196,7 +196,7 @@ fn read<T>(
     }
     Ok((value.value, value.observed_at))
 }
-fn validate_plan(plan: &ClaimPlan, policy: Policy, budget: Duration) -> Result<(), Failure> {
+fn validate_plan_shape(plan: &ClaimPlan, policy: Policy, budget: Duration) -> Result<(), Failure> {
     if !matches!(
         (plan.bitcoin_chain, plan.fork_chain),
         (ChainId::Bitcoin, ChainId::BitcoinBlake2b)
@@ -219,6 +219,10 @@ fn validate_plan(plan: &ClaimPlan, policy: Policy, budget: Duration) -> Result<(
     {
         return Err(failure(Stage::Plan, FailureKind::InvalidPlan));
     }
+    Ok(())
+}
+fn validate_plan(plan: &ClaimPlan, policy: Policy, budget: Duration) -> Result<(), Failure> {
+    validate_plan_shape(plan, policy, budget)?;
     if plan.poison == Poison::InputAncestry {
         return Err(failure(Stage::Plan, FailureKind::UnsupportedPoison));
     }
@@ -489,6 +493,17 @@ async fn collect_inner(
     policy: Policy,
     generation: u64,
 ) -> Result<CollectedAssessment, Failure> {
+    collect_inner_with_anchor(source, plan, policy, generation)
+        .await
+        .map(|(assessment, _)| assessment)
+}
+
+async fn collect_inner_with_anchor(
+    source: &dyn ObservationSource,
+    plan: &ClaimPlan,
+    policy: Policy,
+    generation: u64,
+) -> Result<(CollectedAssessment, NetworkAnchor), Failure> {
     let btc = plan.bitcoin_chain;
     let fork = plan.fork_chain;
     let txid = plan.step1.compute_txid();
@@ -674,11 +689,14 @@ async fn collect_inner(
         source.now(),
         Some(preflight),
     );
-    Ok(CollectedAssessment {
-        generation,
-        observations,
-        assessment,
-    })
+    Ok((
+        CollectedAssessment {
+            generation,
+            observations,
+            assessment,
+        },
+        last,
+    ))
 }
 
 #[cfg(test)]

@@ -11,34 +11,8 @@ pub(super) fn check(
     source: &HttpObservationSource,
     sender: watch::Sender<u64>,
 ) {
-    let shared = OutPoint::new(Txid::from_str(&"77".repeat(32)).unwrap(), 0);
-    let mut script = vec![0, 32];
-    script.extend([1; 32]);
-    let plan = ClaimPlan {
-        bitcoin_chain: ChainId::Bitcoin,
-        fork_chain: ChainId::BitcoinBlake2b,
-        step1: Transaction {
-            version: transaction::Version::TWO,
-            lock_time: absolute::LockTime::ZERO,
-            input: vec![
-                TxIn {
-                    previous_output: path.selected(),
-                    ..TxIn::default()
-                },
-                TxIn {
-                    previous_output: shared,
-                    ..TxIn::default()
-                },
-            ],
-            output: vec![TxOut {
-                value: Amount::from_sat(1),
-                script_pubkey: ScriptBuf::from_bytes(script),
-            }],
-        },
-        claimed_prevouts: vec![shared],
-        poison: Poison::InputAncestry,
-        previous_confirmation: None,
-    };
+    let plan = plan(path);
+    let shared = plan.claimed_prevouts[0];
     let context = || AncestryContext {
         provider: &source.base,
         generation: 4,
@@ -158,4 +132,35 @@ pub(super) fn check(
         observed.validate_for_plan(path, &plan, context()),
         Err(FailureKind::Cancelled)
     );
+}
+
+pub(super) fn plan(path: &RetainedPath) -> ClaimPlan {
+    let shared = OutPoint::new(Txid::from_str(&"77".repeat(32)).unwrap(), 0);
+    let mut script = vec![0, 32];
+    script.extend([1; 32]);
+    ClaimPlan {
+        bitcoin_chain: ChainId::Bitcoin,
+        fork_chain: ChainId::BitcoinBlake2b,
+        step1: Transaction {
+            version: transaction::Version::TWO,
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![
+                TxIn {
+                    previous_output: path.selected(),
+                    ..TxIn::default()
+                },
+                TxIn {
+                    previous_output: shared,
+                    ..TxIn::default()
+                },
+            ],
+            output: vec![TxOut {
+                value: Amount::from_sat(1),
+                script_pubkey: ScriptBuf::from_bytes(script),
+            }],
+        },
+        claimed_prevouts: vec![shared],
+        poison: Poison::InputAncestry,
+        previous_confirmation: None,
+    }
 }

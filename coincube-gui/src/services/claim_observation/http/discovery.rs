@@ -1,6 +1,7 @@
 //! Bounded network discovery, retaining raw evidence without authorizing a spend.
 use super::*;
 mod binding;
+mod collect;
 pub use binding::AncestryContext;
 use coincube_core::{
     claim_ancestry::{
@@ -9,6 +10,7 @@ use coincube_core::{
     },
     miniscript::bitcoin::OutPoint,
 };
+pub use collect::CollectedAncestry;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
