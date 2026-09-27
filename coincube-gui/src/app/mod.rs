@@ -2480,20 +2480,22 @@ pub(crate) fn claim_target_checksums(
 
 /// The claim target Cube for `descriptor_checksum`, if one exists on this
 /// device: its Cube id, which the claim journal's identity is keyed by.
+/// Ambiguous, empty, or wrong-chain identities refuse selection; presence
+/// still blocks installing a second target.
 /// Same read as [`claim_target_checksums`].
 pub(crate) fn claim_target_cube_id(
     datadir: &CoincubeDirectory,
     descriptor_checksum: &str,
 ) -> Option<String> {
-    claim_targets(datadir).remove(descriptor_checksum)
+    claim_targets(datadir).remove(descriptor_checksum).flatten()
 }
 
-/// Every claim target on this device: descriptor checksum → the Bitcoin
-/// Blake2b Cube that reuses it. The one reader behind
+/// Every claim target on this device: descriptor checksum → the unique valid
+/// Bitcoin Blake2b Cube that reuses it, or `None` for an ambiguous identity. The one reader behind
 /// [`claim_target_checksums`], [`claim_target_exists`] and
 /// [`claim_target_cube_id`], so the three can never disagree about what is
 /// on disk.
-fn claim_targets(datadir: &CoincubeDirectory) -> std::collections::HashMap<String, String> {
+fn claim_targets(datadir: &CoincubeDirectory) -> std::collections::HashMap<String, Option<String>> {
     let fork_dir = datadir.network_directory(crate::chain::ChainId::BitcoinBlake2b);
     // No file, no targets — and no retry. `Settings::from_file` treats
     // `NotFound` as possibly-transient and sleeps between five attempts (at
@@ -2514,14 +2516,27 @@ fn claim_targets(datadir: &CoincubeDirectory) -> std::collections::HashMap<Strin
             // wallet would hide the claim entry (nothing to retry with) while
             // Home shows no Cube (nothing to open), stranding the user between
             // two screens that each think the other has it.
-            s.cubes
-                .iter()
-                .filter_map(|cube| {
-                    cube.vault_wallet_id
-                        .as_ref()
-                        .map(|id| (id.descriptor_checksum.clone(), cube.id.clone()))
-                })
-                .collect()
+            // Presence still blocks another target installation, but ambiguous
+            // descriptor or Cube identities must never select a Claim journal.
+            let mut ids = std::collections::HashMap::new();
+            for cube in &s.cubes {
+                *ids.entry(&cube.id).or_insert(0usize) += 1;
+            }
+            let mut targets = std::collections::HashMap::new();
+            for cube in &s.cubes {
+                let Some(wallet) = &cube.vault_wallet_id else {
+                    continue;
+                };
+                let selected = (cube.network == crate::chain::ChainId::BitcoinBlake2b
+                    && !cube.id.is_empty()
+                    && ids.get(&cube.id) == Some(&1))
+                .then(|| cube.id.clone());
+                targets
+                    .entry(wallet.descriptor_checksum.clone())
+                    .and_modify(|selected| *selected = None)
+                    .or_insert(selected);
+            }
+            targets
         })
         .unwrap_or_default()
 }
@@ -9215,6 +9230,53 @@ mod claim_step1_tests {
             serde_json::to_vec(&with_cube).unwrap(),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn claim_target_selection_refuses_ambiguous_or_invalid_identities() {
+        let path =
+            std::env::temp_dir().join(format!("claim-target-selection-{}", uuid::Uuid::new_v4()));
+        let root = CoincubeDirectory::new(path.clone());
+        let fork = root.network_directory(crate::chain::ChainId::BitcoinBlake2b);
+        std::fs::create_dir_all(fork.path()).unwrap();
+        let mut target = settings::CubeSettings::new_with_raw_id(
+            "target-a".into(),
+            "Target".into(),
+            crate::chain::ChainId::BitcoinBlake2b,
+        );
+        target.vault_wallet_id = Some(settings::WalletId::new("checksum".into(), Some(1)));
+        let check = |cubes: Vec<settings::CubeSettings>, expected: Option<&str>| {
+            std::fs::write(
+                fork.path().join(settings::SETTINGS_FILE_NAME),
+                serde_json::to_vec(&settings::Settings {
+                    cubes,
+                    ..Default::default()
+                })
+                .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(claim_target_cube_id(&root, "checksum").as_deref(), expected);
+            // Do not offer another installation to fix ambiguous existing data.
+            assert!(claim_target_exists(&root, "checksum"));
+            assert!(claim_target_checksums(&root).contains("checksum"));
+        };
+        check(vec![target.clone()], Some("target-a"));
+        let mut other = target.clone();
+        other.id = "target-b".into();
+        check(vec![target.clone(), other.clone()], None);
+        check(vec![other, target.clone()], None);
+        check(vec![target.clone(), target.clone()], None);
+        let mut wrong_chain = target.clone();
+        wrong_chain.network = crate::chain::ChainId::Bitcoin;
+        check(vec![wrong_chain], None);
+        let mut empty = target.clone();
+        empty.id.clear();
+        check(vec![empty], None);
+        let mut duplicate_id = target.clone();
+        duplicate_id.vault_wallet_id = Some(settings::WalletId::new("different".into(), Some(2)));
+        check(vec![target.clone(), duplicate_id], None);
+        check(vec![target], Some("target-a")); // corrected settings recover on the next read
+        std::fs::remove_dir_all(path).unwrap();
     }
 
     /// Every message a task produces, in order.

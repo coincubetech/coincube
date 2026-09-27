@@ -139,9 +139,9 @@ pub const OTHER_ACCOUNT: &str = "This claim was recorded under a different Conne
 /// A step that reads or writes through the Vault's daemon was asked for
 /// while the App has none (a failed backend switch leaves it that way).
 pub const NODE_UNAVAILABLE: &str = "The Vault's node isn't available right now, so this step can't run. Check Vault → Settings → Node, then try again.";
-/// The claim target's Cube left this device while a claim was journaled.
+/// The claim target is missing or no longer identifies one valid Cube.
 pub const TARGET_GONE: &str =
-    "The claim target is no longer on this device. Create it again, then come back.";
+    "The claim target is missing or ambiguous. Check the paired Bitcoin Blake2b Cube on this device, then try again.";
 /// `Production::new`'s backend refusal, in the words a user can act on.
 const BACKEND_UNSUPPORTED: &str = "This Vault must use Coincube's Bitcoin service as its node backend for a claim. Change it under Vault → Settings → Node, then come back.";
 
@@ -788,7 +788,7 @@ impl ClaimStep1Panel {
         };
         if self.pre.target.is_none() {
             return refuse(
-                "No Bitcoin Blake2b Cube on this device reuses this Vault yet. Create the claim target first.",
+                "No unique valid Bitcoin Blake2b Cube on this device matches this Vault. Check the paired Cube before continuing.",
                 false,
             );
         }

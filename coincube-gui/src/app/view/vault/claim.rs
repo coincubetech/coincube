@@ -117,7 +117,7 @@ fn preconditions_view<'a>(
             Some(pre.target.is_some()),
             match &pre.target {
                 Some(_) => "A Bitcoin Blake2b Cube reuses this Vault on this device.".to_string(),
-                None => "Not created yet.".to_string(),
+                None => "Missing or ambiguous target.".to_string(),
             },
         ))
         .push(check_row(
