@@ -199,6 +199,7 @@ impl VerifiedClaimForkSweep {
 #[derive(Debug)]
 pub enum ClaimForkFinalizeError {
     ConstructionChanged,
+    InvalidRecoveredWitness,
     Adapter(crate::psbt_unified::UnifiedPsbtError),
     Finalize(crate::unified_finalize::UnifiedFinalizeError),
     Economics,
@@ -207,6 +208,9 @@ impl std::fmt::Display for ClaimForkFinalizeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::ConstructionChanged => f.write_str("Claim fork sweep construction changed"),
+            Self::InvalidRecoveredWitness => {
+                f.write_str("Recovered Claim fork witness is invalid or noncanonical")
+            }
             Self::Adapter(e) => e.fmt(f),
             Self::Finalize(e) => e.fmt(f),
             Self::Economics => f.write_str("Claim fork sweep economics are invalid"),
@@ -269,6 +273,107 @@ pub fn finalize_claim_fork_sweep<C: secp256k1::Verification>(
         descriptor: construction.descriptor().clone(),
         fee,
     })
+}
+
+/// Recover the exact canonical witness produced by this Claim finalizer.
+/// Signatures are checked against owned prevouts and keys, then fed through the
+/// existing Miniscript finalizer. Its output must equal the recovered bytes,
+/// including every witness item. No journal value or matching txid substitutes
+/// for cryptographic verification, and this grants no permission to resubmit.
+pub fn verify_claim_fork_transaction<C: secp256k1::Verification>(
+    construction: &crate::claim_spend::ClaimForkSweep,
+    transaction: &Transaction,
+    secp: &secp256k1::Secp256k1<C>,
+) -> Result<VerifiedClaimForkSweep, ClaimForkFinalizeError> {
+    use crate::{
+        psbt_unified::{proprietary_key, UnifiedPsbt},
+        unified_sighash::{UnifiedSighashCache, SCRIPT_TYPE_WITNESS_V0},
+    };
+    use bitcoin::{ecdsa, PublicKey};
+    let invalid = || ClaimForkFinalizeError::InvalidRecoveredWitness;
+    let original = construction.psbt();
+    let mut unsigned = transaction.clone();
+    for input in &mut unsigned.input {
+        input.witness.clear();
+    }
+    if unsigned != original.unsigned_tx {
+        return Err(ClaimForkFinalizeError::ConstructionChanged);
+    }
+    spend::reverify_spend_before_broadcast(construction.descriptor(), original)
+        .map_err(|_| ClaimForkFinalizeError::Economics)?;
+    let prevouts = original
+        .inputs
+        .iter()
+        .zip(&original.unsigned_tx.input)
+        .map(|(input, txin)| {
+            spend::authenticate_previous_output(
+                &txin.previous_output,
+                input.non_witness_utxo.as_ref(),
+                input.witness_utxo.as_ref(),
+            )
+            .map_err(|_| invalid())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let unified =
+        UnifiedSighashCache::new(&original.unsigned_tx, &prevouts).map_err(|_| invalid())?;
+    let mut legacy = SighashCache::new(&original.unsigned_tx);
+    let mut recovered =
+        UnifiedPsbt::from_psbt(original.clone()).map_err(ClaimForkFinalizeError::Adapter)?;
+    for (index, input) in original.inputs.iter().enumerate() {
+        let script = input.witness_script.as_ref().ok_or_else(invalid)?;
+        let witness = &transaction.input[index].witness;
+        if witness.last() != Some(script.as_bytes()) {
+            return Err(invalid());
+        }
+        let unified_message = secp256k1::Message::from_digest(
+            unified
+                .signature_hash(index, 0x21, SCRIPT_TYPE_WITNESS_V0, script)
+                .map_err(|_| invalid())?,
+        );
+        let legacy_message = secp256k1::Message::from_digest(
+            legacy
+                .p2wsh_signature_hash(index, script, prevouts[index].value, EcdsaSighashType::All)
+                .map_err(|_| invalid())?
+                .to_byte_array(),
+        );
+        for item in witness.iter().take(witness.len().saturating_sub(1)) {
+            let Some((&tag, der)) = item.split_last() else {
+                continue;
+            };
+            let Ok(signature) = secp256k1::ecdsa::Signature::from_der(der) else {
+                continue;
+            };
+            let message = match tag {
+                1 => &legacy_message,
+                0x21 => &unified_message,
+                _ => return Err(invalid()),
+            };
+            let key = input
+                .bip32_derivation
+                .keys()
+                .find(|key| secp.verify_ecdsa(message, &signature, key).is_ok())
+                .ok_or_else(invalid)?;
+            let key = PublicKey::new(*key);
+            let dest = &mut recovered.psbt_mut().inputs[index];
+            if tag == 0x21 {
+                dest.proprietary
+                    .insert(proprietary_key(&key), item.to_vec());
+            } else {
+                dest.partial_sigs.insert(
+                    key,
+                    ecdsa::Signature {
+                        signature,
+                        sighash_type: EcdsaSighashType::All,
+                    },
+                );
+            }
+        }
+    }
+    let verified = finalize_claim_fork_sweep(construction, &recovered, secp)?;
+    if verified.transaction() != transaction {
+        return Err(invalid());
+    }
+    Ok(verified)
 }
 
 /// Verify a transaction recovered from the node against a reconstructed owned

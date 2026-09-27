@@ -383,6 +383,32 @@ fn fork_sweep_finalization_reports_actual_unified_mixed_and_legacy_witnesses() {
                 }
             }
             let verified = finalize_claim_fork_sweep(&sweep, &signed, &secp).unwrap();
+            let restored =
+                verify_claim_fork_transaction(&sweep, verified.transaction(), &secp).unwrap();
+            assert_eq!(restored.transaction(), verified.transaction());
+            assert_eq!(restored.inputs(), verified.inputs());
+            assert_eq!(restored.fee(), verified.fee());
+            for mutation in 0..6 {
+                let mut bad = verified.transaction().clone();
+                let mut witness = bad.input[0].witness.to_vec();
+                match mutation {
+                    0 => witness.clear(),
+                    1 => witness[1][4] ^= 1,
+                    2 => {
+                        let last = witness[1].len() - 1;
+                        witness[1][last] = 0x81;
+                    }
+                    3 => witness.insert(0, vec![]),
+                    4 => bad.output[0].value = Amount::from_sat(1),
+                    _ => witness.swap(1, 2),
+                }
+                bad.input[0].witness = bitcoin::Witness::from_slice(&witness);
+                assert!(
+                    verify_claim_fork_transaction(&sweep, &bad, &secp).is_err(),
+                    "mutation {}",
+                    mutation
+                );
+            }
             assert_eq!(verified.chain(), sweep.chain());
             assert_eq!(verified.bitcoin_step1(), sweep.bitcoin_step1());
             assert_eq!(verified.fee(), sweep.psbt().fee().unwrap());
