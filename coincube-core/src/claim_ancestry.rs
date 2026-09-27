@@ -29,6 +29,7 @@ pub enum Error {
     RepeatedTransaction,
     IncompletePath,
     InvalidTerminal,
+    InvalidCoinbaseHeight,
 }
 
 /// A dependency path, NOT chain-exclusivity evidence. Fields cannot be supplied
@@ -52,6 +53,25 @@ impl CoinbaseDependency {
     }
     pub fn txids(&self) -> &[Txid] {
         &self.txids
+    }
+    /// Check the exact BIP34 height prefix and coinbase script-size range.
+    /// The caller must separately establish that BIP34 is active, this height
+    /// is canonical, and no historical duplicate can supply the same outpoint.
+    /// This check does not establish any of those facts.
+    pub fn check_height_commitment(&self, height: u32) -> Result<(), Error> {
+        // The node's contextual height is a signed int, never a wrapping u32.
+        if height > i32::MAX as u32 {
+            return Err(Error::InvalidCoinbaseHeight);
+        }
+        let script = &self.coinbase.input[0].script_sig;
+        let expected = miniscript::bitcoin::script::Builder::new()
+            .push_int(i64::from(height))
+            .into_script();
+        if !(2..=100).contains(&script.len()) || !script.as_bytes().starts_with(expected.as_bytes())
+        {
+            return Err(Error::InvalidCoinbaseHeight);
+        }
+        Ok(())
     }
 }
 
@@ -376,6 +396,72 @@ mod tests {
         assert_eq!(
             verify(selected, &links).unwrap().txids().len(),
             MAX_PATH_TRANSACTIONS
+        );
+    }
+
+    #[test]
+    fn height_commitment_matches_consensus_prefix_not_numeric_equivalence() {
+        fn check(script: Vec<u8>, height: u32) -> Result<(), Error> {
+            let mut root = tx(OutPoint::null());
+            root.input[0].script_sig = ScriptBuf::from_bytes(script);
+            let raw = serialize(&root);
+            verify(
+                out(&root),
+                &[Link {
+                    transaction: &raw,
+                    parent_input: None,
+                }],
+            )
+            .unwrap()
+            .check_height_commitment(height)
+        }
+        for height in [
+            0,
+            1,
+            16,
+            17,
+            127,
+            128,
+            32_767,
+            32_768,
+            961_640,
+            i32::MAX as u32,
+        ] {
+            let mut prefix = miniscript::bitcoin::script::Builder::new()
+                .push_int(i64::from(height))
+                .into_script()
+                .into_bytes();
+            prefix.push(0); // arbitrary miner suffix; also makes tiny prefixes >= 2 bytes
+            assert_eq!(check(prefix.clone(), height), Ok(()));
+            assert_eq!(check(prefix, height + 1), Err(Error::InvalidCoinbaseHeight));
+        }
+        // Literal vectors are independent of the builder used by the checker.
+        for (height, prefix) in [
+            (127, vec![0x01, 0x7f]),
+            (128, vec![0x02, 0x80, 0x00]),
+            (32_767, vec![0x02, 0xff, 0x7f]),
+            (32_768, vec![0x03, 0x00, 0x80, 0x00]),
+            (i32::MAX as u32, vec![0x04, 0xff, 0xff, 0xff, 0x7f]),
+        ] {
+            assert_eq!(check(prefix, height), Ok(()));
+        }
+        assert_eq!(check(vec![1, 1], 1), Err(Error::InvalidCoinbaseHeight)); // OP_1 required
+        assert_eq!(
+            check(vec![0x4c, 1, 17], 17),
+            Err(Error::InvalidCoinbaseHeight)
+        ); // nonminimal PUSHDATA1
+        assert_eq!(check(vec![2, 17, 0], 17), Err(Error::InvalidCoinbaseHeight)); // redundant numeric zero
+        assert_eq!(check(vec![1, 0x91], 17), Err(Error::InvalidCoinbaseHeight)); // negative script number
+        assert_eq!(check(vec![1], 17), Err(Error::InvalidCoinbaseHeight)); // truncated
+        assert_eq!(check(vec![0x51], 1), Err(Error::InvalidCoinbaseHeight)); // coinbase too short
+        let mut maximum = vec![0; 100];
+        maximum[0] = 0x51;
+        assert_eq!(check(maximum.clone(), 1), Ok(()));
+        maximum.push(0);
+        assert_eq!(check(maximum, 1), Err(Error::InvalidCoinbaseHeight));
+        assert_eq!(
+            check(vec![0, 0], u32::MAX),
+            Err(Error::InvalidCoinbaseHeight)
         );
     }
 
