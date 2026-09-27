@@ -1,6 +1,8 @@
 //! Structural ancestry checks only. This does not establish chain inclusion,
 //! coinbase uniqueness, ownership, maturity, or Bitcoin-only spendability.
 //! A verified dependency must never by itself authorize an input poison.
+pub mod search;
+
 use std::collections::BTreeSet;
 
 use miniscript::bitcoin::{consensus::deserialize, OutPoint, Transaction, Txid};
