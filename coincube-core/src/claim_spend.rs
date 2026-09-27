@@ -331,6 +331,47 @@ pub fn create_claim_fork_sweep(
     })
 }
 
+/// Recover an exact recorded fork sweep from authenticated wallet inputs.
+/// This rebuilds all PSBT signing metadata rather than trusting persisted PSBT
+/// fields. It reserves no address and grants no signing or broadcast authority;
+/// callers must still bind the result to the journal and obtain fresh checks.
+/// Only the recorded output amount is retained, allowing recovery without the
+/// original fee estimate. Actual economics are reverified before returning.
+#[allow(clippy::too_many_arguments)]
+pub fn reconstruct_claim_fork_sweep(
+    source: &PoisonSelfTransfer,
+    fork_chain: ChainId,
+    secp: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
+    tx_getter: &mut impl TxGetter,
+    coins: &[CandidateCoin],
+    change_index: ChildNumber,
+    recorded: &bitcoin::Transaction,
+) -> Result<ClaimForkSweep, Error> {
+    if recorded.output.len() != 1 {
+        return Err(Error::InvalidRequest(
+            "Recorded fork sweep must have one output",
+        ));
+    }
+    let mut rebuilt = create_claim_fork_sweep(
+        source,
+        fork_chain,
+        secp,
+        tx_getter,
+        coins,
+        change_index,
+        1,
+        recorded.lock_time,
+    )?;
+    rebuilt.psbt.unsigned_tx.output[0].value = recorded.output[0].value;
+    if rebuilt.psbt.unsigned_tx != *recorded {
+        return Err(Error::InvalidRequest(
+            "Recorded transaction differs from the owned fork construction",
+        ));
+    }
+    spend::reverify_spend_before_broadcast(source.descriptor(), &rebuilt.psbt)?;
+    Ok(rebuilt)
+}
+
 /// Reconstruct an existing unsigned poison transfer from authenticated wallet
 /// coins and previous transactions. This does not reserve another change index
 /// or authorize a new submission. The caller must bind the result to its journal.
@@ -583,6 +624,131 @@ mod tests {
             assert!(fee >= desc.unsigned_tx_max_vbytes(&psbt.unsigned_tx, true) * 3);
             spend::reverify_spend_before_broadcast(&desc, psbt).unwrap();
         }
+    }
+
+    #[test]
+    fn fork_sweep_restart_rebuilds_metadata_and_exact_transaction() {
+        let secp = secp256k1::Secp256k1::verification_only();
+        for (bitcoin, fork) in [
+            (ChainId::Bitcoin, ChainId::BitcoinBlake2b),
+            (ChainId::Testnet4, ChainId::BitcoinBlake2bTestnet4),
+        ] {
+            let (desc, coins, mut getter) = fixture();
+            let source = build(bitcoin, &desc, &coins, &mut getter, 10, 5).unwrap();
+            let index = ChildNumber::from_normal_idx(20).unwrap();
+            let original = create_claim_fork_sweep(
+                &source,
+                fork,
+                &secp,
+                &mut getter,
+                &coins,
+                index,
+                7,
+                LockTime::ZERO,
+            )
+            .unwrap();
+            let recovered = reconstruct_claim_fork_sweep(
+                &source,
+                fork,
+                &secp,
+                &mut getter,
+                &coins,
+                index,
+                &original.psbt().unsigned_tx,
+            )
+            .unwrap();
+            assert_eq!(recovered.psbt(), original.psbt());
+            assert_eq!(recovered.bitcoin_step1(), original.bitcoin_step1());
+            assert_eq!(recovered.chain(), fork);
+        }
+    }
+
+    #[test]
+    fn fork_sweep_restart_rejects_replacement_and_untrusted_economics() {
+        let secp = secp256k1::Secp256k1::verification_only();
+        let (desc, coins, mut getter) = fixture();
+        let source = build(ChainId::Bitcoin, &desc, &coins, &mut getter, 10, 5).unwrap();
+        let index = ChildNumber::from_normal_idx(20).unwrap();
+        let original = create_claim_fork_sweep(
+            &source,
+            ChainId::BitcoinBlake2b,
+            &secp,
+            &mut getter,
+            &coins,
+            index,
+            7,
+            LockTime::ZERO,
+        )
+        .unwrap();
+        let tx = &original.psbt().unsigned_tx;
+        let mut variants = Vec::new();
+        let mut changed = tx.clone();
+        changed.output.clear();
+        variants.push(changed);
+        let mut changed = tx.clone();
+        changed.output.push(tx.output[0].clone());
+        variants.push(changed);
+        let mut changed = tx.clone();
+        changed.output[0].script_pubkey = bitcoin::ScriptBuf::new();
+        variants.push(changed);
+        let mut changed = tx.clone();
+        changed.output[0].value = Amount::from_sat(200_001);
+        variants.push(changed);
+        let mut changed = tx.clone();
+        changed.output[0].value = Amount::ZERO;
+        variants.push(changed);
+        let mut changed = tx.clone();
+        changed.input[0].previous_output.vout += 1;
+        variants.push(changed);
+        let mut changed = tx.clone();
+        changed.input[0].witness.push([1]);
+        variants.push(changed);
+        let mut changed = tx.clone();
+        changed.version = bitcoin::transaction::Version::ONE;
+        variants.push(changed);
+        for changed in variants {
+            assert!(reconstruct_claim_fork_sweep(
+                &source,
+                ChainId::BitcoinBlake2b,
+                &secp,
+                &mut getter,
+                &coins,
+                index,
+                &changed,
+            )
+            .is_err());
+        }
+        assert!(reconstruct_claim_fork_sweep(
+            &source,
+            ChainId::BitcoinBlake2bTestnet4,
+            &secp,
+            &mut getter,
+            &coins,
+            index,
+            tx,
+        )
+        .is_err());
+        assert!(reconstruct_claim_fork_sweep(
+            &source,
+            ChainId::BitcoinBlake2b,
+            &secp,
+            &mut getter,
+            &coins,
+            ChildNumber::from_normal_idx(21).unwrap(),
+            tx,
+        )
+        .is_err());
+        getter.0.clear();
+        assert!(reconstruct_claim_fork_sweep(
+            &source,
+            ChainId::BitcoinBlake2b,
+            &secp,
+            &mut getter,
+            &coins,
+            index,
+            tx,
+        )
+        .is_err());
     }
 
     #[test]
