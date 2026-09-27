@@ -280,7 +280,7 @@ impl Services for Fixture {
     }
     async fn submit(
         &self,
-        tx: Arc<VerifiedPoisonTransfer>,
+        tx: VerifiedStep1,
         _gate: Arc<SubmissionGate>,
     ) -> Result<SubmissionOutcome, DaemonError> {
         let journal: serde_json::Value =
@@ -1287,3 +1287,5 @@ async fn recovery_ineligibility_is_not_a_journal_failure() {
         Error::Journal(claim_workflow::Error::Io(_))
     ));
 }
+
+mod ancestry;

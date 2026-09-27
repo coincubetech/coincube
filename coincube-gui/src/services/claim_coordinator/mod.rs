@@ -1,4 +1,7 @@
 //! Owned Claim coordination. Signing keys and explicit user consent stay with callers.
+mod ancestry;
+mod step1;
+use step1::VerifiedStep1;
 pub mod fork;
 mod recovery;
 mod reorg;
@@ -123,6 +126,9 @@ pub enum Outcome {
 #[async_trait]
 trait Services: Send + Sync {
     fn source(&self) -> &dyn ObservationSource;
+    fn ancestry_source(&self) -> Option<&HttpObservationSource> {
+        None
+    }
     async fn preflight(
         &self,
         tx: &Transaction,
@@ -131,7 +137,7 @@ trait Services: Send + Sync {
     ) -> Result<Evidence, claim_preflight::Error>;
     async fn submit(
         &self,
-        tx: Arc<VerifiedPoisonTransfer>,
+        tx: VerifiedStep1,
         gate: Arc<SubmissionGate>,
     ) -> Result<SubmissionOutcome, DaemonError>;
 }
@@ -254,6 +260,9 @@ impl Production {
 }
 #[async_trait]
 impl Services for Production {
+    fn ancestry_source(&self) -> Option<&HttpObservationSource> {
+        Some(&self.source)
+    }
     fn source(&self) -> &dyn ObservationSource {
         &self.source
     }
@@ -269,12 +278,15 @@ impl Services for Production {
     }
     async fn submit(
         &self,
-        tx: Arc<VerifiedPoisonTransfer>,
+        tx: VerifiedStep1,
         gate: Arc<SubmissionGate>,
     ) -> Result<SubmissionOutcome, DaemonError> {
         // The transport adapter owns its blocking worker and checks the revocable
         // gate under the actual backend lock immediately before submission.
-        self.daemon.submit_verified_poison(tx, gate).await
+        match tx {
+            VerifiedStep1::OpReturn(tx) => self.daemon.submit_verified_poison(tx, gate).await,
+            VerifiedStep1::Ancestry(tx) => self.daemon.submit_verified_ancestry(tx, gate).await,
+        }
     }
 }
 
@@ -335,7 +347,7 @@ pub struct Coordinator {
     context: Context,
     generation: watch::Receiver<u64>,
     controller: Controller,
-    verified: Arc<VerifiedPoisonTransfer>,
+    verified: VerifiedStep1,
     services: Box<dyn Services>,
     policy: CheckPolicy,
     revoker: Revoker,
@@ -484,7 +496,7 @@ impl Coordinator {
             context,
             generation,
             controller,
-            verified: Arc::new(verified),
+            verified: VerifiedStep1::OpReturn(Arc::new(verified)),
             services,
             policy,
             revoker: Revoker::new(),
@@ -530,6 +542,23 @@ impl Coordinator {
         }
     }
     async fn collect(&self) -> Result<claim_observation::CollectedAssessment, Error> {
+        if matches!(self.verified, VerifiedStep1::Ancestry(_)) {
+            let path = self
+                .controller
+                .recorded_ancestry()?
+                .ok_or(Error::InvalidBinding)?;
+            let source = self.services.ancestry_source().ok_or(Error::Unsupported)?;
+            return source
+                .collect_ancestry(
+                    &path,
+                    &self.controller.plan(),
+                    self.policy.observations,
+                    self.policy.collection_budget,
+                )
+                .await
+                .map(|collected| collected.assessment())
+                .map_err(Error::Observation);
+        }
         claim_observation::collect(
             self.services.source(),
             &self.controller.plan(),
@@ -675,7 +704,7 @@ impl Coordinator {
             txid: refreshed.txid,
             wtxid: refreshed.wtxid,
         };
-        let (gate, revoker) = SubmissionGate::new(&self.verified, refreshed.not_after);
+        let (gate, revoker) = self.verified.gate(refreshed.not_after);
         let _pending = PendingGate(revoker.clone());
         if self.revoker.register(revoker).is_err() {
             return Ok(uncertain);
