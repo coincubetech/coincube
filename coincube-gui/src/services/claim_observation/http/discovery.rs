@@ -150,7 +150,7 @@ impl HttpObservationSource {
             return Err(DiscoveryError::Observation(FailureKind::Cancelled));
         }
         Ok(DiscoveredAncestry {
-            provider: snapshot.base.clone(),
+            provider: snapshot.provider_identity(),
             live_generation: snapshot.generation.clone(),
             links: path.links().to_vec(),
             pair,
@@ -192,7 +192,7 @@ impl HttpObservationSource {
                             Err(error) => return Err(observation(error)),
                             Ok((pair, observed_at)) => {
                                 return Ok(Some(DiscoveredAncestry {
-                                    provider: snapshot.base.clone(),
+                                    provider: snapshot.provider_identity(),
                                     live_generation: snapshot.generation.clone(),
                                     links: candidate.links,
                                     pair,

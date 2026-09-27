@@ -687,13 +687,16 @@ async fn production_refuses_a_non_embedded_backend_at_construction() {
     .unwrap();
 
     #[derive(Debug)]
-    struct ExternalWithGoodConfig(coincubed::config::Config);
+    struct ExternalWithGoodConfig(coincubed::config::Config, bool);
 
     #[async_trait::async_trait]
     impl Daemon for ExternalWithGoodConfig {
         fn backend(&self) -> crate::daemon::DaemonBackend {
-            // The only thing wrong with this daemon.
-            crate::daemon::DaemonBackend::ExternalCoincubed
+            if self.1 {
+                crate::daemon::DaemonBackend::EmbeddedCoincubed(None)
+            } else {
+                crate::daemon::DaemonBackend::ExternalCoincubed
+            }
         }
 
         fn config(&self) -> Option<&coincubed::config::Config> {
@@ -845,7 +848,8 @@ async fn production_refuses_a_non_embedded_backend_at_construction() {
     let mut client = CoincubeClient::new();
     client.base_url = server.base_url();
     let (_tx, generation) = tokio::sync::watch::channel(7u64);
-    let daemon: Arc<dyn Daemon + Send + Sync> = Arc::new(ExternalWithGoodConfig(cfg));
+    let daemon: Arc<dyn Daemon + Send + Sync> =
+        Arc::new(ExternalWithGoodConfig(cfg.clone(), false));
 
     let refused = Production::new(
         client,
@@ -857,6 +861,25 @@ async fn production_refuses_a_non_embedded_backend_at_construction() {
     assert!(
         matches!(refused, Err(Error::Unsupported)),
         "an external backend must be refused before anything is journaled"
+    );
+    // The otherwise identical embedded configuration must use the exact
+    // journal identity that fresh ancestry observations consume.
+    let mut client = CoincubeClient::new();
+    client.base_url = format!("{}/", server.base_url());
+    client.set_token("synthetic-test-token");
+    let (_tx, generation) = tokio::sync::watch::channel(7u64);
+    let production = Production::new(
+        client,
+        Arc::new(ExternalWithGoodConfig(cfg, true)),
+        "synthetic-account".to_string(),
+        7,
+        generation,
+    )
+    .unwrap();
+    assert_eq!(production.context.provider, format!("bitcoin|{}", endpoint));
+    assert_eq!(
+        production.context.provider,
+        production.source.provider_identity()
     );
     let _ = std::fs::remove_dir_all(&root);
 }

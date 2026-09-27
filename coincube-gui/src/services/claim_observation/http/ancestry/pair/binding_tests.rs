@@ -13,8 +13,10 @@ pub(super) fn check(
 ) {
     let plan = plan(path);
     let shared = plan.claimed_prevouts[0];
+    let provider = format!("bitcoin|{}/api/v1/esplora/bitcoin/mainnet", source.base);
+    assert_eq!(source.provider_identity(), provider);
     let context = || AncestryContext {
-        provider: &source.base,
+        provider: &provider,
         generation: 4,
         policy: Policy {
             max_observation_age_seconds: 60,
@@ -27,7 +29,7 @@ pub(super) fn check(
         },
     };
     assert_eq!(observed.validate_for_plan(path, &plan, context()), Ok(()));
-    for case in 0..16 {
+    for case in 0..18 {
         let mut changed = plan.clone();
         let mut current = context();
         let expected = match case {
@@ -94,6 +96,14 @@ pub(super) fn check(
             15 => {
                 current.policy.max_observation_age_seconds = 0;
                 FailureKind::InvalidPlan
+            }
+            16 => {
+                current.provider = &source.base;
+                FailureKind::Changed
+            }
+            17 => {
+                current.provider = "bitcoin-blake2b|https://different.invalid/api/v1/esplora/bitcoin-blake2b/mainnet";
+                FailureKind::Changed
             }
             _ => unreachable!(),
         };

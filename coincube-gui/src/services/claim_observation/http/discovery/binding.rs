@@ -5,6 +5,7 @@ use coincube_core::claim_ancestry::retained::RetainedPath;
 /// Current caller context, not stored authority. Both tips must come from the
 /// fresh ordinary transaction/deployment preflight collection.
 pub struct AncestryContext<'a> {
+    /// Chain-qualified identity used by the journal Context, not a bare origin.
     pub provider: &'a str,
     pub generation: u64,
     pub policy: Policy,

@@ -64,7 +64,7 @@ impl HttpObservationSource {
                     path,
                     plan,
                     AncestryContext {
-                        provider: &snapshot.base,
+                        provider: &snapshot.provider_identity(),
                         generation: snapshot.expected,
                         policy,
                         now: snapshot.now(),

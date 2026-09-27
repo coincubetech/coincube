@@ -70,6 +70,13 @@ impl HttpObservationSource {
             budget: None,
         })
     }
+    /// Stable identity shared with the Claim journal. Bind the admitted pair
+    /// through its fixed Bitcoin endpoint, without account tokens or credentials.
+    /// Preserve this encoding when reopening existing journals.
+    pub(crate) fn provider_identity(&self) -> String {
+        format!("bitcoin|{}/api/v1/esplora/bitcoin/mainnet", self.base)
+    }
+
     fn prefix(chain: ChainId) -> Result<&'static str, FailureKind> {
         match chain {
             ChainId::Bitcoin => Ok("bitcoin/mainnet"),

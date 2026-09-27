@@ -222,6 +222,13 @@ impl Production {
         {
             return Err(Error::Unsupported);
         }
+        let cc = || CollectionContext {
+            expected_generation,
+            generation: generation.clone(),
+        };
+        let source =
+            HttpObservationSource::new(client, ChainId::Bitcoin, ChainId::BitcoinBlake2b, cc())
+                .map_err(|_| Error::InvalidBinding)?;
         // Only exact chain+endpoint selection enters identity, never Debug/config
         // serialization, bearer tokens, RPC credentials or device metadata.
         let context = Context {
@@ -230,18 +237,8 @@ impl Production {
             // The persisted Claim identity binds the pair through its Bitcoin
             // endpoint. Fork transport independently admits the fixed sibling
             // endpoint at this same origin; changing origins cannot reopen it.
-            provider: format!(
-                "bitcoin|{}/api/v1/esplora/bitcoin/mainnet",
-                origin.as_str().trim_end_matches('/')
-            ),
+            provider: source.provider_identity(),
         };
-        let cc = || CollectionContext {
-            expected_generation,
-            generation: generation.clone(),
-        };
-        let source =
-            HttpObservationSource::new(client, ChainId::Bitcoin, ChainId::BitcoinBlake2b, cc())
-                .map_err(|_| Error::InvalidBinding)?;
         let preflight = PreflightClient::new(origin.as_str(), cc()).map_err(Error::Preflight)?;
         Ok(Self {
             source,
