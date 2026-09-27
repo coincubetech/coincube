@@ -120,7 +120,10 @@ class Bitcoind(BitcoinBackend):
         logging.info("Bitcoind started")
 
     def stop(self):
-        self.rpc.stop()
+        # Popen may have failed before a node existed; preserve that startup
+        # error rather than attempting RPC cleanup against a nonexistent node.
+        if self.proc is not None:
+            self.rpc.stop()
         return TailableProc.stop(self)
 
     # wait_for_mempool can be used to wait for the mempool before generating
