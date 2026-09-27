@@ -109,7 +109,12 @@ def supervise(command, log_path):
             )
             owner = await_ready(daemon)
             env = dict(os.environ, COINCUBE_TEST_KEYRING_PID=str(daemon.pid))
-            child = subprocess.Popen(command, env=env, start_new_session=True)
+            try:
+                child = subprocess.Popen(command, env=env, start_new_session=True)
+            except OSError as error:
+                print(f"TEST COMMAND LAUNCH FAILURE: {command[0]}: {error}",
+                      file=sys.stderr, flush=True)
+                return 127 if isinstance(error, FileNotFoundError) else 126
             while True:
                 require_original(daemon, owner)
                 status = child.poll()

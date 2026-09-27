@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Unit checks everywhere; --live-kill probes the actual Linux fixture."""
 import os
+import io
+from contextlib import redirect_stderr
 from pathlib import Path
 import subprocess
 import sys
@@ -24,6 +26,21 @@ class SupervisionTests(unittest.TestCase):
         with patch.object(fixture, "service_owner", return_value=(":1.1", 456)):
             with self.assertRaisesRegex(fixture.FixtureFailure, "owner changed"):
                 fixture.require_original(daemon, (":1.0", 123))
+
+    def test_child_launch_errors_are_not_keyring_failures(self):
+        for error, status in [(FileNotFoundError("missing"), 127),
+                              (PermissionError("not executable"), 126)]:
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as directory:
+                daemon = Mock(pid=123)
+                diagnostic = io.StringIO()
+                with patch.dict(os.environ, {"DBUS_SESSION_BUS_ADDRESS": "test"}), \
+                     patch.object(fixture.subprocess, "Popen", side_effect=[daemon, error]), \
+                     patch.object(fixture, "await_ready", return_value=(":1.0", 123)), \
+                     patch.object(fixture, "stop_group") as stop, redirect_stderr(diagnostic):
+                    self.assertEqual(fixture.supervise(["missing-test-command"], Path(directory) / "log"), status)
+                self.assertIn("TEST COMMAND LAUNCH FAILURE: missing-test-command", diagnostic.getvalue())
+                self.assertNotIn("INFRASTRUCTURE FAILURE", diagnostic.getvalue())
+                stop.assert_any_call(daemon)
 
     def test_readiness_requires_original_pid_and_responsive_unique_name(self):
         daemon = Mock(pid=123)
