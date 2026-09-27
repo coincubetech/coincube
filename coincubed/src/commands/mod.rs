@@ -1499,12 +1499,13 @@ impl DaemonControl {
             .genesis_block_timestamp()
             .map_err(|error| CommandError::RescanGenesis(error.to_string()))?;
 
-        let future_timestamp = self
-            .bitcoin
-            .tip_time()
-            .map(|t| timestamp >= t)
-            .unwrap_or(false);
-        if timestamp < genesis_timestamp || future_timestamp {
+        let tip_timestamp = self.bitcoin.tip_time().ok_or_else(|| {
+            CommandError::RescanTrigger(
+                "Cannot determine current tip timestamp; retry when the backend is available"
+                    .into(),
+            )
+        })?;
+        if timestamp < genesis_timestamp || timestamp >= tip_timestamp {
             return Err(CommandError::InsaneRescanTimestamp(timestamp));
         }
         if db_conn.rescan_timestamp().is_some() || self.bitcoin.rescan_progress().is_some() {
@@ -1884,10 +1885,41 @@ mod tests {
         assert!(control.db.connection().rescan_timestamp().is_none());
         assert!(backend.lock().unwrap().rescan_requests.is_empty());
         backend.lock().unwrap().genesis_error = None;
+        backend.lock().unwrap().tip_timestamp = Some(1231006600);
         assert!(matches!(
             control.start_rescan(1231006504),
             Err(CommandError::InsaneRescanTimestamp(_))
         ));
+        control.start_rescan(1231006506).unwrap();
+        assert_eq!(control.db.connection().rescan_timestamp(), Some(1231006506));
+        assert_eq!(backend.lock().unwrap().rescan_requests, vec![1231006506]);
+    }
+
+    #[test]
+    fn rescan_missing_tip_is_retryable_and_never_records_or_triggers_a_scan() {
+        let backend = std::sync::Arc::new(std::sync::Mutex::new(DummyBitcoind::new()));
+        let interface: std::sync::Arc<std::sync::Mutex<dyn crate::bitcoin::BitcoinInterface>> =
+            backend.clone();
+        let daemon = DummyCoincube::new(interface, DummyDatabase::new());
+        let mut control = daemon.control().clone();
+        daemon.shutdown();
+        for timestamp in [1231006506, 1231006600, 1231006601] {
+            assert!(matches!(
+                control.start_rescan(timestamp),
+                Err(CommandError::RescanTrigger(_))
+            ));
+            assert!(control.db.connection().rescan_timestamp().is_none());
+            assert!(backend.lock().unwrap().rescan_requests.is_empty());
+        }
+        backend.lock().unwrap().tip_timestamp = Some(1231006600);
+        for timestamp in [1231006600, 1231006601] {
+            assert!(matches!(
+                control.start_rescan(timestamp),
+                Err(CommandError::InsaneRescanTimestamp(_))
+            ));
+            assert!(control.db.connection().rescan_timestamp().is_none());
+            assert!(backend.lock().unwrap().rescan_requests.is_empty());
+        }
         control.start_rescan(1231006506).unwrap();
         assert_eq!(control.db.connection().rescan_timestamp(), Some(1231006506));
         assert_eq!(backend.lock().unwrap().rescan_requests, vec![1231006506]);

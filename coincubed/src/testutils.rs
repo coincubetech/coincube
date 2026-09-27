@@ -30,6 +30,7 @@ pub struct DummyBitcoind {
     pub broadcasted: sync::Mutex<Vec<Transaction>>,
     pub broadcast_error: Option<String>,
     pub rescan_requests: Vec<u32>,
+    pub tip_timestamp: Option<u32>,
     pub genesis_error: Option<crate::connect::AdmissionError>,
     pub txs: HashMap<Txid, (Transaction, Option<Block>)>,
     /// What `chain_tip` reports. Defaults to the historical fixed value (height 100).
@@ -74,6 +75,7 @@ impl DummyBitcoind {
             broadcast_error: None,
             rescan_requests: Vec::new(),
             genesis_error: None,
+            tip_timestamp: None,
             txs: HashMap::new(),
             tip: BlockChainTip { hash, height: 100 },
             in_chain: true,
@@ -202,7 +204,7 @@ impl BitcoinInterface for DummyBitcoind {
     }
 
     fn tip_time(&self) -> Option<u32> {
-        None
+        self.tip_timestamp
     }
 
     fn wallet_transaction(
