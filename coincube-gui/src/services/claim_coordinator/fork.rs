@@ -967,28 +967,179 @@ impl CompletionEvidence {
                 "Claim confirmation expired or changed; check both chains again".into(),
             ));
         }
-        if settings.cubes.iter().filter(|cube| cube.id == id).count() != 1 {
-            return Err(SettingsError::Unexpected(
-                "Claim Cube is missing or ambiguous".into(),
-            ));
-        }
-        let cube = settings
-            .cubes
-            .iter_mut()
-            .find(|cube| cube.id == id)
-            .ok_or_else(|| SettingsError::Unexpected("Claim Cube is missing".into()))?;
-        if cube.network != chain
-            || cube.vault_fingerprint.as_deref() != Some(self.descriptor_fingerprint.as_str())
-            || cube
-                .vault_wallet_id
-                .as_ref()
-                .is_none_or(|wallet| wallet.descriptor_checksum != self.descriptor_checksum)
-        {
-            return Err(SettingsError::Unexpected(
-                "Claim Cube no longer matches its Vault".into(),
-            ));
-        }
+        let cube = matching_completion_cube(
+            settings,
+            chain,
+            id,
+            &self.descriptor_fingerprint,
+            &self.descriptor_checksum,
+        )?;
         cube.split_completed_at_height = Some(self.block.height);
+        cube.split_completion_txid = Some(self.txid);
         Ok(())
+    }
+}
+
+fn matching_completion_cube<'a>(
+    settings: &'a mut crate::app::settings::Settings,
+    chain: ChainId,
+    id: &str,
+    descriptor_fingerprint: &str,
+    descriptor_checksum: &str,
+) -> Result<&'a mut crate::app::settings::CubeSettings, crate::app::settings::SettingsError> {
+    use crate::app::settings::SettingsError;
+    if settings.cubes.iter().filter(|cube| cube.id == id).count() != 1 {
+        return Err(SettingsError::Unexpected(
+            "Claim Cube is missing or ambiguous".into(),
+        ));
+    }
+    let cube = settings
+        .cubes
+        .iter_mut()
+        .find(|cube| cube.id == id)
+        .ok_or_else(|| SettingsError::Unexpected("Claim Cube is missing".into()))?;
+    if cube.network != chain
+        || cube.vault_fingerprint.as_deref() != Some(descriptor_fingerprint)
+        || cube
+            .vault_wallet_id
+            .as_ref()
+            .is_none_or(|wallet| wallet.descriptor_checksum != descriptor_checksum)
+    {
+        return Err(SettingsError::Unexpected(
+            "Claim Cube no longer matches its Vault".into(),
+        ));
+    }
+    Ok(cube)
+}
+
+// Completion reconciliation must inspect inclusion independently of deployment:
+// an expired RDTS window can mask a Bitcoin reorg in the preflight assessment.
+fn completion_bitcoin_loss(
+    plan: &coincube_core::claim::ClaimPlan,
+    bitcoin: coincube_core::claim::BitcoinObservation,
+) -> Option<Assessment> {
+    use coincube_core::claim::{TransactionLocation, MIN_CONFIRMATIONS};
+    if bitcoin.chain != plan.bitcoin_chain {
+        return None;
+    }
+    match bitcoin.location {
+        TransactionLocation::Unknown => None,
+        TransactionLocation::Unconfirmed => Some(if plan.previous_confirmation.is_some() {
+            Assessment::Reorged
+        } else {
+            Assessment::WaitingForConfirmation
+        }),
+        TransactionLocation::Confirmed {
+            txid,
+            block,
+            best_chain_hash_at_height,
+        } => {
+            if txid != plan.step1.compute_txid() {
+                return None;
+            }
+            if block.hash != best_chain_hash_at_height
+                || plan
+                    .previous_confirmation
+                    .is_some_and(|previous| previous != block)
+            {
+                return Some(Assessment::Reorged);
+            }
+            let depth = bitcoin
+                .tip
+                .height
+                .checked_sub(block.height)?
+                .checked_add(1)?;
+            (depth < MIN_CONFIRMATIONS).then_some(Assessment::WaitingForDepth {
+                confirmations: depth,
+            })
+        }
+    }
+}
+
+impl Coordinator {
+    /// Reconcile saved markers after a fresh loss of fork inclusion or Bitcoin
+    /// poison depth. Transport failures leave historical data alone and return
+    /// an error; a marker belonging to another sweep is never cleared.
+    pub async fn reconcile_completion(
+        &mut self,
+        context: &Context,
+        root: &crate::dir::CoincubeDirectory,
+    ) -> Result<(Status, claim_observation::TransactionObservation), Error> {
+        use crate::app::settings::{
+            update_settings_file_checked, Settings, SettingsError, WalletId,
+        };
+        let origin = Instant::now();
+        let plan = self.controller.plan();
+        let (status, checked) = self.checked_sweep(context).await?;
+        let bitcoin_loss =
+            completion_bitcoin_loss(&plan, checked.assessment().observations.bitcoin);
+        let status = bitcoin_loss.map(Status::Observation).unwrap_or(status);
+        let transaction = checked.transaction();
+        let lost = !matches!(
+            transaction,
+            claim_observation::TransactionObservation::Confirmed { .. }
+        ) || matches!(
+            status,
+            Status::Observation(
+                Assessment::Reorged
+                    | Assessment::WaitingForConfirmation
+                    | Assessment::WaitingForDepth { .. }
+            )
+        );
+        if !lost {
+            return Ok((status, transaction));
+        }
+        let deadline = evidence_deadline(
+            self.policy,
+            checked.assessment().observations,
+            checked.observed_at(),
+            self.services.source().now(),
+            origin,
+        )?;
+        let wallet = self.controller.identity().clone();
+        let fork = self.construction.chain();
+        let bitcoin = self.controller.plan().bitcoin_chain;
+        let txid = self.verified.transaction().compute_txid();
+        let fingerprint =
+            crate::app::wallet::descriptor_id_fingerprint(self.construction.descriptor())
+                .to_string();
+        let checksum = WalletId::generate(self.construction.descriptor()).descriptor_checksum;
+        let pair = [(fork, &wallet.fork_cube), (bitcoin, &wallet.bitcoin_cube)];
+        let apply = |settings: &mut Settings, chain, id: &str| -> Result<(), SettingsError> {
+            if self.revoker.is_revoked()
+                || self.generation.has_changed().is_err()
+                || *self.generation.borrow() != context.generation
+                || Instant::now() >= deadline
+            {
+                return Err(SettingsError::Unexpected(
+                    "Claim reorg check expired or changed".into(),
+                ));
+            }
+            let cube = matching_completion_cube(settings, chain, id, &fingerprint, &checksum)?;
+            if cube.split_completion_txid == Some(txid) {
+                cube.split_completed_at_height = None;
+                cube.split_completion_txid = None;
+            }
+            Ok(())
+        };
+        for (chain, id) in pair {
+            let mut settings = Settings::from_file(&root.network_directory(chain))
+                .map_err(|error| Error::CompletionPersistence(error.to_string()))?;
+            apply(&mut settings, chain, id)
+                .map_err(|error| Error::CompletionPersistence(error.to_string()))?;
+        }
+        for (chain, id) in pair {
+            update_settings_file_checked(&root.network_directory(chain), |mut settings| {
+                apply(&mut settings, chain, id)?;
+                Ok(Some(settings))
+            })
+            .await
+            .map_err(|error| Error::CompletionPersistence(error.to_string()))?;
+        }
+        self.current(context)?;
+        if Instant::now() >= deadline {
+            return Err(Error::ExpiredEvidence);
+        }
+        Ok((status, transaction))
     }
 }

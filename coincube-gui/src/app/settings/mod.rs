@@ -673,6 +673,9 @@ pub struct CubeSettings {
     /// Historical Claim completion height on the fork. Never spending or replay authority.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub split_completed_at_height: Option<u64>,
+    /// Which Claim sweep the historical completion marker describes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub split_completion_txid: Option<coincube_core::miniscript::bitcoin::Txid>,
     pub id: String,
     pub name: String,
     /// The chain this Cube lives on — its *identity*, which decides the
@@ -935,6 +938,7 @@ impl CubeSettings {
     pub fn new_with_raw_id<C: Into<ChainId>>(id: String, name: String, network: C) -> Self {
         Self {
             split_completed_at_height: None,
+            split_completion_txid: None,
             id,
             name,
             network: network.into(),

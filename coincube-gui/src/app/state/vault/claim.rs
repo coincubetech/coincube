@@ -2382,6 +2382,11 @@ pub fn describe(error: claim_coordinator::Error) -> String {
             "A submission is already recorded for this claim; it can only be tracked now."
                 .to_string()
         }
+        E::CompletionPersistence(error) => {
+            log::warn!("Unable to update Claim completion record: {error}");
+            "Couldn't update the saved Claim status on this device. Check confirmation again."
+                .to_string()
+        }
         E::ExpiredEvidence => {
             "The evidence went stale before submission. Review the transaction again.".to_string()
         }

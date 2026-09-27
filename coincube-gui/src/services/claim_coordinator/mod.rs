@@ -46,6 +46,7 @@ pub enum Error {
     NotReady(Assessment),
     SubmissionAlreadyRecorded,
     ExpiredEvidence,
+    CompletionPersistence(String),
 }
 impl From<claim_workflow::Error> for Error {
     fn from(e: claim_workflow::Error) -> Self {

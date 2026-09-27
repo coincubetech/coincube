@@ -209,7 +209,7 @@ impl ObservationSource for Fixture {
                         flagday: RdtsFlagday {
                             height: 90,
                             expiry_time: 20000,
-                            active: fault != 1,
+                            active: !matches!(fault, 1 | 14),
                         },
                     },
                 },
@@ -231,7 +231,7 @@ impl ObservationSource for Fixture {
         txid: Txid,
     ) -> Result<FreshRead<TransactionObservation>, FailureKind> {
         let fault = self.fault.load(Ordering::SeqCst);
-        if chain.is_blake2b() && txid != self.source_txid && matches!(fault, 11..=13) {
+        if chain.is_blake2b() && txid != self.source_txid && matches!(fault, 11..=14) {
             return self.read(
                 chain,
                 if fault == 11 {
@@ -253,7 +253,7 @@ impl ObservationSource for Fixture {
                 TransactionObservation::Confirmed {
                     txid,
                     block: BlockRef {
-                        height: if matches!(self.fault.load(Ordering::SeqCst), 6 | 13) {
+                        height: if matches!(self.fault.load(Ordering::SeqCst), 6 | 13 | 14) {
                             101
                         } else {
                             100
@@ -1159,4 +1159,107 @@ async fn partial_completion_write_is_reported_and_recoverable_with_fresh_evidenc
         Some(100)
     );
     assert_eq!(h.calls.load(Ordering::SeqCst), 1);
+}
+
+async fn completed_pair() -> (Harness, crate::dir::CoincubeDirectory) {
+    use crate::app::settings::{update_settings_file, CubeSettings, VaultIdentity};
+    let mut h = Harness::new(true).await;
+    let root = crate::dir::CoincubeDirectory::new(h._temp.0.join("reorg-settings"));
+    let identity = VaultIdentity::generate(h.coordinator.construction.descriptor());
+    for (chain, id) in [
+        (ChainId::Bitcoin, "bitcoin-cube"),
+        (ChainId::BitcoinBlake2b, "fork-cube"),
+    ] {
+        let cube =
+            CubeSettings::new_with_raw_id(id.into(), id.into(), chain).with_vault(identity.clone());
+        update_settings_file(&root.network_directory(chain), |mut settings| {
+            settings.cubes.push(cube);
+            Some(settings)
+        })
+        .await
+        .unwrap();
+    }
+    let review = h.coordinator.prepare_review(&context()).await.unwrap();
+    h.coordinator
+        .confirm_and_submit(review, &context())
+        .await
+        .unwrap();
+    h.fault.store(12, Ordering::SeqCst);
+    h.coordinator
+        .check_completion(&context())
+        .await
+        .unwrap()
+        .unwrap()
+        .persist(&root)
+        .await
+        .unwrap();
+    (h, root)
+}
+
+#[tokio::test]
+async fn fresh_confirmation_loss_clears_both_markers_but_transport_failure_does_not() {
+    use crate::app::settings::Settings;
+    for lost in [0, 13, 14] {
+        let (mut h, root) = completed_pair().await;
+        h.fault.store(3, Ordering::SeqCst);
+        assert!(h
+            .coordinator
+            .reconcile_completion(&context(), &root)
+            .await
+            .is_err());
+        for chain in [ChainId::Bitcoin, ChainId::BitcoinBlake2b] {
+            let cube = Settings::from_file(&root.network_directory(chain))
+                .unwrap()
+                .cubes
+                .remove(0);
+            assert_eq!(cube.split_completed_at_height, Some(100));
+            assert_eq!(
+                cube.split_completion_txid,
+                Some(h.coordinator.verified.transaction().compute_txid())
+            );
+        }
+        h.fault.store(lost, Ordering::SeqCst);
+        h.coordinator
+            .reconcile_completion(&context(), &root)
+            .await
+            .unwrap();
+        for chain in [ChainId::Bitcoin, ChainId::BitcoinBlake2b] {
+            let cube = Settings::from_file(&root.network_directory(chain))
+                .unwrap()
+                .cubes
+                .remove(0);
+            assert_eq!(cube.split_completed_at_height, None);
+            assert_eq!(cube.split_completion_txid, None);
+        }
+        assert_eq!(h.calls.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[tokio::test]
+async fn reorg_reconciliation_never_clears_another_sweeps_marker() {
+    use crate::app::settings::{update_settings_file, Settings};
+    let (mut h, root) = completed_pair().await;
+    let other = Txid::from_byte_array([99; 32]);
+    for chain in [ChainId::Bitcoin, ChainId::BitcoinBlake2b] {
+        update_settings_file(&root.network_directory(chain), |mut settings| {
+            settings.cubes[0].split_completed_at_height = Some(101);
+            settings.cubes[0].split_completion_txid = Some(other);
+            Some(settings)
+        })
+        .await
+        .unwrap();
+    }
+    h.fault.store(0, Ordering::SeqCst);
+    h.coordinator
+        .reconcile_completion(&context(), &root)
+        .await
+        .unwrap();
+    for chain in [ChainId::Bitcoin, ChainId::BitcoinBlake2b] {
+        let cube = Settings::from_file(&root.network_directory(chain))
+            .unwrap()
+            .cubes
+            .remove(0);
+        assert_eq!(cube.split_completed_at_height, Some(101));
+        assert_eq!(cube.split_completion_txid, Some(other));
+    }
 }
