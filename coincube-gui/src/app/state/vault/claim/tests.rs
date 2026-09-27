@@ -1318,6 +1318,7 @@ mod flow {
         }
         assert_eq!(submissions(&f), 0);
         assert_eq!(std::fs::read(&path).unwrap(), journal);
+        assert!(!f.daemon.hits().contains(&"list_revealed_addresses"));
         f.p.start_signing();
         let _ = f.p.update(
             Some(f.dyn_daemon.clone()),
@@ -1356,6 +1357,37 @@ mod flow {
         );
         drop(f.p);
         let _ = std::fs::remove_dir_all(f.root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restart_legacy_index_fallback_and_tampered_hint_are_checked() {
+        let mut f = reach_review().await;
+        let path = journal_directory(&f.datadir, &f.wallet).join("intent.json");
+        let mut journal: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        // Release the journal owner before simulating an older on-disk record.
+        f.p.revoke();
+        f.p.stage = Stage::Preconditions;
+        journal["version"] = 1.into();
+        journal
+            .as_object_mut()
+            .unwrap()
+            .remove("bitcoin_change_index");
+        std::fs::write(&path, serde_json::to_vec(&journal).unwrap()).unwrap();
+        reopen(&mut f).await;
+        assert!(matches!(f.p.stage, Stage::Plan { .. }));
+        assert!(f.daemon.hits().contains(&"list_revealed_addresses"));
+        journal["version"] = 4.into();
+        journal["bitcoin_change_index"] = 13.into();
+        std::fs::write(&path, serde_json::to_vec(&journal).unwrap()).unwrap();
+        reopen(&mut f).await;
+        assert!(!matches!(
+            f.p.stage,
+            Stage::Plan { .. } | Stage::Sign { .. }
+        ));
+        assert!(f.p.restart_error.is_some());
+        assert_eq!(submissions(&f), 0);
     }
 
     #[cfg(unix)]

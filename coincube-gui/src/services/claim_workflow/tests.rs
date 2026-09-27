@@ -86,7 +86,7 @@ fn plan() -> ClaimPlan {
     }
 }
 fn controller(temp: &Temp) -> Controller {
-    Controller::create_intent(&temp.0, identity(), plan(), context()).unwrap()
+    Controller::create_intent(&temp.0, identity(), plan(), context(), None).unwrap()
 }
 fn observation(confirmed: bool) -> CollectedAssessment {
     let tip = BlockRef {
@@ -435,6 +435,38 @@ fn public_admission_and_restart_revalidation_bind_the_opaque_artifact() {
     c.revalidate_construction(&context(), &built).unwrap();
     assert!(c.construction_verified);
     assert_eq!(c.status(), Status::Unchecked);
+    assert_eq!(
+        c.recorded_bitcoin_change_index(),
+        Some(built.change_index())
+    );
+    assert_eq!(c.intent.version, 4);
+    let mut bad = c.intent.clone();
+    bad.bitcoin_change_index = None;
+    assert!(validate(&bad).is_err());
+    bad.bitcoin_change_index = Some(0x8000_0000);
+    assert!(validate(&bad).is_err());
+    // A well-formed but false hint never authenticates a construction.
+    c.intent.bitcoin_change_index = Some(u32::from(built.change_index()) + 1);
+    assert!(matches!(
+        c.revalidate_construction(&context(), &built),
+        Err(Error::WrongIdentity)
+    ));
+    assert!(!c.construction_verified);
+    // Legacy records remain readable and gain the hint only by reconstruction.
+    c.intent.version = 1;
+    c.intent.bitcoin_change_index = None;
+    c.journal.store(&c.intent).unwrap();
+    drop(c);
+    let mut c = Controller::reopen(&temp.0, &identity, context()).unwrap();
+    assert!(c.recorded_bitcoin_change_index().is_none());
+    c.revalidate_construction(&context(), &built).unwrap();
+    drop(c);
+    let c = Controller::reopen(&temp.0, &identity, context()).unwrap();
+    assert_eq!(
+        c.recorded_bitcoin_change_index(),
+        Some(built.change_index())
+    );
+    assert!(!c.construction_verified);
 }
 
 #[test]
@@ -653,12 +685,13 @@ fn fork_plan_requires_fresh_depth_and_survives_restart_without_authority() {
         .unwrap();
     assert_eq!(c.recorded_fork_sweep(), Some(&sweep.psbt().unsigned_tx));
     assert_eq!(c.recorded_fork_change_index(), Some(20.into()));
-    assert_eq!(c.intent.version, 3);
+    assert_eq!(c.intent.version, 4);
     assert!(c.fresh.is_none());
     // Older v2 records remain readable, but acquire a derivation hint only
     // after authenticated construction and fresh depth checks.
     c.intent.version = 2;
     c.intent.fork_change_index = None;
+    c.intent.bitcoin_change_index = None;
     validate(&c.intent).unwrap();
     c.journal.store(&c.intent).unwrap();
     assert!(c.recorded_fork_change_index().is_none());

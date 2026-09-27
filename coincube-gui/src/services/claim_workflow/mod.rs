@@ -72,6 +72,8 @@ struct Intent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     fork_change_index: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    bitcoin_change_index: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     fork_submission: Option<RecordedForkSubmission>,
 }
 /// A possible submission, not evidence of acceptance or confirmation. Reading
@@ -143,9 +145,14 @@ fn validate(intent: &Intent) -> Result<(), Error> {
         (
             intent.version,
             intent.fork_sweep.is_some(),
-            intent.fork_change_index
+            intent.fork_change_index,
+            intent.bitcoin_change_index,
         ),
-        (1, false, None) | (2, true, None) | (3, true, Some(0..=0x7fff_ffff))
+        (1, false, None, None)
+            | (2, true, None, None)
+            | (3, true, Some(0..=0x7fff_ffff), None)
+            | (4, false, None, Some(0..=0x7fff_ffff))
+            | (4, true, Some(0..=0x7fff_ffff), Some(0..=0x7fff_ffff))
     ) || intent.identity.bitcoin_cube.is_empty()
         || intent.identity.fork_cube.is_empty()
         || intent.identity.bitcoin_cube.len() > 256
@@ -256,6 +263,7 @@ impl Controller {
                 previous_confirmation: None,
             },
             context,
+            Some(u32::from(artifact.change_index())),
         )
     }
     /// Restart never restores the builder artifact. A caller must reconstruct it
@@ -271,12 +279,36 @@ impl Controller {
             || digest(&artifact.psbt().unsigned_tx) != self.intent.unsigned_digest
             || sha256::Hash::hash(artifact.descriptor().to_string().as_bytes())
                 != self.intent.identity.descriptor_digest
+            || self
+                .intent
+                .bitcoin_change_index
+                .is_some_and(|index| index != u32::from(artifact.change_index()))
         {
             self.construction_verified = false;
             return Err(Error::WrongIdentity);
         }
+        // Older records gain the hint only after the owned builder has
+        // reproduced the exact transaction. A v2 fork plan must first acquire
+        // its fork index through prepare_fork_sweep before upgrading to v4.
+        if self.intent.bitcoin_change_index.is_none() && self.intent.version != 2 {
+            let mut next = self.intent.clone();
+            next.version = 4;
+            next.bitcoin_change_index = Some(u32::from(artifact.change_index()));
+            validate(&next)?;
+            self.journal.store(&next)?;
+            self.intent = next;
+        }
         self.construction_verified = true;
         Ok(())
+    }
+    /// Untrusted derivation hint only. Reconstruct the complete owned Bitcoin
+    /// transaction and revalidate it before using the journal for any action.
+    pub fn recorded_bitcoin_change_index(
+        &self,
+    ) -> Option<coincube_core::miniscript::bitcoin::bip32::ChildNumber> {
+        self.intent.bitcoin_change_index.and_then(|index| {
+            coincube_core::miniscript::bitcoin::bip32::ChildNumber::from_normal_idx(index).ok()
+        })
     }
     pub fn identity(&self) -> &WalletIdentity {
         &self.intent.identity
@@ -287,9 +319,10 @@ impl Controller {
         identity: WalletIdentity,
         plan: ClaimPlan,
         context: Context,
+        bitcoin_change_index: Option<u32>,
     ) -> Result<Self, Error> {
         let intent = Intent {
-            version: 1,
+            version: if bitcoin_change_index.is_some() { 4 } else { 1 },
             identity,
             unsigned_digest: digest(&plan.step1),
             context_digest: context_digest(&context),
@@ -298,6 +331,7 @@ impl Controller {
             phase: Phase::Intent,
             fork_sweep: None,
             fork_change_index: None,
+            bitcoin_change_index,
             fork_submission: None,
         };
         validate(&intent)?;
@@ -518,7 +552,11 @@ impl Controller {
             // authenticated construction required for initial admission.
         }
         let mut next = self.intent.clone();
-        next.version = 3;
+        next.version = if next.bitcoin_change_index.is_some() {
+            4
+        } else {
+            3
+        };
         next.fork_sweep = Some(transaction.clone());
         next.fork_change_index = Some(change_index);
         validate(&next)?;

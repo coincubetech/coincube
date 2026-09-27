@@ -2019,6 +2019,7 @@ async fn restore_recorded_claim(
     let controller = claim_workflow::Controller::reopen(&directory, &identity, context.clone())
         .map_err(|e| describe(claim_coordinator::Error::Journal(e)))?;
     let plan = controller.plan();
+    let change_hint = controller.recorded_bitcoin_change_index();
     let phase = controller.phase();
     let txid = controller.signed_txid();
     drop(controller);
@@ -2049,7 +2050,9 @@ async fn restore_recorded_claim(
     } else {
         None
     };
-    let built = reconstruct_recorded_claim(daemon, &wallet, &plan, expected, &generation).await;
+    let built =
+        reconstruct_recorded_claim(daemon, &wallet, &plan, change_hint, expected, &generation)
+            .await;
     check()?;
     let built = match built {
         Ok(built) => built,
@@ -2106,6 +2109,7 @@ async fn reconstruct_recorded_claim(
     daemon: Arc<dyn Daemon + Sync + Send>,
     wallet: &Wallet,
     plan: &claim::ClaimPlan,
+    change_hint: Option<ChildNumber>,
     expected: u64,
     generation: &watch::Receiver<u64>,
 ) -> Result<Box<PoisonSelfTransfer>, String> {
@@ -2161,32 +2165,42 @@ async fn reconstruct_recorded_claim(
         .get(1)
         .ok_or_else(|| "The recorded claim has no change output.".to_string())?;
     let mut cursor = None;
-    let change = loop {
-        if *generation.borrow() != expected || generation.has_changed().is_err() {
-            return Err(SESSION_ENDED.into());
-        }
-        let page = daemon
-            .list_revealed_addresses(true, false, 100, cursor)
-            .await
-            .map_err(|e| e.to_string())?;
-        if let Some(entry) = page
-            .addresses
-            .iter()
-            .find(|entry| entry.address.script_pubkey() == output.script_pubkey)
-        {
-            break entry.index;
-        }
-        match page.continue_from {
-            Some(next) if cursor.is_none_or(|old| next < old) && !next.is_hardened() => {
-                cursor = Some(next)
+    let change = if let Some(index) = change_hint {
+        // The journal index is only a hint. The core builder below derives the
+        // owned script and verifies the entire recorded transaction and inputs.
+        index
+    } else {
+        loop {
+            if *generation.borrow() != expected || generation.has_changed().is_err() {
+                return Err(SESSION_ENDED.into());
             }
-            _ => {
-                return Err(
-                    "The recorded change address is not a revealed address of this Vault.".into(),
-                )
+            let page = daemon
+                .list_revealed_addresses(true, false, 100, cursor)
+                .await
+                .map_err(|e| e.to_string())?;
+            if let Some(entry) = page
+                .addresses
+                .iter()
+                .find(|entry| entry.address.script_pubkey() == output.script_pubkey)
+            {
+                break entry.index;
+            }
+            match page.continue_from {
+                Some(next) if cursor.is_none_or(|old| next < old) && !next.is_hardened() => {
+                    cursor = Some(next)
+                }
+                _ => {
+                    return Err(
+                        "The recorded change address is not a revealed address of this Vault."
+                            .into(),
+                    )
+                }
             }
         }
     };
+    if *generation.borrow() != expected || generation.has_changed().is_err() {
+        return Err(SESSION_ENDED.into());
+    }
     reconstruct_poison_self_transfer(
         wallet.chain,
         &wallet.main_descriptor,
