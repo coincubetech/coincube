@@ -639,6 +639,18 @@ pub(crate) mod tests {
     use super::*;
     use iced::futures::StreamExt;
     #[cfg(feature = "regtest-harness")]
+    pub(crate) fn live_psbt(
+        panel: &ForkClaimPanel,
+    ) -> coincube_core::miniscript::bitcoin::psbt::Psbt {
+        panel
+            .psbt
+            .as_ref()
+            .expect("fork signing state")
+            .tx
+            .psbt
+            .clone()
+    }
+    #[cfg(feature = "regtest-harness")]
     pub(crate) fn live_snapshot(panel: &ForkClaimPanel) -> serde_json::Value {
         serde_json::json!({"busy":panel.busy, "error":panel.error,
             "review":panel.review.is_some(), "outcome":panel.outcome.map(|o| format!("{o:?}")),

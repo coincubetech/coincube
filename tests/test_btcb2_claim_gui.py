@@ -24,13 +24,14 @@ from test_framework.authproxy import JSONRPCException
 
 
 class Child:
-    def __init__(self, tool, home):
+    def __init__(self, tool, home, multisig=False):
         home.mkdir()
         self.home = home
         self.proc = subprocess.Popen(
             [tool, "claim_gui_regtest_driver", "--ignored", "--nocapture", "--test-threads=1"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, env={**os.environ, "CLAIM_GUI_REGTEST_CHILD": "1",
+                            "CLAIM_GUI_REGTEST_MULTISIG": "1" if multisig else "0",
                             "HOME": str(home), "XDG_CONFIG_HOME": str(home / ".config"),
                             "XDG_DATA_HOME": str(home / ".local/share"),
                             "XDG_CACHE_HOME": str(home / ".cache")})
@@ -173,7 +174,8 @@ class Bridge:
         self.thread.join(timeout=5)
 
 
-def test_gui_claims_both_chains_and_recovers_remined_bitcoin(tmp_path, record_property):
+@pytest.mark.parametrize("multisig", [False, True], ids=["single-key", "two-of-three"])
+def test_gui_claims_both_chains_and_recovers_remined_bitcoin(tmp_path, record_property, multisig):
     tool = os.getenv("CLAIM_GUI_REGTEST_TEST_PATH")
     missing = missing_binaries()
     if not tool or not os.access(tool, os.X_OK) or missing:
@@ -184,7 +186,7 @@ def test_gui_claims_both_chains_and_recovers_remined_bitcoin(tmp_path, record_pr
     if os.getenv("TEST_DIR"):
         Path(os.environ["TEST_DIR"]).mkdir(parents=True, exist_ok=True)
         tmp_path = Path(tempfile.mkdtemp(prefix="btcb2-gui-", dir=os.environ["TEST_DIR"]))
-    child = Child(tool, tmp_path / "gui-home")
+    child = Child(tool, tmp_path / "gui-home", multisig)
     harness = bridge = None
     try:
         descriptor = child.receive()
@@ -217,10 +219,17 @@ def test_gui_claims_both_chains_and_recovers_remined_bitcoin(tmp_path, record_pr
                             "tip_height": node.rpc.getblockcount()}
         ready = child.send(initial)
         assert ready["event"] == "ready", ready
-        for action, stage in (("build", "plan"), ("sign", "sign"), ("open_signer", "sign"), ("hot_sign", "review")):
+        for action, stage in (("build", "plan"), ("sign", "sign"), ("open_signer", "sign"), ("hot_sign", "sign" if multisig else "review")):
             result = child.send({"command": action})
             assert result["stage"] == stage, result
             assert result["submission_calls"] == 0 and result["submitted"] is None
+        if multisig:
+            assert result["journal"] is None, "one signature must not finalize or journal"
+            assert not bridge.preflights, "one signature must not reach signed preflight"
+            result = child.send({"command": "second_sign"})
+            assert result["stage"] == "review", result
+            assert result["submission_calls"] == 0 and result["submitted"] is None
+        record_property("primary_threshold", 2 if multisig else 1)
         assert result["journal"] is not None
         assert bridge.preflights and all(v["allowed"] for v in bridge.preflights)
         result = child.send({"command": "confirm"})
@@ -280,6 +289,10 @@ def test_gui_claims_both_chains_and_recovers_remined_bitcoin(tmp_path, record_pr
         assert opened["submission_calls"] == 0 and opened["fork"]["error"] is None, opened
         child.send({"command": "fork_open_signer"})
         signed = child.send({"command": "fork_hot_sign"})
+        if multisig:
+            assert not signed["fork"]["review"] and signed["submitted"] is None, signed
+            assert signed["submission_calls"] == 0
+            signed = child.send({"command": "fork_second_sign"})
         assert signed["fork"]["review"] and not signed["fork"]["busy"] and signed["fork"]["error"] is None, signed
         assert signed["submission_calls"] == 0 and signed["submitted"] is None
         fork_result = child.send({"command": "fork_confirm"})
@@ -327,7 +340,7 @@ def test_gui_claims_both_chains_and_recovers_remined_bitcoin(tmp_path, record_pr
         old_log = tmp_path / "before-restart" / "log"
         old_log.parent.mkdir()
         old_log.write_text("".join(child.transcript))
-        child = Child(tool, tmp_path / "gui-home-restart")
+        child = Child(tool, tmp_path / "gui-home-restart", multisig)
         assert child.proc.pid != old_pid
         assert child.receive() == descriptor
         restart = child.send({**initial, "resume": True,

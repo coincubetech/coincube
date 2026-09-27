@@ -69,12 +69,14 @@ async fn drive(
 async fn claim_gui_regtest_driver() {
     assert_eq!(std::env::var("CLAIM_GUI_REGTEST_CHILD").as_deref(), Ok("1"));
     let mut input = std::io::BufReader::new(std::io::stdin());
-    let mut fixture = fixture_with_multisig(false);
+    let multisig = std::env::var("CLAIM_GUI_REGTEST_MULTISIG").as_deref() == Ok("1");
+    let mut fixture = fixture_with_multisig(multisig);
     emit(json!({"event":"descriptor", "descriptor":fixture.descriptor.to_string()}));
     let init = read(&mut input);
     let root = PathBuf::from(init["root"].as_str().unwrap());
     assert!(root.is_dir());
     let resume = init["resume"].as_bool().unwrap_or(false);
+    let second = if resume { None } else { fixture.second.take() };
     let fixture_marker = root.join("regtest-fixture-descriptor");
     if resume {
         assert_eq!(
@@ -251,6 +253,18 @@ async fn claim_gui_regtest_driver() {
             "hot_sign" => Message::View(view::Message::Spend(
                 view::SpendTxMessage::SelectMasterSigner,
             )),
+            "second_sign" => {
+                let second = second.as_ref().expect("second software signer configured");
+                let psbt = match &panel.stage {
+                    Stage::Sign { psbt, .. } => psbt.tx.psbt.clone(),
+                    _ => panic!("second signature must start at Sign"),
+                };
+                let secp = secp256k1::Secp256k1::new();
+                Message::Signed(
+                    second.fingerprint(&secp),
+                    Ok(second.sign_psbt(psbt, &secp).unwrap()),
+                )
+            }
             "review_reconfirmation" => Message::View(view::Message::Claim(
                 view::ClaimMessage::ReviewReconfirmation,
             )),
@@ -304,7 +318,8 @@ async fn claim_gui_regtest_driver() {
                 );
                 continue;
             }
-            "fork_open_signer" | "fork_hot_sign" | "fork_confirm" | "fork_refresh" => {
+            "fork_open_signer" | "fork_hot_sign" | "fork_second_sign" | "fork_confirm"
+            | "fork_refresh" => {
                 let p = fork_panel.as_mut().unwrap();
                 let message = match action {
                     "fork_open_signer" => {
@@ -313,6 +328,15 @@ async fn claim_gui_regtest_driver() {
                     "fork_hot_sign" => Message::View(view::Message::Spend(
                         view::SpendTxMessage::SelectMasterSigner,
                     )),
+                    "fork_second_sign" => {
+                        let second = second.as_ref().expect("second software signer configured");
+                        let secp = secp256k1::Secp256k1::new();
+                        let psbt = fork_panel::tests::live_psbt(p);
+                        Message::Signed(
+                            second.fingerprint(&secp),
+                            Ok(second.sign_psbt(psbt, &secp).unwrap()),
+                        )
+                    }
                     "fork_confirm" => {
                         Message::View(view::Message::Claim(view::ClaimMessage::Confirm))
                     }
