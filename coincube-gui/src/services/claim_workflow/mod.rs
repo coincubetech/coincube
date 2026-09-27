@@ -7,7 +7,7 @@ use coincube_core::{
     miniscript::bitcoin::{
         consensus,
         hashes::{sha256, Hash},
-        Transaction, Txid,
+        Transaction, Txid, Wtxid,
     },
 };
 use journal::Journal;
@@ -69,6 +69,24 @@ struct Intent {
     phase: Phase,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     fork_sweep: Option<Transaction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fork_submission: Option<RecordedForkSubmission>,
+}
+/// A possible submission, not evidence of acceptance or confirmation. Reading
+/// this journal record never permits a retry, even after an app restart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecordedForkSubmission {
+    txid: Txid,
+    wtxid: Wtxid,
+}
+impl RecordedForkSubmission {
+    pub fn txid(&self) -> Txid {
+        self.txid
+    }
+    pub fn wtxid(&self) -> Wtxid {
+        self.wtxid
+    }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
@@ -186,6 +204,15 @@ fn validate(intent: &Intent) -> Result<(), Error> {
             return Err(Error::InvalidPlan);
         }
     }
+    if let Some(submission) = intent.fork_submission {
+        if intent
+            .fork_sweep
+            .as_ref()
+            .is_none_or(|sweep| sweep.compute_txid() != submission.txid)
+        {
+            return Err(Error::InvalidPlan);
+        }
+    }
     Ok(())
 }
 impl Controller {
@@ -264,6 +291,7 @@ impl Controller {
             signed_txid: None,
             phase: Phase::Intent,
             fork_sweep: None,
+            fork_submission: None,
         };
         validate(&intent)?;
         Self::valid_context(&context)?;
@@ -462,6 +490,9 @@ impl Controller {
         if assessment != Assessment::ObservationsEligibleForPreflight {
             return Err(Error::Unchecked);
         }
+        if self.intent.fork_submission.is_some() {
+            return Err(Error::Conflict);
+        }
         let transaction = &sweep.psbt().unsigned_tx;
         if let Some(recorded) = &self.intent.fork_sweep {
             return if recorded == transaction {
@@ -482,6 +513,66 @@ impl Controller {
     /// checks must reconstruct/revalidate it before use; this returns no authority.
     pub fn recorded_fork_sweep(&self) -> Option<&Transaction> {
         self.intent.fork_sweep.as_ref()
+    }
+
+    /// Durably mark a fork submission as uncertain before the coordinator can
+    /// perform network I/O. Requires the exact verified signed construction and
+    /// another fresh Bitcoin depth/tip assessment after signing. The coordinator
+    /// must additionally enforce current fork-backend policy and generation.
+    /// Failure to write the journal must prevent the send; a saved intent must
+    /// never be interpreted as permission to retry after an ambiguous outcome.
+    pub fn record_fork_broadcast_intent(
+        &mut self,
+        current: &Context,
+        signed: &coincube_core::claim_finalize::VerifiedClaimForkSweep,
+        policy: Policy,
+        now: i64,
+    ) -> Result<(), Error> {
+        self.ensure_context(current)?;
+        let observations = self.fresh.take().ok_or(Error::Unchecked)?;
+        self.status = Status::Unchecked;
+        if !self.construction_verified || self.intent.phase != Phase::Tracking {
+            return Err(Error::Unchecked);
+        }
+        if self.intent.fork_submission.is_some() {
+            return Err(Error::Conflict);
+        }
+        if signed.chain() != self.intent.plan.fork_chain
+            || Some(signed.bitcoin_step1()) != self.intent.signed_txid
+        {
+            return Err(Error::WrongIdentity);
+        }
+        let mut unsigned = signed.transaction().clone();
+        for input in &mut unsigned.input {
+            input.witness.clear();
+        }
+        if self.intent.fork_sweep.as_ref() != Some(&unsigned) {
+            return Err(Error::InvalidPlan);
+        }
+        if claim::assess(
+            &self.intent.plan,
+            observations.bitcoin,
+            observations.fork,
+            observations.deployment,
+            policy,
+            now,
+            Some(observations.preflight),
+        ) != Assessment::ObservationsEligibleForPreflight
+        {
+            return Err(Error::Unchecked);
+        }
+        let mut next = self.intent.clone();
+        next.fork_submission = Some(RecordedForkSubmission {
+            txid: signed.transaction().compute_txid(),
+            wtxid: signed.transaction().compute_wtxid(),
+        });
+        validate(&next)?;
+        self.journal.store(&next)?;
+        self.intent = next;
+        Ok(())
+    }
+    pub fn recorded_fork_submission(&self) -> Option<RecordedForkSubmission> {
+        self.intent.fork_submission
     }
 
     /// Durably record a possible external broadcast *before* it is attempted.

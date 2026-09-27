@@ -681,4 +681,72 @@ fn fork_plan_requires_fresh_depth_and_survives_restart_without_authority() {
         Err(Error::Unchecked)
     ));
     assert_eq!(c.recorded_fork_sweep(), Some(&sweep.psbt().unsigned_tx));
+    let sign_sweep = |sweep: &coincube_core::claim_spend::ClaimForkSweep| {
+        let secp = secp256k1::Secp256k1::new();
+        let mut psbt = sweep.psbt().clone();
+        for b in 40..42 {
+            let signer = MasterSigner::from_mnemonic(
+                Network::Bitcoin,
+                Mnemonic::from_entropy(&[b; 16]).unwrap(),
+            )
+            .unwrap();
+            psbt = signer.sign_psbt(psbt, &secp).unwrap();
+        }
+        coincube_core::claim_finalize::finalize_claim_fork_sweep(
+            sweep,
+            &coincube_core::psbt_unified::UnifiedPsbt::from_psbt(psbt).unwrap(),
+            &secp,
+        )
+        .unwrap()
+    };
+    let signed = sign_sweep(&sweep);
+    // The last refresh observed a reorg: valid signatures cannot override it.
+    assert!(matches!(
+        c.record_fork_broadcast_intent(&context(), &signed, policy(), 10000),
+        Err(Error::Unchecked)
+    ));
+    let obs = real_observation(&c, 5);
+    refresh(&mut c, obs, 10000);
+    assert!(matches!(
+        c.record_fork_broadcast_intent(&context(), &signed, policy(), 10000),
+        Err(Error::Unchecked)
+    ));
+    let obs = real_observation(&c, 6);
+    refresh(&mut c, obs, 10000);
+    assert!(matches!(
+        c.record_fork_broadcast_intent(&context(), &signed, policy(), 10061),
+        Err(Error::Unchecked)
+    ));
+    let obs = real_observation(&c, 6);
+    refresh(&mut c, obs, 10000);
+    let replacement = sign_sweep(&build(4));
+    assert!(matches!(
+        c.record_fork_broadcast_intent(&context(), &replacement, policy(), 10000),
+        Err(Error::InvalidPlan)
+    ));
+    assert!(c.recorded_fork_submission().is_none());
+    let obs = real_observation(&c, 6);
+    refresh(&mut c, obs, 10000);
+    c.record_fork_broadcast_intent(&context(), &signed, policy(), 10000)
+        .unwrap();
+    let recorded = c.recorded_fork_submission().unwrap();
+    assert_eq!(recorded.txid(), signed.transaction().compute_txid());
+    assert_eq!(recorded.wtxid(), signed.transaction().compute_wtxid());
+    assert!(c.fresh.is_none());
+    drop(c);
+    let mut c = Controller::reopen(&temp.0, &wallet, context()).unwrap();
+    assert_eq!(c.recorded_fork_submission(), Some(recorded));
+    c.revalidate_construction(&context(), &source).unwrap();
+    let obs = real_observation(&c, 6);
+    refresh(&mut c, obs, 10000);
+    assert!(matches!(
+        c.record_fork_broadcast_intent(&context(), &signed, policy(), 10000),
+        Err(Error::Conflict)
+    ));
+    let obs = real_observation(&c, 6);
+    refresh(&mut c, obs, 10000);
+    assert!(matches!(
+        c.prepare_fork_sweep(&context(), &sweep, policy(), 10000),
+        Err(Error::Conflict)
+    ));
 }
