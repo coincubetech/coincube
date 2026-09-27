@@ -389,4 +389,78 @@ mod tests {
         std::fs::rename(&root, &moved).unwrap();
         std::fs::remove_dir_all(moved).unwrap();
     }
+    #[test]
+    fn null_dacl_is_rejected_and_reparse_ancestors_are_not_followed() {
+        let root = std::env::temp_dir().join(format!("claim-null-acl-{}", uuid::Uuid::new_v4()));
+        let guard = Directory::open(&root, true).unwrap();
+        let user = User::current().unwrap();
+        let mut descriptor = SECURITY_DESCRIPTOR::default();
+        let pointer = PSECURITY_DESCRIPTOR(ptr::addr_of_mut!(descriptor).cast());
+        unsafe {
+            InitializeSecurityDescriptor(pointer, 1).unwrap();
+            SetSecurityDescriptorOwner(pointer, Some(user.sid()), false).unwrap();
+            SetSecurityDescriptorDacl(pointer, true, None, false).unwrap();
+            SetSecurityDescriptorControl(pointer, SE_DACL_PROTECTED, SE_DACL_PROTECTED).unwrap();
+        }
+        let attrs = SECURITY_ATTRIBUTES {
+            nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: pointer.0,
+            bInheritHandle: false.into(),
+        };
+        let name = wide(&root.join("null-acl")).unwrap();
+        let raw = unsafe {
+            CreateFileW(
+                PCWSTR(name.as_ptr()),
+                FILE_GENERIC_READ.0 | FILE_GENERIC_WRITE.0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                Some(&attrs),
+                CREATE_NEW,
+                FILE_FLAG_OPEN_REPARSE_POINT,
+                None,
+            )
+            .unwrap()
+        };
+        let file = unsafe { File::from_raw_handle(raw.0) };
+        let mut actual_acl = ptr::null_mut();
+        let mut actual_descriptor = PSECURITY_DESCRIPTOR::default();
+        unsafe {
+            GetSecurityInfo(
+                handle(&file),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                None,
+                None,
+                Some(&mut actual_acl),
+                None,
+                Some(&mut actual_descriptor),
+            )
+            .ok()
+            .unwrap();
+        }
+        let actual = Allocation(actual_descriptor.0);
+        let mut control = 0;
+        let mut revision = 0;
+        unsafe {
+            GetSecurityDescriptorControl(actual_descriptor, &mut control, &mut revision).unwrap();
+        }
+        assert_ne!(control & SE_DACL_PROTECTED.0, 0);
+        assert!(
+            actual_acl.is_null(),
+            "fixture must have an actual null DACL"
+        );
+        assert!(validate(&file, false, true).is_err());
+        drop(actual);
+        drop(file);
+        let target = root.join("target");
+        drop(Directory::open(&target.join("claim"), true).unwrap());
+        let link = root.join("link");
+        // Native CI must actually exercise reparse rejection, not silently skip
+        // this security check when symlink creation is unavailable.
+        std::os::windows::fs::symlink_dir(&target, &link).unwrap();
+        assert!(Directory::open(&link, false).is_err());
+        assert!(Directory::open(&link.join("claim"), false).is_err());
+        assert!(Directory::open(&target.join("claim"), false).is_ok());
+        drop(guard);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

@@ -196,8 +196,12 @@ impl Journal {
             #[cfg(windows)]
             let mut file = windows::temporary(&path)?;
             created = true;
+            #[cfg(test)]
+            crash_boundary("created", &self.directory, intent);
             file.write_all(&bytes)?;
             file.sync_all()?;
+            #[cfg(test)]
+            crash_boundary("flushed", &self.directory, intent);
             drop(file);
             #[cfg(windows)]
             windows::replace(&path, &self.directory.join("intent.json"))?;
@@ -206,6 +210,8 @@ impl Journal {
                 fs::rename(&path, self.directory.join("intent.json"))?;
                 File::open(&self.directory)?.sync_all()?;
             }
+            #[cfg(test)]
+            crash_boundary("replaced", &self.directory, intent);
             Ok(())
         })();
         if result.is_err() {
@@ -219,5 +225,27 @@ impl Journal {
         }
         self.snapshot = Some(bytes);
         Ok(())
+    }
+}
+
+// Only the explicitly selected subprocess fixture can pause here. Production
+// builds contain neither the environment hooks nor the pause.
+#[cfg(test)]
+fn crash_boundary(stage: &str, directory: &Path, intent: &Intent) {
+    if intent.phase != super::Phase::BroadcastUncertain
+        || std::env::var("COINCUBE_TEST_CLAIM_CRASH_STAGE")
+            .ok()
+            .as_deref()
+            != Some(stage)
+        || std::env::var_os("COINCUBE_TEST_CLAIM_CRASH_DIRECTORY")
+            .is_none_or(|path| Path::new(&path) != directory)
+    {
+        return;
+    }
+    use std::io::Write;
+    println!("CLAIM_WRITE_BOUNDARY_REACHED");
+    std::io::stdout().flush().unwrap();
+    loop {
+        std::thread::park();
     }
 }
