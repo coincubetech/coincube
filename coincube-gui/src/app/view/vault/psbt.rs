@@ -67,8 +67,8 @@ pub struct ReplayPill<'a> {
 /// input is known to also exist on Bitcoin (`#276` I13) — the requirement
 /// that cannot be acknowledged away.
 fn replay_status_view<'a>(pill: &ReplayPill<'a>) -> Element<'a, Message> {
-    let (label, tone) = replay::pill_copy(&pill.review.status, &pill.entangled);
-    let blocked = replay::blocked_entangled_inputs(&pill.review.status, &pill.entangled);
+    let (label, tone) = replay::pill_copy(&pill.review.status(), &pill.entangled);
+    let blocked = replay::blocked_entangled_inputs(&pill.review.status(), &pill.entangled);
     let style: fn(&theme::Theme) -> iced::widget::container::Style = match tone {
         PillTone::Success => theme::pill::success,
         PillTone::Warning => theme::pill::warning,
@@ -90,7 +90,7 @@ fn replay_status_view<'a>(pill: &ReplayPill<'a>) -> Element<'a, Message> {
         // No checkbox: the acknowledgement does not apply to a required
         // signature, and showing one would suggest it does.
         column = column.push(p2_regular(required).style(theme::text::warning));
-    } else if pill.review.status.needs_acknowledgement() {
+    } else if pill.review.status().needs_acknowledgement() {
         if pill.checking {
             column = column.push(p2_regular(replay::CHECKING_COPY).style(theme::text::secondary));
         } else if !pill.unresolved.is_empty() {

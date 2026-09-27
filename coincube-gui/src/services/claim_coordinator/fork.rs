@@ -75,11 +75,12 @@ pub struct Coordinator {
     context: Context,
     generation: watch::Receiver<u64>,
     controller: Controller,
-    construction: ClaimForkSweep,
+    construction: Arc<ClaimForkSweep>,
     verified: Arc<VerifiedClaimForkSweep>,
     services: Box<dyn ForkServices>,
     policy: CheckPolicy,
     revoker: Revoker,
+    lifetime: Arc<()>,
 }
 impl Coordinator {
     /// Caller reconstructs both owned constructions and obtains signing consent.
@@ -183,11 +184,12 @@ impl Coordinator {
             context,
             generation,
             controller,
-            construction,
+            construction: Arc::new(construction),
             verified: Arc::new(verified),
             services,
             policy,
             revoker: Revoker::new(),
+            lifetime: Arc::new(()),
         })
     }
     pub fn context(&self) -> &Context {
@@ -423,10 +425,11 @@ pub struct Preparation {
     context: Context,
     generation: watch::Receiver<u64>,
     controller: Controller,
-    construction: ClaimForkSweep,
+    construction: Arc<ClaimForkSweep>,
     services: Box<dyn ForkServices>,
     policy: CheckPolicy,
     revoker: Revoker,
+    lifetime: Arc<()>,
 }
 impl Preparation {
     #[allow(clippy::too_many_arguments)]
@@ -514,10 +517,11 @@ impl Preparation {
             context,
             generation,
             controller,
-            construction,
+            construction: Arc::new(construction),
             services,
             policy,
             revoker: Revoker::new(),
+            lifetime: Arc::new(()),
         })
     }
     pub fn context(&self) -> &Context {
@@ -666,6 +670,99 @@ impl Preparation {
             services: self.services,
             policy: self.policy,
             revoker: self.revoker,
+            lifetime: self.lifetime,
         })
+    }
+}
+
+/// Positive, short-lived poison-split evidence for one owned construction.
+/// Only fresh Claim checks in this module can construct it. No serialization or
+/// public arbitrary-data constructor; equality means check identity, not freshness.
+pub struct SplitEvidence {
+    check: (u64, u64),
+    construction: Arc<ClaimForkSweep>,
+    generation: watch::Receiver<u64>,
+    expected_generation: u64,
+    revoker: Revoker,
+    not_after: Instant,
+    owner: std::sync::Weak<()>,
+}
+impl std::fmt::Debug for SplitEvidence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SplitEvidence").finish_non_exhaustive()
+    }
+}
+impl PartialEq for SplitEvidence {
+    fn eq(&self, other: &Self) -> bool {
+        self.check == other.check
+    }
+}
+impl Eq for SplitEvidence {}
+impl SplitEvidence {
+    pub(crate) fn is_live(&self) -> bool {
+        self.owner.upgrade().is_some()
+            && !self.revoker.is_revoked()
+            && *self.generation.borrow() == self.expected_generation
+            && self.generation.has_changed().is_ok()
+            && Instant::now() < self.not_after
+    }
+    pub(crate) fn matches(&self, psbt: &coincube_core::psbt_unified::UnifiedPsbt) -> bool {
+        self.is_live()
+            && coincube_core::claim_finalize::validate_claim_fork_signing(&self.construction, psbt)
+                .is_ok()
+    }
+}
+/// The exact PSBT to dispatch plus evidence for the Claim screen's replay label.
+/// The evidence does not replace signature verification or fresh submission review.
+pub struct SigningDispatch {
+    pub psbt: coincube_core::miniscript::bitcoin::psbt::Psbt,
+    pub split: Arc<SplitEvidence>,
+}
+impl Preparation {
+    pub fn signing_dispatch(
+        &mut self,
+        check: SigningCheck,
+        current_psbt: &coincube_core::psbt_unified::UnifiedPsbt,
+        context: &Context,
+    ) -> Result<SigningDispatch, Error> {
+        let identity = (check.preparation, check.revision);
+        let not_after = check.not_after;
+        let psbt = self.signing_psbt(check, current_psbt, context)?;
+        let split = Arc::new(SplitEvidence {
+            owner: Arc::downgrade(&self.lifetime),
+            check: identity,
+            construction: self.construction.clone(),
+            generation: self.generation.clone(),
+            expected_generation: self.context.generation,
+            revoker: self.revoker.clone(),
+            not_after,
+        });
+        Ok(SigningDispatch { psbt, split })
+    }
+}
+impl Coordinator {
+    /// Refresh the replay label from the same fully checked review shown to the
+    /// user. No observation or signature work is skipped by this accessor.
+    pub fn split_evidence(
+        &mut self,
+        review: &Review,
+        context: &Context,
+    ) -> Result<Arc<SplitEvidence>, Error> {
+        self.current(context)?;
+        if review.coordinator != self.id || review.revision != self.revision {
+            return Err(Error::InvalidReview);
+        }
+        if Instant::now() >= review.snapshot.not_after {
+            return Err(Error::ExpiredEvidence);
+        }
+        Ok(Arc::new(SplitEvidence {
+            owner: Arc::downgrade(&self.lifetime),
+            check: (review.coordinator, review.revision),
+            construction: self.construction.clone(),
+            generation: self.generation.clone(),
+            expected_generation: self.context.generation,
+            revoker: self.revoker.clone(),
+            not_after: review.snapshot.not_after,
+        }))
     }
 }

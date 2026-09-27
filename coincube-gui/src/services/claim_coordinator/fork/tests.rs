@@ -797,3 +797,115 @@ async fn signing_preserves_partial_signatures_and_refuses_replaced_metadata() {
         .is_ok());
     assert_eq!(h.calls.load(Ordering::SeqCst), 0);
 }
+
+#[tokio::test]
+async fn split_proof_never_bypasses_finalization_or_owned_construction() {
+    use crate::app::state::vault::replay::{replay_status, ReplayStatus};
+    let mut h = PreparingHarness::new().await;
+    let unsigned = h.psbt();
+    let partial = sign_sweep(unsigned.psbt().clone(), 1);
+    let signed = sign_sweep(unsigned.psbt().clone(), 2);
+    let check = h.preparation.check_signing(&context()).await.unwrap();
+    let dispatch = h
+        .preparation
+        .signing_dispatch(check, &unsigned, &context())
+        .unwrap();
+    let secp = secp256k1::Secp256k1::verification_only();
+    for incomplete in [unsigned.psbt(), partial.psbt()] {
+        assert!(matches!(
+            replay_status(incomplete, &secp, Some(&dispatch.split)),
+            ReplayStatus::Unknown(_)
+        ));
+    }
+    assert_eq!(
+        replay_status(signed.psbt(), &secp, Some(&dispatch.split)),
+        ReplayStatus::Split
+    );
+    let mut tampered = signed.psbt().clone();
+    tampered.unsigned_tx.output[0].value = Amount::from_sat(1);
+    assert!(matches!(
+        replay_status(&tampered, &secp, Some(&dispatch.split)),
+        ReplayStatus::Unknown(_)
+    ));
+    let mut changed_origin = signed.psbt().clone();
+    changed_origin.inputs[0].bip32_derivation.clear();
+    assert!(matches!(
+        replay_status(&changed_origin, &secp, Some(&dispatch.split)),
+        ReplayStatus::Unknown(_)
+    ));
+    // Proof is tied to its journal owner, not merely a still-open generation channel.
+    drop(h.preparation);
+    assert!(!dispatch.split.is_live());
+    assert!(matches!(
+        replay_status(signed.psbt(), &secp, Some(&dispatch.split)),
+        ReplayStatus::Unknown(_)
+    ));
+}
+#[tokio::test]
+async fn cached_split_review_expires_without_psbt_change_or_acknowledgement_escape() {
+    use crate::app::state::vault::replay::{ReplayReview, ReplayStatus};
+    let mut h = PreparingHarness::new().await;
+    let signed = sign_sweep(h.psbt().psbt().clone(), 2);
+    let check = h.preparation.check_signing(&context()).await.unwrap();
+    let dispatch = h
+        .preparation
+        .signing_dispatch(check, &signed, &context())
+        .unwrap();
+    let secp = secp256k1::Secp256k1::verification_only();
+    let mut review = ReplayReview::with_split(signed.psbt(), &secp, dispatch.split.clone());
+    assert_eq!(review.status(), ReplayStatus::Split);
+    assert!(review.broadcast_ready(&[]));
+    tokio::time::sleep_until(
+        tokio::time::Instant::from_std(dispatch.split.not_after) + Duration::from_millis(1),
+    )
+    .await;
+    assert!(matches!(review.status(), ReplayStatus::Unknown(_)));
+    review.set_acknowledged(true);
+    assert!(!review.broadcast_ready(&[]));
+    assert!(!review.refreshed(signed.psbt(), &secp).broadcast_ready(&[]));
+}
+#[tokio::test]
+async fn psbt_state_and_pill_drop_split_readiness_on_synchronous_revocation() {
+    use crate::app::{
+        cache::Cache,
+        state::vault::{
+            psbt::PsbtState,
+            replay::{pill_copy, ReplayStatus},
+        },
+        wallet::Wallet,
+    };
+    use crate::daemon::model::SpendTx;
+    let mut h = PreparingHarness::new().await;
+    let signed = sign_sweep(h.psbt().psbt().clone(), 2);
+    let check = h.preparation.check_signing(&context()).await.unwrap();
+    let dispatch = h
+        .preparation
+        .signing_dispatch(check, &signed, &context())
+        .unwrap();
+    let descriptor = h.preparation.construction.descriptor().clone();
+    let wallet = Arc::new(Wallet::new(descriptor.clone()).with_chain(ChainId::BitcoinBlake2b));
+    let tx = SpendTx::new(
+        None,
+        signed.psbt().clone(),
+        Vec::new(),
+        &descriptor,
+        &secp256k1::Secp256k1::new(),
+        Network::Bitcoin,
+    );
+    let mut state = PsbtState::new(wallet, tx, false);
+    assert!(state.set_claim_split_evidence(dispatch.split));
+    let cache = Cache::default();
+    assert!(state.broadcast_ready(&cache));
+    assert_eq!(
+        state.replay_presentation(&cache).unwrap().review.status(),
+        ReplayStatus::Split
+    );
+    h.preparation.revoker().revoke();
+    assert!(!state.broadcast_ready(&cache));
+    let pill = state.replay_presentation(&cache).unwrap();
+    assert!(matches!(pill.review.status(), ReplayStatus::Unknown(_)));
+    assert_ne!(
+        pill_copy(&pill.review.status(), &pill.entangled).0,
+        "Split — cannot replay"
+    );
+}

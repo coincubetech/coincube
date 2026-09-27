@@ -235,7 +235,7 @@ impl PsbtState {
         let Some(review) = &self.replay else {
             return Task::none();
         };
-        if !review.status.needs_acknowledgement() {
+        if !review.status().needs_acknowledgement() {
             self.entangled_check = EntangledCheck::Idle;
             return Task::none();
         }
@@ -432,6 +432,28 @@ impl PsbtState {
             self.replay.as_ref(),
             &self.entangled_inputs(cache),
         ) && !self.entangled_check.in_flight()
+    }
+
+    /// Attach only live Claim evidence for this exact owned fork construction.
+    /// Signature changes still run the ordinary verified replay refresh, while
+    /// every display/readiness read checks the evidence's current lifetime.
+    pub fn set_claim_split_evidence(&mut self, evidence: Arc<replay::SplitEvidence>) -> bool {
+        if !self.wallet.chain.is_blake2b() {
+            return false;
+        }
+        let Ok(unified) = coincube_core::psbt_unified::UnifiedPsbt::from_psbt(self.tx.psbt.clone())
+        else {
+            return false;
+        };
+        if !evidence.matches(&unified) {
+            return false;
+        }
+        self.replay = Some(ReplayReview::with_split(
+            &self.tx.psbt,
+            &secp256k1::Secp256k1::verification_only(),
+            evidence,
+        ));
+        true
     }
 
     pub fn with_recipient_identities(mut self, identities: Option<RecipientIdentities>) -> Self {
@@ -4093,7 +4115,7 @@ mod tests {
             );
             let mut state = PsbtState::new(wallet.clone(), tx, true);
             assert_eq!(
-                state.replay.as_ref().map(|r| r.status.clone()),
+                state.replay.as_ref().map(|r| r.status()),
                 Some(ReplayStatus::Unknown(UnknownReason::NotYetChecked))
             );
             assert!(!state.broadcast_ready(&Cache::default()));
@@ -4104,7 +4126,7 @@ mod tests {
             state.tx.psbt = unified(&unified(&f.psbt, &f.signers[0]), &f.signers[1]);
             let _ = state.reconcile_and_maybe_close(&Cache::default());
             assert_eq!(
-                state.replay.as_ref().unwrap().status,
+                state.replay.as_ref().unwrap().status(),
                 ReplayStatus::Protected
             );
             assert_eq!(state.tx.sigs.primary_path().sigs_count, 2);
@@ -4122,7 +4144,7 @@ mod tests {
             state.tx.psbt = legacy(&legacy(&f.psbt, &f.signers[0]), &f.signers[1]);
             let _ = state.reconcile_and_maybe_close(&Cache::default());
             assert_eq!(
-                state.replay.as_ref().unwrap().status,
+                state.replay.as_ref().unwrap().status(),
                 ReplayStatus::Replayable { inputs: vec![0] }
             );
             assert!(!state.broadcast_ready(&Cache::default()));
@@ -4204,10 +4226,10 @@ mod tests {
             assert!(!pill.broadcast_ready);
             assert!(!pill.review.signatures_complete(&pill.entangled));
             assert_eq!(
-                replay::blocked_entangled_inputs(&pill.review.status, &pill.entangled),
+                replay::blocked_entangled_inputs(&pill.review.status(), &pill.entangled),
                 vec![0]
             );
-            let (label, _) = replay::pill_copy(&pill.review.status, &pill.entangled);
+            let (label, _) = replay::pill_copy(&pill.review.status(), &pill.entangled);
             assert_eq!(
                 label,
                 "Replayable — no replay-capable signature on input 0 \
@@ -4263,14 +4285,14 @@ mod tests {
             );
             let _ = state.reconcile_and_maybe_close(&entangled);
             assert_eq!(
-                state.replay.as_ref().unwrap().status,
+                state.replay.as_ref().unwrap().status(),
                 ReplayStatus::Protected
             );
             assert!(state.broadcast_ready(&entangled));
             let pill = state.replay_presentation(&entangled).unwrap();
             assert!(pill.broadcast_ready);
             assert!(
-                replay::blocked_entangled_inputs(&pill.review.status, &pill.entangled).is_empty()
+                replay::blocked_entangled_inputs(&pill.review.status(), &pill.entangled).is_empty()
             );
 
             // Forward ordering: the lookup is already known when the legacy
