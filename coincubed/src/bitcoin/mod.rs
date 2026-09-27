@@ -300,7 +300,7 @@ pub trait BitcoinInterface: Send {
         None
     }
 
-    fn genesis_block_timestamp(&self) -> u32;
+    fn genesis_block_timestamp(&self) -> Result<u32, GenesisError>;
 
     fn genesis_block(&self) -> Result<BlockChainTip, GenesisError>;
 
@@ -442,13 +442,13 @@ impl BitcoinInterface for d::BitcoinD {
         Some(self.backend_id())
     }
 
-    fn genesis_block_timestamp(&self) -> u32 {
-        self.get_block_stats(
-            self.get_block_hash(0)
-                .expect("Genesis block hash must always be there"),
-        )
-        .expect("Genesis block must always be there")
-        .time
+    fn genesis_block_timestamp(&self) -> Result<u32, GenesisError> {
+        let hash = self
+            .get_block_hash_result(0)
+            .map_err(|error| GenesisError::Bitcoind(Box::new(error)))?;
+        self.get_block_stats_result(hash)
+            .map(|stats| stats.time)
+            .map_err(|error| GenesisError::Bitcoind(Box::new(error)))
     }
 
     fn genesis_block(&self) -> Result<BlockChainTip, GenesisError> {
@@ -858,10 +858,10 @@ impl BitcoinInterface for electrum::Electrum {
         spent_coins_from(&self.wallet_coins(Some(&ops)), outpoints)
     }
 
-    fn genesis_block_timestamp(&self) -> u32 {
+    fn genesis_block_timestamp(&self) -> Result<u32, GenesisError> {
         self.client()
             .genesis_block_timestamp()
-            .expect("Genesis block timestamp must always be there")
+            .map_err(|error| GenesisError::Electrum(Box::new(error)))
     }
 
     fn genesis_block(&self) -> Result<BlockChainTip, GenesisError> {
@@ -996,8 +996,10 @@ impl BitcoinInterface for esplora::Esplora {
         spent_coins_from(&self.wallet_coins(Some(&ops)), outpoints)
     }
 
-    fn genesis_block_timestamp(&self) -> u32 {
-        self.client().genesis_block_timestamp().unwrap_or(0)
+    fn genesis_block_timestamp(&self) -> Result<u32, GenesisError> {
+        self.client()
+            .genesis_block_timestamp()
+            .map_err(|error| GenesisError::Esplora(Box::new(error)))
     }
 
     fn genesis_block(&self) -> Result<BlockChainTip, GenesisError> {
@@ -1090,7 +1092,7 @@ impl BitcoinInterface for sync::Arc<sync::Mutex<dyn BitcoinInterface + 'static>>
         self.lock().unwrap().backend_id()
     }
 
-    fn genesis_block_timestamp(&self) -> u32 {
+    fn genesis_block_timestamp(&self) -> Result<u32, GenesisError> {
         self.lock().unwrap().genesis_block_timestamp()
     }
 

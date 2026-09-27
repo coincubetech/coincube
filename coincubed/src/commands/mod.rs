@@ -84,6 +84,8 @@ pub enum CommandError {
     InsaneRescanTimestamp(u32),
     /// An error that might occur in the racy rescan triggering logic.
     RescanTrigger(String),
+    /// The backend could not establish the genesis timestamp; no rescan started.
+    RescanGenesis(String),
     RecoveryNotAvailable,
     // Include timelock in error as it may not have been set explicitly by the user.
     OutpointNotRecoverable(bitcoin::OutPoint, /* timelock */ u16),
@@ -154,6 +156,7 @@ impl fmt::Display for CommandError {
                 "There is already a rescan ongoing. Please wait for it to complete first."
             ),
             Self::InsaneRescanTimestamp(t) => write!(f, "Insane timestamp '{}'.", t),
+            Self::RescanGenesis(e) => write!(f, "Cannot determine rescan lower bound: {e}"),
             Self::RescanTrigger(e) => write!(f, "Error while starting rescan: '{}'", e),
             Self::RecoveryNotAvailable => write!(
                 f,
@@ -1491,7 +1494,10 @@ impl DaemonControl {
     /// The date must be after the genesis block time and before the current tip blocktime.
     pub fn start_rescan(&mut self, timestamp: u32) -> Result<(), CommandError> {
         let mut db_conn = self.db.connection();
-        let genesis_timestamp = self.bitcoin.genesis_block_timestamp();
+        let genesis_timestamp = self
+            .bitcoin
+            .genesis_block_timestamp()
+            .map_err(|error| CommandError::RescanGenesis(error.to_string()))?;
 
         let future_timestamp = self
             .bitcoin
@@ -1861,6 +1867,31 @@ mod tests {
     use std::{collections::BTreeMap, str::FromStr};
 
     const DUST: u64 = DUST_OUTPUT_SATS;
+
+    #[test]
+    fn rescan_genesis_failure_is_retryable_without_recording_success() {
+        let backend = std::sync::Arc::new(std::sync::Mutex::new(DummyBitcoind::new()));
+        let interface: std::sync::Arc<std::sync::Mutex<dyn crate::bitcoin::BitcoinInterface>> =
+            backend.clone();
+        let daemon = DummyCoincube::new(interface, DummyDatabase::new());
+        let mut control = daemon.control().clone();
+        daemon.shutdown();
+        backend.lock().unwrap().genesis_error = Some(crate::connect::AdmissionError::Unavailable);
+        assert!(matches!(
+            control.start_rescan(1231006506),
+            Err(CommandError::RescanGenesis(_))
+        ));
+        assert!(control.db.connection().rescan_timestamp().is_none());
+        assert!(backend.lock().unwrap().rescan_requests.is_empty());
+        backend.lock().unwrap().genesis_error = None;
+        assert!(matches!(
+            control.start_rescan(1231006504),
+            Err(CommandError::InsaneRescanTimestamp(_))
+        ));
+        control.start_rescan(1231006506).unwrap();
+        assert_eq!(control.db.connection().rescan_timestamp(), Some(1231006506));
+        assert_eq!(backend.lock().unwrap().rescan_requests, vec![1231006506]);
+    }
 
     #[test]
     fn getinfo() {
