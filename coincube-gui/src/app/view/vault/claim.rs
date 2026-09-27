@@ -583,7 +583,7 @@ fn track_view<'a>(
                 .push(row("New block", p2_regular(format!("{} — {}", inclusion.confirmed.height, inclusion.confirmed.hash))))
                 .push(button::primary(None, "Acknowledge new confirmation").on_press_maybe((!busy).then_some(Message::Claim(ClaimMessage::ConfirmReconfirmation))))
         }))
-        .push_maybe((status == Some(Status::Observation(Assessment::Reorged)) && reconfirmation.is_none()).then(|| {
+        .push_maybe((!has_resubmission && status == Some(Status::Observation(Assessment::Reorged)) && reconfirmation.is_none()).then(|| {
             button::secondary(None, "Review new confirmation").on_press_maybe((!busy).then_some(Message::Claim(ClaimMessage::ReviewReconfirmation)))
         }))
         .push(
