@@ -17,7 +17,7 @@ impl BitcoinSubmissionAttempt {
 }
 
 pub(super) fn validate_record(intent: &Intent) -> Result<(), Error> {
-    if intent.version != 6 {
+    if intent.version < 6 || (intent.version == 7 && intent.phase == Phase::Intent) {
         return if intent.bitcoin_transaction.is_none() && intent.bitcoin_attempts.is_empty() {
             Ok(())
         } else {
@@ -85,7 +85,7 @@ impl Controller {
             };
         }
         let mut next = self.intent.clone();
-        next.version = 6;
+        next.version = next.version.max(6);
         next.bitcoin_transaction = Some(tx.clone());
         next.bitcoin_attempts
             .push(BitcoinSubmissionAttempt { wtxid: None });

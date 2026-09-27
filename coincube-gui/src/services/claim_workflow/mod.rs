@@ -1,4 +1,5 @@
 //! Restart-safe intent bookkeeping only. No signing/broadcast/UI entry point.
+mod ancestry;
 mod journal;
 mod recovery;
 mod reorg;
@@ -70,6 +71,8 @@ pub enum Phase {
 #[serde(deny_unknown_fields)]
 struct Intent {
     version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ancestry: Option<ancestry::StoredAncestry>,
     identity: WalletIdentity,
     plan: ClaimPlan,
     unsigned_digest: sha256::Hash,
@@ -166,8 +169,8 @@ fn validate(intent: &Intent) -> Result<(), Error> {
         (1 | 5 | 6, false, None, None)
             | (2 | 5 | 6, true, None, None)
             | (3 | 5 | 6, true, Some(0..=0x7fff_ffff), None)
-            | (4..=6, false, None, Some(0..=0x7fff_ffff))
-            | (4..=6, true, Some(0..=0x7fff_ffff), Some(0..=0x7fff_ffff))
+            | (4..=7, false, None, Some(0..=0x7fff_ffff))
+            | (4..=7, true, Some(0..=0x7fff_ffff), Some(0..=0x7fff_ffff))
     ) || intent.identity.bitcoin_cube.is_empty()
         || intent.identity.fork_cube.is_empty()
         || intent.identity.bitcoin_cube.len() > 256
@@ -178,12 +181,10 @@ fn validate(intent: &Intent) -> Result<(), Error> {
             (ChainId::Bitcoin, ChainId::BitcoinBlake2b)
                 | (ChainId::Testnet4, ChainId::BitcoinBlake2bTestnet4)
         )
-        || p.poison != Poison::OpReturn
         || p.step1.input.is_empty()
         || p.step1.input.iter().any(|i| {
             !i.script_sig.is_empty() || !i.witness.is_empty() || i.previous_output.is_null()
         })
-        || p.claimed_prevouts.len() != p.step1.input.len()
         || p.step1
             .input
             .iter()
@@ -196,15 +197,6 @@ fn validate(intent: &Intent) -> Result<(), Error> {
             .collect::<std::collections::BTreeSet<_>>()
             .len()
             != p.claimed_prevouts.len()
-        || p.step1
-            .input
-            .iter()
-            .any(|i| !p.claimed_prevouts.contains(&i.previous_output))
-        || !p
-            .step1
-            .output
-            .iter()
-            .any(|o| o.script_pubkey.is_op_return() && o.script_pubkey.len() > 83)
         || intent.unsigned_digest != digest(&p.step1)
         || intent
             .signed_txid
@@ -213,6 +205,7 @@ fn validate(intent: &Intent) -> Result<(), Error> {
     {
         return Err(Error::InvalidPlan);
     }
+    ancestry::validate_poison(intent)?;
     if let Some(sweep) = &intent.fork_sweep {
         let inputs: std::collections::BTreeSet<_> =
             sweep.input.iter().map(|i| i.previous_output).collect();
@@ -340,8 +333,32 @@ impl Controller {
         context: Context,
         bitcoin_change_index: Option<u32>,
     ) -> Result<Self, Error> {
+        Self::create_intent_with_ancestry(
+            directory,
+            identity,
+            plan,
+            context,
+            bitcoin_change_index,
+            None,
+        )
+    }
+    fn create_intent_with_ancestry(
+        directory: &Path,
+        identity: WalletIdentity,
+        plan: ClaimPlan,
+        context: Context,
+        bitcoin_change_index: Option<u32>,
+        ancestry: Option<ancestry::StoredAncestry>,
+    ) -> Result<Self, Error> {
         let intent = Intent {
-            version: if bitcoin_change_index.is_some() { 4 } else { 1 },
+            version: if ancestry.is_some() {
+                7
+            } else if bitcoin_change_index.is_some() {
+                4
+            } else {
+                1
+            },
+            ancestry,
             identity,
             unsigned_digest: digest(&plan.step1),
             context_digest: context_digest(&context),
@@ -707,7 +724,7 @@ impl Controller {
         let mut next = self.intent.clone();
         next.signed_txid = Some(signed.compute_txid());
         next.phase = Phase::BroadcastUncertain;
-        next.version = 6;
+        next.version = next.version.max(6);
         next.bitcoin_transaction = Some(signed.clone());
         next.bitcoin_attempts.push(BitcoinSubmissionAttempt {
             wtxid: Some(signed.compute_wtxid()),

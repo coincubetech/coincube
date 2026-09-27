@@ -1227,3 +1227,5 @@ fn windows_replacement_failure_poisons_owner_without_changing_saved_intent() {
     assert_eq!(recovered.phase(), Phase::Intent);
     assert_eq!(recovered.status(), Status::Unchecked);
 }
+
+mod ancestry;
