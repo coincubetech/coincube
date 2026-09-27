@@ -74,10 +74,29 @@ async fn claim_gui_regtest_driver() {
     let init = read(&mut input);
     let root = PathBuf::from(init["root"].as_str().unwrap());
     assert!(root.is_dir());
-    assert!(
-        root.read_dir().unwrap().next().is_none(),
-        "use a fresh synthetic root"
-    );
+    let resume = init["resume"].as_bool().unwrap_or(false);
+    let fixture_marker = root.join("regtest-fixture-descriptor");
+    if resume {
+        assert_eq!(
+            std::fs::read_to_string(&fixture_marker).unwrap(),
+            fixture.descriptor.to_string(),
+            "only reopen a matching synthetic test root"
+        );
+    } else {
+        assert!(
+            root.read_dir().unwrap().next().is_none(),
+            "use a fresh synthetic root"
+        );
+        std::fs::write(&fixture_marker, fixture.descriptor.to_string()).unwrap();
+    }
+    let recovered_transaction = |name: &str| {
+        init[name].as_str().map(|raw| {
+            coincube_core::miniscript::bitcoin::consensus::encode::deserialize_hex::<Transaction>(
+                raw,
+            )
+            .unwrap()
+        })
+    };
     let previous: Transaction =
         coincube_core::miniscript::bitcoin::consensus::encode::deserialize_hex(
             init["previous"].as_str().unwrap(),
@@ -108,7 +127,7 @@ async fn claim_gui_regtest_driver() {
         config,
         coin: fixture.coin,
         previous: fixture.previous,
-        submitted: Mutex::new(None),
+        submitted: Mutex::new(recovered_transaction("bitcoin_recorded_raw")),
         hits: Mutex::new(Vec::new()),
         live: Some(LiveTransport {
             transport,
@@ -117,26 +136,34 @@ async fn claim_gui_regtest_driver() {
     });
     let dyn_daemon: Arc<dyn Daemon + Send + Sync> = daemon.clone();
     let mut wallet = Wallet::new(fixture.descriptor);
-    wallet.signer = Some(Arc::new(Signer::new(fixture.hot)));
+    // A reopened tracking session deliberately has no signing key loaded.
+    // Recovery must use the journal and independently supplied node reads.
+    wallet.signer = if resume {
+        None
+    } else {
+        Some(Arc::new(Signer::new(fixture.hot)))
+    };
     let wallet = Arc::new(wallet);
     let datadir = CoincubeDirectory::new(root);
     let mut fork_wallet = (*wallet).clone();
     fork_wallet.chain = ChainId::BitcoinBlake2b;
     fork_wallet.pinned_at = Some(77);
     let fork_wallet = Arc::new(fork_wallet);
-    for (chain, id, vault) in [
-        (ChainId::Bitcoin, "bitcoin-cube", wallet.clone()),
-        (ChainId::BitcoinBlake2b, "fork-cube", fork_wallet.clone()),
-    ] {
-        use crate::app::settings::{update_settings_file, CubeSettings, VaultIdentity};
-        let cube = CubeSettings::new_with_raw_id(id.into(), id.into(), chain)
-            .with_vault(VaultIdentity::new(vault.id(), Some(&vault.main_descriptor)));
-        update_settings_file(&datadir.network_directory(chain), |mut settings| {
-            settings.cubes = vec![cube];
-            Some(settings)
-        })
-        .await
-        .unwrap();
+    if !resume {
+        for (chain, id, vault) in [
+            (ChainId::Bitcoin, "bitcoin-cube", wallet.clone()),
+            (ChainId::BitcoinBlake2b, "fork-cube", fork_wallet.clone()),
+        ] {
+            use crate::app::settings::{update_settings_file, CubeSettings, VaultIdentity};
+            let cube = CubeSettings::new_with_raw_id(id.into(), id.into(), chain)
+                .with_vault(VaultIdentity::new(vault.id(), Some(&vault.main_descriptor)));
+            update_settings_file(&datadir.network_directory(chain), |mut settings| {
+                settings.cubes = vec![cube];
+                Some(settings)
+            })
+            .await
+            .unwrap();
+        }
     }
     let mut fork_config = daemon.config.clone();
     fork_config.bitcoin_config.chain = ChainId::BitcoinBlake2b;
@@ -149,7 +176,7 @@ async fn claim_gui_regtest_driver() {
         config: fork_config,
         coin: daemon.coin.clone(),
         previous: daemon.previous.clone(),
-        submitted: Mutex::new(None),
+        submitted: Mutex::new(recovered_transaction("fork_recorded_raw")),
         hits: Mutex::new(Vec::new()),
         live: Some(LiveTransport {
             height: i32::try_from(init["fork_tip_height"].as_u64().unwrap()).unwrap(),
@@ -190,9 +217,30 @@ async fn claim_gui_regtest_driver() {
     };
     let task = panel.reload(Some(dyn_daemon.clone()), Some(wallet));
     drive(&mut panel, &dyn_daemon, &cache, task).await;
-    assert_eq!(panel.refusal(), None, "{:?}", panel.pre.checked);
-    assert!(panel.can_build());
-    emit(json!({"event":"ready"}));
+    if resume {
+        assert!(
+            matches!(
+                &panel.stage,
+                Stage::Track {
+                    session: Some(_),
+                    busy: false,
+                    error: None,
+                    ..
+                }
+            ),
+            "recorded Bitcoin claim must reopen for tracking: {:?}",
+            panel.restart_error
+        );
+        assert!(!panel.can_build());
+        assert!(!daemon.hits().contains(&"reserve_change"));
+    } else {
+        assert_eq!(panel.refusal(), None, "{:?}", panel.pre.checked);
+        assert!(panel.can_build());
+    }
+    emit(json!({"event":"ready", "resumed":resume,
+        "signer_available":panel.wallet.signer.is_some(),
+        "bitcoin_submission_calls":daemon.hits().iter().filter(|h| **h == "submit_verified_poison").count(),
+        "fork_submission_calls":fork_daemon.hits().iter().filter(|h| **h == "submit_verified_claim_fork").count()}));
     loop {
         let cmd = read(&mut input);
         let action = cmd["command"].as_str().unwrap();

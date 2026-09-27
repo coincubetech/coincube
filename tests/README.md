@@ -114,8 +114,12 @@ reconfirmation after the identical transaction is re-mined. The pinned indexer i
 paused while the complete competing branch is assembled, then restarted with the
 same database: this proves GUI recovery after indexing resumes, not uninterrupted
 indexer availability or outage UI. Return-to-Bitcoin uses panel lifecycle methods;
-fork reopening is in the same process. Process restart, App/tab routing, rendered
-UI, PIN unlock and hardware signing remain outside this live test.
+the driver also kills the GUI test process after both claims confirm, starts a
+new process with no signer loaded, and requires byte-for-byte journal/settings
+preservation before refresh. Both claims resume without new submissions and the
+reorg scenario then runs in the new process. This is headless panel-process
+recovery; full App bootstrap/tab routing, rendered UI, PIN unlock and hardware
+signing remain outside this live test.
 The `regtest-harness` feature is off in normal builds. The labelled BTCB2 workflow
 builds this driver and fails if the required executable or pinned nodes are missing.
 

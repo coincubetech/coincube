@@ -205,7 +205,7 @@ def test_gui_claims_both_chains_and_recovers_remined_bitcoin(tmp_path, record_pr
         txid, vout, _ = harness.prefork_outpoints[0]
         node = harness.legacy
         block = harness.prefork_block_hashes[txid]
-        ready = child.send({"root": str(root), "bridge": bridge.url,
+        initial = {"root": str(root), "bridge": bridge.url,
                             "rpc": f"127.0.0.1:{node.rpcport}",
                             "cookie": Path(node.node_rpc.cookie_path).read_text().strip(),
                             "fork_rpc": f"127.0.0.1:{harness.blake2b.rpcport}",
@@ -213,7 +213,8 @@ def test_gui_claims_both_chains_and_recovers_remined_bitcoin(tmp_path, record_pr
                             "fork_tip_height": harness.blake2b.rpc.getblockcount(),
                             "previous": node.rpc.getrawtransaction(txid, False, block), "vout": vout,
                             "coin_height": node.rpc.getblockheader(block)["height"],
-                            "tip_height": node.rpc.getblockcount()})
+                            "tip_height": node.rpc.getblockcount()}
+        ready = child.send(initial)
         assert ready["event"] == "ready", ready
         for action, stage in (("build", "plan"), ("sign", "sign"), ("open_signer", "sign"), ("hot_sign", "review")):
             result = child.send({"command": action})
@@ -272,6 +273,47 @@ def test_gui_claims_both_chains_and_recovers_remined_bitcoin(tmp_path, record_pr
                      ("fork_sweep", "fork_submission", "bitcoin_transaction", "bitcoin_attempts")}
         old_history = completed["journal"].get("inclusion_history", [])
 
+        # Terminate the actual GUI child, keeping only its on-disk state. A
+        # different process reloads without a signer, with freshly read node
+        # transactions supplying its wallet adapter's historical reads.
+        def durable_files():
+            return {str(path.relative_to(root)): path.read_bytes()
+                    for pattern in ("settings.json", "intent.json") for path in root.rglob(pattern)}
+        before_restart = durable_files()
+        assert len(before_restart) == 3, before_restart.keys()
+        old_pid = child.proc.pid
+        assert list(child.home.iterdir()) == []
+        child.proc.kill()
+        child.proc.wait(timeout=10)
+        child.close()
+        old_log = tmp_path / "before-restart" / "log"
+        old_log.parent.mkdir()
+        old_log.write_text("".join(child.transcript))
+        child = Child(tool, tmp_path / "gui-home-restart")
+        assert child.proc.pid != old_pid
+        assert child.receive() == descriptor
+        restart = child.send({**initial, "resume": True,
+                              "tip_height": node.rpc.getblockcount(),
+                              "fork_tip_height": fork_node.rpc.getblockcount(),
+                              "bitcoin_recorded_raw": node.rpc.getrawtransaction(submitted["txid"], False, inclusion["hash"]),
+                              "fork_recorded_raw": fork_node.rpc.getrawtransaction(fork_tx["txid"], False, fork_block)})
+        assert restart == {"event": "ready", "resumed": True, "signer_available": False,
+                           "bitcoin_submission_calls": 0, "fork_submission_calls": 0}, restart
+        assert durable_files() == before_restart, "restart changed journal or paired completion settings"
+        resumed_bitcoin = child.send({"command": "refresh"})
+        assert resumed_bitcoin["tracking"] == {"status": "Some(Observation(ObservationsEligibleForPreflight))",
+                                               "busy": False, "error": None}, resumed_bitcoin
+        assert resumed_bitcoin["submission_calls"] == 0
+        assert resumed_bitcoin["journal"] == completed["journal"]
+        resumed_fork = child.send({"command": "fork_open"})
+        assert resumed_fork["fork"]["outcome"] is not None and resumed_fork["submission_calls"] == 0
+        resumed_completion = child.send({"command": "fork_refresh"})
+        assert resumed_completion["fork"]["tracking"]["saved"] is True, resumed_completion
+        assert resumed_completion["submission_calls"] == 0
+        assert {key: resumed_completion["journal"].get(key) for key in preserved} == preserved
+        record_property("restart_new_pid", child.proc.pid)
+        record_property("restart_loaded_signer", False)
+
         # Invalidate only Bitcoin. The fork remains canonical and confirmed.
         # Present a complete competing branch to the pinned indexer. A bare
         # invalidateblock leaves a regtest-only shorter tip which this electrs
@@ -292,7 +334,7 @@ def test_gui_claims_both_chains_and_recovers_remined_bitcoin(tmp_path, record_pr
         assert reorged["fork"]["tracking"]["transaction"].startswith("Confirmed")
         assert reorged["fork"]["tracking"]["saved"] is False
         assert reorged["fork"]["error"] is None and not reorged["fork"]["busy"]
-        assert reorged["submission_calls"] == 1
+        assert reorged["submission_calls"] == 0
         for settings in reorged["settings"]:
             for cube in settings["cubes"]:
                 assert cube.get("split_completed_at_height") is None
@@ -322,18 +364,18 @@ def test_gui_claims_both_chains_and_recovers_remined_bitcoin(tmp_path, record_pr
         assert confirmed["journal"]["inclusion_history"] == old_history + [{"previous": inclusion, "confirmed": new_inclusion}]
         assert {key: confirmed["journal"].get(key) for key in preserved} == preserved
         duplicate = child.send({"command": "confirm_reconfirmation"})
-        assert duplicate["journal"] == confirmed["journal"] and duplicate["submission_calls"] == 1
+        assert duplicate["journal"] == confirmed["journal"] and duplicate["submission_calls"] == 0
         node.generate_block(5)
         harness.electrs_legacy.wait_for_tip(node.rpc.getbestblockhash())
         recovered = child.send({"command": "refresh"})
         assert recovered["tracking"]["status"] == "Some(Observation(ObservationsEligibleForPreflight))", recovered
-        assert recovered["submission_calls"] == 1
+        assert recovered["submission_calls"] == 0
         # Reopening the fork loader must recover its recorded transaction, not sign again.
         reopened = child.send({"command": "fork_open"})
-        assert reopened["fork"]["outcome"] is not None and reopened["submission_calls"] == 1
+        assert reopened["fork"]["outcome"] is not None and reopened["submission_calls"] == 0
         restored = child.send({"command": "fork_refresh"})
         assert restored["fork"]["tracking"]["saved"] is True, restored
-        assert restored["submission_calls"] == 1
+        assert restored["submission_calls"] == 0
         for settings in restored["settings"]:
             for cube in settings["cubes"]:
                 assert cube["split_completed_at_height"] == fork_height
