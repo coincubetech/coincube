@@ -186,6 +186,7 @@ pub enum Message {
     /// poisoned, swept or broadcast by this flow.
     StartClaimBlake2b,
     ContinueForkClaim,
+    ReturnBitcoinClaim,
     /// Claim step 1 — the poison self-transfer on Bitcoin (Lane B1.5),
     /// handled by `state::vault::claim::ClaimStep1Panel`.
     Claim(ClaimMessage),

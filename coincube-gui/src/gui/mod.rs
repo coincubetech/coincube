@@ -459,6 +459,59 @@ impl GUI {
                     Task::none()
                 }
             }
+            Message::Pane(
+                origin,
+                pane::Message::View(pane::ViewMessage::OpenBitcoinClaim(handoff)),
+            ) => {
+                // Reuse an already-unlocked source in any pane. Opening a second
+                // daemon for it could contend with the original wallet owner.
+                let existing = self.panes.iter().find_map(|(pane_id, pane)| {
+                    pane.tabs
+                        .iter()
+                        .enumerate()
+                        .find_map(|(index, tab)| match &tab.state {
+                            tab::State::App(app)
+                                if handoff.matches_root(app.datadir())
+                                    && app.cube_settings().network
+                                        == crate::chain::ChainId::Bitcoin
+                                    && app.cube_settings().id == handoff.bitcoin_cube() =>
+                            {
+                                Some((*pane_id, index, tab.id))
+                            }
+                            _ => None,
+                        })
+                });
+                if let Some((pane_id, index, tab_id)) = existing {
+                    if let Some(pane) = self.panes.get_mut(pane_id) {
+                        if let tab::State::App(app) = &mut pane.tabs[index].state {
+                            let task = app.resume_returned_bitcoin_claim(&handoff).unwrap_or_else(
+                                |error| {
+                                    Task::done(crate::app::Message::View(
+                                        crate::app::view::Message::ShowError(error),
+                                    ))
+                                },
+                            );
+                            pane.focused_tab = index;
+                            self.focus = Some(pane_id);
+                            return task.map(move |message| {
+                                Message::Pane(
+                                    pane_id,
+                                    pane::Message::Tab(tab_id, tab::Message::Run(message)),
+                                )
+                            });
+                        }
+                    }
+                }
+                if let Some(pane) = self.panes.get_mut(origin) {
+                    pane.update(
+                        pane::Message::View(pane::ViewMessage::OpenBitcoinClaim(handoff)),
+                        &self.config,
+                    )
+                    .map(move |message| Message::Pane(origin, message))
+                } else {
+                    Task::none()
+                }
+            }
             Message::Pane(_, pane::Message::View(pane::ViewMessage::ToggleTheme)) => {
                 self.update(Message::ToggleTheme)
             }

@@ -924,6 +924,12 @@ impl ClaimStep1Panel {
         Ok(handoff)
     }
 
+    /// The source tab may still be open after its forward handoff. Returning
+    /// releases the navigation hold; recovery still reopens the saved journal.
+    pub fn return_from_fork(&mut self) {
+        self.handoff_pending = false;
+    }
+
     pub fn is_resuming(&self) -> bool {
         self.resuming
     }

@@ -1542,6 +1542,9 @@ mod flow {
         );
         assert!(reopened.is_ok(), "{:?}", reopened.err());
         drop(reopened);
+        f.p.return_from_fork();
+        assert!(!f.p.handoff_pending);
+        assert!(f.p.restart_pending);
         update_settings_file(
             &f.datadir.network_directory(ChainId::Bitcoin),
             |mut settings| {

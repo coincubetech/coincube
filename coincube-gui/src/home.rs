@@ -930,6 +930,38 @@ impl Home {
         ))
     }
 
+    fn return_bitcoin_claim(&mut self, handoff: app::claim_intent::ForkHandoff) -> Task<Message> {
+        app::claim_intent::clear();
+        self.pending_fork_claim = None;
+        let source = match handoff.resolve_source(&self.datadir_path) {
+            Ok(source) => source,
+            Err(error) => {
+                self.set_error(error);
+                return Task::none();
+            }
+        };
+        let chain = ChainId::Bitcoin;
+        let path = self
+            .datadir_path
+            .network_directory(chain)
+            .path()
+            .join(app::config::DEFAULT_FILE_NAME);
+        let config = match app::Config::from_file(&path) {
+            Ok(config) => config,
+            Err(error) => {
+                self.set_error(format!("Couldn't read the Bitcoin configuration: {error}"));
+                return Task::none();
+            }
+        };
+        app::claim_intent::arm_return(handoff);
+        Task::done(Message::Run(
+            self.datadir_path.clone(),
+            config,
+            chain,
+            source,
+        ))
+    }
+
     pub fn update(&mut self, message: Message) -> Task<Message> {
         let message = match message {
             Message::FocusedCubes { for_chain, res } => {
@@ -949,6 +981,7 @@ impl Home {
             other => other,
         };
         let task = match message {
+            Message::ReturnBitcoinClaim(handoff) => self.return_bitcoin_claim(handoff),
             Message::ContinueForkClaim(handoff) => {
                 app::claim_intent::clear();
                 if !handoff.matches_root(&self.datadir_path) {
@@ -5528,6 +5561,7 @@ fn map_connect_task(task: Task<app::message::Message>) -> Task<Message> {
 pub enum Message {
     View(ViewMessage),
     ContinueForkClaim(app::claim_intent::ForkHandoff),
+    ReturnBitcoinClaim(app::claim_intent::ForkHandoff),
     /// A focus refresh must not replace a form opened while the read ran.
     FocusedCubes {
         for_chain: crate::chain::ChainId,
@@ -9500,6 +9534,25 @@ mod chain_identity_open_tests {
             Some(app::claim_intent::Intent::Fork(_))
         ));
         assert!(app::claim_intent::take_for_cube(&root, "target").is_none());
+        // Returning opens the exact source through the ordinary unlock route;
+        // only that source and root can consume the recovery intent.
+        let messages = drain(home.update(Message::ReturnBitcoinClaim(pair.clone())));
+        assert!(messages
+            .iter()
+            .any(|m| is_run_for(m, ChainId::Bitcoin, "source")));
+        assert!(matches!(
+            app::claim_intent::take_for_cube(&root, "source"),
+            Some(app::claim_intent::Intent::RecoverBitcoin(_))
+        ));
+        assert!(app::claim_intent::take_for_cube(&root, "source").is_none());
+        let foreign = app::claim_intent::ForkHandoff::new(
+            &CoincubeDirectory::new(root.path().join("other")),
+            "source".into(),
+            "target".into(),
+        )
+        .unwrap();
+        assert!(drain(home.update(Message::ReturnBitcoinClaim(foreign))).is_empty());
+        assert!(app::claim_intent::take_for_cube(&root, "source").is_none());
         // A changed/ambiguous target cannot be armed, even under an admitted account.
         let fork_dir = root.network_directory(ChainId::BitcoinBlake2b);
         std::fs::write(
@@ -9511,6 +9564,8 @@ mod chain_identity_open_tests {
             .unwrap(),
         )
         .unwrap();
+        assert!(drain(home.update(Message::ReturnBitcoinClaim(pair.clone()))).is_empty());
+        assert!(app::claim_intent::take_for_cube(&root, "source").is_none());
         assert!(drain(home.update(Message::ContinueForkClaim(pair))).is_empty());
         assert!(home.error().unwrap().contains("ambiguous"));
         assert!(app::claim_intent::take_for_cube(&root, "target").is_none());

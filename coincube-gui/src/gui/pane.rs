@@ -21,6 +21,7 @@ pub enum Message {
 #[derive(Debug, Clone)]
 pub enum ViewMessage {
     OpenForkClaim(app::claim_intent::ForkHandoff),
+    OpenBitcoinClaim(app::claim_intent::ForkHandoff),
     FocusTab(usize),
     CloseTab(usize),
     SplitTab(usize),
@@ -186,6 +187,9 @@ impl Pane {
                             tab::Message::ToggleTheme => {
                                 Task::done(Message::View(ViewMessage::ToggleTheme))
                             }
+                            tab::Message::OpenBitcoinClaim(handoff) => {
+                                Task::done(Message::View(ViewMessage::OpenBitcoinClaim(handoff)))
+                            }
                             tab::Message::OpenForkClaim(handoff) => {
                                 Task::done(Message::View(ViewMessage::OpenForkClaim(handoff)))
                             }
@@ -241,6 +245,10 @@ impl Pane {
                 if !tasks.is_empty() {
                     return Task::batch(tasks);
                 }
+            }
+            Message::View(ViewMessage::OpenBitcoinClaim(handoff)) => {
+                return self
+                    .focus_home_tab_with(crate::home::Message::ReturnBitcoinClaim(handoff), cfg);
             }
             Message::View(ViewMessage::OpenForkClaim(handoff)) => {
                 return self
