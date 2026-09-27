@@ -1158,7 +1158,7 @@ impl Coordinator {
                 .to_string();
         let checksum = WalletId::generate(self.construction.descriptor()).descriptor_checksum;
         let pair = [(fork, &wallet.fork_cube), (bitcoin, &wallet.bitcoin_cube)];
-        let apply = |settings: &mut Settings, chain, id: &str| -> Result<(), SettingsError> {
+        let apply = |settings: &mut Settings, chain, id: &str| -> Result<bool, SettingsError> {
             if self.revoker.is_revoked()
                 || self.generation.has_changed().is_err()
                 || *self.generation.borrow() != context.generation
@@ -1172,19 +1172,36 @@ impl Coordinator {
             if cube.split_completion_txid == Some(txid) {
                 cube.split_completed_at_height = None;
                 cube.split_completion_txid = None;
+                return Ok(true);
             }
-            Ok(())
+            Ok(false)
         };
+        let mut snapshots = Vec::new();
         for (chain, id) in pair {
-            let mut settings = Settings::from_file(&root.network_directory(chain))
+            let settings = Settings::from_file(&root.network_directory(chain))
                 .map_err(|error| Error::CompletionPersistence(error.to_string()))?;
+            snapshots.push((chain, id, settings));
+        }
+        let marked = snapshots.iter().any(|(_, id, settings)| {
+            settings
+                .cubes
+                .iter()
+                .any(|cube| cube.id == **id && cube.split_completion_txid == Some(txid))
+        });
+        if !marked {
+            self.current(context)?;
+            if Instant::now() >= deadline {
+                return Err(Error::ExpiredEvidence);
+            }
+            return Ok((status, transaction));
+        }
+        for (chain, id, mut settings) in snapshots {
             apply(&mut settings, chain, id)
                 .map_err(|error| Error::CompletionPersistence(error.to_string()))?;
         }
         for (chain, id) in pair {
             update_settings_file_checked(&root.network_directory(chain), |mut settings| {
-                apply(&mut settings, chain, id)?;
-                Ok(Some(settings))
+                Ok(apply(&mut settings, chain, id)?.then_some(settings))
             })
             .await
             .map_err(|error| Error::CompletionPersistence(error.to_string()))?;

@@ -978,7 +978,15 @@ impl Home {
                             | ViewMessage::ConnectAccount(app::view::ConnectAccountMessage::LogOut)
                     )
                 ) {
-                    self.pending_fork_claim = None;
+                    let cancelled = self.pending_fork_claim.take().is_some();
+                    if cancelled
+                        && matches!(
+                            &message,
+                            Message::View(ViewMessage::GoToSection(HomeSection::Cubes))
+                        )
+                    {
+                        self.set_error("The Bitcoin Blake2b Claim handoff was cancelled. Return to the Bitcoin Cube to continue.");
+                    }
                 }
                 self.update_inner(message)
             }
@@ -9405,6 +9413,25 @@ mod chain_identity_open_tests {
         }
         assert!(matches!(home.state, State::RecoveryInput));
         assert!(drain(home.on_focus()).is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn cancelled_pending_claim_handoff_explains_how_to_resume() {
+        let _guard = crate::app::session::test_guard();
+        let dir = tmp_datadir("cancelled-claim-handoff");
+        let root = CoincubeDirectory::new(dir.clone());
+        let mut home = Home::new(root.clone(), Some(Network::Bitcoin)).0;
+        home.pending_fork_claim = Some(
+            app::claim_intent::ForkHandoff::new(&root, "source".into(), "target".into()).unwrap(),
+        );
+        let _ = home.update(Message::View(ViewMessage::GoToSection(HomeSection::Cubes)));
+        assert!(home.pending_fork_claim.is_none());
+        assert!(home.error().unwrap().contains("handoff was cancelled"));
+        assert!(home.error().unwrap().contains("Return to the Bitcoin Cube"));
+        home.error = None;
+        let _ = home.update(Message::View(ViewMessage::GoToSection(HomeSection::Cubes)));
+        assert!(home.error().is_none());
         std::fs::remove_dir_all(dir).unwrap();
     }
 

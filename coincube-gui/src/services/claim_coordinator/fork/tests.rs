@@ -1470,3 +1470,53 @@ async fn historical_completion_requires_positive_exact_bitcoin_inclusion() {
     });
     assert!(!completion_bitcoin_confirmed(&plan, observed));
 }
+
+#[tokio::test]
+async fn unmarked_completion_tracking_does_not_rewrite_settings_or_require_marker_identity() {
+    use crate::app::settings::{update_settings_file, Settings, SETTINGS_FILE_NAME};
+    use std::os::unix::fs::MetadataExt;
+    let (mut h, root) = completed_pair().await;
+    let mut before = Vec::new();
+    for chain in [ChainId::Bitcoin, ChainId::BitcoinBlake2b] {
+        update_settings_file(&root.network_directory(chain), |mut settings| {
+            settings.cubes[0].split_completion_txid = None;
+            settings.cubes[0].split_completed_at_height = None;
+            settings.cubes[0].vault_fingerprint = None;
+            Some(settings)
+        })
+        .await
+        .unwrap();
+        let path = root
+            .network_directory(chain)
+            .path()
+            .join(SETTINGS_FILE_NAME);
+        let metadata = std::fs::metadata(&path).unwrap();
+        before.push((
+            path.clone(),
+            std::fs::read(path).unwrap(),
+            metadata.ino(),
+            metadata.modified().unwrap(),
+        ));
+    }
+    h.fault.store(11, Ordering::SeqCst);
+    let (_, tx) = h
+        .coordinator
+        .reconcile_completion(&context(), &root)
+        .await
+        .unwrap();
+    assert!(matches!(tx, TransactionObservation::Unconfirmed { .. }));
+    for (path, bytes, inode, modified) in before {
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        let metadata = std::fs::metadata(path).unwrap();
+        assert_eq!(metadata.ino(), inode);
+        assert_eq!(metadata.modified().unwrap(), modified);
+    }
+    assert_eq!(h.calls.load(Ordering::SeqCst), 1);
+    assert!(
+        Settings::from_file(&root.network_directory(ChainId::Bitcoin))
+            .unwrap()
+            .cubes[0]
+            .split_completion_txid
+            .is_none()
+    );
+}
