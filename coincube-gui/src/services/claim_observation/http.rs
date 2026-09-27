@@ -10,7 +10,9 @@ use std::{
 };
 
 mod ancestry;
+mod discovery;
 pub use ancestry::{CanonicalCoinbase, CoinbasePair};
+pub use discovery::{DiscoveredAncestry, DiscoveryError};
 
 const BODY_LIMIT: usize = 256 * 1024;
 const TRANSACTION_HEX_LIMIT: usize = 2 * coincube_core::claim_ancestry::MAX_TRANSACTION_BYTES;
@@ -25,6 +27,7 @@ pub struct HttpObservationSource {
     base: String,
     generation: watch::Receiver<u64>,
     expected: u64,
+    budget: Option<std::sync::Arc<discovery::CollectionBudget>>,
 }
 impl HttpObservationSource {
     pub fn new(
@@ -62,6 +65,7 @@ impl HttpObservationSource {
             anonymous,
             expected: context.expected_generation,
             generation: context.generation,
+            budget: None,
         })
     }
     fn prefix(chain: ChainId) -> Result<&'static str, FailureKind> {
@@ -114,6 +118,9 @@ impl HttpObservationSource {
         let prefix = Self::prefix(chain)?;
         self.bounded(async {
             let stamp = self.now();
+            if let Some(budget) = &self.budget {
+                budget.charge_request(0)?;
+            }
             let mut request = self
                 .anonymous
                 .get(format!("{}/api/v1/esplora/{}/{}", self.base, prefix, path))
@@ -151,6 +158,9 @@ impl HttpObservationSource {
                 if chunk.len() > body_limit.saturating_sub(bytes.len()) {
                     return Err(FailureKind::Malformed);
                 }
+                if let Some(budget) = &self.budget {
+                    budget.charge_bytes(chunk.len())?;
+                }
                 bytes.extend_from_slice(&chunk);
             }
             Ok((status, bytes, headers, stamp))
@@ -166,12 +176,25 @@ impl HttpObservationSource {
         chain: ChainId,
         txid: Txid,
     ) -> Result<Vec<u8>, FailureKind> {
+        self.ancestry_transaction_limited(
+            chain,
+            txid,
+            coincube_core::claim_ancestry::MAX_TRANSACTION_BYTES,
+        )
+        .await
+    }
+    async fn ancestry_transaction_limited(
+        &self,
+        chain: ChainId,
+        txid: Txid,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, FailureKind> {
         let (status, bytes, _, _) = self
             .get_body(
                 chain,
                 &format!("tx/{}/hex", txid),
                 false,
-                TRANSACTION_HEX_LIMIT,
+                TRANSACTION_HEX_LIMIT.min(max_bytes.saturating_mul(2)),
             )
             .await?;
         if status != 200 {
@@ -255,6 +278,11 @@ impl ObservationSource for HttpObservationSource {
             return Err(FailureKind::WrongChain);
         }
         self.bounded(async {
+            if let Some(budget) = &self.budget {
+                budget.charge_request(
+                    crate::services::coincube::network_anchor::MAX_ANCHOR_BODY_BYTES,
+                )?;
+            }
             self.authenticated.network_anchor(chain).await.map_err(|e| {
                 match AnchorStartupError::from(e) {
                     AnchorStartupError::Http(status) => FailureKind::Http(status),

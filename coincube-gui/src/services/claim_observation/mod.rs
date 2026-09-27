@@ -47,6 +47,7 @@ pub enum FailureKind {
     Changed,
     Cancelled,
     Deadline,
+    CollectionLimit,
     Http(u16),
     Unavailable,
     Anchor(AnchorState),

@@ -324,6 +324,8 @@ mod tests {
                 max_observation_age_seconds: if case == "policy" { 0 } else { 60 },
                 expiry_margin_seconds: 600,
             };
+            fresh_mock(&server, &format!("/api/v1/esplora/bitcoin/mainnet/tx/{}", bitcoin.compute_txid()),
+                json!({"txid":bitcoin.compute_txid(),"status":{"confirmed":true,"block_height":root_height,"block_hash":bitcoin_block}}).to_string());
             let collect = source.coinbase_pair(&dependency, root_height, policy);
             let result = if matches!(case, "anchor-change" | "bitcoin-reorg" | "revoked") {
                 let disrupt = async {
@@ -374,6 +376,63 @@ mod tests {
                     );
                     assert_eq!(pair.generation(), 4);
                     assert!(pair.observed_at() <= source.now());
+                    if case == "valid" {
+                        // The first input leads to a positively observed pre-fork
+                        // root; discovery must continue to the second input.
+                        let mut old_root = bitcoin.clone();
+                        old_root.input[0].script_sig =
+                            Builder::new().push_int(17).push_int(1).into_script();
+                        let old_id = old_root.compute_txid();
+                        let mut selected = bitcoin.clone();
+                        selected.input = vec![
+                            coincube_core::miniscript::bitcoin::TxIn {
+                                previous_output: OutPoint::new(old_id, 0),
+                                ..Default::default()
+                            },
+                            coincube_core::miniscript::bitcoin::TxIn {
+                                previous_output: OutPoint::new(bitcoin.compute_txid(), 0),
+                                ..Default::default()
+                            },
+                        ];
+                        for tx in [&old_root, &selected] {
+                            server.mock(|when, then| {
+                                when.method(GET).path(format!(
+                                    "/api/v1/esplora/bitcoin/mainnet/tx/{}/hex",
+                                    tx.compute_txid()
+                                ));
+                                then.status(200).body(hex::encode(serialize(tx)));
+                            });
+                        }
+                        fresh_mock(&server,&format!("/api/v1/esplora/bitcoin/mainnet/tx/{}",old_id),
+                            json!({"txid":old_id,"status":{"confirmed":true,"block_height":17,"block_hash":"88".repeat(32)}}).to_string());
+                        let selected = OutPoint::new(selected.compute_txid(), 0);
+                        let discovered = source
+                            .discover_ancestry(selected, policy)
+                            .await
+                            .unwrap()
+                            .unwrap();
+                        assert_eq!(discovered.pair().selected(), selected);
+                        assert_eq!(discovered.links().len(), 2);
+                        assert_eq!(discovered.links()[0].parent_input, Some(1));
+                        assert_eq!(discovered.generation(), 4);
+                        assert!(discovered.observed_at() <= source.now());
+                        let links: Vec<_> = discovered
+                            .links()
+                            .iter()
+                            .map(|link| claim_ancestry::Link {
+                                transaction: &link.transaction,
+                                parent_input: link.parent_input,
+                            })
+                            .collect();
+                        assert_eq!(
+                            claim_ancestry::verify(selected, &links)
+                                .unwrap()
+                                .root()
+                                .txid,
+                            bitcoin.compute_txid()
+                        );
+                    }
+
                     for height in [FIRST_FORK_HEIGHT - 1, HISTORICAL_LIMIT, u32::MAX] {
                         assert_eq!(
                             source
