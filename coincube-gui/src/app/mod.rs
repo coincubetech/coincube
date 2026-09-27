@@ -107,6 +107,7 @@ struct Panels {
     /// (`Message::View(Menu(Vault(Claim)))` decides, from the disk, on every
     /// arrival).
     claim: Option<state::vault::claim::ClaimStep1Panel>,
+    fork_claim: Option<state::vault::claim::fork_panel::ForkClaimPanel>,
     /// The claim generation every coordinator call checks. Advanced by
     /// [`App::revoke_claim`] after the synchronous revocation; the panel
     /// subscribes to it when a coordinator is created.
@@ -242,6 +243,7 @@ impl Panels {
             create_spend: None,
             vault_settings: None,
             claim: None,
+            fork_claim: None,
             claim_generation: tokio::sync::watch::channel(1).0,
             // remaining panels
             buy_sell: None,
@@ -408,6 +410,7 @@ impl Panels {
                 config.clone(),
             )),
             claim,
+            fork_claim: None,
             claim_generation,
             connect: ConnectPanel::new(
                 spark_backend.as_ref().map(|b| b.client().clone()),
@@ -543,6 +546,7 @@ impl Panels {
             internal_bitcoind.is_some(),
             config.clone(),
         ));
+        self.fork_claim = None; // replacing the Vault drops and revokes its old session
         self.claim = Self::claim_panel(
             &wallet,
             &data_dir,
@@ -627,9 +631,11 @@ impl Panels {
                 crate::app::menu::VaultSubMenu::Settings(_) => {
                     self.vault_settings.as_ref().map(|v| v as &dyn State)
                 }
-                crate::app::menu::VaultSubMenu::Claim => {
-                    self.claim.as_ref().map(|v| v as &dyn State)
-                }
+                crate::app::menu::VaultSubMenu::Claim => self
+                    .fork_claim
+                    .as_ref()
+                    .map(|v| v as &dyn State)
+                    .or_else(|| self.claim.as_ref().map(|v| v as &dyn State)),
             },
             Menu::Marketplace(MarketplaceSubMenu::BuySell) => {
                 self.buy_sell.as_ref().map(|v| v as &dyn State)
@@ -715,7 +721,11 @@ impl Panels {
                     self.vault_settings.as_mut().map(|v| v as &mut dyn State)
                 }
                 crate::app::menu::VaultSubMenu::Claim => {
-                    self.claim.as_mut().map(|v| v as &mut dyn State)
+                    if let Some(panel) = &mut self.fork_claim {
+                        Some(panel as &mut dyn State)
+                    } else {
+                        self.claim.as_mut().map(|v| v as &mut dyn State)
+                    }
                 }
             },
             Menu::Marketplace(MarketplaceSubMenu::BuySell) => {
@@ -3570,6 +3580,9 @@ impl App {
     /// coordinator call also checks. The journaled claim itself survives:
     /// the panel re-binds it under the next context.
     pub fn revoke_claim(&mut self) {
+        if let Some(panel) = &mut self.panels.fork_claim {
+            panel.revoke();
+        }
         if let Some(panel) = &mut self.panels.claim {
             panel.revoke();
         }
@@ -5886,6 +5899,12 @@ impl App {
             // it is the one on screen: a coordinator session travels inside
             // them, and a result handed to whichever panel is current would
             // drop that session on the floor.
+            Message::ForkClaim(_) => {
+                if let Some(panel) = &mut self.panels.fork_claim {
+                    return panel.update(self.daemon.clone(), &self.cache, message);
+                }
+                return Task::none();
+            }
             Message::Claim(_) => {
                 if let Some(panel) = &mut self.panels.claim {
                     return panel.update(self.daemon.clone(), &self.cache, message);
@@ -5935,6 +5954,7 @@ impl App {
                     )) => Some(*epoch),
                     _ => None,
                 };
+                let previous_claim_session = self.claim_connect_session();
                 let task = self
                     .panels
                     .connect
@@ -5977,12 +5997,21 @@ impl App {
                 } else {
                     None
                 };
+                // Compare the accepted session, not the arrival of a possibly
+                // obsolete refresh result. The fork loader owns this client.
+                let fork_replaced = self.panels.fork_claim.is_some()
+                    && (!self.cache.btcb2_server_enabled
+                        || match (&previous_claim_session, &claim_session) {
+                            (Some(old), Some(new)) => !state::vault::claim::same_session(old, new),
+                            (Some(_), None) | (None, Some(_)) => true,
+                            (None, None) => false,
+                        });
                 let claim_replaced = self
                     .panels
                     .claim
                     .as_mut()
                     .is_some_and(|panel| panel.set_connect(claim_session));
-                if !claim_signed_in || claim_replaced {
+                if !claim_signed_in || claim_replaced || fork_replaced {
                     self.revoke_claim();
                 }
                 let claim_daemon = self.daemon.clone();

@@ -19,6 +19,7 @@
 //! re-signing; a recorded submission is recovered only for tracking.
 
 pub mod fork_load;
+pub mod fork_panel;
 pub mod pairing;
 
 use std::{
@@ -1677,7 +1678,7 @@ impl State for ClaimStep1Panel {
 }
 
 /// The same Connect session: account, endpoint and credential.
-fn same_session(a: &ConnectSession, b: &ConnectSession) -> bool {
+pub(crate) fn same_session(a: &ConnectSession, b: &ConnectSession) -> bool {
     a.account == b.account
         && a.client.base_url == b.client.base_url
         && a.client.token() == b.client.token()

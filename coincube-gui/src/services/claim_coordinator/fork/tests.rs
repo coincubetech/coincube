@@ -366,6 +366,7 @@ fn sweep(source: &PoisonSelfTransfer) -> (ClaimForkSweep, VerifiedClaimForkSweep
     (built, verified)
 }
 struct Harness {
+    preflight_mock_id: usize,
     coordinator: Coordinator,
     _server: MockServer,
     _temp: Temp,
@@ -386,7 +387,7 @@ impl Harness {
             .unwrap()
             .as_secs() as i64;
         let tx = verified.transaction();
-        server.mock_async(|when,then| { when.method(POST).path("/api/v1/esplora/bitcoin-blake2b/mainnet/tx/preflight"); then.status(200).header("cache-control","no-store").json_body(json!({"success":true,"data":{"network":"bitcoin-blake2b","state":"available","result":{"txid":tx.compute_txid(),"wtxid":tx.compute_wtxid(),"tip_hash":hash(2),"observed_at":stamp,"allowed":accepted,"reject_reason":if accepted { serde_json::Value::Null } else { json!("policy-rejected") }}}})); }).await;
+        let preflight_mock_id = server.mock_async(|when,then| { when.method(POST).path("/api/v1/esplora/bitcoin-blake2b/mainnet/tx/preflight"); then.status(200).header("cache-control","no-store").json_body(json!({"success":true,"data":{"network":"bitcoin-blake2b","state":"available","result":{"txid":tx.compute_txid(),"wtxid":tx.compute_wtxid(),"tip_hash":hash(2),"observed_at":stamp,"allowed":accepted,"reject_reason":if accepted { serde_json::Value::Null } else { json!("policy-rejected") }}}})); }).await.id;
         let fault = Arc::new(AtomicUsize::new(10));
         let calls = Arc::new(AtomicUsize::new(0));
         let reached = Arc::new(tokio::sync::Notify::new());
@@ -461,6 +462,7 @@ impl Harness {
         )
         .unwrap();
         Self {
+            preflight_mock_id,
             coordinator,
             _server: server,
             _temp: temp,
@@ -605,6 +607,7 @@ async fn fork_journal_failure_foreign_review_and_sync_revocation_prevent_send() 
 }
 
 struct PreparingHarness {
+    preflight_mock_id: usize,
     preparation: Preparation,
     _server: MockServer,
     _temp: Temp,
@@ -621,6 +624,7 @@ impl PreparingHarness {
     }
     async fn new() -> Self {
         let Harness {
+            preflight_mock_id,
             coordinator,
             _server,
             _temp,
@@ -663,6 +667,7 @@ impl PreparingHarness {
         )
         .unwrap();
         Self {
+            preflight_mock_id,
             preparation,
             _server,
             _temp,
@@ -1283,4 +1288,72 @@ async fn reorg_reconciliation_never_clears_another_sweeps_marker() {
         assert_eq!(cube.split_completed_at_height, Some(101));
         assert_eq!(cube.split_completion_txid, Some(other));
     }
+}
+
+#[tokio::test]
+async fn fork_panel_hot_signature_review_and_one_explicit_submission() {
+    use crate::app::{
+        cache::Cache,
+        state::vault::claim::{fork_load::Loaded, fork_panel},
+        wallet::Wallet,
+    };
+    use crate::utils::mock::Daemon as MockDaemon;
+    let h = PreparingHarness::new().await;
+    h.fault.store(0, Ordering::SeqCst);
+    let construction = h.preparation.construction.clone();
+    let psbt = h.psbt();
+    let master =
+        MasterSigner::from_mnemonic(Network::Bitcoin, Mnemonic::from_entropy(&[40; 16]).unwrap())
+            .unwrap();
+    let second =
+        MasterSigner::from_mnemonic(Network::Bitcoin, Mnemonic::from_entropy(&[41; 16]).unwrap())
+            .unwrap();
+    let wallet = Arc::new(
+        Wallet::new(construction.descriptor().clone())
+            .with_chain(ChainId::BitcoinBlake2b)
+            .with_signer(crate::signer::Signer::new(master)),
+    );
+    let daemon: Arc<dyn Daemon + Send + Sync> = Arc::new(crate::daemon::client::Coincubed::new(
+        MockDaemon::new(vec![]).run(),
+    ));
+    let cache = Cache {
+        network: Network::Bitcoin,
+        fiat_chain: ChainId::BitcoinBlake2b,
+        ..Cache::default()
+    };
+    let loaded = Loaded::Signing {
+        preparation: h.preparation,
+        psbt,
+        context: context(),
+    };
+    let (panel, review_task, signed) = fork_panel::tests::signed_panel_awaiting_review(
+        crate::dir::CoincubeDirectory::new(h._temp.0.clone()),
+        wallet,
+        loaded,
+        daemon.clone(),
+        &cache,
+        second,
+    )
+    .await;
+    // The actual GUI hot key uses the fork sighash; bind node acceptance to
+    // this exact resulting witness, not the fixture's legacy-only witness.
+    let verified = coincube_core::claim_finalize::finalize_claim_fork_sweep(
+        &construction,
+        &signed,
+        &secp256k1::Secp256k1::verification_only(),
+    )
+    .unwrap();
+    let tx = verified.transaction();
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    httpmock::Mock::new(h.preflight_mock_id, &h._server)
+        .delete_async()
+        .await;
+    h._server.mock_async(|when,then| {
+        when.method(POST).path("/api/v1/esplora/bitcoin-blake2b/mainnet/tx/preflight");
+        then.status(200).header("cache-control","no-store").json_body(json!({"success":true,"data":{"network":"bitcoin-blake2b","state":"available","result":{"txid":tx.compute_txid(),"wtxid":tx.compute_wtxid(),"tip_hash":hash(2),"observed_at":stamp,"allowed":true,"reject_reason":null}}}));
+    }).await;
+    fork_panel::tests::review_and_submit_once(panel, review_task, daemon, &cache, h.calls).await;
 }

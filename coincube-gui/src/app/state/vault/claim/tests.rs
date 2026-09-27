@@ -185,7 +185,9 @@ fn refusals_come_in_actionable_order() {
     let mut p = panel(TAPROOT);
     let target = p.refusal().unwrap();
     assert!(
-        target.reason.contains("Create the claim target"),
+        target
+            .reason
+            .contains("No unique valid Bitcoin Blake2b Cube"),
         "{}",
         target.reason
     );
@@ -1531,26 +1533,19 @@ mod flow {
         )
         .await
         .unwrap();
-        let psbt = match loaded {
-            fork_load::Loaded::Signing {
-                mut preparation,
-                psbt,
-                context,
-            } => {
-                assert_eq!(
-                    psbt.psbt().unsigned_tx.input[0].previous_output,
-                    f.daemon.coin.outpoint
-                );
-                assert!(matches!(
-                    preparation.check_signing(&context).await,
-                    Err(claim_coordinator::Error::NotReady(
-                        Assessment::WaitingForConfirmation
-                    ))
-                ));
-                psbt
-            }
-            other => panic!("unexpected loaded state: {:?}", other),
-        };
+        let psbt = fork_panel::tests::refused_signer_and_late_result(
+            f.datadir.clone(),
+            wallet.clone(),
+            vec![daemon.coin.clone()],
+            loaded,
+            daemon.clone(),
+            &f.cache,
+        )
+        .await;
+        assert_eq!(
+            psbt.psbt().unsigned_tx.input[0].previous_output,
+            f.daemon.coin.outpoint
+        );
         assert_eq!(
             daemon
                 .hits()
@@ -1597,19 +1592,14 @@ mod flow {
         )
         .await
         .unwrap();
-        match loaded {
-            fork_load::Loaded::Tracking {
-                mut coordinator,
-                context,
-            } => {
-                assert!(coordinator.recorded_outcome().is_some());
-                assert!(matches!(
-                    coordinator.prepare_review(&context).await,
-                    Err(claim_coordinator::Error::SubmissionAlreadyRecorded)
-                ));
-            }
-            other => panic!("submitted sweep returned to signing: {:?}", other),
-        }
+        fork_panel::tests::recorded_submission_cannot_sign_or_confirm(
+            f.datadir.clone(),
+            wallet.clone(),
+            loaded,
+            daemon.clone(),
+            &f.cache,
+        )
+        .await;
         let mut altered = transaction;
         altered.input[0].witness.clear();
         *daemon.submitted.lock().unwrap() = Some(altered);

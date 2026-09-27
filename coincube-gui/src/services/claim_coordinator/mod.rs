@@ -293,7 +293,7 @@ impl Revoker {
             gate: None,
         })))
     }
-    fn is_revoked(&self) -> bool {
+    pub(crate) fn is_revoked(&self) -> bool {
         self.0.lock().unwrap_or_else(|e| e.into_inner()).revoked
     }
     fn register(&self, revoker: SubmissionRevoker) -> Result<(), Error> {
