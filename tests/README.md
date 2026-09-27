@@ -94,6 +94,25 @@ export CLAIM_REGTEST_TOOL_PATH="$PWD/target/release/examples/claim_regtest_vecto
 pytest tests/test_btcb2_claim_consensus.py -vvv --junitxml=claim-consensus.xml
 ```
 
+A separate headless GUI test drives the production Claim panel's build, signer
+picker, software signing, review, explicit confirmation and confirmation tracking.
+It sends through the opt-in gated regtest transport and independently checks the
+exact transaction and witness on the real node. Build and select the lib-test
+executable (not the GUI application):
+
+```sh
+BREEZ_API_KEY=DUMMY_BREEZ_API_KEY cargo test --package coincube-gui --lib --features regtest-harness --no-run --message-format=json > claim-gui-build.json
+export CLAIM_GUI_REGTEST_TEST_PATH="$(jq -r 'select(.reason == "compiler-artifact" and .target.name == "coincube_gui" and .profile.test == true and .executable != null) | .executable' claim-gui-build.json)"
+pytest tests/test_btcb2_claim_gui.py -vvv --junitxml=claim-gui.xml
+```
+
+This test owns separate disposable nodes and synthetic keys. Its account, logical
+mainnet routes and backend adapter are test fixtures; deployment, observations,
+preflight, signing and submission use actual node evidence. It does not yet cover
+the fork panel, restart/reorg recovery, rendered UI, PIN unlock or hardware signing.
+The `regtest-harness` feature is off in normal builds. The labelled BTCB2 workflow
+builds this driver and fails if the required executable or pinned nodes are missing.
+
 Set the bridge path to your Cargo target directory when using `CARGO_TARGET_DIR`.
 This test spends the fixture's original coins, so it has its own module-scoped
 harness. It checks the production OP_RETURN self-transfer and legacy 2-of-3 fork

@@ -127,6 +127,7 @@ class TwoChainRegtest:
         blake2b_path=None,
         electrs_path=None,
         csv_value=10,
+        public_descriptor=None,
     ):
         self.directory = directory
         self.activation_height = activation_height
@@ -135,6 +136,7 @@ class TwoChainRegtest:
         self.blake2b_path = blake2b_path or KNOTS_BLAKE2B_PATH
         self.electrs_path = electrs_path or ELECTRS_BLAKE2B_PATH
         self.csv_value = csv_value
+        self.public_descriptor = public_descriptor
 
         self.home_dir = os.path.join(directory, "home-sandbox")
         self.legacy_dir = os.path.join(directory, "knots-legacy")
@@ -210,8 +212,13 @@ class TwoChainRegtest:
         assert rpc.getblockcount() == COINBASE_MATURITY + 1
 
         # The Vault: 2-of-3 primary path, 1-key recovery path after `csv_value`.
-        self.signer = MultiSigner(3, {self.csv_value: 1}, is_taproot=False)
-        self.desc = vault_descriptor(self.signer, self.csv_value)
+        if self.public_descriptor is None:
+            self.signer = MultiSigner(3, {self.csv_value: 1}, is_taproot=False)
+            self.desc = vault_descriptor(self.signer, self.csv_value)
+        else:
+            # The GUI child owns the synthetic signing keys; the harness only
+            # receives its public descriptor and funds the same scripts.
+            self.desc = Descriptor.from_str(self.public_descriptor)
         receive_desc, _ = self.desc.singlepath_descriptors()
         checksummed = rpc.getdescriptorinfo(str(receive_desc))["descriptor"]
         self.vault_addresses = rpc.deriveaddresses(checksummed, [0, 3])

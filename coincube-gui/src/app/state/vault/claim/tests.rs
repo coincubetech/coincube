@@ -467,6 +467,8 @@ fn reviewer_claim_completion_without_daemon_must_not_panic() {
 // Windows; shared helper definitions also serve the Unix-only flow cases.
 #[cfg_attr(not(unix), allow(dead_code, unused_imports))]
 mod flow {
+    #[cfg(feature = "regtest-harness")]
+    mod live_regtest;
     use super::*;
     use crate::{daemon::model::GetInfoResult, signer::Signer};
     use coincube_core::{
@@ -580,6 +582,8 @@ mod flow {
         previous: Transaction,
         submitted: Mutex<Option<Transaction>>,
         hits: Mutex<Vec<&'static str>>,
+        #[cfg(feature = "regtest-harness")]
+        live: Option<live_regtest::LiveTransport>,
     }
     impl FlowDaemon {
         fn hit(&self, name: &'static str) {
@@ -606,6 +610,10 @@ mod flow {
         }
         async fn get_info(&self) -> Result<model::GetInfoResult, DaemonError> {
             self.hit("get_info");
+            #[cfg(feature = "regtest-harness")]
+            if let Some(live) = &self.live {
+                return Ok(live.info(&self.config));
+            }
             Ok(GetInfoResult {
                 version: String::new(),
                 network: Network::Bitcoin,
@@ -723,6 +731,15 @@ mod flow {
             _gate: Arc<SubmissionGate>,
         ) -> Result<SubmissionOutcome, DaemonError> {
             self.hit("submit_verified_poison");
+            #[cfg(feature = "regtest-harness")]
+            if let Some(live) = &self.live {
+                let outcome = live
+                    .transport
+                    .submit_poison(&verified, &_gate)
+                    .map_err(DaemonError::PoisonSubmission)?;
+                *self.submitted.lock().unwrap() = Some(verified.transaction().clone());
+                return Ok(outcome);
+            }
             *self.submitted.lock().unwrap() = Some(verified.transaction().clone());
             Ok(SubmissionOutcome::UpstreamAccepted {
                 txid: verified.transaction().compute_txid(),
@@ -758,7 +775,7 @@ mod flow {
             if txids.contains(&self.previous.compute_txid()) {
                 transactions.push(coincubed::commands::TransactionInfo {
                     tx: self.previous.clone(),
-                    height: Some(50),
+                    height: self.coin.block_height,
                     time: None,
                 });
             }
@@ -953,6 +970,8 @@ mod flow {
             previous: f.previous.clone(),
             submitted: Mutex::new(None),
             hits: Mutex::new(Vec::new()),
+            #[cfg(feature = "regtest-harness")]
+            live: None,
         });
         let dyn_daemon: Arc<dyn Daemon + Sync + Send> = daemon.clone();
         let mut wallet = Wallet::new(f.descriptor.clone());
@@ -1658,6 +1677,8 @@ mod flow {
             previous: f.daemon.previous.clone(),
             submitted: Mutex::new(None),
             hits: Mutex::new(Vec::new()),
+            #[cfg(feature = "regtest-harness")]
+            live: None,
         });
         let loaded = fork_load::load(
             &f.datadir,
@@ -2959,6 +2980,8 @@ mod flow {
             previous: f.daemon.previous.clone(),
             submitted: Mutex::new(None),
             hits: Mutex::new(Vec::new()),
+            #[cfg(feature = "regtest-harness")]
+            live: None,
         });
         let installed_dyn: Arc<dyn Daemon + Sync + Send> = installed.clone();
         let settle = app.update(Message::DaemonRestarted(
@@ -3219,6 +3242,8 @@ mod flow {
             previous: f.daemon.previous.clone(),
             submitted: Mutex::new(None),
             hits: Mutex::new(Vec::new()),
+            #[cfg(feature = "regtest-harness")]
+            live: None,
         });
         let installed_dyn: Arc<dyn Daemon + Sync + Send> = installed.clone();
         let settle = app.update(Message::DaemonRestarted(
