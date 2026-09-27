@@ -2151,9 +2151,9 @@ mod tests {
                     if !head.ends_with("\r\n\r\n") {
                         continue;
                     }
-                    assert!(head
-                        .to_ascii_lowercase()
-                        .contains("authorization: bearer synthetic-jwt"));
+                    // Authenticated admission is handled by Authority above;
+                    // Esplora chain reads must never carry the Connect token.
+                    assert!(!head.to_ascii_lowercase().contains("authorization:"));
                     let path = head.split_whitespace().nth(1).unwrap().to_string();
                     serving_requests.lock().unwrap().push(path.clone());
                     let (status, body) = match path.as_str() {
