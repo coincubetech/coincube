@@ -1383,6 +1383,8 @@ CREATE TABLE labels (
             conn.db_address(&address).unwrap().derivation_index,
             3.into()
         );
+        // Close the SQLite file before directory removal on Windows.
+        drop(conn);
         fs::remove_dir_all(dir).unwrap();
         assert_eq!(
             db.reserve_change(ChainId::Bitcoin, &desc, &secp),
@@ -1467,6 +1469,8 @@ CREATE TABLE labels (
                 .unwrap();
             assert_eq!(stored, invalid);
         }
+        // Close the SQLite file before directory removal on Windows.
+        drop(conn);
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -3855,6 +3859,8 @@ CREATE TABLE labels (
                 );
                 db.sanity_check(chain, &options.main_descriptor).unwrap();
                 assert_eq!(read_stored_identity(&db_path).unwrap().chain, chain);
+                // Close the SQLite file before directory removal on Windows.
+                drop(conn);
                 fs::remove_dir_all(tmp_dir).unwrap();
             }
         }
@@ -4451,6 +4457,8 @@ CREATE TABLE labels (
                 .psbt;
             assert_eq!(stored.inputs[0].proprietary.get(&key), Some(&value));
             assert_eq!(stored, psbt);
+            // Close the SQLite file before directory removal on Windows.
+            drop(conn);
             fs::remove_dir_all(tmp_dir).unwrap();
         }
 
