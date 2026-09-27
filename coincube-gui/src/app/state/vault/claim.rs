@@ -1263,6 +1263,7 @@ impl ClaimStep1Panel {
 
     fn resubmit(&mut self, confirm: bool) -> Task<Message> {
         if self.revoked
+            || self.reconfirmation().is_some()
             || self.connect.is_none()
             || !self.backend_ready()
             || !matches!(
@@ -1317,6 +1318,7 @@ impl ClaimStep1Panel {
 
     fn reconfirm(&mut self, confirm: bool) -> Task<Message> {
         if self.revoked
+            || self.resubmission().is_some()
             || self.connect.is_none()
             || !self.backend_ready()
             || !matches!(

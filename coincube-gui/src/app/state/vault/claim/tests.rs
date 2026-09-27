@@ -4298,6 +4298,15 @@ mod flow {
         let (snapshot, attempts) = f.p.resubmission().expect("explicit resend review");
         assert_eq!(snapshot.txid, f.unsigned_txid);
         assert_eq!(attempts, 1);
+        // Model a stale queued reconfirmation action after the visible status
+        // changes. The state owner must preserve the active resend review.
+        if let Stage::Track { status, .. } = &mut f.p.stage {
+            *status = Some(Status::Observation(Assessment::Reorged));
+        }
+        assert!(outputs(f.p.reconfirm(false)).await.is_empty());
+        assert!(outputs(f.p.reconfirm(true)).await.is_empty());
+        assert!(f.p.resubmission().is_some());
+        assert_eq!(submissions(&f), 1);
         settle_recovery(&mut f, view::ClaimMessage::Refresh).await;
         assert!(f.p.resubmission().is_none());
         settle_recovery(&mut f, view::ClaimMessage::ConfirmResubmission).await;
@@ -4351,6 +4360,11 @@ mod flow {
             f.p.reconfirmation()
                 .expect("reconfirmation review displayed");
         assert_eq!(review.confirmed.hash, BlockHash::from_byte_array([7; 32]));
+        // A queued resend action cannot replace this reconfirmation review.
+        assert!(outputs(f.p.resubmit(false)).await.is_empty());
+        assert!(outputs(f.p.resubmit(true)).await.is_empty());
+        assert_eq!(f.p.reconfirmation().unwrap().confirmed, review.confirmed);
+        assert_eq!(submissions(&f), 1);
         assert_eq!(std::fs::read(&path).unwrap(), old);
         settle_recovery(&mut f, view::ClaimMessage::ConfirmReconfirmation).await;
         assert!(f.p.reconfirmation().is_none());
