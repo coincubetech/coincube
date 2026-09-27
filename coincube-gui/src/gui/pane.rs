@@ -206,6 +206,13 @@ impl Pane {
             Message::View(ViewMessage::FocusTab(i)) => {
                 if i < self.tabs.len() {
                     self.focused_tab = i;
+                    let tab = &self.tabs[i];
+                    if let tab::State::Home(home) = &tab.state {
+                        let id = tab.id;
+                        return home
+                            .on_focus()
+                            .map(move |message| Message::Tab(id, tab::Message::Launch(message)));
+                    }
                 }
             }
             Message::View(ViewMessage::AddTab) => return self.add_tab(cfg),

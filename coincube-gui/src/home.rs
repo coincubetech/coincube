@@ -475,6 +475,27 @@ impl Home {
         !matches!(self.state, State::Unchecked)
     }
 
+    /// Refresh persisted completion/reorg changes when returning to the list,
+    /// without replacing an in-progress creation, recovery, or account screen.
+    pub fn on_focus(&self) -> Task<Message> {
+        if matches!(self.active_section, HomeSection::Cubes)
+            && matches!(
+                self.state,
+                State::Cubes {
+                    create_cube: false,
+                    ..
+                }
+            )
+        {
+            self.reload().map(|message| match message {
+                Message::Checked { for_chain, res } => Message::FocusedCubes { for_chain, res },
+                other => other,
+            })
+        } else {
+            Task::none()
+        }
+    }
+
     pub fn reload(&self) -> Task<Message> {
         probe_network_datadir(
             self.network,
@@ -772,6 +793,11 @@ impl Home {
     /// the Cube's own record and the fork chain's settings file. Home never
     /// unlocks anything, so "already claimed" is read from disk.
     pub(crate) fn claim_availability(&self, index: usize) -> app::features::Availability {
+        if self.has_recorded_claim_completion(index) {
+            return app::features::Availability::Unavailable {
+                reason: "This Claim is recorded as complete. Open the Cube's Claim screen to check its current status.".into(),
+            };
+        }
         match self.claim_source_cube(index) {
             Some(source) => app::features::claim_blake2b(source),
             None => app::features::Availability::Unavailable {
@@ -785,8 +811,25 @@ impl Home {
     /// [`claim_availability`](Self::claim_availability); the card's label is
     /// derived from this, never the other way round.
     pub(crate) fn claim_entry(&self, index: usize) -> Option<app::features::ClaimEntry> {
+        if self.has_recorded_claim_completion(index) {
+            return None;
+        }
         self.claim_source_cube(index)
             .and_then(app::features::claim_entry)
+    }
+
+    /// Retire the Home prompt from a complete historical record only. The
+    /// in-Cube Claim route stays available for fresh confirmation/reorg checks;
+    /// these settings never grant signing or submission authority.
+    fn has_recorded_claim_completion(&self, index: usize) -> bool {
+        let State::Cubes { cubes, .. } = &self.state else {
+            return false;
+        };
+        cubes.get(index).is_some_and(|cube| {
+            cube.network == ChainId::Bitcoin
+                && cube.split_completed_at_height.is_some()
+                && cube.split_completion_txid.is_some()
+        })
     }
 
     /// The Cube at `index` as a candidate claim source — the input
@@ -888,6 +931,23 @@ impl Home {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        let message = match message {
+            Message::FocusedCubes { for_chain, res } => {
+                if !matches!(self.active_section, HomeSection::Cubes)
+                    || !matches!(
+                        self.state,
+                        State::Cubes {
+                            create_cube: false,
+                            ..
+                        }
+                    )
+                {
+                    return Task::none();
+                }
+                Message::Checked { for_chain, res }
+            }
+            other => other,
+        };
         let task = match message {
             Message::ContinueForkClaim(handoff) => {
                 app::claim_intent::clear();
@@ -2404,6 +2464,9 @@ impl Home {
                     self.connect_account.active_sub = sub.clone();
                 }
                 self.active_section = section;
+                if matches!(self.active_section, HomeSection::Cubes) {
+                    return self.on_focus();
+                }
                 // If navigating to Connect and not yet initialized, trigger Init
                 if matches!(self.active_section, HomeSection::Connect(_))
                     && matches!(
@@ -5457,6 +5520,11 @@ fn map_connect_task(task: Task<app::message::Message>) -> Task<Message> {
 pub enum Message {
     View(ViewMessage),
     ContinueForkClaim(app::claim_intent::ForkHandoff),
+    /// A focus refresh must not replace a form opened while the read ran.
+    FocusedCubes {
+        for_chain: crate::chain::ChainId,
+        res: Result<State, String>,
+    },
     /// Bubbles up to the pane on the auth-success edge so it can
     /// broadcast a session re-check to every open Cube tab. Carries
     /// no payload — the Cube tabs read the keyring themselves.
@@ -9275,6 +9343,69 @@ mod chain_identity_open_tests {
 
     fn is_run_for(msg: &Message, chain: ChainId, id: &str) -> bool {
         matches!(msg, Message::Run(_, _, c, cube) if *c == chain && cube.id == id)
+    }
+
+    #[test]
+    fn completed_claim_retires_home_prompt_and_reorg_reload_restores_it() {
+        let _guard = crate::app::session::test_guard();
+        let mut cube =
+            record("completed-claim", ChainId::Bitcoin).with_vault(settings::VaultIdentity {
+                wallet_id: settings::WalletId::new("descriptor".into(), Some(1)),
+                fingerprint: Some("12345678".into()),
+            });
+        cube.split_completed_at_height = Some(100);
+        cube.split_completion_txid = Some("01".repeat(32).parse().unwrap());
+        let dir = bitcoin_datadir_with(vec![cube.clone()]);
+        let mut home = loaded_home(&dir);
+        let mut client = CoincubeClient::new();
+        client.set_token("synthetic-completion-token");
+        home.connect_account.install_admitted_client(client);
+        home.connect_account.features = Some(
+            serde_json::from_value(serde_json::json!({"plans":[],"bitcoinBlake2bEnabled":true}))
+                .unwrap(),
+        );
+        assert!(home.claim_entry(0).is_none());
+        assert!(!home.claim_availability(0).is_available());
+        assert!(drain(home.update(Message::View(ViewMessage::ClaimBlake2b(0)))).is_empty());
+        assert!(!app::claim_intent::take(&cube.id));
+        // The ordinary source gate is still available inside the Cube.
+        assert!(app::features::claim_blake2b(home.claim_source_cube(0).unwrap()).is_available());
+        // A cleared or partial record must not suppress the entry after reload.
+        for (height, txid) in [
+            (Some(100), None),
+            (None, cube.split_completion_txid),
+            (None, None),
+        ] {
+            cube.split_completed_at_height = height;
+            cube.split_completion_txid = txid;
+            std::fs::write(
+                dir.join("bitcoin").join(settings::SETTINGS_FILE_NAME),
+                serde_json::to_vec(&settings::Settings {
+                    cubes: vec![cube.clone()],
+                    ..Default::default()
+                })
+                .unwrap(),
+            )
+            .unwrap();
+            for message in drain(home.on_focus()) {
+                let _ = home.update(message);
+            }
+            assert!(home.claim_entry(0).is_some());
+            assert!(home.claim_availability(0).is_available());
+        }
+        let late_refresh = drain(home.on_focus());
+        assert!(!late_refresh.is_empty());
+        if let State::Cubes { create_cube, .. } = &mut home.state {
+            *create_cube = true;
+        }
+        assert!(drain(home.on_focus()).is_empty());
+        home.state = State::RecoveryInput;
+        for message in late_refresh {
+            assert!(drain(home.update(message)).is_empty());
+        }
+        assert!(matches!(home.state, State::RecoveryInput));
+        assert!(drain(home.on_focus()).is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
