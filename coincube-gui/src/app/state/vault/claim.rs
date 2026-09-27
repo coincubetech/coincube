@@ -18,6 +18,7 @@
 //! Reopening a recorded step-one intent requires
 //! re-signing; a recorded submission is recovered only for tracking.
 
+pub mod fork_load;
 pub mod pairing;
 
 use std::{

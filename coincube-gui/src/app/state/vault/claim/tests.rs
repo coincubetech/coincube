@@ -1475,6 +1475,211 @@ mod flow {
         let _ = std::fs::remove_dir_all(f.root);
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fork_loader_preserves_pairing_and_requires_fresh_depth_before_signing() {
+        use crate::app::settings::{update_settings_file, CubeSettings, VaultIdentity};
+        let mut f = reach_review().await;
+        reach_track(&mut f).await;
+        let connect = f.p.connect.clone().unwrap();
+        f.p.revoke();
+        f.p.stage = Stage::Preconditions; // release the Bitcoin journal owner
+        let mut wallet = (*f.wallet).clone();
+        wallet.chain = ChainId::BitcoinBlake2b;
+        wallet.pinned_at = Some(77);
+        let wallet = Arc::new(wallet);
+        for (chain, id, vault) in [
+            (ChainId::Bitcoin, "bitcoin-cube", f.wallet.clone()),
+            (ChainId::BitcoinBlake2b, "fork-cube", wallet.clone()),
+        ] {
+            let cube = CubeSettings::new_with_raw_id(id.into(), id.into(), chain)
+                .with_vault(VaultIdentity::new(vault.id(), Some(&vault.main_descriptor)));
+            update_settings_file(&f.datadir.network_directory(chain), |mut settings| {
+                settings.cubes = vec![cube];
+                Some(settings)
+            })
+            .await
+            .unwrap();
+        }
+        let mut config = f.daemon.config.clone();
+        config.bitcoin_config.chain = ChainId::BitcoinBlake2b;
+        if let Some(coincubed::config::BitcoinBackend::Esplora(selection)) =
+            &mut config.bitcoin_backend
+        {
+            selection.addr = format!(
+                "{}/api/v1/esplora/bitcoin-blake2b/mainnet",
+                f._server.base_url()
+            );
+        }
+        let daemon = Arc::new(FlowDaemon {
+            config,
+            coin: f.daemon.coin.clone(),
+            previous: f.daemon.previous.clone(),
+            submitted: Mutex::new(None),
+            hits: Mutex::new(Vec::new()),
+        });
+        let loaded = fork_load::load(
+            &f.datadir,
+            wallet.clone(),
+            daemon.clone(),
+            connect.clone(),
+            "bitcoin-cube",
+            "fork-cube",
+            1,
+            f.sender.subscribe(),
+            3,
+        )
+        .await
+        .unwrap();
+        let psbt = match loaded {
+            fork_load::Loaded::Signing {
+                mut preparation,
+                psbt,
+                context,
+            } => {
+                assert_eq!(
+                    psbt.psbt().unsigned_tx.input[0].previous_output,
+                    f.daemon.coin.outpoint
+                );
+                assert!(matches!(
+                    preparation.check_signing(&context).await,
+                    Err(claim_coordinator::Error::NotReady(
+                        Assessment::WaitingForConfirmation
+                    ))
+                ));
+                psbt
+            }
+            other => panic!("unexpected loaded state: {:?}", other),
+        };
+        assert_eq!(
+            daemon
+                .hits()
+                .iter()
+                .filter(|name| **name == "reserve_change")
+                .count(),
+            1
+        );
+        // Only the original Bitcoin submission has occurred.
+        assert_eq!(submissions(&f), 1);
+
+        // Model a durable submitted record and a node-recovered legacy witness.
+        // Journal data alone must never turn a submitted sweep back into signing.
+        use coincube_core::miniscript::psbt::PsbtExt;
+        let secp = secp256k1::Secp256k1::verification_only();
+        let mut signed = f
+            .wallet
+            .signer
+            .as_ref()
+            .unwrap()
+            .sign_psbt(psbt.psbt().clone())
+            .unwrap();
+        signed.finalize_mut(&secp).unwrap();
+        let transaction = signed.extract(&secp).unwrap();
+        let path = journal_directory(&f.datadir, &f.wallet).join("intent.json");
+        let mut journal: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        journal["phase"] = serde_json::to_value(Phase::Tracking).unwrap();
+        journal["fork_sweep"] = serde_json::to_value(&psbt.psbt().unsigned_tx).unwrap();
+        journal["fork_change_index"] = 12.into();
+        journal["fork_submission"] = serde_json::json!({"txid": transaction.compute_txid(), "wtxid": transaction.compute_wtxid()});
+        std::fs::write(&path, serde_json::to_vec(&journal).unwrap()).unwrap();
+        *daemon.submitted.lock().unwrap() = Some(transaction.clone());
+        let loaded = fork_load::load(
+            &f.datadir,
+            wallet.clone(),
+            daemon.clone(),
+            connect.clone(),
+            "bitcoin-cube",
+            "fork-cube",
+            1,
+            f.sender.subscribe(),
+            0,
+        )
+        .await
+        .unwrap();
+        match loaded {
+            fork_load::Loaded::Tracking {
+                mut coordinator,
+                context,
+            } => {
+                assert!(coordinator.recorded_outcome().is_some());
+                assert!(matches!(
+                    coordinator.prepare_review(&context).await,
+                    Err(claim_coordinator::Error::SubmissionAlreadyRecorded)
+                ));
+            }
+            other => panic!("submitted sweep returned to signing: {:?}", other),
+        }
+        let mut altered = transaction;
+        altered.input[0].witness.clear();
+        *daemon.submitted.lock().unwrap() = Some(altered);
+        assert!(fork_load::load(
+            &f.datadir,
+            wallet.clone(),
+            daemon.clone(),
+            connect.clone(),
+            "bitcoin-cube",
+            "fork-cube",
+            1,
+            f.sender.subscribe(),
+            0
+        )
+        .await
+        .is_err());
+        *daemon.submitted.lock().unwrap() = None;
+        assert!(fork_load::load(
+            &f.datadir,
+            wallet.clone(),
+            daemon.clone(),
+            connect.clone(),
+            "bitcoin-cube",
+            "fork-cube",
+            1,
+            f.sender.subscribe(),
+            0
+        )
+        .await
+        .is_err());
+        let mut other_account = connect.clone();
+        other_account.account = "other-account".into();
+        assert!(fork_load::load(
+            &f.datadir,
+            wallet.clone(),
+            daemon.clone(),
+            other_account,
+            "bitcoin-cube",
+            "fork-cube",
+            1,
+            f.sender.subscribe(),
+            3
+        )
+        .await
+        .is_err());
+        f.sender.send(2).unwrap();
+        assert!(fork_load::load(
+            &f.datadir,
+            wallet,
+            daemon.clone(),
+            connect,
+            "bitcoin-cube",
+            "fork-cube",
+            1,
+            f.sender.subscribe(),
+            3
+        )
+        .await
+        .is_err());
+        assert_eq!(
+            daemon
+                .hits()
+                .iter()
+                .filter(|name| **name == "reserve_change")
+                .count(),
+            1
+        );
+        assert!(daemon.submitted.lock().unwrap().is_none());
+    }
+
     /// `reach_review`, then confirm → submit → track, asserting each.
     async fn reach_track(f: &mut Flow) {
         let submit = f.p.update(
