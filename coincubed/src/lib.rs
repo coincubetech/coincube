@@ -200,14 +200,11 @@ impl error::Error for StartupError {}
 
 impl From<crate::bitcoin::GenesisError> for StartupError {
     fn from(error: crate::bitcoin::GenesisError) -> Self {
-        use crate::bitcoin::{esplora::client::Error, GenesisError};
+        use crate::bitcoin::GenesisError;
         match error {
             GenesisError::Bitcoind(error) => Self::Bitcoind(*error),
             GenesisError::Electrum(error) => Self::Electrum(ElectrumError::Client(*error)),
-            GenesisError::Esplora(error) => match *error {
-                Error::Admission(error) => Self::ConnectAdmission(error),
-                error => Self::Esplora(EsploraError::Client(error)),
-            },
+            GenesisError::Esplora(error) => connect_startup_error(*error),
         }
     }
 }
@@ -1651,6 +1648,28 @@ mod tests {
     // bitcoind interface, and use the DummyCoincube from testutils to sanity check the startup.
     // Note that startup as checked by this unit test is also tested in the functional test
     // framework.
+    #[test]
+    fn genesis_esplora_errors_preserve_admission_classification() {
+        use crate::bitcoin::{esplora::client::Error, GenesisError};
+        for (error, expected) in [
+            (Error::AllCooling, connect::AdmissionError::Throttled),
+            (Error::Aborted, connect::AdmissionError::Aborted),
+            (
+                Error::Admission(connect::AdmissionError::Unavailable),
+                connect::AdmissionError::Unavailable,
+            ),
+            (
+                Error::Admission(connect::AdmissionError::HashMismatch),
+                connect::AdmissionError::HashMismatch,
+            ),
+        ] {
+            let startup = StartupError::from(GenesisError::Esplora(Box::new(error)));
+            assert!(
+                matches!(startup, StartupError::ConnectAdmission(actual) if actual == expected)
+            );
+        }
+    }
+
     #[test]
     fn bitcoind_genesis_lookup_preserves_rpc_and_malformed_response_errors() {
         use crate::bitcoin::{BitcoinInterface, GenesisError};
