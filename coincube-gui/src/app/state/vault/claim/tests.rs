@@ -746,6 +746,21 @@ mod flow {
                 wtxid: verified.transaction().compute_wtxid(),
             })
         }
+        #[cfg(feature = "regtest-harness")]
+        async fn submit_verified_claim_fork(
+            &self,
+            verified: Arc<coincube_core::claim_finalize::VerifiedClaimForkSweep>,
+            gate: Arc<SubmissionGate>,
+        ) -> Result<SubmissionOutcome, DaemonError> {
+            let live = self.live.as_ref().ok_or(DaemonError::ClientNotSupported)?;
+            self.hit("submit_verified_claim_fork");
+            let outcome = live
+                .transport
+                .submit_fork(&verified, &gate)
+                .map_err(DaemonError::PoisonSubmission)?;
+            *self.submitted.lock().unwrap() = Some(verified.transaction().clone());
+            Ok(outcome)
+        }
         async fn start_rescan(&self, _: u32) -> Result<(), DaemonError> {
             unreachable!()
         }

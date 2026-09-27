@@ -108,8 +108,14 @@ pytest tests/test_btcb2_claim_gui.py -vvv --junitxml=claim-gui.xml
 
 This test owns separate disposable nodes and synthetic keys. Its account, logical
 mainnet routes and backend adapter are test fixtures; deployment, observations,
-preflight, signing and submission use actual node evidence. It does not yet cover
-the fork panel, restart/reorg recovery, rendered UI, PIN unlock or hardware signing.
+preflight, signing and submission use actual node evidence. It also drives fork-panel software signing and explicit submission, verifies paired
+completion markers, and exercises Bitcoin reorg withdrawal and explicit
+reconfirmation after the identical transaction is re-mined. The pinned indexer is
+paused while the complete competing branch is assembled, then restarted with the
+same database: this proves GUI recovery after indexing resumes, not uninterrupted
+indexer availability or outage UI. Return-to-Bitcoin uses panel lifecycle methods;
+fork reopening is in the same process. Process restart, App/tab routing, rendered
+UI, PIN unlock and hardware signing remain outside this live test.
 The `regtest-harness` feature is off in normal builds. The labelled BTCB2 workflow
 builds this driver and fails if the required executable or pinned nodes are missing.
 

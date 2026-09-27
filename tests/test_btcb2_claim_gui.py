@@ -172,7 +172,7 @@ class Bridge:
         self.thread.join(timeout=5)
 
 
-def test_gui_software_signs_reviews_and_submits_to_bitcoin(tmp_path, record_property):
+def test_gui_claims_both_chains_and_recovers_remined_bitcoin(tmp_path, record_property):
     tool = os.getenv("CLAIM_GUI_REGTEST_TEST_PATH")
     missing = missing_binaries()
     if not tool or not os.access(tool, os.X_OK) or missing:
@@ -208,6 +208,9 @@ def test_gui_software_signs_reviews_and_submits_to_bitcoin(tmp_path, record_prop
         ready = child.send({"root": str(root), "bridge": bridge.url,
                             "rpc": f"127.0.0.1:{node.rpcport}",
                             "cookie": Path(node.node_rpc.cookie_path).read_text().strip(),
+                            "fork_rpc": f"127.0.0.1:{harness.blake2b.rpcport}",
+                            "fork_cookie": Path(harness.blake2b.node_rpc.cookie_path).read_text().strip(),
+                            "fork_tip_height": harness.blake2b.rpc.getblockcount(),
                             "previous": node.rpc.getrawtransaction(txid, False, block), "vout": vout,
                             "coin_height": node.rpc.getblockheader(block)["height"],
                             "tip_height": node.rpc.getblockcount()})
@@ -237,6 +240,107 @@ def test_gui_software_signs_reviews_and_submits_to_bitcoin(tmp_path, record_prop
         assert node.rpc.getblockhash(inclusion["height"]) == inclusion["hash"]
         assert node.rpc.getblockcount() - inclusion["height"] + 1 >= 6
         assert submitted["txid"] in node.rpc.getblock(inclusion["hash"])["tx"]
+        opened = child.send({"command": "fork_open"})
+        assert opened["submission_calls"] == 0 and opened["fork"]["error"] is None, opened
+        child.send({"command": "fork_open_signer"})
+        signed = child.send({"command": "fork_hot_sign"})
+        assert signed["fork"]["review"] and not signed["fork"]["busy"] and signed["fork"]["error"] is None, signed
+        assert signed["submission_calls"] == 0 and signed["submitted"] is None
+        fork_result = child.send({"command": "fork_confirm"})
+        assert fork_result["submission_calls"] == 1 and fork_result["fork"]["error"] is None, fork_result
+        fork_tx = fork_result["submitted"]
+        fork_node = harness.blake2b
+        fork_actual = fork_node.rpc.getrawtransaction(fork_tx["txid"], True)
+        assert fork_actual["hex"] == fork_tx["raw"] and fork_actual["hash"] == fork_tx["wtxid"]
+        assert not node.rpc.testmempoolaccept([fork_tx["raw"]])[0]["allowed"]
+        repeated = child.send({"command": "fork_confirm"})
+        assert repeated["submission_calls"] == 1
+        fork_node.generate_block(1, wait_for_mempool=fork_tx["txid"])
+        fork_block = fork_node.rpc.getbestblockhash()
+        fork_height = fork_node.rpc.getblockcount()
+        harness.electrs_blake2b.wait_for_tip(fork_block)
+        completed = child.send({"command": "fork_refresh"})
+        assert completed["fork"]["tracking"]["saved"] is True, completed
+        assert completed["fork"]["tracking"]["transaction"].startswith("Confirmed"), completed
+        assert completed["fork"]["error"] is None and not completed["fork"]["busy"]
+        assert fork_tx["txid"] in fork_node.rpc.getblock(fork_block)["tx"]
+        for settings, cube_id in zip(completed["settings"], ("bitcoin-cube", "fork-cube")):
+            cube = next(c for c in settings["cubes"] if c["id"] == cube_id)
+            assert cube["split_completed_at_height"] == fork_height
+            assert cube["split_completion_txid"] == fork_tx["txid"]
+        preserved = {key: completed["journal"].get(key) for key in
+                     ("fork_sweep", "fork_submission", "bitcoin_transaction", "bitcoin_attempts")}
+        old_history = completed["journal"].get("inclusion_history", [])
+
+        # Invalidate only Bitcoin. The fork remains canonical and confirmed.
+        # Present a complete competing branch to the pinned indexer. A bare
+        # invalidateblock leaves a regtest-only shorter tip which this electrs
+        # pin cannot index (schema.rs asserts on an empty replacement branch).
+        # Keep its existing DB; this tests rollback + indexing the new branch,
+        # not uninterrupted service during that synthetic transition.
+        old_tip_height = node.rpc.getblockcount()
+        harness.electrs_legacy.stop()
+        node.invalidate_block(inclusion["hash"])
+        node.generate_empty_blocks(old_tip_height - node.rpc.getblockcount() + 1)
+        harness.electrs_legacy.startup()
+        assert node.rpc.getblockheader(inclusion["hash"])["confirmations"] == -1
+        assert fork_node.rpc.getbestblockhash() == fork_block
+        assert fork_node.rpc.getrawtransaction(fork_tx["txid"], True, fork_block)["confirmations"] >= 1
+        harness.electrs_legacy.wait_for_tip(node.rpc.getbestblockhash())
+        reorged = child.send({"command": "fork_refresh"})
+        assert reorged["fork"]["tracking"]["status"] == "Observation(Reorged)", reorged
+        assert reorged["fork"]["tracking"]["transaction"].startswith("Confirmed")
+        assert reorged["fork"]["tracking"]["saved"] is False
+        assert reorged["fork"]["error"] is None and not reorged["fork"]["busy"]
+        assert reorged["submission_calls"] == 1
+        for settings in reorged["settings"]:
+            for cube in settings["cubes"]:
+                assert cube.get("split_completed_at_height") is None
+                assert cube.get("split_completion_txid") is None
+        assert reorged["journal"]["plan"]["previous_confirmation"] == inclusion
+        assert {key: reorged["journal"].get(key) for key in preserved} == preserved
+        assert reorged["journal"].get("inclusion_history", []) == old_history
+
+        # A new coinbase destination ensures a different block even if time is unchanged.
+        assert submitted["txid"] in node.rpc.getrawmempool()
+        new_block = node.rpc.generatetoaddress(1, node.rpc.getnewaddress())[0]
+        assert new_block != inclusion["hash"]
+        new_inclusion = {"height": node.rpc.getblockcount(), "hash": new_block}
+        new_actual = node.rpc.getrawtransaction(submitted["txid"], True, new_block)
+        assert new_actual["hex"] == submitted["raw"] and new_actual["hash"] == submitted["wtxid"]
+        harness.electrs_legacy.wait_for_tip(new_block)
+        returned = child.send({"command": "bitcoin_return"})
+        assert returned["tracking"]["status"] == "Some(Observation(Reorged))", returned
+        review = child.send({"command": "review_reconfirmation"})
+        assert review["reconfirmation_review"] == {"previous": inclusion, "confirmed": new_inclusion}, review
+        assert review["journal"]["plan"]["previous_confirmation"] == inclusion
+        confirmed = child.send({"command": "confirm_reconfirmation"})
+        assert confirmed["reconfirmation_review"] is None
+        assert confirmed["tracking"] == {"status": "Some(Observation(WaitingForDepth { confirmations: 1 }))",
+                                         "busy": False, "error": None}, confirmed
+        assert confirmed["journal"]["plan"]["previous_confirmation"] == new_inclusion
+        assert confirmed["journal"]["inclusion_history"] == old_history + [{"previous": inclusion, "confirmed": new_inclusion}]
+        assert {key: confirmed["journal"].get(key) for key in preserved} == preserved
+        duplicate = child.send({"command": "confirm_reconfirmation"})
+        assert duplicate["journal"] == confirmed["journal"] and duplicate["submission_calls"] == 1
+        node.generate_block(5)
+        harness.electrs_legacy.wait_for_tip(node.rpc.getbestblockhash())
+        recovered = child.send({"command": "refresh"})
+        assert recovered["tracking"]["status"] == "Some(Observation(ObservationsEligibleForPreflight))", recovered
+        assert recovered["submission_calls"] == 1
+        # Reopening the fork loader must recover its recorded transaction, not sign again.
+        reopened = child.send({"command": "fork_open"})
+        assert reopened["fork"]["outcome"] is not None and reopened["submission_calls"] == 1
+        restored = child.send({"command": "fork_refresh"})
+        assert restored["fork"]["tracking"]["saved"] is True, restored
+        assert restored["submission_calls"] == 1
+        for settings in restored["settings"]:
+            for cube in settings["cubes"]:
+                assert cube["split_completed_at_height"] == fork_height
+                assert cube["split_completion_txid"] == fork_tx["txid"]
+        record_property("fork_txid", fork_tx["txid"])
+        record_property("fork_wtxid", fork_tx["wtxid"])
+        record_property("bitcoin_reconfirmation", {"previous": inclusion, "confirmed": new_inclusion})
         assert not bridge.errors, bridge.errors
         record_property("step1_txid", submitted["txid"])
         record_property("step1_wtxid", submitted["wtxid"])

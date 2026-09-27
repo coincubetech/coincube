@@ -638,6 +638,13 @@ impl State for ForkClaimPanel {
 pub(crate) mod tests {
     use super::*;
     use iced::futures::StreamExt;
+    #[cfg(feature = "regtest-harness")]
+    pub(crate) fn live_snapshot(panel: &ForkClaimPanel) -> serde_json::Value {
+        serde_json::json!({"busy":panel.busy, "error":panel.error,
+            "review":panel.review.is_some(), "outcome":panel.outcome.map(|o| format!("{o:?}")),
+            "tracking":panel.tracking.as_ref().map(|t| serde_json::json!({
+                "status":format!("{:?}",t.status), "transaction":format!("{:?}",t.transaction), "saved":t.saved}))})
+    }
     async fn outputs(task: Task<Message>) -> Vec<Message> {
         let mut messages = Vec::new();
         if let Some(mut stream) = iced_runtime::task::into_stream(task) {
