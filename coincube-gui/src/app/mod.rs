@@ -2463,9 +2463,9 @@ fn settle_rescan_obligation(
     )
 }
 
-/// Whether a Bitcoin Blake2b Cube on this device already holds a Vault built
-/// from `descriptor_checksum` — i.e. this Bitcoin Cube has already been
-/// claimed.
+/// Descriptor checksums held by Bitcoin Blake2b claim-target Cubes on this
+/// device. Callers test membership to determine whether a source Vault
+/// already has a target.
 ///
 /// Read from the fork chain's own settings file, so it is a fact about the
 /// disk rather than about the Connect session: a claim target that exists must
