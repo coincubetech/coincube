@@ -10,7 +10,7 @@ use std::{
 };
 
 mod ancestry;
-pub use ancestry::CanonicalCoinbase;
+pub use ancestry::{CanonicalCoinbase, CoinbasePair};
 
 const BODY_LIMIT: usize = 256 * 1024;
 const TRANSACTION_HEX_LIMIT: usize = 2 * coincube_core::claim_ancestry::MAX_TRANSACTION_BYTES;

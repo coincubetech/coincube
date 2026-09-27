@@ -1,4 +1,7 @@
 //! Positive indexer observations only, never chain-exclusivity authorization.
+mod pair;
+pub use pair::CoinbasePair;
+
 use super::*;
 use coincube_core::{claim_ancestry, miniscript::bitcoin::OutPoint};
 
