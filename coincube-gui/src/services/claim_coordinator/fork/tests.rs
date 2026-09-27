@@ -1312,6 +1312,9 @@ async fn fork_panel_hot_signature_review_and_one_explicit_submission() {
     };
     use crate::utils::mock::Daemon as MockDaemon;
     let h = PreparingHarness::new().await;
+    // All observations in this fixture use one controlled clock. Signing may
+    // take longer on a loaded CI worker; wall time is not this source clock.
+    let stamp = h.preparation.services.source().now();
     h.fault.store(0, Ordering::SeqCst);
     let construction = h.preparation.construction.clone();
     let psbt = h.psbt();
@@ -1357,10 +1360,6 @@ async fn fork_panel_hot_signature_review_and_one_explicit_submission() {
     )
     .unwrap();
     let tx = verified.transaction();
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64;
     httpmock::Mock::new(h.preflight_mock_id, &h._server)
         .delete_async()
         .await;
