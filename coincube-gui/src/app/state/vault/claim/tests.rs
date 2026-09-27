@@ -510,7 +510,6 @@ mod flow {
     use crate::{daemon::model::GetInfoResult, signer::Signer};
     use coincube_core::{
         bip39::Mnemonic,
-        claim_finalize::finalize_poison_transfer,
         descriptors::{CoincubeDescriptor, CoincubePolicy, PathInfo},
         miniscript::{
             bitcoin::{
@@ -1139,12 +1138,7 @@ mod flow {
             } = &p.stage
             {
                 assert!(
-                    finalize_poison_transfer(
-                        built,
-                        &signed,
-                        &secp256k1::Secp256k1::verification_only()
-                    )
-                    .is_err(),
+                    built.verify(&signed, None).is_err(),
                     "one signature cannot satisfy 2-of-3"
                 );
             } else {
@@ -1188,12 +1182,7 @@ mod flow {
         let final_tx = match &p.stage {
             Stage::Sign {
                 built: Some(built), ..
-            } => {
-                finalize_poison_transfer(built, &signed, &secp256k1::Secp256k1::verification_only())
-                    .unwrap()
-                    .transaction()
-                    .clone()
-            }
+            } => built.verify(&signed, None).unwrap().transaction().clone(),
             _ => panic!("the construction is still in the stage"),
         };
         assert_eq!(final_tx.compute_txid(), unsigned_txid);
@@ -1823,28 +1812,59 @@ mod flow {
                 .sign_psbt(source.psbt().clone())
                 .unwrap();
             let signed = finalize_ancestry_transfer(&source, &psbt, &verify).unwrap();
-            let production = crate::services::claim_coordinator::fork::ForkProduction::new(
-                connect.client.clone(),
-                daemon.clone(),
-                connect.account.clone(),
+            let directory = journal_directory(&f.datadir, &f.wallet);
+            // Use the panel's typed finalize/journal path before modeling a
+            // recorded submission. Public eligibility remains disabled.
+            std::fs::remove_file(directory.join("intent.json")).unwrap();
+            let mut session = finalize_and_journal(
+                Box::new(Construction::Ancestry {
+                    transfer: source,
+                    path,
+                }),
+                psbt,
+                f.daemon.clone(),
+                connect.clone(),
+                "bitcoin-cube".into(),
+                "fork-cube".into(),
+                directory.clone(),
+                1,
+                f.sender.subscribe(),
+                false,
+            )
+            .await
+            .unwrap();
+            assert_eq!(session.built.selected_ancestry_input(), Some(selected));
+            assert_eq!(session.phase(), Phase::Intent);
+            let context = session.context.clone();
+            assert!(session
+                .coordinator
+                .as_mut()
+                .unwrap()
+                .prepare_review(&context)
+                .await
+                .is_err());
+            drop(session);
+            let restored = restore_recorded_claim(
+                f.daemon.clone(),
+                f.wallet.clone(),
+                connect.clone(),
+                "bitcoin-cube".into(),
+                "fork-cube".into(),
+                directory.clone(),
                 1,
                 f.sender.subscribe(),
             )
+            .await
             .unwrap();
-            let directory = journal_directory(&f.datadir, &f.wallet);
-            // Model a previously recorded ancestry submission in this disposable
-            // fixture. The public eligibility gate remains disabled.
-            std::fs::remove_file(directory.join("intent.json")).unwrap();
-            let controller = crate::services::claim_workflow::Controller::create_ancestry(
-                &directory,
-                "bitcoin-cube".into(),
-                "fork-cube".into(),
-                &source,
-                &path,
-                production.context().clone(),
-            )
-            .unwrap();
-            drop(controller);
+            let RestartedState::Intent(restored) = restored.state else {
+                panic!("intent must resume for signing")
+            };
+            assert_eq!(restored.selected_ancestry_input(), Some(selected));
+            assert_eq!(
+                restored.psbt().unsigned_tx.compute_txid(),
+                signed.transaction().compute_txid()
+            );
+            drop(restored);
             let file = directory.join("intent.json");
             let mut journal: serde_json::Value =
                 serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
@@ -1853,7 +1873,62 @@ mod flow {
             journal["bitcoin_transaction"] = json!(signed.transaction());
             journal["bitcoin_attempts"] =
                 json!([{ "wtxid": signed.transaction().compute_wtxid() }]);
-            std::fs::write(file, serde_json::to_vec(&journal).unwrap()).unwrap();
+            let before = serde_json::to_vec(&journal).unwrap();
+            std::fs::write(&file, &before).unwrap();
+            let restored = restore_recorded_claim(
+                f.daemon.clone(),
+                f.wallet.clone(),
+                connect.clone(),
+                "bitcoin-cube".into(),
+                "fork-cube".into(),
+                directory.clone(),
+                1,
+                f.sender.subscribe(),
+            )
+            .await
+            .unwrap();
+            let RestartedState::Bound(mut session) = restored.state else {
+                panic!("recorded ancestry must resume tracking")
+            };
+            assert_eq!(session.recovered.as_ref(), Some(signed.transaction()));
+            assert_eq!(session.built.selected_ancestry_input(), Some(selected));
+            rebind_session(
+                &mut session,
+                f.daemon.clone(),
+                connect.clone(),
+                "bitcoin-cube".into(),
+                "fork-cube".into(),
+                directory.clone(),
+                1,
+                f.sender.subscribe(),
+            )
+            .unwrap();
+            assert!(session.is_bound());
+            drop(session);
+            assert_eq!(std::fs::read(&file).unwrap(), before);
+            let mut altered = signed.transaction().clone();
+            altered.input[0].witness.clear();
+            journal["bitcoin_transaction"] = json!(altered);
+            std::fs::write(&file, serde_json::to_vec(&journal).unwrap()).unwrap();
+            let refused = restore_recorded_claim(
+                f.daemon.clone(),
+                f.wallet.clone(),
+                connect.clone(),
+                "bitcoin-cube".into(),
+                "fork-cube".into(),
+                directory,
+                1,
+                f.sender.subscribe(),
+            )
+            .await;
+            assert!(!matches!(
+                refused,
+                Ok(RestartedClaim {
+                    state: RestartedState::Bound(_),
+                    ..
+                })
+            ));
+            std::fs::write(&file, before).unwrap();
         }
         let loaded = fork_load::load(
             &f.datadir,

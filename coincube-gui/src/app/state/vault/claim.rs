@@ -18,6 +18,8 @@
 //! Reopening a recorded step-one intent requires
 //! re-signing; a recorded submission is recovered only for tracking.
 
+pub mod construction;
+use construction::Construction;
 pub mod fork_load;
 pub mod fork_panel;
 pub mod pairing;
@@ -243,7 +245,7 @@ pub struct ClaimSession {
     resubmission: Option<claim_coordinator::ResubmissionReview>,
     /// Kept for a re-bind: `Coordinator::resume` re-validates the
     /// construction against the journal and re-verifies the signatures.
-    built: Box<PoisonSelfTransfer>,
+    built: Box<Construction>,
     signed: Psbt,
     recovered: Option<Transaction>,
     /// The journal phase as last read through a live coordinator.
@@ -283,14 +285,11 @@ pub enum ClaimEvent {
     /// the request that started it; a reply to an older request is dropped.
     Checked(u64, Box<Checked>),
     /// The poison self-transfer was (or could not be) built.
-    Built(Result<Box<PoisonSelfTransfer>, String>),
+    Built(Result<Box<Construction>, String>),
     /// The signed construction was finalised and journaled as an intent —
     /// or refused, in which case the construction comes back so the user can
     /// keep signing. The number names the finalisation attempt it answers.
-    Ready(
-        u64,
-        Result<Box<ClaimSession>, (Box<PoisonSelfTransfer>, String)>,
-    ),
+    Ready(u64, Result<Box<ClaimSession>, (Box<Construction>, String)>),
     /// A revoked session was re-bound under the current context — or could
     /// not be, in which case it comes back unbound with the reason. The
     /// number is the panel's revocation count when the re-bind was sent.
@@ -314,7 +313,7 @@ pub struct RestartedClaim {
 }
 #[derive(Debug)]
 enum RestartedState {
-    Intent(Box<PoisonSelfTransfer>),
+    Intent(Box<Construction>),
     Bound(Box<ClaimSession>),
     Unavailable(Txid, String),
 }
@@ -323,12 +322,12 @@ enum Stage {
     Preconditions,
     /// Built and shown; nothing signed yet.
     Plan {
-        built: Box<PoisonSelfTransfer>,
+        built: Box<Construction>,
     },
     /// In the Vault's signing flow. `built` is `None` only while the
     /// finalise task holds it, and `finalizing` names that task.
     Sign {
-        built: Option<Box<PoisonSelfTransfer>>,
+        built: Option<Box<Construction>>,
         psbt: Box<PsbtState>,
         finalizing: Option<FinalizeAttempt>,
         error: Option<String>,
@@ -392,7 +391,7 @@ struct FinalizeAttempt {
 /// Read-only view of the panel's stage, for rendering.
 pub enum StageView<'a> {
     Preconditions(&'a Preconditions, Option<Refusal>),
-    Plan(&'a PoisonSelfTransfer),
+    Plan(&'a Construction),
     Sign {
         psbt: &'a PsbtState,
         finalizing: bool,
@@ -1035,7 +1034,24 @@ impl ClaimStep1Panel {
         let Stage::Plan { built } = std::mem::replace(&mut self.stage, Stage::Preconditions) else {
             unreachable!("matched above");
         };
-        let coins = self.coins().map(|c| c.pre_fork.clone()).unwrap_or_default();
+        let coins = self
+            .coins()
+            .map(|c| {
+                c.pre_fork
+                    .iter()
+                    .chain(c.ancestry_candidates.iter())
+                    .filter(|coin| {
+                        built
+                            .psbt()
+                            .unsigned_tx
+                            .input
+                            .iter()
+                            .any(|input| input.previous_output == coin.outpoint)
+                    })
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
         let secp = secp256k1::Secp256k1::verification_only();
         let tx = SpendTx::new(
             None,
@@ -2228,7 +2244,7 @@ async fn build(
     coins: CoinSet,
     feerate_vb: u64,
     fork_hash: BlockHash,
-) -> Result<Box<PoisonSelfTransfer>, String> {
+) -> Result<Box<Construction>, String> {
     let change_index = daemon
         .reserve_change()
         .await
@@ -2280,7 +2296,7 @@ async fn build(
         locktime,
         fork_hash,
     )
-    .map(Box::new)
+    .map(|built| Box::new(Construction::OpReturn(built)))
     .map_err(|e| e.to_string())
 }
 
@@ -2327,14 +2343,13 @@ async fn restore_recorded_claim(
         fork_cube: fork_cube.clone(),
         descriptor_digest: sha256::Hash::hash(wallet.main_descriptor.to_string().as_bytes()),
     };
-    let controller = claim_workflow::Controller::reopen(&directory, &identity, context.clone())
+    let mut controller = claim_workflow::Controller::reopen(&directory, &identity, context.clone())
         .map_err(|e| describe(claim_coordinator::Error::Journal(e)))?;
     let plan = controller.plan();
     let change_hint = controller.recorded_bitcoin_change_index();
     let phase = controller.phase();
     let txid = controller.signed_txid();
     let stored_transaction = controller.recorded_bitcoin_transaction().cloned();
-    drop(controller);
     let check = || {
         if *generation.borrow() != expected || generation.has_changed().is_err() {
             Err(SESSION_ENDED.to_string())
@@ -2366,9 +2381,20 @@ async fn restore_recorded_claim(
     } else {
         None
     };
-    let built =
-        reconstruct_recorded_claim(daemon, &wallet, &plan, change_hint, expected, &generation)
-            .await;
+    let built = if plan.poison == claim::Poison::InputAncestry {
+        construction::restore_ancestry(
+            &mut controller,
+            &context,
+            daemon,
+            &wallet,
+            expected,
+            &generation,
+        )
+        .await
+    } else {
+        reconstruct_recorded_claim(daemon, &wallet, &plan, change_hint, expected, &generation).await
+    };
+    drop(controller);
     check()?;
     let built = match built {
         Ok(built) => built,
@@ -2390,22 +2416,15 @@ async fn restore_recorded_claim(
     }
     let transaction =
         recovered.ok_or_else(|| "The journal is missing its recorded transaction.".to_string())?;
-    let verified = verify_poison_transaction(
-        &built,
-        &transaction,
-        &secp256k1::Secp256k1::verification_only(),
-    )
-    .map_err(|e| e.to_string())?;
-    let coordinator = Coordinator::resume(
+    let verified = built.verify(built.psbt(), Some(&transaction))?;
+    let coordinator = built.open(
         &directory,
         bitcoin_cube,
         fork_cube,
-        &built,
         verified,
         production,
-        CHECK_POLICY,
-    )
-    .map_err(describe)?;
+        true,
+    )?;
     let signed = built.psbt().clone();
     Ok(RestartedClaim {
         context: context.clone(),
@@ -2430,7 +2449,7 @@ async fn reconstruct_recorded_claim(
     change_hint: Option<ChildNumber>,
     expected: u64,
     generation: &watch::Receiver<u64>,
-) -> Result<Box<PoisonSelfTransfer>, String> {
+) -> Result<Box<Construction>, String> {
     let coins = daemon
         .list_coins(&[], &plan.claimed_prevouts)
         .await
@@ -2528,7 +2547,7 @@ async fn reconstruct_recorded_claim(
         change,
         &plan.step1,
     )
-    .map(Box::new)
+    .map(|built| Box::new(Construction::OpReturn(built)))
     .map_err(|e| e.to_string())
 }
 
@@ -2539,7 +2558,7 @@ async fn reconstruct_recorded_claim(
 /// refuse the same binding, this just says why first.
 #[allow(clippy::too_many_arguments)]
 async fn finalize_and_journal(
-    built: Box<PoisonSelfTransfer>,
+    built: Box<Construction>,
     signed: Psbt,
     daemon: Arc<dyn Daemon + Sync + Send>,
     connect: ConnectSession,
@@ -2549,12 +2568,11 @@ async fn finalize_and_journal(
     expected: u64,
     generation: watch::Receiver<u64>,
     resume: bool,
-) -> Result<Box<ClaimSession>, (Box<PoisonSelfTransfer>, String)> {
+) -> Result<Box<ClaimSession>, (Box<Construction>, String)> {
     if *generation.borrow() != expected || generation.has_changed().is_err() {
         return Err((built, SIGNED_OUT_BEFORE_RECORD.to_string()));
     }
-    let secp = secp256k1::Secp256k1::verification_only();
-    let verified = match finalize_poison_transfer(&built, &signed, &secp) {
+    let verified = match built.verify(&signed, None) {
         Ok(verified) => verified,
         Err(error) => return Err((built, error.to_string())),
     };
@@ -2575,19 +2593,13 @@ async fn finalize_and_journal(
         Err(error) => return Err((built, describe_production(error))),
     };
     let context = production.context().clone();
-    let open = if resume {
-        Coordinator::resume
-    } else {
-        Coordinator::create
-    };
-    match open(
+    match built.open(
         &directory,
         bitcoin_cube,
         fork_cube,
-        &built,
         verified,
         production,
-        CHECK_POLICY,
+        resume,
     ) {
         Ok(coordinator) => Ok(Box::new(ClaimSession {
             phase: coordinator.phase(),
@@ -2600,7 +2612,7 @@ async fn finalize_and_journal(
             signed,
             recovered: None,
         })),
-        Err(error) => Err((built, describe(error))),
+        Err(error) => Err((built, error)),
     }
 }
 
@@ -2635,27 +2647,17 @@ fn rebind_session(
     )
     .map_err(describe_production)?;
     let context = production.context().clone();
-    let secp = secp256k1::Secp256k1::verification_only();
-    let verified = match &session.recovered {
-        Some(transaction) => verify_poison_transaction(&session.built, transaction, &secp),
-        None => finalize_poison_transfer(&session.built, &session.signed, &secp),
-    }
-    .map_err(|error| error.to_string())?;
-    let coordinator = Coordinator::resume(
+    let verified = session
+        .built
+        .verify(&session.signed, session.recovered.as_ref())?;
+    let coordinator = session.built.open(
         &directory,
         bitcoin_cube,
         fork_cube,
-        &session.built,
         verified,
         production,
-        CHECK_POLICY,
-    )
-    .map_err(|error| match error {
-        claim_coordinator::Error::Journal(claim_workflow::Error::WrongIdentity) => {
-            OTHER_ACCOUNT.to_string()
-        }
-        other => describe(other),
-    })?;
+        true,
+    )?;
     session.phase = coordinator.phase();
     session.context = context;
     session.coordinator = Some(coordinator);

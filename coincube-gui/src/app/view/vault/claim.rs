@@ -9,7 +9,6 @@ use iced::{
 
 use coincube_core::{
     claim::{Assessment, MIN_CONFIRMATIONS},
-    claim_spend::PoisonSelfTransfer,
     miniscript::bitcoin::Amount,
 };
 use coincube_ui::{
@@ -275,7 +274,7 @@ fn format_amount(amount: Amount, cache: &Cache) -> String {
 fn plan_view<'a>(
     cache: &'a Cache,
     panel: &'a ClaimStep1Panel,
-    built: &'a PoisonSelfTransfer,
+    built: &'a crate::app::state::vault::claim::construction::Construction,
 ) -> Element<'a, Message> {
     let tx = &built.psbt().unsigned_tx;
     let inputs: Amount = built
@@ -307,8 +306,15 @@ fn plan_view<'a>(
             p1_regular(format_amount(outputs, cache)),
         ))
         .push(row(
-            "Marker output",
-            p1_regular(format!("{marker}-byte OP_RETURN, zero value")),
+            if built.selected_ancestry_input().is_some() {
+                "Bitcoin-only input"
+            } else {
+                "Marker output"
+            },
+            p1_regular(match built.selected_ancestry_input() {
+                Some(outpoint) => format!("{outpoint} — excluded from the Bitcoin Blake2b sweep"),
+                None => format!("{marker}-byte OP_RETURN, zero value"),
+            }),
         ))
         .push(row(
             "Fee",
