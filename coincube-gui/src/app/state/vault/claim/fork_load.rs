@@ -33,6 +33,13 @@ use std::{
 };
 use tokio::sync::watch;
 
+#[derive(Debug)]
+pub struct Opened {
+    pub handoff: crate::app::claim_intent::ForkHandoff,
+    pub generation: u64,
+    pub result: Result<(Loaded, Vec<crate::daemon::model::Coin>), String>,
+}
+
 pub enum Loaded {
     Signing {
         preparation: Preparation,

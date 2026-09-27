@@ -69,6 +69,7 @@ pub enum Message {
     /// coordinator session back and forth, so no other handler ever sees it.
     Claim(super::state::vault::claim::ClaimEvent),
     ForkClaim(Box<super::state::vault::claim::fork_panel::Event>),
+    ForkClaimOpened(Box<super::state::vault::claim::fork_load::Opened>),
     LoadDaemonConfig(Box<DaemonConfig>),
     DaemonConfigLoaded(Result<(), Error>),
     /// Result of an off-UI-thread daemon restart (a backend switch). Carries the

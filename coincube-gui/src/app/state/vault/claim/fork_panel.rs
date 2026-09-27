@@ -158,6 +158,9 @@ impl ForkClaimPanel {
             tracking: None,
         })
     }
+    pub fn is_revoked(&self) -> bool {
+        self.revoked || self.revoker.is_revoked()
+    }
     pub fn revoke(&mut self) {
         self.revoker.revoke();
         self.epoch = self.epoch.wrapping_add(1);

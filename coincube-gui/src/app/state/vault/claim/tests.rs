@@ -1479,6 +1479,91 @@ mod flow {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn confirmed_handoff_releases_journal_and_does_not_reacquire_in_background() {
+        use crate::app::settings::{update_settings_file, CubeSettings, VaultIdentity};
+        let mut f = reach_review().await;
+        assert!(f.p.take_fork_handoff().is_err());
+        reach_track(&mut f).await;
+        assert!(f.p.take_fork_handoff().is_err()); // no Bitcoin confirmation yet
+        for (chain, id) in [
+            (ChainId::Bitcoin, "bitcoin-cube"),
+            (ChainId::BitcoinBlake2b, "fork-cube"),
+        ] {
+            let cube = CubeSettings::new_with_raw_id(id.into(), id.into(), chain).with_vault(
+                VaultIdentity::new(f.wallet.id(), Some(&f.wallet.main_descriptor)),
+            );
+            update_settings_file(&f.datadir.network_directory(chain), |mut settings| {
+                settings.cubes = vec![cube];
+                Some(settings)
+            })
+            .await
+            .unwrap();
+        }
+        // Only a previously collected eligible tracking view offers navigation;
+        // this fixture does not claim current permission to sign on the fork.
+        if let Stage::Track { status, .. } = &mut f.p.stage {
+            *status = Some(Status::Observation(
+                Assessment::ObservationsEligibleForPreflight,
+            ));
+        }
+        let context = match &f.p.stage {
+            Stage::Track {
+                session: Some(session),
+                ..
+            } => session.context.clone(),
+            _ => panic!("tracked"),
+        };
+        let mut fork_wallet = (*f.wallet).clone();
+        fork_wallet.chain = ChainId::BitcoinBlake2b;
+        let discovered =
+            crate::app::claim_intent::ForkHandoff::discover(&f.datadir, "fork-cube", &fork_wallet)
+                .unwrap();
+        assert_eq!(discovered.bitcoin_cube(), "bitcoin-cube");
+        let pair = f.p.take_fork_handoff().unwrap();
+        assert_eq!(pair.bitcoin_cube(), "bitcoin-cube");
+        assert_eq!(pair.fork_cube(), "fork-cube");
+        assert!(!f.p.can_continue_on_fork());
+        assert!(f.p.handoff_pending);
+        assert!(outputs(f.p.recover(Some(f.dyn_daemon.clone())))
+            .await
+            .is_empty());
+        // Reopening proves the Bitcoin panel released the actual exclusive lock.
+        let identity = crate::services::claim_workflow::WalletIdentity {
+            bitcoin_cube: "bitcoin-cube".into(),
+            fork_cube: "fork-cube".into(),
+            descriptor_digest: coincube_core::miniscript::bitcoin::hashes::sha256::Hash::hash(
+                f.wallet.main_descriptor.to_string().as_bytes(),
+            ),
+        };
+        let reopened = crate::services::claim_workflow::Controller::reopen(
+            &journal_directory(&f.datadir, &f.wallet),
+            &identity,
+            context,
+        );
+        assert!(reopened.is_ok(), "{:?}", reopened.err());
+        drop(reopened);
+        update_settings_file(
+            &f.datadir.network_directory(ChainId::Bitcoin),
+            |mut settings| {
+                let mut second = settings.cubes[0].clone();
+                second.id = "other-source".into();
+                settings.cubes.push(second);
+                Some(settings)
+            },
+        )
+        .await
+        .unwrap();
+        assert!(crate::app::claim_intent::ForkHandoff::discover(
+            &f.datadir,
+            "fork-cube",
+            &fork_wallet
+        )
+        .is_none());
+        assert_eq!(submissions(&f), 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn fork_loader_preserves_pairing_and_requires_fresh_depth_before_signing() {
         use crate::app::settings::{update_settings_file, CubeSettings, VaultIdentity};
         let mut f = reach_review().await;

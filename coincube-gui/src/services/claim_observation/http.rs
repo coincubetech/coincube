@@ -142,6 +142,25 @@ impl HttpObservationSource {
         })
         .await
     }
+    /// Six-block fee estimate from the paired fork provider, without account
+    /// headers or Bitcoin-provider fallback. A quote never authorizes a spend.
+    pub async fn claim_fee_rate(&self) -> Result<u64, FailureKind> {
+        let (status, bytes, _, _) = self.get(ChainId::BitcoinBlake2b, "fee-estimates").await?;
+        if status != 200 {
+            return Err(FailureKind::Http(status));
+        }
+        let quotes: std::collections::BTreeMap<String, f64> =
+            serde_json::from_slice(&bytes).map_err(|_| FailureKind::Malformed)?;
+        let rate = quotes
+            .get("6")
+            .copied()
+            .ok_or(FailureKind::Malformed)?
+            .ceil();
+        if !rate.is_finite() || rate < 1.0 || rate >= u64::MAX as f64 {
+            return Err(FailureKind::Malformed);
+        }
+        Ok(rate as u64)
+    }
     async fn hash(&self, chain: ChainId, path: &str) -> Result<FreshRead<BlockHash>, FailureKind> {
         let (status, bytes, headers, stamp) = self.get(chain, path).await?;
         if status != 200 {
@@ -299,6 +318,52 @@ mod tests {
             .unwrap(),
             sender,
         )
+    }
+    #[tokio::test]
+    async fn claim_fee_uses_fork_quote_and_refuses_missing_invalid_or_stale_values() {
+        for (body, expected) in [
+            (r#"{"6":1.1}"#, Some(2)),
+            (r#"{"6":0}"#, None),
+            (r#"{"6":-1}"#, None),
+            (r#"{"1":3}"#, None),
+            (r#"{"6":1e30}"#, None),
+            (r#"{"6":"2"}"#, None),
+        ] {
+            let server = MockServer::start();
+            let (source, sender) = source(&server);
+            let mock = server.mock(|when, then| {
+                when.method(GET)
+                    .path("/api/v1/esplora/bitcoin-blake2b/mainnet/fee-estimates")
+                    .header("x-coincube-observation", "fresh")
+                    .matches(|request| {
+                        request.headers.as_ref().is_none_or(|headers| {
+                            headers.iter().all(|(name, _)| {
+                                ![
+                                    "authorization",
+                                    "cookie",
+                                    "x-device-fingerprint",
+                                    "x-device-name",
+                                ]
+                                .iter()
+                                .any(|forbidden| name.eq_ignore_ascii_case(forbidden))
+                            })
+                        })
+                    });
+                then.status(200)
+                    .header("cache-control", "no-store")
+                    .header("x-cache", "BYPASS")
+                    .header("x-coincube-observation", "fresh")
+                    .body(body);
+            });
+            assert_eq!(source.claim_fee_rate().await.ok(), expected);
+            mock.assert_hits(1);
+            sender.send_replace(5);
+            assert!(matches!(
+                source.claim_fee_rate().await,
+                Err(FailureKind::Cancelled)
+            ));
+            mock.assert_hits(1);
+        }
     }
     fn id() -> Txid {
         Txid::from_str(&"11".repeat(32)).unwrap()

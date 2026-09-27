@@ -430,6 +430,7 @@ pub struct ClaimStep1Panel {
     finalize_attempts: u64,
     feerate: FeerateSource,
     restart_pending: bool,
+    handoff_pending: bool,
     restarting: Option<FinalizeAttempt>,
     restart_error: Option<String>,
     resuming: bool,
@@ -462,6 +463,7 @@ impl ClaimStep1Panel {
             finalize_attempts: 0,
             feerate: FeerateSource::Estimator,
             restart_pending,
+            handoff_pending: false,
             restarting: None,
             restart_error: None,
             resuming: false,
@@ -637,6 +639,9 @@ impl ClaimStep1Panel {
     /// and on entry, so a claim revoked by a sign-out or a backend switch
     /// continues once its context is back. Nothing to do without a daemon.
     pub fn recover(&mut self, daemon: Option<Arc<dyn Daemon + Sync + Send>>) -> Task<Message> {
+        if self.handoff_pending {
+            return Task::none();
+        }
         let Some(daemon) = daemon else {
             return Task::none();
         };
@@ -866,6 +871,54 @@ impl ClaimStep1Panel {
         self.pre.target =
             crate::app::claim_target_cube_id(&self.datadir, &self.wallet.descriptor_checksum);
         self.pre.shape = vault_shape_refusal(&self.wallet);
+    }
+
+    pub fn can_continue_on_fork(&self) -> bool {
+        !self.revoked
+            && !self.handoff_pending
+            && self.backend_ready()
+            && self.connect.is_some()
+            && matches!(&self.stage, Stage::Track { session: Some(session), busy: false,
+                status: Some(Status::Observation(Assessment::ObservationsEligibleForPreflight | Assessment::NeedsPreflightRecheck)), .. }
+                if session.coordinator.as_ref().is_some_and(|c| c.wallet_identity().bitcoin_cube == self.bitcoin_cube))
+    }
+    /// Release the Bitcoin journal owner before the paired Cube opens. The
+    /// next stage obtains all authority from fresh checks after normal unlock.
+    pub fn take_fork_handoff(&mut self) -> Result<crate::app::claim_intent::ForkHandoff, String> {
+        if !self.can_continue_on_fork() {
+            return Err(
+                "Read both chains again and wait for six Bitcoin confirmations before continuing."
+                    .into(),
+            );
+        }
+        let identity = match &self.stage {
+            Stage::Track {
+                session: Some(session),
+                ..
+            } => session
+                .coordinator
+                .as_ref()
+                .map(|c| c.wallet_identity().clone()),
+            _ => None,
+        }
+        .ok_or_else(|| SESSION_ENDED.to_string())?;
+        let handoff = crate::app::claim_intent::ForkHandoff::new(
+            &self.datadir,
+            identity.bitcoin_cube,
+            identity.fork_cube,
+        )?;
+        handoff.resolve_target(&self.datadir)?;
+        self.revoke();
+        if let Stage::Track {
+            session, status, ..
+        } = &mut self.stage
+        {
+            *session = None;
+            *status = None;
+        }
+        self.handoff_pending = true;
+        self.restart_pending = true;
+        Ok(handoff)
     }
 
     pub fn is_resuming(&self) -> bool {
@@ -1582,43 +1635,48 @@ impl State for ClaimStep1Panel {
             )))
         };
         match message {
-            Message::View(view::Message::Claim(intent)) => match intent {
-                view::ClaimMessage::Recheck => match daemon {
-                    Some(daemon) => self.probe(daemon),
-                    None => node_unavailable(),
-                },
-                view::ClaimMessage::Build => match daemon {
-                    Some(daemon) => self.build(daemon),
-                    None => node_unavailable(),
-                },
-                view::ClaimMessage::Sign => {
-                    self.start_signing();
-                    Task::none()
+            Message::View(view::Message::Claim(intent)) => {
+                if intent == view::ClaimMessage::Refresh {
+                    self.handoff_pending = false;
                 }
-                view::ClaimMessage::Confirm => self.confirm(),
-                view::ClaimMessage::Refresh if self.restart_pending => match daemon {
-                    Some(daemon) => self.recover(Some(daemon)),
-                    None => node_unavailable(),
-                },
-                view::ClaimMessage::Refresh => match &self.stage {
-                    Stage::Review { .. } | Stage::Track { .. } if self.revoked => {
-                        match (self.backend.copy(), daemon) {
-                            // Held by the App's backend state: say so, bind nothing.
-                            (Some(copy), _) => Task::done(Message::View(view::Message::ShowError(
-                                copy.to_string(),
-                            ))),
-                            (None, Some(daemon)) => self.recover(Some(daemon)),
-                            (None, None) => node_unavailable(),
-                        }
+                match intent {
+                    view::ClaimMessage::Recheck => match daemon {
+                        Some(daemon) => self.probe(daemon),
+                        None => node_unavailable(),
+                    },
+                    view::ClaimMessage::Build => match daemon {
+                        Some(daemon) => self.build(daemon),
+                        None => node_unavailable(),
+                    },
+                    view::ClaimMessage::Sign => {
+                        self.start_signing();
+                        Task::none()
                     }
-                    Stage::Review { .. } => self.prepare_review(),
-                    _ => self.reconcile(),
-                },
-                view::ClaimMessage::Cancel => {
-                    self.cancel();
-                    Task::none()
+                    view::ClaimMessage::Confirm => self.confirm(),
+                    view::ClaimMessage::Refresh if self.restart_pending => match daemon {
+                        Some(daemon) => self.recover(Some(daemon)),
+                        None => node_unavailable(),
+                    },
+                    view::ClaimMessage::Refresh => match &self.stage {
+                        Stage::Review { .. } | Stage::Track { .. } if self.revoked => {
+                            match (self.backend.copy(), daemon) {
+                                // Held by the App's backend state: say so, bind nothing.
+                                (Some(copy), _) => Task::done(Message::View(
+                                    view::Message::ShowError(copy.to_string()),
+                                )),
+                                (None, Some(daemon)) => self.recover(Some(daemon)),
+                                (None, None) => node_unavailable(),
+                            }
+                        }
+                        Stage::Review { .. } => self.prepare_review(),
+                        _ => self.reconcile(),
+                    },
+                    view::ClaimMessage::Cancel => {
+                        self.cancel();
+                        Task::none()
+                    }
                 }
-            },
+            }
             Message::Claim(event) => self.apply(event),
             other => {
                 let Stage::Sign { psbt, error, .. } = &mut self.stage else {
@@ -1649,6 +1707,7 @@ impl State for ClaimStep1Panel {
         daemon: Option<Arc<dyn Daemon + Sync + Send>>,
         wallet: Option<Arc<Wallet>>,
     ) -> Task<Message> {
+        self.handoff_pending = false;
         if let Some(wallet) = wallet {
             self.wallet = wallet;
         }

@@ -65,7 +65,18 @@ pub fn view<'a>(
             status,
             busy,
             error,
-        } => dashboard(menu, cache, track_view(outcome, phase, status, busy, error)),
+        } => dashboard(
+            menu,
+            cache,
+            track_view(
+                outcome,
+                phase,
+                status,
+                busy,
+                error,
+                panel.can_continue_on_fork(),
+            ),
+        ),
     }
 }
 
@@ -461,6 +472,7 @@ fn track_view<'a>(
     status: Option<Status>,
     busy: bool,
     error: Option<&'a str>,
+    can_continue: bool,
 ) -> Element<'a, Message> {
     let (txid, submitted) = match outcome {
         Outcome::Recorded { txid } => (txid, "A submission is recorded on this device. Its transaction has not been recovered and verified yet; it will not be retried.".into()),
@@ -489,7 +501,7 @@ fn track_view<'a>(
             }
             Assessment::ObservationsEligibleForPreflight | Assessment::NeedsPreflightRecheck => {
                 format!(
-                    "Confirmed with {MIN_CONFIRMATIONS} or more confirmations. Step 2 comes in a later release."
+                    "Confirmed with {MIN_CONFIRMATIONS} or more confirmations. Continue in the paired Bitcoin Blake2b Cube."
                 )
             }
             Assessment::Reorged => {
@@ -545,6 +557,10 @@ fn track_view<'a>(
                 button::secondary(Some(icon::reload_icon()), "Read again")
                     .on_press_maybe((!busy).then_some(Message::Claim(ClaimMessage::Refresh))),
             ),
+        )
+        .push(
+            button::primary(None, "Continue in Bitcoin Blake2b")
+                .on_press_maybe(can_continue.then_some(Message::ContinueForkClaim)),
         )
         .push(Space::new().height(Length::Fixed(10.0)))
         .into()

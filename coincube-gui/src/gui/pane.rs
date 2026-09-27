@@ -20,6 +20,7 @@ pub enum Message {
 
 #[derive(Debug, Clone)]
 pub enum ViewMessage {
+    OpenForkClaim(app::claim_intent::ForkHandoff),
     FocusTab(usize),
     CloseTab(usize),
     SplitTab(usize),
@@ -185,6 +186,9 @@ impl Pane {
                             tab::Message::ToggleTheme => {
                                 Task::done(Message::View(ViewMessage::ToggleTheme))
                             }
+                            tab::Message::OpenForkClaim(handoff) => {
+                                Task::done(Message::View(ViewMessage::OpenForkClaim(handoff)))
+                            }
                             tab::Message::OpenConnectSignIn => {
                                 Task::done(Message::View(ViewMessage::OpenConnectSignIn))
                             }
@@ -230,6 +234,10 @@ impl Pane {
                 if !tasks.is_empty() {
                     return Task::batch(tasks);
                 }
+            }
+            Message::View(ViewMessage::OpenForkClaim(handoff)) => {
+                return self
+                    .focus_home_tab_with(crate::home::Message::ContinueForkClaim(handoff), cfg);
             }
             Message::View(ViewMessage::OpenConnectSignIn) => {
                 // Focus/spawn a Home tab and land on Connect → Overview so the

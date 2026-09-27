@@ -185,6 +185,7 @@ pub enum Message {
     /// (Lane B1.4). Creates the target Cube only — nothing is claimed,
     /// poisoned, swept or broadcast by this flow.
     StartClaimBlake2b,
+    ContinueForkClaim,
     /// Claim step 1 — the poison self-transfer on Bitcoin (Lane B1.5),
     /// handled by `state::vault::claim::ClaimStep1Panel`.
     Claim(ClaimMessage),

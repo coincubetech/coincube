@@ -490,6 +490,9 @@ impl Coordinator {
             wtxid: self.verified.transaction().compute_wtxid(),
         })
     }
+    pub(crate) fn wallet_identity(&self) -> &WalletIdentity {
+        self.controller.identity()
+    }
     pub fn context(&self) -> &Context {
         &self.context
     }

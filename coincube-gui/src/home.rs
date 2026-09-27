@@ -251,6 +251,7 @@ struct PendingRemoteRename {
 }
 
 pub struct Home {
+    pending_fork_claim: Option<app::claim_intent::ForkHandoff>,
     state: State,
     displayed_networks: Vec<ChainId>,
     /// Descriptor checksums that already have a Bitcoin Blake2b claim target
@@ -403,6 +404,7 @@ impl Home {
         let network_dir = datadir_path.network_directory(network);
         (
             Self {
+                pending_fork_claim: None,
                 // Resolved on the first `refresh_displayed_networks`.
                 btcb2_claim_targets: std::collections::HashSet::new(),
                 state: State::Unchecked,
@@ -846,7 +848,95 @@ impl Home {
         self.btcb2_claim_targets = app::claim_target_checksums(&self.datadir_path);
     }
 
+    /// Route a paired Claim through the ordinary launcher. This does not
+    /// unlock a Cube or admit a wallet by itself.
+    fn continue_fork_claim(&mut self, handoff: app::claim_intent::ForkHandoff) -> Task<Message> {
+        app::claim_intent::clear();
+        let chain = ChainId::BitcoinBlake2b;
+        if let Some(reason) = self.connect_chain_availability(chain).reason() {
+            self.set_error(reason.to_string());
+            return Task::none();
+        }
+        let target = match handoff.resolve_target(&self.datadir_path) {
+            Ok(target) => target,
+            Err(error) => {
+                self.set_error(error);
+                return Task::none();
+            }
+        };
+        let path = self
+            .datadir_path
+            .network_directory(chain)
+            .path()
+            .join(app::config::DEFAULT_FILE_NAME);
+        let config = match app::Config::from_file(&path) {
+            Ok(config) => config,
+            Err(error) => {
+                self.set_error(format!(
+                    "Couldn't read the Bitcoin Blake2b configuration: {error}"
+                ));
+                return Task::none();
+            }
+        };
+        app::claim_intent::arm_fork(handoff);
+        Task::done(Message::Run(
+            self.datadir_path.clone(),
+            config,
+            chain,
+            target,
+        ))
+    }
+
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        let task = match message {
+            Message::ContinueForkClaim(handoff) => {
+                app::claim_intent::clear();
+                if !handoff.matches_root(&self.datadir_path) {
+                    self.pending_fork_claim = None;
+                    self.set_error("This Claim belongs to a different data directory.");
+                    return Task::none();
+                }
+                self.pending_fork_claim = Some(handoff);
+                self.refresh_displayed_networks();
+                if let Some(reason) = self
+                    .connect_chain_availability(ChainId::BitcoinBlake2b)
+                    .reason()
+                {
+                    self.set_error(reason.to_string());
+                }
+                Task::none()
+            }
+            message => {
+                if matches!(
+                    &message,
+                    Message::View(
+                        ViewMessage::Run(_)
+                            | ViewMessage::SelectNetwork(_)
+                            | ViewMessage::CreateCube
+                            | ViewMessage::CreateWallet
+                            | ViewMessage::GoToSection(HomeSection::Cubes)
+                            | ViewMessage::ConnectAccount(app::view::ConnectAccountMessage::LogOut)
+                    )
+                ) {
+                    self.pending_fork_claim = None;
+                }
+                self.update_inner(message)
+            }
+        };
+        let continue_claim = if self
+            .connect_chain_availability(ChainId::BitcoinBlake2b)
+            .is_available()
+        {
+            self.pending_fork_claim
+                .take()
+                .map_or_else(Task::none, |handoff| self.continue_fork_claim(handoff))
+        } else {
+            Task::none()
+        };
+        Task::batch([task, continue_claim])
+    }
+
+    fn update_inner(&mut self, message: Message) -> Task<Message> {
         self.refresh_displayed_networks();
         if self.network.is_blake2b() {
             // Explicitly supported launcher actions only. No legacy seed-only,
@@ -5366,6 +5456,7 @@ fn map_connect_task(task: Task<app::message::Message>) -> Task<Message> {
 #[derive(Debug, Clone)]
 pub enum Message {
     View(ViewMessage),
+    ContinueForkClaim(app::claim_intent::ForkHandoff),
     /// Bubbles up to the pane on the auth-success edge so it can
     /// broadcast a session re-check to every open Cube tab. Carries
     /// no payload — the Cube tabs read the keyring themselves.
@@ -9184,6 +9275,88 @@ mod chain_identity_open_tests {
 
     fn is_run_for(msg: &Message, chain: ChainId, id: &str) -> bool {
         matches!(msg, Message::Run(_, _, c, cube) if *c == chain && cube.id == id)
+    }
+
+    #[test]
+    fn claim_handoff_waits_for_admission_and_uses_normal_run_with_exact_identity() {
+        let _guard = crate::app::session::test_guard();
+        let dir = tmp_datadir("claim-handoff");
+        let root = CoincubeDirectory::new(dir.clone());
+        let source = settings::CubeSettings::new_with_raw_id(
+            "source".into(),
+            "Source".into(),
+            ChainId::Bitcoin,
+        )
+        .with_vault(settings::VaultIdentity {
+            wallet_id: settings::WalletId::new("descriptor".into(), Some(1)),
+            fingerprint: Some("12345678".into()),
+        });
+        let target = settings::CubeSettings::new_with_raw_id(
+            "target".into(),
+            "Target".into(),
+            ChainId::BitcoinBlake2b,
+        )
+        .with_vault(settings::VaultIdentity {
+            wallet_id: settings::WalletId::new("descriptor".into(), Some(2)),
+            fingerprint: Some("12345678".into()),
+        });
+        for (chain, cube) in [
+            (ChainId::Bitcoin, source),
+            (ChainId::BitcoinBlake2b, target.clone()),
+        ] {
+            let chain_dir = root.network_directory(chain);
+            std::fs::create_dir_all(chain_dir.path()).unwrap();
+            app::Config::new(false)
+                .to_file(&chain_dir.path().join(app::config::DEFAULT_FILE_NAME))
+                .unwrap();
+            std::fs::write(
+                chain_dir.path().join(settings::SETTINGS_FILE_NAME),
+                serde_json::to_vec(&settings::Settings {
+                    cubes: vec![cube],
+                    ..Default::default()
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        }
+        let pair =
+            app::claim_intent::ForkHandoff::new(&root, "source".into(), "target".into()).unwrap();
+        let mut home = Home::new(root.clone(), Some(Network::Bitcoin)).0;
+        assert!(drain(home.update(Message::ContinueForkClaim(pair.clone()))).is_empty());
+        assert!(home.pending_fork_claim.is_some());
+        assert!(app::claim_intent::take_for_cube(&root, "target").is_none());
+        let mut client = CoincubeClient::new();
+        client.set_token("synthetic-handoff-token");
+        home.connect_account.install_admitted_client(client);
+        home.connect_account.features = Some(
+            serde_json::from_value(serde_json::json!({"plans":[],"bitcoinBlake2bEnabled":true}))
+                .unwrap(),
+        );
+        let messages = drain(home.update(Message::View(ViewMessage::DismissAdvisoryNotice)));
+        assert!(messages
+            .iter()
+            .any(|m| is_run_for(m, ChainId::BitcoinBlake2b, "target")));
+        assert!(home.pending_fork_claim.is_none());
+        assert!(matches!(
+            app::claim_intent::take_for_cube(&root, "target"),
+            Some(app::claim_intent::Intent::Fork(_))
+        ));
+        assert!(app::claim_intent::take_for_cube(&root, "target").is_none());
+        // A changed/ambiguous target cannot be armed, even under an admitted account.
+        let fork_dir = root.network_directory(ChainId::BitcoinBlake2b);
+        std::fs::write(
+            fork_dir.path().join(settings::SETTINGS_FILE_NAME),
+            serde_json::to_vec(&settings::Settings {
+                cubes: vec![target.clone(), target],
+                ..Default::default()
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(drain(home.update(Message::ContinueForkClaim(pair))).is_empty());
+        assert!(home.error().unwrap().contains("ambiguous"));
+        assert!(app::claim_intent::take_for_cube(&root, "target").is_none());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
