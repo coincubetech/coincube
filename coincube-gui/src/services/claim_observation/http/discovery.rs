@@ -3,6 +3,7 @@ use super::*;
 mod binding;
 mod collect;
 mod preferred;
+mod sweep;
 pub use binding::AncestryContext;
 use coincube_core::{
     claim_ancestry::{
@@ -17,6 +18,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
 };
+pub use sweep::CollectedAncestrySweep;
 
 const MAX_REQUESTS: usize = 128;
 const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
