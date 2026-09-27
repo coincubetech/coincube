@@ -164,6 +164,97 @@ pub fn finalize_poison_transfer<C: secp256k1::Verification>(
     })
 }
 
+/// A finalized fork sweep and its verified retained-witness reports. This is
+/// cryptographic evidence, not proof that Bitcoin's poison transfer is confirmed
+/// or permission to broadcast a legacy-signed sweep.
+#[derive(Debug)]
+pub struct VerifiedClaimForkSweep {
+    finalized: crate::unified_finalize::FinalizedSpend,
+    chain: ChainId,
+    bitcoin_step1: Txid,
+    fee: Amount,
+}
+impl VerifiedClaimForkSweep {
+    pub fn transaction(&self) -> &Transaction {
+        &self.finalized.transaction
+    }
+    pub fn inputs(&self) -> &[crate::unified_finalize::InputWitnessReport] {
+        &self.finalized.inputs
+    }
+    pub fn chain(&self) -> ChainId {
+        self.chain
+    }
+    pub fn bitcoin_step1(&self) -> Txid {
+        self.bitcoin_step1
+    }
+    pub fn fee(&self) -> Amount {
+        self.fee
+    }
+}
+
+#[derive(Debug)]
+pub enum ClaimForkFinalizeError {
+    ConstructionChanged,
+    Adapter(crate::psbt_unified::UnifiedPsbtError),
+    Finalize(crate::unified_finalize::UnifiedFinalizeError),
+    Economics,
+}
+impl std::fmt::Display for ClaimForkFinalizeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ConstructionChanged => f.write_str("Claim fork sweep construction changed"),
+            Self::Adapter(e) => e.fmt(f),
+            Self::Finalize(e) => e.fmt(f),
+            Self::Economics => f.write_str("Claim fork sweep economics are invalid"),
+        }
+    }
+}
+impl std::error::Error for ClaimForkFinalizeError {}
+
+/// Only validated signing additions may differ from the owned construction.
+/// Full prevouts, key origins, scripts, output metadata and unrelated maps must
+/// remain exact; prefinalized/imported replacements do not bypass the verifier.
+/// Both unified and legacy signatures are cryptographically checked by the
+/// existing finalizer. A legacy-only report still requires fresh poison proof
+/// from the coordinator before any replay-safety claim or submission.
+pub fn finalize_claim_fork_sweep<C: secp256k1::Verification>(
+    construction: &crate::claim_spend::ClaimForkSweep,
+    signed: &crate::psbt_unified::UnifiedPsbt,
+    secp: &secp256k1::Secp256k1<C>,
+) -> Result<VerifiedClaimForkSweep, ClaimForkFinalizeError> {
+    use crate::psbt_unified::{merge_signatures, UnifiedPsbt};
+    let mut expected = UnifiedPsbt::from_psbt(construction.psbt().clone())
+        .map_err(ClaimForkFinalizeError::Adapter)?;
+    merge_signatures(&mut expected, signed).map_err(ClaimForkFinalizeError::Adapter)?;
+    // The adapter validates permitted sighash requests. Copy only this signing
+    // field in addition to the signature records, then compare the entire PSBT.
+    for (original, supplied) in expected
+        .psbt_mut()
+        .inputs
+        .iter_mut()
+        .zip(&signed.psbt().inputs)
+    {
+        original.sighash_type = supplied.sighash_type;
+    }
+    if expected.psbt() != signed.psbt() {
+        return Err(ClaimForkFinalizeError::ConstructionChanged);
+    }
+    spend::reverify_spend_before_broadcast(construction.descriptor(), signed.psbt())
+        .map_err(|_| ClaimForkFinalizeError::Economics)?;
+    let fee = signed
+        .psbt()
+        .fee()
+        .map_err(|_| ClaimForkFinalizeError::Economics)?;
+    let finalized = crate::unified_finalize::finalize_p2wsh_all_unified(signed, secp)
+        .map_err(ClaimForkFinalizeError::Finalize)?;
+    Ok(VerifiedClaimForkSweep {
+        finalized,
+        chain: construction.chain(),
+        bitcoin_step1: construction.bitcoin_step1(),
+        fee,
+    })
+}
+
 /// Verify a transaction recovered from the node against a reconstructed owned
 /// poison transfer. Disk state and a matching txid are not signature evidence:
 /// every retained witness is interpreted against authenticated previous outputs.
