@@ -285,3 +285,93 @@ fn restore_ancestry_rebuilds_intent_and_authenticates_recorded_witness_without_w
         assert_eq!(fs::read(temp.0.join("intent.json")).unwrap(), before);
     }
 }
+
+#[test]
+fn restore_ancestry_fork_uses_only_shared_inputs_and_rejects_saved_output_tampering() {
+    use coincube_core::{
+        claim_finalize::finalize_ancestry_transfer, claim_spend::create_ancestry_fork_sweep,
+    };
+    let (owned, _) = real_artifact(ChainId::Bitcoin, true, 10);
+    let (built, path, mut getter, coins) = material(10, false, owned.descriptor().clone());
+    let curve = secp256k1::Secp256k1::new();
+    let mut signed = built.psbt().clone();
+    for byte in [40, 41] {
+        let signer = MasterSigner::from_mnemonic(
+            Network::Bitcoin,
+            Mnemonic::from_entropy(&[byte; 16]).unwrap(),
+        )
+        .unwrap();
+        signed = signer.sign_psbt(signed, &curve).unwrap();
+    }
+    let verified = finalize_ancestry_transfer(&built, &signed, &curve).unwrap();
+    // The fork side cannot retrieve the Bitcoin-only input's transaction.
+    getter.0.remove(&built.poison_input().txid);
+    let sweep = create_ancestry_fork_sweep(
+        &built,
+        ChainId::BitcoinBlake2b,
+        &secp256k1::Secp256k1::verification_only(),
+        &mut getter,
+        &coins[1..],
+        ChildNumber::from_normal_idx(11).unwrap(),
+        5,
+        absolute::LockTime::ZERO,
+    )
+    .unwrap();
+    for mode in 0..6 {
+        let temp = Temp::new();
+        let c = create(&temp, &built, &path);
+        let identity = c.identity().clone();
+        let mut intent = c.intent.clone();
+        drop(c);
+        intent.phase = Phase::Tracking;
+        intent.signed_txid = Some(verified.transaction().compute_txid());
+        intent.bitcoin_transaction = Some(verified.transaction().clone());
+        intent.bitcoin_attempts = vec![BitcoinSubmissionAttempt {
+            wtxid: Some(verified.transaction().compute_wtxid()),
+        }];
+        intent.fork_change_index = Some(11);
+        intent.fork_sweep = Some(sweep.psbt().unsigned_tx.clone());
+        match mode {
+            2 => intent.fork_change_index = Some(12),
+            3 => {
+                intent.fork_sweep.as_mut().unwrap().output[0].script_pubkey = built
+                    .descriptor()
+                    .receive_descriptor()
+                    .derive(ChildNumber::from_normal_idx(12).unwrap(), &curve)
+                    .script_pubkey();
+            }
+            4 => {
+                intent.fork_sweep.as_mut().unwrap().output[0].value = Amount::from_sat(200_000);
+            }
+            _ => {}
+        }
+        let file = temp.0.join("intent.json");
+        fs::write(&file, serde_json::to_vec(&intent).unwrap()).unwrap();
+        let before = fs::read(&file).unwrap();
+        let mut c = Controller::reopen(&temp.0, &identity, context()).unwrap();
+        let (wrong, _) = fixture(12, false);
+        let result = c.restore_ancestry_fork_sweep(
+            &context(),
+            if mode == 5 { &wrong } else { &built },
+            &mut getter,
+            if mode == 1 { &coins } else { &coins[1..] },
+        );
+        if mode == 0 {
+            let restored = result.unwrap();
+            assert_eq!(restored.psbt(), sweep.psbt());
+            assert_eq!(
+                restored.bitcoin_step1(),
+                built.psbt().unsigned_tx.compute_txid()
+            );
+            assert!(c.construction_verified);
+            assert!(c
+                .restore_ancestry_fork_sweep(&context(), &built, &mut getter, &[])
+                .is_err());
+        } else {
+            assert!(result.is_err(), "mode {}", mode);
+        }
+        assert!(!c.construction_verified);
+        assert_eq!(c.status(), Status::Unchecked);
+        assert_eq!(fs::read(&file).unwrap(), before);
+    }
+}

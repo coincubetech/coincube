@@ -3,7 +3,10 @@ use super::*;
 use coincube_core::{
     claim_ancestry::retained::{RetainedPath, MAX_ENCODED_BYTES},
     claim_finalize::{verify_ancestry_transaction, VerifiedAncestryTransfer},
-    claim_spend::{reconstruct_ancestry_self_transfer, AncestrySelfTransfer},
+    claim_spend::{
+        reconstruct_ancestry_fork_sweep, reconstruct_ancestry_self_transfer, AncestrySelfTransfer,
+        ClaimForkSweep,
+    },
     descriptors::CoincubeDescriptor,
     miniscript::bitcoin::OutPoint,
     spend::{CandidateCoin, TxGetter},
@@ -182,6 +185,48 @@ impl Controller {
             .transpose()?;
         self.revalidate_ancestry_construction(current, &built)?;
         Ok((built, signed))
+    }
+
+    /// Rebuild a saved fork sweep using only the owned shared inputs. The
+    /// ancestry input remains excluded, including from transaction lookups.
+    /// The Bitcoin source must match this journal; the saved fork output and
+    /// amount must match a fresh owned reconstruction. No signing metadata from
+    /// disk is trusted and no chain eligibility or submission right is restored.
+    pub fn restore_ancestry_fork_sweep(
+        &mut self,
+        current: &Context,
+        source: &AncestrySelfTransfer,
+        tx_getter: &mut impl TxGetter,
+        coins: &[CandidateCoin],
+    ) -> Result<ClaimForkSweep, Error> {
+        self.revalidate_ancestry_construction(current, source)?;
+        self.construction_verified = false;
+        if self.intent.phase != Phase::Tracking
+            || self.intent.signed_txid != Some(source.psbt().unsigned_tx.compute_txid())
+        {
+            return Err(Error::Unchecked);
+        }
+        let recorded = self
+            .intent
+            .fork_sweep
+            .as_ref()
+            .ok_or(Error::InvalidJournal)?;
+        let index = self
+            .recorded_fork_change_index()
+            .ok_or(Error::InvalidJournal)?;
+        let secp = coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::verification_only();
+        let sweep = reconstruct_ancestry_fork_sweep(
+            source,
+            self.intent.plan.fork_chain,
+            &secp,
+            tx_getter,
+            coins,
+            index,
+            recorded,
+        )
+        .map_err(|_| Error::InvalidPlan)?;
+        self.construction_verified = true;
+        Ok(sweep)
     }
 
     pub fn revalidate_ancestry_construction(
