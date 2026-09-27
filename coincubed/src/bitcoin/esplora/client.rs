@@ -713,6 +713,49 @@ mod tests {
         .unwrap()
     }
     #[test]
+    fn admitted_proxy_reads_and_broadcast_never_send_account_credentials() {
+        use bitcoin::hashes::Hash;
+        let hash = bitcoin::BlockHash::from_byte_array([7; 32]);
+        // Synthetic transport payload only; this mock grants no node acceptance.
+        let tx = bitcoin::Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![bitcoin::TxIn::default()],
+            output: vec![],
+        };
+        let server = mock_esplora(StdHashMap::from([
+            ("/block-height/900000", (200, hash.to_string())),
+            ("/tx", (200, tx.compute_txid().to_string())),
+        ]));
+        let authority = authority_fixture(hash);
+        let client = Client::new_for_connect(
+            backend_fixture(&server, authority.clone()),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap();
+        client.broadcast_tx(&tx).unwrap();
+        let heads = server.heads.lock().unwrap();
+        assert!(heads
+            .iter()
+            .any(|h| h.starts_with("GET /block-height/900000 ")));
+        assert!(heads.iter().any(|h| h.starts_with("POST /tx ")));
+        assert!(heads
+            .iter()
+            .all(|head| !head.to_ascii_lowercase().contains("authorization:")));
+        assert!(heads.iter().all(|head| !head.contains("synthetic-jwt")));
+        drop(heads);
+        // Dropping credentials from proxy HTTP must not bypass authenticated
+        // authority checks, including their post-admission revocation state.
+        authority.0.lock().unwrap().hash = bitcoin::BlockHash::from_byte_array([8; 32]);
+        let before = server.requests().iter().filter(|p| *p == "/tx").count();
+        assert!(client.broadcast_tx(&tx).is_err());
+        assert_eq!(
+            server.requests().iter().filter(|p| *p == "/tx").count(),
+            before
+        );
+    }
+
+    #[test]
     fn admitted_operation_accepts_growth_and_lag_is_typed_without_fallback() {
         use bitcoin::hashes::Hash;
         let old = bitcoin::BlockHash::from_byte_array([7; 32]);
@@ -1336,6 +1379,7 @@ mod tests {
         base: String,
         addr: std::net::SocketAddr,
         requests: Arc<Mutex<Vec<String>>>,
+        heads: Arc<Mutex<Vec<String>>>,
         stop: Arc<AtomicBool>,
         thread: Option<std::thread::JoinHandle<()>>,
     }
@@ -1457,6 +1501,8 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let base = format!("http://{}", addr);
         let requests: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let heads = Arc::new(Mutex::new(Vec::new()));
+        let seen_heads = heads.clone();
         let stop = Arc::new(AtomicBool::new(false));
         let seen = requests.clone();
         let stopping = stop.clone();
@@ -1486,6 +1532,7 @@ mod tests {
                     .and_then(|l| l.split_whitespace().nth(1))
                     .unwrap_or("")
                     .to_string();
+                seen_heads.lock().unwrap().push(head);
                 seen.lock().unwrap().push(path.clone());
                 let (status, body) = routes
                     .get(path.as_str())
@@ -1512,6 +1559,7 @@ mod tests {
             base,
             addr,
             requests,
+            heads,
             stop,
             thread: Some(thread),
         }
