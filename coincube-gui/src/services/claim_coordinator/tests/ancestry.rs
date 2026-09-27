@@ -5,7 +5,7 @@ use coincube_core::{
     claim_spend::{create_ancestry_self_transfer, AncestrySelfTransfer},
     miniscript::bitcoin::consensus::{deserialize, serialize},
 };
-fn built(
+pub(crate) fn built(
     change: u32,
     alternate: bool,
 ) -> (AncestrySelfTransfer, RetainedPath, VerifiedAncestryTransfer) {

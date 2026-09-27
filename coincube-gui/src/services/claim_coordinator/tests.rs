@@ -1288,4 +1288,4 @@ async fn recovery_ineligibility_is_not_a_journal_failure() {
     ));
 }
 
-mod ancestry;
+pub(crate) mod ancestry;

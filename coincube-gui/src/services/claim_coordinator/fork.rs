@@ -1,6 +1,9 @@
 //! Fork-side confirmation and submission. No signing keys or automatic retry.
 use super::*;
+mod source;
+use coincube_core::claim_spend::AncestrySelfTransfer;
 use coincube_core::{claim_finalize::VerifiedClaimForkSweep, claim_spend::ClaimForkSweep};
+use source::Source;
 
 /// Fork backend admitted at the original Claim's paired API origin.
 /// This type cannot be used as Bitcoin step-one production services.
@@ -30,6 +33,9 @@ impl ForkProduction {
 #[async_trait]
 trait ForkServices: Send + Sync {
     fn source(&self) -> &dyn ObservationSource;
+    fn ancestry_source(&self) -> Option<&HttpObservationSource> {
+        None
+    }
     async fn preflight(
         &self,
         tx: &Transaction,
@@ -44,6 +50,9 @@ trait ForkServices: Send + Sync {
 }
 #[async_trait]
 impl ForkServices for ForkProduction {
+    fn ancestry_source(&self) -> Option<&HttpObservationSource> {
+        Some(&self.0.source)
+    }
     fn source(&self) -> &dyn ObservationSource {
         &self.0.source
     }
@@ -120,12 +129,48 @@ impl Coordinator {
             policy,
         )
     }
+    /// Reopen an owned ancestry claim without restoring eligibility. Fresh
+    /// proof collection still refuses signing/submission until full acceptance.
     #[allow(clippy::too_many_arguments)]
-    fn open(
+    pub fn resume_ancestry(
         directory: &Path,
         bitcoin_cube: String,
         fork_cube: String,
-        source: &PoisonSelfTransfer,
+        source: &AncestrySelfTransfer,
+        construction: ClaimForkSweep,
+        verified: VerifiedClaimForkSweep,
+        production: ForkProduction,
+        policy: CheckPolicy,
+    ) -> Result<Self, Error> {
+        if production
+            .0
+            .daemon
+            .config()
+            .is_none_or(|c| c.main_descriptor != *source.descriptor())
+        {
+            return Err(Error::InvalidBinding);
+        }
+        let context = production.0.context.clone();
+        let generation = production.0.generation.clone();
+        Self::open(
+            directory,
+            bitcoin_cube,
+            fork_cube,
+            source,
+            construction,
+            verified,
+            context,
+            generation,
+            Box::new(production),
+            policy,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn open<'a>(
+        directory: &Path,
+        bitcoin_cube: String,
+        fork_cube: String,
+        source: impl Into<Source<'a>>,
         construction: ClaimForkSweep,
         verified: VerifiedClaimForkSweep,
         context: Context,
@@ -133,6 +178,7 @@ impl Coordinator {
         services: Box<dyn ForkServices>,
         policy: CheckPolicy,
     ) -> Result<Self, Error> {
+        let source = source.into();
         if !policy.valid()
             || source.chain() != ChainId::Bitcoin
             || construction.chain() != ChainId::BitcoinBlake2b
@@ -161,7 +207,7 @@ impl Coordinator {
             descriptor_digest: sha256::Hash::hash(source.descriptor().to_string().as_bytes()),
         };
         let mut controller = Controller::reopen(directory, &identity, context.clone())?;
-        controller.revalidate_construction(&context, source)?;
+        source.revalidate(&mut controller, &context)?;
         if controller.signed_txid() != Some(construction.bitcoin_step1()) {
             return Err(Error::InvalidBinding);
         }
@@ -224,6 +270,21 @@ impl Coordinator {
         Ok(())
     }
     async fn collect(&self) -> Result<claim_observation::CollectedAssessment, Error> {
+        if let Some(path) = self.controller.recorded_ancestry()? {
+            return self
+                .services
+                .ancestry_source()
+                .ok_or(Error::Unsupported)?
+                .collect_ancestry(
+                    &path,
+                    &self.controller.plan(),
+                    self.policy.observations,
+                    self.policy.collection_budget,
+                )
+                .await
+                .map(|collected| collected.assessment())
+                .map_err(Error::Observation);
+        }
         claim_observation::collect(
             self.services.source(),
             &self.controller.plan(),
@@ -454,6 +515,11 @@ impl Coordinator {
         self.completion_revoker.revoke();
         self.completion_revoker = Revoker::new();
         self.current(context)?;
+        // Completion needs a combined ancestry and sweep-inclusion collection.
+        // The ordinary sweep collector alone must not establish ancestry safety.
+        if self.controller.recorded_ancestry()?.is_some() {
+            return Err(Error::Unsupported);
+        }
         let submission = self
             .controller
             .recorded_fork_submission()
@@ -570,18 +636,53 @@ impl Preparation {
             policy,
         )
     }
+    /// Reopen an owned ancestry claim without restoring eligibility. Fresh
+    /// proof collection still refuses signing/submission until full acceptance.
     #[allow(clippy::too_many_arguments)]
-    fn open(
+    pub fn resume_ancestry(
         directory: &Path,
         bitcoin_cube: String,
         fork_cube: String,
-        source: &PoisonSelfTransfer,
+        source: &AncestrySelfTransfer,
+        construction: ClaimForkSweep,
+        production: ForkProduction,
+        policy: CheckPolicy,
+    ) -> Result<Self, Error> {
+        if production
+            .0
+            .daemon
+            .config()
+            .is_none_or(|c| c.main_descriptor != *source.descriptor())
+        {
+            return Err(Error::InvalidBinding);
+        }
+        let context = production.0.context.clone();
+        let generation = production.0.generation.clone();
+        Self::open(
+            directory,
+            bitcoin_cube,
+            fork_cube,
+            source,
+            construction,
+            context,
+            generation,
+            Box::new(production),
+            policy,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn open<'a>(
+        directory: &Path,
+        bitcoin_cube: String,
+        fork_cube: String,
+        source: impl Into<Source<'a>>,
         construction: ClaimForkSweep,
         context: Context,
         generation: watch::Receiver<u64>,
         services: Box<dyn ForkServices>,
         policy: CheckPolicy,
     ) -> Result<Self, Error> {
+        let source = source.into();
         if !policy.valid()
             || source.chain() != ChainId::Bitcoin
             || construction.chain() != ChainId::BitcoinBlake2b
@@ -602,7 +703,7 @@ impl Preparation {
             descriptor_digest: sha256::Hash::hash(source.descriptor().to_string().as_bytes()),
         };
         let mut controller = Controller::reopen(directory, &identity, context.clone())?;
-        controller.revalidate_construction(&context, source)?;
+        source.revalidate(&mut controller, &context)?;
         if controller.signed_txid() != Some(construction.bitcoin_step1()) {
             return Err(Error::InvalidBinding);
         }
@@ -649,6 +750,21 @@ impl Preparation {
         Ok(())
     }
     async fn collect(&self) -> Result<claim_observation::CollectedAssessment, Error> {
+        if let Some(path) = self.controller.recorded_ancestry()? {
+            return self
+                .services
+                .ancestry_source()
+                .ok_or(Error::Unsupported)?
+                .collect_ancestry(
+                    &path,
+                    &self.controller.plan(),
+                    self.policy.observations,
+                    self.policy.collection_budget,
+                )
+                .await
+                .map(|collected| collected.assessment())
+                .map_err(Error::Observation);
+        }
         claim_observation::collect(
             self.services.source(),
             &self.controller.plan(),
