@@ -932,16 +932,17 @@ fn windows_replacement_failure_poisons_owner_without_changing_saved_intent() {
     let temp = Temp::new();
     let mut c = controller(&temp);
     let path = temp.0.join("intent.json");
+    refresh(&mut c, observation(false), 10000);
     let before = fs::read(&path).unwrap();
     let blocker = fs::OpenOptions::new()
         .read(true)
         .share_mode(3)
         .open(&path)
         .unwrap();
-    refresh(&mut c, observation(false), 10000);
-    assert!(c
-        .record_broadcast_intent(&context(), &signed(), policy(), 10000)
-        .is_err());
+    assert!(matches!(
+        c.record_broadcast_intent(&context(), &signed(), policy(), 10000),
+        Err(Error::Io(_))
+    ));
     assert_eq!(c.status(), Status::Unchecked);
     drop(blocker);
     assert_eq!(fs::read(&path).unwrap(), before);
