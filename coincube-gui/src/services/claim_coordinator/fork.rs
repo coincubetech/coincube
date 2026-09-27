@@ -81,6 +81,7 @@ pub struct Coordinator {
     policy: CheckPolicy,
     revoker: Revoker,
     lifetime: Arc<()>,
+    completion_revoker: Revoker,
 }
 impl Coordinator {
     /// Caller reconstructs both owned constructions and obtains signing consent.
@@ -190,6 +191,7 @@ impl Coordinator {
             policy,
             revoker: Revoker::new(),
             lifetime: Arc::new(()),
+            completion_revoker: Revoker::new(),
         })
     }
     pub fn context(&self) -> &Context {
@@ -381,6 +383,51 @@ impl Coordinator {
             _ => Ok(uncertain),
         }
     }
+    /// Obtain short-lived evidence for saving historical completion metadata.
+    /// The record remains subject to reorg checks and never authorizes a spend.
+    pub async fn check_completion(
+        &mut self,
+        context: &Context,
+    ) -> Result<Option<CompletionEvidence>, Error> {
+        let origin = Instant::now();
+        let (status, checked) = self.checked_sweep(context).await?;
+        if status != Status::Observation(Assessment::ObservationsEligibleForPreflight) {
+            return Ok(None);
+        }
+        let claim_observation::TransactionObservation::Confirmed { txid, block } =
+            checked.transaction()
+        else {
+            return Ok(None);
+        };
+        let not_after = evidence_deadline(
+            self.policy,
+            checked.assessment().observations,
+            checked.observed_at(),
+            self.services.source().now(),
+            origin,
+        )?;
+        Ok(Some(CompletionEvidence {
+            descriptor_fingerprint: crate::app::wallet::descriptor_id_fingerprint(
+                self.construction.descriptor(),
+            )
+            .to_string(),
+            descriptor_checksum: crate::app::settings::WalletId::generate(
+                self.construction.descriptor(),
+            )
+            .descriptor_checksum,
+            check_revoker: self.completion_revoker.clone(),
+            wallet: self.controller.identity().clone(),
+            block,
+            txid,
+            fork_chain: self.construction.chain(),
+            lifetime: Arc::downgrade(&self.lifetime),
+            generation: self.generation.clone(),
+            expected_generation: context.generation,
+            revoker: self.revoker.clone(),
+            not_after,
+        }))
+    }
+
     /// Check the recorded fork sweep's current chain inclusion together with
     /// Bitcoin poison validity. A saved submission only identifies what to look
     /// up; it never substitutes for current confirmation or allows a retry.
@@ -388,6 +435,15 @@ impl Coordinator {
         &mut self,
         context: &Context,
     ) -> Result<(Status, claim_observation::TransactionObservation), Error> {
+        let (status, checked) = self.checked_sweep(context).await?;
+        Ok((status, checked.transaction()))
+    }
+    async fn checked_sweep(
+        &mut self,
+        context: &Context,
+    ) -> Result<(Status, claim_observation::SweepObservation), Error> {
+        self.completion_revoker.revoke();
+        self.completion_revoker = Revoker::new();
         self.current(context)?;
         let submission = self
             .controller
@@ -418,12 +474,13 @@ impl Coordinator {
                 self.services.source().now(),
             )
             .map_err(Error::Journal)?;
-        Ok((status, collected.transaction()))
+        Ok((status, collected))
     }
 
     /// Continues checking Bitcoin poison validity after submission; does not
     /// claim the fork sweep is confirmed or persist split completion.
     pub async fn reconcile(&mut self, context: &Context) -> Result<Status, Error> {
+        self.completion_revoker.revoke();
         self.current(context)?;
         let ticket = self.controller.begin_check(context)?;
         let collected = self.collect().await?;
@@ -711,6 +768,7 @@ impl Preparation {
             policy: self.policy,
             revoker: self.revoker,
             lifetime: self.lifetime,
+            completion_revoker: Revoker::new(),
         })
     }
 }
@@ -804,5 +862,133 @@ impl Coordinator {
             revoker: self.revoker.clone(),
             not_after: review.snapshot.not_after,
         }))
+    }
+}
+
+/// Non-serializable, generation- and lifetime-bound evidence that the recorded
+/// sweep is currently confirmed and the Bitcoin poison still has required depth.
+/// Only the coordinator's fresh completion check constructs this value.
+pub struct CompletionEvidence {
+    descriptor_fingerprint: String,
+    descriptor_checksum: String,
+    check_revoker: Revoker,
+    wallet: WalletIdentity,
+    block: coincube_core::claim::BlockRef,
+    txid: Txid,
+    fork_chain: ChainId,
+    lifetime: std::sync::Weak<()>,
+    generation: watch::Receiver<u64>,
+    expected_generation: u64,
+    revoker: Revoker,
+    not_after: Instant,
+}
+impl CompletionEvidence {
+    pub fn is_live(&self) -> bool {
+        self.lifetime.upgrade().is_some()
+            && !self.check_revoker.is_revoked()
+            && !self.revoker.is_revoked()
+            && self.generation.has_changed().is_ok()
+            && *self.generation.borrow() == self.expected_generation
+            && Instant::now() < self.not_after
+    }
+    pub fn wallet(&self) -> &WalletIdentity {
+        &self.wallet
+    }
+    pub fn block(&self) -> coincube_core::claim::BlockRef {
+        self.block
+    }
+    pub fn txid(&self) -> Txid {
+        self.txid
+    }
+    pub fn fork_chain(&self) -> ChainId {
+        self.fork_chain
+    }
+}
+
+impl CompletionEvidence {
+    /// Save the historical height on both paired Cubes. Every retry requires
+    /// live evidence; a partial I/O failure is returned and never reported as
+    /// paired success. Each chain keeps its existing cooperating-writer lock.
+    pub async fn persist(
+        &self,
+        root: &crate::dir::CoincubeDirectory,
+    ) -> Result<(), crate::app::settings::SettingsError> {
+        self.persist_with_hook(root, std::future::ready(())).await
+    }
+    async fn persist_with_hook<F: std::future::Future<Output = ()>>(
+        &self,
+        root: &crate::dir::CoincubeDirectory,
+        between_files: F,
+    ) -> Result<(), crate::app::settings::SettingsError> {
+        use crate::app::settings::{update_settings_file_checked, SettingsError};
+        let bitcoin_chain = match self.fork_chain {
+            ChainId::BitcoinBlake2b => ChainId::Bitcoin,
+            ChainId::BitcoinBlake2bTestnet4 => ChainId::Testnet4,
+            _ => return Err(SettingsError::Unexpected("Invalid Claim chain pair".into())),
+        };
+        let pair = [
+            (self.fork_chain, &self.wallet.fork_cube),
+            (bitcoin_chain, &self.wallet.bitcoin_cube),
+        ];
+        // Refuse missing/mismatched Cubes before either file is changed. The
+        // same checks run again under each writer lock to detect concurrent edits.
+        for (chain, id) in pair {
+            let mut settings =
+                crate::app::settings::Settings::from_file(&root.network_directory(chain))?;
+            self.apply_completion(&mut settings, chain, id)?;
+        }
+        let mut between_files = Some(between_files);
+        for (chain, id) in pair {
+            update_settings_file_checked(&root.network_directory(chain), |mut settings| {
+                self.apply_completion(&mut settings, chain, id)?;
+                Ok(Some(settings))
+            })
+            .await?;
+            if let Some(hook) = between_files.take() {
+                hook.await;
+            }
+        }
+        if !self.is_live() {
+            return Err(SettingsError::Unexpected(
+                "Claim confirmation expired while saving; check both chains again".into(),
+            ));
+        }
+        Ok(())
+    }
+    fn apply_completion(
+        &self,
+        settings: &mut crate::app::settings::Settings,
+        chain: ChainId,
+        id: &str,
+    ) -> Result<(), crate::app::settings::SettingsError> {
+        use crate::app::settings::SettingsError;
+        if !self.is_live() {
+            return Err(SettingsError::Unexpected(
+                "Claim confirmation expired or changed; check both chains again".into(),
+            ));
+        }
+        if settings.cubes.iter().filter(|cube| cube.id == id).count() != 1 {
+            return Err(SettingsError::Unexpected(
+                "Claim Cube is missing or ambiguous".into(),
+            ));
+        }
+        let cube = settings
+            .cubes
+            .iter_mut()
+            .find(|cube| cube.id == id)
+            .ok_or_else(|| SettingsError::Unexpected("Claim Cube is missing".into()))?;
+        if cube.network != chain
+            || cube.vault_fingerprint.as_deref() != Some(self.descriptor_fingerprint.as_str())
+            || cube
+                .vault_wallet_id
+                .as_ref()
+                .is_none_or(|wallet| wallet.descriptor_checksum != self.descriptor_checksum)
+        {
+            return Err(SettingsError::Unexpected(
+                "Claim Cube no longer matches its Vault".into(),
+            ));
+        }
+        cube.split_completed_at_height = Some(self.block.height);
+        Ok(())
     }
 }

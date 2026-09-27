@@ -346,8 +346,12 @@ pub async fn collect(
 pub struct SweepObservation {
     assessment: CollectedAssessment,
     transaction: TransactionObservation,
+    observed_at: i64,
 }
 impl SweepObservation {
+    pub fn observed_at(&self) -> i64 {
+        self.observed_at
+    }
     pub fn assessment(&self) -> CollectedAssessment {
         self.assessment
     }
@@ -440,6 +444,16 @@ pub async fn collect_sweep(
         {
             return Err(failure(Stage::ForkTransaction, FailureKind::Changed));
         }
+        let observed_at = stamps
+            .iter()
+            .copied()
+            .chain([
+                b.bitcoin.observed_at,
+                b.fork.observed_at,
+                b.deployment.observed_at,
+            ])
+            .min()
+            .ok_or_else(|| failure(Stage::ForkTransaction, FailureKind::Unavailable))?;
         if stamps
             .into_iter()
             .any(|stamp| !fresh(stamp, source.now(), policy.max_observation_age_seconds))
@@ -447,6 +461,7 @@ pub async fn collect_sweep(
             return Err(failure(Stage::ForkTransaction, FailureKind::Stale));
         }
         Ok(SweepObservation {
+            observed_at,
             assessment: last,
             transaction: prior
                 .ok_or_else(|| failure(Stage::ForkTransaction, FailureKind::Unavailable))?,

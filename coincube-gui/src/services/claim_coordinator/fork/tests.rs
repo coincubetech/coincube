@@ -164,6 +164,7 @@ fn context() -> Context {
     }
 }
 struct Fixture {
+    source_txid: Txid,
     preflight: PreflightClient,
     stamp: i64,
     clock: Arc<AtomicI64>,
@@ -229,13 +230,30 @@ impl ObservationSource for Fixture {
         chain: ChainId,
         txid: Txid,
     ) -> Result<FreshRead<TransactionObservation>, FailureKind> {
+        let fault = self.fault.load(Ordering::SeqCst);
+        if chain.is_blake2b() && txid != self.source_txid && matches!(fault, 11..=13) {
+            return self.read(
+                chain,
+                if fault == 11 {
+                    TransactionObservation::Unconfirmed { txid }
+                } else {
+                    TransactionObservation::Confirmed {
+                        txid,
+                        block: BlockRef {
+                            height: 100,
+                            hash: hash(2),
+                        },
+                    }
+                },
+            );
+        }
         self.read(
             chain,
             if chain == ChainId::Bitcoin && self.fault.load(Ordering::SeqCst) != 10 {
                 TransactionObservation::Confirmed {
                     txid,
                     block: BlockRef {
-                        height: if self.fault.load(Ordering::SeqCst) == 6 {
+                        height: if matches!(self.fault.load(Ordering::SeqCst), 6 | 13) {
                             101
                         } else {
                             100
@@ -373,6 +391,7 @@ impl Harness {
         let calls = Arc::new(AtomicUsize::new(0));
         let reached = Arc::new(tokio::sync::Notify::new());
         let fixture = Fixture {
+            source_txid: source.psbt().unsigned_tx.compute_txid(),
             preflight: PreflightClient::new(
                 &server.base_url(),
                 CollectionContext {
@@ -607,6 +626,7 @@ impl PreparingHarness {
         let (source, _) = artifact(ChainId::Bitcoin, true, 12);
         let (construction, _) = sweep(&source);
         let fixture = Fixture {
+            source_txid: source.psbt().unsigned_tx.compute_txid(),
             preflight: PreflightClient::new(
                 &_server.base_url(),
                 CollectionContext {
@@ -908,4 +928,235 @@ async fn psbt_state_and_pill_drop_split_readiness_on_synchronous_revocation() {
         pill_copy(&pill.review.status(), &pill.entangled).0,
         "Split — cannot replay"
     );
+}
+
+#[tokio::test]
+async fn completion_requires_current_fork_inclusion_and_bitcoin_depth_and_revokes_old_checks() {
+    let mut h = Harness::new(true).await;
+    assert!(h.coordinator.check_completion(&context()).await.is_err());
+    let review = h.coordinator.prepare_review(&context()).await.unwrap();
+    h.coordinator
+        .confirm_and_submit(review, &context())
+        .await
+        .unwrap();
+    for fault in [0, 11, 13] {
+        h.fault.store(fault, Ordering::SeqCst);
+        assert!(h
+            .coordinator
+            .check_completion(&context())
+            .await
+            .unwrap()
+            .is_none());
+    }
+    h.fault.store(12, Ordering::SeqCst);
+    let evidence = h
+        .coordinator
+        .check_completion(&context())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(evidence.is_live());
+    assert_eq!(
+        evidence.block(),
+        BlockRef {
+            height: 100,
+            hash: hash(2)
+        }
+    );
+    assert_eq!(evidence.wallet().bitcoin_cube, "bitcoin-cube");
+    assert_eq!(evidence.wallet().fork_cube, "fork-cube");
+    assert_eq!(
+        evidence.txid(),
+        h.coordinator.verified.transaction().compute_txid()
+    );
+    h.fault.store(13, Ordering::SeqCst);
+    assert!(h
+        .coordinator
+        .check_completion(&context())
+        .await
+        .unwrap()
+        .is_none());
+    assert!(!evidence.is_live());
+    h.fault.store(12, Ordering::SeqCst);
+    let evidence = h
+        .coordinator
+        .check_completion(&context())
+        .await
+        .unwrap()
+        .unwrap();
+    h.coordinator.revoker().revoke();
+    assert!(!evidence.is_live());
+    assert_eq!(h.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn confirmed_completion_persists_both_cubes_and_refuses_changed_identity_without_writes() {
+    use crate::app::settings::{update_settings_file, CubeSettings, Settings, VaultIdentity};
+    let mut h = Harness::new(true).await;
+    let root = crate::dir::CoincubeDirectory::new(h._temp.0.join("paired-settings"));
+    let identity = VaultIdentity::generate(h.coordinator.construction.descriptor());
+    for (chain, id) in [
+        (ChainId::Bitcoin, "bitcoin-cube"),
+        (ChainId::BitcoinBlake2b, "fork-cube"),
+    ] {
+        let cube =
+            CubeSettings::new_with_raw_id(id.into(), id.into(), chain).with_vault(identity.clone());
+        update_settings_file(&root.network_directory(chain), |mut settings| {
+            settings.cubes.push(cube);
+            Some(settings)
+        })
+        .await
+        .unwrap();
+    }
+    let review = h.coordinator.prepare_review(&context()).await.unwrap();
+    h.coordinator
+        .confirm_and_submit(review, &context())
+        .await
+        .unwrap();
+    h.fault.store(12, Ordering::SeqCst);
+    let proof = h
+        .coordinator
+        .check_completion(&context())
+        .await
+        .unwrap()
+        .unwrap();
+    proof.persist(&root).await.unwrap();
+    proof.persist(&root).await.unwrap(); // same confirmed record is retry-safe
+    for chain in [ChainId::Bitcoin, ChainId::BitcoinBlake2b] {
+        let settings = Settings::from_file(&root.network_directory(chain)).unwrap();
+        assert_eq!(settings.cubes[0].split_completed_at_height, Some(100));
+    }
+    update_settings_file(&root.network_directory(ChainId::Bitcoin), |mut settings| {
+        settings.cubes[0].vault_fingerprint = Some("changed".into());
+        Some(settings)
+    })
+    .await
+    .unwrap();
+    let files: Vec<_> = [ChainId::Bitcoin, ChainId::BitcoinBlake2b]
+        .iter()
+        .copied()
+        .map(|chain| root.network_directory(chain).path().join("settings.json"))
+        .collect();
+    let before: Vec<_> = files
+        .iter()
+        .map(|path| std::fs::read(path).unwrap())
+        .collect();
+    assert!(proof.persist(&root).await.is_err());
+    for (path, bytes) in files.iter().zip(&before) {
+        assert_eq!(&std::fs::read(path).unwrap(), bytes);
+    }
+    h.coordinator.revoker().revoke();
+    assert!(proof
+        .persist(&root)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("expired or changed"));
+    for (path, bytes) in files.iter().zip(&before) {
+        assert_eq!(&std::fs::read(path).unwrap(), bytes);
+    }
+}
+
+#[tokio::test]
+async fn fallible_settings_updates_leave_both_chain_files_unchanged_on_refusal() {
+    use crate::app::settings::{
+        update_settings_file, update_settings_file_checked, CubeSettings, SettingsError,
+    };
+    let temp = Temp::new();
+    let root = crate::dir::CoincubeDirectory::new(temp.0.clone());
+    for chain in [ChainId::Bitcoin, ChainId::BitcoinBlake2b] {
+        let directory = root.network_directory(chain);
+        update_settings_file(&directory, |mut settings| {
+            settings
+                .cubes
+                .push(CubeSettings::new("unchanged".into(), chain));
+            Some(settings)
+        })
+        .await
+        .unwrap();
+        let path = directory.path().join("settings.json");
+        let before = std::fs::read(&path).unwrap();
+        assert!(update_settings_file_checked(&directory, |mut settings| {
+            settings.cubes.clear();
+            Err(SettingsError::Unexpected("synthetic refusal".into()))
+        })
+        .await
+        .is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+}
+
+#[tokio::test]
+async fn partial_completion_write_is_reported_and_recoverable_with_fresh_evidence() {
+    use crate::app::settings::{update_settings_file, CubeSettings, Settings, VaultIdentity};
+    let mut h = Harness::new(true).await;
+    let root = crate::dir::CoincubeDirectory::new(h._temp.0.join("partial-settings"));
+    let identity = VaultIdentity::generate(h.coordinator.construction.descriptor());
+    for (chain, id) in [
+        (ChainId::Bitcoin, "bitcoin-cube"),
+        (ChainId::BitcoinBlake2b, "fork-cube"),
+    ] {
+        let cube =
+            CubeSettings::new_with_raw_id(id.into(), id.into(), chain).with_vault(identity.clone());
+        update_settings_file(&root.network_directory(chain), |mut settings| {
+            settings.cubes.push(cube);
+            Some(settings)
+        })
+        .await
+        .unwrap();
+    }
+    let review = h.coordinator.prepare_review(&context()).await.unwrap();
+    h.coordinator
+        .confirm_and_submit(review, &context())
+        .await
+        .unwrap();
+    h.fault.store(12, Ordering::SeqCst);
+    let proof = h
+        .coordinator
+        .check_completion(&context())
+        .await
+        .unwrap()
+        .unwrap();
+    let bitcoin_dir = root.network_directory(ChainId::Bitcoin);
+    assert!(proof
+        .persist_with_hook(&root, async {
+            update_settings_file(&bitcoin_dir, |mut settings| {
+                settings.cubes[0].vault_fingerprint = Some("concurrently-replaced".into());
+                Some(settings)
+            })
+            .await
+            .unwrap();
+        })
+        .await
+        .is_err());
+    assert_eq!(
+        Settings::from_file(&bitcoin_dir).unwrap().cubes[0].split_completed_at_height,
+        None
+    );
+    assert_eq!(
+        Settings::from_file(&root.network_directory(ChainId::BitcoinBlake2b))
+            .unwrap()
+            .cubes[0]
+            .split_completed_at_height,
+        Some(100)
+    );
+    update_settings_file(&bitcoin_dir, |mut settings| {
+        settings.cubes[0].vault_fingerprint = identity.fingerprint;
+        Some(settings)
+    })
+    .await
+    .unwrap();
+    let fresh = h
+        .coordinator
+        .check_completion(&context())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!proof.is_live());
+    fresh.persist(&root).await.unwrap();
+    assert_eq!(
+        Settings::from_file(&bitcoin_dir).unwrap().cubes[0].split_completed_at_height,
+        Some(100)
+    );
+    assert_eq!(h.calls.load(Ordering::SeqCst), 1);
 }
