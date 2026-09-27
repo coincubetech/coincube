@@ -300,11 +300,10 @@ fn plan_view<'a>(
         ))
         .push(row(
             "Fee",
-            p1_regular(format!(
-                "{} at {} sat/vB",
-                format_amount(fee, cache),
-                panel.feerate_vb().unwrap_or(0)
-            )),
+            p1_regular(match panel.feerate_vb() {
+                Some(rate) => format!("{} at {} sat/vB", format_amount(fee, cache), rate),
+                None => format_amount(fee, cache),
+            }),
         ));
     for warning in built.warnings() {
         summary = summary.push(
@@ -316,7 +315,7 @@ fn plan_view<'a>(
     }
     Column::new()
         .spacing(20)
-        .push(header("Review the transaction, then sign it with this Vault's keys"))
+        .push(header(if panel.is_resuming() { "Review this recorded claim, then sign it again to continue" } else { "Review the transaction, then sign it with this Vault's keys" }))
         .push(
             Container::new(summary)
                 .padding(20)
@@ -464,6 +463,7 @@ fn track_view<'a>(
     error: Option<&'a str>,
 ) -> Element<'a, Message> {
     let (txid, submitted) = match outcome {
+        Outcome::Recorded { txid } => (txid, "A submission is recorded on this device. Its transaction has not been recovered and verified yet; it will not be retried.".into()),
         Outcome::UpstreamAccepted { txid, .. } => (
             txid,
             "Accepted by the Bitcoin node. Waiting for it to confirm.".to_string(),

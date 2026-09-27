@@ -576,6 +576,7 @@ mod flow {
         config: coincubed::config::Config,
         coin: Coin,
         previous: Transaction,
+        submitted: Mutex<Option<Transaction>>,
         hits: Mutex<Vec<&'static str>>,
     }
     impl FlowDaemon {
@@ -633,7 +634,22 @@ mod flow {
             _: usize,
             _: Option<ChildNumber>,
         ) -> Result<model::ListRevealedAddressesResult, DaemonError> {
-            unreachable!()
+            self.hit("list_revealed_addresses");
+            let index = ChildNumber::from_normal_idx(12).unwrap();
+            Ok(model::ListRevealedAddressesResult {
+                addresses: vec![coincubed::commands::ListRevealedAddressesEntry {
+                    index,
+                    address: self
+                        .config
+                        .main_descriptor
+                        .change_descriptor()
+                        .derive(index, &secp256k1::Secp256k1::verification_only())
+                        .address(Network::Bitcoin),
+                    label: None,
+                    used_count: 0,
+                }],
+                continue_from: None,
+            })
         }
         async fn update_deriv_indexes(
             &self,
@@ -648,10 +664,17 @@ mod flow {
             _: &[OutPoint],
         ) -> Result<model::ListCoinsResult, DaemonError> {
             self.hit("list_coins");
-            assert_eq!(statuses, &[CoinStatus::Confirmed]);
-            Ok(model::ListCoinsResult {
-                coins: vec![self.coin.clone()],
-            })
+            assert!(statuses.is_empty() || statuses == [CoinStatus::Confirmed]);
+            let mut coin = self.coin.clone();
+            if statuses.is_empty() {
+                if let Some(tx) = self.submitted.lock().unwrap().as_ref() {
+                    coin.spend_info = Some(coincubed::commands::LCSpendInfo {
+                        txid: tx.compute_txid(),
+                        height: None,
+                    });
+                }
+            }
+            Ok(model::ListCoinsResult { coins: vec![coin] })
         }
         async fn list_spend_txs(&self) -> Result<model::ListSpendResult, DaemonError> {
             self.hit("list_spend_txs");
@@ -698,6 +721,7 @@ mod flow {
             _gate: Arc<SubmissionGate>,
         ) -> Result<SubmissionOutcome, DaemonError> {
             self.hit("submit_verified_poison");
+            *self.submitted.lock().unwrap() = Some(verified.transaction().clone());
             Ok(SubmissionOutcome::UpstreamAccepted {
                 txid: verified.transaction().compute_txid(),
                 wtxid: verified.transaction().compute_wtxid(),
@@ -728,14 +752,24 @@ mod flow {
             txids: &[Txid],
         ) -> Result<model::ListTransactionsResult, DaemonError> {
             self.hit("list_txs");
-            assert_eq!(txids, &[self.previous.compute_txid()]);
-            Ok(model::ListTransactionsResult {
-                transactions: vec![coincubed::commands::TransactionInfo {
+            let mut transactions = Vec::new();
+            if txids.contains(&self.previous.compute_txid()) {
+                transactions.push(coincubed::commands::TransactionInfo {
                     tx: self.previous.clone(),
                     height: Some(50),
                     time: None,
-                }],
-            })
+                });
+            }
+            if let Some(tx) = self.submitted.lock().unwrap().as_ref() {
+                if txids.contains(&tx.compute_txid()) {
+                    transactions.push(coincubed::commands::TransactionInfo {
+                        tx: tx.clone(),
+                        height: None,
+                        time: None,
+                    });
+                }
+            }
+            Ok(model::ListTransactionsResult { transactions })
         }
         async fn get_labels(
             &self,
@@ -915,6 +949,7 @@ mod flow {
             config,
             coin: f.coin.clone(),
             previous: f.previous.clone(),
+            submitted: Mutex::new(None),
             hits: Mutex::new(Vec::new()),
         });
         let dyn_daemon: Arc<dyn Daemon + Sync + Send> = daemon.clone();
@@ -1241,6 +1276,171 @@ mod flow {
         assert_eq!(snapshot.observations.bitcoin.tip.height, 105);
         assert_eq!(snapshot.observations.fork.tip.height, 100);
         f
+    }
+
+    async fn reopen(f: &mut Flow) {
+        let panel = ClaimStep1Panel::new(
+            f.wallet.clone(),
+            f.datadir.clone(),
+            "bitcoin-cube".into(),
+            f.sender.subscribe(),
+            f.p.connect.clone(),
+        );
+        f.p = panel;
+        let task = f.p.reload(Some(f.dyn_daemon.clone()), None);
+        for event in outputs(task).await {
+            let next = f.p.update(Some(f.dyn_daemon.clone()), &f.cache, event);
+            for event in outputs(next).await {
+                let _ = f.p.update(Some(f.dyn_daemon.clone()), &f.cache, event);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restart_intent_recovers_exact_plan_for_resigning_without_new_reservation() {
+        let mut f = reach_review().await;
+        let path = journal_directory(&f.datadir, &f.wallet).join("intent.json");
+        let journal = std::fs::read(&path).unwrap();
+        let reservations = f
+            .daemon
+            .hits()
+            .iter()
+            .filter(|v| **v == "reserve_change")
+            .count();
+        reopen(&mut f).await;
+        assert!(f.p.resuming);
+        match &f.p.stage {
+            Stage::Plan { built } => {
+                assert_eq!(built.psbt().unsigned_tx.compute_txid(), f.unsigned_txid)
+            }
+            _ => panic!("recorded plan review missing"),
+        }
+        assert_eq!(submissions(&f), 0);
+        assert_eq!(std::fs::read(&path).unwrap(), journal);
+        f.p.start_signing();
+        let _ = f.p.update(
+            Some(f.dyn_daemon.clone()),
+            &f.cache,
+            Message::View(view::Message::Spend(view::SpendTxMessage::Sign)),
+        );
+        let unsigned = match &f.p.stage {
+            Stage::Sign { psbt, .. } => psbt.tx.psbt.clone(),
+            _ => panic!("signing restored plan"),
+        };
+        let signer = f.wallet.signer.as_ref().unwrap();
+        let signed = signer.sign_psbt(unsigned).unwrap();
+        let task = f.p.update(
+            Some(f.dyn_daemon.clone()),
+            &f.cache,
+            Message::Signed(signer.fingerprint(), Ok(signed)),
+        );
+        let mut messages: std::collections::VecDeque<_> = outputs(task).await.into();
+        let mut count = 0;
+        while let Some(message) = messages.pop_front() {
+            count += 1;
+            assert!(count < 16, "restart did not settle");
+            messages
+                .extend(outputs(f.p.update(Some(f.dyn_daemon.clone()), &f.cache, message)).await);
+        }
+        assert_eq!(review_snapshot(&f.p).txid, f.unsigned_txid);
+        assert_eq!(std::fs::read(path).unwrap(), journal);
+        assert_eq!(submissions(&f), 0);
+        assert_eq!(
+            f.daemon
+                .hits()
+                .iter()
+                .filter(|v| **v == "reserve_change")
+                .count(),
+            reservations
+        );
+        drop(f.p);
+        let _ = std::fs::remove_dir_all(f.root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restart_result_after_revocation_cannot_rebind_or_enable_build() {
+        let mut f = reach_review().await;
+        f.p = ClaimStep1Panel::new(
+            f.wallet.clone(),
+            f.datadir.clone(),
+            "bitcoin-cube".into(),
+            f.sender.subscribe(),
+            f.p.connect.clone(),
+        );
+        assert!(outputs(f.p.reload(None, None)).await.is_empty());
+        assert!(!f.p.can_build());
+        let task = f.p.reload(Some(f.dyn_daemon.clone()), None);
+        f.p.revoke();
+        f.sender.send_modify(|n| *n += 1);
+        for message in outputs(task).await {
+            assert!(
+                outputs(f.p.update(Some(f.dyn_daemon.clone()), &f.cache, message))
+                    .await
+                    .is_empty()
+            );
+        }
+        assert!(f.p.restart_pending);
+        assert!(!f.p.can_build());
+        assert!(f.p.revoker.is_none());
+        assert_eq!(submissions(&f), 0);
+        drop(f.p);
+        let _ = std::fs::remove_dir_all(f.root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restart_recorded_submission_tracks_verified_witness_without_resubmitting() {
+        let mut f = reach_review().await;
+        reach_track(&mut f).await;
+        reopen(&mut f).await;
+        assert!(
+            matches!(
+                &f.p.stage,
+                Stage::Track {
+                    session: Some(_),
+                    error: None,
+                    ..
+                }
+            ),
+            "{:?}",
+            f.p.restart_error
+        );
+        assert_eq!(submissions(&f), 1);
+        drop(f.p);
+        let _ = std::fs::remove_dir_all(f.root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restart_missing_witness_is_track_only_and_wrong_account_is_refused() {
+        let mut f = reach_review().await;
+        reach_track(&mut f).await;
+        *f.daemon.submitted.lock().unwrap() = None;
+        reopen(&mut f).await;
+        assert!(matches!(
+            &f.p.stage,
+            Stage::Track {
+                session: None,
+                outcome: Outcome::Recorded { .. },
+                ..
+            }
+        ));
+        let task = f.p.update(
+            Some(f.dyn_daemon.clone()),
+            &f.cache,
+            Message::View(view::Message::Claim(view::ClaimMessage::Confirm)),
+        );
+        assert!(outputs(task).await.is_empty());
+        assert_eq!(submissions(&f), 1);
+        f.p.connect.as_mut().unwrap().account = "someone-else".into();
+        reopen(&mut f).await;
+        assert_eq!(f.p.restart_error.as_deref(), Some(OTHER_ACCOUNT));
+        assert!(!f.p.can_build());
+        assert_eq!(submissions(&f), 1);
+        drop(f.p);
+        let _ = std::fs::remove_dir_all(f.root);
     }
 
     /// `reach_review`, then confirm → submit → track, asserting each.
@@ -2391,6 +2591,7 @@ mod flow {
             config: f.daemon.config.clone(),
             coin: f.daemon.coin.clone(),
             previous: f.daemon.previous.clone(),
+            submitted: Mutex::new(None),
             hits: Mutex::new(Vec::new()),
         });
         let installed_dyn: Arc<dyn Daemon + Sync + Send> = installed.clone();
@@ -2650,6 +2851,7 @@ mod flow {
             config: f.daemon.config.clone(),
             coin: f.daemon.coin.clone(),
             previous: f.daemon.previous.clone(),
+            submitted: Mutex::new(None),
             hits: Mutex::new(Vec::new()),
         });
         let installed_dyn: Arc<dyn Daemon + Sync + Send> = installed.clone();

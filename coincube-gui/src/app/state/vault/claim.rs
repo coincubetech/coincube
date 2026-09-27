@@ -14,8 +14,9 @@
 //! provider) on the next sign-in or return to the panel.
 //!
 //! What this slice does *not* do: input poison (the journal only represents
-//! `Poison::OpReturn`), step 2 (`Step2Authorization` stays uninhabited), and
-//! resuming a journaled intent after a restart.
+//! `Poison::OpReturn`) or step 2 (`Step2Authorization` stays uninhabited).
+//! Reopening a recorded step-one intent requires
+//! re-signing; a recorded submission is recovered only for tracking.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -32,8 +33,10 @@ use tokio::sync::watch;
 use coincube_core::{
     chain::ChainId,
     claim::{self, Assessment, ForkTransactionPresence, Policy},
-    claim_finalize::finalize_poison_transfer,
-    claim_spend::{create_poison_self_transfer, PoisonSelfTransfer},
+    claim_finalize::{finalize_poison_transfer, verify_poison_transaction},
+    claim_spend::{
+        create_poison_self_transfer, reconstruct_poison_self_transfer, PoisonSelfTransfer,
+    },
     miniscript::bitcoin::{
         absolute::LockTime, address, bip32::ChildNumber, hashes::Hash, psbt::Psbt, secp256k1,
         Address, BlockHash, Network, OutPoint, Transaction, Txid,
@@ -233,6 +236,7 @@ pub struct ClaimSession {
     /// construction against the journal and re-verifies the signatures.
     built: Box<PoisonSelfTransfer>,
     signed: Psbt,
+    recovered: Option<Transaction>,
     /// The journal phase as last read through a live coordinator.
     phase: Phase,
 }
@@ -265,6 +269,7 @@ impl ClaimSession {
 /// session carries it back to the one panel that sent it out.
 #[derive(Debug)]
 pub enum ClaimEvent {
+    Restarted(u64, Result<RestartedClaim, String>),
     /// The preconditions probe finished. The sequence number matches it to
     /// the request that started it; a reply to an older request is dropped.
     Checked(u64, Box<Checked>),
@@ -289,6 +294,18 @@ pub enum ClaimEvent {
     Submitted(u64, Box<ClaimSession>, Result<Outcome, String>),
     /// `reconcile` finished; the number as for `Reviewed`.
     Tracked(u64, Box<ClaimSession>, Result<Status, String>),
+}
+
+#[derive(Debug)]
+pub struct RestartedClaim {
+    context: Context,
+    state: RestartedState,
+}
+#[derive(Debug)]
+enum RestartedState {
+    Intent(Box<PoisonSelfTransfer>),
+    Bound(Box<ClaimSession>),
+    Unavailable(Txid, String),
 }
 
 enum Stage {
@@ -408,6 +425,10 @@ pub struct ClaimStep1Panel {
     check_seq: u64,
     finalize_attempts: u64,
     feerate: FeerateSource,
+    restart_pending: bool,
+    restarting: Option<FinalizeAttempt>,
+    restart_error: Option<String>,
+    resuming: bool,
 }
 
 impl ClaimStep1Panel {
@@ -418,6 +439,9 @@ impl ClaimStep1Panel {
         generation: watch::Receiver<u64>,
         connect: Option<ConnectSession>,
     ) -> Self {
+        let restart_pending = !matches!(std::fs::symlink_metadata(
+            journal_directory(&datadir, &wallet).join("intent.json"),
+        ), Err(e) if e.kind() == std::io::ErrorKind::NotFound);
         let mut panel = Self {
             wallet,
             datadir,
@@ -433,6 +457,10 @@ impl ClaimStep1Panel {
             check_seq: 0,
             finalize_attempts: 0,
             feerate: FeerateSource::Estimator,
+            restart_pending,
+            restarting: None,
+            restart_error: None,
+            resuming: false,
         };
         panel.refresh_static_preconditions();
         panel
@@ -613,6 +641,9 @@ impl ClaimStep1Panel {
         if !self.backend_ready() {
             return Task::none();
         }
+        if self.restart_pending {
+            return self.restart(daemon);
+        }
         match &self.stage {
             Stage::Sign { .. } => self.maybe_finalize(daemon),
             Stage::Review { .. } | Stage::Track { .. } if self.revoked => self.rebind(daemon),
@@ -770,6 +801,14 @@ impl ClaimStep1Panel {
         if let Some(copy) = self.backend.copy() {
             return refuse(copy, self.backend != BackendState::Unknown);
         }
+        if self.restart_pending {
+            return refuse(
+                self.restart_error
+                    .as_deref()
+                    .unwrap_or("A claim is recorded on this device. Read it again to continue."),
+                true,
+            );
+        }
         let Some(checked) = &self.pre.checked else {
             return None;
         };
@@ -812,6 +851,7 @@ impl ClaimStep1Panel {
     pub fn can_build(&self) -> bool {
         matches!(self.stage, Stage::Preconditions)
             && !self.pre.checking
+            && !self.restart_pending
             && self.pre.checked.is_some()
             && self.refusal().is_none()
     }
@@ -824,7 +864,58 @@ impl ClaimStep1Panel {
         self.pre.shape = vault_shape_refusal(&self.wallet);
     }
 
+    pub fn is_resuming(&self) -> bool {
+        self.resuming
+    }
+
+    fn restart(&mut self, daemon: Arc<dyn Daemon + Sync + Send>) -> Task<Message> {
+        if self.restarting.is_some() || !self.backend_ready() {
+            return Task::none();
+        }
+        self.refresh_static_preconditions();
+        let (Some(connect), Some(target)) = (self.connect.clone(), self.pre.target.clone()) else {
+            return Task::none();
+        };
+        let attempt = FinalizeAttempt {
+            id: self.finalize_attempts.wrapping_add(1),
+            generation: *self.generation.borrow(),
+            revocations: self.revocations,
+        };
+        self.finalize_attempts = attempt.id;
+        self.restarting = Some(attempt);
+        self.pre.checking = true;
+        let wallet = self.wallet.clone();
+        let directory = journal_directory(&self.datadir, &wallet);
+        let bitcoin_cube = self.bitcoin_cube.clone();
+        let generation = self.generation.clone();
+        Task::perform(
+            async move {
+                tokio::time::timeout(
+                    CHECK_POLICY.collection_budget,
+                    restore_recorded_claim(
+                        daemon,
+                        wallet,
+                        connect,
+                        bitcoin_cube,
+                        target,
+                        directory,
+                        attempt.generation,
+                        generation,
+                    ),
+                )
+                .await
+                .unwrap_or_else(|_| {
+                    Err("Reading the recorded claim timed out. Read it again to continue.".into())
+                })
+            },
+            move |result| Message::Claim(ClaimEvent::Restarted(attempt.id, result)),
+        )
+    }
+
     fn probe(&mut self, daemon: Arc<dyn Daemon + Sync + Send>) -> Task<Message> {
+        if self.restart_pending {
+            return self.restart(daemon);
+        }
         self.refresh_static_preconditions();
         // A refusal no probe can change: don't spend the network on it. Nor
         // a daemon that is being replaced: `refusal` says so.
@@ -961,6 +1052,7 @@ impl ClaimStep1Panel {
         *error = None;
         self.finalize_attempts = id;
         let signed = psbt.tx.psbt.clone();
+        let resume = self.resuming;
         Task::perform(
             async move {
                 finalize_and_journal(
@@ -973,6 +1065,7 @@ impl ClaimStep1Panel {
                     directory,
                     expected,
                     generation,
+                    resume,
                 )
                 .await
             },
@@ -1096,6 +1189,9 @@ impl ClaimStep1Panel {
                 ..
             } => {}
             Stage::Plan { .. } | Stage::Sign { .. } => {
+                if self.resuming {
+                    self.restart_pending = true;
+                }
                 self.stage = Stage::Preconditions;
                 // The reserved change index is not reused: the daemon's
                 // reservation is durable, so the next build reserves anew.
@@ -1109,6 +1205,69 @@ impl ClaimStep1Panel {
     /// session travelling inside one is never dropped for want of it.
     fn apply(&mut self, event: ClaimEvent) -> Task<Message> {
         match event {
+            ClaimEvent::Restarted(id, result) => {
+                let Some(attempt) = self.restarting.filter(|a| a.id == id) else {
+                    return Task::none();
+                };
+                self.restarting = None;
+                self.pre.checking = false;
+                if !self.authorized(attempt.generation, attempt.revocations)
+                    || !self.backend_ready()
+                {
+                    self.restart_error = Some(self.ended_copy());
+                    return Task::none();
+                }
+                let restored = match result {
+                    Ok(restored) if restored.context.generation == attempt.generation => restored,
+                    Ok(_) => {
+                        self.restart_error = Some(SESSION_ENDED.into());
+                        return Task::none();
+                    }
+                    Err(error) => {
+                        self.restart_error = Some(error.clone());
+                        if let Stage::Track { error: slot, .. } = &mut self.stage {
+                            *slot = Some(error);
+                        }
+                        return Task::none();
+                    }
+                };
+                self.restart_error = None;
+                self.resuming = true;
+                match restored.state {
+                    RestartedState::Intent(built) => {
+                        self.restart_pending = false;
+                        self.stage = Stage::Plan { built };
+                    }
+                    RestartedState::Bound(session) => {
+                        self.restart_pending = false;
+                        self.revoked = false;
+                        self.revoker = session.coordinator.as_ref().map(|c| c.revoker());
+                        let tx = session.recovered.as_ref().expect("restored witness");
+                        let outcome = Outcome::Uncertain {
+                            txid: tx.compute_txid(),
+                            wtxid: tx.compute_wtxid(),
+                        };
+                        self.stage = Stage::Track {
+                            session: Some(session),
+                            outcome,
+                            status: None,
+                            busy: false,
+                            error: None,
+                        };
+                        return self.reconcile();
+                    }
+                    RestartedState::Unavailable(txid, error) => {
+                        self.stage = Stage::Track {
+                            session: None,
+                            outcome: Outcome::Recorded { txid },
+                            status: None,
+                            busy: false,
+                            error: Some(error),
+                        };
+                    }
+                }
+                Task::none()
+            }
             ClaimEvent::Checked(seq, checked) => {
                 if seq != self.check_seq {
                     return Task::none();
@@ -1156,6 +1315,24 @@ impl ClaimStep1Panel {
                         self.revoker = session.coordinator.as_ref().map(|c| c.revoker());
                         self.revoked = !authorized;
                         let ended = self.ended_copy();
+                        if let Some(outcome) = session
+                            .coordinator
+                            .as_ref()
+                            .and_then(|c| c.recorded_outcome())
+                        {
+                            self.stage = Stage::Track {
+                                session: Some(session),
+                                outcome,
+                                status: None,
+                                busy: false,
+                                error: (!authorized).then_some(ended),
+                            };
+                            return if authorized {
+                                self.reconcile()
+                            } else {
+                                Task::none()
+                            };
+                        }
                         self.stage = Stage::Review {
                             session: Some(session),
                             snapshot: None,
@@ -1415,6 +1592,10 @@ impl State for ClaimStep1Panel {
                     Task::none()
                 }
                 view::ClaimMessage::Confirm => self.confirm(),
+                view::ClaimMessage::Refresh if self.restart_pending => match daemon {
+                    Some(daemon) => self.recover(Some(daemon)),
+                    None => node_unavailable(),
+                },
                 view::ClaimMessage::Refresh => match &self.stage {
                     Stage::Review { .. } | Stage::Track { .. } if self.revoked => {
                         match (self.backend.copy(), daemon) {
@@ -1470,6 +1651,9 @@ impl State for ClaimStep1Panel {
         let Some(daemon) = daemon else {
             return Task::none();
         };
+        if self.restart_pending {
+            return self.restart(daemon);
+        }
         match &self.stage {
             Stage::Preconditions => self.probe(daemon),
             Stage::Sign { psbt, .. } => {
@@ -1799,6 +1983,223 @@ pub fn journal_directory(datadir: &CoincubeDirectory, wallet: &Wallet) -> PathBu
         .join("claim")
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn restore_recorded_claim(
+    daemon: Arc<dyn Daemon + Sync + Send>,
+    wallet: Arc<Wallet>,
+    connect: ConnectSession,
+    bitcoin_cube: String,
+    fork_cube: String,
+    directory: PathBuf,
+    expected: u64,
+    generation: watch::Receiver<u64>,
+) -> Result<RestartedClaim, String> {
+    use coincube_core::miniscript::bitcoin::hashes::sha256;
+    if wallet.chain != ChainId::Bitcoin
+        || daemon
+            .config()
+            .is_none_or(|c| c.main_descriptor != wallet.main_descriptor)
+    {
+        return Err("The recorded claim does not match this Bitcoin Vault.".into());
+    }
+    let production = Production::new(
+        connect.client,
+        daemon.clone(),
+        connect.account,
+        expected,
+        generation.clone(),
+    )
+    .map_err(describe_production)?;
+    let context = production.context().clone();
+    let identity = claim_workflow::WalletIdentity {
+        bitcoin_cube: bitcoin_cube.clone(),
+        fork_cube: fork_cube.clone(),
+        descriptor_digest: sha256::Hash::hash(wallet.main_descriptor.to_string().as_bytes()),
+    };
+    let controller = claim_workflow::Controller::reopen(&directory, &identity, context.clone())
+        .map_err(|e| describe(claim_coordinator::Error::Journal(e)))?;
+    let plan = controller.plan();
+    let phase = controller.phase();
+    let txid = controller.signed_txid();
+    drop(controller);
+    let check = || {
+        if *generation.borrow() != expected || generation.has_changed().is_err() {
+            Err(SESSION_ENDED.to_string())
+        } else {
+            Ok(())
+        }
+    };
+    check()?;
+    // An unavailable recorded submission must remain a hold even when its inputs
+    // have already disappeared from the wallet's unspent set.
+    let recovered = if let Some(txid) = txid {
+        let transaction = daemon.list_txs(&[txid]).await.ok().and_then(|result| {
+            result
+                .transactions
+                .into_iter()
+                .find(|entry| entry.tx.compute_txid() == txid)
+                .map(|entry| entry.tx)
+        });
+        check()?;
+        let Some(transaction) = transaction else {
+            return Ok(RestartedClaim { context, state: RestartedState::Unavailable(txid,
+                "The recorded transaction is not available from the Bitcoin service yet. Read again to track it; no submission will be retried.".into()) });
+        };
+        Some(transaction)
+    } else {
+        None
+    };
+    let built = reconstruct_recorded_claim(daemon, &wallet, &plan, expected, &generation).await;
+    check()?;
+    let built = match built {
+        Ok(built) => built,
+        Err(error) => {
+            return match txid {
+                Some(txid) => Ok(RestartedClaim {
+                    context,
+                    state: RestartedState::Unavailable(txid, error),
+                }),
+                None => Err(error),
+            }
+        }
+    };
+    if phase == Phase::Intent {
+        return Ok(RestartedClaim {
+            context,
+            state: RestartedState::Intent(built),
+        });
+    }
+    let transaction =
+        recovered.ok_or_else(|| "The journal is missing its recorded transaction.".to_string())?;
+    let verified = verify_poison_transaction(
+        &built,
+        &transaction,
+        &secp256k1::Secp256k1::verification_only(),
+    )
+    .map_err(|e| e.to_string())?;
+    let coordinator = Coordinator::resume(
+        &directory,
+        bitcoin_cube,
+        fork_cube,
+        &built,
+        verified,
+        production,
+        CHECK_POLICY,
+    )
+    .map_err(describe)?;
+    let signed = built.psbt().clone();
+    Ok(RestartedClaim {
+        context: context.clone(),
+        state: RestartedState::Bound(Box::new(ClaimSession {
+            phase: coordinator.phase(),
+            coordinator: Some(coordinator),
+            context,
+            review: None,
+            built,
+            signed,
+            recovered: Some(transaction),
+        })),
+    })
+}
+
+async fn reconstruct_recorded_claim(
+    daemon: Arc<dyn Daemon + Sync + Send>,
+    wallet: &Wallet,
+    plan: &claim::ClaimPlan,
+    expected: u64,
+    generation: &watch::Receiver<u64>,
+) -> Result<Box<PoisonSelfTransfer>, String> {
+    let coins = daemon
+        .list_coins(&[], &plan.claimed_prevouts)
+        .await
+        .map_err(|e| e.to_string())?
+        .coins;
+    if coins.len() != plan.claimed_prevouts.len() {
+        return Err("Some recorded inputs are missing from this Vault.".into());
+    }
+    let by_outpoint: HashMap<_, _> = coins
+        .into_iter()
+        .map(|coin| (coin.outpoint, coin))
+        .collect();
+    let candidates = plan
+        .step1
+        .input
+        .iter()
+        .map(|input| {
+            let coin = by_outpoint
+                .get(&input.previous_output)
+                .ok_or_else(|| "A recorded input is not owned by this Vault.".to_string())?;
+            Ok(CandidateCoin {
+                outpoint: coin.outpoint,
+                amount: coin.amount,
+                deriv_index: coin.derivation_index,
+                is_change: coin.is_change,
+                must_select: true,
+                sequence: None,
+                ancestor_info: None,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let txids: Vec<_> = plan
+        .claimed_prevouts
+        .iter()
+        .map(|p| p.txid)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let previous = daemon.list_txs(&txids).await.map_err(|e| e.to_string())?;
+    let mut getter = TxMap(
+        previous
+            .transactions
+            .into_iter()
+            .map(|entry| (entry.tx.compute_txid(), entry.tx))
+            .collect(),
+    );
+    let output = plan
+        .step1
+        .output
+        .get(1)
+        .ok_or_else(|| "The recorded claim has no change output.".to_string())?;
+    let mut cursor = None;
+    let change = loop {
+        if *generation.borrow() != expected || generation.has_changed().is_err() {
+            return Err(SESSION_ENDED.into());
+        }
+        let page = daemon
+            .list_revealed_addresses(true, false, 100, cursor)
+            .await
+            .map_err(|e| e.to_string())?;
+        if let Some(entry) = page
+            .addresses
+            .iter()
+            .find(|entry| entry.address.script_pubkey() == output.script_pubkey)
+        {
+            break entry.index;
+        }
+        match page.continue_from {
+            Some(next) if cursor.is_none_or(|old| next < old) && !next.is_hardened() => {
+                cursor = Some(next)
+            }
+            _ => {
+                return Err(
+                    "The recorded change address is not a revealed address of this Vault.".into(),
+                )
+            }
+        }
+    };
+    reconstruct_poison_self_transfer(
+        wallet.chain,
+        &wallet.main_descriptor,
+        &secp256k1::Secp256k1::verification_only(),
+        &mut getter,
+        &candidates,
+        change,
+        &plan.step1,
+    )
+    .map(Box::new)
+    .map_err(|e| e.to_string())
+}
+
 /// Finalise and journal under the context captured at dispatch (`expected`).
 /// If the generation moved in between — the App signed out — the attempt is
 /// refused here, before the journal directory is touched, and the
@@ -1815,6 +2216,7 @@ async fn finalize_and_journal(
     directory: PathBuf,
     expected: u64,
     generation: watch::Receiver<u64>,
+    resume: bool,
 ) -> Result<Box<ClaimSession>, (Box<PoisonSelfTransfer>, String)> {
     if *generation.borrow() != expected || generation.has_changed().is_err() {
         return Err((built, SIGNED_OUT_BEFORE_RECORD.to_string()));
@@ -1841,7 +2243,12 @@ async fn finalize_and_journal(
         Err(error) => return Err((built, describe_production(error))),
     };
     let context = production.context().clone();
-    match Coordinator::create(
+    let open = if resume {
+        Coordinator::resume
+    } else {
+        Coordinator::create
+    };
+    match open(
         &directory,
         bitcoin_cube,
         fork_cube,
@@ -1857,6 +2264,7 @@ async fn finalize_and_journal(
             review: None,
             built,
             signed,
+            recovered: None,
         })),
         Err(error) => Err((built, describe(error))),
     }
@@ -1892,8 +2300,11 @@ fn rebind_session(
     .map_err(describe_production)?;
     let context = production.context().clone();
     let secp = secp256k1::Secp256k1::verification_only();
-    let verified = finalize_poison_transfer(&session.built, &session.signed, &secp)
-        .map_err(|error| error.to_string())?;
+    let verified = match &session.recovered {
+        Some(transaction) => verify_poison_transaction(&session.built, transaction, &secp),
+        None => finalize_poison_transfer(&session.built, &session.signed, &secp),
+    }
+    .map_err(|error| error.to_string())?;
     let coordinator = Coordinator::resume(
         &directory,
         bitcoin_cube,
@@ -1947,6 +2358,10 @@ pub fn describe(error: claim_coordinator::Error) -> String {
         E::Revoked => SESSION_ENDED.to_string(),
         E::InvalidReview | E::ChangedReview => {
             "What you reviewed has changed since. Review the transaction again.".to_string()
+        }
+        E::Journal(claim_workflow::Error::WrongIdentity) => OTHER_ACCOUNT.into(),
+        E::Journal(claim_workflow::Error::Conflict) => {
+            "A claim is already recorded on this device. Reopen Claim to continue it.".into()
         }
         E::Journal(error) => format!("Couldn't record the claim on this device ({error:?})."),
         E::Observation(failure) => format!(
