@@ -9,6 +9,9 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+mod ancestry;
+pub use ancestry::CanonicalCoinbase;
+
 const BODY_LIMIT: usize = 256 * 1024;
 const TRANSACTION_HEX_LIMIT: usize = 2 * coincube_core::claim_ancestry::MAX_TRANSACTION_BYTES;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -343,7 +346,7 @@ mod tests {
     use httpmock::prelude::*;
     use serde_json::json;
 
-    fn source(server: &MockServer) -> (HttpObservationSource, watch::Sender<u64>) {
+    pub(super) fn source(server: &MockServer) -> (HttpObservationSource, watch::Sender<u64>) {
         let mut client = CoincubeClient::for_test(server.base_url());
         client.set_token("synthetic-observation-token");
         let (sender, generation) = watch::channel(4);
@@ -407,7 +410,7 @@ mod tests {
             mock.assert_hits(1);
         }
     }
-    fn ancestry_fixture() -> (Txid, Vec<u8>) {
+    pub(super) fn ancestry_fixture() -> (Txid, Vec<u8>) {
         use coincube_core::miniscript::bitcoin::{
             absolute, consensus::serialize, transaction, Amount, Transaction, TxIn, TxOut,
         };
