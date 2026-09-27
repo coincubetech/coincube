@@ -23,7 +23,13 @@ fn built(
         .map(|index| Transaction {
             version: transaction::Version::TWO,
             lock_time: absolute::LockTime::ZERO,
-            input: vec![TxIn::default()],
+            input: vec![TxIn {
+                script_sig: coincube_core::miniscript::bitcoin::script::Builder::new()
+                    .push_int(961_640)
+                    .push_int(1)
+                    .into_script(),
+                ..TxIn::default()
+            }],
             output: vec![TxOut {
                 value: Amount::from_sat(100_000),
                 script_pubkey: descriptor
@@ -206,3 +212,5 @@ async fn ancestry_resume_binds_saved_path_account_and_exact_recorded_witness() {
         assert_eq!(std::fs::read(&file).unwrap(), before);
     }
 }
+
+mod http;
