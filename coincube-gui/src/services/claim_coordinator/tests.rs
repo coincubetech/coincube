@@ -956,3 +956,20 @@ async fn reconfirmation_recollects_and_refuses_changed_inclusion() {
     assert_eq!(std::fs::read(h.temp.0.join("intent.json")).unwrap(), old);
     assert_eq!(h.calls.load(Ordering::SeqCst), 1);
 }
+
+#[tokio::test]
+async fn review_view_distinguishes_absence_from_mempool_presence() {
+    let mut h = Harness::new().await;
+    let review = h.coordinator.prepare_review(&context()).await.unwrap();
+    let mut absent = review.snapshot.observations;
+    absent.bitcoin_transaction = TransactionObservation::Absent;
+    let mut mempool = absent;
+    mempool.bitcoin_transaction = TransactionObservation::Unconfirmed {
+        txid: h.coordinator.verified.transaction().compute_txid(),
+    };
+    assert!(!same_view(absent, mempool));
+    assert!(!same_view(mempool, absent));
+    let mut later = absent;
+    later.bitcoin.observed_at += 1;
+    assert!(same_view(absent, later));
+}

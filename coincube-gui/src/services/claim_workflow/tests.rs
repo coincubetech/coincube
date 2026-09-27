@@ -101,6 +101,17 @@ fn observation(confirmed: bool) -> CollectedAssessment {
         generation: 1,
         assessment: Assessment::ObservationsEligibleForPreflight,
         observations: ObservationBundle {
+            bitcoin_transaction: if confirmed {
+                crate::services::claim_observation::TransactionObservation::Confirmed {
+                    txid: plan().step1.compute_txid(),
+                    block: BlockRef {
+                        height: 100,
+                        hash: hash(4),
+                    },
+                }
+            } else {
+                crate::services::claim_observation::TransactionObservation::Absent
+            },
             bitcoin: BitcoinObservation {
                 chain: ChainId::Bitcoin,
                 tip,
@@ -601,6 +612,12 @@ fn real_artifact(
     let final_tx = finalize_poison_transfer(&built, &signed, &verify).unwrap();
     (built, final_tx)
 }
+fn sync_transaction_observation(o: &mut CollectedAssessment) {
+    if let TransactionLocation::Confirmed { txid, block, .. } = o.observations.bitcoin.location {
+        o.observations.bitcoin_transaction =
+            crate::services::claim_observation::TransactionObservation::Confirmed { txid, block };
+    }
+}
 fn real_observation(c: &Controller, depth: u64) -> CollectedAssessment {
     let mut result = observation(depth > 0);
     let id = c.plan().step1.compute_txid();
@@ -610,6 +627,7 @@ fn real_observation(c: &Controller, depth: u64) -> CollectedAssessment {
     }
     result.observations.bitcoin.tip.height = 99 + depth.max(1);
     result.observations.preflight.bitcoin = result.observations.bitcoin.tip;
+    sync_transaction_observation(&mut result);
     result
 }
 
@@ -820,6 +838,7 @@ fn fork_plan_requires_fresh_depth_and_survives_restart_without_authority() {
         block.hash = hash(8);
         *best_chain_hash_at_height = hash(8);
     }
+    sync_transaction_observation(&mut new_inclusion);
     let ticket = c.begin_check(&context()).unwrap();
     c.acknowledge_reconfirmation(ticket, &context(), new_inclusion, policy(), 10000)
         .unwrap();
@@ -848,6 +867,7 @@ fn remined() -> CollectedAssessment {
         block.hash = hash(8);
         *best_chain_hash_at_height = hash(8);
     }
+    sync_transaction_observation(&mut o);
     o
 }
 fn tracked(temp: &Temp) -> Controller {
@@ -920,6 +940,7 @@ fn reconfirmation_rejects_unconfirmed_stale_wrong_chain_and_changed_context() {
     {
         *txid = Txid::from_byte_array([99; 32]);
     }
+    sync_transaction_observation(&mut wrong_txid);
     for (o, now) in [
         (observation(false), 10000),
         (observation(true), 10000),
