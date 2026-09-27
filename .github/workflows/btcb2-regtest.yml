@@ -92,7 +92,9 @@ jobs:
           key: ${{ runner.os }}-electrs-blake2b-v2-${{ env.ELECTRS_BLAKE2B_COMMIT }}
 
       - name: Build coincubed
-        run: cargo build --release --package coincubed
+        run: |
+          cargo build --release --package coincubed
+          cargo build --release --package coincube-core --example claim_regtest_vectors
 
       - name: Test and build knots_verify
         # The verifier decides which node binaries the harness may execute, so
@@ -133,6 +135,7 @@ jobs:
           TIMEOUT: 120
           # A missing binary fails the run instead of skipping the tests.
           BTCB2_HARNESS_REQUIRED: "1"
+          CLAIM_REGTEST_TOOL_PATH: ${{ github.workspace }}/target/release/examples/claim_regtest_vectors
           # Failing tests keep their datadirs here so the logs can be collected.
           TEST_DIR: ${{ github.workspace }}/test-datadirs
         run: |
@@ -141,10 +144,10 @@ jobs:
           "$KNOTS_LEGACY_PATH" --version | head -1
           "$KNOTS_BLAKE2B_PATH" --version | head -1
           # B4.1 proves the harness; B4.2 runs the QA matrices on it.
-          # Both modules are named explicitly: a bare `pytest tests/`
+          # Modules are named explicitly: a bare `pytest tests/`
           # here would also pull in the functional suite, which this job
           # does not set up.
-          pytest tests/test_btcb2_harness.py tests/test_btcb2_b42_matrices.py -vvv
+          pytest tests/test_btcb2_harness.py tests/test_btcb2_b42_matrices.py tests/test_btcb2_claim_consensus.py -vvv --junitxml="$TEST_DIR/btcb2.xml" -o junit_family=legacy
 
       - name: Collect logs from failed tests
         if: failure()
@@ -166,5 +169,14 @@ jobs:
         with:
           name: failure-logs-btcb2-harness
           path: failure-logs
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Upload two-chain test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: btcb2-test-results
+          path: test-datadirs/btcb2.xml
           retention-days: 14
           if-no-files-found: warn
