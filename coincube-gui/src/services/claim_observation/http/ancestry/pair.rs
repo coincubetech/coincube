@@ -414,6 +414,20 @@ mod tests {
                             .await
                             .unwrap()
                             .unwrap();
+                        let preferred = source
+                            .discover_preferred_ancestry(
+                                &[OutPoint::new(old_id, 0), selected],
+                                policy,
+                            )
+                            .await
+                            .unwrap()
+                            .unwrap();
+                        assert_eq!(preferred.pair().selected(), selected);
+                        assert!(source
+                            .discover_preferred_ancestry(&[OutPoint::new(old_id, 0)], policy)
+                            .await
+                            .unwrap()
+                            .is_none());
                         assert_eq!(discovered.pair().selected(), selected);
                         assert_eq!(discovered.links().len(), 2);
                         assert_eq!(discovered.links()[0].parent_input, Some(1));

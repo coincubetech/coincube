@@ -47,7 +47,7 @@ fn pre_fork_coins_are_those_confirmed_below_the_fork_height() {
     let set = partition_coins(
         vec![
             coin(Some(89), false, false, 1), // pre-fork
-            coin(Some(90), false, false, 2), // the fork block: Bitcoin-only
+            coin(Some(90), false, false, 2), // fork block: ancestry remains unproven
             coin(Some(91), false, false, 3), // post-fork
             coin(None, false, false, 4),     // unconfirmed: neither
             coin(Some(10), true, false, 5),  // spent
@@ -65,6 +65,43 @@ fn pre_fork_coins_are_those_confirmed_below_the_fork_height() {
     );
     assert_eq!(set.post_fork, 2, "at and above the fork height");
     assert_eq!(set.tip_height, 105);
+    assert_eq!(
+        set.ancestry_candidates
+            .iter()
+            .map(|c| c.outpoint.vout)
+            .collect::<Vec<_>>(),
+        vec![2, 3]
+    );
+}
+
+#[test]
+fn ancestry_inventory_excludes_spent_immature_unconfirmed_and_impossible_heights() {
+    let set = partition_coins(
+        vec![
+            coin(Some(99), false, false, 1),
+            coin(Some(100), false, false, 2),
+            coin(Some(101), false, false, 3),
+            coin(Some(-1), false, false, 4),
+            coin(None, false, false, 5),
+            coin(Some(99), true, false, 6),
+            coin(Some(99), false, true, 7),
+            coin(Some(89), false, false, 8),
+        ],
+        90,
+        100,
+    );
+    assert_eq!(
+        set.ancestry_candidates
+            .iter()
+            .map(|c| c.outpoint.vout)
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    assert_eq!(set.post_fork, 2);
+    assert_eq!(set.pre_fork.len(), 1);
+    let invalid_tip = partition_coins(vec![coin(Some(1), false, false, 0)], 90, -1);
+    assert!(invalid_tip.pre_fork.is_empty());
+    assert!(invalid_tip.ancestry_candidates.is_empty());
 }
 
 #[test]

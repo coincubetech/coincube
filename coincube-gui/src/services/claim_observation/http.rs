@@ -12,7 +12,9 @@ use std::{
 mod ancestry;
 mod discovery;
 pub use ancestry::{CanonicalCoinbase, CoinbasePair};
-pub use discovery::{AncestryContext, CollectedAncestry, DiscoveredAncestry, DiscoveryError};
+pub use discovery::{
+    AncestryContext, CollectedAncestry, DiscoveredAncestry, DiscoveryError, MAX_ANCESTRY_CANDIDATES,
+};
 
 const BODY_LIMIT: usize = 256 * 1024;
 const TRANSACTION_HEX_LIMIT: usize = 2 * coincube_core::claim_ancestry::MAX_TRANSACTION_BYTES;

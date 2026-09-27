@@ -2,6 +2,7 @@
 use super::*;
 mod binding;
 mod collect;
+mod preferred;
 pub use binding::AncestryContext;
 use coincube_core::{
     claim_ancestry::{
@@ -11,6 +12,7 @@ use coincube_core::{
     miniscript::bitcoin::OutPoint,
 };
 pub use collect::CollectedAncestry;
+pub use preferred::MAX_ANCESTRY_CANDIDATES;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,

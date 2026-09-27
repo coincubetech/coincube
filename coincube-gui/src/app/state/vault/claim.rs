@@ -191,6 +191,9 @@ pub struct CoinSet {
     /// fork, so they may still be entangled. Counted for the copy; slice 2's
     /// input poison is where they become useful.
     pub post_fork: usize,
+    /// Candidates only: positive ancestry, ownership and current spend checks
+    /// are still required before including any of these in a Claim transfer.
+    pub ancestry_candidates: Vec<Coin>,
     pub tip_height: i32,
 }
 
@@ -2050,6 +2053,7 @@ pub fn partition_coins(coins: Vec<Coin>, fork_height: u64, tip_height: i32) -> C
     let mut set = CoinSet {
         pre_fork: Vec::new(),
         post_fork: 0,
+        ancestry_candidates: Vec::new(),
         tip_height,
     };
     for coin in coins {
@@ -2059,13 +2063,18 @@ pub fn partition_coins(coins: Vec<Coin>, fork_height: u64, tip_height: i32) -> C
         let Some(height) = coin.block_height else {
             continue;
         };
-        if height >= 0 && (height as u64) < fork_height {
+        if height < 0 || height > tip_height {
+            continue;
+        }
+        if (height as u64) < fork_height {
             set.pre_fork.push(coin);
         } else {
             set.post_fork += 1;
+            set.ancestry_candidates.push(coin);
         }
     }
     set.pre_fork.sort_by_key(|coin| coin.outpoint);
+    set.ancestry_candidates.sort_by_key(|coin| coin.outpoint);
     set
 }
 
@@ -2191,6 +2200,7 @@ async fn probe(
         (Err(_), Ok((coins, tip))) => Ok(CoinSet {
             pre_fork: Vec::new(),
             post_fork: coins.len(),
+            ancestry_candidates: Vec::new(),
             tip_height: tip,
         }),
         (_, Err(reason)) => Err(reason),
