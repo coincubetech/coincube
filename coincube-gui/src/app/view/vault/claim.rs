@@ -573,7 +573,7 @@ fn track_view<'a>(
                 .push(row("Previous attempts", p2_regular(attempts.to_string())))
                 .push(button::primary(None, "Confirm resend of original transaction").on_press_maybe((!busy).then_some(Message::Claim(ClaimMessage::ConfirmResubmission))))
         }))
-        .push_maybe((!has_resubmission && matches!(status, Some(Status::Observation(Assessment::Reorged | Assessment::WaitingForConfirmation)))).then(|| {
+        .push_maybe((!has_resubmission && reconfirmation.is_none() && matches!(status, Some(Status::Observation(Assessment::Reorged | Assessment::WaitingForConfirmation)))).then(|| {
             button::secondary(None, "Review resend of original transaction").on_press_maybe((!busy).then_some(Message::Claim(ClaimMessage::ReviewResubmission)))
         }))
         .push_maybe(reconfirmation.map(|inclusion| {
