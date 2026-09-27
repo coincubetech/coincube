@@ -2202,6 +2202,7 @@ async fn restore_recorded_claim(
     let change_hint = controller.recorded_bitcoin_change_index();
     let phase = controller.phase();
     let txid = controller.signed_txid();
+    let stored_transaction = controller.recorded_bitcoin_transaction().cloned();
     drop(controller);
     let check = || {
         if *generation.borrow() != expected || generation.has_changed().is_err() {
@@ -2214,13 +2215,17 @@ async fn restore_recorded_claim(
     // An unavailable recorded submission must remain a hold even when its inputs
     // have already disappeared from the wallet's unspent set.
     let recovered = if let Some(txid) = txid {
-        let transaction = daemon.list_txs(&[txid]).await.ok().and_then(|result| {
-            result
-                .transactions
-                .into_iter()
-                .find(|entry| entry.tx.compute_txid() == txid)
-                .map(|entry| entry.tx)
-        });
+        let transaction = if stored_transaction.is_some() {
+            stored_transaction
+        } else {
+            daemon.list_txs(&[txid]).await.ok().and_then(|result| {
+                result
+                    .transactions
+                    .into_iter()
+                    .find(|entry| entry.tx.compute_txid() == txid)
+                    .map(|entry| entry.tx)
+            })
+        };
         check()?;
         let Some(transaction) = transaction else {
             return Ok(RestartedClaim { context, state: RestartedState::Unavailable(txid,

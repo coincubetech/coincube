@@ -1448,10 +1448,61 @@ mod flow {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn restart_uses_stored_signed_bytes_but_verifies_their_signatures() {
+        for corrupt in [false, true] {
+            let mut f = reach_review().await;
+            reach_track(&mut f).await;
+            *f.daemon.submitted.lock().unwrap() = None;
+            if corrupt {
+                let path = journal_directory(&f.datadir, &f.wallet).join("intent.json");
+                let mut journal: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                let mut tx: Transaction =
+                    serde_json::from_value(journal["bitcoin_transaction"].clone()).unwrap();
+                tx.input[0].witness =
+                    coincube_core::miniscript::bitcoin::Witness::from_slice(&[vec![1u8]]);
+                journal["bitcoin_transaction"] = serde_json::to_value(&tx).unwrap();
+                journal["bitcoin_attempts"][0]["wtxid"] =
+                    serde_json::to_value(tx.compute_wtxid()).unwrap();
+                std::fs::write(path, serde_json::to_vec(&journal).unwrap()).unwrap();
+            }
+            reopen(&mut f).await;
+            if corrupt {
+                assert!(f.p.restart_error.is_some());
+                assert!(!f.p.can_build());
+            } else {
+                assert!(matches!(
+                    &f.p.stage,
+                    Stage::Track {
+                        session: Some(_),
+                        error: None,
+                        ..
+                    }
+                ));
+            }
+            assert_eq!(submissions(&f), 1);
+            drop(f.p);
+            let _ = std::fs::remove_dir_all(f.root);
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn restart_missing_witness_is_track_only_and_wrong_account_is_refused() {
         let mut f = reach_review().await;
         reach_track(&mut f).await;
         *f.daemon.submitted.lock().unwrap() = None;
+        // A legacy journal has no recoverable signed bytes of its own.
+        let path = journal_directory(&f.datadir, &f.wallet).join("intent.json");
+        let mut journal: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        journal["version"] = serde_json::json!(4);
+        journal
+            .as_object_mut()
+            .unwrap()
+            .remove("bitcoin_transaction");
+        journal.as_object_mut().unwrap().remove("bitcoin_attempts");
+        std::fs::write(&path, serde_json::to_vec(&journal).unwrap()).unwrap();
         reopen(&mut f).await;
         assert!(matches!(
             &f.p.stage,

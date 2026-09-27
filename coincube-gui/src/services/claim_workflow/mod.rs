@@ -1,5 +1,6 @@
 //! Restart-safe intent bookkeeping only. No signing/broadcast/UI entry point.
 mod journal;
+mod recovery;
 mod reorg;
 use super::claim_observation::{CollectedAssessment, Failure, ObservationBundle};
 use coincube_core::{
@@ -12,6 +13,7 @@ use coincube_core::{
     },
 };
 use journal::Journal;
+pub use recovery::BitcoinSubmissionAttempt;
 pub use reorg::Reconfirmation;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -79,6 +81,10 @@ struct Intent {
     fork_submission: Option<RecordedForkSubmission>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     inclusion_history: Vec<Reconfirmation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bitcoin_transaction: Option<Transaction>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    bitcoin_attempts: Vec<BitcoinSubmissionAttempt>,
 }
 /// A possible submission, not evidence of acceptance or confirmation. Reading
 /// this journal record never permits a retry, even after an app restart.
@@ -152,11 +158,11 @@ fn validate(intent: &Intent) -> Result<(), Error> {
             intent.fork_change_index,
             intent.bitcoin_change_index,
         ),
-        (1 | 5, false, None, None)
-            | (2 | 5, true, None, None)
-            | (3 | 5, true, Some(0..=0x7fff_ffff), None)
-            | (4 | 5, false, None, Some(0..=0x7fff_ffff))
-            | (4 | 5, true, Some(0..=0x7fff_ffff), Some(0..=0x7fff_ffff))
+        (1 | 5 | 6, false, None, None)
+            | (2 | 5 | 6, true, None, None)
+            | (3 | 5 | 6, true, Some(0..=0x7fff_ffff), None)
+            | (4..=6, false, None, Some(0..=0x7fff_ffff))
+            | (4..=6, true, Some(0..=0x7fff_ffff), Some(0..=0x7fff_ffff))
     ) || intent.identity.bitcoin_cube.is_empty()
         || intent.identity.fork_cube.is_empty()
         || intent.identity.bitcoin_cube.len() > 256
@@ -231,6 +237,7 @@ fn validate(intent: &Intent) -> Result<(), Error> {
         }
     }
     reorg::validate_history(intent)?;
+    recovery::validate_record(intent)?;
     Ok(())
 }
 impl Controller {
@@ -341,6 +348,8 @@ impl Controller {
             bitcoin_change_index,
             fork_submission: None,
             inclusion_history: Vec::new(),
+            bitcoin_transaction: None,
+            bitcoin_attempts: Vec::new(),
         };
         validate(&intent)?;
         Self::valid_context(&context)?;
@@ -693,6 +702,11 @@ impl Controller {
         let mut next = self.intent.clone();
         next.signed_txid = Some(signed.compute_txid());
         next.phase = Phase::BroadcastUncertain;
+        next.version = 6;
+        next.bitcoin_transaction = Some(signed.clone());
+        next.bitcoin_attempts.push(BitcoinSubmissionAttempt {
+            wtxid: Some(signed.compute_wtxid()),
+        });
         validate(&next)?;
         self.journal.store(&next)?;
         self.intent = next;

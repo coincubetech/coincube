@@ -703,11 +703,13 @@ fn fork_plan_requires_fresh_depth_and_survives_restart_without_authority() {
         .unwrap();
     assert_eq!(c.recorded_fork_sweep(), Some(&sweep.psbt().unsigned_tx));
     assert_eq!(c.recorded_fork_change_index(), Some(20.into()));
-    assert_eq!(c.intent.version, 4);
+    assert_eq!(c.intent.version, 6);
     assert!(c.fresh.is_none());
     // Older v2 records remain readable, but acquire a derivation hint only
     // after authenticated construction and fresh depth checks.
     c.intent.version = 2;
+    c.intent.bitcoin_transaction = None;
+    c.intent.bitcoin_attempts.clear();
     c.intent.fork_change_index = None;
     c.intent.bitcoin_change_index = None;
     validate(&c.intent).unwrap();
@@ -844,6 +846,16 @@ fn fork_plan_requires_fresh_depth_and_survives_restart_without_authority() {
         .unwrap();
     assert_eq!(c.recorded_fork_submission(), Some(recorded));
     assert_eq!(c.recorded_fork_sweep().cloned(), before_sweep);
+    let history = c.intent.inclusion_history.clone();
+    // This fixture migrated through legacy v2; recovering bytes must retain
+    // both completed fork submission bookkeeping and changed Bitcoin inclusion.
+    assert!(c.recorded_bitcoin_transaction().is_none());
+    c.bind_recovered_bitcoin_transaction(&context(), &verified)
+        .unwrap();
+    assert_eq!(c.intent.inclusion_history, history);
+    assert_eq!(c.recorded_fork_submission(), Some(recorded));
+    assert_eq!(c.recorded_fork_sweep().cloned(), before_sweep);
+    assert_eq!(c.bitcoin_submission_attempts()[0].wtxid(), None);
     drop(c);
     let mut c = Controller::reopen(&temp.0, &wallet, context()).unwrap();
     c.revalidate_construction(&context(), &source).unwrap();
@@ -908,7 +920,7 @@ fn explicit_reconfirmation_preserves_history_and_never_restores_submission() {
     ));
     drop(c);
     let mut c = Controller::reopen(&temp.0, &identity(), context()).unwrap();
-    assert_eq!(c.intent.version, 5);
+    assert_eq!(c.intent.version, 6);
     assert_eq!(c.intent.inclusion_history.len(), 1);
     assert_eq!(c.status(), Status::Unchecked);
     assert_eq!(
@@ -962,4 +974,89 @@ fn reconfirmation_rejects_unconfirmed_stale_wrong_chain_and_changed_context() {
         .acknowledge_reconfirmation(ticket, &other, remined(), policy(), 10000)
         .is_err());
     assert_eq!(fs::read(temp.0.join("intent.json")).unwrap(), original);
+}
+
+#[test]
+fn signed_bytes_and_attempt_are_durable_without_restart_authority() {
+    let temp = Temp::new();
+    let mut c = controller(&temp);
+    refresh(&mut c, observation(false), 10000);
+    let tx = signed();
+    c.record_broadcast_intent(&context(), &tx, policy(), 10000)
+        .unwrap();
+    assert_eq!(c.recorded_bitcoin_transaction(), Some(&tx));
+    assert_eq!(
+        c.bitcoin_submission_attempts()[0].wtxid(),
+        Some(tx.compute_wtxid())
+    );
+    drop(c);
+    let c = Controller::reopen(&temp.0, &identity(), context()).unwrap();
+    assert_eq!(c.status(), Status::Unchecked);
+    assert!(!c.construction_verified);
+    assert_eq!(c.recorded_bitcoin_transaction(), Some(&tx));
+    assert_eq!(c.bitcoin_submission_attempts().len(), 1);
+    for mutation in 0..7 {
+        let mut bad = c.intent.clone();
+        match mutation {
+            0 => bad.bitcoin_transaction = None,
+            1 => bad.bitcoin_attempts.clear(),
+            2 => bad.bitcoin_transaction.as_mut().unwrap().input[0]
+                .witness
+                .clear(),
+            3 => bad.bitcoin_transaction.as_mut().unwrap().output[0].value += Amount::ONE_SAT,
+            4 => bad.bitcoin_attempts[0].wtxid = Some(Wtxid::from_byte_array([42; 32])),
+            5 => bad
+                .bitcoin_attempts
+                .push(BitcoinSubmissionAttempt { wtxid: None }),
+            _ => bad.bitcoin_attempts = vec![bad.bitcoin_attempts[0]; 129],
+        }
+        assert!(validate(&bad).is_err(), "mutation {}", mutation);
+    }
+}
+
+#[test]
+fn legacy_recovered_witness_does_not_rewrite_unknown_original_attempt() {
+    let temp = Temp::new();
+    let (built, verified) = real_artifact(ChainId::Bitcoin, false, 10);
+    let mut c =
+        Controller::create(&temp.0, "btc".into(), "fork".into(), &built, context()).unwrap();
+    let observation = real_observation(&c, 0);
+    refresh(&mut c, observation, 10000);
+    c.record_broadcast_intent(&context(), verified.transaction(), policy(), 10000)
+        .unwrap();
+    c.intent.version = 4;
+    c.intent.bitcoin_transaction = None;
+    c.intent.bitcoin_attempts.clear();
+    validate(&c.intent).unwrap();
+    c.journal.store(&c.intent).unwrap();
+    let identity = c.identity().clone();
+    drop(c);
+    let mut c = Controller::reopen(&temp.0, &identity, context()).unwrap();
+    assert!(c
+        .bind_recovered_bitcoin_transaction(&context(), &verified)
+        .is_err());
+    c.revalidate_construction(&context(), &built).unwrap();
+    c.bind_recovered_bitcoin_transaction(&context(), &verified)
+        .unwrap();
+    assert_eq!(c.intent.version, 6);
+    assert_eq!(c.bitcoin_submission_attempts().len(), 1);
+    assert_eq!(c.bitcoin_submission_attempts()[0].wtxid(), None);
+    assert_eq!(c.status(), Status::Unchecked);
+    let before = fs::read(temp.0.join("intent.json")).unwrap();
+    c.bind_recovered_bitcoin_transaction(&context(), &verified)
+        .unwrap();
+    assert_eq!(fs::read(temp.0.join("intent.json")).unwrap(), before);
+    let (_, other) = real_artifact(ChainId::Bitcoin, false, 11);
+    assert!(matches!(
+        c.bind_recovered_bitcoin_transaction(&context(), &other),
+        Err(Error::Conflict)
+    ));
+    assert_eq!(fs::read(temp.0.join("intent.json")).unwrap(), before);
+    drop(c);
+    let c = Controller::reopen(&temp.0, &identity, context()).unwrap();
+    assert_eq!(c.bitcoin_submission_attempts()[0].wtxid(), None);
+    assert_eq!(
+        c.recorded_bitcoin_transaction(),
+        Some(verified.transaction())
+    );
 }

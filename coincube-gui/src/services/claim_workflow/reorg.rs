@@ -12,7 +12,7 @@ pub struct Reconfirmation {
 
 pub(super) fn validate_history(intent: &Intent) -> Result<(), Error> {
     let history = &intent.inclusion_history;
-    if (intent.version != 5 && !history.is_empty())
+    if (!matches!(intent.version, 5 | 6) && !history.is_empty())
         || history.len() > MAX_INCLUSION_CHANGES
         || history
             .iter()
@@ -106,7 +106,7 @@ impl Controller {
         }
         let inclusion = self.check_reconfirmation(collected, policy, now)?;
         let mut next = self.intent.clone();
-        next.version = 5;
+        next.version = next.version.max(5);
         next.inclusion_history.push(inclusion);
         next.plan.previous_confirmation = Some(inclusion.confirmed);
         validate(&next)?;

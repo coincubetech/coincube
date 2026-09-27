@@ -468,6 +468,7 @@ impl Coordinator {
             )?
         };
         controller.revalidate_construction(&context, construction)?;
+        controller.bind_recovered_bitcoin_transaction(&context, &verified)?;
         let id = NEXT
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
             .map_err(|_| Error::Revoked)?;
