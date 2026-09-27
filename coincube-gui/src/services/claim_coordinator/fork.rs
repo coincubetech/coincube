@@ -1242,6 +1242,11 @@ fn completion_bitcoin_loss(
 }
 
 impl Coordinator {
+    /// Whether tracking must remain read-only pending full ancestry acceptance.
+    pub fn is_ancestry(&self) -> bool {
+        self.controller.plan().poison == coincube_core::claim::Poison::InputAncestry
+    }
+
     /// Reconcile saved markers after a fresh loss of fork inclusion or Bitcoin
     /// poison depth. Transport failures leave historical data alone and return
     /// an error; a marker belonging to another sweep is never cleared.

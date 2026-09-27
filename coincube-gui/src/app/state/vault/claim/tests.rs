@@ -619,6 +619,7 @@ mod flow {
         previous: Transaction,
         submitted: Mutex<Option<Transaction>>,
         hits: Mutex<Vec<&'static str>>,
+        queried_txs: Mutex<Vec<Txid>>,
         #[cfg(feature = "regtest-harness")]
         live: Option<live_regtest::LiveTransport>,
     }
@@ -823,6 +824,7 @@ mod flow {
             txids: &[Txid],
         ) -> Result<model::ListTransactionsResult, DaemonError> {
             self.hit("list_txs");
+            self.queried_txs.lock().unwrap().extend_from_slice(txids);
             let mut transactions = Vec::new();
             if txids.contains(&self.previous.compute_txid()) {
                 transactions.push(coincubed::commands::TransactionInfo {
@@ -1022,6 +1024,7 @@ mod flow {
             previous: f.previous.clone(),
             submitted: Mutex::new(None),
             hits: Mutex::new(Vec::new()),
+            queried_txs: Mutex::new(Vec::new()),
             #[cfg(feature = "regtest-harness")]
             live: None,
         });
@@ -1690,6 +1693,17 @@ mod flow {
     #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn fork_loader_preserves_pairing_and_requires_fresh_depth_before_signing() {
+        fork_loader_restart(false).await;
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn ancestry_fork_loader_restores_excluded_input_and_exact_witness() {
+        fork_loader_restart(true).await;
+    }
+
+    #[cfg(any(unix, windows))]
+    async fn fork_loader_restart(ancestry: bool) {
         use crate::app::settings::{update_settings_file, CubeSettings, VaultIdentity};
         let mut f = reach_review().await;
         reach_track(&mut f).await;
@@ -1729,9 +1743,118 @@ mod flow {
             previous: f.daemon.previous.clone(),
             submitted: Mutex::new(None),
             hits: Mutex::new(Vec::new()),
+            queried_txs: Mutex::new(Vec::new()),
             #[cfg(feature = "regtest-harness")]
             live: None,
         });
+        let mut excluded = None;
+        if ancestry {
+            use coincube_core::{
+                claim_ancestry::{retained::RetainedPath, search::OwnedLink},
+                claim_finalize::finalize_ancestry_transfer,
+                claim_spend::create_ancestry_self_transfer,
+                miniscript::bitcoin::consensus::serialize,
+            };
+            let verify = secp256k1::Secp256k1::verification_only();
+            let mut root = f.daemon.previous.clone();
+            root.input[0].script_sig = coincube_core::miniscript::bitcoin::script::Builder::new()
+                .push_int(961_640)
+                .push_int(1)
+                .into_script();
+            root.output[0].script_pubkey = wallet
+                .main_descriptor
+                .receive_descriptor()
+                .derive(1.into(), &verify)
+                .script_pubkey();
+            let selected = OutPoint::new(root.compute_txid(), 0);
+            excluded = Some(selected.txid);
+            let path = RetainedPath::new(
+                selected,
+                vec![OwnedLink {
+                    transaction: serialize(&root),
+                    parent_input: None,
+                }],
+            )
+            .unwrap();
+            let coins = [
+                CandidateCoin {
+                    outpoint: selected,
+                    amount: root.output[0].value,
+                    deriv_index: 1.into(),
+                    is_change: false,
+                    must_select: true,
+                    sequence: None,
+                    ancestor_info: None,
+                },
+                CandidateCoin {
+                    outpoint: f.daemon.coin.outpoint,
+                    amount: f.daemon.coin.amount,
+                    deriv_index: f.daemon.coin.derivation_index,
+                    is_change: false,
+                    must_select: true,
+                    sequence: None,
+                    ancestor_info: None,
+                },
+            ];
+            let mut getter = TxMap(
+                [
+                    (root.compute_txid(), root),
+                    (f.daemon.previous.compute_txid(), f.daemon.previous.clone()),
+                ]
+                .into(),
+            );
+            let source = create_ancestry_self_transfer(
+                ChainId::Bitcoin,
+                &wallet.main_descriptor,
+                &verify,
+                &mut getter,
+                &coins,
+                12.into(),
+                5,
+                absolute::LockTime::ZERO,
+                &path.reverify().unwrap(),
+            )
+            .unwrap();
+            let psbt = f
+                .wallet
+                .signer
+                .as_ref()
+                .unwrap()
+                .sign_psbt(source.psbt().clone())
+                .unwrap();
+            let signed = finalize_ancestry_transfer(&source, &psbt, &verify).unwrap();
+            let production = crate::services::claim_coordinator::fork::ForkProduction::new(
+                connect.client.clone(),
+                daemon.clone(),
+                connect.account.clone(),
+                1,
+                f.sender.subscribe(),
+            )
+            .unwrap();
+            let directory = journal_directory(&f.datadir, &f.wallet);
+            // Model a previously recorded ancestry submission in this disposable
+            // fixture. The public eligibility gate remains disabled.
+            std::fs::remove_file(directory.join("intent.json")).unwrap();
+            let controller = crate::services::claim_workflow::Controller::create_ancestry(
+                &directory,
+                "bitcoin-cube".into(),
+                "fork-cube".into(),
+                &source,
+                &path,
+                production.context().clone(),
+            )
+            .unwrap();
+            drop(controller);
+            let file = directory.join("intent.json");
+            let mut journal: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+            journal["phase"] = json!("Tracking");
+            journal["signed_txid"] = json!(signed.transaction().compute_txid());
+            journal["bitcoin_transaction"] = json!(signed.transaction());
+            journal["bitcoin_attempts"] =
+                json!([{ "wtxid": signed.transaction().compute_wtxid() }]);
+            std::fs::write(file, serde_json::to_vec(&journal).unwrap()).unwrap();
+        }
         let loaded = fork_load::load(
             &f.datadir,
             wallet.clone(),
@@ -1745,15 +1868,28 @@ mod flow {
         )
         .await
         .unwrap();
-        let psbt = fork_panel::tests::refused_signer_and_late_result(
-            f.datadir.clone(),
-            wallet.clone(),
-            vec![daemon.coin.clone()],
-            loaded,
-            daemon.clone(),
-            &f.cache,
-        )
-        .await;
+        let psbt = if ancestry {
+            let fork_load::Loaded::Signing {
+                mut preparation,
+                psbt,
+                context,
+            } = loaded
+            else {
+                panic!("an unsubmitted ancestry sweep must reopen for preparation");
+            };
+            assert!(preparation.check_signing(&context).await.is_err());
+            psbt
+        } else {
+            fork_panel::tests::refused_signer_and_late_result(
+                f.datadir.clone(),
+                wallet.clone(),
+                vec![daemon.coin.clone()],
+                loaded,
+                daemon.clone(),
+                &f.cache,
+            )
+            .await
+        };
         assert_eq!(
             psbt.psbt().unsigned_tx.input[0].previous_output,
             f.daemon.coin.outpoint
@@ -1880,6 +2016,12 @@ mod flow {
             1
         );
         assert!(daemon.submitted.lock().unwrap().is_none());
+        if let Some(excluded) = excluded {
+            assert!(
+                !daemon.queried_txs.lock().unwrap().contains(&excluded),
+                "the fork daemon must never be asked for the excluded Bitcoin transaction"
+            );
+        }
     }
 
     /// `reach_review`, then confirm → submit → track, asserting each.
@@ -3032,6 +3174,7 @@ mod flow {
             previous: f.daemon.previous.clone(),
             submitted: Mutex::new(None),
             hits: Mutex::new(Vec::new()),
+            queried_txs: Mutex::new(Vec::new()),
             #[cfg(feature = "regtest-harness")]
             live: None,
         });
@@ -3294,6 +3437,7 @@ mod flow {
             previous: f.daemon.previous.clone(),
             submitted: Mutex::new(None),
             hits: Mutex::new(Vec::new()),
+            queried_txs: Mutex::new(Vec::new()),
             #[cfg(feature = "regtest-harness")]
             live: None,
         });

@@ -311,6 +311,17 @@ impl ForkClaimPanel {
         Task::perform(
             async move {
                 let result = async {
+                    if coordinator.is_ancestry() {
+                        let (status, transaction) = coordinator
+                            .reconcile_sweep(&context)
+                            .await
+                            .map_err(describe)?;
+                        return Ok(Tracking {
+                            status,
+                            transaction,
+                            saved: false,
+                        });
+                    }
                     let (status, transaction) = coordinator
                         .reconcile_completion(&context, &root)
                         .await

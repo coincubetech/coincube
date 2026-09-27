@@ -131,6 +131,7 @@ async fn claim_gui_regtest_driver() {
         previous: fixture.previous,
         submitted: Mutex::new(recovered_transaction("bitcoin_recorded_raw")),
         hits: Mutex::new(Vec::new()),
+        queried_txs: Mutex::new(Vec::new()),
         live: Some(LiveTransport {
             transport,
             height: i32::try_from(init["tip_height"].as_u64().unwrap()).unwrap(),
@@ -180,6 +181,7 @@ async fn claim_gui_regtest_driver() {
         previous: daemon.previous.clone(),
         submitted: Mutex::new(recovered_transaction("fork_recorded_raw")),
         hits: Mutex::new(Vec::new()),
+        queried_txs: Mutex::new(Vec::new()),
         live: Some(LiveTransport {
             height: i32::try_from(init["fork_tip_height"].as_u64().unwrap()).unwrap(),
             transport: RegtestTransport::new(
