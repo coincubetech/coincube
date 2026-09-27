@@ -484,8 +484,8 @@ mod tests {
         fs::remove_file(&socket_path).unwrap();
     }
 
-    // TODO: debug on MacOS
-    #[cfg(not(target_os = "macos"))]
+    // Accepted sockets are blocking on every Unix platform (#490), and the
+    // hashed socket path plus deadline below prevent the historical wait hang.
     #[test]
     fn server_sanity_check() {
         let ms = crate::testutils::DummyCoincube::new_server(
