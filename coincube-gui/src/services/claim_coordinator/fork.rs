@@ -381,6 +381,46 @@ impl Coordinator {
             _ => Ok(uncertain),
         }
     }
+    /// Check the recorded fork sweep's current chain inclusion together with
+    /// Bitcoin poison validity. A saved submission only identifies what to look
+    /// up; it never substitutes for current confirmation or allows a retry.
+    pub async fn reconcile_sweep(
+        &mut self,
+        context: &Context,
+    ) -> Result<(Status, claim_observation::TransactionObservation), Error> {
+        self.current(context)?;
+        let submission = self
+            .controller
+            .recorded_fork_submission()
+            .ok_or(Error::InvalidBinding)?;
+        let ticket = self.controller.begin_check(context)?;
+        let collected = claim_observation::collect_sweep(
+            self.services.source(),
+            &self.controller.plan(),
+            submission.txid(),
+            self.policy.observations,
+            self.policy.collection_budget,
+            CollectionContext {
+                expected_generation: context.generation,
+                generation: self.generation.clone(),
+            },
+        )
+        .await
+        .map_err(Error::Observation)?;
+        self.current(context)?;
+        let status = self
+            .controller
+            .apply_observation(
+                ticket,
+                context,
+                Ok(collected.assessment()),
+                self.policy.observations,
+                self.services.source().now(),
+            )
+            .map_err(Error::Journal)?;
+        Ok((status, collected.transaction()))
+    }
+
     /// Continues checking Bitcoin poison validity after submission; does not
     /// claim the fork sweep is confirmed or persist split completion.
     pub async fn reconcile(&mut self, context: &Context) -> Result<Status, Error> {

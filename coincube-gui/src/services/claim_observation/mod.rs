@@ -340,6 +340,129 @@ pub async fn collect(
     result
 }
 
+/// A current fork-side transaction view, paired with fresh Bitcoin poison
+/// checks. This is not persistent completion or permission to submit again.
+#[derive(Debug, Clone, Copy)]
+pub struct SweepObservation {
+    assessment: CollectedAssessment,
+    transaction: TransactionObservation,
+}
+impl SweepObservation {
+    pub fn assessment(&self) -> CollectedAssessment {
+        self.assessment
+    }
+    pub fn transaction(&self) -> TransactionObservation {
+        self.transaction
+    }
+}
+
+/// Track the exact recorded sweep under the same fresh-read, anchor and session
+/// contracts as step one. Mempool acceptance and absence never mean completion.
+pub async fn collect_sweep(
+    source: &dyn ObservationSource,
+    plan: &ClaimPlan,
+    sweep: Txid,
+    policy: Policy,
+    budget: Duration,
+    mut context: CollectionContext,
+) -> Result<SweepObservation, Failure> {
+    validate_plan(plan, policy, budget)?;
+    if sweep == plan.step1.compute_txid() {
+        return Err(failure(Stage::Plan, FailureKind::InvalidPlan));
+    }
+    let expected = context.expected_generation;
+    if *context.generation.borrow() != expected || context.generation.has_changed().is_err() {
+        return Err(failure(Stage::Context, FailureKind::Cancelled));
+    }
+    let cancelled = async {
+        loop {
+            if context.generation.changed().await.is_err()
+                || *context.generation.borrow_and_update() != expected
+            {
+                break;
+            }
+        }
+    };
+    let work = async {
+        let first = collect_inner(source, plan, policy, expected).await?;
+        let fork = plan.fork_chain;
+        let mut prior = None;
+        let mut stamps = Vec::new();
+        for _ in 0..2 {
+            let (tx, stamp) = read(
+                source
+                    .transaction(fork, sweep)
+                    .await
+                    .map_err(|e| failure(Stage::ForkTransaction, e))?,
+                fork,
+                source,
+                policy,
+                Stage::ForkTransaction,
+            )?;
+            stamps.push(stamp);
+            if matches!(tx, TransactionObservation::Unconfirmed { txid } | TransactionObservation::Confirmed { txid, .. } if txid != sweep)
+            {
+                return Err(failure(Stage::ForkTransaction, FailureKind::Malformed));
+            }
+            if prior.is_some_and(|previous| previous != tx) {
+                return Err(failure(Stage::ForkTransaction, FailureKind::Changed));
+            }
+            if let TransactionObservation::Confirmed { block, .. } = tx {
+                if block.height > first.observations.fork.tip.height {
+                    return Err(failure(Stage::ForkTransaction, FailureKind::Malformed));
+                }
+                let (hash, stamp) = read(
+                    source
+                        .hash_at_height(fork, block.height)
+                        .await
+                        .map_err(|e| failure(Stage::ForkIndexer, e))?,
+                    fork,
+                    source,
+                    policy,
+                    Stage::ForkIndexer,
+                )?;
+                stamps.push(stamp);
+                if hash != block.hash {
+                    return Err(failure(Stage::ForkIndexer, FailureKind::Changed));
+                }
+            }
+            prior = Some(tx);
+        }
+        let last = collect_inner(source, plan, policy, expected).await?;
+        let a = first.observations;
+        let b = last.observations;
+        if a.bitcoin.tip != b.bitcoin.tip
+            || a.bitcoin.location != b.bitcoin.location
+            || a.fork.tip != b.fork.tip
+            || a.fork.step1_presence != b.fork.step1_presence
+            || a.fork.median_time_past != b.fork.median_time_past
+            || a.deployment.state != b.deployment.state
+        {
+            return Err(failure(Stage::ForkTransaction, FailureKind::Changed));
+        }
+        if stamps
+            .into_iter()
+            .any(|stamp| !fresh(stamp, source.now(), policy.max_observation_age_seconds))
+        {
+            return Err(failure(Stage::ForkTransaction, FailureKind::Stale));
+        }
+        Ok(SweepObservation {
+            assessment: last,
+            transaction: prior
+                .ok_or_else(|| failure(Stage::ForkTransaction, FailureKind::Unavailable))?,
+        })
+    };
+    let result = tokio::select! {
+        biased;
+        _ = cancelled => Err(failure(Stage::Context, FailureKind::Cancelled)),
+        result = tokio::time::timeout(budget, work) => result.map_err(|_| failure(Stage::Context, FailureKind::Deadline))?,
+    };
+    if *context.generation.borrow() != expected || context.generation.has_changed().is_err() {
+        return Err(failure(Stage::Context, FailureKind::Cancelled));
+    }
+    result
+}
+
 async fn collect_inner(
     source: &dyn ObservationSource,
     plan: &ClaimPlan,
