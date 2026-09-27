@@ -215,17 +215,13 @@ impl std::fmt::Display for ClaimForkFinalizeError {
 }
 impl std::error::Error for ClaimForkFinalizeError {}
 
-/// Only validated signing additions may differ from the owned construction.
-/// Full prevouts, key origins, scripts, output metadata and unrelated maps must
-/// remain exact; prefinalized/imported replacements do not bypass the verifier.
-/// Both unified and legacy signatures are cryptographically checked by the
-/// existing finalizer. A legacy-only report still requires fresh poison proof
-/// from the coordinator before any replay-safety claim or submission.
-pub fn finalize_claim_fork_sweep<C: secp256k1::Verification>(
+/// Validate an in-progress signing PSBT against its owned fork construction.
+/// Incomplete signature sets are permitted here; metadata, amounts, scripts and
+/// outputs are not replaceable. This is not signature or replay-safety evidence.
+pub fn validate_claim_fork_signing(
     construction: &crate::claim_spend::ClaimForkSweep,
     signed: &crate::psbt_unified::UnifiedPsbt,
-    secp: &secp256k1::Secp256k1<C>,
-) -> Result<VerifiedClaimForkSweep, ClaimForkFinalizeError> {
+) -> Result<(), ClaimForkFinalizeError> {
     use crate::psbt_unified::{merge_signatures, UnifiedPsbt};
     let mut expected = UnifiedPsbt::from_psbt(construction.psbt().clone())
         .map_err(ClaimForkFinalizeError::Adapter)?;
@@ -245,6 +241,21 @@ pub fn finalize_claim_fork_sweep<C: secp256k1::Verification>(
     }
     spend::reverify_spend_before_broadcast(construction.descriptor(), signed.psbt())
         .map_err(|_| ClaimForkFinalizeError::Economics)?;
+    Ok(())
+}
+
+/// Only validated signing additions may differ from the owned construction.
+/// Full prevouts, key origins, scripts, output metadata and unrelated maps must
+/// remain exact; prefinalized/imported replacements do not bypass the verifier.
+/// Both unified and legacy signatures are cryptographically checked by the
+/// existing finalizer. A legacy-only report still requires fresh poison proof
+/// from the coordinator before any replay-safety claim or submission.
+pub fn finalize_claim_fork_sweep<C: secp256k1::Verification>(
+    construction: &crate::claim_spend::ClaimForkSweep,
+    signed: &crate::psbt_unified::UnifiedPsbt,
+    secp: &secp256k1::Secp256k1<C>,
+) -> Result<VerifiedClaimForkSweep, ClaimForkFinalizeError> {
+    validate_claim_fork_signing(construction, signed)?;
     let fee = signed
         .psbt()
         .fee()

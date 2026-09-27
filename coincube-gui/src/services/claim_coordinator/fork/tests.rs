@@ -576,3 +576,224 @@ async fn fork_journal_failure_foreign_review_and_sync_revocation_prevent_send() 
     ));
     assert_eq!(other.calls.load(Ordering::SeqCst), 0);
 }
+
+struct PreparingHarness {
+    preparation: Preparation,
+    _server: MockServer,
+    _temp: Temp,
+    sender: watch::Sender<u64>,
+    fault: Arc<AtomicUsize>,
+    calls: Arc<AtomicUsize>,
+}
+impl PreparingHarness {
+    fn psbt(&self) -> coincube_core::psbt_unified::UnifiedPsbt {
+        coincube_core::psbt_unified::UnifiedPsbt::from_psbt(
+            self.preparation.construction.psbt().clone(),
+        )
+        .unwrap()
+    }
+    async fn new() -> Self {
+        let Harness {
+            coordinator,
+            _server,
+            _temp,
+            sender,
+            fault,
+            calls,
+            reached,
+        } = Harness::new(true).await;
+        let stamp = coordinator.services.source().now();
+        drop(coordinator); // release the actual exclusive journal lock
+        let (source, _) = artifact(ChainId::Bitcoin, true, 12);
+        let (construction, _) = sweep(&source);
+        let fixture = Fixture {
+            preflight: PreflightClient::new(
+                &_server.base_url(),
+                CollectionContext {
+                    expected_generation: 7,
+                    generation: sender.subscribe(),
+                },
+            )
+            .unwrap(),
+            stamp,
+            clock: Arc::new(AtomicI64::new(stamp)),
+            fault: fault.clone(),
+            calls: calls.clone(),
+            reached,
+            directory: _temp.0.clone(),
+        };
+        let preparation = Preparation::open(
+            &_temp.0,
+            "bitcoin-cube".into(),
+            "fork-cube".into(),
+            &source,
+            construction,
+            context(),
+            sender.subscribe(),
+            Box::new(fixture),
+            policy(),
+        )
+        .unwrap();
+        Self {
+            preparation,
+            _server,
+            _temp,
+            sender,
+            fault,
+            calls,
+        }
+    }
+}
+fn sign_sweep(
+    psbt: coincube_core::miniscript::bitcoin::psbt::Psbt,
+    signers: usize,
+) -> coincube_core::psbt_unified::UnifiedPsbt {
+    let secp = secp256k1::Secp256k1::new();
+    let signed = [40, 41]
+        .iter()
+        .copied()
+        .take(signers)
+        .fold(psbt, |psbt, b| {
+            MasterSigner::from_mnemonic(Network::Bitcoin, Mnemonic::from_entropy(&[b; 16]).unwrap())
+                .unwrap()
+                .sign_psbt(psbt, &secp)
+                .unwrap()
+        });
+    coincube_core::psbt_unified::UnifiedPsbt::from_psbt(signed).unwrap()
+}
+#[tokio::test]
+async fn signing_requires_fresh_depth_then_transfers_lock_into_verified_submission() {
+    let mut h = PreparingHarness::new().await;
+    h.fault.store(6, Ordering::SeqCst);
+    assert!(h.preparation.check_signing(&context()).await.is_err());
+    assert!(h.preparation.controller.recorded_fork_sweep().is_none());
+    h.fault.store(0, Ordering::SeqCst);
+    let check = h.preparation.check_signing(&context()).await.unwrap();
+    let psbt = h
+        .preparation
+        .signing_psbt(check, &h.psbt(), &context())
+        .unwrap();
+    assert_eq!(
+        h.preparation.controller.recorded_fork_sweep(),
+        Some(&psbt.unsigned_tx)
+    );
+    assert_eq!(h.calls.load(Ordering::SeqCst), 0);
+    let mut coordinator = h
+        .preparation
+        .finish(&sign_sweep(psbt, 2), &context())
+        .unwrap();
+    // The same controller owns the lock continuously through finalization.
+    assert!(Controller::reopen(&h._temp.0, coordinator.controller.identity(), context()).is_err());
+    let review = coordinator.prepare_review(&context()).await.unwrap();
+    assert!(matches!(
+        coordinator
+            .confirm_and_submit(review, &context())
+            .await
+            .unwrap(),
+        Outcome::UpstreamAccepted { .. }
+    ));
+    assert_eq!(h.calls.load(Ordering::SeqCst), 1);
+}
+#[tokio::test]
+async fn signing_checks_are_bound_one_use_expiring_and_revocable() {
+    let mut first = PreparingHarness::new().await;
+    let mut second = PreparingHarness::new().await;
+    let check = first.preparation.check_signing(&context()).await.unwrap();
+    assert!(matches!(
+        second
+            .preparation
+            .signing_psbt(check, &second.psbt(), &context()),
+        Err(Error::InvalidReview)
+    ));
+    let old = first.preparation.check_signing(&context()).await.unwrap();
+    let mut newest = first.preparation.check_signing(&context()).await.unwrap();
+    assert!(matches!(
+        first
+            .preparation
+            .signing_psbt(old, &first.psbt(), &context()),
+        Err(Error::InvalidReview)
+    ));
+    newest.not_after = Instant::now();
+    assert!(matches!(
+        first
+            .preparation
+            .signing_psbt(newest, &first.psbt(), &context()),
+        Err(Error::ExpiredEvidence)
+    ));
+    let check = first.preparation.check_signing(&context()).await.unwrap();
+    first.preparation.revoker().revoke();
+    assert!(matches!(
+        first
+            .preparation
+            .signing_psbt(check, &first.psbt(), &context()),
+        Err(Error::Revoked)
+    ));
+    let check = second.preparation.check_signing(&context()).await.unwrap();
+    second.sender.send(8).unwrap();
+    assert!(matches!(
+        second
+            .preparation
+            .signing_psbt(check, &second.psbt(), &context()),
+        Err(Error::Revoked)
+    ));
+    assert_eq!(first.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(second.calls.load(Ordering::SeqCst), 0);
+}
+#[tokio::test]
+async fn signing_journal_failure_and_incomplete_signatures_never_advance() {
+    let mut h = PreparingHarness::new().await;
+    let moved = h._temp.0.with_extension("moved");
+    std::fs::rename(&h._temp.0, &moved).unwrap();
+    let checked = h.preparation.check_signing(&context()).await;
+    std::fs::rename(&moved, &h._temp.0).unwrap();
+    assert!(checked.is_err());
+    assert_eq!(h.calls.load(Ordering::SeqCst), 0);
+    let mut h = PreparingHarness::new().await;
+    let check = h.preparation.check_signing(&context()).await.unwrap();
+    let psbt = h
+        .preparation
+        .signing_psbt(check, &h.psbt(), &context())
+        .unwrap();
+    assert!(matches!(
+        h.preparation.finish(&sign_sweep(psbt, 1), &context()),
+        Err(Error::InvalidBinding)
+    ));
+    assert_eq!(h.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn signing_preserves_partial_signatures_and_refuses_replaced_metadata() {
+    let mut h = PreparingHarness::new().await;
+    let partial = sign_sweep(h.psbt().psbt().clone(), 1);
+    let check = h.preparation.check_signing(&context()).await.unwrap();
+    let continued = h
+        .preparation
+        .signing_psbt(check, &partial, &context())
+        .unwrap();
+    assert_eq!(&continued, partial.psbt());
+    assert_eq!(continued.inputs[0].partial_sigs.len(), 1);
+    for field in 0..3 {
+        let mut altered = partial.psbt().clone();
+        match field {
+            0 => altered.unsigned_tx.output[0].value = Amount::from_sat(1),
+            1 => altered.inputs[0].bip32_derivation.clear(),
+            _ => altered.inputs[0].witness_utxo.as_mut().unwrap().value = Amount::from_sat(1),
+        }
+        let altered = coincube_core::psbt_unified::UnifiedPsbt::from_psbt(altered).unwrap();
+        let check = h.preparation.check_signing(&context()).await.unwrap();
+        assert!(matches!(
+            h.preparation.signing_psbt(check, &altered, &context()),
+            Err(Error::InvalidBinding)
+        ));
+    }
+    let check = h.preparation.check_signing(&context()).await.unwrap();
+    let continued = h
+        .preparation
+        .signing_psbt(check, &partial, &context())
+        .unwrap();
+    assert!(h
+        .preparation
+        .finish(&sign_sweep(continued, 2), &context())
+        .is_ok());
+    assert_eq!(h.calls.load(Ordering::SeqCst), 0);
+}

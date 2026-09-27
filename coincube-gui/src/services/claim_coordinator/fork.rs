@@ -405,3 +405,267 @@ impl Drop for Coordinator {
 
 #[cfg(all(test, unix))]
 mod tests;
+
+/// Fresh, one-use permission to hand this exact construction to the signing UI.
+/// It is neither a signature, a replay-status assertion nor broadcast authority.
+/// The caller must still obtain the user's explicit signing consent.
+pub struct SigningCheck {
+    preparation: u64,
+    revision: u64,
+    not_after: Instant,
+}
+
+/// Owns the unsigned fork construction and the Claim journal while signatures
+/// are collected. Every new signing dispatch needs another fresh chain check.
+pub struct Preparation {
+    id: u64,
+    revision: u64,
+    context: Context,
+    generation: watch::Receiver<u64>,
+    controller: Controller,
+    construction: ClaimForkSweep,
+    services: Box<dyn ForkServices>,
+    policy: CheckPolicy,
+    revoker: Revoker,
+}
+impl Preparation {
+    #[allow(clippy::too_many_arguments)]
+    pub fn resume(
+        directory: &Path,
+        bitcoin_cube: String,
+        fork_cube: String,
+        source: &PoisonSelfTransfer,
+        construction: ClaimForkSweep,
+        production: ForkProduction,
+        policy: CheckPolicy,
+    ) -> Result<Self, Error> {
+        if production
+            .0
+            .daemon
+            .config()
+            .is_none_or(|c| c.main_descriptor != *source.descriptor())
+        {
+            return Err(Error::InvalidBinding);
+        }
+        let context = production.0.context.clone();
+        let generation = production.0.generation.clone();
+        Self::open(
+            directory,
+            bitcoin_cube,
+            fork_cube,
+            source,
+            construction,
+            context,
+            generation,
+            Box::new(production),
+            policy,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn open(
+        directory: &Path,
+        bitcoin_cube: String,
+        fork_cube: String,
+        source: &PoisonSelfTransfer,
+        construction: ClaimForkSweep,
+        context: Context,
+        generation: watch::Receiver<u64>,
+        services: Box<dyn ForkServices>,
+        policy: CheckPolicy,
+    ) -> Result<Self, Error> {
+        if !policy.valid()
+            || source.chain() != ChainId::Bitcoin
+            || construction.chain() != ChainId::BitcoinBlake2b
+            || !admits_descriptor(source.descriptor())
+        {
+            return Err(Error::Unsupported);
+        }
+        if construction.descriptor() != source.descriptor()
+            || construction.bitcoin_step1() != source.psbt().unsigned_tx.compute_txid()
+            || *generation.borrow() != context.generation
+            || generation.has_changed().is_err()
+        {
+            return Err(Error::InvalidBinding);
+        }
+        let identity = WalletIdentity {
+            bitcoin_cube,
+            fork_cube,
+            descriptor_digest: sha256::Hash::hash(source.descriptor().to_string().as_bytes()),
+        };
+        let mut controller = Controller::reopen(directory, &identity, context.clone())?;
+        controller.revalidate_construction(&context, source)?;
+        if controller.signed_txid() != Some(construction.bitcoin_step1()) {
+            return Err(Error::InvalidBinding);
+        }
+        if controller.recorded_fork_submission().is_some() {
+            return Err(Error::SubmissionAlreadyRecorded);
+        }
+        if controller
+            .recorded_fork_sweep()
+            .is_some_and(|tx| tx != &construction.psbt().unsigned_tx)
+        {
+            return Err(Error::InvalidBinding);
+        }
+        Ok(Self {
+            id: NEXT
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
+                .map_err(|_| Error::Revoked)?,
+            revision: 0,
+            context,
+            generation,
+            controller,
+            construction,
+            services,
+            policy,
+            revoker: Revoker::new(),
+        })
+    }
+    pub fn context(&self) -> &Context {
+        &self.context
+    }
+    pub fn revoker(&self) -> Revoker {
+        self.revoker.clone()
+    }
+    fn current(&mut self, context: &Context) -> Result<(), Error> {
+        if self.revoker.is_revoked()
+            || context != &self.context
+            || *self.generation.borrow() != context.generation
+            || self.generation.has_changed().is_err()
+        {
+            self.revoker.revoke();
+            self.controller.invalidate();
+            return Err(Error::Revoked);
+        }
+        Ok(())
+    }
+    async fn collect(&self) -> Result<claim_observation::CollectedAssessment, Error> {
+        claim_observation::collect(
+            self.services.source(),
+            &self.controller.plan(),
+            self.policy.observations,
+            self.policy.collection_budget,
+            CollectionContext {
+                expected_generation: self.context.generation,
+                generation: self.generation.clone(),
+            },
+        )
+        .await
+        .map_err(Error::Observation)
+    }
+    /// Re-checks six Bitcoin confirmations, RDTS validity and both tips. No
+    /// unsigned transaction is treated as having passed mempool preflight.
+    pub async fn check_signing(&mut self, context: &Context) -> Result<SigningCheck, Error> {
+        self.current(context)?;
+        self.revision = self.revision.checked_add(1).ok_or(Error::Revoked)?;
+        let ticket = self.controller.begin_check(context)?;
+        let first = self.collect().await?;
+        if first.assessment != Assessment::ObservationsEligibleForPreflight {
+            return Err(Error::NotReady(first.assessment));
+        }
+        let last = self.collect().await?;
+        self.current(context)?;
+        if !same_view(first.observations, last.observations) {
+            return Err(Error::ChangedReview);
+        }
+        let origin = Instant::now();
+        let now = self.services.source().now();
+        let mut remaining = self.policy.collection_budget.min(Duration::from_secs(30));
+        for stamp in [
+            last.observations.bitcoin.observed_at,
+            last.observations.fork.observed_at,
+            last.observations.deployment.observed_at,
+        ] {
+            let age = now
+                .checked_sub(stamp)
+                .filter(|age| *age >= 0 && stamp >= 0)
+                .ok_or(Error::ExpiredEvidence)?;
+            let seconds = self
+                .policy
+                .observations
+                .max_observation_age_seconds
+                .checked_sub(age)
+                .and_then(|s| s.checked_sub(1))
+                .filter(|s| *s > 0)
+                .ok_or(Error::ExpiredEvidence)?;
+            remaining = remaining.min(Duration::from_secs(seconds as u64));
+        }
+        let not_after = origin
+            .checked_add(remaining)
+            .ok_or(Error::ExpiredEvidence)?;
+        let status = self.controller.apply_observation(
+            ticket,
+            context,
+            Ok(last),
+            self.policy.observations,
+            now,
+        )?;
+        if status != Status::Observation(Assessment::ObservationsEligibleForPreflight) {
+            return Err(Error::NotReady(last.assessment));
+        }
+        self.controller.prepare_fork_sweep(
+            context,
+            &self.construction,
+            self.policy.observations,
+            now,
+        )?;
+        Ok(SigningCheck {
+            preparation: self.id,
+            revision: self.revision,
+            not_after,
+        })
+    }
+    /// Called immediately at dispatch, after explicit consent. Consumes even an
+    /// expired check; the UI must collect fresh evidence for another attempt.
+    pub fn signing_psbt(
+        &mut self,
+        check: SigningCheck,
+        current_psbt: &coincube_core::psbt_unified::UnifiedPsbt,
+        context: &Context,
+    ) -> Result<coincube_core::miniscript::bitcoin::psbt::Psbt, Error> {
+        self.current(context)?;
+        if check.preparation != self.id || check.revision != self.revision {
+            return Err(Error::InvalidReview);
+        }
+        self.revision = self.revision.checked_add(1).ok_or(Error::Revoked)?;
+        if Instant::now() >= check.not_after {
+            return Err(Error::ExpiredEvidence);
+        }
+        coincube_core::claim_finalize::validate_claim_fork_signing(
+            &self.construction,
+            current_psbt,
+        )
+        .map_err(|_| Error::InvalidBinding)?;
+        Ok(current_psbt.psbt().clone())
+    }
+    /// Verifies imported signing additions against the owned construction, then
+    /// transfers the journal lock into the submission coordinator. This does not
+    /// bypass that coordinator's fresh review, confirmation or fork preflight.
+    pub fn finish(
+        mut self,
+        signed: &coincube_core::psbt_unified::UnifiedPsbt,
+        context: &Context,
+    ) -> Result<Coordinator, Error> {
+        self.current(context)?;
+        if self.controller.recorded_fork_sweep() != Some(&self.construction.psbt().unsigned_tx) {
+            return Err(Error::InvalidReview);
+        }
+        let verified = coincube_core::claim_finalize::finalize_claim_fork_sweep(
+            &self.construction,
+            signed,
+            &coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::verification_only(),
+        )
+        .map_err(|_| Error::InvalidBinding)?;
+        Ok(Coordinator {
+            id: self.id,
+            revision: self.revision,
+            context: self.context,
+            generation: self.generation,
+            controller: self.controller,
+            construction: self.construction,
+            verified: Arc::new(verified),
+            services: self.services,
+            policy: self.policy,
+            revoker: self.revoker,
+        })
+    }
+}
