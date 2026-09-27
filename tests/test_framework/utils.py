@@ -334,12 +334,15 @@ class TailableProc(object):
 
     def stop(self, timeout=10):
         self.save_log()
+        if self.proc is None:
+            return None
         self.proc.terminate()
 
-        # Now give it some time to react to the signal
-        rc = self.proc.wait(timeout)
-
-        if rc is None:
+        # wait() raises on expiry; it never returns None. Always reap a
+        # process that ignores SIGTERM before joining its output reader.
+        try:
+            self.proc.wait(timeout)
+        except subprocess.TimeoutExpired:
             self.proc.kill()
             self.proc.wait()
 

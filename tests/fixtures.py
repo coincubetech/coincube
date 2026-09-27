@@ -436,8 +436,9 @@ def two_chain(request, test_base_dir):
         if os.getenv("BTCB2_HARNESS_REQUIRED") == "1":
             pytest.fail(msg)
         pytest.skip(msg)
-    directory = os.path.join(test_base_dir, "btcb2_two_chain")
-    os.makedirs(directory, exist_ok=True)
+    # A failed module retains its datadir. Never reuse it when fixtures are
+    # shared through conftest.py or another module starts a second harness.
+    directory = tempfile.mkdtemp(prefix="btcb2_two_chain-", dir=test_base_dir)
     harness = TwoChainRegtest(directory)
     try:
         harness.setup()
