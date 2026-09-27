@@ -18,7 +18,7 @@ use coincubed::{
 // Keep synchronous backend-lock waits and HTTP transport off the async executor.
 // Dropping this future does not stop a started blocking worker: the coordinator
 // must revoke its gate, and preserve uncertain intent after Started.
-async fn blocking_poison_submission(
+async fn blocking_claim_submission(
     txid: Txid,
     wtxid: coincube_core::miniscript::bitcoin::Wtxid,
     submit: impl FnOnce() -> Result<
@@ -400,8 +400,26 @@ impl Daemon for EmbeddedDaemon {
         };
         let txid = verified.transaction().compute_txid();
         let wtxid = verified.transaction().compute_wtxid();
-        blocking_poison_submission(txid, wtxid, move || {
+        blocking_claim_submission(txid, wtxid, move || {
             control.submit_verified_poison(&verified, &gate)
+        })
+        .await
+    }
+
+    async fn submit_verified_claim_fork(
+        &self,
+        verified: std::sync::Arc<coincube_core::claim_finalize::VerifiedClaimForkSweep>,
+        gate: std::sync::Arc<coincubed::poison_broadcast::SubmissionGate>,
+    ) -> Result<coincubed::poison_broadcast::SubmissionOutcome, DaemonError> {
+        let control = match self.handle.lock().await.as_ref() {
+            Some(DaemonHandle::Controller { control, .. }) => control.clone(),
+            Some(_) => return Err(DaemonError::ClientNotSupported),
+            None => return Err(DaemonError::DaemonStopped),
+        };
+        let txid = verified.transaction().compute_txid();
+        let wtxid = verified.transaction().compute_wtxid();
+        blocking_claim_submission(txid, wtxid, move || {
+            control.submit_verified_claim_fork(&verified, &gate)
         })
         .await
     }
@@ -671,7 +689,7 @@ mod poison_submission_scheduling_tests {
         let revoked = Arc::new(AtomicBool::new(false));
         let worker_revoked = revoked.clone();
         let (started, received) = tokio::sync::oneshot::channel();
-        let task = tokio::spawn(blocking_poison_submission(
+        let task = tokio::spawn(blocking_claim_submission(
             Txid::all_zeros(),
             Wtxid::all_zeros(),
             move || {
@@ -696,7 +714,7 @@ mod poison_submission_scheduling_tests {
     #[tokio::test]
     async fn blocking_worker_failure_is_uncertain_not_success() {
         assert!(matches!(
-            blocking_poison_submission(Txid::all_zeros(), Wtxid::all_zeros(), || panic!(
+            blocking_claim_submission(Txid::all_zeros(), Wtxid::all_zeros(), || panic!(
                 "synthetic worker failure"
             ))
             .await,

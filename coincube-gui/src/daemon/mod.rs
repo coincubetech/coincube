@@ -188,6 +188,17 @@ pub trait Daemon: Debug {
         Err(DaemonError::ClientNotSupported)
     }
 
+    /// Embedded-only fork transport. The coordinator must provide fresh split
+    /// evidence and durable intent; verified signatures alone grant no permission.
+    /// External backends cannot encode the opaque artifact over JSON-RPC.
+    async fn submit_verified_claim_fork(
+        &self,
+        _verified: std::sync::Arc<coincube_core::claim_finalize::VerifiedClaimForkSweep>,
+        _gate: std::sync::Arc<coincubed::poison_broadcast::SubmissionGate>,
+    ) -> Result<coincubed::poison_broadcast::SubmissionOutcome, DaemonError> {
+        Err(DaemonError::ClientNotSupported)
+    }
+
     async fn start_rescan(&self, t: u32) -> Result<(), DaemonError>;
     async fn list_confirmed_txs(
         &self,
