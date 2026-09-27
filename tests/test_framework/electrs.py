@@ -3,9 +3,10 @@ import json
 import logging
 import os
 import socket
+import time
 
 from ephemeral_port_reserve import reserve
-from test_framework.utils import BitcoinBackend, TailableProc, ELECTRS_PATH, TIMEOUT, wait_for
+from test_framework.utils import BitcoinBackend, TailableProc, ELECTRS_PATH, TIMEOUT
 
 
 class Electrs(BitcoinBackend):
@@ -67,12 +68,31 @@ class Electrs(BitcoinBackend):
             self.stop()
             raise
 
-    def tip_hash(self):
-        """Read the indexed tip via Electrum, independent of the wallet poller."""
-        with socket.create_connection(("127.0.0.1", self.rpcport), timeout=5) as sock:
+    def tip_hash(self, timeout=5):
+        """Read the indexed tip within one budget, independent of the wallet."""
+        deadline = time.monotonic() + timeout
+
+        def remaining():
+            seconds = deadline - time.monotonic()
+            if seconds <= 0:
+                raise socket.timeout("Electrs header request exceeded its budget")
+            return seconds
+
+        with socket.create_connection(("127.0.0.1", self.rpcport), timeout=remaining()) as sock:
+            sock.settimeout(remaining())
             sock.sendall(b'{"jsonrpc":"2.0","id":0,"method":"blockchain.headers.subscribe","params":[]}\n')
-            with sock.makefile("rb") as stream:
-                response = json.loads(stream.readline(4096))
+            data = bytearray()
+            while b"\n" not in data:
+                if len(data) >= 4096:
+                    raise ValueError("Electrs header response exceeds the size limit")
+                # Renew the remaining budget for each fragment, not the timeout:
+                # slow fragments cannot extend the overall request deadline.
+                sock.settimeout(remaining())
+                chunk = sock.recv(4096 - len(data))
+                if not chunk:
+                    raise ValueError("Electrs closed the header response before newline")
+                data.extend(chunk)
+            response = json.loads(data.split(b"\n", 1)[0])
         if response.get("id") != 0 or response.get("error") is not None:
             raise ValueError(f"Electrs tip request failed: {response}")
         header = bytes.fromhex(response["result"]["hex"])
@@ -80,10 +100,21 @@ class Electrs(BitcoinBackend):
             raise ValueError("Electrs returned an invalid Bitcoin header")
         return hashlib.sha256(hashlib.sha256(header).digest()).digest()[::-1].hex()
 
-    def wait_for_tip(self, expected_hash):
+    def wait_for_tip(self, expected_hash, timeout=TIMEOUT):
         # Exact hash, not just height: successive reorgs may have equal heights.
-        # No restart/retry-on-timeout: an unhealthy indexer must still fail CI.
-        wait_for(lambda: self.tip_hash() == expected_hash)
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"Electrs did not index tip {expected_hash} within {timeout}s")
+            try:
+                if self.tip_hash(timeout=min(5, remaining)) == expected_hash:
+                    return
+            except socket.timeout:
+                # Indexing batches can delay RPC. Retry only while the original
+                # barrier budget remains; malformed replies still fail directly.
+                pass
+            time.sleep(min(0.25, max(0, deadline - time.monotonic())))
 
     def stop(self):
         return TailableProc.stop(self)
