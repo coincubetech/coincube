@@ -53,6 +53,13 @@ pub struct DiscoveredAncestry {
     observed_at: i64,
 }
 impl DiscoveredAncestry {
+    /// Retain raw structural evidence only. Restoring it must use the intent's
+    /// selected outpoint and obtain new chain observations before any spend.
+    pub fn retained_path(
+        &self,
+    ) -> Result<claim_ancestry::retained::RetainedPath, claim_ancestry::Error> {
+        claim_ancestry::retained::RetainedPath::new(self.pair.selected(), self.links.clone())
+    }
     pub fn links(&self) -> &[OwnedLink] {
         &self.links
     }

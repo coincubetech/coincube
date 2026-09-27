@@ -1,6 +1,7 @@
 //! Structural ancestry checks only. This does not establish chain inclusion,
 //! coinbase uniqueness, ownership, maturity, or Bitcoin-only spendability.
 //! A verified dependency must never by itself authorize an input poison.
+pub mod retained;
 pub mod search;
 
 use std::collections::BTreeSet;
@@ -148,7 +149,7 @@ mod tests {
         absolute, consensus::serialize, transaction, Amount, ScriptBuf, TxIn, TxOut, Witness,
     };
 
-    fn tx(parent: OutPoint) -> Transaction {
+    pub(super) fn tx(parent: OutPoint) -> Transaction {
         Transaction {
             version: transaction::Version::TWO,
             lock_time: absolute::LockTime::ZERO,
@@ -162,7 +163,7 @@ mod tests {
             }],
         }
     }
-    fn out(tx: &Transaction) -> OutPoint {
+    pub(super) fn out(tx: &Transaction) -> OutPoint {
         OutPoint::new(tx.compute_txid(), 0)
     }
     fn result(selected: OutPoint, links: &[Link<'_>]) -> Error {

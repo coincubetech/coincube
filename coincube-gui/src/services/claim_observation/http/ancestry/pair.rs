@@ -414,6 +414,17 @@ mod tests {
                         assert_eq!(discovered.pair().selected(), selected);
                         assert_eq!(discovered.links().len(), 2);
                         assert_eq!(discovered.links()[0].parent_input, Some(1));
+                        let retained = discovered.retained_path().unwrap();
+                        let restored = claim_ancestry::retained::RetainedPath::decode(
+                            selected,
+                            &retained.encode(),
+                        )
+                        .unwrap();
+                        assert_eq!(
+                            restored.reverify().unwrap().root().txid,
+                            bitcoin.compute_txid()
+                        );
+                        assert_eq!(restored.links()[0].parent_input, Some(1));
                         assert_eq!(discovered.generation(), 4);
                         assert!(discovered.observed_at() <= source.now());
                         let links: Vec<_> = discovered
