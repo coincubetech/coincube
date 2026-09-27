@@ -119,6 +119,23 @@ pub struct RecipientIdentities {
     pub results: Vec<(usize, crate::services::branta::LookupResult)>,
 }
 
+/// Actual signer requests, rather than opening or dismissing the picker.
+/// The Claim panel uses this same boundary to collect fresh checks before
+/// forwarding a request. The picker consumes that check immediately below.
+pub(crate) fn claim_signing_dispatch(message: &Message) -> bool {
+    matches!(
+        message,
+        Message::View(view::Message::SelectHardwareWallet(_))
+            | Message::View(view::Message::Spend(
+                view::SpendTxMessage::SelectMasterSigner
+                    | view::SpendTxMessage::SelectKeychainSigner(_)
+                    | view::SpendTxMessage::RequestFromEveryone
+                    | view::SpendTxMessage::RetryKeychainSigner(_)
+                    | view::SpendTxMessage::BorderWalletRecon(BorderWalletReconMessage::Next)
+            ))
+    )
+}
+
 pub struct PsbtState {
     pub wallet: Arc<Wallet>,
     pub desc_policy: CoincubePolicy,
@@ -133,6 +150,10 @@ pub struct PsbtState {
     /// Recomputed from the verified witness after every
     /// signature merge ([`Self::refresh_replay`]).
     pub replay: Option<ReplayReview>,
+    /// Claim signing uses the ordinary picker, but all submission stays with
+    /// the Claim coordinator. Each signer dispatch consumes a fresh check.
+    claim_signing: bool,
+    claim_dispatch: Option<Arc<replay::SplitEvidence>>,
     /// The spend screen's own re-check of a replayable spend's inputs
     /// against the twin chain (`#276` I13, cache lifecycle): a sync-time
     /// *not entangled* has a shelf life, so it is asked again at the moment
@@ -203,6 +224,8 @@ impl PsbtState {
             tx,
             saved,
             replay,
+            claim_signing: false,
+            claim_dispatch: None,
             entangled_check: EntangledCheck::Idle,
             revalidated_for: None,
             bitcoin_finalization: std::sync::Mutex::new(None),
@@ -427,11 +450,36 @@ impl PsbtState {
     /// unified finalizer's verdict, the I13 requirement on known-entangled inputs,
     /// and the acknowledgement.
     pub fn broadcast_ready(&self, cache: &Cache) -> bool {
+        if self.claim_signing {
+            return false;
+        }
         replay::broadcast_ready(
             self.bitcoin_signatures_complete(),
             self.replay.as_ref(),
             &self.entangled_inputs(cache),
         ) && !self.entangled_check.in_flight()
+    }
+
+    /// Put the picker into Claim mode before showing it. Without a fresh
+    /// coordinator check every signing dispatch is refused, including retries.
+    pub fn require_claim_signing_checks(&mut self) -> bool {
+        if !self.wallet.chain.is_blake2b() {
+            return false;
+        }
+        self.claim_signing = true;
+        self.claim_dispatch = None;
+        true
+    }
+
+    pub(crate) fn consume_claim_signing_permit(&mut self) -> bool {
+        if !self.claim_signing {
+            return true;
+        }
+        let Some(proof) = self.claim_dispatch.take() else {
+            return false;
+        };
+        coincube_core::psbt_unified::UnifiedPsbt::from_psbt(self.tx.psbt.clone())
+            .is_ok_and(|psbt| proof.consume_for_signing(&psbt))
     }
 
     /// Attach only live Claim evidence for this exact owned fork construction.
@@ -448,6 +496,8 @@ impl PsbtState {
         if !evidence.matches(&unified) {
             return false;
         }
+        self.claim_signing = true;
+        self.claim_dispatch = Some(evidence.clone());
         self.replay = Some(ReplayReview::with_split(
             &self.tx.psbt,
             &secp256k1::Secp256k1::verification_only(),
@@ -590,6 +640,29 @@ impl PsbtState {
         cache: &Cache,
         message: Message,
     ) -> Task<Message> {
+        if self.claim_signing {
+            let forbidden = matches!(
+                &message,
+                Message::View(view::Message::Spend(
+                    view::SpendTxMessage::Broadcast
+                        | view::SpendTxMessage::Save
+                        | view::SpendTxMessage::Delete
+                        | view::SpendTxMessage::Confirm
+                ))
+            );
+            if forbidden
+                || (claim_signing_dispatch(&message) && !self.consume_claim_signing_permit())
+            {
+                return Task::done(Message::View(view::Message::ShowError(
+                    if forbidden {
+                        "Return to the Claim review to submit this transaction."
+                    } else {
+                        "Check both chains again before requesting this signature."
+                    }
+                    .into(),
+                )));
+            }
+        }
         if self
             .recipient_identities
             .as_ref()
@@ -4569,6 +4642,76 @@ mod tests {
             messages.iter().any(|m| {
                 matches!(m, Message::View(view::Message::ShowError(text)) if text.contains(needle))
             })
+        }
+
+        #[tokio::test]
+        async fn claim_picker_requires_a_fresh_permit_for_every_signer_and_never_submits() {
+            let f = fixture();
+            let wallet = wallet_with_hot_signer(&f);
+            let tx = SpendTx::new(
+                None,
+                f.psbt.clone(),
+                Vec::new(),
+                &f.descriptor,
+                &secp256k1::Secp256k1::new(),
+                Network::Bitcoin,
+            );
+            let mut state = PsbtState::new(wallet.clone(), tx, false);
+            assert!(state.consume_claim_signing_permit()); // ordinary picker is unaffected
+            assert!(state.require_claim_signing_checks());
+            let daemon: Arc<dyn Daemon + Sync + Send> = Arc::new(
+                crate::daemon::client::Coincubed::new(MockDaemon::new(vec![]).run()),
+            );
+            let fingerprint = wallet.signer.as_ref().unwrap().fingerprint();
+            let requests = vec![
+                Message::View(view::Message::SelectHardwareWallet(0)),
+                Message::View(view::Message::Spend(
+                    view::SpendTxMessage::SelectMasterSigner,
+                )),
+                Message::View(view::Message::Spend(
+                    view::SpendTxMessage::SelectKeychainSigner(fingerprint),
+                )),
+                Message::View(view::Message::Spend(
+                    view::SpendTxMessage::RequestFromEveryone,
+                )),
+                Message::View(view::Message::Spend(
+                    view::SpendTxMessage::RetryKeychainSigner(0),
+                )),
+                Message::View(view::Message::Spend(
+                    view::SpendTxMessage::BorderWalletRecon(BorderWalletReconMessage::Next),
+                )),
+            ];
+            for request in requests {
+                assert!(claim_signing_dispatch(&request));
+                let out = drive(state.update(daemon.clone(), &Cache::default(), request)).await;
+                assert!(shows_error(&out, "Check both chains again"));
+            }
+            for intent in [
+                view::SpendTxMessage::Broadcast,
+                view::SpendTxMessage::Confirm,
+                view::SpendTxMessage::Save,
+                view::SpendTxMessage::Delete,
+            ] {
+                let out = drive(state.update(
+                    daemon.clone(),
+                    &Cache::default(),
+                    Message::View(view::Message::Spend(intent)),
+                ))
+                .await;
+                assert!(shows_error(&out, "Claim review"));
+            }
+            for intent in [
+                view::SpendTxMessage::Sign,
+                view::SpendTxMessage::Cancel,
+                view::SpendTxMessage::CancelKeychainSign,
+                view::SpendTxMessage::AcknowledgeReplay(true),
+            ] {
+                assert!(!claim_signing_dispatch(&Message::View(
+                    view::Message::Spend(intent)
+                )));
+            }
+            assert!(!state.broadcast_ready(&Cache::default()));
+            assert!(state.modal.is_none());
         }
 
         /// Final Confirm is gated on the **current** cache (`#276` I13): a

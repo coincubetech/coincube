@@ -475,6 +475,14 @@ impl Harness {
 async fn fork_confirmation_records_exact_intent_before_single_submission() {
     let mut h = Harness::new(true).await;
     let review = h.coordinator.prepare_review(&context()).await.unwrap();
+    let evidence = h.coordinator.split_evidence(&review, &context()).unwrap();
+    let unsigned = coincube_core::psbt_unified::UnifiedPsbt::from_psbt(
+        h.coordinator.construction.psbt().clone(),
+    )
+    .unwrap();
+    assert!(evidence.matches(&unsigned));
+    assert!(!evidence.consume_for_signing(&unsigned)); // review evidence is display-only
+
     assert!(matches!(
         h.coordinator
             .confirm_and_submit(review, &context())
@@ -913,14 +921,27 @@ async fn psbt_state_and_pill_drop_split_readiness_on_synchronous_revocation() {
         Network::Bitcoin,
     );
     let mut state = PsbtState::new(wallet, tx, false);
+    assert!(state.require_claim_signing_checks());
+    assert!(!state.consume_claim_signing_permit());
+    assert!(state.set_claim_split_evidence(dispatch.split.clone()));
+    assert!(state.consume_claim_signing_permit());
+    assert!(!state.consume_claim_signing_permit());
     assert!(state.set_claim_split_evidence(dispatch.split));
+    assert!(!state.consume_claim_signing_permit()); // reattaching/cloning cannot renew it
+    let check = h.preparation.check_signing(&context()).await.unwrap();
+    let fresh = h
+        .preparation
+        .signing_dispatch(check, &signed, &context())
+        .unwrap();
+    assert!(state.set_claim_split_evidence(fresh.split));
     let cache = Cache::default();
-    assert!(state.broadcast_ready(&cache));
+    assert!(!state.broadcast_ready(&cache)); // only the Claim coordinator submits
     assert_eq!(
         state.replay_presentation(&cache).unwrap().review.status(),
         ReplayStatus::Split
     );
     h.preparation.revoker().revoke();
+    assert!(!state.consume_claim_signing_permit());
     assert!(!state.broadcast_ready(&cache));
     let pill = state.replay_presentation(&cache).unwrap();
     assert!(matches!(pill.review.status(), ReplayStatus::Unknown(_)));

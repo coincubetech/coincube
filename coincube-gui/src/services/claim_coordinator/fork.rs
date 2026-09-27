@@ -777,6 +777,7 @@ impl Preparation {
 /// Only fresh Claim checks in this module can construct it. No serialization or
 /// public arbitrary-data constructor; equality means check identity, not freshness.
 pub struct SplitEvidence {
+    signing_consumed: std::sync::atomic::AtomicBool,
     check: (u64, u64),
     construction: Arc<ClaimForkSweep>,
     generation: watch::Receiver<u64>,
@@ -797,6 +798,18 @@ impl PartialEq for SplitEvidence {
 }
 impl Eq for SplitEvidence {}
 impl SplitEvidence {
+    /// All Arc clones share one signer-dispatch allowance. Review evidence is
+    /// created already consumed: it is display evidence, not a signing check.
+    pub(crate) fn consume_for_signing(
+        &self,
+        psbt: &coincube_core::psbt_unified::UnifiedPsbt,
+    ) -> bool {
+        self.matches(psbt)
+            && self
+                .signing_consumed
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+    }
     pub(crate) fn is_live(&self) -> bool {
         self.owner.upgrade().is_some()
             && !self.revoker.is_revoked()
@@ -827,6 +840,7 @@ impl Preparation {
         let not_after = check.not_after;
         let psbt = self.signing_psbt(check, current_psbt, context)?;
         let split = Arc::new(SplitEvidence {
+            signing_consumed: std::sync::atomic::AtomicBool::new(false),
             owner: Arc::downgrade(&self.lifetime),
             check: identity,
             construction: self.construction.clone(),
@@ -854,6 +868,7 @@ impl Coordinator {
             return Err(Error::ExpiredEvidence);
         }
         Ok(Arc::new(SplitEvidence {
+            signing_consumed: std::sync::atomic::AtomicBool::new(true),
             owner: Arc::downgrade(&self.lifetime),
             check: (review.coordinator, review.revision),
             construction: self.construction.clone(),
