@@ -105,6 +105,36 @@ impl Controller {
             .map(StoredAncestry::decode)
             .transpose()
     }
+    /// Bind a new positive ancestry collection to the saved intent. This clears
+    /// prior checks and never makes the controller eligible by itself.
+    pub fn validate_ancestry_observation(
+        &mut self,
+        current: &Context,
+        observed: &crate::services::claim_observation::http::DiscoveredAncestry,
+        policy: Policy,
+        now: i64,
+        tips: coincube_core::claim::PreflightTips,
+    ) -> Result<(), Error> {
+        self.ensure_context(current)?;
+        self.clear_check();
+        if !self.construction_verified {
+            return Err(Error::Unchecked);
+        }
+        let path = self.recorded_ancestry()?.ok_or(Error::WrongIdentity)?;
+        observed
+            .validate_for_plan(
+                &path,
+                &self.intent.plan,
+                crate::services::claim_observation::http::AncestryContext {
+                    provider: &current.provider,
+                    generation: current.generation,
+                    policy,
+                    now,
+                    tips,
+                },
+            )
+            .map_err(|_| Error::Unchecked)
+    }
     pub fn revalidate_ancestry_construction(
         &mut self,
         current: &Context,

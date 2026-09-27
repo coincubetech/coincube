@@ -135,6 +135,12 @@ fn large_path_reopens_without_construction_or_submission_authority() {
         .unwrap();
     assert!(c.construction_verified);
     assert_eq!(c.status(), Status::Unchecked);
+    assert!(matches!(
+        c.revalidate_ancestry_construction(&context(), &wrong),
+        Err(Error::WrongIdentity)
+    ));
+    assert!(!c.construction_verified);
+    assert_eq!(c.status(), Status::Unchecked);
     assert_eq!(c.intent.phase, Phase::Intent);
     assert!(c.intent.signed_txid.is_none());
 }

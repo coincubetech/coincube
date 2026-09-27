@@ -157,6 +157,9 @@ impl HttpObservationSource {
 }
 
 #[cfg(test)]
+mod binding_tests;
+
+#[cfg(test)]
 mod tests {
     use super::super::super::tests::{ancestry_fixture, source};
     use super::*;
@@ -458,6 +461,7 @@ mod tests {
                                 .txid,
                             bitcoin.compute_txid()
                         );
+                        super::binding_tests::check(&renewed, &restored, &source, sender);
                     }
 
                     for height in [FIRST_FORK_HEIGHT - 1, HISTORICAL_LIMIT, u32::MAX] {
