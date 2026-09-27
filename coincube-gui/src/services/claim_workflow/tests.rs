@@ -464,3 +464,221 @@ fn journal_symlink_is_rejected_without_touching_target() {
     assert!(Controller::reopen(&temp.0, &identity(), context()).is_err());
     assert_eq!(fs::read(target).unwrap(), bytes);
 }
+
+use coincube_core::{
+    bip39::Mnemonic,
+    claim_finalize::{finalize_poison_transfer, VerifiedPoisonTransfer},
+    claim_spend::{create_claim_fork_sweep, create_poison_self_transfer, PoisonSelfTransfer},
+    descriptors::{CoincubeDescriptor, CoincubePolicy, PathInfo},
+    miniscript::{
+        bitcoin::{
+            bip32::{ChildNumber, DerivationPath},
+            secp256k1, Network,
+        },
+        DescriptorPublicKey,
+    },
+    signer::MasterSigner,
+    spend::{CandidateCoin, TxGetter},
+};
+use std::str::FromStr;
+fn real_artifact(
+    chain: ChainId,
+    multi: bool,
+    change: u32,
+) -> (PoisonSelfTransfer, VerifiedPoisonTransfer) {
+    let secp = secp256k1::Secp256k1::new();
+    let signers: Vec<_> = (40..44)
+        .map(|b| {
+            MasterSigner::from_mnemonic(Network::Bitcoin, Mnemonic::from_entropy(&[b; 16]).unwrap())
+                .unwrap()
+        })
+        .collect();
+    let keys: Vec<_> = signers
+        .iter()
+        .map(|s| {
+            DescriptorPublicKey::from_str(&format!(
+                "[{}]{}/<0;1>/*",
+                s.fingerprint(&secp),
+                s.xpub_at(&DerivationPath::default(), &secp)
+            ))
+            .unwrap()
+        })
+        .collect();
+    let primary = if multi {
+        PathInfo::Multi(2, keys[..3].to_vec())
+    } else {
+        PathInfo::Single(keys[0].clone())
+    };
+    let desc = CoincubeDescriptor::new(
+        CoincubePolicy::new_legacy(
+            primary,
+            std::iter::once((
+                46,
+                PathInfo::Single(keys[if multi { 3 } else { 2 }].clone()),
+            ))
+            .collect(),
+        )
+        .unwrap(),
+    );
+    let verify = secp256k1::Secp256k1::verification_only();
+    let previous = Transaction {
+        version: transaction::Version::TWO,
+        lock_time: absolute::LockTime::ZERO,
+        input: vec![TxIn::default()],
+        output: vec![TxOut {
+            value: Amount::from_sat(100000),
+            script_pubkey: desc
+                .receive_descriptor()
+                .derive(0.into(), &verify)
+                .script_pubkey(),
+        }],
+    };
+    struct Getter(Transaction);
+    impl TxGetter for Getter {
+        fn get_tx(&mut self, id: &Txid) -> Option<Transaction> {
+            (self.0.compute_txid() == *id).then(|| self.0.clone())
+        }
+    }
+    let coin = CandidateCoin {
+        outpoint: OutPoint::new(previous.compute_txid(), 0),
+        amount: previous.output[0].value,
+        deriv_index: 0.into(),
+        is_change: false,
+        must_select: true,
+        sequence: None,
+        ancestor_info: None,
+    };
+    let built = create_poison_self_transfer(
+        chain,
+        &desc,
+        &verify,
+        &mut Getter(previous),
+        &[coin],
+        ChildNumber::from_normal_idx(change).unwrap(),
+        5,
+        absolute::LockTime::ZERO,
+        hash(42),
+    )
+    .unwrap();
+    let signed = signers[0].sign_psbt(built.psbt().clone(), &secp).unwrap();
+    let signed = if multi {
+        signers[1].sign_psbt(signed, &secp).unwrap()
+    } else {
+        signed
+    };
+    let final_tx = finalize_poison_transfer(&built, &signed, &verify).unwrap();
+    (built, final_tx)
+}
+fn real_observation(c: &Controller, depth: u64) -> CollectedAssessment {
+    let mut result = observation(depth > 0);
+    let id = c.plan().step1.compute_txid();
+    result.observations.fork.step1_txid = id;
+    if let TransactionLocation::Confirmed { txid, .. } = &mut result.observations.bitcoin.location {
+        *txid = id;
+    }
+    result.observations.bitcoin.tip.height = 99 + depth.max(1);
+    result.observations.preflight.bitcoin = result.observations.bitcoin.tip;
+    result
+}
+
+#[test]
+fn fork_plan_requires_fresh_depth_and_survives_restart_without_authority() {
+    let temp = Temp::new();
+    let (source, verified) = real_artifact(ChainId::Bitcoin, true, 10);
+    let mut c = Controller::create(
+        &temp.0,
+        "btc-fixture".into(),
+        "fork-fixture".into(),
+        &source,
+        context(),
+    )
+    .unwrap();
+    let wallet = c.identity().clone();
+    let initial = real_observation(&c, 0);
+    refresh(&mut c, initial, 10000);
+    c.record_broadcast_intent(&context(), verified.transaction(), policy(), 10000)
+        .unwrap();
+    struct Getter(Transaction);
+    impl TxGetter for Getter {
+        fn get_tx(&mut self, id: &Txid) -> Option<Transaction> {
+            (self.0.compute_txid() == *id).then(|| self.0.clone())
+        }
+    }
+    let previous = source.psbt().inputs[0].non_witness_utxo.clone().unwrap();
+    let coin = CandidateCoin {
+        outpoint: source.psbt().unsigned_tx.input[0].previous_output,
+        amount: previous.output[0].value,
+        deriv_index: 0.into(),
+        is_change: false,
+        must_select: false,
+        sequence: None,
+        ancestor_info: None,
+    };
+    let build = |fee| {
+        create_claim_fork_sweep(
+            &source,
+            ChainId::BitcoinBlake2b,
+            &secp256k1::Secp256k1::verification_only(),
+            &mut Getter(previous.clone()),
+            &[coin],
+            20.into(),
+            fee,
+            absolute::LockTime::ZERO,
+        )
+        .unwrap()
+    };
+    let sweep = build(3);
+    assert!(matches!(
+        c.prepare_fork_sweep(&context(), &sweep, policy(), 10000),
+        Err(Error::Unchecked)
+    ));
+    for depth in [1, 5] {
+        let obs = real_observation(&c, depth);
+        refresh(&mut c, obs, 10000);
+        assert!(matches!(
+            c.prepare_fork_sweep(&context(), &sweep, policy(), 10000),
+            Err(Error::Unchecked)
+        ));
+        assert!(c.recorded_fork_sweep().is_none());
+    }
+    let obs = real_observation(&c, 6);
+    refresh(&mut c, obs, 10000);
+    assert!(matches!(
+        c.prepare_fork_sweep(&context(), &sweep, policy(), 10061),
+        Err(Error::Unchecked)
+    ));
+    let obs = real_observation(&c, 6);
+    refresh(&mut c, obs, 10000);
+    c.prepare_fork_sweep(&context(), &sweep, policy(), 10000)
+        .unwrap();
+    assert_eq!(c.recorded_fork_sweep(), Some(&sweep.psbt().unsigned_tx));
+    assert!(c.fresh.is_none());
+    let obs = real_observation(&c, 6);
+    refresh(&mut c, obs, 10000);
+    assert!(matches!(
+        c.prepare_fork_sweep(&context(), &build(4), policy(), 10000),
+        Err(Error::Conflict)
+    ));
+    drop(c);
+    let mut c = Controller::reopen(&temp.0, &wallet, context()).unwrap();
+    assert_eq!(c.recorded_fork_sweep(), Some(&sweep.psbt().unsigned_tx));
+    assert_eq!(c.status(), Status::Unchecked);
+    let obs = real_observation(&c, 6);
+    refresh(&mut c, obs, 10000);
+    assert!(matches!(
+        c.prepare_fork_sweep(&context(), &sweep, policy(), 10000),
+        Err(Error::Unchecked)
+    ));
+    c.revalidate_construction(&context(), &source).unwrap();
+    let obs = real_observation(&c, 6);
+    refresh(&mut c, obs, 10000);
+    c.prepare_fork_sweep(&context(), &sweep, policy(), 10000)
+        .unwrap();
+    let obs = real_observation(&c, 0);
+    refresh(&mut c, obs, 10000);
+    assert!(matches!(
+        c.prepare_fork_sweep(&context(), &sweep, policy(), 10000),
+        Err(Error::Unchecked)
+    ));
+    assert_eq!(c.recorded_fork_sweep(), Some(&sweep.psbt().unsigned_tx));
+}

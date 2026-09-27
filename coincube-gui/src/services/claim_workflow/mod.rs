@@ -67,6 +67,8 @@ struct Intent {
     context_digest: sha256::Hash,
     signed_txid: Option<Txid>,
     phase: Phase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fork_sweep: Option<Transaction>,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
@@ -117,8 +119,10 @@ fn context_digest(context: &Context) -> sha256::Hash {
 }
 fn validate(intent: &Intent) -> Result<(), Error> {
     let p = &intent.plan;
-    if intent.version != 1
-        || intent.identity.bitcoin_cube.is_empty()
+    if !matches!(
+        (intent.version, intent.fork_sweep.is_some()),
+        (1, false) | (2, true)
+    ) || intent.identity.bitcoin_cube.is_empty()
         || intent.identity.fork_cube.is_empty()
         || intent.identity.bitcoin_cube.len() > 256
         || intent.identity.fork_cube.len() > 256
@@ -162,6 +166,25 @@ fn validate(intent: &Intent) -> Result<(), Error> {
         || (intent.phase == Phase::Intent) != intent.signed_txid.is_none()
     {
         return Err(Error::InvalidPlan);
+    }
+    if let Some(sweep) = &intent.fork_sweep {
+        let inputs: std::collections::BTreeSet<_> =
+            sweep.input.iter().map(|i| i.previous_output).collect();
+        let claimed: std::collections::BTreeSet<_> = p.claimed_prevouts.iter().copied().collect();
+        if intent.phase != Phase::Tracking
+            || intent.signed_txid.is_none()
+            || inputs.len() != sweep.input.len()
+            || inputs != claimed
+            || sweep
+                .input
+                .iter()
+                .any(|i| !i.script_sig.is_empty() || !i.witness.is_empty())
+            || sweep.output.len() != 1
+            || !sweep.output[0].script_pubkey.is_p2wsh()
+            || sweep.output[0].value == coincube_core::miniscript::bitcoin::Amount::ZERO
+        {
+            return Err(Error::InvalidPlan);
+        }
     }
     Ok(())
 }
@@ -240,6 +263,7 @@ impl Controller {
             plan,
             signed_txid: None,
             phase: Phase::Intent,
+            fork_sweep: None,
         };
         validate(&intent)?;
         Self::valid_context(&context)?;
@@ -403,6 +427,63 @@ impl Controller {
         }
         Ok(self.status)
     }
+    /// Persist the exact fork-side unsigned plan only after a fresh depth/tip
+    /// assessment of the Bitcoin poison. This is a restart record, not signing
+    /// or broadcast permission. Replacing an existing plan is refused.
+    pub fn prepare_fork_sweep(
+        &mut self,
+        current: &Context,
+        sweep: &coincube_core::claim_spend::ClaimForkSweep,
+        policy: Policy,
+        now: i64,
+    ) -> Result<(), Error> {
+        self.ensure_context(current)?;
+        let observations = self.fresh.take().ok_or(Error::Unchecked)?;
+        self.status = Status::Unchecked;
+        if !self.construction_verified || self.intent.phase != Phase::Tracking {
+            return Err(Error::Unchecked);
+        }
+        if sweep.chain() != self.intent.plan.fork_chain
+            || Some(sweep.bitcoin_step1()) != self.intent.signed_txid
+            || sha256::Hash::hash(sweep.descriptor().to_string().as_bytes())
+                != self.intent.identity.descriptor_digest
+        {
+            return Err(Error::WrongIdentity);
+        }
+        let assessment = claim::assess(
+            &self.intent.plan,
+            observations.bitcoin,
+            observations.fork,
+            observations.deployment,
+            policy,
+            now,
+            Some(observations.preflight),
+        );
+        if assessment != Assessment::ObservationsEligibleForPreflight {
+            return Err(Error::Unchecked);
+        }
+        let transaction = &sweep.psbt().unsigned_tx;
+        if let Some(recorded) = &self.intent.fork_sweep {
+            return if recorded == transaction {
+                Ok(())
+            } else {
+                Err(Error::Conflict)
+            };
+        }
+        let mut next = self.intent.clone();
+        next.version = 2;
+        next.fork_sweep = Some(transaction.clone());
+        validate(&next)?;
+        self.journal.store(&next)?;
+        self.intent = next;
+        Ok(())
+    }
+    /// An untrusted restart record. The ordinary fork builder and current chain
+    /// checks must reconstruct/revalidate it before use; this returns no authority.
+    pub fn recorded_fork_sweep(&self) -> Option<&Transaction> {
+        self.intent.fork_sweep.as_ref()
+    }
+
     /// Durably record a possible external broadcast *before* it is attempted.
     /// This checks unsigned identity only, NOT witness validity or mempool policy.
     /// It returns no broadcast or step-two authorization and performs no network I/O.
