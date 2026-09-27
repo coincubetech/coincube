@@ -292,7 +292,36 @@ class TwoChainRegtest:
         self.poison_raw_hex = signed["hex"]
         self.poison_outpoint = (poison_txid, 0, Decimal(str(cb_out["value"])) - fee)
 
+    @staticmethod
+    def _preflight_block_data(node, label):
+        """Read every block the indexer will need, not only the current tip.
+
+        This diagnoses an unreadable copied/history block before a fetcher
+        panics. It is not a flush/durability guarantee and does not retry or
+        restart a node that cannot serve its data (#394).
+        """
+        tip = node.rpc.getblockcount()
+        expected_tip = node.rpc.getblockhash(tip)
+        for height in range(tip + 1):
+            block_hash = "unresolved"
+            try:
+                block_hash = node.rpc.getblockhash(height)
+                raw = node.rpc.getblock(block_hash, 0)
+                if not isinstance(raw, str) or len(bytes.fromhex(raw)) < 80:
+                    raise ValueError("missing or malformed raw block data")
+            except Exception as error:
+                raise RuntimeError(
+                    f"{label} block-data preflight failed at height {height}, "
+                    f"hash {block_hash}, tip {tip}: {error}"
+                ) from error
+        if node.rpc.getbestblockhash() != expected_tip:
+            raise RuntimeError(f"{label} chain changed during block-data preflight")
+        logging.info("%s preflight read every block through height %s", label, tip)
+
     def _start_indexers(self):
+        for node, label in ((self.legacy, "knots-legacy"),
+                            (self.blake2b, "knots-blake2b")):
+            self._preflight_block_data(node, label)
         self.electrs_legacy = EsploraElectrs(
             electrs_dir=self.electrs_legacy_dir,
             bitcoind_dir=self.legacy_dir,
