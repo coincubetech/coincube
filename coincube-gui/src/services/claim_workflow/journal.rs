@@ -1,7 +1,12 @@
+#[cfg(not(windows))]
+use std::fs::OpenOptions;
+#[cfg(windows)]
+mod windows;
+
 use super::{Error, Intent};
 use fs4::fs_std::FileExt;
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
@@ -14,6 +19,8 @@ static NEXT: AtomicU64 = AtomicU64::new(0);
 pub(super) struct Journal {
     directory: PathBuf,
     _lock: File,
+    #[cfg(windows)]
+    _directory: windows::Directory,
     snapshot: Option<Vec<u8>>,
     poisoned: bool,
 }
@@ -39,7 +46,11 @@ fn private_file(path: &Path, create: bool) -> Result<File, Error> {
         }
         Ok(file)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        windows::file(path, create).map_err(Error::Io)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (path, create);
         Err(Error::UnsupportedPlatform)
@@ -65,7 +76,13 @@ pub(super) fn prepare_directory(directory: &Path) -> Result<(), Error> {
         }
         validate_directory(directory)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        windows::Directory::open(directory, true)
+            .map(|_| ())
+            .map_err(Error::Io)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = directory;
         Err(Error::UnsupportedPlatform)
@@ -89,10 +106,15 @@ impl Journal {
     pub(super) fn open(directory: &Path) -> Result<Self, Error> {
         #[cfg(unix)]
         validate_directory(directory)?;
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         {
             return Err(Error::UnsupportedPlatform);
         }
+        #[cfg(windows)]
+        let pinned_directory = windows::Directory::open(directory, false)?;
+        #[cfg(windows)]
+        let directory = pinned_directory.path.clone();
+        #[cfg(not(windows))]
         let directory = fs::canonicalize(directory)?;
         let lock = private_file(&directory.join("claim.lock"), true)?;
         if !lock.try_lock_exclusive()? {
@@ -101,6 +123,8 @@ impl Journal {
         let mut journal = Self {
             directory,
             _lock: lock,
+            #[cfg(windows)]
+            _directory: pinned_directory,
             snapshot: None,
             poisoned: false,
         };
@@ -158,19 +182,30 @@ impl Journal {
         ));
         let mut created = false;
         let result = (|| -> Result<(), Error> {
-            let mut options = OpenOptions::new();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-            }
-            let mut file = options.open(&path)?;
+            #[cfg(not(windows))]
+            let mut file = {
+                let mut options = OpenOptions::new();
+                options.write(true).create_new(true);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+                }
+                options.open(&path)?
+            };
+            #[cfg(windows)]
+            let mut file = windows::temporary(&path)?;
             created = true;
             file.write_all(&bytes)?;
             file.sync_all()?;
-            fs::rename(&path, self.directory.join("intent.json"))?;
-            File::open(&self.directory)?.sync_all()?;
+            drop(file);
+            #[cfg(windows)]
+            windows::replace(&path, &self.directory.join("intent.json"))?;
+            #[cfg(not(windows))]
+            {
+                fs::rename(&path, self.directory.join("intent.json"))?;
+                File::open(&self.directory)?.sync_all()?;
+            }
             Ok(())
         })();
         if result.is_err() {

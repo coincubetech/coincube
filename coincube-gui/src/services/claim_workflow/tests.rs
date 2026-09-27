@@ -19,12 +19,7 @@ impl Temp {
             std::process::id(),
             controller_id().unwrap()
         ));
-        fs::create_dir(&p).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&p, fs::Permissions::from_mode(0o700)).unwrap();
-        }
+        prepare_directory(&p).unwrap();
         Self(p)
     }
 }
@@ -315,6 +310,7 @@ fn lock_conflicts_identity_mismatch_and_private_permissions_fail_closed() {
         ));
     }
 }
+#[cfg(unix)]
 #[test]
 fn failed_atomic_write_poisoned_owner_cannot_reuse_old_observations() {
     let temp = Temp::new();
@@ -482,6 +478,7 @@ fn corrupted_unsigned_bytes_are_not_restored_as_valid_intent() {
         Err(Error::InvalidPlan)
     ));
 }
+#[cfg(unix)]
 #[test]
 fn journal_symlink_is_rejected_without_touching_target() {
     use std::os::unix::fs::symlink;
@@ -811,6 +808,7 @@ fn fork_plan_requires_fresh_depth_and_survives_restart_without_authority() {
     ));
 }
 
+#[cfg(unix)]
 #[test]
 fn preparing_existing_journal_directory_never_follows_symlinks_or_repairs_permissions() {
     use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
@@ -834,4 +832,18 @@ fn preparing_existing_journal_directory_never_follows_symlinks_or_repairs_permis
     prepare_directory(&private).unwrap();
     assert_eq!(fs::metadata(&private).unwrap().mode() & 0o777, 0o700);
     prepare_directory(&private).unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_journal_pins_directory_and_rejects_hard_links() {
+    let temp = Temp::new();
+    let c = controller(&temp);
+    assert!(fs::rename(&temp.0, temp.0.with_extension("moved")).is_err());
+    drop(c);
+    let alias = temp.0.join("alias.json");
+    fs::hard_link(temp.0.join("intent.json"), &alias).unwrap();
+    assert!(Controller::reopen(&temp.0, &identity(), context()).is_err());
+    fs::remove_file(alias).unwrap();
+    assert!(Controller::reopen(&temp.0, &identity(), context()).is_ok());
 }

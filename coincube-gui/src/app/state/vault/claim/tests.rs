@@ -1186,7 +1186,7 @@ mod flow {
         )
     }
 
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     #[tokio::test]
     async fn unsupported_journal_platform_refuses_before_review_or_submission() {
         let (mut f, ready) = reach_signed().await;
@@ -1222,7 +1222,7 @@ mod flow {
         let _ = std::fs::remove_dir_all(&f.root);
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn two_of_three_signs_through_psbt_state_then_finalizes_and_journals() {
         let (mut f, ready) = reach_signed_with_multisig(true).await;
@@ -1899,7 +1899,7 @@ mod flow {
         seen
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn step_one_runs_from_preconditions_to_tracking_through_the_panel() {
         // `sender` stays alive: closing the generation channel is itself a
