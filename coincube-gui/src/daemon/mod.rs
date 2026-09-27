@@ -188,6 +188,16 @@ pub trait Daemon: Debug {
         Err(DaemonError::ClientNotSupported)
     }
 
+    /// Embedded-only ancestry transport. Fresh qualification, user approval and
+    /// durable intent remain mandatory at the coordinator; no RPC serialization.
+    async fn submit_verified_ancestry(
+        &self,
+        _verified: std::sync::Arc<coincube_core::claim_finalize::VerifiedAncestryTransfer>,
+        _gate: std::sync::Arc<coincubed::poison_broadcast::SubmissionGate>,
+    ) -> Result<coincubed::poison_broadcast::SubmissionOutcome, DaemonError> {
+        Err(DaemonError::ClientNotSupported)
+    }
+
     /// Embedded-only fork transport. The coordinator must provide fresh split
     /// evidence and durable intent; verified signatures alone grant no permission.
     /// External backends cannot encode the opaque artifact over JSON-RPC.

@@ -4,7 +4,7 @@ pub mod regtest_harness;
 use crate::DaemonControl;
 use coincube_core::{
     chain::ChainId,
-    claim_finalize::{VerifiedClaimForkSweep, VerifiedPoisonTransfer},
+    claim_finalize::{VerifiedAncestryTransfer, VerifiedClaimForkSweep, VerifiedPoisonTransfer},
     descriptors::CoincubeDescriptor,
 };
 use miniscript::bitcoin::{Transaction, Txid, Wtxid};
@@ -99,6 +99,14 @@ impl SubmissionGate {
     ) -> (Self, SubmissionRevoker) {
         Self::for_transaction(verified.chain(), verified.transaction(), not_after)
     }
+    /// Ancestry transport only. Fresh chain qualification and durable consent
+    /// remain the coordinator's responsibility; signatures are not authorization.
+    pub fn for_ancestry(
+        verified: &VerifiedAncestryTransfer,
+        not_after: std::time::Instant,
+    ) -> (Self, SubmissionRevoker) {
+        Self::for_transaction(verified.chain(), verified.transaction(), not_after)
+    }
     /// Fork transport gate only. Fresh split evidence, approval and durable
     /// submission intent remain the coordinator's responsibility.
     pub fn for_claim_fork(
@@ -175,6 +183,27 @@ impl DaemonControl {
     pub fn submit_verified_poison(
         &self,
         verified: &VerifiedPoisonTransfer,
+        gate: &SubmissionGate,
+    ) -> Result<SubmissionOutcome, SubmissionError> {
+        if self.config.bitcoin_config.chain != ChainId::Bitcoin
+            || verified.chain() != ChainId::Bitcoin
+        {
+            return Err(SubmissionError::UnsupportedChain);
+        }
+        self.submit_exact_claim_transaction(
+            verified.chain(),
+            verified.descriptor(),
+            verified.transaction(),
+            gate,
+        )
+    }
+
+    /// Exact-byte ancestry transport, with no RPC exposure or automatic retry.
+    /// The caller must first qualify ancestry against fresh chain observations,
+    /// preflight this witness, obtain consent and persist uncertain intent.
+    pub fn submit_verified_ancestry(
+        &self,
+        verified: &VerifiedAncestryTransfer,
         gate: &SubmissionGate,
     ) -> Result<SubmissionOutcome, SubmissionError> {
         if self.config.bitcoin_config.chain != ChainId::Bitcoin

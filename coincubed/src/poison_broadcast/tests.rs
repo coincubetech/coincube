@@ -40,7 +40,14 @@ impl TxGetter for Getter {
         self.0.get(id).cloned()
     }
 }
-fn fixture(chain: ChainId, recovery: bool) -> (PoisonSelfTransfer, Vec<MasterSigner>) {
+fn fixture_inputs(
+    recovery: bool,
+) -> (
+    CoincubeDescriptor,
+    Getter,
+    Vec<CandidateCoin>,
+    Vec<MasterSigner>,
+) {
     let secp = secp256k1::Secp256k1::new();
     let signers: Vec<_> = (10..14).map(signer).collect();
     let keys: Vec<_> = signers
@@ -89,6 +96,11 @@ fn fixture(chain: ChainId, recovery: bool) -> (PoisonSelfTransfer, Vec<MasterSig
         });
         getter.0.insert(previous.compute_txid(), previous);
     }
+    (descriptor, getter, coins, signers)
+}
+fn fixture(chain: ChainId, recovery: bool) -> (PoisonSelfTransfer, Vec<MasterSigner>) {
+    let (descriptor, mut getter, coins, signers) = fixture_inputs(recovery);
+    let verify = secp256k1::Secp256k1::verification_only();
     let built = create_poison_self_transfer(
         chain,
         &descriptor,
@@ -858,5 +870,137 @@ mod regtest_transport_tests {
             built.descriptor().clone()
         )
         .is_err());
+    }
+}
+
+#[test]
+fn ancestry_transport_binds_exact_witness_and_preserves_one_use_refusals() {
+    use coincube_core::{
+        claim_ancestry::{verify, Link},
+        claim_finalize::finalize_ancestry_transfer,
+        claim_spend::create_ancestry_self_transfer,
+    };
+    for recovery in [false, true] {
+        let (descriptor, mut getter, coins, signers) = fixture_inputs(recovery);
+        let raw = bitcoin::consensus::serialize(&getter.0[&coins[0].outpoint.txid]);
+        let dependency = verify(
+            coins[0].outpoint,
+            &[Link {
+                transaction: &raw,
+                parent_input: None,
+            }],
+        )
+        .unwrap();
+        let secp = secp256k1::Secp256k1::new();
+        let built = create_ancestry_self_transfer(
+            ChainId::Bitcoin,
+            &descriptor,
+            &secp256k1::Secp256k1::verification_only(),
+            &mut getter,
+            &coins,
+            ChildNumber::from_normal_idx(12).unwrap(),
+            5,
+            absolute::LockTime::ZERO,
+            &dependency,
+        )
+        .unwrap();
+        let selected = if recovery {
+            &signers[3..]
+        } else {
+            &signers[..2]
+        };
+        let signed = selected.iter().fold(built.psbt().clone(), |psbt, signer| {
+            signer.sign_psbt(psbt, &secp).unwrap()
+        });
+        let verified = finalize_ancestry_transfer(&built, &signed, &secp).unwrap();
+        let deadline = || std::time::Instant::now() + Duration::from_secs(60);
+        let backend = Arc::new(Mutex::new(DummyBitcoind::new()));
+        let daemon = control(ChainId::Bitcoin, descriptor.clone(), backend.clone());
+        let (gate, revoker) = SubmissionGate::for_ancestry(&verified, deadline());
+        revoker.revoke();
+        assert_eq!(
+            daemon.submit_verified_ancestry(&verified, &gate),
+            Err(SubmissionError::Revoked)
+        );
+        let (expired, _) = SubmissionGate::for_ancestry(&verified, std::time::Instant::now());
+        assert_eq!(
+            daemon.submit_verified_ancestry(&verified, &expired),
+            Err(SubmissionError::Expired)
+        );
+        let (gate, _) = SubmissionGate::for_ancestry(&verified, deadline());
+        for chain in [ChainId::BitcoinBlake2b, ChainId::Testnet4] {
+            assert_eq!(
+                control(chain, descriptor.clone(), backend.clone())
+                    .submit_verified_ancestry(&verified, &gate),
+                Err(SubmissionError::UnsupportedChain)
+            );
+        }
+        let other = CoincubeDescriptor::from_str(
+            &descriptor
+                .to_string()
+                .split('#')
+                .next()
+                .unwrap()
+                .replace("older(46)", "older(47)"),
+        )
+        .unwrap();
+        assert_eq!(
+            control(ChainId::Bitcoin, other, backend.clone())
+                .submit_verified_ancestry(&verified, &gate),
+            Err(SubmissionError::DescriptorMismatch)
+        );
+        if !recovery {
+            let alternate_signed = signers[1..3]
+                .iter()
+                .fold(built.psbt().clone(), |psbt, signer| {
+                    signer.sign_psbt(psbt, &secp).unwrap()
+                });
+            let alternate = finalize_ancestry_transfer(&built, &alternate_signed, &secp).unwrap();
+            assert_eq!(
+                alternate.transaction().compute_txid(),
+                verified.transaction().compute_txid()
+            );
+            assert_ne!(
+                alternate.transaction().compute_wtxid(),
+                verified.transaction().compute_wtxid()
+            );
+            assert_eq!(
+                daemon.submit_verified_ancestry(&alternate, &gate),
+                Err(SubmissionError::GateMismatch)
+            );
+        }
+        assert_eq!(gate.state(), SubmissionState::Pending);
+        assert!(backend
+            .lock()
+            .unwrap()
+            .broadcasted
+            .lock()
+            .unwrap()
+            .is_empty());
+        let txid = verified.transaction().compute_txid();
+        let wtxid = verified.transaction().compute_wtxid();
+        assert_eq!(
+            daemon.submit_verified_ancestry(&verified, &gate),
+            Ok(SubmissionOutcome::UpstreamAccepted { txid, wtxid })
+        );
+        assert_eq!(
+            daemon.submit_verified_ancestry(&verified, &gate),
+            Err(SubmissionError::AlreadyStarted)
+        );
+        assert_eq!(
+            *backend.lock().unwrap().broadcasted.lock().unwrap(),
+            vec![verified.transaction().clone()]
+        );
+        backend.lock().unwrap().broadcast_error = Some("connection lost".into());
+        let (gate, _) = SubmissionGate::for_ancestry(&verified, deadline());
+        assert_eq!(
+            daemon.submit_verified_ancestry(&verified, &gate),
+            Err(SubmissionError::Uncertain { txid, wtxid })
+        );
+        assert_eq!(
+            daemon.submit_verified_ancestry(&verified, &gate),
+            Err(SubmissionError::AlreadyStarted)
+        );
+        assert_eq!(backend.lock().unwrap().broadcasted.lock().unwrap().len(), 2);
     }
 }

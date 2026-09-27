@@ -406,6 +406,24 @@ impl Daemon for EmbeddedDaemon {
         .await
     }
 
+    async fn submit_verified_ancestry(
+        &self,
+        verified: std::sync::Arc<coincube_core::claim_finalize::VerifiedAncestryTransfer>,
+        gate: std::sync::Arc<coincubed::poison_broadcast::SubmissionGate>,
+    ) -> Result<coincubed::poison_broadcast::SubmissionOutcome, DaemonError> {
+        let control = match self.handle.lock().await.as_ref() {
+            Some(DaemonHandle::Controller { control, .. }) => control.clone(),
+            Some(_) => return Err(DaemonError::ClientNotSupported),
+            None => return Err(DaemonError::DaemonStopped),
+        };
+        let txid = verified.transaction().compute_txid();
+        let wtxid = verified.transaction().compute_wtxid();
+        blocking_claim_submission(txid, wtxid, move || {
+            control.submit_verified_ancestry(&verified, &gate)
+        })
+        .await
+    }
+
     async fn submit_verified_claim_fork(
         &self,
         verified: std::sync::Arc<coincube_core::claim_finalize::VerifiedClaimForkSweep>,
