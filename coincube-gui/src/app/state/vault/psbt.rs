@@ -983,6 +983,7 @@ impl PsbtState {
             },
             cache.bitcoin_unit,
             self.replay_presentation(cache),
+            self.broadcast_ready(cache),
         );
         if let Some(modal) = &self.modal {
             modal.as_ref().view(content)
@@ -3417,8 +3418,46 @@ mod tests {
             let _ = replay::REPLAYABLE_ACKNOWLEDGEMENT;
         }
 
-        #[test]
-        fn tampered_bitcoin_signatures_never_enable_broadcast_or_close_the_picker() {
+        #[tokio::test]
+        async fn tampered_bitcoin_signatures_never_enable_broadcast_or_close_the_picker() {
+            use iced::advanced::{
+                layout,
+                renderer::Headless,
+                widget::{Id, Operation, Tree},
+                Layout,
+            };
+            #[derive(Default)]
+            struct Labels(Vec<String>);
+            impl Operation for Labels {
+                fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+                    operate(self);
+                }
+                fn text(&mut self, _: Option<&Id>, _: iced::Rectangle, text: &str) {
+                    self.0.push(text.to_owned());
+                }
+            }
+            let renderer =
+                iced::Renderer::new(iced::Font::DEFAULT, iced::Pixels(16.0), Some("tiny-skia"))
+                    .await
+                    .expect("software renderer available for view regression");
+            let labels = |state: &PsbtState| {
+                let cache = Cache::default();
+                let mut element = state.view(&cache);
+                let mut tree = Tree::new(element.as_widget());
+                let node = element.as_widget_mut().layout(
+                    &mut tree,
+                    &renderer,
+                    &layout::Limits::new(iced::Size::ZERO, iced::Size::new(1200.0, 1600.0)),
+                );
+                let mut labels = Labels::default();
+                element.as_widget_mut().operate(
+                    &mut tree,
+                    Layout::new(&node),
+                    &renderer,
+                    &mut labels,
+                );
+                labels.0
+            };
             use crate::app::state::vault::test_support::unified::taproot_fixture;
             for f in [fixture(), taproot_fixture()] {
                 let signed = legacy(&legacy(&f.psbt, &f.signers[0]), &f.signers[1]);
@@ -3433,6 +3472,9 @@ mod tests {
                     Network::Bitcoin,
                 );
                 let mut state = PsbtState::new(wallet, tx, true);
+                // This signing fixture has no wallet coin registry. Exercise the
+                // pending-spend controls independently of coin availability.
+                state.tx.status = crate::daemon::model::SpendStatus::Pending;
                 assert!(state.broadcast_ready(&Cache::default()));
                 // Keep every claimed signer present, but invalidate their digests.
                 state.tx.psbt.unsigned_tx.output[0].value =
@@ -3446,6 +3488,14 @@ mod tests {
                     "cached validity must be invalidated"
                 );
                 assert!(state.not_ready_reason(&Cache::default()).is_some());
+                let rendered = labels(&state);
+                assert!(
+                    rendered.iter().any(|s| s == "Sign"),
+                    "labels: {:?}; status: {:?}",
+                    rendered,
+                    state.tx.status
+                );
+                assert!(!rendered.iter().any(|s| s == "Ready" || s == "Broadcast"));
                 state.modal = Some(PsbtModal::Sign(SignModal::new(
                     HashSet::new(),
                     state.wallet.clone(),
@@ -3465,6 +3515,10 @@ mod tests {
                     "valid signatures complete the picker"
                 );
                 assert!(state.broadcast_ready(&Cache::default()));
+                let rendered = labels(&state);
+                assert!(rendered.iter().any(|s| s == "Ready"));
+                assert!(rendered.iter().any(|s| s == "Broadcast"));
+                assert!(!rendered.iter().any(|s| s == "Sign"));
             }
         }
 
