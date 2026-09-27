@@ -1,4 +1,5 @@
-//! Dormant owned step-one coordination. No signing keys, UI or step-two permission.
+//! Owned Claim coordination. Signing keys and explicit user consent stay with callers.
+pub mod fork;
 use super::{
     claim_observation::{
         self, http::HttpObservationSource, CollectionContext, ObservationBundle, ObservationSource,
@@ -123,7 +124,7 @@ trait Services: Send + Sync {
     ) -> Result<SubmissionOutcome, DaemonError>;
 }
 
-/// Immutable admitted session plus the exact anonymous Bitcoin Connect endpoint.
+/// Immutable admitted session plus the exact Connect endpoint.
 /// Account id comes from the caller's admitted session, never unverified JWT parsing.
 pub struct Production {
     source: HttpObservationSource,
@@ -145,6 +146,28 @@ impl Production {
         expected_generation: u64,
         generation: watch::Receiver<u64>,
     ) -> Result<Self, Error> {
+        Self::for_chain(
+            client,
+            daemon,
+            account,
+            expected_generation,
+            generation,
+            ChainId::Bitcoin,
+        )
+    }
+    fn for_chain(
+        client: CoincubeClient,
+        daemon: Arc<dyn Daemon + Send + Sync>,
+        account: String,
+        expected_generation: u64,
+        generation: watch::Receiver<u64>,
+        chain: ChainId,
+    ) -> Result<Self, Error> {
+        let route = match chain {
+            ChainId::Bitcoin => "bitcoin/mainnet",
+            ChainId::BitcoinBlake2b => "bitcoin-blake2b/mainnet",
+            _ => return Err(Error::Unsupported),
+        };
         // Refused here, before any journal write, and not left to fail at the
         // submit call. `confirm_and_submit` records the broadcast intent
         // *before* it submits, so a backend that answers `config()` but cannot
@@ -170,10 +193,11 @@ impl Production {
             return Err(Error::InvalidBinding);
         }
         let endpoint = format!(
-            "{}/api/v1/esplora/bitcoin/mainnet",
-            origin.as_str().trim_end_matches('/')
+            "{}/api/v1/esplora/{}",
+            origin.as_str().trim_end_matches('/'),
+            route
         );
-        if config.bitcoin_config.chain != ChainId::Bitcoin
+        if config.bitcoin_config.chain != chain
             || config.bitcoin_config.network != coincube_core::miniscript::bitcoin::Network::Bitcoin
             || selection.addr.trim_end_matches('/') != endpoint
             || selection.token.is_some()
@@ -191,7 +215,13 @@ impl Production {
         let context = Context {
             generation: expected_generation,
             account,
-            provider: format!("bitcoin|{}", endpoint),
+            // The persisted Claim identity binds the pair through its Bitcoin
+            // endpoint. Fork transport independently admits the fixed sibling
+            // endpoint at this same origin; changing origins cannot reopen it.
+            provider: format!(
+                "bitcoin|{}/api/v1/esplora/bitcoin/mainnet",
+                origin.as_str().trim_end_matches('/')
+            ),
         };
         let cc = || CollectionContext {
             expected_generation,

@@ -539,6 +539,8 @@ impl Controller {
         }
         if signed.chain() != self.intent.plan.fork_chain
             || Some(signed.bitcoin_step1()) != self.intent.signed_txid
+            || sha256::Hash::hash(signed.descriptor().to_string().as_bytes())
+                != self.intent.identity.descriptor_digest
         {
             return Err(Error::WrongIdentity);
         }
