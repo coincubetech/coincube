@@ -518,13 +518,61 @@ pub fn reconstruct_claim_fork_sweep(
     change_index: ChildNumber,
     recorded: &bitcoin::Transaction,
 ) -> Result<ClaimForkSweep, Error> {
+    reconstruct_fork_sweep(
+        source,
+        None,
+        fork_chain,
+        secp,
+        tx_getter,
+        coins,
+        change_index,
+        recorded,
+    )
+}
+
+/// Rebuild only the recorded shared-input sweep, retaining the ancestry
+/// construction's bound exclusion. This restores no live eligibility.
+#[allow(clippy::too_many_arguments)]
+pub fn reconstruct_ancestry_fork_sweep(
+    source: &AncestrySelfTransfer,
+    fork_chain: ChainId,
+    secp: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
+    tx_getter: &mut impl TxGetter,
+    coins: &[CandidateCoin],
+    change_index: ChildNumber,
+    recorded: &bitcoin::Transaction,
+) -> Result<ClaimForkSweep, Error> {
+    reconstruct_fork_sweep(
+        &source.transfer,
+        Some(source.poison_input),
+        fork_chain,
+        secp,
+        tx_getter,
+        coins,
+        change_index,
+        recorded,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reconstruct_fork_sweep(
+    source: &PoisonSelfTransfer,
+    excluded_input: Option<bitcoin::OutPoint>,
+    fork_chain: ChainId,
+    secp: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
+    tx_getter: &mut impl TxGetter,
+    coins: &[CandidateCoin],
+    change_index: ChildNumber,
+    recorded: &bitcoin::Transaction,
+) -> Result<ClaimForkSweep, Error> {
     if recorded.output.len() != 1 {
         return Err(Error::InvalidRequest(
             "Recorded fork sweep must have one output",
         ));
     }
-    let mut rebuilt = create_claim_fork_sweep(
+    let mut rebuilt = create_fork_sweep(
         source,
+        excluded_input,
         fork_chain,
         secp,
         tx_getter,
@@ -540,6 +588,49 @@ pub fn reconstruct_claim_fork_sweep(
         ));
     }
     spend::reverify_spend_before_broadcast(source.descriptor(), &rebuilt.psbt)?;
+    Ok(rebuilt)
+}
+
+/// Rebuild an exact recorded ancestry self-transfer using newly authenticated
+/// owned inputs and a reverified dependency. Only the recorded output amount
+/// is retained; all scripts, inputs and PSBT metadata are reconstructed and
+/// actual economics checked. The caller must bind the selected dependency,
+/// change index and recorded transaction to its intent and freshly qualify the
+/// path. Reconstruction neither reserves an address nor authorizes submission.
+#[allow(clippy::too_many_arguments)]
+pub fn reconstruct_ancestry_self_transfer(
+    chain: ChainId,
+    descriptor: &CoincubeDescriptor,
+    secp: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
+    tx_getter: &mut impl TxGetter,
+    coins: &[CandidateCoin],
+    change_index: ChildNumber,
+    dependency: &crate::claim_ancestry::CoinbaseDependency,
+    recorded: &bitcoin::Transaction,
+) -> Result<AncestrySelfTransfer, Error> {
+    if recorded.output.len() != 1 {
+        return Err(Error::InvalidRequest(
+            "Recorded ancestry transfer must have one output",
+        ));
+    }
+    let mut rebuilt = create_ancestry_self_transfer(
+        chain,
+        descriptor,
+        secp,
+        tx_getter,
+        coins,
+        change_index,
+        1,
+        recorded.lock_time,
+        dependency,
+    )?;
+    rebuilt.transfer.psbt.unsigned_tx.output[0].value = recorded.output[0].value;
+    if rebuilt.psbt().unsigned_tx != *recorded {
+        return Err(Error::InvalidRequest(
+            "Recorded transaction differs from the owned ancestry construction",
+        ));
+    }
+    spend::reverify_spend_before_broadcast(descriptor, rebuilt.psbt())?;
     Ok(rebuilt)
 }
 
@@ -863,6 +954,136 @@ mod tests {
                 Err(Error::Spend(SpendCreationError::InputAuthentication(..)))
             ));
         }
+    }
+
+    #[test]
+    fn ancestry_restart_rebuilds_metadata_and_refuses_replacement_or_bad_economics() {
+        let (desc, coins, mut getter) = fixture();
+        let raw = bitcoin::consensus::serialize(getter.0.get(&coins[0].outpoint.txid).unwrap());
+        let dependency = crate::claim_ancestry::verify(
+            coins[0].outpoint,
+            &[crate::claim_ancestry::Link {
+                transaction: &raw,
+                parent_input: None,
+            }],
+        )
+        .unwrap();
+        let secp = secp256k1::Secp256k1::verification_only();
+        let index = ChildNumber::from_normal_idx(10).unwrap();
+        let built = create_ancestry_self_transfer(
+            ChainId::Bitcoin,
+            &desc,
+            &secp,
+            &mut getter,
+            &coins,
+            index,
+            5,
+            LockTime::ZERO,
+            &dependency,
+        )
+        .unwrap();
+        let original = built.psbt().unsigned_tx.clone();
+        let restored = reconstruct_ancestry_self_transfer(
+            ChainId::Bitcoin,
+            &desc,
+            &secp,
+            &mut getter,
+            &coins,
+            index,
+            &dependency,
+            &original,
+        )
+        .unwrap();
+        assert_eq!(restored.psbt(), built.psbt());
+        assert_eq!(restored.claimed_prevouts(), built.claimed_prevouts());
+        let fork = create_ancestry_fork_sweep(
+            &restored,
+            ChainId::BitcoinBlake2b,
+            &secp,
+            &mut getter,
+            &coins[1..],
+            index,
+            5,
+            LockTime::ZERO,
+        )
+        .unwrap();
+        let fork_tx = fork.psbt().unsigned_tx.clone();
+        let fork_restored = reconstruct_ancestry_fork_sweep(
+            &restored,
+            ChainId::BitcoinBlake2b,
+            &secp,
+            &mut getter,
+            &coins[1..],
+            index,
+            &fork_tx,
+        )
+        .unwrap();
+        assert_eq!(fork_restored.psbt(), fork.psbt());
+        for fork_side in [false, true] {
+            let recorded = if fork_side { &fork_tx } else { &original };
+            for case in 0..7 {
+                let mut bad = recorded.clone();
+                match case {
+                    0 => bad.output.clear(),
+                    1 => bad.output[0].script_pubkey = bitcoin::ScriptBuf::new(),
+                    2 => bad.version = bitcoin::transaction::Version::ONE,
+                    3 => bad.input[0].sequence = bitcoin::Sequence::MAX,
+                    4 => bad.output[0].value = Amount::ZERO,
+                    5 => bad.output[0].value = Amount::from_sat(300_000),
+                    _ => bad.input[0].previous_output = OutPoint::null(),
+                }
+                if fork_side {
+                    assert!(reconstruct_ancestry_fork_sweep(
+                        &restored,
+                        ChainId::BitcoinBlake2b,
+                        &secp,
+                        &mut getter,
+                        &coins[1..],
+                        index,
+                        &bad
+                    )
+                    .is_err());
+                } else {
+                    assert!(reconstruct_ancestry_self_transfer(
+                        ChainId::Bitcoin,
+                        &desc,
+                        &secp,
+                        &mut getter,
+                        &coins,
+                        index,
+                        &dependency,
+                        &bad
+                    )
+                    .is_err());
+                }
+            }
+        }
+        getter.0.clear();
+        assert!(matches!(
+            reconstruct_ancestry_self_transfer(
+                ChainId::Bitcoin,
+                &desc,
+                &secp,
+                &mut getter,
+                &coins,
+                index,
+                &dependency,
+                &original
+            ),
+            Err(Error::Spend(SpendCreationError::InputAuthentication(..)))
+        ));
+        assert!(matches!(
+            reconstruct_ancestry_fork_sweep(
+                &restored,
+                ChainId::BitcoinBlake2b,
+                &secp,
+                &mut getter,
+                &coins[1..],
+                index,
+                &fork_tx
+            ),
+            Err(Error::Spend(SpendCreationError::InputAuthentication(..)))
+        ));
     }
 
     #[test]
