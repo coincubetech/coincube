@@ -1443,7 +1443,7 @@ mod tests {
         thread, time,
     };
 
-    // Read all bytes from the socket until the end of a JSON object, good enough approximation.
+    // Validate one complete JSON object without waiting for the peer to close the socket.
     fn read_til_json_end(stream: &mut net::TcpStream) {
         stream
             .set_read_timeout(Some(time::Duration::from_secs(5)))
@@ -1451,14 +1451,81 @@ mod tests {
         let mut reader = BufReader::new(stream);
         loop {
             let mut line = String::new();
-            reader.read_line(&mut line).unwrap();
+            assert_ne!(
+                reader.read_line(&mut line).unwrap(),
+                0,
+                "connection closed before the JSON body"
+            );
 
-            if line.starts_with("Authorization") {
-                let mut buf = vec![0; 256];
-                reader.read_until(b'}', &mut buf).unwrap();
+            if line == "\r\n" || line == "\n" {
+                let body = serde_json::Deserializer::from_reader(&mut reader)
+                    .into_iter::<serde_json::Value>()
+                    .next();
+                assert!(
+                    matches!(body, Some(Ok(value)) if value.is_object()),
+                    "connection closed before the JSON body ended"
+                );
                 return;
             }
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "connection closed before the JSON body")]
+    fn json_fixture_rejects_eof_before_headers() {
+        let listener = net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        drop(client);
+        read_til_json_end(&mut server);
+    }
+
+    #[test]
+    #[should_panic(expected = "connection closed before the JSON body ended")]
+    fn json_fixture_rejects_truncated_body() {
+        let listener = net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        client
+            .write_all(b"Authorization: synthetic\r\n\r\n{\"id\":1")
+            .unwrap();
+        drop(client);
+        read_til_json_end(&mut server);
+    }
+
+    #[test]
+    #[should_panic(expected = "connection closed before the JSON body ended")]
+    fn json_fixture_rejects_truncated_outer_object() {
+        let listener = net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        client
+            .write_all(b"Authorization: synthetic\r\n\r\n{\"params\":{\"nested\":true}")
+            .unwrap();
+        drop(client);
+        read_til_json_end(&mut server);
+    }
+
+    #[test]
+    fn json_fixture_completes_nested_object_without_socket_eof() {
+        let listener = net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        let worker = thread::spawn(move || {
+            read_til_json_end(&mut server);
+            server.write_all(b"accepted").unwrap();
+        });
+        client
+            .write_all(b"POST / HTTP/1.1\r\nAuthorization: synthetic\r\nContent-Type: application/json\r\n\r\n{\"params\":{\"nested\":\"}\"},\"id\":1}")
+            .unwrap();
+        // Keep the write side open: the fixture must respond before EOF.
+        client
+            .set_read_timeout(Some(time::Duration::from_secs(2)))
+            .unwrap();
+        let mut response = [0; 8];
+        std::io::Read::read_exact(&mut client, &mut response).unwrap();
+        assert_eq!(&response, b"accepted");
+        worker.join().unwrap();
     }
 
     // Respond to the two "echo" sent at startup to sanity check the connection

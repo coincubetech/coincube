@@ -1353,8 +1353,8 @@ async fn an_install_interrupted_between_the_wallet_and_the_cube_stays_retryable(
     );
 
     // Finish where the user would: the Cube reloaded from disk, and the seed
-    // opened under *that* persisted identity rather than the one the installer
-    // held in memory.
+    // opened using the reloaded Cube's identity. The lookup below also
+    // verifies that the installer persisted the expected id.
     let persisted =
         crate::app::settings::Settings::from_file(&root.network_directory(ChainId::BitcoinBlake2b))
             .unwrap()
@@ -1641,7 +1641,7 @@ async fn completing_a_claim_revokes_the_source_cubes_session() {
 /// `Settings::from_file` treats `NotFound` as possibly-transient and sleeps
 /// between five attempts — right for a file that is supposed to exist, wrong
 /// for a question whose ordinary answer is "nothing here yet". The retry floor
-/// is 20+40+60+80 ms = 300 ms by construction, so a run under 100 ms can only
+/// is 20+40+60+80+100 ms = 300 ms by construction, so a run under 100 ms can only
 /// mean the retry was not entered.
 #[test]
 fn an_absent_fork_settings_file_answers_immediately_rather_than_retrying() {
