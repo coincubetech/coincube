@@ -265,6 +265,8 @@ def test_direct_node_backend_outage_preserves_chain_and_recovers(two_chain):
                 "Transient error when sending request to bitcoind",
                 start=outage_log_start,
             ), "the daemon did not observe the node outage"
+            assert daemon.rpc.getinfo()["block_height"] == before
+            assert _confirmed_outpoints(daemon) == coins_before
         finally:
             if b.proc.poll() is not None:
                 b.start()
