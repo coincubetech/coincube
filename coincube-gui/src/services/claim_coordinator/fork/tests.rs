@@ -197,7 +197,11 @@ impl ObservationSource for Fixture {
             anchor: Some(NetworkAnchor {
                 tip_hash: hash(2),
                 tip_height: 100,
-                tip_median_time_past: 8000 + i64::from(fault == 2),
+                tip_median_time_past: if matches!(fault, 15..=17) {
+                    20001
+                } else {
+                    8000 + i64::from(fault == 2)
+                },
                 observed_at: self.stamp,
                 observation: NetworkObservation {
                     tip_height: 100,
@@ -209,7 +213,7 @@ impl ObservationSource for Fixture {
                         flagday: RdtsFlagday {
                             height: 90,
                             expiry_time: 20000,
-                            active: !matches!(fault, 1 | 14),
+                            active: !matches!(fault, 1 | 14..=17),
                         },
                     },
                 },
@@ -231,7 +235,7 @@ impl ObservationSource for Fixture {
         txid: Txid,
     ) -> Result<FreshRead<TransactionObservation>, FailureKind> {
         let fault = self.fault.load(Ordering::SeqCst);
-        if chain.is_blake2b() && txid != self.source_txid && matches!(fault, 11..=14) {
+        if chain.is_blake2b() && txid != self.source_txid && matches!(fault, 11..=17) {
             return self.read(
                 chain,
                 if fault == 11 {
@@ -249,7 +253,7 @@ impl ObservationSource for Fixture {
         }
         self.read(
             chain,
-            if chain == ChainId::Bitcoin && self.fault.load(Ordering::SeqCst) != 10 {
+            if chain == ChainId::Bitcoin && !matches!(self.fault.load(Ordering::SeqCst), 10 | 16) {
                 TransactionObservation::Confirmed {
                     txid,
                     block: BlockRef {
@@ -271,7 +275,16 @@ impl ObservationSource for Fixture {
         chain: ChainId,
         _height: u64,
     ) -> Result<FreshRead<BlockHash>, FailureKind> {
-        self.read(chain, hash(if chain.is_blake2b() { 2 } else { 1 }))
+        self.read(
+            chain,
+            hash(if chain.is_blake2b() {
+                2
+            } else if self.fault.load(Ordering::SeqCst) == 17 {
+                9
+            } else {
+                1
+            }),
+        )
     }
 }
 
@@ -504,7 +517,7 @@ async fn fork_confirmation_records_exact_intent_before_single_submission() {
 }
 #[tokio::test]
 async fn fork_confirm_rechecks_depth_deployment_provider_and_generation() {
-    for fault in [1, 2, 3, 6] {
+    for fault in [1, 2, 3, 6, 15] {
         let mut h = Harness::new(true).await;
         let review = h.coordinator.prepare_review(&context()).await.unwrap();
         h.fault.store(fault, Ordering::SeqCst);
@@ -1356,4 +1369,104 @@ async fn fork_panel_hot_signature_review_and_one_explicit_submission() {
         then.status(200).header("cache-control","no-store").json_body(json!({"success":true,"data":{"network":"bitcoin-blake2b","state":"available","result":{"txid":tx.compute_txid(),"wtxid":tx.compute_wtxid(),"tip_hash":hash(2),"observed_at":stamp,"allowed":true,"reject_reason":null}}}));
     }).await;
     fork_panel::tests::review_and_submit_once(panel, review_task, daemon, &cache, h.calls).await;
+}
+
+#[tokio::test]
+async fn confirmed_completion_survives_rdts_expiry_but_requires_both_chain_inclusions() {
+    let (mut h, root) = completed_pair().await;
+    h.fault.store(15, Ordering::SeqCst);
+    let proof = h
+        .coordinator
+        .check_completion(&context())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(proof.is_live());
+    proof.persist(&root).await.unwrap();
+    // A saved completion is not authority to create another spend or submit.
+    assert!(h.coordinator.prepare_review(&context()).await.is_err());
+    assert_eq!(h.calls.load(Ordering::SeqCst), 1);
+    for fault in [16, 17, 14, 11, 0] {
+        h.fault.store(fault, Ordering::SeqCst);
+        assert!(h
+            .coordinator
+            .check_completion(&context())
+            .await
+            .unwrap()
+            .is_none());
+    }
+    h.fault.store(3, Ordering::SeqCst);
+    assert!(h.coordinator.check_completion(&context()).await.is_err());
+    assert_eq!(h.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn historical_completion_requires_positive_exact_bitcoin_inclusion() {
+    use coincube_core::claim::{BitcoinObservation, TransactionLocation};
+    let h = Harness::new(true).await;
+    let mut plan = h.coordinator.controller.plan();
+    let block = BlockRef {
+        height: 100,
+        hash: hash(1),
+    };
+    let observed = BitcoinObservation {
+        chain: plan.bitcoin_chain,
+        tip: BlockRef {
+            height: 105,
+            hash: hash(2),
+        },
+        location: TransactionLocation::Confirmed {
+            txid: plan.step1.compute_txid(),
+            block,
+            best_chain_hash_at_height: block.hash,
+        },
+        observed_at: 10000,
+    };
+    assert!(completion_bitcoin_confirmed(&plan, observed));
+    for location in [
+        TransactionLocation::Unknown,
+        TransactionLocation::Unconfirmed,
+        TransactionLocation::Confirmed {
+            txid: Txid::all_zeros(),
+            block,
+            best_chain_hash_at_height: block.hash,
+        },
+        TransactionLocation::Confirmed {
+            txid: plan.step1.compute_txid(),
+            block,
+            best_chain_hash_at_height: hash(9),
+        },
+    ] {
+        assert!(!completion_bitcoin_confirmed(
+            &plan,
+            BitcoinObservation {
+                location,
+                ..observed
+            }
+        ));
+    }
+    assert!(!completion_bitcoin_confirmed(
+        &plan,
+        BitcoinObservation {
+            chain: ChainId::BitcoinBlake2b,
+            ..observed
+        }
+    ));
+    for height in [99, 100, 104] {
+        assert!(!completion_bitcoin_confirmed(
+            &plan,
+            BitcoinObservation {
+                tip: BlockRef {
+                    height,
+                    hash: hash(2)
+                },
+                ..observed
+            }
+        ));
+    }
+    plan.previous_confirmation = Some(BlockRef {
+        height: 100,
+        hash: hash(3),
+    });
+    assert!(!completion_bitcoin_confirmed(&plan, observed));
 }

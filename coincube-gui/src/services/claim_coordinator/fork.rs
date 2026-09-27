@@ -390,8 +390,17 @@ impl Coordinator {
         context: &Context,
     ) -> Result<Option<CompletionEvidence>, Error> {
         let origin = Instant::now();
-        let (status, checked) = self.checked_sweep(context).await?;
-        if status != Status::Observation(Assessment::ObservationsEligibleForPreflight) {
+        let (_, checked) = self.checked_sweep(context).await?;
+        // Confirmed conflicting spends separate the chains even after RDTS
+        // expires. This is historical metadata, never signing authority.
+        let plan = self.controller.plan();
+        let observations = checked.assessment().observations;
+        if !completion_bitcoin_confirmed(&plan, observations.bitcoin)
+            || observations.fork.chain != plan.fork_chain
+            || observations.fork.step1_txid != plan.step1.compute_txid()
+            || observations.fork.step1_presence
+                != coincube_core::claim::ForkTransactionPresence::NotObserved
+        {
             return Ok(None);
         }
         let claim_observation::TransactionObservation::Confirmed { txid, block } =
@@ -1025,6 +1034,35 @@ fn matching_completion_cube<'a>(
         ));
     }
     Ok(cube)
+}
+
+// Positive inclusion evidence is required: absence of a known loss also covers
+// unknown observations and must never be enough to record completion.
+fn completion_bitcoin_confirmed(
+    plan: &coincube_core::claim::ClaimPlan,
+    bitcoin: coincube_core::claim::BitcoinObservation,
+) -> bool {
+    use coincube_core::claim::{TransactionLocation, MIN_CONFIRMATIONS};
+    let TransactionLocation::Confirmed {
+        txid,
+        block,
+        best_chain_hash_at_height,
+    } = bitcoin.location
+    else {
+        return false;
+    };
+    bitcoin.chain == plan.bitcoin_chain
+        && txid == plan.step1.compute_txid()
+        && block.hash == best_chain_hash_at_height
+        && plan
+            .previous_confirmation
+            .is_none_or(|previous| previous == block)
+        && bitcoin
+            .tip
+            .height
+            .checked_sub(block.height)
+            .and_then(|depth| depth.checked_add(1))
+            .is_some_and(|depth| depth >= MIN_CONFIRMATIONS)
 }
 
 // Completion reconciliation must inspect inclusion independently of deployment:
