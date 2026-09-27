@@ -810,3 +810,28 @@ fn fork_plan_requires_fresh_depth_and_survives_restart_without_authority() {
         Err(Error::Conflict)
     ));
 }
+
+#[test]
+fn preparing_existing_journal_directory_never_follows_symlinks_or_repairs_permissions() {
+    use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
+    let parent = Temp::new();
+    let target = parent.0.join("target");
+    fs::create_dir(&target).unwrap();
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
+    let link = parent.0.join("claim-link");
+    symlink(&target, &link).unwrap();
+    assert!(matches!(
+        prepare_directory(&link),
+        Err(Error::InvalidJournal)
+    ));
+    assert_eq!(fs::metadata(&target).unwrap().mode() & 0o777, 0o755);
+    assert!(matches!(
+        prepare_directory(&target),
+        Err(Error::InvalidJournal)
+    ));
+    assert_eq!(fs::metadata(&target).unwrap().mode() & 0o777, 0o755);
+    let private = parent.0.join("new-wallet").join("claim");
+    prepare_directory(&private).unwrap();
+    assert_eq!(fs::metadata(&private).unwrap().mode() & 0o777, 0o700);
+    prepare_directory(&private).unwrap();
+}

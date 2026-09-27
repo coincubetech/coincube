@@ -45,19 +45,50 @@ fn private_file(path: &Path, create: bool) -> Result<File, Error> {
         Err(Error::UnsupportedPlatform)
     }
 }
+/// Create the private journal directory without following a final-component
+/// symlink or changing permissions on an existing object. Platform backends
+/// must establish privacy at creation, before any intent can be written.
+pub(super) fn prepare_directory(directory: &Path) -> Result<(), Error> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        // A freshly installed wallet may not have materialized all parents yet.
+        // New components are private; existing components are never chmodded.
+        match fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(directory)
+        {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+        validate_directory(directory)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = directory;
+        Err(Error::UnsupportedPlatform)
+    }
+}
+
+#[cfg(unix)]
+fn validate_directory(directory: &Path) -> Result<(), Error> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = fs::symlink_metadata(directory)?;
+    if !metadata.is_dir()
+        || metadata.mode() & 0o077 != 0
+        || metadata.uid() != unsafe { libc::geteuid() }
+    {
+        return Err(Error::InvalidJournal);
+    }
+    Ok(())
+}
+
 impl Journal {
     pub(super) fn open(directory: &Path) -> Result<Self, Error> {
         #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            let metadata = fs::symlink_metadata(directory)?;
-            if !metadata.is_dir()
-                || metadata.mode() & 0o077 != 0
-                || metadata.uid() != unsafe { libc::geteuid() }
-            {
-                return Err(Error::InvalidJournal);
-            }
-        }
+        validate_directory(directory)?;
         #[cfg(not(unix))]
         {
             return Err(Error::UnsupportedPlatform);
