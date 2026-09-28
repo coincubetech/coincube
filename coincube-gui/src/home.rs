@@ -2698,6 +2698,7 @@ impl Home {
                     self.active_section =
                         HomeSection::Connect(app::menu::ConnectSubMenu::PlanBilling);
                 }
+                let explicit_logout = matches!(&msg, ConnectAccountMessage::LogOut);
                 let was_authenticated = self.connect_account.is_authenticated();
                 let task = map_connect_task(self.connect_account.update_message(msg));
                 let now_authenticated = self.connect_account.is_authenticated();
@@ -2705,43 +2706,48 @@ impl Home {
                 // Update cached keyring state on login/logout transitions
                 if was_authenticated != now_authenticated {
                     self.has_stored_session = now_authenticated;
-                    if !now_authenticated {
-                        self.server_cube_limit = None;
-                        // Refusal reasons are account-scoped: they say what
-                        // *that* account's server said about a Cube. The local
-                        // Cube outlives the sign-out, so leaving them keyed by
-                        // its id would show the previous account's refusal —
-                        // rendered with the new account's tier and limits — to
-                        // someone who may have slots to spare. Nothing else
-                        // clears them promptly: the next catch-up sync only
-                        // replaces them if it completes, and an aborted round
-                        // deliberately keeps what it already has.
-                        self.cube_sync_errors.clear();
-                        self.remote_cubes.clear();
-                        // Clearing alone isn't enough: a fetch issued for the
-                        // account we just left is still in flight and would
-                        // repopulate the list. Bump the generation so its
-                        // result is discarded on arrival.
-                        self.invalidate_remote_cubes();
-                        // Reset the heir discovery surface back to Idle so the
-                        // next sign-in re-fetches: otherwise its `Loaded` state
-                        // (and `is_loaded()` re-fetch guard) would persist and a
-                        // later account would see the prior account's vault rows.
-                        self.recover_vault = RecoverVaultPanel::new();
-                        // Split targets and reports are account/session scoped.
-                        // Cancel the request and replace the panel so another
-                        // account never inherits the prior account's selected
-                        // Cube or discovered balance summary.
-                        self.split_wallet.cancel();
-                        self.split_wallet = SplitWalletPanel::new();
-                        self.resume_split_after_install = false;
-                        if matches!(self.active_section, HomeSection::SplitWallet) {
-                            self.active_section = HomeSection::Cubes;
-                        }
-                        // Drop any open recovery-method picker so it can't
-                        // reference a prior account's remote cube.
-                        self.recovery_method_modal = None;
+                }
+                // A rejected stored-session refresh dispatches `LogOut` into
+                // a fresh Home that is already unauthenticated. Treat that
+                // explicit invalidation like a signed-in -> signed-out edge so
+                // a pending post-install Split intent cannot survive and resume
+                // after a later login.
+                if !now_authenticated && (was_authenticated || explicit_logout) {
+                    self.server_cube_limit = None;
+                    // Refusal reasons are account-scoped: they say what
+                    // *that* account's server said about a Cube. The local
+                    // Cube outlives the sign-out, so leaving them keyed by
+                    // its id would show the previous account's refusal —
+                    // rendered with the new account's tier and limits — to
+                    // someone who may have slots to spare. Nothing else
+                    // clears them promptly: the next catch-up sync only
+                    // replaces them if it completes, and an aborted round
+                    // deliberately keeps what it already has.
+                    self.cube_sync_errors.clear();
+                    self.remote_cubes.clear();
+                    // Clearing alone isn't enough: a fetch issued for the
+                    // account we just left is still in flight and would
+                    // repopulate the list. Bump the generation so its
+                    // result is discarded on arrival.
+                    self.invalidate_remote_cubes();
+                    // Reset the heir discovery surface back to Idle so the
+                    // next sign-in re-fetches: otherwise its `Loaded` state
+                    // (and `is_loaded()` re-fetch guard) would persist and a
+                    // later account would see the prior account's vault rows.
+                    self.recover_vault = RecoverVaultPanel::new();
+                    // Split targets and reports are account/session scoped.
+                    // Cancel the request and replace the panel so another
+                    // account never inherits the prior account's selected
+                    // Cube or discovered balance summary.
+                    self.split_wallet.cancel();
+                    self.split_wallet = SplitWalletPanel::new();
+                    self.resume_split_after_install = false;
+                    if matches!(self.active_section, HomeSection::SplitWallet) {
+                        self.active_section = HomeSection::Cubes;
                     }
+                    // Drop any open recovery-method picker so it can't
+                    // reference a prior account's remote cube.
+                    self.recovery_method_modal = None;
                 }
                 // Auto-expand Connect submenu and navigate to Cubes after login
                 if !was_authenticated && now_authenticated {
@@ -6482,6 +6488,30 @@ mod tests {
         assert!(!home.resume_split_after_install);
         assert_eq!(home.active_section, HomeSection::Cubes);
         assert!(home.error().is_some());
+        std::fs::remove_dir_all(datadir.path()).unwrap();
+    }
+
+    #[test]
+    fn rejected_stored_session_clears_post_install_split_resume() {
+        use crate::app::view::ConnectAccountMessage;
+
+        let datadir = fresh_datadir();
+        let mut home = Home::new_for_chain(datadir.clone(), Some(ChainId::BitcoinBlake2b)).0;
+        write_btcb2_vault_target(&home);
+        home.request_split_resume();
+        assert!(!home.connect_account.is_authenticated());
+
+        // A rejected refresh reaches Home as LogOut while this fresh Home is
+        // already unauthenticated. It must still revoke the installer resume.
+        let _ = home.update(Message::View(ViewMessage::ConnectAccount(
+            ConnectAccountMessage::LogOut,
+        )));
+        assert!(!home.resume_split_after_install);
+
+        // A later valid login must not revive the invalidated intent.
+        enable_btcb2(&mut home);
+        home.resume_split_if_ready();
+        assert_eq!(home.active_section, HomeSection::Cubes);
         std::fs::remove_dir_all(datadir.path()).unwrap();
     }
 
