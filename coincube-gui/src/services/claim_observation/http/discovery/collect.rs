@@ -17,6 +17,69 @@ impl CollectedAncestry {
     pub fn assessment(&self) -> CollectedAssessment {
         self.assessment
     }
+    /// Revalidate this live collection before inspecting Bitcoin inclusion.
+    /// This does not turn a proof record or confirmation count into signing or
+    /// submission authority; full ancestry admission remains separately gated.
+    pub fn bitcoin_confirmation(
+        &self,
+        path: &RetainedPath,
+        plan: &ClaimPlan,
+        context: AncestryContext<'_>,
+    ) -> Result<coincube_core::claim::BitcoinConfirmation, FailureKind> {
+        if plan.step1.compute_txid() != self.assessment.observations.fork.step1_txid {
+            return Err(FailureKind::Changed);
+        }
+        if !super::super::super::fresh(
+            self.observed_at,
+            context.now,
+            context.policy.max_observation_age_seconds,
+        ) {
+            return Err(FailureKind::Stale);
+        }
+        self.ancestry.validate_for_plan(path, plan, context)?;
+        Ok(coincube_core::claim::bitcoin_confirmation(
+            plan.step1.compute_txid(),
+            plan.previous_confirmation,
+            self.assessment.observations.bitcoin,
+        ))
+    }
+    /// Assess freshly bound proof and inclusion observations for later flow
+    /// integration. This does not authorize signing or submission. Existing
+    /// coordinator admission uses `assessment()` and remains unsupported until
+    /// the complete ancestry flow has passed independent acceptance.
+    pub fn assess_verified_observations(
+        &self,
+        path: &RetainedPath,
+        plan: &ClaimPlan,
+        context: AncestryContext<'_>,
+    ) -> Result<CollectedAssessment, FailureKind> {
+        use coincube_core::claim::{
+            BitcoinConfirmation, ForkTransactionPresence, MIN_CONFIRMATIONS,
+        };
+        let confirmation = self.bitcoin_confirmation(path, plan, context)?;
+        if self.assessment.assessment != Assessment::InputProofUnsupported {
+            return Err(FailureKind::Malformed);
+        }
+        let mut result = self.assessment;
+        result.assessment = match result.observations.fork.step1_presence {
+            ForkTransactionPresence::Unknown => Assessment::Unknown,
+            ForkTransactionPresence::Present => Assessment::Step1AlreadyOnFork,
+            ForkTransactionPresence::NotObserved => match confirmation {
+                BitcoinConfirmation::Unknown => Assessment::Unknown,
+                BitcoinConfirmation::Unconfirmed => Assessment::WaitingForConfirmation,
+                BitcoinConfirmation::Reorged => Assessment::Reorged,
+                BitcoinConfirmation::Confirmed { confirmations }
+                    if confirmations < MIN_CONFIRMATIONS =>
+                {
+                    Assessment::WaitingForDepth { confirmations }
+                }
+                BitcoinConfirmation::Confirmed { .. } => {
+                    Assessment::ObservationsEligibleForPreflight
+                }
+            },
+        };
+        Ok(result)
+    }
     pub fn observed_at(&self) -> i64 {
         self.observed_at
     }

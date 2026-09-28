@@ -219,6 +219,61 @@ pub fn assess_deployment(
     }
 }
 
+/// Bitcoin inclusion only, with no conclusion about exclusion on another chain.
+/// This is not spend, signing, or submission authority. The caller must validate
+/// chain identity and freshness before consuming these supplied observations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BitcoinConfirmation {
+    Unknown,
+    Unconfirmed,
+    Reorged,
+    Confirmed { confirmations: u64 },
+}
+
+/// Recompute inclusion from the exact transaction and prior recorded block.
+/// Kept separate from poison checks so an ancestry caller need not pretend its
+/// transaction contains OP_RETURN to apply the same Bitcoin reorg rules.
+pub fn bitcoin_confirmation(
+    expected_txid: Txid,
+    previous_confirmation: Option<BlockRef>,
+    bitcoin: BitcoinObservation,
+) -> BitcoinConfirmation {
+    let block = match bitcoin.location {
+        TransactionLocation::Unknown => return BitcoinConfirmation::Unknown,
+        TransactionLocation::Unconfirmed => {
+            return if previous_confirmation.is_some() {
+                BitcoinConfirmation::Reorged
+            } else {
+                BitcoinConfirmation::Unconfirmed
+            };
+        }
+        TransactionLocation::Confirmed {
+            txid,
+            block,
+            best_chain_hash_at_height,
+        } => {
+            if txid != expected_txid {
+                return BitcoinConfirmation::Unknown;
+            }
+            if block.hash != best_chain_hash_at_height
+                || previous_confirmation.is_some_and(|previous| previous != block)
+            {
+                return BitcoinConfirmation::Reorged;
+            }
+            block
+        }
+    };
+    match bitcoin
+        .tip
+        .height
+        .checked_sub(block.height)
+        .and_then(|d| d.checked_add(1))
+    {
+        Some(confirmations) => BitcoinConfirmation::Confirmed { confirmations },
+        None => BitcoinConfirmation::Unknown,
+    }
+}
+
 /// Evaluate from scratch. Stale/reorg/unknown results must replace any previous
 /// eligibility in the caller; never cache eligibility as completed split proof.
 pub fn assess(
@@ -288,40 +343,15 @@ pub fn assess(
     if let Err(refused) = assess_deployment(&fork, &deployment, policy) {
         return refused;
     }
-    let block = match bitcoin.location {
-        TransactionLocation::Unknown => return Assessment::Unknown,
-        TransactionLocation::Unconfirmed => {
-            return if plan.previous_confirmation.is_some() {
-                Assessment::Reorged
-            } else {
-                Assessment::WaitingForConfirmation
-            };
-        }
-        TransactionLocation::Confirmed {
-            txid,
-            block,
-            best_chain_hash_at_height,
-        } => {
-            if txid != plan.step1.compute_txid() {
-                return Assessment::Unknown;
-            }
-            if block.hash != best_chain_hash_at_height
-                || plan
-                    .previous_confirmation
-                    .is_some_and(|previous| previous != block)
-            {
-                return Assessment::Reorged;
-            }
-            block
-        }
-    };
-    let Some(confirmations) = bitcoin
-        .tip
-        .height
-        .checked_sub(block.height)
-        .and_then(|d| d.checked_add(1))
-    else {
-        return Assessment::Unknown;
+    let confirmations = match bitcoin_confirmation(
+        plan.step1.compute_txid(),
+        plan.previous_confirmation,
+        bitcoin,
+    ) {
+        BitcoinConfirmation::Unknown => return Assessment::Unknown,
+        BitcoinConfirmation::Unconfirmed => return Assessment::WaitingForConfirmation,
+        BitcoinConfirmation::Reorged => return Assessment::Reorged,
+        BitcoinConfirmation::Confirmed { confirmations } => confirmations,
     };
     if confirmations < MIN_CONFIRMATIONS {
         return Assessment::WaitingForDepth { confirmations };
@@ -346,6 +376,65 @@ mod tests {
         deployment: DeploymentObservation,
         policy: Policy,
         now: i64,
+    }
+
+    #[test]
+    fn bitcoin_confirmation_is_exact_and_reorg_sensitive_without_poison_authority() {
+        let mut f = Fixture::new();
+        let txid = f.plan.step1.compute_txid();
+        f.bitcoin.location = TransactionLocation::Unconfirmed;
+        assert_eq!(
+            bitcoin_confirmation(txid, None, f.bitcoin),
+            BitcoinConfirmation::Unconfirmed
+        );
+        let block = BlockRef {
+            height: 100,
+            hash: BlockHash::from_byte_array([2; 32]),
+        };
+        assert_eq!(
+            bitcoin_confirmation(txid, Some(block), f.bitcoin),
+            BitcoinConfirmation::Reorged
+        );
+        f.bitcoin.location = TransactionLocation::Confirmed {
+            txid,
+            block,
+            best_chain_hash_at_height: block.hash,
+        };
+        for (height, expected) in [
+            (99, BitcoinConfirmation::Unknown),
+            (100, BitcoinConfirmation::Confirmed { confirmations: 1 }),
+            (104, BitcoinConfirmation::Confirmed { confirmations: 5 }),
+            (105, BitcoinConfirmation::Confirmed { confirmations: 6 }),
+        ] {
+            f.bitcoin.tip.height = height;
+            assert_eq!(bitcoin_confirmation(txid, None, f.bitcoin), expected);
+        }
+        assert_eq!(
+            bitcoin_confirmation(Txid::from_byte_array([42; 32]), None, f.bitcoin),
+            BitcoinConfirmation::Unknown
+        );
+        let replaced = BlockRef {
+            height: block.height,
+            hash: BlockHash::from_byte_array([9; 32]),
+        };
+        assert_eq!(
+            bitcoin_confirmation(txid, Some(replaced), f.bitcoin),
+            BitcoinConfirmation::Reorged
+        );
+        f.bitcoin.location = TransactionLocation::Confirmed {
+            txid,
+            block,
+            best_chain_hash_at_height: replaced.hash,
+        };
+        assert_eq!(
+            bitcoin_confirmation(txid, None, f.bitcoin),
+            BitcoinConfirmation::Reorged
+        );
+        f.bitcoin.location = TransactionLocation::Unknown;
+        assert_eq!(
+            bitcoin_confirmation(txid, Some(block), f.bitcoin),
+            BitcoinConfirmation::Unknown
+        );
     }
 
     impl Fixture {
