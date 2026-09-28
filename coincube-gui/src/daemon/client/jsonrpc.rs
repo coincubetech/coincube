@@ -256,6 +256,11 @@ impl From<Error> for super::DaemonError {
             }
             Error::NoErrorOrResult => super::DaemonError::NoAnswer,
             Error::NotSupported => super::DaemonError::ClientNotSupported,
+            Error::Rpc(e)
+                if i64::from(e.code) == coincubed::commands::UNSAFE_LEGACY_ALTERNATIVE_ERROR =>
+            {
+                super::DaemonError::UnsafeLegacyAlternative(e.message)
+            }
             Error::Rpc(e) => super::DaemonError::Rpc(e.code, e.message),
         }
     }
@@ -270,4 +275,23 @@ pub struct RpcError {
     pub message: String,
     /// Additional data specific to the error
     pub data: Option<serde_json::Value>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unsafe_legacy_rpc_code_preserves_the_typed_daemon_error() {
+        let daemon_error = super::super::DaemonError::from(Error::Rpc(RpcError {
+            code: coincubed::commands::UNSAFE_LEGACY_ALTERNATIVE_ERROR as i32,
+            message: "policy refusal".to_string(),
+            data: None,
+        }));
+        assert!(matches!(
+            daemon_error,
+            super::super::DaemonError::UnsafeLegacyAlternative(message)
+                if message == "policy refusal"
+        ));
+    }
 }
