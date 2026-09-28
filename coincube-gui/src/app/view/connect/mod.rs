@@ -780,26 +780,43 @@ fn plan_billing_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAcc
 
 // ── Plan provenance card (server-driven, v2) ────────────────────────────────
 
-/// Renders the current plan's `plan_provenance` (`{label, expires_at,
-/// badge}`) verbatim — the desktop knows nothing about which campaign
-/// granted it. Returns `None` for purchased/free plans (no provenance),
-/// which keeps the existing paid/free UX. Display strings are entirely
-/// server-authored so a campaign's copy never needs an app release.
+/// Renders launch-safe copy for the current plan's `plan_provenance`.
+///
+/// The API fields still carry campaign metadata, but release copy is owned by
+/// the desktop so a stale backend cannot revive expired promotional promises.
+/// Returns `None` for purchased/free plans (no provenance), which keeps the
+/// existing paid/free UX.
+fn plan_provenance_label(tier: &PlanTier) -> &'static str {
+    match tier {
+        PlanTier::Free => "Free plan",
+        PlanTier::Pro => "Promotional Pro access",
+        PlanTier::Estate => "Launch offer — Estate free for 60 days",
+    }
+}
+
+fn launch_feature_copy(feature: &str) -> String {
+    let normalized = feature.to_ascii_lowercase();
+    if normalized.contains("duress") {
+        "Duress mode — Coming soon".to_string()
+    } else if normalized.contains("alert") {
+        "Recovery alerts — Coming soon".to_string()
+    } else {
+        feature.to_string()
+    }
+}
+
 fn plan_provenance_card<'a>(plan: &'a ConnectPlan) -> Option<Element<'a, ConnectAccountMessage>> {
     let prov = plan.plan_provenance.as_ref()?;
     let badge_color = plan_tier_color(plan.tier());
 
-    let mut header = Row::new()
+    let header = Row::new()
         .push(text::p1_bold(plan.tier().to_string()).color(badge_color))
         .push(iced::widget::Space::new().width(Length::Fill));
-    if let Some(badge) = prov.badge.as_deref().filter(|b| !b.is_empty()) {
-        header = header.push(text::p2_bold(badge).color(color::ORANGE));
-    }
 
     let mut card_col = Column::new()
         .push(header.align_y(Alignment::Center))
         .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
-        .push(text::p1_medium(prov.label.clone()).style(theme::text::primary));
+        .push(text::p1_medium(plan_provenance_label(plan.tier())).style(theme::text::primary));
     if let Some(exp) = prov.expires_at.as_deref().filter(|e| !e.is_empty()) {
         card_col = card_col
             .push(iced::widget::Space::new().height(Length::Fixed(6.0)))
@@ -958,14 +975,16 @@ fn plan_selection_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectA
                         BillingCycle::Monthly => p.monthly,
                         BillingCycle::Annual => p.annual,
                     });
-                    // Render the server's feature bullets verbatim — the
-                    // `/connect/features` list is the single source of truth
-                    // (including the per-network cube count), so the desktop
-                    // no longer prepends its own cube-count line.
+                    // Preserve server-authored availability while keeping
+                    // unreleased duress and alert marketing launch-safe.
                     Some(PlanCardData {
                         name: tier.to_string(),
                         tier,
-                        features: info.features.clone(),
+                        features: info
+                            .features
+                            .iter()
+                            .map(|feature| launch_feature_copy(feature))
+                            .collect(),
                         price_amount,
                     })
                 })
@@ -2638,6 +2657,32 @@ mod renewal_banner_tests {
             billing_cycle: Some(BillingCycle::Monthly),
             plan_provenance: None,
         }
+    }
+
+    #[test]
+    fn launch_copy_does_not_render_stale_campaign_promises() {
+        assert_eq!(
+            plan_provenance_label(&PlanTier::Estate),
+            "Launch offer — Estate free for 60 days"
+        );
+        assert_eq!(
+            plan_provenance_label(&PlanTier::Pro),
+            "Promotional Pro access"
+        );
+        assert_eq!(plan_provenance_label(&PlanTier::Free), "Free plan");
+    }
+
+    #[test]
+    fn unreleased_plan_features_are_marked_coming_soon() {
+        assert_eq!(
+            launch_feature_copy("Duress mode"),
+            "Duress mode — Coming soon"
+        );
+        assert_eq!(
+            launch_feature_copy("Recovery alerts"),
+            "Recovery alerts — Coming soon"
+        );
+        assert_eq!(launch_feature_copy("More Cubes"), "More Cubes");
     }
 
     /// Regression: dismissing the pre-expiry reminder must NOT suppress the
