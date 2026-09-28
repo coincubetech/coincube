@@ -256,6 +256,18 @@ async fn claim_gui_regtest_driver() {
     let mut fork_panel: Option<ForkClaimPanel> = None;
     let mut client = CoincubeClient::for_test(base.to_string());
     client.set_token("synthetic-regtest-only");
+    if init["ancestry_previous"].is_string() {
+        client.enable_regtest_ancestry(
+            u32::try_from(init["ancestry_first_fork_height"].as_u64().unwrap()).unwrap(),
+            u32::try_from(init["ancestry_historical_limit"].as_u64().unwrap()).unwrap(),
+            init["ancestry_shared_history_height"].as_u64().unwrap(),
+            init["ancestry_shared_history_hash"]
+                .as_str()
+                .unwrap()
+                .parse()
+                .unwrap(),
+        );
+    }
     let (_sender, generation) = watch::channel(1);
     let mut panel = ClaimStep1Panel::new(
         wallet.clone(),
@@ -478,6 +490,18 @@ async fn claim_gui_regtest_driver() {
             Stage::Track { .. } => "track",
             _ => "preconditions",
         };
+        let (construction, selected_ancestry_input) = match &panel.stage {
+            Stage::Plan { built } => match &**built {
+                Construction::OpReturn(_) => (Some("op-return"), None),
+                Construction::Ancestry { .. } => (
+                    Some("input-ancestry"),
+                    built
+                        .selected_ancestry_input()
+                        .map(|outpoint| outpoint.to_string()),
+                ),
+            },
+            _ => (None, None),
+        };
         let reviewed_route = match &panel.stage {
             Stage::Review {
                 snapshot: Some(snapshot),
@@ -505,7 +529,9 @@ async fn claim_gui_regtest_driver() {
         let tx = daemon.submitted.lock().unwrap().clone();
         let journal = journal_directory(&datadir, &panel.wallet).join("intent.json");
         emit(
-            json!({"event":action,"stage":stage,"reviewed_route":reviewed_route,"review_error":review_error,
+            json!({"event":action,"stage":stage,"construction":construction,
+            "selected_ancestry_input":selected_ancestry_input,
+            "reviewed_route":reviewed_route,"review_error":review_error,
             "node_submissions":daemon.hits().iter().filter(|h| **h == "submit_verified_poison_to_node").count(),
             "connect_submissions":daemon.hits().iter().filter(|h| **h == "submit_verified_poison_to_connect").count(),
             "tracking":tracking,"submission_outcome":submission_outcome,"reconfirmation_review":panel.reconfirmation(),"submitted":tx.map(|tx| json!({

@@ -267,6 +267,10 @@ def test_gui_claims_both_chains_and_recovers_remined_bitcoin(tmp_path, record_pr
                 "ancestry_height": node.rpc.getblockheader(
                     harness.poison_block_hash)["height"],
                 "ancestry_derivation_index": 3,
+                "ancestry_first_fork_height": harness.activation_height,
+                "ancestry_historical_limit": node.rpc.getblockcount() + 1,
+                "ancestry_shared_history_height": harness.activation_height - 1,
+                "ancestry_shared_history_hash": harness.fork_parent_hash,
             })
         ready = child.send(initial)
         assert ready["event"] == "ready", ready
@@ -275,6 +279,11 @@ def test_gui_claims_both_chains_and_recovers_remined_bitcoin(tmp_path, record_pr
             result = child.send({"command": action})
             assert result["stage"] == stage, result
             assert result["submission_calls"] == 0 and result["submitted"] is None
+            if action == "build":
+                assert result["construction"] == (
+                    "input-ancestry" if ancestry else "op-return"), result
+                assert result["selected_ancestry_input"] == (
+                    f"{ancestry_txid}:{ancestry_vout}" if ancestry else None), result
         if multisig:
             assert result["journal"] is None, "one signature must not finalize or journal"
             assert not bridge.preflights, "one signature must not reach signed preflight"

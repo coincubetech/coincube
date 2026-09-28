@@ -10,6 +10,35 @@ const HISTORICAL_LIMIT: u32 = 1_983_702;
 const BIP34_HEIGHT: u64 = 227_931;
 const BIP34_HASH: &str = "000000000000024b89b42a942fe0d9fea3bb44ab7bd1b19115dd6a759c0808b8";
 
+#[derive(Clone, Copy)]
+struct AncestryHistory {
+    first_fork_height: u32,
+    historical_limit: u32,
+    shared_history_height: u64,
+    shared_history_hash: BlockHash,
+}
+
+impl HttpObservationSource {
+    fn ancestry_history(&self) -> Result<AncestryHistory, FailureKind> {
+        #[cfg(all(test, feature = "regtest-harness"))]
+        if let Some(history) = self.test_ancestry_history {
+            return Ok(AncestryHistory {
+                first_fork_height: history.first_fork_height,
+                historical_limit: history.historical_limit,
+                shared_history_height: history.shared_history_height,
+                shared_history_hash: history.shared_history_hash,
+            });
+        }
+        Ok(AncestryHistory {
+            first_fork_height: FIRST_FORK_HEIGHT,
+            historical_limit: HISTORICAL_LIMIT,
+            shared_history_height: BIP34_HEIGHT,
+            shared_history_hash: BlockHash::from_str(BIP34_HASH)
+                .map_err(|_| FailureKind::Malformed)?,
+        })
+    }
+}
+
 /// Matching current mainnet histories with distinct same-height coinbase roots.
 /// Still only provider-trusted observations: the selected output's ownership,
 /// maturity, spendability, complete ancestry path and submission policy remain
@@ -54,7 +83,8 @@ impl HttpObservationSource {
         height: u32,
         policy: Policy,
     ) -> Result<CoinbasePair, FailureKind> {
-        if !(FIRST_FORK_HEIGHT..HISTORICAL_LIMIT).contains(&height) {
+        let history = self.ancestry_history()?;
+        if !(history.first_fork_height..history.historical_limit).contains(&height) {
             return Err(FailureKind::UnsupportedPoison);
         }
         dependency
@@ -73,15 +103,19 @@ impl HttpObservationSource {
                 .observation
                 .fork
                 .as_ref()
-                .is_none_or(|fork| fork.height != u64::from(FIRST_FORK_HEIGHT))
+                .is_none_or(|fork| fork.height != u64::from(history.first_fork_height))
             {
                 return Err(FailureKind::WrongChain);
             }
-            let expected_history =
-                BlockHash::from_str(BIP34_HASH).map_err(|_| FailureKind::Malformed)?;
-            let bitcoin_history = self.hash_at_height(ChainId::Bitcoin, BIP34_HEIGHT).await?;
-            let fork_history = self.hash_at_height(fork_chain, BIP34_HEIGHT).await?;
-            if bitcoin_history.value != expected_history || fork_history.value != expected_history {
+            let bitcoin_history = self
+                .hash_at_height(ChainId::Bitcoin, history.shared_history_height)
+                .await?;
+            let fork_history = self
+                .hash_at_height(fork_chain, history.shared_history_height)
+                .await?;
+            if bitcoin_history.value != history.shared_history_hash
+                || fork_history.value != history.shared_history_hash
+            {
                 return Err(FailureKind::WrongChain);
             }
             let bitcoin = self.canonical_coinbase(ChainId::Bitcoin, height).await?;
@@ -100,17 +134,19 @@ impl HttpObservationSource {
                 (ChainId::Bitcoin, &bitcoin.value),
                 (fork_chain, &fork.value),
             ] {
-                let history = self.hash_at_height(chain, BIP34_HEIGHT).await?;
+                let shared = self
+                    .hash_at_height(chain, history.shared_history_height)
+                    .await?;
                 let block = self.hash_at_height(chain, u64::from(height)).await?;
                 let tip = self.tip(chain).await?;
-                if history.value != expected_history
+                if shared.value != history.shared_history_hash
                     || block.value != root.block.hash
                     || tip.value != root.tip
                 {
                     return Err(FailureKind::Changed);
                 }
                 oldest = oldest
-                    .min(history.observed_at)
+                    .min(shared.observed_at)
                     .min(block.observed_at)
                     .min(tip.observed_at);
             }
@@ -191,6 +227,40 @@ mod tests {
                 .body(body);
         })
     }
+
+    #[cfg(feature = "regtest-harness")]
+    #[test]
+    fn explicit_regtest_history_is_local_to_the_test_client() {
+        let server = MockServer::start();
+        let shared = BlockHash::from_str(&"09".repeat(32)).unwrap();
+        let mut client = crate::services::coincube::CoincubeClient::for_test(server.base_url());
+        client.set_token("synthetic-observation-token");
+        client.enable_regtest_ancestry(110, 213, 109, shared);
+        let (_sender, generation) = watch::channel(4);
+        let configured_source = HttpObservationSource::new(
+            client,
+            ChainId::Bitcoin,
+            ChainId::BitcoinBlake2b,
+            CollectionContext {
+                expected_generation: 4,
+                generation,
+            },
+        )
+        .unwrap();
+        let configured = configured_source.ancestry_history().unwrap();
+        assert_eq!(configured.first_fork_height, 110);
+        assert_eq!(configured.historical_limit, 213);
+        assert_eq!(configured.shared_history_height, 109);
+        assert_eq!(configured.shared_history_hash, shared);
+
+        let (default, _sender) = source(&server);
+        let pinned = default.ancestry_history().unwrap();
+        assert_eq!(pinned.first_fork_height, FIRST_FORK_HEIGHT);
+        assert_eq!(pinned.historical_limit, HISTORICAL_LIMIT);
+        assert_eq!(pinned.shared_history_height, BIP34_HEIGHT);
+        assert_eq!(pinned.shared_history_hash.to_string(), BIP34_HASH);
+    }
+
     #[tokio::test]
     async fn paired_roots_bind_history_anchor_identity_and_current_views() {
         for case in [

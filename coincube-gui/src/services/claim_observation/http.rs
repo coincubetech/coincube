@@ -31,6 +31,8 @@ pub struct HttpObservationSource {
     generation: watch::Receiver<u64>,
     expected: u64,
     budget: Option<std::sync::Arc<discovery::CollectionBudget>>,
+    #[cfg(all(test, feature = "regtest-harness"))]
+    test_ancestry_history: Option<crate::services::coincube::client::TestAncestryHistory>,
 }
 
 #[derive(Clone)]
@@ -83,6 +85,8 @@ impl HttpObservationSource {
             .timeout(REQUEST_TIMEOUT)
             .build()
             .map_err(|_| FailureKind::Unavailable)?;
+        #[cfg(all(test, feature = "regtest-harness"))]
+        let test_ancestry_history = client.test_ancestry_history();
         Ok(Self {
             base: url.as_str().trim_end_matches('/').to_owned(),
             authenticated: client,
@@ -90,6 +94,8 @@ impl HttpObservationSource {
             expected: context.expected_generation,
             generation: context.generation,
             budget: None,
+            #[cfg(all(test, feature = "regtest-harness"))]
+            test_ancestry_history,
         })
     }
     /// Stable identity shared with the Claim journal. Bind the admitted pair

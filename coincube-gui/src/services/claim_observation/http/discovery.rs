@@ -96,6 +96,8 @@ impl HttpObservationSource {
                     .clone()
                     .unwrap_or_else(|| Arc::new(CollectionBudget::new())),
             ),
+            #[cfg(all(test, feature = "regtest-harness"))]
+            test_ancestry_history: self.test_ancestry_history,
         }
     }
     async fn qualify_dependency(
