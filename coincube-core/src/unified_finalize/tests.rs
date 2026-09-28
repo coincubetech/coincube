@@ -1231,6 +1231,13 @@ fn issue_398_surplus_legacy_signatures_form_an_alternate_bitcoin_witness() {
         mixed.psbt().inputs[0].partial_sigs.len() >= 2,
         "two legacy-class keys must leave a satisfying `partial_sigs` set"
     );
+    assert!(matches!(
+        ensure_no_unsafe_legacy_alternative(&mixed, &secp),
+        Err(UnifiedFinalizeError::UnsafeLegacyAlternative {
+            input: 0,
+            legacy_signatures,
+        }) if legacy_signatures >= 2
+    ));
 
     let coincube = finalize_p2wsh_all_unified(&mixed, &secp).unwrap();
     assert!(
@@ -1304,6 +1311,8 @@ fn issue_398_one_legacy_signature_cannot_form_an_alternate_witness() {
     let mixed = sign_p2wsh_all_unified(&fixture.signers[0], &fixture.psbt, &secp).unwrap();
     let mixed = add_legacy(&mixed, &fixture.signers[1], &secp);
     assert_eq!(mixed.psbt().inputs[0].partial_sigs.len(), 1);
+    ensure_no_unsafe_legacy_alternative(&mixed, &secp)
+        .expect("the legacy signature required by the mixed witness is safe to retain");
 
     let coincube = finalize_p2wsh_all_unified(&mixed, &secp).unwrap();
     assert!(coincube.inputs[0].replay_protected());
@@ -1341,6 +1350,7 @@ fn issue_398_retained_legacy_copy_of_the_same_keys_is_a_separate_psbt() {
     let unified_copy = sign_p2wsh_all_unified(&fixture.signers[0], &fixture.psbt, &secp).unwrap();
     let unified_copy = sign_p2wsh_all_unified(&fixture.signers[1], &unified_copy, &secp).unwrap();
     let protected = finalize_p2wsh_all_unified(&unified_copy, &secp).unwrap();
+    ensure_no_unsafe_legacy_alternative(&unified_copy, &secp).unwrap();
     assert!(protected.inputs[0].replay_protected());
     assert_eq!(
         (
@@ -1357,6 +1367,8 @@ fn issue_398_retained_legacy_copy_of_the_same_keys_is_a_separate_psbt() {
     );
     assert!(unified_signatures(&legacy_copy).unwrap().is_empty());
     let coincube_legacy = finalize_p2wsh_all_unified(&legacy_copy, &secp).unwrap();
+    ensure_no_unsafe_legacy_alternative(&legacy_copy, &secp)
+        .expect("a separate external legacy-only copy cannot be revoked locally");
     assert!(!coincube_legacy.inputs[0].replay_protected());
 
     let mut bitcoin_view = legacy_copy.psbt().clone();
@@ -1402,6 +1414,8 @@ fn issue_398_timelocked_recovery_legacy_is_not_an_alternate_without_csv() {
     );
 
     let coincube = finalize_p2wsh_all_unified(&mixed, &secp).unwrap();
+    ensure_no_unsafe_legacy_alternative(&mixed, &secp)
+        .expect("a locked recovery signature is not an independently usable alternative");
     // One unified + however many of signer 2's primary-key legacy the script
     // can use. Recovery is not enabled, so this is still the primary path.
     assert!(coincube.inputs[0].replay_protected());

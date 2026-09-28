@@ -1,5 +1,5 @@
 use coincubed::bip329::Labels;
-use coincubed::commands::UpdateDerivIndexesResult;
+use coincubed::commands::{CommandError, UpdateDerivIndexesResult};
 use std::collections::{HashMap, HashSet};
 use tokio::sync::Mutex;
 
@@ -64,6 +64,22 @@ fn authenticated_startup_error(error: coincubed::StartupError) -> DaemonError {
             DaemonError::ConnectAnchor(error.into())
         }
         error => DaemonError::Start(error),
+    }
+}
+
+fn map_spend_command_error(error: CommandError) -> DaemonError {
+    match error {
+        CommandError::UnsafeLegacyAlternative {
+            input,
+            legacy_signatures,
+        } => DaemonError::UnsafeLegacyAlternative(
+            CommandError::UnsafeLegacyAlternative {
+                input,
+                legacy_signatures,
+            }
+            .to_string(),
+        ),
+        other => DaemonError::Unexpected(other.to_string()),
     }
 }
 
@@ -407,7 +423,7 @@ impl Daemon for EmbeddedDaemon {
         self.command(|daemon| {
             daemon
                 .update_spend(psbt.clone())
-                .map_err(|e| DaemonError::Unexpected(e.to_string()))
+                .map_err(map_spend_command_error)
         })
         .await
     }
@@ -424,7 +440,7 @@ impl Daemon for EmbeddedDaemon {
         self.command(|daemon| {
             daemon
                 .broadcast_spend(txid)
-                .map_err(|e| DaemonError::Unexpected(e.to_string()))
+                .map_err(map_spend_command_error)
         })
         .await
     }
