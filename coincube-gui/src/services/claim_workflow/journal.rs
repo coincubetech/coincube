@@ -173,7 +173,7 @@ impl Journal {
             })
             .transpose()
     }
-    pub(super) fn store(&mut self, intent: &Intent) -> Result<(), Error> {
+    pub(super) fn ensure_current(&mut self) -> Result<(), Error> {
         if self.poisoned {
             return Err(Error::InvalidJournal);
         }
@@ -189,6 +189,10 @@ impl Journal {
             self.poisoned = true;
             return Err(Error::Conflict);
         }
+        Ok(())
+    }
+    pub(super) fn store(&mut self, intent: &Intent) -> Result<(), Error> {
+        self.ensure_current()?;
         let bytes = serde_json::to_vec(intent).map_err(|_| Error::InvalidJournal)?;
         if bytes.len() as u64 > intent_limit(intent) {
             return Err(Error::InvalidJournal);

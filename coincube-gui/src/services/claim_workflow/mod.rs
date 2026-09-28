@@ -572,11 +572,18 @@ impl Controller {
                     next.phase = Phase::Tracking;
                 }
             }
-            if let Err(error) = self.journal.store(&next) {
+            let changed = next.plan.previous_confirmation != self.intent.plan.previous_confirmation
+                || next.phase != self.intent.phase;
+            if changed {
+                if let Err(error) = self.journal.store(&next) {
+                    self.clear_check();
+                    return Err(error);
+                }
+                self.intent = next;
+            } else if let Err(error) = self.journal.ensure_current() {
                 self.clear_check();
                 return Err(error);
             }
-            self.intent = next;
             self.fresh = Some(fresh);
         }
         Ok(self.status)

@@ -463,8 +463,8 @@ impl Coordinator {
         // Confirmed conflicting spends separate the chains even after RDTS
         // expires. This is historical metadata, never signing authority.
         let plan = self.controller.plan();
-        // Read-only ancestry reconciliation is available, but completion
-        // metadata awaits independent acceptance of the full integration.
+        // Keep durable completion gated until the complete ancestry signing,
+        // reorg and two-chain acceptance flow has independent approval.
         if plan.poison == coincube_core::claim::Poison::InputAncestry {
             return Ok(None);
         }
@@ -533,10 +533,9 @@ impl Coordinator {
             .recorded_fork_submission()
             .ok_or(Error::InvalidBinding)?;
         let ticket = self.controller.begin_check(context)?;
-        let collected = if let Some(path) = self.controller.recorded_ancestry()? {
-            self.services
-                .ancestry_source()
-                .ok_or(Error::Unsupported)?
+        let (collected, ancestry) = if let Some(path) = self.controller.recorded_ancestry()? {
+            let source = self.services.ancestry_source().ok_or(Error::Unsupported)?;
+            let (proof, sweep) = source
                 .collect_ancestry_sweep(
                     &path,
                     &self.controller.plan(),
@@ -546,33 +545,44 @@ impl Coordinator {
                 )
                 .await
                 .map_err(Error::Observation)?
-                .sweep()
+                .into_parts();
+            (sweep, Some(proof))
         } else {
-            claim_observation::collect_sweep(
-                self.services.source(),
-                &self.controller.plan(),
-                submission.txid(),
-                self.policy.observations,
-                self.policy.collection_budget,
-                CollectionContext {
-                    expected_generation: context.generation,
-                    generation: self.generation.clone(),
-                },
+            (
+                claim_observation::collect_sweep(
+                    self.services.source(),
+                    &self.controller.plan(),
+                    submission.txid(),
+                    self.policy.observations,
+                    self.policy.collection_budget,
+                    CollectionContext {
+                        expected_generation: context.generation,
+                        generation: self.generation.clone(),
+                    },
+                )
+                .await
+                .map_err(Error::Observation)?,
+                None,
             )
-            .await
-            .map_err(Error::Observation)?
         };
         self.current(context)?;
-        let status = self
-            .controller
-            .apply_observation(
+        let status = match ancestry {
+            Some(proof) => self.controller.apply_ancestry_observation(
+                ticket,
+                context,
+                Ok(proof),
+                self.policy.observations,
+                self.services.source().now(),
+            ),
+            None => self.controller.apply_observation(
                 ticket,
                 context,
                 Ok(collected.assessment()),
                 self.policy.observations,
                 self.services.source().now(),
-            )
-            .map_err(Error::Journal)?;
+            ),
+        }
+        .map_err(Error::Journal)?;
         Ok((status, collected))
     }
 

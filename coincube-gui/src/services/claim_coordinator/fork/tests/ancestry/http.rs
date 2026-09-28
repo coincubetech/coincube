@@ -47,7 +47,7 @@ fn fresh<'a>(server: &'a MockServer, path: &str, body: String) -> Mock<'a> {
 }
 
 #[tokio::test]
-async fn ancestry_sweep_reconciliation_recollects_proof_without_granting_completion() {
+async fn ancestry_sweep_reconciliation_recollects_proof_without_persisting_completion() {
     let (built, path, bitcoin) = built(10, false);
     let (construction, verified) = ancestry_sweep(&built);
     let root: Transaction = deserialize(&path.links()[0].transaction).unwrap();
@@ -275,7 +275,7 @@ async fn ancestry_sweep_reconciliation_recollects_proof_without_granting_complet
         let (status, transaction) = coordinator.reconcile_sweep(&current).await.unwrap();
         assert_eq!(
             status,
-            Status::Observation(Assessment::InputProofUnsupported)
+            Status::Observation(Assessment::ObservationsEligibleForPreflight)
         );
         assert!(matches!(
             transaction,
