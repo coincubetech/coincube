@@ -11,9 +11,11 @@ use coincube_ui::{
     widget::{Column, Container, Element, Row, RowExt},
 };
 use iced::{widget::text_input, Alignment, Length, Task};
+use std::sync::Arc;
 use tokio::sync::watch;
 
 use crate::{
+    app::split_intent::SplitIntent,
     chain::ChainId,
     services::{
         coincube::CoincubeClient,
@@ -60,8 +62,44 @@ pub enum Message {
     InternalEdited(String),
     TargetSelected(TargetCube),
     Scan,
-    Scanned(Result<ScanSummary, String>, u64, u64),
+    Scanned(Result<Arc<ScanEvidence>, String>, u64, u64),
+    Continue,
     Cancel,
+}
+
+#[derive(Debug, Clone)]
+pub struct ScanEvidence {
+    report: foreign_scan::ScanReport,
+    external: ScanDescriptor,
+    internal: Option<ScanDescriptor>,
+    summary: ScanSummary,
+}
+
+impl ScanEvidence {
+    fn new(
+        report: foreign_scan::ScanReport,
+        external: ScanDescriptor,
+        internal: Option<ScanDescriptor>,
+    ) -> Self {
+        let summary = ScanSummary {
+            generation: report.generation(),
+            addresses: report.addresses_scanned(),
+            coins: report.coins().len(),
+            confirmed: report.coins().iter().filter(|coin| coin.confirmed).count(),
+            sats: report
+                .coins()
+                .iter()
+                .map(|coin| coin.output.value.to_sat())
+                .sum(),
+            tip: report.tip().to_string(),
+        };
+        Self {
+            report,
+            external,
+            internal,
+            summary,
+        }
+    }
 }
 
 pub struct SplitWalletPanel {
@@ -70,6 +108,7 @@ pub struct SplitWalletPanel {
     external: String,
     internal: String,
     status: Status,
+    evidence: Option<Arc<ScanEvidence>>,
     generation: u64,
     cancel: watch::Sender<u64>,
 }
@@ -83,6 +122,7 @@ impl Default for SplitWalletPanel {
             external: String::new(),
             internal: String::new(),
             status: Status::Editing,
+            evidence: None,
             generation: 0,
             cancel,
         }
@@ -108,11 +148,53 @@ impl SplitWalletPanel {
     }
 
     pub fn cancel(&mut self) {
+        crate::app::split_intent::clear();
         self.generation = self.generation.wrapping_add(1);
         let _ = self.cancel.send(self.generation);
-        if matches!(self.status, Status::Scanning) {
-            self.status = Status::Editing;
+        self.evidence = None;
+        self.status = Status::Editing;
+    }
+
+    /// Consume exact scan evidence for the selected target and account
+    /// session. The returned intent is memory-only and is still not authority
+    /// to construct a transaction.
+    pub fn take_handoff(
+        &mut self,
+        target_source: ChainId,
+        account_session_generation: u64,
+        client: &CoincubeClient,
+    ) -> Option<SplitIntent> {
+        let target = self.selected.as_ref()?;
+        let evidence = self.evidence.take()?;
+        if !matches!(&self.status, Status::Complete(summary) if summary.generation == self.generation)
+            || evidence.summary.generation != self.generation
+        {
+            self.cancel();
+            return None;
         }
+        let ScanEvidence {
+            report,
+            external,
+            internal,
+            ..
+        } = Arc::try_unwrap(evidence).unwrap_or_else(|shared| (*shared).clone());
+        let intent = SplitIntent::new(
+            target.id.clone(),
+            target_source,
+            account_session_generation,
+            client,
+            report,
+            external,
+            internal,
+        );
+        self.generation = self.generation.wrapping_add(1);
+        let _ = self.cancel.send(self.generation);
+        self.status = Status::Editing;
+        intent
+    }
+
+    pub fn selected_target_id(&self) -> Option<&str> {
+        self.selected.as_ref().map(|target| target.id.as_str())
     }
 
     pub fn update(
@@ -175,27 +257,18 @@ impl SplitWalletPanel {
                 let generation = self.generation;
                 let _ = self.cancel.send(generation);
                 let receiver = self.cancel.subscribe();
+                let external = plan.branches[0].descriptor.clone();
+                let internal = plan
+                    .branches
+                    .iter()
+                    .find(|range| range.descriptor.branch() == Branch::Internal)
+                    .map(|range| range.descriptor.clone());
                 self.status = Status::Scanning;
                 Task::perform(
                     async move {
                         foreign_scan::scan(client, plan, generation, receiver)
                             .await
-                            .map(|report| ScanSummary {
-                                generation: report.generation(),
-                                addresses: report.addresses_scanned(),
-                                coins: report.coins().len(),
-                                confirmed: report
-                                    .coins()
-                                    .iter()
-                                    .filter(|coin| coin.confirmed)
-                                    .count(),
-                                sats: report
-                                    .coins()
-                                    .iter()
-                                    .map(|coin| coin.output.value.to_sat())
-                                    .sum(),
-                                tip: report.tip().to_string(),
-                            })
+                            .map(|report| Arc::new(ScanEvidence::new(report, external, internal)))
                             .map_err(scan_error_copy)
                     },
                     move |result| Message::Scanned(result, generation, session_generation),
@@ -209,12 +282,19 @@ impl SplitWalletPanel {
                     self.cancel();
                     return Task::none();
                 }
-                self.status = match result {
-                    Ok(summary) => Status::Complete(summary),
-                    Err(error) => Status::Failed(error),
-                };
+                match result {
+                    Ok(evidence) => {
+                        self.status = Status::Complete(evidence.summary.clone());
+                        self.evidence = Some(evidence);
+                    }
+                    Err(error) => {
+                        self.evidence = None;
+                        self.status = Status::Failed(error);
+                    }
+                }
                 Task::none()
             }
+            Message::Continue => Task::none(),
         }
     }
 
@@ -323,13 +403,20 @@ pub fn view(panel: &SplitWalletPanel) -> Element<'_, Message> {
                 summary.addresses, summary.tip
             )).style(theme::text::secondary))
             .push(
-                p1_regular("Spending is still locked. The next slice will bind these exact outpoints to the poison-split PSBT and shared Claim confirmation/reorg gates.")
+                p1_regular(if summary.coins == 0 {
+                    "No spendable outputs were found in this bounded scan."
+                } else if summary.confirmed != summary.coins {
+                    "Wait for every discovered output to confirm, then scan again before reviewing a sweep."
+                } else {
+                    "Continue to unlock the destination Cube and review bounded sweep economics. Spending remains locked."
+                })
                     .style(theme::text::warning),
             )
             .into(),
     };
 
     let scanning = matches!(panel.status, Status::Scanning);
+    let reviewable = matches!(&panel.status, Status::Complete(summary) if summary.coins > 0 && summary.confirmed == summary.coins);
     let actions = Row::new()
         .spacing(10)
         .align_y(Alignment::Center)
@@ -345,6 +432,9 @@ pub fn view(panel: &SplitWalletPanel) -> Element<'_, Message> {
             .on_press_maybe((!scanning).then_some(Message::Scan)),
         )
         .push_maybe(scanning.then(|| button::secondary(None, "Cancel").on_press(Message::Cancel)));
+    let actions = actions.push_maybe(reviewable.then(|| {
+        button::primary(None, "Continue to destination Cube").on_press(Message::Continue)
+    }));
 
     Container::new(
         Column::new()
@@ -365,7 +455,9 @@ mod tests {
     use super::*;
     use coincube_core::miniscript::bitcoin::{
         bip32::{Xpriv, Xpub},
+        hashes::Hash,
         secp256k1::Secp256k1,
+        BlockHash,
     };
 
     const FIXED_DESCRIPTOR: &str =
@@ -389,17 +481,6 @@ mod tests {
             .unwrap(),
         );
         format!("wpkh({xpub}/{branch}/*)")
-    }
-
-    fn completed_summary(generation: u64) -> ScanSummary {
-        ScanSummary {
-            generation,
-            addresses: 1,
-            coins: 1,
-            confirmed: 1,
-            sats: 1,
-            tip: "tip-a".into(),
-        }
     }
 
     #[test]
@@ -459,7 +540,7 @@ mod tests {
             assert_eq!(panel.status(), &Status::Editing);
 
             let _ = panel.update(
-                Message::Scanned(Ok(completed_summary(stale_generation)), stale_generation, 7),
+                Message::Scanned(Err("stale".into()), stale_generation, 7),
                 None,
                 7,
             );
@@ -492,5 +573,62 @@ mod tests {
         assert!(
             matches!(panel.status(), Status::Failed(copy) if copy.contains("public mainnet descriptor"))
         );
+    }
+
+    #[test]
+    fn completed_scan_handoff_retains_exact_report_and_descriptors() {
+        let mut client = CoincubeClient::new();
+        client.set_token("session-a");
+        let external = ScanDescriptor::parse(Branch::External, FIXED_DESCRIPTOR).unwrap();
+        let report = foreign_scan::ScanReport::for_test(
+            ChainId::BitcoinBlake2b,
+            17,
+            BlockHash::from_byte_array([9; 32]),
+            Vec::new(),
+        );
+        let evidence = ScanEvidence::new(report, external, None);
+        let mut panel = SplitWalletPanel::new();
+        panel.set_targets(vec![target()]);
+        panel.generation = 17;
+        panel.status = Status::Complete(evidence.summary.clone());
+        panel.evidence = Some(Arc::new(evidence));
+
+        let intent = panel
+            .take_handoff(ChainId::BitcoinBlake2b, 4, &client)
+            .unwrap();
+        assert_eq!(intent.report.generation(), 17);
+        assert_eq!(intent.report.tip(), BlockHash::from_byte_array([9; 32]));
+        assert_eq!(
+            intent.external.canonical(),
+            ScanDescriptor::parse(Branch::External, FIXED_DESCRIPTOR)
+                .unwrap()
+                .canonical()
+        );
+        assert!(intent.internal.is_none());
+        assert!(panel.evidence.is_none());
+        assert!(matches!(panel.status, Status::Editing));
+    }
+
+    #[test]
+    fn cancel_discards_completed_scan_evidence() {
+        let external = ScanDescriptor::parse(Branch::External, FIXED_DESCRIPTOR).unwrap();
+        let report = foreign_scan::ScanReport::for_test(
+            ChainId::BitcoinBlake2b,
+            23,
+            BlockHash::from_byte_array([10; 32]),
+            Vec::new(),
+        );
+        let evidence = ScanEvidence::new(report, external, None);
+        let mut panel = SplitWalletPanel::new();
+        panel.set_targets(vec![target()]);
+        panel.generation = 23;
+        panel.status = Status::Complete(evidence.summary.clone());
+        panel.evidence = Some(Arc::new(evidence));
+
+        panel.cancel();
+
+        assert!(panel.evidence.is_none());
+        assert!(matches!(panel.status, Status::Editing));
+        assert_eq!(panel.generation, 24);
     }
 }
