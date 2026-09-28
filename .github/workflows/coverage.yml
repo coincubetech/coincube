@@ -15,7 +15,9 @@ on:
 jobs:
   rust-coverage:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # Instrumented workspace tests now take 36-44 minutes on hosted runners;
+    # 45 minutes left no margin and timed out mid-suite on #545 and #557.
+    timeout-minutes: 75
     env:
       BREEZ_API_KEY: DUMMY_BREEZ_API_KEY
       # Coverage (including the doctest pass) needs a single nightly toolchain:
