@@ -33,6 +33,7 @@ impl std::fmt::Display for Error {
             Self::Spend(e) => write!(f, "{}", e),
             Self::Daemon(e) => match e {
                 DaemonError::Unexpected(e) => write!(f, "{}", e),
+                DaemonError::UnsafeLegacyAlternative(e) => write!(f, "{}", e),
                 DaemonError::NoAnswer => write!(f, "Daemon did not answer"),
                 DaemonError::DaemonStopped => write!(f, "Daemon stopped"),
                 DaemonError::RpcSocket(Some(ErrorKind::ConnectionRefused), _) => {
