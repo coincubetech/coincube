@@ -164,8 +164,17 @@ def describe_failure(path, marker):
     failure = None
     children = _forked_children(events)
     for event in events:
+        # A forked child inherits a copy of the parent's descriptor table.
+        # Its opens and closes mutate only that copy, so they must not change
+        # the descriptor state used to reconstruct a bare parent failure.
+        # Keep the events in `events` for the explanatory history below.
+        child = event["tid"] in children
         fd = _fd_of(event)
-        if event["name"] in OPENING and not event["ret"].startswith("-1"):
+        if (
+            not child
+            and event["name"] in OPENING
+            and not event["ret"].startswith("-1")
+        ):
             for number, opened_path in _opened_fds(event):
                 opened[number] = opened_path
             continue
@@ -176,12 +185,16 @@ def describe_failure(path, marker):
             and not fd.startswith("-")
             # A forked child failing to close an inherited descriptor is its
             # own business and says nothing about this process.
-            and event["tid"] not in children
+            and not child
             and (marker in event["args"] or marker in opened.get(fd, ""))
         ):
             failure = event
             break
-        if event["name"] == "close" and not event["ret"].startswith("-1"):
+        if (
+            not child
+            and event["name"] == "close"
+            and not event["ret"].startswith("-1")
+        ):
             opened.pop(fd, None)
     if failure is None:
         return (

@@ -17,9 +17,10 @@ harness: it needs two nodes, two indexers and two daemons to exercise one thing
 exactly that, in batches, the way electrs does with ``--jsonrpc-import``, and
 fails on the node's own error lines rather than on a downstream symptom.
 
-It is a reproduction vehicle first and a regression test second. Until #394 has
-a cause, a green run here proves only that this probe did not trigger it; a red
-run is a reproduction with the node's error in the assertion message and, under
+It is a reproduction vehicle first and a regression test second. Until the
+upstream node defect tracked by #394 is fixed and validated, a green run here
+proves only that this probe did not trigger it; a red run is a reproduction
+with the node's error in the assertion message and, under
 ``BTCB2_TRACE_SYSCALLS=1``, the failing thread's syscalls and errno next to it
 in ``<datadir>/strace.log``.
 
@@ -458,7 +459,7 @@ def test_the_trace_reader_never_raises_on_a_broken_trace(tmp_path):
 CHILD_TRACE = """\
 1001 05:22:56.100000 openat(AT_FDCWD</w>, "/d/blocks/blk00000.dat", O_RDONLY) = 23</d/blocks/blk00000.dat> <0.000012>
 {storm}\
-1001 05:22:56.200400 lseek(23</d/blocks/blk00000.dat>, 24197, SEEK_SET) = -1 EBADF (Bad file descriptor) <0.000005>
+1001 05:22:56.200400 lseek(23, 24197, SEEK_SET) = -1 EBADF (Bad file descriptor) <0.000005>
 """
 
 
