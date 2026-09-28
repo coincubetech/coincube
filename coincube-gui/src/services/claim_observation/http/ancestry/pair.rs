@@ -141,10 +141,14 @@ impl HttpObservationSource {
             // complete fresh collection. A provider error or bracket race must
             // remain indeterminate and cannot revoke durable completion.
             if bitcoin.value.txid != dependency.root().txid {
-                return Err(FailureKind::AncestryRootChanged);
+                return Err(FailureKind::AncestryRootChanged {
+                    observed_at: oldest,
+                });
             }
             if bitcoin.value.txid == fork.value.txid {
-                return Err(FailureKind::AncestryRootShared);
+                return Err(FailureKind::AncestryRootShared {
+                    observed_at: oldest,
+                });
             }
             Ok(CoinbasePair {
                 selected: dependency.selected(),
@@ -783,8 +787,14 @@ mod tests {
                 "revoked" | "shared-revoked" => {
                     assert_eq!(result.unwrap_err(), FailureKind::Cancelled)
                 }
-                "root" => assert_eq!(result.unwrap_err(), FailureKind::AncestryRootChanged),
-                "shared" => assert_eq!(result.unwrap_err(), FailureKind::AncestryRootShared),
+                "root" => assert!(matches!(
+                    result.unwrap_err(),
+                    FailureKind::AncestryRootChanged { observed_at } if observed_at <= source.now()
+                )),
+                "shared" => assert!(matches!(
+                    result.unwrap_err(),
+                    FailureKind::AncestryRootShared { observed_at } if observed_at <= source.now()
+                )),
                 "stale" | "root-stale" | "policy" => {
                     assert_eq!(result.unwrap_err(), FailureKind::Stale)
                 }

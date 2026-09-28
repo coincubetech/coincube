@@ -91,6 +91,8 @@ pub struct Coordinator {
     revoker: Revoker,
     lifetime: Arc<()>,
     completion_revoker: Revoker,
+    #[cfg(test)]
+    completion_cleanup_barrier: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
 }
 impl Coordinator {
     /// Caller reconstructs both owned constructions and obtains signing consent.
@@ -238,6 +240,8 @@ impl Coordinator {
             revoker: Revoker::new(),
             lifetime: Arc::new(()),
             completion_revoker: Revoker::new(),
+            #[cfg(test)]
+            completion_cleanup_barrier: None,
         })
     }
     pub fn context(&self) -> &Context {
@@ -535,6 +539,14 @@ impl Coordinator {
         let ticket = self.controller.begin_check(context)?;
         let (collected, ancestry) = if let Some(path) = self.controller.recorded_ancestry()? {
             let source = self.services.ancestry_source().ok_or(Error::Unsupported)?;
+            source
+                .validate_context(&context.provider, context.generation)
+                .map_err(|kind| {
+                    Error::Observation(claim_observation::Failure {
+                        stage: claim_observation::Stage::Context,
+                        kind,
+                    })
+                })?;
             let (proof, sweep) = source
                 .collect_ancestry_sweep(
                     &path,
@@ -942,6 +954,8 @@ impl Preparation {
             revoker: self.revoker,
             lifetime: self.lifetime,
             completion_revoker: Revoker::new(),
+            #[cfg(test)]
+            completion_cleanup_barrier: None,
         })
     }
 }
@@ -1069,6 +1083,20 @@ pub struct CompletionEvidence {
     expected_generation: u64,
     revoker: Revoker,
     not_after: Instant,
+}
+
+/// Result of reconciling already persisted completion state. Stable ancestry
+/// invalidation has no truthful sweep transaction observation, so it is kept
+/// distinct from the ordinary observation result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompletionReconciliation {
+    Observed {
+        status: Status,
+        transaction: claim_observation::TransactionObservation,
+    },
+    AncestryInvalidated {
+        kind: claim_observation::FailureKind,
+    },
 }
 impl CompletionEvidence {
     pub fn is_live(&self) -> bool {
@@ -1286,15 +1314,53 @@ impl Coordinator {
         &mut self,
         context: &Context,
         root: &crate::dir::CoincubeDirectory,
-    ) -> Result<(Status, claim_observation::TransactionObservation), Error> {
-        use crate::app::settings::{
-            update_settings_file_checked, Settings, SettingsError, WalletId,
-        };
+    ) -> Result<CompletionReconciliation, Error> {
         let origin = Instant::now();
         let plan = self.controller.plan();
         if plan.poison == coincube_core::claim::Poison::InputAncestry {
-            self.current(context)?;
-            return Err(Error::Unsupported);
+            if !self.has_matching_completion_marker(root)? {
+                self.current(context)?;
+                return Err(Error::Unsupported);
+            }
+            let source_guard = self
+                .services
+                .ancestry_source()
+                .ok_or(Error::Unsupported)?
+                .context_guard();
+            source_guard
+                .validate(&context.provider, context.generation)
+                .map_err(|kind| {
+                    Error::Observation(claim_observation::Failure {
+                        stage: claim_observation::Stage::Context,
+                        kind,
+                    })
+                })?;
+            return match self.checked_sweep(context).await {
+                Err(Error::Observation(claim_observation::Failure {
+                    kind:
+                        kind @ (claim_observation::FailureKind::AncestryRootChanged { observed_at }
+                        | claim_observation::FailureKind::AncestryRootShared { observed_at }),
+                    ..
+                })) => {
+                    self.current(context)?;
+                    let deadline = observation_deadline(
+                        self.policy,
+                        observed_at,
+                        self.services.source().now(),
+                        origin,
+                    )?;
+                    self.clear_matching_completion_markers(
+                        context,
+                        root,
+                        deadline,
+                        Some(&source_guard),
+                    )
+                    .await?;
+                    Ok(CompletionReconciliation::AncestryInvalidated { kind })
+                }
+                Ok(_) => Err(Error::Unsupported),
+                Err(error) => Err(error),
+            };
         }
         let (status, checked) = self.checked_sweep(context).await?;
         let bitcoin_loss =
@@ -1313,7 +1379,10 @@ impl Coordinator {
             )
         );
         if !lost {
-            return Ok((status, transaction));
+            return Ok(CompletionReconciliation::Observed {
+                status,
+                transaction,
+            });
         }
         let deadline = evidence_deadline(
             self.policy,
@@ -1322,6 +1391,54 @@ impl Coordinator {
             self.services.source().now(),
             origin,
         )?;
+        self.clear_matching_completion_markers(context, root, deadline, None)
+            .await?;
+        Ok(CompletionReconciliation::Observed {
+            status,
+            transaction,
+        })
+    }
+
+    fn has_matching_completion_marker(
+        &self,
+        root: &crate::dir::CoincubeDirectory,
+    ) -> Result<bool, Error> {
+        use crate::app::settings::{Settings, WalletId, SETTINGS_FILE_NAME};
+        let wallet = self.controller.identity().clone();
+        let fork = self.construction.chain();
+        let bitcoin = self.controller.plan().bitcoin_chain;
+        let txid = self.verified.transaction().compute_txid();
+        let fingerprint =
+            crate::app::wallet::descriptor_id_fingerprint(self.construction.descriptor())
+                .to_string();
+        let checksum = WalletId::generate(self.construction.descriptor()).descriptor_checksum;
+        let pair = [(fork, &wallet.fork_cube), (bitcoin, &wallet.bitcoin_cube)];
+        for (chain, id) in pair {
+            let directory = root.network_directory(chain);
+            if !directory.path().join(SETTINGS_FILE_NAME).exists() {
+                continue;
+            }
+            let mut settings = Settings::from_file(&directory)
+                .map_err(|error| Error::CompletionPersistence(error.to_string()))?;
+            let cube = matching_completion_cube(&mut settings, chain, id, &fingerprint, &checksum)
+                .map_err(|error| Error::CompletionPersistence(error.to_string()))?;
+            if cube.split_completion_txid == Some(txid) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    async fn clear_matching_completion_markers(
+        &mut self,
+        context: &Context,
+        root: &crate::dir::CoincubeDirectory,
+        deadline: Instant,
+        source_guard: Option<&claim_observation::http::ObservationContextGuard>,
+    ) -> Result<(), Error> {
+        use crate::app::settings::{
+            update_settings_file_checked, Settings, SettingsError, WalletId,
+        };
         let wallet = self.controller.identity().clone();
         let fork = self.construction.chain();
         let bitcoin = self.controller.plan().bitcoin_chain;
@@ -1332,6 +1449,15 @@ impl Coordinator {
         let checksum = WalletId::generate(self.construction.descriptor()).descriptor_checksum;
         let pair = [(fork, &wallet.fork_cube), (bitcoin, &wallet.bitcoin_cube)];
         let apply = |settings: &mut Settings, chain, id: &str| -> Result<bool, SettingsError> {
+            if let Some(source_guard) = source_guard {
+                source_guard
+                    .validate(&context.provider, context.generation)
+                    .map_err(|_| {
+                        SettingsError::Unexpected(
+                            "Claim ancestry observation source changed".into(),
+                        )
+                    })?;
+            }
             if self.revoker.is_revoked()
                 || self.generation.has_changed().is_err()
                 || *self.generation.borrow() != context.generation
@@ -1366,11 +1492,16 @@ impl Coordinator {
             if Instant::now() >= deadline {
                 return Err(Error::ExpiredEvidence);
             }
-            return Ok((status, transaction));
+            return Ok(());
         }
         for (chain, id, mut settings) in snapshots {
             apply(&mut settings, chain, id)
                 .map_err(|error| Error::CompletionPersistence(error.to_string()))?;
+        }
+        #[cfg(test)]
+        if let Some((reached, release)) = &self.completion_cleanup_barrier {
+            reached.notify_one();
+            release.notified().await;
         }
         for (chain, id) in pair {
             update_settings_file_checked(&root.network_directory(chain), |mut settings| {
@@ -1383,6 +1514,6 @@ impl Coordinator {
         if Instant::now() >= deadline {
             return Err(Error::ExpiredEvidence);
         }
-        Ok((status, transaction))
+        Ok(())
     }
 }

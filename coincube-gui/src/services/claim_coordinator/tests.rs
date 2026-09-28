@@ -681,6 +681,33 @@ async fn dispatch_deadline_uses_oldest_evidence_and_never_extends_for_skew() {
     ));
 }
 
+#[test]
+fn ancestry_invalidation_deadline_uses_the_original_observation_age() {
+    let mut p = policy();
+    p.collection_budget = Duration::from_secs(30);
+    let origin = Instant::now();
+    assert_eq!(
+        observation_deadline(p, 42, 100, origin).unwrap(),
+        origin + Duration::from_secs(1)
+    );
+    assert!(matches!(
+        observation_deadline(p, 41, 100, origin),
+        Err(Error::ExpiredEvidence)
+    ));
+    assert!(matches!(
+        observation_deadline(p, 101, 100, origin),
+        Err(Error::ExpiredEvidence)
+    ));
+    assert!(matches!(
+        observation_deadline(p, -1, 100, origin),
+        Err(Error::ExpiredEvidence)
+    ));
+    assert!(matches!(
+        observation_deadline(p, 100, -1, origin),
+        Err(Error::ExpiredEvidence)
+    ));
+}
+
 /// `Production` is embedded-only, and it says so **at construction** rather
 /// than at the submit call.
 ///

@@ -12,7 +12,7 @@ use crate::{
     dir::CoincubeDirectory,
     services::{
         claim_coordinator::{
-            fork::{Coordinator, Preparation, SigningCheck},
+            fork::{CompletionReconciliation, Coordinator, Preparation, SigningCheck},
             Outcome, Review, Revoker,
         },
         claim_observation::TransactionObservation,
@@ -322,10 +322,16 @@ impl ForkClaimPanel {
                             saved: false,
                         });
                     }
-                    let (status, transaction) = coordinator
+                    let CompletionReconciliation::Observed {
+                        status,
+                        transaction,
+                    } = coordinator
                         .reconcile_completion(&context, &root)
                         .await
-                        .map_err(describe)?;
+                        .map_err(describe)?
+                    else {
+                        return Err("Ancestry completion was invalidated".into());
+                    };
                     let saved = if let Some(evidence) = coordinator
                         .check_completion(&context)
                         .await

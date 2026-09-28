@@ -986,6 +986,40 @@ fn evidence_deadline(
     origin.checked_add(remaining).ok_or(Error::ExpiredEvidence)
 }
 
+/// Bind a stable negative ancestry observation to the same short, monotonic
+/// lifetime used by positive completion evidence. The observation's original
+/// timestamp determines the remaining lifetime; reaching the coordinator does
+/// not grant it a fresh collection window.
+fn observation_deadline(
+    policy: CheckPolicy,
+    observed_at: i64,
+    now: i64,
+    origin: Instant,
+) -> Result<Instant, Error> {
+    if now < 0 || observed_at < 0 {
+        return Err(Error::ExpiredEvidence);
+    }
+    let age = now
+        .checked_sub(observed_at)
+        .filter(|age| *age >= 0)
+        .ok_or(Error::ExpiredEvidence)?;
+    let seconds = policy
+        .observations
+        .max_observation_age_seconds
+        .checked_sub(age)
+        .and_then(|remaining| remaining.checked_sub(1))
+        .filter(|remaining| *remaining > 0)
+        .ok_or(Error::ExpiredEvidence)?;
+    let remaining = policy
+        .collection_budget
+        .min(Duration::from_secs(30))
+        .min(Duration::from_secs(seconds as u64));
+    if remaining.is_zero() {
+        return Err(Error::ExpiredEvidence);
+    }
+    origin.checked_add(remaining).ok_or(Error::ExpiredEvidence)
+}
+
 fn same_view(mut a: ObservationBundle, mut b: ObservationBundle) -> bool {
     a.bitcoin.observed_at = 0;
     a.fork.observed_at = 0;

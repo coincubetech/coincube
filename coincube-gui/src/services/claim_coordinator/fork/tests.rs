@@ -1498,11 +1498,16 @@ async fn unmarked_completion_tracking_does_not_rewrite_settings_or_require_marke
         ));
     }
     h.fault.store(11, Ordering::SeqCst);
-    let (_, tx) = h
+    let CompletionReconciliation::Observed {
+        transaction: tx, ..
+    } = h
         .coordinator
         .reconcile_completion(&context(), &root)
         .await
-        .unwrap();
+        .unwrap()
+    else {
+        panic!("ordinary completion must return an observation");
+    };
     assert!(matches!(tx, TransactionObservation::Unconfirmed { .. }));
     for (path, bytes, inode, modified) in before {
         assert_eq!(std::fs::read(&path).unwrap(), bytes);

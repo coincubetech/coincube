@@ -73,6 +73,7 @@ async fn ancestry_sweep_reconciliation_recollects_proof_without_persisting_compl
     };
     let root_height = 961_640u32;
     let tip_height = root_height + 200;
+    let mut bitcoin_position = None;
     let mut fork_position = None;
     let mut step_reads = Vec::new();
     for (route, tip, block, tx) in [
@@ -110,7 +111,9 @@ async fn ancestry_sweep_reconciliation_recollects_proof_without_persisting_compl
             &format!("{}/block/{}/txid/0", prefix, block),
             tx.compute_txid().to_string(),
         );
-        if route.starts_with("bitcoin-blake2b") {
+        if route == "bitcoin/mainnet" {
+            bitcoin_position = Some(position);
+        } else {
             fork_position = Some(position);
         }
         server.mock(|when, then| {
@@ -306,14 +309,168 @@ async fn ancestry_sweep_reconciliation_recollects_proof_without_persisting_compl
     ));
     assert!(!settings_root.exists());
     root_read.assert_hits(10);
-    fork_position.as_ref().unwrap().delete_async().await;
+
+    // Existing completion markers remain gated while ancestry is valid. A
+    // stable canonical root change can revoke only the exact recorded sweep.
+    use crate::app::settings::{update_settings_file, CubeSettings, Settings, VaultIdentity};
+    let completion_root = crate::dir::CoincubeDirectory::new(temp.0.join("ancestry-settings"));
+    let identity = VaultIdentity::generate(coordinator.construction.descriptor());
+    let completion_txid = coordinator.verified.transaction().compute_txid();
+    for (chain, id) in [
+        (ChainId::Bitcoin, "bitcoin-cube"),
+        (ChainId::BitcoinBlake2b, "fork-cube"),
+    ] {
+        let mut cube =
+            CubeSettings::new_with_raw_id(id.into(), id.into(), chain).with_vault(identity.clone());
+        cube.split_completed_at_height = Some(u64::from(root_height + 2));
+        cube.split_completion_txid = Some(completion_txid);
+        update_settings_file(&completion_root.network_directory(chain), |mut settings| {
+            settings.cubes.push(cube);
+            Some(settings)
+        })
+        .await
+        .unwrap();
+    }
+    assert!(matches!(
+        coordinator
+            .reconcile_completion(&current, &completion_root)
+            .await,
+        Err(Error::Unsupported)
+    ));
+    for chain in [ChainId::Bitcoin, ChainId::BitcoinBlake2b] {
+        assert_eq!(
+            Settings::from_file(&completion_root.network_directory(chain))
+                .unwrap()
+                .cubes[0]
+                .split_completion_txid,
+            Some(completion_txid)
+        );
+    }
+    bitcoin_position.as_mut().unwrap().delete_async().await;
+    let mut changed_root = root.clone();
+    changed_root.output[0].value = Amount::from_sat(80_000);
+    let changed_position = fresh(
+        &server,
+        &format!("/api/v1/esplora/bitcoin/mainnet/block/{}/txid/0", hash(3)),
+        changed_root.compute_txid().to_string(),
+    );
     server.mock(|when, then| {
+        when.method(GET).path(format!(
+            "/api/v1/esplora/bitcoin/mainnet/tx/{}/hex",
+            changed_root.compute_txid()
+        ));
+        then.status(200).body(hex::encode(serialize(&changed_root)));
+    });
+    assert!(matches!(
+        coordinator
+            .reconcile_completion(&current, &completion_root)
+            .await
+            .unwrap(),
+        CompletionReconciliation::AncestryInvalidated {
+            kind: FailureKind::AncestryRootChanged { .. }
+        }
+    ));
+    for chain in [ChainId::Bitcoin, ChainId::BitcoinBlake2b] {
+        let cube = Settings::from_file(&completion_root.network_directory(chain))
+            .unwrap()
+            .cubes
+            .remove(0);
+        assert_eq!(cube.split_completed_at_height, None);
+        assert_eq!(cube.split_completion_txid, None);
+    }
+    changed_position.delete_async().await;
+    let restored_bitcoin_position = fresh(
+        &server,
+        &format!("/api/v1/esplora/bitcoin/mainnet/block/{}/txid/0", hash(3)),
+        root.compute_txid().to_string(),
+    );
+    for chain in [ChainId::Bitcoin, ChainId::BitcoinBlake2b] {
+        update_settings_file(&completion_root.network_directory(chain), |mut settings| {
+            settings.cubes[0].split_completed_at_height = Some(u64::from(root_height + 2));
+            settings.cubes[0].split_completion_txid = Some(completion_txid);
+            Some(settings)
+        })
+        .await
+        .unwrap();
+    }
+    fork_position.as_mut().unwrap().delete_async().await;
+    let shared_position = fresh(
+        &server,
+        &format!(
+            "/api/v1/esplora/bitcoin-blake2b/mainnet/block/{}/txid/0",
+            hash(4)
+        ),
+        root.compute_txid().to_string(),
+    );
+    server.mock(|when, then| {
+        when.method(GET).path(format!(
+            "/api/v1/esplora/bitcoin-blake2b/mainnet/tx/{}/hex",
+            root.compute_txid()
+        ));
+        then.status(200).body(hex::encode(serialize(&root)));
+    });
+    assert!(matches!(
+        coordinator
+            .reconcile_completion(&current, &completion_root)
+            .await
+            .unwrap(),
+        CompletionReconciliation::AncestryInvalidated {
+            kind: FailureKind::AncestryRootShared { .. }
+        }
+    ));
+    for chain in [ChainId::Bitcoin, ChainId::BitcoinBlake2b] {
+        assert_eq!(
+            Settings::from_file(&completion_root.network_directory(chain))
+                .unwrap()
+                .cubes[0]
+                .split_completion_txid,
+            None
+        );
+    }
+    shared_position.delete_async().await;
+    let restored_fork_position = fresh(
+        &server,
+        &format!(
+            "/api/v1/esplora/bitcoin-blake2b/mainnet/block/{}/txid/0",
+            hash(4)
+        ),
+        fork_root.compute_txid().to_string(),
+    );
+    restored_fork_position.delete_async().await;
+    let fork_failure = server.mock(|when, then| {
         when.method(GET).path(format!(
             "/api/v1/esplora/bitcoin-blake2b/mainnet/block/{}/txid/0",
             hash(4)
         ));
         then.status(500);
     });
+    for chain in [ChainId::Bitcoin, ChainId::BitcoinBlake2b] {
+        update_settings_file(&completion_root.network_directory(chain), |mut settings| {
+            settings.cubes[0].split_completed_at_height = Some(u64::from(root_height + 2));
+            settings.cubes[0].split_completion_txid = Some(completion_txid);
+            Some(settings)
+        })
+        .await
+        .unwrap();
+    }
+    assert!(matches!(
+        coordinator
+            .reconcile_completion(&current, &completion_root)
+            .await,
+        Err(Error::Observation(claim_observation::Failure {
+            kind: FailureKind::Http(500),
+            ..
+        }))
+    ));
+    for chain in [ChainId::Bitcoin, ChainId::BitcoinBlake2b] {
+        assert_eq!(
+            Settings::from_file(&completion_root.network_directory(chain))
+                .unwrap()
+                .cubes[0]
+                .split_completion_txid,
+            Some(completion_txid)
+        );
+    }
     assert!(matches!(
         coordinator.reconcile_sweep(&current).await,
         Err(Error::Observation(claim_observation::Failure {
@@ -328,4 +485,197 @@ async fn ancestry_sweep_reconciliation_recollects_proof_without_persisting_compl
         Err(Error::Revoked)
     ));
     assert_eq!(std::fs::read(&file).unwrap(), before);
+    drop(coordinator);
+
+    // The coordinator session and the HTTP ancestry source are separate
+    // objects. A source from another provider or generation must fail before
+    // network collection and must not turn a negative result into settings
+    // authority.
+    let settings_before: Vec<_> = [ChainId::Bitcoin, ChainId::BitcoinBlake2b]
+        .iter()
+        .copied()
+        .map(|chain| {
+            std::fs::read(
+                completion_root
+                    .network_directory(chain)
+                    .path()
+                    .join(crate::app::settings::SETTINGS_FILE_NAME),
+            )
+            .unwrap()
+        })
+        .collect();
+    let (_session_sender, session_generation) = watch::channel(7);
+    let foreign = MockServer::start();
+    let mut foreign_client = CoincubeClient::for_test(foreign.base_url());
+    foreign_client.set_token("synthetic-proof-token");
+    let foreign_source = HttpObservationSource::new(
+        foreign_client,
+        ChainId::Bitcoin,
+        ChainId::BitcoinBlake2b,
+        CollectionContext {
+            expected_generation: 7,
+            generation: session_generation.clone(),
+        },
+    )
+    .unwrap();
+    let (foreign_construction, foreign_verified) = ancestry_sweep(&built);
+    let mut foreign_coordinator = Coordinator::open(
+        &temp.0,
+        "bitcoin-cube".into(),
+        "fork-cube".into(),
+        &built,
+        foreign_construction,
+        foreign_verified,
+        current.clone(),
+        session_generation.clone(),
+        Box::new(ProofServices {
+            source: foreign_source,
+            calls: calls.clone(),
+        }),
+        policy(),
+    )
+    .unwrap();
+    assert!(matches!(
+        foreign_coordinator
+            .reconcile_completion(&current, &completion_root)
+            .await,
+        Err(Error::Observation(claim_observation::Failure {
+            stage: claim_observation::Stage::Context,
+            kind: FailureKind::Changed,
+        }))
+    ));
+    drop(foreign_coordinator);
+
+    let mut generation_client = CoincubeClient::for_test(server.base_url());
+    generation_client.set_token("synthetic-proof-token");
+    let generation_source = HttpObservationSource::new(
+        generation_client,
+        ChainId::Bitcoin,
+        ChainId::BitcoinBlake2b,
+        CollectionContext {
+            expected_generation: 8,
+            generation: session_generation.clone(),
+        },
+    )
+    .unwrap();
+    let (generation_construction, generation_verified) = ancestry_sweep(&built);
+    let mut generation_coordinator = Coordinator::open(
+        &temp.0,
+        "bitcoin-cube".into(),
+        "fork-cube".into(),
+        &built,
+        generation_construction,
+        generation_verified,
+        current.clone(),
+        session_generation,
+        Box::new(ProofServices {
+            source: generation_source,
+            calls: calls.clone(),
+        }),
+        policy(),
+    )
+    .unwrap();
+    assert!(matches!(
+        generation_coordinator
+            .reconcile_completion(&current, &completion_root)
+            .await,
+        Err(Error::Observation(claim_observation::Failure {
+            stage: claim_observation::Stage::Context,
+            kind: FailureKind::Cancelled,
+        }))
+    ));
+    for (chain, expected) in [ChainId::Bitcoin, ChainId::BitcoinBlake2b]
+        .iter()
+        .copied()
+        .zip(&settings_before)
+    {
+        assert_eq!(
+            std::fs::read(
+                completion_root
+                    .network_directory(chain)
+                    .path()
+                    .join(crate::app::settings::SETTINGS_FILE_NAME)
+            )
+            .unwrap(),
+            expected.clone()
+        );
+    }
+
+    drop(generation_coordinator);
+    fork_failure.delete_async().await;
+    fresh(
+        &server,
+        &format!(
+            "/api/v1/esplora/bitcoin-blake2b/mainnet/block/{}/txid/0",
+            hash(4)
+        ),
+        fork_root.compute_txid().to_string(),
+    );
+    restored_bitcoin_position.delete_async().await;
+    let _race_changed_position = fresh(
+        &server,
+        &format!("/api/v1/esplora/bitcoin/mainnet/block/{}/txid/0", hash(3)),
+        changed_root.compute_txid().to_string(),
+    );
+    let (_race_session_sender, race_session_generation) = watch::channel(7);
+    let (race_source_sender, race_source_generation) = watch::channel(7);
+    let mut race_client = CoincubeClient::for_test(server.base_url());
+    race_client.set_token("synthetic-proof-token");
+    let race_source = HttpObservationSource::new(
+        race_client,
+        ChainId::Bitcoin,
+        ChainId::BitcoinBlake2b,
+        CollectionContext {
+            expected_generation: 7,
+            generation: race_source_generation,
+        },
+    )
+    .unwrap();
+    let (race_construction, race_verified) = ancestry_sweep(&built);
+    let mut race_coordinator = Coordinator::open(
+        &temp.0,
+        "bitcoin-cube".into(),
+        "fork-cube".into(),
+        &built,
+        race_construction,
+        race_verified,
+        current.clone(),
+        race_session_generation,
+        Box::new(ProofServices {
+            source: race_source,
+            calls: calls.clone(),
+        }),
+        policy(),
+    )
+    .unwrap();
+    let cleanup_reached = Arc::new(tokio::sync::Notify::new());
+    let cleanup_release = Arc::new(tokio::sync::Notify::new());
+    race_coordinator.completion_cleanup_barrier =
+        Some((cleanup_reached.clone(), cleanup_release.clone()));
+    let reconcile = race_coordinator.reconcile_completion(&current, &completion_root);
+    let revoke_while_waiting = async {
+        tokio::time::timeout(Duration::from_secs(3), cleanup_reached.notified())
+            .await
+            .unwrap();
+        race_source_sender.send_replace(8);
+        cleanup_release.notify_one();
+    };
+    let (result, ()) = tokio::join!(reconcile, revoke_while_waiting);
+    assert!(matches!(result, Err(Error::CompletionPersistence(_))));
+    for (chain, expected) in [ChainId::Bitcoin, ChainId::BitcoinBlake2b]
+        .iter()
+        .copied()
+        .zip(&settings_before)
+    {
+        assert_eq!(
+            std::fs::read(
+                completion_root
+                    .network_directory(chain)
+                    .path()
+                    .join(crate::app::settings::SETTINGS_FILE_NAME)
+            )
+            .unwrap(),
+            expected.clone()
+        );
+    }
 }

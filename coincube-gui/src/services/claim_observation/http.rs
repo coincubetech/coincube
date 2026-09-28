@@ -32,6 +32,27 @@ pub struct HttpObservationSource {
     expected: u64,
     budget: Option<std::sync::Arc<discovery::CollectionBudget>>,
 }
+
+#[derive(Clone)]
+pub(crate) struct ObservationContextGuard {
+    provider: String,
+    expected: u64,
+    generation: watch::Receiver<u64>,
+}
+impl ObservationContextGuard {
+    pub(crate) fn validate(&self, provider: &str, generation: u64) -> Result<(), FailureKind> {
+        if provider.trim_end_matches('/') != self.provider {
+            return Err(FailureKind::Changed);
+        }
+        if generation != self.expected
+            || *self.generation.borrow() != self.expected
+            || self.generation.has_changed().is_err()
+        {
+            return Err(FailureKind::Cancelled);
+        }
+        Ok(())
+    }
+}
 impl HttpObservationSource {
     pub fn new(
         client: CoincubeClient,
@@ -76,6 +97,24 @@ impl HttpObservationSource {
     /// Preserve this encoding when reopening existing journals.
     pub(crate) fn provider_identity(&self) -> String {
         format!("bitcoin|{}/api/v1/esplora/bitcoin/mainnet", self.base)
+    }
+
+    /// Bind every result, including stable negative ancestry observations, to
+    /// the same admitted provider and live session generation as its consumer.
+    pub(crate) fn validate_context(
+        &self,
+        provider: &str,
+        generation: u64,
+    ) -> Result<(), FailureKind> {
+        self.context_guard().validate(provider, generation)
+    }
+
+    pub(crate) fn context_guard(&self) -> ObservationContextGuard {
+        ObservationContextGuard {
+            provider: self.provider_identity(),
+            expected: self.expected,
+            generation: self.generation.clone(),
+        }
     }
 
     fn prefix(chain: ChainId) -> Result<&'static str, FailureKind> {
