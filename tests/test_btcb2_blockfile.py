@@ -50,6 +50,7 @@ import pytest
 from fixtures import *  # noqa: F401,F403  (test_base_dir)
 from test_framework import utils
 from test_framework.bitcoind import Bitcoind
+from test_framework.strace import describe_failure
 from test_framework.btcb2 import (
     KNOTS_LEGACY_PATH,
     TwoChainRegtest,
@@ -224,14 +225,35 @@ def test_concurrent_getblock_never_loses_the_block_file(legacy_node):
 
     node_errors = node_block_file_errors(node)
     if rpc_errors or node_errors or transport_errors:
-        report = node_block_file_report(node, "knots-legacy")
+        report = node_block_file_report(
+            node, "knots-legacy", "concurrent getblock probe failed"
+        )
         pytest.fail(
             f"block-file fault reproduced after {sent} getblock calls "
             f"({rounds_run} rounds x {THREADS} threads, batches of {BATCH}).\n"
             f"getblock RPC errors: {rpc_errors[:5]}\n"
             f"transport errors: {transport_errors[:5]}\n"
-            f"{report}"
+            f"{report}\n"
+            f"{_trace_excerpt(node)}"
         )
+
+
+def _trace_excerpt(node):
+    """The failing descriptor's history, in the failure message and on disk.
+
+    The full trace is tens of megabytes; this is the part that answers the
+    question, and it is small enough to survive artifact collection.
+    """
+    if not utils.TRACE_SYSCALLS or not os.path.exists(node.strace_log):
+        return "(not traced: re-run with BTCB2_TRACE_SYSCALLS=1 for the errno)"
+    excerpt = describe_failure(node.strace_log, "blk00000.dat")
+    path = os.path.join(node.bitcoin_dir, "strace-excerpt.log")
+    try:
+        with open(path, "w") as handle:
+            handle.write(excerpt + "\n")
+    except OSError as error:  # pragma: no cover - the excerpt still goes to the log
+        logging.warning("could not write %s: %s", path, error)
+    return excerpt
 
 
 # ── node-free regressions for the diagnosis machinery ────────────────────────
@@ -372,3 +394,45 @@ def test_indexer_failure_is_reported_with_the_nodes_block_file_state(tmp_path):
     assert "Unable to seek to position 47310" in str(failure.value)
     assert "re-read of every block succeeded" in str(failure.value)
     assert isinstance(failure.value.__cause__, OSError)
+
+
+# ── the trace reader ─────────────────────────────────────────────────────────
+
+TRACE = """\
+1001 05:22:56.100000 openat(AT_FDCWD</w>, "/d/blocks/blk00000.dat", O_RDONLY) = 23</d/blocks/blk00000.dat> <0.000012>
+1002 05:22:56.100100 openat(AT_FDCWD</w>, "/d/blocks/blk00000.dat", O_RDONLY) = 24</d/blocks/blk00000.dat> <0.000011>
+1002 05:22:56.100200 close(24</d/blocks/blk00000.dat>) = 0 <0.000004>
+1002 05:22:56.100300 close(23</d/blocks/blk00000.dat>) = 0 <0.000004>
+1001 05:22:56.100400 lseek(23</d/blocks/blk00000.dat>, 24197, SEEK_SET) = -1 EBADF (Bad file descriptor) <0.000005>
+1001 05:22:56.100500 close(23</d/blocks/blk00000.dat>) = -1 EBADF (Bad file descriptor) <0.000004>
+"""
+
+
+def test_the_trace_reader_names_the_thread_that_closed_the_descriptor(tmp_path):
+    trace = tmp_path / "strace.log"
+    trace.write_text(TRACE)
+    report = describe_failure(str(trace), "blk00000.dat")
+    assert "fd 23 failed in tid 1001" in report
+    assert "EBADF" in report
+    # The close that poisoned it came from another thread, and saying so is the
+    # entire value of the report.
+    assert "* 05:22:56.100300 tid    1002 close = 0" in report
+    assert "other threads touched fd 23 before it failed: 1002" in report
+    # fd 24's life is a different descriptor's and must not be mixed in.
+    assert "100100" not in report
+
+
+def test_the_trace_reader_says_so_when_nothing_failed(tmp_path):
+    trace = tmp_path / "strace.log"
+    trace.write_text(TRACE.replace("-1 EBADF (Bad file descriptor)", "0"))
+    report = describe_failure(str(trace), "blk00000.dat")
+    assert "none of them failed" in report
+
+
+def test_the_trace_reader_never_raises_on_a_broken_trace(tmp_path):
+    """It runs inside a failure path; throwing there would hide the failure it
+    exists to explain."""
+    assert "could not read" in describe_failure(str(tmp_path / "absent"), "blk")
+    trace = tmp_path / "strace.log"
+    trace.write_text("not a trace at all\n<... resumed>\n+++ exited with 0 +++\n")
+    assert "no parsable strace lines" in describe_failure(str(trace), "blk")

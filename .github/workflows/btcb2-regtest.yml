@@ -241,14 +241,23 @@ jobs:
           dest="$GITHUB_WORKSPACE/failure-logs"
           mkdir -p "$dest"
           cd "$GITHUB_WORKSPACE/test-datadirs" || exit 0
-          # blk*.dat rides along (tens of KB on regtest) so the bytes at the
-          # position the node could not seek to can be checked offline, and
-          # strace.log carries the syscall/errno evidence when tracing is on.
+          # blk*.dat rides along so the bytes at the position the node could
+          # not seek to can be checked offline, and strace-excerpt.log is the
+          # failing descriptor's history, already correlated by the test.
           find . -type f \( -name 'log' -o -name 'debug.log' \
-            -o -name 'strace.log' -o -name 'blk*.dat' \) -size -50M |
+            -o -name 'strace-excerpt.log' -o -name 'blk*.dat' \) -size -50M |
             while read -r f; do
               mkdir -p "$dest/$(dirname "$f")"
               cp "$f" "$dest/$f"
+            done
+          # The full syscall trace is the one file the size cap must not drop.
+          # Run 36381534801 reproduced #394 and lost its trace to that cap; it
+          # compresses about twentyfold, so it goes in gzipped rather than not
+          # at all.
+          find . -type f -name 'strace.log' |
+            while read -r f; do
+              mkdir -p "$dest/$(dirname "$f")"
+              gzip -c "$f" > "$dest/$f.gz"
             done
           du -sh "$dest"
 

@@ -140,10 +140,10 @@ def reread_every_block(node):
     return failures
 
 
-def node_block_file_report(node, label):
+def node_block_file_report(node, label, context="block-file failure"):
     """What the node itself says about its block files, plus an exact re-read."""
     errors = node_block_file_errors(node)
-    lines = [f"{label}: indexer startup failed."]
+    lines = [f"{label}: {context}."]
     if errors:
         lines.append(f"{label} block-file errors in debug.log ({len(errors)}):")
         lines.extend(f"  {line}" for line in errors[-20:])
@@ -425,7 +425,7 @@ class TwoChainRegtest:
                 electrs.wait_for_tip(node.rpc.getbestblockhash(), timeout=TIMEOUT * 3)
             except Exception as error:
                 raise RuntimeError(
-                    node_block_file_report(node, label)
+                    node_block_file_report(node, label, "indexer startup failed")
                 ) from error
 
     def _start_daemons(self):
