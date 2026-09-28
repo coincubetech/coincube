@@ -714,7 +714,7 @@ mod flow {
         async fn list_coins(
             &self,
             statuses: &[CoinStatus],
-            _: &[OutPoint],
+            outpoints: &[OutPoint],
         ) -> Result<model::ListCoinsResult, DaemonError> {
             self.hit("list_coins");
             assert!(statuses.is_empty() || statuses == [CoinStatus::Confirmed]);
@@ -730,6 +730,9 @@ mod flow {
             let mut coins = vec![coin];
             if let Some(ancestry) = &self.ancestry_coin {
                 coins.push(ancestry.clone());
+            }
+            if !outpoints.is_empty() {
+                coins.retain(|coin| outpoints.contains(&coin.outpoint));
             }
             Ok(model::ListCoinsResult { coins })
         }

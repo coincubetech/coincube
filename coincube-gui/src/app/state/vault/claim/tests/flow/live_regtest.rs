@@ -288,6 +288,23 @@ async fn claim_gui_regtest_driver() {
     let task = panel.reload(Some(dyn_daemon.clone()), Some(wallet));
     drive(&mut panel, &dyn_daemon, &cache, task).await;
     if resume {
+        let restart_state = match &panel.stage {
+            Stage::Track {
+                session,
+                status,
+                busy,
+                error,
+                ..
+            } => format!(
+                "track(session={}, status={status:?}, busy={busy}, error={error:?})",
+                session.is_some()
+            ),
+            Stage::Preconditions => "preconditions".into(),
+            Stage::Plan { .. } => "plan".into(),
+            Stage::CheckingSign(_) => "checking-sign".into(),
+            Stage::Sign { .. } => "sign".into(),
+            Stage::Review { .. } => "review".into(),
+        };
         assert!(
             matches!(
                 &panel.stage,
@@ -298,8 +315,8 @@ async fn claim_gui_regtest_driver() {
                     ..
                 }
             ),
-            "recorded Bitcoin claim must reopen for tracking: {:?}",
-            panel.restart_error
+            "recorded Bitcoin claim must reopen for tracking: restart_error={:?}, state={restart_state}",
+            panel.restart_error,
         );
         assert!(!panel.can_build());
         assert!(!daemon.hits().contains(&"reserve_change"));
