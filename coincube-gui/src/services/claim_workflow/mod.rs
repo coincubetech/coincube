@@ -145,7 +145,13 @@ pub struct Controller {
     revision: u64,
     pending: bool,
     status: Status,
-    fresh: Option<ObservationBundle>,
+    fresh: Option<FreshObservation>,
+}
+/// An ancestry check retains its live, non-serializable proof alongside the
+/// exact observations. Journal recovery never reconstructs this authority.
+struct FreshObservation {
+    observations: ObservationBundle,
+    ancestry: Option<crate::services::claim_observation::http::CollectedAncestry>,
 }
 fn digest(tx: &Transaction) -> sha256::Hash {
     sha256::Hash::hash(&consensus::serialize(tx))
@@ -476,6 +482,49 @@ impl Controller {
         policy: Policy,
         now: i64,
     ) -> Result<Status, Error> {
+        self.apply_collected(
+            ticket,
+            current,
+            result.map(|collected| (collected, None)),
+            policy,
+            now,
+        )
+    }
+
+    /// Consume a fresh collection rather than accepting an ancestry eligibility
+    /// boolean. Provider, generation, path and plan are checked against this
+    /// controller, and the proof is retained only for the current check.
+    pub fn apply_ancestry_observation(
+        &mut self,
+        ticket: Ticket,
+        current: &Context,
+        result: Result<crate::services::claim_observation::http::CollectedAncestry, Failure>,
+        policy: Policy,
+        now: i64,
+    ) -> Result<Status, Error> {
+        self.apply_collected(
+            ticket,
+            current,
+            result.map(|collected| (collected.assessment(), Some(collected))),
+            policy,
+            now,
+        )
+    }
+
+    fn apply_collected(
+        &mut self,
+        ticket: Ticket,
+        current: &Context,
+        result: Result<
+            (
+                CollectedAssessment,
+                Option<crate::services::claim_observation::http::CollectedAncestry>,
+            ),
+            Failure,
+        >,
+        policy: Policy,
+        now: i64,
+    ) -> Result<Status, Error> {
         self.ensure_context(current)?;
         if ticket.controller != self.id
             || !self.pending
@@ -487,7 +536,7 @@ impl Controller {
             return Err(Error::LateObservation);
         }
         self.clear_check();
-        let result = match result {
+        let (result, ancestry) = match result {
             Ok(result) => result,
             Err(_) => {
                 self.status = Status::Unavailable;
@@ -503,15 +552,11 @@ impl Controller {
             self.status = Status::Observation(Assessment::NeedsPreflightRecheck);
             return Ok(self.status);
         }
-        let assessment = claim::assess(
-            &self.intent.plan,
-            o.bitcoin,
-            o.fork,
-            o.deployment,
-            policy,
-            now,
-            Some(o.preflight),
-        );
+        let fresh = FreshObservation {
+            observations: o,
+            ancestry,
+        };
+        let assessment = self.assess_fresh(&fresh, policy, now)?;
         self.status = Status::Observation(assessment);
         if matches!(
             assessment,
@@ -531,7 +576,7 @@ impl Controller {
                 return Err(error);
             }
             self.intent = next;
-            self.fresh = Some(o);
+            self.fresh = Some(fresh);
         }
         Ok(self.status)
     }
@@ -558,15 +603,7 @@ impl Controller {
         {
             return Err(Error::WrongIdentity);
         }
-        let assessment = claim::assess(
-            &self.intent.plan,
-            observations.bitcoin,
-            observations.fork,
-            observations.deployment,
-            policy,
-            now,
-            Some(observations.preflight),
-        );
+        let assessment = self.assess_fresh(&observations, policy, now)?;
         if assessment != Assessment::ObservationsEligibleForPreflight {
             return Err(Error::Unchecked);
         }
@@ -657,15 +694,8 @@ impl Controller {
         if self.intent.fork_sweep.as_ref() != Some(&unsigned) {
             return Err(Error::InvalidPlan);
         }
-        if claim::assess(
-            &self.intent.plan,
-            observations.bitcoin,
-            observations.fork,
-            observations.deployment,
-            policy,
-            now,
-            Some(observations.preflight),
-        ) != Assessment::ObservationsEligibleForPreflight
+        if self.assess_fresh(&observations, policy, now)?
+            != Assessment::ObservationsEligibleForPreflight
         {
             return Err(Error::Unchecked);
         }
@@ -700,15 +730,7 @@ impl Controller {
         }
         let observations = self.fresh.take().ok_or(Error::Unchecked)?;
         self.status = Status::Unchecked;
-        let assessment = claim::assess(
-            &self.intent.plan,
-            observations.bitcoin,
-            observations.fork,
-            observations.deployment,
-            policy,
-            now,
-            Some(observations.preflight),
-        );
+        let assessment = self.assess_fresh(&observations, policy, now)?;
         if assessment != Assessment::WaitingForConfirmation || self.intent.phase != Phase::Intent {
             return Err(Error::Unchecked);
         }

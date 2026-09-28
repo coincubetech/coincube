@@ -77,6 +77,46 @@ pub(super) fn validate_poison(intent: &Intent) -> Result<(), Error> {
     Ok(())
 }
 impl Controller {
+    pub(super) fn assess_fresh(
+        &self,
+        fresh: &FreshObservation,
+        policy: Policy,
+        now: i64,
+    ) -> Result<Assessment, Error> {
+        let o = fresh.observations;
+        match fresh.ancestry.as_ref() {
+            Some(collected) => {
+                if !self.construction_verified {
+                    return Err(Error::Unchecked);
+                }
+                let path = self.recorded_ancestry()?.ok_or(Error::WrongIdentity)?;
+                collected
+                    .assess_verified_observations(
+                        &path,
+                        &self.intent.plan,
+                        crate::services::claim_observation::http::AncestryContext {
+                            provider: &self.context.provider,
+                            generation: self.context.generation,
+                            policy,
+                            now,
+                            tips: o.preflight,
+                        },
+                    )
+                    .map(|checked| checked.assessment)
+                    .map_err(|_| Error::Unchecked)
+            }
+            None => Ok(claim::assess(
+                &self.intent.plan,
+                o.bitcoin,
+                o.fork,
+                o.deployment,
+                policy,
+                now,
+                Some(o.preflight),
+            )),
+        }
+    }
+
     /// Persist the owned construction and its structurally verified raw path in
     /// the same atomic intent. Fresh qualification is deliberately not stored.
     pub fn create_ancestry(

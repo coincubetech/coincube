@@ -210,6 +210,12 @@ async fn ancestry_protocol_case(rdts_active: bool, expiry_time: i64) {
             .assessment,
         Assessment::WaitingForConfirmation
     );
+    let mut tightened = proof_context(checked_at + 2);
+    tightened.policy.max_observation_age_seconds = 1;
+    assert!(matches!(
+        collected.assess_verified_observations(&path, &plan, tightened),
+        Err(FailureKind::Stale)
+    ));
     let mut altered = plan.clone();
     altered.step1.output[0].value = Amount::from_sat(1);
     assert_eq!(
@@ -260,6 +266,52 @@ async fn ancestry_protocol_case(rdts_active: bool, expiry_time: i64) {
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         assert_eq!(std::fs::read(temp.0.join("intent.json")).unwrap(), before);
     }
+    // The controller requires the opaque live proof and rechecks its lifetime
+    // at the durable-intent boundary, even after accepting the observation.
+    let source = coordinator.services.ancestry_source().unwrap();
+    let intent_collection = source
+        .collect_ancestry(
+            &path,
+            &plan,
+            policy().observations,
+            policy().collection_budget,
+        )
+        .await
+        .unwrap();
+    let intent_checked_at = source.now();
+    let ticket = coordinator.controller.begin_check(&current).unwrap();
+    assert_eq!(
+        coordinator
+            .controller
+            .apply_ancestry_observation(
+                ticket,
+                &current,
+                Ok(intent_collection),
+                policy().observations,
+                intent_checked_at,
+            )
+            .unwrap(),
+        claim_workflow::Status::Observation(Assessment::WaitingForConfirmation),
+    );
+    let stale_at = intent_checked_at + policy().observations.max_observation_age_seconds + 1;
+    for now in [stale_at, intent_checked_at] {
+        assert!(matches!(
+            coordinator.controller.record_broadcast_intent(
+                &current,
+                coordinator.verified.transaction(),
+                policy().observations,
+                now,
+            ),
+            Err(claim_workflow::Error::Unchecked),
+        ));
+    }
+    assert_eq!(
+        coordinator.controller.phase(),
+        claim_workflow::Phase::Intent
+    );
+    assert_eq!(std::fs::read(temp.0.join("intent.json")).unwrap(), before);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+
     // Exercise the same inclusion observer through fresh HTTP collection, then
     // change the canonical height mapping while preserving the tx status reply.
     step_reads[0].delete_async().await;
@@ -398,7 +450,7 @@ async fn ancestry_protocol_case(rdts_active: bool, expiry_time: i64) {
             ..
         }))
     ));
-    root_read.assert_hits(7);
+    root_read.assert_hits(8);
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     sender.send_replace(8);
     assert_eq!(
@@ -409,6 +461,6 @@ async fn ancestry_protocol_case(rdts_active: bool, expiry_time: i64) {
         coordinator.prepare_review(&current).await,
         Err(Error::Revoked)
     ));
-    root_read.assert_hits(7);
+    root_read.assert_hits(8);
     assert_eq!(std::fs::read(temp.0.join("intent.json")).unwrap(), before);
 }

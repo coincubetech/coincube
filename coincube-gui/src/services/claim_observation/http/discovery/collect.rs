@@ -56,8 +56,18 @@ impl CollectedAncestry {
         use coincube_core::claim::{
             BitcoinConfirmation, ForkTransactionPresence, MIN_CONFIRMATIONS,
         };
+        let o = self.assessment.observations;
+        let base = coincube_core::claim::assess(
+            plan,
+            o.bitcoin,
+            o.fork,
+            o.deployment,
+            context.policy,
+            context.now,
+            Some(context.tips),
+        );
         let confirmation = self.bitcoin_confirmation(path, plan, context)?;
-        if self.assessment.assessment != Assessment::InputProofUnsupported {
+        if base != Assessment::InputProofUnsupported {
             return Err(FailureKind::Malformed);
         }
         let mut result = self.assessment;
