@@ -11,6 +11,7 @@ use coincube_core::{
     descriptors::CoincubePolicy,
     miniscript::bitcoin::{bip32::Fingerprint, psbt::Psbt, secp256k1, Network, Txid},
     psbt_unified::UnifiedPsbt,
+    unified_finalize::UnifiedFinalizeError,
 };
 use coincubed::commands::CoinStatus;
 use iced::Task;
@@ -687,6 +688,18 @@ impl PsbtState {
         match message {
             Message::View(view::Message::ExportPsbt) => {
                 if self.modal.is_none() {
+                    if let Err(reason) =
+                        enforce_legacy_signature_policy(self.wallet.chain, &self.tx.psbt)
+                    {
+                        let message = replay::unsafe_legacy_policy_copy(&reason)
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| {
+                                crate::user_error::report(&Error::Unexpected(reason.to_string()))
+                            });
+                        let error = Error::Unexpected(reason.to_string());
+                        self.warning = Some(error);
+                        return Task::done(Message::View(view::Message::ShowError(message)));
+                    }
                     let psbt_str = self.tx.psbt.to_string();
                     let modal = VaultExportModal::new(None, ImportExportType::ExportPsbt(psbt_str));
                     let launch = modal.launch(true);
@@ -1010,8 +1023,14 @@ impl PsbtState {
                 if let Err(e) =
                     merge_signatures_for_chain(self.wallet.chain, &mut self.tx.psbt, &psbt)
                 {
+                    let err_msg = replay::unsafe_legacy_policy_copy(&e)
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| {
+                            crate::user_error::report(&Error::Unexpected(format!(
+                                "Couldn't merge the imported PSBT: {e}"
+                            )))
+                        });
                     let e = Error::Unexpected(format!("Couldn't merge the imported PSBT: {e}"));
-                    let err_msg = crate::user_error::report(&e);
                     self.warning = Some(e);
                     return Task::done(Message::View(view::Message::ShowError(err_msg)));
                 }
@@ -2354,10 +2373,16 @@ impl Modal for SignModal {
                             // Nothing was merged and nothing is persisted: a
                             // signature the adapter refuses (conflicting or
                             // ambiguous encoding) must not reach the daemon.
+                            let err_msg = replay::unsafe_legacy_policy_copy(&e)
+                                .map(str::to_owned)
+                                .unwrap_or_else(|| {
+                                    crate::user_error::report(&Error::Unexpected(format!(
+                                        "Couldn't merge the signature from {fingerprint}: {e}"
+                                    )))
+                                });
                             let e = Error::Unexpected(format!(
                                 "Couldn't merge the signature from {fingerprint}: {e}"
                             ));
-                            let err_msg = crate::user_error::report(&e);
                             self.error = Some(e);
                             return Task::done(Message::View(view::Message::ShowError(err_msg)));
                         }
@@ -2541,15 +2566,14 @@ fn merge_signatures_for_chain(
     chain: ChainId,
     psbt: &mut Psbt,
     signed_psbt: &Psbt,
-) -> Result<(), String> {
+) -> Result<(), UnifiedFinalizeError> {
     if !chain.is_blake2b() {
         merge_signatures(psbt, signed_psbt);
         return Ok(());
     }
-    let mut destination = UnifiedPsbt::from_psbt(psbt.clone()).map_err(|e| e.to_string())?;
-    let delta = UnifiedPsbt::from_psbt(signed_psbt.clone()).map_err(|e| e.to_string())?;
-    coincube_core::psbt_unified::merge_signatures(&mut destination, &delta)
-        .map_err(|e| e.to_string())?;
+    let mut destination = UnifiedPsbt::from_psbt(psbt.clone())?;
+    let delta = UnifiedPsbt::from_psbt(signed_psbt.clone())?;
+    coincube_core::psbt_unified::merge_signatures(&mut destination, &delta)?;
     // The adapter validates representation, not validity: a signer result
     // carrying a signature that does not verify (wrong digest, ANYONECANPAY)
     // must not enter the in-memory PSBT — the daemon would refuse to store
@@ -2563,10 +2587,27 @@ fn merge_signatures_for_chain(
     coincube_core::unified_finalize::verify_all_signatures(
         &destination,
         &secp256k1::Secp256k1::verification_only(),
-    )
-    .map_err(|e| e.to_string())?;
+    )?;
+    coincube_core::unified_finalize::ensure_no_unsafe_legacy_alternative(
+        &destination,
+        &secp256k1::Secp256k1::verification_only(),
+    )?;
     *psbt = destination.psbt().clone();
     Ok(())
+}
+
+fn enforce_legacy_signature_policy(
+    chain: ChainId,
+    psbt: &Psbt,
+) -> Result<(), UnifiedFinalizeError> {
+    if !chain.is_blake2b() {
+        return Ok(());
+    }
+    let unified = UnifiedPsbt::from_psbt(psbt.clone())?;
+    coincube_core::unified_finalize::ensure_no_unsafe_legacy_alternative(
+        &unified,
+        &secp256k1::Secp256k1::verification_only(),
+    )
 }
 
 /// [`merge_signatures_for_chain`] for the Keychain sign flow, so every merge
@@ -2575,7 +2616,7 @@ pub(crate) fn merge_signatures_pub(
     chain: ChainId,
     psbt: &mut Psbt,
     signed_psbt: &Psbt,
-) -> Result<(), String> {
+) -> Result<(), UnifiedFinalizeError> {
     merge_signatures_for_chain(chain, psbt, signed_psbt)
 }
 
@@ -3392,8 +3433,9 @@ mod tests {
         use super::super::*;
         use crate::app::state::vault::{
             replay,
-            test_support::unified::{fixture, legacy, signer},
+            test_support::unified::{fixture, legacy, signer, unified},
         };
+        use crate::utils::mock::Daemon as MockDaemon;
         use coincube_core::{
             border_wallet::sign_psbt_with_border_wallet, miniscript::bitcoin::secp256k1,
         };
@@ -3484,6 +3526,39 @@ mod tests {
                 );
                 assert_eq!(keyed.serialize(), prior.serialize());
             }
+        }
+
+        #[test]
+        fn export_does_not_apply_the_blake2b_legacy_policy() {
+            let f = fixture();
+            // This exact retained set is refused on Bitcoin Blake2b: a
+            // unified-bearing witness and a complete legacy alternative are
+            // both available. A Bitcoin-family wallet keeps its historical
+            // opaque PSBT export behavior.
+            let psbt = legacy(
+                &legacy(&unified(&f.psbt, &f.signers[0]), &f.signers[1]),
+                &f.signers[2],
+            );
+            let wallet = Arc::new(Wallet::new(f.descriptor.clone()).with_chain(ChainId::Bitcoin));
+            let tx = SpendTx::new(
+                None,
+                psbt.clone(),
+                Vec::new(),
+                &f.descriptor,
+                &secp256k1::Secp256k1::new(),
+                Network::Bitcoin,
+            );
+            let mut state = PsbtState::new(wallet, tx, true);
+            let daemon: Arc<dyn Daemon + Sync + Send> = Arc::new(
+                crate::daemon::client::Coincubed::new(MockDaemon::new(vec![]).run()),
+            );
+            let _task = state.update(
+                daemon,
+                &Cache::default(),
+                Message::View(view::Message::ExportPsbt),
+            );
+            assert!(state.modal.is_some(), "Bitcoin export modal must open");
+            assert_eq!(state.tx.psbt.serialize(), psbt.serialize());
         }
 
         #[test]
@@ -3766,8 +3841,11 @@ mod tests {
             let before = merged.serialize();
             let err = merge_signatures_for_chain(ChainId::BitcoinBlake2b, &mut merged, &both)
                 .unwrap_err();
+            let err_text = err.to_string();
             assert!(
-                err.contains("both") || err.contains("ambiguous") || err.contains("Ambiguous"),
+                err_text.contains("both")
+                    || err_text.contains("ambiguous")
+                    || err_text.contains("Ambiguous"),
                 "{}",
                 err
             );
@@ -3802,7 +3880,11 @@ mod tests {
                 &unverifiable,
             )
             .unwrap_err();
-            assert!(err.to_lowercase().contains("conflict"), "{}", err);
+            assert!(
+                err.to_string().to_lowercase().contains("conflict"),
+                "{}",
+                err
+            );
             assert_eq!(destination.serialize(), stored_bytes);
             // …and against an unsigned destination it is refused because the
             // merged result does not verify — nothing enters.
@@ -3811,7 +3893,7 @@ mod tests {
             let err =
                 merge_signatures_for_chain(ChainId::BitcoinBlake2b, &mut unsigned, &unverifiable)
                     .unwrap_err();
-            assert!(err.contains("does not verify"), "{}", err);
+            assert!(err.to_string().contains("does not verify"), "{}", err);
             assert_eq!(unsigned.serialize(), unsigned_bytes);
             {
                 use coincube_core::miniscript::bitcoin::{
@@ -3869,7 +3951,11 @@ mod tests {
                     &conflicting,
                 )
                 .unwrap_err();
-                assert!(err.to_lowercase().contains("conflict"), "{}", err);
+                assert!(
+                    err.to_string().to_lowercase().contains("conflict"),
+                    "{}",
+                    err
+                );
                 assert_eq!(destination.serialize(), stored_bytes);
             }
             // Merging the same signature again is a no-op, not a conflict.
@@ -3884,7 +3970,7 @@ mod tests {
                 Some(coincube_core::miniscript::bitcoin::psbt::PsbtSighashType::from_u32(0x81));
             let err = merge_signatures_for_chain(ChainId::BitcoinBlake2b, &mut destination, &asks)
                 .unwrap_err();
-            assert!(err.contains("0x81"), "{}", err);
+            assert!(err.to_string().contains("0x81"), "{}", err);
             assert_eq!(destination.serialize(), stored_bytes);
 
             // Signatures that pass the adapter's representation checks but do
@@ -3924,7 +4010,7 @@ mod tests {
                 let err =
                     merge_signatures_for_chain(ChainId::BitcoinBlake2b, &mut destination, &bad)
                         .unwrap_err();
-                assert!(!err.is_empty(), "{}", name);
+                assert!(!err.to_string().is_empty(), "{}", name);
                 assert_eq!(destination.serialize(), stored_bytes, "{}", name);
             }
             // …and the correct signature for the same key still merges after.
@@ -3957,7 +4043,7 @@ mod tests {
                 &incoming_unified,
             )
             .unwrap_err();
-            assert!(err.contains("sighash"), "{}", err);
+            assert!(err.to_string().contains("sighash"), "{}", err);
             assert_eq!(asks_all.serialize(), asks_all_bytes);
 
             // A signer's result that carries **no prevout data at all** — a
@@ -4001,7 +4087,7 @@ mod tests {
             let err =
                 merge_signatures_for_chain(ChainId::BitcoinBlake2b, &mut untouched, &bare_bad)
                     .unwrap_err();
-            assert!(err.contains("does not verify"), "{}", err);
+            assert!(err.to_string().contains("does not verify"), "{}", err);
             assert_eq!(untouched.serialize(), untouched_bytes);
 
             // Taproot signature data in a signer's result never enters the
@@ -4043,6 +4129,75 @@ mod tests {
                     )
                 )
             ));
+        }
+
+        #[tokio::test]
+        async fn surplus_legacy_is_refused_atomically_and_cannot_be_exported_after_reload() {
+            let f = fixture();
+            let mut safe = unified(&f.psbt, &f.signers[0]);
+            merge_signatures_for_chain(
+                ChainId::BitcoinBlake2b,
+                &mut safe,
+                &legacy(&f.psbt, &f.signers[1]),
+            )
+            .expect("one legacy signature is required by the mixed witness");
+            let safe_bytes = safe.serialize();
+            let refusal = merge_signatures_for_chain(
+                ChainId::BitcoinBlake2b,
+                &mut safe,
+                &legacy(&f.psbt, &f.signers[2]),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(
+                    refusal,
+                    UnifiedFinalizeError::UnsafeLegacyAlternative { input: 0, .. }
+                ),
+                "{}",
+                refusal
+            );
+            assert_eq!(safe.serialize(), safe_bytes, "merge must be atomic");
+
+            // Simulate an unsafe row created by an older build: reload must not
+            // show Protected or permit export even though the selected witness
+            // contains a unified signature.
+            let mut unsafe_psbt = unified(&f.psbt, &f.signers[0]);
+            for signer in [&f.signers[1], &f.signers[2]] {
+                unsafe_psbt.inputs[0]
+                    .partial_sigs
+                    .extend(legacy(&f.psbt, signer).inputs[0].partial_sigs.clone());
+            }
+            let wallet = wallet_with_hot_signer(&f);
+            let tx = SpendTx::new(
+                None,
+                unsafe_psbt,
+                Vec::new(),
+                &f.descriptor,
+                &secp256k1::Secp256k1::new(),
+                Network::Bitcoin,
+            );
+            let mut state = PsbtState::new(wallet, tx, true);
+            assert!(matches!(
+                state.replay.as_ref().map(|review| review.status()),
+                Some(ReplayStatus::Unknown(UnknownReason::Refused(reason)))
+                    if reason.contains("independently satisfy")
+            ));
+            assert!(!state.broadcast_ready(&Cache::default()));
+            let daemon: Arc<dyn Daemon + Sync + Send> = Arc::new(
+                crate::daemon::client::Coincubed::new(MockDaemon::new(vec![]).run()),
+            );
+            let messages = drive(state.update(
+                daemon,
+                &Cache::default(),
+                Message::View(view::Message::ExportPsbt),
+            ))
+            .await;
+            assert!(
+                shows_error(&messages, "independently form a Bitcoin-valid witness"),
+                "{:?}",
+                messages
+            );
+            assert!(state.modal.is_none(), "unsafe export modal must not open");
         }
 
         // Gandalf's probes from the review of 15a26267 (WORK_LOGS/LAUNCH_GA/
@@ -4350,12 +4505,24 @@ mod tests {
                 .entangled
                 .is_empty());
 
-            // The remedy: a verified unified signature on that input (the hot
-            // key, position 2 — the finaliser keeps it whichever key holds it).
+            // Adding a unified signature after a complete legacy threshold
+            // would leave two complete alternatives, so the reloaded-state
+            // gate refuses it and tells the user to recreate the spend.
             state.tx.psbt = legacy(
                 &legacy(&unified(&f.psbt, &f.signers[2]), &f.signers[0]),
                 &f.signers[1],
             );
+            let _ = state.reconcile_and_maybe_close(&entangled);
+            assert!(matches!(
+                &state.replay.as_ref().unwrap().status(),
+                ReplayStatus::Unknown(UnknownReason::Refused(reason))
+                    if reason.contains("independently satisfy")
+            ));
+            assert!(!state.broadcast_ready(&entangled));
+
+            // Recreated in the safe order: unified first, then only the one
+            // legacy signature the mixed witness needs.
+            state.tx.psbt = legacy(&unified(&f.psbt, &f.signers[0]), &f.signers[1]);
             let _ = state.reconcile_and_maybe_close(&entangled);
             assert_eq!(
                 state.replay.as_ref().unwrap().status(),
@@ -4409,8 +4576,18 @@ mod tests {
             );
             let _ = state.reconcile_and_maybe_close(&entangled);
             assert!(
+                state.modal.is_some(),
+                "unsafe retained alternatives do not close the picker"
+            );
+            assert!(matches!(
+                &state.replay.as_ref().unwrap().status(),
+                ReplayStatus::Unknown(UnknownReason::Refused(_))
+            ));
+            state.tx.psbt = legacy(&unified(&f.psbt, &f.signers[0]), &f.signers[1]);
+            let _ = state.reconcile_and_maybe_close(&entangled);
+            assert!(
                 state.modal.is_none(),
-                "picker closes once the requirement is met"
+                "safe recreated spend closes the picker"
             );
             let pill = state.replay_presentation(&entangled).unwrap();
             assert!(pill.review.signatures_complete(&pill.entangled));
