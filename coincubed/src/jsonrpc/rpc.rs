@@ -50,6 +50,8 @@ pub struct Request {
 
 /// A failure to broadcast a transaction to the P2P network.
 const BROADCAST_ERROR: i64 = 1_000;
+/// A transient change-allocation race; the complete command may be retried.
+const CHANGE_RESERVATION_BUSY_ERROR: i64 = 1_001;
 
 /// JSONRPC2 error codes. See https://www.jsonrpc.org/specification#error_object.
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -183,6 +185,10 @@ impl From<commands::CommandError> for Error {
             commands::CommandError::TxBroadcast(_) => {
                 Error::new(ErrorCode::ServerError(BROADCAST_ERROR), e.to_string())
             }
+            commands::CommandError::ChangeReservationContended => Error::new(
+                ErrorCode::ServerError(CHANGE_RESERVATION_BUSY_ERROR),
+                e.to_string(),
+            ),
         }
     }
 }
@@ -219,5 +225,20 @@ impl Response {
 
     pub fn error(id: ReqId, error: Error) -> Response {
         Response::new(id, None, Some(error))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn change_reservation_contention_is_a_retryable_server_error() {
+        let error = Error::from(commands::CommandError::ChangeReservationContended);
+        assert_eq!(
+            error.code,
+            ErrorCode::ServerError(CHANGE_RESERVATION_BUSY_ERROR)
+        );
+        assert!(error.message.contains("Retry"));
     }
 }

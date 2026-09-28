@@ -43,6 +43,8 @@ use miniscript::{
 };
 use serde::{Deserialize, Serialize};
 
+const CHANGE_COMMIT_CONFLICT_LIMIT: usize = 8;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandError {
     NoOutpointForSelfSend,
@@ -90,6 +92,9 @@ pub enum CommandError {
     /// Overflowing or unhardened derivation index.
     InvalidDerivationIndex,
     ChangeReservation(crate::database::ReservationError),
+    /// Other durable reservations repeatedly won after this builder selected change.
+    /// The caller may retry the complete command.
+    ChangeReservationContended,
     RbfError(RbfErrorInfo),
     EmptyFilterList,
 }
@@ -168,6 +173,10 @@ impl fmt::Display for CommandError {
                 write!(f, "Unhardened or overflowing BIP32 derivation index.")
             }
             Self::ChangeReservation(e) => write!(f, "{}", e),
+            Self::ChangeReservationContended => write!(
+                f,
+                "Change address reservations are busy. Retry the command."
+            ),
             Self::RbfError(e) => write!(f, "RBF error: '{}'.", e),
             Self::EmptyFilterList => write!(f, "Filter list is empty, should supply None instead."),
         }
@@ -1085,6 +1094,7 @@ impl DaemonControl {
         // we peeked. In that case retry with the new next address; the compare-and-commit
         // operation itself leaves the database untouched on a lost race.
         let locktime = self.anti_fee_sniping_locktime();
+        let mut change_commit_conflicts = 0;
         loop {
             let change_info = change_address.info;
             let CreateSpendRes {
@@ -1110,6 +1120,10 @@ impl DaemonControl {
                 }
             };
             if has_change && fresh_change && !self.commit_change_if_next(&change_info)? {
+                change_commit_conflicts += 1;
+                if change_commit_conflicts >= CHANGE_COMMIT_CONFLICT_LIMIT {
+                    return Err(CommandError::ChangeReservationContended);
+                }
                 change_address = self.next_change_addr(&mut db_conn)?;
                 continue;
             }
@@ -1477,7 +1491,9 @@ impl DaemonControl {
         // RBF rule 4.
         let replaced_fee = descendant_fees.to_sat();
         let locktime = self.anti_fee_sniping_locktime();
-        // This loop can have up to 2 iterations in the case of cancel and otherwise only 1.
+        // Coin selection can add one retry for cancel. Change allocation conflicts
+        // have their own finite budget so a reservation stream cannot starve this RPC.
+        let mut change_commit_conflicts = 0;
         loop {
             match create_spend(
                 &self.config.main_descriptor,
@@ -1496,6 +1512,10 @@ impl DaemonControl {
                 }) => {
                     let change_info = change_address.info;
                     if has_change && fresh_change && !self.commit_change_if_next(&change_info)? {
+                        change_commit_conflicts += 1;
+                        if change_commit_conflicts >= CHANGE_COMMIT_CONFLICT_LIMIT {
+                            return Err(CommandError::ChangeReservationContended);
+                        }
                         change_address = self.next_change_addr(&mut db_conn)?;
                         continue;
                     }
@@ -1909,6 +1929,63 @@ mod tests {
     use std::{collections::BTreeMap, str::FromStr};
 
     const DUST: u64 = DUST_OUTPUT_SATS;
+
+    struct ConflictDatabase {
+        inner: DummyDatabase,
+        conflicts: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl ConflictDatabase {
+        fn new(conflicts: usize) -> (Self, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+            let conflicts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(conflicts));
+            (
+                Self {
+                    inner: DummyDatabase::new(),
+                    conflicts: conflicts.clone(),
+                },
+                conflicts,
+            )
+        }
+    }
+
+    impl DatabaseInterface for ConflictDatabase {
+        fn reserve_change(
+            &self,
+            chain: coincube_core::chain::ChainId,
+            descriptor: &coincube_core::descriptors::CoincubeDescriptor,
+            secp: &bitcoin::secp256k1::Secp256k1<bitcoin::secp256k1::VerifyOnly>,
+        ) -> Result<crate::database::ChangeReservation, ReservationError> {
+            self.inner.reserve_change(chain, descriptor, secp)
+        }
+
+        fn commit_change_if_next(
+            &self,
+            chain: coincube_core::chain::ChainId,
+            descriptor: &coincube_core::descriptors::CoincubeDescriptor,
+            secp: &bitcoin::secp256k1::Secp256k1<bitcoin::secp256k1::VerifyOnly>,
+            index: bip32::ChildNumber,
+        ) -> Result<bool, ReservationError> {
+            let forced = self
+                .conflicts
+                .fetch_update(
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                    |remaining| remaining.checked_sub(1),
+                )
+                .is_ok();
+            if forced {
+                let claim = self.inner.reserve_change(chain, descriptor, secp)?;
+                assert_eq!(claim.index(), index);
+                return Ok(false);
+            }
+            self.inner
+                .commit_change_if_next(chain, descriptor, secp, index)
+        }
+
+        fn connection(&self) -> Box<dyn DatabaseConnection> {
+            self.inner.connection()
+        }
+    }
 
     #[test]
     fn getinfo() {
@@ -2413,6 +2490,96 @@ mod tests {
             }],
             output,
         }
+    }
+
+    fn funded_conflict_control(
+        conflicts: usize,
+    ) -> (
+        DummyCoincube,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        bitcoin::OutPoint,
+        bitcoin::Address<address::NetworkUnchecked>,
+    ) {
+        const COIN_VALUE: u64 = 100_000;
+        let (database, conflict_count) = ConflictDatabase::new(conflicts);
+        let daemon = DummyCoincube::new(DummyBitcoind::new(), database);
+        let control = daemon.control();
+        let funding = funding_tx(control, &[(0, COIN_VALUE, 13, false)]);
+        let outpoint = bitcoin::OutPoint::new(funding.compute_txid(), 0);
+        let mut db_conn = control.db().lock().unwrap().connection();
+        db_conn.new_txs(std::slice::from_ref(&funding));
+        db_conn.new_unspent_coins(&[Coin {
+            outpoint,
+            is_immature: false,
+            block_info: Some(BlockInfo { height: 1, time: 1 }),
+            amount: bitcoin::Amount::from_sat(COIN_VALUE),
+            derivation_index: 13.into(),
+            is_change: false,
+            spend_txid: None,
+            spend_block: None,
+            is_from_self: false,
+        }]);
+        let destination =
+            bitcoin::Address::from_str("bc1qnsexk3gnuyayu92fc3tczvc7k62u22a22ua2kv").unwrap();
+        (daemon, conflict_count, outpoint, destination)
+    }
+
+    #[test]
+    fn create_spend_rebuilds_on_conflict_and_stops_at_the_budget() {
+        let (daemon, conflicts, outpoint, destination) = funded_conflict_control(2);
+        let control = daemon.control();
+        let result = control
+            .create_spend(
+                &HashMap::from([(destination, 10_000)]),
+                &[outpoint],
+                1,
+                None,
+            )
+            .unwrap();
+        let psbt = match result {
+            CreateSpendResult::Success { psbt, .. } => psbt,
+            other => panic!("expected successful spend, got {:?}", other),
+        };
+        assert_eq!(conflicts.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(
+            control.db().lock().unwrap().connection().change_index(),
+            3.into()
+        );
+        let committed_script = control
+            .config
+            .main_descriptor
+            .change_descriptor()
+            .derive(3.into(), &control.secp)
+            .script_pubkey();
+        assert!(psbt
+            .unsigned_tx
+            .output
+            .iter()
+            .any(|output| output.script_pubkey == committed_script));
+        daemon.shutdown();
+
+        let (daemon, conflicts, outpoint, destination) =
+            funded_conflict_control(CHANGE_COMMIT_CONFLICT_LIMIT);
+        let control = daemon.control();
+        assert_eq!(
+            control.create_spend(
+                &HashMap::from([(destination, 10_000)]),
+                &[outpoint],
+                1,
+                None,
+            ),
+            Err(CommandError::ChangeReservationContended)
+        );
+        assert_eq!(conflicts.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(
+            control.db().lock().unwrap().connection().change_index(),
+            bip32::ChildNumber::from(CHANGE_COMMIT_CONFLICT_LIMIT as u32)
+        );
+        assert_eq!(
+            control.reserve_change().unwrap().index(),
+            bip32::ChildNumber::from(CHANGE_COMMIT_CONFLICT_LIMIT as u32 + 1)
+        );
+        daemon.shutdown();
     }
 
     #[test]
@@ -3370,6 +3537,44 @@ mod tests {
         assert_eq!(control.reserve_change().unwrap().index(), 1.into());
 
         ms.shutdown();
+    }
+
+    #[test]
+    fn rbf_change_conflicts_stop_at_the_budget() {
+        let (daemon, conflicts, outpoint, destination) = funded_conflict_control(0);
+        let control = daemon.control();
+        let psbt = match control
+            .create_spend(
+                &HashMap::from([(destination, 99_500)]),
+                &[outpoint],
+                1,
+                None,
+            )
+            .unwrap()
+        {
+            CreateSpendResult::Success { psbt, .. } => psbt,
+            other => panic!("expected changeless spend, got {:?}", other),
+        };
+        assert_eq!(psbt.unsigned_tx.output.len(), 1);
+        let txid = psbt.unsigned_tx.compute_txid();
+        let mut db_conn = control.db().lock().unwrap().connection();
+        db_conn.store_spend(&psbt);
+        db_conn.spend_coins(&[(outpoint, txid)]);
+        conflicts.store(
+            CHANGE_COMMIT_CONFLICT_LIMIT,
+            std::sync::atomic::Ordering::SeqCst,
+        );
+
+        assert_eq!(
+            control.rbf_psbt(&txid, true, None),
+            Err(CommandError::ChangeReservationContended)
+        );
+        assert_eq!(conflicts.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(
+            db_conn.change_index(),
+            bip32::ChildNumber::from(CHANGE_COMMIT_CONFLICT_LIMIT as u32)
+        );
+        daemon.shutdown();
     }
 
     #[test]
