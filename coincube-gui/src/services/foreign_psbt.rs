@@ -546,6 +546,47 @@ mod tests {
     }
 
     #[test]
+    fn taproot_key_signature_on_p2wpkh_input_refuses() {
+        let (prepared, source, target) = fixture();
+        let descriptors = source.descriptors(StandardSinglesig::Bip84, 0).unwrap();
+        let mut psbt = Psbt::from_str(&prepared.export_text()).unwrap();
+        assert!(psbt.inputs[0]
+            .witness_utxo
+            .as_ref()
+            .unwrap()
+            .script_pubkey
+            .is_p2wpkh());
+        assert!(psbt.inputs[0].tap_internal_key.is_none());
+
+        let secp = secp256k1::Secp256k1::new();
+        let keypair = secp256k1::Keypair::from_secret_key(
+            &secp,
+            &secp256k1::SecretKey::from_slice(&[7; 32]).unwrap(),
+        );
+        psbt.inputs[0].tap_key_sig = Some(bitcoin::taproot::Signature {
+            signature: secp
+                .sign_schnorr_no_aux_rand(&secp256k1::Message::from_digest([8; 32]), &keypair),
+            sighash_type: TapSighashType::All,
+        });
+
+        assert_eq!(
+            prepared
+                .import_text(
+                    &psbt.to_string(),
+                    ForeignSession {
+                        chain: ChainId::BitcoinBlake2b,
+                        generation: 9,
+                        target: &target,
+                        external: &descriptors.external,
+                        internal: Some(&descriptors.internal),
+                    },
+                )
+                .unwrap_err(),
+            ForeignPsbtError::UnsupportedSighash
+        );
+    }
+
+    #[test]
     fn transaction_and_metadata_tampering_refuse() {
         let (prepared, source, target) = fixture();
         let descriptors = source.descriptors(StandardSinglesig::Bip84, 0).unwrap();
