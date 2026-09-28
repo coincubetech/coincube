@@ -1,4 +1,5 @@
 import logging
+from concurrent.futures import ThreadPoolExecutor
 import pytest
 import shutil
 import time
@@ -341,7 +342,7 @@ def bitcoind_wait_block_height(bitcoind, height, overloaded):
     BITCOIN_BACKEND_TYPE is not BitcoinBackendType.Bitcoind,
     reason="Tests the retry logic specific to the bitcoind backend.",
 )
-def test_retry_on_workqueue_exceeded(coincubed, bitcoind, executor):
+def test_retry_on_workqueue_exceeded(coincubed, bitcoind):
     """Make sure we retry requests to bitcoind if it is temporarily overloaded."""
     # Restart both processes with a single RPC worker and queue slot, keeping
     # startup traffic outside the deliberately overloaded interval.
@@ -361,33 +362,36 @@ def test_retry_on_workqueue_exceeded(coincubed, bitcoind, executor):
     # One request occupies the only RPC thread, one fills the queue, and a
     # third observes 503. All three complete at the same known height, even
     # if they enter the RPC handler only after the block has arrived.
-    overloaded = Event()
-    waiters = [
-        executor.submit(
-            bitcoind_wait_block_height, bitcoind, block_count + 1, overloaded
-        )
-        for _ in range(3)
-    ]
-    try:
-        assert overloaded.wait(TIMEOUT), "RPC work queue was not saturated"
-        # getinfo uses cached sync/height and no longer exercises node RPC.
-        # Timestamp zero forces the generic genesis/tip reads but is rejected
-        # before changing rescan state once the node answers.
-        f_coincube = executor.submit(coincubed.rpc.startrescan, 0)
-        coincubed.wait_for_logs(
-            [
-                "Transient error when sending request to bitcoind.*(status: 503, body: Work queue depth exceeded)",
-                "Retrying RPC request to bitcoind",
-            ],
-            timeout=TIMEOUT,
-        )
-    finally:
-        # Use P2P, which remains available with the RPC queue full. Always
-        # release the blocked requests, including when the log assertion fails.
-        bitcoind.submit_block(block_count, block["hex"])
-        for future in waiters:
-            future.result(TIMEOUT)
+    # CI's shared executor has only three workers. All three waiters must run
+    # concurrently with the daemon command, so own exactly four here.
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        overloaded = Event()
+        waiters = [
+            executor.submit(
+                bitcoind_wait_block_height, bitcoind, block_count + 1, overloaded
+            )
+            for _ in range(3)
+        ]
+        try:
+            assert overloaded.wait(TIMEOUT), "RPC work queue was not saturated"
+            # getinfo uses cached sync/height and no longer exercises node RPC.
+            # Timestamp zero forces the generic genesis/tip reads but is rejected
+            # before changing rescan state once the node answers.
+            f_coincube = executor.submit(coincubed.rpc.startrescan, 0)
+            coincubed.wait_for_logs(
+                [
+                    "Transient error when sending request to bitcoind.*(status: 503, body: Work queue depth exceeded)",
+                    "Retrying RPC request to bitcoind",
+                ],
+                timeout=TIMEOUT,
+            )
+        finally:
+            # Use P2P, which remains available with the RPC queue full. Always
+            # release the blocked requests, including when the log assertion fails.
+            bitcoind.submit_block(block_count, block["hex"])
+            for future in waiters:
+                future.result(TIMEOUT)
 
-    with pytest.raises(RpcError, match="Insane timestamp"):
-        f_coincube.result(TIMEOUT)
-    assert coincubed.rpc.getinfo()["rescan_progress"] is None
+        with pytest.raises(RpcError, match="Insane timestamp"):
+            f_coincube.result(TIMEOUT)
+        assert coincubed.rpc.getinfo()["rescan_progress"] is None
