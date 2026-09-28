@@ -2400,12 +2400,22 @@ mod bootstrap_backend_selection_tests {
         CoincubeDirectory::new(path)
     }
 
-    fn tree(root: &Path) -> Vec<PathBuf> {
-        fn walk(p: &Path, out: &mut Vec<PathBuf>) {
-            if let Ok(rd) = std::fs::read_dir(p) {
-                for e in rd.flatten() {
-                    out.push(e.path());
-                    walk(&e.path(), out);
+    /// Every directory and file under `root`, including exact file bytes.
+    /// Refusal tests use this as a mutation oracle, so traversal and reads must
+    /// fail the test rather than silently weakening the snapshot.
+    fn tree(root: &Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
+        fn walk(p: &Path, out: &mut Vec<(PathBuf, Option<Vec<u8>>)>) {
+            for entry in std::fs::read_dir(p).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                let kind = entry.file_type().unwrap();
+                if kind.is_dir() {
+                    out.push((path.clone(), None));
+                    walk(&path, out);
+                } else if kind.is_file() {
+                    out.push((path.clone(), Some(std::fs::read(path).unwrap())));
+                } else {
+                    panic!("unsupported filesystem entry in test snapshot: {:?}", path);
                 }
             }
         }
