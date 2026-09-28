@@ -115,15 +115,23 @@ impl ScanDescriptor {
             1
         }
     }
-    #[cfg(test)]
     pub(crate) fn canonical(&self) -> String {
         self.descriptor.to_string()
     }
-    fn script(&self, index: u32) -> Result<ScriptBuf, ScanError> {
+    pub(crate) fn branch(&self) -> Branch {
+        self.branch
+    }
+    pub(crate) fn derive(
+        &self,
+        index: u32,
+    ) -> Result<Descriptor<coincube_core::miniscript::descriptor::DefiniteDescriptorKey>, ScanError>
+    {
         self.descriptor
             .at_derivation_index(index)
-            .map(|d| d.script_pubkey())
             .map_err(|_| ScanError::Descriptor)
+    }
+    pub(crate) fn script(&self, index: u32) -> Result<ScriptBuf, ScanError> {
+        self.derive(index).map(|d| d.script_pubkey())
     }
 }
 
@@ -193,6 +201,21 @@ impl ScanReport {
     }
     pub fn coins(&self) -> &[DiscoveredCoin] {
         &self.coins
+    }
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        chain: ChainId,
+        generation: u64,
+        tip: BlockHash,
+        coins: Vec<DiscoveredCoin>,
+    ) -> Self {
+        Self {
+            chain,
+            generation,
+            tip,
+            addresses: 1,
+            coins,
+        }
     }
 }
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
