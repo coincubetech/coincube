@@ -123,11 +123,13 @@ impl SplitWalletPanel {
     ) -> Task<Message> {
         match message {
             Message::ExternalEdited(value) => {
+                self.cancel();
                 self.external = value;
                 self.status = Status::Editing;
                 Task::none()
             }
             Message::InternalEdited(value) => {
+                self.cancel();
                 self.internal = value;
                 self.status = Status::Editing;
                 Task::none()
@@ -138,6 +140,7 @@ impl SplitWalletPanel {
                     .iter()
                     .any(|candidate| candidate.id == target.id)
                 {
+                    self.cancel();
                     self.selected = Some(target);
                     self.status = Status::Editing;
                 }
@@ -217,16 +220,19 @@ impl SplitWalletPanel {
 
     fn plan(&self) -> Result<ScanPlan, ScanError> {
         let external = ScanDescriptor::parse(Branch::External, self.external.trim())?;
+        let external_end = external.end_exclusive(DEFAULT_RANGE_END);
         let mut branches = vec![BranchRange {
             descriptor: external,
             start: 0,
-            end_exclusive: DEFAULT_RANGE_END,
+            end_exclusive: external_end,
         }];
         if !self.internal.trim().is_empty() {
+            let internal = ScanDescriptor::parse(Branch::Internal, self.internal.trim())?;
+            let internal_end = internal.end_exclusive(DEFAULT_RANGE_END);
             branches.push(BranchRange {
-                descriptor: ScanDescriptor::parse(Branch::Internal, self.internal.trim())?,
+                descriptor: internal,
                 start: 0,
-                end_exclusive: DEFAULT_RANGE_END,
+                end_exclusive: internal_end,
             });
         }
         Ok(ScanPlan {
@@ -357,6 +363,13 @@ pub fn view(panel: &SplitWalletPanel) -> Element<'_, Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use coincube_core::miniscript::bitcoin::{
+        bip32::{Xpriv, Xpub},
+        secp256k1::Secp256k1,
+    };
+
+    const FIXED_DESCRIPTOR: &str =
+        "wpkh(02c6047f9441ed7d6d3045406e95c07cd85aeb5c6b7a3c2e21b73cdb1e24ff3a64)";
 
     fn target() -> TargetCube {
         TargetCube {
@@ -365,11 +378,34 @@ mod tests {
         }
     }
 
+    fn ranged_descriptor(branch: u32) -> String {
+        let secp = Secp256k1::new();
+        let xpub = Xpub::from_priv(
+            &secp,
+            &Xpriv::new_master(
+                coincube_core::miniscript::bitcoin::Network::Bitcoin,
+                &[42; 32],
+            )
+            .unwrap(),
+        );
+        format!("wpkh({xpub}/{branch}/*)")
+    }
+
+    fn completed_summary(generation: u64) -> ScanSummary {
+        ScanSummary {
+            generation,
+            addresses: 1,
+            coins: 1,
+            confirmed: 1,
+            sats: 1,
+            tip: "tip-a".into(),
+        }
+    }
+
     #[test]
     fn refuses_scan_without_destination_cube() {
         let mut panel = SplitWalletPanel::new();
-        panel.external =
-            "wpkh(02c6047f9441ed7d6d3045406e95c07cd85aeb5c6b7a3c2e21b73cdb1e24ff3a64)".into();
+        panel.external = FIXED_DESCRIPTOR.into();
         let _ = panel.update(Message::Scan, Some(CoincubeClient::new()), 0);
         assert!(
             matches!(panel.status(), Status::Failed(copy) if copy.contains("Create a Bitcoin Blake2b Vault"))
@@ -400,6 +436,51 @@ mod tests {
             4,
         );
         assert_eq!(panel.status(), &Status::Editing);
+    }
+
+    #[test]
+    fn edits_and_target_changes_invalidate_inflight_results() {
+        let other_target = TargetCube {
+            id: "cube-2".into(),
+            name: "Other Vault".into(),
+        };
+        for message in [
+            Message::ExternalEdited(FIXED_DESCRIPTOR.into()),
+            Message::InternalEdited(FIXED_DESCRIPTOR.into()),
+            Message::TargetSelected(other_target.clone()),
+        ] {
+            let mut panel = SplitWalletPanel::new();
+            panel.set_targets(vec![target(), other_target.clone()]);
+            panel.status = Status::Scanning;
+            let stale_generation = panel.generation;
+
+            let _ = panel.update(message, None, 7);
+            assert_eq!(panel.generation, stale_generation + 1);
+            assert_eq!(panel.status(), &Status::Editing);
+
+            let _ = panel.update(
+                Message::Scanned(Ok(completed_summary(stale_generation)), stale_generation, 7),
+                None,
+                7,
+            );
+            assert_eq!(panel.status(), &Status::Editing);
+        }
+    }
+
+    #[test]
+    fn plan_uses_single_index_for_fixed_descriptors_and_bound_for_wildcards() {
+        let mut panel = SplitWalletPanel::new();
+        panel.external = FIXED_DESCRIPTOR.into();
+        panel.internal = FIXED_DESCRIPTOR.into();
+        let fixed = panel.plan().unwrap();
+        assert_eq!(fixed.branches[0].end_exclusive, 1);
+        assert_eq!(fixed.branches[1].end_exclusive, 1);
+
+        panel.external = ranged_descriptor(0);
+        panel.internal = ranged_descriptor(1);
+        let wildcard = panel.plan().unwrap();
+        assert_eq!(wildcard.branches[0].end_exclusive, DEFAULT_RANGE_END);
+        assert_eq!(wildcard.branches[1].end_exclusive, DEFAULT_RANGE_END);
     }
 
     #[test]

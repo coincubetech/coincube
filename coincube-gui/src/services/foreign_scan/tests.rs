@@ -107,6 +107,7 @@ fn descriptor_capabilities_are_scan_only_and_ambiguous_or_secret_paths_refuse() 
         format!("wsh(pk({}))", public),
     ] {
         let d = ScanDescriptor::parse(Branch::External, &text).unwrap();
+        assert_eq!(d.end_exclusive(100), 100);
         assert_eq!(
             d.capabilities(),
             Capabilities {
@@ -130,6 +131,12 @@ fn descriptor_capabilities_are_scan_only_and_ambiguous_or_secret_paths_refuse() 
     let mut p = plan(3);
     p.chain = ChainId::BitcoinBlake2bTestnet4;
     assert_eq!(p.validate(), Err(ScanError::UnsupportedChain));
+}
+
+#[test]
+fn fixed_descriptor_uses_the_scanners_single_index_range() {
+    let fixed = ScanDescriptor::parse(Branch::External, &ranged().replace("/*", "/0")).unwrap();
+    assert_eq!(fixed.end_exclusive(100), 1);
 }
 #[tokio::test]
 async fn full_prevout_binding_and_duplicate_outpoints_refuse() {

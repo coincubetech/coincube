@@ -100,6 +100,15 @@ impl ScanDescriptor {
             claim_authorization: false,
         }
     }
+    /// Select the only valid range for a fixed descriptor while preserving the
+    /// caller's explicit bound for wildcard discovery.
+    pub fn end_exclusive(&self, wildcard_end_exclusive: u32) -> u32 {
+        if self.descriptor.has_wildcard() {
+            wildcard_end_exclusive
+        } else {
+            1
+        }
+    }
     fn script(&self, index: u32) -> Result<ScriptBuf, ScanError> {
         self.descriptor
             .at_derivation_index(index)
