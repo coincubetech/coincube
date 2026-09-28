@@ -1797,13 +1797,16 @@ def test_rbfpsbt_insufficient_funds(coincubed, bitcoind):
     spend_res_1 = coincubed.rpc.createspend(destinations_1, [], 1)
     spend_psbt_1 = PSBT.from_base64(spend_res_1["psbt"])
     spend_txid_1 = sign_and_broadcast_psbt(coincubed, spend_psbt_1)
+    change_before_failed_bump = coincubed.rpc.getinfo()["change_index"]
 
     # We don't have sufficient funds to bump the fee.
     feerate = 3 if USE_TAPROOT else 2
     assert "missing" in coincubed.rpc.rbfpsbt(spend_txid_1, False, feerate)
+    assert coincubed.rpc.getinfo()["change_index"] == change_before_failed_bump
     # We can still cancel it as the coin has enough value to create a single
     # output at a higher feerate.
     assert "psbt" in coincubed.rpc.rbfpsbt(spend_txid_1, True)
+    assert coincubed.rpc.getinfo()["change_index"] == change_before_failed_bump + 1
 
     wait_for(lambda: len(coincubed.rpc.listcoins(["confirmed"])["coins"]) == 0)
     # Get another coin.
@@ -1822,7 +1825,9 @@ def test_rbfpsbt_insufficient_funds(coincubed, bitcoind):
     spend_txid_2 = sign_and_broadcast_psbt(coincubed, spend_psbt_2)
 
     # We don't have enough to create a transaction with feerate 2 sat/vb.
+    change_before_failed_cancel = coincubed.rpc.getinfo()["change_index"]
     assert "missing" in coincubed.rpc.rbfpsbt(spend_txid_2, True)
+    assert coincubed.rpc.getinfo()["change_index"] == change_before_failed_cancel
 
 
 def test_rbfpsbt_cancel(coincubed, bitcoind):

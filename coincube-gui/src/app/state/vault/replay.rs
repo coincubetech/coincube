@@ -10,8 +10,10 @@
 //! up the witness — never from which signers were asked, what the PSBT claims,
 //! or a capability flag (`#276` correction 1). The four states:
 //!
-//! - *Replay protected*: every input's witness carries at least one verified
-//!   unified signature. Legacy signatures alongside are fine.
+//! - *This witness is replay protected*: every input's witness carries at least
+//!   one verified unified signature, and the locally retained legacy set cannot
+//!   independently satisfy it. External legacy copies remain outside this
+//!   guarantee.
 //! - *Replayable*: at least one input would be finalised from legacy
 //!   signatures alone. Amber; broadcasting needs the explicit acknowledgement
 //!   [`REPLAYABLE_ACKNOWLEDGEMENT`] — **unless** one of those inputs spends a
@@ -41,6 +43,24 @@ use crate::{chain::ChainId, services::entangled::Entanglement};
 /// The acknowledgement a user gives before broadcasting a replayable spend
 /// (`#276` I4). Verbatim from the lane brief.
 pub const REPLAYABLE_ACKNOWLEDGEMENT: &str = "I understand this can also spend my Bitcoin";
+
+/// The exact-witness limit of [`ReplayStatus::Protected`]. Coincube can bound
+/// signatures retained in this PSBT, but cannot revoke copies held elsewhere.
+pub const PROTECTED_LIMITATION: &str =
+    "This status applies only to the witness Coincube will broadcast. Legacy signatures held by \
+     another device, exported copy, or coordinator may still be combined into a Bitcoin spend; \
+     Coincube cannot revoke them.";
+
+pub const UNSAFE_LEGACY_POLICY_COPY: &str =
+    "Coincube refused this Bitcoin Blake2b PSBT because its retained legacy signatures can \
+     independently form a Bitcoin-valid witness. Remove the surplus legacy signatures or create \
+     a new spend. Signatures already held by another device, exported copy, or coordinator cannot \
+     be revoked.";
+
+pub fn unsafe_legacy_policy_copy(error: &UnifiedFinalizeError) -> Option<&'static str> {
+    matches!(error, UnifiedFinalizeError::UnsafeLegacyAlternative { .. })
+        .then_some(UNSAFE_LEGACY_POLICY_COPY)
+}
 
 /// Why a spend's replay status is not known yet.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,6 +129,11 @@ pub fn replay_status(
         .unwrap_or(false);
     if !has_any_signature {
         return ReplayStatus::Unknown(UnknownReason::NotYetChecked);
+    }
+    if let Err(error) =
+        coincube_core::unified_finalize::ensure_no_unsafe_legacy_alternative(&unified, secp)
+    {
+        return ReplayStatus::Unknown(UnknownReason::Refused(error.to_string()));
     }
     match finalize_p2wsh_all_unified(&unified, secp) {
         Ok(finalized) => {
@@ -513,8 +538,10 @@ pub fn blocked_entangled_copy(blocked: &[usize]) -> Option<String> {
     };
     Some(format!(
         "{noun} {list} also {verb} on Bitcoin, so this cannot be sent without a replay-capable \
-         signature on {pronoun} (the Cube key or a Border Wallet key). Splitting the coins first \
-         is not available in this version."
+         signature on {pronoun} (the Cube key or a Border Wallet key). If enough legacy \
+         signatures were already collected to form a Bitcoin witness, create a new spend and \
+         collect the replay-capable signature first; Coincube refuses to retain both complete \
+         alternatives. Splitting the coins first is not available in this version."
     ))
 }
 
@@ -531,7 +558,10 @@ pub enum PillTone {
 /// the same PSBT.
 pub fn pill_copy(status: &ReplayStatus, entangled: &[(usize, Entanglement)]) -> (String, PillTone) {
     match status {
-        ReplayStatus::Protected => ("Replay protected".to_string(), PillTone::Success),
+        ReplayStatus::Protected => (
+            "This witness is replay protected".to_string(),
+            PillTone::Success,
+        ),
         ReplayStatus::Split => ("Split — cannot replay".to_string(), PillTone::Success),
         ReplayStatus::Replayable { inputs } => {
             let blocked: BTreeSet<usize> = blocked_entangled_inputs(status, entangled)
@@ -643,13 +673,19 @@ mod tests {
         // signature alongside is fine.
         let mixed = legacy(&one, &f.signers[1]);
         assert_eq!(replay_status(&mixed, &secp, None), ReplayStatus::Protected);
-        // Unified on the *third* key with two legacy ones: still protected
-        // (the finaliser keeps the unified signature whichever key holds it).
+        // Unified on the *third* key with two legacy ones: the finaliser would
+        // keep the unified signature, but the retained legacy pair can also
+        // satisfy the input. Local policy refuses the alternate set instead of
+        // displaying a green status.
         let third = legacy(
             &legacy(&unified(&f.psbt, &f.signers[2]), &f.signers[0]),
             &f.signers[1],
         );
-        assert_eq!(replay_status(&third, &secp, None), ReplayStatus::Protected);
+        assert!(matches!(
+            replay_status(&third, &secp, None),
+            ReplayStatus::Unknown(UnknownReason::Refused(reason))
+                if reason.contains("independently satisfy")
+        ));
     }
 
     #[test]
@@ -895,8 +931,7 @@ mod tests {
 
         // 2. The same input with a verified unified signature in the witness
         //    is ready: the requirement is satisfiable in this build.
-        let with_unified = legacy(&unified(&f.psbt, &f.signers[2]), &f.signers[0]);
-        let with_unified = legacy(&with_unified, &f.signers[1]);
+        let with_unified = legacy(&unified(&f.psbt, &f.signers[0]), &f.signers[1]);
         let protected = ReplayReview::new(&with_unified, &secp);
         assert_eq!(protected.status, ReplayStatus::Protected);
         assert!(blocked_entangled_inputs(&protected.status, &entangled).is_empty());
@@ -944,6 +979,7 @@ mod tests {
         assert!(one.starts_with("Input 0 also exists on Bitcoin"), "{}", one);
         assert!(one.contains("replay-capable signature on it"), "{}", one);
         assert!(one.contains("Cube key or a Border Wallet key"), "{}", one);
+        assert!(one.contains("create a new spend"), "{}", one);
         assert!(
             one.contains("Splitting the coins first is not available in this version"),
             "{}",
@@ -996,7 +1032,10 @@ mod tests {
     fn pill_copy_names_replayable_inputs_and_entangled_ones() {
         assert_eq!(
             pill_copy(&ReplayStatus::Protected, &[]),
-            ("Replay protected".to_string(), PillTone::Success)
+            (
+                "This witness is replay protected".to_string(),
+                PillTone::Success
+            )
         );
         assert_eq!(
             pill_copy(&ReplayStatus::Replayable { inputs: vec![1] }, &[]),
@@ -1022,7 +1061,10 @@ mod tests {
         // named: the pill is about the witness, not the coin.
         assert_eq!(
             pill_copy(&ReplayStatus::Protected, &[(0, Entanglement::Entangled)]),
-            ("Replay protected".to_string(), PillTone::Success)
+            (
+                "This witness is replay protected".to_string(),
+                PillTone::Success
+            )
         );
         assert_eq!(
             pill_copy(&ReplayStatus::Unknown(UnknownReason::NotYetChecked), &[]),

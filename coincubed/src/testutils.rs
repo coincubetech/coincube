@@ -247,6 +247,28 @@ impl DatabaseInterface for DummyDatabase {
         })
     }
 
+    fn commit_change_if_next(
+        &self,
+        _: coincube_core::chain::ChainId,
+        _: &coincube_core::descriptors::CoincubeDescriptor,
+        _: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
+        index: bip32::ChildNumber,
+    ) -> Result<bool, crate::database::ReservationError> {
+        if index.is_hardened() {
+            return Err(crate::database::ReservationError::Exhausted);
+        }
+        let mut state = self.db.write().unwrap();
+        let next = state
+            .change_index
+            .increment()
+            .map_err(|_| crate::database::ReservationError::Exhausted)?;
+        if next != index {
+            return Ok(false);
+        }
+        state.change_index = index;
+        Ok(true)
+    }
+
     fn connection(&self) -> Box<dyn DatabaseConnection> {
         Box::new(DummyDatabase {
             db: self.db.clone(),
