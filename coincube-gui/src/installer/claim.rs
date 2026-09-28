@@ -92,6 +92,13 @@ impl ClaimSource {
 /// and the install continues. It also matches the rule the entry points already
 /// enforce — one target per source Cube — so the stable id is not a constraint
 /// being added, it is one being made explicit.
+///
+/// The derivation hashes the versioned domain, target chain API name and source
+/// Cube id, then formats the first 16 bytes as a UUID without rewriting its
+/// version/variant bits. Knowing a source Cube id therefore permits computing
+/// its target id: this local linkage is intentional. Target existence/admission
+/// is checked separately by descriptor checksum; the checksum is not a hash
+/// input here. Changing these bytes requires considering interrupted installs.
 pub fn target_cube_id(source: &ClaimSource) -> String {
     use coincube_core::miniscript::bitcoin::hashes::{sha256, Hash};
     // Domain-separated so this can never collide with another derivation over
@@ -199,12 +206,22 @@ mod tests {
 
     #[test]
     fn the_debug_rendering_never_carries_seed_material() {
-        let s = source("Savings");
-        // An exact match, not a scan for mnemonic words: the fixture's
-        // mnemonic is random, and BIP39 words such as "cube" and "aim" occur
-        // in this fixed text, so a word scan fails nondeterministically. Any
-        // field added to the rendering, seed material included, changes the
-        // string and fails this assertion.
-        assert_eq!(format!("{s:?}"), r#"ClaimSource { cube_id: "cube-1", .. }"#);
+        let mut s = source("Savings");
+        // Synthetic entropy whose first BIP-39 word is "cube", also present
+        // in the allowed cube-id metadata. This deterministically exercises
+        // the old substring collision without revealing a real wallet seed.
+        let mut entropy = [0u8; 16];
+        entropy[..2].copy_from_slice(&[53, 96]);
+        let mnemonic = coincube_core::bip39::Mnemonic::from_entropy(&entropy).unwrap();
+        s.signer = Arc::new(Signer::new(
+            coincube_core::signer::MasterSigner::from_mnemonic(Network::Bitcoin, mnemonic).unwrap(),
+        ));
+        assert_eq!(s.signer.mnemonic()[0], "cube");
+        let rendered = format!("{s:?}");
+        assert!(rendered.contains("cube-1"), "{}", rendered);
+        // Match the entire allowed metadata surface. Mnemonic words such as
+        // "cube" also occur in the allowed metadata, so substring
+        // comparisons against a random mnemonic produce false positives.
+        assert_eq!(rendered, "ClaimSource { cube_id: \"cube-1\", .. }");
     }
 }

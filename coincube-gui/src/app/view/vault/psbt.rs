@@ -160,6 +160,7 @@ pub fn psbt_view<'a>(
     currently_signing: bool,
     bitcoin_unit: BitcoinDisplayUnit,
     replay: Option<ReplayPill<'a>>,
+    broadcast_ready: bool,
 ) -> Element<'a, Message> {
     dashboard(
         &Menu::Vault(VaultSubMenu::PSBTs(None)),
@@ -191,6 +192,7 @@ pub fn psbt_view<'a>(
                 currently_signing,
                 saved,
                 replay,
+                broadcast_ready,
             ))
             .push(
                 Column::new()
@@ -608,19 +610,12 @@ pub fn spend_overview_view<'a>(
     currently_signing: bool,
     saved: bool,
     replay: Option<ReplayPill<'a>>,
+    broadcast_ready: bool,
 ) -> Element<'a, Message> {
-    // Broadcast readiness has one definition shared with the state
-    // (`replay::broadcast_ready`): the path threshold on a Bitcoin-family
-    // Cube; on Bitcoin Blake2b the finaliser's verdict, the I13 requirement on
-    // known-entangled inputs, and the acknowledgement. "Sign" stays the action
-    // while a required signature is missing, so the user is led to add it
-    // rather than to a Broadcast button that cannot be enabled.
-    let broadcast_ready = match &replay {
-        None => tx.path_ready().is_some(),
-        Some(pill) => pill.broadcast_ready,
-    };
+    // The state supplies cryptographically verified readiness. Claimed
+    // signature counts below are progress hints only.
     let sign_or_broadcast = match &replay {
-        None => tx.path_ready().is_none(),
+        None => !broadcast_ready,
         Some(pill) => !pill.review.signatures_complete(&pill.entangled),
     };
     // Force the user to save (which commits the derivation-index increment to the
@@ -695,7 +690,10 @@ pub fn spend_overview_view<'a>(
                                     .align_y(Alignment::Center),
                             ),
                     )
-                    .push(signatures(tx, desc_info, key_aliases))
+                    .push(signatures(tx, desc_info, key_aliases, match &replay {
+                        None => broadcast_ready,
+                        Some(pill) => pill.review.signatures_complete(&pill.entangled),
+                    }))
                     .push_maybe(replay.as_ref().map(replay_status_view)),
             )
             .style(theme::card::simple),
@@ -743,93 +741,100 @@ pub fn signatures<'a>(
     tx: &'a SpendTx,
     desc_info: &'a CoincubePolicy,
     keys_aliases: &'a HashMap<Fingerprint, String>,
+    signatures_verified: bool,
 ) -> Element<'a, Message> {
     Column::new()
-        .push(if let Some(sigs) = tx.path_ready() {
-            Container::new(
-                scrollable(
-                    Row::new()
-                        .spacing(5)
-                        .align_y(Alignment::Center)
-                        .spacing(10)
-                        .push(p1_bold("Status"))
-                        .push(icon::square_check_icon().style(theme::text::success))
-                        .push(text("Ready").bold().style(theme::text::success))
-                        .push(text("  signed by"))
-                        .push(
-                            sigs.signed_pubkeys
-                                .keys()
-                                .fold(Row::new().spacing(5), |row, value| {
-                                    row.push(container_from_fg(*value, keys_aliases))
-                                }),
-                        ),
-                )
-                .direction(scrollable::Direction::Horizontal(
-                    scrollable::Scrollbar::new().width(2).scroller_width(2),
-                )),
-            )
-            .padding(15)
-        } else {
-            // Not broadcastable yet. If some (but not enough) signatures are
-            // present, surface a "Partially signed" banner with the signers so
-            // the user sees progress instead of a bare "Not ready".
-            let signed: Vec<Fingerprint> = {
-                let mut v: Vec<_> = tx.signers().into_iter().collect();
-                v.sort_by_key(|fg| fg.to_string());
-                v
-            };
-            let is_partial = !signed.is_empty();
-
-            let collapse = Collapse::new(
-                move || requirements_header(is_partial, icon::collapse_icon()),
-                move || requirements_header(is_partial, icon::collapsed_icon()),
-                move || {
-                    Into::<Element<'a, Message>>::into(
-                        Column::new()
-                            .padding(15)
+        .push(
+            if let Some(sigs) = tx.path_ready().filter(|_| signatures_verified) {
+                Container::new(
+                    scrollable(
+                        Row::new()
+                            .spacing(5)
+                            .align_y(Alignment::Center)
                             .spacing(10)
-                            .push(text("Finalizing this transaction requires:"))
-                            .push(if tx.sigs.recovery_paths().is_empty() {
-                                Some(path_view(
-                                    desc_info.primary_path(),
-                                    tx.sigs.primary_path(),
-                                    keys_aliases,
-                                ))
-                            } else {
-                                tx.sigs.recovery_paths().iter().last().map(|(seq, path)| {
-                                    let keys = &desc_info.recovery_paths()[seq];
-                                    path_view(keys, path, keys_aliases)
-                                })
-                            }),
+                            .push(p1_bold("Status"))
+                            .push(icon::square_check_icon().style(theme::text::success))
+                            .push(text("Ready").bold().style(theme::text::success))
+                            .push(text("  signed by"))
+                            .push(
+                                sigs.signed_pubkeys
+                                    .keys()
+                                    .fold(Row::new().spacing(5), |row, value| {
+                                        row.push(container_from_fg(*value, keys_aliases))
+                                    }),
+                            ),
                     )
-                },
-            );
+                    .direction(scrollable::Direction::Horizontal(
+                        scrollable::Scrollbar::new().width(2).scroller_width(2),
+                    )),
+                )
+                .padding(15)
+            } else {
+                // Not broadcastable yet. If some (but not enough) signatures are
+                // present, surface a "Partially signed" banner with the signers so
+                // the user sees progress instead of a bare "Not ready".
+                let signed: Vec<Fingerprint> = {
+                    let mut v: Vec<_> = tx.signers().into_iter().collect();
+                    v.sort_by_key(|fg| fg.to_string());
+                    v
+                };
+                let is_partial = !signed.is_empty();
 
-            let mut col = Column::new();
-            if is_partial {
-                col = col.push(
-                    Container::new(
-                        scrollable(
-                            Row::new()
+                let collapse = Collapse::new(
+                    move || requirements_header(is_partial, icon::collapse_icon()),
+                    move || requirements_header(is_partial, icon::collapsed_icon()),
+                    move || {
+                        Into::<Element<'a, Message>>::into(
+                            Column::new()
+                                .padding(15)
                                 .spacing(10)
-                                .align_y(Alignment::Center)
-                                .push(p1_bold("Status"))
-                                .push(icon::clock_icon().style(theme::text::warning))
-                                .push(text("Partially signed").bold().style(theme::text::warning))
-                                .push(text("  signed by"))
-                                .push(signed.iter().fold(Row::new().spacing(5), |row, fg| {
-                                    row.push(container_from_fg(*fg, keys_aliases))
-                                })),
+                                .push(text("Finalizing this transaction requires:"))
+                                .push(if tx.sigs.recovery_paths().is_empty() {
+                                    Some(path_view(
+                                        desc_info.primary_path(),
+                                        tx.sigs.primary_path(),
+                                        keys_aliases,
+                                    ))
+                                } else {
+                                    tx.sigs.recovery_paths().iter().last().map(|(seq, path)| {
+                                        let keys = &desc_info.recovery_paths()[seq];
+                                        path_view(keys, path, keys_aliases)
+                                    })
+                                }),
                         )
-                        .direction(scrollable::Direction::Horizontal(
-                            scrollable::Scrollbar::new().width(2).scroller_width(2),
-                        )),
-                    )
-                    .padding(15),
+                    },
                 );
-            }
-            Container::new(col.push(collapse))
-        })
+
+                let mut col = Column::new();
+                if is_partial {
+                    col = col.push(
+                        Container::new(
+                            scrollable(
+                                Row::new()
+                                    .spacing(10)
+                                    .align_y(Alignment::Center)
+                                    .push(p1_bold("Status"))
+                                    .push(icon::clock_icon().style(theme::text::warning))
+                                    .push(
+                                        text("Partially signed").bold().style(theme::text::warning),
+                                    )
+                                    .push(text("  signed by"))
+                                    .push(signed.iter().fold(Row::new().spacing(5), |row, fg| {
+                                        row.push(container_from_fg(*fg, keys_aliases))
+                                    })),
+                            )
+                            .direction(
+                                scrollable::Direction::Horizontal(
+                                    scrollable::Scrollbar::new().width(2).scroller_width(2),
+                                ),
+                            ),
+                        )
+                        .padding(15),
+                    );
+                }
+                Container::new(col.push(collapse))
+            },
+        )
         .into()
 }
 

@@ -417,7 +417,9 @@ impl CoincubeDescriptor {
         matches!(self.multi_desc, descriptor::Descriptor::Tr(..))
     }
 
-    /// Get some information about a PSBT input spending Coincube coins.
+    /// Get presence-based progress information about an input spending Coincube coins.
+    /// Counts claimed signatures; it does not verify them. Readiness to broadcast
+    /// must use a chain-appropriate finalizer, not this progress count.
     /// This analysis assumes that:
     /// - The PSBT input actually spend a Coincube coin for this descriptor. Otherwise the analysis will be off.
     /// - The signatures contained in the PSBT input are valid for this script.
@@ -485,7 +487,8 @@ impl CoincubeDescriptor {
     // TODO: decide whether we should check the signatures too. To be useful it should check pubkeys
     // correspond to those in the script. And we could be checking the witness scripts are all for
     // our descriptor too..
-    /// Get some information about a PSBT spending Coincube coins.
+    /// Get presence-based progress information about a PSBT spending Coincube coins.
+    /// Counts claimed signatures; use the chain-appropriate finalizer for validity.
     /// This analysis assumes that:
     /// - The PSBT only contains input that spends Coincube coins. Otherwise the analysis will be off.
     /// - The PSBT is consistent across inputs (the sequence is the same across inputs, the

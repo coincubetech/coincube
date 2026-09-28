@@ -85,6 +85,14 @@ pub mod unified {
     }
 
     pub fn fixture() -> Fixture {
+        fixture_with_policy(false)
+    }
+
+    pub fn taproot_fixture() -> Fixture {
+        fixture_with_policy(true)
+    }
+
+    fn fixture_with_policy(taproot: bool) -> Fixture {
         let secp = secp256k1::Secp256k1::new();
         let signers = vec![signer(21), signer(22), signer(23)];
         let primary = PathInfo::Multi(
@@ -96,10 +104,13 @@ pub mod unified {
             ],
         );
         let recovery = PathInfo::Single(descriptor_key(&signers[2], 1, &secp));
-        let descriptor = CoincubeDescriptor::new(
-            CoincubePolicy::new_legacy(primary, [(46, recovery)].iter().cloned().collect())
-                .unwrap(),
-        );
+        let recovery = [(46, recovery)].iter().cloned().collect();
+        let policy = if taproot {
+            CoincubePolicy::new(primary, recovery)
+        } else {
+            CoincubePolicy::new_legacy(primary, recovery)
+        };
+        let descriptor = CoincubeDescriptor::new(policy.unwrap());
         let derived = descriptor.receive_descriptor().derive(3.into(), &secp);
         let output = TxOut {
             value: Amount::from_sat(50_000),

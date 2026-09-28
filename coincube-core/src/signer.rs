@@ -9,6 +9,7 @@ use crate::seed_crypt;
 use zeroize::Zeroizing;
 
 use std::{
+    borrow::Cow,
     error, fmt, fs,
     io::{self, Write},
     path,
@@ -129,6 +130,74 @@ pub struct MasterSigner {
     mnemonic: bip39::Mnemonic,
     master_xpriv: bip32::Xpriv,
     network: bitcoin::Network,
+}
+
+/// A BIP39 signer whose authority exists only for one active workflow.
+///
+/// Unlike [`MasterSigner`], this type deliberately has no mnemonic accessor or
+/// persistence method. The caller supplies zeroizing mnemonic/passphrase
+/// buffers, construction retains only the derived xpriv, and `Drop` scrubs that
+/// xpriv. The BTCB2 foreign-wallet Split flow uses this boundary so a seed
+/// entered for a one-time unified sweep cannot enter a Cube seed file by API
+/// accident.
+pub struct SessionSigner {
+    master_xpriv: bip32::Xpriv,
+}
+
+impl SessionSigner {
+    pub fn from_mnemonic(
+        network: bitcoin::Network,
+        mnemonic: bip39::Mnemonic,
+        passphrase: &str,
+    ) -> Result<Self, SignerError> {
+        // BIP39 requires both mnemonic and passphrase to be UTF-8 NFKD. The
+        // method name is literal: `to_seed_normalized` assumes its caller has
+        // already normalized the passphrase. Reuse bip39's own normalization
+        // helper so our behavior cannot drift from the crate's implementation.
+        // `into_owned` moves the allocation when normalization was necessary;
+        // either way the sole owned normalized copy is scrubbed immediately
+        // after PBKDF2 returns.
+        let mut normalized = Cow::Borrowed(passphrase);
+        bip39::Mnemonic::normalize_utf8_cow(&mut normalized);
+        let normalized = Zeroizing::new(normalized.into_owned());
+        let seed = Zeroizing::new(mnemonic.to_seed_normalized(normalized.as_str()));
+        let master_xpriv =
+            bip32::Xpriv::new_master(network, seed.as_ref()).map_err(SignerError::Bip32)?;
+        // `mnemonic` has bip39's ZeroizeOnDrop implementation; `seed` is a
+        // Zeroizing buffer. Neither is retained by this session signer.
+        Ok(Self { master_xpriv })
+    }
+
+    pub fn fingerprint(
+        &self,
+        secp: &secp256k1::Secp256k1<impl secp256k1::Signing>,
+    ) -> bip32::Fingerprint {
+        self.master_xpriv.fingerprint(secp)
+    }
+
+    pub fn xpub_at(
+        &self,
+        der_path: &bip32::DerivationPath,
+        secp: &secp256k1::Secp256k1<impl secp256k1::Signing>,
+    ) -> bip32::Xpub {
+        let mut derived = self
+            .master_xpriv
+            .derive_priv(secp, der_path)
+            .expect("validated BIP32 path cannot exceed the depth limit");
+        let xpub = bip32::Xpub::from_priv(secp, &derived);
+        scrub_xpriv(&mut derived);
+        xpub
+    }
+
+    fn zeroize_secrets(&mut self) {
+        scrub_xpriv(&mut self.master_xpriv);
+    }
+}
+
+impl Drop for SessionSigner {
+    fn drop(&mut self) {
+        self.zeroize_secrets();
+    }
 }
 
 /// Overwrite an extended private key in place.
@@ -1137,6 +1206,29 @@ mod tests {
         );
         assert_ne!(xpriv.chain_code, chain_before);
         assert_eq!(xpriv.chain_code, bip32::ChainCode::from([0u8; 32]));
+    }
+
+    #[test]
+    fn session_signer_explicit_zeroize_scrubs_the_retained_xpriv() {
+        let mnemonic = bip39::Mnemonic::parse_in(
+            bip39::Language::English,
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+        )
+        .unwrap();
+        let mut signer =
+            SessionSigner::from_mnemonic(bitcoin::Network::Bitcoin, mnemonic, "passphrase")
+                .unwrap();
+        let key_before = signer.master_xpriv.private_key.secret_bytes();
+        let chain_before = signer.master_xpriv.chain_code;
+
+        signer.zeroize_secrets();
+
+        assert_ne!(signer.master_xpriv.private_key.secret_bytes(), key_before);
+        assert_ne!(signer.master_xpriv.chain_code, chain_before);
+        assert_eq!(
+            signer.master_xpriv.chain_code,
+            bip32::ChainCode::from([0u8; 32])
+        );
     }
 
     #[test]

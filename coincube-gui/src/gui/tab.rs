@@ -556,6 +556,9 @@ pub struct Tab {
     fork_save_task: Option<iced::task::Handle>,
     fork_tasks: HashMap<u64, iced::task::Handle>,
     next_fork_task: u64,
+    /// Split entry suspended while the ordinary BTCB2 wallet installer creates
+    /// the first eligible Vault Cube.
+    pending_split_after_install: bool,
 }
 
 impl Tab {
@@ -569,6 +572,7 @@ impl Tab {
             fork_save_task: None,
             fork_tasks: HashMap::new(),
             next_fork_task: 0,
+            pending_split_after_install: false,
         }
     }
 
@@ -726,6 +730,7 @@ impl Tab {
         originated: bool,
     ) -> Task<Message> {
         self.fork_session_generation = self.fork_session_generation.wrapping_add(1);
+        self.pending_split_after_install = false;
         self.fork_save_task.take();
         self.fork_tasks.clear();
         let mut command = Task::none();
@@ -953,6 +958,35 @@ impl Tab {
                             );
                         }
                     }
+                    self.state = State::Installer(install);
+                    command.map(Message::Install)
+                }
+                home::Message::InstallForSplit(datadir, coincube_client) => {
+                    let network = crate::chain::ChainId::BitcoinBlake2b;
+                    if let Some(reason) = l.connect_chain_availability(network).reason() {
+                        l.set_error(reason.to_string());
+                        return Task::none();
+                    }
+                    let (install, command) = match Installer::try_new_for_chain(
+                        datadir,
+                        network,
+                        None,
+                        UserFlow::CreateWallet,
+                        false,
+                        None,
+                        None,
+                        None,
+                        false,
+                        Some(coincube_client),
+                    ) {
+                        Ok(result) => result,
+                        Err(error) => {
+                            self.pending_split_after_install = false;
+                            l.set_error(error.to_string());
+                            return Task::none();
+                        }
+                    };
+                    self.pending_split_after_install = true;
                     self.state = State::Installer(install);
                     command.map(Message::Install)
                 }
@@ -1185,6 +1219,9 @@ impl Tab {
                 _ => l.update(msg).map(Message::Login),
             },
             (State::Installer(i), Message::Install(msg)) => {
+                if matches!(msg, installer::Message::CubeSaveFailed(_)) {
+                    self.pending_split_after_install = false;
+                }
                 if let installer::Message::Exit(settings_opt, internal_bitcoind) = msg {
                     // Associate wallet with cube, and — for the Recovery
                     // Kit restore flow specifically — build the
@@ -1446,6 +1483,7 @@ impl Tab {
                         Ok(triple) => triple,
                         Err(err) => {
                             error!("Aborting loader transition due to cube save failure");
+                            self.pending_split_after_install = false;
                             return i
                                 .update(installer::Message::CubeSaveFailed(err))
                                 .map(Message::Install);
@@ -1453,6 +1491,14 @@ impl Tab {
                     };
 
                     if cube.network.is_blake2b() {
+                        if self.pending_split_after_install {
+                            self.pending_split_after_install = false;
+                            let (mut home, command) =
+                                Home::new_for_chain(i.datadir.clone(), Some(cube.network));
+                            home.request_split_resume();
+                            self.state = State::Home(home);
+                            return command.map(Message::Launch);
+                        }
                         let config = match app::Config::from_file(
                             &i.datadir
                                 .network_directory(cube.network)
@@ -1461,9 +1507,10 @@ impl Tab {
                         ) {
                             Ok(config) => config,
                             Err(e) => {
+                                self.pending_split_after_install = false;
                                 return i
                                     .update(installer::Message::CubeSaveFailed(e.to_string()))
-                                    .map(Message::Install)
+                                    .map(Message::Install);
                             }
                         };
                         let on_success = crate::pin_entry::PinEntrySuccess::LoadApp {
@@ -1592,6 +1639,7 @@ impl Tab {
                         command.map(Message::Load)
                     }
                 } else if let installer::Message::BackToApp(network) = msg {
+                    self.pending_split_after_install = false;
                     // A claim was launched from a *different* Cube than the one
                     // being built, so there is no `cube_settings` to go back to
                     // — without this the user who backs out of a claim lands on
@@ -5306,6 +5354,39 @@ mod fork_completion_tests {
     use super::*;
     use crate::chain::ChainId;
 
+    #[test]
+    fn cancelling_the_split_prerequisite_installer_discards_the_pending_intent() {
+        let root_path = std::env::temp_dir().join(format!(
+            "coincube-split-installer-cancel-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let root = CoincubeDirectory::new(root_path.clone());
+        let (mut installer, _) = Installer::new(
+            root,
+            bitcoin::Network::Bitcoin,
+            None,
+            installer::UserFlow::CreateWallet,
+            false,
+            None,
+            None,
+            None,
+            false,
+            None,
+        )
+        .expect("installer fixture");
+        installer.context.bitcoin_config.chain = ChainId::BitcoinBlake2b;
+        let mut tab = Tab::new(1, State::Installer(installer));
+        tab.pending_split_after_install = true;
+
+        let _ = tab.update(Message::Install(installer::Message::BackToApp(
+            bitcoin::Network::Bitcoin,
+        )));
+
+        assert!(!tab.pending_split_after_install);
+        assert!(matches!(tab.state, State::Home(_)));
+        let _ = std::fs::remove_dir_all(root_path);
+    }
+
     async fn outputs(task: Task<Message>) -> Vec<Message> {
         use iced_runtime::futures::futures::StreamExt;
         match iced_runtime::task::into_stream(task) {
@@ -5458,5 +5539,21 @@ mod fork_completion_tests {
         assert!(matches!(&tab.state, State::Home(home) if home.is_checked_for_test()));
         assert!(app::session::pin_for("synthetic-save-cube").is_none());
         std::fs::remove_dir_all(root_path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    #[test]
+    fn tab_state_stays_within_debug_stack_budget() {
+        // #481: inline Panels grew State to 32 KiB, multiplying temporaries
+        // in update_inner until Windows' 2 MiB test-thread stack overflowed.
+        // The lint compares variants; this also catches balanced growth.
+        let bytes = std::mem::size_of::<super::State>();
+        assert!(
+            bytes <= 8 * 1024,
+            "Tab State is {} bytes; review stack use and box bulky state",
+            bytes
+        );
     }
 }
