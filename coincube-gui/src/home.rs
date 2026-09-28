@@ -26,6 +26,7 @@ use crate::services::coincube::{
 use crate::services::passkey::CeremonyMode;
 use crate::services::passkey::{self as passkey_svc, CeremonyOutcome, PasskeyCeremony};
 use crate::services::unlock::{self, creation_gate};
+use crate::split_wallet::{self, SplitWalletPanel, TargetCube};
 use crate::{
     app::{
         self,
@@ -241,6 +242,8 @@ pub enum HomeSection {
     /// Heir "Recover a Vault" discovery surface (COIN-377 / PR 1). Global —
     /// reachable even when the heir owns no Vault of their own.
     RecoverVault,
+    /// Scan a non-Cube Bitcoin wallet before the PR 8 poison-split handoff.
+    SplitWallet,
 }
 
 /// Context stashed for firing a remote cube update after local rename succeeds.
@@ -287,6 +290,7 @@ pub struct Home {
     pub connect_account: ConnectAccountPanel,
     /// Heir "Recover a Vault" discovery surface state (COIN-377 / PR 1).
     pub recover_vault: RecoverVaultPanel,
+    pub split_wallet: SplitWalletPanel,
     /// Whether the Connect sidebar section is expanded
     pub connect_expanded: bool,
     /// Which section is currently displayed in the main content area
@@ -426,6 +430,7 @@ impl Home {
                 )),
                 connect_account: ConnectAccountPanel::new(),
                 recover_vault: RecoverVaultPanel::new(),
+                split_wallet: SplitWalletPanel::new(),
                 connect_expanded: false,
                 active_section: HomeSection::Cubes,
                 theme_mode: GlobalSettings::load_theme_mode(&GlobalSettings::path(&datadir_path)),
@@ -763,6 +768,27 @@ impl Home {
         })
     }
 
+    /// Local BTCB2 Vaults eligible to receive a foreign-wallet split. Public
+    /// identifiers only; the panel never opens or unlocks the Cube.
+    fn split_wallet_targets(&self) -> Vec<TargetCube> {
+        let directory = self.datadir_path.network_directory(ChainId::BitcoinBlake2b);
+        settings::Settings::from_file(&directory)
+            .map(|settings| {
+                settings
+                    .cubes
+                    .into_iter()
+                    .filter(|cube| {
+                        cube.network == ChainId::BitcoinBlake2b && cube.vault_wallet_id.is_some()
+                    })
+                    .map(|cube| TargetCube {
+                        id: cube.id,
+                        name: cube.name,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Whether the Cube at `index` may start a Bitcoin Blake2b claim.
     ///
     /// The same predicate the Vault rail uses inside a running Cube
@@ -864,7 +890,10 @@ impl Home {
                         | ViewMessage::ToggleConnect
                         | ViewMessage::ToggleDeveloperMode(_)
                         | ViewMessage::ToggleTheme
-                        | ViewMessage::GoToSection(HomeSection::Cubes | HomeSection::Connect(_))
+                        | ViewMessage::GoToSection(
+                            HomeSection::Cubes | HomeSection::Connect(_) | HomeSection::SplitWallet,
+                        )
+                        | ViewMessage::SplitWallet(_)
                         | ViewMessage::OpenUrl(_)
                         | ViewMessage::DismissAdvisoryNotice
                 ),
@@ -2309,6 +2338,18 @@ impl Home {
                 } else {
                     section
                 };
+                if matches!(section, HomeSection::SplitWallet) {
+                    if let Some(reason) = self
+                        .connect_chain_availability(ChainId::BitcoinBlake2b)
+                        .reason()
+                    {
+                        self.set_error(reason.to_string());
+                        return Task::none();
+                    }
+                    self.split_wallet.set_targets(self.split_wallet_targets());
+                } else if matches!(self.active_section, HomeSection::SplitWallet) {
+                    self.split_wallet.cancel();
+                }
                 // Update the account panel's active_sub when navigating to a Connect submenu
                 if let HomeSection::Connect(ref sub) = section {
                     self.connect_account.active_sub = sub.clone();
@@ -2424,6 +2465,13 @@ impl Home {
                 self.recover_vault
                     .update(msg, client, gen)
                     .map(|m| Message::View(ViewMessage::RecoverVault(m)))
+            }
+            Message::View(ViewMessage::SplitWallet(msg)) => {
+                let client = self.connect_account.authenticated_client();
+                let generation = self.connect_account.session_generation();
+                self.split_wallet
+                    .update(msg, client, generation)
+                    .map(|message| Message::View(ViewMessage::SplitWallet(message)))
             }
 
             // Owner chose passwordless phone recovery for a Cube: launch the
@@ -4033,6 +4081,9 @@ impl Home {
             // Heir "Recover a Vault" discovery surface (COIN-377 / PR 1).
             recover_vault::view(&self.recover_vault)
                 .map(|msg| Message::View(ViewMessage::RecoverVault(msg)))
+        } else if matches!(self.active_section, HomeSection::SplitWallet) {
+            split_wallet::view(&self.split_wallet)
+                .map(|msg| Message::View(ViewMessage::SplitWallet(msg)))
         } else {
             content
         };
@@ -4304,6 +4355,24 @@ fn home_sidebar<'a>(home: &'a Home) -> Element<'a, Message> {
         .on_press(msg(ViewMessage::ToggleConnect))
         .into();
         col = col.push(connect_button);
+    }
+
+    // PR 8 entry: account flag and runtime support must both be live. The
+    // panel itself requires a destination BTCB2 Vault before it will scan.
+    if home.network == ChainId::Bitcoin
+        && home
+            .connect_chain_availability(ChainId::BitcoinBlake2b)
+            .is_available()
+    {
+        let active = matches!(home.active_section, HomeSection::SplitWallet);
+        let split_button = if active {
+            btn::menu_active(Some(ic::cube_icon()), "Split a Bitcoin wallet").width(Length::Fill)
+        } else {
+            btn::menu(Some(ic::cube_icon()), "Split a Bitcoin wallet")
+                .on_press(msg(ViewMessage::GoToSection(HomeSection::SplitWallet)))
+                .width(Length::Fill)
+        };
+        col = col.push(Row::new().push(split_button).width(Length::Fill));
     }
 
     if home.connect_expanded && is_authenticated {
@@ -5552,6 +5621,9 @@ pub enum ViewMessage {
     ConnectAccount(ConnectAccountMessage),
     /// Heir "Recover a Vault" discovery-surface messages (COIN-377 / PR 1).
     RecoverVault(RecoverVaultMessage),
+    /// PR 8 foreign-wallet discovery surface. Scan-only until the shared
+    /// poison-split safety primitives are available.
+    SplitWallet(split_wallet::Message),
     /// Toggle light/dark theme
     ToggleTheme,
     /// Toggle passkey mode for Cube creation (no PIN when enabled).
