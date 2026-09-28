@@ -489,3 +489,44 @@ def test_a_failing_open_is_not_mistaken_for_a_descriptor_fault(tmp_path):
     report = describe_failure(str(trace), "blk00000.dat")
     assert "no lseek/read/close on blk00000.dat failed" in report
     assert "fd -1" not in report
+
+
+# The sequence run 36382915647 captured, trimmed to fd 27. Every awkward part
+# of it is load-bearing: the open that names the file is split across two
+# lines, its result carries no path because the descriptor was already dead,
+# the close that killed it completed *before* that open completed, and a forked
+# child's failed close sits in the middle looking like a culprit.
+REAL_TRACE = """\
+8878  05:46:32.849699 close(27)         = -1 EBADF (Bad file descriptor) <0.000015>
+8833  05:46:32.854550 close(27<pipe:[180543]> <unfinished ...>
+8833  05:46:32.854603 <... close resumed>) = 0 <0.000040>
+8820  05:46:32.854615 openat(AT_FDCWD</w>, "/d/regtest/blocks/blk00000.dat", O_RDONLY <unfinished ...>
+8833  05:46:32.854646 close(27</d/regtest/blocks/blk00000.dat> <unfinished ...>
+8833  05:46:32.854681 <... close resumed>) = 0 <0.000023>
+8820  05:46:32.854694 <... openat resumed>) = 27 <0.000060>
+8820  05:46:32.854832 lseek(27, 8192, SEEK_SET) = -1 EBADF (Bad file descriptor) <0.000029>
+8820  05:46:32.855056 close(27)         = -1 EBADF (Bad file descriptor) <0.000021>
+"""
+
+
+def test_the_trace_reader_reconstructs_the_double_close(tmp_path):
+    trace = tmp_path / "strace.log"
+    # 8878 is a forked child: give it the close storm that makes it one.
+    storm = "".join(
+        f"8878 05:46:32.8{i:05d} close({fd}) = -1 EBADF (Bad file descriptor) <0.000004>\n"
+        for i, fd in enumerate(range(9000, 3999, -1))
+    )
+    trace.write_text(storm + REAL_TRACE)
+    report = describe_failure(str(trace), "blk00000.dat")
+
+    # The failing call is the one the node's log complains about, found even
+    # though nothing in it names the block file.
+    assert "fd 27 failed in tid 8820" in report
+    assert "lseek(27, 8192, SEEK_SET) = -1 EBADF" in report
+    # Both of the other thread's closes are present, including the one that
+    # completed before the open it destroyed.
+    assert report.count("tid    8833 close = 0") == 2
+    assert "another thread of this process touched fd 27 before it failed: 8833" in report
+    # The child's failed close is shown but not blamed.
+    assert "c 05:46:32" in report
+    assert "8878" not in report.split("another thread of this process")[1]
