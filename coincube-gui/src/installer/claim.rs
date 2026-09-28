@@ -200,27 +200,11 @@ mod tests {
     #[test]
     fn the_debug_rendering_never_carries_seed_material() {
         let s = source("Savings");
-        let rendered = format!("{s:?}");
-        assert!(rendered.contains("cube-1"), "{}", rendered);
-        let rendered_tokens: Vec<_> = rendered
-            .split(|character: char| !character.is_ascii_alphabetic())
-            .filter(|token| !token.is_empty())
-            .collect();
-        assert!(rendered.to_ascii_lowercase().contains("claim"));
-        assert!(
-            !rendered_tokens
-                .iter()
-                .any(|token| token.eq_ignore_ascii_case("claim")),
-            "a mnemonic word may be a harmless substring of the type name"
-        );
-        for word in s.signer.mnemonic() {
-            assert!(
-                !rendered_tokens
-                    .iter()
-                    .any(|token| token.eq_ignore_ascii_case(word)),
-                "{}",
-                rendered
-            );
-        }
+        // An exact match, not a scan for mnemonic words: the fixture's
+        // mnemonic is random, and BIP39 words such as "cube" and "aim" occur
+        // in this fixed text, so a word scan fails nondeterministically. Any
+        // field added to the rendering, seed material included, changes the
+        // string and fails this assertion.
+        assert_eq!(format!("{s:?}"), r#"ClaimSource { cube_id: "cube-1", .. }"#);
     }
 }
