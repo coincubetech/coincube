@@ -202,8 +202,25 @@ mod tests {
         let s = source("Savings");
         let rendered = format!("{s:?}");
         assert!(rendered.contains("cube-1"), "{}", rendered);
+        let rendered_tokens: Vec<_> = rendered
+            .split(|character: char| !character.is_ascii_alphabetic())
+            .filter(|token| !token.is_empty())
+            .collect();
+        assert!(rendered.to_ascii_lowercase().contains("claim"));
+        assert!(
+            !rendered_tokens
+                .iter()
+                .any(|token| token.eq_ignore_ascii_case("claim")),
+            "a mnemonic word may be a harmless substring of the type name"
+        );
         for word in s.signer.mnemonic() {
-            assert!(!rendered.contains(word), "{}", rendered);
+            assert!(
+                !rendered_tokens
+                    .iter()
+                    .any(|token| token.eq_ignore_ascii_case(word)),
+                "{}",
+                rendered
+            );
         }
     }
 }
