@@ -51,7 +51,7 @@ import pytest
 from fixtures import *  # noqa: F401,F403  (test_base_dir)
 from test_framework import utils
 from test_framework.bitcoind import Bitcoind
-from test_framework.strace import describe_failure
+from test_framework.strace import _returned_tid, describe_failure
 from test_framework.btcb2 import (
     KNOTS_LEGACY_PATH,
     TwoChainRegtest,
@@ -301,7 +301,7 @@ def test_syscall_trace_prefix_follows_threads_and_appends(monkeypatch):
     assert "-y" in argv
     assert argv[-2:] == ["-o", "/somewhere/strace.log"]
     traced = argv[argv.index("-e") + 1]
-    for call in ("openat", "lseek", "read", "close", "dup"):
+    for call in ("openat", "lseek", "read", "close", "dup", "clone", "fork"):
         assert call in traced
 
 
@@ -473,11 +473,79 @@ def test_a_forked_child_is_not_reported_as_a_sibling_thread(tmp_path):
     )
     storm += "2002 05:22:56.200300 close(23</d/blocks/blk00000.dat>) = 0 <0.000004>\n"
     trace = tmp_path / "strace.log"
-    trace.write_text(CHILD_TRACE.format(storm=storm))
+    creation = "2001 05:22:56.099999 fork() = 2002 <0.000100>\n"
+    trace.write_text(creation + CHILD_TRACE.format(storm=storm))
     report = describe_failure(str(trace), "blk00000.dat")
     assert "fd 23 failed in tid 1001" in report
     assert "no sibling thread touched fd 23" in report
     assert "forked child clearing its inherited descriptor table" in report
+
+
+def test_a_busy_shared_table_sibling_is_not_mistaken_for_a_child(tmp_path):
+    """A long-lived worker can close thousands of sockets during churn. Its
+    lifetime count does not make its descriptor table a forked copy."""
+    trace = tmp_path / "strace.log"
+    creation = (
+        "1001 05:22:55.000000 clone(child_stack=NULL, "
+        "flags=CLONE_VM|CLONE_FS|CLONE_FILES|SIGCHLD) = 1002 <0.000100>\n"
+    )
+    busy_closes = "".join(
+        f"1002 05:22:55.{i:06d} close({9000 - i}) = 0 <0.000001>\n"
+        for i in range(4096)
+    )
+    sibling_close = (
+        "1002 05:22:56.100300 close(23</d/blocks/blk00000.dat>) = 0 "
+        "<0.000004>\n"
+    )
+    # Keep the failing call path-annotated here so descriptor reconstruction is
+    # independent of the classification under test. (The bare-fd case is
+    # covered by the fork-child and real-trace fixtures.)
+    shared_trace = CHILD_TRACE.replace(
+        "lseek(23,", "lseek(23</d/blocks/blk00000.dat>,"
+    )
+    trace.write_text(creation + shared_trace.format(storm=busy_closes + sibling_close))
+    report = describe_failure(str(trace), "blk00000.dat")
+    assert "* 05:22:56.100300 tid    1002 close = 0" in report
+    assert (
+        "another thread of this process touched fd 23 before it failed: 1002"
+        in report
+    )
+    assert "no sibling thread touched fd 23" not in report
+
+
+def test_successful_lifo_closes_without_creation_evidence_remain_a_sibling(tmp_path):
+    """A shared worker can close many real descriptors in descending order.
+    Successful closes are not the failed inherited-table sweep from the legacy
+    trace and must not become child-process evidence on their own."""
+    trace = tmp_path / "strace.log"
+    busy_closes = "".join(
+        f"1002 05:22:55.{i:06d} close({9000 - i}) = 0 <0.000001>\n"
+        for i in range(4096)
+    )
+    sibling_close = (
+        "1002 05:22:56.100300 close(23</d/blocks/blk00000.dat>) = 0 "
+        "<0.000004>\n"
+    )
+    shared_trace = CHILD_TRACE.replace(
+        "lseek(23,", "lseek(23</d/blocks/blk00000.dat>,"
+    )
+    trace.write_text(shared_trace.format(storm=busy_closes + sibling_close))
+    report = describe_failure(str(trace), "blk00000.dat")
+    assert "* 05:22:56.100300 tid    1002 close = 0" in report
+    assert (
+        "another thread of this process touched fd 23 before it failed: 1002"
+        in report
+    )
+    assert "no sibling thread touched fd 23" not in report
+
+
+def test_process_creation_return_zero_is_not_a_child_tid():
+    event = {"ret": "0"}
+    assert _returned_tid(event) is None
+    event["ret"] = "-1 EAGAIN (Resource temporarily unavailable)"
+    assert _returned_tid(event) is None
+    event["ret"] = "2002"
+    assert _returned_tid(event) == "2002"
 
 
 def test_a_failing_open_is_not_mistaken_for_a_descriptor_fault(tmp_path):

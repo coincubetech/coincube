@@ -34,12 +34,13 @@ OPENING = ("openat", "open", "dup", "dup2", "dup3", "socket", "accept", "accept4
 # these says anything about descriptor lifetime; a failing `openat` just means
 # the path was not there, and it carries no fd to trace.
 USING = ("lseek", "_llseek", "read", "pread64", "close")
-# A process that closes more descriptors than any real workload holds is a
-# forked child clearing its inherited table before exec. Its closes happen in
-# its own copy of the table and cannot affect the parent, so reporting them as
-# "another thread closed your descriptor" would be exactly backwards. The
-# threshold is a heuristic, named as one.
-FORK_CLOSE_STORM = 4096
+# Older captured traces did not include process-creation calls. Their forked
+# children are still recognizable by the descending close(fd), close(fd - 1),
+# ... EBADF sweep used to clear an inherited table before exec. Keep that
+# narrowly evidenced fallback for existing artifacts; a lifetime count or a
+# run of successful LIFO closes is unsafe because a real sibling can close
+# thousands of sockets under this probe's connection churn.
+FORK_CLOSE_SWEEP = 4096
 # How far back to show a descriptor's history. Long enough to hold the calls
 # that raced, short enough to exclude the number's previous tenants.
 HISTORY_SECONDS = 0.5
@@ -277,15 +278,80 @@ def _seconds(clock):
 
 
 def _forked_children(events):
-    """PIDs that closed their whole descriptor table, i.e. forked children.
+    """TIDs whose descriptor table is separate from the traced parent.
 
-    strace's first column is a PID, and a fork and a thread look alike there.
-    A child clearing thousands of inherited descriptors is unmistakable, and
-    failing to exclude it turns an ordinary fork into a false report of one
-    thread destroying another's descriptor.
+    strace's first column alone cannot distinguish a process from a thread.
+    `fork`/`vfork`, and `clone` without CLONE_FILES, create a separate descriptor
+    table whose closes cannot affect the parent. `clone` with CLONE_FILES creates
+    a sibling that shares the table and must remain part of the diagnosis.
+
+    A child can create threads of its own with CLONE_FILES, so propagate child
+    status through those creation edges. Creation completion may appear after
+    the new task's first syscall in an interleaved trace; computing the complete
+    set before descriptor reconstruction handles that ordering.
     """
-    closes = {}
+    children = set()
+    shared_children = []
     for event in events:
-        if event["name"] == "close":
-            closes[event["tid"]] = closes.get(event["tid"], 0) + 1
-    return {tid for tid, count in closes.items() if count >= FORK_CLOSE_STORM}
+        if event["name"] not in ("clone", "clone3", "fork", "vfork"):
+            continue
+        child = _returned_tid(event)
+        if child is None:
+            continue
+        if event["name"] in ("fork", "vfork") or "CLONE_FILES" not in event["args"]:
+            children.add(child)
+        else:
+            shared_children.append((event["tid"], child))
+
+    # A TID with explicit CLONE_FILES ancestry gets its status from that
+    # ancestry, never from the compatibility heuristic. This makes the traced
+    # kernel semantics authoritative even if that thread happens to perform a
+    # descending series of closes itself.
+    shared_tids = {child for _, child in shared_children}
+    children.update(_legacy_close_sweep_children(events) - shared_tids)
+
+    changed = True
+    while changed:
+        changed = False
+        for parent, child in shared_children:
+            if parent in children and child not in children:
+                children.add(child)
+                changed = True
+    return children
+
+
+def _returned_tid(event):
+    """Successful process-creation return value, as a TID string."""
+    match = re.match(r"^(\d+)(?:\D|$)", event["ret"])
+    if match is None or int(match.group(1)) == 0:
+        return None
+    return match.group(1)
+
+
+def _legacy_close_sweep_children(events):
+    """Fork children in old traces, recognized by failed descending closes."""
+    previous = {}
+    run = {}
+    children = set()
+    for event in events:
+        if event["name"] != "close":
+            continue
+        tid = event["tid"]
+        if not event["ret"].startswith("-1 EBADF"):
+            previous.pop(tid, None)
+            run.pop(tid, None)
+            continue
+        fd = _fd_of(event)
+        if fd is None or fd.startswith("-"):
+            previous.pop(tid, None)
+            run.pop(tid, None)
+            continue
+        number = int(fd)
+        if previous.get(tid) == number + 1:
+            run[tid] = run.get(tid, 1) + 1
+        else:
+            run[tid] = 1
+        previous[tid] = number
+        if run[tid] >= FORK_CLOSE_SWEEP:
+            children.add(tid)
+    return children

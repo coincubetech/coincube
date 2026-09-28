@@ -65,7 +65,7 @@ STRACE_PATH = os.getenv("STRACE_PATH", "strace")
 # 36382138529, where fd 52's socket and pipe incarnations were invisible).
 TRACED_SYSCALLS = (
     "openat,open,lseek,_llseek,read,pread64,close,dup,dup2,dup3,fcntl,"
-    "socket,socketpair,accept,accept4,pipe2,eventfd2,execve"
+    "socket,socketpair,accept,accept4,pipe2,eventfd2,clone,clone3,fork,vfork,execve"
 )
 
 
