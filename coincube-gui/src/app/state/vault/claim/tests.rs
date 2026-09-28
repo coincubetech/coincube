@@ -885,14 +885,14 @@ mod flow {
         async fn submit_verified_ancestry(
             &self,
             verified: Arc<coincube_core::claim_finalize::VerifiedAncestryTransfer>,
-            gate: Arc<SubmissionGate>,
+            _gate: Arc<SubmissionGate>,
         ) -> Result<SubmissionOutcome, DaemonError> {
             self.hit("submit_verified_poison");
             #[cfg(feature = "regtest-harness")]
             if let Some(live) = &self.live {
                 let outcome = live
                     .transport
-                    .submit_ancestry(&verified, &gate)
+                    .submit_ancestry(&verified, &_gate)
                     .map_err(DaemonError::PoisonSubmission)?;
                 *self.submitted.lock().unwrap() = Some(verified.transaction().clone());
                 return Ok(outcome);

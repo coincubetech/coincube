@@ -190,7 +190,9 @@ impl HttpObservationSource {
                             .await
                         {
                             // Only positively disqualified roots allow another branch.
-                            Err(FailureKind::UnsupportedPoison) => continue,
+                            Err(
+                                FailureKind::UnsupportedPoison | FailureKind::AncestryRootShared,
+                            ) => continue,
                             Err(error) => return Err(observation(error)),
                             Ok((pair, observed_at)) => {
                                 return Ok(Some(DiscoveredAncestry {
