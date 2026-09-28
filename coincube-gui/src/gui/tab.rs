@@ -5541,3 +5541,19 @@ mod fork_completion_tests {
         std::fs::remove_dir_all(root_path).unwrap();
     }
 }
+
+#[cfg(test)]
+mod layout_tests {
+    #[test]
+    fn tab_state_stays_within_debug_stack_budget() {
+        // #481: inline Panels grew State to 32 KiB, multiplying temporaries
+        // in update_inner until Windows' 2 MiB test-thread stack overflowed.
+        // The lint compares variants; this also catches balanced growth.
+        let bytes = std::mem::size_of::<super::State>();
+        assert!(
+            bytes <= 8 * 1024,
+            "Tab State is {} bytes; review stack use and box bulky state",
+            bytes
+        );
+    }
+}
