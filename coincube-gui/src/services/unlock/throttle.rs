@@ -89,6 +89,10 @@ impl ThrottleState {
     /// How much longer this Cube must wait before another attempt is accepted.
     /// `Duration::ZERO` when it may try now.
     pub fn remaining_lockout(&self, cube_id: &str) -> Duration {
+        self.remaining_lockout_at(cube_id, now_unix())
+    }
+
+    fn remaining_lockout_at(&self, cube_id: &str, now_unix: u64) -> Duration {
         let Some(entry) = self.failures.get(cube_id) else {
             return Duration::ZERO;
         };
@@ -96,7 +100,7 @@ impl ThrottleState {
         if penalty.is_zero() {
             return Duration::ZERO;
         }
-        let elapsed = now_unix().saturating_sub(entry.last_failure_unix);
+        let elapsed = now_unix.saturating_sub(entry.last_failure_unix);
         penalty.saturating_sub(Duration::from_secs(elapsed))
     }
 
@@ -148,6 +152,15 @@ pub fn lockout_message(remaining: Duration) -> String {
 mod tests {
     use super::*;
 
+    fn remaining_at_last_failure(state: &ThrottleState, cube_id: &str) -> Duration {
+        let last_failure_unix = state
+            .failures
+            .get(cube_id)
+            .expect("the test must record a failure first")
+            .last_failure_unix;
+        state.remaining_lockout_at(cube_id, last_failure_unix)
+    }
+
     fn tmp(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!(
             "coincube-throttle-{}-{}-{:?}",
@@ -188,7 +201,7 @@ mod tests {
         for _ in 0..3 {
             st.record_failure(&root, "cube-a");
         }
-        assert!(st.remaining_lockout("cube-a") > Duration::ZERO);
+        assert!(remaining_at_last_failure(&st, "cube-a") > Duration::ZERO);
 
         st.record_success(&root, "cube-a");
         assert_eq!(st.remaining_lockout("cube-a"), Duration::ZERO);
@@ -205,7 +218,7 @@ mod tests {
             st.record_failure(&root, "cube-a");
         }
         let reloaded = ThrottleState::load(&root);
-        assert!(reloaded.remaining_lockout("cube-a") > Duration::ZERO);
+        assert!(remaining_at_last_failure(&reloaded, "cube-a") > Duration::ZERO);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -228,9 +241,10 @@ mod tests {
         }
 
         // ...and a *different* surface, loading the state fresh, sees it.
-        let seen_elsewhere = ThrottleState::load(&root).remaining_lockout("cube-a");
+        let seen_elsewhere = ThrottleState::load(&root);
+        let remaining = remaining_at_last_failure(&seen_elsewhere, "cube-a");
         assert!(
-            seen_elsewhere > Duration::ZERO,
+            remaining > Duration::ZERO,
             "a second PIN surface would have offered unlimited fresh guesses"
         );
 
@@ -250,7 +264,7 @@ mod tests {
         for _ in 0..5 {
             st.record_failure(&root, "cube-a");
         }
-        assert!(st.remaining_lockout("cube-a") > Duration::ZERO);
+        assert!(remaining_at_last_failure(&st, "cube-a") > Duration::ZERO);
         assert_eq!(st.remaining_lockout("cube-b"), Duration::ZERO);
         std::fs::remove_dir_all(root).unwrap();
     }
