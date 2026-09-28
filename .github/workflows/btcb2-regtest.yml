@@ -202,8 +202,14 @@ jobs:
           # named explicitly: a bare `pytest tests/` here would also pull in
           # the functional suite, which this job does not set up.
           modules="tests/test_btcb2_harness.py tests/test_btcb2_b42_matrices.py tests/test_btcb2_blockfile.py"
+          # The stress reproduction itself runs only when it is asked for: it
+          # reproduces a node defect nothing here can fix, about one attempt in
+          # eight, and a pull request is not the place to discover that. Its
+          # no-node regressions still run everywhere.
+          select=(-m "not probe")
           if [ "$PROBE_ONLY" = "1" ]; then
             modules="tests/test_btcb2_blockfile.py"
+            select=()
           else
             "$KNOTS_BLAKE2B_PATH" --version | head -1
           fi
@@ -230,7 +236,7 @@ jobs:
           # reproduction is the one whose datadir and trace must be kept.
           for attempt in $(seq 1 "$REPEAT"); do
             echo "::group::attempt $attempt of $REPEAT"
-            pytest $modules -vvv
+            pytest $modules "${select[@]}" -vvv
             echo "::endgroup::"
           done
 

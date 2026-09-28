@@ -144,6 +144,7 @@ def legacy_node(request, test_base_dir):
         print(f"Test failed, leaving directory '{directory}' intact")
 
 
+@pytest.mark.probe
 def test_concurrent_getblock_never_loses_the_block_file(legacy_node):
     """Many concurrent batched `getblock`s must not make the node lose its
     own block file (#394)."""
