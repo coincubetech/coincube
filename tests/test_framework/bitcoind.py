@@ -93,6 +93,11 @@ class Bitcoind(BitcoinBackend):
             "-debug=1",
             "-debugexclude=libevent",
             "-debugexclude=tor",
+            # Knots enables its Tor subprocess by default. These isolated
+            # regtest nodes never exercise Tor, and an absent `tor` binary
+            # enters an upstream subprocess error path that can double-close
+            # a reused file descriptor (#394).
+            "-listenonion=0",
         ] + extra_args
         bitcoind_conf = {
             "bind": f"127.0.0.1:{self.p2pport}",

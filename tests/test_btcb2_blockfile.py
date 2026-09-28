@@ -77,6 +77,13 @@ THREADS = _knob("BTCB2_BLOCKFILE_THREADS", 16)
 ROUNDS = _knob("BTCB2_BLOCKFILE_ROUNDS", 8)
 BATCH = _knob("BTCB2_BLOCKFILE_BATCH", 100)
 SECONDS = _knob("BTCB2_BLOCKFILE_SECONDS", 180.0)
+BLOCKFILE_PROBE_NODE_ARGS = [
+    # Ordinary test nodes disable Knots' automatic Tor subprocess. This probe
+    # opts back into the vendor failure path with a deterministically missing
+    # executable so it remains useful for verifying an upstream fix (#394).
+    "-listenonion=1",
+    "-torexecute=coincube-btcb2-probe-missing-tor",
+]
 
 
 def _rpc_batch(node, calls, timeout=60):
@@ -130,6 +137,7 @@ def legacy_node(request, test_base_dir):
     node = Bitcoind(
         bitcoin_dir=os.path.join(directory, "knots-legacy"),
         bitcoind_path=KNOTS_LEGACY_PATH,
+        extra_args=BLOCKFILE_PROBE_NODE_ARGS,
     )
     node.env.update(_child_env(home_dir))
     node.startup()
