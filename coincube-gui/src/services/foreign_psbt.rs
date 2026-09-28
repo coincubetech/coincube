@@ -9,8 +9,8 @@ use coincube_core::{
     chain::ChainId,
     miniscript::{
         bitcoin::{
-            absolute, psbt::Psbt, sighash::EcdsaSighashType, sighash::TapSighashType, transaction,
-            Amount, OutPoint, Sequence, Transaction, TxIn, TxOut,
+            self, absolute, psbt::Psbt, sighash::EcdsaSighashType, sighash::TapSighashType,
+            transaction, Amount, OutPoint, Sequence, Transaction, TxIn, TxOut,
         },
         psbt::PsbtExt,
     },
@@ -19,6 +19,13 @@ use coincube_core::{
 use sha2::{Digest, Sha256};
 
 use super::foreign_scan::{Branch, ScanDescriptor, ScanReport};
+use crate::{
+    app::{
+        settings::{CubeSettings, WalletId},
+        wallet::{descriptor_id_fingerprint, Wallet},
+    },
+    daemon::model::GetAddressResult,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ForeignPsbtError {
@@ -26,6 +33,8 @@ pub enum ForeignPsbtError {
     StaleSession,
     SourceChanged,
     TargetChanged,
+    TargetAddress,
+    StaleAddress,
     Empty,
     DuplicateInput,
     Unconfirmed,
@@ -45,12 +54,64 @@ pub struct ForeignChange {
     pub amount: Amount,
 }
 
+/// Opaque proof that a daemon-reserved receive address belongs to the exact
+/// selected BTCB2 Cube and its currently loaded Vault descriptor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetAddressEvidence {
+    cube_id: String,
+    vault_id: WalletId,
+    vault_fingerprint: String,
+    derivation_index: bitcoin::bip32::ChildNumber,
+    script_pubkey: bitcoin::ScriptBuf,
+    generation: u64,
+}
+
+impl TargetAddressEvidence {
+    pub fn authenticate(
+        cube: &CubeSettings,
+        wallet: &Wallet,
+        reserved: &GetAddressResult,
+        generation: u64,
+    ) -> Result<Self, ForeignPsbtError> {
+        if cube.id.is_empty()
+            || cube.network != ChainId::BitcoinBlake2b
+            || wallet.chain != ChainId::BitcoinBlake2b
+            || cube.vault_wallet_id.as_ref() != Some(&wallet.id())
+        {
+            return Err(ForeignPsbtError::TargetChanged);
+        }
+        let vault_fingerprint = descriptor_id_fingerprint(&wallet.main_descriptor).to_string();
+        if cube.vault_fingerprint.as_deref() != Some(vault_fingerprint.as_str())
+            || reserved.derivation_index.is_hardened()
+        {
+            return Err(ForeignPsbtError::TargetChanged);
+        }
+        let secp = bitcoin::secp256k1::Secp256k1::verification_only();
+        let derived = wallet
+            .main_descriptor
+            .receive_descriptor()
+            .derive(reserved.derivation_index, &secp)
+            .address(wallet.chain.bitcoin_network());
+        if derived != reserved.address {
+            return Err(ForeignPsbtError::TargetAddress);
+        }
+        Ok(Self {
+            cube_id: cube.id.clone(),
+            vault_id: wallet.id(),
+            vault_fingerprint,
+            derivation_index: reserved.derivation_index,
+            script_pubkey: derived.script_pubkey(),
+            generation,
+        })
+    }
+}
+
 /// Current UI/session identity supplied again at import time. Its descriptor
 /// fingerprint is computed internally so callers cannot assert one by fiat.
 pub struct ForeignSession<'a> {
     pub chain: ChainId,
     pub generation: u64,
-    pub target_cube: &'a str,
+    pub target: &'a TargetAddressEvidence,
     pub external: &'a ScanDescriptor,
     pub internal: Option<&'a ScanDescriptor>,
 }
@@ -69,19 +130,20 @@ pub struct PreparedForeignSweep {
     original: Psbt,
     chain: ChainId,
     generation: u64,
-    target_cube: String,
+    target: TargetAddressEvidence,
     source_fingerprint: [u8; 32],
     fee: Amount,
 }
 
 impl PreparedForeignSweep {
     /// Consume every authenticated coin in the report and construct one exact
-    /// unsigned transaction. The caller supplies explicit destination, fee and
-    /// optional change; their sum must equal the selected inputs exactly.
+    /// unsigned transaction. The authenticated target supplies the destination
+    /// script; the caller supplies its amount, fee and optional change, whose
+    /// sum must equal the selected inputs exactly.
     pub fn new(
         report: &ScanReport,
         session: ForeignSession<'_>,
-        destination: TxOut,
+        destination_amount: Amount,
         fee: Amount,
         change: Option<ForeignChange>,
     ) -> Result<Self, ForeignPsbtError> {
@@ -89,8 +151,8 @@ impl PreparedForeignSweep {
         if report.coins().is_empty() {
             return Err(ForeignPsbtError::Empty);
         }
-        if destination.value.to_sat() < spend::DUST_OUTPUT_SATS
-            || destination.value > Amount::MAX_MONEY
+        if destination_amount.to_sat() < spend::DUST_OUTPUT_SATS
+            || destination_amount > Amount::MAX_MONEY
             || fee == Amount::ZERO
             || fee > spend::MAX_FEE
         {
@@ -135,7 +197,10 @@ impl PreparedForeignSweep {
             derived.push((definite, coin.previous.clone(), authenticated));
         }
 
-        let mut outputs = vec![destination];
+        let mut outputs = vec![TxOut {
+            value: destination_amount,
+            script_pubkey: session.target.script_pubkey.clone(),
+        }];
         let change_descriptor = match change {
             Some(change) => {
                 let descriptor = session.internal.ok_or(ForeignPsbtError::Descriptor)?;
@@ -191,7 +256,7 @@ impl PreparedForeignSweep {
             original: psbt,
             chain: session.chain,
             generation: session.generation,
-            target_cube: session.target_cube.to_owned(),
+            target: session.target.clone(),
             source_fingerprint: source_fingerprint(&session)?,
             fee,
         })
@@ -219,8 +284,14 @@ impl PreparedForeignSweep {
         if current.chain != self.chain || current.generation != self.generation {
             return Err(ForeignPsbtError::StaleSession);
         }
-        if current.target_cube != self.target_cube {
+        if current.target.cube_id != self.target.cube_id
+            || current.target.vault_id != self.target.vault_id
+            || current.target.vault_fingerprint != self.target.vault_fingerprint
+        {
             return Err(ForeignPsbtError::TargetChanged);
+        }
+        if current.target != &self.target || current.target.generation != current.generation {
+            return Err(ForeignPsbtError::StaleAddress);
         }
         if source_fingerprint(&current)? != self.source_fingerprint {
             return Err(ForeignPsbtError::SourceChanged);
@@ -235,21 +306,20 @@ impl PreparedForeignSweep {
         let mut normalized = signed.clone();
         let mut signatures = 0usize;
         for (index, input) in signed.inputs.iter().enumerate() {
+            if input.sighash_type != self.original.inputs[index].sighash_type {
+                return Err(ForeignPsbtError::ConstructionChanged);
+            }
             if input.partial_sigs.iter().any(|(key, signature)| {
                 signature.sighash_type != EcdsaSighashType::All
                     || !input.bip32_derivation.contains_key(&key.inner)
             }) || input.tap_key_sig.is_some_and(|signature| {
                 signature.sighash_type != TapSighashType::All || input.tap_internal_key.is_none()
-            }) || input
-                .sighash_type
-                .is_some_and(|sighash| sighash.to_u32() != EcdsaSighashType::All as u32)
-            {
+            }) {
                 return Err(ForeignPsbtError::UnsupportedSighash);
             }
             signatures += input.partial_sigs.len() + usize::from(input.tap_key_sig.is_some());
             normalized.inputs[index].partial_sigs.clear();
             normalized.inputs[index].tap_key_sig = None;
-            normalized.inputs[index].sighash_type = self.original.inputs[index].sighash_type;
         }
         if signatures == 0 {
             return Err(ForeignPsbtError::MissingSignature);
@@ -272,7 +342,8 @@ fn verify_session(
     if report_generation != session.generation {
         return Err(ForeignPsbtError::StaleSession);
     }
-    if session.target_cube.is_empty()
+    if session.target.cube_id.is_empty()
+        || session.target.generation != session.generation
         || session.external.branch() != Branch::External
         || session
             .internal
@@ -319,11 +390,17 @@ fn source_fingerprint(session: &ForeignSession<'_>) -> Result<[u8; 32], ForeignP
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::settings::VaultIdentity;
     use crate::services::{
         foreign_scan::{DiscoveredCoin, ScanReport},
         foreign_wallet_source::{SessionSeedSource, StandardSinglesig},
     };
-    use coincube_core::miniscript::bitcoin::{self, hashes::Hash, secp256k1, BlockHash, PublicKey};
+    use coincube_core::{
+        descriptors::CoincubeDescriptor,
+        miniscript::bitcoin::{
+            self, bip32::ChildNumber, hashes::Hash, secp256k1, BlockHash, PublicKey,
+        },
+    };
     use std::{
         fs,
         time::{SystemTime, UNIX_EPOCH},
@@ -332,8 +409,44 @@ mod tests {
 
     const WORDS: &str =
         "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+    const TARGET_DESC: &str = "wsh(or_d(multi(2,[ffd63c8d/48'/1'/0'/2']tpubDExA3EC3iAsPxPhFn4j6gMiVup6V2eH3qKyk69RcTc9TTNRfFYVPad8bJD5FCHVQxyBT4izKsvr7Btd2R4xmQ1hZkvsqGBaeE82J71uTK4N/<0;1>/*,[de6eb005/48'/1'/0'/2']tpubDFGuYfS2JwiUSEXiQuNGdT3R7WTDhbaE6jbUhgYSSdhmfQcSx7ZntMPPv7nrkvAqjpj3jX9wbhSGMeKVao4qAzhbNyBi7iQmv5xxQk6H6jz/<0;1>/*),and_v(v:pkh([ffd63c8d/48'/1'/0'/2']tpubDExA3EC3iAsPxPhFn4j6gMiVup6V2eH3qKyk69RcTc9TTNRfFYVPad8bJD5FCHVQxyBT4izKsvr7Btd2R4xmQ1hZkvsqGBaeE82J71uTK4N/<2;3>/*),older(3))))#p9ax3xxp";
 
-    fn fixture() -> (PreparedForeignSweep, SessionSeedSource, String) {
+    fn target_context(cube_id: &str) -> (CoincubeDescriptor, Wallet, CubeSettings) {
+        let descriptor = CoincubeDescriptor::from_str(TARGET_DESC).unwrap();
+        let wallet = Wallet::new(descriptor.clone())
+            .with_chain(ChainId::BitcoinBlake2b)
+            .with_pinned_at(Some(42));
+        let cube = CubeSettings::new_with_raw_id(
+            cube_id.to_owned(),
+            "Target".to_owned(),
+            ChainId::BitcoinBlake2b,
+        )
+        .with_vault(VaultIdentity::new(wallet.id(), Some(&descriptor)));
+        (descriptor, wallet, cube)
+    }
+
+    fn target_evidence(cube_id: &str, index: u32, generation: u64) -> TargetAddressEvidence {
+        let (descriptor, wallet, cube) = target_context(cube_id);
+        let derivation_index = ChildNumber::from_normal_idx(index).unwrap();
+        let secp = secp256k1::Secp256k1::verification_only();
+        let address = descriptor
+            .receive_descriptor()
+            .derive(derivation_index, &secp)
+            .address(bitcoin::Network::Bitcoin);
+        TargetAddressEvidence::authenticate(
+            &cube,
+            &wallet,
+            &GetAddressResult::new(address, derivation_index),
+            generation,
+        )
+        .unwrap()
+    }
+
+    fn fixture() -> (
+        PreparedForeignSweep,
+        SessionSeedSource,
+        TargetAddressEvidence,
+    ) {
         let source = SessionSeedSource::new(
             Zeroizing::new(WORDS.to_owned()),
             Zeroizing::new("session passphrase".to_owned()),
@@ -364,22 +477,17 @@ mod tests {
             BlockHash::from_byte_array([2; 32]),
             vec![coin],
         );
-        let destination = TxOut {
-            value: Amount::from_sat(90_000),
-            script_pubkey: bitcoin::ScriptBuf::new_p2wpkh(&bitcoin::WPubkeyHash::from_byte_array(
-                [3; 20],
-            )),
-        };
+        let target = target_evidence("vault-a", 11, 9);
         let prepared = PreparedForeignSweep::new(
             &report,
             ForeignSession {
                 chain: ChainId::BitcoinBlake2b,
                 generation: 9,
-                target_cube: "vault-a",
+                target: &target,
                 external: &descriptors.external,
                 internal: Some(&descriptors.internal),
             },
-            destination,
+            Amount::from_sat(90_000),
             Amount::from_sat(1_000),
             Some(ForeignChange {
                 index: 4,
@@ -387,7 +495,7 @@ mod tests {
             }),
         )
         .unwrap();
-        (prepared, source, "vault-a".to_owned())
+        (prepared, source, target)
     }
 
     fn signed_text(prepared: &PreparedForeignSweep) -> String {
@@ -416,7 +524,7 @@ mod tests {
                 ForeignSession {
                     chain: ChainId::BitcoinBlake2b,
                     generation: 9,
-                    target_cube: &target,
+                    target: &target,
                     external: &descriptors.external,
                     internal: Some(&descriptors.internal),
                 },
@@ -426,6 +534,10 @@ mod tests {
         assert_eq!(
             verified.psbt().unsigned_tx.output[0].value,
             Amount::from_sat(90_000)
+        );
+        assert_eq!(
+            verified.psbt().unsigned_tx.output[0].script_pubkey,
+            target.script_pubkey
         );
         assert_eq!(
             verified.psbt().unsigned_tx.output[1].value,
@@ -463,13 +575,32 @@ mod tests {
                     ForeignSession {
                         chain: ChainId::BitcoinBlake2b,
                         generation: 9,
-                        target_cube: &target,
+                        target: &target,
                         external: &descriptors.external,
                         internal: Some(&descriptors.internal)
                     }
                 )
                 .is_err());
         }
+
+        let mut sighash_tamper = Psbt::from_str(&signed_text(&prepared)).unwrap();
+        assert!(sighash_tamper.inputs[0].sighash_type.is_none());
+        sighash_tamper.inputs[0].sighash_type = Some(EcdsaSighashType::All.into());
+        assert_eq!(
+            prepared
+                .import_text(
+                    &sighash_tamper.to_string(),
+                    ForeignSession {
+                        chain: ChainId::BitcoinBlake2b,
+                        generation: 9,
+                        target: &target,
+                        external: &descriptors.external,
+                        internal: Some(&descriptors.internal),
+                    }
+                )
+                .unwrap_err(),
+            ForeignPsbtError::ConstructionChanged
+        );
     }
 
     #[test]
@@ -477,6 +608,8 @@ mod tests {
         let (prepared, source, target) = fixture();
         let descriptors = source.descriptors(StandardSinglesig::Bip84, 0).unwrap();
         let text = signed_text(&prepared);
+        let wrong_cube = target_evidence("vault-b", 11, 9);
+        let stale_address = target_evidence("vault-a", 12, 9);
         assert_eq!(
             prepared
                 .import_text(
@@ -484,7 +617,7 @@ mod tests {
                     ForeignSession {
                         chain: ChainId::BitcoinBlake2b,
                         generation: 10,
-                        target_cube: &target,
+                        target: &target,
                         external: &descriptors.external,
                         internal: Some(&descriptors.internal)
                     }
@@ -499,13 +632,28 @@ mod tests {
                     ForeignSession {
                         chain: ChainId::BitcoinBlake2b,
                         generation: 9,
-                        target_cube: "vault-b",
+                        target: &wrong_cube,
                         external: &descriptors.external,
                         internal: Some(&descriptors.internal)
                     }
                 )
                 .unwrap_err(),
             ForeignPsbtError::TargetChanged
+        );
+        assert_eq!(
+            prepared
+                .import_text(
+                    &text,
+                    ForeignSession {
+                        chain: ChainId::BitcoinBlake2b,
+                        generation: 9,
+                        target: &stale_address,
+                        external: &descriptors.external,
+                        internal: Some(&descriptors.internal)
+                    }
+                )
+                .unwrap_err(),
+            ForeignPsbtError::StaleAddress
         );
         let other = SessionSeedSource::new(
             Zeroizing::new(WORDS.to_owned()),
@@ -521,7 +669,7 @@ mod tests {
                     ForeignSession {
                         chain: ChainId::BitcoinBlake2b,
                         generation: 9,
-                        target_cube: &target,
+                        target: &target,
                         external: &other.external,
                         internal: Some(&other.internal)
                     }
@@ -536,13 +684,53 @@ mod tests {
                     ForeignSession {
                         chain: ChainId::Bitcoin,
                         generation: 9,
-                        target_cube: &target,
+                        target: &target,
                         external: &descriptors.external,
                         internal: Some(&descriptors.internal)
                     }
                 )
                 .unwrap_err(),
             ForeignPsbtError::UnsupportedChain
+        );
+    }
+
+    #[test]
+    fn target_authentication_rejects_wrong_vault_and_arbitrary_address() {
+        let (descriptor, wallet, cube) = target_context("vault-a");
+        let secp = secp256k1::Secp256k1::verification_only();
+        let index = ChildNumber::from_normal_idx(11).unwrap();
+        let valid = descriptor
+            .receive_descriptor()
+            .derive(index, &secp)
+            .address(bitcoin::Network::Bitcoin);
+
+        let wrong_wallet = Wallet::new(descriptor.clone())
+            .with_chain(ChainId::BitcoinBlake2b)
+            .with_pinned_at(Some(43));
+        assert_eq!(
+            TargetAddressEvidence::authenticate(
+                &cube,
+                &wrong_wallet,
+                &GetAddressResult::new(valid, index),
+                9,
+            )
+            .unwrap_err(),
+            ForeignPsbtError::TargetChanged
+        );
+
+        let arbitrary = descriptor
+            .receive_descriptor()
+            .derive(ChildNumber::from_normal_idx(12).unwrap(), &secp)
+            .address(bitcoin::Network::Bitcoin);
+        assert_eq!(
+            TargetAddressEvidence::authenticate(
+                &cube,
+                &wallet,
+                &GetAddressResult::new(arbitrary, index),
+                9,
+            )
+            .unwrap_err(),
+            ForeignPsbtError::TargetAddress
         );
     }
 
@@ -562,7 +750,7 @@ mod tests {
                 ForeignSession {
                     chain: ChainId::BitcoinBlake2b,
                     generation: 9,
-                    target_cube: &target,
+                    target: &target,
                     external: &descriptors.external,
                     internal: Some(&descriptors.internal),
                 },
