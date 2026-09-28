@@ -116,6 +116,124 @@ def _rpc_batch(node, calls, timeout=60):
         return json.loads(response.read())
 
 
+def _decode_getblock_batch(responses, expected_count):
+    """Validate one batch and count responses that decode as raw blocks.
+
+    JSON-RPC batch response order is not significant, so identity rather than
+    position binds each response to the request. A malformed or substituted
+    response must not contribute activity evidence for this probe.
+    """
+    if not isinstance(responses, list):
+        raise ValueError("getblock batch response is not a list")
+    if len(responses) != expected_count:
+        raise ValueError(
+            f"getblock batch returned {len(responses)}/{expected_count} responses"
+        )
+
+    by_id = {}
+    for response in responses:
+        if not isinstance(response, dict):
+            raise ValueError("getblock batch contains a non-object response")
+        response_id = response.get("id")
+        if type(response_id) is not int or response_id in by_id:
+            raise ValueError(
+                f"getblock batch has invalid or duplicate id {response_id!r}"
+            )
+        by_id[response_id] = response
+    expected_ids = set(range(expected_count))
+    if set(by_id) != expected_ids:
+        raise ValueError(
+            f"getblock batch ids {sorted(by_id)} do not match "
+            f"{sorted(expected_ids)}"
+        )
+
+    decoded = 0
+    rpc_errors = []
+    for response_id in range(expected_count):
+        response = by_id[response_id]
+        if response.get("error") is not None:
+            rpc_errors.append(response["error"])
+            continue
+        result = response.get("result")
+        if not isinstance(result, str):
+            raise ValueError(f"getblock response {response_id} has no hex result")
+        try:
+            block = bytes.fromhex(result)
+        except ValueError as error:
+            raise ValueError(
+                f"getblock response {response_id} is not valid hex"
+            ) from error
+        if len(block) < 80:
+            raise ValueError(
+                f"getblock response {response_id} decoded to only {len(block)} bytes"
+            )
+        decoded += 1
+    return decoded, rpc_errors
+
+
+def _run_getblock_probe(node, batches, deadline, threads, rounds, rpc_batch=_rpc_batch):
+    """Run bounded workers and return evidence gathered by the caller thread."""
+    activity = {
+        "attempted": 0,
+        "decoded_blocks": 0,
+        "successful_batches": 0,
+        "rounds_run": 0,
+        "rpc_errors": [],
+        "response_errors": [],
+        "transport_errors": [],
+    }
+
+    def one_pass(_worker):
+        outcomes = []
+        for calls in batches:
+            if time.time() > deadline:
+                break
+            try:
+                responses = rpc_batch(node, calls)
+                decoded, rpc_errors = _decode_getblock_batch(responses, len(calls))
+                outcomes.append(("response", len(calls), decoded, rpc_errors))
+            except (urllib.error.URLError, OSError) as error:
+                outcomes.append(("transport", len(calls), repr(error)))
+            except (TypeError, ValueError) as error:
+                outcomes.append(("malformed", len(calls), repr(error)))
+        return outcomes
+
+    with ThreadPoolExecutor(max_workers=threads) as pool:
+        for _ in range(rounds):
+            if time.time() > deadline:
+                break
+            for outcomes in pool.map(one_pass, range(threads)):
+                for outcome in outcomes:
+                    kind, count, *details = outcome
+                    activity["attempted"] += count
+                    if kind == "transport":
+                        activity["transport_errors"].append(details[0])
+                    elif kind == "malformed":
+                        activity["response_errors"].append(details[0])
+                    else:
+                        decoded, rpc_errors = details
+                        activity["decoded_blocks"] += decoded
+                        activity["rpc_errors"].extend(rpc_errors)
+                        if decoded == count and not rpc_errors:
+                            activity["successful_batches"] += 1
+            activity["rounds_run"] += 1
+    return activity
+
+
+def _probe_activity_error(activity):
+    """Explain why a completed loop did not exercise readable block data."""
+    if activity["successful_batches"] > 0 and activity["decoded_blocks"] > 0:
+        return None
+    return (
+        "probe completed without a successful decoded getblock batch: "
+        f"{activity['attempted']} calls attempted, "
+        f"{activity['decoded_blocks']} blocks decoded, "
+        f"{len(activity['transport_errors'])} transport errors, "
+        f"{len(activity['response_errors'])} malformed responses, and "
+        f"{len(activity['rpc_errors'])} RPC errors"
+    )
+
+
 @pytest.fixture
 def legacy_node(request, test_base_dir):
     """One pinned non-enforcing Knots node with `BLOCKS` blocks of history.
@@ -167,45 +285,23 @@ def test_concurrent_getblock_never_loses_the_block_file(legacy_node):
     ]
 
     deadline = time.time() + SECONDS
-    rpc_errors = []
-    transport_errors = []
-    sent = 0
-
-    def one_pass(_worker):
-        results = []
-        for calls in batches:
-            if time.time() > deadline:
-                break
-            try:
-                results.append((len(calls), _rpc_batch(node, calls)))
-            except (urllib.error.URLError, OSError, ValueError) as e:
-                transport_errors.append(repr(e))
-        return results
-
-    rounds_run = 0
-    with ThreadPoolExecutor(max_workers=THREADS) as pool:
-        for _ in range(ROUNDS):
-            if time.time() > deadline:
-                break
-            for results in pool.map(one_pass, range(THREADS)):
-                for count, responses in results:
-                    sent += count
-                    for response in responses:
-                        if response.get("error") is not None:
-                            rpc_errors.append(response["error"])
-            rounds_run += 1
+    activity = _run_getblock_probe(node, batches, deadline, THREADS, ROUNDS)
 
     logging.info(
-        "blockfile probe: %s getblock calls over %s/%s rounds, %s threads, "
-        "batches of %s, %s blocks",
-        sent,
-        rounds_run,
+        "blockfile probe: %s getblock calls, %s decoded blocks in %s successful "
+        "batches over %s/%s rounds, %s threads, batches of %s, %s blocks",
+        activity["attempted"],
+        activity["decoded_blocks"],
+        activity["successful_batches"],
+        activity["rounds_run"],
         ROUNDS,
         THREADS,
         BATCH,
         len(hashes),
     )
-    assert rounds_run > 0, f"wall-clock cap {SECONDS}s hit before a single round"
+    assert activity["rounds_run"] > 0, (
+        f"wall-clock cap {SECONDS}s hit before a single round"
+    )
 
     # A green traced run has to prove it was traced. Without this, a run that
     # passes because the trace never happened is indistinguishable from a run
@@ -238,27 +334,43 @@ def test_concurrent_getblock_never_loses_the_block_file(legacy_node):
     # failed on exactly that while the node logged no block-file error at all.
     # #394 is the node failing to read a block it has, so that is what this
     # fails on: the node's own error lines, or getblock refusing to serve.
-    if transport_errors:
+    if activity["transport_errors"]:
         logging.warning(
             "blockfile probe: %s transport errors, not the #394 fault: %s",
-            len(transport_errors),
-            transport_errors[:3],
+            len(activity["transport_errors"]),
+            activity["transport_errors"][:3],
+        )
+    if activity["response_errors"]:
+        logging.warning(
+            "blockfile probe: %s malformed/mismatched batch responses: %s",
+            len(activity["response_errors"]),
+            activity["response_errors"][:3],
         )
     assert node.proc.poll() is None, (
         f"the node exited with {node.proc.returncode} during the probe; "
-        f"transport errors: {transport_errors[:3]}"
+        f"transport errors: {activity['transport_errors'][:3]}"
     )
 
     node_errors = node_block_file_errors(node)
-    if rpc_errors or node_errors:
+    activity_error = _probe_activity_error(activity)
+    if (
+        activity["rpc_errors"]
+        or activity["response_errors"]
+        or node_errors
+        or activity_error
+    ):
         report = node_block_file_report(
             node, "knots-legacy", "concurrent getblock probe failed"
         )
         pytest.fail(
-            f"block-file fault reproduced after {sent} getblock calls "
-            f"({rounds_run} rounds x {THREADS} threads, batches of {BATCH}).\n"
-            f"getblock RPC errors: {rpc_errors[:5]}\n"
-            f"transport errors (context, not the fault): {len(transport_errors)}\n"
+            f"block-file probe failed after {activity['attempted']} getblock calls "
+            f"({activity['rounds_run']} rounds x {THREADS} threads, "
+            f"batches of {BATCH}).\n"
+            f"activity error: {activity_error}\n"
+            f"getblock RPC errors: {activity['rpc_errors'][:5]}\n"
+            "transport errors (context, not the fault): "
+            f"{len(activity['transport_errors'])}\n"
+            f"malformed response errors: {activity['response_errors'][:5]}\n"
             f"{report}\n"
             f"{_trace_excerpt(node)}"
         )
@@ -287,6 +399,88 @@ def _trace_excerpt(node):
 # These run everywhere, with no binaries: they are what keeps the evidence path
 # itself honest, since the fault it exists to catch is intermittent and the
 # probe above can be green for the wrong reason.
+
+
+def _raw_block_response(response_id, byte=0):
+    return {"id": response_id, "result": f"{byte:02x}" * 80, "error": None}
+
+
+def test_batch_activity_requires_matching_ids_and_decoded_blocks():
+    responses = [_raw_block_response(1, 1), _raw_block_response(0, 2)]
+    decoded, rpc_errors = _decode_getblock_batch(responses, 2)
+    assert decoded == 2
+    assert rpc_errors == []
+
+
+@pytest.mark.parametrize(
+    "responses, expected_count, message",
+    [
+        ({"id": 0, "result": "00" * 80}, 1, "not a list"),
+        ([_raw_block_response(0)], 2, "returned 1/2"),
+        ([_raw_block_response(0), _raw_block_response(0)], 2, "duplicate id"),
+        ([_raw_block_response(0), _raw_block_response(2)], 2, "do not match"),
+        (
+            [{"id": 0, "result": "not-hex", "error": None}],
+            1,
+            "not valid hex",
+        ),
+        ([_raw_block_response(0) | {"result": "00"}], 1, "only 1 bytes"),
+    ],
+)
+def test_malformed_or_mismatched_batch_is_not_activity(
+    responses, expected_count, message
+):
+    with pytest.raises(ValueError, match=message):
+        _decode_getblock_batch(responses, expected_count)
+
+
+def test_all_transport_failures_cannot_make_the_probe_green():
+    def unavailable(_node, _calls):
+        raise urllib.error.URLError("connection refused")
+
+    activity = _run_getblock_probe(
+        Mock(),
+        [[("getblock", ["hash-0", 0])]],
+        time.time() + 5,
+        threads=2,
+        rounds=1,
+        rpc_batch=unavailable,
+    )
+    assert activity["rounds_run"] == 1
+    assert activity["attempted"] == 2
+    assert activity["successful_batches"] == 0
+    assert activity["decoded_blocks"] == 0
+    assert len(activity["transport_errors"]) == 2
+    assert "without a successful decoded getblock batch" in _probe_activity_error(
+        activity
+    )
+
+
+def test_mismatched_responses_cannot_make_the_probe_green():
+    def mismatched(_node, _calls):
+        return [_raw_block_response(1)]
+
+    activity = _run_getblock_probe(
+        Mock(),
+        [[("getblock", ["hash-0", 0])]],
+        time.time() + 5,
+        threads=1,
+        rounds=1,
+        rpc_batch=mismatched,
+    )
+    assert activity["successful_batches"] == 0
+    assert activity["decoded_blocks"] == 0
+    assert len(activity["response_errors"]) == 1
+    assert "without a successful decoded getblock batch" in _probe_activity_error(
+        activity
+    )
+
+
+def test_rpc_error_batch_cannot_make_the_probe_green():
+    response = [{"id": 0, "result": None, "error": {"code": -1}}]
+    decoded, rpc_errors = _decode_getblock_batch(response, 1)
+    assert decoded == 0
+    assert rpc_errors == [{"code": -1}]
 
 
 def test_syscall_trace_prefix_is_empty_unless_asked_for(monkeypatch):
