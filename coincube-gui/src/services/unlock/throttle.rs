@@ -209,6 +209,22 @@ mod tests {
     }
 
     #[test]
+    fn the_public_lockout_uses_current_time_and_expires() {
+        let root = tmp("expires");
+        let mut st = ThrottleState::load(&root);
+        for _ in 0..3 {
+            st.record_failure(&root, "cube-a");
+        }
+        st.failures
+            .get_mut("cube-a")
+            .expect("the test must record a failure first")
+            .last_failure_unix = now_unix().saturating_sub(2);
+
+        assert_eq!(st.remaining_lockout("cube-a"), Duration::ZERO);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn the_penalty_survives_a_restart() {
         // Quitting and relaunching must not reset the counter — otherwise it
         // is a two-keystroke bypass.
