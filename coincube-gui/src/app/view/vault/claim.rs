@@ -433,8 +433,9 @@ fn review_view<'a>(
             .push(row(
                 "Bitcoin tip",
                 p1_regular(format!(
-                    "height {} — the node accepts this transaction",
-                    snapshot.observations.bitcoin.tip.height
+                    "height {} — {} accepts this transaction",
+                    snapshot.observations.bitcoin.tip.height,
+                    snapshot.route.label()
                 )),
             ))
             .push(row(
