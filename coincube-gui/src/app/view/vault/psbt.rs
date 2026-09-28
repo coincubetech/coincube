@@ -121,6 +121,9 @@ fn replay_status_view<'a>(pill: &ReplayPill<'a>) -> Element<'a, Message> {
                 .label(replay::REPLAYABLE_ACKNOWLEDGEMENT)
                 .on_toggle(|checked| Message::Spend(SpendTxMessage::AcknowledgeReplay(checked))),
         );
+    } else if matches!(pill.review.status, replay::ReplayStatus::Protected) {
+        column =
+            column.push(p2_regular(replay::PROTECTED_LIMITATION).style(theme::text::secondary));
     }
     let unchecked: Vec<usize> = pill
         .entangled
