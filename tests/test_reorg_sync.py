@@ -94,6 +94,20 @@ class Clock:
         self.now += seconds
 
 
+def test_header_timeout_retries_then_succeeds_with_remaining_budget():
+    electrs = Electrs.__new__(Electrs)
+    clock = Clock()
+    electrs.tip_hash = Mock(
+        side_effect=[socket.timeout("busy indexing"), "expected"]
+    )
+
+    with patch("test_framework.electrs.time", clock):
+        electrs.wait_for_tip("expected", timeout=1)
+
+    assert electrs.tip_hash.call_count == 2
+    assert electrs.tip_hash.call_args.kwargs["timeout"] == 0.75
+
+
 def test_header_timeout_retries_only_within_original_deadline():
     electrs = Electrs.__new__(Electrs)
     clock = Clock()
@@ -115,3 +129,28 @@ def test_malformed_header_reply_is_not_retried():
         electrs.wait_for_tip("expected")
 
     electrs.tip_hash.assert_called_once()
+
+
+def test_header_fragments_cannot_extend_request_budget():
+    electrs = Electrs.__new__(Electrs)
+    electrs.rpcport = 1
+    clock = Clock()
+    sock = Mock()
+
+    def fragment(_size):
+        clock.sleep(0.4)
+        return b"x"
+
+    sock.recv.side_effect = fragment
+    connection = Mock()
+    connection.__enter__ = Mock(return_value=sock)
+    connection.__exit__ = Mock(return_value=False)
+
+    with patch("test_framework.electrs.time", clock), patch(
+        "test_framework.electrs.socket.create_connection", return_value=connection
+    ):
+        with pytest.raises(socket.timeout, match="exceeded its budget"):
+            electrs.tip_hash(timeout=1)
+
+    assert sock.recv.call_count == 3
+    assert sock.settimeout.call_args.args[0] < 0.3
