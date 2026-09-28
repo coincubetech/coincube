@@ -291,6 +291,11 @@ pub struct Home {
     /// Heir "Recover a Vault" discovery surface state (COIN-377 / PR 1).
     pub recover_vault: RecoverVaultPanel,
     pub split_wallet: SplitWalletPanel,
+    /// A Split entry that was interrupted to create its first BTCB2 Vault.
+    /// The flag survives only inside the newly-created Home; resumption still
+    /// requires a live Connect session, an explicitly enabled server flag, and
+    /// a persisted eligible target.
+    resume_split_after_install: bool,
     /// Whether the Connect sidebar section is expanded
     pub connect_expanded: bool,
     /// Which section is currently displayed in the main content area
@@ -431,6 +436,7 @@ impl Home {
                 connect_account: ConnectAccountPanel::new(),
                 recover_vault: RecoverVaultPanel::new(),
                 split_wallet: SplitWalletPanel::new(),
+                resume_split_after_install: false,
                 connect_expanded: false,
                 active_section: HomeSection::Cubes,
                 theme_mode: GlobalSettings::load_theme_mode(&GlobalSettings::path(&datadir_path)),
@@ -787,6 +793,49 @@ impl Home {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// Resume a Split entry after the ordinary BTCB2 installer persisted its
+    /// Cube. Connect initialization is asynchronous, so this arms an intent
+    /// rather than bypassing the account feature gate.
+    pub(crate) fn request_split_resume(&mut self) {
+        self.resume_split_after_install = true;
+    }
+
+    /// Enter Split only once every server-controlled prerequisite has been
+    /// re-established in this fresh Home. A loaded feature response without an
+    /// explicit `true` is terminal and clears the intent fail-closed.
+    fn resume_split_if_ready(&mut self) {
+        if !self.resume_split_after_install || !self.connect_account.is_authenticated() {
+            return;
+        }
+        if self.connect_account.features.is_none() {
+            return;
+        }
+        if !self
+            .connect_chain_availability(ChainId::BitcoinBlake2b)
+            .is_available()
+        {
+            self.resume_split_after_install = false;
+            self.set_error(
+                self.connect_chain_availability(ChainId::BitcoinBlake2b)
+                    .reason()
+                    .unwrap_or("Bitcoin Blake2b is unavailable.")
+                    .to_string(),
+            );
+            return;
+        }
+        let targets = self.split_wallet_targets();
+        if targets.is_empty() {
+            self.resume_split_after_install = false;
+            self.set_error(
+                "The new Bitcoin Blake2b Cube has no Vault available for Split.".to_string(),
+            );
+            return;
+        }
+        self.split_wallet.set_targets(targets);
+        self.active_section = HomeSection::SplitWallet;
+        self.resume_split_after_install = false;
     }
 
     /// Whether the Cube at `index` may start a Bitcoin Blake2b claim.
@@ -2346,7 +2395,18 @@ impl Home {
                         self.set_error(reason.to_string());
                         return Task::none();
                     }
-                    self.split_wallet.set_targets(self.split_wallet_targets());
+                    let targets = self.split_wallet_targets();
+                    if targets.is_empty() {
+                        let Some(client) = self.connect_account.authenticated_client() else {
+                            self.set_error("Sign in to Connect to use Split.".to_string());
+                            return Task::none();
+                        };
+                        return Task::done(Message::InstallForSplit(
+                            self.datadir_path.clone(),
+                            client,
+                        ));
+                    }
+                    self.split_wallet.set_targets(targets);
                 } else if matches!(self.active_section, HomeSection::SplitWallet) {
                     self.split_wallet.cancel();
                 }
@@ -2674,6 +2734,7 @@ impl Home {
                         // Cube or discovered balance summary.
                         self.split_wallet.cancel();
                         self.split_wallet = SplitWalletPanel::new();
+                        self.resume_split_after_install = false;
                         if matches!(self.active_section, HomeSection::SplitWallet) {
                             self.active_section = HomeSection::Cubes;
                         }
@@ -2718,6 +2779,7 @@ impl Home {
                     self.split_wallet.cancel();
                     self.active_section = HomeSection::Cubes;
                 }
+                self.resume_split_if_ready();
                 // Sync account tier from the Connect plan data
                 let old_tier = self.account_tier;
                 self.account_tier =
@@ -5466,6 +5528,9 @@ pub enum Message {
     /// "home had no Connect session" — the relevant installer step
     /// then falls back to its own auth form.
     Install(CoincubeDirectory, ChainId, UserFlow, Option<CoincubeClient>),
+    /// Launch the ordinary BTCB2 wallet installer, then return to Home and
+    /// resume the pending Split entry after the Cube and Vault are persisted.
+    InstallForSplit(CoincubeDirectory, CoincubeClient),
     /// Result of probing a chain directory. `for_chain` is the chain the probe
     /// was started for; a result that arrives after the user has switched
     /// networks is stale and must not replace the current list.
@@ -6294,6 +6359,130 @@ mod tests {
             email_verified: Some(true),
         });
         home
+    }
+
+    fn enable_btcb2(home: &mut Home) {
+        let mut client = CoincubeClient::new();
+        client.set_token("synthetic-btcb2-token");
+        home.connect_account.install_admitted_client(client);
+        home.connect_account.step = ConnectFlowStep::Dashboard;
+        home.connect_account.user = Some(User {
+            id: 7,
+            email: "founder@example.com".to_string(),
+            email_verified: Some(true),
+        });
+        home.connect_account.features = Some(
+            serde_json::from_value(serde_json::json!({
+                "plans": [],
+                "bitcoinBlake2bEnabled": true
+            }))
+            .unwrap(),
+        );
+    }
+
+    fn write_btcb2_vault_target(home: &Home) {
+        let directory = home.datadir_path.network_directory(ChainId::BitcoinBlake2b);
+        std::fs::create_dir_all(directory.path()).unwrap();
+        let cube = CubeSettings::new_with_raw_id(
+            "split-target".to_string(),
+            "Split target".to_string(),
+            ChainId::BitcoinBlake2b,
+        )
+        .with_vault(crate::app::settings::VaultIdentity {
+            wallet_id: crate::app::settings::WalletId::new("target-checksum".to_string(), Some(1)),
+            fingerprint: Some("0123abcd".to_string()),
+        });
+        let settings = settings::Settings {
+            cubes: vec![cube],
+            ..Default::default()
+        };
+        std::fs::write(
+            directory.path().join(settings::SETTINGS_FILE_NAME),
+            serde_json::to_vec_pretty(&settings).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn split_without_a_target_launches_the_ordinary_btcb2_installer() {
+        let datadir = fresh_datadir();
+        let mut home = Home::new_for_chain(datadir.clone(), Some(ChainId::Bitcoin)).0;
+        enable_btcb2(&mut home);
+
+        let messages = drain(home.update(Message::View(ViewMessage::GoToSection(
+            HomeSection::SplitWallet,
+        ))));
+
+        assert!(matches!(
+            messages.as_slice(),
+            [Message::InstallForSplit(path, client)]
+                if path.path() == datadir.path() && client.token().is_some()
+        ));
+        assert_eq!(home.active_section, HomeSection::Cubes);
+        std::fs::remove_dir_all(datadir.path()).unwrap();
+    }
+
+    #[test]
+    fn split_with_an_existing_target_opens_without_installing() {
+        let datadir = fresh_datadir();
+        let mut home = Home::new_for_chain(datadir.clone(), Some(ChainId::Bitcoin)).0;
+        enable_btcb2(&mut home);
+        write_btcb2_vault_target(&home);
+
+        assert!(drain(home.update(Message::View(ViewMessage::GoToSection(
+            HomeSection::SplitWallet,
+        ))))
+        .is_empty());
+        assert_eq!(home.active_section, HomeSection::SplitWallet);
+        std::fs::remove_dir_all(datadir.path()).unwrap();
+    }
+
+    #[test]
+    fn post_install_split_resume_waits_for_and_rechecks_the_server_gate() {
+        let datadir = fresh_datadir();
+        let mut home = Home::new_for_chain(datadir.clone(), Some(ChainId::BitcoinBlake2b)).0;
+        enable_btcb2(&mut home);
+        home.connect_account.features = None;
+        write_btcb2_vault_target(&home);
+        home.request_split_resume();
+
+        home.resume_split_if_ready();
+        assert!(home.resume_split_after_install);
+        assert_eq!(home.active_section, HomeSection::Cubes);
+
+        home.connect_account.features = Some(
+            serde_json::from_value(serde_json::json!({
+                "plans": [],
+                "bitcoinBlake2bEnabled": true
+            }))
+            .unwrap(),
+        );
+        home.resume_split_if_ready();
+        assert!(!home.resume_split_after_install);
+        assert_eq!(home.active_section, HomeSection::SplitWallet);
+        std::fs::remove_dir_all(datadir.path()).unwrap();
+    }
+
+    #[test]
+    fn post_install_split_resume_clears_when_the_server_gate_is_closed() {
+        let datadir = fresh_datadir();
+        let mut home = Home::new_for_chain(datadir.clone(), Some(ChainId::BitcoinBlake2b)).0;
+        enable_btcb2(&mut home);
+        home.connect_account.features = Some(
+            serde_json::from_value(serde_json::json!({
+                "plans": [],
+                "bitcoinBlake2bEnabled": false
+            }))
+            .unwrap(),
+        );
+        write_btcb2_vault_target(&home);
+        home.request_split_resume();
+
+        home.resume_split_if_ready();
+        assert!(!home.resume_split_after_install);
+        assert_eq!(home.active_section, HomeSection::Cubes);
+        assert!(home.error().is_some());
+        std::fs::remove_dir_all(datadir.path()).unwrap();
     }
 
     /// A fresh, empty datadir — see the same helper in
