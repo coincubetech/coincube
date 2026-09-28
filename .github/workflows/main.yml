@@ -166,6 +166,12 @@ jobs:
           Add-MpPreference -ExclusionPath $env:RUNNER_TEMP -ErrorAction SilentlyContinue
           Add-MpPreference -ExclusionPath $env:GITHUB_WORKSPACE -ErrorAction SilentlyContinue
           Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue
+      # Chocolatey updates the machine PATH, which a new PowerShell process
+      # reloads. Keep installation separate from Cargo so prost-build can find
+      # protoc on runners where it was not already present.
+      - name: Install Windows dependencies
+        if: matrix.os == 'windows-latest'
+        run: choco install protoc --yes --no-progress
       - name: Test on Rust ${{ matrix.toolchain }} (Windows)
         if: matrix.os == 'windows-latest'
         # Cap test parallelism: the filesystem-heavy tests create files under
@@ -175,7 +181,6 @@ jobs:
         # concurrency costs little and, with the in-code retries, removes the
         # remaining Windows flakiness.
         run: |
-          choco install protoc --yes --no-progress
           cargo test --no-default-features -- --test-threads=2
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python contrib/check_windows_binary.py target/debug/coincube.exe
