@@ -310,12 +310,66 @@ async fn ancestry_sweep_reconciliation_recollects_proof_without_persisting_compl
     assert!(!settings_root.exists());
     root_read.assert_hits(10);
 
+    use crate::app::settings::{
+        update_settings_file, CubeSettings, Settings, VaultIdentity, SETTINGS_FILE_NAME,
+    };
+    let completion_txid = coordinator.verified.transaction().compute_txid();
+    let unmarked_root = crate::dir::CoincubeDirectory::new(temp.0.join("unmarked-settings"));
+    for (chain, id) in [
+        (ChainId::Bitcoin, "bitcoin-cube"),
+        (ChainId::BitcoinBlake2b, "fork-cube"),
+    ] {
+        update_settings_file(&unmarked_root.network_directory(chain), |mut settings| {
+            settings
+                .cubes
+                .push(CubeSettings::new_with_raw_id(id.into(), id.into(), chain));
+            Some(settings)
+        })
+        .await
+        .unwrap();
+    }
+    let settings_bytes = |root: &crate::dir::CoincubeDirectory| {
+        [ChainId::Bitcoin, ChainId::BitcoinBlake2b].map(|chain| {
+            std::fs::read(
+                root.network_directory(chain)
+                    .path()
+                    .join(SETTINGS_FILE_NAME),
+            )
+            .unwrap()
+        })
+    };
+    let unmarked_before = settings_bytes(&unmarked_root);
+    assert!(matches!(
+        coordinator
+            .reconcile_completion(&current, &unmarked_root)
+            .await,
+        Err(Error::Unsupported)
+    ));
+    assert_eq!(settings_bytes(&unmarked_root), unmarked_before);
+    root_read.assert_hits(10);
+
+    for chain in [ChainId::Bitcoin, ChainId::BitcoinBlake2b] {
+        update_settings_file(&unmarked_root.network_directory(chain), |mut settings| {
+            settings.cubes[0].split_completion_txid = Some(completion_txid);
+            Some(settings)
+        })
+        .await
+        .unwrap();
+    }
+    let invalid_marker_before = settings_bytes(&unmarked_root);
+    assert!(matches!(
+        coordinator
+            .reconcile_completion(&current, &unmarked_root)
+            .await,
+        Err(Error::CompletionPersistence(_))
+    ));
+    assert_eq!(settings_bytes(&unmarked_root), invalid_marker_before);
+    root_read.assert_hits(10);
+
     // Existing completion markers remain gated while ancestry is valid. A
     // stable canonical root change can revoke only the exact recorded sweep.
-    use crate::app::settings::{update_settings_file, CubeSettings, Settings, VaultIdentity};
     let completion_root = crate::dir::CoincubeDirectory::new(temp.0.join("ancestry-settings"));
     let identity = VaultIdentity::generate(coordinator.construction.descriptor());
-    let completion_txid = coordinator.verified.transaction().compute_txid();
     for (chain, id) in [
         (ChainId::Bitcoin, "bitcoin-cube"),
         (ChainId::BitcoinBlake2b, "fork-cube"),

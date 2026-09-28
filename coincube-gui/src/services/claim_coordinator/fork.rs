@@ -1420,11 +1420,16 @@ impl Coordinator {
             }
             let mut settings = Settings::from_file(&directory)
                 .map_err(|error| Error::CompletionPersistence(error.to_string()))?;
-            let cube = matching_completion_cube(&mut settings, chain, id, &fingerprint, &checksum)
-                .map_err(|error| Error::CompletionPersistence(error.to_string()))?;
-            if cube.split_completion_txid == Some(txid) {
-                return Ok(true);
+            let marked = settings
+                .cubes
+                .iter()
+                .any(|cube| cube.id == *id && cube.split_completion_txid == Some(txid));
+            if !marked {
+                continue;
             }
+            matching_completion_cube(&mut settings, chain, id, &fingerprint, &checksum)
+                .map_err(|error| Error::CompletionPersistence(error.to_string()))?;
+            return Ok(true);
         }
         Ok(false)
     }
