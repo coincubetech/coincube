@@ -91,6 +91,17 @@ async fn spent_history_is_not_an_unused_address_and_limits_are_incomplete() {
     assert_eq!(report.addresses_scanned(), 3);
     assert!(report.coins().is_empty());
     assert_eq!(report.generation(), 7);
+    // Coverage records the exact proven walk: index 0 had history, 1..3 did not.
+    assert_eq!(
+        report.coverage(Branch::External),
+        Some(BranchCoverage {
+            branch: Branch::External,
+            start: 0,
+            end_exclusive: 3,
+            last_used: Some(0),
+        })
+    );
+    assert_eq!(report.coverage(Branch::Internal), None);
     let mut source = Fake::empty();
     source.used_first = true;
     assert!(matches!(

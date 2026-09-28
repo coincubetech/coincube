@@ -1,7 +1,8 @@
 //! Safe first surface for canonical BTCB2 plan PR 8.
 //!
-//! This panel deliberately stops after authenticated, bounded discovery. A scan
-//! report is evidence about UTXOs, not permission to sign or spend them. The
+//! This panel deliberately stops after authenticated, bounded discovery on
+//! both chains. A scan report and its two-chain inventory are evidence about
+//! UTXOs, not permission to sign or spend them. The
 //! poison-split actions remain unavailable until the shared Claim ancestry,
 //! finalisation and reorg primitives are merged.
 
@@ -20,6 +21,7 @@ use crate::{
     services::{
         coincube::CoincubeClient,
         foreign_scan::{self, Branch, BranchRange, ForkSide, ScanDescriptor, ScanError, ScanPlan},
+        foreign_split_inventory::{self, FreshIndex, InventoryError, SplitInventory},
     },
 };
 
@@ -53,6 +55,40 @@ pub struct ScanSummary {
     /// Confirmed but not classifiable (no observed fork or block height).
     pub unclassified: usize,
     pub tip: String,
+    pub inventory: InventorySummary,
+}
+
+/// Two-chain categories, display only. See `foreign_split_inventory`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InventorySummary {
+    pub fork_height: u64,
+    pub bitcoin_tip: String,
+    pub splittable: usize,
+    pub splittable_sats: u64,
+    pub spent_on_bitcoin: usize,
+    pub spent_on_btcb2: usize,
+    pub btcb2_post_fork: usize,
+    /// Possible input poisons only; never poison proof.
+    pub bitcoin_only_candidates: usize,
+    pub pending: usize,
+    pub fresh_receive: FreshIndex,
+}
+
+impl InventorySummary {
+    fn of(inventory: &SplitInventory) -> Self {
+        Self {
+            fork_height: inventory.fork_height(),
+            bitcoin_tip: inventory.bitcoin_tip().to_string(),
+            splittable: inventory.splittable().len(),
+            splittable_sats: inventory.splittable().iter().map(|c| c.sats).sum(),
+            spent_on_bitcoin: inventory.spent_on_bitcoin().len(),
+            spent_on_btcb2: inventory.spent_on_btcb2().len(),
+            btcb2_post_fork: inventory.btcb2_post_fork().len(),
+            bitcoin_only_candidates: inventory.bitcoin_only_post_fork().len(),
+            pending: inventory.pending().len(),
+            fresh_receive: inventory.fresh_receive(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,6 +113,7 @@ pub enum Message {
 #[derive(Debug, Clone)]
 pub struct ScanEvidence {
     report: foreign_scan::ScanReport,
+    inventory: SplitInventory,
     external: ScanDescriptor,
     internal: Option<ScanDescriptor>,
     summary: ScanSummary,
@@ -85,6 +122,7 @@ pub struct ScanEvidence {
 impl ScanEvidence {
     fn new(
         report: foreign_scan::ScanReport,
+        inventory: SplitInventory,
         external: ScanDescriptor,
         internal: Option<ScanDescriptor>,
     ) -> Self {
@@ -115,9 +153,11 @@ impl ScanEvidence {
             post_fork,
             unclassified,
             tip: report.tip().to_string(),
+            inventory: InventorySummary::of(&inventory),
         };
         Self {
             report,
+            inventory,
             external,
             internal,
             summary,
@@ -199,6 +239,7 @@ impl SplitWalletPanel {
             report,
             external,
             internal,
+            inventory: _,
             ..
         } = Arc::try_unwrap(evidence).unwrap_or_else(|shared| (*shared).clone());
         let intent = SplitIntent::new(
@@ -289,10 +330,17 @@ impl SplitWalletPanel {
                 self.status = Status::Scanning;
                 Task::perform(
                     async move {
-                        foreign_scan::scan(client, plan, generation, receiver)
+                        foreign_split_inventory::scan(client, plan, generation, receiver)
                             .await
-                            .map(|report| Arc::new(ScanEvidence::new(report, external, internal)))
-                            .map_err(scan_error_copy)
+                            .map(|two| {
+                                Arc::new(ScanEvidence::new(
+                                    two.btcb2,
+                                    two.inventory,
+                                    external,
+                                    internal,
+                                ))
+                            })
+                            .map_err(inventory_error_copy)
                     },
                     move |result| Message::Scanned(result, generation, session_generation),
                 )
@@ -306,6 +354,13 @@ impl SplitWalletPanel {
                     return Task::none();
                 }
                 match result {
+                    // Evidence from any other generation is stale by definition.
+                    Ok(evidence)
+                        if evidence.summary.generation != generation
+                            || evidence.inventory.generation() != generation =>
+                    {
+                        self.cancel();
+                    }
                     Ok(evidence) => {
                         self.status = Status::Complete(evidence.summary.clone());
                         self.evidence = Some(evidence);
@@ -351,6 +406,34 @@ impl SplitWalletPanel {
     }
 }
 
+fn inventory_error_copy(error: InventoryError) -> String {
+    match error {
+        InventoryError::Scan(ChainId::Bitcoin, error) => {
+            format!("Bitcoin chain: {}", scan_error_copy(error))
+        }
+        InventoryError::Scan(_, error) => {
+            format!("Bitcoin Blake2b chain: {}", scan_error_copy(error))
+        }
+        InventoryError::Stale => "The scan was cancelled.".to_string(),
+        InventoryError::ForkHeightUnknown => "Connect did not report the active Bitcoin Blake2b fork height, so pre-fork coins cannot be identified. No balance conclusion was made.".to_string(),
+        InventoryError::PrevoutMismatch(_) | InventoryError::Inconsistent(_) => "The two chains disagree about a pre-fork coin. The inventory was refused; no balance conclusion was made.".to_string(),
+        InventoryError::Coverage(..) => "A coin lies beyond the other chain's bounded scan, so its status there is unknown. No balance conclusion was made.".to_string(),
+        InventoryError::WrongChain => "This scan request is not supported.".to_string(),
+    }
+}
+
+fn fresh_index_copy(fresh: FreshIndex) -> String {
+    match fresh {
+        FreshIndex::Proven(index) => {
+            format!("Receive index {index} is unused on both chains.")
+        }
+        FreshIndex::FixedDescriptor => {
+            "This single-address descriptor has no fresh receive address.".to_string()
+        }
+        FreshIndex::NotProven => "No receive index was proven unused on both chains.".to_string(),
+    }
+}
+
 fn scan_error_copy(error: ScanError) -> String {
     match error {
         ScanError::Descriptor => "Enter a supported public mainnet descriptor. Private keys, hardened public derivation and ambiguous multipath descriptors are refused.".to_string(),
@@ -359,7 +442,7 @@ fn scan_error_copy(error: ScanError) -> String {
         ScanError::Cancelled => "The scan was cancelled.".to_string(),
         ScanError::Deadline => "The bounded scan timed out before proving a complete result.".to_string(),
         ScanError::Http(401) => "Sign in to Connect before scanning a Bitcoin wallet.".to_string(),
-        ScanError::Http(_) | ScanError::Unavailable => "The Bitcoin Blake2b scanner is temporarily unavailable. No balance conclusion was made.".to_string(),
+        ScanError::Http(_) | ScanError::Unavailable => "The scanner is temporarily unavailable. No balance conclusion was made.".to_string(),
         ScanError::Prevout | ScanError::Malformed => "The scan response could not be authenticated. No balance conclusion was made.".to_string(),
         ScanError::BodyLimit => "The scan exceeded its safety budget before completing.".to_string(),
         ScanError::UnsupportedChain | ScanError::InvalidLimits => "This scan request is not supported.".to_string(),
@@ -371,7 +454,7 @@ pub fn view(panel: &SplitWalletPanel) -> Element<'_, Message> {
         .spacing(6)
         .push(h3("Split a Bitcoin wallet"))
         .push(
-            p1_regular("Find BTCB2 held by a Sparrow, Electrum, Coldcard or other non-Cube Bitcoin wallet. This step scans public descriptors only; it cannot sign or move funds.")
+            p1_regular("Find BTCB2 held by a Sparrow, Electrum, Coldcard or other non-Cube Bitcoin wallet. This step scans public descriptors on Bitcoin and Bitcoin Blake2b only; it cannot sign or move funds.")
                 .style(theme::text::secondary),
         );
 
@@ -429,9 +512,23 @@ pub fn view(panel: &SplitWalletPanel) -> Element<'_, Message> {
                 summary.post_fork,
                 summary.unclassified
             )))
+            .push(p1_regular(format!(
+                "Unspent on both chains (splittable): {} UTXO{}, {} sats · Spent on Bitcoin: {} · Spent on Bitcoin Blake2b: {} · Pending or replayed: {}",
+                summary.inventory.splittable,
+                if summary.inventory.splittable == 1 { "" } else { "s" },
+                summary.inventory.splittable_sats,
+                summary.inventory.spent_on_bitcoin,
+                summary.inventory.spent_on_btcb2,
+                summary.inventory.pending,
+            )))
             .push(caption(format!(
-                "{} addresses checked at BTCB2 tip {}",
-                summary.addresses, summary.tip
+                "Bitcoin-only coins received after the fork: {} (possible input poison; not yet verified, display only). {}",
+                summary.inventory.bitcoin_only_candidates,
+                fresh_index_copy(summary.inventory.fresh_receive),
+            )).style(theme::text::secondary))
+            .push(caption(format!(
+                "{} BTCB2 addresses checked at BTCB2 tip {} · Bitcoin tip {} · fork height {} (observed)",
+                summary.addresses, summary.tip, summary.inventory.bitcoin_tip, summary.inventory.fork_height
             )).style(theme::text::secondary))
             .push(
                 p1_regular(if summary.coins == 0 {
@@ -495,6 +592,34 @@ mod tests {
 
     const FIXED_DESCRIPTOR: &str =
         "wpkh(02c6047f9441ed7d6d3045406e95c07cd85aeb5c6b7a3c2e21b73cdb1e24ff3a64)";
+
+    fn walk() -> Vec<foreign_scan::BranchCoverage> {
+        vec![foreign_scan::BranchCoverage {
+            branch: Branch::External,
+            start: 0,
+            end_exclusive: 1,
+            last_used: Some(0),
+        }]
+    }
+
+    /// Evidence joined against a Bitcoin report holding `bitcoin_coins`.
+    fn evidence(
+        report: foreign_scan::ScanReport,
+        bitcoin_coins: Vec<foreign_scan::DiscoveredCoin>,
+    ) -> ScanEvidence {
+        let report = report.with_coverage(walk());
+        let bitcoin = foreign_scan::ScanReport::for_test(
+            ChainId::Bitcoin,
+            report.generation(),
+            BlockHash::from_byte_array([8; 32]),
+            bitcoin_coins,
+        )
+        .with_coverage(walk());
+        let inventory =
+            SplitInventory::join(&report, &bitcoin, report.generation(), false).unwrap();
+        let external = ScanDescriptor::parse(Branch::External, FIXED_DESCRIPTOR).unwrap();
+        ScanEvidence::new(report, inventory, external, None)
+    }
 
     fn target() -> TargetCube {
         TargetCube {
@@ -612,14 +737,14 @@ mod tests {
     fn completed_scan_handoff_retains_exact_report_and_descriptors() {
         let mut client = CoincubeClient::new();
         client.set_token("session-a");
-        let external = ScanDescriptor::parse(Branch::External, FIXED_DESCRIPTOR).unwrap();
         let report = foreign_scan::ScanReport::for_test(
             ChainId::BitcoinBlake2b,
             17,
             BlockHash::from_byte_array([9; 32]),
             Vec::new(),
-        );
-        let evidence = ScanEvidence::new(report, external, None);
+        )
+        .with_fork_height(Some(100));
+        let evidence = evidence(report, Vec::new());
         let mut panel = SplitWalletPanel::new();
         panel.set_targets(vec![target()]);
         panel.generation = 17;
@@ -681,7 +806,10 @@ mod tests {
             coins.clone(),
         )
         .with_fork_height(Some(100));
-        let summary = ScanEvidence::new(report, external.clone(), None).summary;
+        // The pre-fork coin is also unspent on Bitcoin; a Bitcoin coin
+        // confirmed after the fork is only a displayed candidate.
+        let bitcoin_only = coin(3, Some(150), 8_000);
+        let summary = evidence(report.clone(), vec![coins[0].clone(), bitcoin_only]).summary;
         assert_eq!(
             (
                 summary.pre_fork,
@@ -691,28 +819,97 @@ mod tests {
             ),
             (1, 1_000, 1, 1)
         );
+        assert_eq!(
+            summary.inventory,
+            InventorySummary {
+                fork_height: 100,
+                bitcoin_tip: BlockHash::from_byte_array([8; 32]).to_string(),
+                splittable: 1,
+                splittable_sats: 1_000,
+                spent_on_bitcoin: 0,
+                spent_on_btcb2: 0,
+                btcb2_post_fork: 1,
+                bitcoin_only_candidates: 1,
+                pending: 1,
+                fresh_receive: FreshIndex::FixedDescriptor,
+            }
+        );
+        // Absent from the Bitcoin UTXO set: shown as spent on Bitcoin.
+        let summary = evidence(report, Vec::new()).summary;
+        assert_eq!(
+            (
+                summary.inventory.splittable,
+                summary.inventory.spent_on_bitcoin
+            ),
+            (0, 1)
+        );
 
-        // No observed fork height: nothing is splittable.
+        // No observed fork height: the inventory refuses instead of guessing.
         let report = foreign_scan::ScanReport::for_test(
             ChainId::BitcoinBlake2b,
             3,
             BlockHash::from_byte_array([9; 32]),
             coins,
         );
-        let summary = ScanEvidence::new(report, external, None).summary;
-        assert_eq!((summary.pre_fork, summary.unclassified), (0, 3));
+        let bitcoin = foreign_scan::ScanReport::for_test(
+            ChainId::Bitcoin,
+            3,
+            BlockHash::from_byte_array([8; 32]),
+            Vec::new(),
+        );
+        let error = SplitInventory::join(&report, &bitcoin, 3, false).unwrap_err();
+        assert_eq!(error, InventoryError::ForkHeightUnknown);
+        assert!(inventory_error_copy(error).contains("fork height"));
+    }
+
+    #[test]
+    fn split_evidence_from_another_generation_is_discarded() {
+        let report = foreign_scan::ScanReport::for_test(
+            ChainId::BitcoinBlake2b,
+            8,
+            BlockHash::from_byte_array([9; 32]),
+            Vec::new(),
+        )
+        .with_fork_height(Some(100));
+        let stale = Arc::new(evidence(report, Vec::new()));
+        let mut panel = SplitWalletPanel::new();
+        panel.set_targets(vec![target()]);
+        panel.generation = 9;
+        panel.status = Status::Scanning;
+        // Delivered under the current generation tag but carrying older evidence.
+        let _ = panel.update(Message::Scanned(Ok(stale), 9, 1), None, 1);
+        assert!(panel.evidence.is_none());
+        assert_eq!(panel.status(), &Status::Editing);
+        assert_eq!(panel.generation, 10);
+    }
+
+    #[test]
+    fn split_incomplete_bitcoin_scan_fails_the_panel_explicitly() {
+        let mut panel = SplitWalletPanel::new();
+        panel.set_targets(vec![target()]);
+        panel.status = Status::Scanning;
+        let generation = panel.generation;
+        let copy = inventory_error_copy(InventoryError::Scan(
+            ChainId::Bitcoin,
+            ScanError::RangeLimit,
+        ));
+        let _ = panel.update(Message::Scanned(Err(copy), generation, 2), None, 2);
+        assert!(
+            matches!(panel.status(), Status::Failed(copy) if copy.starts_with("Bitcoin chain:") && copy.contains("No zero-balance conclusion"))
+        );
+        assert!(panel.evidence.is_none());
     }
 
     #[test]
     fn cancel_discards_completed_scan_evidence() {
-        let external = ScanDescriptor::parse(Branch::External, FIXED_DESCRIPTOR).unwrap();
         let report = foreign_scan::ScanReport::for_test(
             ChainId::BitcoinBlake2b,
             23,
             BlockHash::from_byte_array([10; 32]),
             Vec::new(),
-        );
-        let evidence = ScanEvidence::new(report, external, None);
+        )
+        .with_fork_height(Some(100));
+        let evidence = evidence(report, Vec::new());
         let mut panel = SplitWalletPanel::new();
         panel.set_targets(vec![target()]);
         panel.generation = 23;
