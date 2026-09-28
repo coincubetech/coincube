@@ -76,89 +76,111 @@ fn update_coins(
 
     // Start by fetching newly received coins.
     let mut received = Vec::new();
-    for utxo in bit.try_received_coins(previous_tip, descs)? {
-        let UTxO {
-            outpoint,
-            amount,
-            address,
-            is_immature,
-            ..
-        } = utxo;
-        // We can only really treat them if we know the derivation index that was used.
-        let (derivation_index, is_change) = match address {
-            UTxOAddress::Address(address) => {
-                let address = match address.require_network(network) {
-                    Ok(addr) => addr,
-                    Err(e) => {
-                        log::error!("Invalid network for address: {}", e);
-                        continue;
-                    }
-                };
-                if let Some((derivation_index, is_change)) =
-                    db_conn.derivation_index_by_address(&address)
-                {
-                    (derivation_index, is_change)
-                } else {
-                    // Earlier deposits in this batch may extend the lookahead.
-                    // Resolve that extension in memory, keeping DB writes deferred.
-                    let highest = u32::from(receive_index.max(change_index));
-                    let gap = crate::database::sqlite::LOOK_AHEAD_LIMIT;
-                    let start = initial_highest
-                        .checked_add(gap)
-                        .ok_or("Derivation range overflow")?;
-                    let end = highest
-                        .checked_add(gap)
-                        .ok_or("Derivation range overflow")?;
-                    let mut found = None;
-                    for index in start..end {
-                        let child = bitcoin::bip32::ChildNumber::from_normal_idx(index)
-                            .map_err(|_| "Derivation range exhausted")?;
-                        for (branch, desc) in descs.iter().enumerate().take(2) {
-                            if desc.derive(child, secp).address(network) == address {
-                                found = Some((child, branch == 1));
+    let mut pending = bit.try_received_coins(previous_tip, descs)?;
+    loop {
+        let before = pending.len();
+        let mut unresolved = Vec::new();
+        for utxo in pending {
+            let UTxO {
+                outpoint,
+                amount,
+                ref address,
+                is_immature,
+                ..
+            } = utxo;
+            // We can only really treat them if we know the derivation index that was used.
+            let (derivation_index, is_change) = match address {
+                UTxOAddress::Address(address) => {
+                    let address = match address.clone().require_network(network) {
+                        Ok(addr) => addr,
+                        Err(e) => {
+                            log::error!("Invalid network for address: {}", e);
+                            continue;
+                        }
+                    };
+                    if let Some((derivation_index, is_change)) =
+                        db_conn.derivation_index_by_address(&address)
+                    {
+                        (derivation_index, is_change)
+                    } else {
+                        // Earlier deposits in this batch may extend the lookahead.
+                        // Resolve that extension in memory, keeping DB writes deferred.
+                        let highest = u32::from(receive_index.max(change_index));
+                        let gap = crate::database::sqlite::LOOK_AHEAD_LIMIT;
+                        let start = initial_highest
+                            .checked_add(gap)
+                            .ok_or("Derivation range overflow")?;
+                        let end = highest
+                            .checked_add(gap)
+                            .ok_or("Derivation range overflow")?;
+                        let mut found = None;
+                        for index in start..end {
+                            let child = bitcoin::bip32::ChildNumber::from_normal_idx(index)
+                                .map_err(|_| "Derivation range exhausted")?;
+                            for (branch, desc) in descs.iter().enumerate().take(2) {
+                                if desc.derive(child, secp).address(network) == address {
+                                    found = Some((child, branch == 1));
+                                    break;
+                                }
+                            }
+                            if found.is_some() {
                                 break;
                             }
                         }
-                        if found.is_some() {
-                            break;
+                        match found {
+                            Some(mapped) => mapped,
+                            None => {
+                                unresolved.push(utxo);
+                                continue;
+                            }
                         }
                     }
-                    found.ok_or_else(|| {
-                        format!(
-                            "Cannot map owned coin {} to a derivation index; poll deferred",
-                            outpoint
-                        )
-                    })?
                 }
-            }
-            UTxOAddress::DerivIndex(index, is_change) => (index, is_change),
-        };
-        // First of if we are receiving coins that are beyond our next derivation index,
-        // adjust it.
-        // Stage index changes with the coin updates. Later backend reads may
-        // fail or reveal a changed tip, in which case nothing from this batch
-        // should have been written yet.
-        if !is_change && derivation_index > receive_index {
-            receive_index = derivation_index;
-        } else if is_change && derivation_index > change_index {
-            change_index = derivation_index;
-        }
-
-        // Now record this coin as a newly received one.
-        if !curr_coins.contains_key(&outpoint) {
-            let coin = Coin {
-                outpoint,
-                is_immature,
-                amount,
-                derivation_index,
-                is_change,
-                block_info: None,
-                spend_txid: None,
-                spend_block: None,
-                is_from_self: false,
+                UTxOAddress::DerivIndex(index, is_change) => (*index, *is_change),
             };
-            received.push(coin);
+            // First of if we are receiving coins that are beyond our next derivation index,
+            // adjust it.
+            // Stage index changes with the coin updates. Later backend reads may
+            // fail or reveal a changed tip, in which case nothing from this batch
+            // should have been written yet.
+            if !is_change && derivation_index > receive_index {
+                receive_index = derivation_index;
+            } else if is_change && derivation_index > change_index {
+                change_index = derivation_index;
+            }
+
+            // Now record this coin as a newly received one.
+            if !curr_coins.contains_key(&outpoint) {
+                let coin = Coin {
+                    outpoint,
+                    is_immature,
+                    amount,
+                    derivation_index,
+                    is_change,
+                    block_info: None,
+                    spend_txid: None,
+                    spend_block: None,
+                    is_from_self: false,
+                };
+                received.push(coin);
+            }
         }
+        // A later entry may have widened the staged range. Revisit only
+        // unresolved entries until no more can be mapped, independent of RPC
+        // ordering. Unknown outliers must not stall the entire wallet poll.
+        if unresolved.is_empty() {
+            break;
+        }
+        if unresolved.len() == before {
+            for utxo in unresolved {
+                log::error!(
+                    "Cannot map owned coin {} to a derivation index; skipping it for now",
+                    utxo.outpoint
+                );
+            }
+            break;
+        }
+        pending = unresolved;
     }
     log::debug!("Newly received coins: {:?}", received);
 
@@ -1126,7 +1148,7 @@ mod failure_tests {
     use bitcoin::{bip32::ChildNumber, hashes::Hash};
 
     #[test]
-    fn staged_lookahead_resolves_the_next_deposit_without_writing_indexes() {
+    fn staged_lookahead_resolves_reversed_deposits_and_skips_unmapped_without_writes() {
         let secp = secp256k1::Secp256k1::verification_only();
         let descs = super::tests::test_descs();
         for branch in [0, 1] {
@@ -1156,11 +1178,55 @@ mod failure_tests {
                 ),
                 ..first.clone()
             };
-            bit.received = vec![first, next];
+            let extended = UTxO {
+                outpoint: bitcoin::OutPoint {
+                    txid: bitcoin::Txid::all_zeros(),
+                    vout: 2,
+                },
+                address: UTxOAddress::Address(
+                    descs[branch]
+                        .derive(399.into(), &secp)
+                        .address(conn.network())
+                        .into_unchecked(),
+                ),
+                ..first.clone()
+            };
+            let unmapped = UTxO {
+                outpoint: bitcoin::OutPoint {
+                    txid: bitcoin::Txid::all_zeros(),
+                    vout: 3,
+                },
+                address: UTxOAddress::Address(
+                    descs[branch]
+                        .derive(1000.into(), &secp)
+                        .address(conn.network())
+                        .into_unchecked(),
+                ),
+                ..first.clone()
+            };
+            // Three passes are needed: 199 unlocks 200, which unlocks 399.
+            // The distant outlier must not prevent unrelated deposits updating.
+            bit.received = vec![extended, next, first, unmapped];
             let staged = update_coins(&bit, &mut conn, &bit.tip, &descs, &secp).unwrap();
-            assert_eq!(staged.received.len(), 2);
-            assert_eq!(staged.received[1].derivation_index, ChildNumber::from(200));
-            assert_eq!(staged.received[1].is_change, branch == 1);
+            let mut indexes: Vec<_> = staged
+                .received
+                .iter()
+                .map(|coin| u32::from(coin.derivation_index))
+                .collect();
+            indexes.sort_unstable();
+            assert_eq!(indexes, vec![199, 200, 399]);
+            assert!(staged
+                .received
+                .iter()
+                .all(|coin| coin.is_change == (branch == 1)));
+            assert_eq!(
+                if branch == 1 {
+                    staged.change_index
+                } else {
+                    staged.receive_index
+                },
+                ChildNumber::from(399)
+            );
             assert_eq!(conn.receive_index(), ChildNumber::from(0));
             assert_eq!(conn.change_index(), ChildNumber::from(0));
             bit.poll_failure = Some("confirmed");
