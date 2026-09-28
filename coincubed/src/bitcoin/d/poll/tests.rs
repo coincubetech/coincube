@@ -104,7 +104,6 @@ fn unreachable_node_is_not_absence_or_rescan_completion() {
     drop(listener);
     let txid = bitcoin::Txid::all_zeros();
     let hash = bitcoin::BlockHash::all_zeros();
-    let start = Instant::now();
     assert!(bit.try_is_in_mempool(&txid).is_err());
     assert!(bit.try_get_transaction(&txid).is_err());
     assert!(bit
@@ -114,10 +113,60 @@ fn unreachable_node_is_not_absence_or_rescan_completion() {
     assert!(bit.try_list_since_block(&hash).is_err());
     assert!(bit.try_chain_tip().is_err());
     assert!(bit.try_sync_progress().is_err());
-    assert!(
-        start.elapsed() < Duration::from_secs(5),
-        "polling must not enter the minute-long retry loop"
-    );
+}
+
+#[test]
+fn polling_transport_errors_make_one_attempt_per_read() {
+    // Closed-port connection timing differs across operating systems. Count
+    // real accepted connections instead of timing seven connection refusals.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let mut bit = backend(listener.local_addr().unwrap());
+    // A regression into the generic retry path must fail without making the
+    // test spend a minute on each of the seven reads.
+    bit.retries = 2;
+    let (stop, stopped) = std::sync::mpsc::channel();
+    let worker = thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut requests = 0;
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    requests += 1;
+                    // Closing before an HTTP reply exercises a real retryable
+                    // transport failure, not an RPC-level absence result.
+                    drop(stream);
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    if stopped.try_recv().is_ok() {
+                        return requests;
+                    }
+                    assert!(
+                        Instant::now() < deadline,
+                        "polling transport did not finish"
+                    );
+                    thread::sleep(Duration::from_millis(5));
+                }
+                other => panic!("RPC test accept failed: {:?}", other),
+            }
+        }
+    });
+    let txid = bitcoin::Txid::all_zeros();
+    let hash = bitcoin::BlockHash::all_zeros();
+    let failures = [
+        bit.try_is_in_mempool(&txid).is_err(),
+        bit.try_get_transaction(&txid).is_err(),
+        bit.try_is_spent(&bitcoin::OutPoint { txid, vout: 0 })
+            .is_err(),
+        bit.try_rescan_progress().is_err(),
+        bit.try_list_since_block(&hash).is_err(),
+        bit.try_chain_tip().is_err(),
+        bit.try_sync_progress().is_err(),
+    ];
+    stop.send(()).unwrap();
+    let requests = worker.join().unwrap();
+    assert!(failures.iter().all(|failed| *failed));
+    assert_eq!(requests, 7, "polling must not retry a transport failure");
 }
 
 #[test]
