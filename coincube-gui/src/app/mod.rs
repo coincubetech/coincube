@@ -939,7 +939,7 @@ fn split_review_error(error: crate::services::foreign_psbt::ForeignPsbtError) ->
     match error {
         E::UnsupportedRoute => "Taproot (tr) wallets can be scanned but not split: there is no signing route for them yet.".to_string(),
         E::ForkUnknown => "The Bitcoin Blake2b fork height was not observed with this scan, so no coin can be proven pre-fork. Scan again.".to_string(),
-        E::Empty => "No confirmed pre-fork coins were found. Coins received after the fork exist only on Bitcoin Blake2b and are not part of a split.".to_string(),
+        E::Empty => "No confirmed pre-fork coins were found. Coins confirmed after the fork are not part of this split and may still be replayable.".to_string(),
         E::Unconfirmed => "Wait for every discovered output to confirm, then scan again.".to_string(),
         E::Economics => "The pre-fork total cannot cover the maximum fee at this fee rate while leaving a spendable amount.".to_string(),
         _ => "The source evidence cannot produce a safe sweep review. Scan again.".to_string(),
@@ -7493,7 +7493,7 @@ fn split_review_overlay<'a>(
             sweep.inputs
         )))
         .push(p1_regular(format!(
-            "Excluded: {} post-fork (Bitcoin Blake2b only), {} without a confirming height",
+            "Excluded: {} confirmed after the fork (not part of this split; may still be replayable), {} without a confirming height",
             sweep.excluded_post_fork, sweep.excluded_unknown
         )))
         .push(p1_regular(format!(
