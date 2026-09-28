@@ -83,7 +83,7 @@ node about *which* signatures go into the witness — the next section.
    for a replay statement: `replay_protected()` is true iff the witness holds
    at least one verified unified signature, which is invalid on Bitcoin.
 
-## What the finaliser does not guarantee (`#398`)
+## Exact-witness protection and retained legacy policy (`#398`, `#536`)
 
 The pill is a statement about **the exact witness Coincube would broadcast**,
 not about exclusive ancestry of the coin and not about every signature that
@@ -95,46 +95,61 @@ different witness assembled later from leftover `SIGHASH_ALL` signatures for
 the same prevouts, sequence, locktime and script. Those two serializations
 share a txid and differ in wtxid.
 
-How leftover signatures arise in this build:
+How leftover signatures can arise:
 
 - Keychain keys are classified `ReplayProtection::Legacy` until Lane B3
   (`state/vault/signers.rs`). Hardware is `UserMarked`, default unmarked =
-  not capable. The unified picker still collects them, and `updatespend`
-  persists every verified `partial_sigs` entry it is given.
+  not capable. A mixed witness can legitimately need one or more of those
+  legacy signatures alongside a unified signature.
 - The Sign action hides once the spend is finalisable
   (`ReplayReview::signatures_complete`), but Import remains, and copies
   signed in parallel (exported PSBT, another coordinator, a device that
   already signed) never have to merge back.
-- Export writes `Psbt::to_string()` (`state/vault/psbt.rs` `ExportPsbt`) —
-  rust-bitcoin's internal representation, proprietary unified records plus
-  standard `partial_sigs`. A Bitcoin-family consumer ignores the proprietary
-  keys and runs `finalize_mut` / `finalizepsbt` on the legacy set. That is
-  the construction rust-miniscript would have produced on Blake2b if the core
-  finaliser were not in the way.
+- Export writes `Psbt::to_string()` (`state/vault/psbt.rs` `ExportPsbt`) only
+  after applying the same retained-legacy policy as persistence. A
+  Bitcoin-family consumer ignores the proprietary keys and runs
+  `finalize_mut` / `finalizepsbt` on `partial_sigs`, so export is refused if
+  those legacy records can independently satisfy an input for which a
+  unified-bearing satisfaction is available.
 - `export_standard` is the opposite transform: it *moves* `0x21` records
   into `PSBT_IN_PARTIAL_SIG`. The GUI export path does not use it.
 - The adapter refuses both encodings for one key in **one** PSBT
   (`AmbiguousSignatureEncoding`). It cannot bind a second file that never
   comes back.
 
-A follow-up collection/export policy, still tracked in `#398` and **not
-implemented in this slice**, could prevent storing or exporting a
-`partial_sigs` set that already satisfies an input while a unified record is
-present, and could refuse further legacy collection once a unified path is
-finalisable. The app cannot revoke signatures that already left on a
-Keychain, a hardware device, an exported file, or another coordinator.
+The bounded local policy is `ensure_no_unsafe_legacy_alternative` in
+`coincube-core::unified_finalize`. For each input it verifies every signature,
+builds the preferred unified-bearing satisfaction, then separately offers only
+the retained legacy signatures to the same transaction-aware miniscript
+satisfier. If the legacy set independently satisfies the input, the PSBT is
+refused. A legacy signature required by a mixed witness is preserved when the
+legacy set is insufficient on its own; legacy-only and incomplete spends keep
+their existing replay status.
+
+The policy runs on the desktop's local/device/Keychain/import merge result,
+daemon first insert and merge, export, reload status, and the daemon's final
+broadcast check. All refusals are atomic: no signature is silently removed and
+an existing stored or in-memory PSBT stays byte-identical. An unsafe row made
+by an older build becomes `Unknown` on reload and cannot be exported or
+broadcast until the surplus signatures are removed or the spend is recreated.
+Bitcoin-family paths return before this policy and retain their historical
+merge, persistence, export, and finalisation behavior.
+
+This bounds what Coincube itself retains and exports. The app cannot revoke
+signatures that already left on a Keychain, a hardware device, an exported
+file, or another coordinator. A separately retained legacy-only copy remains
+usable if it independently meets the script.
 
 A unified spend is therefore not proof the Bitcoin twin cannot be spent, and
 not poison evidence. Lane B1.5's *Split — cannot replay* is the exclusivity
 claim; that type still has no values.
 
-Copy today (`state/vault/replay.rs`): the success pill is the two words
-"Replay protected". The acknowledgement "I understand this can also spend my
-Bitcoin" is shown only for `ReplayStatus::Replayable`. A Protected spend does
-not warn that leftover or external legacy signatures may still spend the
-twin. That wording overstates the established guarantee if it is read as
-coin exclusivity. This slice does not change the pill; the follow-up is
-collection policy plus copy, listed on `#398`.
+Copy (`state/vault/replay.rs`): the success pill is "This witness is replay
+protected". The line below it says the status applies only to Coincube's
+selected witness and that legacy signatures held by another device, exported
+copy, or coordinator may still be combined into a Bitcoin spend and cannot be
+revoked. The acknowledgement "I understand this can also spend my Bitcoin"
+remains specific to `ReplayStatus::Replayable`; it is not an exclusivity claim.
 
 ## Daemon
 
@@ -219,7 +234,7 @@ input's report. Stored PSBTs round-trip the proprietary records unchanged.
   the same chain-keyed analysis, so a collected unified signature is not asked
   for again.
 - **Status** (`state/vault/replay.rs`): four states derived from the
-  finaliser's report over the merged PSBT — *Replay protected*, *Replayable —
+  finaliser's report over the merged PSBT — *This witness is replay protected*, *Replayable —
   no replay-capable signature on input N* (amber; Broadcast disabled until "I
   understand this can also spend my Bitcoin" is ticked; the tick is keyed to
   the PSBT's bytes, so it survives a recompute over the same signatures and is

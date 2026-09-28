@@ -175,6 +175,10 @@ impl From<commands::CommandError> for Error {
             | commands::CommandError::OutpointNotRecoverable(..) => {
                 Error::new(ErrorCode::InvalidParams, e.to_string())
             }
+            commands::CommandError::UnsafeLegacyAlternative { .. } => Error::new(
+                ErrorCode::ServerError(commands::UNSAFE_LEGACY_ALTERNATIVE_ERROR),
+                e.to_string(),
+            ),
             commands::CommandError::RescanTrigger(..)
             | commands::CommandError::ChangeReservation(
                 crate::database::ReservationError::Storage
@@ -219,5 +223,23 @@ impl Response {
 
     pub fn error(id: ReqId, error: Error) -> Response {
         Response::new(id, None, Some(error))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unsafe_legacy_alternative_has_a_dedicated_rpc_code() {
+        let error = Error::from(commands::CommandError::UnsafeLegacyAlternative {
+            input: 2,
+            legacy_signatures: 3,
+        });
+        assert_eq!(
+            error.code,
+            ErrorCode::ServerError(commands::UNSAFE_LEGACY_ALTERNATIVE_ERROR)
+        );
+        assert!(error.message.contains("legacy signatures"));
     }
 }
