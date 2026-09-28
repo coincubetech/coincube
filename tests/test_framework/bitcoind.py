@@ -13,6 +13,7 @@ from test_framework.serializations import deser_compact_size
 from test_framework.utils import (
     BitcoinBackend,
     TailableProc,
+    syscall_trace_prefix,
     wait_for,
     TIMEOUT,
     BITCOIND_PATH,
@@ -78,7 +79,13 @@ class Bitcoind(BitcoinBackend):
         if not os.path.exists(regtestdir):
             os.makedirs(regtestdir)
 
-        self.cmd_line = [
+        # With BTCB2_TRACE_SYSCALLS=1 the node runs under strace and its trace
+        # lands next to its datadir (#394). The child's stdout still reaches
+        # TailableProc, so log waiting is unaffected; `-A` means a node that is
+        # stopped and started again (the two-chain fork does that) appends
+        # rather than throwing its earlier trace away.
+        self.strace_log = os.path.join(bitcoin_dir, "strace.log")
+        self.cmd_line = syscall_trace_prefix(self.strace_log) + [
             self.bitcoind_path,
             "-datadir={}".format(bitcoin_dir),
             "-printtoconsole",
@@ -86,6 +93,11 @@ class Bitcoind(BitcoinBackend):
             "-debug=1",
             "-debugexclude=libevent",
             "-debugexclude=tor",
+            # Knots enables its Tor subprocess by default. These isolated
+            # regtest nodes never exercise Tor, and an absent `tor` binary
+            # enters an upstream subprocess error path that can double-close
+            # a reused file descriptor (#394).
+            "-listenonion=0",
         ] + extra_args
         bitcoind_conf = {
             "bind": f"127.0.0.1:{self.p2pport}",
