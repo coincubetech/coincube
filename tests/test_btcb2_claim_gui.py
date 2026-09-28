@@ -298,7 +298,7 @@ def test_gui_claims_both_chains_and_recovers_remined_bitcoin(tmp_path, record_pr
                 "event": "replace_backend", "binding_changed": True}
             refused = child.send({"command": "confirm"})
             assert refused["stage"] == "review", refused
-            assert refused["review_error"] == "The Bitcoin node's preflight check failed (InvalidRequest).", refused
+            assert refused["review_error"] == "This Vault's backend changed or stopped. Check its connection, then reopen Claim.", refused
             assert refused["submission_calls"] == 0 and refused["submitted"] is None, refused
             assert refused["node_submissions"] == refused["connect_submissions"] == 0
             assert refused["journal"] == journal, "replacement must refuse before durable send intent"
