@@ -595,6 +595,9 @@ impl Step for DefineDescriptor {
             return false;
         }
         ctx.keys = HashMap::new();
+        // Every key below comes with its source, so a key recorded without a
+        // Keychain id is known not to be one.
+        ctx.keychain_keys_recorded = true;
         // Reset backend-vault payloads — `apply()` runs every time the
         // user re-confirms the descriptor, including after going back
         // and editing, so we can't append incrementally.
@@ -626,6 +629,7 @@ impl Step for DefineDescriptor {
                             ),
                             grid_seed_source: key.source.grid_seed_source(),
                             replay_protected: None,
+                            keychain_key_id: key.source.keychain_key_id(),
                         },
                     );
                     if key.source.device_kind().is_some() {
@@ -668,6 +672,7 @@ impl Step for DefineDescriptor {
                                 ),
                                 grid_seed_source: key.source.grid_seed_source(),
                                 replay_protected: None,
+                                keychain_key_id: key.source.keychain_key_id(),
                             },
                         );
                         if key.source.device_kind().is_some() {
@@ -1067,6 +1072,64 @@ mod tests {
             assert!(KeySource::Manual.available_for_creation(chain));
             assert!(KeySource::MasterSigner.available_for_creation(chain));
         }
+    }
+
+    /// A Vault built in the editor records which of its keys came from the
+    /// Keychain, on every path, and marks that record complete.
+    #[test]
+    fn apply_records_keychain_provenance_per_key() {
+        use crate::installer::context::RemoteBackend;
+        use coincube_core::miniscript::bitcoin::bip32::DerivationPath;
+        let network = Network::Signet;
+        let key_from = |signer: &Signer, source: KeySource, name: &str| {
+            let path = DerivationPath::from_str("m/48'/1'/0'/2'").unwrap();
+            let xpub = signer.get_extended_pubkey(&path);
+            Key {
+                source,
+                name: name.to_string(),
+                fingerprint: signer.fingerprint(),
+                key: DescriptorPublicKey::from_str(&format!(
+                    "[{}/48'/1'/0'/2']{}",
+                    signer.fingerprint(),
+                    xpub
+                ))
+                .unwrap(),
+                account: None,
+            }
+        };
+        let phone = Signer::generate(network).unwrap();
+        let backup = Signer::generate(network).unwrap();
+        let phone_key = key_from(
+            &phone,
+            KeySource::KeychainKey {
+                owner: crate::installer::descriptor::KeychainKeyOwner::SelfUser {
+                    primary_owner_id: 1,
+                },
+                key_id: 42,
+                name: "My iPhone".to_string(),
+            },
+            "My iPhone",
+        );
+        let backup_key = key_from(&backup, KeySource::Manual, "Backup");
+
+        let dir = CoincubeDirectory::new(PathBuf::new());
+        let mut ctx = Context::new(network, dir, RemoteBackend::None, None, None);
+        let mut step = DefineDescriptor::new(
+            network,
+            Arc::new(Mutex::new(Signer::generate(network).unwrap())),
+        );
+        step.load_context(&ctx);
+        step.keys.insert(phone_key.fingerprint, phone_key.clone());
+        step.keys.insert(backup_key.fingerprint, backup_key.clone());
+        step.paths[0].keys = vec![Some(phone_key.clone())];
+        step.paths[0].threshold = 1;
+        step.paths[1].keys = vec![Some(backup_key.clone())];
+        step.paths[1].threshold = 1;
+        assert!(step.apply(&mut ctx), "{:?}", step.error);
+
+        assert!(ctx.keychain_keys_recorded);
+        assert_eq!(ctx.keys[&phone.fingerprint()].keychain_key_id, Some(42));
+        assert_eq!(ctx.keys[&backup.fingerprint()].keychain_key_id, None);
     }
 
     pub struct Sandbox<S: Step> {
