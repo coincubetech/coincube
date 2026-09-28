@@ -75,7 +75,7 @@ async fn automatic_ancestry_build_prefers_owned_input_and_never_falls_back_on_pr
                 "tip_hash":hash(2),"tip_height":height+200,"tip_median_time_past":10000,
                 "observed_at":unix_now(),"observation":{"tip_height":height+200,
                     "fork":{"height":height,"active":true},
-                    "rdts":{"state":"flagday","flagday":{"height":height,"expiry_time":200000,"active":true}}}}}}));
+                    "rdts":{"state":"flagday","flagday":{"height":height,"expiry_time":9000,"active":false}}}}}}));
     });
     let config = toml::from_str(&format!("main_descriptor = '{}'\n[bitcoin_config]\nnetwork = 'bitcoin'\n[esplora_config]\naddr = '{}/api/v1/esplora/bitcoin/mainnet'\n", fixture.descriptor, server.base_url())).unwrap();
     let daemon = Arc::new(FlowDaemon {
@@ -108,8 +108,8 @@ async fn automatic_ancestry_build_prefers_owned_input_and_never_falls_back_on_pr
         fork_hash: hash(4),
         tip_height: height as u64 + 200,
         median_time_past: 10000,
-        expires_at: 200000,
-        rdts: Ok(()),
+        expires_at: 9000,
+        rdts: Err(Assessment::RdtsExpired),
     };
     let built = super::super::super::preferred::build_preferred(
         daemon.clone(),
@@ -132,6 +132,32 @@ async fn automatic_ancestry_build_prefers_owned_input_and_never_falls_back_on_pr
         panic!("positive ancestry must be preferred")
     };
     assert_eq!(transfer.claimed_prevouts(), &[fixture.coin.outpoint]);
+    // Positive ancestry above is independent of expired RDTS. With no
+    // qualifying candidate, the same expiry must refuse OP_RETURN fallback
+    // before it reserves another address.
+    let mut no_candidates = coins.clone();
+    no_candidates.ancestry_candidates.clear();
+    let refused = super::super::super::preferred::build_preferred(
+        daemon.clone(),
+        wallet.clone(),
+        no_candidates,
+        5,
+        window.clone(),
+        connect.clone(),
+        1,
+        generation.clone(),
+    )
+    .await
+    .unwrap_err();
+    assert!(refused.contains("expired"), "{}", refused);
+    assert_eq!(
+        daemon
+            .hits()
+            .iter()
+            .filter(|h| **h == "reserve_change")
+            .count(),
+        1
+    );
     let mut many = coins.clone();
     for vout in 0..32 {
         let mut extra = selected.clone();

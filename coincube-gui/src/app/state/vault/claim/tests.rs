@@ -4655,3 +4655,56 @@ mod flow {
         assert_eq!(submissions(&f), 1);
     }
 }
+
+#[test]
+fn ancestry_candidates_allow_search_outside_rdts_but_never_override_bad_observations() {
+    let mut p = panel(SINGLE_WSH);
+    p.pre.target = Some("fork-cube".into());
+    p.connect = Some(ConnectSession {
+        client: CoincubeClient::new(),
+        account: "7".into(),
+    });
+    for assessment in [
+        Assessment::RdtsScheduled,
+        Assessment::RdtsInactive,
+        Assessment::RdtsExpired,
+        Assessment::ExpiryMargin,
+    ] {
+        let mut checked = checked_ok(1_000_000);
+        checked.window.as_mut().unwrap().rdts = Err(assessment);
+        p.pre.checked = Some(checked);
+        assert!(!p.can_build(), "no candidate and no valid fallback");
+        p.pre
+            .checked
+            .as_mut()
+            .unwrap()
+            .coins
+            .as_mut()
+            .unwrap()
+            .ancestry_candidates
+            .push(coin(Some(95), false, false, 2));
+        assert!(
+            p.can_build(),
+            "candidate search should be possible: {:?}",
+            assessment
+        );
+        assert!(matches!(p.stage, Stage::Preconditions));
+    }
+    for assessment in [
+        Assessment::Unknown,
+        Assessment::InvalidPlan,
+        Assessment::Deployment(claim::DeploymentState::Malformed),
+    ] {
+        p.pre
+            .checked
+            .as_mut()
+            .unwrap()
+            .window
+            .as_mut()
+            .unwrap()
+            .rdts = Err(assessment);
+        assert!(!p.can_build(), "invalid observations remain refused");
+    }
+    p.pre.checked.as_mut().unwrap().window = Err("stale anchor".into());
+    assert!(!p.can_build());
+}

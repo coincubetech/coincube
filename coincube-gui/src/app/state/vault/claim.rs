@@ -803,7 +803,8 @@ impl ClaimStep1Panel {
 
     /// The first precondition that fails, in the order a user can act on
     /// them: target, Vault shape, Connect session, node backend, the fork's
-    /// RDTS window, coins, fee rate. `None` when everything holds.
+    /// observation validity, applicable RDTS window, coins, fee rate. `None`
+    /// when construction may attempt positive ancestry or valid fallback.
     pub fn refusal(&self) -> Option<Refusal> {
         let refuse = |reason: &str, retry: bool| {
             Some(Refusal {
@@ -852,7 +853,22 @@ impl ClaimStep1Panel {
             }
             Ok(window) => {
                 if let Err(assessment) = window.rdts {
-                    return refuse(&rdts_refusal(assessment, window), false);
+                    // These timing states only disallow OP_RETURN. Candidates
+                    // permit a bounded proof search, never signing authority;
+                    // build_preferred independently refuses invalid fallback.
+                    let can_search_ancestry = matches!(
+                        assessment,
+                        Assessment::RdtsScheduled
+                            | Assessment::RdtsInactive
+                            | Assessment::RdtsExpired
+                            | Assessment::ExpiryMargin
+                    ) && checked
+                        .coins
+                        .as_ref()
+                        .is_ok_and(|coins| !coins.ancestry_candidates.is_empty());
+                    if !can_search_ancestry {
+                        return refuse(&rdts_refusal(assessment, window), false);
+                    }
                 }
             }
         }

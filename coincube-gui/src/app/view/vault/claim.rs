@@ -160,7 +160,7 @@ fn preconditions_view<'a>(
             },
         ))
         .push(check_row(
-            "Replay protection",
+            "OP_RETURN fallback",
             window.map(|w| w.rdts.is_ok()),
             match (checked.map(|c| &c.window), window) {
                 (None, _) => "Checking Bitcoin Blake2b…".to_string(),
