@@ -368,6 +368,7 @@ fn sign_view<'a>(
                 currently_signing,
                 state.saved,
                 None,
+                state.broadcast_ready(cache),
             ))
             .push_maybe((!finalizing).then(|| {
                 button::secondary(None, "Cancel").on_press(Message::Claim(ClaimMessage::Cancel))

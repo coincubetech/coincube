@@ -10,8 +10,8 @@ use coincube_core::{
     chain::ChainId,
     miniscript::{
         bitcoin::{self, BlockHash, OutPoint, ScriptBuf, Transaction, Txid},
-        descriptor::{DescriptorType, Wildcard},
-        Descriptor, DescriptorPublicKey, ForEachKey,
+        descriptor::{ShInner, Wildcard, WshInner},
+        Descriptor, DescriptorPublicKey, ForEachKey, Terminal,
     },
 };
 use serde::Deserialize;
@@ -68,16 +68,22 @@ impl ScanDescriptor {
         }
         let descriptor =
             Descriptor::<DescriptorPublicKey>::from_str(text).map_err(|_| ScanError::Descriptor)?;
-        if !matches!(
-            descriptor.desc_type(),
-            DescriptorType::Pkh
-                | DescriptorType::Wpkh
-                | DescriptorType::ShWpkh
-                | DescriptorType::Wsh
-                | DescriptorType::WshSortedMulti
-                | DescriptorType::Tr
-        ) || descriptor.sanity_check().is_err()
-        {
+        // PR 8's source matrix is intentionally narrower than everything
+        // miniscript can parse. In particular, arbitrary wsh policies and
+        // Taproot script trees are discovery-capable in principle but have no
+        // agreed foreign-wallet signing route. Accepting them here would make
+        // the UI promise a later step that cannot be completed safely.
+        let supported_shape = match &descriptor {
+            Descriptor::Pkh(_) | Descriptor::Wpkh(_) => true,
+            Descriptor::Sh(sh) => matches!(sh.as_inner(), ShInner::Wpkh(_)),
+            Descriptor::Wsh(wsh) => match wsh.as_inner() {
+                WshInner::SortedMulti(_) => true,
+                WshInner::Ms(ms) => matches!(ms.as_inner(), Terminal::Multi(_)),
+            },
+            Descriptor::Tr(tr) => tr.tap_tree().is_none(),
+            Descriptor::Bare(_) => false,
+        };
+        if !supported_shape || descriptor.sanity_check().is_err() {
             return Err(ScanError::Descriptor);
         }
         if !descriptor.for_each_key(|key| match key {
@@ -100,11 +106,32 @@ impl ScanDescriptor {
             claim_authorization: false,
         }
     }
-    fn script(&self, index: u32) -> Result<ScriptBuf, ScanError> {
+    /// Select the only valid range for a fixed descriptor while preserving the
+    /// caller's explicit bound for wildcard discovery.
+    pub fn end_exclusive(&self, wildcard_end_exclusive: u32) -> u32 {
+        if self.descriptor.has_wildcard() {
+            wildcard_end_exclusive
+        } else {
+            1
+        }
+    }
+    pub(crate) fn canonical(&self) -> String {
+        self.descriptor.to_string()
+    }
+    pub(crate) fn branch(&self) -> Branch {
+        self.branch
+    }
+    pub(crate) fn derive(
+        &self,
+        index: u32,
+    ) -> Result<Descriptor<coincube_core::miniscript::descriptor::DefiniteDescriptorKey>, ScanError>
+    {
         self.descriptor
             .at_derivation_index(index)
-            .map(|d| d.script_pubkey())
             .map_err(|_| ScanError::Descriptor)
+    }
+    pub(crate) fn script(&self, index: u32) -> Result<ScriptBuf, ScanError> {
+        self.derive(index).map(|d| d.script_pubkey())
     }
 }
 
@@ -174,6 +201,21 @@ impl ScanReport {
     }
     pub fn coins(&self) -> &[DiscoveredCoin] {
         &self.coins
+    }
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        chain: ChainId,
+        generation: u64,
+        tip: BlockHash,
+        coins: Vec<DiscoveredCoin>,
+    ) -> Self {
+        Self {
+            chain,
+            generation,
+            tip,
+            addresses: 1,
+            coins,
+        }
     }
 }
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]

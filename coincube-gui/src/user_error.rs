@@ -302,22 +302,38 @@ impl From<&Error> for UserError {
                     true,
                 ),
 
+                DaemonError::UnsafeLegacyAlternative(_) => UserError::new(
+                    "Bitcoin Blake2b signatures refused",
+                    crate::app::state::vault::replay::UNSAFE_LEGACY_POLICY_COPY,
+                    CC_DMN_RPC,
+                    false,
+                ),
+
                 DaemonError::ConnectAnchor(error) => anchor_startup_error(error),
                 DaemonError::PoisonSubmission(error) => {
-                    if matches!(error, coincubed::poison_broadcast::SubmissionError::Uncertain { .. } | coincubed::poison_broadcast::SubmissionError::AlreadyStarted) {
-                        UserError::new(
+                    use coincubed::poison_broadcast::SubmissionError;
+                    // Exhaustive: a new outcome must explicitly decide whether
+                    // it can truthfully promise that transport never started.
+                    match error {
+                        SubmissionError::Uncertain { .. } | SubmissionError::AlreadyStarted => UserError::new(
                             "Transaction submission is uncertain",
                             "The transaction may have been submitted. Check its exact transaction status before taking another action.",
                             CC_DMN_RPC,
                             false,
-                        )
-                    } else {
-                        UserError::new(
+                        ),
+                        // Each guard returns before broadcast_tx:
+                        SubmissionError::UnsupportedChain // Bitcoin-mainnet boundary.
+                        | SubmissionError::DescriptorMismatch // Construction identity check.
+                        | SubmissionError::BackendUnavailable // Backend acquisition.
+                        | SubmissionError::GateMismatch // Transaction-bound gate check.
+                        | SubmissionError::Revoked // Revocation at gate entry.
+                        | SubmissionError::Expired // Freshness at gate entry.
+                        => UserError::new(
                             "Transaction was not submitted",
                             "The submission context is no longer valid. Review the transaction state before continuing.",
                             CC_DMN_RPC,
                             false,
-                        )
+                        ),
                     }
                 },
 
@@ -709,6 +725,50 @@ pub fn border_wallet_cell_message(e: &coincube_core::border_wallet::BorderWallet
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn submission_copy_distinguishes_every_current_transport_outcome() {
+        use coincube_core::miniscript::bitcoin::{hashes::Hash, Txid, Wtxid};
+        use coincubed::poison_broadcast::SubmissionError;
+        for (error, uncertain) in [
+            (SubmissionError::UnsupportedChain, false),
+            (SubmissionError::DescriptorMismatch, false),
+            (SubmissionError::BackendUnavailable, false),
+            (SubmissionError::GateMismatch, false),
+            (SubmissionError::Revoked, false),
+            (SubmissionError::Expired, false),
+            (SubmissionError::AlreadyStarted, true),
+            (
+                SubmissionError::Uncertain {
+                    txid: Txid::all_zeros(),
+                    wtxid: Wtxid::all_zeros(),
+                },
+                true,
+            ),
+        ] {
+            let user: UserError = (&Error::Daemon(DaemonError::PoisonSubmission(error))).into();
+            assert_eq!(
+                user.title,
+                if uncertain {
+                    "Transaction submission is uncertain"
+                } else {
+                    "Transaction was not submitted"
+                }
+            );
+            assert_eq!(
+                user.guidance,
+                if uncertain {
+                    "The transaction may have been submitted. Check its exact transaction status before taking another action."
+                } else {
+                    "The submission context is no longer valid. Review the transaction state before continuing."
+                }
+            );
+            assert!(
+                !user.retryable,
+                "never offer an automatic transaction retry"
+            );
+        }
+    }
 
     #[test]
     fn retry_action_is_offered_only_for_retryable_errors() {

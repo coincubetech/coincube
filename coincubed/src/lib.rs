@@ -1462,14 +1462,46 @@ mod tests {
         let mut reader = BufReader::new(stream);
         loop {
             let mut line = String::new();
-            reader.read_line(&mut line).unwrap();
+            assert_ne!(
+                reader.read_line(&mut line).unwrap(),
+                0,
+                "connection closed before the JSON body"
+            );
 
             if line.starts_with("Authorization") {
-                let mut buf = vec![0; 256];
+                let mut buf = Vec::new();
                 reader.read_until(b'}', &mut buf).unwrap();
+                assert_eq!(
+                    buf.last(),
+                    Some(&b'}'),
+                    "connection closed before the JSON body ended"
+                );
                 return;
             }
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "connection closed before the JSON body")]
+    fn json_fixture_rejects_eof_before_headers() {
+        let listener = net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        drop(client);
+        read_til_json_end(&mut server);
+    }
+
+    #[test]
+    #[should_panic(expected = "connection closed before the JSON body ended")]
+    fn json_fixture_rejects_truncated_body() {
+        let listener = net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        client
+            .write_all(b"Authorization: synthetic\r\n\r\n{\"id\":1")
+            .unwrap();
+        drop(client);
+        read_til_json_end(&mut server);
     }
 
     // Respond to the two "echo" sent at startup to sanity check the connection

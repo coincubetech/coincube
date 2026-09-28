@@ -135,9 +135,12 @@ def bitcoin_backend(directory, bitcoind):
             bitcoind_p2pport=bitcoind.p2pport,
         )
         electrs.startup()
-        # Invalidating blocks still being fetched makes Core refuse Electrs'
-        # outstanding P2P requests. Wait for the exact old tip first (#406).
-        bitcoind.before_reorg = lambda: electrs.wait_for_tip(bitcoind.rpc.getbestblockhash())
+        # If Core invalidates blocks Electrs is still fetching, Electrs can
+        # finish stale branch batches and stop serving wallet history. Require
+        # the exact old tip before destructive chain edits (#406).
+        bitcoind.before_reorg = lambda: electrs.wait_for_tip(
+            bitcoind.rpc.getbestblockhash()
+        )
         try:
             yield electrs
         finally:
@@ -436,8 +439,9 @@ def two_chain(request, test_base_dir):
         if os.getenv("BTCB2_HARNESS_REQUIRED") == "1":
             pytest.fail(msg)
         pytest.skip(msg)
-    directory = os.path.join(test_base_dir, "btcb2_two_chain")
-    os.makedirs(directory, exist_ok=True)
+    # A failed module retains its datadir. Never reuse it when fixtures are
+    # shared through conftest.py or another module starts a second harness.
+    directory = tempfile.mkdtemp(prefix="btcb2_two_chain-", dir=test_base_dir)
     harness = TwoChainRegtest(directory)
     try:
         harness.setup()

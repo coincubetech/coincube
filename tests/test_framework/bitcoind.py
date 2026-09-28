@@ -73,7 +73,8 @@ class Bitcoind(BitcoinBackend):
         self.rpcport = rpcport
         self.p2pport = reserve()
         self.prefix = "bitcoind"
-        # The Electrs fixture installs a barrier before destructive chain edits.
+        # Indexer fixtures may install a synchronization barrier before a
+        # destructive chain edit. Bitcoind-only tests leave this unset.
         self.before_reorg = None
 
         regtestdir = os.path.join(bitcoin_dir, "regtest")
@@ -122,7 +123,10 @@ class Bitcoind(BitcoinBackend):
         logging.info("Bitcoind started")
 
     def stop(self):
-        self.rpc.stop()
+        # Popen may have failed before a node existed; preserve that startup
+        # error rather than attempting RPC cleanup against a nonexistent node.
+        if self.proc is not None:
+            self.rpc.stop()
         return TailableProc.stop(self)
 
     # wait_for_mempool can be used to wait for the mempool before generating
@@ -172,7 +176,7 @@ class Bitcoind(BitcoinBackend):
             self.rpc.generateblock(addr, [])
 
     def invalidate_block(self, block_hash):
-        """Invalidate only after the indexer has finished fetching the old chain."""
+        """Invalidate a block after attached indexers have reached Core's tip."""
         if self.before_reorg is not None:
             self.before_reorg()
         self.rpc.invalidateblock(block_hash)
