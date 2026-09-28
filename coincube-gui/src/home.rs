@@ -6916,6 +6916,99 @@ mod tests {
         assert_eq!(home.active_section, HomeSection::Cubes);
     }
 
+    #[test]
+    fn split_route_requires_an_authenticated_account_flag() {
+        let datadir = fresh_datadir();
+        let root = datadir.path().to_path_buf();
+        let mut home = Home::new(datadir, Some(Network::Bitcoin)).0;
+
+        let enabled: crate::services::coincube::FeaturesResponse =
+            serde_json::from_value(serde_json::json!({
+                "plans": [],
+                "bitcoinBlake2bEnabled": true
+            }))
+            .unwrap();
+        home.connect_account.features = Some(enabled.clone());
+
+        // A cached `true` flag without an authenticated Connect client is not
+        // authority. The rejected deep link must not create the fork datadir.
+        let _ = home.update(Message::View(ViewMessage::GoToSection(
+            HomeSection::SplitWallet,
+        )));
+        assert_eq!(home.active_section, HomeSection::Cubes);
+        assert!(home.error().is_some());
+        assert!(!root.join("bitcoin-blake2b").exists());
+
+        let mut client = CoincubeClient::new();
+        client.set_token("synthetic-split-qa-token");
+        home.connect_account.install_admitted_client(client);
+        home.connect_account.features = Some(
+            serde_json::from_value(serde_json::json!({
+                "plans": [],
+                "bitcoinBlake2bEnabled": false
+            }))
+            .unwrap(),
+        );
+        let _ = home.update(Message::View(ViewMessage::GoToSection(
+            HomeSection::SplitWallet,
+        )));
+        assert_eq!(home.active_section, HomeSection::Cubes);
+        assert!(!root.join("bitcoin-blake2b").exists());
+
+        home.connect_account.features = Some(enabled);
+        let _ = home.update(Message::View(ViewMessage::GoToSection(
+            HomeSection::SplitWallet,
+        )));
+        assert_eq!(home.active_section, HomeSection::SplitWallet);
+        assert!(home.split_wallet.targets().is_empty());
+        assert!(!root.join("bitcoin-blake2b").exists());
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn split_targets_include_only_local_mainnet_fork_vaults() {
+        use crate::app::settings::{VaultIdentity, WalletId};
+
+        fn vault(name: &str, chain: ChainId) -> CubeSettings {
+            CubeSettings::new(name.to_string(), chain).with_vault(VaultIdentity {
+                wallet_id: WalletId::new(format!("{name}-wallet"), Some(1)),
+                fingerprint: Some("01234567".to_string()),
+            })
+        }
+
+        let datadir = fresh_datadir();
+        let root = datadir.path().to_path_buf();
+        let fork_dir = datadir.network_directory(ChainId::BitcoinBlake2b);
+        std::fs::create_dir_all(fork_dir.path()).unwrap();
+        let eligible = vault("Eligible", ChainId::BitcoinBlake2b);
+        let settings = settings::Settings {
+            cubes: vec![
+                eligible.clone(),
+                CubeSettings::new("No Vault".to_string(), ChainId::BitcoinBlake2b),
+                vault("Bitcoin", ChainId::Bitcoin),
+                vault("Fork testnet", ChainId::BitcoinBlake2bTestnet4),
+            ],
+            ..Default::default()
+        };
+        std::fs::write(
+            fork_dir.path().join(settings::SETTINGS_FILE_NAME),
+            serde_json::to_vec_pretty(&settings).unwrap(),
+        )
+        .unwrap();
+
+        let home = Home::new(datadir, Some(Network::Bitcoin)).0;
+        assert_eq!(
+            home.split_wallet_targets(),
+            vec![TargetCube {
+                id: eligible.id,
+                name: "Eligible".to_string(),
+            }]
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     /// A refusal reason describes what *one account's* server said. The local
     /// Cube outlives the sign-out, so a reason left behind would be shown under
     /// the next account — rendered with that account's tier and limits — to
