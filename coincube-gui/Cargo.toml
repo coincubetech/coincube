@@ -235,6 +235,8 @@ libc = "0.2"
 iced = { version = "0.14.0", features = ["x11", "wayland"] }
 
 [dev-dependencies]
+# Keep widget regression tests independent of a GPU on every platform.
+iced = { version = "0.14.0", default-features = false, features = ["tiny-skia"] }
 # `test-util` gives us `#[tokio::test(start_paused = true)]` for the
 # local-signer timeout test in tests/local_signer_loopback.rs.
 tokio = { version = "1", features = ["rt", "macros", "test-util"] }

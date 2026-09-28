@@ -37,61 +37,155 @@ async fn output<T: Send + 'static>(task: Task<T>) -> Vec<T> {
     }
 }
 
+/// This one end-to-end fixture needs a response-time clock. httpmock's JSON
+/// response is fixed at registration; PIN encryption/decryption can take longer
+/// than the anchor freshness window on loaded runners (#495, #521).
+struct ActivationServer {
+    base_url: String,
+    features: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    bitcoin: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for ActivationServer {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+impl ActivationServer {
+    async fn start(clock: impl Fn() -> u64 + Send + 'static) -> Self {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let features = Arc::new(AtomicUsize::new(0));
+        let bitcoin = Arc::new(AtomicUsize::new(0));
+        let feature_hits = features.clone();
+        let bitcoin_hits = bitcoin.clone();
+        let task = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                loop {
+                    let byte =
+                        tokio::time::timeout(std::time::Duration::from_secs(5), stream.read_u8())
+                            .await
+                            .unwrap()
+                            .unwrap();
+                    request.push(byte);
+                    assert!(request.len() <= 8192, "oversized synthetic HTTP request");
+                    if request.ends_with(b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let request = String::from_utf8(request).unwrap();
+                let path = request.split_whitespace().nth(1).unwrap();
+                let authorized = request.lines().any(|line| {
+                    line.split_once(':').is_some_and(|(name, value)| {
+                        name.eq_ignore_ascii_case("authorization")
+                            && value.trim() == "Bearer synthetic-activation-token"
+                    })
+                });
+                let (status, body) = if !authorized {
+                    (401, String::new())
+                } else if path == "/api/v1/connect/features" {
+                    feature_hits.fetch_add(1, Ordering::Relaxed);
+                    (
+                        200,
+                        json!({"success":true,"data":{"plans":[],"bitcoinBlake2bEnabled":true}})
+                            .to_string(),
+                    )
+                } else if path == "/api/v1/connect/networks/bitcoin-blake2b/anchor" {
+                    (200, json!({"success":true,"data":{"network":"bitcoin-blake2b","state":"available","anchor":{
+                        "tip_hash":"11".repeat(32),"tip_height":973029,"tip_median_time_past":1800000000,
+                        "observed_at":clock(),
+                        "observation":{"tip_height":973029,"fork":{"height":972000,"active":true},
+                            "rdts":{"state":"flagday","flagday":{"height":972000,"expiry_time":1800010000_i64,"active":false}}}
+                    }}}).to_string())
+                } else if let Some(route) =
+                    path.strip_prefix("/api/v1/esplora/bitcoin-blake2b/mainnet")
+                {
+                    match route {
+                        "/block-height/0" => (
+                            200,
+                            "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
+                                .into(),
+                        ),
+                        "/block-height/973029" | "/blocks/tip/hash" => (200, "11".repeat(32)),
+                        route if route == format!("/block/{}/status", "11".repeat(32)) => (
+                            200,
+                            json!({"in_best_chain":true,"height":973029,"next_best":null})
+                                .to_string(),
+                        ),
+                        _ => (404, String::new()),
+                    }
+                } else {
+                    if path.contains("/esplora/bitcoin/") {
+                        bitcoin_hits.fetch_add(1, Ordering::Relaxed);
+                    }
+                    (404, String::new())
+                };
+                let response = format!("HTTP/1.1 {status} Synthetic\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        Self {
+            base_url,
+            features,
+            bitcoin,
+            task,
+        }
+    }
+}
+
+#[tokio::test]
+async fn activation_anchor_timestamp_is_generated_for_each_request() {
+    use std::sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    };
+    let clock = Arc::new(AtomicU64::new(1000));
+    let response_clock = clock.clone();
+    let server = ActivationServer::start(move || response_clock.load(Ordering::Relaxed)).await;
+    let http = reqwest::Client::new();
+    for now in [1000, 2000] {
+        clock.store(now, Ordering::Relaxed);
+        let response: serde_json::Value = http
+            .get(format!(
+                "{}/api/v1/connect/networks/bitcoin-blake2b/anchor",
+                server.base_url
+            ))
+            .bearer_auth("synthetic-activation-token")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(response["data"]["anchor"]["observed_at"], now);
+    }
+}
+
 #[tokio::test]
 async fn actual_fork_install_pin_unlock_and_authenticated_reopen_are_chain_bound() {
-    let server = MockServer::start_async().await;
-    let features = server
-        .mock_async(|when, then| {
-            when.method(GET)
-                .path("/api/v1/connect/features")
-                .header("authorization", "Bearer synthetic-activation-token");
-            then.status(200).json_body(
-                json!({"success":true,"data":{"plans":[],"bitcoinBlake2bEnabled":true}}),
-            );
-        })
-        .await;
-    server.mock_async(|when, then| {
-        when.method(GET).path("/api/v1/connect/networks/bitcoin-blake2b/anchor")
-            .header("authorization", "Bearer synthetic-activation-token");
-        then.status(200).json_body(json!({"success":true,"data":{"network":"bitcoin-blake2b","state":"available","anchor":{
-            "tip_hash":"11".repeat(32),"tip_height":973029,"tip_median_time_past":1800000000,
-            "observed_at":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
-            "observation":{"tip_height":973029,"fork":{"height":972000,"active":true},
-                "rdts":{"state":"flagday","flagday":{"height":972000,"expiry_time":1800010000_i64,"active":false}}}
-        }}}));
-    }).await;
+    let server = ActivationServer::start(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    })
+    .await;
     let prefix = "/api/v1/esplora/bitcoin-blake2b/mainnet";
-    for (path, body) in [
-        (
-            format!("{prefix}/block-height/0"),
-            "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f".into(),
-        ),
-        (format!("{prefix}/block-height/973029"), "11".repeat(32)),
-        (format!("{prefix}/blocks/tip/hash"), "11".repeat(32)),
-        (
-            format!("{prefix}/block/{}/status", "11".repeat(32)),
-            "{\"in_best_chain\":true,\"height\":973029,\"next_best\":null}".into(),
-        ),
-    ] {
-        server
-            .mock_async(|when, then| {
-                when.method(GET)
-                    .path(path)
-                    .header("authorization", "Bearer synthetic-activation-token");
-                then.status(200).body(body);
-            })
-            .await;
-    }
-    let forbidden_bitcoin = server
-        .mock_async(|when, then| {
-            when.path_contains("/esplora/bitcoin/");
-            then.status(500);
-        })
-        .await;
     let root_path =
         std::env::temp_dir().join(format!("btcb2-create-reopen-{}", uuid::Uuid::new_v4()));
     let root = CoincubeDirectory::new(root_path.clone());
-    let client = client(&server);
+    let mut client = CoincubeClient::new();
+    client.base_url = server.base_url.clone();
+    client.set_token("synthetic-activation-token");
     let (mut installer, _) = Installer::try_new_for_chain(
         root.clone(),
         ChainId::BitcoinBlake2b,
@@ -111,7 +205,7 @@ async fn actual_fork_install_pin_unlock_and_authenticated_reopen_are_chain_bound
     installer.context.descriptor = Some(DESCRIPTOR.parse().unwrap());
     installer.context.bitcoin_backend =
         Some(BitcoinBackend::Esplora(coincubed::config::EsploraConfig {
-            addr: format!("{}{prefix}", server.base_url()),
+            addr: format!("{}{prefix}", server.base_url),
             token: None,
             fallback_addr: None,
             fallback_token: None,
@@ -199,8 +293,11 @@ async fn actual_fork_install_pin_unlock_and_authenticated_reopen_are_chain_bound
     daemon.stop().await.unwrap();
     // Reopening exercises daemon preflight against the stored exact-chain identity.
     assert!(database_path.is_file());
-    features.assert_hits_async(3).await;
-    forbidden_bitcoin.assert_hits_async(0).await;
+    assert_eq!(
+        server.features.load(std::sync::atomic::Ordering::Relaxed),
+        3
+    );
+    assert_eq!(server.bitcoin.load(std::sync::atomic::Ordering::Relaxed), 0);
     std::fs::remove_dir_all(root_path).unwrap();
 }
 

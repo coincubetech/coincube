@@ -1641,6 +1641,7 @@ impl Step for SaveSpend {
             cache.bitcoin_unit,
             psbt_state.recipient_identities(),
             psbt_state.replay_presentation(cache),
+            psbt_state.broadcast_ready(cache),
         );
         if let Some(modal) = &psbt_state.modal {
             modal.as_ref().view(content)
