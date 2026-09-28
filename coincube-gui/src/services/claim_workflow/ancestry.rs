@@ -76,7 +76,73 @@ pub(super) fn validate_poison(intent: &Intent) -> Result<(), Error> {
     }
     Ok(())
 }
+/// Borrowed live proof for recovery checks; this value is never journaled.
+#[derive(Clone, Copy)]
+pub(crate) enum RecoveryObservation<'a> {
+    Ordinary(CollectedAssessment),
+    Ancestry(&'a crate::services::claim_observation::http::CollectedAncestry),
+}
+impl From<CollectedAssessment> for RecoveryObservation<'_> {
+    fn from(value: CollectedAssessment) -> Self {
+        Self::Ordinary(value)
+    }
+}
+impl<'a> From<&'a crate::services::claim_observation::http::CollectedAncestry>
+    for RecoveryObservation<'a>
+{
+    fn from(value: &'a crate::services::claim_observation::http::CollectedAncestry) -> Self {
+        Self::Ancestry(value)
+    }
+}
+impl RecoveryObservation<'_> {
+    pub(super) fn data(self) -> CollectedAssessment {
+        match self {
+            Self::Ordinary(value) => value,
+            Self::Ancestry(value) => value.assessment(),
+        }
+    }
+}
 impl Controller {
+    pub(super) fn assess_recovery(
+        &self,
+        collected: RecoveryObservation<'_>,
+        plan: &ClaimPlan,
+        policy: Policy,
+        now: i64,
+    ) -> Result<Assessment, Error> {
+        let o = collected.data().observations;
+        match collected {
+            RecoveryObservation::Ancestry(proof) => {
+                if !self.construction_verified {
+                    return Err(Error::Unchecked);
+                }
+                let path = self.recorded_ancestry()?.ok_or(Error::WrongIdentity)?;
+                proof
+                    .assess_verified_observations(
+                        &path,
+                        plan,
+                        crate::services::claim_observation::http::AncestryContext {
+                            provider: &self.context.provider,
+                            generation: self.context.generation,
+                            policy,
+                            now,
+                            tips: o.preflight,
+                        },
+                    )
+                    .map(|result| result.assessment)
+                    .map_err(|_| Error::Unchecked)
+            }
+            RecoveryObservation::Ordinary(_) => Ok(claim::assess(
+                plan,
+                o.bitcoin,
+                o.fork,
+                o.deployment,
+                policy,
+                now,
+                Some(o.preflight),
+            )),
+        }
+    }
     pub(super) fn assess_fresh(
         &self,
         fresh: &FreshObservation,

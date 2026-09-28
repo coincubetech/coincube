@@ -98,24 +98,26 @@ impl Controller {
 }
 
 impl Controller {
-    pub(crate) fn check_resubmission(
+    pub(crate) fn check_resubmission<'a>(
         &self,
-        collected: CollectedAssessment,
+        collected: impl Into<RecoveryObservation<'a>>,
         signed: &Transaction,
         policy: Policy,
         now: i64,
     ) -> Result<(), Error> {
         use crate::services::claim_observation::TransactionObservation;
+        let collected = collected.into();
+        let data = collected.data();
         if !self.construction_verified
-            || collected.generation != self.context.generation
+            || data.generation != self.context.generation
             || self.intent.phase == Phase::Intent
             || self.intent.bitcoin_transaction.as_ref() != Some(signed)
             || self.intent.bitcoin_attempts.len() >= MAX_BITCOIN_ATTEMPTS
-            || collected.observations.bitcoin_transaction != TransactionObservation::Absent
+            || data.observations.bitcoin_transaction != TransactionObservation::Absent
         {
             return Err(Error::Unchecked);
         }
-        let o = collected.observations;
+        let o = data.observations;
         if o.bitcoin.location != TransactionLocation::Unconfirmed
             || o.preflight.bitcoin != o.bitcoin.tip
             || o.preflight.fork != o.fork.tip
@@ -126,26 +128,19 @@ impl Controller {
         // Ignore the old inclusion only for this fresh absence assessment. The
         // persisted inclusion and any fork submission remain unchanged.
         plan.previous_confirmation = None;
-        if claim::assess(
-            &plan,
-            o.bitcoin,
-            o.fork,
-            o.deployment,
-            policy,
-            now,
-            Some(o.preflight),
-        ) != Assessment::WaitingForConfirmation
+        if self.assess_recovery(collected, &plan, policy, now)?
+            != Assessment::WaitingForConfirmation
         {
             return Err(Error::Unchecked);
         }
         Ok(())
     }
 
-    pub(crate) fn record_resubmission(
+    pub(crate) fn record_resubmission<'a>(
         &mut self,
         ticket: Ticket,
         current: &Context,
-        collected: CollectedAssessment,
+        collected: impl Into<RecoveryObservation<'a>>,
         signed: &Transaction,
         policy: Policy,
         now: i64,

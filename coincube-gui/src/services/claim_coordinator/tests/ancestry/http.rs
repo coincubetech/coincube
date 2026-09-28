@@ -312,11 +312,91 @@ async fn ancestry_protocol_case(rdts_active: bool, expiry_time: i64) {
     assert_eq!(std::fs::read(temp.0.join("intent.json")).unwrap(), before);
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 
+    // A recovered submission uses the same exact signed bytes and live proof.
+    // Ordinary copied observations must not regain ancestry authority.
+    let recovery_temp = Temp::new();
+    let mut recovery = claim_workflow::Controller::create_ancestry(
+        &recovery_temp.0,
+        "bitcoin-cube".into(),
+        "fork-cube".into(),
+        &built,
+        &path,
+        current.clone(),
+    )
+    .unwrap();
+    recovery
+        .revalidate_ancestry_construction(&current, &built)
+        .unwrap();
+    let source = coordinator.services.ancestry_source().unwrap();
+    let recovery_collection = source
+        .collect_ancestry(
+            &path,
+            &plan,
+            policy().observations,
+            policy().collection_budget,
+        )
+        .await
+        .unwrap();
+    let now = source.now();
+    let ticket = recovery.begin_check(&current).unwrap();
+    recovery
+        .apply_ancestry_observation(
+            ticket,
+            &current,
+            Ok(recovery_collection),
+            policy().observations,
+            now,
+        )
+        .unwrap();
+    let signed = coordinator.verified.transaction();
+    recovery
+        .record_broadcast_intent(&current, signed, policy().observations, now)
+        .unwrap();
+    assert_eq!(recovery.bitcoin_submission_attempts().len(), 1);
+    recovery
+        .check_resubmission(&collected, signed, policy().observations, now)
+        .unwrap();
+    assert!(matches!(
+        recovery.check_resubmission(collected.assessment(), signed, policy().observations, now),
+        Err(claim_workflow::Error::Unchecked)
+    ));
+    let before_recovery = std::fs::read(recovery_temp.0.join("intent.json")).unwrap();
+    let ticket = recovery.begin_check(&current).unwrap();
+    assert!(matches!(
+        recovery.record_resubmission(
+            ticket,
+            &current,
+            &collected,
+            signed,
+            policy().observations,
+            stale_at,
+        ),
+        Err(claim_workflow::Error::Unchecked)
+    ));
+    assert_eq!(
+        std::fs::read(recovery_temp.0.join("intent.json")).unwrap(),
+        before_recovery
+    );
+    assert_eq!(recovery.bitcoin_submission_attempts().len(), 1);
+    let ticket = recovery.begin_check(&current).unwrap();
+    recovery
+        .record_resubmission(
+            ticket,
+            &current,
+            &collected,
+            signed,
+            policy().observations,
+            now,
+        )
+        .unwrap();
+    assert_eq!(recovery.bitcoin_submission_attempts().len(), 2);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+
     // Exercise the same inclusion observer through fresh HTTP collection, then
     // change the canonical height mapping while preserving the tx status reply.
     step_reads[0].delete_async().await;
     let step_height = tip_height - 5;
-    fresh(
+    let confirmed_step = fresh(
         &server,
         &format!(
             "/api/v1/esplora/bitcoin/mainnet/tx/{}",
@@ -387,6 +467,18 @@ async fn ancestry_protocol_case(rdts_active: bool, expiry_time: i64) {
             observed.assessment().assessment,
             Assessment::InputProofUnsupported
         );
+        if expected == (claim::BitcoinConfirmation::Confirmed { confirmations: 6 }) {
+            let ticket = recovery.begin_check(&current).unwrap();
+            recovery
+                .apply_ancestry_observation(
+                    ticket,
+                    &current,
+                    Ok(observed),
+                    policy().observations,
+                    now,
+                )
+                .unwrap();
+        }
         mapping.delete_async().await;
         mapping = fresh(
             &server,
@@ -396,6 +488,62 @@ async fn ancestry_protocol_case(rdts_active: bool, expiry_time: i64) {
     }
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     assert_eq!(std::fs::read(temp.0.join("intent.json")).unwrap(), before);
+    // The same transaction re-mined in another canonical block requires a new
+    // live proof and explicit acknowledgement; it does not add a send attempt.
+    confirmed_step.delete_async().await;
+    fresh(
+        &server,
+        &format!(
+            "/api/v1/esplora/bitcoin/mainnet/tx/{}",
+            plan.step1.compute_txid()
+        ),
+        json!({"txid":plan.step1.compute_txid(),"status":{"confirmed":true,
+            "block_height":step_height,"block_hash":hash(6)}})
+        .to_string(),
+    );
+    let source = coordinator.services.ancestry_source().unwrap();
+    let reminted = source
+        .collect_ancestry(
+            &path,
+            &recovery.plan(),
+            policy().observations,
+            policy().collection_budget,
+        )
+        .await
+        .unwrap();
+    let now = source.now();
+    let changed = recovery
+        .check_reconfirmation(&reminted, policy().observations, now)
+        .unwrap();
+    assert_ne!(changed.previous, changed.confirmed);
+    assert!(matches!(
+        recovery.check_reconfirmation(reminted.assessment(), policy().observations, now),
+        Err(claim_workflow::Error::Unchecked)
+    ));
+    let before_reconfirmation = std::fs::read(recovery_temp.0.join("intent.json")).unwrap();
+    let ticket = recovery.begin_check(&current).unwrap();
+    assert!(matches!(
+        recovery.acknowledge_reconfirmation(
+            ticket,
+            &current,
+            &reminted,
+            policy().observations,
+            now + policy().observations.max_observation_age_seconds + 1,
+        ),
+        Err(claim_workflow::Error::Unchecked)
+    ));
+    assert_eq!(
+        std::fs::read(recovery_temp.0.join("intent.json")).unwrap(),
+        before_reconfirmation
+    );
+    let ticket = recovery.begin_check(&current).unwrap();
+    recovery
+        .acknowledge_reconfirmation(ticket, &current, &reminted, policy().observations, now)
+        .unwrap();
+    assert_eq!(recovery.last_inclusion(), Some(changed.confirmed));
+    assert_eq!(recovery.bitcoin_submission_attempts().len(), 2);
+    assert_eq!(recovery.status(), claim_workflow::Status::Unchecked);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
     // Contradictory positive fork presence must win over the exclusion result.
     step_reads[1].delete_async().await;
     fresh(
@@ -450,7 +598,7 @@ async fn ancestry_protocol_case(rdts_active: bool, expiry_time: i64) {
             ..
         }))
     ));
-    root_read.assert_hits(8);
+    root_read.assert_hits(10);
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     sender.send_replace(8);
     assert_eq!(
@@ -461,6 +609,6 @@ async fn ancestry_protocol_case(rdts_active: bool, expiry_time: i64) {
         coordinator.prepare_review(&current).await,
         Err(Error::Revoked)
     ));
-    root_read.assert_hits(8);
+    root_read.assert_hits(10);
     assert_eq!(std::fs::read(temp.0.join("intent.json")).unwrap(), before);
 }
