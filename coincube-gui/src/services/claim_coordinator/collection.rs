@@ -13,6 +13,32 @@ impl std::ops::Deref for Collected {
     }
 }
 impl Collected {
+    pub fn ancestry(
+        proof: CollectedAncestry,
+        path: &coincube_core::claim_ancestry::retained::RetainedPath,
+        plan: &coincube_core::claim::ClaimPlan,
+        context: &Context,
+        policy: Policy,
+        now: i64,
+    ) -> Result<Self, Error> {
+        let data = proof
+            .assess_verified_observations(
+                path,
+                plan,
+                claim_observation::http::AncestryContext {
+                    provider: &context.provider,
+                    generation: context.generation,
+                    policy,
+                    now,
+                    tips: proof.assessment().observations.preflight,
+                },
+            )
+            .map_err(|_| Error::ChangedReview)?;
+        Ok(Self {
+            data,
+            ancestry: Some(proof),
+        })
+    }
     pub fn ordinary(data: CollectedAssessment) -> Self {
         Self {
             data,

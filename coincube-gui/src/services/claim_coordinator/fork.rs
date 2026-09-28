@@ -129,8 +129,8 @@ impl Coordinator {
             policy,
         )
     }
-    /// Reopen an owned ancestry claim without restoring eligibility. Fresh
-    /// proof collection still refuses signing/submission until full acceptance.
+    /// Reopen an owned ancestry claim without restoring eligibility. Signing
+    /// requires fresh live proof, depth checks and explicit one-use dispatch.
     #[allow(clippy::too_many_arguments)]
     pub fn resume_ancestry(
         directory: &Path,
@@ -269,12 +269,10 @@ impl Coordinator {
         }
         Ok(())
     }
-    async fn collect(&self) -> Result<claim_observation::CollectedAssessment, Error> {
+    async fn collect(&self) -> Result<Collected, Error> {
         if let Some(path) = self.controller.recorded_ancestry()? {
-            return self
-                .services
-                .ancestry_source()
-                .ok_or(Error::Unsupported)?
+            let source = self.services.ancestry_source().ok_or(Error::Unsupported)?;
+            let proof = source
                 .collect_ancestry(
                     &path,
                     &self.controller.plan(),
@@ -282,8 +280,15 @@ impl Coordinator {
                     self.policy.collection_budget,
                 )
                 .await
-                .map(|collected| collected.assessment())
-                .map_err(Error::Observation);
+                .map_err(Error::Observation)?;
+            return Collected::ancestry(
+                proof,
+                &path,
+                &self.controller.plan(),
+                &self.context,
+                self.policy.observations,
+                source.now(),
+            );
         }
         claim_observation::collect(
             self.services.source(),
@@ -296,6 +301,7 @@ impl Coordinator {
             },
         )
         .await
+        .map(Collected::ordinary)
         .map_err(Error::Observation)
     }
     async fn fresh_snapshot(&mut self, context: &Context) -> Result<ReviewSnapshot, Error> {
@@ -340,15 +346,16 @@ impl Coordinator {
             now,
             Instant::now(),
         )?;
-        let status = self.controller.apply_observation(
+        let last_data = last.data;
+        let status = last.apply(
+            &mut self.controller,
             ticket,
             context,
-            Ok(last),
             self.policy.observations,
             now,
         )?;
         if status != Status::Observation(Assessment::ObservationsEligibleForPreflight) {
-            return Err(Error::NotReady(last.assessment));
+            return Err(Error::NotReady(last_data.assessment));
         }
         if self.controller.recorded_fork_sweep().is_none() {
             self.controller.prepare_fork_sweep(
@@ -365,7 +372,7 @@ impl Coordinator {
             wtxid: tx.compute_wtxid(),
             fee_sats: self.verified.fee().to_sat(),
             vsize: tx.vsize(),
-            observations: last.observations,
+            observations: last_data.observations,
             route: SubmissionRoute::Connect,
             not_after,
         })
@@ -577,11 +584,11 @@ impl Coordinator {
         let ticket = self.controller.begin_check(context)?;
         let collected = self.collect().await?;
         self.current(context)?;
-        self.controller
-            .apply_observation(
+        collected
+            .apply(
+                &mut self.controller,
                 ticket,
                 context,
-                Ok(collected),
                 self.policy.observations,
                 self.services.source().now(),
             )
@@ -653,8 +660,8 @@ impl Preparation {
             policy,
         )
     }
-    /// Reopen an owned ancestry claim without restoring eligibility. Fresh
-    /// proof collection still refuses signing/submission until full acceptance.
+    /// Reopen an owned ancestry claim without restoring eligibility. Signing
+    /// requires fresh live proof, depth checks and explicit one-use dispatch.
     #[allow(clippy::too_many_arguments)]
     pub fn resume_ancestry(
         directory: &Path,
@@ -766,12 +773,10 @@ impl Preparation {
         }
         Ok(())
     }
-    async fn collect(&self) -> Result<claim_observation::CollectedAssessment, Error> {
+    async fn collect(&self) -> Result<Collected, Error> {
         if let Some(path) = self.controller.recorded_ancestry()? {
-            return self
-                .services
-                .ancestry_source()
-                .ok_or(Error::Unsupported)?
+            let source = self.services.ancestry_source().ok_or(Error::Unsupported)?;
+            let proof = source
                 .collect_ancestry(
                     &path,
                     &self.controller.plan(),
@@ -779,8 +784,15 @@ impl Preparation {
                     self.policy.collection_budget,
                 )
                 .await
-                .map(|collected| collected.assessment())
-                .map_err(Error::Observation);
+                .map_err(Error::Observation)?;
+            return Collected::ancestry(
+                proof,
+                &path,
+                &self.controller.plan(),
+                &self.context,
+                self.policy.observations,
+                source.now(),
+            );
         }
         claim_observation::collect(
             self.services.source(),
@@ -793,6 +805,7 @@ impl Preparation {
             },
         )
         .await
+        .map(Collected::ordinary)
         .map_err(Error::Observation)
     }
     /// Re-checks six Bitcoin confirmations, RDTS validity and both tips. No
@@ -835,15 +848,16 @@ impl Preparation {
         let not_after = origin
             .checked_add(remaining)
             .ok_or(Error::ExpiredEvidence)?;
-        let status = self.controller.apply_observation(
+        let last_data = last.data;
+        let status = last.apply(
+            &mut self.controller,
             ticket,
             context,
-            Ok(last),
             self.policy.observations,
             now,
         )?;
         if status != Status::Observation(Assessment::ObservationsEligibleForPreflight) {
-            return Err(Error::NotReady(last.assessment));
+            return Err(Error::NotReady(last_data.assessment));
         }
         self.controller.prepare_fork_sweep(
             context,
@@ -878,7 +892,14 @@ impl Preparation {
             current_psbt,
         )
         .map_err(|_| Error::InvalidBinding)?;
-        Ok(current_psbt.psbt().clone())
+        let signing = current_psbt.psbt().clone();
+        // Validation and cloning consume the same one-use deadline. A session
+        // change during that work must not hand a signer an obsolete request.
+        self.current(context)?;
+        if Instant::now() >= check.not_after {
+            return Err(Error::ExpiredEvidence);
+        }
+        Ok(signing)
     }
     /// Verifies imported signing additions against the owned construction, then
     /// transfers the journal lock into the submission coordinator. This does not

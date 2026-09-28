@@ -198,10 +198,63 @@ async fn ancestry_sweep_reconciliation_recollects_proof_without_granting_complet
     stored["plan"]["previous_confirmation"] = json!({"height":root_height+1,"hash":hash(5)});
     stored["fork_sweep"] = json!(construction.psbt().unsigned_tx);
     stored["fork_change_index"] = json!(20);
+    // Before any sweep submission exists, fresh proof permits only the owned
+    // shared-input PSBT. Expired signing permission cannot be reused.
+    std::fs::write(&file, serde_json::to_vec(&stored).unwrap()).unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut signing_client = CoincubeClient::for_test(server.base_url());
+    signing_client.set_token("synthetic-proof-token");
+    let signing_source = HttpObservationSource::new(
+        signing_client,
+        ChainId::Bitcoin,
+        ChainId::BitcoinBlake2b,
+        CollectionContext {
+            expected_generation: 7,
+            generation: generation.clone(),
+        },
+    )
+    .unwrap();
+    let (signing_construction, _) = ancestry_sweep(&built);
+    let unsigned =
+        coincube_core::psbt_unified::UnifiedPsbt::from_psbt(signing_construction.psbt().clone())
+            .unwrap();
+    let mut preparation = Preparation::open(
+        &temp.0,
+        "bitcoin-cube".into(),
+        "fork-cube".into(),
+        &built,
+        signing_construction,
+        current.clone(),
+        generation.clone(),
+        Box::new(ProofServices {
+            source: signing_source,
+            calls: calls.clone(),
+        }),
+        policy(),
+    )
+    .unwrap();
+    let mut expired = preparation.check_signing(&current).await.unwrap();
+    expired.not_after = Instant::now();
+    assert!(matches!(
+        preparation.signing_psbt(expired, &unsigned, &current),
+        Err(Error::ExpiredEvidence)
+    ));
+    let checked = preparation.check_signing(&current).await.unwrap();
+    let signing = preparation
+        .signing_psbt(checked, &unsigned, &current)
+        .unwrap();
+    assert_eq!(signing.unsigned_tx, construction.psbt().unsigned_tx);
+    assert!(signing
+        .unsigned_tx
+        .input
+        .iter()
+        .all(|input| input.previous_output != path.selected()));
+    assert!(preparation.controller.recorded_fork_submission().is_none());
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    drop(preparation);
     stored["fork_submission"] = json!({"txid":verified.transaction().compute_txid(),"wtxid":verified.transaction().compute_wtxid()});
     std::fs::write(&file, serde_json::to_vec(&stored).unwrap()).unwrap();
     let before = std::fs::read(&file).unwrap();
-    let calls = Arc::new(AtomicUsize::new(0));
     let mut coordinator = Coordinator::open(
         &temp.0,
         "bitcoin-cube".into(),
@@ -228,10 +281,10 @@ async fn ancestry_sweep_reconciliation_recollects_proof_without_granting_complet
             transaction,
             TransactionObservation::Confirmed { .. }
         ));
-        root_read.assert_hits(2 * round);
+        root_read.assert_hits(4 + 2 * round);
         sweep_read.assert_hits(2 * round);
         for read in &step_reads {
-            read.assert_hits(4 * round);
+            read.assert_hits(8 + 4 * round);
         }
         assert_eq!(std::fs::read(&file).unwrap(), before);
     }
@@ -240,7 +293,7 @@ async fn ancestry_sweep_reconciliation_recollects_proof_without_granting_complet
         .await
         .unwrap()
         .is_none());
-    root_read.assert_hits(6);
+    root_read.assert_hits(10);
     let settings_root = temp.0.join("no-settings");
     assert!(matches!(
         coordinator
@@ -252,7 +305,7 @@ async fn ancestry_sweep_reconciliation_recollects_proof_without_granting_complet
         Err(Error::Unsupported)
     ));
     assert!(!settings_root.exists());
-    root_read.assert_hits(6);
+    root_read.assert_hits(10);
     fork_position.as_ref().unwrap().delete_async().await;
     server.mock(|when, then| {
         when.method(GET).path(format!(

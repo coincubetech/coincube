@@ -724,23 +724,14 @@ impl Coordinator {
                 )
                 .await
                 .map_err(Error::Observation)?;
-            let data = proof
-                .assess_verified_observations(
-                    &path,
-                    &self.controller.plan(),
-                    claim_observation::http::AncestryContext {
-                        provider: &self.context.provider,
-                        generation: self.context.generation,
-                        policy: self.policy.observations,
-                        now: source.now(),
-                        tips: proof.assessment().observations.preflight,
-                    },
-                )
-                .map_err(|_| Error::ChangedReview)?;
-            return Ok(Collected {
-                data,
-                ancestry: Some(proof),
-            });
+            return Collected::ancestry(
+                proof,
+                &path,
+                &self.controller.plan(),
+                &self.context,
+                self.policy.observations,
+                source.now(),
+            );
         }
         claim_observation::collect(
             self.services.source(),
