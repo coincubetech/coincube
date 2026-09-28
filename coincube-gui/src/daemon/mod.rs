@@ -34,6 +34,10 @@ pub enum DaemonError {
     Http(Option<u16>, String),
     /// Something unexpected happened.
     Unexpected(String),
+    /// The daemon refused a Bitcoin Blake2b PSBT whose retained legacy
+    /// signatures can independently satisfy an input alongside a protected
+    /// unified-bearing witness.
+    UnsafeLegacyAlternative(String),
     /// No response.
     NoAnswer,
     /// Daemon stopped
@@ -59,6 +63,7 @@ impl std::fmt::Display for DaemonError {
             Self::RpcSocket(kind, e) => write!(f, "Daemon transport error: [{:?}] {}", kind, e),
             Self::Http(kind, e) => write!(f, "Http error: [{:?}] {}", kind, e),
             Self::Unexpected(e) => write!(f, "Daemon unexpected error: {}", e),
+            Self::UnsafeLegacyAlternative(e) => write!(f, "{}", e),
             Self::Start(e) => write!(f, "Daemon did not start: {}", e),
             Self::ConnectAnchor(e) => write!(f, "{}", e),
             Self::PoisonSubmission(e) => write!(f, "{}", e),

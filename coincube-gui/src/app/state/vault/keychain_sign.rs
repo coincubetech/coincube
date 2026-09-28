@@ -1677,8 +1677,13 @@ impl KeychainSignModal {
                             self.pending.iter_mut().find(|p| p.session_id == session_id)
                         {
                             entry.status = PendingSessionStatus::Failed;
-                            entry.error =
-                                Some(format!("Couldn't merge the returned signatures: {}", e));
+                            entry.error = Some(
+                                super::replay::unsafe_legacy_policy_copy(&e)
+                                    .map(str::to_owned)
+                                    .unwrap_or_else(|| {
+                                        format!("Couldn't merge the returned signatures: {}", e)
+                                    }),
+                            );
                         }
                         return Task::none();
                     }
