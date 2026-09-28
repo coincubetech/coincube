@@ -572,10 +572,9 @@ pub fn pill_copy(status: &ReplayStatus, entangled: &[(usize, Entanglement)]) -> 
 
 /// Copy for the Bitcoin Cube's recovery and inheritance screens (`#276` I8):
 /// coins received before the fork also exist on Bitcoin Blake2b until a BTCB2
-/// Cube sweeps them. Copy only, no behaviour: shown when a Bitcoin Cube
-/// holds pre-fork coins that no BTCB2 Cube has swept — a fact Lane B1.5
-/// records (`split_completed_at_height`). Until it does, nothing supplies
-/// `Some(true)`, so the line is never rendered.
+/// Cube sweeps them. Display requires fresh positive fork-UTXO evidence
+/// bound to the current Bitcoin-owned outputs and session. Neither a missing
+/// split-completion marker nor an absent counterpart Cube proves unswept funds.
 pub const BITCOIN_CUBE_UNSWEPT_NOTICE: &str =
     "These coins also exist on Bitcoin Blake2b until swept there.";
 

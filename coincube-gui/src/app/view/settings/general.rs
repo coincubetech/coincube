@@ -115,6 +115,7 @@ fn recovery_section<'a>(
     let mut col = Column::new()
         .spacing(20)
         .push(super::header("Recovery", SettingsMessage::RecoverySection))
+        .push(cache.unswept_recovery_notice().map(text))
         .push(backup_master_seed_card(cache.current_cube_backed_up));
 
     // Connect-hosted Recovery Kit card. Render only when the outer
