@@ -48,6 +48,7 @@ pub fn spend_view<'a>(
     bitcoin_unit: BitcoinDisplayUnit,
     identities: &'a [(usize, crate::services::branta::LookupResult)],
     replay: Option<psbt::ReplayPill<'a>>,
+    broadcast_ready: bool,
 ) -> Element<'a, Message> {
     let is_recovery = tx
         .psbt
@@ -87,6 +88,7 @@ pub fn spend_view<'a>(
                 currently_signing,
                 saved,
                 replay,
+                broadcast_ready,
             ))
             .push(
                 Column::new()

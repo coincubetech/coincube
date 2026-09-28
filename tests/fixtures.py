@@ -135,8 +135,17 @@ def bitcoin_backend(directory, bitcoind):
             bitcoind_p2pport=bitcoind.p2pport,
         )
         electrs.startup()
-        yield electrs
-        electrs.cleanup()
+        # If Core invalidates blocks Electrs is still fetching, Electrs can
+        # finish stale branch batches and stop serving wallet history. Require
+        # the exact old tip before destructive chain edits (#406).
+        bitcoind.before_reorg = lambda: electrs.wait_for_tip(
+            bitcoind.rpc.getbestblockhash()
+        )
+        try:
+            yield electrs
+        finally:
+            bitcoind.before_reorg = None
+            electrs.cleanup()
     else:
         raise NotImplementedError
 

@@ -124,6 +124,7 @@ pub enum Error {
     ChannelLost,
     NoParentDir,
     Daemon(String),
+    UnsafeLegacyAlternative,
     TxTimeMissing,
     DaemonMissing,
     ParsePsbt,
@@ -151,6 +152,11 @@ impl Display for Error {
             Error::ChannelLost => write!(f, "ImportExport: the channel have been closed"),
             Error::NoParentDir => write!(f, "ImportExport: there is no parent dir"),
             Error::Daemon(e) => write!(f, "ImportExport daemon error: {e}"),
+            Error::UnsafeLegacyAlternative => write!(
+                f,
+                "{}",
+                crate::app::state::vault::replay::UNSAFE_LEGACY_POLICY_COPY
+            ),
             Error::TxTimeMissing => write!(f, "ImportExport: transaction block height missing"),
             Error::DaemonMissing => write!(f, "ImportExport: the daemon is missing"),
             Error::ParsePsbt => write!(f, "ImportExport: fail to parse PSBT"),
@@ -229,7 +235,10 @@ impl From<std::io::Error> for Error {
 
 impl From<DaemonError> for Error {
     fn from(value: DaemonError) -> Self {
-        Error::Daemon(format!("{:?}", value))
+        match value {
+            DaemonError::UnsafeLegacyAlternative(_) => Error::UnsafeLegacyAlternative,
+            other => Error::Daemon(format!("{:?}", other)),
+        }
     }
 }
 
@@ -934,17 +943,13 @@ pub async fn import_psbt(
         }
     }
 
-    let e = daemon.update_spend_tx(&psbt).await;
-    if let (None, Err(error)) = (txid, &e) {
-        if let DaemonError::Unexpected(e) = error {
-            if e.contains("Unknown outpoint") {
-                return Err(Error::OutpointNotOwned);
-            } else {
-                return Err(Error::Daemon(error.to_string()));
-            }
+    if let Err(error) = daemon.update_spend_tx(&psbt).await {
+        if txid.is_none()
+            && matches!(&error, DaemonError::Unexpected(message) if message.contains("Unknown outpoint"))
+        {
+            return Err(Error::OutpointNotOwned);
         }
-    } else {
-        e?;
+        return Err(error.into());
     }
     send_progress!(sender, Psbt(psbt));
 
@@ -1715,8 +1720,99 @@ mod tests {
     };
 
     use encrypted_backup::Version;
+    use serde_json::json;
 
     use super::*;
+
+    async fn import_psbt_with_update_result(
+        psbt: &Psbt,
+        descriptor: &CoincubeDescriptor,
+        update: Result<serde_json::Value, DaemonError>,
+    ) -> (Result<(), Error>, Vec<Progress>) {
+        let (root, path) = unique_temp_dir("spend.psbt");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&path, psbt.to_string()).unwrap();
+        let daemon: Arc<dyn Daemon + Send + Sync> =
+            Arc::new(crate::daemon::client::Coincubed::new(
+                crate::utils::mock::Daemon::new(vec![
+                    (
+                        None,
+                        Ok(json!({
+                            "version": "",
+                            "network": "bitcoin",
+                            "block_height": 0,
+                            "sync": 1.0,
+                            "descriptors": { "main": descriptor },
+                            "receive_index": 0,
+                            "change_index": 0,
+                            "timestamp": 0,
+                        })),
+                    ),
+                    (None, update),
+                ])
+                .run(),
+            ));
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let result = import_psbt(Some(daemon), &sender, path, None).await;
+        drop(sender);
+        let mut progress = Vec::new();
+        while let Some(item) = receiver.recv().await {
+            progress.push(item);
+        }
+        std::fs::remove_dir_all(root).unwrap();
+        (result, progress)
+    }
+
+    #[tokio::test]
+    async fn psbt_import_preserves_typed_legacy_policy_and_bitcoin_behavior() {
+        use crate::app::state::vault::test_support::unified::{fixture, legacy, unified};
+
+        let fixture = fixture();
+        let mixed = legacy(
+            &unified(&fixture.psbt, &fixture.signers[0]),
+            &fixture.signers[1],
+        );
+        let unsafe_psbt = legacy(&mixed, &fixture.signers[2]);
+
+        let (refused, progress) = import_psbt_with_update_result(
+            &unsafe_psbt,
+            &fixture.descriptor,
+            Err(DaemonError::UnsafeLegacyAlternative(
+                "typed test refusal".to_string(),
+            )),
+        )
+        .await;
+        assert!(matches!(refused, Err(Error::UnsafeLegacyAlternative)));
+        let copy = refused.unwrap_err().to_string();
+        assert_eq!(
+            copy,
+            crate::app::state::vault::replay::UNSAFE_LEGACY_POLICY_COPY
+        );
+        assert!(copy.contains("exported copy, or coordinator"));
+        assert!(
+            !progress
+                .iter()
+                .any(|item| matches!(item, Progress::Psbt(_))),
+            "a refused import must not announce an imported PSBT"
+        );
+
+        let (accepted_mixed, mixed_progress) =
+            import_psbt_with_update_result(&mixed, &fixture.descriptor, Ok(json!({}))).await;
+        assert!(accepted_mixed.is_ok());
+        assert!(mixed_progress
+            .iter()
+            .any(|item| matches!(item, Progress::Psbt(imported) if imported == &mixed)));
+
+        // Import remains chain-neutral: a Bitcoin daemon may accept the same
+        // opaque PSBT bytes, and the desktop neither strips signatures nor
+        // applies the Bitcoin Blake2b retention policy locally.
+        let (bitcoin_accepted, bitcoin_progress) =
+            import_psbt_with_update_result(&unsafe_psbt, &fixture.descriptor, Ok(json!({}))).await;
+        assert!(bitcoin_accepted.is_ok());
+        assert!(bitcoin_progress
+            .iter()
+            .any(|item| matches!(item, Progress::Psbt(imported) if imported == &unsafe_psbt)));
+    }
 
     /// This test's own scratch directory, and `label` resolved inside it.
     ///

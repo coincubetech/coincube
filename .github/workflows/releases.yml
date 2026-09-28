@@ -196,6 +196,9 @@ jobs:
         if: matrix.platform == 'windows'
         run: |
           cargo build --package coincube-gui --profile minimal --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python contrib/check_windows_binary.py target/minimal/coincube.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           # The bridge is excluded from the root workspace, so the line above
           # cannot build it — this is the second half of `make build`.
           cargo build --manifest-path coincube-spark-bridge/Cargo.toml --profile minimal --locked

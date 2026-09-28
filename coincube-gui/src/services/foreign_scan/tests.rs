@@ -16,6 +16,15 @@ fn ranged() -> String {
     );
     format!("wpkh({}/0/*)", xpub)
 }
+
+fn ranged_key(seed: u8) -> String {
+    let secp = Secp256k1::new();
+    let xpub = Xpub::from_priv(
+        &secp,
+        &Xpriv::new_master(bitcoin::Network::Bitcoin, &[seed; 32]).unwrap(),
+    );
+    format!("{xpub}/0/*")
+}
 fn plan(end: u32) -> ScanPlan {
     ScanPlan {
         chain: ChainId::BitcoinBlake2b,
@@ -99,14 +108,21 @@ async fn spent_history_is_not_an_unused_address_and_limits_are_incomplete() {
 fn descriptor_capabilities_are_scan_only_and_ambiguous_or_secret_paths_refuse() {
     let text = ranged();
     let public = text.trim_start_matches("wpkh(").trim_end_matches(')');
+    let key_a = ranged_key(41);
+    let key_b = ranged_key(42);
+    let key_c = ranged_key(43);
+    let origin = format!("[abcd1234/84h/0h/0h]{public}");
     for text in [
         text.clone(),
         format!("pkh({})", public),
+        format!("wpkh({origin})"),
         format!("sh(wpkh({}))", public),
         format!("tr({})", public),
-        format!("wsh(pk({}))", public),
+        format!("wsh(multi(2,{key_a},{key_b},{key_c}))"),
+        format!("wsh(sortedmulti(2,{key_a},{key_b},{key_c}))"),
     ] {
         let d = ScanDescriptor::parse(Branch::External, &text).unwrap();
+        assert_eq!(d.end_exclusive(100), 100);
         assert_eq!(
             d.capabilities(),
             Capabilities {
@@ -121,6 +137,9 @@ fn descriptor_capabilities_are_scan_only_and_ambiguous_or_secret_paths_refuse() 
         text.replace("/0/*", "/0'/*"),
         text.replace("/0/*", "/0/*'"),
         "raw(51)".into(),
+        format!("wsh(pk({public}))"),
+        format!("wsh(and_v(v:pk({public}),older(10)))"),
+        format!("tr({public},pk({public}))"),
         "wpkh(not-a-key)".into(),
     ] {
         assert!(ScanDescriptor::parse(Branch::External, &text).is_err());
@@ -130,6 +149,12 @@ fn descriptor_capabilities_are_scan_only_and_ambiguous_or_secret_paths_refuse() 
     let mut p = plan(3);
     p.chain = ChainId::BitcoinBlake2bTestnet4;
     assert_eq!(p.validate(), Err(ScanError::UnsupportedChain));
+}
+
+#[test]
+fn fixed_descriptor_uses_the_scanners_single_index_range() {
+    let fixed = ScanDescriptor::parse(Branch::External, &ranged().replace("/*", "/0")).unwrap();
+    assert_eq!(fixed.end_exclusive(100), 1);
 }
 #[tokio::test]
 async fn full_prevout_binding_and_duplicate_outpoints_refuse() {

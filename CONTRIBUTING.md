@@ -92,3 +92,20 @@ for `cargo-llvm-cov` and is independent of the stable pin.
 To avoid endless bikeshedding, just use [`rustfmt`](https://github.com/rust-lang/rustfmt).
 
 [Clippy](https://github.com/rust-lang/rust-clippy) is also often your friend.
+
+### Large type lint policy
+
+GUI and daemon builds enable `large_enum_variant` and `result_large_err`.
+The workspace `clippy.toml` permits a 4096-byte enum variant size difference
+and errors below 256 bytes; CI's `-D warnings` enforces both. Prefer boxing a
+bulky payload over raising these thresholds or adding an unexplained allow.
+The Tab State layout test also caps its total size at 8 KiB, since relative
+variant-size linting cannot catch all variants growing together.
+
+The initial #482 measurement on macOS ARM64 with Rust 1.94 found 35 unique
+enum warnings (34 GUI source sites and one generated protobuf site), plus
+31 result warnings (13 GUI and 18 daemon). Existing result payloads were
+176–192 bytes. The measured thresholds let all existing types pass, including
+six previously suppressed enum sites, while restoring inline `App.panels`
+made Clippy reject a 33,312-byte Tab State. Sizes and warning counts can vary
+by toolchain and target; the pinned CI build remains the merge gate.
