@@ -1,4 +1,4 @@
-//! Successful protocol qualification is still not coordinator spend authority.
+//! Live proof must survive preflight and controller admission; it is not consent.
 use super::*;
 use coincube_core::claim;
 use httpmock::Mock;
@@ -6,6 +6,8 @@ use httpmock::Mock;
 struct ProofServices {
     source: HttpObservationSource,
     calls: Arc<AtomicUsize>,
+    allow_preflight: Arc<std::sync::atomic::AtomicBool>,
+    preflight_client: PreflightClient,
 }
 #[async_trait]
 impl Services for ProofServices {
@@ -17,12 +19,18 @@ impl Services for ProofServices {
     }
     async fn preflight(
         &self,
-        _: &Transaction,
-        _: BlockHash,
-        _: FreshnessPolicy,
+        tx: &Transaction,
+        tip: BlockHash,
+        policy: FreshnessPolicy,
     ) -> Result<Evidence, claim_preflight::Error> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        Err(claim_preflight::Error::UnsupportedChain)
+        if self.allow_preflight.load(Ordering::SeqCst) {
+            self.preflight_client
+                .observe(ChainId::Bitcoin, tx, tip, policy)
+                .await
+        } else {
+            Err(claim_preflight::Error::UnsupportedChain)
+        }
     }
     async fn submit(
         &self,
@@ -236,6 +244,15 @@ async fn ancestry_protocol_case(rdts_active: bool, expiry_time: i64) {
     );
     let temp = Temp::new();
     let calls = Arc::new(AtomicUsize::new(0));
+    let allow_preflight = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let preflight_client = PreflightClient::new(
+        &server.base_url(),
+        CollectionContext {
+            expected_generation: current.generation,
+            generation: generation.clone(),
+        },
+    )
+    .unwrap();
     let mut coordinator = Coordinator::open_ancestry(
         &temp.0,
         "bitcoin-cube".into(),
@@ -248,6 +265,8 @@ async fn ancestry_protocol_case(rdts_active: bool, expiry_time: i64) {
         Box::new(ProofServices {
             source,
             calls: calls.clone(),
+            allow_preflight: allow_preflight.clone(),
+            preflight_client,
         }),
         policy(),
         false,
@@ -257,15 +276,47 @@ async fn ancestry_protocol_case(rdts_active: bool, expiry_time: i64) {
     for round in 1..=2 {
         assert!(matches!(
             coordinator.prepare_review(&current).await,
-            Err(Error::NotReady(Assessment::InputProofUnsupported))
+            Err(Error::Preflight(claim_preflight::Error::UnsupportedChain))
         ));
         root_read.assert_hits(round + 1);
         for read in &step_reads {
             read.assert_hits(2 * (round + 1));
         }
-        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(calls.load(Ordering::SeqCst), round);
         assert_eq!(std::fs::read(temp.0.join("intent.json")).unwrap(), before);
     }
+    // Real preflight parsing for the exact signed witness admits a review only
+    // after a second ancestry collection. Preparing it does not submit or record
+    // an attempt, and the journal remains byte-identical.
+    let tx = coordinator.verified.transaction();
+    let stamp = coordinator.services.source().now();
+    let preflight_mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/api/v1/esplora/bitcoin/mainnet/tx/preflight")
+            .json_body(json!({"transaction":hex::encode(serialize(tx)),"tip_hash":hash(1)}));
+        then.status(200)
+            .header("cache-control", "no-store")
+            .json_body(json!({
+                "success":true,"data":{"network":"mainnet","state":"available","result":{
+                    "txid":tx.compute_txid(),"wtxid":tx.compute_wtxid(),"tip_hash":hash(1),
+                    "observed_at":stamp,"allowed":true,"reject_reason":null
+                }}
+            }));
+    });
+    allow_preflight.store(true, Ordering::SeqCst);
+    let review = coordinator.prepare_review(&current).await.unwrap();
+    assert_eq!(
+        review.snapshot().transaction,
+        *coordinator.verified.transaction()
+    );
+    assert_eq!(
+        coordinator.controller.bitcoin_submission_attempts().len(),
+        0
+    );
+    assert_eq!(coordinator.phase(), Phase::Intent);
+    assert_eq!(std::fs::read(temp.0.join("intent.json")).unwrap(), before);
+    preflight_mock.assert_hits(1);
+    drop(review);
     // The controller requires the opaque live proof and rechecks its lifetime
     // at the durable-intent boundary, even after accepting the observation.
     let source = coordinator.services.ancestry_source().unwrap();
@@ -310,7 +361,7 @@ async fn ancestry_protocol_case(rdts_active: bool, expiry_time: i64) {
         claim_workflow::Phase::Intent
     );
     assert_eq!(std::fs::read(temp.0.join("intent.json")).unwrap(), before);
-    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
 
     // A recovered submission uses the same exact signed bytes and live proof.
     // Ordinary copied observations must not regain ancestry authority.
@@ -390,7 +441,7 @@ async fn ancestry_protocol_case(rdts_active: bool, expiry_time: i64) {
         )
         .unwrap();
     assert_eq!(recovery.bitcoin_submission_attempts().len(), 2);
-    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
 
     // Exercise the same inclusion observer through fresh HTTP collection, then
     // change the canonical height mapping while preserving the tx status reply.
@@ -486,7 +537,7 @@ async fn ancestry_protocol_case(rdts_active: bool, expiry_time: i64) {
             hash(6).to_string(),
         );
     }
-    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
     assert_eq!(std::fs::read(temp.0.join("intent.json")).unwrap(), before);
     // The same transaction re-mined in another canonical block requires a new
     // live proof and explicit acknowledgement; it does not add a send attempt.
@@ -543,7 +594,7 @@ async fn ancestry_protocol_case(rdts_active: bool, expiry_time: i64) {
     assert_eq!(recovery.last_inclusion(), Some(changed.confirmed));
     assert_eq!(recovery.bitcoin_submission_attempts().len(), 2);
     assert_eq!(recovery.status(), claim_workflow::Status::Unchecked);
-    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
     // Contradictory positive fork presence must win over the exclusion result.
     step_reads[1].delete_async().await;
     fresh(
@@ -598,8 +649,8 @@ async fn ancestry_protocol_case(rdts_active: bool, expiry_time: i64) {
             ..
         }))
     ));
-    root_read.assert_hits(10);
-    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    root_read.assert_hits(12);
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
     sender.send_replace(8);
     assert_eq!(
         collected.bitcoin_confirmation(&path, &plan, proof_context(checked_at)),
@@ -609,6 +660,6 @@ async fn ancestry_protocol_case(rdts_active: bool, expiry_time: i64) {
         coordinator.prepare_review(&current).await,
         Err(Error::Revoked)
     ));
-    root_read.assert_hits(10);
+    root_read.assert_hits(12);
     assert_eq!(std::fs::read(temp.0.join("intent.json")).unwrap(), before);
 }

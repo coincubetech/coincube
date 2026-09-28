@@ -1,6 +1,6 @@
 //! Restart-safe intent bookkeeping only. No signing/broadcast/UI entry point.
 mod ancestry;
-use ancestry::RecoveryObservation;
+pub(crate) use ancestry::RecoveryObservation;
 mod journal;
 mod recovery;
 mod reorg;

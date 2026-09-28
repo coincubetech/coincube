@@ -32,7 +32,7 @@ impl Coordinator {
         let now = self.services.source().now();
         let inclusion = self
             .controller
-            .check_reconfirmation(collected, self.policy.observations, now)
+            .check_reconfirmation(collected.recovery(), self.policy.observations, now)
             .map_err(|error| recovery_check_error(error, collected.assessment))?;
         let not_after = evidence_deadline(
             self.policy,
@@ -76,7 +76,7 @@ impl Coordinator {
             || self
                 .controller
                 .check_reconfirmation(
-                    collected,
+                    collected.recovery(),
                     self.policy.observations,
                     self.services.source().now(),
                 )
@@ -88,7 +88,7 @@ impl Coordinator {
         self.controller.acknowledge_reconfirmation(
             ticket,
             context,
-            collected,
+            collected.recovery(),
             self.policy.observations,
             self.services.source().now(),
         )?;

@@ -2,8 +2,8 @@
 use super::*;
 use coincube_core::claim_ancestry::retained::RetainedPath;
 
-/// Observation data only. Eligibility stays InputProofUnsupported until the
-/// complete ancestry integration and proof receive independent acceptance.
+/// Live observation data. The copied assessment remains unsupported; callers
+/// must revalidate the retained proof against the current context at use.
 #[derive(Debug)]
 pub struct CollectedAncestry {
     ancestry: DiscoveredAncestry,
@@ -44,9 +44,9 @@ impl CollectedAncestry {
         ))
     }
     /// Assess freshly bound proof and inclusion observations for later flow
-    /// integration. This does not authorize signing or submission. Existing
-    /// coordinator admission uses `assessment()` and remains unsupported until
-    /// the complete ancestry flow has passed independent acceptance.
+    /// integration. This does not authorize signing or submission: callers must
+    /// retain the live proof through their own ownership, review and intent
+    /// checks, and cannot use the copied assessment as a capability.
     pub fn assess_verified_observations(
         &self,
         path: &RetainedPath,

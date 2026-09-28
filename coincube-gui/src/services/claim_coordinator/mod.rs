@@ -1,5 +1,7 @@
 //! Owned Claim coordination. Signing keys and explicit user consent stay with callers.
 mod ancestry;
+mod collection;
+use collection::Collected;
 mod route;
 use route::RoutedEvidence;
 pub use route::{NodeIdentity, SubmissionRoute};
@@ -706,14 +708,14 @@ impl Coordinator {
             generation: self.generation.clone(),
         }
     }
-    async fn collect(&self) -> Result<claim_observation::CollectedAssessment, Error> {
+    async fn collect(&self) -> Result<Collected, Error> {
         if matches!(self.verified, VerifiedStep1::Ancestry(_)) {
             let path = self
                 .controller
                 .recorded_ancestry()?
                 .ok_or(Error::InvalidBinding)?;
             let source = self.services.ancestry_source().ok_or(Error::Unsupported)?;
-            return source
+            let proof = source
                 .collect_ancestry(
                     &path,
                     &self.controller.plan(),
@@ -721,8 +723,24 @@ impl Coordinator {
                     self.policy.collection_budget,
                 )
                 .await
-                .map(|collected| collected.assessment())
-                .map_err(Error::Observation);
+                .map_err(Error::Observation)?;
+            let data = proof
+                .assess_verified_observations(
+                    &path,
+                    &self.controller.plan(),
+                    claim_observation::http::AncestryContext {
+                        provider: &self.context.provider,
+                        generation: self.context.generation,
+                        policy: self.policy.observations,
+                        now: source.now(),
+                        tips: proof.assessment().observations.preflight,
+                    },
+                )
+                .map_err(|_| Error::ChangedReview)?;
+            return Ok(Collected {
+                data,
+                ancestry: Some(proof),
+            });
         }
         claim_observation::collect(
             self.services.source(),
@@ -732,6 +750,7 @@ impl Coordinator {
             self.collection_context(),
         )
         .await
+        .map(Collected::ordinary)
         .map_err(Error::Observation)
     }
     fn fresh_evidence(&self, evidence: &RoutedEvidence, tip: BlockHash) -> Result<(), Error> {
@@ -787,22 +806,23 @@ impl Coordinator {
             return Err(Error::ChangedReview);
         }
         self.fresh_evidence(&evidence, last.observations.bitcoin.tip.hash)?;
-        let status = self.controller.apply_observation(
+        let last_data = last.data;
+        let status = last.apply(
+            &mut self.controller,
             ticket,
             context,
-            Ok(last),
             self.policy.observations,
             self.services.source().now(),
         )?;
         if status != Status::Observation(Assessment::WaitingForConfirmation) {
-            return Err(Error::NotReady(last.assessment));
+            return Err(Error::NotReady(last_data.assessment));
         }
         // Capture the monotonic origin before reading wall time or persisting intent.
         // Slow durable writes and backend queues consume this same remaining budget.
         let origin = Instant::now();
         let not_after = evidence_deadline(
             self.policy,
-            last.observations,
+            last_data.observations,
             evidence.observed_at(),
             self.services.source().now(),
             origin,
@@ -814,7 +834,7 @@ impl Coordinator {
             wtxid: self.verified.transaction().compute_wtxid(),
             fee_sats: self.verified.fee().to_sat(),
             vsize: self.verified.vsize(),
-            observations: last.observations,
+            observations: last_data.observations,
             route: evidence.route(),
             not_after,
         })
@@ -912,11 +932,11 @@ impl Coordinator {
         let ticket = self.controller.begin_check(context)?;
         let collected = self.collect().await?;
         self.current(context)?;
-        self.controller
-            .apply_observation(
+        collected
+            .apply(
+                &mut self.controller,
                 ticket,
                 context,
-                Ok(collected),
                 self.policy.observations,
                 self.services.source().now(),
             )
