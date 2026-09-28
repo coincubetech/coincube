@@ -302,6 +302,13 @@ impl From<&Error> for UserError {
                     true,
                 ),
 
+                DaemonError::UnsafeLegacyAlternative(_) => UserError::new(
+                    "Bitcoin Blake2b signatures refused",
+                    crate::app::state::vault::replay::UNSAFE_LEGACY_POLICY_COPY,
+                    CC_DMN_RPC,
+                    false,
+                ),
+
                 DaemonError::ConnectAnchor(error) => anchor_startup_error(error),
                 DaemonError::PoisonSubmission(error) => {
                     if matches!(error, coincubed::poison_broadcast::SubmissionError::Uncertain { .. } | coincubed::poison_broadcast::SubmissionError::AlreadyStarted) {
