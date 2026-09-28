@@ -337,9 +337,9 @@ impl Services for Production {
                 .daemon
                 .claim_backend_binding()
                 .await
-                .map_err(|_| claim_preflight::Error::InvalidRequest)?;
+                .map_err(|_| claim_preflight::Error::BackendChanged)?;
             if self.backend_binding.get_or_init(|| current.clone()) != &current {
-                return Err(claim_preflight::Error::InvalidRequest);
+                return Err(claim_preflight::Error::BackendChanged);
             }
         }
         let local = match (
@@ -360,7 +360,7 @@ impl Services for Production {
                     | coincubed::config::BitcoinBackend::Electrum(_),
                 ),
             ) => None,
-            _ => return Err(claim_preflight::Error::InvalidRequest),
+            _ => return Err(claim_preflight::Error::BackendChanged),
         };
         route::preflight(
             local,

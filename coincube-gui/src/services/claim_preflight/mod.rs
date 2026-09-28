@@ -47,6 +47,7 @@ pub enum Error {
     },
     UnsupportedChain,
     InvalidRequest,
+    BackendChanged,
     InvalidResponse,
     MissingNoStore,
     ResponseTooLarge,

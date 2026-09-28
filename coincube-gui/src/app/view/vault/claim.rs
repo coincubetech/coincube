@@ -433,8 +433,9 @@ fn review_view<'a>(
             .push(row(
                 "Bitcoin tip",
                 p1_regular(format!(
-                    "height {} — the node accepts this transaction",
-                    snapshot.observations.bitcoin.tip.height
+                    "height {} — {} accepts this transaction",
+                    snapshot.observations.bitcoin.tip.height,
+                    snapshot.route.label()
                 )),
             ))
             .push(row(
@@ -503,11 +504,11 @@ fn track_view<'a>(
         Outcome::Recorded { txid } => (txid, "A submission is recorded on this device. Its transaction has not been recovered and verified yet; it will not be retried automatically.".into()),
         Outcome::UpstreamAccepted { txid, .. } => (
             txid,
-            "Accepted by the Bitcoin node. Waiting for it to confirm.".to_string(),
+            "Submission accepted. Waiting for the transaction to confirm.".to_string(),
         ),
         Outcome::Uncertain { txid, .. } => (
             txid,
-            "The submission's outcome is uncertain: the intent was recorded, but the node's answer \
+            "The submission's outcome is uncertain: the intent was recorded, but the submission response \
              did not arrive. It is being reconciled from the chain; it will not be retried automatically."
                 .to_string(),
         ),
