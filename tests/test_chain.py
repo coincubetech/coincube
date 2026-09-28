@@ -247,7 +247,7 @@ def test_rescan_edge_cases(coincubed, bitcoind):
         delta = bitcoind.rpc.getblockcount() - height + 1
         assert delta > 2
         h = bitcoind.rpc.getblockhash(height)
-        bitcoind.rpc.invalidateblock(h)
+        bitcoind.invalidate_block(h)
         bitcoind.generate_block(1)
         for tx in txs:
             bitcoind.rpc.sendrawtransaction(tx)
