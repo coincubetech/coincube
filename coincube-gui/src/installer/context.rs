@@ -114,6 +114,10 @@ pub struct Context {
     pub descriptor_template: DescriptorTemplate,
     pub descriptor: Option<CoincubeDescriptor>,
     pub keys: HashMap<bitcoin::bip32::Fingerprint, KeySetting>,
+    /// Whether [`Self::keys`] were built by the descriptor editor, which
+    /// knows every key's source. Becomes
+    /// [`crate::app::settings::WalletSettings::keychain_keys_recorded`].
+    pub keychain_keys_recorded: bool,
     pub hws: Vec<(DeviceKind, bitcoin::bip32::Fingerprint, Option<[u8; 32]>)>,
     pub coincube_directory: CoincubeDirectory,
     pub network: bitcoin::Network,
@@ -393,6 +397,7 @@ impl Context {
             bitcoin_config: BitcoinConfig::new(chain, Duration::from_secs(10)),
             hws: Vec::new(),
             keys: HashMap::new(),
+            keychain_keys_recorded: false,
             bitcoin_backend: None,
             descriptor: None,
             coincube_directory,
