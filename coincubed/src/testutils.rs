@@ -27,6 +27,7 @@ use miniscript::{
 };
 
 pub struct DummyBitcoind {
+    pub rescan_start: Option<BlockChainTip>,
     pub poll_failure: Option<&'static str>,
     pub received: Vec<UTxO>,
     pub broadcasted: sync::Mutex<Vec<Transaction>>,
@@ -70,6 +71,7 @@ impl DummyBitcoind {
         )
         .unwrap();
         Self {
+            rescan_start: None,
             poll_failure: None,
             received: Vec::new(),
             broadcasted: sync::Mutex::new(Vec::new()),
@@ -210,7 +212,7 @@ impl BitcoinInterface for DummyBitcoind {
     }
 
     fn block_before_date(&self, _: u32) -> Option<BlockChainTip> {
-        todo!()
+        self.rescan_start
     }
 
     fn tip_time(&self) -> Option<u32> {
@@ -550,12 +552,12 @@ impl DatabaseConnection for DummyDatabase {
         self.db.read().unwrap().rescan_timestamp
     }
 
-    fn set_rescan(&mut self, _: u32) {
-        todo!()
+    fn set_rescan(&mut self, timestamp: u32) {
+        self.db.write().unwrap().rescan_timestamp = Some(timestamp);
     }
 
     fn complete_rescan(&mut self) {
-        todo!()
+        self.db.write().unwrap().rescan_timestamp = None;
     }
 
     fn last_poll_timestamp(&mut self) -> Option<u32> {

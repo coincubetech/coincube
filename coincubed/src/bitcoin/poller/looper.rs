@@ -619,12 +619,14 @@ pub fn poll(
 ) {
     let mut db_conn = db.connection();
     let result = observe_rescan(&mut db_conn, bit).and_then(|rescan| {
-        // A verified rescan completion starts a new scan on the next tick;
-        // do not report successful freshness before that scan has run.
+        // Keep the persisted rescan marker until the post-rollback wallet
+        // update succeeds. Otherwise callers can observe completion while
+        // coins are still unconfirmed and recovery is temporarily unavailable.
         if let RescanObservation::Completed(tip) = rescan {
             db_conn.rollback_tip(&tip);
+            updates(&mut db_conn, bit, descs, secp, reorg_alert)?;
             db_conn.complete_rescan();
-            return Err("Rescan completion requires a new scheduled poll".into());
+            return Ok(());
         }
         if let RescanObservation::Running(progress) = rescan {
             log::info!("Rescan progress: {:.2}%.", progress * 100.0);
@@ -1191,5 +1193,40 @@ mod failure_tests {
             assert_eq!(conn.last_poll_timestamp(), Some(123));
             assert!(conn.coins(&[], &[]).is_empty());
         }
+    }
+}
+
+#[cfg(test)]
+mod rescan_completion_tests {
+    use super::*;
+    use crate::testutils::{DummyBitcoind, DummyDatabase};
+
+    #[test]
+    fn rescan_stays_pending_until_post_rollback_update_succeeds() {
+        let mut bit = DummyBitcoind::new();
+        let tip = bit.tip;
+        bit.rescan_start = Some(BlockChainTip { height: 90, ..tip });
+        bit.poll_failure = Some("confirmed");
+        let bit = sync::Arc::new(sync::Mutex::new(bit));
+        let mut backend: sync::Arc<sync::Mutex<dyn BitcoinInterface>> = bit.clone();
+        let db = DummyDatabase::new();
+        let mut conn = db.connection();
+        conn.update_tip(&tip);
+        conn.set_rescan(1000);
+        conn.set_last_poll(123);
+        let database: sync::Arc<sync::Mutex<dyn DatabaseInterface>> =
+            sync::Arc::new(sync::Mutex::new(db));
+        let secp = secp256k1::Secp256k1::verification_only();
+        let descs = super::tests::test_descs();
+        let alert = ReorgAlertCache::default();
+        poll(&mut backend, &database, &secp, &descs, &alert);
+        assert_eq!(conn.rescan_timestamp(), Some(1000));
+        assert_eq!(conn.last_poll_timestamp(), Some(123));
+        assert_eq!(conn.chain_tip().unwrap().height, 90);
+        bit.lock().unwrap().poll_failure = None;
+        poll(&mut backend, &database, &secp, &descs, &alert);
+        assert_eq!(conn.rescan_timestamp(), None);
+        assert_eq!(conn.chain_tip(), Some(tip));
+        assert_ne!(conn.last_poll_timestamp(), Some(123));
     }
 }
