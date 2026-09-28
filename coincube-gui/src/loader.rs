@@ -2373,6 +2373,7 @@ mod bootstrap_backend_selection_tests {
             remote_backend_auth: None,
             start_internal_bitcoind: Some(true),
             pending_rescan: None,
+            keychain_keys_recorded: false,
         }
     }
 
