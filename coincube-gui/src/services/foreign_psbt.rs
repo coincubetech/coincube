@@ -3,7 +3,7 @@
 //! This module constructs and checks a signing handoff. It cannot finalize,
 //! broadcast, persist secrets, or grant Claim/ancestry authority.
 
-use std::{collections::BTreeSet, str::FromStr};
+use std::{collections::BTreeSet, convert::TryFrom, str::FromStr};
 
 use coincube_core::{
     chain::ChainId,
@@ -104,6 +104,18 @@ impl TargetAddressEvidence {
             generation,
         })
     }
+
+    pub fn cube_id(&self) -> &str {
+        &self.cube_id
+    }
+
+    pub fn vault_fingerprint(&self) -> &str {
+        &self.vault_fingerprint
+    }
+
+    pub fn derivation_index(&self) -> bitcoin::bip32::ChildNumber {
+        self.derivation_index
+    }
 }
 
 /// Current UI/session identity supplied again at import time. Its descriptor
@@ -133,6 +145,135 @@ pub struct PreparedForeignSweep {
     target: TargetAddressEvidence,
     source_fingerprint: [u8; 32],
     fee: Amount,
+}
+
+/// Read-only, conservative sweep-all economics. Constructing this value does
+/// not construct a PSBT or grant any signing, finalisation, or broadcast
+/// capability. `fee` uses the maximum signed vsize for every authenticated
+/// input, so the later exact transaction may be smaller but never larger for
+/// the same one-output shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SweepEconomics {
+    pub inputs: usize,
+    pub total: Amount,
+    pub feerate_sat_vb: u64,
+    pub maximum_signed_vbytes: u64,
+    pub fee: Amount,
+    pub destination: Amount,
+}
+
+/// Compute a conservative, one-output sweep review from the authenticated scan
+/// evidence. This deliberately stops before [`PreparedForeignSweep`]: the
+/// poison-confirmed/unified authorization token required by #568 does not exist
+/// yet, so no transaction-authorizing object is reachable from this path.
+pub fn review_sweep_economics(
+    report: &ScanReport,
+    session: ForeignSession<'_>,
+    feerate_sat_vb: u64,
+) -> Result<SweepEconomics, ForeignPsbtError> {
+    verify_session(report.chain(), report.generation(), &session)?;
+    if report.coins().is_empty() {
+        return Err(ForeignPsbtError::Empty);
+    }
+    if !(1..=spend::MAX_FEERATE).contains(&feerate_sat_vb) {
+        return Err(ForeignPsbtError::Economics);
+    }
+
+    let mut coins: Vec<_> = report.coins().iter().collect();
+    coins.sort_by_key(|coin| coin.outpoint);
+    let mut seen = BTreeSet::<OutPoint>::new();
+    let mut total = 0_u64;
+    let mut inputs = Vec::with_capacity(coins.len());
+    let mut satisfaction_weight = 0_u64;
+    let mut has_witness = false;
+    for coin in coins {
+        if !seen.insert(coin.outpoint) {
+            return Err(ForeignPsbtError::DuplicateInput);
+        }
+        if !coin.confirmed {
+            return Err(ForeignPsbtError::Unconfirmed);
+        }
+        let descriptor = descriptor_for(coin.branch, &session)?;
+        let definite = descriptor
+            .derive(coin.index)
+            .map_err(|_| ForeignPsbtError::Descriptor)?;
+        if definite.script_pubkey() != coin.output.script_pubkey {
+            return Err(ForeignPsbtError::Descriptor);
+        }
+        let authenticated = spend::authenticate_previous_output(
+            &coin.outpoint,
+            Some(&coin.previous),
+            Some(&coin.output),
+        )
+        .map_err(|_| ForeignPsbtError::Prevout)?;
+        total = total
+            .checked_add(authenticated.value.to_sat())
+            .filter(|value| *value <= Amount::MAX_MONEY.to_sat())
+            .ok_or(ForeignPsbtError::Economics)?;
+        satisfaction_weight = satisfaction_weight
+            .checked_add(
+                definite
+                    .max_weight_to_satisfy()
+                    .map_err(|_| ForeignPsbtError::Descriptor)?
+                    .to_wu(),
+            )
+            .ok_or(ForeignPsbtError::Economics)?;
+        has_witness |= !matches!(definite, coincube_core::miniscript::Descriptor::Pkh(_));
+        inputs.push(TxIn {
+            previous_output: coin.outpoint,
+            sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+            ..TxIn::default()
+        });
+    }
+
+    let unsigned = Transaction {
+        version: transaction::Version::TWO,
+        lock_time: absolute::LockTime::ZERO,
+        input: inputs,
+        output: vec![TxOut {
+            value: Amount::from_sat(spend::DUST_OUTPUT_SATS),
+            script_pubkey: session.target.script_pubkey.clone(),
+        }],
+    };
+    // `max_weight_to_satisfy` measures from an input that already carries its
+    // empty witness-stack byte. The unsigned serialization above has no
+    // witness section, so a witness transaction also needs marker+flag and one
+    // empty-stack byte for every input (including legacy inputs in a mixed
+    // transaction).
+    let witness_overhead = if has_witness {
+        2_u64
+            .checked_add(
+                u64::try_from(unsigned.input.len()).map_err(|_| ForeignPsbtError::Economics)?,
+            )
+            .ok_or(ForeignPsbtError::Economics)?
+    } else {
+        0
+    };
+    let maximum_signed_vbytes = unsigned
+        .weight()
+        .to_wu()
+        .checked_add(satisfaction_weight)
+        .and_then(|weight| weight.checked_add(witness_overhead))
+        .and_then(|weight| weight.checked_add(3))
+        .map(|weight| weight / 4)
+        .ok_or(ForeignPsbtError::Economics)?;
+    let fee_sat = maximum_signed_vbytes
+        .checked_mul(feerate_sat_vb)
+        .filter(|fee| *fee <= spend::MAX_FEE.to_sat())
+        .ok_or(ForeignPsbtError::Economics)?;
+    let destination_sat = total
+        .checked_sub(fee_sat)
+        .filter(|amount| *amount >= spend::DUST_OUTPUT_SATS)
+        .ok_or(ForeignPsbtError::Economics)?;
+
+    Ok(SweepEconomics {
+        inputs: seen.len(),
+        total: Amount::from_sat(total),
+        feerate_sat_vb,
+        maximum_signed_vbytes,
+        fee: Amount::from_sat(fee_sat),
+        destination: Amount::from_sat(destination_sat),
+    })
 }
 
 impl PreparedForeignSweep {
@@ -393,7 +534,7 @@ mod tests {
     use crate::app::settings::VaultIdentity;
     use crate::services::{
         foreign_scan::{DiscoveredCoin, ScanReport},
-        foreign_wallet_source::{SessionSeedSource, StandardSinglesig},
+        foreign_wallet_source::{AccountDescriptors, SessionSeedSource, StandardSinglesig},
     };
     use coincube_core::{
         descriptors::CoincubeDescriptor,
@@ -512,6 +653,121 @@ mod tests {
             },
         );
         psbt.to_string()
+    }
+
+    fn economics_fixture(
+        value: u64,
+        confirmed: bool,
+    ) -> (ScanReport, AccountDescriptors, TargetAddressEvidence) {
+        let source = SessionSeedSource::new(
+            Zeroizing::new(WORDS.to_owned()),
+            Zeroizing::new("economics passphrase".to_owned()),
+        )
+        .unwrap();
+        let descriptors = source.descriptors(StandardSinglesig::Bip84, 0).unwrap();
+        let script = descriptors.external.script(2).unwrap();
+        let previous = Transaction {
+            version: transaction::Version::TWO,
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![TxIn::default()],
+            output: vec![TxOut {
+                value: Amount::from_sat(value),
+                script_pubkey: script,
+            }],
+        };
+        let report = ScanReport::for_test(
+            ChainId::BitcoinBlake2b,
+            21,
+            BlockHash::from_byte_array([4; 32]),
+            vec![DiscoveredCoin {
+                branch: Branch::External,
+                index: 2,
+                outpoint: OutPoint::new(previous.compute_txid(), 0),
+                output: previous.output[0].clone(),
+                previous,
+                confirmed,
+            }],
+        );
+        (report, descriptors, target_evidence("vault-a", 13, 21))
+    }
+
+    #[test]
+    fn review_economics_is_bounded_and_uses_maximum_signed_vsize() {
+        let (report, descriptors, target) = economics_fixture(100_000, true);
+        let review = review_sweep_economics(
+            &report,
+            ForeignSession {
+                chain: ChainId::BitcoinBlake2b,
+                generation: 21,
+                target: &target,
+                external: &descriptors.external,
+                internal: Some(&descriptors.internal),
+            },
+            5,
+        )
+        .unwrap();
+        assert_eq!(review.inputs, 1);
+        assert!(review.maximum_signed_vbytes > 41);
+        assert_eq!(
+            review.fee.to_sat(),
+            review.maximum_signed_vbytes * review.feerate_sat_vb
+        );
+        assert_eq!(review.destination.to_sat() + review.fee.to_sat(), 100_000);
+
+        for invalid in [0, spend::MAX_FEERATE + 1] {
+            assert_eq!(
+                review_sweep_economics(
+                    &report,
+                    ForeignSession {
+                        chain: ChainId::BitcoinBlake2b,
+                        generation: 21,
+                        target: &target,
+                        external: &descriptors.external,
+                        internal: Some(&descriptors.internal),
+                    },
+                    invalid,
+                )
+                .unwrap_err(),
+                ForeignPsbtError::Economics
+            );
+        }
+    }
+
+    #[test]
+    fn review_economics_refuses_unconfirmed_and_dust_remainders() {
+        let (unconfirmed, descriptors, target) = economics_fixture(100_000, false);
+        assert_eq!(
+            review_sweep_economics(
+                &unconfirmed,
+                ForeignSession {
+                    chain: ChainId::BitcoinBlake2b,
+                    generation: 21,
+                    target: &target,
+                    external: &descriptors.external,
+                    internal: Some(&descriptors.internal),
+                },
+                5,
+            )
+            .unwrap_err(),
+            ForeignPsbtError::Unconfirmed
+        );
+
+        let (small, descriptors, target) = economics_fixture(1_000, true);
+        assert_eq!(
+            review_sweep_economics(
+                &small,
+                ForeignSession {
+                    chain: ChainId::BitcoinBlake2b,
+                    generation: 21,
+                    target: &target,
+                    external: &descriptors.external,
+                    internal: Some(&descriptors.internal),
+                },
+                spend::MAX_FEERATE,
+            )
+            .unwrap_err(),
+            ForeignPsbtError::Economics
+        );
     }
 
     #[test]

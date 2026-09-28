@@ -2527,6 +2527,76 @@ impl Home {
                     .map(|m| Message::View(ViewMessage::RecoverVault(m)))
             }
             Message::View(ViewMessage::SplitWallet(msg)) => {
+                if matches!(msg, split_wallet::Message::Continue) {
+                    if let Some(reason) = self
+                        .connect_chain_availability(ChainId::BitcoinBlake2b)
+                        .reason()
+                    {
+                        self.set_error(reason.to_string());
+                        return Task::none();
+                    }
+                    let Some(client) = self.connect_account.authenticated_client() else {
+                        self.set_error("Sign in to Connect to continue Split.".to_string());
+                        return Task::none();
+                    };
+                    let Some(target_id) = self.split_wallet.selected_target_id() else {
+                        self.set_error("Choose a destination Cube before continuing.".to_string());
+                        return Task::none();
+                    };
+                    let State::Cubes { cubes, source, .. } = &self.state else {
+                        self.set_error("Reload the Cube list before continuing Split.".to_string());
+                        return Task::none();
+                    };
+                    let source = *source;
+                    let Some(cube) = cubes.iter().find(|cube| cube.id == target_id).cloned() else {
+                        self.set_error(
+                            "The selected destination Cube is no longer available.".to_string(),
+                        );
+                        self.split_wallet.cancel();
+                        return Task::none();
+                    };
+                    if source != ChainId::BitcoinBlake2b || cube.network != source {
+                        self.set_error(
+                            "The selected destination Cube no longer belongs to Bitcoin Blake2b."
+                                .to_string(),
+                        );
+                        self.split_wallet.cancel();
+                        return Task::none();
+                    }
+                    let mut config_path = self
+                        .datadir_path
+                        .network_directory(source)
+                        .path()
+                        .to_path_buf();
+                    config_path.push(app::config::DEFAULT_FILE_NAME);
+                    let cfg = match app::Config::from_file(&config_path) {
+                        Ok(cfg) => cfg,
+                        Err(error) => {
+                            self.set_error(format!(
+                                "Couldn't read the destination Cube configuration ({}): {}",
+                                config_path.display(),
+                                error
+                            ));
+                            return Task::none();
+                        }
+                    };
+                    let session_generation = self.connect_account.session_generation();
+                    let Some(intent) =
+                        self.split_wallet
+                            .take_handoff(source, session_generation, &client)
+                    else {
+                        self.set_error(
+                            "The scan evidence is stale. Scan the source wallet again.".to_string(),
+                        );
+                        return Task::none();
+                    };
+                    app::split_intent::arm(intent);
+                    let datadir = self.datadir_path.clone();
+                    return Task::perform(
+                        async move { (datadir, cfg, source, cube) },
+                        |(datadir, cfg, source, cube)| Message::Run(datadir, cfg, source, cube),
+                    );
+                }
                 let client = self.connect_account.authenticated_client();
                 let generation = self.connect_account.session_generation();
                 self.split_wallet

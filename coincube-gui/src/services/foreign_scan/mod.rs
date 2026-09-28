@@ -57,6 +57,7 @@ pub struct Capabilities {
 /// Explicit single branch, not an ambiguous multipath expansion. Private keys
 /// are never accepted by the public-key parser; hardened origins are labels,
 /// whereas hardened public derivation suffixes cannot be derived and refuse.
+#[derive(Debug, Clone)]
 pub struct ScanDescriptor {
     descriptor: Descriptor<DescriptorPublicKey>,
     branch: Branch,
@@ -179,6 +180,7 @@ pub struct DiscoveredCoin {
 }
 /// Complete only within the caller's bounded history-gap policy. No exclusive
 /// funds classification and no conversion into a signing or Claim capability.
+#[derive(Debug, Clone)]
 pub struct ScanReport {
     chain: ChainId,
     generation: u64,

@@ -731,6 +731,7 @@ impl Tab {
     ) -> Task<Message> {
         self.fork_session_generation = self.fork_session_generation.wrapping_add(1);
         self.pending_split_after_install = false;
+        app::split_intent::clear();
         self.fork_save_task.take();
         self.fork_tasks.clear();
         let mut command = Task::none();
