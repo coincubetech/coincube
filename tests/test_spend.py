@@ -268,12 +268,12 @@ def test_send_to_self(coincubed, bitcoind):
     # Note they may ask for an impossible send-to-self. In this case we'll report missing amount.
     huge_feerate = 50_000 if USE_TAPROOT else 40_500
     assert "missing" in coincubed.rpc.createspend({}, outpoints, huge_feerate)
-    # Fresh change is reserved before construction. Even this rejected attempt
-    # burns index 2, durably, without changing the earlier PSBT's index-1 output.
-    assert coincubed.rpc.getinfo()["change_index"] == 2
+    # A rejected attempt only peeks at fresh change. It does not consume index 2
+    # or change the earlier PSBT's committed index-1 output.
+    assert coincubed.rpc.getinfo()["change_index"] == 1
     coincubed.stop()
     coincubed.start()
-    assert coincubed.rpc.getinfo()["change_index"] == 2
+    assert coincubed.rpc.getinfo()["change_index"] == 1
     assert spend_psbt.tx.vout[0].scriptPubKey == change_scripts[0]
 
     # Sign and broadcast the send-to-self transaction created above.

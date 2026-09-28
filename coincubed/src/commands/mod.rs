@@ -6,7 +6,7 @@ mod utils;
 
 use crate::{
     bitcoin::BitcoinInterface,
-    database::{Coin, DatabaseConnection, DatabaseInterface},
+    database::{Coin, DatabaseConnection, DatabaseInterface, ReservationError},
     miniscript::bitcoin::absolute::LockTime,
     poller::PollerMessage,
     DaemonControl, VERSION,
@@ -504,20 +504,54 @@ impl DaemonControl {
             .map_err(CommandError::ChangeReservation)
     }
 
-    fn next_change_addr(&self) -> Result<SpendOutputAddress, CommandError> {
-        let reservation = self.reserve_change()?;
-        let index = reservation.index();
-        let desc = reservation
-            .descriptor()
+    fn change_addr_at(&self, index: bip32::ChildNumber) -> SpendOutputAddress {
+        let desc = self
+            .config
+            .main_descriptor
             .change_descriptor()
             .derive(index, &self.secp);
-        Ok(SpendOutputAddress {
-            addr: desc.address(reservation.chain().bitcoin_network()),
+        SpendOutputAddress {
+            addr: desc.address(self.config.bitcoin_config.network),
             info: Some(AddrInfo {
                 index,
                 is_change: true,
             }),
-        })
+        }
+    }
+
+    // Derive the next change address without persisting it. Ordinary spend builders
+    // commit it only after producing a PSBT that actually carries change.
+    fn next_change_addr(
+        &self,
+        db_conn: &mut Box<dyn DatabaseConnection>,
+    ) -> Result<SpendOutputAddress, CommandError> {
+        let index = db_conn
+            .change_index()
+            .increment()
+            .map_err(|_| CommandError::ChangeReservation(ReservationError::Exhausted))?;
+        Ok(self.change_addr_at(index))
+    }
+
+    // Commit a successfully built change output only if its peeked index is still
+    // next. Claim uses `reserve_change` directly; both operations serialize through
+    // the same database writer lock, so a false result requires rebuilding with a
+    // newly peeked address and never permits index reuse.
+    fn commit_change_if_next(&self, change: &Option<AddrInfo>) -> Result<bool, CommandError> {
+        let index = match change {
+            Some(AddrInfo {
+                index,
+                is_change: true,
+            }) => *index,
+            _ => return Ok(true),
+        };
+        self.db
+            .commit_change_if_next(
+                self.config.bitcoin_config.chain,
+                &self.config.main_descriptor,
+                &self.secp,
+                index,
+            )
+            .map_err(CommandError::ChangeReservation)
     }
 
     // If we detect the given address as ours, and it has a higher derivation index than our last
@@ -952,10 +986,12 @@ impl DaemonControl {
 
         // The change address to be used if a change output needs to be created. It may be
         // specified by the caller (for instance for the purpose of a sweep, or to avoid us
-        // creating a new change address on every call).
-        let change_address = match change_address {
+        // creating a new change address on every call). A fresh address is only peeked here;
+        // it is committed after a successful build that actually carries change.
+        let fresh_change = change_address.is_none();
+        let mut change_address = match change_address {
             Some(addr) => self.spend_addr(&mut db_conn, self.validate_address(addr)?),
-            None => self.next_change_addr()?,
+            None => self.next_change_addr(&mut db_conn)?,
         };
 
         // The candidate coins will be either all optional or all mandatory.
@@ -1045,44 +1081,50 @@ impl DaemonControl {
                 .collect()
         };
 
-        // Create the PSBT. If there was no error in doing so make sure to update our next
-        // derivation index in case any address in the transaction outputs was ours and from the
-        // future.
-        let change_info = change_address.info;
+        // Create the PSBT. A concurrent Claim or ordinary spend may reserve the address
+        // we peeked. In that case retry with the new next address; the compare-and-commit
+        // operation itself leaves the database untouched on a lost race.
         let locktime = self.anti_fee_sniping_locktime();
-        let CreateSpendRes {
-            psbt,
-            has_change,
-            warnings,
-        } = match create_spend(
-            &self.config.main_descriptor,
-            &self.secp,
-            &mut tx_getter,
-            &destinations_checked,
-            &candidate_coins,
-            SpendTxFees::Regular(feerate_vb),
-            change_address,
-            locktime,
-        ) {
-            Ok(res) => res,
-            Err(SpendCreationError::CoinSelection(e)) => {
-                return Ok(CreateSpendResult::InsufficientFunds { missing: e.missing });
+        loop {
+            let change_info = change_address.info;
+            let CreateSpendRes {
+                psbt,
+                has_change,
+                warnings,
+            } = match create_spend(
+                &self.config.main_descriptor,
+                &self.secp,
+                &mut tx_getter,
+                &destinations_checked,
+                &candidate_coins,
+                SpendTxFees::Regular(feerate_vb),
+                change_address,
+                locktime,
+            ) {
+                Ok(res) => res,
+                Err(SpendCreationError::CoinSelection(e)) => {
+                    return Ok(CreateSpendResult::InsufficientFunds { missing: e.missing });
+                }
+                Err(e) => {
+                    return Err(e.into());
+                }
+            };
+            if has_change && fresh_change && !self.commit_change_if_next(&change_info)? {
+                change_address = self.next_change_addr(&mut db_conn)?;
+                continue;
             }
-            Err(e) => {
-                return Err(e.into());
+            for (addr, _) in destinations_checked {
+                self.maybe_increase_last_deriv_index(&mut db_conn, &addr.info);
             }
-        };
-        for (addr, _) in destinations_checked {
-            self.maybe_increase_last_deriv_index(&mut db_conn, &addr.info);
-        }
-        if has_change {
-            self.maybe_increase_last_deriv_index(&mut db_conn, &change_info);
-        }
+            if has_change {
+                self.maybe_increase_last_deriv_index(&mut db_conn, &change_info);
+            }
 
-        Ok(CreateSpendResult::Success {
-            psbt,
-            warnings: warnings.iter().map(|w| w.to_string()).collect(),
-        })
+            return Ok(CreateSpendResult::Success {
+                psbt,
+                warnings: warnings.iter().map(|w| w.to_string()).collect(),
+            });
+        }
     }
 
     pub fn update_spend(&self, mut psbt: Psbt) -> Result<(), CommandError> {
@@ -1386,12 +1428,13 @@ impl DaemonControl {
             Vec::new()
         };
 
-        // If there was no previous change address, we set the change address for the replacement
-        // to our next change address. This way, we won't increment the change index with each attempt
-        // at creating the replacement PSBT below.
-        let change_address = match prev_change_address {
+        // If there was no previous change address, peek at the next address for the
+        // replacement. It is committed only after a successful replacement actually
+        // carries change.
+        let fresh_change = prev_change_address.is_none();
+        let mut change_address = match prev_change_address {
             Some(addr) => self.spend_addr(&mut db_conn, addr),
-            None => self.next_change_addr()?,
+            None => self.next_change_addr(&mut db_conn)?,
         };
         // If `!is_cancel`, we take the previous coins as mandatory candidates and add confirmed coins as optional.
         // Otherwise, we take the previous coins as optional candidates and let coin selection find the
@@ -1451,13 +1494,18 @@ impl DaemonControl {
                     has_change,
                     warnings,
                 }) => {
+                    let change_info = change_address.info;
+                    if has_change && fresh_change && !self.commit_change_if_next(&change_info)? {
+                        change_address = self.next_change_addr(&mut db_conn)?;
+                        continue;
+                    }
                     // In case of success, make sure to update our next derivation index if any address
                     // used in the transaction outputs was from the future.
                     for (addr, _) in destinations {
                         self.maybe_increase_last_deriv_index(&mut db_conn, &addr.info);
                     }
                     if has_change {
-                        self.maybe_increase_last_deriv_index(&mut db_conn, &change_address.info);
+                        self.maybe_increase_last_deriv_index(&mut db_conn, &change_info);
                     }
 
                     return Ok(CreateSpendResult::Success {
@@ -2368,26 +2416,36 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_fresh_change_uses_and_burns_reservations() {
+    fn ordinary_failed_spend_does_not_consume_claim_reservation() {
         let daemon = DummyCoincube::new(DummyBitcoind::new(), DummyDatabase::new());
         let control = daemon.control();
         let claim = control.reserve_change().unwrap();
         assert_eq!(claim.index(), 1.into());
-        let ordinary = control.next_change_addr().unwrap();
+        let mut db_conn = control.db().lock().unwrap().connection();
+        let ordinary = control.next_change_addr(&mut db_conn).unwrap();
         assert_eq!(ordinary.info.unwrap().index, 2.into());
         let missing = bitcoin::OutPoint::null();
         assert!(matches!(
             control.create_spend(&HashMap::new(), &[missing], 1, None),
             Err(CommandError::UnknownOutpoint(_))
         ));
-        // The failed builder attempt allocated index3 before discovering the missing coin.
-        // It cannot be handed to a later Claim or ordinary attempt.
-        assert_eq!(control.reserve_change().unwrap().index(), 4.into());
+        // Neither peeking nor the failed builder consumed index 2. The next Claim
+        // durably owns it and an ordinary spend must subsequently peek index 3.
+        assert_eq!(control.reserve_change().unwrap().index(), 2.into());
+        assert_eq!(
+            control
+                .next_change_addr(&mut db_conn)
+                .unwrap()
+                .info
+                .unwrap()
+                .index,
+            3.into()
+        );
     }
 
     /// The contract the GUI's transfer preview relies on: a change address the
     /// wallet already owns never reserves an index, while a fresh one (`None`)
-    /// reserves exactly one. A preview that only reads `psbt.fee()` can therefore
+    /// commits exactly one when the result carries change. A preview that only reads `psbt.fee()` can therefore
     /// pass its fixed sizing address and leave the change index alone.
     #[test]
     fn supplied_own_change_address_reserves_nothing_fresh_reserves_once() {
@@ -2410,10 +2468,9 @@ mod tests {
             is_from_self: false,
         }]);
         let mut destinations = <HashMap<bitcoin::Address<address::NetworkUnchecked>, u64>>::new();
-        destinations.insert(
-            bitcoin::Address::from_str("bc1qnsexk3gnuyayu92fc3tczvc7k62u22a22ua2kv").unwrap(),
-            10_000,
-        );
+        let destination =
+            bitcoin::Address::from_str("bc1qnsexk3gnuyayu92fc3tczvc7k62u22a22ua2kv").unwrap();
+        destinations.insert(destination.clone(), 10_000);
         let sizing = control
             .config
             .main_descriptor
@@ -2432,7 +2489,22 @@ mod tests {
             ));
             assert_eq!(db_conn.change_index(), before);
         }
+        // A fresh address is also only a peek when the successful spend has no
+        // change output. The remaining value is fee rather than a second output.
+        destinations.insert(destination.clone(), 99_500);
+        let changeless = control
+            .create_spend(&destinations, &[dummy_op], 1, None)
+            .unwrap();
+        match changeless {
+            CreateSpendResult::Success { psbt, .. } => {
+                assert_eq!(psbt.unsigned_tx.output.len(), 1);
+            }
+            other => panic!("expected changeless spend, got {:?}", other),
+        }
+        assert_eq!(db_conn.change_index(), before);
+
         // The real spend asks for a fresh change address and reserves exactly one.
+        destinations.insert(destination, 10_000);
         assert!(matches!(
             control.create_spend(&destinations, &[dummy_op], 1, None),
             Ok(CreateSpendResult::Success { .. })
@@ -3250,6 +3322,52 @@ mod tests {
         );
         // A target feerate not higher than the previous should return an error. This is tested in
         // the functional tests.
+
+        ms.shutdown();
+    }
+
+    #[test]
+    fn failed_rbf_without_previous_change_does_not_consume_index() {
+        const COIN_VALUE: u64 = 100_000;
+        let ms = DummyCoincube::new(DummyBitcoind::new(), DummyDatabase::new());
+        let control = &ms.control();
+        let funding = funding_tx(control, &[(0, COIN_VALUE, 13, false)]);
+        let outpoint = bitcoin::OutPoint::new(funding.compute_txid(), 0);
+        let mut db_conn = control.db().lock().unwrap().connection();
+        db_conn.new_txs(std::slice::from_ref(&funding));
+        db_conn.new_unspent_coins(&[Coin {
+            outpoint,
+            is_immature: false,
+            block_info: Some(BlockInfo { height: 1, time: 1 }),
+            amount: bitcoin::Amount::from_sat(COIN_VALUE),
+            derivation_index: 13.into(),
+            is_change: false,
+            spend_txid: None,
+            spend_block: None,
+            is_from_self: false,
+        }]);
+        let destination =
+            bitcoin::Address::from_str("bc1qnsexk3gnuyayu92fc3tczvc7k62u22a22ua2kv").unwrap();
+        let destinations = HashMap::from([(destination, 99_500)]);
+        let psbt = match control
+            .create_spend(&destinations, &[outpoint], 1, None)
+            .unwrap()
+        {
+            CreateSpendResult::Success { psbt, .. } => psbt,
+            other => panic!("expected changeless spend, got {:?}", other),
+        };
+        assert_eq!(psbt.unsigned_tx.output.len(), 1);
+        assert_eq!(db_conn.change_index(), 0.into());
+        let txid = psbt.unsigned_tx.compute_txid();
+        db_conn.store_spend(&psbt);
+        db_conn.spend_coins(&[(outpoint, txid)]);
+
+        assert!(matches!(
+            control.rbf_psbt(&txid, false, Some(50_000)),
+            Ok(CreateSpendResult::InsufficientFunds { .. })
+        ));
+        assert_eq!(db_conn.change_index(), 0.into());
+        assert_eq!(control.reserve_change().unwrap().index(), 1.into());
 
         ms.shutdown();
     }
