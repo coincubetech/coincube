@@ -1408,6 +1408,7 @@ pub async fn install_local_wallet(
         // that has never seen them; `App` turns this into an actual rescan once
         // the daemon is up, and clears it when the daemon accepts one.
         pending_rescan: pending_rescan(&ctx),
+        keychain_keys_recorded: ctx.keychain_keys_recorded,
     };
 
     let cfg: coincubed::config::Config = extract_daemon_config(&ctx, &wallet_settings)?;
@@ -1666,6 +1667,8 @@ pub async fn create_remote_wallet(
         start_internal_bitcoind: None,
         // Remote backend: no local node, so no scan window to fall short.
         pending_rescan: None,
+        // Keys live on the remote backend, not in this file.
+        keychain_keys_recorded: false,
     };
     update_settings_file(&network_datadir, |mut settings| {
         settings.wallets.push(wallet_settings.clone());
@@ -1755,6 +1758,8 @@ pub async fn import_remote_wallet(
         start_internal_bitcoind: None,
         // Remote backend: no local node, so no scan window to fall short.
         pending_rescan: None,
+        // Keys live on the remote backend, not in this file.
+        keychain_keys_recorded: false,
     };
     update_settings_file(&network_datadir, |mut settings| {
         settings.wallets.push(wallet_settings.clone());
