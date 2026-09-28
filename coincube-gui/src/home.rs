@@ -6530,6 +6530,8 @@ mod tests {
 
     #[test]
     fn split_hardware_source_is_unreachable_while_btcb2_is_gated() {
+        // cancel() clears the process-wide Split intent slot.
+        let _guard = crate::app::session::test_guard();
         let datadir = fresh_datadir();
         let mut home = Home::new_for_chain(datadir.clone(), Some(ChainId::Bitcoin)).0;
         write_btcb2_vault_target(&home);
