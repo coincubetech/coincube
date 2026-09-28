@@ -56,6 +56,18 @@ pub trait DatabaseInterface: Send {
     ) -> Result<ChangeReservation, ReservationError> {
         Err(ReservationError::Unsupported)
     }
+
+    /// Atomically commit `index` only when it is still the next unallocated change index.
+    /// A false result means another reservation won the race and persisted a different index.
+    fn commit_change_if_next(
+        &self,
+        _chain: ChainId,
+        _descriptor: &CoincubeDescriptor,
+        _secp: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
+        _index: bip32::ChildNumber,
+    ) -> Result<bool, ReservationError> {
+        Err(ReservationError::Unsupported)
+    }
 }
 
 impl DatabaseInterface for SqliteDb {
@@ -68,6 +80,18 @@ impl DatabaseInterface for SqliteDb {
         self.connection()
             .map_err(|_| ReservationError::Storage)?
             .reserve_change(chain, descriptor, secp)
+    }
+
+    fn commit_change_if_next(
+        &self,
+        chain: ChainId,
+        descriptor: &CoincubeDescriptor,
+        secp: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
+        index: bip32::ChildNumber,
+    ) -> Result<bool, ReservationError> {
+        self.connection()
+            .map_err(|_| ReservationError::Storage)?
+            .commit_change_if_next(chain, descriptor, secp, index)
     }
 
     fn connection(&self) -> Box<dyn DatabaseConnection> {
@@ -86,6 +110,18 @@ impl DatabaseInterface for sync::Arc<sync::Mutex<dyn DatabaseInterface>> {
         self.lock()
             .map_err(|_| ReservationError::Storage)?
             .reserve_change(chain, descriptor, secp)
+    }
+
+    fn commit_change_if_next(
+        &self,
+        chain: ChainId,
+        descriptor: &CoincubeDescriptor,
+        secp: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
+        index: bip32::ChildNumber,
+    ) -> Result<bool, ReservationError> {
+        self.lock()
+            .map_err(|_| ReservationError::Storage)?
+            .commit_change_if_next(chain, descriptor, secp, index)
     }
 
     fn connection(&self) -> Box<dyn DatabaseConnection> {
