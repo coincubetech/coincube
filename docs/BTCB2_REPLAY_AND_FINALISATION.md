@@ -135,10 +135,12 @@ broadcast until the surplus signatures are removed or the spend is recreated.
 Bitcoin-family paths return before this policy and retain their historical
 merge, persistence, export, and finalisation behavior.
 
-This bounds what Coincube itself retains and exports. The app cannot revoke
-signatures that already left on a Keychain, a hardware device, an exported
-file, or another coordinator. A separately retained legacy-only copy remains
-usable if it independently meets the script.
+Coincube blocks new unsafe legacy alternatives at its guarded merge,
+persistence, export, and finalisation boundaries. Rows created by older builds
+remain stored, but once detected they cannot be exported or broadcast. The app
+cannot revoke signatures that already left on a Keychain, a hardware device,
+an exported file, or another coordinator. A separately retained legacy-only
+copy remains usable if it independently meets the script.
 
 A unified spend is therefore not proof the Bitcoin twin cannot be spent, and
 not poison evidence. Lane B1.5's *Split — cannot replay* is the exclusivity
