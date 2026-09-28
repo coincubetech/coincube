@@ -584,8 +584,8 @@ fn plan_tagline(tier: &PlanTier) -> &'static str {
              and a Lightning address."
         }
         PlanTier::Pro => {
-            "More Cubes per network, Duress protection, and Connect-enforced \
-             policies for greater control."
+            "More Cubes per network and Connect-enforced policies for greater control. \
+             Duress mode — Coming soon."
         }
         PlanTier::Estate => {
             "Maximum Cube capacity, inheritance escrow, and collaborative \
@@ -795,13 +795,12 @@ fn plan_provenance_label(tier: &PlanTier) -> &'static str {
 }
 
 fn launch_feature_copy(feature: &str) -> String {
-    let normalized = feature.to_ascii_lowercase();
-    if normalized.contains("duress") {
-        "Duress mode — Coming soon".to_string()
-    } else if normalized.contains("alert") {
-        "Recovery alerts — Coming soon".to_string()
-    } else {
-        feature.to_string()
+    match feature.trim().to_ascii_lowercase().as_str() {
+        "duress" | "duress mode" | "duress protection" => "Duress mode — Coming soon".to_string(),
+        "recovery alert" | "recovery alerts" | "duress alert" | "duress alerts" => {
+            "Recovery alerts — Coming soon".to_string()
+        }
+        _ => feature.to_string(),
     }
 }
 
@@ -2675,6 +2674,11 @@ mod renewal_banner_tests {
     #[test]
     fn unreleased_plan_features_are_marked_coming_soon() {
         assert_eq!(
+            plan_tagline(&PlanTier::Pro),
+            "More Cubes per network and Connect-enforced policies for greater control. \
+             Duress mode — Coming soon."
+        );
+        assert_eq!(
             launch_feature_copy("Duress mode"),
             "Duress mode — Coming soon"
         );
@@ -2683,6 +2687,11 @@ mod renewal_banner_tests {
             "Recovery alerts — Coming soon"
         );
         assert_eq!(launch_feature_copy("More Cubes"), "More Cubes");
+        assert_eq!(launch_feature_copy("Price alerts"), "Price alerts");
+        assert_eq!(
+            launch_feature_copy("Duress activation alerts"),
+            "Duress activation alerts"
+        );
     }
 
     /// Regression: dismissing the pre-expiry reminder must NOT suppress the
