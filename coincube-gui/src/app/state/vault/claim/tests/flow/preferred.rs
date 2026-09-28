@@ -200,6 +200,46 @@ async fn automatic_ancestry_build_prefers_owned_input_and_never_falls_back_on_pr
             fresh(then.status(404));
         });
     }
+    // Live checked inputs are one-use and still bound when the GUI consumes
+    // a delayed result. This does not remove the public signing delivery gate.
+    for case in ["valid", "account", "provider", "generation", "logout"] {
+        let checked = super::super::super::signing::check_inputs(
+            &built,
+            daemon.clone(),
+            wallet.clone(),
+            connect.clone(),
+            1,
+            generation.clone(),
+        )
+        .await
+        .unwrap();
+        let mut current = connect.clone();
+        if case == "account" {
+            current.account = "different-account".into();
+        }
+        if case == "provider" {
+            current.client = CoincubeClient::for_test("https://other.example.invalid");
+        }
+        let consumed = checked.consume(
+            &built,
+            &wallet,
+            if case == "logout" {
+                None
+            } else {
+                Some(&current)
+            },
+            if case == "generation" { 2 } else { 1 },
+        );
+        if case == "valid" {
+            assert_eq!(consumed.unwrap().len(), built.psbt().inputs.len());
+        } else {
+            assert!(
+                consumed.is_err(),
+                "{} must invalidate a checked signing result",
+                case
+            );
+        }
+    }
     let proof_reads = fork_position.as_ref().unwrap().hits();
     let check = super::super::super::signing::check(
         &built,
