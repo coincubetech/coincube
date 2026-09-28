@@ -223,8 +223,24 @@ def test_concurrent_getblock_never_loses_the_block_file(legacy_node):
             "did not cover the calls #394 is about"
         )
 
+    # A reset connection is not the fault. 32 senders opening a connection per
+    # call outruns what the node's HTTP layer will accept, and run 36382138529
+    # failed on exactly that while the node logged no block-file error at all.
+    # #394 is the node failing to read a block it has, so that is what this
+    # fails on: the node's own error lines, or getblock refusing to serve.
+    if transport_errors:
+        logging.warning(
+            "blockfile probe: %s transport errors, not the #394 fault: %s",
+            len(transport_errors),
+            transport_errors[:3],
+        )
+    assert node.proc.poll() is None, (
+        f"the node exited with {node.proc.returncode} during the probe; "
+        f"transport errors: {transport_errors[:3]}"
+    )
+
     node_errors = node_block_file_errors(node)
-    if rpc_errors or node_errors or transport_errors:
+    if rpc_errors or node_errors:
         report = node_block_file_report(
             node, "knots-legacy", "concurrent getblock probe failed"
         )
@@ -232,7 +248,7 @@ def test_concurrent_getblock_never_loses_the_block_file(legacy_node):
             f"block-file fault reproduced after {sent} getblock calls "
             f"({rounds_run} rounds x {THREADS} threads, batches of {BATCH}).\n"
             f"getblock RPC errors: {rpc_errors[:5]}\n"
-            f"transport errors: {transport_errors[:5]}\n"
+            f"transport errors (context, not the fault): {len(transport_errors)}\n"
             f"{report}\n"
             f"{_trace_excerpt(node)}"
         )
@@ -417,7 +433,7 @@ def test_the_trace_reader_names_the_thread_that_closed_the_descriptor(tmp_path):
     # The close that poisoned it came from another thread, and saying so is the
     # entire value of the report.
     assert "* 05:22:56.100300 tid    1002 close = 0" in report
-    assert "other threads touched fd 23 before it failed: 1002" in report
+    assert "another thread of this process touched fd 23 before it failed: 1002" in report
     # fd 24's life is a different descriptor's and must not be mixed in.
     assert "100100" not in report
 
@@ -426,7 +442,7 @@ def test_the_trace_reader_says_so_when_nothing_failed(tmp_path):
     trace = tmp_path / "strace.log"
     trace.write_text(TRACE.replace("-1 EBADF (Bad file descriptor)", "0"))
     report = describe_failure(str(trace), "blk00000.dat")
-    assert "none of them failed" in report
+    assert "no lseek/read/close on blk00000.dat failed" in report
 
 
 def test_the_trace_reader_never_raises_on_a_broken_trace(tmp_path):
@@ -436,3 +452,40 @@ def test_the_trace_reader_never_raises_on_a_broken_trace(tmp_path):
     trace = tmp_path / "strace.log"
     trace.write_text("not a trace at all\n<... resumed>\n+++ exited with 0 +++\n")
     assert "no parsable strace lines" in describe_failure(str(trace), "blk")
+
+
+CHILD_TRACE = """\
+1001 05:22:56.100000 openat(AT_FDCWD</w>, "/d/blocks/blk00000.dat", O_RDONLY) = 23</d/blocks/blk00000.dat> <0.000012>
+{storm}\
+1001 05:22:56.200400 lseek(23</d/blocks/blk00000.dat>, 24197, SEEK_SET) = -1 EBADF (Bad file descriptor) <0.000005>
+"""
+
+
+def test_a_forked_child_is_not_reported_as_a_sibling_thread(tmp_path):
+    """The child closes its inherited copy of the table before exec. Calling
+    that "another thread closed your descriptor" is exactly backwards, and it
+    is what a first reading of run 36382138529 looked like."""
+    storm = "".join(
+        f"2002 05:22:56.1{i:05d} close({fd}) = -1 EBADF (Bad file descriptor) <0.000004>\n"
+        for i, fd in enumerate(range(5000, 0, -1))
+    )
+    storm += "2002 05:22:56.200300 close(23</d/blocks/blk00000.dat>) = 0 <0.000004>\n"
+    trace = tmp_path / "strace.log"
+    trace.write_text(CHILD_TRACE.format(storm=storm))
+    report = describe_failure(str(trace), "blk00000.dat")
+    assert "fd 23 failed in tid 1001" in report
+    assert "no sibling thread touched fd 23" in report
+    assert "forked child clearing its inherited descriptor table" in report
+
+
+def test_a_failing_open_is_not_mistaken_for_a_descriptor_fault(tmp_path):
+    """`openat(...) = -1 ENOENT` has no descriptor to trace, and reporting a
+    history of "fd -1" is noise dressed as evidence."""
+    trace = tmp_path / "strace.log"
+    trace.write_text(
+        '1001 05:22:56.100000 openat(AT_FDCWD</w>, "/d/blocks/blk00000.dat", O_RDWR)'
+        " = -1 ENOENT (No such file or directory) <0.000035>\n"
+    )
+    report = describe_failure(str(trace), "blk00000.dat")
+    assert "no lseek/read/close on blk00000.dat failed" in report
+    assert "fd -1" not in report

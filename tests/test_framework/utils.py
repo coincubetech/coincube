@@ -59,7 +59,14 @@ STRACE_PATH = os.getenv("STRACE_PATH", "strace")
 # this descriptor still open, and who closed it": openat/close/dup/dup2/dup3
 # and fcntl (F_DUPFD) are every way a descriptor is created or destroyed,
 # lseek/read are what the reading thread was doing with it.
-TRACED_SYSCALLS = "openat,open,lseek,_llseek,read,pread64,close,dup,dup2,dup3,fcntl"
+# socket/accept4/pipe2 are here for the other half of the question: when a
+# descriptor number goes bad, what took it over. Without them the trace shows a
+# number being closed and nothing showing where it went (seen in run
+# 36382138529, where fd 52's socket and pipe incarnations were invisible).
+TRACED_SYSCALLS = (
+    "openat,open,lseek,_llseek,read,pread64,close,dup,dup2,dup3,fcntl,"
+    "socket,socketpair,accept,accept4,pipe2,eventfd2"
+)
 
 
 def syscall_trace_prefix(log_path):

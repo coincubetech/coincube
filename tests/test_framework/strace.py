@@ -21,6 +21,16 @@ FD = re.compile(r"(-?\d+)(?:<(?P<path>[^>]*)>)?")
 # Calls that hand out a descriptor, so the return value is the fd rather than
 # the first argument.
 OPENING = ("openat", "open", "dup", "dup2", "dup3", "socket", "accept", "accept4")
+# Calls that use a descriptor someone else handed out. Only a failure in one of
+# these says anything about descriptor lifetime; a failing `openat` just means
+# the path was not there, and it carries no fd to trace.
+USING = ("lseek", "_llseek", "read", "pread64", "close")
+# A process that closes more descriptors than any real workload holds is a
+# forked child clearing its inherited table before exec. Its closes happen in
+# its own copy of the table and cannot affect the parent, so reporting them as
+# "another thread closed your descriptor" would be exactly backwards. The
+# threshold is a heuristic, named as one.
+FORK_CLOSE_STORM = 4096
 
 
 def parse_events(path):
@@ -74,18 +84,21 @@ def describe_failure(path, marker):
         (
             event
             for event in events
-            if event["ret"].startswith("-1") and marker in event["args"]
+            if event["ret"].startswith("-1")
+            and event["name"] in USING
+            and marker in event["args"]
         ),
         None,
     )
     if failure is None:
         return (
-            f"({len(events)} calls traced in {path}; none of them failed on "
-            f"{marker}, so the failing call was made by an untraced process or "
-            "outside the traced window)"
+            f"({len(events)} calls traced in {path}; no lseek/read/close on "
+            f"{marker} failed, so either the fault did not occur here or the "
+            "failing call was outside the traced window)"
         )
 
     fd = _fd_of(failure)
+    children = _forked_children(events)
     history = [
         event
         for event in events
@@ -100,19 +113,52 @@ def describe_failure(path, marker):
         f"history of fd {fd} (* = a different thread from the one that failed):",
     ]
     for event in history[-40:]:
-        mark = " " if event["tid"] == failure["tid"] else "*"
+        if event["tid"] == failure["tid"]:
+            mark = " "
+        elif event["tid"] in children:
+            mark = "c"
+        else:
+            mark = "*"
         lines.append(
             f"  {mark} {event['time']} tid {event['tid']:>7} "
             f"{event['name']} = {event['ret']}"
         )
-    other = sorted({e["tid"] for e in history if e["tid"] != failure["tid"]})
-    if other:
+    siblings = sorted(
+        {
+            e["tid"]
+            for e in history
+            if e["tid"] != failure["tid"] and e["tid"] not in children
+        }
+    )
+    if siblings:
         lines.append(
-            f"other threads touched fd {fd} before it failed: {', '.join(other)}"
+            f"* another thread of this process touched fd {fd} before it "
+            f"failed: {', '.join(siblings)}"
         )
     else:
         lines.append(
-            f"no other thread touched fd {fd}: its history is the failing "
+            f"no sibling thread touched fd {fd}: its history is the failing "
             "thread's alone"
         )
+    if any(e["tid"] in children for e in history):
+        lines.append(
+            "c = a forked child clearing its inherited descriptor table before "
+            "exec; those closes are in its own copy and cannot affect this "
+            "process"
+        )
     return "\n".join(lines)
+
+
+def _forked_children(events):
+    """PIDs that closed their whole descriptor table, i.e. forked children.
+
+    strace's first column is a PID, and a fork and a thread look alike there.
+    A child clearing thousands of inherited descriptors is unmistakable, and
+    failing to exclude it turns an ordinary fork into a false report of one
+    thread destroying another's descriptor.
+    """
+    closes = {}
+    for event in events:
+        if event["name"] == "close":
+            closes[event["tid"]] = closes.get(event["tid"], 0) + 1
+    return {tid for tid, count in closes.items() if count >= FORK_CLOSE_STORM}
