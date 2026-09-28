@@ -1220,6 +1220,16 @@ pub struct WalletSettings {
     /// from now is correct and there is nothing to catch up on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_rescan: Option<PendingRescan>,
+    /// Whether [`KeySetting::keychain_key_id`] was recorded for this Vault's
+    /// keys, so a key without one is known not to be a Keychain key.
+    ///
+    /// Set only by a Vault built in the descriptor editor, where every key's
+    /// source is known. `false` for every Vault created before the field
+    /// existed and for imports and restores, whose keys carry no provenance:
+    /// there an absent id means *unrecorded*, not "not a Keychain key".
+    /// Absent from the file when `false`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub keychain_keys_recorded: bool,
 }
 
 /// A rescan a restored Vault owes, and whether we know where to start it.
@@ -1310,6 +1320,16 @@ impl WalletSettings {
         self.keys
             .iter()
             .filter_map(|k| k.replay_protected.map(|mark| (k.master_fingerprint, mark)))
+            .collect()
+    }
+
+    /// Keychain key ids, one entry per key that came from the COINCUBE
+    /// Keychain. Sparse, and only complete when
+    /// [`Self::keychain_keys_recorded`] is set.
+    pub fn keychain_key_ids(&self) -> HashMap<Fingerprint, u64> {
+        self.keys
+            .iter()
+            .filter_map(|k| k.keychain_key_id.map(|id| (k.master_fingerprint, id)))
             .collect()
     }
 
@@ -1502,6 +1522,14 @@ pub struct KeySetting {
     /// [`crate::app::state::vault::signers::ReplayCapabilities`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replay_protected: Option<bool>,
+    /// The Connect id of the COINCUBE Keychain key this is, when it is one.
+    ///
+    /// Recorded when the Vault is built, so the Pair panel can offer only the
+    /// keys a Keychain phone can actually hold. `None` is only conclusive
+    /// when [`WalletSettings::keychain_keys_recorded`] is set; otherwise the
+    /// key's provenance is unrecorded. Absent from the file when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keychain_key_id: Option<u64>,
 }
 
 /// Where a Border Wallet key's Entropy Grid seed came from.
@@ -1582,6 +1610,7 @@ impl KeySetting {
                 is_border_wallet: false,
                 grid_seed_source: None,
                 replay_protected: None,
+                keychain_key_id: None,
             })
         } else {
             let is_border_wallet = metadata
@@ -1601,6 +1630,8 @@ impl KeySetting {
                 // machine, not part of the Vault's backup; a restore starts
                 // unmarked.
                 replay_protected: None,
+                // Not part of the backup; the restored Vault is unrecorded.
+                keychain_key_id: None,
             })
         }
     }
