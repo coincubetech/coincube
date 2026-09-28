@@ -2843,7 +2843,8 @@ pub fn describe(error: claim_coordinator::Error) -> String {
             format!("Your Bitcoin node rejected the transaction: {local}. Connect also rejected it: {connect}. This check did not broadcast anything.")
         }
         E::Preflight(crate::services::claim_preflight::Error::BackendChanged) => {
-            "This Vault's backend changed or stopped. Check its connection, then reopen Claim.".into()
+            "This Vault's backend changed or stopped. Check its connection, then reopen Claim."
+                .into()
         }
         E::Preflight(error) => format!("The transaction preflight check failed ({error:?})."),
         E::PolicyRejected(policy) => match policy {
