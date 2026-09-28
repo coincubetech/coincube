@@ -8,6 +8,7 @@ struct ProofServices {
     calls: Arc<AtomicUsize>,
     allow_preflight: Arc<std::sync::atomic::AtomicBool>,
     preflight_client: PreflightClient,
+    submission: Option<(Arc<Mutex<Vec<Transaction>>>, PathBuf)>,
 }
 #[async_trait]
 impl Services for ProofServices {
@@ -34,11 +35,31 @@ impl Services for ProofServices {
     }
     async fn submit(
         &self,
-        _: VerifiedStep1,
+        tx: VerifiedStep1,
         _: Arc<SubmissionGate>,
     ) -> Result<SubmissionOutcome, DaemonError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        Err(DaemonError::DaemonStopped)
+        let Some((submissions, directory)) = &self.submission else {
+            return Err(DaemonError::DaemonStopped);
+        };
+        let journal: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(directory.join("intent.json")).unwrap()).unwrap();
+        assert_eq!(journal["phase"], "BroadcastUncertain");
+        assert_eq!(journal["bitcoin_attempts"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            journal["signed_txid"],
+            tx.transaction().compute_txid().to_string()
+        );
+        assert_eq!(journal["bitcoin_transaction"], json!(tx.transaction()));
+        assert_eq!(
+            journal["bitcoin_attempts"][0]["wtxid"],
+            tx.transaction().compute_wtxid().to_string()
+        );
+        submissions.lock().unwrap().push(tx.transaction().clone());
+        Ok(SubmissionOutcome::UpstreamAccepted {
+            txid: tx.transaction().compute_txid(),
+            wtxid: tx.transaction().compute_wtxid(),
+        })
     }
 }
 fn fresh<'a>(server: &'a MockServer, path: &str, body: String) -> Mock<'a> {
@@ -55,7 +76,7 @@ fn fresh<'a>(server: &'a MockServer, path: &str, body: String) -> Mock<'a> {
 }
 
 #[tokio::test]
-async fn successful_http_proof_is_recollected_and_cannot_authorize_coordinator_submission() {
+async fn successful_http_proof_is_recollected_and_authorizes_one_exact_submission() {
     ancestry_protocol_case(true, 20_000).await;
 }
 
@@ -267,6 +288,7 @@ async fn ancestry_protocol_case(rdts_active: bool, expiry_time: i64) {
             calls: calls.clone(),
             allow_preflight: allow_preflight.clone(),
             preflight_client,
+            submission: None,
         }),
         policy(),
         false,
@@ -542,7 +564,7 @@ async fn ancestry_protocol_case(rdts_active: bool, expiry_time: i64) {
     // The same transaction re-mined in another canonical block requires a new
     // live proof and explicit acknowledgement; it does not add a send attempt.
     confirmed_step.delete_async().await;
-    fresh(
+    let reminted_step = fresh(
         &server,
         &format!(
             "/api/v1/esplora/bitcoin/mainnet/tx/{}",
@@ -595,6 +617,95 @@ async fn ancestry_protocol_case(rdts_active: bool, expiry_time: i64) {
     assert_eq!(recovery.bitcoin_submission_attempts().len(), 2);
     assert_eq!(recovery.status(), claim_workflow::Status::Unchecked);
     assert_eq!(calls.load(Ordering::SeqCst), 3);
+
+    // A separate coordinator proves the review-to-transport call boundary;
+    // the transport's gate consumption is covered in poison_broadcast tests.
+    // confirmation recollects the proof, records the exact attempt before the
+    // transport call, sends once, and cannot prepare a second submission.
+    reminted_step.delete_async().await;
+    let _submit_step_absent = server.mock(|when, then| {
+        when.method(GET)
+            .path(format!(
+                "/api/v1/esplora/bitcoin/mainnet/tx/{}",
+                plan.step1.compute_txid()
+            ))
+            .header("x-coincube-observation", "fresh");
+        then.status(404)
+            .header("x-cache", "BYPASS")
+            .header("cache-control", "no-store")
+            .header("x-coincube-observation", "fresh");
+    });
+    let (submit_built, submit_path, submit_verified) = super::built(10, false);
+    let submit_temp = Temp::new();
+    let (_submit_sender, submit_generation) = watch::channel(7);
+    let mut submit_client = CoincubeClient::for_test(server.base_url());
+    submit_client.set_token("synthetic-proof-token");
+    let submit_source = HttpObservationSource::new(
+        submit_client,
+        ChainId::Bitcoin,
+        ChainId::BitcoinBlake2b,
+        CollectionContext {
+            expected_generation: 7,
+            generation: submit_generation.clone(),
+        },
+    )
+    .unwrap();
+    let submit_preflight = PreflightClient::new(
+        &server.base_url(),
+        CollectionContext {
+            expected_generation: 7,
+            generation: submit_generation.clone(),
+        },
+    )
+    .unwrap();
+    let submit_calls = Arc::new(AtomicUsize::new(0));
+    let submissions = Arc::new(Mutex::new(Vec::new()));
+    let mut submit_coordinator = Coordinator::open_ancestry(
+        &submit_temp.0,
+        "bitcoin-cube".into(),
+        "fork-cube".into(),
+        &submit_built,
+        &submit_path,
+        submit_verified,
+        current.clone(),
+        submit_generation,
+        Box::new(ProofServices {
+            source: submit_source,
+            calls: submit_calls.clone(),
+            allow_preflight: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            preflight_client: submit_preflight,
+            submission: Some((submissions.clone(), submit_temp.0.clone())),
+        }),
+        policy(),
+        false,
+    )
+    .unwrap();
+    let submit_review = submit_coordinator.prepare_review(&current).await.unwrap();
+    let expected_tx = submit_review.snapshot().transaction.clone();
+    let expected_txid = expected_tx.compute_txid();
+    assert!(matches!(
+        submit_coordinator
+            .confirm_and_submit(submit_review, &current)
+            .await
+            .unwrap(),
+        Outcome::UpstreamAccepted { txid, .. } if txid == expected_txid
+    ));
+    assert_eq!(submissions.lock().unwrap().as_slice(), &[expected_tx]);
+    assert_eq!(
+        submit_coordinator
+            .controller
+            .bitcoin_submission_attempts()
+            .len(),
+        1
+    );
+    assert_eq!(submit_coordinator.phase(), Phase::BroadcastUncertain);
+    assert!(matches!(
+        submit_coordinator.prepare_review(&current).await,
+        Err(Error::SubmissionAlreadyRecorded)
+    ));
+    assert_eq!(submissions.lock().unwrap().len(), 1);
+    assert_eq!(submit_calls.load(Ordering::SeqCst), 3);
+
     // Contradictory positive fork presence must win over the exclusion result.
     step_reads[1].delete_async().await;
     fresh(
@@ -642,6 +753,7 @@ async fn ancestry_protocol_case(rdts_active: bool, expiry_time: i64) {
         ));
         then.status(500);
     });
+    let root_hits_before_failure = root_read.hits();
     assert!(matches!(
         coordinator.prepare_review(&current).await,
         Err(Error::Observation(claim_observation::Failure {
@@ -649,7 +761,7 @@ async fn ancestry_protocol_case(rdts_active: bool, expiry_time: i64) {
             ..
         }))
     ));
-    root_read.assert_hits(12);
+    root_read.assert_hits(root_hits_before_failure + 1);
     assert_eq!(calls.load(Ordering::SeqCst), 3);
     sender.send_replace(8);
     assert_eq!(
@@ -660,6 +772,6 @@ async fn ancestry_protocol_case(rdts_active: bool, expiry_time: i64) {
         coordinator.prepare_review(&current).await,
         Err(Error::Revoked)
     ));
-    root_read.assert_hits(12);
+    root_read.assert_hits(root_hits_before_failure + 1);
     assert_eq!(std::fs::read(temp.0.join("intent.json")).unwrap(), before);
 }
