@@ -217,20 +217,32 @@ class UnixDomainSocketRpc(object):
         self.next_id = 0
 
     def _readobj(self, sock):
-        """Read a JSON object"""
+        """Read one JSON object.
+
+        coincubed writes the response unframed and keeps the connection open,
+        so the response can arrive split into chunks of any size and no EOF
+        follows it. Try to decode after every chunk: whether a read filled the
+        requested size says nothing about whether the response is complete.
+        """
         buff = b""
         while True:
-            n_to_read = max(2048, len(buff))
-            chunk = sock.recv(n_to_read)
+            chunk = sock.recv(max(2048, len(buff)))
+            if not chunk:
+                if not buff:
+                    raise ConnectionError(
+                        "coincubed closed the RPC connection before sending a response"
+                    )
+                raise ConnectionError(
+                    f"coincubed closed the RPC connection after {len(buff)} bytes of "
+                    f"an incomplete response: {buff[:200]!r}"
+                    + ("..." if len(buff) > 200 else "")
+                )
             buff += chunk
-            if len(chunk) != n_to_read:
-                try:
-                    return json.loads(buff)
-                except json.JSONDecodeError:
-                    # There is more to read, continue
-                    # FIXME: this is a workaround for large reads taken from coincubed.
-                    # We should use the '\n' marker instead since coincubed uses that.
-                    continue
+            try:
+                return json.loads(buff)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                # Incomplete, possibly cut inside a multi-byte character.
+                continue
 
     def __getattr__(self, name):
         """Intercept any call that is not explicitly defined and call @call.
