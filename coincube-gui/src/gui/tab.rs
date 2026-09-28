@@ -2711,6 +2711,9 @@ impl Tab {
                     }
                 }
                 crate::pin_entry::Message::Back => {
+                    // An abandoned unlock abandons its Split handoff too; it
+                    // must not fire on a later ordinary open of this Cube.
+                    app::split_intent::clear();
                     // Go back to home. `Home` speaks `bitcoin::Network` (it
                     // only ever lists the Bitcoin family), and a Cube on the
                     // PIN screen is one that passed the open gate, so the
@@ -2981,6 +2984,8 @@ impl Tab {
                     )
                 }
                 crate::passkey_unlock::Message::Back => {
+                    // As for PIN Back: abandoning the unlock clears Split.
+                    app::split_intent::clear();
                     // Dropping the screen drops any in-flight ceremony, which
                     // cancels the system prompt.
                     let network = unlock.cube().network.bitcoin_network();
@@ -5326,6 +5331,51 @@ mod unlock_routing_tests {
             matches!(state, State::PasskeyUnlock(_)),
             "a passkey Cube must unlock with its passkey, not a PIN keypad"
         );
+    }
+
+    /// #576 review F1: abandoning the unlock of a Split target must clear the
+    /// armed handoff, or it fires on a later ordinary open of the same Cube.
+    #[test]
+    fn abandoning_pin_or_passkey_unlock_clears_the_split_handoff() {
+        use crate::{app::split_intent, chain::ChainId};
+        let _guard = crate::app::session::test_guard();
+        for passkey in [false, true] {
+            let mut cube = CubeSettings::new("Fork".to_string(), ChainId::BitcoinBlake2b);
+            if passkey {
+                cube = cube.with_passkey(PasskeyMetadata {
+                    credential_id: "Y3JlZC1pZA==".to_string(),
+                    rp_id: "coincube.io".to_string(),
+                    created_at: 1_786_122_245,
+                    label: None,
+                });
+            }
+            let id = cube.id.clone();
+            // Control: the fixture is armed and would be taken by this Cube.
+            split_intent::arm_fresh_for_test(&id);
+            assert!(split_intent::take_for_open(&id, ChainId::BitcoinBlake2b).is_some());
+
+            split_intent::arm_fresh_for_test(&id);
+            let mut tab = super::Tab::new(
+                1,
+                unlock_state(
+                    cube,
+                    std::path::PathBuf::from("/tmp/unused"),
+                    on_success(),
+                    None,
+                ),
+            );
+            let _ = tab.update(if passkey {
+                super::Message::PasskeyUnlock(crate::passkey_unlock::Message::Back)
+            } else {
+                super::Message::PinEntry(crate::pin_entry::Message::Back)
+            });
+            assert!(matches!(tab.state, State::Home(_)));
+            assert!(
+                split_intent::take_for_open(&id, ChainId::BitcoinBlake2b).is_none(),
+                "passkey={}",
+                passkey
+            );
+        }
     }
 
     /// The other half: the PIN path is untouched by the fix. Without this, a

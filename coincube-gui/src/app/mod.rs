@@ -940,7 +940,9 @@ fn split_review_error(error: crate::services::foreign_psbt::ForeignPsbtError) ->
         E::UnsupportedRoute => "Taproot (tr) wallets can be scanned but not split: there is no signing route for them yet.".to_string(),
         E::ForkUnknown => "The Bitcoin Blake2b fork height was not observed with this scan, so no coin can be proven pre-fork. Scan again.".to_string(),
         E::Empty => "No confirmed pre-fork coins were found. Coins received after the fork exist only on Bitcoin Blake2b and are not part of a split.".to_string(),
-        _ => "The source evidence cannot produce a safe sweep review. Scan again after all outputs confirm.".to_string(),
+        E::Unconfirmed => "Wait for every discovered output to confirm, then scan again.".to_string(),
+        E::Economics => "The pre-fork total cannot cover the maximum fee at this fee rate while leaving a spendable amount.".to_string(),
+        _ => "The source evidence cannot produce a safe sweep review. Scan again.".to_string(),
     }
 }
 
@@ -2623,21 +2625,27 @@ impl App {
         cube_settings: settings::CubeSettings,
     ) -> Result<(App, Task<Message>), Error> {
         let chain = cube_settings.network;
+        // A refused fork open never reaches `new_inner`, which is what takes
+        // the Split slot; refuse it here too so it cannot fire later.
+        let refuse = |error: Error| -> Result<(App, Task<Message>), Error> {
+            split_intent::clear();
+            Err(error)
+        };
         if !chain.is_blake2b() || wallet.chain != chain || cache.chain() != chain {
-            return Err(Error::Daemon(DaemonError::ConnectAnchor(
+            return refuse(Error::Daemon(DaemonError::ConnectAnchor(
                 coincubed::connect::AdmissionError::WrongChain.into(),
             )));
         }
         if client.token().is_none_or(|token| token.trim().is_empty()) {
-            return Err(Error::Daemon(DaemonError::ConnectAnchor(
+            return refuse(Error::Daemon(DaemonError::ConnectAnchor(
                 coincubed::connect::AdmissionError::MissingAuth.into(),
             )));
         }
-        let backend_config = daemon.config().ok_or_else(|| {
-            Error::Daemon(DaemonError::ConnectAnchor(
+        let Some(backend_config) = daemon.config() else {
+            return refuse(Error::Daemon(DaemonError::ConnectAnchor(
                 coincubed::connect::AdmissionError::InvalidBackend.into(),
-            ))
-        })?;
+            )));
+        };
         let endpoint = format!(
             "{}/api/v1/esplora/{}",
             client.base_url.trim_end_matches('/'),
@@ -2652,7 +2660,7 @@ impl App {
             || !correct_backend
             || backend_config.pending_bitcoind.is_some()
         {
-            return Err(Error::Daemon(DaemonError::ConnectAnchor(
+            return refuse(Error::Daemon(DaemonError::ConnectAnchor(
                 coincubed::connect::AdmissionError::InvalidBackend.into(),
             )));
         }
@@ -7830,6 +7838,47 @@ fn restart_daemon_blocking(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #576 review F1: a fork open refused before `new_inner` must still
+    /// consume the Split handoff, so it cannot fire on a later open.
+    #[test]
+    fn a_refused_fork_open_clears_the_split_handoff() {
+        use std::str::FromStr;
+        let _guard = crate::app::session::test_guard();
+        let chain = crate::chain::ChainId::BitcoinBlake2b;
+        let desc = coincube_core::descriptors::CoincubeDescriptor::from_str(
+            "wsh(or_d(pk([f5acc2fd]tpubD6NzVbkrYhZ4YgUx2ZLNt2rLYAMTdYysCRzKoLu2BeSHKvzqPaBDvf17GeBPnExUVPkuBpx4kniP964e2MxyzzazcXLptxLXModSVCVEV1T/<0;1>/*),and_v(v:pkh([8a64f2a9]tpubD6NzVbkrYhZ4WmzFjvQrp7sDa4ECUxTi9oby8K4FZkd3XCBtEdKwUiQyYJaxiJo5y42gyDWEczrFpozEjeLxMPxjf2WtkfcbpUdfvNnozWF/<0;1>/*),older(10))))#d72le4dr"
+        ).unwrap();
+        let root =
+            std::env::temp_dir().join(format!("coincube-split-refused-{}", uuid::Uuid::new_v4()));
+        let cfg: coincubed::config::Config = toml::from_str(&format!(
+            "main_descriptor = '{}'\ndata_directory = '{}'\n[bitcoin_config]\nnetwork = '{}'\n[esplora_config]\naddr = 'http://127.0.0.1:1'\n",
+            desc,
+            root.display(),
+            chain.api_str()
+        ))
+        .unwrap();
+        let settings = settings::CubeSettings::new("Fork".into(), chain);
+        split_intent::arm_fresh_for_test(&settings.id);
+        // The client has no token: admission refuses before `new_inner`.
+        let result = App::new_for_chain(
+            Cache {
+                fiat_chain: chain,
+                network: chain.bitcoin_network(),
+                ..Cache::default()
+            },
+            Arc::new(Wallet::new(desc).with_chain(chain)),
+            None,
+            crate::services::coincube::CoincubeClient::new(),
+            Config::new(false),
+            Arc::new(EmbeddedDaemon::unstarted_for_test(cfg, None)),
+            CoincubeDirectory::new(root.clone()),
+            settings.clone(),
+        );
+        assert!(result.is_err());
+        assert!(split_intent::take_for_open(&settings.id, chain).is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     /// #568 A1: the Split review is priced only by a BTCB2-scoped source, and
     /// none exists yet, so fees are unavailable instead of Bitcoin mainnet's.
