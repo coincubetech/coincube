@@ -33,6 +33,11 @@ use std::{
     time::SystemTime,
 };
 
+/// Stable JSON-RPC server error code for [`CommandError::UnsafeLegacyAlternative`].
+/// The desktop uses it to preserve the typed policy refusal across an external
+/// daemon boundary instead of treating it as generic invalid input.
+pub const UNSAFE_LEGACY_ALTERNATIVE_ERROR: i64 = 1_002;
+
 use miniscript::{
     bitcoin::{
         self, address,
@@ -81,6 +86,14 @@ pub enum CommandError {
     /// and the finaliser would refuse. Nothing was stored; an existing row is
     /// unchanged.
     UnifiedSpendValidation(String),
+    /// The locally retained Bitcoin Blake2b PSBT has a unified-bearing
+    /// satisfaction, but its legacy signatures can independently satisfy an
+    /// input. Refused before storage, export, or broadcast so Coincube does not
+    /// persist or present a locally reproducible alternate Bitcoin witness.
+    UnsafeLegacyAlternative {
+        input: usize,
+        legacy_signatures: usize,
+    },
     TxBroadcast(String),
     AlreadyRescanning,
     InsaneRescanTimestamp(u32),
@@ -153,6 +166,16 @@ impl fmt::Display for CommandError {
             Self::UnifiedSpendValidation(e) => {
                 write!(f, "Refused to store the Bitcoin Blake2b spend: '{}'.", e)
             }
+            Self::UnsafeLegacyAlternative {
+                input,
+                legacy_signatures,
+            } => write!(
+                f,
+                "Refused Bitcoin Blake2b spend input {input}: its {legacy_signatures} retained \
+                 legacy signatures can independently form a Bitcoin-valid witness. Remove the \
+                 surplus legacy signatures or create a new spend. Signatures already held by \
+                 another device or exported copy cannot be revoked."
+            ),
             Self::TxBroadcast(e) => write!(f, "Failed to broadcast transaction: {}", e),
             Self::AlreadyRescanning => write!(
                 f,
@@ -285,8 +308,27 @@ fn validate_spend_for_chain(
     let unified = coincube_core::psbt_unified::UnifiedPsbt::from_psbt(psbt.clone())
         .map_err(|e| CommandError::UnifiedSpendValidation(e.to_string()))?;
     coincube_core::unified_finalize::verify_all_signatures(&unified, secp)
-        .map(|_| ())
-        .map_err(|e| CommandError::UnifiedSpendValidation(e.to_string()))
+        .map_err(|e| CommandError::UnifiedSpendValidation(e.to_string()))?;
+    enforce_legacy_signature_policy(&unified, secp)
+}
+
+fn enforce_legacy_signature_policy(
+    psbt: &coincube_core::psbt_unified::UnifiedPsbt,
+    secp: &bitcoin::secp256k1::Secp256k1<bitcoin::secp256k1::VerifyOnly>,
+) -> Result<(), CommandError> {
+    use coincube_core::unified_finalize::{
+        ensure_no_unsafe_legacy_alternative, UnifiedFinalizeError,
+    };
+    ensure_no_unsafe_legacy_alternative(psbt, secp).map_err(|error| match error {
+        UnifiedFinalizeError::UnsafeLegacyAlternative {
+            input,
+            legacy_signatures,
+        } => CommandError::UnsafeLegacyAlternative {
+            input,
+            legacy_signatures,
+        },
+        other => CommandError::UnifiedSpendValidation(other.to_string()),
+    })
 }
 
 /// Merge the signatures of an incoming PSBT for a spend already stored, keyed on
@@ -333,6 +375,7 @@ fn merge_spend_signatures(
         // row. Refused atomically; no request reconciliation.
         coincube_core::unified_finalize::verify_all_signatures(&stored, secp)
             .map_err(|e| CommandError::UnifiedSignatureMerge(e.to_string()))?;
+        enforce_legacy_signature_policy(&stored, secp)?;
         return Ok(stored.psbt().clone());
     }
 
@@ -399,9 +442,22 @@ fn finalize_spend_for_chain(
         return Ok(spend_psbt.extract_tx_unchecked_fee_rate());
     }
 
-    use coincube_core::{psbt_unified::UnifiedPsbt, unified_finalize::finalize_p2wsh_all_unified};
+    use coincube_core::{
+        psbt_unified::UnifiedPsbt,
+        unified_finalize::{ensure_no_unsafe_legacy_alternative, finalize_p2wsh_all_unified},
+    };
     let unified = UnifiedPsbt::from_psbt(spend_psbt)
         .map_err(|e| CommandError::UnifiedSpendFinalization(e.to_string()))?;
+    ensure_no_unsafe_legacy_alternative(&unified, secp).map_err(|error| match error {
+        coincube_core::unified_finalize::UnifiedFinalizeError::UnsafeLegacyAlternative {
+            input,
+            legacy_signatures,
+        } => CommandError::UnsafeLegacyAlternative {
+            input,
+            legacy_signatures,
+        },
+        other => CommandError::UnifiedSpendFinalization(other.to_string()),
+    })?;
     let finalized = finalize_p2wsh_all_unified(&unified, secp)
         .map_err(|e| CommandError::UnifiedSpendFinalization(e.to_string()))?;
     for (index, report) in finalized.inputs.iter().enumerate() {
@@ -4978,6 +5034,63 @@ mod tests {
                 Err(CommandError::UnifiedSignatureMerge(_))
             ));
             assert_eq!(stored(&control).unwrap().serialize(), merged.serialize());
+        }
+
+        #[test]
+        fn blake2b_persistence_refuses_an_independent_legacy_alternative_atomically() {
+            let (signers, descriptor, psbt) = vault_fixture();
+            let control = blake2b_control(descriptor);
+            let txid = psbt.unsigned_tx.compute_txid();
+            let outpoint = psbt.unsigned_tx.input[0].previous_output;
+            {
+                let mut db = control.db().lock().unwrap().connection();
+                db.new_unspent_coins(&[Coin {
+                    outpoint,
+                    is_immature: false,
+                    block_info: None,
+                    amount: bitcoin::Amount::from_sat(50_000),
+                    derivation_index: bip32::ChildNumber::from(3),
+                    is_change: false,
+                    spend_txid: None,
+                    spend_block: None,
+                    is_from_self: false,
+                }]);
+            }
+            let stored =
+                |control: &DaemonControl| control.db().lock().unwrap().connection().spend_tx(&txid);
+
+            let safe_mixed = legacy(&unified(&psbt, &signers[0]), &signers[1]);
+            let unsafe_first = legacy(&safe_mixed, &signers[2]);
+            assert!(matches!(
+                control.update_spend(unsafe_first.clone()),
+                Err(CommandError::UnsafeLegacyAlternative { input: 0, .. })
+            ));
+            assert!(
+                stored(&control).is_none(),
+                "unsafe first insert stored nothing"
+            );
+
+            control.update_spend(safe_mixed.clone()).unwrap();
+            let before = stored(&control).expect("safe mixed witness stored");
+            assert_eq!(before.serialize(), safe_mixed.serialize());
+            assert!(matches!(
+                control.update_spend(legacy(&psbt, &signers[2])),
+                Err(CommandError::UnsafeLegacyAlternative { input: 0, .. })
+            ));
+            assert_eq!(
+                stored(&control).unwrap().serialize(),
+                before.serialize(),
+                "unsafe merge leaves the row byte-identical"
+            );
+
+            assert!(matches!(
+                finalize_spend_for_chain(ChainId::BitcoinBlake2b, unsafe_first, &verify_only()),
+                Err(CommandError::UnsafeLegacyAlternative { input: 0, .. })
+            ));
+            let mixed =
+                finalize_spend_for_chain(ChainId::BitcoinBlake2b, safe_mixed, &verify_only())
+                    .expect("one legacy signature needed by a mixed witness remains valid");
+            assert_eq!(sig_elements(&mixed.input[0].witness), (1, 1));
         }
 
         /// Gandalf's probe from the review of 15a26267 (WORK_LOGS/LAUNCH_GA/B1/
