@@ -175,7 +175,8 @@ impl From<commands::CommandError> for Error {
             | commands::CommandError::OutpointNotRecoverable(..) => {
                 Error::new(ErrorCode::InvalidParams, e.to_string())
             }
-            commands::CommandError::RescanTrigger(..)
+            commands::CommandError::RescanGenesis(..)
+            | commands::CommandError::RescanTrigger(..)
             | commands::CommandError::ChangeReservation(
                 crate::database::ReservationError::Storage
                 | crate::database::ReservationError::Unsupported,

@@ -29,6 +29,8 @@ use miniscript::{
 pub struct DummyBitcoind {
     pub broadcasted: sync::Mutex<Vec<Transaction>>,
     pub broadcast_error: Option<String>,
+    pub rescan_requests: Vec<u32>,
+    pub tip_timestamp: Option<u32>,
     pub genesis_error: Option<crate::connect::AdmissionError>,
     pub txs: HashMap<Txid, (Transaction, Option<Block>)>,
     /// What `chain_tip` reports. Defaults to the historical fixed value (height 100).
@@ -71,7 +73,9 @@ impl DummyBitcoind {
         Self {
             broadcasted: sync::Mutex::new(Vec::new()),
             broadcast_error: None,
+            rescan_requests: Vec::new(),
             genesis_error: None,
+            tip_timestamp: None,
             txs: HashMap::new(),
             tip: BlockChainTip { hash, height: 100 },
             in_chain: true,
@@ -84,8 +88,9 @@ impl DummyBitcoind {
 }
 
 impl BitcoinInterface for DummyBitcoind {
-    fn genesis_block_timestamp(&self) -> u32 {
-        1231006505
+    fn genesis_block_timestamp(&self) -> Result<u32, crate::bitcoin::GenesisError> {
+        self.genesis_block()?;
+        Ok(1231006505)
     }
 
     fn genesis_block(&self) -> Result<BlockChainTip, crate::bitcoin::GenesisError> {
@@ -181,8 +186,13 @@ impl BitcoinInterface for DummyBitcoind {
         }
     }
 
-    fn start_rescan(&mut self, _: &descriptors::CoincubeDescriptor, _: u32) -> Result<(), String> {
-        todo!()
+    fn start_rescan(
+        &mut self,
+        _: &descriptors::CoincubeDescriptor,
+        timestamp: u32,
+    ) -> Result<(), String> {
+        self.rescan_requests.push(timestamp);
+        Ok(())
     }
 
     fn rescan_progress(&self) -> Option<f64> {
@@ -194,7 +204,7 @@ impl BitcoinInterface for DummyBitcoind {
     }
 
     fn tip_time(&self) -> Option<u32> {
-        None
+        self.tip_timestamp
     }
 
     fn wallet_transaction(
@@ -530,8 +540,8 @@ impl DatabaseConnection for DummyDatabase {
         self.db.read().unwrap().rescan_timestamp
     }
 
-    fn set_rescan(&mut self, _: u32) {
-        todo!()
+    fn set_rescan(&mut self, timestamp: u32) {
+        self.db.write().unwrap().rescan_timestamp = Some(timestamp);
     }
 
     fn complete_rescan(&mut self) {
