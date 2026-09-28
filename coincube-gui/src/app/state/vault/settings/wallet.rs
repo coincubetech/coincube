@@ -572,6 +572,7 @@ pub async fn update_aliases(
                             .get(master_fingerprint)
                             .copied(),
                         replay_protected: wallet.replay_marks.get(master_fingerprint).copied(),
+                        keychain_key_id: wallet.keychain_key_ids.get(master_fingerprint).copied(),
                     })
                     .collect();
             }
@@ -623,6 +624,7 @@ mod chain_tests {
                     remote_backend_auth: None,
                     start_internal_bitcoind: None,
                     pending_rescan: None,
+                    keychain_keys_recorded: false,
                 }],
                 ..Default::default()
             };
@@ -660,6 +662,70 @@ mod chain_tests {
             );
             std::fs::remove_dir_all(root).unwrap();
         }
+    }
+
+    /// Renaming a key rewrites the whole key list; the Keychain id must come
+    /// through it, or the Pair panel would stop offering the renamed key.
+    #[tokio::test]
+    async fn alias_update_keeps_keychain_key_id() {
+        use std::collections::HashMap;
+        let descriptor = crate::app::state::vault::test_support::unified::fixture().descriptor;
+        let root = std::env::temp_dir().join(format!("coincube-settings-{}", uuid::Uuid::new_v4()));
+        let dir = CoincubeDirectory::new(root.clone());
+        let phone = Fingerprint::from([1, 2, 3, 4]);
+        let other = Fingerprint::from([5, 6, 7, 8]);
+        let wallet = Arc::new(
+            Wallet::new(descriptor)
+                .with_chain(ChainId::Bitcoin)
+                .with_keychain_keys(HashMap::from([(phone, 7)]), true),
+        );
+        let settings = settings::Settings {
+            wallets: vec![settings::WalletSettings {
+                name: wallet.name.clone(),
+                alias: None,
+                descriptor_checksum: wallet.descriptor_checksum.clone(),
+                pinned_at: wallet.pinned_at,
+                keys: vec![],
+                hardware_wallets: vec![],
+                remote_backend_auth: None,
+                start_internal_bitcoind: None,
+                pending_rescan: None,
+                keychain_keys_recorded: true,
+            }],
+            ..Default::default()
+        };
+        let path = dir.network_directory(ChainId::Bitcoin);
+        std::fs::create_dir_all(path.path()).unwrap();
+        std::fs::write(
+            path.path().join(settings::SETTINGS_FILE_NAME),
+            serde_json::to_vec(&settings).unwrap(),
+        )
+        .unwrap();
+        let daemon = Arc::new(crate::daemon::client::Coincubed::new(
+            crate::utils::mock::Daemon::new(vec![]).run(),
+        ));
+        let updated = update_aliases(
+            dir.clone(),
+            wallet,
+            None,
+            vec![(phone, "Renamed phone".into()), (other, "Ledger".into())],
+            daemon,
+        )
+        .await
+        .unwrap();
+        assert_eq!(updated.keychain_key_ids.get(&phone), Some(&7));
+
+        let stored = settings::Settings::from_file(&path).unwrap();
+        assert!(stored.wallets[0].keychain_keys_recorded);
+        let keys: HashMap<_, _> = stored.wallets[0]
+            .keys
+            .iter()
+            .map(|k| (k.master_fingerprint, k))
+            .collect();
+        assert_eq!(keys[&phone].name, "Renamed phone");
+        assert_eq!(keys[&phone].keychain_key_id, Some(7));
+        assert_eq!(keys[&other].keychain_key_id, None);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
