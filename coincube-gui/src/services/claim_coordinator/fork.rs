@@ -467,9 +467,11 @@ impl Coordinator {
         // Confirmed conflicting spends separate the chains even after RDTS
         // expires. This is historical metadata, never signing authority.
         let plan = self.controller.plan();
-        // Keep durable completion gated until the complete ancestry signing,
-        // reorg and two-chain acceptance flow has independent approval.
-        if plan.poison == coincube_core::claim::Poison::InputAncestry {
+        // New ancestry completion and GUI signer dispatch share one production
+        // authorization. Existing markers can still be reconciled below.
+        if plan.poison == coincube_core::claim::Poison::InputAncestry
+            && crate::services::claim_ancestry_gate::authorization().is_none()
+        {
             return Ok(None);
         }
         let observations = checked.assessment().observations;

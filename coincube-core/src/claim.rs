@@ -25,8 +25,11 @@ pub enum Poison {
     /// The actual transaction must contain an OP_RETURN script larger than
     /// RDTS's 83-byte output-script limit. Its validity is time-dependent.
     OpReturn,
-    /// No verified ancestry constructor exists yet. Always unsupported;
-    /// never replace this with an absent-txid or post-fork-time heuristic.
+    /// The generic observation bundle cannot carry the bounded positive proof
+    /// required for ancestry. It therefore remains unsupported here; callers
+    /// must use the typed, freshly verified ancestry assessment and the GUI's
+    /// separate production gate. Never replace either boundary with an
+    /// absent-txid or post-fork-time heuristic.
     InputAncestry,
 }
 
