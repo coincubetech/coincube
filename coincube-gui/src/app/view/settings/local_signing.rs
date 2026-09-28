@@ -12,7 +12,7 @@ use coincube_ui::{icon, theme};
 
 use crate::app::cache;
 use crate::app::menu::Menu;
-use crate::app::state::settings::local_signing::{LocalSigningState, PairingFlow};
+use crate::app::state::settings::local_signing::{LocalSigningState, PairableKey, PairingFlow};
 use crate::app::view::dashboard;
 use crate::app::view::message::{LocalSigningMessage, Message, SettingsMessage};
 use crate::phone_signer::errors::PairingError;
@@ -77,44 +77,160 @@ fn pairing_card<'a>(state: &'a LocalSigningState) -> Element<'a, Message> {
 }
 
 fn idle_body<'a>(state: &'a LocalSigningState) -> Element<'a, Message> {
+    let intro = text(
+        "Pair a Keychain phone over your local network so it can \
+         sign PSBTs directly, without going through the Connect \
+         API. The phone must be on the same Wi-Fi.",
+    );
+    if state.keychain_keys_recorded && state.vault_keys.is_empty() {
+        return Column::new()
+            .padding(10)
+            .spacing(8)
+            .push(intro)
+            .push(no_keychain_keys())
+            .into();
+    }
+
     let mut pair_btn = button::secondary(None, "Pair phone");
     if state.wallet_fingerprint.is_some() && state.selected_key.is_some() {
         pair_btn = pair_btn.on_press(Message::Settings(SettingsMessage::LocalSigning(
             LocalSigningMessage::StartPairing,
         )));
     }
-    let mut keys = Column::new()
-        .spacing(8)
-        .push(text("Select the exact vault key held by this phone:"));
-    for (xpub, label) in &state.vault_keys {
-        let selected = state.selected_key.as_ref() == Some(xpub);
-        keys = keys.push(
-            iced::widget::Button::new(
-                text(format!(
-                    "{}{}",
-                    if selected { "Selected: " } else { "" },
-                    label
-                ))
-                .width(Length::Fill)
-                .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
-            )
-            .width(Length::Fill)
-            .style(theme::button::secondary)
-            .on_press(Message::Settings(SettingsMessage::LocalSigning(
-                LocalSigningMessage::SelectKey(xpub.clone()),
-            ))),
-        );
+    let prompt = if state.vault_keys.len() == 1 {
+        "The Keychain key this phone will sign for:"
+    } else {
+        "Select the key held by this phone:"
+    };
+    let mut keys = Column::new().spacing(8).push(text(prompt));
+    for key in &state.vault_keys {
+        keys = keys.push(key_row(
+            key,
+            state.selected_key.as_ref() == Some(&key.xpub),
+            state.show_key_details,
+        ));
     }
+    let details = button::link(
+        None,
+        if state.show_key_details {
+            "Hide key details"
+        } else {
+            "Show key details"
+        },
+    )
+    .on_press(Message::Settings(SettingsMessage::LocalSigning(
+        LocalSigningMessage::ToggleKeyDetails,
+    )));
     Column::new()
         .padding(10)
         .spacing(8)
-        .push(text(
-            "Pair a Keychain phone over your local network so it can \
-             sign PSBTs directly, without going through the Connect \
-             API. The phone must be on the same Wi-Fi.",
-        ))
+        .push(intro)
         .push(keys)
+        .push(details)
+        .push(
+            text("Key names can be changed in Vault → Settings → Wallet.")
+                .style(theme::text::secondary),
+        )
         .push(pair_btn)
+        .into()
+}
+
+/// The Vault has no key from the Keychain app, so no phone holds a key it
+/// could sign with. Says so instead of offering a pairing that must fail.
+fn no_keychain_keys<'a>() -> Element<'a, Message> {
+    Column::new()
+        .spacing(4)
+        .push(text("No Keychain keys to pair").bold())
+        .push(
+            text(
+                "This Vault doesn't have a key from the COINCUBE Keychain \
+                 app, so there's no phone that can sign for it. Keychain \
+                 keys are added when you create a Vault.",
+            )
+            .style(theme::text::secondary),
+        )
+        .into()
+}
+
+/// A key's display name: the name the user gave it, else a generic label
+/// with its fingerprint, never the raw xpub.
+fn key_title(key: &PairableKey) -> String {
+    match (&key.name, key.fingerprint) {
+        (Some(name), _) => name.clone(),
+        (None, Some(fp)) if key.keychain => format!("Keychain key {}", fp),
+        (None, Some(fp)) => format!("Key {}", fp),
+        (None, None) => "Unnamed key".to_string(),
+    }
+}
+
+/// The line under a key's name: where it comes from and the fingerprint
+/// the phone shows for it.
+fn key_subtitle(key: &PairableKey) -> Option<String> {
+    match (key.keychain, key.fingerprint) {
+        (true, Some(fp)) => Some(format!("Keychain · {}", fp)),
+        (true, None) => Some("Keychain".to_string()),
+        (false, Some(fp)) => Some(fp.to_string()),
+        (false, None) => None,
+    }
+}
+
+fn key_row<'a>(key: &'a PairableKey, selected: bool, show_details: bool) -> Element<'a, Message> {
+    let mut content = Column::new()
+        .spacing(2)
+        .width(Length::Fill)
+        .push(text(key_title(key)).bold());
+    if let Some(subtitle) = key_subtitle(key) {
+        content = content.push(text(subtitle).style(theme::text::secondary));
+    }
+    if show_details {
+        content = content.push(
+            text(&key.descriptor_key)
+                .font(Font::MONOSPACE)
+                .size(12)
+                .style(theme::text::secondary)
+                .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
+        );
+    }
+    let mut row = Row::new()
+        .spacing(12)
+        .align_y(Alignment::Center)
+        .push(content);
+    if selected {
+        row = row.push(
+            Row::new()
+                .spacing(6)
+                .align_y(Alignment::Center)
+                .push(icon::check_icon())
+                .push(text("Selected")),
+        );
+    }
+    // The button styles are fully rounded, so the text needs room to clear
+    // the corners. The orange outline marks the choice, as it does for the
+    // fee presets on the Send screen.
+    iced::widget::Button::new(row)
+        .width(Length::Fill)
+        .padding([12, 20])
+        .style(if selected {
+            theme::button::orange_outline
+        } else {
+            theme::button::secondary
+        })
+        .on_press(Message::Settings(SettingsMessage::LocalSigning(
+            LocalSigningMessage::SelectKey(key.xpub.clone()),
+        )))
+        .into()
+}
+
+/// Leaves the pairing steps for key selection, keeping the chosen key.
+/// Every step past key selection starts with it, so there is always a way
+/// back, including from an error that can't be retried. Fixed width as on
+/// the SideShift screens: `button::secondary` otherwise fills the card.
+fn back_button<'a>() -> Element<'a, Message> {
+    button::secondary(Some(icon::previous_icon()), "Back")
+        .width(Length::Fixed(150.0))
+        .on_press(Message::Settings(SettingsMessage::LocalSigning(
+            LocalSigningMessage::CancelPairing,
+        )))
         .into()
 }
 
@@ -130,8 +246,7 @@ fn waiting_body<'a>(
         "Pairing offer expired.".to_string()
     };
 
-    let mut body = Column::new()
-        .padding(10)
+    let mut offer_col = Column::new()
         .spacing(10)
         .align_x(Alignment::Center)
         .push(text(countdown))
@@ -141,16 +256,16 @@ fn waiting_body<'a>(
             phone.cert_fp8, phone.addr,
         )));
     if let Some(qr) = qr {
-        body = body.push(
+        offer_col = offer_col.push(
             Container::new(QRCode::<coincube_ui::theme::Theme>::new(qr).cell_size(4)).padding(10),
         );
     }
-    body = body.push(
-        button::secondary(None, "Cancel").on_press(Message::Settings(
-            SettingsMessage::LocalSigning(LocalSigningMessage::CancelPairing),
-        )),
-    );
-    body.into()
+    Column::new()
+        .padding(10)
+        .spacing(10)
+        .push(back_button())
+        .push(offer_col)
+        .into()
 }
 
 fn picker_body<'a>(
@@ -160,22 +275,19 @@ fn picker_body<'a>(
         return Column::new()
             .padding(10)
             .spacing(8)
+            .push(back_button())
             .push(text("Looking for phones…").bold())
             .push(text(
                 "No phones found on this Wi-Fi yet. Open the Keychain \
                  app on a phone on the same network and make sure it's \
                  unlocked, then wait a few seconds.",
             ))
-            .push(
-                button::secondary(None, "Cancel").on_press(Message::Settings(
-                    SettingsMessage::LocalSigning(LocalSigningMessage::CancelPairing),
-                )),
-            )
             .into();
     }
     let mut col = Column::new()
         .padding(10)
         .spacing(8)
+        .push(back_button())
         .push(text("Pick a phone to pair with").bold())
         .push(text(
             "These are the Keychain phones currently advertising on \
@@ -198,12 +310,6 @@ fn picker_body<'a>(
             )));
         col = col.push(row);
     }
-    col = col.push(separation().width(Length::Fill));
-    col = col.push(
-        button::secondary(None, "Cancel").on_press(Message::Settings(
-            SettingsMessage::LocalSigning(LocalSigningMessage::CancelPairing),
-        )),
-    );
     col.into()
 }
 
@@ -231,8 +337,8 @@ fn error_body<'a>(err: &'a PairingError) -> Element<'a, Message> {
         ),
         PairingError::ReplayRefused => (
             "QR already used",
-            "This pairing QR has already completed a pairing. Cancel \
-             and start a fresh offer rather than re-using it."
+            "This pairing QR has already completed a pairing. Go \
+             back and start a fresh offer rather than re-using it."
                 .to_string(),
         ),
         PairingError::PhoneVerificationFailed => (
@@ -265,6 +371,7 @@ fn error_body<'a>(err: &'a PairingError) -> Element<'a, Message> {
     let mut col = Column::new()
         .padding(10)
         .spacing(8)
+        .push(back_button())
         .push(text(title).bold().style(theme::text::error))
         .push(text(body).style(theme::text::error));
     if err.is_retriable() {
@@ -408,4 +515,67 @@ fn paired_phones_card<'a>(state: &'a LocalSigningState) -> Element<'a, Message> 
             .push(body),
     )
     .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use coincube_core::miniscript::bitcoin::bip32::Fingerprint;
+    use std::str::FromStr;
+
+    fn key(name: Option<&str>, keychain: bool) -> PairableKey {
+        PairableKey {
+            xpub: "tpubD6NzVbkrYhZ4X".to_string(),
+            descriptor_key: "[f108451f/48'/1'/0'/2']tpubD6NzVbkrYhZ4X".to_string(),
+            fingerprint: Some(Fingerprint::from_str("f108451f").unwrap()),
+            name: name.map(str::to_string),
+            keychain,
+        }
+    }
+
+    #[test]
+    fn keys_are_labelled_by_name_and_never_by_xpub() {
+        let named = key(Some("My iPhone"), true);
+        assert_eq!(key_title(&named), "My iPhone");
+        assert_eq!(key_subtitle(&named).as_deref(), Some("Keychain · f108451f"));
+
+        let unnamed = key(None, true);
+        assert_eq!(key_title(&unnamed), "Keychain key f108451f");
+
+        let other = key(None, false);
+        assert_eq!(key_title(&other), "Key f108451f");
+        assert_eq!(key_subtitle(&other).as_deref(), Some("f108451f"));
+
+        for k in [named, unnamed, other] {
+            assert!(!key_title(&k).contains("tpub"));
+            assert!(!key_subtitle(&k).unwrap_or_default().contains("tpub"));
+        }
+    }
+
+    #[test]
+    fn idle_body_renders_both_the_empty_state_and_a_key_list() {
+        let mut state = LocalSigningState::default();
+        state.keychain_keys_recorded = true;
+        let _ = idle_body(&state);
+
+        state.vault_keys = vec![key(Some("My iPhone"), true)];
+        state.show_key_details = true;
+        let _ = idle_body(&state);
+
+        state.selected_key = Some(state.vault_keys[0].xpub.clone());
+        let _ = idle_body(&state);
+    }
+
+    #[test]
+    fn every_pairing_step_renders() {
+        let phone = crate::phone_signer::mdns::DiscoveredPhone {
+            cert_fp8: "65647abe".into(),
+            addr: "192.168.100.95:54502".parse().unwrap(),
+            instance_name: "x".into(),
+        };
+        let _ = picker_body(&[]);
+        let _ = picker_body(std::slice::from_ref(&phone));
+        let _ = error_body(&PairingError::ReplayRefused);
+        let _ = error_body(&PairingError::OfferExpired);
+    }
 }
