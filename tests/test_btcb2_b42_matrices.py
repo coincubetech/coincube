@@ -33,11 +33,10 @@ import pytest
 from fixtures import *
 from test_framework.utils import TIMEOUT, wait_for
 
-# `TRANSPORT_FAILURE_COOLDOWN` in `coincubed/src/bitcoin/esplora/client.rs:40`.
-# A provider whose request fails at the transport layer is skipped for this long
-# before it is tried again; with one provider configured that is exactly how long
-# a BTCB2 Cube stays on its last known state after its indexer comes back.
-ESPLORA_TRANSPORT_COOLDOWN_SECS = 120
+# A sole provider retries after 5s, but the poller can sleep for 30s after
+# exhausting its providers. Allow two poller sleeps plus 5s for local requests;
+# retaining the former 120s transport cooldown must fail this recovery gate.
+SOLE_PROVIDER_RECOVERY_BUDGET_SECS = 65
 
 
 def _confirmed_outpoints(daemon):
@@ -191,29 +190,22 @@ def test_backend_loss_never_shows_a_bitcoin_balance(two_chain):
     finally:
         two_chain.electrs_blake2b.start()
 
-    # Backend back. Recovery is *not* immediate and that is by design: the
-    # daemon put the dead provider in `TRANSPORT_FAILURE_COOLDOWN`
-    # (`coincubed/src/bitcoin/esplora/client.rs:40`, 120 s) when the request
-    # failed, and with a single provider configured there is nothing to fail
-    # over to, so it resumes on the first tick after the cooldown expires. The
-    # matrix records that bound rather than papering over it with a restart.
+    # The indexer must first catch up before daemon recovery can be measured.
     two_chain.electrs_blake2b.wait_for_tip(
         b.rpc.getbestblockhash(), timeout=TIMEOUT * 3
     )
-    # t=0 for the measurement is the indexer coming back. The cooldown's own
-    # clock started earlier — at the request that failed — so the observed wait
-    # is 120 s minus however long the indexer took to return, not a reading of
-    # the constant itself.
-    recovery_started = time.time()
+    # This is a daemon-level bound, not a promise of a five-second GUI refresh:
+    # the provider cooldown is short, while the poller's retry sleep is 30s.
+    recovery_started = time.monotonic()
     wait_for(
         lambda: db.rpc.getinfo()["block_height"] == b.rpc.getblockcount(),
-        timeout=ESPLORA_TRANSPORT_COOLDOWN_SECS + 60,
+        timeout=SOLE_PROVIDER_RECOVERY_BUDGET_SECS,
     )
-    recovery_secs = time.time() - recovery_started
-    assert recovery_secs <= ESPLORA_TRANSPORT_COOLDOWN_SECS + 60, recovery_secs
+    recovery_secs = time.monotonic() - recovery_started
+    assert recovery_secs <= SOLE_PROVIDER_RECOVERY_BUDGET_SECS, recovery_secs
     print(
         f"BTCB2 Cube resumed {recovery_secs:.1f}s after the indexer returned "
-        f"(cooldown {ESPLORA_TRANSPORT_COOLDOWN_SECS}s, timed from indexer-back)"
+        f"(sole-provider recovery budget {SOLE_PROVIDER_RECOVERY_BUDGET_SECS}s)"
     )
     assert db.rpc.getinfo()["block_height"] > height_before
     coins = _confirmed_outpoints(db)
