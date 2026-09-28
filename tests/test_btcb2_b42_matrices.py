@@ -213,7 +213,8 @@ def test_backend_loss_never_shows_a_bitcoin_balance(two_chain):
     assert poison not in coins
 
 
-def test_direct_node_backend_outage_preserves_chain_and_recovers(two_chain):
+@pytest.mark.parametrize("outage_seconds", [10, 70], ids=["short", "retry-exhausted"])
+def test_direct_node_backend_outage_preserves_chain_and_recovers(two_chain, outage_seconds):
     """B.5: direct node RPC backend isolation, outage and recovery.
 
     This exercises the backend used with a managed node, not the GUI launcher.
@@ -222,7 +223,7 @@ def test_direct_node_backend_outage_preserves_chain_and_recovers(two_chain):
     from test_framework.coincubed import Coincubed
 
     b = two_chain.blake2b
-    directory = os.path.join(two_chain.directory, "coincubed-blake2b-direct")
+    directory = os.path.join(two_chain.directory, f"coincubed-blake2b-direct-{outage_seconds}")
     os.mkdir(directory)
     daemon = Coincubed(directory, two_chain.signer, two_chain.desc, b)
     daemon.env.update(two_chain.coincubed_blake2b.env)
@@ -255,16 +256,17 @@ def test_direct_node_backend_outage_preserves_chain_and_recovers(two_chain):
             outage_log_start = len(daemon.logs)
             b.stop()
             legacy_tip = two_chain.legacy.rpc.getbestblockhash()
-            deadline = time.monotonic() + max(10 * daemon.poll_interval_secs, 10)
+            deadline = time.monotonic() + max(outage_seconds * daemon.poll_interval_secs, outage_seconds)
             while time.monotonic() < deadline:
+                assert daemon.proc.poll() is None, "daemon exited during the node outage"
                 assert daemon.rpc.getinfo()["block_height"] == before
                 assert _confirmed_outpoints(daemon) == coins_before
                 assert two_chain.legacy.rpc.getbestblockhash() == legacy_tip
                 time.sleep(daemon.poll_interval_secs)
             assert daemon.is_in_log(
-                "Transient error when sending request to bitcoind",
+                "Poll deferred without updating successful-poll time",
                 start=outage_log_start,
-            ), "the daemon did not observe the node outage"
+            ), "the daemon did not finish a failed poll during the outage"
             assert daemon.rpc.getinfo()["block_height"] == before
             assert _confirmed_outpoints(daemon) == coins_before
         finally:
@@ -283,6 +285,15 @@ def test_direct_node_backend_outage_preserves_chain_and_recovers(two_chain):
         assert daemon.proc.pid == pid
         assert daemon.rpc.getinfo()["block_height"] > before
         assert _confirmed_outpoints(daemon) == coins_before
+        assert poison not in _confirmed_outpoints(daemon)
+        recovered_deposit = b.rpc.sendtoaddress(two_chain.vault_addresses[0], 0.01)
+        b.generate_block(1, wait_for_mempool=recovered_deposit)
+        wait_for(
+            lambda: any(op[0] == recovered_deposit for op in _confirmed_outpoints(daemon)),
+            timeout=TIMEOUT * 3,
+        )
+        assert daemon.proc.pid == pid
+        assert coins_before <= _confirmed_outpoints(daemon)
         assert poison not in _confirmed_outpoints(daemon)
         two_chain.assert_home_sandbox_untouched()
     finally:

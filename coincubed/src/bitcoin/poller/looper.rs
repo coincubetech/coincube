@@ -44,6 +44,8 @@ fn ancestor_lookup_retry_interval() -> time::Duration {
 
 #[derive(Debug, Clone)]
 struct UpdatedCoins {
+    pub receive_index: bitcoin::bip32::ChildNumber,
+    pub change_index: bitcoin::bip32::ChildNumber,
     pub received: Vec<Coin>,
     pub confirmed: Vec<(bitcoin::OutPoint, i32, u32)>,
     pub expired: Vec<bitcoin::OutPoint>,
@@ -64,14 +66,17 @@ fn update_coins(
     previous_tip: &BlockChainTip,
     descs: &[descriptors::SinglePathCoincubeDesc],
     secp: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
-) -> UpdatedCoins {
+) -> Result<UpdatedCoins, String> {
     let network = db_conn.network();
     let curr_coins = db_conn.coins(&[], &[]);
+    let mut receive_index = db_conn.receive_index();
+    let mut change_index = db_conn.change_index();
+    let initial_highest = u32::from(receive_index.max(change_index));
     log::debug!("Current coins: {:?}", curr_coins);
 
     // Start by fetching newly received coins.
     let mut received = Vec::new();
-    for utxo in bit.received_coins(previous_tip, descs) {
+    for utxo in bit.try_received_coins(previous_tip, descs)? {
         let UTxO {
             outpoint,
             amount,
@@ -94,27 +99,53 @@ fn update_coins(
                 {
                     (derivation_index, is_change)
                 } else {
-                    // TODO: maybe we could try out something here? Like bruteforcing the next 200 indexes?
-                    log::error!(
-                        "Could not get derivation index for coin '{}' (address: '{}')",
-                        utxo.outpoint,
-                        address
-                    );
-                    continue;
+                    // Earlier deposits in this batch may extend the lookahead.
+                    // Resolve that extension in memory, keeping DB writes deferred.
+                    let highest = u32::from(receive_index.max(change_index));
+                    let gap = crate::database::sqlite::LOOK_AHEAD_LIMIT;
+                    let start = initial_highest
+                        .checked_add(gap)
+                        .ok_or("Derivation range overflow")?;
+                    let end = highest
+                        .checked_add(gap)
+                        .ok_or("Derivation range overflow")?;
+                    let mut found = None;
+                    for index in start..end {
+                        let child = bitcoin::bip32::ChildNumber::from_normal_idx(index)
+                            .map_err(|_| "Derivation range exhausted")?;
+                        for (branch, desc) in descs.iter().enumerate().take(2) {
+                            if desc.derive(child, secp).address(network) == address {
+                                found = Some((child, branch == 1));
+                                break;
+                            }
+                        }
+                        if found.is_some() {
+                            break;
+                        }
+                    }
+                    found.ok_or_else(|| {
+                        format!(
+                            "Cannot map owned coin {} to a derivation index; poll deferred",
+                            outpoint
+                        )
+                    })?
                 }
             }
             UTxOAddress::DerivIndex(index, is_change) => (index, is_change),
         };
         // First of if we are receiving coins that are beyond our next derivation index,
         // adjust it.
-        if !is_change && derivation_index > db_conn.receive_index() {
-            db_conn.set_receive_index(derivation_index, secp);
-        } else if is_change && derivation_index > db_conn.change_index() {
-            db_conn.set_change_index(derivation_index, secp);
+        // Stage index changes with the coin updates. Later backend reads may
+        // fail or reveal a changed tip, in which case nothing from this batch
+        // should have been written yet.
+        if !is_change && derivation_index > receive_index {
+            receive_index = derivation_index;
+        } else if is_change && derivation_index > change_index {
+            change_index = derivation_index;
         }
 
         // Now record this coin as a newly received one.
-        if !curr_coins.contains_key(&utxo.outpoint) {
+        if !curr_coins.contains_key(&outpoint) {
             let coin = Coin {
                 outpoint,
                 is_immature,
@@ -145,7 +176,7 @@ fn update_coins(
             }
         })
         .collect();
-    let (confirmed, expired) = bit.confirmed_coins(&to_be_confirmed);
+    let (confirmed, expired) = bit.try_confirmed_coins(&to_be_confirmed)?;
     log::debug!("Newly confirmed coins: {:?}", confirmed);
     log::debug!("Expired coins: {:?}", expired);
 
@@ -169,7 +200,7 @@ fn update_coins(
             }
         })
         .collect();
-    let spending = bit.spending_coins(&to_be_spent);
+    let spending = bit.try_spending_coins(&to_be_spent)?;
     log::debug!("Newly spending coins: {:?}", spending);
 
     // Mark coins in a spending state whose Spend transaction was confirmed as such. Note we
@@ -182,25 +213,27 @@ fn update_coins(
         .map(|coin| (coin.outpoint, coin.spend_txid.expect("Coin is spending")))
         .chain(spending.iter().cloned())
         .collect();
-    let (spent, expired_spending) = bit.spent_coins(spending_coins.as_slice());
+    let (spent, expired_spending) = bit.try_spent_coins(spending_coins.as_slice())?;
     log::debug!("Newly spent coins: {:?}", spent);
 
-    UpdatedCoins {
+    Ok(UpdatedCoins {
+        receive_index,
+        change_index,
         received,
         confirmed,
         expired,
         spending,
         expired_spending,
         spent,
-    }
+    })
 }
 
 // Add new deposit and spend transactions to the database.
-fn add_txs_to_db(
+fn collect_txs(
     bit: &impl BitcoinInterface,
     db_conn: &mut Box<dyn DatabaseConnection>,
     updated_coins: &UpdatedCoins,
-) {
+) -> Result<Vec<bitcoin::Transaction>, String> {
     let curr_txids: HashSet<_> = db_conn.list_saved_txids().into_iter().collect();
     let mut new_txids = HashSet::new();
     // Get the transaction for all newly received coins. Note we also query it if the coins
@@ -217,12 +250,13 @@ fn add_txs_to_db(
 
     // Now retrieve txs.
     let txs: Vec<_> = missing_txids
-        .map(|txid| bit.wallet_transaction(txid).map(|(tx, _)| tx))
-        .collect::<Option<Vec<_>>>()
-        .expect("we must retrieve all txs");
-    if !txs.is_empty() {
-        db_conn.new_txs(&txs);
-    }
+        .map(|txid| {
+            bit.try_wallet_transaction(txid)?
+                .map(|(tx, _)| tx)
+                .ok_or_else(|| "Wallet transaction disappeared during polling".to_string())
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(txs)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -255,7 +289,9 @@ fn new_tip(bit: &impl BitcoinInterface, current_tip: &BlockChainTip) -> TipUpdat
     // grows the stack on every turn, since the call is not guaranteed to be optimised into a
     // jump. Retry a few times with a pause, then give up until the next poll.
     for attempt in 1..=ANCESTOR_LOOKUP_ATTEMPTS {
-        let bitcoin_tip = bit.chain_tip();
+        let Ok(bitcoin_tip) = bit.try_chain_tip() else {
+            return TipUpdate::Unavailable;
+        };
 
         // If the tip didn't change, there is nothing to update.
         if current_tip == &bitcoin_tip {
@@ -264,7 +300,10 @@ fn new_tip(bit: &impl BitcoinInterface, current_tip: &BlockChainTip) -> TipUpdat
 
         if bitcoin_tip.height > current_tip.height {
             // Make sure we are on the same chain.
-            if bit.is_in_chain(current_tip) {
+            if match bit.try_is_in_chain(current_tip) {
+                Ok(in_chain) => in_chain,
+                Err(_) => return TipUpdate::Unavailable,
+            } {
                 // All good, we just moved forward.
                 return TipUpdate::Progress(bitcoin_tip);
             }
@@ -416,7 +455,7 @@ fn updates(
     descs: &[descriptors::SinglePathCoincubeDesc],
     secp: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
     reorg_alert: &ReorgAlertCache,
-) {
+) -> Result<(), String> {
     // Check if there was a new block before we update our state.
     //
     // Some backends (such as Electrum) need to perform an explicit sync to provide updated data
@@ -437,17 +476,19 @@ fn updates(
                     // between our former chain and the new one, then restart fresh.
                     db_conn.rollback_tip(&new_tip);
                     log::info!("Tip was rolled back to '{}'.", new_tip);
-                    return updates(db_conn, bit, descs, secp, reorg_alert);
+                    return Err("Chain rollback requires a new scheduled poll".into());
                 }
                 TipUpdate::ImplausibleReorg { min_depth } => {
                     refuse_deep_reorg(reorg_alert, &current_tip, RefusedDepth::AtLeast(min_depth));
-                    return;
+                    return Err("Poll did not produce a coherent chain update".into());
                 }
                 TipUpdate::Diverged { backend_tip } => {
                     report_divergence(reorg_alert, &current_tip, &backend_tip);
-                    return;
+                    return Err("Poll did not produce a coherent chain update".into());
                 }
-                TipUpdate::Unavailable => return,
+                TipUpdate::Unavailable => {
+                    return Err("Backend unavailable during tip lookup".into())
+                }
             }
         }
         Ok(Some(reorg_common_ancestor)) => {
@@ -467,7 +508,7 @@ fn updates(
                     .saturating_sub(reorg_common_ancestor.height);
                 if depth > MAX_REORG_DEPTH {
                     refuse_deep_reorg(reorg_alert, &current_tip, RefusedDepth::Exact(depth));
-                    return;
+                    return Err("Poll did not produce a coherent chain update".into());
                 }
                 db_conn.rollback_tip(&reorg_common_ancestor);
                 log::info!("Tip was rolled back to '{}'.", reorg_common_ancestor);
@@ -477,60 +518,32 @@ fn updates(
                     reorg_common_ancestor
                 );
             }
-            return updates(db_conn, bit, descs, secp, reorg_alert);
+            return Err("Chain rollback requires a new scheduled poll".into());
         }
-        Err(e) => {
-            // The Esplora "every provider cooling" case isn't a real
-            // failure — no network call was attempted — so log it at
-            // debug and back off long enough for at least one
-            // provider's cooldown to expire (cooldowns run 10 min,
-            // so 30s here just keeps the tick from being wasteful;
-            // future ticks will still skip-fast until something
-            // recovers). Without this branch the poller spammed
-            // ~30 ERROR lines/min while every backend was throttled.
-            // The string check is intentional: the
-            // `BitcoinInterface::sync_wallet` signature returns
-            // `Result<_, String>`, so we can't pattern-match on the
-            // typed `client::Error::AllCooling` variant from here.
-            // A regression test in `bitcoin::esplora::client`
-            // guards the marker.
-            // A scan aborted by `DaemonHandle::stop` must NOT retry: return so
-            // `poll_forever` regains control and processes the Shutdown message.
-            // Recursing the 2s retry below would re-issue the (now instantly
-            // aborting) scan forever and never let the poller exit — leaving
-            // `stop()` blocked on the join.
-            if e.contains(crate::bitcoin::esplora::client::SCAN_ABORTED_DISPLAY_MARKER) {
-                log::debug!("Esplora poll aborted — daemon shutting down");
-                return;
-            }
-            if e.contains(crate::bitcoin::esplora::client::ALL_COOLING_DISPLAY_MARKER) {
-                log::debug!("Esplora poll skipped: {}", e);
-                thread::sleep(time::Duration::from_secs(30));
-            } else {
-                log::error!("Error syncing wallet: '{}'.", e);
-                thread::sleep(time::Duration::from_secs(2));
-            }
-            return updates(db_conn, bit, descs, secp, reorg_alert);
-        }
+        Err(e) => return Err(e),
     };
-
-    // We got a coherent answer out of the backend and its chain contains our tip, so any
-    // outstanding chain alert — a refused deep reorg or an unresolved divergence — no
-    // longer reflects reality: synchronization has resumed. Clear it before touching coins.
-    reorg_alert.clear();
 
     // Then check the state of our coins. Do it even if the tip did not change since last poll, as
     // we may have unconfirmed transactions.
-    let updated_coins = update_coins(bit, db_conn, &current_tip, descs, secp);
+    let updated_coins = update_coins(bit, db_conn, &current_tip, descs, secp)?;
 
-    // If the tip changed while we were polling our Bitcoin interface, start over.
-    if bit.chain_tip() != latest_tip {
-        log::info!("Chain tip changed while we were updating our state. Starting over.");
-        return updates(db_conn, bit, descs, secp, reorg_alert);
+    let transactions = collect_txs(bit, db_conn, &updated_coins)?;
+    // Check again after all transaction reads, before the first write.
+    if bit.try_chain_tip()? != latest_tip {
+        return Err("Chain tip changed during polling; retry on the next scheduled poll".into());
     }
 
     // Transactions must be added to the DB before coins due to foreign key constraints.
-    add_txs_to_db(bit, db_conn, &updated_coins);
+    if !transactions.is_empty() {
+        db_conn.new_txs(&transactions);
+    }
+    reorg_alert.clear();
+    if updated_coins.receive_index > db_conn.receive_index() {
+        db_conn.set_receive_index(updated_coins.receive_index, secp);
+    }
+    if updated_coins.change_index > db_conn.change_index() {
+        db_conn.set_change_index(updated_coins.change_index, secp);
+    }
     // The chain tip did not change since we started our updates. Record them and the latest tip.
     // Having the tip in database means that, as far as the chain is concerned, we've got all
     // updates up to this block. But not more.
@@ -549,55 +562,31 @@ fn updates(
     }
 
     log::debug!("Updates done.");
+    Ok(())
 }
 
-// Check if there is any rescan of the backend ongoing or one that just finished.
-fn rescan_check(
-    db_conn: &mut Box<dyn DatabaseConnection>,
-    bit: &mut impl BitcoinInterface,
-    descs: &[descriptors::SinglePathCoincubeDesc],
-    secp: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
-    reorg_alert: &ReorgAlertCache,
-) {
-    log::debug!("Checking the state of an ongoing rescan if there is any");
+// Read rescan state before any writes from this poll. An RPC failure is not
+// evidence that a previously requested rescan has finished.
+enum RescanObservation {
+    Idle,
+    Running(f64),
+    Completed(BlockChainTip),
+}
 
-    // Check if there is an ongoing rescan. If there isn't and we previously asked for a rescan of
-    // the backend, we treat it as completed.
-    // Upon completion of the rescan from the given timestamp on the backend, we rollback our state
-    // down to the height before this timestamp to rescan everything that happened since then.
-    let rescan_timestamp = db_conn.rescan_timestamp();
-    if let Some(progress) = bit.rescan_progress() {
-        log::info!("Rescan progress: {:.2}%.", progress * 100.0);
-        if rescan_timestamp.is_none() {
-            log::warn!("Backend is rescanning but we didn't ask for it.");
-        }
-    } else if let Some(timestamp) = rescan_timestamp {
-        log::info!("Rescan completed on the backend.");
-        // TODO: we could check if the timestamp of the descriptors in the Bitcoin backend are
-        // truly at the rescan timestamp, and trigger a rescan otherwise. Note however it would be
-        // no use for the bitcoind implementation of the backend, since bitcoind will always set
-        // the timestamp of the descriptors in the wallet first (and therefore consider it as
-        // rescanned from this height even if it aborts the rescan by being stopped).
-        let rescan_tip = match bit.block_before_date(timestamp) {
-            Some(block) => block,
-            None => {
-                log::error!(
-                    "Could not retrieve block height for timestamp '{}'",
-                    timestamp
-                );
-                return;
-            }
-        };
-        db_conn.rollback_tip(&rescan_tip);
-        db_conn.complete_rescan();
-        log::info!(
-            "Rolling back our internal tip to '{}' to update our internal state with past transactions.",
-            rescan_tip
-        );
-        updates(db_conn, bit, descs, secp, reorg_alert)
-    } else {
-        log::debug!("No ongoing rescan.");
+fn observe_rescan(
+    db_conn: &mut Box<dyn DatabaseConnection>,
+    bit: &impl BitcoinInterface,
+) -> Result<RescanObservation, String> {
+    if let Some(progress) = bit.try_rescan_progress()? {
+        return Ok(RescanObservation::Running(progress));
     }
+    if let Some(timestamp) = db_conn.rescan_timestamp() {
+        return bit
+            .try_block_before_date(timestamp)?
+            .map(RescanObservation::Completed)
+            .ok_or_else(|| "Could not retrieve the rescan starting block".into());
+    }
+    Ok(RescanObservation::Idle)
 }
 
 /// If the database chain tip is NULL (first startup), initialize it.
@@ -629,8 +618,26 @@ pub fn poll(
     reorg_alert: &ReorgAlertCache,
 ) {
     let mut db_conn = db.connection();
-    updates(&mut db_conn, bit, descs, secp, reorg_alert);
-    rescan_check(&mut db_conn, bit, descs, secp, reorg_alert);
+    let result = observe_rescan(&mut db_conn, bit).and_then(|rescan| {
+        // A verified rescan completion starts a new scan on the next tick;
+        // do not report successful freshness before that scan has run.
+        if let RescanObservation::Completed(tip) = rescan {
+            db_conn.rollback_tip(&tip);
+            db_conn.complete_rescan();
+            return Err("Rescan completion requires a new scheduled poll".into());
+        }
+        if let RescanObservation::Running(progress) = rescan {
+            log::info!("Rescan progress: {:.2}%.", progress * 100.0);
+        }
+        updates(&mut db_conn, bit, descs, secp, reorg_alert)
+    });
+    if let Err(error) = result {
+        log::debug!(
+            "Poll deferred without updating successful-poll time: {}",
+            error
+        );
+        return;
+    }
     let now: u32 = time::SystemTime::now()
         .duration_since(time::UNIX_EPOCH)
         .expect("current system time must be later than epoch")
@@ -846,7 +853,7 @@ mod tests {
         assert!(!managed_node_maintenance());
     }
 
-    fn test_descs() -> [descriptors::SinglePathCoincubeDesc; 2] {
+    pub(super) fn test_descs() -> [descriptors::SinglePathCoincubeDesc; 2] {
         let owner_key = descriptors::PathInfo::Single(descriptor::DescriptorPublicKey::from_str("[aabbccdd]xpub68JJTXc1MWK8KLW4HGLXZBJknja7kDUJuFHnM424LbziEXsfkh1WQCiEjjHw4zLqSUm4rvhgyGkkuRowE9tCJSgt3TQB5J3SKAbZ2SdcKST/<0;1>/*").unwrap());
         let heir_key = descriptors::PathInfo::Single(descriptor::DescriptorPublicKey::from_str("[aabbccdd]xpub68JJTXc1MWK8PEQozKsRatrUHXKFNkD1Cb1BuQU9Xr5moCv87anqGyXLyUd4KpnDyZgo3gz4aN1r3NiaoweFW8UutBsBbgKHzaD5HkTkifK/<0;1>/*").unwrap());
         let policy = descriptors::CoincubePolicy::new_legacy(
@@ -892,7 +899,7 @@ mod tests {
         let alert = ReorgAlertCache::default();
         let mut db_conn = db.connection();
 
-        updates(&mut db_conn, &mut bit, &descs, &secp, &alert);
+        let _ = updates(&mut db_conn, &mut bit, &descs, &secp, &alert);
 
         assert!(
             db.rollbacks().is_empty(),
@@ -949,7 +956,7 @@ mod tests {
         let alert = ReorgAlertCache::default();
         let mut db_conn = db.connection();
 
-        updates(&mut db_conn, &mut bit, &descs, &secp, &alert);
+        let _ = updates(&mut db_conn, &mut bit, &descs, &secp, &alert);
 
         assert!(
             db.rollbacks().is_empty(),
@@ -1024,7 +1031,7 @@ mod tests {
         // Backend at our height on a different chain: the zero-gap case the old heuristic
         // recorded as "no alert".
         let mut bit = diverged_backend(&our_tip, our_tip.height);
-        updates(&mut db_conn, &mut bit, &descs, &secp, &alert);
+        let _ = updates(&mut db_conn, &mut bit, &descs, &secp, &alert);
 
         assert_eq!(
             alert.load(),
@@ -1052,7 +1059,7 @@ mod tests {
 
         // First poll: diverged. The status is published and wallet state is held.
         let mut bit = diverged_backend(&our_tip, our_tip.height + 5);
-        updates(&mut db_conn, &mut bit, &descs, &secp, &alert);
+        let _ = updates(&mut db_conn, &mut bit, &descs, &secp, &alert);
         assert_eq!(alert.load(), ChainAlert::Diverged);
         assert_eq!(
             db_conn.chain_tip(),
@@ -1064,7 +1071,7 @@ mod tests {
         // the next poll takes the ordinary forward-progress path and resumes syncing.
         bit.in_chain = true;
         bit.tip = tip(our_tip.height + 5, 0xaa);
-        updates(&mut db_conn, &mut bit, &descs, &secp, &alert);
+        let _ = updates(&mut db_conn, &mut bit, &descs, &secp, &alert);
 
         assert_eq!(
             alert.load(),
@@ -1099,7 +1106,7 @@ mod tests {
 
         // After the rollback the recursive call sees a tip equal to the rolled-back one.
         bit.tip = tip(20_000 - 3, 0xcc);
-        updates(&mut db_conn, &mut bit, &descs, &secp, &alert);
+        let _ = updates(&mut db_conn, &mut bit, &descs, &secp, &alert);
 
         assert_eq!(db.rollbacks(), vec![tip(20_000 - 3, 0xcc)]);
         assert_eq!(
@@ -1107,5 +1114,82 @@ mod tests {
             ChainAlert::None,
             "an applied reorg raises no alert"
         );
+    }
+}
+
+#[cfg(test)]
+mod failure_tests {
+    use super::*;
+    use crate::testutils::{DummyBitcoind, DummyDatabase};
+    use bitcoin::{bip32::ChildNumber, hashes::Hash};
+
+    #[test]
+    fn staged_lookahead_resolves_the_next_deposit_without_writing_indexes() {
+        let secp = secp256k1::Secp256k1::verification_only();
+        let descs = super::tests::test_descs();
+        for branch in [0, 1] {
+            let db = DummyDatabase::new();
+            let mut conn = db.connection();
+            let mut bit = DummyBitcoind::new();
+            let first = UTxO {
+                outpoint: bitcoin::OutPoint {
+                    txid: bitcoin::Txid::all_zeros(),
+                    vout: 0,
+                },
+                amount: bitcoin::Amount::from_sat(100_000),
+                block_height: Some(99),
+                address: UTxOAddress::DerivIndex(199.into(), branch == 1),
+                is_immature: false,
+            };
+            let next = UTxO {
+                outpoint: bitcoin::OutPoint {
+                    txid: bitcoin::Txid::all_zeros(),
+                    vout: 1,
+                },
+                address: UTxOAddress::Address(
+                    descs[branch]
+                        .derive(200.into(), &secp)
+                        .address(conn.network())
+                        .into_unchecked(),
+                ),
+                ..first.clone()
+            };
+            bit.received = vec![first, next];
+            let staged = update_coins(&bit, &mut conn, &bit.tip, &descs, &secp).unwrap();
+            assert_eq!(staged.received.len(), 2);
+            assert_eq!(staged.received[1].derivation_index, ChildNumber::from(200));
+            assert_eq!(staged.received[1].is_change, branch == 1);
+            assert_eq!(conn.receive_index(), ChildNumber::from(0));
+            assert_eq!(conn.change_index(), ChildNumber::from(0));
+            bit.poll_failure = Some("confirmed");
+            assert!(update_coins(&bit, &mut conn, &bit.tip, &descs, &secp).is_err());
+            assert_eq!(conn.receive_index(), ChildNumber::from(0));
+            assert_eq!(conn.change_index(), ChildNumber::from(0));
+            assert!(conn.coins(&[], &[]).is_empty());
+        }
+    }
+
+    #[test]
+    fn failed_poll_preserves_saved_state_and_success_timestamp() {
+        let descs = super::tests::test_descs();
+        let secp = secp256k1::Secp256k1::verification_only();
+        for failure in ["confirmed", "rescan"] {
+            let mut bit = DummyBitcoind::new();
+            bit.poll_failure = Some(failure);
+            let db = DummyDatabase::new();
+            let mut conn = db.connection();
+            conn.update_tip(&bit.tip);
+            conn.set_last_poll(123);
+            let tip = bit.tip;
+            let mut backend: sync::Arc<sync::Mutex<dyn BitcoinInterface>> =
+                sync::Arc::new(sync::Mutex::new(bit));
+            let database: sync::Arc<sync::Mutex<dyn DatabaseInterface>> =
+                sync::Arc::new(sync::Mutex::new(db));
+            let alert = ReorgAlertCache::default();
+            poll(&mut backend, &database, &secp, &descs, &alert);
+            assert_eq!(conn.chain_tip(), Some(tip));
+            assert_eq!(conn.last_poll_timestamp(), Some(123));
+            assert!(conn.coins(&[], &[]).is_empty());
+        }
     }
 }

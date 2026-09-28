@@ -37,6 +37,8 @@ use serde_json::Value as Json;
 
 // If bitcoind takes more than 3 minutes to answer one of our queries, fail.
 const RPC_SOCKET_TIMEOUT: u64 = 180;
+// Polling yields to shutdown and the next scheduled tick after a bounded read.
+const POLL_RPC_SOCKET_TIMEOUT: u64 = 10;
 
 /// Name of the marker a managed node's datadir carries to identify *this* instance of
 /// it, written next to the cookie file. See [`BitcoinD::backend_id`].
@@ -84,6 +86,7 @@ fn is_supported_bitcoind_version(version: u64, is_taproot: bool) -> bool {
 /// An error in the bitcoind interface.
 #[derive(Debug)]
 pub enum BitcoindError {
+    PollAborted,
     CookieFile(io::Error),
     /// Bitcoind server error.
     Server(jsonrpc::error::Error),
@@ -192,6 +195,7 @@ impl BitcoindError {
 impl std::fmt::Display for BitcoindError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
+            BitcoindError::PollAborted => write!(f, "Node polling was cancelled"),
             BitcoindError::CookieFile(e) => write!(f, "Reading bitcoind cookie file: {}", e),
             BitcoindError::Server(ref e) => write!(f, "Bitcoind RPC server error: {}", e),
             BitcoindError::BatchMissingResponse => write!(
@@ -289,6 +293,8 @@ impl std::fmt::Display for WalletError {
 /// rotates it on restart.
 #[derive(Clone, Copy)]
 enum ClientKind {
+    PollNode,
+    PollWallet,
     /// Generalistic node calls ([`BitcoinD::node_client`]).
     Node,
     /// Wallet calls ([`BitcoinD::watchonly_client`]).
@@ -304,6 +310,9 @@ enum ClientKind {
 }
 
 pub struct BitcoinD {
+    poll_node_client: RwLock<Client>,
+    poll_wallet_client: RwLock<Client>,
+    pub(super) poll_abort: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Client for generalistic calls.
     ///
     /// Behind an `RwLock` so a cookie-refreshed client (after bitcoind rotates
@@ -337,6 +346,8 @@ macro_rules! params {
         ])))
     };
 }
+
+mod poll;
 
 impl BitcoinD {
     /// Create a new bitcoind interface. This tests the connection to bitcoind and disables retries
@@ -393,6 +404,17 @@ impl BitcoinD {
                 .build(),
         );
         let dummy_bitcoind = BitcoinD {
+            poll_node_client: RwLock::new(Self::build_client(
+                config,
+                &watchonly_wallet_path,
+                ClientKind::PollNode,
+            )?),
+            poll_wallet_client: RwLock::new(Self::build_client(
+                config,
+                &watchonly_wallet_path,
+                ClientKind::PollWallet,
+            )?),
+            poll_abort: Default::default(),
             node_client: RwLock::new(dummy_node_client),
             sendonly_client: RwLock::new(sendonly_client),
             sendonly_node_client: RwLock::new(sendonly_node_client),
@@ -407,6 +429,17 @@ impl BitcoinD {
 
         // Now the connection is checked, create the clients with an appropriate timeout.
         Ok(BitcoinD {
+            poll_node_client: RwLock::new(Self::build_client(
+                config,
+                &watchonly_wallet_path,
+                ClientKind::PollNode,
+            )?),
+            poll_wallet_client: RwLock::new(Self::build_client(
+                config,
+                &watchonly_wallet_path,
+                ClientKind::PollWallet,
+            )?),
+            poll_abort: Default::default(),
             node_client: RwLock::new(Self::build_client(
                 config,
                 &watchonly_wallet_path,
@@ -455,6 +488,8 @@ impl BitcoinD {
         let node_url = format!("http://{}", config.addr);
         let watchonly_url = format!("http://{}/wallet/{}", config.addr, watchonly_wallet_path);
         let (url, timeout) = match kind {
+            ClientKind::PollNode => (node_url, POLL_RPC_SOCKET_TIMEOUT),
+            ClientKind::PollWallet => (watchonly_url, POLL_RPC_SOCKET_TIMEOUT),
             ClientKind::Node => (node_url, RPC_SOCKET_TIMEOUT),
             ClientKind::Watchonly => (watchonly_url, RPC_SOCKET_TIMEOUT),
             // Fire-and-forget: a very low timeout so we ignore the response.
@@ -473,6 +508,8 @@ impl BitcoinD {
     /// The pre-built client slot for `kind`.
     fn client(&self, kind: ClientKind) -> &RwLock<Client> {
         match kind {
+            ClientKind::PollNode => &self.poll_node_client,
+            ClientKind::PollWallet => &self.poll_wallet_client,
             ClientKind::Node => &self.node_client,
             ClientKind::Watchonly => &self.watchonly_client,
             ClientKind::Sendonly => &self.sendonly_client,
@@ -569,6 +606,11 @@ impl BitcoinD {
         retry: bool,
     ) -> Result<Json, BitcoindError> {
         let attempt = |client: &Client| {
+            if matches!(kind, ClientKind::PollNode | ClientKind::PollWallet)
+                && self.poll_abort.load(std::sync::atomic::Ordering::Relaxed)
+            {
+                return Err(BitcoindError::PollAborted);
+            }
             let req = client.build_request(method, params);
             if retry {
                 self.retry(|| self.try_request(client, req.clone()))
@@ -1178,6 +1220,36 @@ impl BitcoinD {
         self.make_node_request("getblockchaininfo", None)
     }
 
+    /// Poll reads do not consume the minute-long interactive retry budget.
+    /// A failed attempt returns to the scheduler; cookie rotation still gets
+    /// the single credential-refresh retry in make_request_inner.
+    fn poll_chain_info(&self) -> Result<Json, String> {
+        self.poll_node("getblockchaininfo", None)
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn try_sync_progress(&self) -> Result<SyncProgress, String> {
+        let chain_info = self.poll_chain_info()?;
+        let percentage = chain_info
+            .get("verificationprogress")
+            .and_then(Json::as_f64)
+            .filter(|p| p.is_finite() && (0.0..=1.0).contains(p))
+            .ok_or("Invalid verificationprogress in getblockchaininfo")?;
+        let headers = chain_info
+            .get("headers")
+            .and_then(Json::as_u64)
+            .ok_or("Invalid headers in getblockchaininfo")?;
+        let blocks = chain_info
+            .get("blocks")
+            .and_then(Json::as_u64)
+            .ok_or("Invalid blocks in getblockchaininfo")?;
+        Ok(SyncProgress {
+            percentage,
+            headers,
+            blocks,
+        })
+    }
+
     pub fn sync_progress(&self) -> SyncProgress {
         // TODO: don't harass coincubed, be smarter like in revaultd.
         let chain_info = self.block_chain_info();
@@ -1198,6 +1270,25 @@ impl BitcoinD {
             headers,
             blocks,
         }
+    }
+
+    pub fn try_chain_tip(&self) -> Result<BlockChainTip, String> {
+        // One response binds the height and hash, avoiding a two-RPC race.
+        let chain_info = self.poll_chain_info()?;
+        let hash = chain_info
+            .get("bestblockhash")
+            .and_then(Json::as_str)
+            .ok_or("Missing bestblockhash in getblockchaininfo")?
+            .parse::<bitcoin::BlockHash>()
+            .map_err(|e| e.to_string())?;
+        let height = chain_info
+            .get("blocks")
+            .and_then(Json::as_i64)
+            .filter(|h| *h >= 0)
+            .ok_or("Invalid blocks in getblockchaininfo")?
+            .try_into()
+            .map_err(|_| "Block height exceeds supported range")?;
+        Ok(BlockChainTip { hash, height })
     }
 
     pub fn chain_tip(&self) -> BlockChainTip {
@@ -2314,6 +2405,15 @@ pub struct GetTxRes {
     pub confirmations: i32,
 }
 
+impl GetTxRes {
+    /// Knots reports block metadata but zero validated confirmations while
+    /// assumeutxo background validation is pending. Keep this distinct from
+    /// both mempool absence and validated confirmation.
+    pub fn has_assumed_confirmation(&self) -> bool {
+        self.block.is_some() && self.confirmations == 0
+    }
+}
+
 impl From<Json> for GetTxRes {
     fn from(json: Json) -> GetTxRes {
         let block_hash = json.get("blockhash").and_then(Json::as_str).map(|s| {
@@ -2391,6 +2491,20 @@ impl<'a> CachedTxGetter<'a> {
             bitcoind,
             cache: HashMap::new(),
         }
+    }
+
+    pub fn try_get_transaction(
+        &mut self,
+        txid: &bitcoin::Txid,
+    ) -> Result<Option<GetTxRes>, String> {
+        if let Some(tx) = self.cache.get(txid) {
+            return Ok(Some(tx.clone()));
+        }
+        let tx = self.bitcoind.try_get_transaction(txid)?;
+        if let Some(tx) = &tx {
+            self.cache.insert(*txid, tx.clone());
+        }
+        Ok(tx)
     }
 
     /// Query a transaction. Tries to get it from the cache and falls back to calling
