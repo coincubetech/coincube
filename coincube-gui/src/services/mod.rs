@@ -5,6 +5,7 @@ pub mod connect;
 pub mod feeestimation;
 pub mod fiat;
 pub mod foreign_scan;
+pub mod foreign_wallet_source;
 
 pub mod http;
 pub mod keys;

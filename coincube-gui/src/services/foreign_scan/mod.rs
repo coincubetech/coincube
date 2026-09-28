@@ -10,8 +10,8 @@ use coincube_core::{
     chain::ChainId,
     miniscript::{
         bitcoin::{self, BlockHash, OutPoint, ScriptBuf, Transaction, Txid},
-        descriptor::{DescriptorType, Wildcard},
-        Descriptor, DescriptorPublicKey, ForEachKey,
+        descriptor::{ShInner, Wildcard, WshInner},
+        Descriptor, DescriptorPublicKey, ForEachKey, Terminal,
     },
 };
 use serde::Deserialize;
@@ -68,16 +68,22 @@ impl ScanDescriptor {
         }
         let descriptor =
             Descriptor::<DescriptorPublicKey>::from_str(text).map_err(|_| ScanError::Descriptor)?;
-        if !matches!(
-            descriptor.desc_type(),
-            DescriptorType::Pkh
-                | DescriptorType::Wpkh
-                | DescriptorType::ShWpkh
-                | DescriptorType::Wsh
-                | DescriptorType::WshSortedMulti
-                | DescriptorType::Tr
-        ) || descriptor.sanity_check().is_err()
-        {
+        // PR 8's source matrix is intentionally narrower than everything
+        // miniscript can parse. In particular, arbitrary wsh policies and
+        // Taproot script trees are discovery-capable in principle but have no
+        // agreed foreign-wallet signing route. Accepting them here would make
+        // the UI promise a later step that cannot be completed safely.
+        let supported_shape = match &descriptor {
+            Descriptor::Pkh(_) | Descriptor::Wpkh(_) => true,
+            Descriptor::Sh(sh) => matches!(sh.as_inner(), ShInner::Wpkh(_)),
+            Descriptor::Wsh(wsh) => match wsh.as_inner() {
+                WshInner::SortedMulti(_) => true,
+                WshInner::Ms(ms) => matches!(ms.as_inner(), Terminal::Multi(_)),
+            },
+            Descriptor::Tr(tr) => tr.tap_tree().is_none(),
+            Descriptor::Bare(_) => false,
+        };
+        if !supported_shape || descriptor.sanity_check().is_err() {
             return Err(ScanError::Descriptor);
         }
         if !descriptor.for_each_key(|key| match key {
