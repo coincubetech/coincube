@@ -17,7 +17,6 @@ pub mod wallet;
 pub mod wallets;
 
 use std::collections::{HashSet, VecDeque};
-use std::convert::TryFrom;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::sync::Arc;
@@ -922,8 +921,27 @@ enum SplitHandoff {
         intent: split_intent::SplitIntent,
         target: crate::services::foreign_psbt::TargetAddressEvidence,
         address: String,
-        economics: crate::services::foreign_psbt::SweepEconomics,
+        sweep: crate::services::foreign_psbt::SweepInputs,
+        /// `None` when no BTCB2-scoped fee rate is available.
+        economics: Option<crate::services::foreign_psbt::SweepEconomics>,
     },
+}
+
+/// The fee source for a BTCB2 Split review. Tenshu has no BTCB2-chain-scoped
+/// estimator yet, so this is always unavailable; the Bitcoin mainnet
+/// `FeeEstimator` must never price a BTCB2 sweep.
+fn split_fee_source() -> std::sync::Arc<dyn crate::services::foreign_psbt::SweepFeeSource> {
+    std::sync::Arc::new(crate::services::foreign_psbt::UnavailableBtcb2Fees)
+}
+
+fn split_review_error(error: crate::services::foreign_psbt::ForeignPsbtError) -> String {
+    use crate::services::foreign_psbt::ForeignPsbtError as E;
+    match error {
+        E::UnsupportedRoute => "Taproot (tr) wallets can be scanned but not split: there is no signing route for them yet.".to_string(),
+        E::ForkUnknown => "The Bitcoin Blake2b fork height was not observed with this scan, so no coin can be proven pre-fork. Scan again.".to_string(),
+        E::Empty => "No confirmed pre-fork coins were found. Coins received after the fork exist only on Bitcoin Blake2b and are not part of a split.".to_string(),
+        _ => "The source evidence cannot produce a safe sweep review. Scan again after all outputs confirm.".to_string(),
+    }
 }
 
 /// Health of the Connect realtime stream as observed from the desktop.
@@ -3559,14 +3577,13 @@ impl App {
         self.split_handoff = Some(SplitHandoff::Reserving(intent));
         Task::perform(
             async move {
-                let estimator = crate::services::feeestimation::fee_estimation::FeeEstimator::new();
-                let (address, feerate) =
-                    tokio::join!(daemon.get_new_address(), estimator.get_mid_priority_rate());
+                let fees = split_fee_source();
+                let (address, feerate) = tokio::join!(
+                    daemon.get_new_address(),
+                    crate::services::foreign_psbt::btcb2_sweep_feerate(&*fees)
+                );
                 let address = address.map_err(|error| error.to_string())?;
-                let feerate = feerate.map_err(|error| error.to_string())?;
-                let feerate = u64::try_from(feerate)
-                    .map_err(|_| "The fee estimate is outside supported bounds.".to_string())?;
-                Ok((address, feerate.min(coincube_core::spend::MAX_FEERATE)))
+                Ok((address, feerate))
             },
             move |result| Message::SplitTargetPrepared { generation, result },
         )
@@ -4686,29 +4703,37 @@ impl App {
                         .map_err(|_| {
                             "The reserved address did not match this Cube and Vault.".to_string()
                         })?;
-                    let economics = crate::services::foreign_psbt::review_sweep_economics(
+                    let session = || crate::services::foreign_psbt::ForeignSession {
+                        chain: self.cube_settings.network,
+                        generation: intent.scan_generation(),
+                        target: &target,
+                        external: &intent.external,
+                        internal: intent.internal.as_ref(),
+                    };
+                    let sweep = crate::services::foreign_psbt::review_sweep_inputs(
                         &intent.report,
-                        crate::services::foreign_psbt::ForeignSession {
-                            chain: self.cube_settings.network,
-                            generation: intent.scan_generation(),
-                            target: &target,
-                            external: &intent.external,
-                            internal: intent.internal.as_ref(),
-                        },
-                        feerate,
+                        session(),
                     )
-                    .map_err(|_| {
-                        "The source evidence cannot produce a safe sweep review. Scan again after all outputs confirm."
-                            .to_string()
-                    })?;
-                    Ok((target, reserved.address.to_string(), economics))
+                    .map_err(split_review_error)?;
+                    let economics = feerate
+                        .map(|rate| {
+                            crate::services::foreign_psbt::review_sweep_economics(
+                                &intent.report,
+                                session(),
+                                rate,
+                            )
+                        })
+                        .transpose()
+                        .map_err(split_review_error)?;
+                    Ok((target, reserved.address.to_string(), sweep, economics))
                 });
                 match prepared {
-                    Ok((target, address, economics)) => {
+                    Ok((target, address, sweep, economics)) => {
                         self.split_handoff = Some(SplitHandoff::Review {
                             intent,
                             target,
                             address,
+                            sweep,
                             economics,
                         });
                         return Task::none();
@@ -7396,13 +7421,15 @@ impl App {
             intent,
             target,
             address,
+            sweep,
             economics,
         }) = self.split_handoff.as_ref()
         {
             iced::widget::Stack::new()
                 .push(content)
                 .push(iced::widget::opaque(
-                    split_review_overlay(intent, target, address, *economics).map(Message::View),
+                    split_review_overlay(intent, target, address, *sweep, *economics)
+                        .map(Message::View),
                 ))
                 .into()
         } else {
@@ -7434,7 +7461,8 @@ fn split_review_overlay<'a>(
     intent: &'a split_intent::SplitIntent,
     target: &'a crate::services::foreign_psbt::TargetAddressEvidence,
     address: &'a str,
-    economics: crate::services::foreign_psbt::SweepEconomics,
+    sweep: crate::services::foreign_psbt::SweepInputs,
+    economics: Option<crate::services::foreign_psbt::SweepEconomics>,
 ) -> Element<'a, view::Message> {
     use coincube_ui::component::text::*;
     use coincube_ui::component::{button, card};
@@ -7452,27 +7480,44 @@ fn split_review_overlay<'a>(
             )
             .style(theme::text::warning),
         )
-        .push(p1_bold(format!("{} confirmed input(s)", economics.inputs)))
-        .push(p1_regular(format!(
-            "Source total: {} sats",
-            economics.total.to_sat()
+        .push(p1_bold(format!(
+            "{} confirmed pre-fork input(s)",
+            sweep.inputs
         )))
         .push(p1_regular(format!(
-            "Bounded fee rate: {} sat/vB",
-            economics.feerate_sat_vb
+            "Excluded: {} post-fork (Bitcoin Blake2b only), {} without a confirming height",
+            sweep.excluded_post_fork, sweep.excluded_unknown
+        )))
+        .push(p1_regular(format!(
+            "Pre-fork total: {} sats",
+            sweep.total.to_sat()
         )))
         .push(p1_regular(format!(
             "Maximum signed size: {} vB",
-            economics.maximum_signed_vbytes
-        )))
-        .push(p1_regular(format!(
-            "Maximum fee: {} sats",
-            economics.fee.to_sat()
-        )))
-        .push(p1_bold(format!(
-            "Estimated destination amount: {} sats",
-            economics.destination.to_sat()
-        )))
+            sweep.maximum_signed_vbytes
+        )));
+    let review = match economics {
+        Some(economics) => review
+            .push(p1_regular(format!(
+                "Bounded fee rate: {} sat/vB",
+                economics.feerate_sat_vb
+            )))
+            .push(p1_regular(format!(
+                "Maximum fee: {} sats",
+                economics.fee.to_sat()
+            )))
+            .push(p1_bold(format!(
+                "Estimated destination amount: {} sats",
+                economics.destination.to_sat()
+            ))),
+        None => review.push(
+            p1_regular(
+                "Fees unavailable: Tenshu has no Bitcoin Blake2b fee estimate yet, and Bitcoin mainnet fees do not apply to this sweep. No fee or destination amount can be reviewed.",
+            )
+            .style(theme::text::warning),
+        ),
+    };
+    let review = review
         .push(Space::new().height(Length::Fixed(4.0)))
         .push(caption(format!("Reserved destination: {address}")))
         .push(caption(format!(
@@ -7785,6 +7830,18 @@ fn restart_daemon_blocking(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #568 A1: the Split review is priced only by a BTCB2-scoped source, and
+    /// none exists yet, so fees are unavailable instead of Bitcoin mainnet's.
+    #[tokio::test]
+    async fn split_review_fee_source_is_btcb2_scoped_and_unavailable() {
+        let source = split_fee_source();
+        assert_eq!(source.chain(), crate::chain::ChainId::BitcoinBlake2b);
+        assert_eq!(
+            crate::services::foreign_psbt::btcb2_sweep_feerate(&*source).await,
+            None
+        );
+    }
 
     #[test]
     fn fork_panels_construct_without_any_sdk_client_or_marketplace_panel() {

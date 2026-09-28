@@ -69,10 +69,11 @@ pub enum Message {
     /// coordinator session back and forth, so no other handler ever sees it.
     Claim(super::state::vault::claim::ClaimEvent),
     /// Completion of the read-only Split destination reservation and bounded
-    /// fee-rate lookup. It never carries a PSBT or signing capability.
+    /// BTCB2 fee-rate lookup (`None` = unavailable). It never carries a PSBT
+    /// or signing capability.
     SplitTargetPrepared {
         generation: u64,
-        result: Result<(GetAddressResult, u64), String>,
+        result: Result<(GetAddressResult, Option<u64>), String>,
     },
     LoadDaemonConfig(Box<DaemonConfig>),
     DaemonConfigLoaded(Result<(), Error>),

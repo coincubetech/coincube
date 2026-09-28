@@ -197,7 +197,7 @@ mod tests {
             assert_eq!(descriptors.fingerprint, fingerprint);
             assert_eq!(descriptors.external.end_exclusive(100), 100);
             assert_eq!(descriptors.internal.end_exclusive(100), 100);
-            assert!(!descriptors.external.capabilities().unified_signing);
+            assert!(!descriptors.external.capabilities().signing.seed_unified);
             assert!(!descriptors.internal.capabilities().claim_authorization);
         }
     }

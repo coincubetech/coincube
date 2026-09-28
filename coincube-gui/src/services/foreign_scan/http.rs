@@ -107,7 +107,7 @@ impl Source for HttpSource {
         }
         BlockHash::from_str(hash).map_err(|_| ScanError::Malformed)
     }
-    async fn anchor(&self) -> Result<BlockHash, ScanError> {
+    async fn anchor(&self) -> Result<(BlockHash, Option<u64>), ScanError> {
         let status = self
             .authenticated
             .network_anchor(ChainId::BitcoinBlake2b)
@@ -128,7 +128,13 @@ impl Source for HttpSource {
         {
             return Err(ScanError::Freshness);
         }
-        Ok(anchor.tip_hash)
+        let fork_height = anchor
+            .observation
+            .fork
+            .as_ref()
+            .filter(|fork| fork.active)
+            .map(|fork| fork.height);
+        Ok((anchor.tip_hash, fork_height))
     }
     async fn stats(&self, chain: ChainId, address: &str) -> Result<Stats, ScanError> {
         serde_json::from_slice(

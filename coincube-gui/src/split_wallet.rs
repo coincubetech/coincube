@@ -19,7 +19,7 @@ use crate::{
     chain::ChainId,
     services::{
         coincube::CoincubeClient,
-        foreign_scan::{self, Branch, BranchRange, ScanDescriptor, ScanError, ScanPlan},
+        foreign_scan::{self, Branch, BranchRange, ForkSide, ScanDescriptor, ScanError, ScanPlan},
     },
 };
 
@@ -45,6 +45,13 @@ pub struct ScanSummary {
     pub coins: usize,
     pub confirmed: usize,
     pub sats: u64,
+    /// Confirmed below the observed fork height: the only splittable coins.
+    pub pre_fork: usize,
+    pub pre_fork_sats: u64,
+    /// Confirmed at or after the fork: Bitcoin Blake2b only, never swept.
+    pub post_fork: usize,
+    /// Confirmed but not classifiable (no observed fork or block height).
+    pub unclassified: usize,
     pub tip: String,
 }
 
@@ -81,6 +88,18 @@ impl ScanEvidence {
         external: ScanDescriptor,
         internal: Option<ScanDescriptor>,
     ) -> Self {
+        let (mut pre_fork, mut pre_fork_sats, mut post_fork, mut unclassified) = (0, 0, 0, 0);
+        for coin in report.coins() {
+            match report.fork_side(coin) {
+                ForkSide::PreFork => {
+                    pre_fork += 1;
+                    pre_fork_sats += coin.output.value.to_sat();
+                }
+                ForkSide::PostFork => post_fork += 1,
+                ForkSide::Unknown => unclassified += 1,
+                ForkSide::Unconfirmed => {}
+            }
+        }
         let summary = ScanSummary {
             generation: report.generation(),
             addresses: report.addresses_scanned(),
@@ -91,6 +110,10 @@ impl ScanEvidence {
                 .iter()
                 .map(|coin| coin.output.value.to_sat())
                 .sum(),
+            pre_fork,
+            pre_fork_sats,
+            post_fork,
+            unclassified,
             tip: report.tip().to_string(),
         };
         Self {
@@ -377,7 +400,7 @@ pub fn view(panel: &SplitWalletPanel) -> Element<'_, Message> {
                 .padding(10),
         )
         .push(
-            caption("Supported for discovery: pkh, sh(wpkh), wpkh, wsh(multi/sortedmulti), and tr key-path. Only public mainnet descriptors are accepted. The bounded scan uses a gap of 20 and checks at most 100 addresses per branch.")
+            caption("Supported for discovery: pkh, sh(wpkh), wpkh, wsh(multi/sortedmulti), and tr key-path (scan only: tr has no signing route, so it cannot be split). Only pre-fork coins can be split. Only public mainnet descriptors are accepted. The bounded scan uses a gap of 20 and checks at most 100 addresses per branch.")
                 .style(theme::text::secondary),
         );
 
@@ -398,6 +421,14 @@ pub fn view(panel: &SplitWalletPanel) -> Element<'_, Message> {
                 summary.confirmed,
                 summary.sats
             )))
+            .push(p1_regular(format!(
+                "Pre-fork (splittable): {} UTXO{}, {} sats · Post-fork (Bitcoin Blake2b only, excluded): {} · Unclassified (excluded): {}",
+                summary.pre_fork,
+                if summary.pre_fork == 1 { "" } else { "s" },
+                summary.pre_fork_sats,
+                summary.post_fork,
+                summary.unclassified
+            )))
             .push(caption(format!(
                 "{} addresses checked at BTCB2 tip {}",
                 summary.addresses, summary.tip
@@ -407,6 +438,8 @@ pub fn view(panel: &SplitWalletPanel) -> Element<'_, Message> {
                     "No spendable outputs were found in this bounded scan."
                 } else if summary.confirmed != summary.coins {
                     "Wait for every discovered output to confirm, then scan again before reviewing a sweep."
+                } else if summary.pre_fork == 0 {
+                    "No confirmed pre-fork coins were proven. Only pre-fork coins can be split; post-fork or unclassified coins are excluded."
                 } else {
                     "Continue to unlock the destination Cube and review bounded sweep economics. Spending remains locked."
                 })
@@ -416,7 +449,7 @@ pub fn view(panel: &SplitWalletPanel) -> Element<'_, Message> {
     };
 
     let scanning = matches!(panel.status, Status::Scanning);
-    let reviewable = matches!(&panel.status, Status::Complete(summary) if summary.coins > 0 && summary.confirmed == summary.coins);
+    let reviewable = matches!(&panel.status, Status::Complete(summary) if summary.pre_fork > 0 && summary.confirmed == summary.coins);
     let actions = Row::new()
         .spacing(10)
         .align_y(Alignment::Center)
@@ -607,6 +640,67 @@ mod tests {
         assert!(intent.internal.is_none());
         assert!(panel.evidence.is_none());
         assert!(matches!(panel.status, Status::Editing));
+    }
+
+    #[test]
+    fn summary_counts_pre_and_post_fork_coins_separately() {
+        use coincube_core::miniscript::bitcoin::{
+            absolute, transaction, Amount, OutPoint, Transaction, TxIn, TxOut,
+        };
+        let external = ScanDescriptor::parse(Branch::External, FIXED_DESCRIPTOR).unwrap();
+        let coin = |vout: u32, height: Option<u32>, sats: u64| {
+            let previous = Transaction {
+                version: transaction::Version::TWO,
+                lock_time: absolute::LockTime::ZERO,
+                input: vec![TxIn::default()],
+                output: vec![TxOut {
+                    value: Amount::from_sat(sats),
+                    script_pubkey: external.script(0).unwrap(),
+                }],
+            };
+            foreign_scan::DiscoveredCoin {
+                branch: Branch::External,
+                index: 0,
+                outpoint: OutPoint::new(previous.compute_txid(), vout),
+                output: previous.output[0].clone(),
+                previous,
+                confirmed: true,
+                block_height: height,
+                block_hash: height.map(|_| BlockHash::from_byte_array([1; 32])),
+            }
+        };
+        let coins = vec![
+            coin(0, Some(99), 1_000),
+            coin(1, Some(100), 2_000),
+            coin(2, None, 4_000),
+        ];
+        let report = foreign_scan::ScanReport::for_test(
+            ChainId::BitcoinBlake2b,
+            3,
+            BlockHash::from_byte_array([9; 32]),
+            coins.clone(),
+        )
+        .with_fork_height(Some(100));
+        let summary = ScanEvidence::new(report, external.clone(), None).summary;
+        assert_eq!(
+            (
+                summary.pre_fork,
+                summary.pre_fork_sats,
+                summary.post_fork,
+                summary.unclassified
+            ),
+            (1, 1_000, 1, 1)
+        );
+
+        // No observed fork height: nothing is splittable.
+        let report = foreign_scan::ScanReport::for_test(
+            ChainId::BitcoinBlake2b,
+            3,
+            BlockHash::from_byte_array([9; 32]),
+            coins,
+        );
+        let summary = ScanEvidence::new(report, external, None).summary;
+        assert_eq!((summary.pre_fork, summary.unclassified), (0, 3));
     }
 
     #[test]
