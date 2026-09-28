@@ -5,8 +5,10 @@ import json
 import logging
 import os
 import re
+import shutil
 import socket
 import subprocess
+import sys
 import threading
 import time
 
@@ -44,6 +46,54 @@ USE_TAPROOT = bool(
 )  # TODO: switch to True in a couple releases.
 
 COIN = 10**8
+
+# Per-thread syscall tracing for the node processes, off unless
+# BTCB2_TRACE_SYSCALLS=1 (#394). Only Linux CI has ever reproduced the Knots
+# block-file fault this exists to catch, and strace costs enough wall time that
+# it must never be on by default.
+TRACE_SYSCALLS = os.getenv("BTCB2_TRACE_SYSCALLS", "0") == "1"
+STRACE_PATH = os.getenv("STRACE_PATH", "strace")
+# The failing node logs `fseek` and then `fclose` failing on a handle `fopen`
+# had just returned. A seek to an absolute offset on a regular file cannot fail
+# for being past the end, so the question is not "was the data there" but "was
+# this descriptor still open, and who closed it": openat/close/dup/dup2/dup3
+# and fcntl (F_DUPFD) are every way a descriptor is created or destroyed,
+# lseek/read are what the reading thread was doing with it.
+TRACED_SYSCALLS = "openat,open,lseek,_llseek,read,pread64,close,dup,dup2,dup3,fcntl"
+
+
+def syscall_trace_prefix(log_path):
+    """argv prefix running a child under strace, or `[]` when not tracing.
+
+    `-f` follows threads and tags every line with the TID that made the call,
+    which is the whole point: the descriptor goes bad in one thread while other
+    threads are reading the same file.
+    """
+    if not TRACE_SYSCALLS:
+        return []
+    if not sys.platform.startswith("linux"):
+        raise RuntimeError(
+            "BTCB2_TRACE_SYSCALLS=1 but this host is not Linux; strace cannot run here"
+        )
+    strace = shutil.which(STRACE_PATH)
+    if strace is None:
+        raise RuntimeError(
+            f"BTCB2_TRACE_SYSCALLS=1 but {STRACE_PATH!r} is not on PATH"
+        )
+    return [
+        strace,
+        "-f",  # follow every thread; each line carries its TID
+        "-A",  # append, so a restarted node does not truncate its own trace
+        "-tt",  # wall-clock timestamps, to line the trace up with debug.log
+        "-T",  # time spent in each call
+        "-y",  # annotate descriptors with the path they refer to
+        "-s",
+        "64",  # the payload is not the evidence; cap it
+        "-e",
+        f"trace={TRACED_SYSCALLS}",
+        "-o",
+        log_path,
+    ]
 
 
 def wait_for(success, timeout=TIMEOUT, debug_fn=None):

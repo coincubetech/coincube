@@ -8,6 +8,28 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, labeled]
   workflow_dispatch:
+    inputs:
+      trace_syscalls:
+        description: >-
+          Run both Knots nodes under strace (per-thread openat/lseek/read/
+          close/dup) and keep the trace with the failure logs. Investigation
+          only: it multiplies the run's wall time (#394).
+        type: boolean
+        default: false
+      probe_only:
+        description: >-
+          Run only the concurrent getblock block-file probe. Skips the
+          coincubed and electrs builds, so a reproduction attempt costs a Knots
+          download and a few minutes instead of a full harness run.
+        type: boolean
+        default: false
+      repeat:
+        description: >-
+          Run the selected tests this many times (1-10), stopping at the first
+          failure. For an intermittent fault; every attempt costs Actions
+          minutes.
+        type: string
+        default: "1"
 
 concurrency:
   group: btcb2-regtest-${{ github.event.pull_request.number || github.ref }}
@@ -45,6 +67,10 @@ jobs:
 
       - name: Install build dependencies (rocksdb for electrs)
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang libclang-dev cmake
+
+      - name: Install strace
+        if: ${{ inputs.trace_syscalls }}
+        run: sudo apt-get install -y --no-install-recommends strace
 
       - name: Setup Python dependencies
         run: pip install --break-system-packages -r tests/requirements.txt
@@ -92,6 +118,9 @@ jobs:
           key: ${{ runner.os }}-electrs-blake2b-v2-${{ env.ELECTRS_BLAKE2B_COMMIT }}
 
       - name: Build coincubed
+        # The block-file probe drives one Knots node over JSON-RPC and needs no
+        # daemon, so a probe-only reproduction run skips the build entirely.
+        if: ${{ !inputs.probe_only }}
         run: cargo build --release --package coincubed
 
       - name: Test and build knots_verify
@@ -120,6 +149,7 @@ jobs:
           echo "KNOTS_BLAKE2B_PATH=$blake2b" >> "$GITHUB_ENV"
 
       - name: Build retropex/electrs (BLAKE2b-aware Esplora indexer)
+        if: ${{ !inputs.probe_only }}
         run: |
           set -e
           electrs="$(tests/tools/fetch_electrs_blake2b.sh)"
@@ -135,16 +165,40 @@ jobs:
           BTCB2_HARNESS_REQUIRED: "1"
           # Failing tests keep their datadirs here so the logs can be collected.
           TEST_DIR: ${{ github.workspace }}/test-datadirs
+          # Per-thread syscall tracing of the Knots nodes, dispatch-only (#394).
+          # `inputs` is empty on a pull_request, so this is "0" there.
+          BTCB2_TRACE_SYSCALLS: ${{ inputs.trace_syscalls && '1' || '0' }}
+          PROBE_ONLY: ${{ inputs.probe_only && '1' || '0' }}
+          REPEAT: ${{ inputs.repeat || '1' }}
         run: |
           set -xe
           mkdir -p "$TEST_DIR"
           "$KNOTS_LEGACY_PATH" --version | head -1
-          "$KNOTS_BLAKE2B_PATH" --version | head -1
-          # B4.1 proves the harness; B4.2 runs the QA matrices on it.
-          # Both modules are named explicitly: a bare `pytest tests/`
-          # here would also pull in the functional suite, which this job
-          # does not set up.
-          pytest tests/test_btcb2_harness.py tests/test_btcb2_b42_matrices.py -vvv
+          # B4.1 proves the harness; B4.2 runs the QA matrices on it;
+          # test_btcb2_blockfile.py drives concurrent getblock batches at one
+          # node to reproduce the block-file fault in #394. The modules are
+          # named explicitly: a bare `pytest tests/` here would also pull in
+          # the functional suite, which this job does not set up.
+          modules="tests/test_btcb2_harness.py tests/test_btcb2_b42_matrices.py tests/test_btcb2_blockfile.py"
+          if [ "$PROBE_ONLY" = "1" ]; then
+            modules="tests/test_btcb2_blockfile.py"
+          else
+            "$KNOTS_BLAKE2B_PATH" --version | head -1
+          fi
+          case "$REPEAT" in
+            ''|*[!0-9]*) echo "repeat must be a whole number" >&2; exit 2 ;;
+          esac
+          if [ "$REPEAT" -lt 1 ] || [ "$REPEAT" -gt 10 ]; then
+            echo "repeat must be between 1 and 10; these are Actions minutes" >&2
+            exit 2
+          fi
+          # Stops at the first failure: with an intermittent fault the first
+          # reproduction is the one whose datadir and trace must be kept.
+          for attempt in $(seq 1 "$REPEAT"); do
+            echo "::group::attempt $attempt of $REPEAT"
+            pytest $modules -vvv
+            echo "::endgroup::"
+          done
 
       - name: Collect logs from failed tests
         if: failure()
@@ -153,7 +207,11 @@ jobs:
           dest="$GITHUB_WORKSPACE/failure-logs"
           mkdir -p "$dest"
           cd "$GITHUB_WORKSPACE/test-datadirs" || exit 0
-          find . -type f \( -name 'log' -o -name 'debug.log' \) -size -50M |
+          # blk*.dat rides along (tens of KB on regtest) so the bytes at the
+          # position the node could not seek to can be checked offline, and
+          # strace.log carries the syscall/errno evidence when tracing is on.
+          find . -type f \( -name 'log' -o -name 'debug.log' \
+            -o -name 'strace.log' -o -name 'blk*.dat' \) -size -50M |
             while read -r f; do
               mkdir -p "$dest/$(dirname "$f")"
               cp "$f" "$dest/$f"
