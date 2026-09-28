@@ -207,6 +207,21 @@ impl RegtestTransport {
             gate,
         )
     }
+    pub fn submit_ancestry(
+        &self,
+        verified: &VerifiedAncestryTransfer,
+        gate: &SubmissionGate,
+    ) -> Result<SubmissionOutcome, SubmissionError> {
+        if verified.chain() != ChainId::Bitcoin {
+            return Err(SubmissionError::UnsupportedChain);
+        }
+        self.submit(
+            verified.chain(),
+            verified.descriptor(),
+            verified.transaction(),
+            gate,
+        )
+    }
     pub fn submit_fork(
         &self,
         verified: &VerifiedClaimForkSweep,

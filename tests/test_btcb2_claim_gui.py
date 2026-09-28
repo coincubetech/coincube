@@ -195,7 +195,10 @@ class Bridge:
 
 @pytest.mark.parametrize("backend", ["esplora", "node", "electrum", "fallback", "both-reject", "fallback-timeout", "node-replaced", "electrum-replaced"])
 @pytest.mark.parametrize("multisig", [False, True], ids=["single-key", "two-of-three"])
-def test_gui_claims_both_chains_and_recovers_remined_bitcoin(tmp_path, record_property, multisig, backend):
+@pytest.mark.parametrize("ancestry", [False, True], ids=["op-return", "input-ancestry"])
+def test_gui_claims_both_chains_and_recovers_remined_bitcoin(tmp_path, record_property, multisig, backend, ancestry):
+    if ancestry and (multisig or backend != "esplora"):
+        pytest.skip("one live ancestry route proves the gated end-to-end path")
     replace_backend = backend.endswith("-replaced")
     backend = backend.removesuffix("-replaced")
     tool = os.getenv("CLAIM_GUI_REGTEST_TEST_PATH")
@@ -255,9 +258,20 @@ def test_gui_claims_both_chains_and_recovers_remined_bitcoin(tmp_path, record_pr
                             "previous": node.rpc.getrawtransaction(txid, False, block), "vout": vout,
                             "coin_height": node.rpc.getblockheader(block)["height"],
                             "tip_height": node.rpc.getblockcount()}
+        if ancestry:
+            ancestry_txid, ancestry_vout, _ = harness.poison_outpoint
+            initial.update({
+                "ancestry_previous": node.rpc.getrawtransaction(
+                    ancestry_txid, False, harness.poison_block_hash),
+                "ancestry_vout": ancestry_vout,
+                "ancestry_height": node.rpc.getblockheader(
+                    harness.poison_block_hash)["height"],
+                "ancestry_derivation_index": 3,
+            })
         ready = child.send(initial)
         assert ready["event"] == "ready", ready
-        for action, stage in (("build", "plan"), ("sign", "sign"), ("open_signer", "sign"), ("hot_sign", "sign" if multisig else "review")):
+        signing_action = "sign_checked_ancestry" if ancestry else "sign"
+        for action, stage in (("build", "plan"), (signing_action, "sign"), ("open_signer", "sign"), ("hot_sign", "sign" if multisig else "review")):
             result = child.send({"command": action})
             assert result["stage"] == stage, result
             assert result["submission_calls"] == 0 and result["submitted"] is None
@@ -350,7 +364,12 @@ def test_gui_claims_both_chains_and_recovers_remined_bitcoin(tmp_path, record_pr
             harness.blake2b.rpc.generateblock(harness.blake2b.rpc.getnewaddress(), [submitted["raw"]])
         block_error = invalid_block.value.error
         assert block_error["code"] == -25, block_error
-        assert block_error["message"].startswith("TestBlockValidity failed: bad-txns-vout-script-toolarge,"), block_error
+        expected_rejection = (
+            "TestBlockValidity failed: bad-txns-inputs-missingorspent"
+            if ancestry
+            else "TestBlockValidity failed: bad-txns-vout-script-toolarge,"
+        )
+        assert block_error["message"].startswith(expected_rejection), block_error
         assert submitted["txid"] in block_error["message"], block_error
         assert harness.blake2b.rpc.getbestblockhash() == fork_tip
         record_property("step1_fork_consensus_rejection", block_error)
@@ -407,14 +426,14 @@ def test_gui_claims_both_chains_and_recovers_remined_bitcoin(tmp_path, record_pr
         fork_height = fork_node.rpc.getblockcount()
         harness.electrs_blake2b.wait_for_tip(fork_block)
         completed = child.send({"command": "fork_refresh"})
-        assert completed["fork"]["tracking"]["saved"] is True, completed
+        assert completed["fork"]["tracking"]["saved"] is (not ancestry), completed
         assert completed["fork"]["tracking"]["transaction"].startswith("Confirmed"), completed
         assert completed["fork"]["error"] is None and not completed["fork"]["busy"]
         assert fork_tx["txid"] in fork_node.rpc.getblock(fork_block)["tx"]
         for settings, cube_id in zip(completed["settings"], ("bitcoin-cube", "fork-cube")):
             cube = next(c for c in settings["cubes"] if c["id"] == cube_id)
-            assert cube["split_completed_at_height"] == fork_height
-            assert cube["split_completion_txid"] == fork_tx["txid"]
+            assert cube.get("split_completed_at_height") == (None if ancestry else fork_height)
+            assert cube.get("split_completion_txid") == (None if ancestry else fork_tx["txid"])
         preserved = {key: completed["journal"].get(key) for key in
                      ("fork_sweep", "fork_submission", "bitcoin_transaction", "bitcoin_attempts")}
         old_history = completed["journal"].get("inclusion_history", [])
@@ -454,7 +473,7 @@ def test_gui_claims_both_chains_and_recovers_remined_bitcoin(tmp_path, record_pr
         resumed_fork = child.send({"command": "fork_open"})
         assert resumed_fork["fork"]["outcome"] is not None and resumed_fork["submission_calls"] == 0
         resumed_completion = child.send({"command": "fork_refresh"})
-        assert resumed_completion["fork"]["tracking"]["saved"] is True, resumed_completion
+        assert resumed_completion["fork"]["tracking"]["saved"] is (not ancestry), resumed_completion
         assert resumed_completion["submission_calls"] == 0
         assert {key: resumed_completion["journal"].get(key) for key in preserved} == preserved
         record_property("restart_new_pid", child.proc.pid)
@@ -520,12 +539,12 @@ def test_gui_claims_both_chains_and_recovers_remined_bitcoin(tmp_path, record_pr
         reopened = child.send({"command": "fork_open"})
         assert reopened["fork"]["outcome"] is not None and reopened["submission_calls"] == 0
         restored = child.send({"command": "fork_refresh"})
-        assert restored["fork"]["tracking"]["saved"] is True, restored
+        assert restored["fork"]["tracking"]["saved"] is (not ancestry), restored
         assert restored["submission_calls"] == 0
         for settings in restored["settings"]:
             for cube in settings["cubes"]:
-                assert cube["split_completed_at_height"] == fork_height
-                assert cube["split_completion_txid"] == fork_tx["txid"]
+                assert cube.get("split_completed_at_height") == (None if ancestry else fork_height)
+                assert cube.get("split_completion_txid") == (None if ancestry else fork_tx["txid"])
         record_property("fork_txid", fork_tx["txid"])
         record_property("fork_wtxid", fork_tx["wtxid"])
         record_property("bitcoin_reconfirmation", {"previous": inclusion, "confirmed": new_inclusion})

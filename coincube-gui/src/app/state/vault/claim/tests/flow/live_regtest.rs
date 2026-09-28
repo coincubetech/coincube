@@ -115,6 +115,35 @@ async fn claim_gui_regtest_driver() {
     fixture.coin.amount = output.value;
     fixture.coin.block_height = Some(i32::try_from(init["coin_height"].as_u64().unwrap()).unwrap());
     fixture.previous = previous;
+    let ancestry_coin = init["ancestry_previous"].as_str().map(|raw| {
+        let transaction = coincube_core::miniscript::bitcoin::consensus::encode::deserialize_hex::<
+            Transaction,
+        >(raw)
+        .unwrap();
+        let vout = u32::try_from(init["ancestry_vout"].as_u64().unwrap()).unwrap();
+        let output = transaction.output.get(vout as usize).unwrap();
+        let derivation_index = ChildNumber::from_normal_idx(
+            u32::try_from(init["ancestry_derivation_index"].as_u64().unwrap()).unwrap(),
+        )
+        .unwrap();
+        let expected = fixture
+            .descriptor
+            .receive_descriptor()
+            .derive(derivation_index, &secp256k1::Secp256k1::verification_only())
+            .script_pubkey();
+        assert_eq!(output.script_pubkey, expected);
+        Coin {
+            amount: output.value,
+            outpoint: OutPoint::new(transaction.compute_txid(), vout),
+            address: Address::from_script(&output.script_pubkey, Network::Bitcoin).unwrap(),
+            block_height: Some(i32::try_from(init["ancestry_height"].as_u64().unwrap()).unwrap()),
+            derivation_index,
+            spend_info: None,
+            is_immature: false,
+            is_change: false,
+            is_from_self: false,
+        }
+    });
     let base = init["bridge"].as_str().unwrap();
     let mut config: coincubed::config::Config = toml::from_str(&format!(
         "main_descriptor = '{}'\ndata_directory = '{}'\n[bitcoin_config]\nnetwork = 'bitcoin'\n[esplora_config]\naddr = '{}/api/v1/esplora/bitcoin/mainnet'\n",
@@ -152,7 +181,7 @@ async fn claim_gui_regtest_driver() {
         submitted: Mutex::new(recovered_transaction("bitcoin_recorded_raw")),
         hits: Mutex::new(Vec::new()),
         queried_txs: Mutex::new(Vec::new()),
-        ancestry_coin: None,
+        ancestry_coin,
         live: Some(LiveTransport {
             bound,
             transport,
@@ -276,6 +305,33 @@ async fn claim_gui_regtest_driver() {
         let message = match action {
             "build" => Message::View(view::Message::Claim(view::ClaimMessage::Build)),
             "sign" => Message::View(view::Message::Claim(view::ClaimMessage::Sign)),
+            "sign_checked_ancestry" => {
+                let Stage::Plan { built } = &panel.stage else {
+                    panic!("checked ancestry signing must start at Plan")
+                };
+                let connect = panel.connect.clone().expect("live Connect session");
+                let expected = *panel.generation.borrow();
+                let checked = signing::check_inputs(
+                    built,
+                    dyn_daemon.clone(),
+                    panel.wallet.clone(),
+                    connect.clone(),
+                    expected,
+                    panel.generation.clone(),
+                )
+                .await
+                .unwrap();
+                let coins = checked
+                    .consume(built, &panel.wallet, Some(&connect), expected)
+                    .unwrap();
+                let Stage::Plan { built } =
+                    std::mem::replace(&mut panel.stage, Stage::Preconditions)
+                else {
+                    unreachable!()
+                };
+                panel.install_signing(built, coins);
+                Message::Tick
+            }
             "open_signer" => Message::View(view::Message::Spend(view::SpendTxMessage::Sign)),
             "hot_sign" => Message::View(view::Message::Spend(
                 view::SpendTxMessage::SelectMasterSigner,
