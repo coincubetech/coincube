@@ -484,6 +484,16 @@ fn review_view<'a>(
         .into()
 }
 
+fn can_review_reconfirmation(
+    status: Option<Status>,
+    has_resubmission: bool,
+    has_reconfirmation: bool,
+) -> bool {
+    !has_resubmission
+        && !has_reconfirmation
+        && status == Some(Status::Observation(Assessment::Reorged))
+}
+
 fn track_view<'a>(
     outcome: Outcome,
     phase: Option<Phase>,
@@ -600,7 +610,7 @@ fn track_view<'a>(
                 .push(row("New block", p2_regular(format!("{} — {}", inclusion.confirmed.height, inclusion.confirmed.hash))))
                 .push(button::primary(None, "Acknowledge new confirmation").on_press_maybe((!busy).then_some(Message::Claim(ClaimMessage::ConfirmReconfirmation))))
         }))
-        .push_maybe((!has_resubmission && status == Some(Status::Observation(Assessment::Reorged)) && reconfirmation.is_none()).then(|| {
+        .push_maybe(can_review_reconfirmation(status, has_resubmission, reconfirmation.is_some()).then(|| {
             button::secondary(None, "Review new confirmation").on_press_maybe((!busy).then_some(Message::Claim(ClaimMessage::ReviewReconfirmation)))
         }))
         .push(
@@ -609,4 +619,23 @@ fn track_view<'a>(
         )
         .push(Space::new().height(Length::Fixed(10.0)))
         .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reconfirmation_review_never_competes_with_an_existing_recovery_review() {
+        let reorged = Some(Status::Observation(Assessment::Reorged));
+
+        assert!(can_review_reconfirmation(reorged, false, false));
+        assert!(!can_review_reconfirmation(reorged, true, false));
+        assert!(!can_review_reconfirmation(reorged, false, true));
+        assert!(!can_review_reconfirmation(
+            Some(Status::Observation(Assessment::WaitingForConfirmation)),
+            false,
+            false,
+        ));
+    }
 }
