@@ -8186,6 +8186,7 @@ mod tests {
             remote_backend_auth: None,
             start_internal_bitcoind: None,
             pending_rescan: pending,
+            keychain_keys_recorded: false,
         };
 
         let before = settings::Settings {
