@@ -9,6 +9,7 @@ use crate::seed_crypt;
 use zeroize::Zeroizing;
 
 use std::{
+    borrow::Cow,
     error, fmt, fs,
     io::{self, Write},
     path,
@@ -149,7 +150,17 @@ impl SessionSigner {
         mnemonic: bip39::Mnemonic,
         passphrase: &str,
     ) -> Result<Self, SignerError> {
-        let seed = Zeroizing::new(mnemonic.to_seed_normalized(passphrase));
+        // BIP39 requires both mnemonic and passphrase to be UTF-8 NFKD. The
+        // method name is literal: `to_seed_normalized` assumes its caller has
+        // already normalized the passphrase. Reuse bip39's own normalization
+        // helper so our behavior cannot drift from the crate's implementation.
+        // `into_owned` moves the allocation when normalization was necessary;
+        // either way the sole owned normalized copy is scrubbed immediately
+        // after PBKDF2 returns.
+        let mut normalized = Cow::Borrowed(passphrase);
+        bip39::Mnemonic::normalize_utf8_cow(&mut normalized);
+        let normalized = Zeroizing::new(normalized.into_owned());
+        let seed = Zeroizing::new(mnemonic.to_seed_normalized(normalized.as_str()));
         let master_xpriv =
             bip32::Xpriv::new_master(network, seed.as_ref()).map_err(SignerError::Bip32)?;
         // `mnemonic` has bip39's ZeroizeOnDrop implementation; `seed` is a

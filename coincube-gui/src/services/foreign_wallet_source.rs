@@ -253,7 +253,31 @@ mod tests {
     }
 
     #[test]
-    fn passphrase_changes_the_session_source_fingerprint() {
+    fn passphrase_nfkd_equivalence_and_separation_bind_fingerprint_and_descriptors() {
+        let composed = SessionSeedSource::new(
+            Zeroizing::new(WORDS.to_owned()),
+            Zeroizing::new("caf\u{e9}".to_owned()),
+        )
+        .unwrap()
+        .descriptors(StandardSinglesig::Bip84, 0)
+        .unwrap();
+        let decomposed = SessionSeedSource::new(
+            Zeroizing::new(WORDS.to_owned()),
+            Zeroizing::new("cafe\u{301}".to_owned()),
+        )
+        .unwrap()
+        .descriptors(StandardSinglesig::Bip84, 0)
+        .unwrap();
+        assert_eq!(composed.fingerprint, decomposed.fingerprint);
+        assert_eq!(
+            composed.external.canonical(),
+            decomposed.external.canonical()
+        );
+        assert_eq!(
+            composed.internal.canonical(),
+            decomposed.internal.canonical()
+        );
+
         let source = SessionSeedSource::new(
             Zeroizing::new(WORDS.to_owned()),
             Zeroizing::new(String::new()),

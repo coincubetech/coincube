@@ -115,6 +115,10 @@ impl ScanDescriptor {
             1
         }
     }
+    #[cfg(test)]
+    pub(crate) fn canonical(&self) -> String {
+        self.descriptor.to_string()
+    }
     fn script(&self, index: u32) -> Result<ScriptBuf, ScanError> {
         self.descriptor
             .at_derivation_index(index)
