@@ -2668,6 +2668,15 @@ impl Home {
                         // (and `is_loaded()` re-fetch guard) would persist and a
                         // later account would see the prior account's vault rows.
                         self.recover_vault = RecoverVaultPanel::new();
+                        // Split targets and reports are account/session scoped.
+                        // Cancel the request and replace the panel so another
+                        // account never inherits the prior account's selected
+                        // Cube or discovered balance summary.
+                        self.split_wallet.cancel();
+                        self.split_wallet = SplitWalletPanel::new();
+                        if matches!(self.active_section, HomeSection::SplitWallet) {
+                            self.active_section = HomeSection::Cubes;
+                        }
                         // Drop any open recovery-method picker so it can't
                         // reference a prior account's remote cube.
                         self.recovery_method_modal = None;
@@ -2697,6 +2706,17 @@ impl Home {
                     self.connect_account.scrub_duress_dialogs();
                     self.active_section = HomeSection::Connect(app::menu::ConnectSubMenu::Overview);
                     self.connect_account.active_sub = app::menu::ConnectSubMenu::Overview;
+                }
+                // The Split tool follows the same hidden-on-flag-off rule. A
+                // feature refresh can remove the account grant while a scan is
+                // in flight, so cancel and leave the surface immediately.
+                if matches!(self.active_section, HomeSection::SplitWallet)
+                    && !self
+                        .connect_chain_availability(ChainId::BitcoinBlake2b)
+                        .is_available()
+                {
+                    self.split_wallet.cancel();
+                    self.active_section = HomeSection::Cubes;
                 }
                 // Sync account tier from the Connect plan data
                 let old_tier = self.account_tier;
@@ -6879,6 +6899,21 @@ mod tests {
             home.remote_cubes.is_empty(),
             "a fetch issued for the signed-out account must not repopulate the list"
         );
+    }
+
+    #[test]
+    fn logout_closes_the_account_scoped_split_surface() {
+        use crate::app::view::ConnectAccountMessage;
+
+        let mut home = signed_in_home();
+        home.active_section = HomeSection::SplitWallet;
+
+        let _ = home.update(Message::View(ViewMessage::ConnectAccount(
+            ConnectAccountMessage::LogOut,
+        )));
+
+        assert!(!home.connect_account.is_authenticated());
+        assert_eq!(home.active_section, HomeSection::Cubes);
     }
 
     /// A refusal reason describes what *one account's* server said. The local
