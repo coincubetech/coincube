@@ -135,9 +135,12 @@ def bitcoin_backend(directory, bitcoind):
             bitcoind_p2pport=bitcoind.p2pport,
         )
         electrs.startup()
-        # Invalidating blocks still being fetched makes Core refuse Electrs'
-        # outstanding P2P requests. Wait for the exact old tip first (#406).
-        bitcoind.before_reorg = lambda: electrs.wait_for_tip(bitcoind.rpc.getbestblockhash())
+        # If Core invalidates blocks Electrs is still fetching, Electrs can
+        # finish stale branch batches and stop serving wallet history. Require
+        # the exact old tip before destructive chain edits (#406).
+        bitcoind.before_reorg = lambda: electrs.wait_for_tip(
+            bitcoind.rpc.getbestblockhash()
+        )
         try:
             yield electrs
         finally:

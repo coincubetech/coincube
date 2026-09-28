@@ -73,7 +73,8 @@ class Bitcoind(BitcoinBackend):
         self.rpcport = rpcport
         self.p2pport = reserve()
         self.prefix = "bitcoind"
-        # The Electrs fixture installs a barrier before destructive chain edits.
+        # Indexer fixtures may install a synchronization barrier before a
+        # destructive chain edit. Bitcoind-only tests leave this unset.
         self.before_reorg = None
 
         regtestdir = os.path.join(bitcoin_dir, "regtest")
@@ -172,7 +173,7 @@ class Bitcoind(BitcoinBackend):
             self.rpc.generateblock(addr, [])
 
     def invalidate_block(self, block_hash):
-        """Invalidate only after the indexer has finished fetching the old chain."""
+        """Invalidate a block after attached indexers have reached Core's tip."""
         if self.before_reorg is not None:
             self.before_reorg()
         self.rpc.invalidateblock(block_hash)

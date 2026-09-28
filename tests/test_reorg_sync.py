@@ -1,4 +1,5 @@
-"""No-node regressions for the Electrs pre-invalidation synchronization."""
+"""No-node regressions for Electrs synchronization before invalidation."""
+
 import hashlib
 import json
 import socket
@@ -11,8 +12,8 @@ from test_framework.bitcoind import Bitcoind
 from test_framework.electrs import Electrs
 
 
-@pytest.mark.parametrize("method", ["simple_reorg", "invalidate_remine", "invalidate_block"])
-def test_reorg_waits_before_invalidating_and_propagates_failure(method):
+@pytest.mark.parametrize("method", ["simple_reorg", "invalidate_remine"])
+def test_reorg_waits_for_indexer_before_invalidating(method):
     node = Bitcoind.__new__(Bitcoind)
     events = []
     node.rpc = Mock()
@@ -22,23 +23,31 @@ def test_reorg_waits_before_invalidating_and_propagates_failure(method):
     node.wait_for_log = Mock()
     node.generate_block = Mock()
     node.generate_empty_blocks = Mock()
-    node.before_reorg = lambda: events.append("synced")
-    getattr(node, method)(10)
-    assert events == ["synced", "invalidate"]
+    node.before_reorg = lambda: events.append("indexed-old-tip")
 
-    events.clear()
+    getattr(node, method)(10)
+
+    assert events == ["indexed-old-tip", "invalidate"]
+
+
+def test_failed_indexer_barrier_preserves_old_chain():
+    node = Bitcoind.__new__(Bitcoind)
+    node.rpc = Mock()
     node.before_reorg = Mock(side_effect=TimeoutError("indexer stalled"))
+
     with pytest.raises(TimeoutError, match="indexer stalled"):
-        getattr(node, method)(10)
-    assert events == []
+        node.invalidate_block("old-block")
+
+    node.rpc.invalidateblock.assert_not_called()
 
 
 def test_electrs_barrier_uses_exact_hash_not_height():
     header = bytes(range(80))
     expected = hashlib.sha256(hashlib.sha256(header).digest()).digest()[::-1].hex()
-    stale = bytes(80)
+    stale_same_height = bytes(80)
     requests = []
     failures = []
+
     with socket.socket() as server:
         server.bind(("127.0.0.1", 0))
         server.listen()
@@ -48,12 +57,15 @@ def test_electrs_barrier_uses_exact_hash_not_height():
 
         def serve():
             try:
-                for value in [stale, header]:
+                for value in [stale_same_height, header]:
                     with server.accept()[0] as conn:
                         conn.settimeout(5)
                         with conn.makefile("rb") as stream:
                             requests.append(json.loads(stream.readline()))
-                        response = {"id": 0, "result": {"height": 114, "hex": value.hex()}}
+                        response = {
+                            "id": 0,
+                            "result": {"height": 114, "hex": value.hex()},
+                        }
                         conn.sendall(json.dumps(response).encode() + b"\n")
             except Exception as error:
                 failures.append(error)
@@ -64,10 +76,11 @@ def test_electrs_barrier_uses_exact_hash_not_height():
             electrs.wait_for_tip(expected)
         finally:
             worker.join(timeout=6)
-        assert not worker.is_alive()
-        assert not failures
-        assert len(requests) == 2
-        assert all(r["method"] == "blockchain.headers.subscribe" for r in requests)
+
+    assert not worker.is_alive()
+    assert not failures
+    assert len(requests) == 2
+    assert all(r["method"] == "blockchain.headers.subscribe" for r in requests)
 
 
 class Clock:
@@ -81,29 +94,41 @@ class Clock:
         self.now += seconds
 
 
-def test_header_timeout_retries_within_original_deadline():
+def test_header_timeout_retries_then_succeeds_with_remaining_budget():
     electrs = Electrs.__new__(Electrs)
     clock = Clock()
-    electrs.tip_hash = Mock(side_effect=[socket.timeout("busy indexing"), "expected"])
+    electrs.tip_hash = Mock(
+        side_effect=[socket.timeout("busy indexing"), "expected"]
+    )
+
     with patch("test_framework.electrs.time", clock):
         electrs.wait_for_tip("expected", timeout=1)
+
     assert electrs.tip_hash.call_count == 2
     assert electrs.tip_hash.call_args.kwargs["timeout"] == 0.75
 
 
-def test_header_timeouts_exhaust_budget_and_malformed_reply_is_not_retried():
+def test_header_timeout_retries_only_within_original_deadline():
     electrs = Electrs.__new__(Electrs)
     clock = Clock()
     electrs.tip_hash = Mock(side_effect=socket.timeout("still indexing"))
+
     with patch("test_framework.electrs.time", clock):
         with pytest.raises(TimeoutError, match="did not index tip"):
             electrs.wait_for_tip("expected", timeout=1)
+
     assert clock.now == 1
     assert electrs.tip_hash.call_count == 4
+
+
+def test_malformed_header_reply_is_not_retried():
+    electrs = Electrs.__new__(Electrs)
     electrs.tip_hash = Mock(side_effect=ValueError("malformed header"))
+
     with pytest.raises(ValueError, match="malformed header"):
         electrs.wait_for_tip("expected")
-    assert electrs.tip_hash.call_count == 1
+
+    electrs.tip_hash.assert_called_once()
 
 
 def test_header_fragments_cannot_extend_request_budget():
@@ -111,17 +136,21 @@ def test_header_fragments_cannot_extend_request_budget():
     electrs.rpcport = 1
     clock = Clock()
     sock = Mock()
+
     def fragment(_size):
         clock.sleep(0.4)
         return b"x"
+
     sock.recv.side_effect = fragment
     connection = Mock()
     connection.__enter__ = Mock(return_value=sock)
     connection.__exit__ = Mock(return_value=False)
+
     with patch("test_framework.electrs.time", clock), patch(
         "test_framework.electrs.socket.create_connection", return_value=connection
     ):
         with pytest.raises(socket.timeout, match="exceeded its budget"):
             electrs.tip_hash(timeout=1)
+
     assert sock.recv.call_count == 3
     assert sock.settimeout.call_args.args[0] < 0.3
