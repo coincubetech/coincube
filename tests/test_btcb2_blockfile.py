@@ -59,11 +59,22 @@ from test_framework.btcb2 import (
     reread_every_block,
 )
 
-BLOCKS = int(os.getenv("BTCB2_BLOCKFILE_BLOCKS", 120))
-THREADS = int(os.getenv("BTCB2_BLOCKFILE_THREADS", 16))
-ROUNDS = int(os.getenv("BTCB2_BLOCKFILE_ROUNDS", 8))
-BATCH = int(os.getenv("BTCB2_BLOCKFILE_BATCH", 100))
-SECONDS = float(os.getenv("BTCB2_BLOCKFILE_SECONDS", 180))
+def _knob(name, default):
+    """`int`/`float` env override, treating an unset-or-empty value as absent.
+
+    A CI dispatch input that was left blank arrives as an empty string, and
+    `int("")` would fail the run for the one reason that has nothing to do with
+    what is being measured.
+    """
+    value = os.getenv(name, "").strip()
+    return type(default)(value) if value else default
+
+
+BLOCKS = _knob("BTCB2_BLOCKFILE_BLOCKS", 120)
+THREADS = _knob("BTCB2_BLOCKFILE_THREADS", 16)
+ROUNDS = _knob("BTCB2_BLOCKFILE_ROUNDS", 8)
+BATCH = _knob("BTCB2_BLOCKFILE_BATCH", 100)
+SECONDS = _knob("BTCB2_BLOCKFILE_SECONDS", 180.0)
 
 
 def _rpc_batch(node, calls, timeout=60):
@@ -184,6 +195,32 @@ def test_concurrent_getblock_never_loses_the_block_file(legacy_node):
         len(hashes),
     )
     assert rounds_run > 0, f"wall-clock cap {SECONDS}s hit before a single round"
+
+    # A green traced run has to prove it was traced. Without this, a run that
+    # passes because the trace never happened is indistinguishable from a run
+    # that passes because the fault did not occur, and the second is the only
+    # one worth reporting.
+    if utils.TRACE_SYSCALLS:
+        assert os.path.exists(node.strace_log), (
+            f"BTCB2_TRACE_SYSCALLS=1 but {node.strace_log} does not exist: "
+            "this run proves nothing about #394"
+        )
+        with open(node.strace_log, "r", errors="replace") as trace:
+            block_file_calls = sum(
+                1 for line in trace if "blk00000.dat" in line and "lseek(" in line
+            )
+        size = os.path.getsize(node.strace_log)
+        logging.info(
+            "blockfile probe: syscall trace %s bytes, %s lseek calls on "
+            "blk00000.dat, at %s",
+            size,
+            block_file_calls,
+            node.strace_log,
+        )
+        assert block_file_calls > 0, (
+            f"{node.strace_log} holds no lseek on blk00000.dat, so the trace "
+            "did not cover the calls #394 is about"
+        )
 
     node_errors = node_block_file_errors(node)
     if rpc_errors or node_errors or transport_errors:

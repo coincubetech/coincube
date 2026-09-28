@@ -30,6 +30,24 @@ on:
           minutes.
         type: string
         default: "1"
+      probe_threads:
+        description: >-
+          Concurrent senders in the block-file probe. The node runs with
+          rpcthreads=32, and the runner has two cores, so a higher number
+          oversubscribes both on purpose.
+        type: string
+        default: ""
+      probe_batch:
+        description: >-
+          getblock calls per JSON-RPC batch in the probe. 100 is electrs's
+          shape; 1 trades batching for hundreds of short-lived connections,
+          which is the other half of what electrs does to the node.
+        type: string
+        default: ""
+      probe_rounds:
+        description: Passes over the chain per sender in the probe.
+        type: string
+        default: ""
 
 concurrency:
   group: btcb2-regtest-${{ github.event.pull_request.number || github.ref }}
@@ -170,6 +188,10 @@ jobs:
           BTCB2_TRACE_SYSCALLS: ${{ inputs.trace_syscalls && '1' || '0' }}
           PROBE_ONLY: ${{ inputs.probe_only && '1' || '0' }}
           REPEAT: ${{ inputs.repeat || '1' }}
+          # Empty means "use the module's default"; the probe reads these.
+          BTCB2_BLOCKFILE_THREADS: ${{ inputs.probe_threads }}
+          BTCB2_BLOCKFILE_BATCH: ${{ inputs.probe_batch }}
+          BTCB2_BLOCKFILE_ROUNDS: ${{ inputs.probe_rounds }}
         run: |
           set -xe
           mkdir -p "$TEST_DIR"
@@ -188,6 +210,18 @@ jobs:
           case "$REPEAT" in
             ''|*[!0-9]*) echo "repeat must be a whole number" >&2; exit 2 ;;
           esac
+          # An empty override must not reach the probe as `int("")`.
+          for knob in BTCB2_BLOCKFILE_THREADS BTCB2_BLOCKFILE_BATCH \
+                      BTCB2_BLOCKFILE_ROUNDS; do
+            eval "value=\${$knob}"
+            if [ -z "$value" ]; then
+              unset "$knob"
+            else
+              case "$value" in
+                ''|*[!0-9]*|0) echo "$knob must be a positive number" >&2; exit 2 ;;
+              esac
+            fi
+          done
           if [ "$REPEAT" -lt 1 ] || [ "$REPEAT" -gt 10 ]; then
             echo "repeat must be between 1 and 10; these are Actions minutes" >&2
             exit 2
