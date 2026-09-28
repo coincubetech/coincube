@@ -106,7 +106,7 @@ fn default_poll_interval() -> Duration {
 }
 
 /// Bitcoin backend config.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub enum BitcoinBackend {
     /// Settings specific to bitcoind as the Bitcoin interface.
     #[serde(rename = "bitcoind_config")]
@@ -140,7 +140,7 @@ impl fmt::Debug for BitcoindRpcAuth {
 }
 
 /// Everything we need to know for talking to bitcoind serenely
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct BitcoindConfig {
     /// Authentication credentials for bitcoind's RPC server.
     #[serde(flatten, deserialize_with = "deserialize_rpc_auth")]

@@ -772,6 +772,56 @@ mod flow {
             self.hit("reserve_change");
             Ok(ChildNumber::from_normal_idx(12).unwrap())
         }
+        #[cfg(feature = "regtest-harness")]
+        async fn claim_backend_binding(
+            &self,
+        ) -> Result<coincubed::poison_broadcast::ClaimBackendBinding, DaemonError> {
+            self.live
+                .as_ref()
+                .and_then(|live| live.bound.as_ref())
+                .ok_or(DaemonError::ClientNotSupported)?
+                .claim_backend_binding()
+                .await
+        }
+        #[cfg(feature = "regtest-harness")]
+        async fn submit_verified_poison_to_node(
+            &self,
+            verified: Arc<coincube_core::claim_finalize::VerifiedPoisonTransfer>,
+            binding: coincubed::poison_broadcast::ClaimBackendBinding,
+            gate: Arc<SubmissionGate>,
+        ) -> Result<SubmissionOutcome, DaemonError> {
+            self.hit("submit_verified_poison");
+            self.hit("submit_verified_poison_to_node");
+            let outcome = self
+                .live
+                .as_ref()
+                .and_then(|live| live.bound.as_ref())
+                .ok_or(DaemonError::ClientNotSupported)?
+                .submit_verified_poison_to_node(verified.clone(), binding, gate)
+                .await?;
+            *self.submitted.lock().unwrap() = Some(verified.transaction().clone());
+            Ok(outcome)
+        }
+        #[cfg(feature = "regtest-harness")]
+        async fn submit_verified_poison_to_connect(
+            &self,
+            verified: Arc<coincube_core::claim_finalize::VerifiedPoisonTransfer>,
+            origin: String,
+            binding: coincubed::poison_broadcast::ClaimBackendBinding,
+            gate: Arc<SubmissionGate>,
+        ) -> Result<SubmissionOutcome, DaemonError> {
+            self.hit("submit_verified_poison");
+            self.hit("submit_verified_poison_to_connect");
+            let outcome = self
+                .live
+                .as_ref()
+                .and_then(|live| live.bound.as_ref())
+                .ok_or(DaemonError::ClientNotSupported)?
+                .submit_verified_poison_to_connect(verified.clone(), origin, binding, gate)
+                .await?;
+            *self.submitted.lock().unwrap() = Some(verified.transaction().clone());
+            Ok(outcome)
+        }
         async fn submit_verified_poison(
             &self,
             verified: Arc<coincube_core::claim_finalize::VerifiedPoisonTransfer>,

@@ -178,6 +178,55 @@ pub trait Daemon: Debug {
         Err(DaemonError::ClientNotSupported)
     }
 
+    /// Process-local binding captured from the current embedded controller.
+    async fn claim_backend_binding(
+        &self,
+    ) -> Result<coincubed::poison_broadcast::ClaimBackendBinding, DaemonError> {
+        Err(DaemonError::ClientNotSupported)
+    }
+
+    /// Exact-byte, single-attempt submission to the reviewed Connect origin.
+    async fn submit_verified_poison_to_connect(
+        &self,
+        _verified: std::sync::Arc<coincube_core::claim_finalize::VerifiedPoisonTransfer>,
+        _origin: String,
+        _binding: coincubed::poison_broadcast::ClaimBackendBinding,
+        _gate: std::sync::Arc<coincubed::poison_broadcast::SubmissionGate>,
+    ) -> Result<coincubed::poison_broadcast::SubmissionOutcome, DaemonError> {
+        Err(DaemonError::ClientNotSupported)
+    }
+
+    /// Exact-byte Connect submission for the verified ancestry path.
+    async fn submit_verified_ancestry_to_connect(
+        &self,
+        _verified: std::sync::Arc<coincube_core::claim_finalize::VerifiedAncestryTransfer>,
+        _origin: String,
+        _binding: coincubed::poison_broadcast::ClaimBackendBinding,
+        _gate: std::sync::Arc<coincubed::poison_broadcast::SubmissionGate>,
+    ) -> Result<coincubed::poison_broadcast::SubmissionOutcome, DaemonError> {
+        Err(DaemonError::ClientNotSupported)
+    }
+
+    /// Exact-byte, single-attempt submission to a reviewed direct node.
+    async fn submit_verified_poison_to_node(
+        &self,
+        _verified: std::sync::Arc<coincube_core::claim_finalize::VerifiedPoisonTransfer>,
+        _binding: coincubed::poison_broadcast::ClaimBackendBinding,
+        _gate: std::sync::Arc<coincubed::poison_broadcast::SubmissionGate>,
+    ) -> Result<coincubed::poison_broadcast::SubmissionOutcome, DaemonError> {
+        Err(DaemonError::ClientNotSupported)
+    }
+
+    /// Exact-byte direct-node submission for the verified ancestry path.
+    async fn submit_verified_ancestry_to_node(
+        &self,
+        _verified: std::sync::Arc<coincube_core::claim_finalize::VerifiedAncestryTransfer>,
+        _binding: coincubed::poison_broadcast::ClaimBackendBinding,
+        _gate: std::sync::Arc<coincubed::poison_broadcast::SubmissionGate>,
+    ) -> Result<coincubed::poison_broadcast::SubmissionOutcome, DaemonError> {
+        Err(DaemonError::ClientNotSupported)
+    }
+
     /// Embedded-only exact-byte transport, not Claim authorization. External
     /// backends must not serialize or reconstruct the opaque verified artifact.
     async fn submit_verified_poison(

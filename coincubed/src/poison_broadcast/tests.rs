@@ -1004,3 +1004,346 @@ fn ancestry_transport_binds_exact_witness_and_preserves_one_use_refusals() {
         assert_eq!(backend.lock().unwrap().broadcasted.lock().unwrap().len(), 2);
     }
 }
+
+#[test]
+fn claim_backend_binding_detects_same_address_replacement_and_private_config_changes() {
+    use crate::config::{BitcoinBackend, BitcoindConfig, BitcoindRpcAuth};
+    let (descriptor, _, _, _) = fixture_inputs(false);
+    let mut daemon = control(
+        ChainId::Bitcoin,
+        descriptor,
+        Arc::new(Mutex::new(DummyBitcoind::new())),
+    );
+    let node = BitcoindConfig {
+        addr: "127.0.0.1:18443".parse().unwrap(),
+        rpc_auth: BitcoindRpcAuth::UserPass("synthetic-user".into(), "synthetic-secret".into()),
+    };
+    daemon.config.bitcoin_backend = Some(BitcoinBackend::Bitcoind(node.clone()));
+    let binding = daemon.claim_backend_binding();
+    assert_eq!(binding, daemon.clone().claim_backend_binding());
+    assert!(daemon.check_claim_backend_binding(&binding).is_ok());
+    let mut replacement = daemon.clone();
+    replacement.bitcoin = Arc::new(Mutex::new(DummyBitcoind::new()));
+    assert_eq!(
+        replacement.config.bitcoin_backend,
+        daemon.config.bitcoin_backend
+    );
+    assert_ne!(binding, replacement.claim_backend_binding());
+    assert_eq!(
+        replacement.check_claim_backend_binding(&binding),
+        Err(SubmissionError::BackendUnavailable)
+    );
+    let mut changed = daemon.clone();
+    let mut changed_node = node;
+    changed_node.rpc_auth =
+        BitcoindRpcAuth::UserPass("synthetic-user".into(), "different-secret".into());
+    changed.config.bitcoin_backend = Some(BitcoinBackend::Bitcoind(changed_node));
+    assert_eq!(
+        changed.check_claim_backend_binding(&binding),
+        Err(SubmissionError::BackendUnavailable)
+    );
+    changed.config = daemon.config.clone();
+    changed.config.bitcoin_config.chain = ChainId::BitcoinBlake2b;
+    assert_eq!(
+        changed.check_claim_backend_binding(&binding),
+        Err(SubmissionError::BackendUnavailable)
+    );
+    let debug = format!("{:?}", binding);
+    for private in ["synthetic-user", "synthetic-secret", "127.0.0.1"] {
+        assert!(!debug.contains(private));
+    }
+    drop(changed);
+    drop(replacement);
+    let weak = Arc::downgrade(&daemon.bitcoin);
+    drop(daemon);
+    assert!(
+        weak.upgrade().is_none(),
+        "a review must not keep the backend alive"
+    );
+}
+
+#[test]
+fn bound_transports_send_exact_bytes_once_and_never_follow_redirects() {
+    use crate::config::{BitcoinBackend, BitcoindConfig, BitcoindRpcAuth};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    let (built, signers) = fixture(ChainId::Bitcoin, false);
+    let verified = finalize_poison_transfer(
+        &built,
+        &sign(&built, &signers[..2]),
+        &secp256k1::Secp256k1::verification_only(),
+    )
+    .unwrap();
+    for (connect, case) in [false, true]
+        .iter()
+        .copied()
+        .flat_map(|connect| (0..8).map(move |case| (connect, case)))
+    {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let tx = verified.transaction().clone();
+        let worker = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(e)
+                        if e.kind() == std::io::ErrorKind::WouldBlock
+                            && std::time::Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(Duration::from_millis(5))
+                    }
+                    other => panic!("node fixture accept failed: {:?}", other),
+                }
+            };
+            stream.set_nonblocking(false).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut headers = Vec::new();
+            let mut byte = [0];
+            while !headers.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).unwrap();
+                headers.push(byte[0]);
+                assert!(headers.len() < 8192);
+            }
+            let headers = String::from_utf8(headers).unwrap();
+            let length: usize = headers
+                .lines()
+                .find_map(|line| {
+                    let (key, value) = line.split_once(':')?;
+                    key.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse().unwrap())
+                })
+                .unwrap();
+            assert!(length < 16_384);
+            let mut bytes = vec![0; length];
+            stream.read_exact(&mut bytes).unwrap();
+            if connect {
+                assert!(headers.starts_with("POST /api/v1/esplora/bitcoin/mainnet/tx HTTP/1.1\r\n"));
+                assert!(!headers.to_ascii_lowercase().contains("authorization:"));
+                assert_eq!(
+                    bytes,
+                    bitcoin::consensus::encode::serialize_hex(&tx).as_bytes()
+                );
+            } else {
+                let request: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(
+                    request,
+                    serde_json::json!({"jsonrpc":"2.0","id":1,"method":"sendrawtransaction","params":[bitcoin::consensus::encode::serialize_hex(&tx)]})
+                );
+            }
+            let status = match case {
+                1 => "401 Unauthorized",
+                2 => "307 Temporary Redirect",
+                _ => "200 OK",
+            };
+            let body = if connect {
+                match case {
+                    3 => Txid::all_zeros().to_string(),
+                    4 => format!("{{\"result\":\"{}\"}}", tx.compute_txid()),
+                    5 => "not a transaction id".into(),
+                    6 => "x".repeat(16_385),
+                    _ => tx.compute_txid().to_string(),
+                }
+            } else {
+                match case {
+                    3 => serde_json::json!({"id":1,"result":Txid::all_zeros(),"error":null})
+                        .to_string(),
+                    4 => serde_json::json!({"id":2,"result":tx.compute_txid(),"error":null})
+                        .to_string(),
+                    5 => "not JSON".into(),
+                    6 => "x".repeat(16_385),
+                    _ => serde_json::json!({"id":1,"result":tx.compute_txid(),"error":null})
+                        .to_string(),
+                }
+            };
+            if case == 7 {
+                // The node has received every transaction byte but sends no
+                // acknowledgement before the client's total timeout.
+                std::thread::sleep(Duration::from_secs(16));
+            } else {
+                let written = write!(stream, "HTTP/1.1 {}\r\nContent-Length: {}\r\nLocation: http://{}/redirected\r\nConnection: close\r\n\r\n{}", status, body.len(), address, body);
+                // An oversized Content-Length may make the client close before
+                // the fixture finishes writing the deliberately rejected body.
+                if case != 6 {
+                    written.unwrap();
+                }
+            }
+            drop(stream);
+            let deadline = std::time::Instant::now() + Duration::from_millis(200);
+            while std::time::Instant::now() < deadline {
+                assert!(
+                    matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock),
+                    "sender retried or followed a redirect"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        });
+        let mut daemon = control(
+            ChainId::Bitcoin,
+            built.descriptor().clone(),
+            Arc::new(Mutex::new(DummyBitcoind::new())),
+        );
+        daemon.config.bitcoin_backend = Some(BitcoinBackend::Bitcoind(BitcoindConfig {
+            addr: address,
+            rpc_auth: BitcoindRpcAuth::UserPass("synthetic".into(), "fixture".into()),
+        }));
+        let binding = daemon.claim_backend_binding();
+        let (gate, revoker) = SubmissionGate::new(
+            &verified,
+            std::time::Instant::now() + Duration::from_secs(10),
+        );
+        let origin = format!("http://{}/", address);
+        let submit = || {
+            if connect {
+                daemon.submit_verified_poison_to_connect(&verified, &binding, &gate, &origin)
+            } else {
+                daemon.submit_verified_poison_to_node(&verified, &binding, &gate)
+            }
+        };
+        let result = submit();
+        if case == 0 {
+            assert!(matches!(
+                result,
+                Ok(SubmissionOutcome::UpstreamAccepted { .. })
+            ));
+        } else {
+            assert!(matches!(result, Err(SubmissionError::Uncertain { .. })));
+        }
+        assert_eq!(revoker.state(), SubmissionState::Started);
+        assert_eq!(submit(), Err(SubmissionError::AlreadyStarted));
+        worker.join().unwrap();
+    }
+}
+
+#[test]
+fn direct_node_binding_and_revocation_prevent_any_http_attempt() {
+    use crate::config::{BitcoinBackend, BitcoindConfig, BitcoindRpcAuth};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let (built, signers) = fixture(ChainId::Bitcoin, false);
+    let verified = finalize_poison_transfer(
+        &built,
+        &sign(&built, &signers[..2]),
+        &secp256k1::Secp256k1::verification_only(),
+    )
+    .unwrap();
+    let backend = Arc::new(Mutex::new(DummyBitcoind::new()));
+    let mut daemon = control(
+        ChainId::Bitcoin,
+        built.descriptor().clone(),
+        backend.clone(),
+    );
+    daemon.config.bitcoin_backend = Some(BitcoinBackend::Bitcoind(BitcoindConfig {
+        addr: listener.local_addr().unwrap(),
+        rpc_auth: BitcoindRpcAuth::UserPass("synthetic".into(), "fixture".into()),
+    }));
+    let binding = daemon.claim_backend_binding();
+    let mut invalid_auth = daemon.clone();
+    // A directory cannot contain cookie credentials. Preparation must fail
+    // before consuming a gate and must never attempt HTTP authentication.
+    invalid_auth.config.bitcoin_backend = Some(BitcoinBackend::Bitcoind(BitcoindConfig {
+        addr: listener.local_addr().unwrap(),
+        rpc_auth: BitcoindRpcAuth::CookieFile(std::env::temp_dir()),
+    }));
+    let (auth_gate, _auth_revoker) = SubmissionGate::new(
+        &verified,
+        std::time::Instant::now() + Duration::from_secs(30),
+    );
+    assert_eq!(
+        invalid_auth.submit_verified_poison_to_node(
+            &verified,
+            &invalid_auth.claim_backend_binding(),
+            &auth_gate,
+        ),
+        Err(SubmissionError::BackendUnavailable)
+    );
+    assert_eq!(auth_gate.state(), SubmissionState::Pending);
+    assert!(matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock));
+    let mut replacement = daemon.clone();
+    replacement.bitcoin = Arc::new(Mutex::new(DummyBitcoind::new()));
+    let (mut gate, revoker) = SubmissionGate::new(
+        &verified,
+        std::time::Instant::now() + Duration::from_secs(30),
+    );
+    assert_eq!(
+        replacement.submit_verified_poison_to_node(&verified, &binding, &gate),
+        Err(SubmissionError::BackendUnavailable)
+    );
+    assert_eq!(gate.state(), SubmissionState::Pending);
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    gate.before_lock = Some(barrier.clone());
+    let locked = backend.lock().unwrap();
+    let worker = std::thread::spawn(move || {
+        daemon.submit_verified_poison_to_node(&verified, &binding, &gate)
+    });
+    barrier.wait();
+    assert_eq!(revoker.revoke(), SubmissionState::Revoked);
+    drop(locked);
+    assert_eq!(worker.join().unwrap(), Err(SubmissionError::Revoked));
+    assert!(matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock));
+}
+
+#[test]
+fn connect_binding_origin_and_revocation_refuse_before_http() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let origin = format!("http://{}/", listener.local_addr().unwrap());
+    let (built, signers) = fixture(ChainId::Bitcoin, false);
+    let verified = finalize_poison_transfer(
+        &built,
+        &sign(&built, &signers[..2]),
+        &secp256k1::Secp256k1::verification_only(),
+    )
+    .unwrap();
+    let backend = Arc::new(Mutex::new(DummyBitcoind::new()));
+    let daemon = control(
+        ChainId::Bitcoin,
+        built.descriptor().clone(),
+        backend.clone(),
+    );
+    let binding = daemon.claim_backend_binding();
+    let (mut gate, revoker) = SubmissionGate::new(
+        &verified,
+        std::time::Instant::now() + Duration::from_secs(30),
+    );
+    for invalid in [
+        format!("{}unexpected", origin),
+        format!("{}?token=synthetic", origin),
+        format!("{}#fragment", origin),
+        format!(
+            "http://synthetic:password@{}/",
+            listener.local_addr().unwrap()
+        ),
+        "file:///tmp/synthetic".into(),
+    ] {
+        assert_eq!(
+            daemon.submit_verified_poison_to_connect(&verified, &binding, &gate, &invalid),
+            Err(SubmissionError::BackendUnavailable)
+        );
+        assert_eq!(gate.state(), SubmissionState::Pending);
+    }
+    let mut replacement = daemon.clone();
+    replacement.bitcoin = Arc::new(Mutex::new(DummyBitcoind::new()));
+    assert_eq!(
+        replacement.submit_verified_poison_to_connect(&verified, &binding, &gate, &origin),
+        Err(SubmissionError::BackendUnavailable)
+    );
+    assert_eq!(gate.state(), SubmissionState::Pending);
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    gate.before_lock = Some(barrier.clone());
+    let locked = backend.lock().unwrap();
+    let worker = std::thread::spawn(move || {
+        daemon.submit_verified_poison_to_connect(&verified, &binding, &gate, &origin)
+    });
+    barrier.wait();
+    assert_eq!(revoker.revoke(), SubmissionState::Revoked);
+    drop(locked);
+    assert_eq!(worker.join().unwrap(), Err(SubmissionError::Revoked));
+    assert!(matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock));
+}

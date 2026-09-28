@@ -421,6 +421,7 @@ fn review_view<'a>(
         Some(snapshot) => Column::new()
             .spacing(10)
             .push(row("Transaction", p2_regular(snapshot.txid.to_string())))
+            .push(row("Broadcast via", p2_regular(snapshot.route.label())))
             .push(row(
                 "Fee",
                 p1_regular(format!(
@@ -585,6 +586,7 @@ fn track_view<'a>(
             Column::new().spacing(10)
                 .push(p1_regular("The original transaction was not found in the fresh Bitcoin checks. This resends the verified transaction shown below using its recorded inputs and fee. Older records may not identify the witness used in the first attempt. A previous attempt may still have reached the network; confirmation is not guaranteed."))
                 .push(row("Transaction", p2_regular(snapshot.txid.to_string())))
+            .push(row("Broadcast via", p2_regular(snapshot.route.label())))
                 .push(row("Witness ID", p2_regular(snapshot.wtxid.to_string())))
                 .push(row("Fee", p2_regular(format!("{} sats", snapshot.fee_sats))))
                 .push(row("Previous attempts", p2_regular(attempts.to_string())))

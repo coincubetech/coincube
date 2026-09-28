@@ -1,4 +1,5 @@
 //! Dormant anonymous operator-node policy evidence, never spend permission.
+pub mod direct;
 use crate::services::{
     claim_observation::CollectionContext, coincube::network_anchor::AnchorState,
 };
@@ -40,6 +41,10 @@ impl FreshnessPolicy {
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
+    BothRoutesRejected {
+        local: String,
+        connect: String,
+    },
     UnsupportedChain,
     InvalidRequest,
     InvalidResponse,
