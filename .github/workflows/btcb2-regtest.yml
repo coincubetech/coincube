@@ -244,8 +244,13 @@ jobs:
           # blk*.dat rides along so the bytes at the position the node could
           # not seek to can be checked offline, and strace-excerpt.log is the
           # failing descriptor's history, already correlated by the test.
+          # xor.dat is what makes blk*.dat readable at all: Bitcoin Core 28+
+          # obfuscates block files with the key kept there, so without it the
+          # preserved bytes cannot be decoded without guessing the key from a
+          # known record.
           find . -type f \( -name 'log' -o -name 'debug.log' \
-            -o -name 'strace-excerpt.log' -o -name 'blk*.dat' \) -size -50M |
+            -o -name 'strace-excerpt.log' -o -name 'blk*.dat' \
+            -o -name 'xor.dat' \) -size -50M |
             while read -r f; do
               mkdir -p "$dest/$(dirname "$f")"
               cp "$f" "$dest/$f"
