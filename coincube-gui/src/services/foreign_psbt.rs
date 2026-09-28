@@ -171,7 +171,8 @@ pub struct SweepInputs {
     pub inputs: usize,
     pub total: Amount,
     pub maximum_signed_vbytes: u64,
-    /// Confirmed at or after the observed fork height: BTCB2-only, excluded.
+    /// Confirmed at or after the observed fork height: not part of this
+    /// split and not known to be BTCB2-only (it may still be replayable).
     pub excluded_post_fork: usize,
     /// No confirming height: excluded (fail closed).
     pub excluded_unknown: usize,
@@ -1092,7 +1093,7 @@ mod tests {
         let review = review_sweep_inputs(&pre, make()).unwrap();
         assert_eq!((review.inputs, review.excluded_post_fork), (1, 0));
 
-        // Confirmed at the fork height: BTCB2-only, excluded, nothing left.
+        // Confirmed at the fork height: excluded, nothing left.
         let (post, ..) = economics_fixture_at(100_000, Some(FORK_HEIGHT as u32));
         assert_eq!(
             review_sweep_inputs(&post, make()).unwrap_err(),

@@ -50,10 +50,13 @@ pub struct ScanSummary {
     /// Confirmed below the observed fork height: the only splittable coins.
     pub pre_fork: usize,
     pub pre_fork_sats: u64,
-    /// Confirmed at or after the fork: Bitcoin Blake2b only, never swept.
+    /// Confirmed at or after the fork: never swept, and not known to be
+    /// BTCB2-only (a replayed transaction may still exist on Bitcoin).
     pub post_fork: usize,
     /// Confirmed but not classifiable (no observed fork or block height).
     pub unclassified: usize,
+    /// Every selected source descriptor has a signing route (`tr` has none).
+    pub signable: bool,
     pub tip: String,
     pub inventory: InventorySummary,
 }
@@ -75,19 +78,32 @@ pub struct InventorySummary {
 }
 
 impl InventorySummary {
-    fn of(inventory: &SplitInventory) -> Self {
-        Self {
+    /// Checked like `ScanEvidence::new`: an impossible total refuses.
+    fn of(inventory: &SplitInventory) -> Option<Self> {
+        let splittable_sats = inventory
+            .splittable()
+            .iter()
+            .try_fold(0_u64, |sum, coin| sum.checked_add(coin.sats))?;
+        Some(Self {
             fork_height: inventory.fork_height(),
             bitcoin_tip: inventory.bitcoin_tip().to_string(),
             splittable: inventory.splittable().len(),
-            splittable_sats: inventory.splittable().iter().map(|c| c.sats).sum(),
+            splittable_sats,
             spent_on_bitcoin: inventory.spent_on_bitcoin().len(),
             spent_on_btcb2: inventory.spent_on_btcb2().len(),
             btcb2_post_fork: inventory.btcb2_post_fork().len(),
             bitcoin_only_candidates: inventory.bitcoin_only_post_fork().len(),
             pending: inventory.pending().len(),
             fresh_receive: inventory.fresh_receive(),
-        }
+        })
+    }
+}
+
+impl ScanSummary {
+    /// Whether "Continue to destination Cube" is offered: a signing route
+    /// exists, at least one pre-fork coin was proven, and nothing is pending.
+    pub fn reviewable(&self) -> bool {
+        self.signable && self.pre_fork > 0 && self.confirmed == self.coins
     }
 }
 
@@ -120,18 +136,28 @@ pub struct ScanEvidence {
 }
 
 impl ScanEvidence {
+    /// Summarise authenticated evidence. Sums are checked: an overflow means
+    /// the evidence is not coherent, so no summary (and no handoff) exists.
     fn new(
         report: foreign_scan::ScanReport,
         inventory: SplitInventory,
         external: ScanDescriptor,
         internal: Option<ScanDescriptor>,
-    ) -> Self {
-        let (mut pre_fork, mut pre_fork_sats, mut post_fork, mut unclassified) = (0, 0, 0, 0);
+    ) -> Result<Self, String> {
+        let overflow =
+            || "The scan totals are out of range. No balance conclusion was made.".to_string();
+        let (mut pre_fork, mut pre_fork_sats, mut post_fork, mut unclassified) = (0, 0_u64, 0, 0);
+        let mut sats = 0_u64;
         for coin in report.coins() {
+            sats = sats
+                .checked_add(coin.output.value.to_sat())
+                .ok_or_else(overflow)?;
             match report.fork_side(coin) {
                 ForkSide::PreFork => {
                     pre_fork += 1;
-                    pre_fork_sats += coin.output.value.to_sat();
+                    pre_fork_sats = pre_fork_sats
+                        .checked_add(coin.output.value.to_sat())
+                        .ok_or_else(overflow)?;
                 }
                 ForkSide::PostFork => post_fork += 1,
                 ForkSide::Unknown => unclassified += 1,
@@ -143,25 +169,24 @@ impl ScanEvidence {
             addresses: report.addresses_scanned(),
             coins: report.coins().len(),
             confirmed: report.coins().iter().filter(|coin| coin.confirmed).count(),
-            sats: report
-                .coins()
-                .iter()
-                .map(|coin| coin.output.value.to_sat())
-                .sum(),
+            sats,
             pre_fork,
             pre_fork_sats,
             post_fork,
             unclassified,
+            signable: std::iter::once(&external)
+                .chain(internal.as_ref())
+                .all(|descriptor| descriptor.capabilities().signing.psbt_file),
             tip: report.tip().to_string(),
-            inventory: InventorySummary::of(&inventory),
+            inventory: InventorySummary::of(&inventory).ok_or_else(overflow)?,
         };
-        Self {
+        Ok(Self {
             report,
             inventory,
             external,
             internal,
             summary,
-        }
+        })
     }
 }
 
@@ -231,6 +256,7 @@ impl SplitWalletPanel {
         let evidence = self.evidence.take()?;
         if !matches!(&self.status, Status::Complete(summary) if summary.generation == self.generation)
             || evidence.summary.generation != self.generation
+            || !evidence.summary.signable
         {
             self.cancel();
             return None;
@@ -332,15 +358,11 @@ impl SplitWalletPanel {
                     async move {
                         foreign_split_inventory::scan(client, plan, generation, receiver)
                             .await
-                            .map(|two| {
-                                Arc::new(ScanEvidence::new(
-                                    two.btcb2,
-                                    two.inventory,
-                                    external,
-                                    internal,
-                                ))
-                            })
                             .map_err(inventory_error_copy)
+                            .and_then(|two| {
+                                ScanEvidence::new(two.btcb2, two.inventory, external, internal)
+                            })
+                            .map(Arc::new)
                     },
                     move |result| Message::Scanned(result, generation, session_generation),
                 )
@@ -505,7 +527,7 @@ pub fn view(panel: &SplitWalletPanel) -> Element<'_, Message> {
                 summary.sats
             )))
             .push(p1_regular(format!(
-                "Pre-fork (splittable): {} UTXO{}, {} sats · Post-fork (Bitcoin Blake2b only, excluded): {} · Unclassified (excluded): {}",
+                "Pre-fork (splittable): {} UTXO{}, {} sats · Confirmed after the fork (not part of this split; may still be replayable): {} · Unclassified (excluded): {}",
                 summary.pre_fork,
                 if summary.pre_fork == 1 { "" } else { "s" },
                 summary.pre_fork_sats,
@@ -535,6 +557,8 @@ pub fn view(panel: &SplitWalletPanel) -> Element<'_, Message> {
                     "No spendable outputs were found in this bounded scan."
                 } else if summary.confirmed != summary.coins {
                     "Wait for every discovered output to confirm, then scan again before reviewing a sweep."
+                } else if !summary.signable {
+                    "Taproot (tr) wallets can be scanned but not split: there is no signing route for them yet."
                 } else if summary.pre_fork == 0 {
                     "No confirmed pre-fork coins were proven. Only pre-fork coins can be split; post-fork or unclassified coins are excluded."
                 } else {
@@ -546,7 +570,7 @@ pub fn view(panel: &SplitWalletPanel) -> Element<'_, Message> {
     };
 
     let scanning = matches!(panel.status, Status::Scanning);
-    let reviewable = matches!(&panel.status, Status::Complete(summary) if summary.pre_fork > 0 && summary.confirmed == summary.coins);
+    let reviewable = matches!(&panel.status, Status::Complete(summary) if summary.reviewable());
     let actions = Row::new()
         .spacing(10)
         .align_y(Alignment::Center)
@@ -618,7 +642,19 @@ mod tests {
         let inventory =
             SplitInventory::join(&report, &bitcoin, report.generation(), false).unwrap();
         let external = ScanDescriptor::parse(Branch::External, FIXED_DESCRIPTOR).unwrap();
-        ScanEvidence::new(report, inventory, external, None)
+        ScanEvidence::new(report, inventory, external, None).unwrap()
+    }
+
+    /// A joined inventory against an empty, fully covered Bitcoin report.
+    fn empty_bitcoin_inventory(report: &foreign_scan::ScanReport) -> SplitInventory {
+        let bitcoin = foreign_scan::ScanReport::for_test(
+            ChainId::Bitcoin,
+            report.generation(),
+            BlockHash::from_byte_array([8; 32]),
+            Vec::new(),
+        )
+        .with_coverage(walk());
+        SplitInventory::join(report, &bitcoin, report.generation(), true).unwrap()
     }
 
     fn target() -> TargetCube {
@@ -898,6 +934,101 @@ mod tests {
             matches!(panel.status(), Status::Failed(copy) if copy.starts_with("Bitcoin chain:") && copy.contains("No zero-balance conclusion"))
         );
         assert!(panel.evidence.is_none());
+    }
+
+    /// #578 review I6: an impossible total is refused, not wrapped or panicked.
+    #[test]
+    fn overflowing_totals_refuse_the_summary() {
+        use coincube_core::miniscript::bitcoin::{
+            absolute, transaction, Amount, OutPoint, Transaction, TxIn, TxOut,
+        };
+        let external = ScanDescriptor::parse(Branch::External, FIXED_DESCRIPTOR).unwrap();
+        let previous = Transaction {
+            version: transaction::Version::TWO,
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![TxIn::default()],
+            output: vec![TxOut {
+                value: Amount::from_sat(u64::MAX / 2 + 1),
+                script_pubkey: external.script(0).unwrap(),
+            }],
+        };
+        let coins = (0..2)
+            .map(|vout| foreign_scan::DiscoveredCoin {
+                branch: Branch::External,
+                index: 0,
+                outpoint: OutPoint::new(previous.compute_txid(), vout),
+                output: previous.output[0].clone(),
+                previous: previous.clone(),
+                confirmed: true,
+                block_height: Some(1),
+                block_hash: Some(BlockHash::from_byte_array([1; 32])),
+            })
+            .collect();
+        let report = foreign_scan::ScanReport::for_test(
+            ChainId::BitcoinBlake2b,
+            3,
+            BlockHash::from_byte_array([9; 32]),
+            coins,
+        )
+        .with_fork_height(Some(100))
+        .with_coverage(walk());
+        let inventory = empty_bitcoin_inventory(&report);
+        assert!(ScanEvidence::new(report.clone(), inventory, external, None).is_err());
+
+        // The two-chain splittable total is checked the same way.
+        let bitcoin = foreign_scan::ScanReport::for_test(
+            ChainId::Bitcoin,
+            3,
+            BlockHash::from_byte_array([8; 32]),
+            report.coins().to_vec(),
+        )
+        .with_coverage(walk());
+        let joined = SplitInventory::join(&report, &bitcoin, 3, false).unwrap();
+        assert_eq!(joined.splittable().len(), 2);
+        assert_eq!(InventorySummary::of(&joined), None);
+    }
+
+    #[test]
+    fn a_taproot_only_source_is_not_reviewable_and_cannot_hand_off() {
+        let secp = Secp256k1::new();
+        let xpub = Xpub::from_priv(
+            &secp,
+            &Xpriv::new_master(
+                coincube_core::miniscript::bitcoin::Network::Bitcoin,
+                &[42; 32],
+            )
+            .unwrap(),
+        );
+        let tr = ScanDescriptor::parse(Branch::External, &format!("tr({xpub}/0/*)")).unwrap();
+        let report = foreign_scan::ScanReport::for_test(
+            ChainId::BitcoinBlake2b,
+            5,
+            BlockHash::from_byte_array([9; 32]),
+            Vec::new(),
+        )
+        .with_fork_height(Some(100))
+        .with_coverage(walk());
+        let inventory = empty_bitcoin_inventory(&report);
+        let evidence = ScanEvidence::new(report, inventory, tr, None).unwrap();
+        assert!(!evidence.summary.signable);
+        let mut signable = evidence.summary.clone();
+        signable.pre_fork = 1;
+        signable.coins = 1;
+        signable.confirmed = 1;
+        assert!(!signable.reviewable());
+        signable.signable = true;
+        assert!(signable.reviewable());
+
+        let mut client = CoincubeClient::new();
+        client.set_token("session-a");
+        let mut panel = SplitWalletPanel::new();
+        panel.set_targets(vec![target()]);
+        panel.generation = 5;
+        panel.status = Status::Complete(evidence.summary.clone());
+        panel.evidence = Some(Arc::new(evidence));
+        assert!(panel
+            .take_handoff(ChainId::BitcoinBlake2b, 4, &client)
+            .is_none());
     }
 
     #[test]
