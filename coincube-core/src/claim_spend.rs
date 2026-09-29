@@ -187,6 +187,65 @@ pub fn create_poison_self_transfer(
     })
 }
 
+/// Reconstruct an existing unsigned poison transfer from authenticated wallet
+/// coins and previous transactions. This does not reserve another change index
+/// or authorize a new submission. The caller must bind the result to its journal.
+///
+/// The ordinary builder rechecks ownership and recreates all signing metadata.
+/// Only the recorded change amount is retained (the original fee estimate need
+/// not be available after restart); the complete transaction must otherwise
+/// match, and its actual economics are checked again before returning.
+#[allow(clippy::too_many_arguments)]
+pub fn reconstruct_poison_self_transfer(
+    chain: ChainId,
+    descriptor: &CoincubeDescriptor,
+    secp: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
+    tx_getter: &mut impl TxGetter,
+    coins: &[CandidateCoin],
+    change_index: ChildNumber,
+    recorded: &bitcoin::Transaction,
+) -> Result<PoisonSelfTransfer, Error> {
+    use bitcoin::script::Instruction;
+    if recorded.output.len() != 2 {
+        return Err(Error::InvalidRequest(
+            "Recorded poison must have two outputs",
+        ));
+    }
+    let mut instructions = recorded.output[0].script_pubkey.instructions();
+    if instructions.next() != Some(Ok(Instruction::Op(bitcoin::opcodes::all::OP_RETURN))) {
+        return Err(Error::InvalidRequest("Recorded poison payload is invalid"));
+    }
+    let Some(Ok(Instruction::PushBytes(payload))) = instructions.next() else {
+        return Err(Error::InvalidRequest("Recorded poison payload is invalid"));
+    };
+    if payload.len() != 87 || instructions.next().is_some() {
+        return Err(Error::InvalidRequest("Recorded poison payload is invalid"));
+    }
+    let marker = bitcoin::BlockHash::from_slice(&payload.as_bytes()[16..48])
+        .map_err(|_| Error::InvalidRequest("Recorded fork label is invalid"))?;
+    let mut rebuilt = create_poison_self_transfer(
+        chain,
+        descriptor,
+        secp,
+        tx_getter,
+        coins,
+        change_index,
+        1,
+        recorded.lock_time,
+        marker,
+    )?;
+    // Never restore arbitrary output scripts, input metadata or caller PSBTs.
+    // Rebuilding also checks the payload's chain byte and input commitment.
+    rebuilt.psbt.unsigned_tx.output[1].value = recorded.output[1].value;
+    if rebuilt.psbt.unsigned_tx != *recorded {
+        return Err(Error::InvalidRequest(
+            "Recorded transaction differs from the owned poison construction",
+        ));
+    }
+    spend::reverify_spend_before_broadcast(descriptor, &rebuilt.psbt)?;
+    Ok(rebuilt)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,6 +381,75 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn reconstruction_rechecks_owned_plan_without_changing_its_fee_or_metadata() {
+        for chain in [ChainId::Bitcoin, ChainId::Testnet4] {
+            let (desc, coins, mut getter) = fixture();
+            let built = build(chain, &desc, &coins, &mut getter, 10, 5).unwrap();
+            let verify = secp256k1::Secp256k1::verification_only();
+            let index = ChildNumber::from_normal_idx(10).unwrap();
+            let restore = |tx: &Transaction, getter: &mut Getter| {
+                reconstruct_poison_self_transfer(chain, &desc, &verify, getter, &coins, index, tx)
+            };
+            let restored = restore(&built.psbt.unsigned_tx, &mut getter).unwrap();
+            assert_eq!(restored.psbt(), built.psbt());
+            assert_eq!(restored.change_index(), index);
+            assert_eq!(restored.chain(), chain);
+            let mut mutations = Vec::new();
+            let mut tx = built.psbt.unsigned_tx.clone();
+            tx.output[1].script_pubkey = desc
+                .receive_descriptor()
+                .derive(index, &verify)
+                .script_pubkey();
+            mutations.push(tx);
+            let mut tx = built.psbt.unsigned_tx.clone();
+            tx.output[1].value = Amount::MAX;
+            mutations.push(tx);
+            let mut tx = built.psbt.unsigned_tx.clone();
+            tx.output[1].value = Amount::ZERO;
+            mutations.push(tx);
+            let mut tx = built.psbt.unsigned_tx.clone();
+            tx.output[0].value = Amount::from_sat(1);
+            mutations.push(tx);
+            let mut tx = built.psbt.unsigned_tx.clone();
+            let mut script = tx.output[0].script_pubkey.clone().into_bytes();
+            script[51] ^= 1; // recorded input commitment
+            tx.output[0].script_pubkey = bitcoin::ScriptBuf::from_bytes(script);
+            mutations.push(tx);
+            let mut tx = built.psbt.unsigned_tx.clone();
+            tx.input[0].previous_output = OutPoint::null();
+            mutations.push(tx);
+            let mut tx = built.psbt.unsigned_tx.clone();
+            tx.input[0].sequence = bitcoin::Sequence(46);
+            mutations.push(tx);
+            let mut tx = built.psbt.unsigned_tx.clone();
+            tx.input[0].witness.push([1]);
+            mutations.push(tx);
+            let mut tx = built.psbt.unsigned_tx.clone();
+            tx.output.pop();
+            mutations.push(tx);
+            for tx in mutations {
+                assert!(
+                    restore(&tx, &mut getter).is_err(),
+                    "accepted mutated plan: {:?}",
+                    tx
+                );
+            }
+            let mut missing = Getter(HashMap::new());
+            assert!(restore(&built.psbt.unsigned_tx, &mut missing).is_err());
+            assert!(reconstruct_poison_self_transfer(
+                chain,
+                &desc,
+                &verify,
+                &mut getter,
+                &coins,
+                ChildNumber::from_normal_idx(11).unwrap(),
+                &built.psbt.unsigned_tx
+            )
+            .is_err());
+        }
+    }
+
     #[test]
     fn invalid_plan_refuses_without_panics() {
         let (desc, coins, mut getter) = fixture();

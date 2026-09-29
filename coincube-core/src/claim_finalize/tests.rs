@@ -284,3 +284,32 @@ fn retained_witness_tamper_and_unified_byte_fail_actual_interpreter() {
         Err(FinalizeError::InvalidWitness)
     );
 }
+
+#[test]
+fn recovered_transaction_requires_the_exact_construction_and_valid_retained_witnesses() {
+    let secp = secp256k1::Secp256k1::verification_only();
+    for chain in [ChainId::Bitcoin, ChainId::Testnet4] {
+        let (built, signers) = fixture(chain, false);
+        let signed = sign(&built, &signers[..2]);
+        let finalized = finalize_poison_transfer(&built, &signed, &secp).unwrap();
+        let restored = verify_poison_transaction(&built, finalized.transaction(), &secp).unwrap();
+        assert_eq!(restored.transaction(), finalized.transaction());
+        assert_eq!(restored.signatures_per_input(), &[2, 2]);
+        assert_eq!(restored.fee(), finalized.fee());
+        let mut altered = finalized.transaction().clone();
+        altered.input[0].witness.clear();
+        assert!(verify_poison_transaction(&built, &altered, &secp).is_err());
+        let mut altered = finalized.transaction().clone();
+        let mut stack = altered.input[0].witness.to_vec();
+        stack[1][4] ^= 1;
+        altered.input[0].witness = bitcoin::Witness::from_slice(&stack);
+        assert!(verify_poison_transaction(&built, &altered, &secp).is_err());
+        let mut altered = finalized.transaction().clone();
+        altered.output[1].value = Amount::from_sat(1);
+        assert!(matches!(
+            verify_poison_transaction(&built, &altered, &secp),
+            Err(FinalizeError::ConstructionChanged)
+        ));
+        assert!(verify_poison_transaction(&built, &built.psbt().unsigned_tx, &secp).is_err());
+    }
+}

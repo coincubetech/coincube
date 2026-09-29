@@ -164,6 +164,42 @@ pub fn finalize_poison_transfer<C: secp256k1::Verification>(
     })
 }
 
+/// Verify a transaction recovered from the node against a reconstructed owned
+/// poison transfer. Disk state and a matching txid are not signature evidence:
+/// every retained witness is interpreted against authenticated previous outputs.
+/// The result still grants no broadcast, replay-safety or step-two permission.
+pub fn verify_poison_transaction<C: secp256k1::Verification>(
+    construction: &PoisonSelfTransfer,
+    transaction: &Transaction,
+    secp: &secp256k1::Secp256k1<C>,
+) -> Result<VerifiedPoisonTransfer, FinalizeError> {
+    let original = construction.psbt();
+    spend::reverify_spend_before_broadcast(construction.descriptor(), original)
+        .map_err(|_| FinalizeError::Economics)?;
+    let prevouts = original
+        .inputs
+        .iter()
+        .zip(&original.unsigned_tx.input)
+        .map(|(input, txin)| {
+            spend::authenticate_previous_output(
+                &txin.previous_output,
+                input.non_witness_utxo.as_ref(),
+                input.witness_utxo.as_ref(),
+            )
+            .map_err(|_| FinalizeError::InputAuthentication)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let signatures_per_input = verify_retained_witness(transaction, original, &prevouts, secp)?;
+    Ok(VerifiedPoisonTransfer {
+        transaction: transaction.clone(),
+        construction_txid: original.unsigned_tx.compute_txid(),
+        chain: construction.chain(),
+        descriptor: construction.descriptor().clone(),
+        fee: original.fee().map_err(|_| FinalizeError::Economics)?,
+        signatures_per_input,
+    })
+}
+
 fn verify_retained_witness<C: secp256k1::Verification>(
     transaction: &Transaction,
     original: &Psbt,

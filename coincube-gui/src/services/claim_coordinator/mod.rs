@@ -96,6 +96,8 @@ impl Review {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
+    /// A journal records submission, but no witness transaction was recovered yet.
+    Recorded { txid: Txid },
     /// An upstream acknowledgement, not confirmation or chain exclusivity.
     UpstreamAccepted { txid: Txid, wtxid: Wtxid },
     /// Intent was durably recorded. Never automatically retry, even if cancellation
@@ -450,6 +452,12 @@ impl Coordinator {
     }
     pub fn phase(&self) -> Phase {
         self.controller.phase()
+    }
+    pub fn recorded_outcome(&self) -> Option<Outcome> {
+        (self.phase() != Phase::Intent).then(|| Outcome::Uncertain {
+            txid: self.verified.transaction().compute_txid(),
+            wtxid: self.verified.transaction().compute_wtxid(),
+        })
     }
     pub fn context(&self) -> &Context {
         &self.context
