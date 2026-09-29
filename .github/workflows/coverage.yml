@@ -12,10 +12,16 @@ on:
       - ".github/workflows/coverage.yml"
   workflow_dispatch:
 
+# Match main.yml: a new push supersedes the previous coverage run for the same
+# PR instead of holding a runner for up to the full job limit.
+concurrency:
+  group: coverage-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   rust-coverage:
     runs-on: ubuntu-latest
-    # Instrumented workspace tests now take 36-44 minutes on hosted runners;
+    # Instrumented workspace tests now take 36-46 minutes on hosted runners;
     # 45 minutes left no margin and timed out mid-suite on #545 and #557.
     timeout-minutes: 75
     env:
