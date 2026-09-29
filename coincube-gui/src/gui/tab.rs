@@ -733,6 +733,7 @@ impl Tab {
     ) -> Task<Message> {
         self.fork_session_generation = self.fork_session_generation.wrapping_add(1);
         self.pending_split_after_install = false;
+        app::split_intent::clear();
         self.fork_save_task.take();
         self.fork_tasks.clear();
         let mut command = Task::none();
@@ -993,6 +994,8 @@ impl Tab {
                     command.map(Message::Install)
                 }
                 home::Message::Run(datadir_path, cfg, chain, cube) => {
+                    // Every refusal below abandons this open: drop an armed Split
+                    // handoff with it rather than let a later open inherit it.
                     // Chain gate — first, before anything below can touch a
                     // seed file, an SDK, the daemon or a node. Two checks:
                     //
@@ -1017,10 +1020,12 @@ impl Tab {
                             cube.network.label(),
                             chain.label(),
                         ));
+                        app::split_intent::clear();
                         return Task::none();
                     }
                     if let Some(reason) = l.connect_chain_availability(cube.network).reason() {
                         l.set_error(reason.to_string());
+                        app::split_intent::clear();
                         return Task::none();
                     }
                     let network = chain.bitcoin_network();
@@ -1077,6 +1082,7 @@ impl Tab {
                                 cube.is_passkey_cube()
                             )
                         ));
+                        app::split_intent::clear();
                         return Task::none();
                     }
 
@@ -1100,6 +1106,7 @@ impl Tab {
                              and its recovery password, or use a build with \
                              COINCUBE_ENABLE_PASSKEY set.",
                         );
+                        app::split_intent::clear();
                         return Task::none();
                     }
 
@@ -1760,6 +1767,9 @@ impl Tab {
             }
             (State::Loader(loader), Message::Load(msg)) => match msg {
                 loader::Message::View(loader::ViewMessage::SwitchNetwork) => {
+                    // Back from the loader abandons this open, and its Split
+                    // handoff with it (Retry keeps both).
+                    app::split_intent::clear();
                     let (home, command) =
                         Home::new(loader.datadir_path.clone(), Some(loader.network));
                     self.state = State::Home(home);
@@ -2728,6 +2738,9 @@ impl Tab {
                     }
                 }
                 crate::pin_entry::Message::Back => {
+                    // An abandoned unlock abandons its Split handoff too; it
+                    // must not fire on a later ordinary open of this Cube.
+                    app::split_intent::clear();
                     // Go back to home. `Home` speaks `bitcoin::Network` (it
                     // only ever lists the Bitcoin family), and a Cube on the
                     // PIN screen is one that passed the open gate, so the
@@ -2998,6 +3011,8 @@ impl Tab {
                     )
                 }
                 crate::passkey_unlock::Message::Back => {
+                    // As for PIN Back: abandoning the unlock clears Split.
+                    app::split_intent::clear();
                     // Dropping the screen drops any in-flight ceremony, which
                     // cancels the system prompt.
                     let network = unlock.cube().network.bitcoin_network();
@@ -3316,6 +3331,15 @@ impl Tab {
             State::PasskeyUnlock(v) => v.view().map(Message::PasskeyUnlock),
             State::DuressActive(v) => v.view().map(Message::Duress),
         }
+    }
+
+    /// A tab still on its way into a Cube (unlock or loading) may be the
+    /// open an armed Split handoff is waiting for.
+    pub fn is_opening_cube(&self) -> bool {
+        matches!(
+            self.state,
+            State::Loader(_) | State::PinEntry(_) | State::PasskeyUnlock(_)
+        )
     }
 
     pub fn stop(&mut self) {
@@ -4257,6 +4281,22 @@ mod migration_warning_tests {
             State::Loader(_) => ("Loader", None),
             State::App(_) => ("App", None),
             _ => ("other", None),
+        }
+    }
+
+    /// #578 review I7: a Home-level refusal of the open (chain-folder
+    /// mismatch, Connect availability) drops an armed Split handoff.
+    #[test]
+    fn a_refused_open_from_home_clears_the_split_handoff() {
+        use crate::chain::ChainId;
+        for found_in in [ChainId::Bitcoin, ChainId::BitcoinBlake2b] {
+            let cube = cube_on(ChainId::BitcoinBlake2b);
+            let id = cube.id.clone();
+            app::split_intent::arm_fresh_for_test(&id);
+            let (state, error) = open_from_home(cube, found_in);
+            assert_eq!(state, "Home", "{:?}", found_in);
+            assert!(error.is_some());
+            assert!(app::split_intent::take_for_open(&id, ChainId::BitcoinBlake2b).is_none());
         }
     }
 
@@ -5347,6 +5387,130 @@ mod unlock_routing_tests {
         );
     }
 
+    /// #576 review F1: abandoning the unlock of a Split target must clear the
+    /// armed handoff, or it fires on a later ordinary open of the same Cube.
+    #[test]
+    fn abandoning_pin_or_passkey_unlock_clears_the_split_handoff() {
+        use crate::{app::split_intent, chain::ChainId};
+        let _guard = crate::app::session::test_guard();
+        for passkey in [false, true] {
+            let mut cube = CubeSettings::new("Fork".to_string(), ChainId::BitcoinBlake2b);
+            if passkey {
+                cube = cube.with_passkey(PasskeyMetadata {
+                    credential_id: "Y3JlZC1pZA==".to_string(),
+                    rp_id: "coincube.io".to_string(),
+                    created_at: 1_786_122_245,
+                    label: None,
+                });
+            }
+            let id = cube.id.clone();
+            // Control: the fixture is armed and would be taken by this Cube.
+            split_intent::arm_fresh_for_test(&id);
+            assert!(split_intent::take_for_open(&id, ChainId::BitcoinBlake2b).is_some());
+
+            split_intent::arm_fresh_for_test(&id);
+            let mut tab = super::Tab::new(
+                1,
+                unlock_state(
+                    cube,
+                    std::path::PathBuf::from("/tmp/unused"),
+                    on_success(),
+                    None,
+                ),
+            );
+            let _ = tab.update(if passkey {
+                super::Message::PasskeyUnlock(crate::passkey_unlock::Message::Back)
+            } else {
+                super::Message::PinEntry(crate::pin_entry::Message::Back)
+            });
+            assert!(matches!(tab.state, State::Home(_)));
+            assert!(
+                split_intent::take_for_open(&id, ChainId::BitcoinBlake2b).is_none(),
+                "passkey={}",
+                passkey
+            );
+        }
+    }
+
+    fn blake2b_error_loader() -> super::State {
+        use crate::chain::ChainId;
+        let (loader, _task) = crate::loader::Loader::new(
+            crate::dir::CoincubeDirectory::new(std::path::PathBuf::from("/nonexistent")),
+            crate::app::config::Config::new(false),
+            ChainId::BitcoinBlake2b.bitcoin_network(),
+            None,
+            None,
+            None,
+            CubeSettings::new_with_raw_id(
+                "split-loader".to_string(),
+                "Fork".to_string(),
+                ChainId::BitcoinBlake2b,
+            ),
+            None,
+            None,
+        );
+        super::State::Loader(loader)
+    }
+
+    /// #578 review R1: Back from the loader error screen abandons the open
+    /// and its Split handoff; Retry keeps it for the same open.
+    #[test]
+    fn loader_back_clears_the_split_handoff_and_retry_keeps_it() {
+        use crate::{app::split_intent, chain::ChainId, loader};
+        let _guard = crate::app::session::test_guard();
+        let id = "split-loader";
+
+        split_intent::arm_fresh_for_test(id);
+        let mut tab = super::Tab::new(1, blake2b_error_loader());
+        let _ = tab.update(super::Message::Load(loader::Message::View(
+            loader::ViewMessage::Retry,
+        )));
+        assert!(matches!(tab.state, State::Loader(_)));
+        assert!(split_intent::take_for_open(id, ChainId::BitcoinBlake2b).is_some());
+
+        split_intent::arm_fresh_for_test(id);
+        let mut tab = super::Tab::new(1, blake2b_error_loader());
+        let _ = tab.update(super::Message::Load(loader::Message::View(
+            loader::ViewMessage::SwitchNetwork,
+        )));
+        assert!(matches!(tab.state, State::Home(_)));
+        assert!(split_intent::take_for_open(id, ChainId::BitcoinBlake2b).is_none());
+    }
+
+    /// #578 review R1: closing a tab that is mid-open (loader or unlock)
+    /// clears the Split handoff; closing a settled tab does not.
+    #[test]
+    fn closing_a_tab_mid_open_clears_the_split_handoff() {
+        use crate::{app::split_intent, chain::ChainId, gui::pane::Pane};
+        let _guard = crate::app::session::test_guard();
+        let id = "split-loader";
+        let pin = unlock_state(
+            CubeSettings::new("Fork".to_string(), ChainId::BitcoinBlake2b),
+            std::path::PathBuf::from("/tmp/unused"),
+            on_success(),
+            None,
+        );
+        for state in [blake2b_error_loader(), pin] {
+            split_intent::arm_fresh_for_test(id);
+            let mut pane = Pane::new_with_tab(state);
+            pane.close_tab(0);
+            assert!(split_intent::take_for_open(id, ChainId::BitcoinBlake2b).is_none());
+        }
+
+        let root =
+            std::env::temp_dir().join(format!("coincube-split-close-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let (home, _) = crate::home::Home::new(
+            crate::dir::CoincubeDirectory::new(root.clone()),
+            Some(Network::Bitcoin),
+        );
+        split_intent::arm_fresh_for_test(id);
+        let mut pane = Pane::new_with_tab(super::State::Home(home));
+        pane.close_tab(0);
+        assert!(split_intent::take_for_open(id, ChainId::BitcoinBlake2b).is_some());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// The other half: the PIN path is untouched by the fix. Without this, a
     /// future "just always use PasskeyUnlock" simplification passes the test
     /// above and breaks every PIN Cube.
@@ -5376,6 +5540,7 @@ mod fork_completion_tests {
 
     #[test]
     fn cancelling_the_split_prerequisite_installer_discards_the_pending_intent() {
+        let _guard = crate::app::session::test_guard();
         let root_path = std::env::temp_dir().join(format!(
             "coincube-split-installer-cancel-{}",
             uuid::Uuid::new_v4()

@@ -10,6 +10,7 @@ pub mod message;
 pub mod seed_source;
 pub mod session;
 pub mod settings;
+pub mod split_intent;
 pub mod state;
 mod unswept_notice;
 pub mod view;
@@ -811,6 +812,12 @@ pub struct App {
     fork_claim_handoff: Option<claim_intent::ForkHandoff>,
     fork_claim_requested: bool,
     loading_fork_claim: Option<u64>,
+    /// Exact foreign-wallet discovery evidence consumed from Home. This state
+    /// can only reserve and review a destination; it exposes no PSBT controls.
+    split_handoff: Option<SplitHandoff>,
+    /// Invalidates an in-flight address/feerate completion on session, feature,
+    /// account, or Cube changes.
+    split_handoff_generation: u64,
     /// Boxed so that `App` — and therefore `gui::tab::State`, whose size is
     /// set by this variant — stays small. `Panels` holds every panel's state
     /// inline (~30 KiB); carried by value it made each `self.state = ...`
@@ -921,6 +928,38 @@ pub struct App {
     /// fires `Message::ConnectStreamReady`, or permanently `None` if the
     /// service config returned no `grpc_url`.
     connect_stream_config: Option<crate::services::connect::grpc::stream::ConnectStreamConfig>,
+}
+
+enum SplitHandoff {
+    Waiting(split_intent::SplitIntent),
+    Reserving(split_intent::SplitIntent),
+    Review {
+        intent: split_intent::SplitIntent,
+        target: crate::services::foreign_psbt::TargetAddressEvidence,
+        address: String,
+        sweep: crate::services::foreign_psbt::SweepInputs,
+        /// `None` when no BTCB2-scoped fee rate is available.
+        economics: Option<crate::services::foreign_psbt::SweepEconomics>,
+    },
+}
+
+/// The fee source for a BTCB2 Split review. Tenshu has no BTCB2-chain-scoped
+/// estimator yet, so this is always unavailable; the Bitcoin mainnet
+/// `FeeEstimator` must never price a BTCB2 sweep.
+fn split_fee_source() -> std::sync::Arc<dyn crate::services::foreign_psbt::SweepFeeSource> {
+    std::sync::Arc::new(crate::services::foreign_psbt::UnavailableBtcb2Fees)
+}
+
+fn split_review_error(error: crate::services::foreign_psbt::ForeignPsbtError) -> String {
+    use crate::services::foreign_psbt::ForeignPsbtError as E;
+    match error {
+        E::UnsupportedRoute => "Taproot (tr) wallets can be scanned but not split: there is no signing route for them yet.".to_string(),
+        E::ForkUnknown => "The Bitcoin Blake2b fork height was not observed with this scan, so no coin can be proven pre-fork. Scan again.".to_string(),
+        E::Empty => "No confirmed pre-fork coins were found. Coins confirmed after the fork are not part of this split and may still be replayable.".to_string(),
+        E::Unconfirmed => "Wait for every discovered output to confirm, then scan again.".to_string(),
+        E::Economics => "The pre-fork total cannot cover the maximum fee at this fee rate while leaving a spendable amount.".to_string(),
+        _ => "The source evidence cannot produce a safe sweep review. Scan again.".to_string(),
+    }
 }
 
 /// Health of the Connect realtime stream as observed from the desktop.
@@ -2617,21 +2656,27 @@ impl App {
         cube_settings: settings::CubeSettings,
     ) -> Result<(App, Task<Message>), Error> {
         let chain = cube_settings.network;
+        // A refused fork open never reaches `new_inner`, which is what takes
+        // the Split slot; refuse it here too so it cannot fire later.
+        let refuse = |error: Error| -> Result<(App, Task<Message>), Error> {
+            split_intent::clear();
+            Err(error)
+        };
         if !chain.is_blake2b() || wallet.chain != chain || cache.chain() != chain {
-            return Err(Error::Daemon(DaemonError::ConnectAnchor(
+            return refuse(Error::Daemon(DaemonError::ConnectAnchor(
                 coincubed::connect::AdmissionError::WrongChain.into(),
             )));
         }
         if client.token().is_none_or(|token| token.trim().is_empty()) {
-            return Err(Error::Daemon(DaemonError::ConnectAnchor(
+            return refuse(Error::Daemon(DaemonError::ConnectAnchor(
                 coincubed::connect::AdmissionError::MissingAuth.into(),
             )));
         }
-        let backend_config = daemon.config().ok_or_else(|| {
-            Error::Daemon(DaemonError::ConnectAnchor(
+        let Some(backend_config) = daemon.config() else {
+            return refuse(Error::Daemon(DaemonError::ConnectAnchor(
                 coincubed::connect::AdmissionError::InvalidBackend.into(),
-            ))
-        })?;
+            )));
+        };
         let endpoint = format!(
             "{}/api/v1/esplora/{}",
             client.base_url.trim_end_matches('/'),
@@ -2646,7 +2691,7 @@ impl App {
             || !correct_backend
             || backend_config.pending_bitcoind.is_some()
         {
-            return Err(Error::Daemon(DaemonError::ConnectAnchor(
+            return refuse(Error::Daemon(DaemonError::ConnectAnchor(
                 coincubed::connect::AdmissionError::InvalidBackend.into(),
             )));
         }
@@ -2666,7 +2711,8 @@ impl App {
         app.panels.connect.install_admitted_client(client.clone());
         app.cache.has_connect_session = true;
         app.fork_connect_client = Some(client);
-        Ok((app, task))
+        let split = app.start_pending_split();
+        Ok((app, Task::batch([task, split])))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2714,6 +2760,7 @@ impl App {
             _ => claim_intent::ForkHandoff::discover(&data_dir, &cube_settings.id, &wallet),
         };
         cache.btcb2_claim_resume = fork_claim_handoff.is_some();
+        let split_intent = split_intent::take_for_open(&cube_settings.id, cube_settings.network);
         // Connect blinding (PR D3): derive the Cube's encryption key once from
         // the master signer the unlock already loaded, so every surface that
         // opens a Connect-served key can do so without re-prompting for a PIN.
@@ -2841,6 +2888,8 @@ impl App {
             fork_claim_requested,
             fork_claim_handoff,
             loading_fork_claim: None,
+            split_handoff: split_intent.map(SplitHandoff::Waiting),
+            split_handoff_generation: 0,
             panels: Box::new(panels),
             cache: cache_with_vault,
             daemon: Some(daemon),
@@ -2910,6 +2959,7 @@ impl App {
         // rather than acted on — a Cube with no Vault has no descriptor to
         // claim with.
         let _ = claim_intent::take(&cube_settings.id);
+        let _ = split_intent::take_for_open(&cube_settings.id, cube_settings.network);
         if cube_settings.network.is_blake2b() {
             return Err(Error::Daemon(DaemonError::ConnectAnchor(
                 coincubed::connect::AdmissionError::InvalidBackend.into(),
@@ -3012,6 +3062,8 @@ impl App {
                 fork_claim_handoff: None,
                 fork_claim_requested: false,
                 loading_fork_claim: None,
+                split_handoff: None,
+                split_handoff_generation: 0,
                 panels: Box::new(panels),
                 cache,
                 daemon: None,
@@ -3556,6 +3608,79 @@ impl App {
 
     pub fn cube_settings(&self) -> &settings::CubeSettings {
         &self.cube_settings
+    }
+
+    fn split_context_valid(&self, intent: &split_intent::SplitIntent) -> bool {
+        let Some(wallet) = self.wallet.as_ref() else {
+            return false;
+        };
+        let Some(bound) = self.fork_connect_client.as_ref() else {
+            return false;
+        };
+        let current = self.panels.connect.account.authenticated_client();
+        let wallet_fingerprint = wallet.id_fingerprint().to_string();
+        self.cube_settings.network == crate::chain::ChainId::BitcoinBlake2b
+            && wallet.chain == self.cube_settings.network
+            && intent.target_source() == self.cube_settings.network
+            && intent.target_cube_id() == self.cube_settings.id
+            && intent.is_internally_current()
+            && self.cube_settings.vault_wallet_id.as_ref() == Some(&wallet.id())
+            && self.cube_settings.vault_fingerprint.as_deref() == Some(wallet_fingerprint.as_str())
+            && intent.matches_client(bound)
+            && current
+                .as_ref()
+                .is_some_and(|client| intent.matches_client(client))
+    }
+
+    fn revoke_split_handoff(&mut self) {
+        self.split_handoff_generation = self.split_handoff_generation.wrapping_add(1);
+        self.split_handoff = None;
+        split_intent::clear();
+    }
+
+    /// Revalidate and begin the read-only destination review. The account's
+    /// authenticated feature response often arrives after the Cube opens, so a
+    /// missing response waits; an explicit false response destroys the intent.
+    fn start_pending_split(&mut self) -> Task<Message> {
+        let Some(SplitHandoff::Waiting(intent)) = self.split_handoff.as_ref() else {
+            return Task::none();
+        };
+        if self.panels.connect.account.features.is_none()
+            || !self.panels.connect.account.is_authenticated()
+        {
+            return Task::none();
+        }
+        if !self.panels.connect.account.bitcoin_blake2b_server_enabled()
+            || !self.split_context_valid(intent)
+        {
+            self.revoke_split_handoff();
+            return Task::done(Message::View(view::Message::ShowError(
+                "Split was cancelled because its Cube, Vault, account session, or feature grant changed. Scan again."
+                    .to_string(),
+            )));
+        }
+        let Some(daemon) = self.daemon.clone() else {
+            self.revoke_split_handoff();
+            return Task::none();
+        };
+        let Some(SplitHandoff::Waiting(intent)) = self.split_handoff.take() else {
+            return Task::none();
+        };
+        self.split_handoff_generation = self.split_handoff_generation.wrapping_add(1);
+        let generation = self.split_handoff_generation;
+        self.split_handoff = Some(SplitHandoff::Reserving(intent));
+        Task::perform(
+            async move {
+                let fees = split_fee_source();
+                let (address, feerate) = tokio::join!(
+                    daemon.get_new_address(),
+                    crate::services::foreign_psbt::btcb2_sweep_feerate(&*fees)
+                );
+                let address = address.map_err(|error| error.to_string())?;
+                Ok((address, feerate))
+            },
+            move |result| Message::SplitTargetPrepared { generation, result },
+        )
     }
 
     /// Start a claim the Home card asked for, if this Cube is still a valid
@@ -4865,6 +4990,82 @@ impl App {
             )));
         }
         match message {
+            Message::SplitTargetPrepared { generation, result } => {
+                if generation != self.split_handoff_generation {
+                    return Task::none();
+                }
+                let Some(SplitHandoff::Reserving(intent)) = self.split_handoff.take() else {
+                    return Task::none();
+                };
+                if !self.panels.connect.account.bitcoin_blake2b_server_enabled()
+                    || !self.split_context_valid(&intent)
+                {
+                    self.revoke_split_handoff();
+                    return Task::done(Message::View(view::Message::ShowError(
+                        "Split was cancelled because its target or authenticated session changed. Scan again."
+                            .to_string(),
+                    )));
+                }
+                let prepared = result.and_then(|(reserved, feerate)| {
+                    let wallet = self
+                        .wallet
+                        .as_ref()
+                        .ok_or_else(|| "The destination Vault is no longer loaded.".to_string())?;
+                    let target =
+                        crate::services::foreign_psbt::TargetAddressEvidence::authenticate(
+                            &self.cube_settings,
+                            wallet,
+                            &reserved,
+                            intent.scan_generation(),
+                        )
+                        .map_err(|_| {
+                            "The reserved address did not match this Cube and Vault.".to_string()
+                        })?;
+                    let session = || crate::services::foreign_psbt::ForeignSession {
+                        chain: self.cube_settings.network,
+                        generation: intent.scan_generation(),
+                        target: &target,
+                        external: &intent.external,
+                        internal: intent.internal.as_ref(),
+                    };
+                    let sweep = crate::services::foreign_psbt::review_sweep_inputs(
+                        &intent.report,
+                        session(),
+                    )
+                    .map_err(split_review_error)?;
+                    let economics = feerate
+                        .map(|rate| {
+                            crate::services::foreign_psbt::review_sweep_economics(
+                                &intent.report,
+                                session(),
+                                rate,
+                            )
+                        })
+                        .transpose()
+                        .map_err(split_review_error)?;
+                    Ok((target, reserved.address.to_string(), sweep, economics))
+                });
+                match prepared {
+                    Ok((target, address, sweep, economics)) => {
+                        self.split_handoff = Some(SplitHandoff::Review {
+                            intent,
+                            target,
+                            address,
+                            sweep,
+                            economics,
+                        });
+                        return Task::none();
+                    }
+                    Err(error) => {
+                        self.revoke_split_handoff();
+                        return Task::done(Message::View(view::Message::ShowError(error)));
+                    }
+                }
+            }
+            Message::View(view::Message::DismissSplitReview) => {
+                self.revoke_split_handoff();
+                return Task::none();
+            }
             Message::View(view::Message::DismissToast(id)) => {
                 self.errors.retain(|(i, ..)| *i != id);
             }
@@ -6341,6 +6542,14 @@ impl App {
                     .as_mut()
                     .map_or_else(Task::none, |panel| panel.recover(claim_daemon));
                 let pending_claim = self.start_pending_claim();
+                if self.split_handoff.is_some()
+                    && self.panels.connect.account.is_authenticated()
+                    && self.panels.connect.account.features.is_some()
+                    && !self.panels.connect.account.bitcoin_blake2b_server_enabled()
+                {
+                    self.revoke_split_handoff();
+                }
+                let pending_split = self.start_pending_split();
                 if self.cache.chain().is_blake2b() {
                     self.cache.marketplace_flags = Default::default();
                 }
@@ -6447,12 +6656,19 @@ impl App {
                         task,
                         persist_grant,
                         pending_claim,
+                        pending_split,
                         claim_task,
                         nav,
                         switch,
                     ]);
                 }
-                return Task::batch([task, persist_grant, pending_claim, claim_task]);
+                return Task::batch([
+                    task,
+                    persist_grant,
+                    pending_claim,
+                    pending_split,
+                    claim_task,
+                ]);
             }
             Message::View(view::Message::DismissReceivedCelebration) => {
                 self.show_received_celebration = false;
@@ -7361,6 +7577,7 @@ impl App {
     /// A new authenticated startup is required; an old authority is never reused.
     pub fn invalidate_fork_session(&mut self) {
         if self.cache.chain().is_blake2b() {
+            self.revoke_split_handoff();
             if let Some(daemon) = &self.daemon {
                 daemon.invalidate_connect_session();
             }
@@ -7572,6 +7789,25 @@ impl App {
             }
         };
 
+        let content = if let Some(SplitHandoff::Review {
+            intent,
+            target,
+            address,
+            sweep,
+            economics,
+        }) = self.split_handoff.as_ref()
+        {
+            iced::widget::Stack::new()
+                .push(content)
+                .push(iced::widget::opaque(
+                    split_review_overlay(intent, target, address, *sweep, *economics)
+                        .map(Message::View),
+                ))
+                .into()
+        } else {
+            content
+        };
+
         // One-time recovery-alerts consent prompt overlays everything (PR 3).
         // `opaque` makes the full-screen overlay capture mouse presses so a
         // backdrop click can't fall through to (and actuate) the content layer
@@ -7591,6 +7827,108 @@ impl App {
     pub fn datadir_path(&self) -> &CoincubeDirectory {
         &self.cache.datadir_path
     }
+}
+
+fn split_review_overlay<'a>(
+    intent: &'a split_intent::SplitIntent,
+    target: &'a crate::services::foreign_psbt::TargetAddressEvidence,
+    address: &'a str,
+    sweep: crate::services::foreign_psbt::SweepInputs,
+    economics: Option<crate::services::foreign_psbt::SweepEconomics>,
+) -> Element<'a, view::Message> {
+    use coincube_ui::component::text::*;
+    use coincube_ui::component::{button, card};
+    use coincube_ui::theme;
+    use iced::widget::{Column, Container, Row, Space};
+    use iced::{Alignment, Length};
+
+    let review = Column::new()
+        .spacing(10)
+        .max_width(620)
+        .push(h3("Review foreign-wallet sweep"))
+        .push(
+            p1_regular(
+                "This is a read-only estimate from the exact authenticated scan. No transaction, PSBT, signature, submission, or broadcast has been created.",
+            )
+            .style(theme::text::warning),
+        )
+        .push(p1_bold(format!(
+            "{} confirmed pre-fork input(s)",
+            sweep.inputs
+        )))
+        .push(p1_regular(format!(
+            "Excluded: {} confirmed after the fork (not part of this split; may still be replayable), {} without a confirming height",
+            sweep.excluded_post_fork, sweep.excluded_unknown
+        )))
+        .push(p1_regular(format!(
+            "Pre-fork total: {} sats",
+            sweep.total.to_sat()
+        )))
+        .push(p1_regular(format!(
+            "Maximum signed size: {} vB",
+            sweep.maximum_signed_vbytes
+        )));
+    let review = match economics {
+        Some(economics) => review
+            .push(p1_regular(format!(
+                "Bounded fee rate: {} sat/vB",
+                economics.feerate_sat_vb
+            )))
+            .push(p1_regular(format!(
+                "Maximum fee: {} sats",
+                economics.fee.to_sat()
+            )))
+            .push(p1_bold(format!(
+                "Estimated destination amount: {} sats",
+                economics.destination.to_sat()
+            ))),
+        None => review.push(
+            p1_regular(
+                "Fees unavailable: Tenshu has no Bitcoin Blake2b fee estimate yet, and Bitcoin mainnet fees do not apply to this sweep. No fee or destination amount can be reviewed.",
+            )
+            .style(theme::text::warning),
+        ),
+    };
+    let review = review
+        .push(Space::new().height(Length::Fixed(4.0)))
+        .push(caption(format!("Reserved destination: {address}")))
+        .push(caption(format!(
+            "Cube {} · Vault {} · receive index {}",
+            target.cube_id(),
+            target.vault_fingerprint(),
+            target.derivation_index()
+        )))
+        .push(caption(format!(
+            "BTCB2 scan generation {} · account session generation {} · tip {}",
+            intent.scan_generation(),
+            intent.account_session_generation(),
+            intent.report.tip()
+        )))
+        .push(
+            caption(
+                "The later poison confirmation, six-confirmation recheck, reorg handling, signing, import/export, hardware, finalization, and broadcast gates remain required before funds can move.",
+            )
+            .style(theme::text::secondary),
+        )
+        .push(
+            Row::new()
+                .align_y(Alignment::Center)
+                .push(
+                    button::primary(None, "Close review")
+                        .on_press(view::Message::DismissSplitReview),
+                ),
+        );
+
+    Container::new(card::simple(review.padding(24)))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .center_x(Length::Fill)
+        .center_y(Length::Fill)
+        .padding(24)
+        .style(theme::container::custom(iced::Color::from_rgba(
+            0.0, 0.0, 0.0, 0.6,
+        )))
+        .into()
 }
 
 /// What to do about Spark Stable Balance once the SDK's state is known for
@@ -7864,6 +8202,59 @@ fn restart_daemon_blocking(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #576 review F1: a fork open refused before `new_inner` must still
+    /// consume the Split handoff, so it cannot fire on a later open.
+    #[test]
+    fn a_refused_fork_open_clears_the_split_handoff() {
+        use std::str::FromStr;
+        let _guard = crate::app::session::test_guard();
+        let chain = crate::chain::ChainId::BitcoinBlake2b;
+        let desc = coincube_core::descriptors::CoincubeDescriptor::from_str(
+            "wsh(or_d(pk([f5acc2fd]tpubD6NzVbkrYhZ4YgUx2ZLNt2rLYAMTdYysCRzKoLu2BeSHKvzqPaBDvf17GeBPnExUVPkuBpx4kniP964e2MxyzzazcXLptxLXModSVCVEV1T/<0;1>/*),and_v(v:pkh([8a64f2a9]tpubD6NzVbkrYhZ4WmzFjvQrp7sDa4ECUxTi9oby8K4FZkd3XCBtEdKwUiQyYJaxiJo5y42gyDWEczrFpozEjeLxMPxjf2WtkfcbpUdfvNnozWF/<0;1>/*),older(10))))#d72le4dr"
+        ).unwrap();
+        let root =
+            std::env::temp_dir().join(format!("coincube-split-refused-{}", uuid::Uuid::new_v4()));
+        let cfg: coincubed::config::Config = toml::from_str(&format!(
+            "main_descriptor = '{}'\ndata_directory = '{}'\n[bitcoin_config]\nnetwork = '{}'\n[esplora_config]\naddr = 'http://127.0.0.1:1'\n",
+            desc,
+            root.display(),
+            chain.api_str()
+        ))
+        .unwrap();
+        let settings = settings::CubeSettings::new("Fork".into(), chain);
+        split_intent::arm_fresh_for_test(&settings.id);
+        // The client has no token: admission refuses before `new_inner`.
+        let result = App::new_for_chain(
+            Cache {
+                fiat_chain: chain,
+                network: chain.bitcoin_network(),
+                ..Cache::default()
+            },
+            Arc::new(Wallet::new(desc).with_chain(chain)),
+            None,
+            crate::services::coincube::CoincubeClient::new(),
+            Config::new(false),
+            Arc::new(EmbeddedDaemon::unstarted_for_test(cfg, None)),
+            CoincubeDirectory::new(root.clone()),
+            settings.clone(),
+        );
+        assert!(result.is_err());
+        assert!(split_intent::take_for_open(&settings.id, chain).is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// #568 A1: the Split review is priced only by a BTCB2-scoped source, and
+    /// none exists yet, so fees are unavailable instead of Bitcoin mainnet's.
+    #[tokio::test]
+    async fn split_review_fee_source_is_btcb2_scoped_and_unavailable() {
+        let source = split_fee_source();
+        assert_eq!(source.chain(), crate::chain::ChainId::BitcoinBlake2b);
+        assert_eq!(
+            crate::services::foreign_psbt::btcb2_sweep_feerate(&*source).await,
+            None
+        );
+    }
 
     #[test]
     fn fork_panels_construct_without_any_sdk_client_or_marketplace_panel() {

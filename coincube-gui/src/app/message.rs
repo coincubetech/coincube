@@ -70,6 +70,13 @@ pub enum Message {
     Claim(super::state::vault::claim::ClaimEvent),
     ForkClaim(Box<super::state::vault::claim::fork_panel::Event>),
     ForkClaimOpened(Box<super::state::vault::claim::fork_load::Opened>),
+    /// Completion of the read-only Split destination reservation and bounded
+    /// BTCB2 fee-rate lookup (`None` = unavailable). It never carries a PSBT
+    /// or signing capability.
+    SplitTargetPrepared {
+        generation: u64,
+        result: Result<(GetAddressResult, Option<u64>), String>,
+    },
     LoadDaemonConfig(Box<DaemonConfig>),
     DaemonConfigLoaded(Result<(), Error>),
     /// Result of an off-UI-thread daemon restart (a backend switch). Carries the

@@ -116,7 +116,9 @@ async fn collect_known(
     validate(outputs)?;
     let chain = ChainId::BitcoinBlake2b;
     let tip = source.tip(chain).await?;
-    if source.anchor().await? != tip {
+    // `anchor` also reports the observed fork height (Split); only the
+    // anchored tip hash matters for this known-output check.
+    if source.anchor().await?.0 != tip {
         return Err(ScanError::Changed);
     }
     let mut addresses: BTreeMap<String, Vec<&KnownOutput>> = BTreeMap::new();
@@ -169,7 +171,7 @@ async fn collect_known(
             return Err(ScanError::Changed);
         }
     }
-    if tip != source.tip(chain).await? || tip != source.anchor().await? {
+    if tip != source.tip(chain).await? || tip != source.anchor().await?.0 {
         return Err(ScanError::Changed);
     }
     Ok(found)
@@ -235,8 +237,8 @@ mod tests {
         async fn tip(&self, _: ChainId) -> Result<BlockHash, ScanError> {
             Ok(BlockHash::from_byte_array([1; 32]))
         }
-        async fn anchor(&self) -> Result<BlockHash, ScanError> {
-            self.tip(ChainId::BitcoinBlake2b).await
+        async fn anchor(&self) -> Result<(BlockHash, Option<u64>), ScanError> {
+            Ok((self.tip(ChainId::BitcoinBlake2b).await?, None))
         }
         async fn stats(&self, _: ChainId, _: &str) -> Result<Stats, ScanError> {
             panic!("known-output lookup must not enumerate history")

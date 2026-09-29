@@ -64,8 +64,8 @@ impl Source for Fake {
             [if self.changed && n > 0 { 2 } else { 1 }; 32],
         ))
     }
-    async fn anchor(&self) -> Result<BlockHash, ScanError> {
-        Ok(BlockHash::from_byte_array([1; 32]))
+    async fn anchor(&self) -> Result<(BlockHash, Option<u64>), ScanError> {
+        Ok((BlockHash::from_byte_array([1; 32]), Some(100)))
     }
     async fn stats(&self, _: ChainId, _: &str) -> Result<Stats, ScanError> {
         let n = self.stats_calls.fetch_add(1, Ordering::SeqCst);
@@ -112,14 +112,15 @@ fn descriptor_capabilities_are_scan_only_and_ambiguous_or_secret_paths_refuse() 
     let key_b = ranged_key(42);
     let key_c = ranged_key(43);
     let origin = format!("[abcd1234/84h/0h/0h]{public}");
-    for text in [
-        text.clone(),
-        format!("pkh({})", public),
-        format!("wpkh({origin})"),
-        format!("sh(wpkh({}))", public),
-        format!("tr({})", public),
-        format!("wsh(multi(2,{key_a},{key_b},{key_c}))"),
-        format!("wsh(sortedmulti(2,{key_a},{key_b},{key_c}))"),
+    for (text, psbt_file) in [
+        (text.clone(), true),
+        (format!("pkh({})", public), true),
+        (format!("wpkh({origin})"), true),
+        (format!("sh(wpkh({}))", public), true),
+        // `tr` is scan-only: no route, not even a PSBT file.
+        (format!("tr({})", public), false),
+        (format!("wsh(multi(2,{key_a},{key_b},{key_c}))"), true),
+        (format!("wsh(sortedmulti(2,{key_a},{key_b},{key_c}))"), true),
     ] {
         let d = ScanDescriptor::parse(Branch::External, &text).unwrap();
         assert_eq!(d.end_exclusive(100), 100);
@@ -127,10 +128,16 @@ fn descriptor_capabilities_are_scan_only_and_ambiguous_or_secret_paths_refuse() 
             d.capabilities(),
             Capabilities {
                 scan: true,
-                unified_signing: false,
+                signing: SigningRoutes {
+                    psbt_file,
+                    in_app_hardware: false,
+                    seed_unified: false,
+                },
                 claim_authorization: false
-            }
+            },
+            "{text}"
         );
+        assert_eq!(d.is_taproot(), !psbt_file);
     }
     for text in [
         text.replace("/0/*", "/<0;1>/*"),
@@ -185,10 +192,9 @@ async fn full_prevout_binding_and_duplicate_outpoints_refuse() {
     let mut source = Fake::empty();
     source.previous = Some(previous.clone());
     *source.coins.lock().unwrap() = vec![coin.clone()];
-    assert_eq!(
-        collect(&source, &p, 0).await.unwrap().coins()[0].previous,
-        previous
-    );
+    let report = collect(&source, &p, 0).await.unwrap();
+    assert_eq!(report.coins()[0].previous, previous);
+    assert_eq!(report.fork_side(&report.coins()[0]), ForkSide::Unconfirmed);
     source.coins.lock().unwrap()[0].value = 1001;
     assert!(matches!(
         collect(&source, &p, 0).await,
@@ -365,4 +371,48 @@ async fn response_limits_and_redirects_refuse_without_following() {
     );
     redirect.assert();
     target.assert_hits(0);
+}
+
+#[tokio::test]
+async fn confirming_height_and_observed_fork_height_classify_coins() {
+    let mut p = plan(1);
+    p.branches[0].descriptor =
+        ScanDescriptor::parse(Branch::External, &ranged().replace("/*", "/0")).unwrap();
+    p.gap = 1;
+    let previous = Transaction {
+        version: bitcoin::transaction::Version::TWO,
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: vec![],
+        output: vec![bitcoin::TxOut {
+            value: bitcoin::Amount::from_sat(1000),
+            script_pubkey: p.branches[0].descriptor.script(0).unwrap(),
+        }],
+    };
+    let mut source = Fake::empty();
+    source.previous = Some(previous.clone());
+    let hash = BlockHash::from_byte_array([5; 32]);
+    // The fake anchor reports fork height 100: 99 is pre-fork, 100 is not.
+    for (height, side) in [(99, ForkSide::PreFork), (100, ForkSide::PostFork)] {
+        *source.coins.lock().unwrap() = vec![Utxo {
+            txid: previous.compute_txid(),
+            vout: 0,
+            value: 1000,
+            status: Status {
+                confirmed: true,
+                block_height: Some(height),
+                block_hash: Some(hash),
+            },
+        }];
+        let report = collect(&source, &p, 0).await.unwrap();
+        assert_eq!(report.fork_height(), Some(100));
+        let coin = &report.coins()[0];
+        assert_eq!(
+            (coin.block_height, coin.block_hash),
+            (Some(height), Some(hash))
+        );
+        assert_eq!(report.fork_side(coin), side);
+        // Without an observed fork height nothing is classifiable.
+        let unknown = report.clone().with_fork_height(None);
+        assert_eq!(unknown.fork_side(coin), ForkSide::Unknown);
+    }
 }

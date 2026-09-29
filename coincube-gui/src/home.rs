@@ -775,7 +775,24 @@ impl Home {
             }
         }
 
+        if self.split_hardware_polling() {
+            return self
+                .split_wallet
+                .subscription()
+                .map(|message| Message::View(ViewMessage::SplitWallet(message)));
+        }
+
         Subscription::none()
+    }
+
+    /// Split's hardware device polling runs only while the gated Split
+    /// section is open with the hardware source chosen.
+    fn split_hardware_polling(&self) -> bool {
+        matches!(self.active_section, HomeSection::SplitWallet)
+            && self.split_wallet.polls_hardware()
+            && self
+                .connect_chain_availability(ChainId::BitcoinBlake2b)
+                .is_available()
     }
 
     /// Account-scoped admission for the explicit Connect-only fork route.
@@ -857,6 +874,8 @@ impl Home {
             return;
         }
         self.split_wallet.set_targets(targets);
+        self.split_wallet
+            .set_hardware_root(self.datadir_path.clone());
         self.active_section = HomeSection::SplitWallet;
         self.resume_split_after_install = false;
     }
@@ -2598,6 +2617,8 @@ impl Home {
                         ));
                     }
                     self.split_wallet.set_targets(targets);
+                    self.split_wallet
+                        .set_hardware_root(self.datadir_path.clone());
                 } else if matches!(self.active_section, HomeSection::SplitWallet) {
                     self.split_wallet.cancel();
                 }
@@ -2721,6 +2742,85 @@ impl Home {
                     .map(|m| Message::View(ViewMessage::RecoverVault(m)))
             }
             Message::View(ViewMessage::SplitWallet(msg)) => {
+                // Device events and reads never reach a closed or gated panel.
+                if matches!(msg, split_wallet::Message::Hardware(_))
+                    && !(matches!(self.active_section, HomeSection::SplitWallet)
+                        && self
+                            .connect_chain_availability(ChainId::BitcoinBlake2b)
+                            .is_available())
+                {
+                    return Task::none();
+                }
+                if matches!(msg, split_wallet::Message::Continue) {
+                    if let Some(reason) = self
+                        .connect_chain_availability(ChainId::BitcoinBlake2b)
+                        .reason()
+                    {
+                        self.set_error(reason.to_string());
+                        return Task::none();
+                    }
+                    let Some(client) = self.connect_account.authenticated_client() else {
+                        self.set_error("Sign in to Connect to continue Split.".to_string());
+                        return Task::none();
+                    };
+                    let Some(target_id) = self.split_wallet.selected_target_id() else {
+                        self.set_error("Choose a destination Cube before continuing.".to_string());
+                        return Task::none();
+                    };
+                    let State::Cubes { cubes, source, .. } = &self.state else {
+                        self.set_error("Reload the Cube list before continuing Split.".to_string());
+                        return Task::none();
+                    };
+                    let source = *source;
+                    let Some(cube) = cubes.iter().find(|cube| cube.id == target_id).cloned() else {
+                        self.set_error(
+                            "The selected destination Cube is no longer available.".to_string(),
+                        );
+                        self.split_wallet.cancel();
+                        return Task::none();
+                    };
+                    if source != ChainId::BitcoinBlake2b || cube.network != source {
+                        self.set_error(
+                            "The selected destination Cube no longer belongs to Bitcoin Blake2b."
+                                .to_string(),
+                        );
+                        self.split_wallet.cancel();
+                        return Task::none();
+                    }
+                    let mut config_path = self
+                        .datadir_path
+                        .network_directory(source)
+                        .path()
+                        .to_path_buf();
+                    config_path.push(app::config::DEFAULT_FILE_NAME);
+                    let cfg = match app::Config::from_file(&config_path) {
+                        Ok(cfg) => cfg,
+                        Err(error) => {
+                            self.set_error(format!(
+                                "Couldn't read the destination Cube configuration ({}): {}",
+                                config_path.display(),
+                                error
+                            ));
+                            return Task::none();
+                        }
+                    };
+                    let session_generation = self.connect_account.session_generation();
+                    let Some(intent) =
+                        self.split_wallet
+                            .take_handoff(source, session_generation, &client)
+                    else {
+                        self.set_error(
+                            "The scan evidence is stale. Scan the source wallet again.".to_string(),
+                        );
+                        return Task::none();
+                    };
+                    app::split_intent::arm(intent);
+                    let datadir = self.datadir_path.clone();
+                    return Task::perform(
+                        async move { (datadir, cfg, source, cube) },
+                        |(datadir, cfg, source, cube)| Message::Run(datadir, cfg, source, cube),
+                    );
+                }
                 let client = self.connect_account.authenticated_client();
                 let generation = self.connect_account.session_generation();
                 self.split_wallet
@@ -6611,6 +6711,7 @@ mod tests {
 
     #[test]
     fn split_without_a_target_launches_the_ordinary_btcb2_installer() {
+        let _guard = crate::app::session::test_guard();
         let datadir = fresh_datadir();
         let mut home = Home::new_for_chain(datadir.clone(), Some(ChainId::Bitcoin)).0;
         enable_btcb2(&mut home);
@@ -6629,7 +6730,91 @@ mod tests {
     }
 
     #[test]
+    fn split_hardware_source_is_unreachable_while_btcb2_is_gated() {
+        // cancel() clears the process-wide Split intent slot.
+        let _guard = crate::app::session::test_guard();
+        let datadir = fresh_datadir();
+        let mut home = Home::new_for_chain(datadir.clone(), Some(ChainId::Bitcoin)).0;
+        write_btcb2_vault_target(&home);
+        // Flag off: the section does not open and hardware messages are dropped.
+        let _ = home.update(Message::View(ViewMessage::GoToSection(
+            HomeSection::SplitWallet,
+        )));
+        assert_ne!(home.active_section, HomeSection::SplitWallet);
+        home.active_section = HomeSection::SplitWallet;
+        let _ = home.update(Message::View(ViewMessage::SplitWallet(
+            split_wallet::Message::SourceSelected(split_wallet::Source::Hardware),
+        )));
+        assert!(drain(home.update(Message::View(ViewMessage::SplitWallet(
+            split_wallet::Message::Hardware(crate::split_hardware::HardwareMessage::Read(
+                "dev".into()
+            )),
+        ))))
+        .is_empty());
+        assert!(!home.split_hardware_polling());
+
+        // Flag on and open: polling follows the chosen source; leaving stops it.
+        enable_btcb2(&mut home);
+        home.active_section = HomeSection::Cubes;
+        let _ = home.update(Message::View(ViewMessage::GoToSection(
+            HomeSection::SplitWallet,
+        )));
+        assert_eq!(home.active_section, HomeSection::SplitWallet);
+        assert!(home.split_hardware_polling());
+        let _ = home.update(Message::View(ViewMessage::GoToSection(HomeSection::Cubes)));
+        assert!(!home.split_hardware_polling());
+        std::fs::remove_dir_all(datadir.path()).unwrap();
+    }
+
+    /// T1: with a listed device a `Read` would start a device task and move
+    /// the source to `Reading`, so the Home gate is observable.
+    #[test]
+    fn split_hardware_messages_are_dropped_unless_the_open_split_section_is_available() {
+        use crate::split_hardware::{tests::add_fake_device, HardwareMessage, HardwareStatus};
+        let _guard = crate::app::session::test_guard();
+        let datadir = fresh_datadir();
+        let mut home = Home::new_for_chain(datadir.clone(), Some(ChainId::Bitcoin)).0;
+        write_btcb2_vault_target(&home);
+        let _ = home.update(Message::View(ViewMessage::SplitWallet(
+            split_wallet::Message::SourceSelected(split_wallet::Source::Hardware),
+        )));
+        add_fake_device(home.split_wallet.hardware_mut(), datadir.path());
+        let read = || {
+            Message::View(ViewMessage::SplitWallet(split_wallet::Message::Hardware(
+                HardwareMessage::Read("dev-1".into()),
+            )))
+        };
+
+        // Section open, BTCB2 gated off.
+        home.active_section = HomeSection::SplitWallet;
+        let _ = home.update(read());
+        assert!(matches!(
+            home.split_wallet.hardware_mut().status(),
+            HardwareStatus::Idle
+        ));
+
+        // BTCB2 available, section closed.
+        enable_btcb2(&mut home);
+        home.active_section = HomeSection::Cubes;
+        let _ = home.update(read());
+        assert!(matches!(
+            home.split_wallet.hardware_mut().status(),
+            HardwareStatus::Idle
+        ));
+
+        // Control: open and available, the same message starts a read.
+        home.active_section = HomeSection::SplitWallet;
+        let _ = home.update(read());
+        assert!(matches!(
+            home.split_wallet.hardware_mut().status(),
+            HardwareStatus::Reading(_)
+        ));
+        std::fs::remove_dir_all(datadir.path()).unwrap();
+    }
+
+    #[test]
     fn split_with_an_existing_target_opens_without_installing() {
+        let _guard = crate::app::session::test_guard();
         let datadir = fresh_datadir();
         let mut home = Home::new_for_chain(datadir.clone(), Some(ChainId::Bitcoin)).0;
         enable_btcb2(&mut home);
@@ -6645,6 +6830,7 @@ mod tests {
 
     #[test]
     fn post_install_split_resume_waits_for_and_rechecks_the_server_gate() {
+        let _guard = crate::app::session::test_guard();
         let datadir = fresh_datadir();
         let mut home = Home::new_for_chain(datadir.clone(), Some(ChainId::BitcoinBlake2b)).0;
         enable_btcb2(&mut home);
@@ -6671,6 +6857,7 @@ mod tests {
 
     #[test]
     fn post_install_split_resume_clears_when_the_server_gate_is_closed() {
+        let _guard = crate::app::session::test_guard();
         let datadir = fresh_datadir();
         let mut home = Home::new_for_chain(datadir.clone(), Some(ChainId::BitcoinBlake2b)).0;
         enable_btcb2(&mut home);
@@ -6693,6 +6880,7 @@ mod tests {
 
     #[test]
     fn rejected_stored_session_clears_post_install_split_resume() {
+        let _guard = crate::app::session::test_guard();
         use crate::app::view::ConnectAccountMessage;
 
         let datadir = fresh_datadir();
@@ -7322,6 +7510,7 @@ mod tests {
 
     #[test]
     fn logout_closes_the_account_scoped_split_surface() {
+        let _guard = crate::app::session::test_guard();
         use crate::app::view::ConnectAccountMessage;
 
         let mut home = signed_in_home();

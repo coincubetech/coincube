@@ -121,6 +121,9 @@ pub enum VaultReceiveMessage {
 
 #[derive(Debug, Clone)]
 pub enum Message {
+    /// Close the read-only foreign-wallet sweep review and destroy its
+    /// session-only evidence.
+    DismissSplitReview,
     /// Open the Branta identity at `(output_index, identity_index)` in the reviewed PSBT.
     OpenVaultRecipientIdentity(usize, usize),
     Scroll(f32),

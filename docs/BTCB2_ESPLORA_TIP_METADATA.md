@@ -1,6 +1,6 @@
 # Bitcoin Blake2b — Esplora tip timestamps without raw headers
 
-Scope: coincube-api#290. One daemon change in
+Scope: coincube-api#290 and coincube-api#293. One daemon change in
 `coincubed/src/bitcoin/esplora/client.rs::tip_time`, plus this note. No
 activation, no chain-identity policy, no dependency change.
 
@@ -29,11 +29,15 @@ and the single request per call, not a race fix.)
 
 Failure semantics: an empty list or a timestamp outside `u32` is
 `Error::TipMetadata`, a parse failure is `Error::Client`; nothing is defaulted,
-and the trait boundary maps every error to `None` as before. Provider
-selection, 402/429 cooldown, transport-failure cooldown, 5xx fall-through,
-non-retryable short-circuit and shutdown abort are unchanged — the one request
-goes through `try_in_order` like every other call. Bitcoin summaries return
-the same value the header did.
+and the trait boundary maps every error to `None` as before. Tip metadata is
+validated inside provider selection. Empty or overflowing metadata therefore
+tries the next eligible provider without cooling the reachable provider or
+fabricating a transport failure. If every attempted provider fails, the last
+attempted provider's typed error is returned; if every provider was already
+cooling, the result remains `Error::AllCooling`. Existing 402/429 cooldown,
+transport-failure cooldown, 5xx fall-through, non-retryable HTTP short-circuit,
+provider ordering, admission checks and shutdown abort behavior are preserved.
+Bitcoin summaries return the same value the header did.
 
 Unknown JSON fields (a BLAKE2b indexer may add fork-specific ones) are
 ignored by serde and covered by the mock test.
@@ -75,9 +79,11 @@ extra fields → timestamp, exactly one `/blocks` request and no `/header`
 request; Bitcoin summaries in arbitrary order → highest block; empty list /
 `u32` overflow → `TipMetadata`, missing or negative timestamp / non-JSON →
 `Client`, never a value; one request per call, each call returning its own
-snapshot's tip; 429 primary → cooldown and fallback serves, cooled primary
-not re-asked; 5xx falls through without cooldown; all providers down →
-error; shutdown abort → no request; mock teardown completes with no request,
+snapshot's tip; empty/overflow metadata → healthy fallback without cooldown,
+including on repeated calls; all metadata unusable → the last typed metadata
+error; shutdown between semantic attempts → abort; 429 primary → cooldown and
+fallback serves, cooled primary not re-asked; 5xx falls through without
+cooldown; all providers down → error; shutdown abort → no request; mock teardown completes with no request,
 with a partial request held open, and with a peer trickling one byte per
 50 ms; a head split across TCP writes is routed; an oversized head is refused
 whether or not it is terminated; at helper level, a dripping peer ends at the

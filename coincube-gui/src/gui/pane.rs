@@ -120,6 +120,12 @@ impl Pane {
 
     pub fn close_tab(&mut self, i: usize) {
         if let Some(mut tab) = self.remove_tab(i) {
+            // Closing a tab mid-open abandons that open. The Split slot is
+            // global, so fail closed and drop it rather than let it fire on
+            // a later ordinary open.
+            if tab.is_opening_cube() {
+                crate::app::split_intent::clear();
+            }
             tab.stop();
         }
     }
