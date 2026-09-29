@@ -96,6 +96,17 @@ fn observation(confirmed: bool) -> CollectedAssessment {
         generation: 1,
         assessment: Assessment::ObservationsEligibleForPreflight,
         observations: ObservationBundle {
+            bitcoin_transaction: if confirmed {
+                crate::services::claim_observation::TransactionObservation::Confirmed {
+                    txid: plan().step1.compute_txid(),
+                    block: BlockRef {
+                        height: 100,
+                        hash: hash(4),
+                    },
+                }
+            } else {
+                crate::services::claim_observation::TransactionObservation::Absent
+            },
             bitcoin: BitcoinObservation {
                 chain: ChainId::Bitcoin,
                 tip,
@@ -598,6 +609,12 @@ fn real_artifact(
     let final_tx = finalize_poison_transfer(&built, &signed, &verify).unwrap();
     (built, final_tx)
 }
+fn sync_transaction_observation(o: &mut CollectedAssessment) {
+    if let TransactionLocation::Confirmed { txid, block, .. } = o.observations.bitcoin.location {
+        o.observations.bitcoin_transaction =
+            crate::services::claim_observation::TransactionObservation::Confirmed { txid, block };
+    }
+}
 fn real_observation(c: &Controller, depth: u64) -> CollectedAssessment {
     let mut result = observation(depth > 0);
     let id = c.plan().step1.compute_txid();
@@ -607,6 +624,7 @@ fn real_observation(c: &Controller, depth: u64) -> CollectedAssessment {
     }
     result.observations.bitcoin.tip.height = 99 + depth.max(1);
     result.observations.preflight.bitcoin = result.observations.bitcoin.tip;
+    sync_transaction_observation(&mut result);
     result
 }
 
@@ -682,11 +700,13 @@ fn fork_plan_requires_fresh_depth_and_survives_restart_without_authority() {
         .unwrap();
     assert_eq!(c.recorded_fork_sweep(), Some(&sweep.psbt().unsigned_tx));
     assert_eq!(c.recorded_fork_change_index(), Some(20.into()));
-    assert_eq!(c.intent.version, 4);
+    assert_eq!(c.intent.version, 6);
     assert!(c.fresh.is_none());
     // Older v2 records remain readable, but acquire a derivation hint only
     // after authenticated construction and fresh depth checks.
     c.intent.version = 2;
+    c.intent.bitcoin_transaction = None;
+    c.intent.bitcoin_attempts.clear();
     c.intent.fork_change_index = None;
     c.intent.bitcoin_change_index = None;
     validate(&c.intent).unwrap();
@@ -806,6 +826,258 @@ fn fork_plan_requires_fresh_depth_and_survives_restart_without_authority() {
         c.prepare_fork_sweep(&context(), &sweep, policy(), 10000),
         Err(Error::Conflict)
     ));
+    let before_sweep = c.recorded_fork_sweep().cloned();
+    let mut new_inclusion = real_observation(&c, 6);
+    if let TransactionLocation::Confirmed {
+        block,
+        best_chain_hash_at_height,
+        ..
+    } = &mut new_inclusion.observations.bitcoin.location
+    {
+        block.hash = hash(8);
+        *best_chain_hash_at_height = hash(8);
+    }
+    sync_transaction_observation(&mut new_inclusion);
+    let ticket = c.begin_check(&context()).unwrap();
+    c.acknowledge_reconfirmation(ticket, &context(), new_inclusion, policy(), 10000)
+        .unwrap();
+    assert_eq!(c.recorded_fork_submission(), Some(recorded));
+    assert_eq!(c.recorded_fork_sweep().cloned(), before_sweep);
+    let history = c.intent.inclusion_history.clone();
+    // This fixture migrated through legacy v2; recovering bytes must retain
+    // both completed fork submission bookkeeping and changed Bitcoin inclusion.
+    assert!(c.recorded_bitcoin_transaction().is_none());
+    c.bind_recovered_bitcoin_transaction(&context(), &verified)
+        .unwrap();
+    assert_eq!(c.intent.inclusion_history, history);
+    assert_eq!(c.recorded_fork_submission(), Some(recorded));
+    assert_eq!(c.recorded_fork_sweep().cloned(), before_sweep);
+    assert_eq!(c.bitcoin_submission_attempts()[0].wtxid(), None);
+    drop(c);
+    let mut c = Controller::reopen(&temp.0, &wallet, context()).unwrap();
+    c.revalidate_construction(&context(), &source).unwrap();
+    assert_eq!(c.recorded_fork_submission(), Some(recorded));
+    assert_eq!(c.recorded_fork_sweep().cloned(), before_sweep);
+    refresh(&mut c, new_inclusion, 10000);
+    assert!(matches!(
+        c.record_fork_broadcast_intent(&context(), &signed, policy(), 10000),
+        Err(Error::Conflict)
+    ));
+    let history = c.intent.inclusion_history.clone();
+    let absent = real_observation(&c, 0);
+    let ticket = c.begin_check(&context()).unwrap();
+    c.record_resubmission(
+        ticket,
+        &context(),
+        absent,
+        verified.transaction(),
+        policy(),
+        10000,
+    )
+    .unwrap();
+    assert_eq!(c.phase(), Phase::Tracking);
+    assert_eq!(c.recorded_fork_submission(), Some(recorded));
+    assert_eq!(c.recorded_fork_sweep().cloned(), before_sweep);
+    assert_eq!(c.intent.inclusion_history, history);
+    assert_eq!(c.bitcoin_submission_attempts().len(), 2);
+    assert_eq!(c.bitcoin_submission_attempts()[0].wtxid(), None);
+    assert_eq!(
+        c.bitcoin_submission_attempts()[1].wtxid(),
+        Some(verified.transaction().compute_wtxid())
+    );
+}
+
+fn remined() -> CollectedAssessment {
+    let mut o = observation(true);
+    if let TransactionLocation::Confirmed {
+        block,
+        best_chain_hash_at_height,
+        ..
+    } = &mut o.observations.bitcoin.location
+    {
+        block.hash = hash(8);
+        *best_chain_hash_at_height = hash(8);
+    }
+    sync_transaction_observation(&mut o);
+    o
+}
+fn tracked(temp: &Temp) -> Controller {
+    let mut c = controller(temp);
+    refresh(&mut c, observation(false), 10000);
+    c.record_broadcast_intent(&context(), &signed(), policy(), 10000)
+        .unwrap();
+    refresh(&mut c, observation(true), 10000);
+    c
+}
+#[test]
+fn explicit_reconfirmation_preserves_history_and_never_restores_submission() {
+    let temp = Temp::new();
+    let mut c = tracked(&temp);
+    let old = c.last_inclusion().unwrap();
+    let id = c.signed_txid();
+    assert_eq!(
+        refresh(&mut c, remined(), 10000),
+        Status::Observation(Assessment::Reorged)
+    );
+    let ticket = c.begin_check(&context()).unwrap();
+    c.acknowledge_reconfirmation(ticket, &context(), remined(), policy(), 10000)
+        .unwrap();
+    assert_eq!(c.status(), Status::Unchecked);
+    assert!(c.fresh.is_none());
+    assert_eq!(c.signed_txid(), id);
+    assert_eq!(c.phase(), Phase::Tracking);
+    assert_eq!(
+        c.intent.inclusion_history,
+        vec![Reconfirmation {
+            previous: old,
+            confirmed: c.last_inclusion().unwrap()
+        }]
+    );
+    assert!(matches!(
+        c.record_broadcast_intent(&context(), &signed(), policy(), 10000),
+        Err(Error::Unchecked)
+    ));
+    drop(c);
+    let mut c = Controller::reopen(&temp.0, &identity(), context()).unwrap();
+    assert_eq!(c.intent.version, 6);
+    assert_eq!(c.intent.inclusion_history.len(), 1);
+    assert_eq!(c.status(), Status::Unchecked);
+    assert_eq!(
+        refresh(&mut c, remined(), 10000),
+        Status::Observation(Assessment::ObservationsEligibleForPreflight)
+    );
+    assert!(c
+        .record_broadcast_intent(&context(), &signed(), policy(), 10000)
+        .is_err());
+}
+#[test]
+fn reconfirmation_rejects_unconfirmed_stale_wrong_chain_and_changed_context() {
+    let temp = Temp::new();
+    let mut c = tracked(&temp);
+    let original = fs::read(temp.0.join("intent.json")).unwrap();
+    let mut noncanonical = remined();
+    if let TransactionLocation::Confirmed {
+        best_chain_hash_at_height,
+        ..
+    } = &mut noncanonical.observations.bitcoin.location
+    {
+        *best_chain_hash_at_height = hash(9);
+    }
+    let mut wrong_chain = remined();
+    wrong_chain.observations.bitcoin.chain = ChainId::BitcoinBlake2b;
+    let mut wrong_txid = remined();
+    if let TransactionLocation::Confirmed { txid, .. } =
+        &mut wrong_txid.observations.bitcoin.location
+    {
+        *txid = Txid::from_byte_array([99; 32]);
+    }
+    sync_transaction_observation(&mut wrong_txid);
+    for (o, now) in [
+        (observation(false), 10000),
+        (observation(true), 10000),
+        (remined(), 10061),
+        (noncanonical, 10000),
+        (wrong_chain, 10000),
+        (wrong_txid, 10000),
+    ] {
+        let ticket = c.begin_check(&context()).unwrap();
+        assert!(c
+            .acknowledge_reconfirmation(ticket, &context(), o, policy(), now)
+            .is_err());
+        assert_eq!(fs::read(temp.0.join("intent.json")).unwrap(), original);
+    }
+    let ticket = c.begin_check(&context()).unwrap();
+    let mut other = context();
+    other.generation += 1;
+    assert!(c
+        .acknowledge_reconfirmation(ticket, &other, remined(), policy(), 10000)
+        .is_err());
+    assert_eq!(fs::read(temp.0.join("intent.json")).unwrap(), original);
+}
+
+#[test]
+fn signed_bytes_and_attempt_are_durable_without_restart_authority() {
+    let temp = Temp::new();
+    let mut c = controller(&temp);
+    refresh(&mut c, observation(false), 10000);
+    let tx = signed();
+    c.record_broadcast_intent(&context(), &tx, policy(), 10000)
+        .unwrap();
+    assert_eq!(c.recorded_bitcoin_transaction(), Some(&tx));
+    assert_eq!(
+        c.bitcoin_submission_attempts()[0].wtxid(),
+        Some(tx.compute_wtxid())
+    );
+    drop(c);
+    let c = Controller::reopen(&temp.0, &identity(), context()).unwrap();
+    assert_eq!(c.status(), Status::Unchecked);
+    assert!(!c.construction_verified);
+    assert_eq!(c.recorded_bitcoin_transaction(), Some(&tx));
+    assert_eq!(c.bitcoin_submission_attempts().len(), 1);
+    for mutation in 0..7 {
+        let mut bad = c.intent.clone();
+        match mutation {
+            0 => bad.bitcoin_transaction = None,
+            1 => bad.bitcoin_attempts.clear(),
+            2 => bad.bitcoin_transaction.as_mut().unwrap().input[0]
+                .witness
+                .clear(),
+            3 => bad.bitcoin_transaction.as_mut().unwrap().output[0].value += Amount::ONE_SAT,
+            4 => bad.bitcoin_attempts[0].wtxid = Some(Wtxid::from_byte_array([42; 32])),
+            5 => bad
+                .bitcoin_attempts
+                .push(BitcoinSubmissionAttempt { wtxid: None }),
+            _ => bad.bitcoin_attempts = vec![bad.bitcoin_attempts[0]; 129],
+        }
+        assert!(validate(&bad).is_err(), "mutation {}", mutation);
+    }
+}
+
+#[test]
+fn legacy_recovered_witness_does_not_rewrite_unknown_original_attempt() {
+    let temp = Temp::new();
+    let (built, verified) = real_artifact(ChainId::Bitcoin, false, 10);
+    let mut c =
+        Controller::create(&temp.0, "btc".into(), "fork".into(), &built, context()).unwrap();
+    let observation = real_observation(&c, 0);
+    refresh(&mut c, observation, 10000);
+    c.record_broadcast_intent(&context(), verified.transaction(), policy(), 10000)
+        .unwrap();
+    c.intent.version = 4;
+    c.intent.bitcoin_transaction = None;
+    c.intent.bitcoin_attempts.clear();
+    validate(&c.intent).unwrap();
+    c.journal.store(&c.intent).unwrap();
+    let identity = c.identity().clone();
+    drop(c);
+    let mut c = Controller::reopen(&temp.0, &identity, context()).unwrap();
+    assert!(c
+        .bind_recovered_bitcoin_transaction(&context(), &verified)
+        .is_err());
+    c.revalidate_construction(&context(), &built).unwrap();
+    c.bind_recovered_bitcoin_transaction(&context(), &verified)
+        .unwrap();
+    assert_eq!(c.intent.version, 6);
+    assert_eq!(c.bitcoin_submission_attempts().len(), 1);
+    assert_eq!(c.bitcoin_submission_attempts()[0].wtxid(), None);
+    assert_eq!(c.status(), Status::Unchecked);
+    let before = fs::read(temp.0.join("intent.json")).unwrap();
+    c.bind_recovered_bitcoin_transaction(&context(), &verified)
+        .unwrap();
+    assert_eq!(fs::read(temp.0.join("intent.json")).unwrap(), before);
+    let (_, other) = real_artifact(ChainId::Bitcoin, false, 11);
+    assert!(matches!(
+        c.bind_recovered_bitcoin_transaction(&context(), &other),
+        Err(Error::Conflict)
+    ));
+    assert_eq!(fs::read(temp.0.join("intent.json")).unwrap(), before);
+    drop(c);
+    let c = Controller::reopen(&temp.0, &identity, context()).unwrap();
+    assert_eq!(c.bitcoin_submission_attempts()[0].wtxid(), None);
+    assert_eq!(
+        c.recorded_bitcoin_transaction(),
+        Some(verified.transaction())
+    );
 }
 
 #[cfg(unix)]

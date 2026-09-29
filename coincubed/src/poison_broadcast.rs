@@ -1,4 +1,6 @@
 //! Exact-byte transport only. This module grants no Claim/broadcast authorization.
+#[cfg(feature = "regtest-harness")]
+pub mod regtest_harness;
 use crate::DaemonControl;
 use coincube_core::{
     chain::ChainId,

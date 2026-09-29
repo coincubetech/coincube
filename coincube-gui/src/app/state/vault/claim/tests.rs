@@ -467,6 +467,8 @@ fn reviewer_claim_completion_without_daemon_must_not_panic() {
 // Windows; shared helper definitions also serve the Unix-only flow cases.
 #[cfg_attr(not(unix), allow(dead_code, unused_imports))]
 mod flow {
+    #[cfg(feature = "regtest-harness")]
+    mod live_regtest;
     use super::*;
     use crate::{daemon::model::GetInfoResult, signer::Signer};
     use coincube_core::{
@@ -580,6 +582,8 @@ mod flow {
         previous: Transaction,
         submitted: Mutex<Option<Transaction>>,
         hits: Mutex<Vec<&'static str>>,
+        #[cfg(feature = "regtest-harness")]
+        live: Option<live_regtest::LiveTransport>,
     }
     impl FlowDaemon {
         fn hit(&self, name: &'static str) {
@@ -606,6 +610,10 @@ mod flow {
         }
         async fn get_info(&self) -> Result<model::GetInfoResult, DaemonError> {
             self.hit("get_info");
+            #[cfg(feature = "regtest-harness")]
+            if let Some(live) = &self.live {
+                return Ok(live.info(&self.config));
+            }
             Ok(GetInfoResult {
                 version: String::new(),
                 network: Network::Bitcoin,
@@ -723,11 +731,35 @@ mod flow {
             _gate: Arc<SubmissionGate>,
         ) -> Result<SubmissionOutcome, DaemonError> {
             self.hit("submit_verified_poison");
+            #[cfg(feature = "regtest-harness")]
+            if let Some(live) = &self.live {
+                let outcome = live
+                    .transport
+                    .submit_poison(&verified, &_gate)
+                    .map_err(DaemonError::PoisonSubmission)?;
+                *self.submitted.lock().unwrap() = Some(verified.transaction().clone());
+                return Ok(outcome);
+            }
             *self.submitted.lock().unwrap() = Some(verified.transaction().clone());
             Ok(SubmissionOutcome::UpstreamAccepted {
                 txid: verified.transaction().compute_txid(),
                 wtxid: verified.transaction().compute_wtxid(),
             })
+        }
+        #[cfg(feature = "regtest-harness")]
+        async fn submit_verified_claim_fork(
+            &self,
+            verified: Arc<coincube_core::claim_finalize::VerifiedClaimForkSweep>,
+            gate: Arc<SubmissionGate>,
+        ) -> Result<SubmissionOutcome, DaemonError> {
+            let live = self.live.as_ref().ok_or(DaemonError::ClientNotSupported)?;
+            self.hit("submit_verified_claim_fork");
+            let outcome = live
+                .transport
+                .submit_fork(&verified, &gate)
+                .map_err(DaemonError::PoisonSubmission)?;
+            *self.submitted.lock().unwrap() = Some(verified.transaction().clone());
+            Ok(outcome)
         }
         async fn start_rescan(&self, _: u32) -> Result<(), DaemonError> {
             unreachable!()
@@ -758,7 +790,7 @@ mod flow {
             if txids.contains(&self.previous.compute_txid()) {
                 transactions.push(coincubed::commands::TransactionInfo {
                     tx: self.previous.clone(),
-                    height: Some(50),
+                    height: self.coin.block_height,
                     time: None,
                 });
             }
@@ -953,6 +985,8 @@ mod flow {
             previous: f.previous.clone(),
             submitted: Mutex::new(None),
             hits: Mutex::new(Vec::new()),
+            #[cfg(feature = "regtest-harness")]
+            live: None,
         });
         let dyn_daemon: Arc<dyn Daemon + Sync + Send> = daemon.clone();
         let mut wallet = Wallet::new(f.descriptor.clone());
@@ -1448,10 +1482,61 @@ mod flow {
 
     #[cfg(any(unix, windows))]
     #[tokio::test]
+    async fn restart_uses_stored_signed_bytes_but_verifies_their_signatures() {
+        for corrupt in [false, true] {
+            let mut f = reach_review().await;
+            reach_track(&mut f).await;
+            *f.daemon.submitted.lock().unwrap() = None;
+            if corrupt {
+                let path = journal_directory(&f.datadir, &f.wallet).join("intent.json");
+                let mut journal: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                let mut tx: Transaction =
+                    serde_json::from_value(journal["bitcoin_transaction"].clone()).unwrap();
+                tx.input[0].witness =
+                    coincube_core::miniscript::bitcoin::Witness::from_slice(&[vec![1u8]]);
+                journal["bitcoin_transaction"] = serde_json::to_value(&tx).unwrap();
+                journal["bitcoin_attempts"][0]["wtxid"] =
+                    serde_json::to_value(tx.compute_wtxid()).unwrap();
+                std::fs::write(path, serde_json::to_vec(&journal).unwrap()).unwrap();
+            }
+            reopen(&mut f).await;
+            if corrupt {
+                assert!(f.p.restart_error.is_some());
+                assert!(!f.p.can_build());
+            } else {
+                assert!(matches!(
+                    &f.p.stage,
+                    Stage::Track {
+                        session: Some(_),
+                        error: None,
+                        ..
+                    }
+                ));
+            }
+            assert_eq!(submissions(&f), 1);
+            drop(f.p);
+            let _ = std::fs::remove_dir_all(f.root);
+        }
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
     async fn restart_missing_witness_is_track_only_and_wrong_account_is_refused() {
         let mut f = reach_review().await;
         reach_track(&mut f).await;
         *f.daemon.submitted.lock().unwrap() = None;
+        // A legacy journal has no recoverable signed bytes of its own.
+        let path = journal_directory(&f.datadir, &f.wallet).join("intent.json");
+        let mut journal: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        journal["version"] = serde_json::json!(4);
+        journal
+            .as_object_mut()
+            .unwrap()
+            .remove("bitcoin_transaction");
+        journal.as_object_mut().unwrap().remove("bitcoin_attempts");
+        std::fs::write(&path, serde_json::to_vec(&journal).unwrap()).unwrap();
         reopen(&mut f).await;
         assert!(matches!(
             &f.p.stage,
@@ -1542,6 +1627,9 @@ mod flow {
         );
         assert!(reopened.is_ok(), "{:?}", reopened.err());
         drop(reopened);
+        f.p.return_from_fork();
+        assert!(!f.p.handoff_pending);
+        assert!(f.p.restart_pending);
         update_settings_file(
             &f.datadir.network_directory(ChainId::Bitcoin),
             |mut settings| {
@@ -1604,6 +1692,8 @@ mod flow {
             previous: f.daemon.previous.clone(),
             submitted: Mutex::new(None),
             hits: Mutex::new(Vec::new()),
+            #[cfg(feature = "regtest-harness")]
+            live: None,
         });
         let loaded = fork_load::load(
             &f.datadir,
@@ -2905,6 +2995,8 @@ mod flow {
             previous: f.daemon.previous.clone(),
             submitted: Mutex::new(None),
             hits: Mutex::new(Vec::new()),
+            #[cfg(feature = "regtest-harness")]
+            live: None,
         });
         let installed_dyn: Arc<dyn Daemon + Sync + Send> = installed.clone();
         let settle = app.update(Message::DaemonRestarted(
@@ -3165,6 +3257,8 @@ mod flow {
             previous: f.daemon.previous.clone(),
             submitted: Mutex::new(None),
             hits: Mutex::new(Vec::new()),
+            #[cfg(feature = "regtest-harness")]
+            live: None,
         });
         let installed_dyn: Arc<dyn Daemon + Sync + Send> = installed.clone();
         let settle = app.update(Message::DaemonRestarted(
@@ -4080,5 +4174,200 @@ mod flow {
             assert_eq!(submissions(&f), 1);
             let _ = std::fs::remove_dir_all(&f.root);
         }
+    }
+    async fn set_confirmation(f: &mut Flow, byte: u8, height: u32) {
+        // httpmock 0.7 exposes reset through its loopback management endpoint.
+        reqwest::Client::new()
+            .delete(format!("{}/__httpmock__/mocks", f._server.base_url()))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        let now = unix_now();
+        let inclusion = format!("{byte:02x}").repeat(32);
+        let bitcoin_tip = if height == 105 {
+            inclusion.clone()
+        } else {
+            "01".repeat(32)
+        };
+        let fork_tip = "02".repeat(32);
+        f._server.mock_async(|when, then| {
+            when.method(GET).path("/api/v1/connect/networks/bitcoin-blake2b/anchor");
+            then.status(200).json_body(json!({"success":true,"data":{
+                "network":"bitcoin-blake2b","state":"available","anchor":{
+                    "tip_hash":fork_tip,"tip_height":100,"tip_median_time_past":now,"observed_at":now,
+                    "observation":{"tip_height":100,"fork":{"height":90,"active":true},
+                        "rdts":{"state":"flagday","flagday":{"height":90,"expiry_time":now + EXPIRY_MARGIN_SECONDS + 3600,"active":true}}}
+                }}}));
+        }).await;
+        for (path, body) in [
+            ("bitcoin/mainnet/blocks/tip/hash", bitcoin_tip.clone()),
+            ("bitcoin/mainnet/block-height/105", bitcoin_tip.clone()),
+            ("bitcoin/mainnet/block-height/100", inclusion.clone()),
+            ("bitcoin-blake2b/mainnet/block-height/100", fork_tip),
+        ] {
+            f._server
+                .mock_async(|when, then| {
+                    when.method(GET).path(format!("/api/v1/esplora/{path}"));
+                    fresh(then.status(200)).body(body);
+                })
+                .await;
+        }
+        f._server
+            .mock_async(|when, then| {
+                when.method(GET).path(format!(
+                    "/api/v1/esplora/bitcoin/mainnet/block/{bitcoin_tip}/status"
+                ));
+                fresh(then.status(200)).json_body(json!({"in_best_chain":true,"height":105}));
+            })
+            .await;
+        f._server.mock_async(|when, then| {
+            when.method(GET).path(format!("/api/v1/esplora/bitcoin/mainnet/tx/{}", f.unsigned_txid));
+            fresh(then.status(200)).json_body(json!({"txid":f.unsigned_txid,"status":{"confirmed":true,"block_height":height,"block_hash":inclusion}}));
+        }).await;
+        f._server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path_contains("/api/v1/esplora/bitcoin-blake2b/mainnet/tx/");
+                fresh(then.status(404));
+            })
+            .await;
+    }
+    async fn settle_recovery(f: &mut Flow, intent: view::ClaimMessage) {
+        let task = f.p.update(
+            Some(f.dyn_daemon.clone()),
+            &f.cache,
+            Message::View(view::Message::Claim(intent)),
+        );
+        let mut messages: std::collections::VecDeque<_> = outputs(task).await.into();
+        let mut count = 0;
+        while let Some(message) = messages.pop_front() {
+            count += 1;
+            assert!(count < 10);
+            messages
+                .extend(outputs(f.p.update(Some(f.dyn_daemon.clone()), &f.cache, message)).await);
+        }
+    }
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn resubmission_panel_requires_review_refresh_withdraws_and_logout_drops_late_review() {
+        let mut f = reach_review().await;
+        reach_track(&mut f).await;
+        settle_recovery(&mut f, view::ClaimMessage::Refresh).await;
+        settle_recovery(&mut f, view::ClaimMessage::ConfirmResubmission).await;
+        assert_eq!(submissions(&f), 1);
+        settle_recovery(&mut f, view::ClaimMessage::ReviewResubmission).await;
+        let (snapshot, attempts) = f.p.resubmission().expect("explicit resend review");
+        assert_eq!(snapshot.txid, f.unsigned_txid);
+        assert_eq!(attempts, 1);
+        settle_recovery(&mut f, view::ClaimMessage::Refresh).await;
+        assert!(f.p.resubmission().is_none());
+        settle_recovery(&mut f, view::ClaimMessage::ConfirmResubmission).await;
+        assert_eq!(submissions(&f), 1);
+        settle_recovery(&mut f, view::ClaimMessage::ReviewResubmission).await;
+        settle_recovery(&mut f, view::ClaimMessage::ConfirmResubmission).await;
+        assert_eq!(submissions(&f), 2);
+        assert!(f.p.resubmission().is_none());
+        settle_recovery(&mut f, view::ClaimMessage::ConfirmResubmission).await;
+        assert_eq!(submissions(&f), 2);
+        let task = f.p.resubmit(false);
+        let messages = outputs(task).await;
+        assert!(!messages.is_empty());
+        f.p.set_connect(None);
+        for message in messages {
+            assert!(
+                outputs(f.p.update(Some(f.dyn_daemon.clone()), &f.cache, message))
+                    .await
+                    .is_empty()
+            );
+        }
+        assert!(f.p.resubmission().is_none());
+        settle_recovery(&mut f, view::ClaimMessage::ConfirmResubmission).await;
+        assert_eq!(submissions(&f), 2);
+        drop(f.p);
+        let _ = std::fs::remove_dir_all(f.root);
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn reconfirmation_panel_requires_review_and_keeps_one_submission() {
+        let mut f = reach_review().await;
+        reach_track(&mut f).await;
+        set_confirmation(&mut f, 6, 100).await;
+        settle_recovery(&mut f, view::ClaimMessage::Refresh).await;
+        set_confirmation(&mut f, 7, 100).await;
+        settle_recovery(&mut f, view::ClaimMessage::Refresh).await;
+        assert!(matches!(
+            f.p.stage(),
+            StageView::Track {
+                status: Some(Status::Observation(Assessment::Reorged)),
+                ..
+            }
+        ));
+        let path = journal_directory(&f.datadir, &f.wallet).join("intent.json");
+        let old = std::fs::read(&path).unwrap();
+        settle_recovery(&mut f, view::ClaimMessage::ConfirmReconfirmation).await;
+        assert_eq!(std::fs::read(&path).unwrap(), old);
+        settle_recovery(&mut f, view::ClaimMessage::ReviewReconfirmation).await;
+        let review =
+            f.p.reconfirmation()
+                .expect("reconfirmation review displayed");
+        assert_eq!(review.confirmed.hash, BlockHash::from_byte_array([7; 32]));
+        assert_eq!(std::fs::read(&path).unwrap(), old);
+        settle_recovery(&mut f, view::ClaimMessage::ConfirmReconfirmation).await;
+        assert!(f.p.reconfirmation().is_none());
+        assert!(matches!(
+            f.p.stage(),
+            StageView::Track {
+                status: Some(Status::Observation(
+                    Assessment::ObservationsEligibleForPreflight
+                )),
+                ..
+            }
+        ));
+        assert_eq!(submissions(&f), 1);
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(saved["inclusion_history"].as_array().unwrap().len(), 1);
+        set_confirmation(&mut f, 8, 105).await;
+        settle_recovery(&mut f, view::ClaimMessage::Refresh).await;
+        settle_recovery(&mut f, view::ClaimMessage::ReviewReconfirmation).await;
+        assert!(f.p.reconfirmation().is_some());
+        settle_recovery(&mut f, view::ClaimMessage::ConfirmReconfirmation).await;
+        assert!(matches!(
+            f.p.stage(),
+            StageView::Track {
+                status: Some(Status::Observation(Assessment::WaitingForDepth {
+                    confirmations: 1
+                })),
+                ..
+            }
+        ));
+        assert!(!f.p.can_continue_on_fork());
+        assert_eq!(submissions(&f), 1);
+
+        set_confirmation(&mut f, 9, 100).await;
+        settle_recovery(&mut f, view::ClaimMessage::Refresh).await;
+        let before =
+            std::fs::read(journal_directory(&f.datadir, &f.wallet).join("intent.json")).unwrap();
+        let task = f.p.reconfirm(false);
+        let messages = outputs(task).await;
+        assert!(!messages.is_empty());
+        f.p.set_connect(None);
+        for message in messages {
+            assert!(
+                outputs(f.p.update(Some(f.dyn_daemon.clone()), &f.cache, message))
+                    .await
+                    .is_empty()
+            );
+        }
+        assert!(f.p.reconfirmation().is_none());
+        settle_recovery(&mut f, view::ClaimMessage::ConfirmReconfirmation).await;
+        assert_eq!(
+            std::fs::read(journal_directory(&f.datadir, &f.wallet).join("intent.json")).unwrap(),
+            before
+        );
+        assert_eq!(submissions(&f), 1);
     }
 }

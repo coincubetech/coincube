@@ -1,5 +1,7 @@
 //! Owned Claim coordination. Signing keys and explicit user consent stay with callers.
 pub mod fork;
+mod recovery;
+mod reorg;
 use super::{
     claim_observation::{
         self, http::HttpObservationSource, CollectionContext, ObservationBundle, ObservationSource,
@@ -22,6 +24,8 @@ use coincube_core::{
     },
 };
 use coincubed::poison_broadcast::{SubmissionGate, SubmissionOutcome, SubmissionRevoker};
+pub use recovery::ResubmissionReview;
+pub use reorg::ReconfirmationReview;
 use std::{
     path::Path,
     sync::{
@@ -48,6 +52,13 @@ pub enum Error {
     ExpiredEvidence,
     CompletionPersistence(String),
 }
+fn recovery_check_error(error: claim_workflow::Error, assessment: Assessment) -> Error {
+    match error {
+        claim_workflow::Error::Unchecked => Error::NotReady(assessment),
+        other => Error::Journal(other),
+    }
+}
+
 impl From<claim_workflow::Error> for Error {
     fn from(e: claim_workflow::Error) -> Self {
         Self::Journal(e)
@@ -466,6 +477,7 @@ impl Coordinator {
             )?
         };
         controller.revalidate_construction(&context, construction)?;
+        controller.bind_recovered_bitcoin_transaction(&context, &verified)?;
         let id = NEXT
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
             .map_err(|_| Error::Revoked)?;
@@ -653,6 +665,15 @@ impl Coordinator {
             self.policy.observations,
             self.services.source().now(),
         )?;
+        self.submit_recorded(context, refreshed).await
+    }
+    // Both initial submission and an explicitly reviewed resend arrive here only
+    // after their durable attempt record has been written.
+    async fn submit_recorded(
+        &mut self,
+        context: &Context,
+        refreshed: ReviewSnapshot,
+    ) -> Result<Outcome, Error> {
         let uncertain = Outcome::Uncertain {
             txid: refreshed.txid,
             wtxid: refreshed.wtxid,

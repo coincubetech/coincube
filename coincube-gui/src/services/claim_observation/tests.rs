@@ -101,6 +101,7 @@ enum Fault {
     Generation,
 }
 struct Fixture {
+    bitcoin_states: Option<[TransactionObservation; 2]>,
     sweep: TransactionObservation,
     sweep_changes: bool,
     sweep_calls: AtomicUsize,
@@ -119,6 +120,7 @@ impl Fixture {
     fn new(fault: Fault) -> Self {
         let (sender, _) = watch::channel(7);
         Self {
+            bitcoin_states: None,
             sweep: TransactionObservation::Absent,
             sweep_changes: false,
             sweep_calls: AtomicUsize::new(0),
@@ -220,6 +222,8 @@ impl ObservationSource for Fixture {
             } else {
                 TransactionObservation::Absent
             }
+        } else if let Some(states) = self.bitcoin_states {
+            states[(n / 2).min(1)]
         } else {
             TransactionObservation::Confirmed {
                 txid: id,
@@ -698,4 +702,44 @@ async fn fork_sweep_inclusion_does_not_hide_insufficient_bitcoin_depth() {
         tracked.assessment.assessment,
         Assessment::WaitingForDepth { confirmations: 5 }
     );
+}
+
+#[tokio::test]
+async fn recovery_preserves_absent_and_mempool_states_and_refuses_transitions() {
+    let p = plan();
+    let absent = TransactionObservation::Absent;
+    let mempool = TransactionObservation::Unconfirmed {
+        txid: p.step1.compute_txid(),
+    };
+    for state in [absent, mempool] {
+        let mut f = Fixture::new(Fault::None);
+        f.bitcoin_states = Some([state, state]);
+        let result = f.run(&p).await.unwrap();
+        assert_eq!(result.observations.bitcoin_transaction, state);
+        assert_eq!(
+            result.observations.bitcoin.location,
+            TransactionLocation::Unconfirmed
+        );
+        assert_eq!(result.assessment, Assessment::WaitingForConfirmation);
+    }
+    let confirmed = TransactionObservation::Confirmed {
+        txid: p.step1.compute_txid(),
+        block: BlockRef {
+            height: 100,
+            hash: hash(5),
+        },
+    };
+    for states in [
+        [absent, mempool],
+        [mempool, absent],
+        [absent, confirmed],
+        [confirmed, absent],
+    ] {
+        let mut f = Fixture::new(Fault::None);
+        f.bitcoin_states = Some(states);
+        assert_eq!(
+            f.run(&p).await.unwrap_err(),
+            failure(Stage::Preflight, FailureKind::Changed)
+        );
+    }
 }

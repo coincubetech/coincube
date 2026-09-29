@@ -94,6 +94,39 @@ export CLAIM_REGTEST_TOOL_PATH="$PWD/target/release/examples/claim_regtest_vecto
 pytest tests/test_btcb2_claim_consensus.py -vvv --junitxml=claim-consensus.xml
 ```
 
+A separate headless GUI test drives the production Claim panel's build, signer
+picker, software signing, review, explicit confirmation and confirmation tracking.
+It sends through the opt-in gated regtest transport and independently checks the
+exact transaction and witness on the real node. It checks one- and five-confirmation
+handoff refusals without journal changes, then proceeds at six. A fork-node
+candidate block containing the exact GUI-signed poison must fail consensus with
+`bad-txns-vout-script-toolarge`; mempool rejection alone is not that proof.
+Build and select the lib-test
+executable (not the GUI application):
+
+```sh
+BREEZ_API_KEY=DUMMY_BREEZ_API_KEY cargo test --package coincube-gui --lib --features regtest-harness --no-run --message-format=json > claim-gui-build.json
+export CLAIM_GUI_REGTEST_TEST_PATH="$(jq -r 'select(.reason == "compiler-artifact" and .target.name == "coincube_gui" and .profile.test == true and .executable != null) | .executable' claim-gui-build.json)"
+pytest tests/test_btcb2_claim_gui.py -vvv --junitxml=claim-gui.xml
+```
+
+This test owns separate disposable nodes and synthetic keys. Its account, logical
+mainnet routes and backend adapter are test fixtures; deployment, observations,
+preflight, signing and submission use actual node evidence. It also drives fork-panel software signing and explicit submission, verifies paired
+completion markers, and exercises Bitcoin reorg withdrawal and explicit
+reconfirmation after the identical transaction is re-mined. The pinned indexer is
+paused while the complete competing branch is assembled, then restarted with the
+same database: this proves GUI recovery after indexing resumes, not uninterrupted
+indexer availability or outage UI. Return-to-Bitcoin uses panel lifecycle methods;
+the driver also kills the GUI test process after both claims confirm, starts a
+new process with no signer loaded, and requires byte-for-byte journal/settings
+preservation before refresh. Both claims resume without new submissions and the
+reorg scenario then runs in the new process. This is headless panel-process
+recovery; full App bootstrap/tab routing, rendered UI, PIN unlock and hardware
+signing remain outside this live test.
+The `regtest-harness` feature is off in normal builds. The labelled BTCB2 workflow
+builds this driver and fails if the required executable or pinned nodes are missing.
+
 Set the bridge path to your Cargo target directory when using `CARGO_TARGET_DIR`.
 This test spends the fixture's original coins, so it has its own module-scoped
 harness. It checks the production OP_RETURN self-transfer and legacy 2-of-3 fork

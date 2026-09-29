@@ -633,3 +633,230 @@ fn fork_transport_revocation_expiry_testnet_refusal_and_uncertain_response() {
     );
     assert_eq!(backend.lock().unwrap().broadcasted.lock().unwrap().len(), 1);
 }
+
+#[cfg(feature = "regtest-harness")]
+mod regtest_transport_tests {
+    use super::super::regtest_harness::RegtestTransport;
+    use super::*;
+    use std::{
+        io::{Read, Write},
+        net::{SocketAddr, TcpListener},
+        sync::atomic::AtomicBool,
+    };
+    struct Server {
+        addr: SocketAddr,
+        requests: Arc<Mutex<Vec<serde_json::Value>>>,
+        mainnet: Arc<AtomicBool>,
+        oversized: Arc<AtomicBool>,
+        stop: Arc<AtomicBool>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+    impl Server {
+        fn new(txid: Txid, redirect: bool) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let mainnet = Arc::new(AtomicBool::new(false));
+            let oversized = Arc::new(AtomicBool::new(false));
+            let huge = oversized.clone();
+            let stop = Arc::new(AtomicBool::new(false));
+            let (log, changed, done) = (requests.clone(), mainnet.clone(), stop.clone());
+            let thread = std::thread::spawn(move || {
+                while !done.load(Ordering::SeqCst) {
+                    let (mut stream, _) = match listener.accept() {
+                        Ok(pair) => pair,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(Duration::from_millis(2));
+                            continue;
+                        }
+                        Err(error) => panic!("{}", error),
+                    };
+                    stream.set_nonblocking(false).unwrap();
+                    stream
+                        .set_write_timeout(Some(Duration::from_secs(2)))
+                        .unwrap();
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(2)))
+                        .unwrap();
+                    let mut headers = Vec::new();
+                    while !headers.ends_with(b"\r\n\r\n") {
+                        let mut byte = [0];
+                        stream.read_exact(&mut byte).unwrap();
+                        headers.push(byte[0]);
+                        assert!(headers.len() < 8192);
+                    }
+                    let headers = String::from_utf8(headers).unwrap();
+                    let length: usize = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse().unwrap())
+                        })
+                        .unwrap();
+                    let mut body = vec![0; length];
+                    stream.read_exact(&mut body).unwrap();
+                    let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                    log.lock().unwrap().push(request.clone());
+                    if redirect {
+                        write!(stream, "HTTP/1.1 302 Found\r\nLocation: http://{}/elsewhere\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", addr).unwrap();
+                        continue;
+                    }
+                    let result = if huge.load(Ordering::SeqCst) {
+                        serde_json::json!({"chain":"regtest", "padding":"x".repeat(1024 * 1024)})
+                    } else {
+                        match request["method"].as_str().unwrap() {
+                            "getblockchaininfo" => {
+                                serde_json::json!({"chain": if changed.load(Ordering::SeqCst) { "main" } else { "regtest" }})
+                            }
+                            "sendrawtransaction" => serde_json::json!(txid),
+                            method => panic!("unexpected method {}", method),
+                        }
+                    };
+                    let body =
+                        serde_json::json!({"jsonrpc":"2.0", "id":request["id"], "result":result})
+                            .to_string();
+                    // Oversize refusal may close the socket while this fixture
+                    // is still sending its deliberately excessive body.
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                }
+            });
+            Self {
+                addr,
+                requests,
+                mainnet,
+                oversized,
+                stop,
+                thread: Some(thread),
+            }
+        }
+        fn sends(&self) -> Vec<serde_json::Value> {
+            self.requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|r| r["method"] == "sendrawtransaction")
+                .cloned()
+                .collect()
+        }
+    }
+    impl Drop for Server {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::SeqCst);
+            self.thread.take().unwrap().join().unwrap();
+        }
+    }
+    #[test]
+    fn local_regtest_transport_uses_exact_bytes_and_one_use_gate() {
+        let (built, signers) = fixture(ChainId::Bitcoin, false);
+        let verified = finalize_poison_transfer(
+            &built,
+            &sign(&built, &signers[..2]),
+            &secp256k1::Secp256k1::verification_only(),
+        )
+        .unwrap();
+        let server = Server::new(verified.transaction().compute_txid(), false);
+        let transport = RegtestTransport::new(
+            server.addr,
+            "synthetic:only",
+            ChainId::Bitcoin,
+            built.descriptor().clone(),
+        )
+        .unwrap();
+        let (gate, _) = SubmissionGate::new(
+            &verified,
+            std::time::Instant::now() + Duration::from_secs(10),
+        );
+        assert!(transport.submit_poison(&verified, &gate).is_ok());
+        assert_eq!(
+            transport.submit_poison(&verified, &gate),
+            Err(SubmissionError::AlreadyStarted)
+        );
+        let sends = server.sends();
+        assert_eq!(sends.len(), 1);
+        assert_eq!(
+            sends[0]["params"][0],
+            miniscript::bitcoin::consensus::encode::serialize_hex(verified.transaction())
+        );
+        for expired in [false, true] {
+            let deadline = std::time::Instant::now()
+                + if expired {
+                    Duration::ZERO
+                } else {
+                    Duration::from_secs(10)
+                };
+            let (gate, revoker) = SubmissionGate::new(&verified, deadline);
+            if !expired {
+                revoker.revoke();
+            }
+            assert_eq!(
+                transport.submit_poison(&verified, &gate),
+                Err(if expired {
+                    SubmissionError::Expired
+                } else {
+                    SubmissionError::Revoked
+                })
+            );
+        }
+        assert_eq!(server.sends().len(), 1);
+        server.mainnet.store(true, Ordering::SeqCst);
+        let (gate, _) = SubmissionGate::new(
+            &verified,
+            std::time::Instant::now() + Duration::from_secs(10),
+        );
+        assert_eq!(
+            transport.submit_poison(&verified, &gate),
+            Err(SubmissionError::UnsupportedChain)
+        );
+        assert_eq!(gate.state(), SubmissionState::Pending);
+        assert_eq!(server.sends().len(), 1);
+    }
+    #[test]
+    fn regtest_transport_refuses_nonlocal_nonregtest_and_redirects() {
+        let (built, _) = fixture(ChainId::Bitcoin, false);
+        assert!(matches!(
+            RegtestTransport::new(
+                "192.0.2.1:8332".parse().unwrap(),
+                "synthetic:only",
+                ChainId::Bitcoin,
+                built.descriptor().clone()
+            ),
+            Err(SubmissionError::UnsupportedChain)
+        ));
+        let server = Server::new(Txid::from_byte_array([1; 32]), false);
+        server.mainnet.store(true, Ordering::SeqCst);
+        assert!(matches!(
+            RegtestTransport::new(
+                server.addr,
+                "synthetic:only",
+                ChainId::Bitcoin,
+                built.descriptor().clone()
+            ),
+            Err(SubmissionError::UnsupportedChain)
+        ));
+        let redirect = Server::new(Txid::from_byte_array([1; 32]), true);
+        assert!(RegtestTransport::new(
+            redirect.addr,
+            "synthetic:only",
+            ChainId::Bitcoin,
+            built.descriptor().clone()
+        )
+        .is_err());
+        assert_eq!(redirect.requests.lock().unwrap().len(), 1);
+        let oversized = Server::new(Txid::from_byte_array([1; 32]), false);
+        oversized.oversized.store(true, Ordering::SeqCst);
+        assert!(RegtestTransport::new(
+            oversized.addr,
+            "synthetic:only",
+            ChainId::Bitcoin,
+            built.descriptor().clone()
+        )
+        .is_err());
+    }
+}

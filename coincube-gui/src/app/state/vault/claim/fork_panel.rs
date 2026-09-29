@@ -78,6 +78,7 @@ pub struct ForkClaimPanel {
     epoch: u64,
     revoked: bool,
     busy: bool,
+    pending_epoch: Option<u64>,
     error: Option<String>,
     psbt: Option<Box<PsbtState>>,
     preparation: Option<Box<Preparation>>,
@@ -149,6 +150,7 @@ impl ForkClaimPanel {
             epoch: NEXT_PANEL.fetch_add(1, Ordering::Relaxed),
             revoked: false,
             busy: false,
+            pending_epoch: None,
             error: None,
             psbt,
             preparation,
@@ -173,6 +175,9 @@ impl ForkClaimPanel {
             psbt.interrupt();
         }
         self.error = Some(SESSION_ENDED.into());
+    }
+    pub fn can_return_to_bitcoin(&self) -> bool {
+        !self.busy
     }
     fn ready(&self) -> bool {
         !self.revoked && !self.revoker.is_revoked() && !self.busy
@@ -216,6 +221,7 @@ impl ForkClaimPanel {
             return Task::none();
         };
         self.busy = true;
+        self.pending_epoch = Some(self.epoch);
         self.error = None;
         let context = self.context.clone();
         let epoch = self.epoch;
@@ -240,6 +246,7 @@ impl ForkClaimPanel {
         };
         self.review = None;
         self.busy = true;
+        self.pending_epoch = Some(self.epoch);
         self.error = None;
         let context = self.context.clone();
         let epoch = self.epoch;
@@ -269,6 +276,7 @@ impl ForkClaimPanel {
             return Task::none();
         };
         self.busy = true;
+        self.pending_epoch = Some(self.epoch);
         self.error = None;
         let context = self.context.clone();
         let epoch = self.epoch;
@@ -294,6 +302,7 @@ impl ForkClaimPanel {
             return Task::none();
         };
         self.busy = true;
+        self.pending_epoch = Some(self.epoch);
         self.tracking = None; // previously displayed confirmation is no fresh authority
         self.error = None;
         let context = self.context.clone();
@@ -374,6 +383,15 @@ impl ForkClaimPanel {
         daemon: Option<Arc<dyn Daemon + Send + Sync>>,
         cache: &Cache,
     ) -> Task<Message> {
+        // A revoked task still owns the journal until its result is delivered.
+        // Only that exact task may release the busy hold; foreign callbacks
+        // cannot make navigation race a live owner.
+        if self.pending_epoch == Some(event.epoch)
+            && !matches!(&event.result, ResultEvent::Signer(_))
+        {
+            self.pending_epoch = None;
+            self.busy = false;
+        }
         if event.epoch != self.epoch || self.revoked || self.revoker.is_revoked() {
             return Task::none(); // drops returning journal owner, never revives authorization
         }
@@ -552,7 +570,13 @@ impl State for ForkClaimPanel {
             .spacing(20)
             .push(h3("Claim Bitcoin Blake2b — step 2").bold())
             .push_maybe(self.error.as_ref().map(|e| card::warning(e.clone())))
-            .push_maybe(self.busy.then(|| p1_regular("Checking both chains…")));
+            .push_maybe(self.busy.then(|| p1_regular("Checking both chains…")))
+            .push(
+                button::secondary(None, "Return to Bitcoin Claim").on_press_maybe(
+                    self.can_return_to_bitcoin()
+                        .then_some(V::ReturnBitcoinClaim),
+                ),
+            );
         if let Some(psbt) = &self.psbt {
             body = body.push(p1_regular("Sign the transfer to your Bitcoin Blake2b Vault. Each signing request checks Bitcoin confirmation and replay protection again."))
                 .push(view::vault::psbt::spend_overview_view(&psbt.tx, &psbt.desc_policy, &psbt.wallet.keys_aliases,
@@ -614,6 +638,13 @@ impl State for ForkClaimPanel {
 pub(crate) mod tests {
     use super::*;
     use iced::futures::StreamExt;
+    #[cfg(feature = "regtest-harness")]
+    pub(crate) fn live_snapshot(panel: &ForkClaimPanel) -> serde_json::Value {
+        serde_json::json!({"busy":panel.busy, "error":panel.error,
+            "review":panel.review.is_some(), "outcome":panel.outcome.map(|o| format!("{o:?}")),
+            "tracking":panel.tracking.as_ref().map(|t| serde_json::json!({
+                "status":format!("{:?}",t.status), "transaction":format!("{:?}",t.transaction), "saved":t.saved}))})
+    }
     async fn outputs(task: Task<Message>) -> Vec<Message> {
         let mut messages = Vec::new();
         if let Some(mut stream) = iced_runtime::task::into_stream(task) {
@@ -656,6 +687,7 @@ pub(crate) mod tests {
         let task = panel.update(Some(daemon.clone()), cache, sign());
         assert!(panel.busy);
         assert!(panel.preparation.is_none()); // async task owns the journal
+        assert!(!panel.can_return_to_bitcoin());
         assert!(outputs(panel.update(Some(daemon.clone()), cache, sign()))
             .await
             .is_empty());
@@ -682,6 +714,7 @@ pub(crate) mod tests {
             .await
             .is_empty());
         assert!(panel.revoked);
+        assert!(!panel.can_return_to_bitcoin());
         for message in outputs(task).await {
             assert!(outputs(panel.update(Some(daemon.clone()), cache, message))
                 .await
@@ -689,6 +722,7 @@ pub(crate) mod tests {
         }
         assert!(panel.preparation.is_none());
         assert!(panel.review.is_none());
+        assert!(panel.can_return_to_bitcoin());
         assert_eq!(&panel.psbt.as_ref().unwrap().tx.psbt, original.psbt());
         original
     }

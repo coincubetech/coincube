@@ -89,10 +89,16 @@ impl ForkHandoff {
     }
     /// Fresh navigation lookup only. The unlocked loader verifies the actual
     /// descriptor, authenticated account, provider, and existing journal later.
-    pub fn resolve_target(
+    fn resolve_pair(
         &self,
         root: &CoincubeDirectory,
-    ) -> Result<crate::app::settings::CubeSettings, String> {
+    ) -> Result<
+        (
+            crate::app::settings::CubeSettings,
+            crate::app::settings::CubeSettings,
+        ),
+        String,
+    > {
         use crate::{
             app::settings::{CubeSettings, Settings},
             chain::ChainId,
@@ -134,7 +140,19 @@ impl ForkHandoff {
                 "The paired Claim Vaults changed. Return to the Bitcoin Cube to check them.".into(),
             );
         }
-        Ok(target)
+        Ok((source, target))
+    }
+    pub fn resolve_target(
+        &self,
+        root: &CoincubeDirectory,
+    ) -> Result<crate::app::settings::CubeSettings, String> {
+        self.resolve_pair(root).map(|(_, target)| target)
+    }
+    pub fn resolve_source(
+        &self,
+        root: &CoincubeDirectory,
+    ) -> Result<crate::app::settings::CubeSettings, String> {
+        self.resolve_pair(root).map(|(source, _)| source)
     }
     pub fn bitcoin_cube(&self) -> &str {
         &self.bitcoin_cube
@@ -147,10 +165,17 @@ impl ForkHandoff {
 pub enum Intent {
     Bitcoin(String),
     Fork(ForkHandoff),
+    RecoverBitcoin(ForkHandoff),
 }
 fn cell() -> &'static Mutex<Option<Intent>> {
     static INTENT: OnceLock<Mutex<Option<Intent>>> = OnceLock::new();
     INTENT.get_or_init(|| Mutex::new(None))
+}
+
+pub fn arm_return(handoff: ForkHandoff) {
+    if let Ok(mut slot) = cell().lock() {
+        *slot = Some(Intent::RecoverBitcoin(handoff));
+    }
 }
 
 pub fn arm_fork(handoff: ForkHandoff) {
@@ -163,6 +188,9 @@ pub fn take_for_cube(root: &CoincubeDirectory, cube_id: &str) -> Option<Intent> 
     let intent = cell().lock().ok()?.take()?;
     match &intent {
         Intent::Bitcoin(id) if id == cube_id => Some(intent),
+        Intent::RecoverBitcoin(pair) if pair.matches_root(root) && pair.bitcoin_cube == cube_id => {
+            Some(intent)
+        }
         Intent::Fork(pair) if pair.matches_root(root) && pair.fork_cube == cube_id => Some(intent),
         _ => None,
     }
@@ -231,6 +259,17 @@ mod tests {
         arm_fork(pair.clone());
         assert!(take_for_cube(&other, "target").is_none());
         assert!(take_for_cube(&root, "target").is_none());
+        arm_return(pair.clone());
+        assert!(take_for_cube(&other, "source").is_none());
+        assert!(take_for_cube(&root, "source").is_none());
+        arm_return(pair.clone());
+        assert!(take_for_cube(&root, "target").is_none());
+        arm_return(pair.clone());
+        assert!(matches!(
+            take_for_cube(&root, "source"),
+            Some(Intent::RecoverBitcoin(_))
+        ));
+        assert!(take_for_cube(&root, "source").is_none());
         arm_fork(pair);
         assert!(take_for_cube(&root, "source").is_none());
         assert!(take_for_cube(&root, "target").is_none());

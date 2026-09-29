@@ -405,6 +405,7 @@ async fn run_local_duress_activation(root: &std::path::Path, account_id: Option<
 #[derive(Debug)]
 pub enum Message {
     OpenForkClaim(app::claim_intent::ForkHandoff),
+    OpenBitcoinClaim(app::claim_intent::ForkHandoff),
     ForkAsync(u64, Box<Message>),
     ForkTaskFinished(u64, u64),
     Launch(home::Message),
@@ -1949,6 +1950,14 @@ impl Tab {
                             }
                             Err(error) => Task::done(Message::Run(app::Message::View(
                                 app::view::Message::ShowError(error.to_string()),
+                            ))),
+                        }
+                    }
+                    app::Message::View(app::view::Message::ReturnBitcoinClaim) => {
+                        match app.return_bitcoin_claim_handoff() {
+                            Ok(handoff) => Task::done(Message::OpenBitcoinClaim(handoff)),
+                            Err(error) => Task::done(Message::Run(app::Message::View(
+                                app::view::Message::ShowError(error),
                             ))),
                         }
                     }

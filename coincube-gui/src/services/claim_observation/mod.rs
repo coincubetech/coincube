@@ -153,6 +153,10 @@ pub struct CollectionContext {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ObservationBundle {
+    /// Preserve absence separately from mempool presence. The core eligibility
+    /// assessment intentionally treats both as unconfirmed, but recovery must
+    /// never infer permission to resend from that coarser assessment.
+    pub bitcoin_transaction: TransactionObservation,
     pub bitcoin: BitcoinObservation,
     pub fork: ForkObservation,
     pub deployment: DeploymentObservation,
@@ -653,6 +657,8 @@ async fn collect_inner(
         fork: fork_tip,
     };
     let observations = ObservationBundle {
+        bitcoin_transaction: prior_btc_tx
+            .ok_or_else(|| failure(Stage::BitcoinTransaction, FailureKind::Malformed))?,
         bitcoin,
         fork: fork_observation,
         deployment,

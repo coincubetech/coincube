@@ -1,5 +1,7 @@
 //! Restart-safe intent bookkeeping only. No signing/broadcast/UI entry point.
 mod journal;
+mod recovery;
+mod reorg;
 use super::claim_observation::{CollectedAssessment, Failure, ObservationBundle};
 use coincube_core::{
     chain::ChainId,
@@ -11,6 +13,8 @@ use coincube_core::{
     },
 };
 use journal::Journal;
+pub use recovery::BitcoinSubmissionAttempt;
+pub use reorg::Reconfirmation;
 
 /// Establish platform-specific journal privacy before constructing a controller.
 pub fn prepare_directory(directory: &std::path::Path) -> Result<(), Error> {
@@ -80,6 +84,12 @@ struct Intent {
     bitcoin_change_index: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     fork_submission: Option<RecordedForkSubmission>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    inclusion_history: Vec<Reconfirmation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bitcoin_transaction: Option<Transaction>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    bitcoin_attempts: Vec<BitcoinSubmissionAttempt>,
 }
 /// A possible submission, not evidence of acceptance or confirmation. Reading
 /// this journal record never permits a retry, even after an app restart.
@@ -153,11 +163,11 @@ fn validate(intent: &Intent) -> Result<(), Error> {
             intent.fork_change_index,
             intent.bitcoin_change_index,
         ),
-        (1, false, None, None)
-            | (2, true, None, None)
-            | (3, true, Some(0..=0x7fff_ffff), None)
-            | (4, false, None, Some(0..=0x7fff_ffff))
-            | (4, true, Some(0..=0x7fff_ffff), Some(0..=0x7fff_ffff))
+        (1 | 5 | 6, false, None, None)
+            | (2 | 5 | 6, true, None, None)
+            | (3 | 5 | 6, true, Some(0..=0x7fff_ffff), None)
+            | (4..=6, false, None, Some(0..=0x7fff_ffff))
+            | (4..=6, true, Some(0..=0x7fff_ffff), Some(0..=0x7fff_ffff))
     ) || intent.identity.bitcoin_cube.is_empty()
         || intent.identity.fork_cube.is_empty()
         || intent.identity.bitcoin_cube.len() > 256
@@ -231,6 +241,8 @@ fn validate(intent: &Intent) -> Result<(), Error> {
             return Err(Error::InvalidPlan);
         }
     }
+    reorg::validate_history(intent)?;
+    recovery::validate_record(intent)?;
     Ok(())
 }
 impl Controller {
@@ -295,9 +307,11 @@ impl Controller {
         // Older records gain the hint only after the owned builder has
         // reproduced the exact transaction. A v2 fork plan must first acquire
         // its fork index through prepare_fork_sweep before upgrading to v4.
-        if self.intent.bitcoin_change_index.is_none() && self.intent.version != 2 {
+        if self.intent.bitcoin_change_index.is_none()
+            && (self.intent.fork_sweep.is_none() || self.intent.fork_change_index.is_some())
+        {
             let mut next = self.intent.clone();
-            next.version = 4;
+            next.version = next.version.max(4);
             next.bitcoin_change_index = Some(u32::from(artifact.change_index()));
             validate(&next)?;
             self.journal.store(&next)?;
@@ -338,6 +352,9 @@ impl Controller {
             fork_change_index: None,
             bitcoin_change_index,
             fork_submission: None,
+            inclusion_history: Vec::new(),
+            bitcoin_transaction: None,
+            bitcoin_attempts: Vec::new(),
         };
         validate(&intent)?;
         Self::valid_context(&context)?;
@@ -557,11 +574,11 @@ impl Controller {
             // authenticated construction required for initial admission.
         }
         let mut next = self.intent.clone();
-        next.version = if next.bitcoin_change_index.is_some() {
+        next.version = next.version.max(if next.bitcoin_change_index.is_some() {
             4
         } else {
             3
-        };
+        });
         next.fork_sweep = Some(transaction.clone());
         next.fork_change_index = Some(change_index);
         validate(&next)?;
@@ -690,6 +707,11 @@ impl Controller {
         let mut next = self.intent.clone();
         next.signed_txid = Some(signed.compute_txid());
         next.phase = Phase::BroadcastUncertain;
+        next.version = 6;
+        next.bitcoin_transaction = Some(signed.clone());
+        next.bitcoin_attempts.push(BitcoinSubmissionAttempt {
+            wtxid: Some(signed.compute_wtxid()),
+        });
         validate(&next)?;
         self.journal.store(&next)?;
         self.intent = next;

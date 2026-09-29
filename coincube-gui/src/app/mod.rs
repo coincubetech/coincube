@@ -2701,7 +2701,10 @@ impl App {
         // open so a stale intent cannot fire on an unrelated Cube later; the
         // gate below is re-checked rather than inherited from the card.
         let intent = claim_intent::take_for_cube(&data_dir, &cube_settings.id);
-        let claim_intent = matches!(&intent, Some(claim_intent::Intent::Bitcoin(_)));
+        let claim_intent = matches!(
+            &intent,
+            Some(claim_intent::Intent::Bitcoin(_) | claim_intent::Intent::RecoverBitcoin(_))
+        );
         let fork_claim_requested = matches!(&intent, Some(claim_intent::Intent::Fork(_)));
         let fork_claim_handoff = match intent {
             Some(claim_intent::Intent::Fork(pair)) => Some(pair),
@@ -3533,6 +3536,56 @@ impl App {
         Task::done(Message::View(view::Message::Menu(Menu::Vault(
             menu::VaultSubMenu::Claim,
         ))))
+    }
+
+    pub fn resume_returned_bitcoin_claim(
+        &mut self,
+        handoff: &claim_intent::ForkHandoff,
+    ) -> Result<Task<Message>, String> {
+        let source = handoff.resolve_source(&self.datadir)?;
+        if self.cube_settings.network != crate::chain::ChainId::Bitcoin
+            || self.cube_settings.id != source.id
+            || self.wallet.as_ref().is_none_or(|wallet| {
+                source
+                    .vault_wallet_id
+                    .as_ref()
+                    .is_none_or(|id| id.descriptor_checksum != wallet.descriptor_checksum)
+            })
+        {
+            return Err("The open Bitcoin Vault does not match this Claim.".into());
+        }
+        claim_intent::clear();
+        if let Some(panel) = &mut self.panels.claim {
+            panel.return_from_fork();
+        }
+        self.pending_claim = true;
+        Ok(self.start_pending_claim())
+    }
+
+    pub fn return_bitcoin_claim_handoff(&mut self) -> Result<claim_intent::ForkHandoff, String> {
+        let handoff = self
+            .fork_claim_handoff
+            .clone()
+            .ok_or_else(|| "The paired Bitcoin Claim is unavailable.".to_string())?;
+        if self.cube_settings.network != crate::chain::ChainId::BitcoinBlake2b
+            || handoff.fork_cube() != self.cube_settings.id
+            || !self
+                .panels
+                .fork_claim
+                .as_ref()
+                .is_some_and(|panel| panel.can_return_to_bitcoin())
+        {
+            return Err(
+                "Wait for the current Claim operation to finish before returning to Bitcoin."
+                    .into(),
+            );
+        }
+        handoff.resolve_source(&self.datadir)?;
+        self.revoke_claim();
+        self.panels.fork_claim = None;
+        self.loading_fork_claim = None;
+        self.fork_claim_requested = false;
+        Ok(handoff)
     }
 
     pub fn continue_claim_handoff(&mut self) -> Result<claim_intent::ForkHandoff, String> {
@@ -9377,7 +9430,7 @@ mod duress_chain_identity_tests {
 
 /// Claim step 1 entry and routing (Lane B1.5), at the App level.
 #[cfg(test)]
-mod claim_step1_tests {
+pub(crate) mod claim_step1_tests {
     use super::*;
     use crate::app::state::vault::claim::{Checked, ClaimEvent, CoinSet, ForkWindow};
     use coincube_core::miniscript::bitcoin::hashes::Hash;
@@ -9446,6 +9499,69 @@ mod claim_step1_tests {
             serde_json::to_vec(&with_cube).unwrap(),
         )
         .unwrap();
+    }
+
+    /// Caller holds session::test_guard through routing and teardown.
+    pub(crate) fn returning_claim_fixture(
+        wrong_wallet: bool,
+    ) -> (App, claim_intent::ForkHandoff, std::path::PathBuf) {
+        let path = std::env::temp_dir().join(format!("claim-return-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&path).unwrap();
+        let (mut app, wallet) = bitcoin_app(&path);
+        let identity = settings::VaultIdentity {
+            wallet_id: wallet.id(),
+            fingerprint: Some("12345678".into()),
+        };
+        app.cube_settings = app.cube_settings.clone().with_vault(identity.clone());
+        let target = settings::CubeSettings::new_with_raw_id(
+            "target".into(),
+            "Target".into(),
+            crate::chain::ChainId::BitcoinBlake2b,
+        )
+        .with_vault(identity);
+        for cube in [app.cube_settings.clone(), target] {
+            let dir = app.datadir.network_directory(cube.network);
+            std::fs::create_dir_all(dir.path()).unwrap();
+            std::fs::write(
+                dir.path().join(settings::SETTINGS_FILE_NAME),
+                serde_json::to_vec(&settings::Settings {
+                    cubes: vec![cube],
+                    ..Default::default()
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        }
+        let pair = claim_intent::ForkHandoff::new(
+            &app.datadir,
+            app.cube_settings.id.clone(),
+            "target".into(),
+        )
+        .unwrap();
+        if wrong_wallet {
+            let mut different = (*wallet).clone();
+            different.descriptor_checksum = "different".into();
+            app.wallet = Some(Arc::new(different));
+        }
+        (app, pair, path)
+    }
+
+    #[test]
+    fn returning_claim_reuses_only_the_matching_open_bitcoin_wallet() {
+        let _guard = crate::app::session::test_guard();
+        let (mut app, pair, path) = returning_claim_fixture(false);
+        assert!(app.resume_returned_bitcoin_claim(&pair).is_ok());
+        let wrong_root = claim_intent::ForkHandoff::new(
+            &CoincubeDirectory::new(path.join("other")),
+            app.cube_settings.id.clone(),
+            "target".into(),
+        )
+        .unwrap();
+        assert!(app.resume_returned_bitcoin_claim(&wrong_root).is_err());
+        app.cube_settings.network = crate::chain::ChainId::BitcoinBlake2b;
+        assert!(app.resume_returned_bitcoin_claim(&pair).is_err());
+        drop(app);
+        std::fs::remove_dir_all(path).unwrap();
     }
 
     #[tokio::test]
