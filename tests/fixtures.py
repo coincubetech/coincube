@@ -112,7 +112,11 @@ def bitcoind(directory):
         bitcoind.rpc.wallet_name, False, False, "", False, True, True
     )
 
-    bitcoind.rpc.generatetoaddress(101, bitcoind.rpc.getnewaddress())
+    # Knots rejects locktime 21 as parasite-cat21. Its wallet's anti-fee-sniping
+    # randomization subtracts at most 99 from the tip, so start above 21 + 99.
+    # This keeps ordinary fixture deposits relayable under the default policy
+    # without disabling the policy that test_knots.py is meant to exercise.
+    bitcoind.rpc.generatetoaddress(121, bitcoind.rpc.getnewaddress())
     while bitcoind.rpc.getbalance() < 50:
         time.sleep(0.01)
 
