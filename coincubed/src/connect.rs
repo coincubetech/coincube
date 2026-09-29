@@ -50,12 +50,11 @@ impl fmt::Display for AdmissionError {
 }
 impl std::error::Error for AdmissionError {}
 
-/// One immutable provider and authority, with in-memory authentication only.
+/// One immutable anonymous proxy provider and authenticated anchor authority.
 /// Replacing credentials/provider requires constructing and admitting a new context.
 pub struct ConnectBackend {
     chain: ChainId,
     endpoint: String,
-    bearer_token: String,
     authority: Arc<dyn ConnectAnchorAuthority>,
 }
 impl fmt::Debug for ConnectBackend {
@@ -84,14 +83,15 @@ impl ConnectBackend {
         Ok(Self {
             chain,
             endpoint,
-            bearer_token,
             authority,
         })
     }
     pub(crate) fn config(&self) -> EsploraConfig {
         EsploraConfig {
             addr: self.endpoint.clone(),
-            token: Some(self.bearer_token.clone()),
+            // The authority owns authenticated anchor access. Proxy reads and
+            // transaction submission must not link wallet activity to an account.
+            token: None,
             fallback_addr: None,
             fallback_token: None,
             secondary_fallback_addr: None,

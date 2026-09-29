@@ -107,6 +107,7 @@ struct Panels {
     /// (`Message::View(Menu(Vault(Claim)))` decides, from the disk, on every
     /// arrival).
     claim: Option<state::vault::claim::ClaimStep1Panel>,
+    fork_claim: Option<state::vault::claim::fork_panel::ForkClaimPanel>,
     /// The claim generation every coordinator call checks. Advanced by
     /// [`App::revoke_claim`] after the synchronous revocation; the panel
     /// subscribes to it when a coordinator is created.
@@ -242,6 +243,7 @@ impl Panels {
             create_spend: None,
             vault_settings: None,
             claim: None,
+            fork_claim: None,
             claim_generation: tokio::sync::watch::channel(1).0,
             // remaining panels
             buy_sell: None,
@@ -408,6 +410,7 @@ impl Panels {
                 config.clone(),
             )),
             claim,
+            fork_claim: None,
             claim_generation,
             connect: ConnectPanel::new(
                 spark_backend.as_ref().map(|b| b.client().clone()),
@@ -543,6 +546,7 @@ impl Panels {
             internal_bitcoind.is_some(),
             config.clone(),
         ));
+        self.fork_claim = None; // replacing the Vault drops and revokes its old session
         self.claim = Self::claim_panel(
             &wallet,
             &data_dir,
@@ -627,9 +631,11 @@ impl Panels {
                 crate::app::menu::VaultSubMenu::Settings(_) => {
                     self.vault_settings.as_ref().map(|v| v as &dyn State)
                 }
-                crate::app::menu::VaultSubMenu::Claim => {
-                    self.claim.as_ref().map(|v| v as &dyn State)
-                }
+                crate::app::menu::VaultSubMenu::Claim => self
+                    .fork_claim
+                    .as_ref()
+                    .map(|v| v as &dyn State)
+                    .or_else(|| self.claim.as_ref().map(|v| v as &dyn State)),
             },
             Menu::Marketplace(MarketplaceSubMenu::BuySell) => {
                 self.buy_sell.as_ref().map(|v| v as &dyn State)
@@ -715,7 +721,11 @@ impl Panels {
                     self.vault_settings.as_mut().map(|v| v as &mut dyn State)
                 }
                 crate::app::menu::VaultSubMenu::Claim => {
-                    self.claim.as_mut().map(|v| v as &mut dyn State)
+                    if let Some(panel) = &mut self.fork_claim {
+                        Some(panel as &mut dyn State)
+                    } else {
+                        self.claim.as_mut().map(|v| v as &mut dyn State)
+                    }
                 }
             },
             Menu::Marketplace(MarketplaceSubMenu::BuySell) => {
@@ -797,6 +807,9 @@ pub struct App {
     /// account's Bitcoin Blake2b grant arrives with `/connect/features`, well
     /// after the Cube is open — see the `ConnectAccount` mirror in `update`.
     pending_claim: bool,
+    fork_claim_handoff: Option<claim_intent::ForkHandoff>,
+    fork_claim_requested: bool,
+    loading_fork_claim: Option<u64>,
     /// Boxed so that `App` — and therefore `gui::tab::State`, whose size is
     /// set by this variant — stays small. `Panels` holds every panel's state
     /// inline (~30 KiB); carried by value it made each `self.state = ...`
@@ -2480,20 +2493,22 @@ pub(crate) fn claim_target_checksums(
 
 /// The claim target Cube for `descriptor_checksum`, if one exists on this
 /// device: its Cube id, which the claim journal's identity is keyed by.
+/// Ambiguous, empty, or wrong-chain identities refuse selection; presence
+/// still blocks installing a second target.
 /// Same read as [`claim_target_checksums`].
 pub(crate) fn claim_target_cube_id(
     datadir: &CoincubeDirectory,
     descriptor_checksum: &str,
 ) -> Option<String> {
-    claim_targets(datadir).remove(descriptor_checksum)
+    claim_targets(datadir).remove(descriptor_checksum).flatten()
 }
 
-/// Every claim target on this device: descriptor checksum → the Bitcoin
-/// Blake2b Cube that reuses it. The one reader behind
+/// Every claim target on this device: descriptor checksum → the unique valid
+/// Bitcoin Blake2b Cube that reuses it, or `None` for an ambiguous identity. The one reader behind
 /// [`claim_target_checksums`], [`claim_target_exists`] and
 /// [`claim_target_cube_id`], so the three can never disagree about what is
 /// on disk.
-fn claim_targets(datadir: &CoincubeDirectory) -> std::collections::HashMap<String, String> {
+fn claim_targets(datadir: &CoincubeDirectory) -> std::collections::HashMap<String, Option<String>> {
     let fork_dir = datadir.network_directory(crate::chain::ChainId::BitcoinBlake2b);
     // No file, no targets — and no retry. `Settings::from_file` treats
     // `NotFound` as possibly-transient and sleeps between five attempts (at
@@ -2514,14 +2529,27 @@ fn claim_targets(datadir: &CoincubeDirectory) -> std::collections::HashMap<Strin
             // wallet would hide the claim entry (nothing to retry with) while
             // Home shows no Cube (nothing to open), stranding the user between
             // two screens that each think the other has it.
-            s.cubes
-                .iter()
-                .filter_map(|cube| {
-                    cube.vault_wallet_id
-                        .as_ref()
-                        .map(|id| (id.descriptor_checksum.clone(), cube.id.clone()))
-                })
-                .collect()
+            // Presence still blocks another target installation, but ambiguous
+            // descriptor or Cube identities must never select a Claim journal.
+            let mut ids = std::collections::HashMap::new();
+            for cube in &s.cubes {
+                *ids.entry(&cube.id).or_insert(0usize) += 1;
+            }
+            let mut targets = std::collections::HashMap::new();
+            for cube in &s.cubes {
+                let Some(wallet) = &cube.vault_wallet_id else {
+                    continue;
+                };
+                let selected = (cube.network == crate::chain::ChainId::BitcoinBlake2b
+                    && !cube.id.is_empty()
+                    && ids.get(&cube.id) == Some(&1))
+                .then(|| cube.id.clone());
+                targets
+                    .entry(wallet.descriptor_checksum.clone())
+                    .and_modify(|selected| *selected = None)
+                    .or_insert(selected);
+            }
+            targets
         })
         .unwrap_or_default()
 }
@@ -2672,7 +2700,14 @@ impl App {
         // A Home claim card pressed before unlock lands here. Taken on every
         // open so a stale intent cannot fire on an unrelated Cube later; the
         // gate below is re-checked rather than inherited from the card.
-        let claim_intent = claim_intent::take(&cube_settings.id);
+        let intent = claim_intent::take_for_cube(&data_dir, &cube_settings.id);
+        let claim_intent = matches!(&intent, Some(claim_intent::Intent::Bitcoin(_)));
+        let fork_claim_requested = matches!(&intent, Some(claim_intent::Intent::Fork(_)));
+        let fork_claim_handoff = match intent {
+            Some(claim_intent::Intent::Fork(pair)) => Some(pair),
+            _ => claim_intent::ForkHandoff::discover(&data_dir, &cube_settings.id, &wallet),
+        };
+        cache.btcb2_claim_resume = fork_claim_handoff.is_some();
         // Connect blinding (PR D3): derive the Cube's encryption key once from
         // the master signer the unlock already loaded, so every surface that
         // opens a Connect-served key can do so without re-prompting for a PIN.
@@ -2797,6 +2832,9 @@ impl App {
             .is_some_and(|p| p.has_test_coordinator());
         let mut app = Self {
             pending_claim: claim_intent,
+            fork_claim_requested,
+            fork_claim_handoff,
+            loading_fork_claim: None,
             panels: Box::new(panels),
             cache: cache_with_vault,
             daemon: Some(daemon),
@@ -2963,6 +3001,9 @@ impl App {
                 // A Vault-less Cube has no descriptor to claim with, so the
                 // Home card is never offered for one.
                 pending_claim: false,
+                fork_claim_handoff: None,
+                fork_claim_requested: false,
+                loading_fork_claim: None,
                 panels: Box::new(panels),
                 cache,
                 daemon: None,
@@ -3480,6 +3521,9 @@ impl App {
     /// Called both when the Cube opens and when `/connect/features` answers,
     /// because the account grant usually arrives second.
     fn start_pending_claim(&mut self) -> Task<Message> {
+        if self.fork_claim_requested {
+            return self.start_pending_fork_claim();
+        }
         if !self.pending_claim
             || !crate::app::features::claim_blake2b(self.claim_source_cube()).is_available()
         {
@@ -3491,6 +3535,146 @@ impl App {
         ))))
     }
 
+    pub fn continue_claim_handoff(&mut self) -> Result<claim_intent::ForkHandoff, String> {
+        if !crate::app::features::claim_blake2b(self.claim_source_cube()).is_available() {
+            return Err("Claim is not available for this Cube or account.".into());
+        }
+        let handoff = self
+            .panels
+            .claim
+            .as_mut()
+            .ok_or_else(|| "Open the Bitcoin Claim first.".to_string())?
+            .take_fork_handoff()?;
+        self.revoke_claim();
+        Ok(handoff)
+    }
+
+    fn start_pending_fork_claim(&mut self) -> Task<Message> {
+        if !self.fork_claim_requested
+            || self.loading_fork_claim.is_some()
+            || self.daemon_switch_in_progress
+            || !self.cache.btcb2_server_enabled
+        {
+            return Task::none();
+        }
+        let (Some(handoff), Some(wallet), Some(daemon), Some(connect)) = (
+            self.fork_claim_handoff.clone(),
+            self.wallet.clone(),
+            self.daemon.clone(),
+            self.claim_connect_session(),
+        ) else {
+            return Task::none();
+        };
+        if self.cube_settings.network != crate::chain::ChainId::BitcoinBlake2b
+            || handoff.fork_cube() != self.cube_settings.id
+            || !handoff.matches_root(&self.datadir)
+        {
+            self.fork_claim_requested = false;
+            return Task::done(Message::View(view::Message::ShowError(
+                "Open the paired Bitcoin Blake2b Cube to continue Claim.".into(),
+            )));
+        }
+        self.panels.fork_claim = None; // drop a revoked journal owner before reopening
+        let generation = *self.panels.claim_generation.borrow();
+        let receiver = self.panels.claim_generation.subscribe();
+        self.loading_fork_claim = Some(generation);
+        self.fork_claim_requested = false;
+        let root = self.datadir.clone();
+        Task::perform(
+            async move {
+                let result = async {
+                    let source =
+                        crate::services::claim_observation::http::HttpObservationSource::new(
+                            connect.client.clone(),
+                            crate::chain::ChainId::Bitcoin,
+                            crate::chain::ChainId::BitcoinBlake2b,
+                            crate::services::claim_observation::CollectionContext {
+                                expected_generation: generation,
+                                generation: receiver.clone(),
+                            },
+                        )
+                        .map_err(|_| "Couldn't bind the Claim fee provider.".to_string())?;
+                    let rate = source.claim_fee_rate().await.unwrap_or(0);
+                    // A missing quote cannot block tracking a recorded submission;
+                    // the loader requires a positive rate only for a new construction.
+                    let loaded = state::vault::claim::fork_load::load(
+                        &root,
+                        wallet,
+                        daemon.clone(),
+                        connect,
+                        handoff.bitcoin_cube(),
+                        handoff.fork_cube(),
+                        generation,
+                        receiver,
+                        rate,
+                    )
+                    .await?;
+                    let coins = match &loaded {
+                        state::vault::claim::fork_load::Loaded::Signing { psbt, .. } => {
+                            let inputs: Vec<_> = psbt
+                                .psbt()
+                                .unsigned_tx
+                                .input
+                                .iter()
+                                .map(|i| i.previous_output)
+                                .collect();
+                            daemon
+                                .list_coins(&[], &inputs)
+                                .await
+                                .map_err(|e| e.to_string())?
+                                .coins
+                        }
+                        state::vault::claim::fork_load::Loaded::Tracking { .. } => Vec::new(),
+                    };
+                    Ok((loaded, coins))
+                }
+                .await;
+                state::vault::claim::fork_load::Opened {
+                    handoff,
+                    generation,
+                    result,
+                }
+            },
+            |opened| Message::ForkClaimOpened(Box::new(opened)),
+        )
+    }
+
+    fn apply_fork_claim_opened(
+        &mut self,
+        opened: state::vault::claim::fork_load::Opened,
+    ) -> Task<Message> {
+        if self.loading_fork_claim != Some(opened.generation) {
+            return Task::none();
+        }
+        self.loading_fork_claim = None;
+        if *self.panels.claim_generation.borrow() != opened.generation
+            || self.fork_claim_handoff.as_ref() != Some(&opened.handoff)
+            || self.daemon_switch_in_progress
+            || !self.cache.btcb2_server_enabled
+            || self.claim_connect_session().is_none()
+        {
+            return Task::none();
+        }
+        let Some(wallet) = self.wallet.clone() else {
+            return Task::none();
+        };
+        let panel = opened.result.and_then(|(loaded, coins)| {
+            state::vault::claim::fork_panel::ForkClaimPanel::new(
+                self.datadir.clone(),
+                wallet,
+                coins,
+                loaded,
+            )
+        });
+        match panel {
+            Ok(panel) => {
+                self.panels.fork_claim = Some(panel);
+                self.set_current_panel(Menu::Vault(menu::VaultSubMenu::Claim))
+            }
+            Err(error) => Task::done(Message::View(view::Message::ShowError(error))),
+        }
+    }
+
     /// Where a claim entry goes: the target installer (Lane B1.4) or claim
     /// step 1 (Lane B1.5). Decided from the **disk** on every arrival (#503),
     /// so a stale cached `false` cannot start a second target installer and a
@@ -3498,6 +3682,31 @@ impl App {
     /// Re-checked against the same predicate the rail used — the item having
     /// been rendered is not a permission.
     fn enter_claim(&mut self) -> Task<Message> {
+        if self.cube_settings.network == crate::chain::ChainId::BitcoinBlake2b {
+            if !self.cache.btcb2_server_enabled {
+                return Task::none();
+            }
+            if self
+                .panels
+                .fork_claim
+                .as_ref()
+                .is_some_and(|p| !p.is_revoked())
+            {
+                return self.set_current_panel(Menu::Vault(menu::VaultSubMenu::Claim));
+            }
+            if self.fork_claim_handoff.is_none() {
+                self.fork_claim_handoff = self.wallet.as_ref().and_then(|wallet| {
+                    claim_intent::ForkHandoff::discover(
+                        &self.datadir,
+                        &self.cube_settings.id,
+                        wallet,
+                    )
+                });
+            }
+            self.cache.btcb2_claim_resume = self.fork_claim_handoff.is_some();
+            self.fork_claim_requested = self.fork_claim_handoff.is_some();
+            return self.start_pending_fork_claim();
+        }
         let Some(wallet) = self.wallet.as_ref() else {
             return Task::none();
         };
@@ -3555,6 +3764,9 @@ impl App {
     /// coordinator call also checks. The journaled claim itself survives:
     /// the panel re-binds it under the next context.
     pub fn revoke_claim(&mut self) {
+        if let Some(panel) = &mut self.panels.fork_claim {
+            panel.revoke();
+        }
         if let Some(panel) = &mut self.panels.claim {
             panel.revoke();
         }
@@ -5871,6 +6083,13 @@ impl App {
             // it is the one on screen: a coordinator session travels inside
             // them, and a result handed to whichever panel is current would
             // drop that session on the floor.
+            Message::ForkClaimOpened(opened) => return self.apply_fork_claim_opened(*opened),
+            Message::ForkClaim(_) => {
+                if let Some(panel) = &mut self.panels.fork_claim {
+                    return panel.update(self.daemon.clone(), &self.cache, message);
+                }
+                return Task::none();
+            }
             Message::Claim(_) => {
                 if let Some(panel) = &mut self.panels.claim {
                     return panel.update(self.daemon.clone(), &self.cache, message);
@@ -5920,6 +6139,7 @@ impl App {
                     )) => Some(*epoch),
                     _ => None,
                 };
+                let previous_claim_session = self.claim_connect_session();
                 let task = self
                     .panels
                     .connect
@@ -5962,12 +6182,22 @@ impl App {
                 } else {
                     None
                 };
+                // Compare the accepted session, not the arrival of a possibly
+                // obsolete refresh result. The fork loader owns this client.
+                let fork_replaced = (self.panels.fork_claim.is_some()
+                    || self.loading_fork_claim.is_some())
+                    && (!self.cache.btcb2_server_enabled
+                        || match (&previous_claim_session, &claim_session) {
+                            (Some(old), Some(new)) => !state::vault::claim::same_session(old, new),
+                            (Some(_), None) | (None, Some(_)) => true,
+                            (None, None) => false,
+                        });
                 let claim_replaced = self
                     .panels
                     .claim
                     .as_mut()
                     .is_some_and(|panel| panel.set_connect(claim_session));
-                if !claim_signed_in || claim_replaced {
+                if !claim_signed_in || claim_replaced || fork_replaced {
                     self.revoke_claim();
                 }
                 let claim_daemon = self.daemon.clone();
@@ -9216,6 +9446,90 @@ mod claim_step1_tests {
             serde_json::to_vec(&with_cube).unwrap(),
         )
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn fork_open_results_cannot_replace_a_new_request_or_revoked_generation() {
+        let path = std::env::temp_dir().join(format!("claim-open-result-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&path).unwrap();
+        let (mut app, _) = {
+            let _guard = crate::app::session::test_guard();
+            bitcoin_app(&path)
+        };
+        let pair =
+            claim_intent::ForkHandoff::new(&app.datadir, "source".into(), "target".into()).unwrap();
+        app.fork_claim_handoff = Some(pair.clone());
+        app.loading_fork_claim = Some(1);
+        let result = |generation| state::vault::claim::fork_load::Opened {
+            handoff: pair.clone(),
+            generation,
+            result: Err("must not surface a stale result".into()),
+        };
+        assert!(outputs(app.apply_fork_claim_opened(result(0)))
+            .await
+            .is_empty());
+        assert_eq!(app.loading_fork_claim, Some(1));
+        app.panels.claim_generation.send_modify(|g| *g = 2);
+        assert!(outputs(app.apply_fork_claim_opened(result(1)))
+            .await
+            .is_empty());
+        assert_eq!(app.loading_fork_claim, None);
+        assert!(app.panels.fork_claim.is_none());
+        app.loading_fork_claim = Some(2);
+        app.fork_claim_handoff = None;
+        assert!(outputs(app.apply_fork_claim_opened(result(2)))
+            .await
+            .is_empty());
+        assert!(app.panels.fork_claim.is_none());
+        drop(app);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn claim_target_selection_refuses_ambiguous_or_invalid_identities() {
+        let path =
+            std::env::temp_dir().join(format!("claim-target-selection-{}", uuid::Uuid::new_v4()));
+        let root = CoincubeDirectory::new(path.clone());
+        let fork = root.network_directory(crate::chain::ChainId::BitcoinBlake2b);
+        std::fs::create_dir_all(fork.path()).unwrap();
+        let mut target = settings::CubeSettings::new_with_raw_id(
+            "target-a".into(),
+            "Target".into(),
+            crate::chain::ChainId::BitcoinBlake2b,
+        );
+        target.vault_wallet_id = Some(settings::WalletId::new("checksum".into(), Some(1)));
+        let check = |cubes: Vec<settings::CubeSettings>, expected: Option<&str>| {
+            std::fs::write(
+                fork.path().join(settings::SETTINGS_FILE_NAME),
+                serde_json::to_vec(&settings::Settings {
+                    cubes,
+                    ..Default::default()
+                })
+                .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(claim_target_cube_id(&root, "checksum").as_deref(), expected);
+            // Do not offer another installation to fix ambiguous existing data.
+            assert!(claim_target_exists(&root, "checksum"));
+            assert!(claim_target_checksums(&root).contains("checksum"));
+        };
+        check(vec![target.clone()], Some("target-a"));
+        let mut other = target.clone();
+        other.id = "target-b".into();
+        check(vec![target.clone(), other.clone()], None);
+        check(vec![other, target.clone()], None);
+        check(vec![target.clone(), target.clone()], None);
+        let mut wrong_chain = target.clone();
+        wrong_chain.network = crate::chain::ChainId::Bitcoin;
+        check(vec![wrong_chain], None);
+        let mut empty = target.clone();
+        empty.id.clear();
+        check(vec![empty], None);
+        let mut duplicate_id = target.clone();
+        duplicate_id.vault_wallet_id = Some(settings::WalletId::new("different".into(), Some(2)));
+        check(vec![target.clone(), duplicate_id], None);
+        check(vec![target], Some("target-a")); // corrected settings recover on the next read
+        std::fs::remove_dir_all(path).unwrap();
     }
 
     /// Every message a task produces, in order.

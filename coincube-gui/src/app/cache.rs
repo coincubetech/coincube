@@ -207,6 +207,8 @@ pub struct Cache {
     /// not about the session, and a Connect outage must not make an existing
     /// claim target look absent.
     pub btcb2_already_claimed: bool,
+    /// A local paired Claim can be resumed from this fork Vault; not authority.
+    pub btcb2_claim_resume: bool,
     /// Entangled-deposit answers for a Bitcoin Blake2b Cube (`#276` I13),
     /// keyed by the deposit's txid: whether the same transaction exists on
     /// the twin Bitcoin chain, and when that was resolved. Only *resolved*
@@ -361,6 +363,7 @@ impl std::default::Default for Cache {
             marketplace_flags: crate::app::features::MarketplaceServerFlags::OFF,
             btcb2_server_enabled: false,
             btcb2_already_claimed: false,
+            btcb2_claim_resume: false,
             liquid_gate: crate::app::features::LiquidGate::HIDDEN,
             entangled: std::collections::HashMap::new(),
             theme_mode: coincube_ui::theme::palette::ThemeMode::default(),

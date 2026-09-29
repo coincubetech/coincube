@@ -85,6 +85,27 @@ export ELECTRS_BLAKE2B_PATH=$(tests/tools/fetch_electrs_blake2b.sh)
 pytest tests/test_btcb2_harness.py -vvv
 ```
 
+The production Claim construction/finalization regression uses the same binaries
+and a test-only Rust bridge:
+
+```sh
+cargo build --release --package coincube-core --example claim_regtest_vectors
+export CLAIM_REGTEST_TOOL_PATH="$PWD/target/release/examples/claim_regtest_vectors"
+pytest tests/test_btcb2_claim_consensus.py -vvv --junitxml=claim-consensus.xml
+```
+
+Set the bridge path to your Cargo target directory when using `CARGO_TARGET_DIR`.
+This test spends the fixture's original coins, so it has its own module-scoped
+harness. It checks the production OP_RETURN self-transfer and legacy 2-of-3 fork
+sweep against both real nodes, pins the fork block rejection `bad-txns-vout-script-toolarge` and Bitcoin
+`missing-inputs` response in JUnit, and
+invalidates Bitcoin confirmation while the fork sweep remains confirmed. The
+legacy node uses `datacarriersize=100`, matching the managed-node Claim policy;
+the fork node does not receive that override. The bridge never loads keys or
+contacts a network: disposable fixture keys sign its PSBTs in Python. This is
+consensus integration coverage, not GUI, hardware, input-poison, or restart
+acceptance. The labelled CI workflow builds the bridge and runs this test too.
+
 `fetch_knots.sh` downloads a release for the host platform and refuses to extract
 it unless its checksum is listed in the release `SHA256SUMS` *and*
 `SHA256SUMS.asc` verifies against the Knots signing key vendored in

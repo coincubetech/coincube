@@ -651,7 +651,7 @@ fn is_reserved_key(key: &ProprietaryKey) -> bool {
     key.prefix == PROPRIETARY_PREFIX && key.subtype == PROPRIETARY_SUBTYPE
 }
 
-fn proprietary_key(public_key: &PublicKey) -> ProprietaryKey {
+pub(crate) fn proprietary_key(public_key: &PublicKey) -> ProprietaryKey {
     ProprietaryKey {
         prefix: PROPRIETARY_PREFIX.to_vec(),
         subtype: PROPRIETARY_SUBTYPE,

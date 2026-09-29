@@ -201,7 +201,7 @@ class TwoChainRegtest:
 
     def _start_legacy_and_fund(self):
         n = self.activation_height
-        self.legacy = self._new_node(self.legacy_dir, self.legacy_path)
+        self.legacy = self._new_node(self.legacy_dir, self.legacy_path, ["-datacarriersize=100"])
         self.legacy.startup()
         rpc = self.legacy.rpc
         rpc.createwallet(rpc.wallet_name, False, False, "", False, True, True)

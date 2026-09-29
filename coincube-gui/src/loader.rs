@@ -873,6 +873,7 @@ pub async fn load_application(
         btcb2_server_enabled: false,
         // Resolved from disk in `App::new_inner`.
         btcb2_already_claimed: false,
+        btcb2_claim_resume: false,
         // Liquid sunset gate. Both halves are filled in later: the local half
         // in `App::new` (from whether the Liquid SDK actually connected), the
         // server half when `/connect/features` loads.
