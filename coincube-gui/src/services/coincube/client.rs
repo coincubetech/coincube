@@ -20,6 +20,15 @@ use zeroize::Zeroizing;
 
 use crate::{services::http::ResponseExt, utils::device::device_headers};
 
+#[cfg(all(test, feature = "regtest-harness"))]
+#[derive(Clone, Copy)]
+pub(crate) struct TestAncestryHistory {
+    pub first_fork_height: u32,
+    pub historical_limit: u32,
+    pub shared_history_height: u64,
+    pub shared_history_hash: coincube_core::miniscript::bitcoin::BlockHash,
+}
+
 #[cfg(not(debug_assertions))]
 const _: () = {
     if option_env!("COINCUBE_API_URL").is_none() {
@@ -53,6 +62,10 @@ pub struct CoincubeClient {
     token: Option<Zeroizing<String>>,
     /// Snapshot once per client identity; never regenerate during token/anchor requests.
     identity_headers: reqwest::header::HeaderMap,
+    /// Explicit isolated-chain policy used only by the live regtest harness.
+    /// Production builds cannot construct or observe this field.
+    #[cfg(all(test, feature = "regtest-harness"))]
+    test_ancestry_history: Option<TestAncestryHistory>,
 }
 
 impl std::fmt::Debug for CoincubeClient {
@@ -104,6 +117,8 @@ impl CoincubeClient {
             base_url,
             token: None,
             identity_headers,
+            #[cfg(all(test, feature = "regtest-harness"))]
+            test_ancestry_history: None,
         }
     }
 
@@ -601,7 +616,41 @@ impl CoincubeClient {
             base_url: base_url.into(),
             token: None,
             identity_headers: reqwest::header::HeaderMap::new(),
+            #[cfg(feature = "regtest-harness")]
+            test_ancestry_history: None,
         }
+    }
+
+    /// Opt an isolated live-test client into the chain's actual fork height.
+    /// The production client and ordinary tests always retain the pinned
+    /// mainnet ancestry policy.
+    #[cfg(all(test, feature = "regtest-harness"))]
+    pub(crate) fn enable_regtest_ancestry(
+        &mut self,
+        first_fork_height: u32,
+        historical_limit: u32,
+        shared_history_height: u64,
+        shared_history_hash: coincube_core::miniscript::bitcoin::BlockHash,
+    ) {
+        assert!(
+            first_fork_height > 0 && historical_limit > first_fork_height,
+            "regtest ancestry bounds must contain the fork"
+        );
+        assert!(
+            shared_history_height < u64::from(first_fork_height),
+            "regtest checkpoint must precede the fork"
+        );
+        self.test_ancestry_history = Some(TestAncestryHistory {
+            first_fork_height,
+            historical_limit,
+            shared_history_height,
+            shared_history_hash,
+        });
+    }
+
+    #[cfg(all(test, feature = "regtest-harness"))]
+    pub(crate) fn test_ancestry_history(&self) -> Option<TestAncestryHistory> {
+        self.test_ancestry_history
     }
 
     #[cfg(test)]

@@ -714,7 +714,7 @@ mod flow {
         async fn list_coins(
             &self,
             statuses: &[CoinStatus],
-            _: &[OutPoint],
+            outpoints: &[OutPoint],
         ) -> Result<model::ListCoinsResult, DaemonError> {
             self.hit("list_coins");
             assert!(statuses.is_empty() || statuses == [CoinStatus::Confirmed]);
@@ -730,6 +730,9 @@ mod flow {
             let mut coins = vec![coin];
             if let Some(ancestry) = &self.ancestry_coin {
                 coins.push(ancestry.clone());
+            }
+            if !outpoints.is_empty() {
+                coins.retain(|coin| outpoints.contains(&coin.outpoint));
             }
             Ok(model::ListCoinsResult { coins })
         }
@@ -833,6 +836,66 @@ mod flow {
                 let outcome = live
                     .transport
                     .submit_poison(&verified, &_gate)
+                    .map_err(DaemonError::PoisonSubmission)?;
+                *self.submitted.lock().unwrap() = Some(verified.transaction().clone());
+                return Ok(outcome);
+            }
+            *self.submitted.lock().unwrap() = Some(verified.transaction().clone());
+            Ok(SubmissionOutcome::UpstreamAccepted {
+                txid: verified.transaction().compute_txid(),
+                wtxid: verified.transaction().compute_wtxid(),
+            })
+        }
+        #[cfg(feature = "regtest-harness")]
+        async fn submit_verified_ancestry_to_node(
+            &self,
+            verified: Arc<coincube_core::claim_finalize::VerifiedAncestryTransfer>,
+            binding: coincubed::poison_broadcast::ClaimBackendBinding,
+            gate: Arc<SubmissionGate>,
+        ) -> Result<SubmissionOutcome, DaemonError> {
+            self.hit("submit_verified_poison");
+            self.hit("submit_verified_poison_to_node");
+            let outcome = self
+                .live
+                .as_ref()
+                .and_then(|live| live.bound.as_ref())
+                .ok_or(DaemonError::ClientNotSupported)?
+                .submit_verified_ancestry_to_node(verified.clone(), binding, gate)
+                .await?;
+            *self.submitted.lock().unwrap() = Some(verified.transaction().clone());
+            Ok(outcome)
+        }
+        #[cfg(feature = "regtest-harness")]
+        async fn submit_verified_ancestry_to_connect(
+            &self,
+            verified: Arc<coincube_core::claim_finalize::VerifiedAncestryTransfer>,
+            origin: String,
+            binding: coincubed::poison_broadcast::ClaimBackendBinding,
+            gate: Arc<SubmissionGate>,
+        ) -> Result<SubmissionOutcome, DaemonError> {
+            self.hit("submit_verified_poison");
+            self.hit("submit_verified_poison_to_connect");
+            let outcome = self
+                .live
+                .as_ref()
+                .and_then(|live| live.bound.as_ref())
+                .ok_or(DaemonError::ClientNotSupported)?
+                .submit_verified_ancestry_to_connect(verified.clone(), origin, binding, gate)
+                .await?;
+            *self.submitted.lock().unwrap() = Some(verified.transaction().clone());
+            Ok(outcome)
+        }
+        async fn submit_verified_ancestry(
+            &self,
+            verified: Arc<coincube_core::claim_finalize::VerifiedAncestryTransfer>,
+            _gate: Arc<SubmissionGate>,
+        ) -> Result<SubmissionOutcome, DaemonError> {
+            self.hit("submit_verified_poison");
+            #[cfg(feature = "regtest-harness")]
+            if let Some(live) = &self.live {
+                let outcome = live
+                    .transport
+                    .submit_ancestry(&verified, &_gate)
                     .map_err(DaemonError::PoisonSubmission)?;
                 *self.submitted.lock().unwrap() = Some(verified.transaction().clone());
                 return Ok(outcome);

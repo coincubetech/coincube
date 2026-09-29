@@ -115,6 +115,35 @@ async fn claim_gui_regtest_driver() {
     fixture.coin.amount = output.value;
     fixture.coin.block_height = Some(i32::try_from(init["coin_height"].as_u64().unwrap()).unwrap());
     fixture.previous = previous;
+    let ancestry_coin = init["ancestry_previous"].as_str().map(|raw| {
+        let transaction = coincube_core::miniscript::bitcoin::consensus::encode::deserialize_hex::<
+            Transaction,
+        >(raw)
+        .unwrap();
+        let vout = u32::try_from(init["ancestry_vout"].as_u64().unwrap()).unwrap();
+        let output = transaction.output.get(vout as usize).unwrap();
+        let derivation_index = ChildNumber::from_normal_idx(
+            u32::try_from(init["ancestry_derivation_index"].as_u64().unwrap()).unwrap(),
+        )
+        .unwrap();
+        let expected = fixture
+            .descriptor
+            .receive_descriptor()
+            .derive(derivation_index, &secp256k1::Secp256k1::verification_only())
+            .script_pubkey();
+        assert_eq!(output.script_pubkey, expected);
+        Coin {
+            amount: output.value,
+            outpoint: OutPoint::new(transaction.compute_txid(), vout),
+            address: Address::from_script(&output.script_pubkey, Network::Bitcoin).unwrap(),
+            block_height: Some(i32::try_from(init["ancestry_height"].as_u64().unwrap()).unwrap()),
+            derivation_index,
+            spend_info: None,
+            is_immature: false,
+            is_change: false,
+            is_from_self: false,
+        }
+    });
     let base = init["bridge"].as_str().unwrap();
     let mut config: coincubed::config::Config = toml::from_str(&format!(
         "main_descriptor = '{}'\ndata_directory = '{}'\n[bitcoin_config]\nnetwork = 'bitcoin'\n[esplora_config]\naddr = '{}/api/v1/esplora/bitcoin/mainnet'\n",
@@ -152,7 +181,7 @@ async fn claim_gui_regtest_driver() {
         submitted: Mutex::new(recovered_transaction("bitcoin_recorded_raw")),
         hits: Mutex::new(Vec::new()),
         queried_txs: Mutex::new(Vec::new()),
-        ancestry_coin: None,
+        ancestry_coin,
         live: Some(LiveTransport {
             bound,
             transport,
@@ -227,6 +256,18 @@ async fn claim_gui_regtest_driver() {
     let mut fork_panel: Option<ForkClaimPanel> = None;
     let mut client = CoincubeClient::for_test(base.to_string());
     client.set_token("synthetic-regtest-only");
+    if init["ancestry_previous"].is_string() {
+        client.enable_regtest_ancestry(
+            u32::try_from(init["ancestry_first_fork_height"].as_u64().unwrap()).unwrap(),
+            u32::try_from(init["ancestry_historical_limit"].as_u64().unwrap()).unwrap(),
+            init["ancestry_shared_history_height"].as_u64().unwrap(),
+            init["ancestry_shared_history_hash"]
+                .as_str()
+                .unwrap()
+                .parse()
+                .unwrap(),
+        );
+    }
     let (_sender, generation) = watch::channel(1);
     let mut panel = ClaimStep1Panel::new(
         wallet.clone(),
@@ -247,6 +288,23 @@ async fn claim_gui_regtest_driver() {
     let task = panel.reload(Some(dyn_daemon.clone()), Some(wallet));
     drive(&mut panel, &dyn_daemon, &cache, task).await;
     if resume {
+        let restart_state = match &panel.stage {
+            Stage::Track {
+                session,
+                status,
+                busy,
+                error,
+                ..
+            } => format!(
+                "track(session={}, status={status:?}, busy={busy}, error={error:?})",
+                session.is_some()
+            ),
+            Stage::Preconditions => "preconditions".into(),
+            Stage::Plan { .. } => "plan".into(),
+            Stage::CheckingSign(_) => "checking-sign".into(),
+            Stage::Sign { .. } => "sign".into(),
+            Stage::Review { .. } => "review".into(),
+        };
         assert!(
             matches!(
                 &panel.stage,
@@ -257,8 +315,8 @@ async fn claim_gui_regtest_driver() {
                     ..
                 }
             ),
-            "recorded Bitcoin claim must reopen for tracking: {:?}",
-            panel.restart_error
+            "recorded Bitcoin claim must reopen for tracking: restart_error={:?}, state={restart_state}",
+            panel.restart_error,
         );
         assert!(!panel.can_build());
         assert!(!daemon.hits().contains(&"reserve_change"));
@@ -276,6 +334,33 @@ async fn claim_gui_regtest_driver() {
         let message = match action {
             "build" => Message::View(view::Message::Claim(view::ClaimMessage::Build)),
             "sign" => Message::View(view::Message::Claim(view::ClaimMessage::Sign)),
+            "sign_checked_ancestry" => {
+                let Stage::Plan { built } = &panel.stage else {
+                    panic!("checked ancestry signing must start at Plan")
+                };
+                let connect = panel.connect.clone().expect("live Connect session");
+                let expected = *panel.generation.borrow();
+                let checked = signing::check_inputs(
+                    built,
+                    dyn_daemon.clone(),
+                    panel.wallet.clone(),
+                    connect.clone(),
+                    expected,
+                    panel.generation.clone(),
+                )
+                .await
+                .unwrap();
+                let coins = checked
+                    .consume(built, &panel.wallet, Some(&connect), expected)
+                    .unwrap();
+                let Stage::Plan { built } =
+                    std::mem::replace(&mut panel.stage, Stage::Preconditions)
+                else {
+                    unreachable!()
+                };
+                panel.install_signing(built, coins);
+                Message::Tick
+            }
             "open_signer" => Message::View(view::Message::Spend(view::SpendTxMessage::Sign)),
             "hot_sign" => Message::View(view::Message::Spend(
                 view::SpendTxMessage::SelectMasterSigner,
@@ -422,6 +507,18 @@ async fn claim_gui_regtest_driver() {
             Stage::Track { .. } => "track",
             _ => "preconditions",
         };
+        let (construction, selected_ancestry_input) = match &panel.stage {
+            Stage::Plan { built } => match &**built {
+                Construction::OpReturn(_) => (Some("op-return"), None),
+                Construction::Ancestry { .. } => (
+                    Some("input-ancestry"),
+                    built
+                        .selected_ancestry_input()
+                        .map(|outpoint| outpoint.to_string()),
+                ),
+            },
+            _ => (None, None),
+        };
         let reviewed_route = match &panel.stage {
             Stage::Review {
                 snapshot: Some(snapshot),
@@ -449,7 +546,9 @@ async fn claim_gui_regtest_driver() {
         let tx = daemon.submitted.lock().unwrap().clone();
         let journal = journal_directory(&datadir, &panel.wallet).join("intent.json");
         emit(
-            json!({"event":action,"stage":stage,"reviewed_route":reviewed_route,"review_error":review_error,
+            json!({"event":action,"stage":stage,"construction":construction,
+            "selected_ancestry_input":selected_ancestry_input,
+            "reviewed_route":reviewed_route,"review_error":review_error,
             "node_submissions":daemon.hits().iter().filter(|h| **h == "submit_verified_poison_to_node").count(),
             "connect_submissions":daemon.hits().iter().filter(|h| **h == "submit_verified_poison_to_connect").count(),
             "tracking":tracking,"submission_outcome":submission_outcome,"reconfirmation_review":panel.reconfirmation(),"submitted":tx.map(|tx| json!({

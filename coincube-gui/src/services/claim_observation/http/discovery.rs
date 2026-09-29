@@ -96,6 +96,8 @@ impl HttpObservationSource {
                     .clone()
                     .unwrap_or_else(|| Arc::new(CollectionBudget::new())),
             ),
+            #[cfg(all(test, feature = "regtest-harness"))]
+            test_ancestry_history: self.test_ancestry_history,
         }
     }
     async fn qualify_dependency(
@@ -190,7 +192,10 @@ impl HttpObservationSource {
                             .await
                         {
                             // Only positively disqualified roots allow another branch.
-                            Err(FailureKind::UnsupportedPoison) => continue,
+                            Err(
+                                FailureKind::UnsupportedPoison
+                                | FailureKind::AncestryRootShared { .. },
+                            ) => continue,
                             Err(error) => return Err(observation(error)),
                             Ok((pair, observed_at)) => {
                                 return Ok(Some(DiscoveredAncestry {

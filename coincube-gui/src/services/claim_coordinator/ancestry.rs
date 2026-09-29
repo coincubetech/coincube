@@ -1,5 +1,5 @@
 //! Ancestry admission retains its separate proof and signed artifact types.
-//! Observation eligibility stays unsupported until the full flow is accepted.
+//! Review eligibility requires fresh live proof, owned construction and preflight.
 use super::*;
 use coincube_core::{
     claim_ancestry::retained::RetainedPath, claim_finalize::VerifiedAncestryTransfer,

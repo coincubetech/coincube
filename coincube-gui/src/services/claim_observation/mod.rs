@@ -39,6 +39,15 @@ pub enum Stage {
 pub enum FailureKind {
     InvalidPlan,
     UnsupportedPoison,
+    /// A fresh, stable canonical view no longer maps the retained dependency
+    /// root to Bitcoin at its committed height.
+    AncestryRootChanged {
+        observed_at: i64,
+    },
+    /// Fresh, stable views now expose the same coinbase root on both chains.
+    AncestryRootShared {
+        observed_at: i64,
+    },
     PoisonMissing,
     WrongChain,
     Malformed,

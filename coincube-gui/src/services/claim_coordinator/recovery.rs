@@ -1,5 +1,4 @@
 use super::*;
-use crate::services::claim_observation::CollectedAssessment;
 
 /// Explicit, one-use consent to resend exactly the recorded signed transaction.
 /// Neither tracking nor restart creates this token.
@@ -25,12 +24,12 @@ impl Coordinator {
     async fn resubmission_snapshot(
         &mut self,
         context: &Context,
-    ) -> Result<(ReviewSnapshot, CollectedAssessment), Error> {
+    ) -> Result<(ReviewSnapshot, Collected), Error> {
         self.current(context)?;
         let first = self.collect().await?;
         self.controller
             .check_resubmission(
-                first,
+                first.recovery(),
                 self.verified.transaction(),
                 self.policy.observations,
                 self.services.source().now(),
@@ -52,7 +51,7 @@ impl Coordinator {
         }
         self.controller
             .check_resubmission(
-                last,
+                last.recovery(),
                 self.verified.transaction(),
                 self.policy.observations,
                 self.services.source().now(),
@@ -126,7 +125,7 @@ impl Coordinator {
         self.controller.record_resubmission(
             ticket,
             context,
-            collected,
+            collected.recovery(),
             self.verified.transaction(),
             self.policy.observations,
             self.services.source().now(),

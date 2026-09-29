@@ -16,6 +16,9 @@ impl CollectedAncestrySweep {
     pub fn sweep(&self) -> SweepObservation {
         self.sweep
     }
+    pub fn into_parts(self) -> (CollectedAncestry, SweepObservation) {
+        (self.ancestry, self.sweep)
+    }
 }
 impl HttpObservationSource {
     pub async fn collect_ancestry_sweep(

@@ -288,7 +288,11 @@ pub enum ClaimEvent {
     Checked(u64, Box<Checked>),
     /// The poison self-transfer was (or could not be) built.
     Built(u64, Result<Box<Construction>, String>),
-    SigningChecked(u64, Box<Construction>, Result<Vec<Coin>, String>),
+    SigningChecked(
+        u64,
+        Box<Construction>,
+        Result<signing::CheckedInputs, String>,
+    ),
     /// The signed construction was finalised and journaled as an intent —
     /// or refused, in which case the construction comes back so the user can
     /// keep signing. The number names the finalisation attempt it answers.
@@ -1624,8 +1628,21 @@ impl ClaimStep1Panel {
                     )));
                 }
                 match result {
-                    Ok(coins) => {
-                        // No live ancestry checker currently grants this result.
+                    Ok(checked) => {
+                        let Stage::Plan { built } = &self.stage else {
+                            unreachable!()
+                        };
+                        let coins = match checked.consume(
+                            built,
+                            &self.wallet,
+                            self.connect.as_ref(),
+                            *self.generation.borrow(),
+                        ) {
+                            Ok(coins) => coins,
+                            Err(error) => {
+                                return Task::done(Message::View(view::Message::ShowError(error)))
+                            }
+                        };
                         let Stage::Plan { built } =
                             std::mem::replace(&mut self.stage, Stage::Preconditions)
                         else {

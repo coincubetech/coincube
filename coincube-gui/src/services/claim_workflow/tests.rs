@@ -336,6 +336,13 @@ fn failed_atomic_write_poisoned_owner_cannot_reuse_old_observations() {
         .is_err());
     assert_eq!(c.status(), Status::Unchecked);
     fs::rename(moved, &temp.0).unwrap();
+    let ticket = c.begin_check(&context()).unwrap();
+    assert!(matches!(
+        c.apply_observation(ticket, &context(), Ok(observation(false)), policy(), 10000),
+        Err(Error::InvalidJournal)
+    ));
+    assert_eq!(c.status(), Status::Unchecked);
+    assert!(c.fresh.is_none());
 }
 
 #[test]

@@ -34,13 +34,15 @@ impl Controller {
     /// Recompute against the original transaction and both fresh chain views.
     /// The old inclusion is ignored only in this temporary assessment; persisted
     /// history and any submission record remain untouched until acknowledgement.
-    pub(crate) fn check_reconfirmation(
+    pub(crate) fn check_reconfirmation<'a>(
         &self,
-        collected: CollectedAssessment,
+        collected: impl Into<RecoveryObservation<'a>>,
         policy: Policy,
         now: i64,
     ) -> Result<Reconfirmation, Error> {
-        if collected.generation != self.context.generation
+        let collected = collected.into();
+        let data = collected.data();
+        if data.generation != self.context.generation
             || self.intent.signed_txid.is_none()
             || self.intent.phase != Phase::Tracking
             || self.intent.inclusion_history.len() >= MAX_INCLUSION_CHANGES
@@ -52,7 +54,7 @@ impl Controller {
             .plan
             .previous_confirmation
             .ok_or(Error::Unchecked)?;
-        let o = collected.observations;
+        let o = data.observations;
         let TransactionLocation::Confirmed { block, .. } = o.bitcoin.location else {
             return Err(Error::Unchecked);
         };
@@ -65,15 +67,7 @@ impl Controller {
         let mut plan = self.intent.plan.clone();
         plan.previous_confirmation = None;
         if !matches!(
-            claim::assess(
-                &plan,
-                o.bitcoin,
-                o.fork,
-                o.deployment,
-                policy,
-                now,
-                Some(o.preflight)
-            ),
+            self.assess_recovery(collected, &plan, policy, now)?,
             Assessment::WaitingForDepth { .. } | Assessment::ObservationsEligibleForPreflight
         ) {
             return Err(Error::Unchecked);
@@ -86,11 +80,11 @@ impl Controller {
 
     /// A coordinator calls this only after an explicit, one-use review and a
     /// second fresh collection. It consumes the controller's observation ticket.
-    pub(crate) fn acknowledge_reconfirmation(
+    pub(crate) fn acknowledge_reconfirmation<'a>(
         &mut self,
         ticket: Ticket,
         current: &Context,
-        collected: CollectedAssessment,
+        collected: impl Into<RecoveryObservation<'a>>,
         policy: Policy,
         now: i64,
     ) -> Result<(), Error> {

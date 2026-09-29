@@ -10,6 +10,35 @@ const HISTORICAL_LIMIT: u32 = 1_983_702;
 const BIP34_HEIGHT: u64 = 227_931;
 const BIP34_HASH: &str = "000000000000024b89b42a942fe0d9fea3bb44ab7bd1b19115dd6a759c0808b8";
 
+#[derive(Clone, Copy)]
+struct AncestryHistory {
+    first_fork_height: u32,
+    historical_limit: u32,
+    shared_history_height: u64,
+    shared_history_hash: BlockHash,
+}
+
+impl HttpObservationSource {
+    fn ancestry_history(&self) -> Result<AncestryHistory, FailureKind> {
+        #[cfg(all(test, feature = "regtest-harness"))]
+        if let Some(history) = self.test_ancestry_history {
+            return Ok(AncestryHistory {
+                first_fork_height: history.first_fork_height,
+                historical_limit: history.historical_limit,
+                shared_history_height: history.shared_history_height,
+                shared_history_hash: history.shared_history_hash,
+            });
+        }
+        Ok(AncestryHistory {
+            first_fork_height: FIRST_FORK_HEIGHT,
+            historical_limit: HISTORICAL_LIMIT,
+            shared_history_height: BIP34_HEIGHT,
+            shared_history_hash: BlockHash::from_str(BIP34_HASH)
+                .map_err(|_| FailureKind::Malformed)?,
+        })
+    }
+}
+
 /// Matching current mainnet histories with distinct same-height coinbase roots.
 /// Still only provider-trusted observations: the selected output's ownership,
 /// maturity, spendability, complete ancestry path and submission policy remain
@@ -54,7 +83,8 @@ impl HttpObservationSource {
         height: u32,
         policy: Policy,
     ) -> Result<CoinbasePair, FailureKind> {
-        if !(FIRST_FORK_HEIGHT..HISTORICAL_LIMIT).contains(&height) {
+        let history = self.ancestry_history()?;
+        if !(history.first_fork_height..history.historical_limit).contains(&height) {
             return Err(FailureKind::UnsupportedPoison);
         }
         dependency
@@ -73,25 +103,23 @@ impl HttpObservationSource {
                 .observation
                 .fork
                 .as_ref()
-                .is_none_or(|fork| fork.height != u64::from(FIRST_FORK_HEIGHT))
+                .is_none_or(|fork| fork.height != u64::from(history.first_fork_height))
             {
                 return Err(FailureKind::WrongChain);
             }
-            let expected_history =
-                BlockHash::from_str(BIP34_HASH).map_err(|_| FailureKind::Malformed)?;
-            let bitcoin_history = self.hash_at_height(ChainId::Bitcoin, BIP34_HEIGHT).await?;
-            let fork_history = self.hash_at_height(fork_chain, BIP34_HEIGHT).await?;
-            if bitcoin_history.value != expected_history || fork_history.value != expected_history {
+            let bitcoin_history = self
+                .hash_at_height(ChainId::Bitcoin, history.shared_history_height)
+                .await?;
+            let fork_history = self
+                .hash_at_height(fork_chain, history.shared_history_height)
+                .await?;
+            if bitcoin_history.value != history.shared_history_hash
+                || fork_history.value != history.shared_history_hash
+            {
                 return Err(FailureKind::WrongChain);
             }
             let bitcoin = self.canonical_coinbase(ChainId::Bitcoin, height).await?;
             let fork = self.canonical_coinbase(fork_chain, height).await?;
-            if bitcoin.value.txid != dependency.root().txid {
-                return Err(FailureKind::Malformed);
-            }
-            if bitcoin.value.txid == fork.value.txid {
-                return Err(FailureKind::UnsupportedPoison);
-            }
             if fork.value.tip.hash != before.tip_hash || fork.value.tip.height != before.tip_height
             {
                 return Err(FailureKind::Changed);
@@ -106,17 +134,19 @@ impl HttpObservationSource {
                 (ChainId::Bitcoin, &bitcoin.value),
                 (fork_chain, &fork.value),
             ] {
-                let history = self.hash_at_height(chain, BIP34_HEIGHT).await?;
+                let shared = self
+                    .hash_at_height(chain, history.shared_history_height)
+                    .await?;
                 let block = self.hash_at_height(chain, u64::from(height)).await?;
                 let tip = self.tip(chain).await?;
-                if history.value != expected_history
+                if shared.value != history.shared_history_hash
                     || block.value != root.block.hash
                     || tip.value != root.tip
                 {
                     return Err(FailureKind::Changed);
                 }
                 oldest = oldest
-                    .min(history.observed_at)
+                    .min(shared.observed_at)
                     .min(block.observed_at)
                     .min(tip.observed_at);
             }
@@ -141,6 +171,20 @@ impl HttpObservationSource {
             if *self.generation.borrow() != self.expected || self.generation.has_changed().is_err()
             {
                 return Err(FailureKind::Cancelled);
+            }
+            // Classify invalidation only after both histories, height mappings,
+            // tips and the authenticated anchor stayed unchanged across the
+            // complete fresh collection. A provider error or bracket race must
+            // remain indeterminate and cannot revoke durable completion.
+            if bitcoin.value.txid != dependency.root().txid {
+                return Err(FailureKind::AncestryRootChanged {
+                    observed_at: oldest,
+                });
+            }
+            if bitcoin.value.txid == fork.value.txid {
+                return Err(FailureKind::AncestryRootShared {
+                    observed_at: oldest,
+                });
             }
             Ok(CoinbasePair {
                 selected: dependency.selected(),
@@ -183,6 +227,40 @@ mod tests {
                 .body(body);
         })
     }
+
+    #[cfg(feature = "regtest-harness")]
+    #[test]
+    fn explicit_regtest_history_is_local_to_the_test_client() {
+        let server = MockServer::start();
+        let shared = BlockHash::from_str(&"09".repeat(32)).unwrap();
+        let mut client = crate::services::coincube::CoincubeClient::for_test(server.base_url());
+        client.set_token("synthetic-observation-token");
+        client.enable_regtest_ancestry(110, 213, 109, shared);
+        let (_sender, generation) = watch::channel(4);
+        let configured_source = HttpObservationSource::new(
+            client,
+            ChainId::Bitcoin,
+            ChainId::BitcoinBlake2b,
+            CollectionContext {
+                expected_generation: 4,
+                generation,
+            },
+        )
+        .unwrap();
+        let configured = configured_source.ancestry_history().unwrap();
+        assert_eq!(configured.first_fork_height, 110);
+        assert_eq!(configured.historical_limit, 213);
+        assert_eq!(configured.shared_history_height, 109);
+        assert_eq!(configured.shared_history_hash, shared);
+
+        let (default, _sender) = source(&server);
+        let pinned = default.ancestry_history().unwrap();
+        assert_eq!(pinned.first_fork_height, FIRST_FORK_HEIGHT);
+        assert_eq!(pinned.historical_limit, HISTORICAL_LIMIT);
+        assert_eq!(pinned.shared_history_height, BIP34_HEIGHT);
+        assert_eq!(pinned.shared_history_hash.to_string(), BIP34_HASH);
+    }
+
     #[tokio::test]
     async fn paired_roots_bind_history_anchor_identity_and_current_views() {
         for case in [
@@ -193,6 +271,10 @@ mod tests {
             "history",
             "root",
             "shared",
+            "root-stale",
+            "shared-revoked",
+            "root-anchor-change",
+            "root-bitcoin-reorg",
             "anchor-tip",
             "activation",
             "stale",
@@ -214,7 +296,7 @@ mod tests {
                 .push_int(1)
                 .into_script();
             let mut fork = bitcoin.clone();
-            if case != "shared" {
+            if !matches!(case, "shared" | "shared-revoked") {
                 fork.output[0].value = Amount::from_sat(4000);
             } else {
                 fork.input[0].witness.push([42]);
@@ -223,7 +305,10 @@ mod tests {
             }
             let bitcoin_raw = serialize(&bitcoin);
             let mut selected_tx = bitcoin.clone();
-            if case == "root" {
+            if matches!(
+                case,
+                "root" | "root-stale" | "root-anchor-change" | "root-bitcoin-reorg"
+            ) {
                 selected_tx.output[0].value = Amount::from_sat(3000);
             }
             let selected_raw = serialize(&selected_tx);
@@ -302,7 +387,15 @@ mod tests {
                 ));
                 then.status(200)
                     .delay(Duration::from_millis(
-                        if matches!(case, "anchor-change" | "bitcoin-reorg" | "revoked") {
+                        if matches!(
+                            case,
+                            "anchor-change"
+                                | "root-anchor-change"
+                                | "bitcoin-reorg"
+                                | "root-bitcoin-reorg"
+                                | "revoked"
+                                | "shared-revoked"
+                        ) {
                             200
                         } else {
                             0
@@ -313,7 +406,7 @@ mod tests {
             let body = json!({"success":true,"data":{"network":"bitcoin-blake2b","state":"available","anchor":{
                 "tip_hash":if case == "anchor-tip" {"66".repeat(32)} else {fork_tip.clone()},
                 "tip_height":tip_height,"tip_median_time_past":10000,
-                "observed_at":source.now() - if case == "stale" {120} else {0},
+                "observed_at":source.now() - if matches!(case, "stale" | "root-stale") {120} else {0},
                 "observation":{"tip_height":tip_height,"fork":{"height":FIRST_FORK_HEIGHT - if case == "activation" {1} else {0},"active":true},
                     "rdts":{"state":"flagday","flagday":{"height":FIRST_FORK_HEIGHT,"expiry_time":20000,"active":true}}}
             }}});
@@ -330,7 +423,15 @@ mod tests {
             let root_status = fresh_mock(&server, &format!("/api/v1/esplora/bitcoin/mainnet/tx/{}", bitcoin.compute_txid()),
                 json!({"txid":bitcoin.compute_txid(),"status":{"confirmed":true,"block_height":root_height,"block_hash":bitcoin_block}}).to_string());
             let collect = source.coinbase_pair(&dependency, root_height, policy);
-            let result = if matches!(case, "anchor-change" | "bitcoin-reorg" | "revoked") {
+            let result = if matches!(
+                case,
+                "anchor-change"
+                    | "root-anchor-change"
+                    | "bitcoin-reorg"
+                    | "root-bitcoin-reorg"
+                    | "revoked"
+                    | "shared-revoked"
+            ) {
                 let disrupt = async {
                     tokio::time::timeout(Duration::from_secs(1), async {
                         while fork_read.hits_async().await == 0 {
@@ -339,9 +440,9 @@ mod tests {
                     })
                     .await
                     .expect("fork collection must begin");
-                    if case == "revoked" {
+                    if matches!(case, "revoked" | "shared-revoked") {
                         sender.send_replace(5);
-                    } else if case == "anchor-change" {
+                    } else if matches!(case, "anchor-change" | "root-anchor-change") {
                         anchor.delete_async().await;
                         let mut changed = body.clone();
                         changed["data"]["anchor"]["tip_median_time_past"] = json!(10001);
@@ -753,10 +854,20 @@ mod tests {
                 "history" | "bitcoin-history" | "activation" => {
                     assert_eq!(result.unwrap_err(), FailureKind::WrongChain)
                 }
-                "revoked" => assert_eq!(result.unwrap_err(), FailureKind::Cancelled),
-                "root" => assert_eq!(result.unwrap_err(), FailureKind::Malformed),
-                "shared" => assert_eq!(result.unwrap_err(), FailureKind::UnsupportedPoison),
-                "stale" | "policy" => assert_eq!(result.unwrap_err(), FailureKind::Stale),
+                "revoked" | "shared-revoked" => {
+                    assert_eq!(result.unwrap_err(), FailureKind::Cancelled)
+                }
+                "root" => assert!(matches!(
+                    result.unwrap_err(),
+                    FailureKind::AncestryRootChanged { observed_at } if observed_at <= source.now()
+                )),
+                "shared" => assert!(matches!(
+                    result.unwrap_err(),
+                    FailureKind::AncestryRootShared { observed_at } if observed_at <= source.now()
+                )),
+                "stale" | "root-stale" | "policy" => {
+                    assert_eq!(result.unwrap_err(), FailureKind::Stale)
+                }
                 _ => assert_eq!(result.unwrap_err(), FailureKind::Changed),
             }
         }
