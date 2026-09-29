@@ -214,6 +214,11 @@ impl SplitWalletPanel {
         self.hardware.clear();
     }
 
+    #[cfg(test)]
+    pub(crate) fn hardware_mut(&mut self) -> &mut HardwareSource {
+        &mut self.hardware
+    }
+
     /// Session-only root for the hardware device list; nothing is written.
     pub fn set_hardware_root(&mut self, datadir: CoincubeDirectory) {
         self.hardware.set_root(datadir);

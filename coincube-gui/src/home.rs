@@ -6565,6 +6565,52 @@ mod tests {
         std::fs::remove_dir_all(datadir.path()).unwrap();
     }
 
+    /// T1: with a listed device a `Read` would start a device task and move
+    /// the source to `Reading`, so the Home gate is observable.
+    #[test]
+    fn split_hardware_messages_are_dropped_unless_the_open_split_section_is_available() {
+        use crate::split_hardware::{tests::add_fake_device, HardwareMessage, HardwareStatus};
+        let _guard = crate::app::session::test_guard();
+        let datadir = fresh_datadir();
+        let mut home = Home::new_for_chain(datadir.clone(), Some(ChainId::Bitcoin)).0;
+        write_btcb2_vault_target(&home);
+        let _ = home.update(Message::View(ViewMessage::SplitWallet(
+            split_wallet::Message::SourceSelected(split_wallet::Source::Hardware),
+        )));
+        add_fake_device(home.split_wallet.hardware_mut(), datadir.path());
+        let read = || {
+            Message::View(ViewMessage::SplitWallet(split_wallet::Message::Hardware(
+                HardwareMessage::Read("dev-1".into()),
+            )))
+        };
+
+        // Section open, BTCB2 gated off.
+        home.active_section = HomeSection::SplitWallet;
+        let _ = home.update(read());
+        assert!(matches!(
+            home.split_wallet.hardware_mut().status(),
+            HardwareStatus::Idle
+        ));
+
+        // BTCB2 available, section closed.
+        enable_btcb2(&mut home);
+        home.active_section = HomeSection::Cubes;
+        let _ = home.update(read());
+        assert!(matches!(
+            home.split_wallet.hardware_mut().status(),
+            HardwareStatus::Idle
+        ));
+
+        // Control: open and available, the same message starts a read.
+        home.active_section = HomeSection::SplitWallet;
+        let _ = home.update(read());
+        assert!(matches!(
+            home.split_wallet.hardware_mut().status(),
+            HardwareStatus::Reading(_)
+        ));
+        std::fs::remove_dir_all(datadir.path()).unwrap();
+    }
+
     #[test]
     fn split_with_an_existing_target_opens_without_installing() {
         let datadir = fresh_datadir();

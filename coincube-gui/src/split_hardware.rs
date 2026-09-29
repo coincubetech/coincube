@@ -472,7 +472,7 @@ pub fn view(source: &HardwareSource) -> Element<'_, HardwareMessage> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use coincube_core::miniscript::bitcoin::{bip32::Xpriv, secp256k1::Secp256k1, Psbt};
     use std::{
@@ -563,6 +563,20 @@ mod tests {
 
     fn source_with(device: Arc<dyn HWI + Send + Sync>, root: &std::path::Path) -> HardwareSource {
         let mut source = HardwareSource::default();
+        add_device(&mut source, device, root);
+        source
+    }
+
+    /// Lists a supported fake device as `dev-1` so a `Read` would start a task.
+    pub(crate) fn add_fake_device(source: &mut HardwareSource, root: &std::path::Path) {
+        add_device(source, fake(Network::Bitcoin, None), root);
+    }
+
+    fn add_device(
+        source: &mut HardwareSource,
+        device: Arc<dyn HWI + Send + Sync>,
+        root: &std::path::Path,
+    ) {
         source.set_root(CoincubeDirectory::new(root.to_path_buf()));
         source
             .devices
@@ -578,7 +592,6 @@ mod tests {
                 registered: None,
                 alias: None,
             });
-        source
     }
 
     #[test]
@@ -723,6 +736,27 @@ mod tests {
         .await
         .map(Arc::new);
         HardwareMessage::Loaded(account, generation)
+    }
+
+    /// T2: a result from a read superseded by an edit and a second read must
+    /// not satisfy the second read.
+    #[tokio::test]
+    async fn split_hardware_stale_result_does_not_satisfy_a_newer_read() {
+        let root = temp_root();
+        let mut source = source_with(fake(Network::Bitcoin, None), &root);
+        let first = read(&mut source);
+        let _ = source.update(HardwareMessage::AccountEdited("1".into()));
+        let second = read(&mut source);
+        assert_ne!(first, second);
+
+        let (_, invalidated) = source.update(loaded(first).await);
+        assert!(!invalidated);
+        assert!(source.account().is_none());
+        assert!(matches!(source.status(), HardwareStatus::Reading(_)));
+
+        let _ = source.update(loaded(second).await);
+        assert!(source.account().is_some());
+        fs::remove_dir(root).unwrap();
     }
 
     #[tokio::test]
