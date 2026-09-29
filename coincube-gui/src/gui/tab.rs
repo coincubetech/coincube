@@ -992,6 +992,8 @@ impl Tab {
                     command.map(Message::Install)
                 }
                 home::Message::Run(datadir_path, cfg, chain, cube) => {
+                    // Every refusal below abandons this open: drop an armed Split
+                    // handoff with it rather than let a later open inherit it.
                     // Chain gate — first, before anything below can touch a
                     // seed file, an SDK, the daemon or a node. Two checks:
                     //
@@ -1016,10 +1018,12 @@ impl Tab {
                             cube.network.label(),
                             chain.label(),
                         ));
+                        app::split_intent::clear();
                         return Task::none();
                     }
                     if let Some(reason) = l.connect_chain_availability(cube.network).reason() {
                         l.set_error(reason.to_string());
+                        app::split_intent::clear();
                         return Task::none();
                     }
                     let network = chain.bitcoin_network();
@@ -1076,6 +1080,7 @@ impl Tab {
                                 cube.is_passkey_cube()
                             )
                         ));
+                        app::split_intent::clear();
                         return Task::none();
                     }
 
@@ -1099,6 +1104,7 @@ impl Tab {
                              and its recovery password, or use a build with \
                              COINCUBE_ENABLE_PASSKEY set.",
                         );
+                        app::split_intent::clear();
                         return Task::none();
                     }
 
@@ -4258,6 +4264,22 @@ mod migration_warning_tests {
         }
     }
 
+    /// #578 review I7: a Home-level refusal of the open (chain-folder
+    /// mismatch, Connect availability) drops an armed Split handoff.
+    #[test]
+    fn a_refused_open_from_home_clears_the_split_handoff() {
+        use crate::chain::ChainId;
+        for found_in in [ChainId::Bitcoin, ChainId::BitcoinBlake2b] {
+            let cube = cube_on(ChainId::BitcoinBlake2b);
+            let id = cube.id.clone();
+            app::split_intent::arm_fresh_for_test(&id);
+            let (state, error) = open_from_home(cube, found_in);
+            assert_eq!(state, "Home", "{:?}", found_in);
+            assert!(error.is_some());
+            assert!(app::split_intent::take_for_open(&id, ChainId::BitcoinBlake2b).is_none());
+        }
+    }
+
     fn cube_on(chain: crate::chain::ChainId) -> app::settings::CubeSettings {
         let mut cube = app::settings::CubeSettings::new("Cube".to_string(), chain);
         // Predates the creation-backup gate, so that gate never interferes
@@ -5498,6 +5520,7 @@ mod fork_completion_tests {
 
     #[test]
     fn cancelling_the_split_prerequisite_installer_discards_the_pending_intent() {
+        let _guard = crate::app::session::test_guard();
         let root_path = std::env::temp_dir().join(format!(
             "coincube-split-installer-cancel-{}",
             uuid::Uuid::new_v4()
