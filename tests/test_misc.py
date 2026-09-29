@@ -1,10 +1,13 @@
 import logging
+import http.client
+import json
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 import pytest
 import shutil
 import time
 
 from fixtures import *
-from test_framework.authproxy import JSONRPCException
 from test_framework.serializations import PSBT
 from test_framework.utils import (
     BitcoinBackendType,
@@ -19,7 +22,7 @@ from test_framework.utils import (
     USE_TAPROOT,
 )
 
-from threading import Thread
+from threading import Event, Lock, Thread
 
 
 def receive_and_send(coincubed, bitcoind):
@@ -318,71 +321,98 @@ def test_bitcoind_submit_block(bitcoind):
     wait_for(lambda: bitcoind.rpc.getblockcount() == block_count + 1)
 
 
-def bitcoind_wait_new_block(bitcoind):
-    """Call 'waitfornewblock', retry on 503."""
-    while True:
-        try:
-            bitcoind.rpc.waitfornewblock()
-            return
-        except JSONRPCException as e:
-            logging.debug(f"Error calling waitfornewblock: {str(e)}")
-            time.sleep(0.1)
-            continue
-
-
-@pytest.mark.skipif(
-    not IS_NOT_BITCOIND_24, reason="Need 'generateblock' with 'submit=False'"
-)
 @pytest.mark.skipif(
     BITCOIN_BACKEND_TYPE is not BitcoinBackendType.Bitcoind,
     reason="Tests the retry logic specific to the bitcoind backend.",
 )
-def test_retry_on_workqueue_exceeded(coincubed, bitcoind, executor):
-    """Make sure we retry requests to bitcoind if it is temporarily overloaded."""
-    # Start by reducing the work queue to a single slot. Note we need to stop coincubed
-    # as we don't support yet restarting a bitcoind due to the cookie file getting
-    # overwritten.
+def test_retry_on_workqueue_exceeded(coincubed, bitcoind):
+    """A single Core-style queue-full response must retry the same read."""
+    # Saturating Core's real queue is not a deterministic retry oracle: the
+    # daemon can occupy its queued slot while unrelated requests receive 503.
+    # Forward startup normally, then fault only startrescan's genesis read.
+    armed = Event()
+    lock = Lock()
+    requests = []
+    forwarded = []
+    errors = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_):
+            pass
+
+        def do_POST(self):
+            connection = None
+            try:
+                body = self.rfile.read(int(self.headers["Content-Length"]))
+                request = json.loads(body)
+                target = (armed.is_set() and request.get("method") == "getblockhash"
+                          and request.get("params") == [0])
+                inject = False
+                if target:
+                    with lock:
+                        requests.append(request)
+                        inject = len(requests) == 1
+                if inject:
+                    status, payload = 503, b"Work queue depth exceeded"
+                else:
+                    connection = http.client.HTTPConnection("127.0.0.1", bitcoind.rpcport,
+                                                            timeout=10)
+                    connection.request("POST", self.path, body, headers={
+                        name: self.headers[name] for name in ("Authorization", "Content-Type")
+                        if name in self.headers})
+                    response = connection.getresponse()
+                    status, payload = response.status, response.read()
+                    if target:
+                        with lock:
+                            forwarded.append((request, status, json.loads(payload)))
+                self.send_response(status)
+                self.send_header("Content-Length", str(len(payload)))
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.wfile.write(payload)
+            except Exception as error:
+                with lock:
+                    errors.append(repr(error))
+                self.close_connection = True
+            finally:
+                if connection is not None:
+                    connection.close()
+
     coincubed.stop()
-    bitcoind.cmd_line += ["-rpcworkqueue=1", "-rpcthreads=1"]
-    bitcoind.stop()
-    bitcoind.start()
-
-    # Mine a block but don't submit it yet, we'll use it to unstuck `waitfornewblock`.
-    block_count = bitcoind.rpc.getblockcount()
-    block = bitcoind.rpc.generateblock(bitcoind.rpc.getnewaddress(), [], False)
-
-    # Only restart Coincube now to make sure the above bitcoind RPCs don't conflict with the
-    # ones performed by Coincube at startup.
-    coincubed.start()
-
-    # Clog the bitcoind RPC server working queue until we get a new block. This is to
-    # make our upcoming call to bitcoind RPC through coincubed fail with a 503 error.
-    f_wait = executor.submit(bitcoind_wait_new_block, bitcoind)
-
-    # Now send an RPC command to coincubed that will involve it making one to bitcoind. This
-    # command to bitcoind should fail and we should retry it.
-    # We use a loop to make sure coincubed hits a 503 when connecting to bitcoind, and not a
-    # (very long) timeout while awaiting the response.
-    while True:
-        f_coincube = executor.submit(coincubed.rpc.getinfo)
+    config = Path(coincubed.conf_file)
+    original = config.read_text()
+    old_address = f"addr = '127.0.0.1:{bitcoind.rpcport}'"
+    assert original.count(old_address) == 1
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    worker = Thread(target=server.serve_forever, daemon=True)
+    worker.start()
+    try:
+        config.write_text(original.replace(old_address,
+                          f"addr = '127.0.0.1:{server.server_port}'"))
+        coincubed.start()
+        assert coincubed.rpc.getinfo()["rescan_progress"] is None
+        armed.set()
+        with pytest.raises(RpcError, match="Insane timestamp"):
+            coincubed.rpc.startrescan(0)
+        coincubed.wait_for_logs([
+            "Transient error when sending request to bitcoind.*(status: 503, body: Work queue depth exceeded)",
+            "Retrying RPC request to bitcoind",
+        ], timeout=TIMEOUT)
+        with lock:
+            assert not errors, errors
+            assert len(requests) == 2, requests
+            assert requests[0] == requests[1], requests
+            assert len(forwarded) == 1, forwarded
+            assert forwarded[0][1] == 200, forwarded
+            assert forwarded[0][2]["result"] == bitcoind.rpc.getblockhash(0)
+        assert coincubed.rpc.getinfo()["rescan_progress"] is None
+    finally:
+        # Stop the daemon before removing its transport, including on failure.
         try:
-            coincubed.wait_for_logs(
-                [
-                    "Transient error when sending request to bitcoind.*(status: 503, body: Work queue depth exceeded)",
-                    "Retrying RPC request to bitcoind",
-                ],
-                timeout=5,
-            )
-            logging.info("Didn't raise. Trying again.")
-            break
-        except TimeoutError:
-            continue
-
-    # Submit the mined block to bitcoind through its P2P interface, it would make `waitfornewblock`
-    # return, thereby unclogging the RPC work queue and unstucking the `getinfo` call to Coincube.
-    bitcoind.submit_block(block_count, block["hex"])
-    f_wait.result(TIMEOUT)
-
-    # We should have retried the request to bitcoind, which should now succeed along with the call.
-    # This just checks the response we get is sane, nothing particular with this field.
-    assert "block_height" in f_coincube.result(TIMEOUT)
+            coincubed.stop()
+        finally:
+            config.write_text(original)
+            server.shutdown()
+            server.server_close()
+            worker.join(timeout=10)
+            assert not worker.is_alive()
