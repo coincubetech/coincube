@@ -67,9 +67,11 @@ pub(super) async fn check(
     expected: u64,
     generation: watch::Receiver<u64>,
 ) -> Result<CheckedInputs, String> {
-    let _checked = check_inputs(built, daemon, wallet, connect, expected, generation).await?;
+    let checked = check_inputs(built, daemon, wallet, connect, expected, generation).await?;
     // Full flow acceptance is still required before returning this to a signer.
-    Err("Bitcoin-only input signing is not available yet.".into())
+    crate::services::claim_ancestry_gate::authorization()
+        .ok_or_else(|| crate::services::claim_ancestry_gate::CLOSED_MESSAGE.to_string())?;
+    Ok(checked)
 }
 
 pub(super) async fn check_inputs(
