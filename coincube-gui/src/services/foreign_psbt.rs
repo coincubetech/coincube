@@ -57,8 +57,9 @@ pub enum ForeignPsbtError {
     /// The reserved target address already has history in the target Vault.
     TargetUsed,
     /// The target Vault's daemon cannot prove the reserved address unused:
-    /// it is not fully synced, is rescanning, holds back a reorg or diverged,
-    /// or has not recorded the reservation.
+    /// it is not fully synced, has not completed a poll since the reservation,
+    /// is rescanning, holds back a reorg or diverged, or has not recorded the
+    /// reservation.
     TargetFreshnessUnknown,
 }
 
@@ -70,11 +71,15 @@ pub struct ForeignChange {
 
 /// What the target Vault's daemon reported for a Split destination: the
 /// address `get_new_address` reserved, then `get_info` and the coin listing
-/// of every status, both taken after the reservation. The daemon's history is
+/// of every status, both taken after the reservation and after a successful
+/// poll that finished no earlier than the reservation. The daemon's history is
 /// the only evidence of address use, so each observation is required.
 #[derive(Debug, Clone)]
 pub struct TargetReservation {
     pub reserved: GetAddressResult,
+    /// Unix seconds taken immediately before `get_new_address`. `info` must
+    /// show a successful poll at or after this time.
+    pub requested_at: u32,
     pub info: GetInfoResult,
     /// `list_coins` with no status or outpoint filter: unconfirmed,
     /// confirmed, spending and spent coins alike.
@@ -152,7 +157,9 @@ impl TargetAddressEvidence {
 
 /// Fail closed unless the target daemon proves the reserved receive address
 /// unused. The listing must come from this Vault's descriptor; the daemon must
-/// be fully synced with no rescan, held-back reorg or divergence; its receive
+/// be fully synced, have completed a poll at or after the reservation time
+/// (Electrum/Esplora report `sync == 1.0` before any poll), with no rescan,
+/// held-back reorg or divergence; its receive
 /// index must already cover the reservation; and no coin of any status may pay
 /// the reserved script or sit at the reserved receive index.
 fn check_target_fresh(
@@ -167,7 +174,11 @@ fn check_target_fresh(
     let index = u32::from(reservation.reserved.derivation_index);
     // `sync` is rounded up to exactly 1.0 when complete; NaN fails.
     let synced = info.sync >= 1.0;
+    let polled_since = info
+        .last_poll_timestamp
+        .is_some_and(|polled| polled >= reservation.requested_at);
     if !synced
+        || !polled_since
         || info.rescan_progress.is_some()
         || info.refused_reorg_depth.is_some()
         || info.chain_divergence
@@ -787,8 +798,11 @@ mod tests {
             .address(bitcoin::Network::Bitcoin)
     }
 
-    /// A synced daemon that has just reserved receive `index` and knows no
-    /// coin in the Vault.
+    /// Reservation time used by the fixtures (Unix seconds).
+    const RESERVED_AT: u32 = 1_800_000_000;
+
+    /// A synced daemon that has just reserved receive `index`, polled after
+    /// the reservation, and knows no coin in the Vault.
     fn fresh_reservation(descriptor: &CoincubeDescriptor, index: u32) -> TargetReservation {
         reservation_at(
             descriptor,
@@ -806,6 +820,7 @@ mod tests {
     ) -> TargetReservation {
         TargetReservation {
             reserved: GetAddressResult::new(address, ChildNumber::from_normal_idx(index).unwrap()),
+            requested_at: RESERVED_AT,
             info: GetInfoResult {
                 version: String::new(),
                 network: bitcoin::Network::Bitcoin,
@@ -818,7 +833,7 @@ mod tests {
                 refused_reorg_depth: None,
                 chain_divergence: false,
                 timestamp: 0,
-                last_poll_timestamp: Some(1),
+                last_poll_timestamp: Some(RESERVED_AT + 1),
                 receive_index: index,
                 change_index: 0,
             },
@@ -1622,7 +1637,12 @@ mod tests {
         );
 
         // The daemon cannot prove freshness.
-        let unproven: [fn(&mut GetInfoResult); 7] = [
+        let unproven: [fn(&mut GetInfoResult); 9] = [
+            // #592 F1: Electrum/Esplora report sync 1.0 before any poll. A
+            // daemon that never polled, or last polled before the
+            // reservation, has not looked at the chain for this address.
+            |i| i.last_poll_timestamp = None,
+            |i| i.last_poll_timestamp = Some(RESERVED_AT - 1),
             |i| i.sync = 0.999,
             |i| i.sync = f64::NAN,
             |i| i.rescan_progress = Some(0.5),
@@ -1641,6 +1661,12 @@ mod tests {
                 "case {}",
                 n
             );
+        }
+        // A poll in the same second as the reservation, or later, counts.
+        for polled in [RESERVED_AT, RESERVED_AT + 60] {
+            let mut reservation = fresh.clone();
+            reservation.info.last_poll_timestamp = Some(polled);
+            assert_eq!(authenticate(&reservation).unwrap(), evidence);
         }
         // The history belongs to another descriptor.
         let mut other = fresh.clone();

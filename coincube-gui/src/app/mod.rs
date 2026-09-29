@@ -934,21 +934,64 @@ fn split_fee_source() -> std::sync::Arc<dyn crate::services::foreign_psbt::Sweep
     std::sync::Arc::new(crate::services::foreign_psbt::UnavailableBtcb2Fees)
 }
 
+/// How long a Split reservation waits for the daemon's first successful poll
+/// after the reservation before the review is refused as unprovable.
+const SPLIT_TARGET_POLL_BOUND: Duration = Duration::from_secs(30);
+
+fn unix_now_secs() -> u32 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| <u32 as std::convert::TryFrom<u64>>::try_from(d.as_secs()).unwrap_or(u32::MAX))
+        .unwrap_or(0)
+}
+
 /// Reserve a Split destination, then read the daemon's sync state and full
 /// coin history *after* the reservation, so `TargetAddressEvidence` can prove
 /// the reserved address unused rather than merely owned by the Vault.
+///
+/// Electrum/Esplora report `sync == 1.0` even before the first poll, so the
+/// sync figure alone proves nothing (#592 F1). The reservation time is taken
+/// before `get_new_address`; a poll is requested, and coins are listed only
+/// once `get_info` shows a successful poll at or after that time. If none
+/// lands within `poll_bound`, the last observation is returned and
+/// `authenticate` refuses it as `TargetFreshnessUnknown`.
 async fn reserve_split_target(
     daemon: Arc<dyn Daemon + Sync + Send>,
+    poll_bound: Duration,
 ) -> Result<crate::services::foreign_psbt::TargetReservation, String> {
+    let requested_at = unix_now_secs();
     let reserved = daemon
         .get_new_address()
         .await
         .map_err(|error| error.to_string())?;
-    let (info, coins) = tokio::join!(daemon.get_info(), daemon.list_coins(&[], &[]));
+    // A failed nudge is not fatal: the poller may still run on its own, and
+    // the poll-time check below fails closed either way.
+    if let Err(error) = daemon.request_sync().await {
+        warn!("Split target: request_sync failed: {}", error);
+    }
+    let polled = |info: &crate::daemon::model::GetInfoResult| {
+        info.last_poll_timestamp
+            .is_some_and(|polled| polled >= requested_at)
+    };
+    let interval = poll_bound.min(Duration::from_millis(500));
+    let deadline = tokio::time::Instant::now() + poll_bound;
+    let info = loop {
+        let info = daemon.get_info().await.map_err(|error| error.to_string())?;
+        if polled(&info) || tokio::time::Instant::now() >= deadline {
+            break info;
+        }
+        tokio::time::sleep(interval).await;
+    };
+    let coins = daemon
+        .list_coins(&[], &[])
+        .await
+        .map_err(|error| error.to_string())?
+        .coins;
     Ok(crate::services::foreign_psbt::TargetReservation {
         reserved,
-        info: info.map_err(|error| error.to_string())?,
-        coins: coins.map_err(|error| error.to_string())?.coins,
+        requested_at,
+        info,
+        coins,
     })
 }
 
@@ -968,7 +1011,7 @@ fn split_target_error(error: crate::services::foreign_psbt::ForeignPsbtError) ->
     use crate::services::foreign_psbt::ForeignPsbtError as E;
     match error {
         E::TargetUsed => "The destination address Tenshu reserved has already been used in this Vault, so it is not a fresh address. Split was cancelled; scan again.".to_string(),
-        E::TargetFreshnessUnknown => "This Vault is not fully synced, so Tenshu cannot prove the destination address is unused. Wait for sync to finish, then scan again.".to_string(),
+        E::TargetFreshnessUnknown => "This Vault has not finished syncing since the destination address was reserved, so Tenshu cannot prove the address is unused. Wait for sync to finish, then scan again.".to_string(),
         _ => "The reserved address did not match this Cube and Vault.".to_string(),
     }
 }
@@ -3614,7 +3657,7 @@ impl App {
             async move {
                 let fees = split_fee_source();
                 let (reservation, feerate) = tokio::join!(
-                    reserve_split_target(daemon),
+                    reserve_split_target(daemon, SPLIT_TARGET_POLL_BOUND),
                     crate::services::foreign_psbt::btcb2_sweep_feerate(&*fees)
                 );
                 Ok((Box::new(reservation?), feerate))
@@ -7882,21 +7925,40 @@ mod tests {
         use std::collections::{HashMap, HashSet};
         use std::sync::Mutex;
 
+        /// When the fake's poller completes a poll.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub(super) enum Polls {
+            /// Never polled: Electrum/Esplora still report sync 1.0 (#592 F1).
+            Never,
+            /// Last polled long before any reservation, and never again.
+            Stale,
+            /// A requested sync completes a poll at the current time.
+            OnRequest,
+        }
+
+        /// `coins` is the on-chain history. Like the real daemon, the fake
+        /// only knows it after a poll that completed after the request.
         #[derive(Debug)]
         pub(super) struct SplitTargetDaemon {
             pub descriptor: CoincubeDescriptor,
             pub index: u32,
             pub coins: Vec<model::ListCoinsEntry>,
+            pub polls: Polls,
             pub calls: Mutex<Vec<String>>,
         }
 
         impl SplitTargetDaemon {
-            fn reserved(&self) -> bool {
-                self.calls
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .any(|c| c == "get_new_address")
+            fn called(&self, name: &str) -> bool {
+                self.calls.lock().unwrap().iter().any(|c| c == name)
+            }
+            fn last_poll(&self) -> Option<u32> {
+                match self.polls {
+                    Polls::Never => None,
+                    Polls::Stale => Some(1),
+                    Polls::OnRequest => self
+                        .called("request_sync")
+                        .then(super::super::unix_now_secs),
+                }
             }
         }
 
@@ -7916,7 +7978,12 @@ mod tests {
             }
             async fn get_info(&self) -> Result<model::GetInfoResult, DaemonError> {
                 // Taken after the reservation, so the receive index covers it.
-                let receive_index = if self.reserved() { self.index } else { 0 };
+                let receive_index = if self.called("get_new_address") {
+                    self.index
+                } else {
+                    0
+                };
+                let last_poll_timestamp = self.last_poll();
                 self.calls.lock().unwrap().push("get_info".into());
                 Ok(model::GetInfoResult {
                     version: String::new(),
@@ -7930,13 +7997,14 @@ mod tests {
                     refused_reorg_depth: None,
                     chain_divergence: false,
                     timestamp: 0,
-                    last_poll_timestamp: Some(1),
+                    last_poll_timestamp,
                     receive_index,
                     change_index: 0,
                 })
             }
             async fn request_sync(&self) -> Result<(), DaemonError> {
-                unreachable!()
+                self.calls.lock().unwrap().push("request_sync".into());
+                Ok(())
             }
             async fn get_new_address(&self) -> Result<model::GetAddressResult, DaemonError> {
                 self.calls.lock().unwrap().push("get_new_address".into());
@@ -7978,9 +8046,9 @@ mod tests {
                 } else {
                     "list_coins(filtered)"
                 };
-                // A listing taken before the reservation cannot see a coin
-                // that arrives in between; model it as empty.
-                let coins = if self.reserved() {
+                // The daemon knows on-chain history only after a poll that
+                // follows the request; before that its coin table is empty.
+                let coins = if self.polls == Polls::OnRequest && self.called("request_sync") {
                     self.coins.clone()
                 } else {
                     Vec::new()
@@ -8099,27 +8167,43 @@ mod tests {
             is_change: false,
             is_from_self: false,
         };
-        let run = |coins| {
+        use split_target::Polls;
+        let run = |coins, polls| {
             let daemon = Arc::new(split_target::SplitTargetDaemon {
                 descriptor: descriptor.clone(),
                 index: 3,
                 coins,
+                polls,
                 calls: Default::default(),
             });
             let reservation = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
                 .build()
                 .unwrap()
-                .block_on(reserve_split_target(daemon.clone()))
+                .block_on(reserve_split_target(
+                    daemon.clone(),
+                    Duration::from_millis(50),
+                ))
                 .unwrap();
             let calls = daemon.calls.lock().unwrap().clone();
             (reservation, calls)
         };
 
-        let (fresh, calls) = run(Vec::new());
-        assert_eq!(calls[0], "get_new_address");
-        let mut rest = calls[1..].to_vec();
-        rest.sort();
-        assert_eq!(rest, ["get_info", "list_coins(all)"]);
+        let (fresh, calls) = run(Vec::new(), Polls::OnRequest);
+        // Reserve, request a poll, wait for it, and only then list coins.
+        assert_eq!(
+            calls,
+            [
+                "get_new_address",
+                "request_sync",
+                "get_info",
+                "list_coins(all)"
+            ]
+        );
+        assert!(fresh
+            .info
+            .last_poll_timestamp
+            .is_some_and(|t| t >= fresh.requested_at));
         let evidence = TargetAddressEvidence::authenticate(&cube, &wallet, &fresh, 7).unwrap();
         assert_eq!(
             evidence.derivation_index(),
@@ -8127,7 +8211,7 @@ mod tests {
         );
 
         for spent in [false, true] {
-            let (used, _) = run(vec![used_coin(spent)]);
+            let (used, _) = run(vec![used_coin(spent)], Polls::OnRequest);
             assert_eq!(
                 TargetAddressEvidence::authenticate(&cube, &wallet, &used, 7).unwrap_err(),
                 ForeignPsbtError::TargetUsed,
@@ -8135,9 +8219,29 @@ mod tests {
                 spent
             );
         }
+        // #592 F1: first open of a Vault whose index 3 is used on chain. The
+        // backend reports sync 1.0 but has not polled (or polled only before
+        // the reservation), so its coin table is empty: never fresh.
+        for polls in [Polls::Never, Polls::Stale] {
+            let (unpolled, calls) = run(vec![used_coin(false)], polls);
+            assert!(unpolled.coins.is_empty());
+            assert_eq!(unpolled.info.sync, 1.0);
+            // It waited (re-reading get_info) until the bound, then gave up.
+            assert!(
+                calls.iter().filter(|c| *c == "get_info").count() >= 2,
+                "{:?}",
+                calls
+            );
+            assert_eq!(
+                TargetAddressEvidence::authenticate(&cube, &wallet, &unpolled, 7).unwrap_err(),
+                ForeignPsbtError::TargetFreshnessUnknown,
+                "{:?}",
+                polls
+            );
+        }
         assert!(split_target_error(ForeignPsbtError::TargetUsed).contains("already been used"));
         assert!(split_target_error(ForeignPsbtError::TargetFreshnessUnknown)
-            .contains("not fully synced"));
+            .contains("not finished syncing"));
     }
 
     /// #576 review F1: a fork open refused before `new_inner` must still
