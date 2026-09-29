@@ -75,6 +75,12 @@ The fixture funds a 2-of-3 Vault with a recovery path before the fork and create
 one post-fork Bitcoin-only coin (spent from a post-fork coinbase) for the input
 poison. See `tests/test_framework/btcb2.py`.
 
+All ordinary regtest nodes pass `-listenonion=0`: the suite does not test Tor,
+and Knots' default automatic Tor launcher can enter the external descriptor
+double-close tracked by #394 when `tor` is absent. The bounded block-file probe
+explicitly re-enables that vendor failure path with a missing test command so it
+can still validate a future upstream repair.
+
 The harness is skipped unless all three binaries are configured:
 
 ```

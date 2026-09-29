@@ -594,4 +594,14 @@ def test_bitcoind_extra_args_are_complete_argument_strings(tmp_path):
 
     plain = Bitcoind(str(node_dir), extra_args=None)
     assert plain.cmd_line == node.cmd_line[:-2]
-    assert plain.cmd_line[-1] == "-debugexclude=tor"
+    assert plain.cmd_line[-1] == "-listenonion=0"
+
+
+def test_blockfile_probe_explicitly_reenables_the_vendor_failure_path():
+    """Normal nodes avoid #394; only the diagnostic probe launches Tor."""
+    from test_btcb2_blockfile import BLOCKFILE_PROBE_NODE_ARGS
+
+    assert BLOCKFILE_PROBE_NODE_ARGS == [
+        "-listenonion=1",
+        "-torexecute=coincube-btcb2-probe-missing-tor",
+    ]
