@@ -265,7 +265,6 @@ impl SplitWalletPanel {
             report,
             external,
             internal,
-            inventory: _,
             ..
         } = Arc::try_unwrap(evidence).unwrap_or_else(|shared| (*shared).clone());
         let intent = SplitIntent::new(

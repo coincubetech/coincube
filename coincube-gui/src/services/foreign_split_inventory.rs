@@ -51,8 +51,9 @@ pub enum InventoryError {
     Coverage(ChainId, OutPoint),
 }
 
-/// Display row. It carries no scriptPubKey, previous transaction or `TxOut`,
-/// so it cannot be turned into a transaction input.
+/// Display row. It carries no scriptPubKey, previous transaction or `TxOut`:
+/// no prevout data a transaction builder needs. That is the only barrier; the
+/// outpoint could still be looked up again, so this type grants nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InventoryCoin {
     pub outpoint: OutPoint,
@@ -76,7 +77,10 @@ impl InventoryCoin {
 
 /// A Bitcoin output confirmed at or after the observed fork height. Shown to
 /// the user as a possible input poison; never proof that it is absent from
-/// BTCB2 (see `coincube_core::claim`). No accessor yields spendable data.
+/// BTCB2 (see `coincube_core::claim`). It carries no prevout data, but that
+/// does not stop a caller re-fetching the outpoint. Step 1 (A3) must instead
+/// require a positive poison-proof type built from verified ancestry, never
+/// this candidate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PoisonCandidate(InventoryCoin);
 
