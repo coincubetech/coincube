@@ -68,12 +68,19 @@ pub enum Message {
     /// probe, build, finalise, review, submit, track). Carries the panel's
     /// coordinator session back and forth, so no other handler ever sees it.
     Claim(super::state::vault::claim::ClaimEvent),
-    /// Completion of the read-only Split destination reservation and bounded
-    /// BTCB2 fee-rate lookup (`None` = unavailable). It never carries a PSBT
-    /// or signing capability.
+    /// Completion of the read-only Split destination reservation (with the
+    /// daemon's post-reservation sync state and coin history, to prove the
+    /// address fresh) and bounded BTCB2 fee-rate lookup (`None` =
+    /// unavailable). It never carries a PSBT or signing capability.
     SplitTargetPrepared {
         generation: u64,
-        result: Result<(GetAddressResult, Option<u64>), String>,
+        result: Result<
+            (
+                Box<crate::services::foreign_psbt::TargetReservation>,
+                Option<u64>,
+            ),
+            String,
+        >,
     },
     LoadDaemonConfig(Box<DaemonConfig>),
     DaemonConfigLoaded(Result<(), Error>),
