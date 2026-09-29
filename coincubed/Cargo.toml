@@ -90,8 +90,8 @@ minreq = "2.14"
 
 [lints.clippy]
 uninlined_format_args = "allow"
-large_enum_variant = "allow"
-result_large_err = "allow"
+large_enum_variant = "warn"
+result_large_err = "warn"
 
 [lib]
 doctest = false

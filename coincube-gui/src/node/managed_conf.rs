@@ -58,7 +58,14 @@ pub fn managed_conf_lock_path(coincube_datadir: &CoincubeDirectory) -> PathBuf {
     coincube_datadir.path().join(MANAGED_CONF_LOCK_FILE)
 }
 
-/// How long to keep trying for the lock, as (attempts, delay between them).
+/// Retry policy for the lock, as (maximum attempts, delay between them).
+///
+/// Production makes at most 40 attempts, with 50 ms sleeps between failed
+/// attempts and no sleep after the last one. This is an attempt bound, not a
+/// wall-clock deadline: exhausting it costs all lock calls plus 39 actual
+/// sleeps (1.95 s of requested sleep). Scheduling and lock-call costs make the
+/// elapsed time platform- and load-dependent; it may exceed two seconds.
+/// The test default of 500 attempts and 10 ms sleeps is likewise not a deadline.
 ///
 /// The same production bound as the node-identity marker lock: real holders
 /// finish in microseconds (a read, an allocation, a rename), so contention is
@@ -142,7 +149,7 @@ pub(crate) async fn with_quick_lock_bound_async<F: std::future::Future>(body: F)
 #[derive(Debug)]
 pub enum ManagedConfLockError {
     /// Another holder — a thread of this process or another process — kept the
-    /// lock for the whole bounded wait. Nothing was read or written; retry.
+    /// lock through every acquisition attempt. Nothing was read or written; retry.
     Busy { path: PathBuf },
     /// The lock file could not be created or locked.
     Io { path: PathBuf, error: io::Error },
@@ -188,14 +195,14 @@ pub struct ManagedConfLock {
 }
 
 impl ManagedConfLock {
-    /// Take the lock, waiting up to the bounded acquisition window.
+    /// Take the lock using the attempt-limited retry policy; elapsed time is not bounded.
     pub fn acquire(coincube_datadir: &CoincubeDirectory) -> Result<Self, ManagedConfLockError> {
         let (attempts, retry) = lock_acquisition_bound();
         Self::acquire_with_bound(coincube_datadir, attempts, retry)
     }
 
-    /// [`Self::acquire`] with an explicit bound (tests exercise the timeout path
-    /// without the production wait).
+    /// [`Self::acquire`] with an explicit attempt count and between-attempt delay.
+    /// Tests use this to exercise contention without the production retry count.
     pub fn acquire_with_bound(
         coincube_datadir: &CoincubeDirectory,
         attempts: u32,

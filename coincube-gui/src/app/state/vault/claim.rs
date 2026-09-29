@@ -2178,7 +2178,7 @@ pub fn vault_shape_refusal(wallet: &Wallet) -> Option<String> {
 fn rdts_refusal(assessment: Assessment, window: &ForkWindow) -> String {
     match assessment {
         Assessment::RdtsExpired => {
-            "Bitcoin Blake2b's replay protection (BIP-110) has expired, so an OP_RETURN split is no longer possible."
+            "Bitcoin Blake2b's replay protection has expired, so an OP_RETURN split is no longer possible."
                 .to_string()
         }
         Assessment::ExpiryMargin => {
@@ -2193,7 +2193,7 @@ fn rdts_refusal(assessment: Assessment, window: &ForkWindow) -> String {
             )
         }
         Assessment::RdtsScheduled | Assessment::RdtsInactive => {
-            "Bitcoin Blake2b's replay protection (BIP-110) isn't active yet.".to_string()
+            "Bitcoin Blake2b's replay protection isn't active yet.".to_string()
         }
         Assessment::Deployment(state) => {
             format!("Bitcoin Blake2b's status isn't usable right now ({state:?}).")

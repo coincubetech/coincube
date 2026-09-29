@@ -801,13 +801,14 @@ pub fn allocate_managed_ports<E: fmt::Display>(
 /// Returns the identity now in force, which may be another caller's if it got there
 /// first. An incomplete marker — an empty file from a crash, or one left by an earlier
 /// version of this function — is discarded and replaced rather than trusted forever.
-/// How long to keep trying for the marker lock, as (attempts, delay between them).
+/// Retry policy for the marker lock, as (maximum attempts, delay between them).
 ///
-/// This is an *attempt count*, not a deadline: its wall-clock cost is the attempts times
-/// whatever one `try_lock_exclusive` plus one `sleep` costs at the time — the nominal
-/// figure where `sleep` tracks nominal, and several times that where it overshoots (the
-/// same macOS host has measured the old 30-attempt bound at both ~0.3 s and ~2.8 s in
-/// different sessions). Every duration quoted here is nominal.
+/// Production makes at most 40 attempts, with 50 ms sleeps between failed
+/// attempts and no sleep after the last one. This is an attempt bound, not a
+/// wall-clock deadline: exhausting it costs all lock calls plus 39 actual
+/// sleeps (1.95 s of requested sleep). Scheduling and lock-call costs make the
+/// elapsed time platform- and load-dependent; it may exceed two seconds.
+/// Test durations quoted below are likewise nominal, not deadlines.
 ///
 /// Under test the default is *generous* (500 attempts 10 ms apart, nominally ~5 s): a
 /// waiter whose holder is merely slow — a loaded CI runner flushing a staged marker to a
@@ -1983,6 +1984,23 @@ pub fn stop_and_wait_managed_bitcoind(config: &BitcoindConfig) {
 }
 
 impl Bitcoind {
+    /// A handle with no node behind it, for a test that has to hand a caller an
+    /// existing managed-node handle without running one. Takes the same lock
+    /// file a started node would, so the lock bookkeeping stays honest, and
+    /// starts no process. Test-only.
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        config: BitcoindConfig,
+        coincube_datadir: &CoincubeDirectory,
+        network: Network,
+    ) -> Self {
+        Self {
+            config,
+            lock: LockFile::create(coincube_datadir.bitcoind_directory(), network)
+                .expect("synthetic lock file"),
+        }
+    }
+
     /// Start the managed node for a chain, by identity.
     ///
     /// The chain-aware entry point: a chain this build cannot run is refused
