@@ -419,7 +419,7 @@ impl CoincubeLiteLogin {
                         .align_x(Alignment::Center)
                         .spacing(20)
                         .width(Length::Fill)
-                        .push(h2("Liana Connect"))
+                        .push(h2("COINCUBE | Connect"))
                         .push(
                             Column::new()
                                 .max_width(500)

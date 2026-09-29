@@ -584,8 +584,8 @@ fn plan_tagline(tier: &PlanTier) -> &'static str {
              and a Lightning address."
         }
         PlanTier::Pro => {
-            "More Cubes per network, Duress protection, and Connect-enforced \
-             policies for greater control."
+            "More Cubes per network and Connect-enforced policies for greater control. \
+             Duress mode — Coming soon."
         }
         PlanTier::Estate => {
             "Maximum Cube capacity, inheritance escrow, and collaborative \
@@ -780,26 +780,83 @@ fn plan_billing_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAcc
 
 // ── Plan provenance card (server-driven, v2) ────────────────────────────────
 
-/// Renders the current plan's `plan_provenance` (`{label, expires_at,
-/// badge}`) verbatim — the desktop knows nothing about which campaign
-/// granted it. Returns `None` for purchased/free plans (no provenance),
-/// which keeps the existing paid/free UX. Display strings are entirely
-/// server-authored so a campaign's copy never needs an app release.
+/// Label shown in place of a server provenance label that carries stale
+/// campaign copy. Deliberately tier- and duration-neutral: the grant's real
+/// expiry is rendered separately from `expires_at`.
+const NEUTRAL_PROVENANCE_LABEL: &str = "Promotional access";
+
+/// Pre-launch campaign wording that must not render at launch (#511): no
+/// "Beta", no "free forever", no "Founding member", no year-one/year-two
+/// promises. Matched case-insensitively, with hyphens treated as spaces.
+const STALE_CAMPAIGN_PHRASES: &[&str] = &[
+    "founding member",
+    "free forever",
+    "first year",
+    "year one",
+    "second year",
+    "year two",
+];
+
+fn contains_stale_campaign_copy(copy: &str) -> bool {
+    let normalized = copy.to_lowercase().replace('-', " ");
+    STALE_CAMPAIGN_PHRASES
+        .iter()
+        .any(|phrase| normalized.contains(phrase))
+        || normalized
+            .split(|c: char| !c.is_alphanumeric())
+            .any(|word| word == "beta")
+}
+
+/// Launch-safe `(label, badge)` for the current plan's `plan_provenance`.
+///
+/// The label and badge stay server-authored (the campaign engine owns grant
+/// semantics, so the desktop cannot know whether a grant is the 60-day launch
+/// offer, a year-one grant or an admin grant). Only stale campaign wording is
+/// filtered: a stale label becomes [`NEUTRAL_PROVENANCE_LABEL`] and a stale
+/// or empty badge is dropped. Returns `None` for purchased/free plans (no
+/// provenance), which keeps the existing paid/free UX.
+fn plan_provenance_display(plan: &ConnectPlan) -> Option<(&str, Option<&str>)> {
+    let prov = plan.plan_provenance.as_ref()?;
+    let label = prov.label.trim();
+    let label = if label.is_empty() || contains_stale_campaign_copy(label) {
+        NEUTRAL_PROVENANCE_LABEL
+    } else {
+        label
+    };
+    let badge = prov
+        .badge
+        .as_deref()
+        .map(str::trim)
+        .filter(|b| !b.is_empty() && !contains_stale_campaign_copy(b));
+    Some((label, badge))
+}
+
+fn launch_feature_copy(feature: &str) -> String {
+    match feature.trim().to_ascii_lowercase().as_str() {
+        "duress" | "duress mode" | "duress protection" => "Duress mode — Coming soon".to_string(),
+        "recovery alert" | "recovery alerts" | "duress alert" | "duress alerts" => {
+            "Recovery alerts — Coming soon".to_string()
+        }
+        _ => feature.to_string(),
+    }
+}
+
 fn plan_provenance_card<'a>(plan: &'a ConnectPlan) -> Option<Element<'a, ConnectAccountMessage>> {
     let prov = plan.plan_provenance.as_ref()?;
+    let (label, badge) = plan_provenance_display(plan)?;
     let badge_color = plan_tier_color(plan.tier());
 
     let mut header = Row::new()
         .push(text::p1_bold(plan.tier().to_string()).color(badge_color))
         .push(iced::widget::Space::new().width(Length::Fill));
-    if let Some(badge) = prov.badge.as_deref().filter(|b| !b.is_empty()) {
+    if let Some(badge) = badge {
         header = header.push(text::p2_bold(badge).color(color::ORANGE));
     }
 
     let mut card_col = Column::new()
         .push(header.align_y(Alignment::Center))
         .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
-        .push(text::p1_medium(prov.label.clone()).style(theme::text::primary));
+        .push(text::p1_medium(label).style(theme::text::primary));
     if let Some(exp) = prov.expires_at.as_deref().filter(|e| !e.is_empty()) {
         card_col = card_col
             .push(iced::widget::Space::new().height(Length::Fixed(6.0)))
@@ -958,14 +1015,16 @@ fn plan_selection_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectA
                         BillingCycle::Monthly => p.monthly,
                         BillingCycle::Annual => p.annual,
                     });
-                    // Render the server's feature bullets verbatim — the
-                    // `/connect/features` list is the single source of truth
-                    // (including the per-network cube count), so the desktop
-                    // no longer prepends its own cube-count line.
+                    // Preserve server-authored availability while keeping
+                    // unreleased duress and alert marketing launch-safe.
                     Some(PlanCardData {
                         name: tier.to_string(),
                         tier,
-                        features: info.features.clone(),
+                        features: info
+                            .features
+                            .iter()
+                            .map(|feature| launch_feature_copy(feature))
+                            .collect(),
                         price_amount,
                     })
                 })
@@ -2638,6 +2697,130 @@ mod renewal_banner_tests {
             billing_cycle: Some(BillingCycle::Monthly),
             plan_provenance: None,
         }
+    }
+
+    fn provenance_plan(tier: PlanTier, label: &str, badge: Option<&str>) -> ConnectPlan {
+        let mut p = plan(tier, PlanStatus::Active, Some("2027-07-04T00:00:00Z"));
+        p.plan_provenance = Some(PlanProvenance {
+            label: label.to_string(),
+            expires_at: Some("2027-07-04T00:00:00Z".to_string()),
+            badge: badge.map(|b| b.to_string()),
+        });
+        p
+    }
+
+    /// Regression (#574 P2-1): an Estate grant that is not the 60-day launch
+    /// offer (year-one campaign, retro-granted beta cohort, admin grant) must
+    /// never be labelled with the launch offer's duration.
+    #[test]
+    fn non_launch_estate_grant_never_renders_sixty_days() {
+        for (label, badge) in [
+            ("Complimentary Estate access", Some("Grant")),
+            ("Estate granted by support", None),
+            ("Free for your first year", Some("Founding member")),
+        ] {
+            let p = provenance_plan(PlanTier::Estate, label, badge);
+            let (shown, shown_badge) = plan_provenance_display(&p).expect("provenance");
+            assert!(
+                !shown.contains("60 days"),
+                "label {:?} for {:?}",
+                shown,
+                label
+            );
+            assert!(
+                !shown_badge.unwrap_or_default().contains("60 days"),
+                "badge {:?} for {:?}",
+                shown_badge,
+                badge
+            );
+        }
+        // The fixture above an "Expires Jul 4, 2027" line keeps a neutral label.
+        let granted = granted_estate(Some("2027-07-04T00:00:00Z"), Some("Founding member"));
+        assert_eq!(
+            plan_provenance_display(&granted),
+            Some((NEUTRAL_PROVENANCE_LABEL, None))
+        );
+    }
+
+    /// Server labels/badges carrying banned pre-launch campaign copy are
+    /// replaced by the neutral fallback label and the badge is dropped.
+    #[test]
+    fn stale_campaign_provenance_copy_falls_back_to_neutral() {
+        for stale in [
+            "Founding member",
+            "FOUNDING MEMBER perks",
+            "Estate free forever",
+            "Free for your first year",
+            "Free for year-one",
+            "Year two pricing locked",
+            "Beta cohort",
+            "",
+            "   ",
+        ] {
+            let p = provenance_plan(PlanTier::Estate, stale, Some(stale));
+            assert_eq!(
+                plan_provenance_display(&p),
+                Some((NEUTRAL_PROVENANCE_LABEL, None)),
+                "stale copy {:?}",
+                stale
+            );
+        }
+        // A clean label keeps rendering while only the stale badge is dropped.
+        let p = provenance_plan(PlanTier::Pro, "Partner grant", Some("Founding member"));
+        assert_eq!(plan_provenance_display(&p), Some(("Partner grant", None)));
+        // Word matching: "Alphabetic" is not "Beta".
+        assert!(!contains_stale_campaign_copy("Alphabetic betatron"));
+    }
+
+    /// Normal server-authored provenance renders unchanged: label and badge.
+    #[test]
+    fn launch_offer_provenance_renders_server_label_and_badge() {
+        let p = provenance_plan(
+            PlanTier::Estate,
+            "Launch offer — Estate free for 60 days",
+            Some("Launch offer"),
+        );
+        assert_eq!(
+            plan_provenance_display(&p),
+            Some((
+                "Launch offer — Estate free for 60 days",
+                Some("Launch offer")
+            ))
+        );
+        let p = provenance_plan(PlanTier::Pro, "Promotional Pro access", None);
+        assert_eq!(
+            plan_provenance_display(&p),
+            Some(("Promotional Pro access", None))
+        );
+        let paid = plan(
+            PlanTier::Pro,
+            PlanStatus::Active,
+            Some("2027-01-01T00:00:00Z"),
+        );
+        assert_eq!(plan_provenance_display(&paid), None);
+    }
+
+    #[test]
+    fn unreleased_plan_features_are_marked_coming_soon() {
+        assert_eq!(
+            plan_tagline(&PlanTier::Pro),
+            "More Cubes per network and Connect-enforced policies for greater control. \
+             Duress mode — Coming soon."
+        );
+        assert_eq!(
+            launch_feature_copy("Duress mode"),
+            "Duress mode — Coming soon"
+        );
+        assert_eq!(
+            launch_feature_copy("Recovery alerts"),
+            "Recovery alerts — Coming soon"
+        );
+        assert_eq!(launch_feature_copy("More Cubes"), "More Cubes");
+        assert_eq!(launch_feature_copy("Price alerts"), "Price alerts");
+        assert_eq!(
+            launch_feature_copy("Duress activation alerts"),
+            "Duress activation alerts"
+        );
     }
 
     /// Regression: dismissing the pre-expiry reminder must NOT suppress the

@@ -39,12 +39,24 @@ const RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(600);
 /// rotation immediately on its next successful call regardless.
 const TRANSPORT_FAILURE_COOLDOWN: Duration = Duration::from_secs(120);
 
+/// A sole provider has no healthy fallback to serve requests during cooldown.
+/// Make it eligible again promptly while bounding repeated UI retries.
+const SOLE_PROVIDER_TRANSPORT_COOLDOWN: Duration = Duration::from_secs(5);
+
+fn transport_cooldown(provider_count: usize) -> Duration {
+    if provider_count == 1 {
+        SOLE_PROVIDER_TRANSPORT_COOLDOWN
+    } else {
+        TRANSPORT_FAILURE_COOLDOWN
+    }
+}
+
 /// An error from the Esplora client.
 #[derive(Debug)]
 pub enum Error {
     Client(Box<esplora_client::Error>),
     Admission(crate::connect::AdmissionError),
-    /// Every configured provider is currently in a 402/429 cooldown,
+    /// Every configured provider is currently in a cooldown,
     /// so no network call was actually attempted. This is a
     /// transient "wait" signal, not a fault — callers (the poller in
     /// particular) should treat it as a no-op outcome rather than a
@@ -99,7 +111,7 @@ impl std::fmt::Display for Error {
             Error::Client(e) => write!(f, "Esplora client error: '{}'.", e),
             Error::AllCooling => write!(
                 f,
-                "{} after recent rate limits; the poller will retry once a cooldown expires.",
+                "{}; the poller will retry once a cooldown expires.",
                 ALL_COOLING_DISPLAY_MARKER,
             ),
             Error::Aborted => {
@@ -120,7 +132,7 @@ impl std::fmt::Display for Error {
 /// Bitcoin Esplora client backed by an ordered chain of providers.
 ///
 /// `try_in_order` walks the providers from index 0 onwards on every call.
-/// A provider is skipped if it's currently in a 429/402 cooldown
+/// A provider is skipped if it's currently in a cooldown
 /// ([`RATE_LIMIT_COOLDOWN`]). On a retryable failure ([`should_fall_back`])
 /// the next provider is tried; a non-retryable failure short-circuits
 /// the chain.
@@ -145,7 +157,7 @@ struct Provider {
     /// Human label used in logs (`mempool.space (anonymous)`, etc.).
     name: String,
     client: esplora_client::blocking::BlockingClient,
-    /// `Some(deadline)` when this provider returned 402/429 recently;
+    /// `Some(deadline)` after a rate limit, transport failure or admission delay;
     /// skipped while `now < deadline`. Cleared on the next successful
     /// call to the same provider so a long-cooled provider that's
     /// healthy again rejoins the rotation immediately rather than
@@ -199,9 +211,9 @@ fn build_blocking_client(
 /// rather than the request — falling through to the next provider is
 /// the correct response, and these statuses additionally trigger a
 /// cooldown so we stop re-asking the throttled provider for a while.
-/// 5xx and transport errors fall through *without* a cooldown — they
-/// often clear within a tick or two and we want to re-test the
-/// provider on the next call. Genuine 4xx outcomes like 400/404
+/// Transport failures also cool down, briefly for a sole provider and longer
+/// when a fallback can serve requests. 5xx errors fall through without a
+/// cooldown so the next call can retry. Genuine 4xx outcomes like 400/404
 /// describe the request itself and pass through unchanged so the
 /// caller sees the real answer.
 fn should_fall_back<T>(result: &Result<T, esplora_client::Error>) -> bool {
@@ -248,6 +260,7 @@ fn admission_hash_at(
     provider: &Provider,
     abort: &AtomicBool,
     height: u32,
+    transport_backoff: Duration,
 ) -> Result<bitcoin::BlockHash, crate::connect::AdmissionError> {
     use crate::connect::AdmissionError;
     if abort.load(Ordering::Relaxed) {
@@ -273,7 +286,7 @@ fn admission_hash_at(
         }
         Err(error) => {
             if is_transport_err(&error) {
-                provider.enter_cooldown(TRANSPORT_FAILURE_COOLDOWN);
+                provider.enter_cooldown(transport_backoff);
             }
             Err(AdmissionError::Unavailable)
         }
@@ -316,7 +329,7 @@ impl Client {
             cooldown_until: Mutex::new(None),
         };
         backend
-            .validate(|height| admission_hash_at(&provider, &abort, height))
+            .validate(|height| admission_hash_at(&provider, &abort, height, transport_cooldown(1)))
             .map_err(|error| admission_error(&provider, error))?;
         Ok(Self {
             providers: vec![provider],
@@ -349,6 +362,8 @@ impl Client {
                 cooldown_until: Mutex::new(None),
             });
         }
+
+        let transport_backoff = transport_cooldown(providers.len());
 
         // Best-effort startup check: log per-provider reachability for
         // diagnostics, then return Ok regardless of outcome. Critically,
@@ -401,7 +416,7 @@ impl Client {
                     // (5xx, decode error) is left to be re-tested next tick.
                     let transport = is_transport_err(&e);
                     if transport {
-                        provider.enter_cooldown(TRANSPORT_FAILURE_COOLDOWN);
+                        provider.enter_cooldown(transport_backoff);
                     }
                     log::warn!(
                         "Esplora {} unreachable at startup: {}{}",
@@ -430,7 +445,7 @@ impl Client {
     }
 
     /// Run `op` against each provider in order, skipping any that's in a
-    /// 429/402 cooldown. See [`should_fall_back`] and [`is_throttled`] for
+    /// cooldown. See [`should_fall_back`] and [`is_throttled`] for
     /// the per-result decisions.
     fn try_in_order<T, F>(&self, op: F) -> Result<T, Error>
     where
@@ -443,6 +458,7 @@ impl Client {
     where
         F: FnMut(&esplora_client::blocking::BlockingClient) -> Result<T, esplora_client::Error>,
     {
+        let transport_backoff = transport_cooldown(self.providers.len());
         let mut last_result: Option<Result<T, esplora_client::Error>> = None;
         for provider in &self.providers {
             // Bail out between providers if the daemon is shutting down, so a
@@ -453,17 +469,16 @@ impl Client {
                 return Err(Error::Aborted);
             }
             if provider.is_cooling() {
-                log::debug!(
-                    "Esplora skipping {} (cooling down after recent 402/429)",
-                    provider.name,
-                );
+                log::debug!("Esplora skipping {} (cooling down)", provider.name,);
                 continue;
             }
             let before = self
                 .admission
                 .as_ref()
                 .map(|guard| {
-                    guard.validate(|height| admission_hash_at(provider, &self.abort, height))
+                    guard.validate(|height| {
+                        admission_hash_at(provider, &self.abort, height, transport_backoff)
+                    })
                 })
                 .transpose()
                 .map_err(|error| admission_error(provider, error))?;
@@ -479,7 +494,7 @@ impl Client {
                 if let (Some(guard), Some(before)) = (&self.admission, before.as_ref()) {
                     guard
                         .revalidate(before, |height| {
-                            admission_hash_at(provider, &self.abort, height)
+                            admission_hash_at(provider, &self.abort, height, transport_backoff)
                         })
                         .map_err(|error| admission_error(provider, error))?;
                 }
@@ -509,13 +524,13 @@ impl Client {
                 // timeout every time — the repeated-stall bug. 5xx falls to the
                 // branch below and is NOT cooled (it usually clears within a
                 // tick).
-                provider.enter_cooldown(TRANSPORT_FAILURE_COOLDOWN);
+                provider.enter_cooldown(transport_backoff);
                 if let Err(ref e) = result {
                     log::warn!(
                         "Esplora {} unreachable ({}); cooling for {:?} and trying next provider",
                         provider.name,
                         e,
-                        TRANSPORT_FAILURE_COOLDOWN,
+                        transport_backoff,
                     );
                 }
             } else if let Err(ref e) = result {
@@ -1075,7 +1090,7 @@ mod tests {
         assert_eq!(which, Some("p2"));
     }
 
-    /// 5xx and transport errors must NOT set the cooldown — the
+    /// 5xx errors must NOT set the cooldown — the
     /// provider could be back in seconds, and a 10-minute lockout
     /// over a transient blip would unnecessarily concentrate load
     /// on the next tier.
@@ -1098,7 +1113,7 @@ mod tests {
 
         assert!(
             !client.providers[0].is_cooling(),
-            "p1 must NOT enter cooldown on a 5xx — only 402/429 trigger that",
+            "p1 must NOT enter cooldown on a 5xx",
         );
     }
 
@@ -1174,6 +1189,95 @@ mod tests {
             !client.providers[1].is_cooling(),
             "the provider that served the request must NOT be cooled",
         );
+    }
+
+    #[test]
+    fn sole_provider_retries_after_short_transport_cooldown() {
+        for count in [1, 2] {
+            let client = client_with((0..count).map(|_| fake_provider("provider")).collect());
+            let before = Instant::now();
+            let result: Result<u32, Error> = client.try_in_order(|_| Err(minreq_timeout()));
+            assert!(matches!(result, Err(Error::Client(_))));
+            let delay = if count == 1 {
+                Duration::from_secs(5)
+            } else {
+                Duration::from_secs(120)
+            };
+            for provider in &client.providers {
+                let mut deadline = provider.cooldown_until.lock().unwrap();
+                assert!(deadline.unwrap() >= before + delay);
+                assert!(deadline.unwrap() <= Instant::now() + delay);
+                // Advance the provider deadlines instead of sleeping in this test.
+                *deadline = Some(deadline.unwrap() - Duration::from_secs(5));
+            }
+            let mut calls = 0;
+            let result = client.try_in_order(|_| {
+                calls += 1;
+                Ok(42)
+            });
+            if count == 1 {
+                assert_eq!(result.unwrap(), 42);
+                assert_eq!(calls, 1);
+                assert!(!client.providers[0].is_cooling());
+            } else {
+                assert!(matches!(result, Err(Error::AllCooling)));
+                assert_eq!(calls, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn sole_provider_startup_and_admission_use_short_transport_backoff() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = format!("http://{}", listener.local_addr().unwrap());
+        // A freshly released ephemeral port gives connection-refused, rather
+        // than an EOF that the HTTP parser classifies as a malformed response.
+        drop(listener);
+        let config = crate::config::EsploraConfig {
+            addr,
+            token: None,
+            fallback_addr: None,
+            fallback_token: None,
+            secondary_fallback_addr: None,
+            secondary_fallback_token: None,
+        };
+        let before = Instant::now();
+        let abort = Arc::new(AtomicBool::new(false));
+        let client = Client::new(&config, abort.clone()).unwrap();
+        let deadline = client.providers[0].cooldown_until.lock().unwrap().unwrap();
+        assert!(deadline >= before + Duration::from_secs(5));
+        assert!(deadline <= Instant::now() + Duration::from_secs(5));
+        client.providers[0].clear_cooldown();
+        let before = Instant::now();
+        assert!(matches!(
+            admission_hash_at(&client.providers[0], &abort, 1, transport_cooldown(1)),
+            Err(crate::connect::AdmissionError::Unavailable)
+        ));
+        let deadline = client.providers[0].cooldown_until.lock().unwrap().unwrap();
+        assert!(deadline >= before + Duration::from_secs(5));
+        assert!(deadline <= Instant::now() + Duration::from_secs(5));
+    }
+
+    #[test]
+    fn sole_provider_retains_full_rate_limit_backoff() {
+        for status in [402, 429] {
+            let client = client_with(vec![fake_provider("sole")]);
+            let before = Instant::now();
+            let _: Result<u32, Error> = client.try_in_order(|_| {
+                Err(esplora_client::Error::HttpResponse {
+                    status,
+                    message: "rate limit".into(),
+                })
+            });
+            assert!(
+                client.providers[0].cooldown_until.lock().unwrap().unwrap()
+                    >= before + Duration::from_secs(600)
+            );
+            assert!(matches!(
+                client.try_in_order(|_| Ok(42)),
+                Err(Error::AllCooling)
+            ));
+        }
     }
 
     /// A 5xx (reachable-but-erroring server) must still fall through WITHOUT a
