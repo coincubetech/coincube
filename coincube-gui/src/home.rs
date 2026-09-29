@@ -752,7 +752,24 @@ impl Home {
             }
         }
 
+        if self.split_hardware_polling() {
+            return self
+                .split_wallet
+                .subscription()
+                .map(|message| Message::View(ViewMessage::SplitWallet(message)));
+        }
+
         Subscription::none()
+    }
+
+    /// Split's hardware device polling runs only while the gated Split
+    /// section is open with the hardware source chosen.
+    fn split_hardware_polling(&self) -> bool {
+        matches!(self.active_section, HomeSection::SplitWallet)
+            && self.split_wallet.polls_hardware()
+            && self
+                .connect_chain_availability(ChainId::BitcoinBlake2b)
+                .is_available()
     }
 
     /// Account-scoped admission for the explicit Connect-only fork route.
@@ -834,6 +851,8 @@ impl Home {
             return;
         }
         self.split_wallet.set_targets(targets);
+        self.split_wallet
+            .set_hardware_root(self.datadir_path.clone());
         self.active_section = HomeSection::SplitWallet;
         self.resume_split_after_install = false;
     }
@@ -2407,6 +2426,8 @@ impl Home {
                         ));
                     }
                     self.split_wallet.set_targets(targets);
+                    self.split_wallet
+                        .set_hardware_root(self.datadir_path.clone());
                 } else if matches!(self.active_section, HomeSection::SplitWallet) {
                     self.split_wallet.cancel();
                 }
@@ -2527,6 +2548,15 @@ impl Home {
                     .map(|m| Message::View(ViewMessage::RecoverVault(m)))
             }
             Message::View(ViewMessage::SplitWallet(msg)) => {
+                // Device events and reads never reach a closed or gated panel.
+                if matches!(msg, split_wallet::Message::Hardware(_))
+                    && !(matches!(self.active_section, HomeSection::SplitWallet)
+                        && self
+                            .connect_chain_availability(ChainId::BitcoinBlake2b)
+                            .is_available())
+                {
+                    return Task::none();
+                }
                 if matches!(msg, split_wallet::Message::Continue) {
                     if let Some(reason) = self
                         .connect_chain_availability(ChainId::BitcoinBlake2b)
@@ -6495,6 +6525,89 @@ mod tests {
                 if path.path() == datadir.path() && client.token().is_some()
         ));
         assert_eq!(home.active_section, HomeSection::Cubes);
+        std::fs::remove_dir_all(datadir.path()).unwrap();
+    }
+
+    #[test]
+    fn split_hardware_source_is_unreachable_while_btcb2_is_gated() {
+        // cancel() clears the process-wide Split intent slot.
+        let _guard = crate::app::session::test_guard();
+        let datadir = fresh_datadir();
+        let mut home = Home::new_for_chain(datadir.clone(), Some(ChainId::Bitcoin)).0;
+        write_btcb2_vault_target(&home);
+        // Flag off: the section does not open and hardware messages are dropped.
+        let _ = home.update(Message::View(ViewMessage::GoToSection(
+            HomeSection::SplitWallet,
+        )));
+        assert_ne!(home.active_section, HomeSection::SplitWallet);
+        home.active_section = HomeSection::SplitWallet;
+        let _ = home.update(Message::View(ViewMessage::SplitWallet(
+            split_wallet::Message::SourceSelected(split_wallet::Source::Hardware),
+        )));
+        assert!(drain(home.update(Message::View(ViewMessage::SplitWallet(
+            split_wallet::Message::Hardware(crate::split_hardware::HardwareMessage::Read(
+                "dev".into()
+            )),
+        ))))
+        .is_empty());
+        assert!(!home.split_hardware_polling());
+
+        // Flag on and open: polling follows the chosen source; leaving stops it.
+        enable_btcb2(&mut home);
+        home.active_section = HomeSection::Cubes;
+        let _ = home.update(Message::View(ViewMessage::GoToSection(
+            HomeSection::SplitWallet,
+        )));
+        assert_eq!(home.active_section, HomeSection::SplitWallet);
+        assert!(home.split_hardware_polling());
+        let _ = home.update(Message::View(ViewMessage::GoToSection(HomeSection::Cubes)));
+        assert!(!home.split_hardware_polling());
+        std::fs::remove_dir_all(datadir.path()).unwrap();
+    }
+
+    /// T1: with a listed device a `Read` would start a device task and move
+    /// the source to `Reading`, so the Home gate is observable.
+    #[test]
+    fn split_hardware_messages_are_dropped_unless_the_open_split_section_is_available() {
+        use crate::split_hardware::{tests::add_fake_device, HardwareMessage, HardwareStatus};
+        let _guard = crate::app::session::test_guard();
+        let datadir = fresh_datadir();
+        let mut home = Home::new_for_chain(datadir.clone(), Some(ChainId::Bitcoin)).0;
+        write_btcb2_vault_target(&home);
+        let _ = home.update(Message::View(ViewMessage::SplitWallet(
+            split_wallet::Message::SourceSelected(split_wallet::Source::Hardware),
+        )));
+        add_fake_device(home.split_wallet.hardware_mut(), datadir.path());
+        let read = || {
+            Message::View(ViewMessage::SplitWallet(split_wallet::Message::Hardware(
+                HardwareMessage::Read("dev-1".into()),
+            )))
+        };
+
+        // Section open, BTCB2 gated off.
+        home.active_section = HomeSection::SplitWallet;
+        let _ = home.update(read());
+        assert!(matches!(
+            home.split_wallet.hardware_mut().status(),
+            HardwareStatus::Idle
+        ));
+
+        // BTCB2 available, section closed.
+        enable_btcb2(&mut home);
+        home.active_section = HomeSection::Cubes;
+        let _ = home.update(read());
+        assert!(matches!(
+            home.split_wallet.hardware_mut().status(),
+            HardwareStatus::Idle
+        ));
+
+        // Control: open and available, the same message starts a read.
+        home.active_section = HomeSection::SplitWallet;
+        let _ = home.update(read());
+        assert!(matches!(
+            home.split_wallet.hardware_mut().status(),
+            HardwareStatus::Reading(_)
+        ));
         std::fs::remove_dir_all(datadir.path()).unwrap();
     }
 

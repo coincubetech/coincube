@@ -10,17 +10,19 @@ use coincube_ui::{
     theme,
     widget::{Column, Container, Element, Row, RowExt},
 };
-use iced::{widget::text_input, Alignment, Length, Task};
+use iced::{widget::text_input, Alignment, Length, Subscription, Task};
 use std::sync::Arc;
 use tokio::sync::watch;
 
 use crate::{
     app::split_intent::SplitIntent,
     chain::ChainId,
+    dir::CoincubeDirectory,
     services::{
         coincube::CoincubeClient,
         foreign_scan::{self, Branch, BranchRange, ForkSide, ScanDescriptor, ScanError, ScanPlan},
     },
+    split_hardware::{self, HardwareMessage, HardwareSource},
 };
 
 const DEFAULT_GAP: u32 = 20;
@@ -74,8 +76,17 @@ pub enum Status {
     Failed(String),
 }
 
+/// Where the foreign wallet's public keys come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Source {
+    Descriptor,
+    Hardware,
+}
+
 #[derive(Debug, Clone)]
 pub enum Message {
+    SourceSelected(Source),
+    Hardware(HardwareMessage),
     ExternalEdited(String),
     InternalEdited(String),
     TargetSelected(TargetCube),
@@ -154,6 +165,8 @@ pub struct SplitWalletPanel {
     evidence: Option<Arc<ScanEvidence>>,
     generation: u64,
     cancel: watch::Sender<u64>,
+    source: Source,
+    hardware: HardwareSource,
 }
 
 impl Default for SplitWalletPanel {
@@ -168,6 +181,8 @@ impl Default for SplitWalletPanel {
             evidence: None,
             generation: 0,
             cancel,
+            source: Source::Descriptor,
+            hardware: HardwareSource::default(),
         }
     }
 }
@@ -196,6 +211,30 @@ impl SplitWalletPanel {
         let _ = self.cancel.send(self.generation);
         self.evidence = None;
         self.status = Status::Editing;
+        self.hardware.clear();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hardware_mut(&mut self) -> &mut HardwareSource {
+        &mut self.hardware
+    }
+
+    /// Session-only root for the hardware device list; nothing is written.
+    pub fn set_hardware_root(&mut self, datadir: CoincubeDirectory) {
+        self.hardware.set_root(datadir);
+    }
+
+    /// Device polling runs only while the hardware source is chosen.
+    pub fn polls_hardware(&self) -> bool {
+        self.source == Source::Hardware
+    }
+
+    pub fn subscription(&self) -> Subscription<Message> {
+        if self.polls_hardware() {
+            self.hardware.subscription().map(Message::Hardware)
+        } else {
+            Subscription::none()
+        }
     }
 
     /// Consume exact scan evidence for the selected target and account
@@ -248,6 +287,24 @@ impl SplitWalletPanel {
         session_generation: u64,
     ) -> Task<Message> {
         match message {
+            Message::SourceSelected(source) => {
+                if source != self.source {
+                    self.cancel();
+                    self.source = source;
+                }
+                Task::none()
+            }
+            Message::Hardware(message) => {
+                let (task, invalidated) = self.hardware.update(message);
+                if invalidated {
+                    // Scan evidence belongs to the account it was built from.
+                    self.generation = self.generation.wrapping_add(1);
+                    let _ = self.cancel.send(self.generation);
+                    self.evidence = None;
+                    self.status = Status::Editing;
+                }
+                task.map(Message::Hardware)
+            }
             Message::ExternalEdited(value) => {
                 self.cancel();
                 self.external = value;
@@ -287,6 +344,12 @@ impl SplitWalletPanel {
                     self.status = Status::Failed(
                         "Create a Bitcoin Blake2b Vault before scanning a Bitcoin wallet."
                             .to_string(),
+                    );
+                    return Task::none();
+                }
+                if self.source == Source::Hardware && self.hardware.account().is_none() {
+                    self.status = Status::Failed(
+                        "Read the account from your hardware wallet before scanning.".to_string(),
                     );
                     return Task::none();
                 }
@@ -344,6 +407,22 @@ impl SplitWalletPanel {
     }
 
     fn plan(&self) -> Result<ScanPlan, ScanError> {
+        if self.source == Source::Hardware {
+            let account = self.hardware.account().ok_or(ScanError::Descriptor)?;
+            let branches = vec![account.external.clone(), account.internal.clone()]
+                .into_iter()
+                .map(|descriptor| BranchRange {
+                    end_exclusive: descriptor.end_exclusive(DEFAULT_RANGE_END),
+                    start: 0,
+                    descriptor,
+                })
+                .collect();
+            return Ok(ScanPlan {
+                chain: ChainId::BitcoinBlake2b,
+                branches,
+                gap: DEFAULT_GAP,
+            });
+        }
         let external = ScanDescriptor::parse(Branch::External, self.external.trim())?;
         let external_end = external.end_exclusive(DEFAULT_RANGE_END);
         let mut branches = vec![BranchRange {
@@ -398,7 +477,7 @@ pub fn view(panel: &SplitWalletPanel) -> Element<'_, Message> {
         .spacing(6)
         .push(h3("Split a Bitcoin wallet"))
         .push(
-            p1_regular("Find BTCB2 held by a Sparrow, Electrum, Coldcard or other non-Cube Bitcoin wallet. This step scans public descriptors only; it cannot sign or move funds.")
+            p1_regular("Find BTCB2 held by a Sparrow, Electrum, Coldcard or other non-Cube Bitcoin wallet. This step scans public keys only; it cannot sign or move funds.")
                 .style(theme::text::secondary),
         );
 
@@ -410,11 +489,32 @@ pub fn view(panel: &SplitWalletPanel) -> Element<'_, Message> {
     .placeholder("Choose a Bitcoin Blake2b Cube")
     .width(Length::Fill);
 
+    let source_button = |label, source| {
+        if panel.source == source {
+            button::primary(None, label)
+        } else {
+            button::secondary(None, label).on_press(Message::SourceSelected(source))
+        }
+    };
     let form = Column::new()
         .spacing(12)
         .push(p1_bold("Destination Cube"))
         .push(target)
-        .push(p1_bold("External / receive descriptor"))
+        .push(p1_bold("Source wallet"))
+        .push(
+            Row::new()
+                .spacing(10)
+                .push(source_button("Public descriptor", Source::Descriptor))
+                .push(source_button("Hardware wallet", Source::Hardware)),
+        );
+    let form = if panel.source == Source::Hardware {
+        form.push(split_hardware::view(&panel.hardware).map(Message::Hardware))
+            .push(
+                caption("Hardware accounts use standard singlesig paths (BIP84, BIP49, BIP44) on Bitcoin mainnet. Only pre-fork coins can be split. The bounded scan uses a gap of 20 and checks at most 100 addresses per branch.")
+                    .style(theme::text::secondary),
+            )
+    } else {
+        form.push(p1_bold("External / receive descriptor"))
         .push(
             text_input("wpkh([fingerprint/path]xpub.../0/*)", &panel.external)
                 .on_input(Message::ExternalEdited)
@@ -429,7 +529,8 @@ pub fn view(panel: &SplitWalletPanel) -> Element<'_, Message> {
         .push(
             caption("Supported for discovery: pkh, sh(wpkh), wpkh, wsh(multi/sortedmulti), and tr key-path (scan only: tr has no signing route, so it cannot be split). Only pre-fork coins can be split. Only public mainnet descriptors are accepted. The bounded scan uses a gap of 20 and checks at most 100 addresses per branch.")
                 .style(theme::text::secondary),
-        );
+        )
+    };
 
     let status: Element<Message> = match &panel.status {
         Status::Editing => caption("Ready to scan. An incomplete scan is always an error, never a zero balance.")
@@ -740,6 +841,91 @@ mod tests {
         );
         let summary = ScanEvidence::new(report, external, None).unwrap().summary;
         assert_eq!((summary.pre_fork, summary.unclassified), (0, 3));
+    }
+
+    fn hardware_account() -> split_hardware::HardwareAccount {
+        use coincube_core::miniscript::bitcoin::bip32::DerivationPath;
+        let secp = Secp256k1::new();
+        let root = Xpriv::new_master(
+            coincube_core::miniscript::bitcoin::Network::Bitcoin,
+            &[42; 32],
+        )
+        .unwrap();
+        let path: DerivationPath = "m/84'/0'/0'".parse().unwrap();
+        let xpub = Xpub::from_priv(&secp, &root.derive_priv(&secp, &path).unwrap());
+        let fingerprint = root.fingerprint(&secp);
+        split_hardware::account_from_device(
+            "dev".into(),
+            split_hardware::Purpose::Bip84,
+            0,
+            fingerprint,
+            fingerprint,
+            xpub,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn split_hardware_source_scans_both_branches_and_refuses_without_account() {
+        // cancel() clears the process-wide Split intent slot.
+        let _guard = crate::app::session::test_guard();
+        let mut panel = SplitWalletPanel::new();
+        panel.set_targets(vec![target()]);
+        let _ = panel.update(Message::SourceSelected(Source::Hardware), None, 0);
+        assert!(panel.polls_hardware());
+        let _ = panel.update(Message::Scan, Some(CoincubeClient::new()), 0);
+        assert!(
+            matches!(panel.status(), Status::Failed(copy) if copy.contains("Read the account"))
+        );
+
+        panel.hardware.ready_for_test(hardware_account());
+        let plan = panel.plan().unwrap();
+        assert_eq!(plan.branches.len(), 2);
+        assert_eq!(plan.branches[0].descriptor.branch(), Branch::External);
+        assert_eq!(plan.branches[1].descriptor.branch(), Branch::Internal);
+        assert!(plan
+            .branches
+            .iter()
+            .all(|b| b.end_exclusive == DEFAULT_RANGE_END));
+        assert!(plan.branches[0].descriptor.canonical().contains("/0/*"));
+        assert!(plan.branches[1].descriptor.canonical().contains("/1/*"));
+
+        // Cancel and switching source clear the read account and stop polling.
+        panel.cancel();
+        assert!(panel.hardware.account().is_none());
+        panel.hardware.ready_for_test(hardware_account());
+        let _ = panel.update(Message::SourceSelected(Source::Descriptor), None, 0);
+        assert!(panel.hardware.account().is_none());
+        assert!(!panel.polls_hardware());
+    }
+
+    #[test]
+    fn split_hardware_change_invalidates_completed_scan_evidence() {
+        // cancel() clears the process-wide Split intent slot.
+        let _guard = crate::app::session::test_guard();
+        let external = ScanDescriptor::parse(Branch::External, FIXED_DESCRIPTOR).unwrap();
+        let report = foreign_scan::ScanReport::for_test(
+            ChainId::BitcoinBlake2b,
+            5,
+            BlockHash::from_byte_array([3; 32]),
+            Vec::new(),
+        );
+        let evidence = ScanEvidence::new(report, external, None).unwrap();
+        let mut panel = SplitWalletPanel::new();
+        panel.set_targets(vec![target()]);
+        panel.source = Source::Hardware;
+        panel.generation = 5;
+        panel.status = Status::Complete(evidence.summary.clone());
+        panel.evidence = Some(Arc::new(evidence));
+
+        let _ = panel.update(
+            Message::Hardware(HardwareMessage::AccountEdited("1".into())),
+            None,
+            0,
+        );
+        assert!(panel.evidence.is_none());
+        assert_eq!(panel.status(), &Status::Editing);
+        assert_eq!(panel.generation, 6);
     }
 
     /// #578 review I6: an impossible total is refused, not wrapped or panicked.
