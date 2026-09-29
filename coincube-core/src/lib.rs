@@ -11,6 +11,7 @@ pub mod seed_crypt;
 pub mod signer;
 pub mod spend;
 pub mod unified_finalize;
+pub mod unified_foreign;
 pub mod unified_sighash;
 pub mod unified_signing;
 

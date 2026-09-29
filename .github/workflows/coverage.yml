@@ -12,11 +12,19 @@ on:
       - ".github/workflows/coverage.yml"
   workflow_dispatch:
 
+# Match main.yml: a new push supersedes the previous coverage run for the same
+# PR instead of holding a runner for up to the full job limit.
+concurrency:
+  group: coverage-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   rust-coverage:
     runs-on: ubuntu-latest
-    # Cold instrumented builds plus doctests exceeded 45 minutes on #559.
-    # Preserve the complete test/report passes and coverage threshold.
+    # Instrumented workspace tests now take 36-46 minutes on hosted runners;
+    # 45 minutes left no margin and timed out mid-suite on #545, #557 and #559
+    # (cold builds plus doctests). Preserve the complete test/report passes
+    # and coverage threshold.
     timeout-minutes: 75
     env:
       BREEZ_API_KEY: DUMMY_BREEZ_API_KEY
