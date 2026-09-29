@@ -23,12 +23,14 @@ from test_framework.utils import (
 MAX_DERIV = 2**31 - 1
 
 
-def test_getinfo(coincubed):
+def test_getinfo(coincubed, bitcoind):
     res = coincubed.rpc.getinfo()
     assert "timestamp" in res.keys()
     assert res["version"] == "0.9.0"
     assert res["network"] == "regtest"
-    wait_for(lambda: coincubed.rpc.getinfo()["block_height"] == 101)
+    wait_for(
+        lambda: coincubed.rpc.getinfo()["block_height"] == bitcoind.rpc.getblockcount()
+    )
     res = coincubed.rpc.getinfo()
     assert res["sync"] == 1.0
     assert "main" in res["descriptors"]

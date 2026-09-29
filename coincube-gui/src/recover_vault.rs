@@ -17,14 +17,13 @@
 //! caller's **ciphertext** envelope(s); the heir's Keychain does the ECDH and
 //! the desktop opens + restores via the tested heir core
 //! ([`crate::services::inheritance::heir::decrypt_envelopes`] → `DecryptedKit`
-//! → the existing Recovery-Kit restore). Rows are labelled by escrow tier and
-//! marked **Beta**.
+//! → the existing Recovery-Kit restore). Rows are labelled by escrow tier.
 
 use iced::widget::{scrollable, Space};
 use iced::{Alignment, Length, Task};
 
 use coincube_ui::{
-    component::{badge, button as btn, card, text::*},
+    component::{button as btn, card, text::*},
     theme,
     widget::{Column, Container, Element, Row},
 };
@@ -324,13 +323,7 @@ impl RecoverVaultPanel {
 pub fn view(panel: &RecoverVaultPanel) -> Element<'_, RecoverVaultMessage> {
     let header = Column::new()
         .spacing(6)
-        .push(
-            Row::new()
-                .spacing(10)
-                .align_y(Alignment::Center)
-                .push(h4_bold("Recover a Vault"))
-                .push(badge::beta()),
-        )
+        .push(h4_bold("Recover a Vault"))
         .push(
             p2_regular(
                 "Vaults you're a keyholder for appear here. When a vault's \
