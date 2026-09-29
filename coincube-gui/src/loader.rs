@@ -1812,7 +1812,7 @@ mod chain_identity_tests {
             None,
             None,
         );
-        assert!(matches!(loader.step, Step::Connecting));
+        assert!(matches!(&loader.step, Step::Connecting));
     }
 
     #[tokio::test]
@@ -1983,7 +1983,7 @@ mod chain_identity_tests {
 
     /// A testnet-family descriptor for every encoding but mainnet, so that `Config::check`'s
     /// xpub-network validation passes and the chain comparison is the gate under test.
-    const TESTNET_DESC: &str = "wsh(andor(pk([aabbccdd]tpubDEN9WSToTyy9ZQfaYqSKfmVqmq1VVLNtYfj3Vkqh67et57eJ5sTKZQBkHqSwPUsoSskJeaYnPttHe2VrkCsKA27kUaN9SDc5zhqeLzKa1rr/<0;1>/*),older(10000),pk([aabbccdd]tpubD8LYfn6njiA2inCoxwM7EuN3cuLVcaHAwLYeups13dpevd3nHLRdK9NdQksWXrhLQVxcUZRpnp5CkJ1FhE61WRAsHxDNAkvGkoQkAeWDYjV/<0;1>/*)))#dw4ulnrs";
+    pub(super) const TESTNET_DESC: &str = "wsh(andor(pk([aabbccdd]tpubDEN9WSToTyy9ZQfaYqSKfmVqmq1VVLNtYfj3Vkqh67et57eJ5sTKZQBkHqSwPUsoSskJeaYnPttHe2VrkCsKA27kUaN9SDc5zhqeLzKa1rr/<0;1>/*),older(10000),pk([aabbccdd]tpubD8LYfn6njiA2inCoxwM7EuN3cuLVcaHAwLYeups13dpevd3nHLRdK9NdQksWXrhLQVxcUZRpnp5CkJ1FhE61WRAsHxDNAkvGkoQkAeWDYjV/<0;1>/*)))#dw4ulnrs";
 
     fn desc_for(network: &str) -> &'static str {
         match network {
@@ -2316,5 +2316,672 @@ mod chain_identity_tests {
             !String::from_utf8_lossy(&std::fs::read(&conf_path).unwrap()).contains("torcontrol")
         );
         let _ = std::fs::remove_dir_all(root.path());
+    }
+}
+
+#[cfg(test)]
+mod bootstrap_backend_selection_tests {
+    //! Which Bitcoin backend the launcher selects when a Cube is opened, and
+    //! which companions the authenticated Bitcoin Blake2b start refuses.
+    //!
+    //! Two properties, both settled without a node, a database or a socket:
+    //!
+    //! 1. A fork Cube never selects the app-managed node — not when its own
+    //!    persisted `daemon.toml` names the managed cookie as its backend, and
+    //!    not when either internal-node preference asks for one. Its only
+    //!    backend is the authenticated Connect route, whose start path returns
+    //!    no node handle at all ([`start_connect_daemon`] yields `None` for it).
+    //!    [`Loader::start_bitcoind`] is the value [`Loader::on_load`] hands to
+    //!    [`start_bitcoind_and_daemon`] as `start_internal_bitcoind`, i.e. the
+    //!    only place the launcher can ask for a managed node, so `false` there
+    //!    is what keeps a fork Cube from requesting one.
+    //! 2. The authenticated fork start refuses each wrong companion on its own,
+    //!    before a socket is dialled or anything is written.
+    //!
+    //! Headless by construction: these drive [`Loader`] and
+    //! [`start_connect_daemon`] directly. A pass here is *not* rendered-GUI,
+    //! PIN-entry, passkey or hardware-signer evidence, and it is not an
+    //! end-to-end App bootstrap run — it pins the launcher's selection and
+    //! refusal decisions only.
+
+    use super::chain_identity_tests::TESTNET_DESC;
+    use super::tests::MAINNET_DESC;
+    use super::*;
+    use crate::app::settings::AuthConfig;
+    use crate::chain::ChainId;
+    use std::path::PathBuf;
+
+    const SESSION_REFUSAL: &str =
+        "Unexpected error: Bitcoin Blake2b requires an authenticated Connect Vault session";
+    const NOT_A_FORK_CUBE: &str =
+        "Unexpected error: The authenticated fork loader requires Bitcoin Blake2b";
+    const FORK_VAULT_REQUIRED: &str = "Authenticated Connect fork Vault required";
+
+    fn cube(chain: ChainId) -> CubeSettings {
+        CubeSettings::new_with_raw_id("cube-uuid".to_string(), "Fork".to_string(), chain)
+    }
+
+    fn wallet() -> WalletSettings {
+        WalletSettings {
+            name: "Coincube-kt6ht0kt".to_string(),
+            alias: None,
+            descriptor_checksum: "kt6ht0kt".to_string(),
+            pinned_at: Some(1_720_000_000),
+            keys: Vec::new(),
+            hardware_wallets: Vec::new(),
+            remote_backend_auth: None,
+            start_internal_bitcoind: Some(true),
+            pending_rescan: None,
+            keychain_keys_recorded: false,
+        }
+    }
+
+    /// A Vault held on the remote backend: the fork route is for a local Vault
+    /// under an authenticated Connect *session*, never for a remote-backend one.
+    fn remote_backend_wallet() -> WalletSettings {
+        WalletSettings {
+            remote_backend_auth: Some(AuthConfig::new(
+                "someone@example.com".to_string(),
+                "wallet-uuid".to_string(),
+            )),
+            ..wallet()
+        }
+    }
+
+    fn temp_root(tag: &str) -> CoincubeDirectory {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "coincube-loader-backend-{}-{}-{}",
+            tag,
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::SeqCst)
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        CoincubeDirectory::new(path)
+    }
+
+    /// Every directory and file under `root`, including exact file bytes.
+    /// Refusal tests use this as a mutation oracle, so traversal and reads must
+    /// fail the test rather than silently weakening the snapshot.
+    fn tree(root: &Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
+        fn walk(p: &Path, out: &mut Vec<(PathBuf, Option<Vec<u8>>)>) {
+            for entry in std::fs::read_dir(p).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                let kind = entry.file_type().unwrap();
+                if kind.is_dir() {
+                    out.push((path.clone(), None));
+                    walk(&path, out);
+                } else if kind.is_file() {
+                    out.push((path.clone(), Some(std::fs::read(path).unwrap())));
+                } else {
+                    panic!("unsupported filesystem entry in test snapshot: {:?}", path);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(root, &mut out);
+        out.sort();
+        out
+    }
+
+    fn desc_for(chain: ChainId) -> &'static str {
+        if chain.bitcoin_network() == bitcoin::Network::Bitcoin {
+            MAINNET_DESC
+        } else {
+            TESTNET_DESC
+        }
+    }
+
+    /// The Cube's daemon directory under `root` for `chain` (created).
+    fn cube_daemon_dir(root: &CoincubeDirectory, chain: ChainId) -> PathBuf {
+        let dir = root
+            .network_directory(chain)
+            .coincubed_data_directory(&wallet().wallet_id())
+            .path()
+            .to_path_buf();
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// This Cube's `daemon.toml`, with a bitcoind backend whose cookie lives
+    /// *inside this chain's managed-node datadir* — the persisted shape that
+    /// means "the app-managed node is my backend" (see
+    /// [`backend_is_internal_bitcoind`]). `config_chain` is what the file
+    /// claims, so a caller can also write one for the wrong chain.
+    fn write_managed_cookie_daemon_toml(
+        root: &CoincubeDirectory,
+        chain: ChainId,
+        config_chain: ChainId,
+    ) -> PathBuf {
+        let dir = cube_daemon_dir(root, chain);
+        let cookie = managed_node_datadir(root, config_chain).join(".cookie");
+        std::fs::write(
+            dir.join("daemon.toml"),
+            format!(
+                "data_directory = '{}'\nmain_descriptor = \"{}\"\n\n\
+                 [bitcoin_config]\nnetwork = \"{}\"\n\n\
+                 [bitcoind_config]\ncookie_path = '{}'\naddr = \"127.0.0.1:1\"\n",
+                dir.display(),
+                desc_for(config_chain),
+                config_chain,
+                cookie.display(),
+            ),
+        )
+        .unwrap();
+        dir
+    }
+
+    /// An authenticated Connect client pointed at a closed port: enough for
+    /// every guard that must refuse *before* a request is made. A guard that
+    /// reaches the network would fail with a transport error instead, which is
+    /// a different assertion and would be visible as such.
+    fn authenticated_client() -> crate::services::coincube::CoincubeClient {
+        let mut client = crate::services::coincube::CoincubeClient::for_test("http://127.0.0.1:1");
+        client.set_token("synthetic-token");
+        client
+    }
+
+    fn tokenless_client() -> crate::services::coincube::CoincubeClient {
+        crate::services::coincube::CoincubeClient::for_test("http://127.0.0.1:1")
+    }
+
+    fn encryption_key() -> Arc<crate::services::connect::crypto::CubeEncryptionKey> {
+        let signer =
+            coincube_core::signer::MasterSigner::generate(bitcoin::Network::Bitcoin).unwrap();
+        Arc::new(crate::services::connect::crypto::CubeEncryptionKey::derive(
+            &signer,
+            bitcoin::Network::Bitcoin,
+        ))
+    }
+
+    /// A managed-node handle with no node behind it, to stand in for one the
+    /// caller already holds. Its lock file lands under `root`, so a caller
+    /// snapshotting the tree must snapshot after this.
+    fn managed_node_handle(root: &CoincubeDirectory) -> Bitcoind {
+        Bitcoind::for_test(
+            BitcoindConfig {
+                rpc_auth: BitcoindRpcAuth::CookieFile(
+                    managed_node_datadir(root, ChainId::Bitcoin).join(".cookie"),
+                ),
+                addr: "127.0.0.1:1".parse().unwrap(),
+            },
+            root,
+            bitcoin::Network::Bitcoin,
+        )
+    }
+
+    fn a_backup() -> Backup {
+        Backup {
+            name: None,
+            alias: None,
+            accounts: Vec::new(),
+            network: bitcoin::Network::Bitcoin,
+            chain: Some(ChainId::BitcoinBlake2b),
+            date: None,
+            proprietary: serde_json::Map::new(),
+            version: 0,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_loader(
+        root: &CoincubeDirectory,
+        chain: ChainId,
+        wallet_settings: Option<WalletSettings>,
+        client: Option<crate::services::coincube::CoincubeClient>,
+        key: Option<Arc<crate::services::connect::crypto::CubeEncryptionKey>>,
+        internal_bitcoind: Option<Bitcoind>,
+        backup: Option<Backup>,
+        start_internal_bitcoind: bool,
+    ) -> Loader {
+        Loader::build(
+            root.clone(),
+            GUIConfig::new(start_internal_bitcoind),
+            chain.bitcoin_network(),
+            internal_bitcoind,
+            backup,
+            wallet_settings,
+            cube(chain),
+            None,
+            None,
+            client,
+            key,
+        )
+        .0
+    }
+
+    /// A fork Cube whose own `daemon.toml` names the app-managed node as its
+    /// backend still must not start one: the selection is keyed on the chain,
+    /// ahead of the config. The Bitcoin control carries the identical fixture
+    /// and *does* select the managed node, so the fork assertion is about the
+    /// chain and not about a fixture that never selected anything.
+    #[test]
+    fn a_fork_cube_never_selects_the_managed_node_its_own_config_names() {
+        for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
+            let root = temp_root("fork-cookie");
+            write_managed_cookie_daemon_toml(&root, chain, chain);
+            let loader = build_loader(
+                &root,
+                chain,
+                Some(wallet()),
+                Some(authenticated_client()),
+                Some(encryption_key()),
+                None,
+                None,
+                true,
+            );
+            assert!(
+                matches!(&loader.step, Step::Connecting),
+                "the authenticated fork session must be admitted for {}, got another step",
+                chain
+            );
+            assert!(
+                loader.vault_uses_internal_bitcoind(),
+                "fixture must name the managed cookie for {}",
+                chain
+            );
+            assert!(
+                !loader.start_bitcoind(),
+                "{} must not select the managed node its config names",
+                chain
+            );
+        }
+
+        let root = temp_root("bitcoin-cookie");
+        write_managed_cookie_daemon_toml(&root, ChainId::Bitcoin, ChainId::Bitcoin);
+        let loader = build_loader(
+            &root,
+            ChainId::Bitcoin,
+            Some(wallet()),
+            None,
+            None,
+            None,
+            None,
+            // Off on purpose: a config-named managed node is started whatever
+            // the preference says, which is the behaviour the fork must not
+            // inherit.
+            false,
+        );
+        assert!(loader.vault_uses_internal_bitcoind());
+        assert!(
+            loader.start_bitcoind(),
+            "control: Bitcoin selects the managed node its config names"
+        );
+    }
+
+    /// The two internal-node preferences — the Vault's own and the GUI default —
+    /// govern an external node. Neither may start one for a fork Cube, at any
+    /// combination.
+    #[test]
+    fn a_fork_cube_ignores_both_internal_node_preferences() {
+        for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
+            for wallet_pref in [Some(true), Some(false), None] {
+                for gui_pref in [true, false] {
+                    let root = temp_root("fork-pref");
+                    let loader = build_loader(
+                        &root,
+                        chain,
+                        Some(WalletSettings {
+                            start_internal_bitcoind: wallet_pref,
+                            ..wallet()
+                        }),
+                        Some(authenticated_client()),
+                        Some(encryption_key()),
+                        None,
+                        None,
+                        gui_pref,
+                    );
+                    assert!(
+                        !loader.vault_uses_internal_bitcoind(),
+                        "no config on disk for {}",
+                        chain
+                    );
+                    assert!(
+                        !loader.start_bitcoind(),
+                        "{} started the managed node for wallet={:?} gui={}",
+                        chain,
+                        wallet_pref,
+                        gui_pref
+                    );
+                }
+            }
+        }
+
+        let root = temp_root("bitcoin-pref");
+        let loader = build_loader(
+            &root,
+            ChainId::Bitcoin,
+            Some(wallet()),
+            None,
+            None,
+            None,
+            None,
+            true,
+        );
+        assert!(
+            loader.start_bitcoind(),
+            "control: the preference does start a node on Bitcoin"
+        );
+    }
+
+    /// Each companion the authenticated fork start refuses, one at a time, so no
+    /// arm can pass behind another's refusal. Every arm must land in the error
+    /// step with the session copy, arm no retry window, hold no abortable fork
+    /// task, and leave the datadir exactly as it found it.
+    ///
+    /// Bounded coverage, stated rather than implied: the same `||` predicate
+    /// also refuses a Breez client and a Spark backend. Neither is constructed
+    /// here — `BreezClient` needs a Liquid SDK instance and `SparkBackend`
+    /// spawns the bridge subprocess, so both would make this a live-SDK test.
+    /// Those two arms are untested.
+    #[test]
+    fn an_authenticated_fork_start_refuses_each_wrong_companion() {
+        let chain = ChainId::BitcoinBlake2b;
+
+        /// One companion swapped for a wrong one; everything else is the shape
+        /// the fork start accepts.
+        struct Arm {
+            name: &'static str,
+            vault: fn() -> Option<WalletSettings>,
+            client: fn() -> Option<crate::services::coincube::CoincubeClient>,
+            with_key: bool,
+            with_node: bool,
+            with_backup: bool,
+        }
+
+        const ACCEPTED: Arm = Arm {
+            name: "",
+            vault: || Some(wallet()),
+            client: || Some(authenticated_client()),
+            with_key: true,
+            with_node: false,
+            with_backup: false,
+        };
+
+        let arms = [
+            Arm {
+                name: "no Connect token",
+                client: || Some(tokenless_client()),
+                ..ACCEPTED
+            },
+            Arm {
+                name: "no Cube encryption key",
+                with_key: false,
+                ..ACCEPTED
+            },
+            Arm {
+                name: "no Vault settings",
+                vault: || None,
+                ..ACCEPTED
+            },
+            Arm {
+                name: "a remote-backend Vault",
+                vault: || Some(remote_backend_wallet()),
+                ..ACCEPTED
+            },
+            Arm {
+                name: "a managed-node handle",
+                with_node: true,
+                ..ACCEPTED
+            },
+            Arm {
+                name: "a pending backup restore",
+                with_backup: true,
+                ..ACCEPTED
+            },
+        ];
+
+        for Arm {
+            name,
+            vault,
+            client,
+            with_key,
+            with_node,
+            with_backup,
+        } in arms
+        {
+            let root = temp_root("fork-companion");
+            let node = with_node.then(|| managed_node_handle(&root));
+            // After the handle's lock file, so the snapshot is of the tree the
+            // loader is actually handed.
+            let before = tree(root.path());
+            let loader = build_loader(
+                &root,
+                chain,
+                vault(),
+                client(),
+                with_key.then(encryption_key),
+                node,
+                with_backup.then(a_backup),
+                true,
+            );
+            match &loader.step {
+                Step::Error(e) => assert_eq!(e.to_string(), SESSION_REFUSAL, "arm: {}", name),
+                other => panic!(
+                    "arm {} was admitted: {:?}",
+                    name,
+                    std::mem::discriminant(other)
+                ),
+            }
+            // Deliberately not asserted here: `fork_task`. Every fork-chain
+            // task is wrapped in the abortable handle, refusal or not, so a
+            // `Some` says nothing about whether work was dispatched — the
+            // refused arm holds an abort handle for an empty task. What a
+            // refusal *does* have to leave alone is the retry window, the
+            // daemon and the datadir, below.
+            assert!(
+                loader.fork_retry_not_before.is_none(),
+                "arm {} armed a retry window for a session that never started",
+                name
+            );
+            assert!(!loader.daemon_started, "arm {} started a daemon", name);
+            assert_eq!(
+                tree(root.path()),
+                before,
+                "arm {} wrote to the datadir while refusing",
+                name
+            );
+        }
+    }
+
+    /// The mirror refusal: a Bitcoin-family Cube handed an authenticated Connect
+    /// client is refused too, rather than quietly loading through the fork's
+    /// dedicated start path.
+    #[test]
+    fn the_fork_loader_refuses_a_bitcoin_family_cube() {
+        for chain in [ChainId::Bitcoin, ChainId::Signet, ChainId::Testnet4] {
+            let root = temp_root("bitcoin-on-fork-path");
+            let before = tree(root.path());
+            let loader = build_loader(
+                &root,
+                chain,
+                Some(wallet()),
+                Some(authenticated_client()),
+                Some(encryption_key()),
+                None,
+                None,
+                true,
+            );
+            match &loader.step {
+                Step::Error(e) => assert_eq!(e.to_string(), NOT_A_FORK_CUBE, "{}", chain),
+                other => panic!(
+                    "{} was admitted to the fork path: {:?}",
+                    chain,
+                    std::mem::discriminant(other)
+                ),
+            }
+            assert!(loader.fork_task.is_none(), "{} armed a fork task", chain);
+            assert!(!loader.daemon_started);
+            assert_eq!(tree(root.path()), before, "{} wrote to the datadir", chain);
+        }
+    }
+
+    /// The fork daemon start's own guards, at the same boundary but called
+    /// directly: each refuses before Connect is dialled, before `daemon.toml` is
+    /// read and without creating a managed datadir.
+    #[tokio::test]
+    async fn the_fork_daemon_start_refuses_before_it_dials_connect() {
+        // A Bitcoin-family chain on the fork's dedicated start path.
+        let root = temp_root("start-bitcoin");
+        let before = tree(root.path());
+        let err = start_connect_daemon(
+            root.clone(),
+            ChainId::Bitcoin,
+            wallet(),
+            authenticated_client(),
+        )
+        .await
+        .expect_err("a Bitcoin chain has no authenticated fork start");
+        assert!(
+            matches!(&err, Error::Unexpected(m) if m.as_str() == FORK_VAULT_REQUIRED),
+            "got {}",
+            err
+        );
+        assert_eq!(tree(root.path()), before);
+
+        // An unauthenticated client.
+        let root = temp_root("start-tokenless");
+        let before = tree(root.path());
+        let err = start_connect_daemon(
+            root.clone(),
+            ChainId::BitcoinBlake2b,
+            wallet(),
+            tokenless_client(),
+        )
+        .await
+        .expect_err("an unauthenticated session cannot start the fork daemon");
+        assert!(
+            matches!(&err, Error::Unexpected(m) if m.as_str() == FORK_VAULT_REQUIRED),
+            "got {}",
+            err
+        );
+        assert_eq!(tree(root.path()), before);
+
+        // A remote-backend Vault.
+        let root = temp_root("start-remote");
+        let before = tree(root.path());
+        let err = start_connect_daemon(
+            root.clone(),
+            ChainId::BitcoinBlake2b,
+            remote_backend_wallet(),
+            authenticated_client(),
+        )
+        .await
+        .expect_err("a remote-backend Vault cannot start the fork daemon");
+        assert!(
+            matches!(&err, Error::Unexpected(m) if m.as_str() == FORK_VAULT_REQUIRED),
+            "got {}",
+            err
+        );
+        assert_eq!(tree(root.path()), before);
+    }
+
+    /// A local stub answering the one `/connect/features` request
+    /// [`crate::chain::require_connect_feature`] makes, with Bitcoin Blake2b
+    /// enabled. Returns its address; the thread ends after that request.
+    fn features_stub_enabling_the_fork() -> std::net::SocketAddr {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut scratch = [0u8; 2048];
+                let _ = stream.read(&mut scratch);
+                let body = "{\"data\":{\"plans\":[],\"bitcoin_blake2b_enabled\":true}}";
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.flush();
+                let _ = stream.shutdown(std::net::Shutdown::Write);
+            }
+        });
+        addr
+    }
+
+    fn client_for(addr: std::net::SocketAddr) -> crate::services::coincube::CoincubeClient {
+        let mut client =
+            crate::services::coincube::CoincubeClient::for_test(format!("http://{addr}"));
+        client.set_token("synthetic-token");
+        client
+    }
+
+    /// Past Connect admission, the fork start still refuses a `daemon.toml`
+    /// written for another chain — and refuses it before the daemon, its
+    /// database or a managed datadir exist.
+    #[tokio::test]
+    async fn an_admitted_fork_session_refuses_a_daemon_toml_for_another_chain() {
+        let root = temp_root("start-chain-mismatch");
+        write_managed_cookie_daemon_toml(&root, ChainId::BitcoinBlake2b, ChainId::Bitcoin);
+        let before = tree(root.path());
+        let err = start_connect_daemon(
+            root.clone(),
+            ChainId::BitcoinBlake2b,
+            wallet(),
+            client_for(features_stub_enabling_the_fork()),
+        )
+        .await
+        .expect_err("a foreign-chain daemon.toml must not start this Cube");
+        match &err {
+            Error::ChainMismatch { cube, config } => {
+                assert_eq!(*cube, ChainId::BitcoinBlake2b);
+                assert_eq!(*config, ChainId::Bitcoin);
+            }
+            other => panic!("expected the chain mismatch, got {}", other),
+        }
+        assert_eq!(
+            tree(root.path()),
+            before,
+            "the refusal created or rewrote something"
+        );
+        assert!(!root.path().join("bitcoind-blake2b").exists());
+    }
+
+    /// The same boundary for a `daemon.toml` whose `data_directory` is some
+    /// other Cube's: refused, so the fork daemon can never be pointed at a
+    /// database that is not this Cube's own.
+    #[tokio::test]
+    async fn an_admitted_fork_session_refuses_a_foreign_data_directory() {
+        let root = temp_root("start-datadir-mismatch");
+        let elsewhere = temp_root("start-datadir-elsewhere");
+        let dir = cube_daemon_dir(&root, ChainId::BitcoinBlake2b);
+        std::fs::write(
+            dir.join("daemon.toml"),
+            format!(
+                "data_directory = '{}'\nmain_descriptor = \"{}\"\n\n\
+                 [bitcoin_config]\nnetwork = \"{}\"\n\n\
+                 [bitcoind_config]\ncookie_path = '/nonexistent/.cookie'\naddr = \"127.0.0.1:1\"\n",
+                elsewhere.path().display(),
+                MAINNET_DESC,
+                ChainId::BitcoinBlake2b,
+            ),
+        )
+        .unwrap();
+        let before = tree(root.path());
+        let before_elsewhere = tree(elsewhere.path());
+        let err = start_connect_daemon(
+            root.clone(),
+            ChainId::BitcoinBlake2b,
+            wallet(),
+            client_for(features_stub_enabling_the_fork()),
+        )
+        .await
+        .expect_err("a foreign data directory must not be adopted");
+        assert!(
+            matches!(&err, Error::Unexpected(m) if m.as_str() == "Connect daemon datadir differs from this Cube"),
+            "got {}",
+            err
+        );
+        assert_eq!(tree(root.path()), before);
+        assert_eq!(
+            tree(elsewhere.path()),
+            before_elsewhere,
+            "the other Cube's directory was written to"
+        );
     }
 }

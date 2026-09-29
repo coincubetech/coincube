@@ -978,6 +978,10 @@ impl DaemonHandle {
             (None, None) => Err(StartupError::MissingBitcoinBackendConfig)?,
         };
 
+        bit.lock()
+            .expect("new backend lock is not poisoned")
+            .set_poll_abort(scan_abort.clone());
+
         // Shared, lock-free sync-progress mirror: the poller publishes into it,
         // `get_info` reads from it — so `get_info` (and the GUI's startup gate
         // that awaits it) never blocks behind the poller's full wallet scan.

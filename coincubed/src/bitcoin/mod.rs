@@ -279,8 +279,14 @@ impl BackendId {
     }
 }
 
+/// Confirmed coins and unconfirmed coins that expired during a poll.
+pub type ConfirmedCoins = (Vec<(bitcoin::OutPoint, i32, u32)>, Vec<bitcoin::OutPoint>);
+
 /// Our Bitcoin backend.
 pub trait BitcoinInterface: Send {
+    /// Install the daemon shutdown signal for bounded polling reads.
+    fn set_poll_abort(&mut self, _abort: sync::Arc<sync::atomic::AtomicBool>) {}
+
     /// Whether this backend talks to a `bitcoind`.
     ///
     /// Used to scope the managed-node maintenance pause: an Esplora or Electrum
@@ -309,8 +315,18 @@ pub trait BitcoinInterface: Send {
     /// backend is completely synced to the best known tip.
     fn sync_progress(&self) -> SyncProgress;
 
+    /// Fallible polling read; unavailable data must not replace cached progress.
+    fn try_sync_progress(&self) -> Result<SyncProgress, String> {
+        Ok(self.sync_progress())
+    }
+
     /// Get the best block info.
     fn chain_tip(&self) -> BlockChainTip;
+
+    /// Fallible polling read; an outage is not a different or missing chain tip.
+    fn try_chain_tip(&self) -> Result<BlockChainTip, String> {
+        Ok(self.chain_tip())
+    }
 
     /// Get the timestamp set in the best block's header.
     fn tip_time(&self) -> Option<u32>;
@@ -385,6 +401,47 @@ pub trait BitcoinInterface: Send {
         true
     }
 
+    fn try_received_coins(
+        &self,
+        tip: &BlockChainTip,
+        descs: &[descriptors::SinglePathCoincubeDesc],
+    ) -> Result<Vec<UTxO>, String> {
+        Ok(self.received_coins(tip, descs))
+    }
+    fn try_confirmed_coins(
+        &self,
+        outpoints: &[bitcoin::OutPoint],
+    ) -> Result<ConfirmedCoins, String> {
+        Ok(self.confirmed_coins(outpoints))
+    }
+    fn try_spending_coins(
+        &self,
+        outpoints: &[bitcoin::OutPoint],
+    ) -> Result<Vec<(bitcoin::OutPoint, bitcoin::Txid)>, String> {
+        Ok(self.spending_coins(outpoints))
+    }
+    fn try_spent_coins(
+        &self,
+        outpoints: &[(bitcoin::OutPoint, bitcoin::Txid)],
+    ) -> Result<(Vec<SpentCoin>, Vec<bitcoin::OutPoint>), String> {
+        Ok(self.spent_coins(outpoints))
+    }
+    fn try_is_in_chain(&self, tip: &BlockChainTip) -> Result<bool, String> {
+        Ok(self.is_in_chain(tip))
+    }
+    fn try_rescan_progress(&self) -> Result<Option<f64>, String> {
+        Ok(self.rescan_progress())
+    }
+    fn try_block_before_date(&self, timestamp: u32) -> Result<Option<BlockChainTip>, String> {
+        Ok(self.block_before_date(timestamp))
+    }
+    fn try_wallet_transaction(
+        &self,
+        txid: &bitcoin::Txid,
+    ) -> Result<Option<(bitcoin::Transaction, Option<Block>)>, String> {
+        Ok(self.wallet_transaction(txid))
+    }
+
     /// Broadcast this transaction to the Bitcoin P2P network
     fn broadcast_tx(&self, tx: &bitcoin::Transaction) -> Result<(), String>;
 
@@ -434,6 +491,153 @@ pub trait BitcoinInterface: Send {
 }
 
 impl BitcoinInterface for d::BitcoinD {
+    fn set_poll_abort(&mut self, abort: sync::Arc<sync::atomic::AtomicBool>) {
+        self.poll_abort = abort;
+    }
+
+    fn try_is_in_chain(&self, tip: &BlockChainTip) -> Result<bool, String> {
+        Ok(self
+            .try_get_block_hash(tip.height)?
+            .is_some_and(|hash| hash == tip.hash))
+    }
+
+    fn try_received_coins(
+        &self,
+        tip: &BlockChainTip,
+        descs: &[descriptors::SinglePathCoincubeDesc],
+    ) -> Result<Vec<UTxO>, String> {
+        Ok(self
+            .try_list_since_block(&tip.hash)?
+            .received_coins
+            .into_iter()
+            .filter_map(|entry| {
+                if !entry
+                    .parent_descs
+                    .iter()
+                    .any(|parent| descs.iter().any(|desc| desc == parent))
+                {
+                    return None;
+                }
+                Some(UTxO {
+                    outpoint: entry.outpoint,
+                    amount: entry.amount,
+                    block_height: entry.block_height,
+                    address: UTxOAddress::Address(entry.address),
+                    is_immature: entry.is_immature,
+                })
+            })
+            .collect())
+    }
+
+    fn try_confirmed_coins(
+        &self,
+        outpoints: &[bitcoin::OutPoint],
+    ) -> Result<ConfirmedCoins, String> {
+        let mut confirmed = Vec::new();
+        let mut expired = Vec::new();
+        let mut getter = CachedTxGetter::new(self);
+        for op in outpoints {
+            let Some(tx) = getter.try_get_transaction(&op.txid)? else {
+                continue;
+            };
+            if tx.has_assumed_confirmation() {
+                continue;
+            }
+            if let Some(block) = tx.block {
+                if !tx.is_coinbase || tx.confirmations >= COINBASE_MATURITY {
+                    confirmed.push((*op, block.height, block.time));
+                }
+            } else if !self.try_is_in_mempool(&op.txid)? {
+                expired.push(*op);
+            }
+        }
+        Ok((confirmed, expired))
+    }
+
+    fn try_spending_coins(
+        &self,
+        outpoints: &[bitcoin::OutPoint],
+    ) -> Result<Vec<(bitcoin::OutPoint, bitcoin::Txid)>, String> {
+        let mut spending = Vec::new();
+        for op in outpoints {
+            if self.try_is_spent(op)? {
+                if let Some(txid) = self.try_get_spender_txid(op)? {
+                    spending.push((*op, txid));
+                }
+            }
+        }
+        Ok(spending)
+    }
+
+    fn try_spent_coins(
+        &self,
+        outpoints: &[(bitcoin::OutPoint, bitcoin::Txid)],
+    ) -> Result<(Vec<SpentCoin>, Vec<bitcoin::OutPoint>), String> {
+        let mut spent = Vec::new();
+        let mut expired = Vec::new();
+        let mut getter = CachedTxGetter::new(self);
+        for (op, txid) in outpoints {
+            let Some(tx) = getter.try_get_transaction(txid)? else {
+                continue;
+            };
+            if tx.has_assumed_confirmation() {
+                continue;
+            }
+            if let Some(block) = tx.block {
+                spent.push((*op, *txid, block.height, block.time));
+                continue;
+            }
+            let mut confirmed_conflict = None;
+            let mut assumed_conflict = false;
+            for conflict in tx.conflicting_txs {
+                if let Some(other) = getter.try_get_transaction(&conflict)? {
+                    if other.has_assumed_confirmation() {
+                        assumed_conflict |= other.tx.input.iter().any(|i| i.previous_output == *op);
+                        continue;
+                    }
+                    if let Some(block) = other.block {
+                        if other
+                            .tx
+                            .input
+                            .iter()
+                            .any(|input| input.previous_output == *op)
+                        {
+                            confirmed_conflict = Some((conflict, block));
+                            break;
+                        }
+                    }
+                }
+            }
+            if let Some((txid, block)) = confirmed_conflict {
+                spent.push((*op, txid, block.height, block.time));
+            } else if !assumed_conflict && !self.try_is_in_mempool(txid)? {
+                expired.push(*op);
+            }
+        }
+        Ok((spent, expired))
+    }
+
+    fn try_wallet_transaction(
+        &self,
+        txid: &bitcoin::Txid,
+    ) -> Result<Option<(bitcoin::Transaction, Option<Block>)>, String> {
+        Ok(self.try_get_transaction(txid)?.map(|tx| {
+            let block = if tx.has_assumed_confirmation() {
+                None
+            } else {
+                tx.block
+            };
+            (tx.tx, block)
+        }))
+    }
+
+    fn try_rescan_progress(&self) -> Result<Option<f64>, String> {
+        self.try_rescan_progress()
+    }
+    fn try_block_before_date(&self, timestamp: u32) -> Result<Option<BlockChainTip>, String> {
+        self.try_tip_before_timestamp(timestamp)
+    }
+
     fn is_bitcoind(&self) -> bool {
         true
     }
@@ -465,6 +669,14 @@ impl BitcoinInterface for d::BitcoinD {
 
     fn chain_tip(&self) -> BlockChainTip {
         self.chain_tip()
+    }
+
+    fn try_chain_tip(&self) -> Result<BlockChainTip, String> {
+        self.try_chain_tip()
+    }
+
+    fn try_sync_progress(&self) -> Result<SyncProgress, String> {
+        self.try_sync_progress()
     }
 
     fn is_in_chain(&self, tip: &BlockChainTip) -> bool {
@@ -642,7 +854,7 @@ impl BitcoinInterface for d::BitcoinD {
     }
 
     fn common_ancestor(&self, tip: &BlockChainTip, max_depth: i32) -> AncestorSearch {
-        let Some(mut stats) = self.get_block_stats(tip.hash) else {
+        let Ok(mut stats) = self.try_get_block_stats(tip.hash) else {
             return AncestorSearch::Failed;
         };
         let mut ancestor = *tip;
@@ -656,7 +868,7 @@ impl BitcoinInterface for d::BitcoinD {
             let Some(previous) = stats.previous_blockhash else {
                 return AncestorSearch::Failed;
             };
-            let Some(next) = self.get_block_stats(previous) else {
+            let Ok(next) = self.try_get_block_stats(previous) else {
                 return AncestorSearch::Failed;
             };
             stats = next;
@@ -1084,6 +1296,47 @@ impl BitcoinInterface for esplora::Esplora {
 
 // FIXME: do we need to repeat the entire trait implementation? Isn't there a nicer way?
 impl BitcoinInterface for sync::Arc<sync::Mutex<dyn BitcoinInterface + 'static>> {
+    fn try_received_coins(
+        &self,
+        tip: &BlockChainTip,
+        descs: &[descriptors::SinglePathCoincubeDesc],
+    ) -> Result<Vec<UTxO>, String> {
+        self.lock().unwrap().try_received_coins(tip, descs)
+    }
+    fn try_confirmed_coins(
+        &self,
+        outpoints: &[bitcoin::OutPoint],
+    ) -> Result<ConfirmedCoins, String> {
+        self.lock().unwrap().try_confirmed_coins(outpoints)
+    }
+    fn try_spending_coins(
+        &self,
+        outpoints: &[bitcoin::OutPoint],
+    ) -> Result<Vec<(bitcoin::OutPoint, bitcoin::Txid)>, String> {
+        self.lock().unwrap().try_spending_coins(outpoints)
+    }
+    fn try_spent_coins(
+        &self,
+        outpoints: &[(bitcoin::OutPoint, bitcoin::Txid)],
+    ) -> Result<(Vec<SpentCoin>, Vec<bitcoin::OutPoint>), String> {
+        self.lock().unwrap().try_spent_coins(outpoints)
+    }
+    fn try_is_in_chain(&self, tip: &BlockChainTip) -> Result<bool, String> {
+        self.lock().unwrap().try_is_in_chain(tip)
+    }
+    fn try_rescan_progress(&self) -> Result<Option<f64>, String> {
+        self.lock().unwrap().try_rescan_progress()
+    }
+    fn try_block_before_date(&self, timestamp: u32) -> Result<Option<BlockChainTip>, String> {
+        self.lock().unwrap().try_block_before_date(timestamp)
+    }
+    fn try_wallet_transaction(
+        &self,
+        txid: &bitcoin::Txid,
+    ) -> Result<Option<(bitcoin::Transaction, Option<Block>)>, String> {
+        self.lock().unwrap().try_wallet_transaction(txid)
+    }
+
     fn is_bitcoind(&self) -> bool {
         self.lock().unwrap().is_bitcoind()
     }
@@ -1106,6 +1359,14 @@ impl BitcoinInterface for sync::Arc<sync::Mutex<dyn BitcoinInterface + 'static>>
 
     fn chain_tip(&self) -> BlockChainTip {
         self.lock().unwrap().chain_tip()
+    }
+
+    fn try_chain_tip(&self) -> Result<BlockChainTip, String> {
+        self.lock().unwrap().try_chain_tip()
+    }
+
+    fn try_sync_progress(&self) -> Result<SyncProgress, String> {
+        self.lock().unwrap().try_sync_progress()
     }
 
     fn is_in_chain(&self, tip: &BlockChainTip) -> bool {

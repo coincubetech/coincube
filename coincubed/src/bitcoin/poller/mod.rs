@@ -96,7 +96,14 @@ impl Poller {
         // regular poller behaviour: re-check sync progress before
         // committing to a poll.
         if !*synced {
-            let progress = self.bit.sync_progress();
+            let progress = match self.bit.try_sync_progress() {
+                Ok(progress) => progress,
+                Err(error) => {
+                    log::debug!("Sync progress unavailable: {}", error);
+                    *last_poll = Some(time::Instant::now());
+                    return;
+                }
+            };
             self.sync_cache.store(&progress);
             log::info!(
                 "Block chain synchronization progress: {:.2}% ({} blocks / {} headers)",
@@ -193,7 +200,13 @@ impl Poller {
 
             // Don't poll until the Bitcoin backend is fully synced.
             if !synced {
-                let progress = self.bit.sync_progress();
+                let progress = match self.bit.try_sync_progress() {
+                    Ok(progress) => progress,
+                    Err(error) => {
+                        log::debug!("Sync progress unavailable: {}", error);
+                        continue;
+                    }
+                };
                 self.sync_cache.store(&progress);
                 log::info!(
                     "Block chain synchronization progress: {:.2}% ({} blocks / {} headers)",

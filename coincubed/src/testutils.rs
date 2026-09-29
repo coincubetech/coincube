@@ -27,6 +27,9 @@ use miniscript::{
 };
 
 pub struct DummyBitcoind {
+    pub rescan_start: Option<BlockChainTip>,
+    pub poll_failure: Option<&'static str>,
+    pub received: Vec<UTxO>,
     pub broadcasted: sync::Mutex<Vec<Transaction>>,
     pub broadcast_error: Option<String>,
     pub rescan_requests: Vec<u32>,
@@ -71,6 +74,9 @@ impl DummyBitcoind {
         )
         .unwrap();
         Self {
+            rescan_start: None,
+            poll_failure: None,
+            received: Vec::new(),
             broadcasted: sync::Mutex::new(Vec::new()),
             broadcast_error: None,
             rescan_requests: Vec::new(),
@@ -88,6 +94,29 @@ impl DummyBitcoind {
 }
 
 impl BitcoinInterface for DummyBitcoind {
+    fn try_received_coins(
+        &self,
+        _: &BlockChainTip,
+        _: &[descriptors::SinglePathCoincubeDesc],
+    ) -> Result<Vec<UTxO>, String> {
+        Ok(self.received.clone())
+    }
+    fn try_confirmed_coins(
+        &self,
+        outpoints: &[bitcoin::OutPoint],
+    ) -> Result<crate::bitcoin::ConfirmedCoins, String> {
+        if self.poll_failure == Some("confirmed") {
+            return Err("injected transport failure".into());
+        }
+        Ok(self.confirmed_coins(outpoints))
+    }
+    fn try_rescan_progress(&self) -> Result<Option<f64>, String> {
+        if self.poll_failure == Some("rescan") {
+            return Err("injected rescan transport failure".into());
+        }
+        Ok(self.rescan_progress())
+    }
+
     fn genesis_block_timestamp(&self) -> Result<u32, crate::bitcoin::GenesisError> {
         self.genesis_block()?;
         Ok(1231006505)
@@ -200,7 +229,7 @@ impl BitcoinInterface for DummyBitcoind {
     }
 
     fn block_before_date(&self, _: u32) -> Option<BlockChainTip> {
-        todo!()
+        self.rescan_start
     }
 
     fn tip_time(&self) -> Option<u32> {
@@ -567,7 +596,7 @@ impl DatabaseConnection for DummyDatabase {
     }
 
     fn complete_rescan(&mut self) {
-        todo!()
+        self.db.write().unwrap().rescan_timestamp = None;
     }
 
     fn last_poll_timestamp(&mut self) -> Option<u32> {
