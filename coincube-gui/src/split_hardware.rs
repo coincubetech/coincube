@@ -454,9 +454,11 @@ pub fn view(source: &HardwareSource) -> Element<'_, HardwareMessage> {
         .spacing(12)
         .push(p1_bold("Address type"))
         .push(
-            iced::widget::pick_list(PURPOSES, Some(source.purpose), |purpose| {
-                HardwareMessage::PurposeSelected(purpose)
-            })
+            iced::widget::pick_list(
+                PURPOSES,
+                Some(source.purpose),
+                HardwareMessage::PurposeSelected,
+            )
             .width(Length::Fill),
         )
         .push(p1_bold("Account"))
