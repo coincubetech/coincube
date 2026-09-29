@@ -164,6 +164,8 @@ fn context() -> Context {
     }
 }
 struct Fixture {
+    local: Arc<Mutex<Option<route::BoundNode>>>,
+    generation: watch::Receiver<u64>,
     preflight: PreflightClient,
     stamp: i64,
     clock: Arc<AtomicI64>,
@@ -278,6 +280,26 @@ impl Services for Fixture {
             .observe(ChainId::Bitcoin, tx, tip, policy)
             .await
     }
+    async fn routed_preflight(
+        &self,
+        tx: &Transaction,
+        tip: BlockHash,
+        policy: FreshnessPolicy,
+    ) -> Result<RoutedEvidence, claim_preflight::Error> {
+        let local = self.local.lock().unwrap().clone();
+        route::preflight(
+            local,
+            &self.preflight,
+            tx,
+            tip,
+            policy,
+            CollectionContext {
+                expected_generation: 7,
+                generation: self.generation.clone(),
+            },
+        )
+        .await
+    }
     async fn submit(
         &self,
         tx: VerifiedStep1,
@@ -313,6 +335,7 @@ impl Services for Fixture {
     }
 }
 struct Harness {
+    local: Arc<Mutex<Option<route::BoundNode>>>,
     _server: MockServer,
     temp: Temp,
     sender: watch::Sender<u64>,
@@ -341,7 +364,10 @@ impl Harness {
         let fault = Arc::new(AtomicUsize::new(0));
         let calls = Arc::new(AtomicUsize::new(0));
         let reached = Arc::new(tokio::sync::Notify::new());
+        let local = Arc::new(Mutex::new(None));
         let services = Fixture {
+            local: local.clone(),
+            generation: generation.clone(),
             preflight: PreflightClient::new(
                 &server.base_url(),
                 CollectionContext {
@@ -371,6 +397,7 @@ impl Harness {
         )
         .unwrap();
         Self {
+            local,
             _server: server,
             temp,
             sender,
@@ -670,7 +697,7 @@ async fn dispatch_deadline_uses_oldest_evidence_and_never_extends_for_skew() {
 /// in `Production::new`. Only `backend()` is wrong. If the guard is removed,
 /// construction succeeds and this test fails.
 #[tokio::test]
-async fn production_refuses_a_non_embedded_backend_at_construction() {
+async fn production_admission_preserves_chain_network_and_daemon_constraints() {
     let server = MockServer::start_async().await;
     let root = std::env::temp_dir().join(format!("claim-prod-guard-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&root).unwrap();
@@ -870,7 +897,7 @@ async fn production_refuses_a_non_embedded_backend_at_construction() {
     let (_tx, generation) = tokio::sync::watch::channel(7u64);
     let production = Production::new(
         client,
-        Arc::new(ExternalWithGoodConfig(cfg, true)),
+        Arc::new(ExternalWithGoodConfig(cfg.clone(), true)),
         "synthetic-account".to_string(),
         7,
         generation,
@@ -881,6 +908,80 @@ async fn production_refuses_a_non_embedded_backend_at_construction() {
         production.context.provider,
         production.source.provider_identity()
     );
+    use coincubed::config::{BitcoinBackend, BitcoindConfig, BitcoindRpcAuth, ElectrumConfig};
+    let construct = |config, embedded, chain| {
+        let mut client = CoincubeClient::new();
+        client.base_url = server.base_url();
+        client.set_token("synthetic-test-token");
+        let (_, generation) = tokio::sync::watch::channel(7u64);
+        Production::for_chain(
+            client,
+            Arc::new(ExternalWithGoodConfig(config, embedded)),
+            "synthetic-account".into(),
+            7,
+            generation,
+            chain,
+        )
+    };
+    for backend in [
+        BitcoinBackend::Bitcoind(BitcoindConfig {
+            addr: "127.0.0.1:8332".parse().unwrap(),
+            rpc_auth: BitcoindRpcAuth::UserPass("synthetic".into(), "fixture".into()),
+        }),
+        BitcoinBackend::Bitcoind(BitcoindConfig {
+            addr: "127.0.0.1:8332".parse().unwrap(),
+            rpc_auth: BitcoindRpcAuth::CookieFile(root.join("managed-node.cookie")),
+        }),
+        BitcoinBackend::Electrum(ElectrumConfig {
+            addr: "tcp://127.0.0.1:50001".into(),
+            validate_domain: true,
+        }),
+    ] {
+        let mut selected = cfg.clone();
+        selected.bitcoin_backend = Some(backend.clone());
+        // Generic daemon fallbacks are captured in the backend binding, but
+        // cannot replace the explicitly reviewed Claim transport.
+        selected.fallback_esplora = match &cfg.bitcoin_backend {
+            Some(BitcoinBackend::Esplora(selection)) => Some(selection.clone()),
+            _ => unreachable!(),
+        };
+        let admitted = construct(selected.clone(), true, ChainId::Bitcoin).unwrap();
+        assert!(admitted.bound_transport);
+        let (_, verified) = artifact(ChainId::Bitcoin, false, 7);
+        let (gate, _revoker) =
+            SubmissionGate::new(&verified, Instant::now() + Duration::from_secs(30));
+        let gate = Arc::new(gate);
+        assert!(matches!(
+            admitted
+                .submit(VerifiedStep1::OpReturn(Arc::new(verified)), gate.clone(),)
+                .await,
+            Err(DaemonError::ClientNotSupported)
+        ));
+        assert_eq!(
+            gate.state(),
+            coincubed::poison_broadcast::SubmissionState::Pending
+        );
+        assert_eq!(
+            admitted.bound_node.is_some(),
+            matches!(backend, BitcoinBackend::Bitcoind(_))
+        );
+        assert_eq!(admitted.context.provider, format!("bitcoin|{}", endpoint));
+        assert!(matches!(
+            construct(selected.clone(), false, ChainId::Bitcoin),
+            Err(Error::Unsupported)
+        ));
+        selected.bitcoin_config.network = Network::Testnet;
+        assert!(matches!(
+            construct(selected.clone(), true, ChainId::Bitcoin),
+            Err(Error::Unsupported)
+        ));
+        selected.bitcoin_config.network = Network::Bitcoin;
+        selected.bitcoin_config.chain = ChainId::BitcoinBlake2b;
+        assert!(matches!(
+            construct(selected, true, ChainId::BitcoinBlake2b),
+            Err(Error::Unsupported)
+        ));
+    }
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -1289,3 +1390,61 @@ async fn recovery_ineligibility_is_not_a_journal_failure() {
 }
 
 pub(crate) mod ancestry;
+
+#[tokio::test]
+async fn changed_submission_route_requires_new_review_before_recording_intent() {
+    let mut h = Harness::new().await;
+    let mut review = h.coordinator.prepare_review(&context()).await.unwrap();
+    assert_eq!(review.snapshot.route, SubmissionRoute::Connect);
+    // Even unchanged transaction bytes and chain observations cannot preserve
+    // consent when confirmation revalidates a different submission route.
+    review.snapshot.route = route::BoundNode::new(coincubed::config::BitcoindConfig {
+        addr: "127.0.0.1:18443".parse().unwrap(),
+        rpc_auth: coincubed::config::BitcoindRpcAuth::UserPass(
+            "fixture".into(),
+            "synthetic".into(),
+        ),
+    })
+    .route();
+    assert!(matches!(
+        h.coordinator.confirm_and_submit(review, &context()).await,
+        Err(Error::ChangedReview)
+    ));
+    assert_eq!(h.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(h.coordinator.phase(), Phase::Intent);
+}
+
+#[tokio::test]
+async fn service_selected_route_change_requires_new_review_without_modifying_snapshot() {
+    let mut h = Harness::new().await;
+    let review = h.coordinator.prepare_review(&context()).await.unwrap();
+    assert_eq!(review.snapshot.route, SubmissionRoute::Connect);
+    let tx = h.coordinator.verified.transaction();
+    for id in [1, 3] {
+        h._server.mock(|when, then| {
+            when.method(POST).path("/").json_body(
+                json!({"jsonrpc":"2.0","id":id,"method":"getbestblockhash","params":[]}),
+            );
+            then.status(200)
+                .json_body(json!({"id":id,"result":hash(1),"error":null}));
+        });
+    }
+    let local = h._server.mock(|when, then| {
+        when.method(POST).path("/").json_body(json!({"jsonrpc":"2.0","id":2,"method":"testmempoolaccept","params":[[hex::encode(coincube_core::miniscript::bitcoin::consensus::serialize(tx))]]}));
+        then.status(200).json_body(json!({"id":2,"result":[{"txid":tx.compute_txid(),"wtxid":tx.compute_wtxid(),"allowed":true}],"error":null}));
+    });
+    *h.local.lock().unwrap() = Some(route::BoundNode::new(coincubed::config::BitcoindConfig {
+        addr: *h._server.address(),
+        rpc_auth: coincubed::config::BitcoindRpcAuth::UserPass(
+            "synthetic".into(),
+            "fixture".into(),
+        ),
+    }));
+    assert!(matches!(
+        h.coordinator.confirm_and_submit(review, &context()).await,
+        Err(Error::ChangedReview)
+    ));
+    local.assert_hits(1);
+    assert_eq!(h.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(h.coordinator.phase(), Phase::Intent);
+}

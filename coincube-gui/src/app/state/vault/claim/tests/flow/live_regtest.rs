@@ -8,6 +8,7 @@ use std::io::{BufRead, Write};
 pub(super) struct LiveTransport {
     pub transport: RegtestTransport,
     pub height: i32,
+    pub bound: Option<crate::daemon::embedded::EmbeddedDaemon>,
 }
 impl std::fmt::Debug for LiveTransport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -115,7 +116,7 @@ async fn claim_gui_regtest_driver() {
     fixture.coin.block_height = Some(i32::try_from(init["coin_height"].as_u64().unwrap()).unwrap());
     fixture.previous = previous;
     let base = init["bridge"].as_str().unwrap();
-    let config: coincubed::config::Config = toml::from_str(&format!(
+    let mut config: coincubed::config::Config = toml::from_str(&format!(
         "main_descriptor = '{}'\ndata_directory = '{}'\n[bitcoin_config]\nnetwork = 'bitcoin'\n[esplora_config]\naddr = '{}/api/v1/esplora/bitcoin/mainnet'\n",
         fixture.descriptor, root.display(), base)).unwrap();
     let transport = RegtestTransport::new(
@@ -125,6 +126,25 @@ async fn claim_gui_regtest_driver() {
         fixture.descriptor.clone(),
     )
     .unwrap();
+    let bound = if matches!(
+        init["backend"].as_str(),
+        Some("node" | "electrum" | "fallback" | "both-reject" | "fallback-timeout")
+    ) {
+        let (selected, handle) = transport
+            .bound_handle(
+                root.join(format!("bound-transport-{}", uuid::Uuid::new_v4())),
+                if init["backend"].as_str() == Some("electrum") {
+                    Some(init["electrum"].as_str().unwrap().parse().unwrap())
+                } else {
+                    None
+                },
+            )
+            .unwrap();
+        config = selected.clone();
+        Some(crate::daemon::embedded::EmbeddedDaemon::from_regtest_handle(selected, handle))
+    } else {
+        None
+    };
     let daemon = Arc::new(FlowDaemon {
         config,
         coin: fixture.coin,
@@ -134,6 +154,7 @@ async fn claim_gui_regtest_driver() {
         queried_txs: Mutex::new(Vec::new()),
         ancestry_coin: None,
         live: Some(LiveTransport {
+            bound,
             transport,
             height: i32::try_from(init["tip_height"].as_u64().unwrap()).unwrap(),
         }),
@@ -171,11 +192,12 @@ async fn claim_gui_regtest_driver() {
     }
     let mut fork_config = daemon.config.clone();
     fork_config.bitcoin_config.chain = ChainId::BitcoinBlake2b;
-    if let Some(coincubed::config::BitcoinBackend::Esplora(selection)) =
-        &mut fork_config.bitcoin_backend
-    {
-        selection.addr = format!("{base}/api/v1/esplora/bitcoin-blake2b/mainnet");
-    }
+    fork_config.bitcoin_backend = Some(coincubed::config::BitcoinBackend::Esplora(
+        toml::from_str(&format!(
+            "addr = '{base}/api/v1/esplora/bitcoin-blake2b/mainnet'"
+        ))
+        .unwrap(),
+    ));
     let fork_daemon = Arc::new(FlowDaemon {
         config: fork_config,
         coin: daemon.coin.clone(),
@@ -185,6 +207,7 @@ async fn claim_gui_regtest_driver() {
         queried_txs: Mutex::new(Vec::new()),
         ancestry_coin: None,
         live: Some(LiveTransport {
+            bound: None,
             height: i32::try_from(init["fork_tip_height"].as_u64().unwrap()).unwrap(),
             transport: RegtestTransport::new(
                 init["fork_rpc"].as_str().unwrap().parse().unwrap(),
@@ -359,9 +382,35 @@ async fn claim_gui_regtest_driver() {
                 drive(&mut panel, &dyn_daemon, &cache, task).await;
                 Message::View(view::Message::Claim(view::ClaimMessage::Refresh))
             }
+            "replace_backend" => {
+                let live = daemon.live.as_ref().unwrap();
+                let bound = live.bound.as_ref().unwrap();
+                let before = bound.claim_backend_binding().await.unwrap();
+                let (_, replacement) = live
+                    .transport
+                    .bound_handle(
+                        PathBuf::from(init["root"].as_str().unwrap())
+                            .join(format!("replacement-{}", uuid::Uuid::new_v4())),
+                        if init["backend"].as_str() == Some("electrum") {
+                            Some(init["electrum"].as_str().unwrap().parse().unwrap())
+                        } else {
+                            None
+                        },
+                    )
+                    .unwrap();
+                bound.replace_regtest_handle(replacement).await;
+                assert_ne!(before, bound.claim_backend_binding().await.unwrap());
+                emit(json!({"event":action,"binding_changed":true}));
+                continue;
+            }
             "confirm" => Message::View(view::Message::Claim(view::ClaimMessage::Confirm)),
             "refresh" => Message::View(view::Message::Claim(view::ClaimMessage::Refresh)),
-            "quit" => break,
+            "quit" => {
+                if let Some(bound) = daemon.live.as_ref().and_then(|live| live.bound.as_ref()) {
+                    bound.stop().await.unwrap();
+                }
+                break;
+            }
             _ => panic!("unknown command"),
         };
         let task = panel.update(Some(dyn_daemon.clone()), &cache, message);
@@ -372,6 +421,21 @@ async fn claim_gui_regtest_driver() {
             Stage::Review { .. } => "review",
             Stage::Track { .. } => "track",
             _ => "preconditions",
+        };
+        let reviewed_route = match &panel.stage {
+            Stage::Review {
+                snapshot: Some(snapshot),
+                ..
+            } => Some(snapshot.route.label()),
+            _ => None,
+        };
+        let review_error = match &panel.stage {
+            Stage::Review { error, .. } => error.clone(),
+            _ => None,
+        };
+        let submission_outcome = match &panel.stage {
+            Stage::Track { outcome, .. } => Some(format!("{outcome:?}")),
+            _ => None,
         };
         let tracking = match &panel.stage {
             Stage::Track {
@@ -385,7 +449,10 @@ async fn claim_gui_regtest_driver() {
         let tx = daemon.submitted.lock().unwrap().clone();
         let journal = journal_directory(&datadir, &panel.wallet).join("intent.json");
         emit(
-            json!({"event":action,"stage":stage,"tracking":tracking,"reconfirmation_review":panel.reconfirmation(),"submitted":tx.map(|tx| json!({
+            json!({"event":action,"stage":stage,"reviewed_route":reviewed_route,"review_error":review_error,
+            "node_submissions":daemon.hits().iter().filter(|h| **h == "submit_verified_poison_to_node").count(),
+            "connect_submissions":daemon.hits().iter().filter(|h| **h == "submit_verified_poison_to_connect").count(),
+            "tracking":tracking,"submission_outcome":submission_outcome,"reconfirmation_review":panel.reconfirmation(),"submitted":tx.map(|tx| json!({
             "txid":tx.compute_txid(),"wtxid":tx.compute_wtxid(),
             "raw":coincube_core::miniscript::bitcoin::consensus::encode::serialize_hex(&tx)})),
             "submission_calls":daemon.hits().iter().filter(|h| **h == "submit_verified_poison").count(),

@@ -78,6 +78,9 @@ class Bridge:
     def __init__(self, harness):
         self.harness = harness
         self.preflights = []
+        self.submissions = []
+        self.policy_node = None
+        self.withhold_submission_reply = False
         self.errors = []
         owner = self
 
@@ -143,10 +146,26 @@ class Bridge:
             def do_POST(self):
                 try:
                     node, _, suffix, network = self.route()
-                    assert suffix == "tx/preflight"
+                    if network == "mainnet" and owner.policy_node is not None:
+                        node = owner.policy_node
                     length = int(self.headers["Content-Length"])
                     assert 0 < length <= 262144
-                    request = json.loads(self.rfile.read(length))
+                    body = self.rfile.read(length)
+                    if suffix == "tx":
+                        assert network == "mainnet"
+                        raw = body.decode("ascii")
+                        txid = node.rpc.sendrawtransaction(raw)
+                        owner.submissions.append({"raw": raw, "txid": txid})
+                        if owner.withhold_submission_reply:
+                            # The real node accepted every byte; let the client's
+                            # 15-second deadline expire without acknowledgement.
+                            time.sleep(16)
+                            self.close_connection = True
+                            return
+                        self.reply(200, txid.encode("ascii"), "text/plain")
+                        return
+                    assert suffix == "tx/preflight"
+                    request = json.loads(body)
                     tip = node.rpc.getbestblockhash()
                     assert tip == request["tip_hash"]
                     result = node.rpc.testmempoolaccept([request["transaction"]])[0]
@@ -174,8 +193,11 @@ class Bridge:
         self.thread.join(timeout=5)
 
 
+@pytest.mark.parametrize("backend", ["esplora", "node", "electrum", "fallback", "both-reject", "fallback-timeout", "node-replaced", "electrum-replaced"])
 @pytest.mark.parametrize("multisig", [False, True], ids=["single-key", "two-of-three"])
-def test_gui_claims_both_chains_and_recovers_remined_bitcoin(tmp_path, record_property, multisig):
+def test_gui_claims_both_chains_and_recovers_remined_bitcoin(tmp_path, record_property, multisig, backend):
+    replace_backend = backend.endswith("-replaced")
+    backend = backend.removesuffix("-replaced")
     tool = os.getenv("CLAIM_GUI_REGTEST_TEST_PATH")
     missing = missing_binaries()
     if not tool or not os.access(tool, os.X_OK) or missing:
@@ -187,7 +209,7 @@ def test_gui_claims_both_chains_and_recovers_remined_bitcoin(tmp_path, record_pr
         Path(os.environ["TEST_DIR"]).mkdir(parents=True, exist_ok=True)
         tmp_path = Path(tempfile.mkdtemp(prefix="btcb2-gui-", dir=os.environ["TEST_DIR"]))
     child = Child(tool, tmp_path / "gui-home", multisig)
-    harness = bridge = None
+    harness = bridge = strict_node = None
     try:
         descriptor = child.receive()
         assert descriptor["event"] == "descriptor"
@@ -207,10 +229,26 @@ def test_gui_claims_both_chains_and_recovers_remined_bitcoin(tmp_path, record_pr
         root.mkdir()
         txid, vout, _ = harness.prefork_outpoints[0]
         node = harness.legacy
+        if backend in ("fallback", "both-reject", "fallback-timeout"):
+            # Replay the same public blocks into an isolated node with stricter
+            # relay policy. No datadir copy, peers, or transaction relay is used.
+            strict_node = harness._new_node(str(tmp_path / "strict-node"),
+                                            harness.legacy_path, ["-datacarriersize=0"])
+            strict_node.startup()
+            for height in range(1, node.rpc.getblockcount() + 1):
+                raw_block = node.rpc.getblock(node.rpc.getblockhash(height), 0)
+                assert strict_node.rpc.submitblock(raw_block) is None
+            assert strict_node.rpc.getbestblockhash() == node.rpc.getbestblockhash()
+        if backend == "both-reject":
+            bridge.policy_node = strict_node
+        bridge.withhold_submission_reply = backend == "fallback-timeout"
+        local_node = strict_node if strict_node else node
+        initial_legacy_mempool = set(node.rpc.getrawmempool())
         block = harness.prefork_block_hashes[txid]
-        initial = {"root": str(root), "bridge": bridge.url,
-                            "rpc": f"127.0.0.1:{node.rpcport}",
-                            "cookie": Path(node.node_rpc.cookie_path).read_text().strip(),
+        initial = {"root": str(root), "bridge": bridge.url, "backend": backend,
+                            "electrum": f"127.0.0.1:{harness.electrs_legacy.electrum_port}",
+                            "rpc": f"127.0.0.1:{local_node.rpcport}",
+                            "cookie": Path(local_node.node_rpc.cookie_path).read_text().strip(),
                             "fork_rpc": f"127.0.0.1:{harness.blake2b.rpcport}",
                             "fork_cookie": Path(harness.blake2b.node_rpc.cookie_path).read_text().strip(),
                             "fork_tip_height": harness.blake2b.rpc.getblockcount(),
@@ -231,13 +269,70 @@ def test_gui_claims_both_chains_and_recovers_remined_bitcoin(tmp_path, record_pr
             assert result["submission_calls"] == 0 and result["submitted"] is None
         record_property("primary_threshold", 2 if multisig else 1)
         assert result["journal"] is not None
-        assert bridge.preflights and all(v["allowed"] for v in bridge.preflights)
+        if backend == "both-reject":
+            assert result["reviewed_route"] is None, result
+            assert "Your Bitcoin node rejected" in result["review_error"], result
+            assert "Connect also rejected" in result["review_error"], result
+            assert bridge.preflights and all(not v["allowed"] for v in bridge.preflights)
+            journal = result["journal"]
+            attempted = child.send({"command": "confirm"})
+            assert attempted["submission_calls"] == 0 and attempted["submitted"] is None, attempted
+            assert attempted["node_submissions"] == attempted["connect_submissions"] == 0
+            assert attempted["journal"] == journal, "refused review must not record send intent"
+            assert not bridge.submissions and not bridge.errors
+            assert not strict_node.rpc.getrawmempool()
+            assert set(node.rpc.getrawmempool()) == initial_legacy_mempool
+            child.proc.stdin.write('{"command":"quit"}\n')
+            child.proc.stdin.flush()
+            assert child.proc.wait(timeout=10) == 0
+            return
+        if backend == "node":
+            assert result["reviewed_route"] == "Your Bitcoin node", result
+            assert not bridge.preflights, "accepted node policy must not preflight another route"
+        else:
+            assert result["reviewed_route"] == "Connect", result
+            assert bridge.preflights and all(v["allowed"] for v in bridge.preflights)
+        if replace_backend:
+            journal = result["journal"]
+            assert child.send({"command": "replace_backend"}) == {
+                "event": "replace_backend", "binding_changed": True}
+            refused = child.send({"command": "confirm"})
+            assert refused["stage"] == "review", refused
+            assert refused["review_error"] == "This Vault's backend changed or stopped. Check its connection, then reopen Claim.", refused
+            assert refused["submission_calls"] == 0 and refused["submitted"] is None, refused
+            assert refused["node_submissions"] == refused["connect_submissions"] == 0
+            assert refused["journal"] == journal, "replacement must refuse before durable send intent"
+            assert not bridge.submissions and not bridge.errors
+            assert set(node.rpc.getrawmempool()) == initial_legacy_mempool
+            child.proc.stdin.write('{"command":"quit"}\n')
+            child.proc.stdin.flush()
+            assert child.proc.wait(timeout=10) == 0
+            return
         result = child.send({"command": "confirm"})
         assert result["stage"] == "track" and result["submission_calls"] == 1, result
+        assert result["node_submissions"] == (1 if backend == "node" else 0), result
+        assert result["connect_submissions"] == (1 if backend in ("electrum", "fallback", "fallback-timeout") else 0), result
         submitted = result["submitted"]
+        if backend == "fallback-timeout":
+            assert result["submission_outcome"].startswith("Uncertain"), result
+            assert submitted is None, "the missing acknowledgement must not be reported as success"
+            assert len(bridge.submissions) == 1, bridge.submissions
+            accepted = bridge.submissions[0]
+            actual = node.rpc.getrawtransaction(accepted["txid"], True)
+            submitted = {"raw": actual["hex"], "txid": actual["txid"], "wtxid": actual["hash"]}
+            assert submitted["raw"] == accepted["raw"]
+        else:
+            assert result["submission_outcome"].startswith("UpstreamAccepted"), result
+        assert bridge.submissions == ([{"raw": submitted["raw"], "txid": submitted["txid"]}]
+                                      if backend in ("electrum", "fallback", "fallback-timeout") else []), bridge.submissions
         actual = node.rpc.getrawtransaction(submitted["txid"], True)
         assert actual["hex"] == submitted["raw"] and actual["hash"] == submitted["wtxid"]
         assert submitted["txid"] in node.rpc.getrawmempool()
+        if strict_node:
+            rejection = strict_node.rpc.testmempoolaccept([submitted["raw"]])[0]
+            assert not rejection["allowed"] and rejection.get("reject-reason"), rejection
+            assert not strict_node.rpc.getrawmempool(), "the rejected local route must not send"
+            record_property("local_policy_rejection", rejection["reject-reason"])
         fork_rejection = harness.blake2b.rpc.testmempoolaccept([submitted["raw"]])[0]
         assert not fork_rejection["allowed"], fork_rejection
         assert fork_rejection.get("reject-reason"), fork_rejection
@@ -435,6 +530,7 @@ def test_gui_claims_both_chains_and_recovers_remined_bitcoin(tmp_path, record_pr
         record_property("fork_wtxid", fork_tx["wtxid"])
         record_property("bitcoin_reconfirmation", {"previous": inclusion, "confirmed": new_inclusion})
         assert not bridge.errors, bridge.errors
+        assert len(bridge.submissions) == (1 if backend in ("electrum", "fallback", "fallback-timeout") else 0), bridge.submissions
         record_property("step1_txid", submitted["txid"])
         record_property("step1_wtxid", submitted["wtxid"])
         record_property("gui_panel_submission_calls", tracked["submission_calls"])
@@ -446,7 +542,13 @@ def test_gui_claims_both_chains_and_recovers_remined_bitcoin(tmp_path, record_pr
     finally:
         child.close()
         (tmp_path / "log").write_text("".join(child.transcript))
-        if bridge:
-            bridge.close()
-        if harness:
-            harness.cleanup()
+        try:
+            if strict_node and getattr(strict_node, "proc", None) is not None:
+                strict_node.cleanup()
+        finally:
+            try:
+                if bridge:
+                    bridge.close()
+            finally:
+                if harness:
+                    harness.cleanup()

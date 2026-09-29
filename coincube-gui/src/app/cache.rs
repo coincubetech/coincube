@@ -85,6 +85,7 @@ pub struct LookupOrigin {
 pub struct Cache {
     /// The `App` instance this cache belongs to. See [`AppGeneration`].
     pub app_generation: AppGeneration,
+    pub unswept_notice: Option<super::unswept_notice::Notice>,
     pub datadir_path: CoincubeDirectory,
     /// IBD progress (0.0–1.0) of the pending local Bitcoind, polled via its
     /// RPC.  `None` when no local node is pending.
@@ -334,6 +335,7 @@ impl std::default::Default for Cache {
     fn default() -> Self {
         Self {
             app_generation: AppGeneration::next(),
+            unswept_notice: None,
             connect_transport_key: None,
             cube_encryption_key: None,
             datadir_path: CoincubeDirectory::new(std::path::PathBuf::new()),

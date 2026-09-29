@@ -11,6 +11,7 @@ pub mod seed_source;
 pub mod session;
 pub mod settings;
 pub mod state;
+mod unswept_notice;
 pub mod view;
 pub mod wallet;
 pub mod wallets;
@@ -861,6 +862,8 @@ pub struct App {
     /// txids that answered `Unknown`, which are not written to the cache and
     /// would otherwise stay claimed forever.
     entangled_in_flight: HashSet<bitcoin::Txid>,
+    unswept_in_flight: Option<u64>,
+    unswept_session: Option<state::vault::claim::ConnectSession>,
     /// Global "payment received" celebration overlay — shown for incoming
     /// Liquid payments (e.g. LNURL) regardless of which panel is active.
     show_received_celebration: bool,
@@ -2858,6 +2861,8 @@ impl App {
             daemon_switch_in_progress: false,
             auto_switch_suppressed: false,
             entangled_in_flight: HashSet::new(),
+            unswept_in_flight: None,
+            unswept_session: None,
             show_received_celebration: false,
             show_recovery_alerts_prompt: false,
             spark_stable_balance_reconciled: false,
@@ -3027,6 +3032,8 @@ impl App {
                 daemon_switch_in_progress: false,
                 auto_switch_suppressed: false,
                 entangled_in_flight: HashSet::new(),
+                unswept_in_flight: None,
+                unswept_session: None,
                 show_received_celebration: false,
                 show_recovery_alerts_prompt: false,
                 spark_stable_balance_reconciled: false,
@@ -3081,6 +3088,41 @@ impl App {
         &self,
     ) -> Option<crate::services::coincube::CoincubeClient> {
         self.panels.connect.account.authenticated_client()
+    }
+
+    /// Refresh positive, session-bound recovery display evidence after sync.
+    fn unswept_notice_task(&mut self) -> Task<Message> {
+        self.cache.unswept_notice = None;
+        if self.cache.chain() != crate::chain::ChainId::Bitcoin
+            || !self.cache.btcb2_server_enabled
+            || self.unswept_in_flight.is_some()
+        {
+            return Task::none();
+        }
+        let Some(wallet) = self.wallet.as_ref() else {
+            return Task::none();
+        };
+        let Some(session) = self.claim_connect_session() else {
+            return Task::none();
+        };
+        let client = session.client.clone();
+        let outputs = unswept_notice::owned(&self.cache, &wallet.main_descriptor);
+        if outputs.is_empty() {
+            return Task::none();
+        }
+        let generation = *self.panels.claim_generation.borrow();
+        let live = self.panels.claim_generation.subscribe();
+        self.unswept_in_flight = Some(generation);
+        self.unswept_session = Some(session);
+        let app = self.cache.app_generation;
+        Task::perform(
+            crate::services::foreign_scan::known::known_unspent(client, outputs, generation, live),
+            move |result| Message::UnsweptNotice {
+                app,
+                generation,
+                result,
+            },
+        )
     }
 
     /// Entangled-deposit detection for a Bitcoin Blake2b Cube (`#276` I13):
@@ -3817,6 +3859,9 @@ impl App {
     /// coordinator call also checks. The journaled claim itself survives:
     /// the panel re-binds it under the next context.
     pub fn revoke_claim(&mut self) {
+        self.cache.unswept_notice = None;
+        self.unswept_in_flight = None;
+        self.unswept_session = None;
         if let Some(panel) = &mut self.panels.fork_claim {
             panel.revoke();
         }
@@ -5298,6 +5343,34 @@ impl App {
                     }
                 }
             }
+            Message::UnsweptNotice {
+                app,
+                generation,
+                result,
+            } => {
+                if app != self.cache.app_generation
+                    || self.unswept_in_flight != Some(generation)
+                    || generation != *self.panels.claim_generation.borrow()
+                {
+                    return Task::none();
+                }
+                self.unswept_in_flight = None;
+                let current_session = self.claim_connect_session();
+                if !matches!((&self.unswept_session, &current_session), (Some(old), Some(new)) if state::vault::claim::same_session(old, new))
+                {
+                    self.cache.unswept_notice = None;
+                    self.unswept_session = None;
+                    return Task::none();
+                }
+                self.cache.unswept_notice = result.ok().flatten().and_then(|proof| {
+                    let wallet = self.wallet.as_ref()?;
+                    let notice = unswept_notice::Notice::new(proof, generation, wallet);
+                    notice
+                        .visible(&self.cache, std::time::Instant::now())
+                        .then_some(notice)
+                });
+                return Task::done(Message::CacheUpdated);
+            }
             Message::EntangledLookups {
                 origin,
                 claimed,
@@ -5593,9 +5666,11 @@ impl App {
                         // Same posture for the BTCB2 entangled-deposit lookups:
                         // `Task::none()` on every Bitcoin-family Cube.
                         let entangled = self.entangled_lookup_task();
+                        let unswept = self.unswept_notice_task();
                         return Task::batch([
                             heartbeat,
                             entangled,
+                            unswept,
                             Task::done(Message::CacheUpdated),
                         ]);
                     }
@@ -6245,12 +6320,18 @@ impl App {
                             (Some(_), None) | (None, Some(_)) => true,
                             (None, None) => false,
                         });
+                let notice_replaced = self.unswept_session.as_ref().is_some_and(|old| {
+                    !self.cache.btcb2_server_enabled
+                        || claim_session
+                            .as_ref()
+                            .is_none_or(|new| !state::vault::claim::same_session(old, new))
+                });
                 let claim_replaced = self
                     .panels
                     .claim
                     .as_mut()
                     .is_some_and(|panel| panel.set_connect(claim_session));
-                if !claim_signed_in || claim_replaced || fork_replaced {
+                if !claim_signed_in || claim_replaced || fork_replaced || notice_replaced {
                     self.revoke_claim();
                 }
                 let claim_daemon = self.daemon.clone();

@@ -148,7 +148,7 @@ pub const NODE_UNAVAILABLE: &str = "The Vault's node isn't available right now, 
 pub const TARGET_GONE: &str =
     "The claim target is missing or ambiguous. Check the paired Bitcoin Blake2b Cube on this device, then try again.";
 /// `Production::new`'s backend refusal, in the words a user can act on.
-const BACKEND_UNSUPPORTED: &str = "This Vault must use Coincube's Bitcoin service as its node backend for a claim. Change it under Vault → Settings → Node, then come back.";
+const BACKEND_UNSUPPORTED: &str = "This Vault's node configuration doesn't support this claim. Check the wallet network and Vault → Settings → Node, then try again.";
 
 /// Where the build's fee rate comes from. The estimator asks public fee
 /// APIs; a fixed rate is for tests, which must never reach the network.
@@ -2836,7 +2836,17 @@ pub fn describe(error: claim_coordinator::Error) -> String {
             "Couldn't observe the chains ({:?} while reading {:?}).",
             failure.kind, failure.stage
         ),
-        E::Preflight(error) => format!("The Bitcoin node's preflight check failed ({error:?})."),
+        E::Preflight(crate::services::claim_preflight::Error::BothRoutesRejected {
+            local,
+            connect,
+        }) => {
+            format!("Your Bitcoin node rejected the transaction: {local}. Connect also rejected it: {connect}. This check did not broadcast anything.")
+        }
+        E::Preflight(crate::services::claim_preflight::Error::BackendChanged) => {
+            "This Vault's backend changed or stopped. Check its connection, then reopen Claim."
+                .into()
+        }
+        E::Preflight(error) => format!("The transaction preflight check failed ({error:?})."),
         E::PolicyRejected(policy) => match policy {
             crate::services::claim_preflight::NodePolicy::Rejected { reason } => {
                 format!("The Bitcoin node rejected the transaction: {reason}")

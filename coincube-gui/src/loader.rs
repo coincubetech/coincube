@@ -858,6 +858,7 @@ pub async fn load_application(
     // Both last poll fields start with the same value.
     let cache = Cache {
         app_generation: crate::app::cache::AppGeneration::next(),
+        unswept_notice: None,
         connect_transport_key: None,
         cube_encryption_key: None,
         datadir_path: config.datadir_path,
