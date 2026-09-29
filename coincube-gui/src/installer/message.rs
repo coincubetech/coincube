@@ -450,7 +450,6 @@ pub enum InternalBitcoindMsg {
     Start,
 }
 
-#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum DefineDescriptor {
     ChangeTemplate(context::DescriptorTemplate),
@@ -475,7 +474,6 @@ pub enum DefineDescriptor {
     ReopenKeyModal(Vec<(usize, usize)>),
 }
 
-#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum DefinePath {
     AddKey,
@@ -486,7 +484,6 @@ pub enum DefinePath {
     EditThreshold,
 }
 
-#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum DefineKey {
     Delete,

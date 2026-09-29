@@ -57,6 +57,13 @@
 //! `SIGHASH_ALL` signatures that independently meet the script threshold can
 //! still be assembled by a standard PSBT consumer that never sees the
 //! proprietary unified records (`#398`).
+//!
+//! [`ensure_no_unsafe_legacy_alternative`] is the local retention/export
+//! policy layered on that fact (`#536`). It refuses an input when a
+//! unified-bearing satisfaction is available and the verified legacy records
+//! retained in the same PSBT independently satisfy the script. It preserves
+//! legacy signatures required by a mixed witness and cannot revoke signatures
+//! held in a separate device, file, or coordinator.
 
 use std::{collections::BTreeMap, error, fmt};
 
@@ -72,7 +79,7 @@ use miniscript::{
 };
 
 use crate::{
-    psbt_unified::{unified_signatures, UnifiedPsbt, UnifiedPsbtError},
+    psbt_unified::{unified_signatures, UnifiedPsbt, UnifiedPsbtError, UnifiedSignature},
     spend::{authenticate_previous_output, InputAuthError},
     unified_signing::{verify_p2wsh_all_unified, UnifiedSigningError},
 };
@@ -160,6 +167,14 @@ pub enum UnifiedFinalizeError {
         input: usize,
         legacy_candidates: usize,
     },
+    /// A unified-bearing witness is available for this input, but the verified
+    /// legacy signatures retained in the same PSBT can independently satisfy
+    /// the script. A standard Bitcoin PSBT consumer can therefore assemble a
+    /// different, Bitcoin-valid witness for the same unsigned transaction.
+    UnsafeLegacyAlternative {
+        input: usize,
+        legacy_signatures: usize,
+    },
 }
 
 impl fmt::Display for UnifiedFinalizeError {
@@ -218,6 +233,16 @@ impl fmt::Display for UnifiedFinalizeError {
                 "input {input} has a verified unified signature but {legacy_candidates} legacy \
                  signatures are too many to search for a witness that keeps it; refusing to \
                  finalise from legacy signatures alone"
+            ),
+            Self::UnsafeLegacyAlternative {
+                input,
+                legacy_signatures,
+            } => write!(
+                f,
+                "input {input} retains {legacy_signatures} verified legacy signatures that can \
+                 independently satisfy it while a unified-bearing witness is available; \
+                 refusing local storage or export because a standard Bitcoin PSBT consumer can \
+                 assemble an alternate witness"
             ),
         }
     }
@@ -640,6 +665,107 @@ fn verified_legacy_signatures<C: secp256k1::Verification>(
     Ok(legacy)
 }
 
+/// Verified unified records for one input in the representation expected by
+/// the miniscript satisfier. [`verify_p2wsh_all_unified`] must have run first.
+fn available_unified_signatures(
+    unified: &[UnifiedSignature],
+    input_index: usize,
+) -> Result<BTreeMap<PublicKey, AvailableSignature>, UnifiedFinalizeError> {
+    let mut available = BTreeMap::new();
+    for record in unified
+        .iter()
+        .filter(|record| record.input_index == input_index)
+    {
+        debug_assert_eq!(record.signature.last(), Some(&UNIFIED_SIGHASH_ALL));
+        let invalid = || {
+            UnifiedFinalizeError::Signing(UnifiedSigningError::InvalidUnifiedSignature {
+                input: input_index,
+                public_key: record.public_key,
+            })
+        };
+        let (_, der_part) = record.signature.split_last().ok_or(invalid())?;
+        let der = ecdsa::Signature {
+            signature: secp256k1::ecdsa::Signature::from_der(der_part).map_err(|_| invalid())?,
+            sighash_type: EcdsaSighashType::All,
+        };
+        available.insert(
+            record.public_key,
+            AvailableSignature {
+                der,
+                witness_bytes: record.signature.clone(),
+                unified: true,
+            },
+        );
+    }
+    Ok(available)
+}
+
+/// Refuse a locally retained PSBT when one of its inputs has both a
+/// unified-bearing satisfaction and an independently sufficient legacy
+/// signature set.
+///
+/// This is a local storage/export policy, not a claim about signatures already
+/// held by another device, coordinator, or exported copy. It deliberately
+/// permits mixed witnesses: legacy signatures needed alongside a unified
+/// signature remain acceptable while they are insufficient on their own.
+/// Inputs that are incomplete or finalise only through legacy signatures are
+/// also left to the ordinary replay-status policy.
+pub fn ensure_no_unsafe_legacy_alternative<C: secp256k1::Verification>(
+    psbt: &UnifiedPsbt,
+    secp: &secp256k1::Secp256k1<C>,
+) -> Result<(), UnifiedFinalizeError> {
+    verify_p2wsh_all_unified(psbt, secp)?;
+    let contexts = input_contexts(psbt)?;
+    let unified = unified_signatures(psbt)?;
+    let unsigned_tx = &psbt.psbt().unsigned_tx;
+    let mut legacy_cache = SighashCache::new(unsigned_tx);
+
+    for (input_index, context) in contexts.iter().enumerate() {
+        let available = available_unified_signatures(&unified, input_index)?;
+        let legacy = verified_legacy_signatures(
+            secp,
+            &mut legacy_cache,
+            input_index,
+            context,
+            &psbt.psbt().inputs[input_index],
+        )?;
+        if available.is_empty() || legacy.is_empty() {
+            continue;
+        }
+
+        let locks = InputLocks::of(unsigned_tx, input_index);
+        let protected = match satisfy_input(input_index, context, &available, locks) {
+            Ok(done) => Some(done),
+            Err(UnifiedFinalizeError::Unsatisfiable { .. }) => {
+                match satisfy_preferring_unified(input_index, context, &available, &legacy, locks) {
+                    Ok(done) => Some(done),
+                    Err(UnifiedFinalizeError::Unsatisfiable { .. }) => None,
+                    Err(other) => return Err(other),
+                }
+            }
+            Err(other) => return Err(other),
+        };
+        let Some((_, report)) = protected else {
+            continue;
+        };
+        if !report.replay_protected() {
+            continue;
+        }
+
+        match satisfy_input(input_index, context, &legacy, locks) {
+            Ok(_) => {
+                return Err(UnifiedFinalizeError::UnsafeLegacyAlternative {
+                    input: input_index,
+                    legacy_signatures: legacy.len(),
+                })
+            }
+            Err(UnifiedFinalizeError::Unsatisfiable { .. }) => {}
+            Err(other) => return Err(other),
+        }
+    }
+    Ok(())
+}
+
 /// Finalise every input of `psbt` and return the transaction ready to
 /// broadcast, together with what each witness is made of.
 ///
@@ -672,34 +798,7 @@ pub fn finalize_p2wsh_all_unified<C: secp256k1::Verification>(
         let input = &psbt.psbt().inputs[input_index];
 
         // Unified first: verified above; the witness bytes are the record itself.
-        let mut available: BTreeMap<PublicKey, AvailableSignature> = BTreeMap::new();
-        for record in unified.iter().filter(|r| r.input_index == input_index) {
-            // A record is `DER || 0x21` (the adapter validated the shape and the
-            // verifier above checked the signature). `ecdsa::Signature::from_slice`
-            // cannot parse a 0x21 sighash byte, so the placeholder is rebuilt from
-            // the DER part with `SIGHASH_ALL`; the witness gets the record itself.
-            debug_assert_eq!(record.signature.last(), Some(&UNIFIED_SIGHASH_ALL));
-            let invalid = || {
-                UnifiedFinalizeError::Signing(UnifiedSigningError::InvalidUnifiedSignature {
-                    input: input_index,
-                    public_key: record.public_key,
-                })
-            };
-            let (_, der_part) = record.signature.split_last().ok_or(invalid())?;
-            let der = ecdsa::Signature {
-                signature: secp256k1::ecdsa::Signature::from_der(der_part)
-                    .map_err(|_| invalid())?,
-                sighash_type: EcdsaSighashType::All,
-            };
-            available.insert(
-                record.public_key,
-                AvailableSignature {
-                    der,
-                    witness_bytes: record.signature.clone(),
-                    unified: true,
-                },
-            );
-        }
+        let available = available_unified_signatures(&unified, input_index)?;
 
         // The input's own sighash *request* was already held to the adapter's
         // rule (absent, `SIGHASH_ALL` or `ALL|UNIFIED`) by `validate_internal`

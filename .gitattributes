@@ -1,5 +1,6 @@
-# Knots BIP-110: byte-exact OpenPGP-signed fixtures/keys (no EOL translation).
+# Node distributions: byte-exact OpenPGP-signed fixtures/keys (no EOL translation).
 coincube-gui/assets/knots_signing_key.asc -text
+coincube-gui/assets/tor_signing_key.asc -text
 coincube-gui/src/installer/step/node/test_fixtures/** -text
 
 # Branta SDK vendor drop (#368): coincube-gui's `vendor_integrity` test hashes

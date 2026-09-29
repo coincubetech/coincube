@@ -425,6 +425,11 @@ impl SplitWalletPanel {
     fn status(&self) -> &Status {
         &self.status
     }
+
+    #[cfg(test)]
+    pub(crate) fn targets(&self) -> &[TargetCube] {
+        &self.targets
+    }
 }
 
 fn inventory_error_copy(error: InventoryError) -> String {
@@ -1064,5 +1069,162 @@ mod tests {
         assert!(panel.evidence.is_none());
         assert!(matches!(panel.status, Status::Editing));
         assert_eq!(panel.generation, 24);
+    }
+
+    #[test]
+    fn every_supported_source_remains_discovery_only() {
+        use crate::services::foreign_scan::{Capabilities, SigningRoutes};
+
+        let secp = Secp256k1::new();
+        let first = Xpub::from_priv(
+            &secp,
+            &Xpriv::new_master(
+                coincube_core::miniscript::bitcoin::Network::Bitcoin,
+                &[41; 32],
+            )
+            .unwrap(),
+        );
+        let second = Xpub::from_priv(
+            &secp,
+            &Xpriv::new_master(
+                coincube_core::miniscript::bitcoin::Network::Bitcoin,
+                &[43; 32],
+            )
+            .unwrap(),
+        );
+        // #568 A1: only the PSBT-file route exists, and `tr` has none. No
+        // shape grants in-app hardware, unified-seed or Claim authority.
+        let expected = |taproot: bool| Capabilities {
+            scan: true,
+            signing: SigningRoutes {
+                psbt_file: !taproot,
+                ..SigningRoutes::NONE
+            },
+            claim_authorization: false,
+        };
+
+        // Covers the PR 8 discovery shapes with and without origin metadata.
+        // A hardware-exported account xpub is public material here: accepting
+        // it for discovery must never imply that a device was connected,
+        // accepted the PSBT, or granted Claim authority.
+        for descriptor in [
+            format!("wpkh({first}/0/*)"),
+            format!("wpkh([d34db33f/84h/0h/0h]{first}/0/*)"),
+            format!("sh(wpkh({first}/0/*))"),
+            format!("pkh({first}/0/*)"),
+            format!("wsh(sortedmulti(2,{first}/0/*,{second}/0/*))"),
+            format!("tr({first}/0/*)"),
+        ] {
+            let parsed =
+                ScanDescriptor::parse(Branch::External, &descriptor).unwrap_or_else(|_| {
+                    panic!("supported discovery descriptor refused: {}", descriptor)
+                });
+            assert_eq!(
+                parsed.capabilities(),
+                expected(descriptor.starts_with("tr(")),
+                "{}",
+                descriptor
+            );
+        }
+
+        // Private material, ambiguous branches and hardened public derivation
+        // fail before a scan can start. They are not silently downgraded to a
+        // scan-only or replayable signing route.
+        let secret = Xpriv::new_master(
+            coincube_core::miniscript::bitcoin::Network::Bitcoin,
+            &[44; 32],
+        )
+        .unwrap();
+        for descriptor in [
+            format!("wpkh({secret}/0/*)"),
+            format!("wpkh({first}/<0;1>/*)"),
+            format!("wpkh({first}/0'/*)"),
+            format!("wpkh({first}/0/*')"),
+            "raw(51)".to_string(),
+        ] {
+            assert!(
+                ScanDescriptor::parse(Branch::External, &descriptor).is_err(),
+                "unsafe discovery descriptor accepted: {}",
+                descriptor
+            );
+        }
+    }
+
+    #[test]
+    fn every_scan_failure_has_explicit_refusal_semantics() {
+        let incomplete = [
+            ScanError::RangeLimit,
+            ScanError::AddressLimit,
+            ScanError::Deadline,
+            ScanError::BodyLimit,
+        ];
+        for error in incomplete {
+            let copy = scan_error_copy(error);
+            assert!(
+                copy.contains("bounded")
+                    || copy.contains("safe gap")
+                    || copy.contains("safety budget"),
+                "bounded failure lost its refusal: {:?}: {}",
+                error,
+                copy
+            );
+            assert!(!copy.to_ascii_lowercase().contains("zero balance"));
+        }
+
+        for error in [
+            ScanError::Freshness,
+            ScanError::Changed,
+            ScanError::Unavailable,
+            ScanError::Http(503),
+            ScanError::Prevout,
+            ScanError::Malformed,
+        ] {
+            let copy = scan_error_copy(error);
+            assert!(
+                copy.contains("No balance conclusion") || copy.contains("Scan again"),
+                "evidence failure could be mistaken for an empty wallet: {:?}: {}",
+                error,
+                copy
+            );
+        }
+
+        assert!(scan_error_copy(ScanError::Http(401)).contains("Sign in to Connect"));
+        assert!(scan_error_copy(ScanError::Descriptor).contains("Private keys"));
+        assert!(scan_error_copy(ScanError::Cancelled).contains("cancelled"));
+        for error in [ScanError::UnsupportedChain, ScanError::InvalidLimits] {
+            assert!(scan_error_copy(error).contains("not supported"));
+        }
+    }
+
+    /// Completed, authenticated (empty) evidence for `generation`.
+    fn completed_evidence(generation: u64) -> Arc<ScanEvidence> {
+        let report = foreign_scan::ScanReport::for_test(
+            ChainId::BitcoinBlake2b,
+            generation,
+            BlockHash::from_byte_array([9; 32]),
+            Vec::new(),
+        );
+        let external = ScanDescriptor::parse(Branch::External, FIXED_DESCRIPTOR).unwrap();
+        Arc::new(ScanEvidence::new(report, external, None).unwrap())
+    }
+
+    #[test]
+    fn scan_result_is_evidence_only_and_never_a_signing_transition() {
+        let _guard = crate::app::session::test_guard();
+        let mut panel = SplitWalletPanel::new();
+        panel.set_targets(vec![target()]);
+        let generation = panel.generation;
+
+        let _ = panel.update(
+            Message::Scanned(Ok(completed_evidence(generation)), generation, 9),
+            None,
+            9,
+        );
+
+        assert!(matches!(panel.status(), Status::Complete(_)));
+        // The state machine intentionally has no authorize/sign/broadcast
+        // state. A completed discovery can only be invalidated back to Editing.
+        let _ = panel.update(Message::TargetSelected(target()), None, 9);
+        assert_eq!(panel.status(), &Status::Editing);
     }
 }

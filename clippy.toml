@@ -1,0 +1,6 @@
+# Keep layout regressions visible without forcing a broad allocation rewrite.
+# The initial #482 audit found 35 enum and 31 Result warnings at defaults;
+# existing message enums are generally below 4 KiB and errors at most 192 B.
+# A 32 KiB State variant (the #481 failure) remains well above this threshold.
+enum-variant-size-threshold = 4096
+large-error-threshold = 256

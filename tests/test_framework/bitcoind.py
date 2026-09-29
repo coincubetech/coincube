@@ -73,6 +73,9 @@ class Bitcoind(BitcoinBackend):
         self.rpcport = rpcport
         self.p2pport = reserve()
         self.prefix = "bitcoind"
+        # Indexer fixtures may install a synchronization barrier before a
+        # destructive chain edit. Bitcoind-only tests leave this unset.
+        self.before_reorg = None
 
         regtestdir = os.path.join(bitcoin_dir, "regtest")
         if not os.path.exists(regtestdir):
@@ -120,7 +123,10 @@ class Bitcoind(BitcoinBackend):
         logging.info("Bitcoind started")
 
     def stop(self):
-        self.rpc.stop()
+        # Popen may have failed before a node existed; preserve that startup
+        # error rather than attempting RPC cleanup against a nonexistent node.
+        if self.proc is not None:
+            self.rpc.stop()
         return TailableProc.stop(self)
 
     # wait_for_mempool can be used to wait for the mempool before generating
@@ -169,10 +175,16 @@ class Bitcoind(BitcoinBackend):
         for _ in range(n):
             self.rpc.generateblock(addr, [])
 
+    def invalidate_block(self, block_hash):
+        """Invalidate a block after attached indexers have reached Core's tip."""
+        if self.before_reorg is not None:
+            self.before_reorg()
+        self.rpc.invalidateblock(block_hash)
+
     def invalidate_remine(self, height):
         delta = self.rpc.getblockcount() - height + 1
         h = self.rpc.getblockhash(height)
-        self.rpc.invalidateblock(h)
+        self.invalidate_block(h)
         self.generate_empty_blocks(delta)
 
     def simple_reorg(self, height, shift=0):
@@ -202,7 +214,7 @@ class Bitcoind(BitcoinBackend):
         else:
             final_len = 1 + orig_len
 
-        self.rpc.invalidateblock(old_hash)
+        self.invalidate_block(old_hash)
         self.wait_for_log(
             r"InvalidChainFound: invalid block=.*  height={}".format(height)
         )

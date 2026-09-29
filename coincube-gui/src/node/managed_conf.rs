@@ -58,7 +58,14 @@ pub fn managed_conf_lock_path(coincube_datadir: &CoincubeDirectory) -> PathBuf {
     coincube_datadir.path().join(MANAGED_CONF_LOCK_FILE)
 }
 
-/// How long to keep trying for the lock, as (attempts, delay between them).
+/// Retry policy for the lock, as (maximum attempts, delay between them).
+///
+/// Production makes at most 40 attempts, with 50 ms sleeps between failed
+/// attempts and no sleep after the last one. This is an attempt bound, not a
+/// wall-clock deadline: exhausting it costs all lock calls plus 39 actual
+/// sleeps (1.95 s of requested sleep). Scheduling and lock-call costs make the
+/// elapsed time platform- and load-dependent; it may exceed two seconds.
+/// The test default of 500 attempts and 10 ms sleeps is likewise not a deadline.
 ///
 /// The same production bound as the node-identity marker lock: real holders
 /// finish in microseconds (a read, an allocation, a rename), so contention is
@@ -71,9 +78,8 @@ pub fn managed_conf_lock_path(coincube_datadir: &CoincubeDirectory) -> PathBuf {
 /// own thread with [`with_quick_lock_bound`] instead of waiting the default
 /// out. The marker lock has the same bound shape with its own, separate
 /// override (`bitcoind::with_quick_marker_lock_bound`), scoped by a guard that
-/// restores the prior value on return or unwind — which the two helpers below
-/// do not have (they reset to `None`); neither override reaches the other lock
-/// or a spawned thread.
+/// restores the prior value on return or unwind. The helpers below do the
+/// same; neither override reaches the other lock or a spawned thread.
 fn lock_acquisition_bound() -> (u32, std::time::Duration) {
     #[cfg(not(test))]
     {
@@ -100,16 +106,34 @@ fn lock_bound_override() -> Option<(u32, std::time::Duration)> {
     LOCK_BOUND_OVERRIDE.with(|b| b.get())
 }
 
+#[cfg(test)]
+struct LockBoundGuard(Option<(u32, std::time::Duration)>);
+
+#[cfg(test)]
+impl LockBoundGuard {
+    fn quick() -> Self {
+        Self(
+            LOCK_BOUND_OVERRIDE
+                .with(|bound| bound.replace(Some((3, std::time::Duration::from_millis(5))))),
+        )
+    }
+}
+
+#[cfg(test)]
+impl Drop for LockBoundGuard {
+    fn drop(&mut self) {
+        LOCK_BOUND_OVERRIDE.with(|bound| bound.set(self.0));
+    }
+}
+
 /// Run `body` with this thread's lock acquisition bound set short (3 × 5 ms),
 /// for tests that want to observe `Busy` through the public paths
 /// (`update_managed_conf`, `prepare_inbound_tor`, the loader …) without
 /// waiting the generous default out. Test-only.
 #[cfg(test)]
 pub(crate) fn with_quick_lock_bound<T>(body: impl FnOnce() -> T) -> T {
-    LOCK_BOUND_OVERRIDE.with(|b| b.set(Some((3, std::time::Duration::from_millis(5)))));
-    let out = body();
-    LOCK_BOUND_OVERRIDE.with(|b| b.set(None));
-    out
+    let _restore = LockBoundGuard::quick();
+    body()
 }
 
 /// [`with_quick_lock_bound`] for an async body. The override is thread-local,
@@ -117,17 +141,15 @@ pub(crate) fn with_quick_lock_bound<T>(body: impl FnOnce() -> T) -> T {
 /// default), where the future is polled on the calling thread.
 #[cfg(test)]
 pub(crate) async fn with_quick_lock_bound_async<F: std::future::Future>(body: F) -> F::Output {
-    LOCK_BOUND_OVERRIDE.with(|b| b.set(Some((3, std::time::Duration::from_millis(5)))));
-    let out = body.await;
-    LOCK_BOUND_OVERRIDE.with(|b| b.set(None));
-    out
+    let _restore = LockBoundGuard::quick();
+    body.await
 }
 
 /// Why the lock could not be taken.
 #[derive(Debug)]
 pub enum ManagedConfLockError {
     /// Another holder — a thread of this process or another process — kept the
-    /// lock for the whole bounded wait. Nothing was read or written; retry.
+    /// lock through every acquisition attempt. Nothing was read or written; retry.
     Busy { path: PathBuf },
     /// The lock file could not be created or locked.
     Io { path: PathBuf, error: io::Error },
@@ -173,14 +195,14 @@ pub struct ManagedConfLock {
 }
 
 impl ManagedConfLock {
-    /// Take the lock, waiting up to the bounded acquisition window.
+    /// Take the lock using the attempt-limited retry policy; elapsed time is not bounded.
     pub fn acquire(coincube_datadir: &CoincubeDirectory) -> Result<Self, ManagedConfLockError> {
         let (attempts, retry) = lock_acquisition_bound();
         Self::acquire_with_bound(coincube_datadir, attempts, retry)
     }
 
-    /// [`Self::acquire`] with an explicit bound (tests exercise the timeout path
-    /// without the production wait).
+    /// [`Self::acquire`] with an explicit attempt count and between-attempt delay.
+    /// Tests use this to exercise contention without the production retry count.
     pub fn acquire_with_bound(
         coincube_datadir: &CoincubeDirectory,
         attempts: u32,
@@ -655,6 +677,48 @@ mod tests {
     use crate::node::bitcoind::{InternalBitcoindNetworkConfig, NodeFlavor, PRUNE_DEFAULT};
     use coincube_core::miniscript::bitcoin::Network;
     use std::sync::{Arc, Barrier};
+
+    #[test]
+    fn quick_lock_bound_restores_nested_and_panicking_calls() {
+        let original = lock_bound_override();
+        with_quick_lock_bound(|| {
+            let outer = lock_bound_override();
+            with_quick_lock_bound(|| assert_eq!(lock_bound_override(), outer));
+            assert_eq!(lock_bound_override(), outer);
+            assert!(std::panic::catch_unwind(|| {
+                with_quick_lock_bound(|| panic!("synthetic panic"));
+            })
+            .is_err());
+            assert_eq!(lock_bound_override(), outer);
+        });
+        assert_eq!(lock_bound_override(), original);
+    }
+
+    #[tokio::test]
+    async fn quick_lock_bound_restores_async_unwind_and_cancellation() {
+        use iced_runtime::futures::futures::FutureExt;
+        let original = lock_bound_override();
+        with_quick_lock_bound_async(async {
+            let outer = lock_bound_override();
+            with_quick_lock_bound_async(async {}).await;
+            assert_eq!(lock_bound_override(), outer);
+            assert!(
+                std::panic::AssertUnwindSafe(with_quick_lock_bound_async(async {
+                    panic!("synthetic panic");
+                }))
+                .catch_unwind()
+                .await
+                .is_err()
+            );
+            assert_eq!(lock_bound_override(), outer);
+            assert!(with_quick_lock_bound_async(std::future::pending::<()>())
+                .now_or_never()
+                .is_none());
+            assert_eq!(lock_bound_override(), outer);
+        })
+        .await;
+        assert_eq!(lock_bound_override(), original);
+    }
 
     fn temp_datadir(tag: &str) -> (PathBuf, CoincubeDirectory) {
         let base = std::env::temp_dir().join(format!(
