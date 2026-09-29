@@ -181,7 +181,8 @@ impl From<commands::CommandError> for Error {
                 ErrorCode::ServerError(commands::UNSAFE_LEGACY_ALTERNATIVE_ERROR),
                 e.to_string(),
             ),
-            commands::CommandError::RescanTrigger(..)
+            commands::CommandError::RescanGenesis(..)
+            | commands::CommandError::RescanTrigger(..)
             | commands::CommandError::ChangeReservation(
                 crate::database::ReservationError::Storage
                 | crate::database::ReservationError::Unsupported,

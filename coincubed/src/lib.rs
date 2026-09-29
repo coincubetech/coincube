@@ -198,6 +198,17 @@ impl fmt::Display for StartupError {
 
 impl error::Error for StartupError {}
 
+impl From<crate::bitcoin::GenesisError> for StartupError {
+    fn from(error: crate::bitcoin::GenesisError) -> Self {
+        use crate::bitcoin::GenesisError;
+        match error {
+            GenesisError::Bitcoind(error) => Self::Bitcoind(*error),
+            GenesisError::Electrum(error) => Self::Electrum(ElectrumError::Client(*error)),
+            GenesisError::Esplora(error) => connect_startup_error(*error),
+        }
+    }
+}
+
 impl From<io::Error> for StartupError {
     fn from(e: io::Error) -> Self {
         Self::Io(e)
@@ -985,7 +996,7 @@ impl DaemonHandle {
             config.main_descriptor.clone(),
             sync_progress_cache.clone(),
             reorg_alert_cache.clone(),
-        );
+        )?;
         let (poller_sender, poller_receiver) = mpsc::sync_channel(1);
         let poller_handle = thread::Builder::new()
             .name("Bitcoin Network poller".to_string())
@@ -1708,6 +1719,82 @@ mod tests {
     // bitcoind interface, and use the DummyCoincube from testutils to sanity check the startup.
     // Note that startup as checked by this unit test is also tested in the functional test
     // framework.
+    #[test]
+    fn genesis_esplora_errors_preserve_admission_classification() {
+        use crate::bitcoin::{esplora::client::Error, GenesisError};
+        for (error, expected) in [
+            (Error::AllCooling, connect::AdmissionError::Throttled),
+            (Error::Aborted, connect::AdmissionError::Aborted),
+            (
+                Error::Admission(connect::AdmissionError::Unavailable),
+                connect::AdmissionError::Unavailable,
+            ),
+            (
+                Error::Admission(connect::AdmissionError::HashMismatch),
+                connect::AdmissionError::HashMismatch,
+            ),
+        ] {
+            let startup = StartupError::from(GenesisError::Esplora(Box::new(error)));
+            assert!(
+                matches!(startup, StartupError::ConnectAdmission(actual) if actual == expected)
+            );
+        }
+    }
+
+    #[test]
+    fn bitcoind_genesis_lookup_preserves_rpc_and_malformed_response_errors() {
+        use crate::bitcoin::{BitcoinInterface, GenesisError};
+        for (payload, rpc_failure) in [
+            (
+                r#"{"jsonrpc":"2.0","id":1,"result":null,"error":{"code":-8,"message":"synthetic unavailable"}}"#,
+                true,
+            ),
+            (
+                r#"{"jsonrpc":"2.0","id":1,"result":"not-a-block-hash"}"#,
+                false,
+            ),
+        ] {
+            let listener = net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = thread::spawn(move || {
+                complete_sanity_check(&listener);
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(time::Duration::from_secs(3)))
+                    .unwrap();
+                read_til_json_end(&mut stream);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    payload.len(),
+                    payload
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            });
+            let backend = BitcoinD::new(
+                &config::BitcoindConfig {
+                    addr,
+                    rpc_auth: config::BitcoindRpcAuth::UserPass(
+                        "synthetic".into(),
+                        "synthetic".into(),
+                    ),
+                },
+                "synthetic-wallet".into(),
+            )
+            .unwrap();
+            let error = backend.genesis_block().unwrap_err();
+            match error {
+                GenesisError::Bitcoind(error) if rpc_failure => {
+                    assert!(matches!(*error, BitcoindError::Server(_)))
+                }
+                GenesisError::Bitcoind(error) => {
+                    assert!(matches!(*error, BitcoindError::MalformedResponse(_)))
+                }
+                other => panic!("unexpected genesis error: {:?}", other),
+            }
+            server.join().unwrap();
+        }
+    }
+
     #[test]
     fn daemon_startup() {
         // This exercises a startup path with a known thread race: the poller can
