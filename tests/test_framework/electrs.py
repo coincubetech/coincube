@@ -1,5 +1,9 @@
+import hashlib
+import json
 import logging
 import os
+import socket
+import time
 
 from ephemeral_port_reserve import reserve
 from test_framework.utils import BitcoinBackend, TailableProc, ELECTRS_PATH, TIMEOUT
@@ -63,6 +67,62 @@ class Electrs(BitcoinBackend):
         except Exception:
             self.stop()
             raise
+
+    def tip_hash(self, timeout=5):
+        """Return Electrs' indexed tip hash within a single time budget."""
+        deadline = time.monotonic() + timeout
+
+        def remaining():
+            seconds = deadline - time.monotonic()
+            if seconds <= 0:
+                raise socket.timeout("Electrs header request exceeded its budget")
+            return seconds
+
+        with socket.create_connection(
+            ("127.0.0.1", self.rpcport), timeout=remaining()
+        ) as sock:
+            sock.settimeout(remaining())
+            sock.sendall(
+                b'{"jsonrpc":"2.0","id":0,'
+                b'"method":"blockchain.headers.subscribe","params":[]}\n'
+            )
+            data = bytearray()
+            while b"\n" not in data:
+                if len(data) >= 4096:
+                    raise ValueError("Electrs header response exceeds the size limit")
+                sock.settimeout(remaining())
+                chunk = sock.recv(4096 - len(data))
+                if not chunk:
+                    raise ValueError(
+                        "Electrs closed the header response before newline"
+                    )
+                data.extend(chunk)
+
+        response = json.loads(data.split(b"\n", 1)[0])
+        if response.get("id") != 0 or response.get("error") is not None:
+            raise ValueError(f"Electrs tip request failed: {response}")
+        header = bytes.fromhex(response["result"]["hex"])
+        if len(header) != 80:
+            raise ValueError("Electrs returned an invalid Bitcoin header")
+        return hashlib.sha256(hashlib.sha256(header).digest()).digest()[::-1].hex()
+
+    def wait_for_tip(self, expected_hash, timeout=TIMEOUT):
+        """Wait until Electrs has indexed the exact expected branch tip."""
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"Electrs did not index tip {expected_hash} within {timeout}s"
+                )
+            try:
+                if self.tip_hash(timeout=min(5, remaining)) == expected_hash:
+                    return
+            except socket.timeout:
+                # Electrs can pause RPC while committing an index batch. Keep
+                # the original overall deadline rather than extending it.
+                pass
+            time.sleep(min(0.25, max(0, deadline - time.monotonic())))
 
     def stop(self):
         return TailableProc.stop(self)

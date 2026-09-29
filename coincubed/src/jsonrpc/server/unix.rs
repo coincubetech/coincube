@@ -21,6 +21,9 @@ use std::{
 
 // Maximum number of concurrent RPC connections we may accept.
 const MAX_CONNECTIONS: u32 = 16;
+// An idle local client must eventually release its handler slot. This bounds
+// waiting for the next request byte, not execution of a wallet operation.
+const CONNECTION_IDLE_TIMEOUT: time::Duration = time::Duration::from_secs(30);
 
 // Read a command from the stream.
 //
@@ -93,9 +96,20 @@ fn connection_handler(
     let mut cursor = 0;
 
     while !shutdown.load(atomic::Ordering::Relaxed) {
-        let req = match read_command(&mut stream, &mut buf, &mut end, &mut cursor)? {
-            Some(req) => req,
-            None => {
+        let req = match read_command(&mut stream, &mut buf, &mut end, &mut cursor) {
+            Ok(Some(req)) => req,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
+                // Accepted streams are blocking; these errors mean the finite
+                // idle timeout elapsed, not that a delayed request was polled.
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+            Ok(None) => {
                 // Connection closed.
                 return Ok(());
             }
@@ -127,9 +141,23 @@ pub fn rpcserver_loop(
     daemon_control: DaemonControl,
     shutdown: sync::Arc<atomic::AtomicBool>,
 ) -> Result<(), io::Error> {
-    // Keep it simple. We don't need great performances so just treat each connection in
-    // its thread, with a given maximum number of connections.
-    let connections_counter = sync::Arc::from(atomic::AtomicU32::new(0));
+    rpcserver_loop_with_timeout(
+        listener,
+        daemon_control,
+        shutdown,
+        CONNECTION_IDLE_TIMEOUT,
+        sync::Arc::new(atomic::AtomicU32::new(0)),
+    )
+}
+
+fn rpcserver_loop_with_timeout(
+    listener: net::UnixListener,
+    daemon_control: DaemonControl,
+    shutdown: sync::Arc<atomic::AtomicBool>,
+    idle_timeout: time::Duration,
+    connections_counter: sync::Arc<atomic::AtomicU32>,
+) -> Result<(), io::Error> {
+    // Each connection has a blocking handler, bounded in count and idle time.
 
     listener.set_nonblocking(true)?;
     while !shutdown.load(atomic::Ordering::Relaxed) {
@@ -148,10 +176,17 @@ pub fn rpcserver_loop(
         // request unread. Each connection is served by its own blocking thread;
         // only the accept loop needs to poll.
         connection.set_nonblocking(false)?;
+        connection.set_read_timeout(Some(idle_timeout))?;
         log::trace!("New JSONRPC connection");
 
         while connections_counter.load(atomic::Ordering::Relaxed) >= MAX_CONNECTIONS {
+            if shutdown.load(atomic::Ordering::Relaxed) {
+                return Ok(());
+            }
             thread::sleep(time::Duration::from_millis(50));
+        }
+        if shutdown.load(atomic::Ordering::Relaxed) {
+            return Ok(());
         }
         connections_counter.fetch_add(1, atomic::Ordering::Relaxed);
 
@@ -228,6 +263,119 @@ mod tests {
 
     #[cfg(not(windows))]
     use std::io::{Read, Write};
+
+    fn with_rpc_fixture(
+        idle_timeout: time::Duration,
+        saturate: bool,
+        test: impl FnOnce(
+            &path::Path,
+            &sync::Arc<atomic::AtomicBool>,
+            &thread::JoinHandle<Result<(), io::Error>>,
+        ),
+    ) {
+        let daemon = crate::testutils::DummyCoincube::new(
+            crate::testutils::DummyBitcoind::new(),
+            crate::testutils::DummyDatabase::new(),
+        );
+        let socket_path = env::temp_dir().join(format!(
+            "rpc-idle-{}-{:?}",
+            process::id(),
+            thread::current().id()
+        ));
+        let listener = rpcserver_setup(&socket_path).unwrap();
+        let shutdown = sync::Arc::new(atomic::AtomicBool::new(false));
+        let counter = sync::Arc::new(atomic::AtomicU32::new(0));
+        let control = daemon.control().clone();
+        let flag = shutdown.clone();
+        let active = counter.clone();
+        let server = thread::spawn(move || {
+            rpcserver_loop_with_timeout(listener, control, flag, idle_timeout, active)
+        });
+        let idle: Vec<_> = (0..if saturate { MAX_CONNECTIONS } else { 0 })
+            .map(|_| net::UnixStream::connect(&socket_path).unwrap())
+            .collect();
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if saturate {
+                let deadline = time::Instant::now() + time::Duration::from_secs(5);
+                while counter.load(atomic::Ordering::Relaxed) != MAX_CONNECTIONS {
+                    assert!(
+                        time::Instant::now() < deadline,
+                        "server never reached capacity"
+                    );
+                    thread::sleep(time::Duration::from_millis(5));
+                }
+            }
+            test(&socket_path, &shutdown, &server);
+        }));
+        // Always release clients before joining, including if an assertion fails.
+        shutdown.store(true, atomic::Ordering::Relaxed);
+        drop(idle);
+        server.join().unwrap().unwrap();
+        daemon.shutdown();
+        fs::remove_file(socket_path).unwrap();
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    fn request_from_late_client(socket_path: &path::Path, fragmented: bool) {
+        let mut client = net::UnixStream::connect(socket_path).unwrap();
+        client
+            .set_read_timeout(Some(time::Duration::from_secs(5)))
+            .unwrap();
+        if fragmented {
+            thread::sleep(time::Duration::from_millis(50));
+        }
+        let request = b"{\"jsonrpc\":\"2.0\",\"id\":17,\"method\":\"unknown_test_method\"}\n";
+        client.write_all(&request[..20]).unwrap();
+        if fragmented {
+            thread::sleep(time::Duration::from_millis(50));
+        }
+        client.write_all(&request[20..]).unwrap();
+        let response = serde_json::Deserializer::from_reader(&mut client)
+            .into_iter::<serde_json::Value>()
+            .next()
+            .unwrap()
+            .unwrap();
+        assert_eq!(response["id"], 17);
+        assert!(
+            response.get("error").is_some(),
+            "unknown method was handled"
+        );
+    }
+
+    #[test]
+    fn idle_connections_release_capacity_for_later_requests() {
+        with_rpc_fixture(time::Duration::from_secs(1), true, |path, _, _| {
+            request_from_late_client(path, false);
+        });
+    }
+
+    #[test]
+    fn saturated_capacity_wait_observes_shutdown_before_idle_timeout() {
+        with_rpc_fixture(
+            time::Duration::from_secs(30),
+            true,
+            |path, shutdown, server| {
+                // Force accept() into the capacity wait with a seventeenth client.
+                let _pending = net::UnixStream::connect(path).unwrap();
+                thread::sleep(time::Duration::from_millis(150));
+                shutdown.store(true, atomic::Ordering::Relaxed);
+                let deadline = time::Instant::now() + time::Duration::from_secs(3);
+                while !server.is_finished() && time::Instant::now() < deadline {
+                    thread::sleep(time::Duration::from_millis(10));
+                }
+                assert!(server.is_finished(), "shutdown waited for idle handlers");
+            },
+        );
+    }
+
+    #[test]
+    fn finite_idle_timeout_accepts_delayed_and_fragmented_requests() {
+        with_rpc_fixture(time::Duration::from_secs(1), false, |path, _, _| {
+            request_from_late_client(path, true);
+        });
+    }
 
     fn read_one_command(socket_path: &path::Path) -> thread::JoinHandle<Option<Request>> {
         let listener = rpcserver_setup(socket_path).unwrap();
@@ -484,8 +632,8 @@ mod tests {
         fs::remove_file(&socket_path).unwrap();
     }
 
-    // TODO: debug on MacOS
-    #[cfg(not(target_os = "macos"))]
+    // Accepted sockets are blocking on every Unix platform (#490), and the
+    // hashed socket path plus deadline below prevent the historical wait hang.
     #[test]
     fn server_sanity_check() {
         let ms = crate::testutils::DummyCoincube::new_server(
