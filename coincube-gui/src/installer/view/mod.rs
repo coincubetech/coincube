@@ -2432,7 +2432,7 @@ pub fn choose_backend(progress: (usize, usize)) -> Element<'static, Message> {
                         Column::new()
                             .spacing(20)
                             .width(Length::FillPortion(1))
-                            .push(h3("Use Liana Connect"))
+                            .push(h3("Use COINCUBE | Connect"))
                             .push(
                                 text::p2_medium(REMOTE_BACKEND_DESC).style(theme::text::secondary),
                             ),
@@ -2493,7 +2493,7 @@ pub fn login(progress: (usize, usize), connection_step: Element<Message>) -> Ele
                 .max_width(700)
                 .align_x(Alignment::Center)
                 .width(Length::FillPortion(1))
-                .push(h2("Liana Connect"))
+                .push(h2("COINCUBE | Connect"))
                 .push(connection_step),
         )
         .center_x(Length::Fill),
