@@ -366,6 +366,7 @@ impl Coordinator {
             fee_sats: self.verified.fee().to_sat(),
             vsize: tx.vsize(),
             observations: last.observations,
+            route: SubmissionRoute::Connect,
             not_after,
         })
     }

@@ -421,6 +421,7 @@ fn review_view<'a>(
         Some(snapshot) => Column::new()
             .spacing(10)
             .push(row("Transaction", p2_regular(snapshot.txid.to_string())))
+            .push(row("Broadcast via", p2_regular(snapshot.route.label())))
             .push(row(
                 "Fee",
                 p1_regular(format!(
@@ -432,8 +433,9 @@ fn review_view<'a>(
             .push(row(
                 "Bitcoin tip",
                 p1_regular(format!(
-                    "height {} — the node accepts this transaction",
-                    snapshot.observations.bitcoin.tip.height
+                    "height {} — {} accepts this transaction",
+                    snapshot.observations.bitcoin.tip.height,
+                    snapshot.route.label()
                 )),
             ))
             .push(row(
@@ -512,11 +514,11 @@ fn track_view<'a>(
         Outcome::Recorded { txid } => (txid, "A submission is recorded on this device. Its transaction has not been recovered and verified yet; it will not be retried automatically.".into()),
         Outcome::UpstreamAccepted { txid, .. } => (
             txid,
-            "Accepted by the Bitcoin node. Waiting for it to confirm.".to_string(),
+            "Submission accepted. Waiting for the transaction to confirm.".to_string(),
         ),
         Outcome::Uncertain { txid, .. } => (
             txid,
-            "The submission's outcome is uncertain: the intent was recorded, but the node's answer \
+            "The submission's outcome is uncertain: the intent was recorded, but the submission response \
              did not arrive. It is being reconciled from the chain; it will not be retried automatically."
                 .to_string(),
         ),
@@ -595,6 +597,7 @@ fn track_view<'a>(
             Column::new().spacing(10)
                 .push(p1_regular("The original transaction was not found in the fresh Bitcoin checks. This resends the verified transaction shown below using its recorded inputs and fee. Older records may not identify the witness used in the first attempt. A previous attempt may still have reached the network; confirmation is not guaranteed."))
                 .push(row("Transaction", p2_regular(snapshot.txid.to_string())))
+            .push(row("Broadcast via", p2_regular(snapshot.route.label())))
                 .push(row("Witness ID", p2_regular(snapshot.wtxid.to_string())))
                 .push(row("Fee", p2_regular(format!("{} sats", snapshot.fee_sats))))
                 .push(row("Previous attempts", p2_regular(attempts.to_string())))

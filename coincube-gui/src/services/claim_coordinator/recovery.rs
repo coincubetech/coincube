@@ -38,7 +38,7 @@ impl Coordinator {
             .map_err(|error| recovery_check_error(error, first.assessment))?;
         let evidence = self
             .services
-            .preflight(
+            .routed_preflight(
                 self.verified.transaction(),
                 first.observations.bitcoin.tip.hash,
                 self.policy.preflight,
@@ -75,6 +75,7 @@ impl Coordinator {
                 fee_sats: self.verified.fee().to_sat(),
                 vsize: self.verified.vsize(),
                 observations: last.observations,
+                route: evidence.route(),
                 not_after,
             },
             last,
@@ -112,6 +113,7 @@ impl Coordinator {
         if review.snapshot.transaction != refreshed.transaction
             || review.snapshot.wallet != refreshed.wallet
             || review.previous_attempts != self.controller.bitcoin_submission_attempts().len()
+            || review.snapshot.route != refreshed.route
             || !same_view(review.snapshot.observations, refreshed.observations)
         {
             return Err(Error::ChangedReview);
