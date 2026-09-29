@@ -1984,6 +1984,23 @@ pub fn stop_and_wait_managed_bitcoind(config: &BitcoindConfig) {
 }
 
 impl Bitcoind {
+    /// A handle with no node behind it, for a test that has to hand a caller an
+    /// existing managed-node handle without running one. Takes the same lock
+    /// file a started node would, so the lock bookkeeping stays honest, and
+    /// starts no process. Test-only.
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        config: BitcoindConfig,
+        coincube_datadir: &CoincubeDirectory,
+        network: Network,
+    ) -> Self {
+        Self {
+            config,
+            lock: LockFile::create(coincube_datadir.bitcoind_directory(), network)
+                .expect("synthetic lock file"),
+        }
+    }
+
     /// Start the managed node for a chain, by identity.
     ///
     /// The chain-aware entry point: a chain this build cannot run is refused

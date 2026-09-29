@@ -7362,11 +7362,20 @@ mod tests {
         assert_eq!(home.active_section, HomeSection::Cubes);
         assert!(!root.join("bitcoin-blake2b").exists());
 
+        // With an authenticated client and an explicit enabled flag, a user
+        // without an eligible target is routed through the ordinary BTCB2
+        // installer (#575) instead of an empty Split panel. The deep link
+        // itself still creates no fork datadir.
         home.connect_account.features = Some(enabled);
-        let _ = home.update(Message::View(ViewMessage::GoToSection(
+        let messages = drain(home.update(Message::View(ViewMessage::GoToSection(
             HomeSection::SplitWallet,
-        )));
-        assert_eq!(home.active_section, HomeSection::SplitWallet);
+        ))));
+        assert!(matches!(
+            messages.as_slice(),
+            [Message::InstallForSplit(path, client)]
+                if path.path() == root && client.token().is_some()
+        ));
+        assert_eq!(home.active_section, HomeSection::Cubes);
         assert!(home.split_wallet.targets().is_empty());
         assert!(!root.join("bitcoin-blake2b").exists());
 
