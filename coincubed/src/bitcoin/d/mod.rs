@@ -1312,13 +1312,19 @@ impl BitcoinD {
     }
 
     pub fn get_block_hash(&self, height: i32) -> Option<bitcoin::BlockHash> {
-        Some(
-            self.make_fallible_node_request("getblockhash", params!(Json::Number(height.into()),))
-                .ok()?
-                .as_str()
-                .and_then(|s| bitcoin::BlockHash::from_str(s).ok())
-                .expect("bitcoind must send valid block hashes"),
-        )
+        self.get_block_hash_result(height).ok()
+    }
+
+    /// Preserve RPC errors for callers that can surface or retry the failure.
+    pub fn get_block_hash_result(&self, height: i32) -> Result<bitcoin::BlockHash, BitcoindError> {
+        self.make_fallible_node_request("getblockhash", params!(Json::Number(height.into()),))?
+            .as_str()
+            .and_then(|s| bitcoin::BlockHash::from_str(s).ok())
+            .ok_or_else(|| {
+                BitcoindError::MalformedResponse(
+                    "getblockhash returned an invalid block hash".into(),
+                )
+            })
     }
 
     pub fn list_since_block(&self, block_hash: &bitcoin::BlockHash) -> LSBlockRes {
@@ -1502,51 +1508,22 @@ impl BitcoinD {
     }
 
     pub fn get_block_stats(&self, blockhash: bitcoin::BlockHash) -> Option<BlockStats> {
-        let res = match self.make_fallible_node_request(
+        self.get_block_stats_result(blockhash)
+            .map_err(|error| {
+                log::warn!("Error when fetching block header {}: {}", blockhash, error);
+            })
+            .ok()
+    }
+
+    pub fn get_block_stats_result(
+        &self,
+        blockhash: bitcoin::BlockHash,
+    ) -> Result<BlockStats, BitcoindError> {
+        let response = self.make_fallible_node_request(
             "getblockheader",
             params!(Json::String(blockhash.to_string()),),
-        ) {
-            Ok(res) => res,
-            Err(e) => {
-                log::warn!("Error when fetching block header {}: {}", blockhash, e);
-                return None;
-            }
-        };
-        let confirmations = res
-            .get("confirmations")
-            .and_then(Json::as_i64)
-            .expect("Invalid confirmations in `getblockheader` response: not an i64")
-            as i32;
-        let previous_blockhash = res
-            .get("previousblockhash")
-            .and_then(Json::as_str)
-            .map(|s| {
-                bitcoin::BlockHash::from_str(s)
-                    .expect("Invalid previousblockhash in `getblockheader` response")
-            });
-        let height = res
-            .get("height")
-            .and_then(Json::as_i64)
-            .expect("Invalid height in `getblockheader` response: not an i64")
-            as i32;
-        let time = res
-            .get("time")
-            .and_then(Json::as_u64)
-            .expect("Invalid timestamp in `getblockheader` response: not an u64")
-            as u32;
-        let median_time_past = res
-            .get("mediantime")
-            .and_then(Json::as_u64)
-            .expect("Invalid median timestamp in `getblockheader` response: not an u64")
-            as u32;
-        Some(BlockStats {
-            confirmations,
-            previous_blockhash,
-            height,
-            blockhash,
-            time,
-            median_time_past,
-        })
+        )?;
+        parse_block_stats(blockhash, response)
     }
 
     pub fn broadcast_tx(&self, tx: &bitcoin::Transaction) -> Result<(), BitcoindError> {
@@ -2468,6 +2445,31 @@ impl From<Json> for GetTxRes {
     }
 }
 
+fn parse_block_stats(
+    blockhash: bitcoin::BlockHash,
+    response: Json,
+) -> Result<BlockStats, BitcoindError> {
+    #[derive(serde::Deserialize)]
+    struct Header {
+        confirmations: i32,
+        previousblockhash: Option<bitcoin::BlockHash>,
+        height: i32,
+        time: u32,
+        mediantime: u32,
+    }
+    let header: Header = serde_json::from_value(response).map_err(|error| {
+        BitcoindError::MalformedResponse(format!("invalid getblockheader: {error}"))
+    })?;
+    Ok(BlockStats {
+        blockhash,
+        confirmations: header.confirmations,
+        previous_blockhash: header.previousblockhash,
+        height: header.height,
+        time: header.time,
+        median_time_past: header.mediantime,
+    })
+}
+
 #[derive(Debug, Clone)]
 pub struct BlockStats {
     pub confirmations: i32,
@@ -2589,6 +2591,31 @@ impl From<&&Json> for MempoolEntryFees {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn malformed_block_stats_are_errors_and_a_later_response_recovers() {
+        let hash = bitcoin::BlockHash::from_str(
+            "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f",
+        )
+        .unwrap();
+        let good = serde_json::json!({"confirmations":1,"height":0,"time":1231006505,"mediantime":1231006505});
+        for (field, value) in [
+            ("time", serde_json::json!(4294967296_u64)),
+            ("height", serde_json::json!(2147483648_i64)),
+            ("confirmations", serde_json::json!("one")),
+            ("previousblockhash", serde_json::json!("invalid")),
+            ("mediantime", serde_json::Value::Null),
+        ] {
+            let mut bad = good.clone();
+            bad[field] = value;
+            assert!(matches!(
+                parse_block_stats(hash, bad),
+                Err(BitcoindError::MalformedResponse(_))
+            ));
+        }
+        assert!(parse_block_stats(hash, serde_json::json!({})).is_err());
+        assert_eq!(parse_block_stats(hash, good).unwrap().time, 1231006505);
+    }
 
     fn rpc_err(code: i32) -> BitcoindError {
         BitcoindError::Server(jsonrpc::error::Error::Rpc(jsonrpc::error::RpcError {

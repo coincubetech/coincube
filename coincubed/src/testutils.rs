@@ -32,6 +32,9 @@ pub struct DummyBitcoind {
     pub received: Vec<UTxO>,
     pub broadcasted: sync::Mutex<Vec<Transaction>>,
     pub broadcast_error: Option<String>,
+    pub rescan_requests: Vec<u32>,
+    pub tip_timestamp: Option<u32>,
+    pub genesis_error: Option<crate::connect::AdmissionError>,
     pub txs: HashMap<Txid, (Transaction, Option<Block>)>,
     /// What `chain_tip` reports. Defaults to the historical fixed value (height 100).
     pub tip: BlockChainTip,
@@ -76,6 +79,9 @@ impl DummyBitcoind {
             received: Vec::new(),
             broadcasted: sync::Mutex::new(Vec::new()),
             broadcast_error: None,
+            rescan_requests: Vec::new(),
+            genesis_error: None,
+            tip_timestamp: None,
             txs: HashMap::new(),
             tip: BlockChainTip { hash, height: 100 },
             in_chain: true,
@@ -111,16 +117,22 @@ impl BitcoinInterface for DummyBitcoind {
         Ok(self.rescan_progress())
     }
 
-    fn genesis_block_timestamp(&self) -> u32 {
-        1231006505
+    fn genesis_block_timestamp(&self) -> Result<u32, crate::bitcoin::GenesisError> {
+        self.genesis_block()?;
+        Ok(1231006505)
     }
 
-    fn genesis_block(&self) -> BlockChainTip {
+    fn genesis_block(&self) -> Result<BlockChainTip, crate::bitcoin::GenesisError> {
+        if let Some(error) = self.genesis_error {
+            return Err(crate::bitcoin::GenesisError::Esplora(Box::new(
+                crate::bitcoin::esplora::client::Error::Admission(error),
+            )));
+        }
         let hash = bitcoin::BlockHash::from_str(
             "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f",
         )
         .unwrap();
-        BlockChainTip { hash, height: 0 }
+        Ok(BlockChainTip { hash, height: 0 })
     }
 
     fn sync_progress(&self) -> SyncProgress {
@@ -203,8 +215,13 @@ impl BitcoinInterface for DummyBitcoind {
         }
     }
 
-    fn start_rescan(&mut self, _: &descriptors::CoincubeDescriptor, _: u32) -> Result<(), String> {
-        todo!()
+    fn start_rescan(
+        &mut self,
+        _: &descriptors::CoincubeDescriptor,
+        timestamp: u32,
+    ) -> Result<(), String> {
+        self.rescan_requests.push(timestamp);
+        Ok(())
     }
 
     fn rescan_progress(&self) -> Option<f64> {
@@ -216,7 +233,7 @@ impl BitcoinInterface for DummyBitcoind {
     }
 
     fn tip_time(&self) -> Option<u32> {
-        None
+        self.tip_timestamp
     }
 
     fn wallet_transaction(

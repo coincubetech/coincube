@@ -35,7 +35,7 @@ where
     let mut start_height = 0;
     let mut end_height = chain_tip.height;
 
-    let genesis_stats = get_stats(get_hash(0).expect("Genesis hash"))?;
+    let genesis_stats = get_stats(get_hash(0)?)?;
     let tip_stats = get_stats(chain_tip.hash)?;
     if !(genesis_stats.time..tip_stats.time).contains(&target_timestamp) {
         return None;
@@ -117,6 +117,30 @@ mod tests {
             time,
             median_time_past: 0,
         }
+    }
+
+    #[test]
+    fn missing_genesis_lookup_is_retryable() {
+        let genesis = bh!("000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f");
+        let tip = BlockChainTip {
+            height: 1,
+            hash: bh!("0000000000000000000560bb21fbab991fe5f7d9a949eb424f9be3c34a55a54f"),
+        };
+        assert!(block_before_date(15, tip, |_| None, |_| Some(create_stats(10))).is_none());
+        let recovered = block_before_date(
+            15,
+            tip,
+            |height| Some(if height == 0 { genesis } else { tip.hash }),
+            |hash| Some(create_stats(if hash == genesis { 10 } else { 20 })),
+        )
+        .unwrap();
+        assert_eq!(
+            recovered,
+            BlockChainTip {
+                height: 0,
+                hash: genesis
+            }
+        );
     }
 
     #[test]
