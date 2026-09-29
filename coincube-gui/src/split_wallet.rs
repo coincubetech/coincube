@@ -678,6 +678,7 @@ mod tests {
 
     #[test]
     fn refuses_scan_without_destination_cube() {
+        let _guard = crate::app::session::test_guard();
         let mut panel = SplitWalletPanel::new();
         panel.external = FIXED_DESCRIPTOR.into();
         let _ = panel.update(Message::Scan, Some(CoincubeClient::new()), 0);
@@ -688,6 +689,7 @@ mod tests {
 
     #[test]
     fn target_refresh_cancels_inflight_and_drops_missing_selection() {
+        let _guard = crate::app::session::test_guard();
         let mut panel = SplitWalletPanel::new();
         panel.set_targets(vec![target()]);
         panel.status = Status::Scanning;
@@ -700,6 +702,7 @@ mod tests {
 
     #[test]
     fn stale_scan_result_never_paints_new_session() {
+        let _guard = crate::app::session::test_guard();
         let mut panel = SplitWalletPanel::new();
         panel.set_targets(vec![target()]);
         panel.status = Status::Scanning;
@@ -714,6 +717,7 @@ mod tests {
 
     #[test]
     fn edits_and_target_changes_invalidate_inflight_results() {
+        let _guard = crate::app::session::test_guard();
         let other_target = TargetCube {
             id: "cube-2".into(),
             name: "Other Vault".into(),
@@ -743,6 +747,7 @@ mod tests {
 
     #[test]
     fn plan_uses_single_index_for_fixed_descriptors_and_bound_for_wildcards() {
+        let _guard = crate::app::session::test_guard();
         let mut panel = SplitWalletPanel::new();
         panel.external = FIXED_DESCRIPTOR.into();
         panel.internal = FIXED_DESCRIPTOR.into();
@@ -759,6 +764,7 @@ mod tests {
 
     #[test]
     fn parse_failure_is_explicit_and_does_not_start_scan() {
+        let _guard = crate::app::session::test_guard();
         let mut panel = SplitWalletPanel::new();
         panel.set_targets(vec![target()]);
         panel.external = "not a descriptor".into();
@@ -770,6 +776,7 @@ mod tests {
 
     #[test]
     fn completed_scan_handoff_retains_exact_report_and_descriptors() {
+        let _guard = crate::app::session::test_guard();
         let mut client = CoincubeClient::new();
         client.set_token("session-a");
         let report = foreign_scan::ScanReport::for_test(
@@ -804,6 +811,7 @@ mod tests {
 
     #[test]
     fn summary_counts_pre_and_post_fork_coins_separately() {
+        let _guard = crate::app::session::test_guard();
         use coincube_core::miniscript::bitcoin::{
             absolute, transaction, Amount, OutPoint, Transaction, TxIn, TxOut,
         };
@@ -899,6 +907,7 @@ mod tests {
 
     #[test]
     fn split_evidence_from_another_generation_is_discarded() {
+        let _guard = crate::app::session::test_guard();
         let report = foreign_scan::ScanReport::for_test(
             ChainId::BitcoinBlake2b,
             8,
@@ -920,6 +929,7 @@ mod tests {
 
     #[test]
     fn split_incomplete_bitcoin_scan_fails_the_panel_explicitly() {
+        let _guard = crate::app::session::test_guard();
         let mut panel = SplitWalletPanel::new();
         panel.set_targets(vec![target()]);
         panel.status = Status::Scanning;
@@ -938,6 +948,7 @@ mod tests {
     /// #578 review I6: an impossible total is refused, not wrapped or panicked.
     #[test]
     fn overflowing_totals_refuse_the_summary() {
+        let _guard = crate::app::session::test_guard();
         use coincube_core::miniscript::bitcoin::{
             absolute, transaction, Amount, OutPoint, Transaction, TxIn, TxOut,
         };
@@ -989,6 +1000,7 @@ mod tests {
 
     #[test]
     fn a_taproot_only_source_is_not_reviewable_and_cannot_hand_off() {
+        let _guard = crate::app::session::test_guard();
         let secp = Secp256k1::new();
         let xpub = Xpub::from_priv(
             &secp,
@@ -1032,6 +1044,7 @@ mod tests {
 
     #[test]
     fn cancel_discards_completed_scan_evidence() {
+        let _guard = crate::app::session::test_guard();
         let report = foreign_scan::ScanReport::for_test(
             ChainId::BitcoinBlake2b,
             23,

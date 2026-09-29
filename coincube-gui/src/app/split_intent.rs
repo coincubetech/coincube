@@ -6,10 +6,7 @@
 //! must destroy the request rather than leave it armed for a surprising later
 //! open. Account credentials are represented only by a one-way session binding.
 
-use std::{
-    sync::{Mutex, OnceLock},
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 
@@ -120,21 +117,37 @@ fn bind(client: &CoincubeClient) -> Option<[u8; 32]> {
     Some(digest.finalize().into())
 }
 
-fn cell() -> &'static Mutex<Option<SplitIntent>> {
+/// Run `f` on the one-intent slot. Production has one process-wide slot.
+#[cfg(not(test))]
+fn with_slot<R>(f: impl FnOnce(&mut Option<SplitIntent>) -> R) -> Option<R> {
+    use std::sync::{Mutex, OnceLock};
     static INTENT: OnceLock<Mutex<Option<SplitIntent>>> = OnceLock::new();
-    INTENT.get_or_init(|| Mutex::new(None))
+    let mut slot = INTENT.get_or_init(|| Mutex::new(None)).lock().ok()?;
+    Some(f(&mut slot))
+}
+
+/// Tests get one slot per test thread. Many unrelated tests clear the slot as
+/// a side effect (every `App` construction, `session::close`, any
+/// `SplitWalletPanel::cancel`), so a process-wide slot made every test that
+/// arms and then reads it racy under the parallel test runner. Arm, clear
+/// and take in a test all run on that test's own thread.
+#[cfg(test)]
+fn with_slot<R>(f: impl FnOnce(&mut Option<SplitIntent>) -> R) -> Option<R> {
+    thread_local! {
+        static INTENT: std::cell::RefCell<Option<SplitIntent>> =
+            const { std::cell::RefCell::new(None) };
+    }
+    INTENT.with(|slot| Some(f(&mut slot.borrow_mut())))
 }
 
 pub fn arm(intent: SplitIntent) {
-    if let Ok(mut slot) = cell().lock() {
-        *slot = Some(intent);
-    }
+    with_slot(|slot| *slot = Some(intent));
 }
 
 /// Consume the single slot on every Cube open. A mismatch returns no evidence;
 /// the caller cannot retry it against another Cube later.
 pub fn take_for_open(cube_id: &str, source: ChainId) -> Option<SplitIntent> {
-    let intent = cell().lock().ok()?.take()?;
+    let intent = with_slot(Option::take)??;
     (intent.target_cube_id == cube_id
         && intent.target_source == source
         && intent.is_internally_current())
@@ -170,9 +183,7 @@ pub(crate) fn arm_fresh_for_test(cube_id: &str) {
 }
 
 pub fn clear() {
-    if let Ok(mut slot) = cell().lock() {
-        *slot = None;
-    }
+    with_slot(|slot| *slot = None);
 }
 
 #[cfg(test)]
