@@ -328,6 +328,13 @@ pub trait BitcoinInterface: Send {
         Ok(self.chain_tip())
     }
 
+    /// Fallible read of the best block for RPC commands (#589). Unlike
+    /// [`Self::try_chain_tip`] it may use the backend's interactive retry budget;
+    /// unlike [`Self::chain_tip`] an outage outlasting it is an error, not a panic.
+    fn chain_tip_result(&self) -> Result<BlockChainTip, String> {
+        Ok(self.chain_tip())
+    }
+
     /// Get the timestamp set in the best block's header.
     fn tip_time(&self) -> Option<u32>;
 
@@ -470,6 +477,12 @@ pub trait BitcoinInterface: Send {
 
     /// Rescan progress percentage. Between 0 and 1.
     fn rescan_progress(&self) -> Option<f64>;
+
+    /// Fallible [`Self::rescan_progress`] for RPC commands (#589): `Ok(None)` is
+    /// the backend saying no rescan runs; an unreachable backend is an `Err`.
+    fn rescan_progress_result(&self) -> Result<Option<f64>, String> {
+        Ok(self.rescan_progress())
+    }
 
     /// Get the last block chain tip with a timestamp below this. Timestamp must be a valid block
     /// timestamp.
@@ -673,6 +686,10 @@ impl BitcoinInterface for d::BitcoinD {
 
     fn try_chain_tip(&self) -> Result<BlockChainTip, String> {
         self.try_chain_tip()
+    }
+
+    fn chain_tip_result(&self) -> Result<BlockChainTip, String> {
+        self.chain_tip_result().map_err(|e| e.to_string())
     }
 
     fn try_sync_progress(&self) -> Result<SyncProgress, String> {
@@ -907,12 +924,22 @@ impl BitcoinInterface for d::BitcoinD {
         self.rescan_progress()
     }
 
+    fn rescan_progress_result(&self) -> Result<Option<f64>, String> {
+        self.rescan_progress_result().map_err(|e| e.to_string())
+    }
+
     fn block_before_date(&self, timestamp: u32) -> Option<BlockChainTip> {
         self.tip_before_timestamp(timestamp)
     }
 
     fn tip_time(&self) -> Option<u32> {
-        let tip = self.chain_tip();
+        // Only RPC commands ask for this (start_rescan, anti-fee-sniping), so a
+        // node that stays down past the retry budget must yield `None` for them
+        // to report, not panic the daemon through `chain_tip` (#589).
+        let tip = self
+            .chain_tip_result()
+            .map_err(|e| log::warn!("Cannot read the chain tip for its timestamp: {}", e))
+            .ok()?;
         Some(self.get_block_stats(tip.hash)?.time)
     }
 
@@ -1365,6 +1392,10 @@ impl BitcoinInterface for sync::Arc<sync::Mutex<dyn BitcoinInterface + 'static>>
         self.lock().unwrap().try_chain_tip()
     }
 
+    fn chain_tip_result(&self) -> Result<BlockChainTip, String> {
+        self.lock().unwrap().chain_tip_result()
+    }
+
     fn try_sync_progress(&self) -> Result<SyncProgress, String> {
         self.lock().unwrap().try_sync_progress()
     }
@@ -1438,6 +1469,10 @@ impl BitcoinInterface for sync::Arc<sync::Mutex<dyn BitcoinInterface + 'static>>
 
     fn rescan_progress(&self) -> Option<f64> {
         self.lock().unwrap().rescan_progress()
+    }
+
+    fn rescan_progress_result(&self) -> Result<Option<f64>, String> {
+        self.lock().unwrap().rescan_progress_result()
     }
 
     fn block_before_date(&self, timestamp: u32) -> Option<BlockChainTip> {
