@@ -211,3 +211,90 @@ def test_backend_loss_never_shows_a_bitcoin_balance(two_chain):
     coins = _confirmed_outpoints(db)
     assert prefork <= coins
     assert poison not in coins
+
+
+@pytest.mark.parametrize("outage_seconds", [10, 70], ids=["short", "retry-exhausted"])
+def test_direct_node_backend_outage_preserves_chain_and_recovers(two_chain, outage_seconds):
+    """B.5: direct node RPC backend isolation, outage and recovery.
+
+    This exercises the backend used with a managed node, not the GUI launcher.
+    The additional daemon has its own temporary database and control socket.
+    """
+    from test_framework.coincubed import Coincubed
+
+    b = two_chain.blake2b
+    directory = os.path.join(two_chain.directory, f"coincubed-blake2b-direct-{outage_seconds}")
+    os.mkdir(directory)
+    daemon = Coincubed(directory, two_chain.signer, two_chain.desc, b)
+    daemon.env.update(two_chain.coincubed_blake2b.env)
+    prefork, poison = _prefork_set(two_chain), _poison(two_chain)
+    try:
+        daemon.start()
+        genesis_time = b.rpc.getblockheader(b.rpc.getblockhash(0))["time"]
+        daemon.rpc.startrescan(genesis_time)
+        wait_for(lambda: prefork <= _confirmed_outpoints(daemon), timeout=TIMEOUT * 3)
+        assert poison not in _confirmed_outpoints(daemon)
+        assert daemon.rpc.socket_path != two_chain.coincubed_blake2b.rpc.socket_path
+
+        # Positive control before testing a stale height: prove this daemon can
+        # advance through its own node and discover a new chain-local deposit.
+        txid = b.rpc.sendtoaddress(two_chain.vault_addresses[0], 0.01)
+        b.generate_block(1, wait_for_mempool=txid)
+        wait_for(
+            lambda: daemon.rpc.getinfo()["block_height"] == b.rpc.getblockcount()
+            and any(outpoint[0] == txid for outpoint in _confirmed_outpoints(daemon)),
+            timeout=TIMEOUT * 3,
+        )
+        before = daemon.rpc.getinfo()["block_height"]
+        coins_before = _confirmed_outpoints(daemon)
+        assert poison not in coins_before
+
+        # The indexer is unrelated to this daemon; stop it to keep its own node
+        # reconnect behavior out of this direct-RPC outage measurement.
+        two_chain.electrs_blake2b.stop()
+        try:
+            outage_log_start = len(daemon.logs)
+            b.stop()
+            legacy_tip = two_chain.legacy.rpc.getbestblockhash()
+            deadline = time.monotonic() + max(outage_seconds * daemon.poll_interval_secs, outage_seconds)
+            while time.monotonic() < deadline:
+                assert daemon.proc.poll() is None, "daemon exited during the node outage"
+                assert daemon.rpc.getinfo()["block_height"] == before
+                assert _confirmed_outpoints(daemon) == coins_before
+                assert two_chain.legacy.rpc.getbestblockhash() == legacy_tip
+                time.sleep(daemon.poll_interval_secs)
+            assert daemon.is_in_log(
+                "Poll deferred without updating successful-poll time",
+                start=outage_log_start,
+            ), "the daemon did not finish a failed poll during the outage"
+            assert daemon.rpc.getinfo()["block_height"] == before
+            assert _confirmed_outpoints(daemon) == coins_before
+        finally:
+            if b.proc.poll() is not None:
+                b.start()
+            two_chain.electrs_blake2b.start()
+
+        # No daemon restart, backend replacement or provider fallback: the same
+        # process must recover through the same configured node backend.
+        pid = daemon.proc.pid
+        b.generate_block(2)
+        wait_for(
+            lambda: daemon.rpc.getinfo()["block_height"] == b.rpc.getblockcount(),
+            timeout=TIMEOUT * 3,
+        )
+        assert daemon.proc.pid == pid
+        assert daemon.rpc.getinfo()["block_height"] > before
+        assert _confirmed_outpoints(daemon) == coins_before
+        assert poison not in _confirmed_outpoints(daemon)
+        recovered_deposit = b.rpc.sendtoaddress(two_chain.vault_addresses[0], 0.01)
+        b.generate_block(1, wait_for_mempool=recovered_deposit)
+        wait_for(
+            lambda: any(op[0] == recovered_deposit for op in _confirmed_outpoints(daemon)),
+            timeout=TIMEOUT * 3,
+        )
+        assert daemon.proc.pid == pid
+        assert coins_before <= _confirmed_outpoints(daemon)
+        assert poison not in _confirmed_outpoints(daemon)
+        two_chain.assert_home_sandbox_untouched()
+    finally:
+        daemon.cleanup()
