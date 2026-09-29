@@ -501,3 +501,31 @@ fn standard_export_preserves_unified_signature_bytes() {
         assert!(placed, "witness carries the stored DER || 0x21 bytes");
     }
 }
+
+/// A record whose last byte is not `0x21` is refused by the verifier itself,
+/// even when it never passed through the PSBT adapter; the DER part alone is
+/// a valid unified signature, so only the byte check can refuse it.
+#[test]
+fn verifier_refuses_a_record_not_ending_in_unified_all() {
+    let a = session(1);
+    let secp = secp256k1::Secp256k1::new();
+    let signed = blake2b_sign(
+        &a,
+        &psbt_for(&[descriptor(&format!("wpkh({})", key(&a, 84)))]),
+    );
+    let contexts = validate_inputs(&signed).unwrap();
+    let spent = spent_outputs(&signed);
+    let cache = UnifiedSighashCache::new(&signed.psbt().unsigned_tx, &spent).unwrap();
+    let mut record = unified_signatures(&signed).unwrap().remove(0);
+    assert_eq!(verify_record(&cache, &contexts[0], &record, &secp), Ok(()));
+    for byte in [0x01u8, 0x81, 0xa1, 0x22] {
+        *record.signature.last_mut().unwrap() = byte;
+        assert_eq!(
+            verify_record(&cache, &contexts[0], &record, &secp),
+            Err(ForeignUnifiedError::InvalidUnifiedSignature {
+                input: 0,
+                public_key: record.public_key
+            })
+        );
+    }
+}

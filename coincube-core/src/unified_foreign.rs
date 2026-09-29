@@ -52,6 +52,7 @@ use crate::{
     chain::ChainId,
     psbt_unified::{
         merge_signatures, unified_signatures, validate_internal, UnifiedPsbt, UnifiedPsbtError,
+        UnifiedSignature,
     },
     signer::SessionSigner,
     spend::{authenticate_previous_output, InputAuthError},
@@ -527,27 +528,41 @@ fn verify_with_contexts<C: secp256k1::Verification>(
     let spent: Vec<_> = contexts.iter().map(|c| c.spent_output.clone()).collect();
     let cache = UnifiedSighashCache::new(&psbt.psbt().unsigned_tx, &spent)?;
     for record in &records {
-        let context = &contexts[record.input_index];
-        let digest = cache.signature_hash(
-            record.input_index,
-            UNIFIED_SIGHASH_ALL,
-            context.script_type,
-            &context.script_code,
-        )?;
-        let invalid = || ForeignUnifiedError::InvalidUnifiedSignature {
-            input: record.input_index,
-            public_key: record.public_key,
-        };
-        let (_, der) = record.signature.split_last().ok_or_else(invalid)?;
-        let signature = secp256k1::ecdsa::Signature::from_der(der).map_err(|_| invalid())?;
-        secp.verify_ecdsa(
-            &secp256k1::Message::from_digest(digest),
-            &signature,
-            &record.public_key.inner,
-        )
-        .map_err(|_| invalid())?;
+        verify_record(&cache, &contexts[record.input_index], record, secp)?;
     }
     Ok(records.len())
+}
+
+/// Verify one record. The trailing byte must be exactly `ALL|UNIFIED`: the
+/// adapter already refuses anything else, but the digest below is computed
+/// for `0x21` only, so this boundary does not rely on it.
+fn verify_record<C: secp256k1::Verification>(
+    cache: &UnifiedSighashCache<'_>,
+    context: &InputContext,
+    record: &UnifiedSignature,
+    secp: &secp256k1::Secp256k1<C>,
+) -> Result<(), ForeignUnifiedError> {
+    let invalid = || ForeignUnifiedError::InvalidUnifiedSignature {
+        input: record.input_index,
+        public_key: record.public_key,
+    };
+    let der = match record.signature.split_last() {
+        Some((&UNIFIED_SIGHASH_ALL, der)) => der,
+        _ => return Err(invalid()),
+    };
+    let digest = cache.signature_hash(
+        record.input_index,
+        UNIFIED_SIGHASH_ALL,
+        context.script_type,
+        &context.script_code,
+    )?;
+    let signature = secp256k1::ecdsa::Signature::from_der(der).map_err(|_| invalid())?;
+    secp.verify_ecdsa(
+        &secp256k1::Message::from_digest(digest),
+        &signature,
+        &record.public_key.inner,
+    )
+    .map_err(|_| invalid())
 }
 
 fn require_compatible_sighash(
