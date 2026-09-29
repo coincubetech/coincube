@@ -3,8 +3,10 @@
 //! Some helpers to facilitate the usage of a signer in client of the Coincube daemon. For now
 //! only contains a master signer.
 
+use crate::psbt_unified::UnifiedPsbt;
 use crate::random;
 use crate::seed_crypt;
+use crate::unified_foreign::ForeignUnifiedError;
 
 use zeroize::Zeroizing;
 
@@ -187,6 +189,51 @@ impl SessionSigner {
         let xpub = bip32::Xpub::from_priv(secp, &derived);
         scrub_xpriv(&mut derived);
         xpub
+    }
+
+    /// Sign every foreign P2WPKH, P2SH-P2WPKH, P2PKH or P2WSH `multi` input
+    /// key this seed controls with `ALL|UNIFIED`, for the Split tool's
+    /// unified-sweep fallback. Refuses every chain but Bitcoin Blake2b (I5),
+    /// Taproot, `ANYONECANPAY`, legacy signatures and any input it cannot
+    /// identify; see [`crate::unified_foreign`]. The input PSBT is not changed.
+    pub fn sign_unified(
+        &self,
+        psbt: &UnifiedPsbt,
+        chain: crate::chain::ChainId,
+        secp: &secp256k1::Secp256k1<secp256k1::All>,
+    ) -> Result<UnifiedPsbt, ForeignUnifiedError> {
+        crate::unified_foreign::sign_foreign_unified(self, psbt, chain, secp)
+    }
+
+    /// Public key at `der_path`; the derived private key is scrubbed before
+    /// returning.
+    pub(crate) fn public_key_at(
+        &self,
+        der_path: &bip32::DerivationPath,
+        secp: &secp256k1::Secp256k1<impl secp256k1::Signing>,
+    ) -> Result<secp256k1::PublicKey, bip32::Error> {
+        let mut derived = self.master_xpriv.derive_priv(secp, der_path)?;
+        let public_key = derived.private_key.public_key(secp);
+        scrub_xpriv(&mut derived);
+        Ok(public_key)
+    }
+
+    /// Low-R ECDSA signature over `digest` with the key at `der_path`. The
+    /// derived private key never leaves this type and is scrubbed before
+    /// returning.
+    pub(crate) fn sign_digest_at(
+        &self,
+        der_path: &bip32::DerivationPath,
+        digest: [u8; 32],
+        secp: &secp256k1::Secp256k1<impl secp256k1::Signing>,
+    ) -> Result<secp256k1::ecdsa::Signature, bip32::Error> {
+        let mut derived = self.master_xpriv.derive_priv(secp, der_path)?;
+        let signature = secp.sign_ecdsa_low_r(
+            &secp256k1::Message::from_digest(digest),
+            &derived.private_key,
+        );
+        scrub_xpriv(&mut derived);
+        Ok(signature)
     }
 
     fn zeroize_secrets(&mut self) {
