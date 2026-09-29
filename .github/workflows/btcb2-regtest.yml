@@ -43,8 +43,9 @@ jobs:
           # invocation, which conflicts with the action's bin/cargo-fmt.
           components: rustfmt, clippy
 
+      # --no-install-recommends omits protoc's standard imports unless explicit.
       - name: Install build dependencies (rocksdb for electrs)
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang libclang-dev cmake
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang libclang-dev cmake libudev-dev libfontconfig1-dev pkg-config libdbus-1-dev protobuf-compiler libprotobuf-dev libwebkit2gtk-4.1-dev
 
       - name: Setup Python dependencies
         run: pip install --break-system-packages -r tests/requirements.txt
@@ -92,7 +93,20 @@ jobs:
           key: ${{ runner.os }}-electrs-blake2b-v2-${{ env.ELECTRS_BLAKE2B_COMMIT }}
 
       - name: Build coincubed
-        run: cargo build --release --package coincubed
+        run: |
+          cargo build --release --package coincubed
+          cargo build --release --package coincube-core --example claim_regtest_vectors
+
+      - name: Build headless Claim panel test driver
+        env:
+          BREEZ_API_KEY: DUMMY_BREEZ_API_KEY
+          # Release compilation requires a default; harness clients inject their local server.
+          COINCUBE_API_URL: https://claim-harness.invalid
+        run: |
+          cargo test --release --locked --package coincube-gui --lib --features regtest-harness --no-run --message-format=json-render-diagnostics > claim-gui-build.json
+          driver="$(jq -ser '[.[] | select(.reason == "compiler-artifact" and .target.name == "coincube_gui" and .profile.test == true and .executable != null) | .executable] | unique | if length == 1 then .[0] else error("expected one GUI test executable") end' claim-gui-build.json)"
+          test -x "$driver"
+          echo "CLAIM_GUI_REGTEST_TEST_PATH=$driver" >> "$GITHUB_ENV"
 
       - name: Test and build knots_verify
         # The verifier decides which node binaries the harness may execute, so
@@ -133,6 +147,7 @@ jobs:
           TIMEOUT: 120
           # A missing binary fails the run instead of skipping the tests.
           BTCB2_HARNESS_REQUIRED: "1"
+          CLAIM_REGTEST_TOOL_PATH: ${{ github.workspace }}/target/release/examples/claim_regtest_vectors
           # Failing tests keep their datadirs here so the logs can be collected.
           TEST_DIR: ${{ github.workspace }}/test-datadirs
         run: |
@@ -141,10 +156,10 @@ jobs:
           "$KNOTS_LEGACY_PATH" --version | head -1
           "$KNOTS_BLAKE2B_PATH" --version | head -1
           # B4.1 proves the harness; B4.2 runs the QA matrices on it.
-          # Both modules are named explicitly: a bare `pytest tests/`
+          # Modules are named explicitly: a bare `pytest tests/`
           # here would also pull in the functional suite, which this job
           # does not set up.
-          pytest tests/test_btcb2_harness.py tests/test_btcb2_b42_matrices.py -vvv
+          pytest tests/test_btcb2_harness.py tests/test_btcb2_b42_matrices.py tests/test_btcb2_claim_consensus.py tests/test_btcb2_claim_ancestry_consensus.py tests/test_btcb2_claim_gui.py -vvv --junitxml="$TEST_DIR/btcb2.xml" -o junit_family=legacy
 
       - name: Collect logs from failed tests
         if: failure()
@@ -166,5 +181,14 @@ jobs:
         with:
           name: failure-logs-btcb2-harness
           path: failure-logs
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Upload two-chain test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: btcb2-test-results
+          path: test-datadirs/btcb2.xml
           retention-days: 14
           if-no-files-found: warn

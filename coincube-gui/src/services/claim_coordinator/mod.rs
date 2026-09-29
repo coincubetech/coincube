@@ -1,4 +1,15 @@
-//! Dormant owned step-one coordination. No signing keys, UI or step-two permission.
+//! Owned Claim coordination. Signing keys and explicit user consent stay with callers.
+mod ancestry;
+mod collection;
+use collection::Collected;
+mod route;
+use route::RoutedEvidence;
+pub use route::{NodeIdentity, SubmissionRoute};
+mod step1;
+use step1::VerifiedStep1;
+pub mod fork;
+mod recovery;
+mod reorg;
 use super::{
     claim_observation::{
         self, http::HttpObservationSource, CollectionContext, ObservationBundle, ObservationSource,
@@ -21,6 +32,8 @@ use coincube_core::{
     },
 };
 use coincubed::poison_broadcast::{SubmissionGate, SubmissionOutcome, SubmissionRevoker};
+pub use recovery::ResubmissionReview;
+pub use reorg::ReconfirmationReview;
 use std::{
     path::Path,
     sync::{
@@ -45,7 +58,15 @@ pub enum Error {
     NotReady(Assessment),
     SubmissionAlreadyRecorded,
     ExpiredEvidence,
+    CompletionPersistence(String),
 }
+fn recovery_check_error(error: claim_workflow::Error, assessment: Assessment) -> Error {
+    match error {
+        claim_workflow::Error::Unchecked => Error::NotReady(assessment),
+        other => Error::Journal(other),
+    }
+}
+
 impl From<claim_workflow::Error> for Error {
     fn from(e: claim_workflow::Error) -> Self {
         Self::Journal(e)
@@ -79,6 +100,7 @@ pub struct ReviewSnapshot {
     pub fee_sats: u64,
     pub vsize: usize,
     pub observations: ObservationBundle,
+    pub route: SubmissionRoute,
     not_after: Instant,
 }
 /// One-use review identity. No Clone, deserialization or public field construction.
@@ -110,20 +132,44 @@ pub enum Outcome {
 #[async_trait]
 trait Services: Send + Sync {
     fn source(&self) -> &dyn ObservationSource;
+    fn ancestry_source(&self) -> Option<&HttpObservationSource> {
+        None
+    }
     async fn preflight(
         &self,
         tx: &Transaction,
         tip: BlockHash,
         policy: FreshnessPolicy,
     ) -> Result<Evidence, claim_preflight::Error>;
+    async fn routed_preflight(
+        &self,
+        tx: &Transaction,
+        tip: BlockHash,
+        policy: FreshnessPolicy,
+    ) -> Result<RoutedEvidence, claim_preflight::Error> {
+        self.preflight(tx, tip, policy)
+            .await
+            .map(RoutedEvidence::Connect)
+    }
+    async fn submit_route(
+        &self,
+        route: SubmissionRoute,
+        tx: VerifiedStep1,
+        gate: Arc<SubmissionGate>,
+    ) -> Result<SubmissionOutcome, DaemonError> {
+        if route != SubmissionRoute::Connect {
+            return Err(DaemonError::ClientNotSupported);
+        }
+        self.submit(tx, gate).await
+    }
     async fn submit(
         &self,
-        tx: Arc<VerifiedPoisonTransfer>,
+        tx: VerifiedStep1,
         gate: Arc<SubmissionGate>,
     ) -> Result<SubmissionOutcome, DaemonError>;
 }
 
-/// Immutable admitted session plus the exact anonymous Bitcoin Connect endpoint.
+/// Immutable admitted session plus the exact Connect endpoint.
 /// Account id comes from the caller's admitted session, never unverified JWT parsing.
 pub struct Production {
     source: HttpObservationSource,
@@ -134,6 +180,11 @@ pub struct Production {
     /// type used to be what encoded "embedded only"; [`Production::new`] now
     /// says so explicitly, and says it *before* anything is journaled.
     daemon: Arc<dyn Daemon + Send + Sync>,
+    bound_node: Option<route::BoundNode>,
+    connect_origin: String,
+    /// Node/Electrum sessions use the dedicated bound transports.
+    bound_transport: bool,
+    backend_binding: std::sync::OnceLock<coincubed::poison_broadcast::ClaimBackendBinding>,
     context: Context,
     generation: watch::Receiver<u64>,
 }
@@ -145,6 +196,28 @@ impl Production {
         expected_generation: u64,
         generation: watch::Receiver<u64>,
     ) -> Result<Self, Error> {
+        Self::for_chain(
+            client,
+            daemon,
+            account,
+            expected_generation,
+            generation,
+            ChainId::Bitcoin,
+        )
+    }
+    fn for_chain(
+        client: CoincubeClient,
+        daemon: Arc<dyn Daemon + Send + Sync>,
+        account: String,
+        expected_generation: u64,
+        generation: watch::Receiver<u64>,
+        chain: ChainId,
+    ) -> Result<Self, Error> {
+        let route = match chain {
+            ChainId::Bitcoin => "bitcoin/mainnet",
+            ChainId::BitcoinBlake2b => "bitcoin-blake2b/mainnet",
+            _ => return Err(Error::Unsupported),
+        };
         // Refused here, before any journal write, and not left to fail at the
         // submit call. `confirm_and_submit` records the broadcast intent
         // *before* it submits, so a backend that answers `config()` but cannot
@@ -155,11 +228,6 @@ impl Production {
             return Err(Error::Unsupported);
         }
         let config = daemon.config().ok_or(Error::Unsupported)?;
-        let coincubed::config::BitcoinBackend::Esplora(selection) =
-            config.bitcoin_backend.as_ref().ok_or(Error::Unsupported)?
-        else {
-            return Err(Error::Unsupported);
-        };
         let origin = reqwest::Url::parse(&client.base_url).map_err(|_| Error::InvalidBinding)?;
         if origin.path() != "/"
             || origin.query().is_some()
@@ -170,28 +238,35 @@ impl Production {
             return Err(Error::InvalidBinding);
         }
         let endpoint = format!(
-            "{}/api/v1/esplora/bitcoin/mainnet",
-            origin.as_str().trim_end_matches('/')
+            "{}/api/v1/esplora/{}",
+            origin.as_str().trim_end_matches('/'),
+            route
         );
-        if config.bitcoin_config.chain != ChainId::Bitcoin
+        if config.bitcoin_config.chain != chain
             || config.bitcoin_config.network != coincube_core::miniscript::bitcoin::Network::Bitcoin
-            || selection.addr.trim_end_matches('/') != endpoint
-            || selection.token.is_some()
-            || selection.fallback_addr.is_some()
-            || selection.fallback_token.is_some()
-            || selection.secondary_fallback_addr.is_some()
-            || selection.secondary_fallback_token.is_some()
-            || config.fallback_esplora.is_some()
             || account.is_empty()
         {
             return Err(Error::Unsupported);
         }
-        // Only exact chain+endpoint selection enters identity, never Debug/config
-        // serialization, bearer tokens, RPC credentials or device metadata.
-        let context = Context {
-            generation: expected_generation,
-            account,
-            provider: format!("bitcoin|{}", endpoint),
+        let bound_transport = match config.bitcoin_backend.as_ref() {
+            Some(coincubed::config::BitcoinBackend::Esplora(selection)) => {
+                if selection.addr.trim_end_matches('/') != endpoint
+                    || selection.token.is_some()
+                    || selection.fallback_addr.is_some()
+                    || selection.fallback_token.is_some()
+                    || selection.secondary_fallback_addr.is_some()
+                    || selection.secondary_fallback_token.is_some()
+                    || config.fallback_esplora.is_some()
+                {
+                    return Err(Error::Unsupported);
+                }
+                false
+            }
+            Some(
+                coincubed::config::BitcoinBackend::Bitcoind(_)
+                | coincubed::config::BitcoinBackend::Electrum(_),
+            ) if chain == ChainId::Bitcoin => true,
+            _ => return Err(Error::Unsupported),
         };
         let cc = || CollectionContext {
             expected_generation,
@@ -200,10 +275,30 @@ impl Production {
         let source =
             HttpObservationSource::new(client, ChainId::Bitcoin, ChainId::BitcoinBlake2b, cc())
                 .map_err(|_| Error::InvalidBinding)?;
+        // Only exact chain+endpoint selection enters identity, never Debug/config
+        // serialization, bearer tokens, RPC credentials or device metadata.
+        let context = Context {
+            generation: expected_generation,
+            account,
+            // The persisted Claim identity binds the pair through its Bitcoin
+            // endpoint. Fork transport independently admits the fixed sibling
+            // endpoint at this same origin; changing origins cannot reopen it.
+            provider: source.provider_identity(),
+        };
         let preflight = PreflightClient::new(origin.as_str(), cc()).map_err(Error::Preflight)?;
+        let bound_node = match &config.bitcoin_backend {
+            Some(coincubed::config::BitcoinBackend::Bitcoind(node)) => {
+                Some(route::BoundNode::new(node.clone()))
+            }
+            _ => None,
+        };
         Ok(Self {
             source,
             preflight,
+            bound_node,
+            connect_origin: origin.as_str().to_owned(),
+            bound_transport,
+            backend_binding: std::sync::OnceLock::new(),
             daemon,
             context,
             generation,
@@ -215,6 +310,9 @@ impl Production {
 }
 #[async_trait]
 impl Services for Production {
+    fn ancestry_source(&self) -> Option<&HttpObservationSource> {
+        Some(&self.source)
+    }
     fn source(&self) -> &dyn ObservationSource {
         &self.source
     }
@@ -228,14 +326,134 @@ impl Services for Production {
             .observe(ChainId::Bitcoin, tx, tip, policy)
             .await
     }
-    async fn submit(
+    async fn routed_preflight(
         &self,
-        tx: Arc<VerifiedPoisonTransfer>,
+        tx: &Transaction,
+        tip: BlockHash,
+        policy: FreshnessPolicy,
+    ) -> Result<RoutedEvidence, claim_preflight::Error> {
+        if self.bound_transport {
+            let current = self
+                .daemon
+                .claim_backend_binding()
+                .await
+                .map_err(|_| claim_preflight::Error::BackendChanged)?;
+            if self.backend_binding.get_or_init(|| current.clone()) != &current {
+                return Err(claim_preflight::Error::BackendChanged);
+            }
+        }
+        let local = match (
+            &self.bound_node,
+            self.daemon
+                .config()
+                .and_then(|c| c.bitcoin_backend.as_ref()),
+        ) {
+            (Some(bound), Some(coincubed::config::BitcoinBackend::Bitcoind(node)))
+                if bound.matches(node) =>
+            {
+                Some(bound.clone())
+            }
+            (
+                None,
+                Some(
+                    coincubed::config::BitcoinBackend::Esplora(_)
+                    | coincubed::config::BitcoinBackend::Electrum(_),
+                ),
+            ) => None,
+            _ => return Err(claim_preflight::Error::BackendChanged),
+        };
+        route::preflight(
+            local,
+            &self.preflight,
+            tx,
+            tip,
+            policy,
+            CollectionContext {
+                expected_generation: self.context.generation,
+                generation: self.generation.clone(),
+            },
+        )
+        .await
+    }
+    async fn submit_route(
+        &self,
+        route: SubmissionRoute,
+        tx: VerifiedStep1,
         gate: Arc<SubmissionGate>,
     ) -> Result<SubmissionOutcome, DaemonError> {
+        if route == SubmissionRoute::Connect {
+            if !self.bound_transport {
+                return self.submit(tx, gate).await;
+            }
+            let binding = self
+                .backend_binding
+                .get()
+                .ok_or(DaemonError::ClientNotSupported)?
+                .clone();
+            return match tx {
+                VerifiedStep1::OpReturn(tx) => {
+                    self.daemon
+                        .submit_verified_poison_to_connect(
+                            tx,
+                            self.connect_origin.clone(),
+                            binding,
+                            gate,
+                        )
+                        .await
+                }
+                VerifiedStep1::Ancestry(tx) => {
+                    self.daemon
+                        .submit_verified_ancestry_to_connect(
+                            tx,
+                            self.connect_origin.clone(),
+                            binding,
+                            gate,
+                        )
+                        .await
+                }
+            };
+        }
+        let node = self
+            .bound_node
+            .as_ref()
+            .ok_or(DaemonError::ClientNotSupported)?;
+        if node.route() != route {
+            return Err(DaemonError::ClientNotSupported);
+        }
+        let binding = self
+            .backend_binding
+            .get()
+            .ok_or(DaemonError::ClientNotSupported)?
+            .clone();
+        match tx {
+            VerifiedStep1::OpReturn(tx) => {
+                self.daemon
+                    .submit_verified_poison_to_node(tx, binding, gate)
+                    .await
+            }
+            VerifiedStep1::Ancestry(tx) => {
+                self.daemon
+                    .submit_verified_ancestry_to_node(tx, binding, gate)
+                    .await
+            }
+        }
+    }
+    async fn submit(
+        &self,
+        tx: VerifiedStep1,
+        gate: Arc<SubmissionGate>,
+    ) -> Result<SubmissionOutcome, DaemonError> {
+        // Node/Electrum sessions must carry the selected route and frozen
+        // backend binding through submit_route, never the generic retrying path.
+        if self.bound_transport {
+            return Err(DaemonError::ClientNotSupported);
+        }
         // The transport adapter owns its blocking worker and checks the revocable
         // gate under the actual backend lock immediately before submission.
-        self.daemon.submit_verified_poison(tx, gate).await
+        match tx {
+            VerifiedStep1::OpReturn(tx) => self.daemon.submit_verified_poison(tx, gate).await,
+            VerifiedStep1::Ancestry(tx) => self.daemon.submit_verified_ancestry(tx, gate).await,
+        }
     }
 }
 
@@ -262,7 +480,7 @@ impl Revoker {
             gate: None,
         })))
     }
-    fn is_revoked(&self) -> bool {
+    pub(crate) fn is_revoked(&self) -> bool {
         self.0.lock().unwrap_or_else(|e| e.into_inner()).revoked
     }
     fn register(&self, revoker: SubmissionRevoker) -> Result<(), Error> {
@@ -296,7 +514,7 @@ pub struct Coordinator {
     context: Context,
     generation: watch::Receiver<u64>,
     controller: Controller,
-    verified: Arc<VerifiedPoisonTransfer>,
+    verified: VerifiedStep1,
     services: Box<dyn Services>,
     policy: CheckPolicy,
     revoker: Revoker,
@@ -435,6 +653,7 @@ impl Coordinator {
             )?
         };
         controller.revalidate_construction(&context, construction)?;
+        controller.bind_recovered_bitcoin_transaction(&context, &verified)?;
         let id = NEXT
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
             .map_err(|_| Error::Revoked)?;
@@ -444,7 +663,7 @@ impl Coordinator {
             context,
             generation,
             controller,
-            verified: Arc::new(verified),
+            verified: VerifiedStep1::OpReturn(Arc::new(verified)),
             services,
             policy,
             revoker: Revoker::new(),
@@ -458,6 +677,9 @@ impl Coordinator {
             txid: self.verified.transaction().compute_txid(),
             wtxid: self.verified.transaction().compute_wtxid(),
         })
+    }
+    pub(crate) fn wallet_identity(&self) -> &WalletIdentity {
+        self.controller.identity()
     }
     pub fn context(&self) -> &Context {
         &self.context
@@ -486,7 +708,31 @@ impl Coordinator {
             generation: self.generation.clone(),
         }
     }
-    async fn collect(&self) -> Result<claim_observation::CollectedAssessment, Error> {
+    async fn collect(&self) -> Result<Collected, Error> {
+        if matches!(self.verified, VerifiedStep1::Ancestry(_)) {
+            let path = self
+                .controller
+                .recorded_ancestry()?
+                .ok_or(Error::InvalidBinding)?;
+            let source = self.services.ancestry_source().ok_or(Error::Unsupported)?;
+            let proof = source
+                .collect_ancestry(
+                    &path,
+                    &self.controller.plan(),
+                    self.policy.observations,
+                    self.policy.collection_budget,
+                )
+                .await
+                .map_err(Error::Observation)?;
+            return Collected::ancestry(
+                proof,
+                &path,
+                &self.controller.plan(),
+                &self.context,
+                self.policy.observations,
+                source.now(),
+            );
+        }
         claim_observation::collect(
             self.services.source(),
             &self.controller.plan(),
@@ -495,9 +741,10 @@ impl Coordinator {
             self.collection_context(),
         )
         .await
+        .map(Collected::ordinary)
         .map_err(Error::Observation)
     }
-    fn fresh_evidence(&self, evidence: &Evidence, tip: BlockHash) -> Result<(), Error> {
+    fn fresh_evidence(&self, evidence: &RoutedEvidence, tip: BlockHash) -> Result<(), Error> {
         let tx = self.verified.transaction();
         let age = self
             .services
@@ -537,7 +784,7 @@ impl Coordinator {
         }
         let evidence = self
             .services
-            .preflight(
+            .routed_preflight(
                 self.verified.transaction(),
                 first.observations.bitcoin.tip.hash,
                 self.policy.preflight,
@@ -550,22 +797,23 @@ impl Coordinator {
             return Err(Error::ChangedReview);
         }
         self.fresh_evidence(&evidence, last.observations.bitcoin.tip.hash)?;
-        let status = self.controller.apply_observation(
+        let last_data = last.data;
+        let status = last.apply(
+            &mut self.controller,
             ticket,
             context,
-            Ok(last),
             self.policy.observations,
             self.services.source().now(),
         )?;
         if status != Status::Observation(Assessment::WaitingForConfirmation) {
-            return Err(Error::NotReady(last.assessment));
+            return Err(Error::NotReady(last_data.assessment));
         }
         // Capture the monotonic origin before reading wall time or persisting intent.
         // Slow durable writes and backend queues consume this same remaining budget.
         let origin = Instant::now();
         let not_after = evidence_deadline(
             self.policy,
-            last.observations,
+            last_data.observations,
             evidence.observed_at(),
             self.services.source().now(),
             origin,
@@ -577,7 +825,8 @@ impl Coordinator {
             wtxid: self.verified.transaction().compute_wtxid(),
             fee_sats: self.verified.fee().to_sat(),
             vsize: self.verified.vsize(),
-            observations: last.observations,
+            observations: last_data.observations,
+            route: evidence.route(),
             not_after,
         })
     }
@@ -605,6 +854,7 @@ impl Coordinator {
         if review.snapshot.wallet != refreshed.wallet
             || review.snapshot.txid != refreshed.txid
             || review.snapshot.wtxid != refreshed.wtxid
+            || review.snapshot.route != refreshed.route
             || !same_view(review.snapshot.observations, refreshed.observations)
         {
             return Err(Error::ChangedReview);
@@ -619,11 +869,20 @@ impl Coordinator {
             self.policy.observations,
             self.services.source().now(),
         )?;
+        self.submit_recorded(context, refreshed).await
+    }
+    // Both initial submission and an explicitly reviewed resend arrive here only
+    // after their durable attempt record has been written.
+    async fn submit_recorded(
+        &mut self,
+        context: &Context,
+        refreshed: ReviewSnapshot,
+    ) -> Result<Outcome, Error> {
         let uncertain = Outcome::Uncertain {
             txid: refreshed.txid,
             wtxid: refreshed.wtxid,
         };
-        let (gate, revoker) = SubmissionGate::new(&self.verified, refreshed.not_after);
+        let (gate, revoker) = self.verified.gate(refreshed.not_after);
         let _pending = PendingGate(revoker.clone());
         if self.revoker.register(revoker).is_err() {
             return Ok(uncertain);
@@ -644,7 +903,7 @@ impl Coordinator {
         };
         let result = tokio::select! { biased;
             _ = cancelled => None,
-            result = tokio::time::timeout(Duration::from_secs(30), self.services.submit(self.verified.clone(), Arc::new(gate))) => result.ok(),
+            result = tokio::time::timeout(Duration::from_secs(30), self.services.submit_route(refreshed.route, self.verified.clone(), Arc::new(gate))) => result.ok(),
         };
         if self.current(context).is_err() {
             return Ok(uncertain);
@@ -664,11 +923,11 @@ impl Coordinator {
         let ticket = self.controller.begin_check(context)?;
         let collected = self.collect().await?;
         self.current(context)?;
-        self.controller
-            .apply_observation(
+        collected
+            .apply(
+                &mut self.controller,
                 ticket,
                 context,
-                Ok(collected),
                 self.policy.observations,
                 self.services.source().now(),
             )
@@ -721,6 +980,40 @@ fn evidence_deadline(
             .ok_or(Error::ExpiredEvidence)?;
         remaining = remaining.min(Duration::from_secs(seconds as u64));
     }
+    if remaining.is_zero() {
+        return Err(Error::ExpiredEvidence);
+    }
+    origin.checked_add(remaining).ok_or(Error::ExpiredEvidence)
+}
+
+/// Bind a stable negative ancestry observation to the same short, monotonic
+/// lifetime used by positive completion evidence. The observation's original
+/// timestamp determines the remaining lifetime; reaching the coordinator does
+/// not grant it a fresh collection window.
+fn observation_deadline(
+    policy: CheckPolicy,
+    observed_at: i64,
+    now: i64,
+    origin: Instant,
+) -> Result<Instant, Error> {
+    if now < 0 || observed_at < 0 {
+        return Err(Error::ExpiredEvidence);
+    }
+    let age = now
+        .checked_sub(observed_at)
+        .filter(|age| *age >= 0)
+        .ok_or(Error::ExpiredEvidence)?;
+    let seconds = policy
+        .observations
+        .max_observation_age_seconds
+        .checked_sub(age)
+        .and_then(|remaining| remaining.checked_sub(1))
+        .filter(|remaining| *remaining > 0)
+        .ok_or(Error::ExpiredEvidence)?;
+    let remaining = policy
+        .collection_budget
+        .min(Duration::from_secs(30))
+        .min(Duration::from_secs(seconds as u64));
     if remaining.is_zero() {
         return Err(Error::ExpiredEvidence);
     }

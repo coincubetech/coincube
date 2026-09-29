@@ -313,3 +313,316 @@ fn recovered_transaction_requires_the_exact_construction_and_valid_retained_witn
         assert!(verify_poison_transaction(&built, &built.psbt().unsigned_tx, &secp).is_err());
     }
 }
+
+fn fork_fixture(chain: ChainId) -> (crate::claim_spend::ClaimForkSweep, Vec<MasterSigner>) {
+    let (source, signers) = fixture(chain, false);
+    let mut getter = Getter(HashMap::new());
+    let coins: Vec<_> = source
+        .psbt()
+        .inputs
+        .iter()
+        .enumerate()
+        .map(|(i, input)| {
+            let previous = input.non_witness_utxo.clone().unwrap();
+            getter.0.insert(previous.compute_txid(), previous);
+            CandidateCoin {
+                outpoint: source.psbt().unsigned_tx.input[i].previous_output,
+                amount: input.witness_utxo.as_ref().unwrap().value,
+                deriv_index: ChildNumber::from_normal_idx(7 + i as u32).unwrap(),
+                is_change: false,
+                must_select: false,
+                sequence: None,
+                ancestor_info: None,
+            }
+        })
+        .collect();
+    let fork = if chain == ChainId::Bitcoin {
+        ChainId::BitcoinBlake2b
+    } else {
+        ChainId::BitcoinBlake2bTestnet4
+    };
+    let sweep = crate::claim_spend::create_claim_fork_sweep(
+        &source,
+        fork,
+        &secp256k1::Secp256k1::verification_only(),
+        &mut getter,
+        &coins,
+        ChildNumber::from_normal_idx(20).unwrap(),
+        3,
+        absolute::LockTime::ZERO,
+    )
+    .unwrap();
+    (sweep, signers)
+}
+
+#[test]
+fn fork_sweep_finalization_reports_actual_unified_mixed_and_legacy_witnesses() {
+    use crate::{psbt_unified::UnifiedPsbt, unified_signing::sign_p2wsh_all_unified};
+    let secp = secp256k1::Secp256k1::new();
+    for chain in [ChainId::Bitcoin, ChainId::Testnet4] {
+        let (sweep, signers) = fork_fixture(chain);
+        for unified_count in 0..=2 {
+            let mut signed = UnifiedPsbt::from_psbt(sweep.psbt().clone()).unwrap();
+            assert!(finalize_claim_fork_sweep(&sweep, &signed, &secp).is_err());
+            for (i, signer) in signers[..2].iter().enumerate() {
+                signed = if i < unified_count {
+                    sign_p2wsh_all_unified(signer, &signed, &secp).unwrap()
+                } else {
+                    // Legacy signers cannot consume the unified sighash request.
+                    // Collect their signatures on the original ordinary PSBT and
+                    // merge signatures only, preserving unified records already held.
+                    let delta = UnifiedPsbt::from_psbt(
+                        signer.sign_psbt(sweep.psbt().clone(), &secp).unwrap(),
+                    )
+                    .unwrap();
+                    crate::psbt_unified::merge_signatures(&mut signed, &delta).unwrap();
+                    signed
+                };
+                if i == 0 {
+                    assert!(finalize_claim_fork_sweep(&sweep, &signed, &secp).is_err());
+                }
+            }
+            let verified = finalize_claim_fork_sweep(&sweep, &signed, &secp).unwrap();
+            let restored =
+                verify_claim_fork_transaction(&sweep, verified.transaction(), &secp).unwrap();
+            assert_eq!(restored.transaction(), verified.transaction());
+            assert_eq!(restored.inputs(), verified.inputs());
+            assert_eq!(restored.fee(), verified.fee());
+            for mutation in 0..6 {
+                let mut bad = verified.transaction().clone();
+                let mut witness = bad.input[0].witness.to_vec();
+                match mutation {
+                    0 => witness.clear(),
+                    1 => witness[1][4] ^= 1,
+                    2 => {
+                        let last = witness[1].len() - 1;
+                        witness[1][last] = 0x81;
+                    }
+                    3 => witness.insert(0, vec![]),
+                    4 => bad.output[0].value = Amount::from_sat(1),
+                    _ => witness.swap(1, 2),
+                }
+                bad.input[0].witness = bitcoin::Witness::from_slice(&witness);
+                assert!(
+                    verify_claim_fork_transaction(&sweep, &bad, &secp).is_err(),
+                    "mutation {}",
+                    mutation
+                );
+            }
+            assert_eq!(verified.chain(), sweep.chain());
+            assert_eq!(verified.bitcoin_step1(), sweep.bitcoin_step1());
+            assert_eq!(verified.fee(), sweep.psbt().fee().unwrap());
+            assert_eq!(
+                verified.transaction().compute_txid(),
+                sweep.psbt().unsigned_tx.compute_txid()
+            );
+            assert!(verified
+                .inputs()
+                .iter()
+                .all(|r| r.unified_used == unified_count && r.legacy_used == 2 - unified_count));
+            assert!(verified
+                .transaction()
+                .input
+                .iter()
+                .all(|i| !i.witness.is_empty()));
+        }
+    }
+}
+
+#[test]
+fn fork_finalizer_rejects_changed_construction_and_tampered_signatures() {
+    use crate::{psbt_unified::UnifiedPsbt, unified_signing::sign_p2wsh_all_unified};
+    let secp = secp256k1::Secp256k1::new();
+    let (sweep, signers) = fork_fixture(ChainId::Bitcoin);
+    let mut signed = UnifiedPsbt::from_psbt(sweep.psbt().clone()).unwrap();
+    for signer in &signers[..2] {
+        signed = sign_p2wsh_all_unified(signer, &signed, &secp).unwrap();
+    }
+    finalize_claim_fork_sweep(&sweep, &signed, &secp).unwrap();
+    let mut mutations = Vec::new();
+    let mut bad = signed.clone();
+    bad.psbt_mut().unsigned_tx.output[0].value = Amount::from_sat(1);
+    mutations.push(bad);
+    let mut bad = signed.clone();
+    bad.psbt_mut().inputs[0].bip32_derivation.clear();
+    mutations.push(bad);
+    let mut bad = signed.clone();
+    bad.psbt_mut().outputs[0].bip32_derivation.clear();
+    mutations.push(bad);
+    let mut bad = signed.clone();
+    bad.psbt_mut().inputs[0].non_witness_utxo = None;
+    mutations.push(bad);
+    let mut bad = signed.clone();
+    bad.psbt_mut().inputs[0].final_script_witness = Some(bitcoin::Witness::from_slice(&[vec![1]]));
+    mutations.push(bad);
+    let mut bad = signed.clone();
+    bad.psbt_mut().inputs[1].proprietary = bad.psbt().inputs[0].proprietary.clone();
+    mutations.push(bad);
+    let mut bad = signed.clone();
+    // Well-formed DER, invalid signature: flip a scalar byte, preserving the
+    // encoding and sighash. Neither the adapter nor metadata equality suffices.
+    let value = bad.psbt_mut().inputs[0]
+        .proprietary
+        .values_mut()
+        .next()
+        .unwrap();
+    value[10] ^= 1;
+    mutations.push(bad);
+    for bad in mutations {
+        assert!(finalize_claim_fork_sweep(&sweep, &bad, &secp).is_err());
+    }
+}
+
+fn ancestry_fixture(
+    recovery: bool,
+) -> (crate::claim_spend::AncestrySelfTransfer, Vec<MasterSigner>) {
+    let (source, signers) = fixture(ChainId::Bitcoin, recovery);
+    let mut getter = Getter(HashMap::new());
+    let mut coins = Vec::new();
+    for (i, input) in source.psbt().inputs.iter().enumerate() {
+        let tx = input.non_witness_utxo.clone().unwrap();
+        let outpoint = source.psbt().unsigned_tx.input[i].previous_output;
+        let script = &tx.output[outpoint.vout as usize].script_pubkey;
+        let secp = secp256k1::Secp256k1::verification_only();
+        let deriv_index = (7..9)
+            .map(|i| ChildNumber::from_normal_idx(i).unwrap())
+            .find(|index| {
+                source
+                    .descriptor()
+                    .receive_descriptor()
+                    .derive(*index, &secp)
+                    .script_pubkey()
+                    == *script
+            })
+            .unwrap();
+        coins.push(CandidateCoin {
+            outpoint,
+            amount: tx.output[outpoint.vout as usize].value,
+            deriv_index,
+            is_change: false,
+            must_select: true,
+            sequence: recovery.then_some(Sequence(46)),
+            ancestor_info: None,
+        });
+        getter.0.insert(tx.compute_txid(), tx);
+    }
+    let selected = coins[0].outpoint;
+    let raw = bitcoin::consensus::serialize(&getter.0[&selected.txid]);
+    let dependency = crate::claim_ancestry::verify(
+        selected,
+        &[crate::claim_ancestry::Link {
+            transaction: &raw,
+            parent_input: None,
+        }],
+    )
+    .unwrap();
+    let built = crate::claim_spend::create_ancestry_self_transfer(
+        ChainId::Bitcoin,
+        source.descriptor(),
+        &secp256k1::Secp256k1::verification_only(),
+        &mut getter,
+        &coins,
+        ChildNumber::from_normal_idx(12).unwrap(),
+        5,
+        absolute::LockTime::ZERO,
+        &dependency,
+    )
+    .unwrap();
+    (built, signers)
+}
+
+#[test]
+fn ancestry_primary_and_recovery_signatures_pass_recovered_witness_verification() {
+    let secp = secp256k1::Secp256k1::new();
+    for recovery in [false, true] {
+        let (built, signers) = ancestry_fixture(recovery);
+        let signing = if recovery {
+            &signers[3..]
+        } else {
+            &signers[..2]
+        };
+        let signed = signing.iter().fold(built.psbt().clone(), |psbt, s| {
+            s.sign_psbt(psbt, &secp).unwrap()
+        });
+        let verified = finalize_ancestry_transfer(&built, &signed, &secp).unwrap();
+        assert_eq!(verified.transaction().output.len(), 1);
+        assert!(!verified.transaction().output[0]
+            .script_pubkey
+            .is_op_return());
+        assert_eq!(verified.poison_input(), built.poison_input());
+        assert_eq!(verified.claimed_prevouts(), built.claimed_prevouts());
+        assert_eq!(
+            verified.signatures_per_input(),
+            if recovery { &[1, 1] } else { &[2, 2] }
+        );
+        assert_eq!(verified.chain(), ChainId::Bitcoin);
+        assert_eq!(verified.descriptor(), built.descriptor());
+        assert_eq!(
+            verified.construction_txid(),
+            built.psbt().unsigned_tx.compute_txid()
+        );
+        assert_eq!(verified.fee(), signed.fee().unwrap());
+        assert_eq!(verified.vsize(), verified.transaction().vsize());
+        let restored = verify_ancestry_transaction(&built, verified.transaction(), &secp).unwrap();
+        assert_eq!(restored.transaction(), verified.transaction());
+        assert_eq!(restored.poison_input(), verified.poison_input());
+        assert_eq!(restored.claimed_prevouts(), verified.claimed_prevouts());
+        for index in 0..2 {
+            let mut bad = verified.transaction().clone();
+            bad.input[index].witness.clear();
+            assert!(verify_ancestry_transaction(&built, &bad, &secp).is_err());
+        }
+        let mut bad = verified.transaction().clone();
+        bad.output[0].value = Amount::from_sat(1);
+        assert!(matches!(
+            verify_ancestry_transaction(&built, &bad, &secp),
+            Err(FinalizeError::ConstructionChanged)
+        ));
+    }
+}
+
+#[test]
+fn ancestry_rejects_wrong_metadata_non_all_and_invalid_or_insufficient_signatures() {
+    let (built, signers) = ancestry_fixture(false);
+    let secp = secp256k1::Secp256k1::new();
+    let partial = signers[0].sign_psbt(built.psbt().clone(), &secp).unwrap();
+    assert!(matches!(
+        finalize_ancestry_transfer(&built, &partial, &secp),
+        Err(FinalizeError::Unsatisfied)
+    ));
+    let signed = signers[1].sign_psbt(partial, &secp).unwrap();
+    let mut bad = signed.clone();
+    bad.inputs[0].non_witness_utxo = None;
+    assert!(matches!(
+        finalize_ancestry_transfer(&built, &bad, &secp),
+        Err(FinalizeError::ConstructionChanged)
+    ));
+    let mut bad = signed.clone();
+    bad.unsigned_tx.output[0].value = Amount::from_sat(1);
+    assert!(matches!(
+        finalize_ancestry_transfer(&built, &bad, &secp),
+        Err(FinalizeError::ConstructionChanged)
+    ));
+    for flag in [2, 3, 0x21, 0x81] {
+        let mut bad = signed.clone();
+        bad.inputs[0].sighash_type = Some(bitcoin::psbt::PsbtSighashType::from_u32(flag));
+        assert!(matches!(
+            finalize_ancestry_transfer(&built, &bad, &secp),
+            Err(FinalizeError::UnsupportedSighash)
+        ));
+    }
+    let mut bad = signed;
+    bad.inputs[0]
+        .partial_sigs
+        .values_mut()
+        .next()
+        .unwrap()
+        .signature = secp.sign_ecdsa(
+        &secp256k1::Message::from_digest([0; 32]),
+        &secp256k1::SecretKey::from_slice(&[1; 32]).unwrap(),
+    );
+    assert!(matches!(
+        finalize_ancestry_transfer(&built, &bad, &secp),
+        Err(FinalizeError::InvalidSignature { input: 0 })
+    ));
+}

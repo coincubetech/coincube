@@ -68,6 +68,8 @@ pub enum Message {
     /// probe, build, finalise, review, submit, track). Carries the panel's
     /// coordinator session back and forth, so no other handler ever sees it.
     Claim(super::state::vault::claim::ClaimEvent),
+    ForkClaim(Box<super::state::vault::claim::fork_panel::Event>),
+    ForkClaimOpened(Box<super::state::vault::claim::fork_load::Opened>),
     LoadDaemonConfig(Box<DaemonConfig>),
     DaemonConfigLoaded(Result<(), Error>),
     /// Result of an off-UI-thread daemon restart (a backend switch). Carries the
@@ -222,6 +224,15 @@ pub enum Message {
     /// Result of polling the *active* managed node's network stats (connection
     /// counts, upload used vs. cap, onion address) for the Node settings.
     BitcoindNetStats(Result<crate::app::cache::NodeNetStats, String>),
+    /// A bounded recovery-notice observation, scoped to App and session.
+    UnsweptNotice {
+        app: crate::app::cache::AppGeneration,
+        generation: u64,
+        result: Result<
+            Option<crate::services::foreign_scan::known::KnownUnspent>,
+            crate::services::foreign_scan::ScanError,
+        >,
+    },
     /// A sync-driven entangled-deposit lookup batch for a Bitcoin Blake2b
     /// Cube (`#276` I13) has answered: `claimed` is every txid the batch took
     /// in flight (released as a whole), `answers` every answer, `Unknown`

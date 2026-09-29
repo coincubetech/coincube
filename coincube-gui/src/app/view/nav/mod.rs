@@ -297,6 +297,7 @@ pub struct NavContext<'a> {
     pub btcb2_server_enabled: bool,
     /// Whether a Bitcoin Blake2b Cube already reuses this Cube's descriptor.
     pub btcb2_already_claimed: bool,
+    pub btcb2_claim_resume: bool,
 }
 
 impl NavContext<'_> {

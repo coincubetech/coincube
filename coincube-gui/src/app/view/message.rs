@@ -185,6 +185,8 @@ pub enum Message {
     /// (Lane B1.4). Creates the target Cube only — nothing is claimed,
     /// poisoned, swept or broadcast by this flow.
     StartClaimBlake2b,
+    ContinueForkClaim,
+    ReturnBitcoinClaim,
     /// Claim step 1 — the poison self-transfer on Bitcoin (Lane B1.5),
     /// handled by `state::vault::claim::ClaimStep1Panel`.
     Claim(ClaimMessage),
@@ -2705,6 +2707,12 @@ mod duress_message_debug_tests {
 /// panel against its current stage; none is a permission on its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClaimMessage {
+    /// Review the original transaction being re-mined after a reorg.
+    ReviewReconfirmation,
+    ReviewResubmission,
+    ConfirmResubmission,
+    /// Explicitly acknowledge the freshly reviewed replacement inclusion.
+    ConfirmReconfirmation,
     /// Run the preconditions again (after a refusal, or to refresh them).
     Recheck,
     /// Build the poison self-transfer from the pre-fork coins shown.

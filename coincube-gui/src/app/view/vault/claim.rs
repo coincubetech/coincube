@@ -9,7 +9,6 @@ use iced::{
 
 use coincube_core::{
     claim::{Assessment, MIN_CONFIRMATIONS},
-    claim_spend::PoisonSelfTransfer,
     miniscript::bitcoin::Amount,
 };
 use coincube_ui::{
@@ -49,6 +48,17 @@ pub fn view<'a>(
             dashboard(menu, cache, preconditions_view(cache, panel, pre, refusal))
         }
         StageView::Plan(built) => dashboard(menu, cache, plan_view(cache, panel, built)),
+        StageView::CheckingSign => dashboard(
+            menu,
+            cache,
+            Column::new()
+                .spacing(20)
+                .push(header("Checking the Claim inputs before signing…"))
+                .push(
+                    button::secondary(None, "Cancel")
+                        .on_press(Message::Claim(ClaimMessage::Cancel)),
+                ),
+        ),
         StageView::Sign {
             psbt: state,
             finalizing,
@@ -65,7 +75,19 @@ pub fn view<'a>(
             status,
             busy,
             error,
-        } => dashboard(menu, cache, track_view(outcome, phase, status, busy, error)),
+        } => dashboard(
+            menu,
+            cache,
+            track_view(
+                outcome,
+                phase,
+                status,
+                busy,
+                error,
+                panel.can_continue_on_fork(),
+                (panel.reconfirmation(), panel.resubmission()),
+            ),
+        ),
     }
 }
 
@@ -117,7 +139,7 @@ fn preconditions_view<'a>(
             Some(pre.target.is_some()),
             match &pre.target {
                 Some(_) => "A Bitcoin Blake2b Cube reuses this Vault on this device.".to_string(),
-                None => "Not created yet.".to_string(),
+                None => "Missing or ambiguous target.".to_string(),
             },
         ))
         .push(check_row(
@@ -138,7 +160,7 @@ fn preconditions_view<'a>(
             },
         ))
         .push(check_row(
-            "Replay protection",
+            "OP_RETURN fallback",
             window.map(|w| w.rdts.is_ok()),
             match (checked.map(|c| &c.window), window) {
                 (None, _) => "Checking Bitcoin Blake2b…".to_string(),
@@ -263,7 +285,7 @@ fn format_amount(amount: Amount, cache: &Cache) -> String {
 fn plan_view<'a>(
     cache: &'a Cache,
     panel: &'a ClaimStep1Panel,
-    built: &'a PoisonSelfTransfer,
+    built: &'a crate::app::state::vault::claim::construction::Construction,
 ) -> Element<'a, Message> {
     let tx = &built.psbt().unsigned_tx;
     let inputs: Amount = built
@@ -295,8 +317,15 @@ fn plan_view<'a>(
             p1_regular(format_amount(outputs, cache)),
         ))
         .push(row(
-            "Marker output",
-            p1_regular(format!("{marker}-byte OP_RETURN, zero value")),
+            if built.selected_ancestry_input().is_some() {
+                "Bitcoin-only input"
+            } else {
+                "Marker output"
+            },
+            p1_regular(match built.selected_ancestry_input() {
+                Some(outpoint) => format!("{outpoint} — excluded from the Bitcoin Blake2b sweep"),
+                None => format!("{marker}-byte OP_RETURN, zero value"),
+            }),
         ))
         .push(row(
             "Fee",
@@ -392,6 +421,7 @@ fn review_view<'a>(
         Some(snapshot) => Column::new()
             .spacing(10)
             .push(row("Transaction", p2_regular(snapshot.txid.to_string())))
+            .push(row("Broadcast via", p2_regular(snapshot.route.label())))
             .push(row(
                 "Fee",
                 p1_regular(format!(
@@ -403,8 +433,9 @@ fn review_view<'a>(
             .push(row(
                 "Bitcoin tip",
                 p1_regular(format!(
-                    "height {} — the node accepts this transaction",
-                    snapshot.observations.bitcoin.tip.height
+                    "height {} — {} accepts this transaction",
+                    snapshot.observations.bitcoin.tip.height,
+                    snapshot.route.label()
                 )),
             ))
             .push(row(
@@ -455,23 +486,40 @@ fn review_view<'a>(
         .into()
 }
 
+fn can_review_reconfirmation(
+    status: Option<Status>,
+    has_resubmission: bool,
+    has_reconfirmation: bool,
+) -> bool {
+    !has_resubmission
+        && !has_reconfirmation
+        && status == Some(Status::Observation(Assessment::Reorged))
+}
+
 fn track_view<'a>(
     outcome: Outcome,
     phase: Option<Phase>,
     status: Option<Status>,
     busy: bool,
     error: Option<&'a str>,
+    can_continue: bool,
+    recovery: (
+        Option<crate::services::claim_workflow::Reconfirmation>,
+        Option<(ReviewSnapshot, usize)>,
+    ),
 ) -> Element<'a, Message> {
+    let (reconfirmation, resubmission) = recovery;
+    let has_resubmission = resubmission.is_some();
     let (txid, submitted) = match outcome {
-        Outcome::Recorded { txid } => (txid, "A submission is recorded on this device. Its transaction has not been recovered and verified yet; it will not be retried.".into()),
+        Outcome::Recorded { txid } => (txid, "A submission is recorded on this device. Its transaction has not been recovered and verified yet; it will not be retried automatically.".into()),
         Outcome::UpstreamAccepted { txid, .. } => (
             txid,
-            "Accepted by the Bitcoin node. Waiting for it to confirm.".to_string(),
+            "Submission accepted. Waiting for the transaction to confirm.".to_string(),
         ),
         Outcome::Uncertain { txid, .. } => (
             txid,
-            "The submission's outcome is uncertain: the intent was recorded, but the node's answer \
-             did not arrive. It is being reconciled from the chain; it will not be retried."
+            "The submission's outcome is uncertain: the intent was recorded, but the submission response \
+             did not arrive. It is being reconciled from the chain; it will not be retried automatically."
                 .to_string(),
         ),
     };
@@ -489,12 +537,11 @@ fn track_view<'a>(
             }
             Assessment::ObservationsEligibleForPreflight | Assessment::NeedsPreflightRecheck => {
                 format!(
-                    "Confirmed with {MIN_CONFIRMATIONS} or more confirmations. Step 2 comes in a later release."
+                    "Confirmed with {MIN_CONFIRMATIONS} or more confirmations. Continue in the paired Bitcoin Blake2b Cube."
                 )
             }
             Assessment::Reorged => {
-                "A reorganisation dropped this transaction from the chain. Read again; if it stays \
-                 out, step 1 must be run again."
+                "A reorganisation changed this transaction’s confirmation. Read again or review its new confirmation before continuing."
                     .to_string()
             }
             Assessment::Step1AlreadyOnFork => {
@@ -526,7 +573,7 @@ fn track_view<'a>(
                         p1_regular(match phase {
                             Some(Phase::Intent) => "intent",
                             Some(Phase::BroadcastUncertain) => "broadcast (unconfirmed)",
-                            Some(Phase::Tracking) => "confirmed, tracking depth",
+                            Some(Phase::Tracking) => "previously confirmed, checking current depth",
                             None => "—",
                         }),
                     ))
@@ -546,6 +593,52 @@ fn track_view<'a>(
                     .on_press_maybe((!busy).then_some(Message::Claim(ClaimMessage::Refresh))),
             ),
         )
+        .push_maybe(resubmission.map(|(snapshot, attempts)| {
+            Column::new().spacing(10)
+                .push(p1_regular("The original transaction was not found in the fresh Bitcoin checks. This resends the verified transaction shown below using its recorded inputs and fee. Older records may not identify the witness used in the first attempt. A previous attempt may still have reached the network; confirmation is not guaranteed."))
+                .push(row("Transaction", p2_regular(snapshot.txid.to_string())))
+            .push(row("Broadcast via", p2_regular(snapshot.route.label())))
+                .push(row("Witness ID", p2_regular(snapshot.wtxid.to_string())))
+                .push(row("Fee", p2_regular(format!("{} sats", snapshot.fee_sats))))
+                .push(row("Previous attempts", p2_regular(attempts.to_string())))
+                .push(button::primary(None, "Confirm resend of original transaction").on_press_maybe((!busy).then_some(Message::Claim(ClaimMessage::ConfirmResubmission))))
+        }))
+        .push_maybe((!has_resubmission && reconfirmation.is_none() && matches!(status, Some(Status::Observation(Assessment::Reorged | Assessment::WaitingForConfirmation)))).then(|| {
+            button::secondary(None, "Review resend of original transaction").on_press_maybe((!busy).then_some(Message::Claim(ClaimMessage::ReviewResubmission)))
+        }))
+        .push_maybe(reconfirmation.map(|inclusion| {
+            Column::new().spacing(10)
+                .push(p1_regular("The same Bitcoin transaction has confirmed in a different block. Acknowledging this keeps its submission history and checks its confirmation depth again."))
+                .push(row("Previous block", p2_regular(format!("{} — {}", inclusion.previous.height, inclusion.previous.hash))))
+                .push(row("New block", p2_regular(format!("{} — {}", inclusion.confirmed.height, inclusion.confirmed.hash))))
+                .push(button::primary(None, "Acknowledge new confirmation").on_press_maybe((!busy).then_some(Message::Claim(ClaimMessage::ConfirmReconfirmation))))
+        }))
+        .push_maybe(can_review_reconfirmation(status, has_resubmission, reconfirmation.is_some()).then(|| {
+            button::secondary(None, "Review new confirmation").on_press_maybe((!busy).then_some(Message::Claim(ClaimMessage::ReviewReconfirmation)))
+        }))
+        .push(
+            button::primary(None, "Continue in Bitcoin Blake2b")
+                .on_press_maybe(can_continue.then_some(Message::ContinueForkClaim)),
+        )
         .push(Space::new().height(Length::Fixed(10.0)))
         .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reconfirmation_review_never_competes_with_an_existing_recovery_review() {
+        let reorged = Some(Status::Observation(Assessment::Reorged));
+
+        assert!(can_review_reconfirmation(reorged, false, false));
+        assert!(!can_review_reconfirmation(reorged, true, false));
+        assert!(!can_review_reconfirmation(reorged, false, true));
+        assert!(!can_review_reconfirmation(
+            Some(Status::Observation(Assessment::WaitingForConfirmation)),
+            false,
+            false,
+        ));
+    }
 }

@@ -96,6 +96,31 @@ pub fn create_poison_self_transfer(
     locktime: LockTime,
     fork_marker: bitcoin::BlockHash,
 ) -> Result<PoisonSelfTransfer, Error> {
+    create_self_transfer(
+        chain,
+        descriptor,
+        secp,
+        tx_getter,
+        coins,
+        change_index,
+        feerate_vb,
+        locktime,
+        Some(fork_marker),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn create_self_transfer(
+    chain: ChainId,
+    descriptor: &CoincubeDescriptor,
+    secp: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
+    tx_getter: &mut impl TxGetter,
+    coins: &[CandidateCoin],
+    change_index: ChildNumber,
+    feerate_vb: u64,
+    locktime: LockTime,
+    fork_marker: Option<bitcoin::BlockHash>,
+) -> Result<PoisonSelfTransfer, Error> {
     let (network, chain_byte) = match chain {
         ChainId::Bitcoin => (bitcoin::Network::Bitcoin, 0),
         ChainId::Testnet4 => (bitcoin::Network::Testnet4, 1),
@@ -137,23 +162,26 @@ pub fn create_poison_self_transfer(
             ));
         }
     }
-    // Sorted outpoints make the labeling independent of input presentation order.
-    let bytes: Vec<_> = seen
-        .iter()
-        .flat_map(bitcoin::consensus::serialize)
-        .collect();
-    let commitment = sha256::Hash::hash(&bytes);
-    let mut payload = [0u8; 87];
-    payload[..14].copy_from_slice(b"COINCUBE-SPLIT");
-    payload[14] = 1; // payload format version
-    payload[15] = chain_byte;
-    payload[16..48].copy_from_slice(fork_marker.as_byte_array());
-    payload[48..80].copy_from_slice(commitment.as_byte_array());
-    let poison = bitcoin::ScriptBuf::new_op_return(
-        bitcoin::script::PushBytesBuf::try_from(payload.to_vec())
-            .expect("fixed 87-byte payload fits script push limits"),
-    );
-    debug_assert_eq!(poison.len(), 90);
+    let poison = fork_marker.map(|fork_marker| {
+        // Sorted outpoints make the labeling independent of input presentation order.
+        let bytes: Vec<_> = seen
+            .iter()
+            .flat_map(bitcoin::consensus::serialize)
+            .collect();
+        let commitment = sha256::Hash::hash(&bytes);
+        let mut payload = [0u8; 87];
+        payload[..14].copy_from_slice(b"COINCUBE-SPLIT");
+        payload[14] = 1; // payload format version
+        payload[15] = chain_byte;
+        payload[16..48].copy_from_slice(fork_marker.as_byte_array());
+        payload[48..80].copy_from_slice(commitment.as_byte_array());
+        let poison = bitcoin::ScriptBuf::new_op_return(
+            bitcoin::script::PushBytesBuf::try_from(payload.to_vec())
+                .expect("fixed 87-byte payload fits script push limits"),
+        );
+        debug_assert_eq!(poison.len(), 90);
+        poison
+    });
     let selected: Vec<_> = coins
         .iter()
         .map(|coin| CandidateCoin {
@@ -176,7 +204,7 @@ pub fn create_poison_self_transfer(
             }),
         },
         locktime,
-        Some(poison),
+        poison,
     )?;
     Ok(PoisonSelfTransfer {
         psbt: result.psbt,
@@ -185,6 +213,436 @@ pub fn create_poison_self_transfer(
         change_index,
         warnings: result.warnings,
     })
+}
+
+/// Unsigned owned construction using one structurally verified ancestry input.
+/// This type certifies neither exclusivity nor live eligibility. It deliberately
+/// cannot be passed to the OP_RETURN signing workflow as PoisonSelfTransfer.
+#[derive(Debug)]
+pub struct AncestrySelfTransfer {
+    transfer: PoisonSelfTransfer,
+    poison_input: bitcoin::OutPoint,
+    poison_derivation: (ChildNumber, bool),
+    claimed_prevouts: Vec<bitcoin::OutPoint>,
+}
+impl AncestrySelfTransfer {
+    pub fn psbt(&self) -> &bitcoin::psbt::Psbt {
+        self.transfer.psbt()
+    }
+    pub fn descriptor(&self) -> &CoincubeDescriptor {
+        self.transfer.descriptor()
+    }
+    pub fn chain(&self) -> ChainId {
+        self.transfer.chain()
+    }
+    pub fn change_index(&self) -> ChildNumber {
+        self.transfer.change_index()
+    }
+    pub fn warnings(&self) -> &[spend::CreateSpendWarning] {
+        self.transfer.warnings()
+    }
+    pub fn poison_input(&self) -> bitcoin::OutPoint {
+        self.poison_input
+    }
+    /// Owned selected-input index and change branch, authenticated by construction.
+    /// Persisted copies are hints: rederive the script before restoring metadata.
+    pub fn poison_derivation(&self) -> (ChildNumber, bool) {
+        self.poison_derivation
+    }
+    pub fn claimed_prevouts(&self) -> &[bitcoin::OutPoint] {
+        &self.claimed_prevouts
+    }
+}
+
+/// Build a Bitcoin self-transfer with a designated ancestry input and no
+/// OP_RETURN output. All inputs are authenticated against the owned descriptor
+/// by the ordinary spend builder. The designated input is excluded from the
+/// fork claim set, which must remain nonempty. The caller must establish fresh
+/// positive chain exclusivity, maturity, spend policy and reservations before
+/// signing; a structural dependency alone is insufficient. Mainnet only, matching
+/// the current ancestry qualification contract. No signing or broadcast occurs.
+#[allow(clippy::too_many_arguments)]
+pub fn create_ancestry_self_transfer(
+    chain: ChainId,
+    descriptor: &CoincubeDescriptor,
+    secp: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
+    tx_getter: &mut impl TxGetter,
+    coins: &[CandidateCoin],
+    change_index: ChildNumber,
+    feerate_vb: u64,
+    locktime: LockTime,
+    dependency: &crate::claim_ancestry::CoinbaseDependency,
+) -> Result<AncestrySelfTransfer, Error> {
+    let poison_input = dependency.selected();
+    if chain != ChainId::Bitcoin
+        || coins.len() < 2
+        || coins
+            .iter()
+            .filter(|coin| coin.outpoint == poison_input)
+            .count()
+            != 1
+    {
+        return Err(Error::InvalidRequest(
+            "Mainnet, one selected ancestry input and nonempty claimed inputs required",
+        ));
+    }
+    let transfer = create_self_transfer(
+        chain,
+        descriptor,
+        secp,
+        tx_getter,
+        coins,
+        change_index,
+        feerate_vb,
+        locktime,
+        None,
+    )?;
+    let claimed_prevouts = transfer
+        .psbt()
+        .unsigned_tx
+        .input
+        .iter()
+        .map(|input| input.previous_output)
+        .filter(|outpoint| *outpoint != poison_input)
+        .collect();
+    let selected = coins
+        .iter()
+        .find(|coin| coin.outpoint == poison_input)
+        .ok_or(Error::InvalidRequest("Selected ancestry input is missing"))?;
+    Ok(AncestrySelfTransfer {
+        transfer,
+        poison_input,
+        poison_derivation: (selected.deriv_index, selected.is_change),
+        claimed_prevouts,
+    })
+}
+
+/// An unsigned BTCB2 self-sweep bound to the original Bitcoin poison inputs.
+/// Construction is not proof of confirmation, exclusivity or broadcast authority.
+#[derive(Debug)]
+pub struct ClaimForkSweep {
+    psbt: bitcoin::psbt::Psbt,
+    chain: ChainId,
+    bitcoin_step1: bitcoin::Txid,
+    descriptor: CoincubeDescriptor,
+    change_index: ChildNumber,
+    warnings: Vec<spend::CreateSpendWarning>,
+}
+impl ClaimForkSweep {
+    pub fn psbt(&self) -> &bitcoin::psbt::Psbt {
+        &self.psbt
+    }
+    pub fn chain(&self) -> ChainId {
+        self.chain
+    }
+    pub fn bitcoin_step1(&self) -> bitcoin::Txid {
+        self.bitcoin_step1
+    }
+    pub fn descriptor(&self) -> &CoincubeDescriptor {
+        &self.descriptor
+    }
+    pub fn change_index(&self) -> ChildNumber {
+        self.change_index
+    }
+    pub fn warnings(&self) -> &[spend::CreateSpendWarning] {
+        &self.warnings
+    }
+}
+
+/// Build Claim's fork-side sweep of exactly the original shared inputs, not
+/// the outputs created by the Bitcoin self-transfer. This entry point uses the
+/// OP_RETURN construction, whose inputs are all included in the fork claim.
+///
+/// `coins` and `tx_getter` must be collected from the authenticated fork wallet.
+/// Values/scripts are authenticated again through the ordinary spend builder
+/// and compared with the checked Bitcoin construction. The caller reserves the
+/// fresh target change index. This function performs no chain queries and does
+/// not establish unspentness, confirmation depth, poison validity or permission
+/// to sign. The signing coordinator chooses the permitted sighash policy later.
+#[allow(clippy::too_many_arguments)]
+pub fn create_claim_fork_sweep(
+    source: &PoisonSelfTransfer,
+    fork_chain: ChainId,
+    secp: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
+    tx_getter: &mut impl TxGetter,
+    coins: &[CandidateCoin],
+    change_index: ChildNumber,
+    feerate_vb: u64,
+    locktime: LockTime,
+) -> Result<ClaimForkSweep, Error> {
+    create_fork_sweep(
+        source,
+        None,
+        fork_chain,
+        secp,
+        tx_getter,
+        coins,
+        change_index,
+        feerate_vb,
+        locktime,
+    )
+}
+
+/// Construct only the shared-input fork sweep. The ancestry input is excluded
+/// by the opaque Bitcoin construction, never by a caller-supplied exclusion.
+/// Fresh qualification and signing permission are still separate requirements.
+#[allow(clippy::too_many_arguments)]
+pub fn create_ancestry_fork_sweep(
+    source: &AncestrySelfTransfer,
+    fork_chain: ChainId,
+    secp: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
+    tx_getter: &mut impl TxGetter,
+    coins: &[CandidateCoin],
+    change_index: ChildNumber,
+    feerate_vb: u64,
+    locktime: LockTime,
+) -> Result<ClaimForkSweep, Error> {
+    create_fork_sweep(
+        &source.transfer,
+        Some(source.poison_input),
+        fork_chain,
+        secp,
+        tx_getter,
+        coins,
+        change_index,
+        feerate_vb,
+        locktime,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn create_fork_sweep(
+    source: &PoisonSelfTransfer,
+    excluded_input: Option<bitcoin::OutPoint>,
+    fork_chain: ChainId,
+    secp: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
+    tx_getter: &mut impl TxGetter,
+    coins: &[CandidateCoin],
+    change_index: ChildNumber,
+    feerate_vb: u64,
+    locktime: LockTime,
+) -> Result<ClaimForkSweep, Error> {
+    if !matches!(
+        (source.chain(), fork_chain),
+        (ChainId::Bitcoin, ChainId::BitcoinBlake2b)
+            | (ChainId::Testnet4, ChainId::BitcoinBlake2bTestnet4)
+    ) || change_index.is_hardened()
+    {
+        return Err(Error::InvalidRequest(
+            "Matching fork chain and normal change index required",
+        ));
+    }
+    let original = source.psbt();
+    let selected: BTreeSet<_> = coins.iter().map(|coin| coin.outpoint).collect();
+    let claimed: BTreeSet<_> = original
+        .unsigned_tx
+        .input
+        .iter()
+        .map(|input| input.previous_output)
+        .filter(|outpoint| Some(*outpoint) != excluded_input)
+        .collect();
+    if coins.is_empty() || selected.len() != coins.len() || selected != claimed {
+        return Err(Error::InvalidRequest(
+            "Fork sweep must spend exactly the original claimed inputs",
+        ));
+    }
+    let descriptor = source.descriptor();
+    let destination = descriptor.change_descriptor().derive(change_index, secp);
+    for coin in coins {
+        let source_index = original
+            .unsigned_tx
+            .input
+            .iter()
+            .position(|input| input.previous_output == coin.outpoint)
+            .ok_or(Error::InvalidRequest("Unclaimed fork input"))?;
+        let prevout =
+            original.inputs[source_index]
+                .witness_utxo
+                .as_ref()
+                .ok_or(Error::InvalidRequest(
+                    "Missing authenticated source prevout",
+                ))?;
+        if coin.deriv_index.is_hardened() || coin.amount != prevout.value {
+            return Err(Error::InvalidRequest(
+                "Fork input metadata differs from Bitcoin construction",
+            ));
+        }
+        let branch = if coin.is_change {
+            descriptor.change_descriptor()
+        } else {
+            descriptor.receive_descriptor()
+        };
+        if branch.derive(coin.deriv_index, secp).script_pubkey() != prevout.script_pubkey
+            || destination.script_pubkey() == prevout.script_pubkey
+        {
+            return Err(Error::InvalidRequest(
+                "Fork input ownership or fresh destination mismatch",
+            ));
+        }
+    }
+    let selected: Vec<_> = coins
+        .iter()
+        .map(|coin| CandidateCoin {
+            must_select: true,
+            ..*coin
+        })
+        .collect();
+    let built = spend::create_spend(
+        descriptor,
+        secp,
+        tx_getter,
+        &[],
+        &selected,
+        SpendTxFees::Regular(feerate_vb),
+        SpendOutputAddress {
+            addr: destination.address(fork_chain.bitcoin_network()),
+            info: Some(AddrInfo {
+                index: change_index,
+                is_change: true,
+            }),
+        },
+        locktime,
+    )?;
+    Ok(ClaimForkSweep {
+        psbt: built.psbt,
+        chain: fork_chain,
+        bitcoin_step1: original.unsigned_tx.compute_txid(),
+        descriptor: descriptor.clone(),
+        change_index,
+        warnings: built.warnings,
+    })
+}
+
+/// Recover an exact recorded fork sweep from authenticated wallet inputs.
+/// This rebuilds all PSBT signing metadata rather than trusting persisted PSBT
+/// fields. It reserves no address and grants no signing or broadcast authority;
+/// callers must still bind the result to the journal and obtain fresh checks.
+/// Only the recorded output amount is retained, allowing recovery without the
+/// original fee estimate. Actual economics are reverified before returning.
+#[allow(clippy::too_many_arguments)]
+pub fn reconstruct_claim_fork_sweep(
+    source: &PoisonSelfTransfer,
+    fork_chain: ChainId,
+    secp: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
+    tx_getter: &mut impl TxGetter,
+    coins: &[CandidateCoin],
+    change_index: ChildNumber,
+    recorded: &bitcoin::Transaction,
+) -> Result<ClaimForkSweep, Error> {
+    reconstruct_fork_sweep(
+        source,
+        None,
+        fork_chain,
+        secp,
+        tx_getter,
+        coins,
+        change_index,
+        recorded,
+    )
+}
+
+/// Rebuild only the recorded shared-input sweep, retaining the ancestry
+/// construction's bound exclusion. This restores no live eligibility.
+#[allow(clippy::too_many_arguments)]
+pub fn reconstruct_ancestry_fork_sweep(
+    source: &AncestrySelfTransfer,
+    fork_chain: ChainId,
+    secp: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
+    tx_getter: &mut impl TxGetter,
+    coins: &[CandidateCoin],
+    change_index: ChildNumber,
+    recorded: &bitcoin::Transaction,
+) -> Result<ClaimForkSweep, Error> {
+    reconstruct_fork_sweep(
+        &source.transfer,
+        Some(source.poison_input),
+        fork_chain,
+        secp,
+        tx_getter,
+        coins,
+        change_index,
+        recorded,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reconstruct_fork_sweep(
+    source: &PoisonSelfTransfer,
+    excluded_input: Option<bitcoin::OutPoint>,
+    fork_chain: ChainId,
+    secp: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
+    tx_getter: &mut impl TxGetter,
+    coins: &[CandidateCoin],
+    change_index: ChildNumber,
+    recorded: &bitcoin::Transaction,
+) -> Result<ClaimForkSweep, Error> {
+    if recorded.output.len() != 1 {
+        return Err(Error::InvalidRequest(
+            "Recorded fork sweep must have one output",
+        ));
+    }
+    let mut rebuilt = create_fork_sweep(
+        source,
+        excluded_input,
+        fork_chain,
+        secp,
+        tx_getter,
+        coins,
+        change_index,
+        1,
+        recorded.lock_time,
+    )?;
+    rebuilt.psbt.unsigned_tx.output[0].value = recorded.output[0].value;
+    if rebuilt.psbt.unsigned_tx != *recorded {
+        return Err(Error::InvalidRequest(
+            "Recorded transaction differs from the owned fork construction",
+        ));
+    }
+    spend::reverify_spend_before_broadcast(source.descriptor(), &rebuilt.psbt)?;
+    Ok(rebuilt)
+}
+
+/// Rebuild an exact recorded ancestry self-transfer using newly authenticated
+/// owned inputs and a reverified dependency. Only the recorded output amount
+/// is retained; all scripts, inputs and PSBT metadata are reconstructed and
+/// actual economics checked. The caller must bind the selected dependency,
+/// change index and recorded transaction to its intent and freshly qualify the
+/// path. Reconstruction neither reserves an address nor authorizes submission.
+#[allow(clippy::too_many_arguments)]
+pub fn reconstruct_ancestry_self_transfer(
+    chain: ChainId,
+    descriptor: &CoincubeDescriptor,
+    secp: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
+    tx_getter: &mut impl TxGetter,
+    coins: &[CandidateCoin],
+    change_index: ChildNumber,
+    dependency: &crate::claim_ancestry::CoinbaseDependency,
+    recorded: &bitcoin::Transaction,
+) -> Result<AncestrySelfTransfer, Error> {
+    if recorded.output.len() != 1 {
+        return Err(Error::InvalidRequest(
+            "Recorded ancestry transfer must have one output",
+        ));
+    }
+    let mut rebuilt = create_ancestry_self_transfer(
+        chain,
+        descriptor,
+        secp,
+        tx_getter,
+        coins,
+        change_index,
+        1,
+        recorded.lock_time,
+        dependency,
+    )?;
+    rebuilt.transfer.psbt.unsigned_tx.output[0].value = recorded.output[0].value;
+    if rebuilt.psbt().unsigned_tx != *recorded {
+        return Err(Error::InvalidRequest(
+            "Recorded transaction differs from the owned ancestry construction",
+        ));
+    }
+    spend::reverify_spend_before_broadcast(descriptor, rebuilt.psbt())?;
+    Ok(rebuilt)
 }
 
 /// Reconstruct an existing unsigned poison transfer from authenticated wallet
@@ -312,6 +770,338 @@ mod tests {
         )
     }
     #[test]
+    fn ancestry_construction_owns_every_input_and_excludes_poison_from_fork_claim() {
+        let (desc, coins, mut getter) = fixture();
+        let selected = coins[0].outpoint;
+        let raw = bitcoin::consensus::serialize(getter.0.get(&selected.txid).unwrap());
+        let dependency = crate::claim_ancestry::verify(
+            selected,
+            &[crate::claim_ancestry::Link {
+                transaction: &raw,
+                parent_input: None,
+            }],
+        )
+        .unwrap();
+        let secp = secp256k1::Secp256k1::verification_only();
+        let index = ChildNumber::from_normal_idx(10).unwrap();
+        let built = create_ancestry_self_transfer(
+            ChainId::Bitcoin,
+            &desc,
+            &secp,
+            &mut getter,
+            &coins,
+            index,
+            5,
+            LockTime::ZERO,
+            &dependency,
+        )
+        .unwrap();
+        assert_eq!(built.poison_input(), selected);
+        assert_eq!(
+            built.poison_derivation(),
+            (coins[0].deriv_index, coins[0].is_change)
+        );
+        assert_eq!(built.claimed_prevouts(), &[coins[1].outpoint]);
+        assert_eq!(built.psbt().unsigned_tx.input.len(), 2);
+        assert_eq!(
+            built
+                .psbt()
+                .unsigned_tx
+                .input
+                .iter()
+                .map(|input| input.previous_output)
+                .collect::<BTreeSet<_>>(),
+            coins.iter().map(|coin| coin.outpoint).collect()
+        );
+        assert_eq!(built.psbt().unsigned_tx.output.len(), 1);
+        assert_eq!(
+            built.psbt().unsigned_tx.output[0].script_pubkey,
+            desc.change_descriptor()
+                .derive(index, &secp)
+                .script_pubkey()
+        );
+        assert!(built
+            .psbt()
+            .inputs
+            .iter()
+            .all(|input| input.partial_sigs.is_empty()
+                && input.witness_utxo.is_some()
+                && input.non_witness_utxo.is_some()));
+        assert!(
+            200_000 - built.psbt().unsigned_tx.output[0].value.to_sat()
+                >= desc.unsigned_tx_max_vbytes(&built.psbt().unsigned_tx, true) * 5
+        );
+        spend::reverify_spend_before_broadcast(&desc, built.psbt()).unwrap();
+        // No fork lookup of the exclusive input is needed or allowed by this
+        // construction: its source transaction is absent from the fork getter.
+        let removed = getter.0.remove(&selected.txid).unwrap();
+        let fork = create_ancestry_fork_sweep(
+            &built,
+            ChainId::BitcoinBlake2b,
+            &secp,
+            &mut getter,
+            &coins[1..],
+            index,
+            5,
+            LockTime::ZERO,
+        )
+        .unwrap();
+        assert_eq!(
+            fork.bitcoin_step1(),
+            built.psbt().unsigned_tx.compute_txid()
+        );
+        assert_eq!(
+            fork.psbt()
+                .unsigned_tx
+                .input
+                .iter()
+                .map(|input| input.previous_output)
+                .collect::<Vec<_>>(),
+            built.claimed_prevouts()
+        );
+        assert_eq!(fork.psbt().unsigned_tx.output.len(), 1);
+        spend::reverify_spend_before_broadcast(&desc, fork.psbt()).unwrap();
+        for invalid in [
+            coins.clone(),
+            vec![coins[0]],
+            vec![],
+            vec![coins[1], coins[1]],
+        ] {
+            assert!(create_ancestry_fork_sweep(
+                &built,
+                ChainId::BitcoinBlake2b,
+                &secp,
+                &mut getter,
+                &invalid,
+                index,
+                5,
+                LockTime::ZERO
+            )
+            .is_err());
+        }
+        let mut wrong_fork = vec![coins[1]];
+        wrong_fork[0].amount = Amount::from_sat(99_999);
+        assert!(create_ancestry_fork_sweep(
+            &built,
+            ChainId::BitcoinBlake2b,
+            &secp,
+            &mut getter,
+            &wrong_fork,
+            index,
+            5,
+            LockTime::ZERO
+        )
+        .is_err());
+        getter.0.insert(selected.txid, removed);
+        for chain in [ChainId::Testnet4, ChainId::BitcoinBlake2b] {
+            assert!(create_ancestry_self_transfer(
+                chain,
+                &desc,
+                &secp,
+                &mut getter,
+                &coins,
+                index,
+                5,
+                LockTime::ZERO,
+                &dependency
+            )
+            .is_err());
+        }
+        for invalid in [vec![coins[0]], vec![coins[1]], vec![coins[0], coins[0]]] {
+            assert!(create_ancestry_self_transfer(
+                ChainId::Bitcoin,
+                &desc,
+                &secp,
+                &mut getter,
+                &invalid,
+                index,
+                5,
+                LockTime::ZERO,
+                &dependency
+            )
+            .is_err());
+        }
+        let mut reused = coins.clone();
+        let mut reused_tx = getter.0.get(&coins[1].outpoint.txid).unwrap().clone();
+        reused_tx.output[0].script_pubkey = desc
+            .change_descriptor()
+            .derive(index, &secp)
+            .script_pubkey();
+        reused[1].outpoint.txid = reused_tx.compute_txid();
+        reused[1].is_change = true;
+        reused[1].deriv_index = index;
+        getter.0.insert(reused_tx.compute_txid(), reused_tx);
+        assert!(matches!(
+            create_ancestry_self_transfer(
+                ChainId::Bitcoin,
+                &desc,
+                &secp,
+                &mut getter,
+                &reused,
+                index,
+                5,
+                LockTime::ZERO,
+                &dependency
+            ),
+            Err(Error::InvalidRequest(
+                "Change must not reuse a selected source script"
+            ))
+        ));
+        for change in [true, false] {
+            let mut bad = coins.clone();
+            if change {
+                bad[0].amount = Amount::from_sat(99_999);
+            } else {
+                bad[1].deriv_index = ChildNumber::from_normal_idx(99).unwrap();
+            }
+            assert!(matches!(
+                create_ancestry_self_transfer(
+                    ChainId::Bitcoin,
+                    &desc,
+                    &secp,
+                    &mut getter,
+                    &bad,
+                    index,
+                    5,
+                    LockTime::ZERO,
+                    &dependency
+                ),
+                Err(Error::Spend(SpendCreationError::InputAuthentication(..)))
+            ));
+        }
+    }
+
+    #[test]
+    fn ancestry_restart_rebuilds_metadata_and_refuses_replacement_or_bad_economics() {
+        let (desc, coins, mut getter) = fixture();
+        let raw = bitcoin::consensus::serialize(getter.0.get(&coins[0].outpoint.txid).unwrap());
+        let dependency = crate::claim_ancestry::verify(
+            coins[0].outpoint,
+            &[crate::claim_ancestry::Link {
+                transaction: &raw,
+                parent_input: None,
+            }],
+        )
+        .unwrap();
+        let secp = secp256k1::Secp256k1::verification_only();
+        let index = ChildNumber::from_normal_idx(10).unwrap();
+        let built = create_ancestry_self_transfer(
+            ChainId::Bitcoin,
+            &desc,
+            &secp,
+            &mut getter,
+            &coins,
+            index,
+            5,
+            LockTime::ZERO,
+            &dependency,
+        )
+        .unwrap();
+        let original = built.psbt().unsigned_tx.clone();
+        let restored = reconstruct_ancestry_self_transfer(
+            ChainId::Bitcoin,
+            &desc,
+            &secp,
+            &mut getter,
+            &coins,
+            index,
+            &dependency,
+            &original,
+        )
+        .unwrap();
+        assert_eq!(restored.psbt(), built.psbt());
+        assert_eq!(restored.claimed_prevouts(), built.claimed_prevouts());
+        let fork = create_ancestry_fork_sweep(
+            &restored,
+            ChainId::BitcoinBlake2b,
+            &secp,
+            &mut getter,
+            &coins[1..],
+            index,
+            5,
+            LockTime::ZERO,
+        )
+        .unwrap();
+        let fork_tx = fork.psbt().unsigned_tx.clone();
+        let fork_restored = reconstruct_ancestry_fork_sweep(
+            &restored,
+            ChainId::BitcoinBlake2b,
+            &secp,
+            &mut getter,
+            &coins[1..],
+            index,
+            &fork_tx,
+        )
+        .unwrap();
+        assert_eq!(fork_restored.psbt(), fork.psbt());
+        for fork_side in [false, true] {
+            let recorded = if fork_side { &fork_tx } else { &original };
+            for case in 0..7 {
+                let mut bad = recorded.clone();
+                match case {
+                    0 => bad.output.clear(),
+                    1 => bad.output[0].script_pubkey = bitcoin::ScriptBuf::new(),
+                    2 => bad.version = bitcoin::transaction::Version::ONE,
+                    3 => bad.input[0].sequence = bitcoin::Sequence::MAX,
+                    4 => bad.output[0].value = Amount::ZERO,
+                    5 => bad.output[0].value = Amount::from_sat(300_000),
+                    _ => bad.input[0].previous_output = OutPoint::null(),
+                }
+                if fork_side {
+                    assert!(reconstruct_ancestry_fork_sweep(
+                        &restored,
+                        ChainId::BitcoinBlake2b,
+                        &secp,
+                        &mut getter,
+                        &coins[1..],
+                        index,
+                        &bad
+                    )
+                    .is_err());
+                } else {
+                    assert!(reconstruct_ancestry_self_transfer(
+                        ChainId::Bitcoin,
+                        &desc,
+                        &secp,
+                        &mut getter,
+                        &coins,
+                        index,
+                        &dependency,
+                        &bad
+                    )
+                    .is_err());
+                }
+            }
+        }
+        getter.0.clear();
+        assert!(matches!(
+            reconstruct_ancestry_self_transfer(
+                ChainId::Bitcoin,
+                &desc,
+                &secp,
+                &mut getter,
+                &coins,
+                index,
+                &dependency,
+                &original
+            ),
+            Err(Error::Spend(SpendCreationError::InputAuthentication(..)))
+        ));
+        assert!(matches!(
+            reconstruct_ancestry_fork_sweep(
+                &restored,
+                ChainId::BitcoinBlake2b,
+                &secp,
+                &mut getter,
+                &coins[1..],
+                index,
+                &fork_tx
+            ),
+            Err(Error::Spend(SpendCreationError::InputAuthentication(..)))
+        ));
+    }
+
+    #[test]
     fn exact_owned_sweep_poison_and_fee_weight_on_both_chains() {
         for chain in [ChainId::Bitcoin, ChainId::Testnet4] {
             let (desc, coins, mut getter) = fixture();
@@ -381,6 +1171,335 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn fork_sweep_uses_original_inputs_and_fresh_owned_output_on_matching_chain() {
+        let secp = secp256k1::Secp256k1::verification_only();
+        for (bitcoin, fork) in [
+            (ChainId::Bitcoin, ChainId::BitcoinBlake2b),
+            (ChainId::Testnet4, ChainId::BitcoinBlake2bTestnet4),
+        ] {
+            let (desc, mut coins, mut getter) = fixture();
+            let source = build(bitcoin, &desc, &coins, &mut getter, 10, 5).unwrap();
+            coins.reverse(); // Membership binds outpoints, not presentation order.
+            let index = ChildNumber::from_normal_idx(20).unwrap();
+            let sweep = create_claim_fork_sweep(
+                &source,
+                fork,
+                &secp,
+                &mut getter,
+                &coins,
+                index,
+                3,
+                LockTime::ZERO,
+            )
+            .unwrap();
+            assert_eq!(sweep.chain(), fork);
+            assert_eq!(
+                sweep.bitcoin_step1(),
+                source.psbt().unsigned_tx.compute_txid()
+            );
+            assert_eq!(sweep.descriptor().to_string(), desc.to_string());
+            assert_eq!(sweep.change_index(), index);
+            let psbt = sweep.psbt();
+            assert_eq!(
+                psbt.unsigned_tx
+                    .input
+                    .iter()
+                    .map(|i| i.previous_output)
+                    .collect::<BTreeSet<_>>(),
+                coins.iter().map(|c| c.outpoint).collect()
+            );
+            assert!(psbt
+                .unsigned_tx
+                .input
+                .iter()
+                .all(|i| i.previous_output.txid != sweep.bitcoin_step1()));
+            assert_eq!(psbt.unsigned_tx.output.len(), 1);
+            assert_eq!(
+                psbt.unsigned_tx.output[0].script_pubkey,
+                desc.change_descriptor()
+                    .derive(index, &secp)
+                    .script_pubkey()
+            );
+            assert!(!psbt.outputs[0].bip32_derivation.is_empty());
+            assert!(psbt.inputs.iter().all(|i| i.partial_sigs.is_empty()
+                && i.non_witness_utxo.is_some()
+                && i.witness_utxo.is_some()));
+            let fee = 200_000 - psbt.unsigned_tx.output[0].value.to_sat();
+            assert!(fee >= desc.unsigned_tx_max_vbytes(&psbt.unsigned_tx, true) * 3);
+            spend::reverify_spend_before_broadcast(&desc, psbt).unwrap();
+        }
+    }
+
+    #[test]
+    fn fork_sweep_restart_rebuilds_metadata_and_exact_transaction() {
+        let secp = secp256k1::Secp256k1::verification_only();
+        for (bitcoin, fork) in [
+            (ChainId::Bitcoin, ChainId::BitcoinBlake2b),
+            (ChainId::Testnet4, ChainId::BitcoinBlake2bTestnet4),
+        ] {
+            let (desc, coins, mut getter) = fixture();
+            let source = build(bitcoin, &desc, &coins, &mut getter, 10, 5).unwrap();
+            let index = ChildNumber::from_normal_idx(20).unwrap();
+            let original = create_claim_fork_sweep(
+                &source,
+                fork,
+                &secp,
+                &mut getter,
+                &coins,
+                index,
+                7,
+                LockTime::ZERO,
+            )
+            .unwrap();
+            let recovered = reconstruct_claim_fork_sweep(
+                &source,
+                fork,
+                &secp,
+                &mut getter,
+                &coins,
+                index,
+                &original.psbt().unsigned_tx,
+            )
+            .unwrap();
+            assert_eq!(recovered.psbt(), original.psbt());
+            assert_eq!(recovered.bitcoin_step1(), original.bitcoin_step1());
+            assert_eq!(recovered.chain(), fork);
+        }
+    }
+
+    #[test]
+    fn fork_sweep_restart_rejects_replacement_and_untrusted_economics() {
+        let secp = secp256k1::Secp256k1::verification_only();
+        let (desc, coins, mut getter) = fixture();
+        let source = build(ChainId::Bitcoin, &desc, &coins, &mut getter, 10, 5).unwrap();
+        let index = ChildNumber::from_normal_idx(20).unwrap();
+        let original = create_claim_fork_sweep(
+            &source,
+            ChainId::BitcoinBlake2b,
+            &secp,
+            &mut getter,
+            &coins,
+            index,
+            7,
+            LockTime::ZERO,
+        )
+        .unwrap();
+        let tx = &original.psbt().unsigned_tx;
+        let mut variants = Vec::new();
+        let mut changed = tx.clone();
+        changed.output.clear();
+        variants.push(changed);
+        let mut changed = tx.clone();
+        changed.output.push(tx.output[0].clone());
+        variants.push(changed);
+        let mut changed = tx.clone();
+        changed.output[0].script_pubkey = bitcoin::ScriptBuf::new();
+        variants.push(changed);
+        let mut changed = tx.clone();
+        changed.output[0].value = Amount::from_sat(200_001);
+        variants.push(changed);
+        let mut changed = tx.clone();
+        changed.output[0].value = Amount::ZERO;
+        variants.push(changed);
+        let mut changed = tx.clone();
+        changed.input[0].previous_output.vout += 1;
+        variants.push(changed);
+        let mut changed = tx.clone();
+        changed.input[0].witness.push([1]);
+        variants.push(changed);
+        let mut changed = tx.clone();
+        changed.version = bitcoin::transaction::Version::ONE;
+        variants.push(changed);
+        for changed in variants {
+            assert!(reconstruct_claim_fork_sweep(
+                &source,
+                ChainId::BitcoinBlake2b,
+                &secp,
+                &mut getter,
+                &coins,
+                index,
+                &changed,
+            )
+            .is_err());
+        }
+        assert!(reconstruct_claim_fork_sweep(
+            &source,
+            ChainId::BitcoinBlake2bTestnet4,
+            &secp,
+            &mut getter,
+            &coins,
+            index,
+            tx,
+        )
+        .is_err());
+        assert!(reconstruct_claim_fork_sweep(
+            &source,
+            ChainId::BitcoinBlake2b,
+            &secp,
+            &mut getter,
+            &coins,
+            ChildNumber::from_normal_idx(21).unwrap(),
+            tx,
+        )
+        .is_err());
+        getter.0.clear();
+        assert!(reconstruct_claim_fork_sweep(
+            &source,
+            ChainId::BitcoinBlake2b,
+            &secp,
+            &mut getter,
+            &coins,
+            index,
+            tx,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn fork_sweep_rejects_missing_extra_duplicate_and_mutated_coins() {
+        let (desc, coins, mut getter) = fixture();
+        let source = build(ChainId::Bitcoin, &desc, &coins, &mut getter, 10, 5).unwrap();
+        let secp = secp256k1::Secp256k1::verification_only();
+        let index = ChildNumber::from_normal_idx(20).unwrap();
+        let mut cases = vec![
+            vec![],
+            vec![coins[0]],
+            vec![coins[0], coins[0]],
+            vec![coins[0], coins[1], coins[1]],
+            vec![coins[0], coins[1], coins[0]],
+        ];
+        for changed in [
+            CandidateCoin {
+                amount: Amount::from_sat(100_001),
+                ..coins[0]
+            },
+            CandidateCoin {
+                outpoint: OutPoint::new(source.psbt().unsigned_tx.compute_txid(), 1),
+                ..coins[0]
+            },
+            CandidateCoin {
+                deriv_index: ChildNumber::from_hardened_idx(0).unwrap(),
+                ..coins[0]
+            },
+            CandidateCoin {
+                deriv_index: ChildNumber::from_normal_idx(9).unwrap(),
+                ..coins[0]
+            },
+            CandidateCoin {
+                is_change: true,
+                ..coins[0]
+            },
+        ] {
+            cases.push(vec![changed, coins[1]]);
+        }
+        for bad in cases {
+            assert!(create_claim_fork_sweep(
+                &source,
+                ChainId::BitcoinBlake2b,
+                &secp,
+                &mut getter,
+                &bad,
+                index,
+                3,
+                LockTime::ZERO
+            )
+            .is_err());
+        }
+        for chain in [
+            ChainId::Bitcoin,
+            ChainId::Testnet4,
+            ChainId::BitcoinBlake2bTestnet4,
+            ChainId::Regtest,
+        ] {
+            assert!(create_claim_fork_sweep(
+                &source,
+                chain,
+                &secp,
+                &mut getter,
+                &coins,
+                index,
+                3,
+                LockTime::ZERO
+            )
+            .is_err());
+        }
+        assert!(create_claim_fork_sweep(
+            &source,
+            ChainId::BitcoinBlake2b,
+            &secp,
+            &mut getter,
+            &coins,
+            ChildNumber::from_hardened_idx(0).unwrap(),
+            3,
+            LockTime::ZERO
+        )
+        .is_err());
+        assert!(create_claim_fork_sweep(
+            &source,
+            ChainId::BitcoinBlake2b,
+            &secp,
+            &mut Getter(HashMap::new()),
+            &coins,
+            index,
+            3,
+            LockTime::ZERO
+        )
+        .is_err());
+        // A fork-side previous transaction must authenticate, not just carry
+        // the right amount at the requested output index.
+        getter.0.get_mut(&coins[0].outpoint.txid).unwrap().output[0].value =
+            Amount::from_sat(99_999);
+        assert!(create_claim_fork_sweep(
+            &source,
+            ChainId::BitcoinBlake2b,
+            &secp,
+            &mut getter,
+            &coins,
+            index,
+            3,
+            LockTime::ZERO
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn fork_sweep_refuses_reusing_a_selected_change_script() {
+        let (desc, mut coins, mut getter) = fixture();
+        let secp = secp256k1::Secp256k1::verification_only();
+        let mut previous = getter.0.remove(&coins[0].outpoint.txid).unwrap();
+        previous.output[0].script_pubkey = desc
+            .change_descriptor()
+            .derive(coins[0].deriv_index, &secp)
+            .script_pubkey();
+        coins[0].is_change = true;
+        coins[0].outpoint.txid = previous.compute_txid();
+        getter.0.insert(previous.compute_txid(), previous);
+        let source = build(ChainId::Bitcoin, &desc, &coins, &mut getter, 10, 5).unwrap();
+        assert!(create_claim_fork_sweep(
+            &source,
+            ChainId::BitcoinBlake2b,
+            &secp,
+            &mut getter,
+            &coins,
+            coins[0].deriv_index,
+            3,
+            LockTime::ZERO
+        )
+        .is_err());
+        assert!(create_claim_fork_sweep(
+            &source,
+            ChainId::BitcoinBlake2b,
+            &secp,
+            &mut getter,
+            &coins,
+            ChildNumber::from_normal_idx(20).unwrap(),
+            3,
+            LockTime::ZERO
+        )
+        .is_ok());
+    }
+
     #[test]
     fn reconstruction_rechecks_owned_plan_without_changing_its_fee_or_metadata() {
         for chain in [ChainId::Bitcoin, ChainId::Testnet4] {

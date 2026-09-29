@@ -90,7 +90,16 @@ impl ActivationServer {
                             && value.trim() == "Bearer synthetic-activation-token"
                     })
                 });
-                let (status, body) = if !authorized {
+                let anonymous_proxy = path.starts_with("/api/v1/esplora/");
+                if anonymous_proxy {
+                    assert!(
+                        !request.lines().any(|line| line
+                            .split_once(':')
+                            .is_some_and(|(name, _)| name.eq_ignore_ascii_case("authorization"))),
+                        "Connect credentials must not reach anonymous Esplora routes"
+                    );
+                }
+                let (status, body) = if !anonymous_proxy && !authorized {
                     (401, String::new())
                 } else if path == "/api/v1/connect/features" {
                     feature_hits.fetch_add(1, Ordering::Relaxed);
