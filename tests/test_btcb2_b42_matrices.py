@@ -27,10 +27,12 @@ Skipped unless the three harness binaries are configured (see tests/README.md).
 
 import os
 import time
+from decimal import Decimal
 
 import pytest
 
 from fixtures import *
+from test_framework.btcb2 import send_to_address
 from test_framework.utils import TIMEOUT, wait_for
 
 # A sole provider retries after 5s, but the poller can sleep for 30s after
@@ -238,7 +240,7 @@ def test_direct_node_backend_outage_preserves_chain_and_recovers(two_chain, outa
 
         # Positive control before testing a stale height: prove this daemon can
         # advance through its own node and discover a new chain-local deposit.
-        txid = b.rpc.sendtoaddress(two_chain.vault_addresses[0], 0.01)
+        txid = send_to_address(b, two_chain.vault_addresses[0], Decimal("0.01"))
         b.generate_block(1, wait_for_mempool=txid)
         wait_for(
             lambda: daemon.rpc.getinfo()["block_height"] == b.rpc.getblockcount()
@@ -286,7 +288,9 @@ def test_direct_node_backend_outage_preserves_chain_and_recovers(two_chain, outa
         assert daemon.rpc.getinfo()["block_height"] > before
         assert _confirmed_outpoints(daemon) == coins_before
         assert poison not in _confirmed_outpoints(daemon)
-        recovered_deposit = b.rpc.sendtoaddress(two_chain.vault_addresses[0], 0.01)
+        recovered_deposit = send_to_address(
+            b, two_chain.vault_addresses[0], Decimal("0.01")
+        )
         b.generate_block(1, wait_for_mempool=recovered_deposit)
         wait_for(
             lambda: any(op[0] == recovered_deposit for op in _confirmed_outpoints(daemon)),

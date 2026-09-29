@@ -12,6 +12,7 @@ Skipped unless the three binaries are configured (see tests/README.md).
 
 import os
 import subprocess
+from decimal import Decimal
 
 import pytest
 
@@ -20,6 +21,7 @@ from test_framework.btcb2 import (
     ELECTRS_BLAKE2B_COMMIT,
     KNOTS_BLAKE2B_VERSION,
     KNOTS_LEGACY_VERSION,
+    PARASITE_CAT21_LOCKTIME,
     RDTS_EXPIRY_FAR_FUTURE,
 )
 from test_framework.authproxy import JSONRPCException
@@ -155,6 +157,46 @@ def test_vault_fixtures_exist_where_expected(two_chain):
         two_chain.poison_coinbase_txid
         not in b.rpc.getblock(b.rpc.getblockhash(n))["tx"]
     )
+
+
+def test_harness_sends_pin_their_locktime_under_knots_cat21_policy(two_chain):
+    """The funding sends avoid locktime 21 by construction, not by policy (#590).
+
+    Same assertion as `test_knots.test_fixture_preserves_knots_locktime_policy`,
+    on both Knots builds: locktime 21 is still refused as `parasite-cat21` and
+    a tip locktime is accepted. Only `testmempoolaccept` is used, so neither
+    chain nor either wallet changes under the other tests of this module.
+    """
+    a, b = two_chain.legacy, two_chain.blake2b
+    n = two_chain.activation_height
+    for txid in two_chain.prefork_txids:
+        tx = a.rpc.gettransaction(txid, True, True)
+        # Sent at the tip one below its block, below the fork: not left to the
+        # wallet's anti-fee-sniping jitter, which could have reached 21.
+        assert tx["blockheight"] < n
+        assert tx["decoded"]["locktime"] == tx["blockheight"] - 1, tx["decoded"]
+        assert tx["decoded"]["locktime"] != PARASITE_CAT21_LOCKTIME
+
+    for node in (a, b):
+        assert "knots" in _subversion(node).lower()
+        coin = node.rpc.listunspent(1)[0]
+        destination = node.rpc.getnewaddress("", "bech32")
+
+        def signed_at(locktime):
+            raw = node.rpc.createrawtransaction(
+                [{"txid": coin["txid"], "vout": coin["vout"]}],
+                {destination: coin["amount"] - Decimal("0.001")},
+                locktime,
+            )
+            signed = node.rpc.signrawtransactionwithwallet(raw)
+            assert signed["complete"], signed
+            return signed["hex"]
+
+        rejected = node.rpc.testmempoolaccept([signed_at(PARASITE_CAT21_LOCKTIME)])[0]
+        assert rejected["allowed"] is False, (_subversion(node), rejected)
+        assert rejected["reject-reason"] == "parasite-cat21", (_subversion(node), rejected)
+        ordinary = node.rpc.testmempoolaccept([signed_at(node.rpc.getblockcount())])[0]
+        assert ordinary["allowed"] is True, (_subversion(node), ordinary)
 
 
 def test_esplora_indexers_follow_their_own_chain(two_chain):

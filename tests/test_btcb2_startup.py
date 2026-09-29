@@ -4,7 +4,11 @@ from unittest.mock import Mock
 
 import pytest
 
-from test_framework.btcb2 import TwoChainRegtest
+from test_framework.btcb2 import (
+    PARASITE_CAT21_LOCKTIME,
+    TwoChainRegtest,
+    send_to_address,
+)
 from test_framework.esplora import EsploraElectrs
 from test_framework.utils import TailableProc
 
@@ -85,3 +89,38 @@ def test_indexer_startup_checks_both_nodes_before_launch():
         harness._start_indexers()
     assert harness.legacy.rpc.getblock.call_count == 4
     assert harness.blake2b.rpc.getblock.call_count == 1
+
+
+def funding_node(tip, funded_locktime=None):
+    result = Mock()
+    result.rpc.getblockcount.return_value = tip
+    result.rpc.fundrawtransaction.return_value = {"hex": "funded"}
+    result.rpc.signrawtransactionwithwallet.return_value = {"hex": "signed", "complete": True}
+    result.rpc.decoderawtransaction.return_value = {
+        "locktime": tip if funded_locktime is None else funded_locktime
+    }
+    result.rpc.sendrawtransaction.return_value = "txid"
+    return result
+
+
+def test_harness_send_pins_the_locktime_to_the_tip():
+    """#590: no anti-fee-sniping jitter that could reach Knots' cat21 locktime."""
+    source = funding_node(102)
+    assert send_to_address(source, "addr", 1) == "txid"
+    source.rpc.createrawtransaction.assert_called_once_with([], {"addr": 1}, 102)
+    source.rpc.fundrawtransaction.assert_called_once()
+    source.rpc.sendrawtransaction.assert_called_once_with("signed")
+
+
+def test_harness_send_refuses_a_locktime_the_wallet_moved():
+    source = funding_node(102, funded_locktime=PARASITE_CAT21_LOCKTIME)
+    with pytest.raises(AssertionError, match="changed locktime 102 to 21"):
+        send_to_address(source, "addr", 1)
+    source.rpc.sendrawtransaction.assert_not_called()
+
+
+def test_harness_send_refuses_to_send_at_the_cat21_tip():
+    source = funding_node(PARASITE_CAT21_LOCKTIME)
+    with pytest.raises(RuntimeError, match="parasite-cat21"):
+        send_to_address(source, "addr", 1)
+    source.rpc.createrawtransaction.assert_not_called()

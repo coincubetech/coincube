@@ -64,6 +64,40 @@ RDTS_EXPIRY_FAR_FUTURE = 4102444800
 # Regtest coinbase maturity.
 COINBASE_MATURITY = 100
 
+# Knots refuses to relay a transaction with nLockTime 21 (`parasite-cat21`).
+# Its wallet's anti-fee-sniping sets the locktime to the tip and, one send in
+# ten, moves it back by up to 99 blocks, so a plain `sendtoaddress` at any tip
+# from 21 to 120 can land on 21 (#554, #590). `fixtures.bitcoind` avoids that by
+# starting at 121; this harness cannot, because its Vault coins must confirm
+# before `activation_height` (110) and node B stays below 121 after the fork.
+PARASITE_CAT21_LOCKTIME = 21
+
+
+def send_to_address(node, address, amount):
+    """`sendtoaddress`, but with the locktime pinned to the current tip.
+
+    That is the value anti-fee-sniping picks nine times in ten; pinning it
+    removes the random step back that can reach `PARASITE_CAT21_LOCKTIME`,
+    without changing the heights the harness funds at or the node's relay
+    policy. Returns the txid, like `sendtoaddress`.
+    """
+    rpc = node.rpc
+    locktime = rpc.getblockcount()
+    if locktime == PARASITE_CAT21_LOCKTIME:
+        raise RuntimeError(
+            f"refusing to send at tip {locktime}: Knots rejects that locktime as "
+            "parasite-cat21"
+        )
+    raw = rpc.createrawtransaction([], {address: amount}, locktime)
+    funded = rpc.fundrawtransaction(raw)
+    signed = rpc.signrawtransactionwithwallet(funded["hex"])
+    assert signed["complete"], signed
+    # `fundrawtransaction` must keep the locktime it was given; if a node ever
+    # re-applied anti-fee-sniping here, fail now rather than at relay 1 in 1000.
+    pinned = rpc.decoderawtransaction(signed["hex"])["locktime"]
+    assert pinned == locktime, f"funding changed locktime {locktime} to {pinned}"
+    return rpc.sendrawtransaction(signed["hex"])
+
 
 def missing_binaries():
     """Names of the harness binaries that are unset or not executable."""
@@ -292,9 +326,11 @@ class TwoChainRegtest:
 
         # Fund three Vault coins *before* the activation height. They confirm at
         # a height every chain shares, so they exist on both sides of the fork.
+        # Heights 101-103 are within anti-fee-sniping reach of locktime 21, so
+        # the locktime is pinned rather than left to the wallet (#590).
         amounts = [Decimal("1.0"), Decimal("0.5"), Decimal("0.25")]
         for addr, amount in zip(self.vault_addresses[:3], amounts):
-            txid = rpc.sendtoaddress(addr, amount)
+            txid = send_to_address(self.legacy, addr, amount)
             self.prefork_txids.append(txid)
             self.legacy.generate_block(1, wait_for_mempool=txid)
             self.prefork_block_hashes[txid] = rpc.getbestblockhash()
