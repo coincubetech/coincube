@@ -61,3 +61,31 @@ def test_standard_p2tr_send_relays(bitcoind):
     if not IS_NOT_BITCOIND_24:
         return
     assert _broadcast_standard_send(bitcoind, "bech32m")
+
+
+def test_fixture_preserves_knots_locktime_policy(bitcoind):
+    """The higher fixture tip avoids accidental locktime 21, not its policy."""
+    if "knots" not in bitcoind.rpc.getnetworkinfo()["subversion"].lower():
+        pytest.skip("Knots-specific relay policy")
+    coin = bitcoind.rpc.listunspent(1)[0]
+    destination = bitcoind.rpc.getnewaddress("", "bech32")
+
+    def signed_at(locktime):
+        raw = bitcoind.rpc.createrawtransaction(
+            [{"txid": coin["txid"], "vout": coin["vout"]}],
+            {destination: coin["amount"] - Decimal("0.001")},
+            locktime,
+        )
+        signed = bitcoind.rpc.signrawtransactionwithwallet(raw)
+        assert signed["complete"]
+        return signed["hex"]
+
+    rejected = bitcoind.rpc.testmempoolaccept([signed_at(21)])[0]
+    assert rejected["allowed"] is False
+    assert rejected["reject-reason"] == "parasite-cat21", rejected
+    ordinary = signed_at(bitcoind.rpc.getblockcount())
+    assert bitcoind.rpc.testmempoolaccept([ordinary])[0]["allowed"] is True
+    txid = bitcoind.rpc.sendrawtransaction(ordinary)
+    wait_for(lambda: txid in bitcoind.rpc.getrawmempool())
+    bitcoind.generate_block(1, wait_for_mempool=txid)
+    assert bitcoind.rpc.gettransaction(txid)["confirmations"] >= 1

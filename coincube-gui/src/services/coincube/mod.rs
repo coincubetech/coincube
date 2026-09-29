@@ -616,9 +616,10 @@ pub enum PlanStatus {
 
 /// Server-authored display metadata for how the current plan was granted,
 /// from `GET /connect/plan`'s `plan_provenance` (campaign engine, v2). The
-/// desktop renders these strings verbatim and knows nothing about specific
-/// campaigns — a campaign's label/badge/expiry are authored server-side, so
-/// display never requires an app release. Absent (`None`) for ordinary
+/// desktop renders these strings (filtering only banned pre-launch campaign
+/// wording, see `plan_provenance_display` in `app/view/connect`) and knows
+/// nothing about specific campaigns — a campaign's label/badge/expiry are
+/// authored server-side, so display never requires an app release. Absent (`None`) for ordinary
 /// purchased/free plans and older backends → existing paid/free UX.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
