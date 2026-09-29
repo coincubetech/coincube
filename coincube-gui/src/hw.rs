@@ -164,6 +164,9 @@ pub struct HardwareWallets {
     pub aliases: HashMap<Fingerprint, String>,
     wallet: Option<Arc<Wallet>>,
     datadir_path: CoincubeDirectory,
+    /// False for session-only consumers (the Split tool): BitBox02 pairing
+    /// then stays in memory and nothing is written under `datadir_path`.
+    persist_pairing: bool,
 }
 
 impl std::fmt::Debug for HardwareWallets {
@@ -180,7 +183,21 @@ impl HardwareWallets {
             aliases: HashMap::new(),
             wallet: None,
             datadir_path,
+            persist_pairing: true,
         }
+    }
+
+    /// Session-only device listing: no BitBox02 pairing persistence. Combined
+    /// with no loaded wallet (so no LAN phone discovery or identity creation),
+    /// the refresh loop never writes to the datadir.
+    pub fn ephemeral(mut self) -> Self {
+        self.persist_pairing = false;
+        self
+    }
+
+    #[cfg(test)]
+    pub fn persists_pairing(&self) -> bool {
+        self.persist_pairing
     }
 
     pub fn with_wallet(mut self, wallet: Arc<Wallet>) -> Self {
@@ -326,6 +343,7 @@ impl HardwareWallets {
             keys_aliases: self.aliases.clone(),
             wallet: self.wallet.clone(),
             datadir_path: self.datadir_path.clone(),
+            persist_pairing: self.persist_pairing,
         };
         iced::Subscription::run_with(state, make_refresh_stream)
     }
@@ -384,6 +402,7 @@ struct RefreshState {
     keys_aliases: HashMap<Fingerprint, String>,
     wallet: Option<Arc<Wallet>>,
     datadir_path: CoincubeDirectory,
+    persist_pairing: bool,
 }
 
 impl std::hash::Hash for RefreshState {
@@ -394,6 +413,7 @@ impl std::hash::Hash for RefreshState {
             .map(|wallet| (wallet.chain, wallet.id_fingerprint()))
             .hash(state);
         self.datadir_path.path().hash(state);
+        self.persist_pairing.hash(state);
     }
 }
 
@@ -404,6 +424,7 @@ struct State {
     connected_supported_hws: Vec<String>,
     api: Option<ledger::HidApi>,
     datadir_path: CoincubeDirectory,
+    persist_pairing: bool,
     /// Per-phone retry cooldowns keyed by `fp8`. Set on a failed
     /// dial so the next refresh tick skips the phone (and pays no
     /// `CONNECT_TIMEOUT`) until the window has elapsed. Cleared on
@@ -430,6 +451,7 @@ fn make_refresh_stream(rs: &RefreshState) -> impl Stream<Item = HardwareWalletMe
         connected_supported_hws: Vec::new(),
         api: None,
         datadir_path: rs.datadir_path.clone(),
+        persist_pairing: rs.persist_pairing,
         phone_cooldowns: HashMap::new(),
         phone_signers: HashMap::new(),
     };
@@ -603,14 +625,15 @@ fn refresh(mut state: State) -> impl Stream<Item = HardwareWalletMessage> {
                     continue;
                 }
                 if let Ok(device) = device_info.open_device(api) {
-                    if let Ok(device) = PairingBitbox02::connect(
-                        device,
-                        Some(Box::new(settings::global::PersistedBitboxNoiseConfig::new(
-                            &state.datadir_path,
-                        ))),
-                    )
-                    .await
-                    {
+                    let noise: Option<Box<dyn async_hwi::bitbox::NoiseConfig>> =
+                        if state.persist_pairing {
+                            Some(Box::new(settings::global::PersistedBitboxNoiseConfig::new(
+                                &state.datadir_path,
+                            )))
+                        } else {
+                            None
+                        };
+                    if let Ok(device) = PairingBitbox02::connect(device, noise).await {
                         hws.push(HardwareWallet::Locked {
                             id,
                             kind: DeviceKind::BitBox02,
@@ -1331,6 +1354,7 @@ mod tests {
             keys_aliases: HashMap::new(),
             wallet,
             datadir_path: CoincubeDirectory::new(root.into()),
+            persist_pairing: true,
         };
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         state.hash(&mut hasher);

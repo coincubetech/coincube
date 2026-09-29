@@ -46,17 +46,40 @@ pub enum Branch {
     Internal,
 }
 
-/// This matrix describes discovery only. No supported descriptor grants signing.
+/// Discovery plus an explicit per-route signing matrix. A route that is not
+/// `true` here has no implementation for the descriptor shape and must fail
+/// closed; no route grants Claim authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Capabilities {
     pub scan: bool,
-    pub unified_signing: bool,
+    pub signing: SigningRoutes,
     pub claim_authorization: bool,
+}
+
+/// Which foreign-wallet signing routes exist for a descriptor shape.
+/// `psbt_file`: an external wallet signs the exported PSBT (ECDSA
+/// `SIGHASH_ALL` only). `in_app_hardware` and `seed_unified` are not
+/// implemented for foreign descriptors yet, so they are `false` for every
+/// shape. `tr` is scan-only: it has no signing route at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SigningRoutes {
+    pub psbt_file: bool,
+    pub in_app_hardware: bool,
+    pub seed_unified: bool,
+}
+
+impl SigningRoutes {
+    pub const NONE: Self = Self {
+        psbt_file: false,
+        in_app_hardware: false,
+        seed_unified: false,
+    };
 }
 
 /// Explicit single branch, not an ambiguous multipath expansion. Private keys
 /// are never accepted by the public-key parser; hardened origins are labels,
 /// whereas hardened public derivation suffixes cannot be derived and refuse.
+#[derive(Debug, Clone)]
 pub struct ScanDescriptor {
     descriptor: Descriptor<DescriptorPublicKey>,
     branch: Branch,
@@ -100,11 +123,22 @@ impl ScanDescriptor {
         Ok(Self { descriptor, branch })
     }
     pub fn capabilities(&self) -> Capabilities {
+        let signing = if self.is_taproot() {
+            SigningRoutes::NONE
+        } else {
+            SigningRoutes {
+                psbt_file: true,
+                ..SigningRoutes::NONE
+            }
+        };
         Capabilities {
             scan: true,
-            unified_signing: false,
+            signing,
             claim_authorization: false,
         }
+    }
+    pub fn is_taproot(&self) -> bool {
+        matches!(self.descriptor, Descriptor::Tr(_))
     }
     /// Select the only valid range for a fixed descriptor while preserving the
     /// caller's explicit bound for wildcard discovery.
@@ -176,17 +210,55 @@ pub struct DiscoveredCoin {
     pub output: bitcoin::TxOut,
     pub previous: Transaction,
     pub confirmed: bool,
+    /// Confirming block from the same fresh scan observation; `None` exactly
+    /// when unconfirmed.
+    pub block_height: Option<u32>,
+    pub block_hash: Option<BlockHash>,
 }
+
+/// Where a coin sits relative to the observed BTCB2 fork activation height.
+/// Only `PreFork` coins can exist on both chains and be swept by Split.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForkSide {
+    PreFork,
+    PostFork,
+    Unconfirmed,
+    /// No observed fork height, or no confirming height: fail closed.
+    Unknown,
+}
+
 /// Complete only within the caller's bounded history-gap policy. No exclusive
 /// funds classification and no conversion into a signing or Claim capability.
+#[derive(Debug, Clone)]
 pub struct ScanReport {
     chain: ChainId,
     generation: u64,
     tip: BlockHash,
+    /// Fork activation height from the authenticated BTCB2 network anchor
+    /// observed at the scan tip. Never a local constant.
+    fork_height: Option<u64>,
     addresses: u32,
     coins: Vec<DiscoveredCoin>,
 }
 impl ScanReport {
+    pub fn fork_height(&self) -> Option<u64> {
+        self.fork_height
+    }
+    pub fn fork_side(&self, coin: &DiscoveredCoin) -> ForkSide {
+        if !coin.confirmed {
+            return ForkSide::Unconfirmed;
+        }
+        match (self.fork_height, coin.block_height, coin.block_hash) {
+            (Some(fork), Some(height), Some(_)) if u64::from(height) < fork => ForkSide::PreFork,
+            (Some(_), Some(_), Some(_)) => ForkSide::PostFork,
+            _ => ForkSide::Unknown,
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn with_fork_height(mut self, fork_height: Option<u64>) -> Self {
+        self.fork_height = fork_height;
+        self
+    }
     pub fn chain(&self) -> ChainId {
         self.chain
     }
@@ -213,6 +285,7 @@ impl ScanReport {
             chain,
             generation,
             tip,
+            fork_height: None,
             addresses: 1,
             coins,
         }
@@ -249,7 +322,8 @@ struct Status {
 #[async_trait]
 trait Source: Send + Sync {
     async fn tip(&self, chain: ChainId) -> Result<BlockHash, ScanError>;
-    async fn anchor(&self) -> Result<BlockHash, ScanError>;
+    /// The BTCB2 anchor's tip and its active fork height, if reported.
+    async fn anchor(&self) -> Result<(BlockHash, Option<u64>), ScanError>;
     async fn stats(&self, chain: ChainId, address: &str) -> Result<Stats, ScanError>;
     async fn utxos(&self, chain: ChainId, address: &str) -> Result<Vec<Utxo>, ScanError>;
     async fn transaction(&self, chain: ChainId, txid: Txid) -> Result<Transaction, ScanError>;
@@ -293,13 +367,19 @@ async fn collect(
 ) -> Result<ScanReport, ScanError> {
     plan.validate()?;
     let before = source.tip(plan.chain).await?;
-    if plan.chain == ChainId::BitcoinBlake2b && source.anchor().await? != before {
-        return Err(ScanError::Changed);
+    let mut fork_height = None;
+    if plan.chain == ChainId::BitcoinBlake2b {
+        let (anchor, fork) = source.anchor().await?;
+        if anchor != before {
+            return Err(ScanError::Changed);
+        }
+        fork_height = fork;
     }
     let mut report = ScanReport {
         chain: plan.chain,
         generation,
         tip: before,
+        fork_height,
         addresses: 0,
         coins: Vec::new(),
     };
@@ -359,6 +439,8 @@ async fn collect(
                     output,
                     previous,
                     confirmed: coin.status.confirmed,
+                    block_height: coin.status.block_height,
+                    block_hash: coin.status.block_hash,
                 });
             }
             // A same-tip mempool change must not turn an empty UTXO list into an
@@ -380,7 +462,8 @@ async fn collect(
         }
     }
     if before != source.tip(plan.chain).await?
-        || (plan.chain == ChainId::BitcoinBlake2b && source.anchor().await? != before)
+        || (plan.chain == ChainId::BitcoinBlake2b
+            && source.anchor().await? != (before, fork_height))
     {
         return Err(ScanError::Changed);
     }

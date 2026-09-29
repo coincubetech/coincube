@@ -3,22 +3,24 @@
 //! This module constructs and checks a signing handoff. It cannot finalize,
 //! broadcast, persist secrets, or grant Claim/ancestry authority.
 
-use std::{collections::BTreeSet, str::FromStr};
+use std::{collections::BTreeSet, convert::TryFrom, str::FromStr};
 
 use coincube_core::{
     chain::ChainId,
     miniscript::{
         bitcoin::{
-            self, absolute, psbt::Psbt, sighash::EcdsaSighashType, sighash::TapSighashType,
-            transaction, Amount, OutPoint, Sequence, Transaction, TxIn, TxOut,
+            self, absolute, psbt::Psbt, sighash::EcdsaSighashType, transaction, Amount, OutPoint,
+            Sequence, Transaction, TxIn, TxOut,
         },
+        descriptor::DefiniteDescriptorKey,
         psbt::PsbtExt,
+        Descriptor,
     },
     spend,
 };
 use sha2::{Digest, Sha256};
 
-use super::foreign_scan::{Branch, ScanDescriptor, ScanReport};
+use super::foreign_scan::{Branch, DiscoveredCoin, ForkSide, ScanDescriptor, ScanReport};
 use crate::{
     app::{
         settings::{CubeSettings, WalletId},
@@ -46,6 +48,12 @@ pub enum ForeignPsbtError {
     ConstructionChanged,
     UnsupportedSighash,
     MissingSignature,
+    /// A source descriptor has no PSBT-file signing route (`tr` is scan-only).
+    UnsupportedRoute,
+    /// Any Taproot PSBT field on import; no foreign route signs Taproot.
+    Taproot,
+    /// No observed fork height, so no coin can be classified as pre-fork.
+    ForkUnknown,
 }
 
 /// Explicit change selection. The amount is never inferred by the handoff.
@@ -104,6 +112,18 @@ impl TargetAddressEvidence {
             generation,
         })
     }
+
+    pub fn cube_id(&self) -> &str {
+        &self.cube_id
+    }
+
+    pub fn vault_fingerprint(&self) -> &str {
+        &self.vault_fingerprint
+    }
+
+    pub fn derivation_index(&self) -> bitcoin::bip32::ChildNumber {
+        self.derivation_index
+    }
 }
 
 /// Current UI/session identity supplied again at import time. Its descriptor
@@ -126,6 +146,13 @@ impl VerifiedForeignPsbt {
     }
 }
 
+/// Step-two authority for a foreign sweep. It is deliberately uninhabited:
+/// scan evidence, economics, a reserved address or a saved phase cannot
+/// create one. A later slice mints it from confirmed poison-split evidence
+/// (six Bitcoin confirmations rechecked at the tip, #568). Until then no
+/// production path can build a sweep PSBT.
+pub(crate) enum ForeignStep2Authorization {}
+
 pub struct PreparedForeignSweep {
     original: Psbt,
     chain: ChainId,
@@ -135,66 +162,304 @@ pub struct PreparedForeignSweep {
     fee: Amount,
 }
 
+/// Fee-independent review of what a sweep would spend: the pre-fork coins of
+/// the authenticated scan and a conservative signed size. `maximum_signed_vbytes`
+/// is the maximum for every selected input, so the later exact transaction may
+/// be smaller but never larger for the same one-output shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SweepInputs {
+    pub inputs: usize,
+    pub total: Amount,
+    pub maximum_signed_vbytes: u64,
+    /// Confirmed at or after the observed fork height: not part of this
+    /// split and not known to be BTCB2-only (it may still be replayable).
+    pub excluded_post_fork: usize,
+    /// No confirming height: excluded (fail closed).
+    pub excluded_unknown: usize,
+}
+
+/// Read-only, conservative sweep-all economics. Constructing this value does
+/// not construct a PSBT or grant any signing, finalisation, or broadcast
+/// capability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SweepEconomics {
+    pub inputs: usize,
+    pub total: Amount,
+    pub feerate_sat_vb: u64,
+    pub maximum_signed_vbytes: u64,
+    pub fee: Amount,
+    pub destination: Amount,
+}
+
+struct SelectedInput<'r> {
+    coin: &'r DiscoveredCoin,
+    definite: Descriptor<DefiniteDescriptorKey>,
+    output: TxOut,
+}
+
+struct Selection<'r> {
+    inputs: Vec<SelectedInput<'r>>,
+    total: u64,
+    excluded_post_fork: usize,
+    excluded_unknown: usize,
+}
+
+/// The one input filter shared by review and construction: session identity,
+/// the PSBT-file signing route for every source descriptor (`tr` has none),
+/// an observed fork height, and only coins confirmed below it.
+fn select_pre_fork<'r>(
+    report: &'r ScanReport,
+    session: &ForeignSession<'_>,
+) -> Result<Selection<'r>, ForeignPsbtError> {
+    verify_session(report.chain(), report.generation(), session)?;
+    if std::iter::once(session.external)
+        .chain(session.internal)
+        .any(|descriptor| !descriptor.capabilities().signing.psbt_file)
+    {
+        return Err(ForeignPsbtError::UnsupportedRoute);
+    }
+    if report.coins().is_empty() {
+        return Err(ForeignPsbtError::Empty);
+    }
+    if report.fork_height().is_none() {
+        return Err(ForeignPsbtError::ForkUnknown);
+    }
+    let mut coins: Vec<_> = report.coins().iter().collect();
+    coins.sort_by_key(|coin| coin.outpoint);
+    let mut seen = BTreeSet::<OutPoint>::new();
+    let mut selection = Selection {
+        inputs: Vec::with_capacity(coins.len()),
+        total: 0,
+        excluded_post_fork: 0,
+        excluded_unknown: 0,
+    };
+    for coin in coins {
+        if !seen.insert(coin.outpoint) {
+            return Err(ForeignPsbtError::DuplicateInput);
+        }
+        match report.fork_side(coin) {
+            ForkSide::PreFork => {}
+            ForkSide::Unconfirmed => return Err(ForeignPsbtError::Unconfirmed),
+            ForkSide::PostFork => {
+                selection.excluded_post_fork += 1;
+                continue;
+            }
+            ForkSide::Unknown => {
+                selection.excluded_unknown += 1;
+                continue;
+            }
+        }
+        let definite = descriptor_for(coin.branch, session)?
+            .derive(coin.index)
+            .map_err(|_| ForeignPsbtError::Descriptor)?;
+        if matches!(definite, Descriptor::Tr(_)) {
+            return Err(ForeignPsbtError::UnsupportedRoute);
+        }
+        if definite.script_pubkey() != coin.output.script_pubkey {
+            return Err(ForeignPsbtError::Descriptor);
+        }
+        let output = spend::authenticate_previous_output(
+            &coin.outpoint,
+            Some(&coin.previous),
+            Some(&coin.output),
+        )
+        .map_err(|_| ForeignPsbtError::Prevout)?;
+        selection.total = selection
+            .total
+            .checked_add(output.value.to_sat())
+            .filter(|value| *value <= Amount::MAX_MONEY.to_sat())
+            .ok_or(ForeignPsbtError::Economics)?;
+        selection.inputs.push(SelectedInput {
+            coin,
+            definite,
+            output,
+        });
+    }
+    if selection.inputs.is_empty() {
+        return Err(ForeignPsbtError::Empty);
+    }
+    Ok(selection)
+}
+
+fn unsigned_inputs(selection: &Selection<'_>) -> Vec<TxIn> {
+    selection
+        .inputs
+        .iter()
+        .map(|input| TxIn {
+            previous_output: input.coin.outpoint,
+            sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+            ..TxIn::default()
+        })
+        .collect()
+}
+
+/// Fee-independent sweep review. Refuses `tr`, an unknown fork height,
+/// unconfirmed coins and an empty pre-fork set.
+pub fn review_sweep_inputs(
+    report: &ScanReport,
+    session: ForeignSession<'_>,
+) -> Result<SweepInputs, ForeignPsbtError> {
+    let selection = select_pre_fork(report, &session)?;
+    let mut satisfaction_weight = 0_u64;
+    let mut has_witness = false;
+    for input in &selection.inputs {
+        satisfaction_weight = satisfaction_weight
+            .checked_add(
+                input
+                    .definite
+                    .max_weight_to_satisfy()
+                    .map_err(|_| ForeignPsbtError::Descriptor)?
+                    .to_wu(),
+            )
+            .ok_or(ForeignPsbtError::Economics)?;
+        has_witness |= !matches!(input.definite, Descriptor::Pkh(_));
+    }
+    let unsigned = Transaction {
+        version: transaction::Version::TWO,
+        lock_time: absolute::LockTime::ZERO,
+        input: unsigned_inputs(&selection),
+        output: vec![TxOut {
+            value: Amount::from_sat(spend::DUST_OUTPUT_SATS),
+            script_pubkey: session.target.script_pubkey.clone(),
+        }],
+    };
+    // `max_weight_to_satisfy` measures from an input that already carries its
+    // empty witness-stack byte. The unsigned serialization above has no
+    // witness section, so a witness transaction also needs marker+flag and one
+    // empty-stack byte for every input (including legacy inputs in a mixed
+    // transaction).
+    let witness_overhead = if has_witness {
+        2_u64
+            .checked_add(
+                u64::try_from(unsigned.input.len()).map_err(|_| ForeignPsbtError::Economics)?,
+            )
+            .ok_or(ForeignPsbtError::Economics)?
+    } else {
+        0
+    };
+    let maximum_signed_vbytes = unsigned
+        .weight()
+        .to_wu()
+        .checked_add(satisfaction_weight)
+        .and_then(|weight| weight.checked_add(witness_overhead))
+        .and_then(|weight| weight.checked_add(3))
+        .map(|weight| weight / 4)
+        .ok_or(ForeignPsbtError::Economics)?;
+    Ok(SweepInputs {
+        inputs: selection.inputs.len(),
+        total: Amount::from_sat(selection.total),
+        maximum_signed_vbytes,
+        excluded_post_fork: selection.excluded_post_fork,
+        excluded_unknown: selection.excluded_unknown,
+    })
+}
+
+/// Compute a conservative, one-output sweep review from the authenticated scan
+/// evidence and a BTCB2-scoped fee rate. This deliberately stops before
+/// [`PreparedForeignSweep`], which requires [`ForeignStep2Authorization`].
+pub fn review_sweep_economics(
+    report: &ScanReport,
+    session: ForeignSession<'_>,
+    feerate_sat_vb: u64,
+) -> Result<SweepEconomics, ForeignPsbtError> {
+    if !(1..=spend::MAX_FEERATE).contains(&feerate_sat_vb) {
+        verify_session(report.chain(), report.generation(), &session)?;
+        return Err(ForeignPsbtError::Economics);
+    }
+    let inputs = review_sweep_inputs(report, session)?;
+    let fee_sat = inputs
+        .maximum_signed_vbytes
+        .checked_mul(feerate_sat_vb)
+        .filter(|fee| *fee <= spend::MAX_FEE.to_sat())
+        .ok_or(ForeignPsbtError::Economics)?;
+    let destination_sat = inputs
+        .total
+        .to_sat()
+        .checked_sub(fee_sat)
+        .filter(|amount| *amount >= spend::DUST_OUTPUT_SATS)
+        .ok_or(ForeignPsbtError::Economics)?;
+    Ok(SweepEconomics {
+        inputs: inputs.inputs,
+        total: inputs.total,
+        feerate_sat_vb,
+        maximum_signed_vbytes: inputs.maximum_signed_vbytes,
+        fee: Amount::from_sat(fee_sat),
+        destination: Amount::from_sat(destination_sat),
+    })
+}
+
+/// A fee-rate source for a Split sweep, tagged with the chain whose mempool
+/// it measures. The BTCB2 flow consults only a BTCB2-scoped source.
+#[async_trait::async_trait]
+pub trait SweepFeeSource: Send + Sync {
+    fn chain(&self) -> ChainId;
+    async fn mid_priority_sat_vb(&self) -> Option<u64>;
+}
+
+/// Production source. Tenshu has no BTCB2-chain-scoped fee estimator yet
+/// (#568 decision 4), and Bitcoin mainnet fees do not describe the BTCB2
+/// mempool, so the review shows fees as unavailable.
+pub struct UnavailableBtcb2Fees;
+
+#[async_trait::async_trait]
+impl SweepFeeSource for UnavailableBtcb2Fees {
+    fn chain(&self) -> ChainId {
+        ChainId::BitcoinBlake2b
+    }
+    async fn mid_priority_sat_vb(&self) -> Option<u64> {
+        None
+    }
+}
+
+/// Resolve a BTCB2 sweep fee rate. A source scoped to any other chain is
+/// never queried; an out-of-bounds rate is unavailable, not clamped.
+pub async fn btcb2_sweep_feerate(source: &dyn SweepFeeSource) -> Option<u64> {
+    if source.chain() != ChainId::BitcoinBlake2b {
+        return None;
+    }
+    source
+        .mid_priority_sat_vb()
+        .await
+        .filter(|rate| (1..=spend::MAX_FEERATE).contains(rate))
+}
+
 impl PreparedForeignSweep {
-    /// Consume every authenticated coin in the report and construct one exact
-    /// unsigned transaction. The authenticated target supplies the destination
-    /// script; the caller supplies its amount, fee and optional change, whose
-    /// sum must equal the selected inputs exactly.
-    pub fn new(
+    /// Construct the exact unsigned step-two sweep. Requires step-two
+    /// authority, which no production code can create yet.
+    // Dormant: the token is uninhabited until a later #568 slice mints it
+    // from confirmation evidence, so this body is unreachable by design.
+    #[allow(dead_code, unreachable_code, unused_variables)]
+    pub(crate) fn new(
+        report: &ScanReport,
+        session: ForeignSession<'_>,
+        destination_amount: Amount,
+        fee: Amount,
+        change: Option<ForeignChange>,
+        authorization: ForeignStep2Authorization,
+    ) -> Result<Self, ForeignPsbtError> {
+        match authorization {}
+        Self::construct(report, session, destination_amount, fee, change)
+    }
+
+    /// Consume every authenticated pre-fork coin in the report and construct
+    /// one exact unsigned transaction. The authenticated target supplies the
+    /// destination script; the caller supplies its amount, fee and optional
+    /// change, whose sum must equal the selected inputs exactly. Private: only
+    /// [`Self::new`] (behind the token) and this module's tests reach it.
+    fn construct(
         report: &ScanReport,
         session: ForeignSession<'_>,
         destination_amount: Amount,
         fee: Amount,
         change: Option<ForeignChange>,
     ) -> Result<Self, ForeignPsbtError> {
-        verify_session(report.chain(), report.generation(), &session)?;
-        if report.coins().is_empty() {
-            return Err(ForeignPsbtError::Empty);
-        }
+        let selection = select_pre_fork(report, &session)?;
         if destination_amount.to_sat() < spend::DUST_OUTPUT_SATS
             || destination_amount > Amount::MAX_MONEY
             || fee == Amount::ZERO
             || fee > spend::MAX_FEE
         {
             return Err(ForeignPsbtError::Economics);
-        }
-
-        let mut coins: Vec<_> = report.coins().iter().collect();
-        coins.sort_by_key(|coin| coin.outpoint);
-        let mut seen = BTreeSet::<OutPoint>::new();
-        let mut total = 0_u64;
-        let mut inputs = Vec::with_capacity(coins.len());
-        let mut derived = Vec::with_capacity(coins.len());
-        for coin in coins {
-            if !seen.insert(coin.outpoint) {
-                return Err(ForeignPsbtError::DuplicateInput);
-            }
-            if !coin.confirmed {
-                return Err(ForeignPsbtError::Unconfirmed);
-            }
-            let descriptor = descriptor_for(coin.branch, &session)?;
-            let definite = descriptor
-                .derive(coin.index)
-                .map_err(|_| ForeignPsbtError::Descriptor)?;
-            if definite.script_pubkey() != coin.output.script_pubkey {
-                return Err(ForeignPsbtError::Descriptor);
-            }
-            let authenticated = spend::authenticate_previous_output(
-                &coin.outpoint,
-                Some(&coin.previous),
-                Some(&coin.output),
-            )
-            .map_err(|_| ForeignPsbtError::Prevout)?;
-            total = total
-                .checked_add(authenticated.value.to_sat())
-                .filter(|value| *value <= Amount::MAX_MONEY.to_sat())
-                .ok_or(ForeignPsbtError::Economics)?;
-            inputs.push(TxIn {
-                previous_output: coin.outpoint,
-                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
-                ..TxIn::default()
-            });
-            derived.push((definite, coin.previous.clone(), authenticated));
         }
 
         let mut outputs = vec![TxOut {
@@ -214,9 +479,10 @@ impl PreparedForeignSweep {
                 }
                 let script_pubkey = definite.script_pubkey();
                 if script_pubkey == outputs[0].script_pubkey
-                    || derived
+                    || selection
+                        .inputs
                         .iter()
-                        .any(|(_, _, previous)| previous.script_pubkey == script_pubkey)
+                        .any(|input| input.output.script_pubkey == script_pubkey)
                 {
                     return Err(ForeignPsbtError::Economics);
                 }
@@ -231,21 +497,21 @@ impl PreparedForeignSweep {
         let spent = outputs.iter().try_fold(fee.to_sat(), |sum, output| {
             sum.checked_add(output.value.to_sat())
         });
-        if spent != Some(total) {
+        if spent != Some(selection.total) {
             return Err(ForeignPsbtError::Economics);
         }
 
         let tx = Transaction {
             version: transaction::Version::TWO,
             lock_time: absolute::LockTime::ZERO,
-            input: inputs,
+            input: unsigned_inputs(&selection),
             output: outputs,
         };
         let mut psbt = Psbt::from_unsigned_tx(tx).map_err(|_| ForeignPsbtError::Psbt)?;
-        for (index, (descriptor, previous, output)) in derived.into_iter().enumerate() {
-            psbt.inputs[index].non_witness_utxo = Some(previous);
-            psbt.inputs[index].witness_utxo = Some(output);
-            psbt.update_input_with_descriptor(index, &descriptor)
+        for (index, input) in selection.inputs.into_iter().enumerate() {
+            psbt.inputs[index].non_witness_utxo = Some(input.coin.previous.clone());
+            psbt.inputs[index].witness_utxo = Some(input.output);
+            psbt.update_input_with_descriptor(index, &input.definite)
                 .map_err(|_| ForeignPsbtError::Descriptor)?;
         }
         if let Some(descriptor) = change_descriptor {
@@ -303,6 +569,23 @@ impl PreparedForeignSweep {
         {
             return Err(ForeignPsbtError::ConstructionChanged);
         }
+        // No foreign route signs Taproot, so any Taproot field is refused
+        // before signatures are counted: a key-path or script-path signature
+        // is never evidence here.
+        if signed.inputs.iter().any(|input| {
+            input.tap_key_sig.is_some()
+                || !input.tap_script_sigs.is_empty()
+                || !input.tap_scripts.is_empty()
+                || !input.tap_key_origins.is_empty()
+                || input.tap_internal_key.is_some()
+                || input.tap_merkle_root.is_some()
+        }) || signed.outputs.iter().any(|output| {
+            output.tap_internal_key.is_some()
+                || output.tap_tree.is_some()
+                || !output.tap_key_origins.is_empty()
+        }) {
+            return Err(ForeignPsbtError::Taproot);
+        }
         let mut normalized = signed.clone();
         let mut signatures = 0usize;
         for (index, input) in signed.inputs.iter().enumerate() {
@@ -312,14 +595,11 @@ impl PreparedForeignSweep {
             if input.partial_sigs.iter().any(|(key, signature)| {
                 signature.sighash_type != EcdsaSighashType::All
                     || !input.bip32_derivation.contains_key(&key.inner)
-            }) || input.tap_key_sig.is_some_and(|signature| {
-                signature.sighash_type != TapSighashType::All || input.tap_internal_key.is_none()
             }) {
                 return Err(ForeignPsbtError::UnsupportedSighash);
             }
-            signatures += input.partial_sigs.len() + usize::from(input.tap_key_sig.is_some());
+            signatures += input.partial_sigs.len();
             normalized.inputs[index].partial_sigs.clear();
-            normalized.inputs[index].tap_key_sig = None;
         }
         if signatures == 0 {
             return Err(ForeignPsbtError::MissingSignature);
@@ -391,10 +671,12 @@ fn source_fingerprint(session: &ForeignSession<'_>) -> Result<[u8; 32], ForeignP
 mod tests {
     use super::*;
     use crate::app::settings::VaultIdentity;
+    use crate::services::foreign_scan::Branch as ScanBranch;
     use crate::services::{
         foreign_scan::{DiscoveredCoin, ScanReport},
-        foreign_wallet_source::{SessionSeedSource, StandardSinglesig},
+        foreign_wallet_source::{AccountDescriptors, SessionSeedSource, StandardSinglesig},
     };
+    use bitcoin::sighash::TapSighashType;
     use coincube_core::{
         descriptors::CoincubeDescriptor,
         miniscript::bitcoin::{
@@ -407,6 +689,8 @@ mod tests {
     };
     use zeroize::Zeroizing;
 
+    /// Test-only observed fork height; production reads it from the anchor.
+    const FORK_HEIGHT: u64 = 900;
     const WORDS: &str =
         "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
     const TARGET_DESC: &str = "wsh(or_d(multi(2,[ffd63c8d/48'/1'/0'/2']tpubDExA3EC3iAsPxPhFn4j6gMiVup6V2eH3qKyk69RcTc9TTNRfFYVPad8bJD5FCHVQxyBT4izKsvr7Btd2R4xmQ1hZkvsqGBaeE82J71uTK4N/<0;1>/*,[de6eb005/48'/1'/0'/2']tpubDFGuYfS2JwiUSEXiQuNGdT3R7WTDhbaE6jbUhgYSSdhmfQcSx7ZntMPPv7nrkvAqjpj3jX9wbhSGMeKVao4qAzhbNyBi7iQmv5xxQk6H6jz/<0;1>/*),and_v(v:pkh([ffd63c8d/48'/1'/0'/2']tpubDExA3EC3iAsPxPhFn4j6gMiVup6V2eH3qKyk69RcTc9TTNRfFYVPad8bJD5FCHVQxyBT4izKsvr7Btd2R4xmQ1hZkvsqGBaeE82J71uTK4N/<2;3>/*),older(3))))#p9ax3xxp";
@@ -470,15 +754,18 @@ mod tests {
             output: previous.output[0].clone(),
             previous,
             confirmed: true,
+            block_height: Some(FORK_HEIGHT as u32 - 1),
+            block_hash: Some(BlockHash::from_byte_array([3; 32])),
         };
         let report = ScanReport::for_test(
             ChainId::BitcoinBlake2b,
             9,
             BlockHash::from_byte_array([2; 32]),
             vec![coin],
-        );
+        )
+        .with_fork_height(Some(FORK_HEIGHT));
         let target = target_evidence("vault-a", 11, 9);
-        let prepared = PreparedForeignSweep::new(
+        let prepared = PreparedForeignSweep::construct(
             &report,
             ForeignSession {
                 chain: ChainId::BitcoinBlake2b,
@@ -514,6 +801,133 @@ mod tests {
         psbt.to_string()
     }
 
+    fn economics_fixture(
+        value: u64,
+        confirmed: bool,
+    ) -> (ScanReport, AccountDescriptors, TargetAddressEvidence) {
+        economics_fixture_at(value, confirmed.then_some(FORK_HEIGHT as u32 - 1))
+    }
+
+    /// One coin at `height` (`None` = unconfirmed) with the fork observed at
+    /// [`FORK_HEIGHT`].
+    fn economics_fixture_at(
+        value: u64,
+        height: Option<u32>,
+    ) -> (ScanReport, AccountDescriptors, TargetAddressEvidence) {
+        let source = SessionSeedSource::new(
+            Zeroizing::new(WORDS.to_owned()),
+            Zeroizing::new("economics passphrase".to_owned()),
+        )
+        .unwrap();
+        let descriptors = source.descriptors(StandardSinglesig::Bip84, 0).unwrap();
+        let script = descriptors.external.script(2).unwrap();
+        let previous = Transaction {
+            version: transaction::Version::TWO,
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![TxIn::default()],
+            output: vec![TxOut {
+                value: Amount::from_sat(value),
+                script_pubkey: script,
+            }],
+        };
+        let report = ScanReport::for_test(
+            ChainId::BitcoinBlake2b,
+            21,
+            BlockHash::from_byte_array([4; 32]),
+            vec![DiscoveredCoin {
+                branch: Branch::External,
+                index: 2,
+                outpoint: OutPoint::new(previous.compute_txid(), 0),
+                output: previous.output[0].clone(),
+                previous,
+                confirmed: height.is_some(),
+                block_height: height,
+                block_hash: height.map(|_| BlockHash::from_byte_array([6; 32])),
+            }],
+        )
+        .with_fork_height(Some(FORK_HEIGHT));
+        (report, descriptors, target_evidence("vault-a", 13, 21))
+    }
+
+    #[test]
+    fn review_economics_is_bounded_and_uses_maximum_signed_vsize() {
+        let (report, descriptors, target) = economics_fixture(100_000, true);
+        let review = review_sweep_economics(
+            &report,
+            ForeignSession {
+                chain: ChainId::BitcoinBlake2b,
+                generation: 21,
+                target: &target,
+                external: &descriptors.external,
+                internal: Some(&descriptors.internal),
+            },
+            5,
+        )
+        .unwrap();
+        assert_eq!(review.inputs, 1);
+        assert!(review.maximum_signed_vbytes > 41);
+        assert_eq!(
+            review.fee.to_sat(),
+            review.maximum_signed_vbytes * review.feerate_sat_vb
+        );
+        assert_eq!(review.destination.to_sat() + review.fee.to_sat(), 100_000);
+
+        for invalid in [0, spend::MAX_FEERATE + 1] {
+            assert_eq!(
+                review_sweep_economics(
+                    &report,
+                    ForeignSession {
+                        chain: ChainId::BitcoinBlake2b,
+                        generation: 21,
+                        target: &target,
+                        external: &descriptors.external,
+                        internal: Some(&descriptors.internal),
+                    },
+                    invalid,
+                )
+                .unwrap_err(),
+                ForeignPsbtError::Economics
+            );
+        }
+    }
+
+    #[test]
+    fn review_economics_refuses_unconfirmed_and_dust_remainders() {
+        let (unconfirmed, descriptors, target) = economics_fixture(100_000, false);
+        assert_eq!(
+            review_sweep_economics(
+                &unconfirmed,
+                ForeignSession {
+                    chain: ChainId::BitcoinBlake2b,
+                    generation: 21,
+                    target: &target,
+                    external: &descriptors.external,
+                    internal: Some(&descriptors.internal),
+                },
+                5,
+            )
+            .unwrap_err(),
+            ForeignPsbtError::Unconfirmed
+        );
+
+        let (small, descriptors, target) = economics_fixture(1_000, true);
+        assert_eq!(
+            review_sweep_economics(
+                &small,
+                ForeignSession {
+                    chain: ChainId::BitcoinBlake2b,
+                    generation: 21,
+                    target: &target,
+                    external: &descriptors.external,
+                    internal: Some(&descriptors.internal),
+                },
+                spend::MAX_FEERATE,
+            )
+            .unwrap_err(),
+            ForeignPsbtError::Economics
+        );
+    }
+
     #[test]
     fn signed_text_round_trips_and_preserves_bound_economics() {
         let (prepared, source, target) = fixture();
@@ -543,6 +957,257 @@ mod tests {
             verified.psbt().unsigned_tx.output[1].value,
             Amount::from_sat(9_000)
         );
+    }
+
+    #[test]
+    fn taproot_fields_on_import_refuse() {
+        let (prepared, source, target) = fixture();
+        let descriptors = source.descriptors(StandardSinglesig::Bip84, 0).unwrap();
+        let secp = secp256k1::Secp256k1::new();
+        let keypair = secp256k1::Keypair::from_secret_key(
+            &secp,
+            &secp256k1::SecretKey::from_slice(&[7; 32]).unwrap(),
+        );
+        let (xonly, _) = keypair.x_only_public_key();
+        let signature = bitcoin::taproot::Signature {
+            signature: secp
+                .sign_schnorr_no_aux_rand(&secp256k1::Message::from_digest([8; 32]), &keypair),
+            sighash_type: TapSighashType::All,
+        };
+        let leaf = bitcoin::taproot::TapLeafHash::from_byte_array([9; 32]);
+        let mut variants = Vec::new();
+        // Before #568 A1 a key-path signature with an internal key was
+        // accepted as signature evidence.
+        let mut psbt = Psbt::from_str(&signed_text(&prepared)).unwrap();
+        psbt.inputs[0].tap_internal_key = Some(xonly);
+        psbt.inputs[0].tap_key_sig = Some(signature);
+        variants.push(psbt);
+        let mut psbt = Psbt::from_str(&signed_text(&prepared)).unwrap();
+        psbt.inputs[0]
+            .tap_script_sigs
+            .insert((xonly, leaf), signature);
+        variants.push(psbt);
+        let mut psbt = Psbt::from_str(&signed_text(&prepared)).unwrap();
+        psbt.inputs[0].tap_internal_key = Some(xonly);
+        variants.push(psbt);
+        let mut psbt = Psbt::from_str(&signed_text(&prepared)).unwrap();
+        psbt.outputs[1].tap_internal_key = Some(xonly);
+        variants.push(psbt);
+        for variant in variants {
+            assert_eq!(
+                prepared
+                    .import_text(
+                        &variant.to_string(),
+                        ForeignSession {
+                            chain: ChainId::BitcoinBlake2b,
+                            generation: 9,
+                            target: &target,
+                            external: &descriptors.external,
+                            internal: Some(&descriptors.internal),
+                        },
+                    )
+                    .unwrap_err(),
+                ForeignPsbtError::Taproot
+            );
+        }
+    }
+
+    /// A `tr` key-path source with one confirmed pre-fork coin. Scan accepts
+    /// it; every signing-side path must refuse it.
+    fn taproot_fixture() -> (ScanReport, ScanDescriptor, TargetAddressEvidence) {
+        let secp = secp256k1::Secp256k1::new();
+        let xpub = bitcoin::bip32::Xpub::from_priv(
+            &secp,
+            &bitcoin::bip32::Xpriv::new_master(bitcoin::Network::Bitcoin, &[42; 32]).unwrap(),
+        );
+        let tr = ScanDescriptor::parse(ScanBranch::External, &format!("tr({xpub}/0/*)")).unwrap();
+        let previous = Transaction {
+            version: transaction::Version::TWO,
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![TxIn::default()],
+            output: vec![TxOut {
+                value: Amount::from_sat(100_000),
+                script_pubkey: tr.script(0).unwrap(),
+            }],
+        };
+        let report = ScanReport::for_test(
+            ChainId::BitcoinBlake2b,
+            21,
+            BlockHash::from_byte_array([4; 32]),
+            vec![DiscoveredCoin {
+                branch: ScanBranch::External,
+                index: 0,
+                outpoint: OutPoint::new(previous.compute_txid(), 0),
+                output: previous.output[0].clone(),
+                previous,
+                confirmed: true,
+                block_height: Some(FORK_HEIGHT as u32 - 1),
+                block_hash: Some(BlockHash::from_byte_array([6; 32])),
+            }],
+        )
+        .with_fork_height(Some(FORK_HEIGHT));
+        (report, tr, target_evidence("vault-a", 13, 21))
+    }
+
+    #[test]
+    fn taproot_source_refuses_economics_and_construction() {
+        let (report, tr, target) = taproot_fixture();
+        let session = || ForeignSession {
+            chain: ChainId::BitcoinBlake2b,
+            generation: 21,
+            target: &target,
+            external: &tr,
+            internal: None,
+        };
+        assert_eq!(
+            review_sweep_inputs(&report, session()).unwrap_err(),
+            ForeignPsbtError::UnsupportedRoute
+        );
+        assert_eq!(
+            review_sweep_economics(&report, session(), 5).unwrap_err(),
+            ForeignPsbtError::UnsupportedRoute
+        );
+        assert_eq!(
+            PreparedForeignSweep::construct(
+                &report,
+                session(),
+                Amount::from_sat(99_000),
+                Amount::from_sat(1_000),
+                None,
+            )
+            .err(),
+            Some(ForeignPsbtError::UnsupportedRoute)
+        );
+    }
+
+    #[test]
+    fn only_pre_fork_coins_are_reviewed_and_unknown_fork_height_refuses() {
+        let (pre, descriptors, target) = economics_fixture_at(100_000, Some(899));
+        let make = || ForeignSession {
+            chain: ChainId::BitcoinBlake2b,
+            generation: 21,
+            target: &target,
+            external: &descriptors.external,
+            internal: Some(&descriptors.internal),
+        };
+        let review = review_sweep_inputs(&pre, make()).unwrap();
+        assert_eq!((review.inputs, review.excluded_post_fork), (1, 0));
+
+        // Confirmed at the fork height: excluded, nothing left.
+        let (post, ..) = economics_fixture_at(100_000, Some(FORK_HEIGHT as u32));
+        assert_eq!(
+            review_sweep_inputs(&post, make()).unwrap_err(),
+            ForeignPsbtError::Empty
+        );
+        assert_eq!(
+            PreparedForeignSweep::construct(
+                &post,
+                make(),
+                Amount::from_sat(99_000),
+                Amount::from_sat(1_000),
+                None,
+            )
+            .err(),
+            Some(ForeignPsbtError::Empty)
+        );
+
+        // Mixed: the post-fork coin is counted as excluded, not swept.
+        let mut coins = pre.coins().to_vec();
+        let mut late = post.coins()[0].clone();
+        late.outpoint.vout = 1;
+        late.previous.output.push(late.output.clone());
+        late.outpoint.txid = late.previous.compute_txid();
+        coins.push(late);
+        let mixed = ScanReport::for_test(
+            ChainId::BitcoinBlake2b,
+            21,
+            BlockHash::from_byte_array([4; 32]),
+            coins.clone(),
+        )
+        .with_fork_height(Some(FORK_HEIGHT));
+        let review = review_sweep_inputs(&mixed, make()).unwrap();
+        assert_eq!((review.inputs, review.excluded_post_fork), (1, 1));
+        assert_eq!(review.total, Amount::from_sat(100_000));
+
+        // A confirmed coin without a confirming height is excluded.
+        let mut heightless = coins[0].clone();
+        heightless.block_height = None;
+        let unknown = ScanReport::for_test(
+            ChainId::BitcoinBlake2b,
+            21,
+            BlockHash::from_byte_array([4; 32]),
+            vec![heightless],
+        )
+        .with_fork_height(Some(FORK_HEIGHT));
+        assert_eq!(
+            review_sweep_inputs(&unknown, make()).unwrap_err(),
+            ForeignPsbtError::Empty
+        );
+
+        // No observed fork height: fail closed, even for an old coin.
+        let unobserved = pre.clone().with_fork_height(None);
+        assert_eq!(
+            review_sweep_economics(&unobserved, make(), 5).unwrap_err(),
+            ForeignPsbtError::ForkUnknown
+        );
+        assert_eq!(
+            PreparedForeignSweep::construct(
+                &unobserved,
+                make(),
+                Amount::from_sat(99_000),
+                Amount::from_sat(1_000),
+                None,
+            )
+            .err(),
+            Some(ForeignPsbtError::ForkUnknown)
+        );
+    }
+
+    struct CountingFees {
+        chain: ChainId,
+        rate: Option<u64>,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl SweepFeeSource for CountingFees {
+        fn chain(&self) -> ChainId {
+            self.chain
+        }
+        async fn mid_priority_sat_vb(&self) -> Option<u64> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.rate
+        }
+    }
+
+    #[tokio::test]
+    async fn btcb2_sweep_never_queries_a_bitcoin_fee_source() {
+        use std::sync::atomic::Ordering;
+        let bitcoin = CountingFees {
+            chain: ChainId::Bitcoin,
+            rate: Some(5),
+            calls: Default::default(),
+        };
+        assert_eq!(btcb2_sweep_feerate(&bitcoin).await, None);
+        assert_eq!(bitcoin.calls.load(Ordering::SeqCst), 0);
+
+        let btcb2 = CountingFees {
+            chain: ChainId::BitcoinBlake2b,
+            rate: Some(5),
+            calls: Default::default(),
+        };
+        assert_eq!(btcb2_sweep_feerate(&btcb2).await, Some(5));
+        assert_eq!(btcb2.calls.load(Ordering::SeqCst), 1);
+        for rate in [Some(0), Some(spend::MAX_FEERATE + 1), None] {
+            let bounded = CountingFees {
+                chain: ChainId::BitcoinBlake2b,
+                rate,
+                calls: Default::default(),
+            };
+            assert_eq!(btcb2_sweep_feerate(&bounded).await, None);
+        }
+        // Production has no BTCB2 estimator: fees are unavailable.
+        assert_eq!(btcb2_sweep_feerate(&UnavailableBtcb2Fees).await, None);
     }
 
     #[test]
@@ -582,7 +1247,7 @@ mod tests {
                     },
                 )
                 .unwrap_err(),
-            ForeignPsbtError::UnsupportedSighash
+            ForeignPsbtError::Taproot
         );
     }
 
