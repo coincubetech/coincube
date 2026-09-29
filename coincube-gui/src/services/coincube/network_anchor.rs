@@ -15,6 +15,8 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+pub(crate) const MAX_ANCHOR_BODY_BYTES: usize = 64 * 1024;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AnchorState {
@@ -216,16 +218,15 @@ impl CoincubeClient {
             .await
             .map_err(CoincubeError::from)?;
         let http = response.status();
-        const MAX_BODY: usize = 64 * 1024;
         if response
             .content_length()
-            .is_some_and(|length| length > MAX_BODY as u64)
+            .is_some_and(|length| length > MAX_ANCHOR_BODY_BYTES as u64)
         {
             return Err(NetworkStatusError::InvalidResponse);
         }
         let mut bytes = Vec::new();
         while let Some(chunk) = response.chunk().await.map_err(CoincubeError::from)? {
-            if chunk.len() > MAX_BODY.saturating_sub(bytes.len()) {
+            if chunk.len() > MAX_ANCHOR_BODY_BYTES.saturating_sub(bytes.len()) {
                 return Err(NetworkStatusError::InvalidResponse);
             }
             bytes.extend_from_slice(&chunk);

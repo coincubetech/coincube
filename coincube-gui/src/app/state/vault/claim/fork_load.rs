@@ -17,7 +17,8 @@ use coincube_core::{
     chain::ChainId,
     claim_finalize::verify_claim_fork_transaction,
     claim_spend::{
-        create_claim_fork_sweep, reconstruct_claim_fork_sweep, reconstruct_poison_self_transfer,
+        create_ancestry_fork_sweep, create_claim_fork_sweep, reconstruct_claim_fork_sweep,
+        reconstruct_poison_self_transfer, AncestrySelfTransfer, PoisonSelfTransfer,
     },
     miniscript::bitcoin::{
         absolute::LockTime,
@@ -38,6 +39,11 @@ pub struct Opened {
     pub handoff: crate::app::claim_intent::ForkHandoff,
     pub generation: u64,
     pub result: Result<(Loaded, Vec<crate::daemon::model::Coin>), String>,
+}
+
+enum Source {
+    OpReturn(PoisonSelfTransfer),
+    Ancestry(AncestrySelfTransfer),
 }
 
 pub enum Loaded {
@@ -104,7 +110,7 @@ pub async fn load(
         descriptor_digest: sha256::Hash::hash(wallet.main_descriptor.to_string().as_bytes()),
     };
     let directory = pair.journal_directory(root);
-    let controller = Controller::reopen(&directory, &identity, context.clone())
+    let mut controller = Controller::reopen(&directory, &identity, context.clone())
         .map_err(|e| super::describe(crate::services::claim_coordinator::Error::Journal(e)))?;
     let plan = controller.plan();
     if plan.bitcoin_chain != ChainId::Bitcoin
@@ -138,9 +144,11 @@ pub async fn load(
         .step1
         .input
         .iter()
-        .map(|input| {
+        .map(|input| &input.previous_output)
+        .filter(|outpoint| plan.claimed_prevouts.contains(outpoint))
+        .map(|outpoint| {
             let coin = by_outpoint
-                .get(&input.previous_output)
+                .get(outpoint)
                 .ok_or_else(|| "A recorded Claim input is not owned by this Vault.".to_string())?;
             if submission.is_none() && (coin.spend_info.is_some() || coin.is_immature) {
                 return Err("A Claim input is spent or not yet mature on Bitcoin Blake2b.".into());
@@ -173,44 +181,98 @@ pub async fn load(
             .collect(),
     );
     let secp = secp256k1::Secp256k1::verification_only();
-    let source = reconstruct_poison_self_transfer(
-        plan.bitcoin_chain,
-        &wallet.main_descriptor,
-        &secp,
-        &mut getter,
-        &candidates,
-        source_index,
-        &plan.step1,
-    )
-    .map_err(|e| e.to_string())?;
+    let source = if controller
+        .recorded_ancestry()
+        .map_err(|e| super::describe(crate::services::claim_coordinator::Error::Journal(e)))?
+        .is_some()
+    {
+        let (selected, transaction) = controller
+            .recorded_ancestry_input(&context, &wallet.main_descriptor)
+            .map_err(|e| super::describe(crate::services::claim_coordinator::Error::Journal(e)))?
+            .ok_or_else(|| {
+                "Open the Bitcoin Cube to recover this Claim's input metadata.".to_string()
+            })?;
+        let mut bitcoin_inputs = candidates.clone();
+        bitcoin_inputs.push(selected);
+        // This transaction is excluded from the fork. Its only source here is
+        // the journal's reverified retained path, never a fork-node query.
+        let mut bitcoin_getter = TxMap(getter.0.clone());
+        bitcoin_getter
+            .0
+            .insert(transaction.compute_txid(), transaction);
+        let (source, signed) = controller
+            .restore_ancestry(
+                &context,
+                &wallet.main_descriptor,
+                &mut bitcoin_getter,
+                &bitcoin_inputs,
+            )
+            .map_err(|e| super::describe(crate::services::claim_coordinator::Error::Journal(e)))?;
+        if signed.is_none() {
+            return Err("The recorded Bitcoin witness is required to continue this Claim.".into());
+        }
+        Source::Ancestry(source)
+    } else {
+        Source::OpReturn(
+            reconstruct_poison_self_transfer(
+                plan.bitcoin_chain,
+                &wallet.main_descriptor,
+                &secp,
+                &mut getter,
+                &candidates,
+                source_index,
+                &plan.step1,
+            )
+            .map_err(|e| e.to_string())?,
+        )
+    };
     let construction = if let Some(recorded) = recorded {
         let index = fork_index.ok_or_else(|| "This older fork plan has no change index; return to the Bitcoin Claim to recover it.".to_string())?;
-        reconstruct_claim_fork_sweep(
-            &source,
-            wallet.chain,
-            &secp,
-            &mut getter,
-            &candidates,
-            index,
-            &recorded,
-        )
-        .map_err(|e| e.to_string())?
+        match &source {
+            Source::OpReturn(source) => reconstruct_claim_fork_sweep(
+                source,
+                wallet.chain,
+                &secp,
+                &mut getter,
+                &candidates,
+                index,
+                &recorded,
+            )
+            .map_err(|e| e.to_string())?,
+            Source::Ancestry(source) => controller
+                .restore_ancestry_fork_sweep(&context, source, &mut getter, &candidates)
+                .map_err(|e| {
+                    super::describe(crate::services::claim_coordinator::Error::Journal(e))
+                })?,
+        }
     } else {
         if feerate_vb == 0 {
             return Err("A current positive fee rate is required to build the fork sweep.".into());
         }
         let index = daemon.reserve_change().await.map_err(|e| e.to_string())?;
         current()?;
-        create_claim_fork_sweep(
-            &source,
-            wallet.chain,
-            &secp,
-            &mut getter,
-            &candidates,
-            index,
-            feerate_vb,
-            LockTime::ZERO,
-        )
+        match &source {
+            Source::OpReturn(source) => create_claim_fork_sweep(
+                source,
+                wallet.chain,
+                &secp,
+                &mut getter,
+                &candidates,
+                index,
+                feerate_vb,
+                LockTime::ZERO,
+            ),
+            Source::Ancestry(source) => create_ancestry_fork_sweep(
+                source,
+                wallet.chain,
+                &secp,
+                &mut getter,
+                &candidates,
+                index,
+                feerate_vb,
+                LockTime::ZERO,
+            ),
+        }
         .map_err(|e| e.to_string())?
     };
     if let Some(submission) = submission {
@@ -224,16 +286,28 @@ pub async fn load(
         let verified = verify_claim_fork_transaction(&construction, &recovered, &secp)
             .map_err(|e| e.to_string())?;
         drop(controller);
-        let coordinator = Coordinator::resume(
-            &directory,
-            identity.bitcoin_cube,
-            identity.fork_cube,
-            &source,
-            construction,
-            verified,
-            production,
-            CHECK_POLICY,
-        )
+        let coordinator = match &source {
+            Source::OpReturn(source) => Coordinator::resume(
+                &directory,
+                identity.bitcoin_cube,
+                identity.fork_cube,
+                source,
+                construction,
+                verified,
+                production,
+                CHECK_POLICY,
+            ),
+            Source::Ancestry(source) => Coordinator::resume_ancestry(
+                &directory,
+                identity.bitcoin_cube,
+                identity.fork_cube,
+                source,
+                construction,
+                verified,
+                production,
+                CHECK_POLICY,
+            ),
+        }
         .map_err(super::describe)?;
         current()?;
         Ok(Loaded::Tracking {
@@ -244,15 +318,26 @@ pub async fn load(
         let psbt =
             UnifiedPsbt::from_psbt(construction.psbt().clone()).map_err(|e| e.to_string())?;
         drop(controller);
-        let preparation = Preparation::resume(
-            &directory,
-            identity.bitcoin_cube,
-            identity.fork_cube,
-            &source,
-            construction,
-            production,
-            CHECK_POLICY,
-        )
+        let preparation = match &source {
+            Source::OpReturn(source) => Preparation::resume(
+                &directory,
+                identity.bitcoin_cube,
+                identity.fork_cube,
+                source,
+                construction,
+                production,
+                CHECK_POLICY,
+            ),
+            Source::Ancestry(source) => Preparation::resume_ancestry(
+                &directory,
+                identity.bitcoin_cube,
+                identity.fork_cube,
+                source,
+                construction,
+                production,
+                CHECK_POLICY,
+            ),
+        }
         .map_err(super::describe)?;
         current()?;
         Ok(Loaded::Signing {

@@ -91,8 +91,14 @@ and a test-only Rust bridge:
 ```sh
 cargo build --release --package coincube-core --example claim_regtest_vectors
 export CLAIM_REGTEST_TOOL_PATH="$PWD/target/release/examples/claim_regtest_vectors"
-pytest tests/test_btcb2_claim_consensus.py -vvv --junitxml=claim-consensus.xml
+pytest tests/test_btcb2_claim_consensus.py tests/test_btcb2_claim_ancestry_consensus.py -vvv --junitxml=claim-consensus.xml
 ```
+
+The ancestry case funds an owned 2-of-3 script with a Bitcoin coinbase, checks
+the 99/100-confirmation maturity boundary, fork mempool and block rejection,
+and a fork sweep excluding that input. It tests construction and consensus;
+it does not admit regtest as mainnet historical proof or exercise automatic
+input preference and coordinator authorization.
 
 A separate headless GUI test drives the production Claim panel's build, signer
 picker, software signing, review, explicit confirmation and confirmation tracking.

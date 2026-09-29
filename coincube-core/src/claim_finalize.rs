@@ -83,7 +83,22 @@ pub fn finalize_poison_transfer<C: secp256k1::Verification>(
     signed: &Psbt,
     secp: &secp256k1::Secp256k1<C>,
 ) -> Result<VerifiedPoisonTransfer, FinalizeError> {
-    let original = construction.psbt();
+    finalize_transfer(
+        construction.psbt(),
+        construction.descriptor(),
+        construction.chain(),
+        signed,
+        secp,
+    )
+}
+
+fn finalize_transfer<C: secp256k1::Verification>(
+    original: &Psbt,
+    descriptor: &CoincubeDescriptor,
+    chain: ChainId,
+    signed: &Psbt,
+    secp: &secp256k1::Secp256k1<C>,
+) -> Result<VerifiedPoisonTransfer, FinalizeError> {
     if signed.unsigned_tx != original.unsigned_tx
         || signed.inputs.len() != original.inputs.len()
         || signed.outputs.len() != original.outputs.len()
@@ -108,7 +123,7 @@ pub fn finalize_poison_transfer<C: secp256k1::Verification>(
     if normalized != *original {
         return Err(FinalizeError::ConstructionChanged);
     }
-    spend::reverify_spend_before_broadcast(construction.descriptor(), signed)
+    spend::reverify_spend_before_broadcast(descriptor, signed)
         .map_err(|_| FinalizeError::Economics)?;
     let mut prevouts = Vec::with_capacity(signed.inputs.len());
     let mut cache = SighashCache::new(&signed.unsigned_tx);
@@ -157,8 +172,8 @@ pub fn finalize_poison_transfer<C: secp256k1::Verification>(
     Ok(VerifiedPoisonTransfer {
         construction_txid: original.unsigned_tx.compute_txid(),
         transaction,
-        chain: construction.chain(),
-        descriptor: construction.descriptor().clone(),
+        chain,
+        descriptor: descriptor.clone(),
         fee,
         signatures_per_input,
     })
@@ -385,8 +400,23 @@ pub fn verify_poison_transaction<C: secp256k1::Verification>(
     transaction: &Transaction,
     secp: &secp256k1::Secp256k1<C>,
 ) -> Result<VerifiedPoisonTransfer, FinalizeError> {
-    let original = construction.psbt();
-    spend::reverify_spend_before_broadcast(construction.descriptor(), original)
+    verify_transfer(
+        construction.psbt(),
+        construction.descriptor(),
+        construction.chain(),
+        transaction,
+        secp,
+    )
+}
+
+fn verify_transfer<C: secp256k1::Verification>(
+    original: &Psbt,
+    descriptor: &CoincubeDescriptor,
+    chain: ChainId,
+    transaction: &Transaction,
+    secp: &secp256k1::Secp256k1<C>,
+) -> Result<VerifiedPoisonTransfer, FinalizeError> {
+    spend::reverify_spend_before_broadcast(descriptor, original)
         .map_err(|_| FinalizeError::Economics)?;
     let prevouts = original
         .inputs
@@ -405,8 +435,8 @@ pub fn verify_poison_transaction<C: secp256k1::Verification>(
     Ok(VerifiedPoisonTransfer {
         transaction: transaction.clone(),
         construction_txid: original.unsigned_tx.compute_txid(),
-        chain: construction.chain(),
-        descriptor: construction.descriptor().clone(),
+        chain,
+        descriptor: descriptor.clone(),
         fee: original.fee().map_err(|_| FinalizeError::Economics)?,
         signatures_per_input,
     })
@@ -466,6 +496,11 @@ fn verify_retained_witness<C: secp256k1::Verification>(
     }
     Ok(counts)
 }
+
+mod ancestry;
+pub use ancestry::{
+    finalize_ancestry_transfer, verify_ancestry_transaction, VerifiedAncestryTransfer,
+};
 
 #[cfg(test)]
 mod tests;

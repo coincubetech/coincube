@@ -47,6 +47,7 @@ pub enum FailureKind {
     Changed,
     Cancelled,
     Deadline,
+    CollectionLimit,
     Http(u16),
     Unavailable,
     Anchor(AnchorState),
@@ -195,7 +196,7 @@ fn read<T>(
     }
     Ok((value.value, value.observed_at))
 }
-fn validate_plan(plan: &ClaimPlan, policy: Policy, budget: Duration) -> Result<(), Failure> {
+fn validate_plan_shape(plan: &ClaimPlan, policy: Policy, budget: Duration) -> Result<(), Failure> {
     if !matches!(
         (plan.bitcoin_chain, plan.fork_chain),
         (ChainId::Bitcoin, ChainId::BitcoinBlake2b)
@@ -218,6 +219,10 @@ fn validate_plan(plan: &ClaimPlan, policy: Policy, budget: Duration) -> Result<(
     {
         return Err(failure(Stage::Plan, FailureKind::InvalidPlan));
     }
+    Ok(())
+}
+fn validate_plan(plan: &ClaimPlan, policy: Policy, budget: Duration) -> Result<(), Failure> {
+    validate_plan_shape(plan, policy, budget)?;
     if plan.poison == Poison::InputAncestry {
         return Err(failure(Stage::Plan, FailureKind::UnsupportedPoison));
     }
@@ -393,49 +398,14 @@ pub async fn collect_sweep(
     };
     let work = async {
         let first = collect_inner(source, plan, policy, expected).await?;
-        let fork = plan.fork_chain;
-        let mut prior = None;
-        let mut stamps = Vec::new();
-        for _ in 0..2 {
-            let (tx, stamp) = read(
-                source
-                    .transaction(fork, sweep)
-                    .await
-                    .map_err(|e| failure(Stage::ForkTransaction, e))?,
-                fork,
-                source,
-                policy,
-                Stage::ForkTransaction,
-            )?;
-            stamps.push(stamp);
-            if matches!(tx, TransactionObservation::Unconfirmed { txid } | TransactionObservation::Confirmed { txid, .. } if txid != sweep)
-            {
-                return Err(failure(Stage::ForkTransaction, FailureKind::Malformed));
-            }
-            if prior.is_some_and(|previous| previous != tx) {
-                return Err(failure(Stage::ForkTransaction, FailureKind::Changed));
-            }
-            if let TransactionObservation::Confirmed { block, .. } = tx {
-                if block.height > first.observations.fork.tip.height {
-                    return Err(failure(Stage::ForkTransaction, FailureKind::Malformed));
-                }
-                let (hash, stamp) = read(
-                    source
-                        .hash_at_height(fork, block.height)
-                        .await
-                        .map_err(|e| failure(Stage::ForkIndexer, e))?,
-                    fork,
-                    source,
-                    policy,
-                    Stage::ForkIndexer,
-                )?;
-                stamps.push(stamp);
-                if hash != block.hash {
-                    return Err(failure(Stage::ForkIndexer, FailureKind::Changed));
-                }
-            }
-            prior = Some(tx);
-        }
+        let (transaction, stamps) = read_sweep_transactions(
+            source,
+            plan.fork_chain,
+            sweep,
+            first.observations.fork.tip.height,
+            policy,
+        )
+        .await?;
         let last = collect_inner(source, plan, policy, expected).await?;
         let a = first.observations;
         let b = last.observations;
@@ -467,8 +437,7 @@ pub async fn collect_sweep(
         Ok(SweepObservation {
             observed_at,
             assessment: last,
-            transaction: prior
-                .ok_or_else(|| failure(Stage::ForkTransaction, FailureKind::Unavailable))?,
+            transaction,
         })
     };
     let result = tokio::select! {
@@ -482,12 +451,78 @@ pub async fn collect_sweep(
     result
 }
 
+async fn read_sweep_transactions(
+    source: &dyn ObservationSource,
+    fork: ChainId,
+    sweep: Txid,
+    tip_height: u64,
+    policy: Policy,
+) -> Result<(TransactionObservation, Vec<i64>), Failure> {
+    let mut prior = None;
+    let mut stamps = Vec::new();
+    for _ in 0..2 {
+        let (tx, stamp) = read(
+            source
+                .transaction(fork, sweep)
+                .await
+                .map_err(|e| failure(Stage::ForkTransaction, e))?,
+            fork,
+            source,
+            policy,
+            Stage::ForkTransaction,
+        )?;
+        stamps.push(stamp);
+        if matches!(tx, TransactionObservation::Unconfirmed { txid } | TransactionObservation::Confirmed { txid, .. } if txid != sweep)
+        {
+            return Err(failure(Stage::ForkTransaction, FailureKind::Malformed));
+        }
+        if prior.is_some_and(|previous| previous != tx) {
+            return Err(failure(Stage::ForkTransaction, FailureKind::Changed));
+        }
+        if let TransactionObservation::Confirmed { block, .. } = tx {
+            if block.height > tip_height {
+                return Err(failure(Stage::ForkTransaction, FailureKind::Malformed));
+            }
+            let (hash, stamp) = read(
+                source
+                    .hash_at_height(fork, block.height)
+                    .await
+                    .map_err(|e| failure(Stage::ForkIndexer, e))?,
+                fork,
+                source,
+                policy,
+                Stage::ForkIndexer,
+            )?;
+            stamps.push(stamp);
+            if hash != block.hash {
+                return Err(failure(Stage::ForkIndexer, FailureKind::Changed));
+            }
+        }
+        prior = Some(tx);
+    }
+    Ok((
+        prior.ok_or_else(|| failure(Stage::ForkTransaction, FailureKind::Unavailable))?,
+        stamps,
+    ))
+}
+
 async fn collect_inner(
     source: &dyn ObservationSource,
     plan: &ClaimPlan,
     policy: Policy,
     generation: u64,
 ) -> Result<CollectedAssessment, Failure> {
+    collect_inner_with_anchor(source, plan, policy, generation)
+        .await
+        .map(|(assessment, _)| assessment)
+}
+
+async fn collect_inner_with_anchor(
+    source: &dyn ObservationSource,
+    plan: &ClaimPlan,
+    policy: Policy,
+    generation: u64,
+) -> Result<(CollectedAssessment, NetworkAnchor), Failure> {
     let btc = plan.bitcoin_chain;
     let fork = plan.fork_chain;
     let txid = plan.step1.compute_txid();
@@ -673,11 +708,14 @@ async fn collect_inner(
         source.now(),
         Some(preflight),
     );
-    Ok(CollectedAssessment {
-        generation,
-        observations,
-        assessment,
-    })
+    Ok((
+        CollectedAssessment {
+            generation,
+            observations,
+            assessment,
+        },
+        last,
+    ))
 }
 
 #[cfg(test)]

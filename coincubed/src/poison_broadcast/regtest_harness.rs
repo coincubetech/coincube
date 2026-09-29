@@ -12,6 +12,7 @@ use std::{io::Read, net::SocketAddr, sync::Mutex};
 
 pub struct RegtestTransport {
     endpoint: SocketAddr,
+    node: crate::config::BitcoindConfig,
     authorization: String,
     chain: ChainId,
     descriptor: CoincubeDescriptor,
@@ -31,8 +32,18 @@ impl RegtestTransport {
         {
             return Err(SubmissionError::UnsupportedChain);
         }
+        let (user, password) = cookie
+            .split_once(':')
+            .ok_or(SubmissionError::BackendUnavailable)?;
+        if user.is_empty() || password.is_empty() {
+            return Err(SubmissionError::BackendUnavailable);
+        }
         let transport = Self {
             endpoint,
+            node: crate::config::BitcoindConfig {
+                addr: endpoint,
+                rpc_auth: crate::config::BitcoindRpcAuth::UserPass(user.into(), password.into()),
+            },
             authorization: format!("Basic {}", STANDARD.encode(cookie)),
             chain,
             descriptor,
@@ -41,6 +52,99 @@ impl RegtestTransport {
         transport.check_regtest()?;
         Ok(transport)
     }
+    /// Build a controller for the production bound-send methods against the
+    /// already verified disposable Bitcoin node. The database must be new.
+    /// Logical chain identity is explicit: this does not admit regtest wallets
+    /// in the product. The idle worker supplies handle cleanup semantics only;
+    /// wallet polling/bootstrap is deliberately outside this transport fixture.
+    pub fn bound_handle(
+        &self,
+        directory: std::path::PathBuf,
+        electrum: Option<SocketAddr>,
+    ) -> Result<(crate::config::Config, crate::DaemonHandle), SubmissionError> {
+        use crate::{
+            bitcoin::{d::BitcoinD, poller::PollerMessage},
+            config::{BitcoinBackend, BitcoinConfig, Config},
+            database::sqlite::{FreshDbOptions, SqliteDb},
+            datadir::DataDirectory,
+        };
+        use std::sync::{atomic::AtomicBool, mpsc, Arc};
+        if self.chain != ChainId::Bitcoin || electrum.is_some_and(|addr| !addr.ip().is_loopback()) {
+            return Err(SubmissionError::UnsupportedChain);
+        }
+        self.check_regtest()?;
+        std::fs::create_dir(&directory).map_err(|_| SubmissionError::BackendUnavailable)?;
+        let secp = miniscript::bitcoin::secp256k1::Secp256k1::verification_only();
+        let database = SqliteDb::new(
+            directory.join("transport.sqlite3"),
+            Some(FreshDbOptions::new(self.chain, self.descriptor.clone())),
+            &secp,
+        )
+        .map_err(|_| SubmissionError::BackendUnavailable)?;
+        let mut config = Config::new(
+            BitcoinConfig::new(self.chain, std::time::Duration::from_secs(2)),
+            None,
+            log::LevelFilter::Off,
+            self.descriptor.clone(),
+            DataDirectory::new(directory),
+        );
+        let database: Arc<Mutex<dyn crate::database::DatabaseInterface>> =
+            Arc::new(Mutex::new(database));
+        let bitcoin: Arc<Mutex<dyn crate::bitcoin::BitcoinInterface>> = match electrum {
+            Some(address) => {
+                config.bitcoin_backend =
+                    Some(BitcoinBackend::Electrum(crate::config::ElectrumConfig {
+                        addr: format!("tcp://{}", address),
+                        validate_domain: true,
+                    }));
+                // Validate the real indexer's regtest genesis before translating
+                // the fixture's logical role back to Bitcoin/mainnet admission.
+                config.bitcoin_config.network = miniscript::bitcoin::Network::Regtest;
+                let backend = crate::setup_electrum(&config, database.clone())
+                    .map_err(|_| SubmissionError::BackendUnavailable)?;
+                config.bitcoin_config.network = miniscript::bitcoin::Network::Bitcoin;
+                Arc::new(Mutex::new(backend))
+            }
+            None => {
+                config.bitcoin_backend = Some(BitcoinBackend::Bitcoind(self.node.clone()));
+                Arc::new(Mutex::new(
+                    BitcoinD::new(&self.node, "unused-claim-transport-fixture".into())
+                        .map_err(|_| SubmissionError::BackendUnavailable)?,
+                ))
+            }
+        };
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let control = DaemonControl::new(
+            config.clone(),
+            bitcoin,
+            sender.clone(),
+            database,
+            secp,
+            Default::default(),
+            Default::default(),
+        );
+        let worker = std::thread::spawn(move || {
+            while let Ok(message) = receiver.recv() {
+                match message {
+                    PollerMessage::Shutdown => break,
+                    PollerMessage::PollNow(ack) => {
+                        let _ = ack.send(());
+                    }
+                    PollerMessage::PollNowNoAck => {}
+                }
+            }
+        });
+        Ok((
+            config,
+            crate::DaemonHandle::Controller {
+                control,
+                poller_sender: sender,
+                poller_handle: worker,
+                scan_abort: Arc::new(AtomicBool::new(false)),
+            },
+        ))
+    }
+
     fn rpc(&self, method: &str, params: Value) -> Result<Value, SubmissionError> {
         let response = minreq::post(format!("http://{}", self.endpoint))
             .with_max_redirects(0)

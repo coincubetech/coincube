@@ -472,3 +472,157 @@ fn fork_finalizer_rejects_changed_construction_and_tampered_signatures() {
         assert!(finalize_claim_fork_sweep(&sweep, &bad, &secp).is_err());
     }
 }
+
+fn ancestry_fixture(
+    recovery: bool,
+) -> (crate::claim_spend::AncestrySelfTransfer, Vec<MasterSigner>) {
+    let (source, signers) = fixture(ChainId::Bitcoin, recovery);
+    let mut getter = Getter(HashMap::new());
+    let mut coins = Vec::new();
+    for (i, input) in source.psbt().inputs.iter().enumerate() {
+        let tx = input.non_witness_utxo.clone().unwrap();
+        let outpoint = source.psbt().unsigned_tx.input[i].previous_output;
+        let script = &tx.output[outpoint.vout as usize].script_pubkey;
+        let secp = secp256k1::Secp256k1::verification_only();
+        let deriv_index = (7..9)
+            .map(|i| ChildNumber::from_normal_idx(i).unwrap())
+            .find(|index| {
+                source
+                    .descriptor()
+                    .receive_descriptor()
+                    .derive(*index, &secp)
+                    .script_pubkey()
+                    == *script
+            })
+            .unwrap();
+        coins.push(CandidateCoin {
+            outpoint,
+            amount: tx.output[outpoint.vout as usize].value,
+            deriv_index,
+            is_change: false,
+            must_select: true,
+            sequence: recovery.then_some(Sequence(46)),
+            ancestor_info: None,
+        });
+        getter.0.insert(tx.compute_txid(), tx);
+    }
+    let selected = coins[0].outpoint;
+    let raw = bitcoin::consensus::serialize(&getter.0[&selected.txid]);
+    let dependency = crate::claim_ancestry::verify(
+        selected,
+        &[crate::claim_ancestry::Link {
+            transaction: &raw,
+            parent_input: None,
+        }],
+    )
+    .unwrap();
+    let built = crate::claim_spend::create_ancestry_self_transfer(
+        ChainId::Bitcoin,
+        source.descriptor(),
+        &secp256k1::Secp256k1::verification_only(),
+        &mut getter,
+        &coins,
+        ChildNumber::from_normal_idx(12).unwrap(),
+        5,
+        absolute::LockTime::ZERO,
+        &dependency,
+    )
+    .unwrap();
+    (built, signers)
+}
+
+#[test]
+fn ancestry_primary_and_recovery_signatures_pass_recovered_witness_verification() {
+    let secp = secp256k1::Secp256k1::new();
+    for recovery in [false, true] {
+        let (built, signers) = ancestry_fixture(recovery);
+        let signing = if recovery {
+            &signers[3..]
+        } else {
+            &signers[..2]
+        };
+        let signed = signing.iter().fold(built.psbt().clone(), |psbt, s| {
+            s.sign_psbt(psbt, &secp).unwrap()
+        });
+        let verified = finalize_ancestry_transfer(&built, &signed, &secp).unwrap();
+        assert_eq!(verified.transaction().output.len(), 1);
+        assert!(!verified.transaction().output[0]
+            .script_pubkey
+            .is_op_return());
+        assert_eq!(verified.poison_input(), built.poison_input());
+        assert_eq!(verified.claimed_prevouts(), built.claimed_prevouts());
+        assert_eq!(
+            verified.signatures_per_input(),
+            if recovery { &[1, 1] } else { &[2, 2] }
+        );
+        assert_eq!(verified.chain(), ChainId::Bitcoin);
+        assert_eq!(verified.descriptor(), built.descriptor());
+        assert_eq!(
+            verified.construction_txid(),
+            built.psbt().unsigned_tx.compute_txid()
+        );
+        assert_eq!(verified.fee(), signed.fee().unwrap());
+        assert_eq!(verified.vsize(), verified.transaction().vsize());
+        let restored = verify_ancestry_transaction(&built, verified.transaction(), &secp).unwrap();
+        assert_eq!(restored.transaction(), verified.transaction());
+        assert_eq!(restored.poison_input(), verified.poison_input());
+        assert_eq!(restored.claimed_prevouts(), verified.claimed_prevouts());
+        for index in 0..2 {
+            let mut bad = verified.transaction().clone();
+            bad.input[index].witness.clear();
+            assert!(verify_ancestry_transaction(&built, &bad, &secp).is_err());
+        }
+        let mut bad = verified.transaction().clone();
+        bad.output[0].value = Amount::from_sat(1);
+        assert!(matches!(
+            verify_ancestry_transaction(&built, &bad, &secp),
+            Err(FinalizeError::ConstructionChanged)
+        ));
+    }
+}
+
+#[test]
+fn ancestry_rejects_wrong_metadata_non_all_and_invalid_or_insufficient_signatures() {
+    let (built, signers) = ancestry_fixture(false);
+    let secp = secp256k1::Secp256k1::new();
+    let partial = signers[0].sign_psbt(built.psbt().clone(), &secp).unwrap();
+    assert!(matches!(
+        finalize_ancestry_transfer(&built, &partial, &secp),
+        Err(FinalizeError::Unsatisfied)
+    ));
+    let signed = signers[1].sign_psbt(partial, &secp).unwrap();
+    let mut bad = signed.clone();
+    bad.inputs[0].non_witness_utxo = None;
+    assert!(matches!(
+        finalize_ancestry_transfer(&built, &bad, &secp),
+        Err(FinalizeError::ConstructionChanged)
+    ));
+    let mut bad = signed.clone();
+    bad.unsigned_tx.output[0].value = Amount::from_sat(1);
+    assert!(matches!(
+        finalize_ancestry_transfer(&built, &bad, &secp),
+        Err(FinalizeError::ConstructionChanged)
+    ));
+    for flag in [2, 3, 0x21, 0x81] {
+        let mut bad = signed.clone();
+        bad.inputs[0].sighash_type = Some(bitcoin::psbt::PsbtSighashType::from_u32(flag));
+        assert!(matches!(
+            finalize_ancestry_transfer(&built, &bad, &secp),
+            Err(FinalizeError::UnsupportedSighash)
+        ));
+    }
+    let mut bad = signed;
+    bad.inputs[0]
+        .partial_sigs
+        .values_mut()
+        .next()
+        .unwrap()
+        .signature = secp.sign_ecdsa(
+        &secp256k1::Message::from_digest([0; 32]),
+        &secp256k1::SecretKey::from_slice(&[1; 32]).unwrap(),
+    );
+    assert!(matches!(
+        finalize_ancestry_transfer(&built, &bad, &secp),
+        Err(FinalizeError::InvalidSignature { input: 0 })
+    ));
+}

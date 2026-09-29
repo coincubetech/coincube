@@ -1,6 +1,7 @@
 //! Scan-only public descriptor discovery. No import, persistence or spend permission.
 //! A history gap bounds discovery; it cannot prove that later addresses are unused.
 mod http;
+pub mod known;
 #[cfg(test)]
 mod tests;
 

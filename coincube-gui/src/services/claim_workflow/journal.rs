@@ -11,7 +11,18 @@ use std::{
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
-const MAX_BYTES: u64 = 1024 * 1024;
+const LEGACY_MAX_BYTES: u64 = 1024 * 1024;
+// One bounded hex ancestry record, atomically replaced with its intent. No
+// second file can get out of sync with the selected input or transaction.
+const MAX_BYTES: u64 =
+    LEGACY_MAX_BYTES + 2 * coincube_core::claim_ancestry::retained::MAX_ENCODED_BYTES as u64 + 1024;
+fn intent_limit(intent: &Intent) -> u64 {
+    if intent.version == 7 && intent.ancestry.is_some() {
+        MAX_BYTES
+    } else {
+        LEGACY_MAX_BYTES
+    }
+}
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 /// Stable lock inode is never renamed or unlinked. All cooperating owners hold
@@ -152,7 +163,14 @@ impl Journal {
     pub(super) fn load(&self) -> Result<Option<Intent>, Error> {
         self.snapshot
             .as_ref()
-            .map(|bytes| serde_json::from_slice(bytes).map_err(|_| Error::InvalidJournal))
+            .map(|bytes| {
+                let intent: Intent =
+                    serde_json::from_slice(bytes).map_err(|_| Error::InvalidJournal)?;
+                if bytes.len() as u64 > intent_limit(&intent) {
+                    return Err(Error::InvalidJournal);
+                }
+                Ok(intent)
+            })
             .transpose()
     }
     pub(super) fn store(&mut self, intent: &Intent) -> Result<(), Error> {
@@ -172,7 +190,7 @@ impl Journal {
             return Err(Error::Conflict);
         }
         let bytes = serde_json::to_vec(intent).map_err(|_| Error::InvalidJournal)?;
-        if bytes.len() as u64 > MAX_BYTES {
+        if bytes.len() as u64 > intent_limit(intent) {
             return Err(Error::InvalidJournal);
         }
         let path = self.directory.join(format!(
