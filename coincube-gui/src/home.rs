@@ -6511,6 +6511,7 @@ mod tests {
 
     #[test]
     fn split_without_a_target_launches_the_ordinary_btcb2_installer() {
+        let _guard = crate::app::session::test_guard();
         let datadir = fresh_datadir();
         let mut home = Home::new_for_chain(datadir.clone(), Some(ChainId::Bitcoin)).0;
         enable_btcb2(&mut home);
@@ -6613,6 +6614,7 @@ mod tests {
 
     #[test]
     fn split_with_an_existing_target_opens_without_installing() {
+        let _guard = crate::app::session::test_guard();
         let datadir = fresh_datadir();
         let mut home = Home::new_for_chain(datadir.clone(), Some(ChainId::Bitcoin)).0;
         enable_btcb2(&mut home);
@@ -6628,6 +6630,7 @@ mod tests {
 
     #[test]
     fn post_install_split_resume_waits_for_and_rechecks_the_server_gate() {
+        let _guard = crate::app::session::test_guard();
         let datadir = fresh_datadir();
         let mut home = Home::new_for_chain(datadir.clone(), Some(ChainId::BitcoinBlake2b)).0;
         enable_btcb2(&mut home);
@@ -6654,6 +6657,7 @@ mod tests {
 
     #[test]
     fn post_install_split_resume_clears_when_the_server_gate_is_closed() {
+        let _guard = crate::app::session::test_guard();
         let datadir = fresh_datadir();
         let mut home = Home::new_for_chain(datadir.clone(), Some(ChainId::BitcoinBlake2b)).0;
         enable_btcb2(&mut home);
@@ -6676,6 +6680,7 @@ mod tests {
 
     #[test]
     fn rejected_stored_session_clears_post_install_split_resume() {
+        let _guard = crate::app::session::test_guard();
         use crate::app::view::ConnectAccountMessage;
 
         let datadir = fresh_datadir();
@@ -7305,6 +7310,7 @@ mod tests {
 
     #[test]
     fn logout_closes_the_account_scoped_split_surface() {
+        let _guard = crate::app::session::test_guard();
         use crate::app::view::ConnectAccountMessage;
 
         let mut home = signed_in_home();
