@@ -442,7 +442,7 @@ fn inventory_error_copy(error: InventoryError) -> String {
         }
         InventoryError::Stale => "The scan was cancelled.".to_string(),
         InventoryError::ForkHeightUnknown => "Connect did not report the active Bitcoin Blake2b fork height, so pre-fork coins cannot be identified. No balance conclusion was made.".to_string(),
-        InventoryError::PrevoutMismatch(_) | InventoryError::Inconsistent(_) => "The two chains disagree about a pre-fork coin. The inventory was refused; no balance conclusion was made.".to_string(),
+        InventoryError::PrevoutMismatch(_) | InventoryError::Inconsistent(_) => "The two chains disagree about a pre-fork coin. The inventory was refused. No balance conclusion was made.".to_string(),
         InventoryError::Coverage(..) => "A coin lies beyond the other chain's bounded scan, so its status there is unknown. No balance conclusion was made.".to_string(),
         InventoryError::WrongChain => "This scan request is not supported.".to_string(),
     }
@@ -1194,6 +1194,35 @@ mod tests {
         for error in [ScanError::UnsupportedChain, ScanError::InvalidLimits] {
             assert!(scan_error_copy(error).contains("not supported"));
         }
+
+        // A2: every two-chain inventory refusal keeps the same semantics and
+        // names the chain whose scan was incomplete.
+        let outpoint = coincube_core::miniscript::bitcoin::OutPoint::null();
+        for error in [
+            InventoryError::ForkHeightUnknown,
+            InventoryError::PrevoutMismatch(outpoint),
+            InventoryError::Inconsistent(outpoint),
+            InventoryError::Coverage(ChainId::Bitcoin, outpoint),
+        ] {
+            let copy = inventory_error_copy(error);
+            assert!(
+                copy.contains("No balance conclusion"),
+                "{:?}: {}",
+                error,
+                copy
+            );
+        }
+        for (chain, prefix) in [
+            (ChainId::Bitcoin, "Bitcoin chain:"),
+            (ChainId::BitcoinBlake2b, "Bitcoin Blake2b chain:"),
+        ] {
+            let copy = inventory_error_copy(InventoryError::Scan(chain, ScanError::Deadline));
+            assert!(
+                copy.starts_with(prefix) && copy.contains("bounded"),
+                "{}",
+                copy
+            );
+        }
     }
 
     /// Completed, authenticated (empty) evidence for `generation`.
@@ -1203,9 +1232,9 @@ mod tests {
             generation,
             BlockHash::from_byte_array([9; 32]),
             Vec::new(),
-        );
-        let external = ScanDescriptor::parse(Branch::External, FIXED_DESCRIPTOR).unwrap();
-        Arc::new(ScanEvidence::new(report, external, None).unwrap())
+        )
+        .with_fork_height(Some(100));
+        Arc::new(evidence(report, Vec::new()))
     }
 
     #[test]
