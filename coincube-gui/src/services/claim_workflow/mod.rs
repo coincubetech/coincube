@@ -11,6 +11,11 @@ use coincube_core::{
     },
 };
 use journal::Journal;
+
+/// Establish platform-specific journal privacy before constructing a controller.
+pub fn prepare_directory(directory: &std::path::Path) -> Result<(), Error> {
+    journal::prepare_directory(directory)
+}
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -691,5 +696,5 @@ impl Controller {
         Ok(())
     }
 }
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(unix, windows)))]
 mod tests;

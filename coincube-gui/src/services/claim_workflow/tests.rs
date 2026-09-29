@@ -19,12 +19,7 @@ impl Temp {
             std::process::id(),
             controller_id().unwrap()
         ));
-        fs::create_dir(&p).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&p, fs::Permissions::from_mode(0o700)).unwrap();
-        }
+        prepare_directory(&p).unwrap();
         Self(p)
     }
 }
@@ -315,6 +310,7 @@ fn lock_conflicts_identity_mismatch_and_private_permissions_fail_closed() {
         ));
     }
 }
+#[cfg(unix)]
 #[test]
 fn failed_atomic_write_poisoned_owner_cannot_reuse_old_observations() {
     let temp = Temp::new();
@@ -482,6 +478,7 @@ fn corrupted_unsigned_bytes_are_not_restored_as_valid_intent() {
         Err(Error::InvalidPlan)
     ));
 }
+#[cfg(unix)]
 #[test]
 fn journal_symlink_is_rejected_without_touching_target() {
     use std::os::unix::fs::symlink;
@@ -809,4 +806,152 @@ fn fork_plan_requires_fresh_depth_and_survives_restart_without_authority() {
         c.prepare_fork_sweep(&context(), &sweep, policy(), 10000),
         Err(Error::Conflict)
     ));
+}
+
+#[cfg(unix)]
+#[test]
+fn preparing_existing_journal_directory_never_follows_symlinks_or_repairs_permissions() {
+    use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
+    let parent = Temp::new();
+    let target = parent.0.join("target");
+    fs::create_dir(&target).unwrap();
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
+    let link = parent.0.join("claim-link");
+    symlink(&target, &link).unwrap();
+    assert!(matches!(
+        prepare_directory(&link),
+        Err(Error::InvalidJournal)
+    ));
+    assert_eq!(fs::metadata(&target).unwrap().mode() & 0o777, 0o755);
+    assert!(matches!(
+        prepare_directory(&target),
+        Err(Error::InvalidJournal)
+    ));
+    assert_eq!(fs::metadata(&target).unwrap().mode() & 0o777, 0o755);
+    let private = parent.0.join("new-wallet").join("claim");
+    prepare_directory(&private).unwrap();
+    assert_eq!(fs::metadata(&private).unwrap().mode() & 0o777, 0o700);
+    prepare_directory(&private).unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_journal_pins_directory_and_rejects_hard_links() {
+    let temp = Temp::new();
+    let c = controller(&temp);
+    assert!(fs::rename(&temp.0, temp.0.with_extension("moved")).is_err());
+    drop(c);
+    let alias = temp.0.join("alias.json");
+    fs::hard_link(temp.0.join("intent.json"), &alias).unwrap();
+    assert!(Controller::reopen(&temp.0, &identity(), context()).is_err());
+    fs::remove_file(alias).unwrap();
+    assert!(Controller::reopen(&temp.0, &identity(), context()).is_ok());
+}
+
+#[test]
+fn journal_crash_child() {
+    let Some(directory) = std::env::var_os("COINCUBE_TEST_CLAIM_CRASH_DIRECTORY") else {
+        return;
+    };
+    // Exercise storage directly; a reopened controller correctly has no
+    // construction authority, and this fixture must not bypass that guard.
+    let mut journal = Journal::open(std::path::Path::new(&directory)).unwrap();
+    let mut intent = journal.load().unwrap().unwrap();
+    intent.phase = Phase::BroadcastUncertain;
+    intent.signed_txid = Some(signed().compute_txid());
+    journal.store(&intent).unwrap();
+    panic!("child did not stop at the selected storage boundary");
+}
+
+#[test]
+fn process_crash_releases_lock_and_recovers_only_complete_intents() {
+    use std::{
+        io::{BufRead, BufReader},
+        process::{Command, Stdio},
+        sync::mpsc,
+        time::Duration,
+    };
+    for stage in ["created", "flushed", "replaced"] {
+        let temp = Temp::new();
+        drop(controller(&temp));
+        let directory = fs::canonicalize(&temp.0).unwrap();
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "services::claim_workflow::tests::journal_crash_child",
+                "--nocapture",
+            ])
+            .env("COINCUBE_TEST_CLAIM_CRASH_DIRECTORY", &directory)
+            .env("COINCUBE_TEST_CLAIM_CRASH_STAGE", stage)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let (sender, receiver) = mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                if line.unwrap().contains("CLAIM_WRITE_BOUNDARY_REACHED") {
+                    let _ = sender.send(());
+                    break;
+                }
+            }
+        });
+        let reached = receiver.recv_timeout(Duration::from_secs(30));
+        // Kill before assertions so a broken fixture never leaves a paused child.
+        let _ = child.kill();
+        let status = child.wait().unwrap();
+        reader.join().unwrap();
+        assert!(reached.is_ok(), "child did not reach {}: {}", stage, status);
+        assert!(!status.success());
+        let mut recovered = Controller::reopen(&directory, &identity(), context()).unwrap();
+        assert_eq!(recovered.status(), Status::Unchecked);
+        assert_eq!(
+            recovered.phase(),
+            if stage == "replaced" {
+                Phase::BroadcastUncertain
+            } else {
+                Phase::Intent
+            }
+        );
+        assert!(recovered
+            .record_broadcast_intent(&context(), &signed(), policy(), 10000)
+            .is_err());
+        // Temporary files are never mistaken for a committed intent, nor does
+        // a recovered record restore signing/submission authority.
+        if stage == "replaced" {
+            assert_eq!(recovered.signed_txid(), Some(signed().compute_txid()));
+        }
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_replacement_failure_poisons_owner_without_changing_saved_intent() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let temp = Temp::new();
+    let mut c = controller(&temp);
+    let path = temp.0.join("intent.json");
+    refresh(&mut c, observation(false), 10000);
+    let before = fs::read(&path).unwrap();
+    let blocker = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(3)
+        .open(&path)
+        .unwrap();
+    assert!(matches!(
+        c.record_broadcast_intent(&context(), &signed(), policy(), 10000),
+        Err(Error::Io(_))
+    ));
+    assert_eq!(c.status(), Status::Unchecked);
+    drop(blocker);
+    assert_eq!(fs::read(&path).unwrap(), before);
+    assert!(matches!(
+        c.journal.store(&c.intent.clone()),
+        Err(Error::InvalidJournal)
+    ));
+    drop(c);
+    let recovered = Controller::reopen(&temp.0, &identity(), context()).unwrap();
+    assert_eq!(recovered.phase(), Phase::Intent);
+    assert_eq!(recovered.status(), Status::Unchecked);
 }

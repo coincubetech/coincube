@@ -1186,7 +1186,7 @@ mod flow {
         )
     }
 
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     #[tokio::test]
     async fn unsupported_journal_platform_refuses_before_review_or_submission() {
         let (mut f, ready) = reach_signed().await;
@@ -1222,7 +1222,7 @@ mod flow {
         let _ = std::fs::remove_dir_all(&f.root);
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn two_of_three_signs_through_psbt_state_then_finalizes_and_journals() {
         let (mut f, ready) = reach_signed_with_multisig(true).await;
@@ -1298,7 +1298,7 @@ mod flow {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn restart_intent_recovers_exact_plan_for_resigning_without_new_reservation() {
         let mut f = reach_review().await;
@@ -1361,7 +1361,7 @@ mod flow {
         let _ = std::fs::remove_dir_all(f.root);
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn restart_legacy_index_fallback_and_tampered_hint_are_checked() {
         let mut f = reach_review().await;
@@ -1392,7 +1392,7 @@ mod flow {
         assert_eq!(submissions(&f), 0);
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn restart_result_after_revocation_cannot_rebind_or_enable_build() {
         let mut f = reach_review().await;
@@ -1423,7 +1423,7 @@ mod flow {
         let _ = std::fs::remove_dir_all(f.root);
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn restart_recorded_submission_tracks_verified_witness_without_resubmitting() {
         let mut f = reach_review().await;
@@ -1446,7 +1446,7 @@ mod flow {
         let _ = std::fs::remove_dir_all(f.root);
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn restart_missing_witness_is_track_only_and_wrong_account_is_refused() {
         let mut f = reach_review().await;
@@ -1477,7 +1477,7 @@ mod flow {
         let _ = std::fs::remove_dir_all(f.root);
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn confirmed_handoff_releases_journal_and_does_not_reacquire_in_background() {
         use crate::app::settings::{update_settings_file, CubeSettings, VaultIdentity};
@@ -1562,7 +1562,7 @@ mod flow {
         assert_eq!(submissions(&f), 1);
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn fork_loader_preserves_pairing_and_requires_fresh_depth_before_signing() {
         use crate::app::settings::{update_settings_file, CubeSettings, VaultIdentity};
@@ -1899,7 +1899,7 @@ mod flow {
         seen
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn step_one_runs_from_preconditions_to_tracking_through_the_panel() {
         // `sender` stays alive: closing the generation channel is itself a
@@ -1984,7 +1984,7 @@ mod flow {
     /// review at once: the coordinator is revoked synchronously, a
     /// confirmation has nothing to act on, the daemon is never asked to
     /// submit, and the journal stays at intent. With and without the bump.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn a_sign_out_between_review_and_confirm_refuses_the_submission() {
         for bump_generation in [false, true] {
@@ -2018,7 +2018,7 @@ mod flow {
     /// generation: it is refused before anything is journaled, the
     /// construction and its signatures come back to the Sign stage, and a
     /// confirmation has nothing to submit. Signing in again records it.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn reviewer_logout_before_finalize_must_not_reauthorize_submission() {
         let (mut f, ready) = reach_signed().await;
@@ -2091,7 +2091,7 @@ mod flow {
     /// The session is installed revoked — the journal is the record — with
     /// no review to confirm and none prepared; a confirmation, and a "review
     /// again" without a session, submit nothing.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn a_sign_out_after_the_intent_is_journaled_installs_a_revoked_review() {
         let (mut f, ready) = reach_signed().await;
@@ -2133,7 +2133,7 @@ mod flow {
     /// digest is account and provider, not generation), the construction is
     /// re-validated, the signatures re-verified — and the claim goes on to
     /// a fresh review and a submission, exactly once.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn signing_in_again_with_the_same_account_rebinds_and_submits() {
         let mut f = reach_review().await;
@@ -2174,7 +2174,7 @@ mod flow {
     /// the re-bind is refused by the journal's identity check, the session
     /// stays unbound and the intent untouched; the right account then
     /// continues.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn signing_in_with_another_account_is_refused() {
         let mut f = reach_review().await;
@@ -2233,7 +2233,7 @@ mod flow {
     /// Finding 2's Some→Some half, at the panel: a session replaced by
     /// another credential revokes the coordinator and withdraws the review;
     /// the same session again replaces nothing.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn a_replaced_session_revokes_and_withdraws_the_review() {
         let mut f = reach_review().await;
@@ -2264,7 +2264,7 @@ mod flow {
     /// Finding 5 at Track: a sign-out after the submission, then the same
     /// account back — re-bound and reconciled, never resubmitted (the
     /// coordinator refuses a review once a submission is recorded).
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn signing_in_again_at_tracking_reconciles_without_resubmitting() {
         let mut f = reach_review().await;
@@ -2315,7 +2315,7 @@ mod flow {
 
     /// A cancel while the finalise task holds the construction is refused:
     /// the result decides whether the attempt was journaled.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn cancel_is_refused_while_finalising() {
         let (mut f, ready) = reach_signed().await;
@@ -2364,7 +2364,7 @@ mod flow {
     /// Control for the test above: with the session intact the same
     /// confirmation submits (the full flow proves it), and `revoke` alone —
     /// what Cube lock, tab close and `Drop` call — is enough to refuse.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn revoke_alone_refuses_the_submission() {
         let Flow {
@@ -2402,7 +2402,7 @@ mod flow {
     /// way (Gandalf's reviewer probe: this test had only traversed them).
     /// Not a pixel test — a guard against a view that panics on a state the
     /// panel can reach.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn every_stage_renders() {
         let menu = Menu::Vault(crate::app::menu::VaultSubMenu::Claim);
@@ -2538,7 +2538,7 @@ mod flow {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn reviewer_global_logout_then_refresh_must_require_new_signin() {
         // App setup may wait on the suite's session guard. Observe only after it.
@@ -2579,7 +2579,7 @@ mod flow {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn reviewer_dead_bearer_rebind_refuses_before_submit() {
         let mut f = reach_review().await;
@@ -2620,7 +2620,7 @@ mod flow {
         let _ = std::fs::remove_dir_all(&f.root);
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn reviewer_rebound_arriving_after_logout_stays_revoked() {
         let mut f = reach_review().await;
@@ -2648,7 +2648,7 @@ mod flow {
         let _ = std::fs::remove_dir_all(&f.root);
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn reviewer_backend_switch_inflight_must_not_rebind_old_daemon() {
         let app = reviewer_blank_app();
@@ -2724,7 +2724,7 @@ mod flow {
     /// established in this tab (`SessionLoaded` through its own Connect
     /// panel) lifts the hold; the next account message then re-binds, and
     /// the claim submits exactly once.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn a_global_sign_out_holds_the_claim_until_a_sign_in_in_this_tab() {
         let app = reviewer_blank_app();
@@ -2877,7 +2877,7 @@ mod flow {
     /// so and binds nothing); `DaemonRestarted(Started)` installs the new
     /// daemon and the claim re-binds to it — a fresh review, one submission
     /// through the installed daemon, none through the superseded one.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn a_settled_backend_switch_rebinds_to_the_installed_daemon() {
         let app = reviewer_blank_app();
@@ -2941,7 +2941,7 @@ mod flow {
     /// panicked switch leaves it held with the unknown-state copy and no
     /// re-bind to the daemon the App keeps. Refresh binds nothing in the
     /// held states; a confirmation submits nothing.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn failed_and_panicked_backend_switches_hold_or_recover_truthfully() {
         use crate::app::{error::Error, DaemonRestart};
@@ -3056,7 +3056,7 @@ mod flow {
         app.cache.connect_authenticated = true;
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn reviewer_sibling_setsession_must_not_require_spurious_logout() {
         let first = reviewer_blank_app();
@@ -3096,7 +3096,7 @@ mod flow {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn reviewer_originating_setsession_lifts_hold_after_gui_broadcast() {
         let first = reviewer_blank_app();
@@ -3149,7 +3149,7 @@ mod flow {
         let _ = std::fs::remove_dir_all(&f.root);
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn reviewer_late_ready_after_switch_settlement_rebinds_only_installed_daemon() {
         let blank = reviewer_blank_app();
@@ -3198,7 +3198,7 @@ mod flow {
         let _ = std::fs::remove_dir_all(&f.root);
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn reviewer_panicked_switch_can_be_retried_through_settings_message() {
         let blank = reviewer_blank_app();
@@ -3227,7 +3227,7 @@ mod flow {
         let _ = std::fs::remove_dir_all(&f.root);
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn reviewer_sessionloaded_queued_before_logout_must_not_lift_hold() {
         let blank = reviewer_blank_app();
@@ -3297,7 +3297,7 @@ mod flow {
     /// A sibling same-account `SetSession` after a log-out leaves the hold
     /// in place: nothing this tab does re-binds, zero submissions, the
     /// sign-out copy stays. (P2: a sibling sign-in never lifts a hold.)
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn a_sibling_same_account_sign_in_after_a_log_out_leaves_the_hold() {
         let first = reviewer_blank_app();
@@ -3335,7 +3335,7 @@ mod flow {
     /// A sibling sign-in of another Connect account holds the claim here,
     /// says why, and binds nothing; a real sign-in in this tab afterwards
     /// re-binds and submits once. (P2: another account, and the P1 lift.)
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn a_sibling_sign_in_of_another_account_holds_until_this_tab_signs_in() {
         let first = reviewer_blank_app();
@@ -3451,7 +3451,7 @@ mod flow {
         drive_claim_messages(app, gate).await;
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn round4_old_sessionloaded_cannot_relabel_a_new_other_account_token() {
         let blank = reviewer_blank_app();
@@ -3545,7 +3545,7 @@ mod flow {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn round4_late_reviewed_after_logout_must_preserve_hold_copy() {
         let blank = reviewer_blank_app();
@@ -3599,7 +3599,7 @@ mod flow {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn round4_obsolete_refresh_failure_must_not_log_out_new_session() {
         let first = reviewer_blank_app();
@@ -3653,7 +3653,7 @@ mod flow {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn round4_current_refresh_auth_failure_still_logs_out() {
         let first = reviewer_blank_app();
@@ -3690,7 +3690,7 @@ mod flow {
         let _ = std::fs::remove_dir_all(&f.root);
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn round4_real_refresh_and_otp_capture_spawn_epoch_across_two_holds() {
         use crate::app::state::connect::account::ConnectFlowStep;
@@ -3876,7 +3876,7 @@ mod flow {
     // log-out, arriving after both tabs freshly signed in as another
     // account, is dropped by its own panel — and, since round 6, never
     // broadcast as a sign-in to the sibling either.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn round5_stale_setsession_must_not_broadcast_a_discarded_account() {
         let first = reviewer_blank_app();
@@ -3964,7 +3964,7 @@ mod flow {
             "GUI broadcast a stale SetSession before its panel dropped it"
         );
     }
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn round7_late_submitted_refusal_preserves_signout_instruction() {
         let blank = reviewer_blank_app();
@@ -3999,7 +3999,7 @@ mod flow {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn round7_late_submitted_success_preserves_signout_instruction() {
         let blank = reviewer_blank_app();
@@ -4051,7 +4051,7 @@ mod flow {
             "late Submitted success erased the sign-in instruction"
         );
     }
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn late_submitted_after_revocation_preserves_hold_with_connect_present() {
         for hold in [Some(SIGNED_IN_ELSEWHERE), None] {
