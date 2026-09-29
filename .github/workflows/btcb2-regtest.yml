@@ -159,7 +159,7 @@ jobs:
           # Modules are named explicitly: a bare `pytest tests/`
           # here would also pull in the functional suite, which this job
           # does not set up.
-          pytest tests/test_btcb2_harness.py tests/test_btcb2_b42_matrices.py tests/test_btcb2_claim_consensus.py tests/test_btcb2_claim_gui.py -vvv --junitxml="$TEST_DIR/btcb2.xml" -o junit_family=legacy
+          pytest tests/test_btcb2_harness.py tests/test_btcb2_b42_matrices.py tests/test_btcb2_claim_consensus.py tests/test_btcb2_claim_ancestry_consensus.py tests/test_btcb2_claim_gui.py -vvv --junitxml="$TEST_DIR/btcb2.xml" -o junit_family=legacy
 
       - name: Collect logs from failed tests
         if: failure()

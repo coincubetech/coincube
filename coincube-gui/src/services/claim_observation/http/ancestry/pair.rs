@@ -157,6 +157,9 @@ impl HttpObservationSource {
 }
 
 #[cfg(test)]
+mod binding_tests;
+
+#[cfg(test)]
 mod tests {
     use super::super::super::tests::{ancestry_fixture, source};
     use super::*;
@@ -314,7 +317,7 @@ mod tests {
                 "observation":{"tip_height":tip_height,"fork":{"height":FIRST_FORK_HEIGHT - if case == "activation" {1} else {0},"active":true},
                     "rdts":{"state":"flagday","flagday":{"height":FIRST_FORK_HEIGHT,"expiry_time":20000,"active":true}}}
             }}});
-            let anchor = server.mock(|when, then| {
+            let mut anchor = server.mock(|when, then| {
                 when.method(GET)
                     .path("/api/v1/connect/networks/bitcoin-blake2b/anchor")
                     .header("authorization", "Bearer synthetic-observation-token");
@@ -411,6 +414,20 @@ mod tests {
                             .await
                             .unwrap()
                             .unwrap();
+                        let preferred = source
+                            .discover_preferred_ancestry(
+                                &[OutPoint::new(old_id, 0), selected],
+                                policy,
+                            )
+                            .await
+                            .unwrap()
+                            .unwrap();
+                        assert_eq!(preferred.pair().selected(), selected);
+                        assert!(source
+                            .discover_preferred_ancestry(&[OutPoint::new(old_id, 0)], policy)
+                            .await
+                            .unwrap()
+                            .is_none());
                         assert_eq!(discovered.pair().selected(), selected);
                         assert_eq!(discovered.links().len(), 2);
                         assert_eq!(discovered.links()[0].parent_input, Some(1));
@@ -428,6 +445,268 @@ mod tests {
                         let renewed = source.requalify_ancestry(&restored, policy).await.unwrap();
                         assert_eq!(renewed.pair().bitcoin().txid, bitcoin.compute_txid());
                         assert_eq!(renewed.generation(), 4);
+                        let plan = super::binding_tests::plan(&restored);
+                        let mut step_reads = Vec::new();
+                        for chain in [ChainId::Bitcoin, ChainId::BitcoinBlake2b] {
+                            step_reads.push(server.mock(|when, then| {
+                                when.method(GET).path(format!(
+                                    "/api/v1/esplora/{}/tx/{}",
+                                    HttpObservationSource::prefix(chain).unwrap(),
+                                    plan.step1.compute_txid()
+                                ));
+                                then.status(404)
+                                    .header("x-cache", "BYPASS")
+                                    .header("cache-control", "no-store")
+                                    .header("x-coincube-observation", "fresh");
+                            }));
+                        }
+                        let combined = source
+                            .collect_ancestry(&restored, &plan, policy, MAX_COLLECTION_TIME)
+                            .await
+                            .unwrap();
+                        assert_eq!(
+                            combined.assessment().assessment,
+                            Assessment::InputProofUnsupported
+                        );
+                        assert_eq!(
+                            combined.assessment().observations.bitcoin_transaction,
+                            TransactionObservation::Absent
+                        );
+                        assert_eq!(combined.ancestry().pair().selected(), selected);
+                        assert_eq!(
+                            combined.observed_at(),
+                            combined.assessment().observations.bitcoin.observed_at
+                        );
+                        assert_eq!(
+                            combined.observed_at(),
+                            combined.assessment().observations.fork.observed_at
+                        );
+                        for mock in &step_reads {
+                            mock.assert_hits(2);
+                        }
+                        let sweep = Txid::from_str(&"55".repeat(32)).unwrap();
+                        let sweep_path =
+                            format!("/api/v1/esplora/bitcoin-blake2b/mainnet/tx/{sweep}");
+                        let sweep_read = fresh_mock(
+                            &server,
+                            &sweep_path,
+                            json!({"txid":sweep,"status":{"confirmed":true,
+                                "block_height":root_height,"block_hash":fork_block}})
+                            .to_string(),
+                        );
+                        let roots_before = root_status.hits();
+                        let checked = source
+                            .collect_ancestry_sweep(
+                                &restored,
+                                &plan,
+                                sweep,
+                                policy,
+                                MAX_COLLECTION_TIME,
+                            )
+                            .await
+                            .unwrap();
+                        root_status.assert_hits(roots_before + 2);
+                        sweep_read.assert_hits(2);
+                        assert_eq!(checked.ancestry().ancestry().pair().selected(), selected);
+                        assert_eq!(
+                            checked.sweep().assessment().assessment,
+                            Assessment::InputProofUnsupported
+                        );
+                        assert!(
+                            matches!(checked.sweep().transaction(), TransactionObservation::Confirmed { txid, .. } if txid == sweep)
+                        );
+                        assert!(checked.sweep().observed_at() <= checked.ancestry().observed_at());
+                        assert_eq!(
+                            checked.sweep().observed_at(),
+                            checked.sweep().assessment().observations.fork.observed_at
+                        );
+                        // Change only RDTS metadata after the first proof pass.
+                        // Both separate ancestry collections remain valid, but
+                        // they must not be combined across different anchors.
+                        sweep_read.delete_async().await;
+                        let delayed_sweep = server.mock(|when, then| {
+                            when.method(GET).path(&sweep_path);
+                            then.status(200)
+                                .delay(Duration::from_millis(100))
+                                .header("x-cache", "BYPASS")
+                                .header("cache-control", "no-store")
+                                .header("x-coincube-observation", "fresh")
+                                .json_body(json!({"txid":sweep,"status":{"confirmed":true,
+                                    "block_height":root_height,"block_hash":fork_block}}));
+                        });
+                        let collection = source.collect_ancestry_sweep(
+                            &restored,
+                            &plan,
+                            sweep,
+                            policy,
+                            MAX_COLLECTION_TIME,
+                        );
+                        let disrupt = async {
+                            tokio::time::timeout(Duration::from_secs(2), async {
+                                while delayed_sweep.hits_async().await == 0 {
+                                    tokio::task::yield_now().await;
+                                }
+                            })
+                            .await
+                            .unwrap();
+                            anchor.delete_async().await;
+                            let mut changed = body.clone();
+                            changed["data"]["anchor"]["observation"]["rdts"]["flagday"]
+                                ["expiry_time"] = json!(21000);
+                            server.mock(|when, then| {
+                                when.method(GET)
+                                    .path("/api/v1/connect/networks/bitcoin-blake2b/anchor");
+                                then.status(200).json_body(changed);
+                            })
+                        };
+                        let (result, changed_anchor) = tokio::join!(collection, disrupt);
+                        assert!(matches!(
+                            result,
+                            Err(Failure {
+                                stage: Stage::ForkTransaction,
+                                kind: FailureKind::Changed
+                            })
+                        ));
+                        changed_anchor.delete_async().await;
+                        anchor = server.mock(|when, then| {
+                            when.method(GET)
+                                .path("/api/v1/connect/networks/bitcoin-blake2b/anchor")
+                                .header("authorization", "Bearer synthetic-observation-token");
+                            then.status(200).json_body(body.clone());
+                        });
+                        delayed_sweep.delete_async().await;
+                        // A sweep reported in a noncanonical block cannot be
+                        // combined with an otherwise successful ancestry proof.
+                        fresh_mock(
+                            &server,
+                            &sweep_path,
+                            json!({"txid":sweep,"status":{"confirmed":true,
+                                "block_height":root_height,"block_hash":"66".repeat(32)}})
+                            .to_string(),
+                        );
+                        assert!(matches!(
+                            source
+                                .collect_ancestry_sweep(
+                                    &restored,
+                                    &plan,
+                                    sweep,
+                                    policy,
+                                    MAX_COLLECTION_TIME
+                                )
+                                .await,
+                            Err(Failure {
+                                stage: Stage::ForkIndexer,
+                                kind: FailureKind::Changed
+                            })
+                        ));
+                        let before = root_status.hits();
+                        assert!(matches!(
+                            source
+                                .collect_ancestry_sweep(
+                                    &restored,
+                                    &plan,
+                                    plan.step1.compute_txid(),
+                                    policy,
+                                    MAX_COLLECTION_TIME
+                                )
+                                .await,
+                            Err(Failure {
+                                stage: Stage::Plan,
+                                kind: FailureKind::InvalidPlan
+                            })
+                        ));
+                        root_status.assert_hits(before);
+                        let mut invalid = plan.clone();
+                        invalid.claimed_prevouts.push(selected);
+                        assert!(matches!(
+                            source
+                                .collect_ancestry(&restored, &invalid, policy, MAX_COLLECTION_TIME)
+                                .await,
+                            Err(Failure {
+                                stage: Stage::Plan,
+                                kind: FailureKind::InvalidPlan
+                            })
+                        ));
+                        assert!(matches!(
+                            source
+                                .collect_ancestry(&restored, &plan, policy, Duration::ZERO)
+                                .await,
+                            Err(Failure {
+                                stage: Stage::Plan,
+                                kind: FailureKind::InvalidPlan
+                            })
+                        ));
+                        root_status.assert_hits(before);
+                        // Change only fork activation metadata between the two
+                        // passes, keeping both tips, MTP and RDTS unchanged.
+                        anchor.delete_async().await;
+                        let slow_anchor = server.mock(|when, then| {
+                            when.method(GET)
+                                .path("/api/v1/connect/networks/bitcoin-blake2b/anchor");
+                            then.status(200)
+                                .delay(Duration::from_millis(50))
+                                .json_body(body.clone());
+                        });
+                        let change_anchor = async {
+                            tokio::time::timeout(Duration::from_secs(3), async {
+                                while slow_anchor.hits_async().await < 2 {
+                                    tokio::task::yield_now().await;
+                                }
+                            })
+                            .await
+                            .unwrap();
+                            slow_anchor.delete_async().await;
+                            let mut changed = body.clone();
+                            changed["data"]["anchor"]["observation"]["fork"]["height"] =
+                                json!(FIRST_FORK_HEIGHT + 1);
+                            server.mock(|when, then| {
+                                when.method(GET)
+                                    .path("/api/v1/connect/networks/bitcoin-blake2b/anchor");
+                                then.status(200).json_body(changed);
+                            })
+                        };
+                        let (result, changed_anchor) = tokio::join!(
+                            source.collect_ancestry(&restored, &plan, policy, MAX_COLLECTION_TIME),
+                            change_anchor
+                        );
+                        assert!(matches!(
+                            result,
+                            Err(Failure {
+                                stage: Stage::Preflight,
+                                kind: FailureKind::Changed
+                            })
+                        ));
+                        changed_anchor.assert_hits(2);
+                        changed_anchor.delete_async().await;
+                        server.mock(|when, then| {
+                            when.method(GET)
+                                .path("/api/v1/connect/networks/bitcoin-blake2b/anchor");
+                            then.status(200).json_body(body.clone());
+                        });
+                        // A delayed transaction read happens only after ancestry
+                        // requalification. The one outer budget includes both phases.
+                        step_reads[0].delete_async().await;
+                        let delayed = server.mock(|when, then| {
+                            when.method(GET).path(format!(
+                                "/api/v1/esplora/bitcoin/mainnet/tx/{}",
+                                plan.step1.compute_txid()
+                            ));
+                            then.status(404)
+                                .delay(Duration::from_secs(2))
+                                .header("x-cache", "BYPASS")
+                                .header("cache-control", "no-store")
+                                .header("x-coincube-observation", "fresh");
+                        });
+                        assert!(matches!(
+                            source
+                                .collect_ancestry(&restored, &plan, policy, Duration::from_secs(1))
+                                .await,
+                            Err(Failure {
+                                kind: FailureKind::Deadline,
+                                ..
+                            })
+                        ));
+                        delayed.assert_hits(1);
                         root_status.delete_async().await;
                         server.mock(|when, then| {
                             when.method(GET).path(format!(
@@ -458,6 +737,7 @@ mod tests {
                                 .txid,
                             bitcoin.compute_txid()
                         );
+                        super::binding_tests::check(&renewed, &restored, &source, sender);
                     }
 
                     for height in [FIRST_FORK_HEIGHT - 1, HISTORICAL_LIMIT, u32::MAX] {

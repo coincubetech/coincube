@@ -18,9 +18,13 @@
 //! Reopening a recorded step-one intent requires
 //! re-signing; a recorded submission is recovered only for tracking.
 
+pub mod construction;
+use construction::Construction;
 pub mod fork_load;
 pub mod fork_panel;
 pub mod pairing;
+mod preferred;
+mod signing;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -144,7 +148,7 @@ pub const NODE_UNAVAILABLE: &str = "The Vault's node isn't available right now, 
 pub const TARGET_GONE: &str =
     "The claim target is missing or ambiguous. Check the paired Bitcoin Blake2b Cube on this device, then try again.";
 /// `Production::new`'s backend refusal, in the words a user can act on.
-const BACKEND_UNSUPPORTED: &str = "This Vault must use Coincube's Bitcoin service as its node backend for a claim. Change it under Vault → Settings → Node, then come back.";
+const BACKEND_UNSUPPORTED: &str = "This Vault's node configuration doesn't support this claim. Check the wallet network and Vault → Settings → Node, then try again.";
 
 /// Where the build's fee rate comes from. The estimator asks public fee
 /// APIs; a fixed rate is for tests, which must never reach the network.
@@ -191,6 +195,9 @@ pub struct CoinSet {
     /// fork, so they may still be entangled. Counted for the copy; slice 2's
     /// input poison is where they become useful.
     pub post_fork: usize,
+    /// Candidates only: positive ancestry, ownership and current spend checks
+    /// are still required before including any of these in a Claim transfer.
+    pub ancestry_candidates: Vec<Coin>,
     pub tip_height: i32,
 }
 
@@ -240,7 +247,7 @@ pub struct ClaimSession {
     resubmission: Option<claim_coordinator::ResubmissionReview>,
     /// Kept for a re-bind: `Coordinator::resume` re-validates the
     /// construction against the journal and re-verifies the signatures.
-    built: Box<PoisonSelfTransfer>,
+    built: Box<Construction>,
     signed: Psbt,
     recovered: Option<Transaction>,
     /// The journal phase as last read through a live coordinator.
@@ -280,14 +287,12 @@ pub enum ClaimEvent {
     /// the request that started it; a reply to an older request is dropped.
     Checked(u64, Box<Checked>),
     /// The poison self-transfer was (or could not be) built.
-    Built(Result<Box<PoisonSelfTransfer>, String>),
+    Built(u64, Result<Box<Construction>, String>),
+    SigningChecked(u64, Box<Construction>, Result<Vec<Coin>, String>),
     /// The signed construction was finalised and journaled as an intent —
     /// or refused, in which case the construction comes back so the user can
     /// keep signing. The number names the finalisation attempt it answers.
-    Ready(
-        u64,
-        Result<Box<ClaimSession>, (Box<PoisonSelfTransfer>, String)>,
-    ),
+    Ready(u64, Result<Box<ClaimSession>, (Box<Construction>, String)>),
     /// A revoked session was re-bound under the current context — or could
     /// not be, in which case it comes back unbound with the reason. The
     /// number is the panel's revocation count when the re-bind was sent.
@@ -311,7 +316,7 @@ pub struct RestartedClaim {
 }
 #[derive(Debug)]
 enum RestartedState {
-    Intent(Box<PoisonSelfTransfer>),
+    Intent(Box<Construction>),
     Bound(Box<ClaimSession>),
     Unavailable(Txid, String),
 }
@@ -320,12 +325,13 @@ enum Stage {
     Preconditions,
     /// Built and shown; nothing signed yet.
     Plan {
-        built: Box<PoisonSelfTransfer>,
+        built: Box<Construction>,
     },
+    CheckingSign(FinalizeAttempt),
     /// In the Vault's signing flow. `built` is `None` only while the
     /// finalise task holds it, and `finalizing` names that task.
     Sign {
-        built: Option<Box<PoisonSelfTransfer>>,
+        built: Option<Box<Construction>>,
         psbt: Box<PsbtState>,
         finalizing: Option<FinalizeAttempt>,
         error: Option<String>,
@@ -389,7 +395,8 @@ struct FinalizeAttempt {
 /// Read-only view of the panel's stage, for rendering.
 pub enum StageView<'a> {
     Preconditions(&'a Preconditions, Option<Refusal>),
-    Plan(&'a PoisonSelfTransfer),
+    Plan(&'a Construction),
+    CheckingSign,
     Sign {
         psbt: &'a PsbtState,
         finalizing: bool,
@@ -432,6 +439,7 @@ pub struct ClaimStep1Panel {
     backend: BackendState,
     check_seq: u64,
     finalize_attempts: u64,
+    building: Option<FinalizeAttempt>,
     feerate: FeerateSource,
     restart_pending: bool,
     handoff_pending: bool,
@@ -465,6 +473,7 @@ impl ClaimStep1Panel {
             backend: BackendState::Ready,
             check_seq: 0,
             finalize_attempts: 0,
+            building: None,
             feerate: FeerateSource::Estimator,
             restart_pending,
             handoff_pending: false,
@@ -513,6 +522,9 @@ impl ClaimStep1Panel {
     pub fn revoke(&mut self) {
         self.revoked = true;
         self.revocations = self.revocations.wrapping_add(1);
+        if self.building.take().is_some() {
+            self.pre.checking = false;
+        }
         if let Some(revoker) = &self.revoker {
             revoker.revoke();
         }
@@ -720,6 +732,7 @@ impl ClaimStep1Panel {
         match &self.stage {
             Stage::Preconditions => StageView::Preconditions(&self.pre, self.refusal()),
             Stage::Plan { built } => StageView::Plan(built),
+            Stage::CheckingSign(_) => StageView::CheckingSign,
             Stage::Sign {
                 psbt,
                 finalizing,
@@ -790,7 +803,8 @@ impl ClaimStep1Panel {
 
     /// The first precondition that fails, in the order a user can act on
     /// them: target, Vault shape, Connect session, node backend, the fork's
-    /// RDTS window, coins, fee rate. `None` when everything holds.
+    /// observation validity, applicable RDTS window, coins, fee rate. `None`
+    /// when construction may attempt positive ancestry or valid fallback.
     pub fn refusal(&self) -> Option<Refusal> {
         let refuse = |reason: &str, retry: bool| {
             Some(Refusal {
@@ -839,7 +853,22 @@ impl ClaimStep1Panel {
             }
             Ok(window) => {
                 if let Err(assessment) = window.rdts {
-                    return refuse(&rdts_refusal(assessment, window), false);
+                    // These timing states only disallow OP_RETURN. Candidates
+                    // permit a bounded proof search, never signing authority;
+                    // build_preferred independently refuses invalid fallback.
+                    let can_search_ancestry = matches!(
+                        assessment,
+                        Assessment::RdtsScheduled
+                            | Assessment::RdtsInactive
+                            | Assessment::RdtsExpired
+                            | Assessment::ExpiryMargin
+                    ) && checked
+                        .coins
+                        .as_ref()
+                        .is_ok_and(|coins| !coins.ancestry_candidates.is_empty());
+                    if !can_search_ancestry {
+                        return refuse(&rdts_refusal(assessment, window), false);
+                    }
                 }
             }
         }
@@ -994,6 +1023,8 @@ impl ClaimStep1Panel {
         let Some(connect) = self.connect.clone() else {
             return Task::none();
         };
+        // A new inventory invalidates any construction still being collected.
+        self.building = None;
         self.check_seq += 1;
         let seq = self.check_seq;
         self.pre.checking = true;
@@ -1016,12 +1047,75 @@ impl ClaimStep1Panel {
             return Task::none();
         };
         let coins = coins.clone();
-        let fork_hash = window.fork_hash;
+        let window = window.clone();
         let wallet = self.wallet.clone();
+        let Some(connect) = self.connect.clone() else {
+            return Task::none();
+        };
+        let expected = *self.generation.borrow();
+        let generation = self.generation.clone();
+        self.finalize_attempts = self.finalize_attempts.wrapping_add(1);
+        let id = self.finalize_attempts;
+        self.building = Some(FinalizeAttempt {
+            id,
+            generation: expected,
+            revocations: self.revocations,
+        });
         self.pre.checking = true;
         Task::perform(
-            async move { build(daemon, wallet, coins, feerate_vb, fork_hash).await },
-            |built| Message::Claim(ClaimEvent::Built(built)),
+            async move {
+                preferred::build_preferred(
+                    daemon, wallet, coins, feerate_vb, window, connect, expected, generation,
+                )
+                .await
+            },
+            move |built| Message::Claim(ClaimEvent::Built(id, built)),
+        )
+    }
+
+    fn request_signing(&mut self, daemon: Arc<dyn Daemon + Send + Sync>) -> Task<Message> {
+        let Stage::Plan { built } = &self.stage else {
+            return Task::none();
+        };
+        if built.selected_ancestry_input().is_none() {
+            self.start_signing();
+            return Task::none();
+        }
+        let Some(connect) = self.connect.clone() else {
+            return Task::none();
+        };
+        if !self.backend_ready() {
+            return Task::none();
+        }
+        self.finalize_attempts = self.finalize_attempts.wrapping_add(1);
+        let attempt = FinalizeAttempt {
+            id: self.finalize_attempts,
+            generation: *self.generation.borrow(),
+            revocations: self.revocations,
+        };
+        let Stage::Plan { built } =
+            std::mem::replace(&mut self.stage, Stage::CheckingSign(attempt))
+        else {
+            unreachable!()
+        };
+        let wallet = self.wallet.clone();
+        let generation = self.generation.clone();
+        Task::perform(
+            async move {
+                let result = signing::check(
+                    &built,
+                    daemon,
+                    wallet,
+                    connect,
+                    attempt.generation,
+                    generation,
+                )
+                .await;
+                (built, result)
+            },
+            move |(built, result)| {
+                Message::Claim(ClaimEvent::SigningChecked(attempt.id, built, result))
+            },
         )
     }
 
@@ -1032,7 +1126,28 @@ impl ClaimStep1Panel {
         let Stage::Plan { built } = std::mem::replace(&mut self.stage, Stage::Preconditions) else {
             unreachable!("matched above");
         };
-        let coins = self.coins().map(|c| c.pre_fork.clone()).unwrap_or_default();
+        let coins = self
+            .coins()
+            .map(|c| {
+                c.pre_fork
+                    .iter()
+                    .chain(c.ancestry_candidates.iter())
+                    .filter(|coin| {
+                        built
+                            .psbt()
+                            .unsigned_tx
+                            .input
+                            .iter()
+                            .any(|input| input.previous_output == coin.outpoint)
+                    })
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.install_signing(built, coins);
+    }
+
+    fn install_signing(&mut self, built: Box<Construction>, coins: Vec<Coin>) {
         let secp = secp256k1::Secp256k1::verification_only();
         let tx = SpendTx::new(
             None,
@@ -1260,6 +1375,7 @@ impl ClaimStep1Panel {
 
     fn resubmit(&mut self, confirm: bool) -> Task<Message> {
         if self.revoked
+            || self.reconfirmation().is_some()
             || self.connect.is_none()
             || !self.backend_ready()
             || !matches!(
@@ -1314,6 +1430,7 @@ impl ClaimStep1Panel {
 
     fn reconfirm(&mut self, confirm: bool) -> Task<Message> {
         if self.revoked
+            || self.resubmission().is_some()
             || self.connect.is_none()
             || !self.backend_ready()
             || !matches!(
@@ -1403,7 +1520,7 @@ impl ClaimStep1Panel {
                 finalizing: Some(_),
                 ..
             } => {}
-            Stage::Plan { .. } | Stage::Sign { .. } => {
+            Stage::Plan { .. } | Stage::CheckingSign(_) | Stage::Sign { .. } => {
                 if self.resuming {
                     self.restart_pending = true;
                 }
@@ -1491,8 +1608,46 @@ impl ClaimStep1Panel {
                 self.pre.checked = Some(*checked);
                 Task::none()
             }
-            ClaimEvent::Built(result) => {
+            ClaimEvent::SigningChecked(id, built, result) => {
+                let Stage::CheckingSign(attempt) = self.stage else {
+                    return Task::none();
+                };
+                if attempt.id != id {
+                    return Task::none();
+                }
+                let authorized = self.authorized(attempt.generation, attempt.revocations)
+                    && self.backend_ready();
+                self.stage = Stage::Plan { built };
+                if !authorized {
+                    return Task::done(Message::View(view::Message::ShowError(
+                        SESSION_ENDED.into(),
+                    )));
+                }
+                match result {
+                    Ok(coins) => {
+                        // No live ancestry checker currently grants this result.
+                        let Stage::Plan { built } =
+                            std::mem::replace(&mut self.stage, Stage::Preconditions)
+                        else {
+                            unreachable!()
+                        };
+                        self.install_signing(built, coins);
+                        Task::none()
+                    }
+                    Err(error) => Task::done(Message::View(view::Message::ShowError(error))),
+                }
+            }
+            ClaimEvent::Built(id, result) => {
+                let Some(attempt) = self.building.filter(|attempt| attempt.id == id) else {
+                    return Task::none();
+                };
+                self.building = None;
                 self.pre.checking = false;
+                if !self.authorized(attempt.generation, attempt.revocations)
+                    || !self.backend_ready()
+                {
+                    return Task::none();
+                }
                 match result {
                     Ok(built) if matches!(self.stage, Stage::Preconditions) => {
                         self.stage = Stage::Plan { built };
@@ -1880,10 +2035,10 @@ impl State for ClaimStep1Panel {
                         Some(daemon) => self.build(daemon),
                         None => node_unavailable(),
                     },
-                    view::ClaimMessage::Sign => {
-                        self.start_signing();
-                        Task::none()
-                    }
+                    view::ClaimMessage::Sign => match daemon {
+                        Some(daemon) => self.request_signing(daemon),
+                        None => node_unavailable(),
+                    },
                     view::ClaimMessage::Confirm => self.confirm(),
                     view::ClaimMessage::ReviewResubmission => self.resubmit(false),
                     view::ClaimMessage::ConfirmResubmission => self.resubmit(true),
@@ -1967,7 +2122,7 @@ impl State for ClaimStep1Panel {
                 self.recover(Some(daemon))
             }
             Stage::Track { .. } => self.reconcile(),
-            Stage::Plan { .. } | Stage::Review { .. } => Task::none(),
+            Stage::Plan { .. } | Stage::CheckingSign(_) | Stage::Review { .. } => Task::none(),
         }
     }
 }
@@ -2050,6 +2205,7 @@ pub fn partition_coins(coins: Vec<Coin>, fork_height: u64, tip_height: i32) -> C
     let mut set = CoinSet {
         pre_fork: Vec::new(),
         post_fork: 0,
+        ancestry_candidates: Vec::new(),
         tip_height,
     };
     for coin in coins {
@@ -2059,13 +2215,18 @@ pub fn partition_coins(coins: Vec<Coin>, fork_height: u64, tip_height: i32) -> C
         let Some(height) = coin.block_height else {
             continue;
         };
-        if height >= 0 && (height as u64) < fork_height {
+        if height < 0 || height > tip_height {
+            continue;
+        }
+        if (height as u64) < fork_height {
             set.pre_fork.push(coin);
         } else {
             set.post_fork += 1;
+            set.ancestry_candidates.push(coin);
         }
     }
     set.pre_fork.sort_by_key(|coin| coin.outpoint);
+    set.ancestry_candidates.sort_by_key(|coin| coin.outpoint);
     set
 }
 
@@ -2191,6 +2352,7 @@ async fn probe(
         (Err(_), Ok((coins, tip))) => Ok(CoinSet {
             pre_fork: Vec::new(),
             post_fork: coins.len(),
+            ancestry_candidates: Vec::new(),
             tip_height: tip,
         }),
         (_, Err(reason)) => Err(reason),
@@ -2216,7 +2378,7 @@ async fn build(
     coins: CoinSet,
     feerate_vb: u64,
     fork_hash: BlockHash,
-) -> Result<Box<PoisonSelfTransfer>, String> {
+) -> Result<Box<Construction>, String> {
     let change_index = daemon
         .reserve_change()
         .await
@@ -2268,7 +2430,7 @@ async fn build(
         locktime,
         fork_hash,
     )
-    .map(Box::new)
+    .map(|built| Box::new(Construction::OpReturn(built)))
     .map_err(|e| e.to_string())
 }
 
@@ -2315,14 +2477,13 @@ async fn restore_recorded_claim(
         fork_cube: fork_cube.clone(),
         descriptor_digest: sha256::Hash::hash(wallet.main_descriptor.to_string().as_bytes()),
     };
-    let controller = claim_workflow::Controller::reopen(&directory, &identity, context.clone())
+    let mut controller = claim_workflow::Controller::reopen(&directory, &identity, context.clone())
         .map_err(|e| describe(claim_coordinator::Error::Journal(e)))?;
     let plan = controller.plan();
     let change_hint = controller.recorded_bitcoin_change_index();
     let phase = controller.phase();
     let txid = controller.signed_txid();
     let stored_transaction = controller.recorded_bitcoin_transaction().cloned();
-    drop(controller);
     let check = || {
         if *generation.borrow() != expected || generation.has_changed().is_err() {
             Err(SESSION_ENDED.to_string())
@@ -2354,9 +2515,20 @@ async fn restore_recorded_claim(
     } else {
         None
     };
-    let built =
-        reconstruct_recorded_claim(daemon, &wallet, &plan, change_hint, expected, &generation)
-            .await;
+    let built = if plan.poison == claim::Poison::InputAncestry {
+        construction::restore_ancestry(
+            &mut controller,
+            &context,
+            daemon,
+            &wallet,
+            expected,
+            &generation,
+        )
+        .await
+    } else {
+        reconstruct_recorded_claim(daemon, &wallet, &plan, change_hint, expected, &generation).await
+    };
+    drop(controller);
     check()?;
     let built = match built {
         Ok(built) => built,
@@ -2378,22 +2550,15 @@ async fn restore_recorded_claim(
     }
     let transaction =
         recovered.ok_or_else(|| "The journal is missing its recorded transaction.".to_string())?;
-    let verified = verify_poison_transaction(
-        &built,
-        &transaction,
-        &secp256k1::Secp256k1::verification_only(),
-    )
-    .map_err(|e| e.to_string())?;
-    let coordinator = Coordinator::resume(
+    let verified = built.verify(built.psbt(), Some(&transaction))?;
+    let coordinator = built.open(
         &directory,
         bitcoin_cube,
         fork_cube,
-        &built,
         verified,
         production,
-        CHECK_POLICY,
-    )
-    .map_err(describe)?;
+        true,
+    )?;
     let signed = built.psbt().clone();
     Ok(RestartedClaim {
         context: context.clone(),
@@ -2418,7 +2583,7 @@ async fn reconstruct_recorded_claim(
     change_hint: Option<ChildNumber>,
     expected: u64,
     generation: &watch::Receiver<u64>,
-) -> Result<Box<PoisonSelfTransfer>, String> {
+) -> Result<Box<Construction>, String> {
     let coins = daemon
         .list_coins(&[], &plan.claimed_prevouts)
         .await
@@ -2516,7 +2681,7 @@ async fn reconstruct_recorded_claim(
         change,
         &plan.step1,
     )
-    .map(Box::new)
+    .map(|built| Box::new(Construction::OpReturn(built)))
     .map_err(|e| e.to_string())
 }
 
@@ -2527,7 +2692,7 @@ async fn reconstruct_recorded_claim(
 /// refuse the same binding, this just says why first.
 #[allow(clippy::too_many_arguments)]
 async fn finalize_and_journal(
-    built: Box<PoisonSelfTransfer>,
+    built: Box<Construction>,
     signed: Psbt,
     daemon: Arc<dyn Daemon + Sync + Send>,
     connect: ConnectSession,
@@ -2537,12 +2702,11 @@ async fn finalize_and_journal(
     expected: u64,
     generation: watch::Receiver<u64>,
     resume: bool,
-) -> Result<Box<ClaimSession>, (Box<PoisonSelfTransfer>, String)> {
+) -> Result<Box<ClaimSession>, (Box<Construction>, String)> {
     if *generation.borrow() != expected || generation.has_changed().is_err() {
         return Err((built, SIGNED_OUT_BEFORE_RECORD.to_string()));
     }
-    let secp = secp256k1::Secp256k1::verification_only();
-    let verified = match finalize_poison_transfer(&built, &signed, &secp) {
+    let verified = match built.verify(&signed, None) {
         Ok(verified) => verified,
         Err(error) => return Err((built, error.to_string())),
     };
@@ -2563,19 +2727,13 @@ async fn finalize_and_journal(
         Err(error) => return Err((built, describe_production(error))),
     };
     let context = production.context().clone();
-    let open = if resume {
-        Coordinator::resume
-    } else {
-        Coordinator::create
-    };
-    match open(
+    match built.open(
         &directory,
         bitcoin_cube,
         fork_cube,
-        &built,
         verified,
         production,
-        CHECK_POLICY,
+        resume,
     ) {
         Ok(coordinator) => Ok(Box::new(ClaimSession {
             phase: coordinator.phase(),
@@ -2588,7 +2746,7 @@ async fn finalize_and_journal(
             signed,
             recovered: None,
         })),
-        Err(error) => Err((built, describe(error))),
+        Err(error) => Err((built, error)),
     }
 }
 
@@ -2623,27 +2781,17 @@ fn rebind_session(
     )
     .map_err(describe_production)?;
     let context = production.context().clone();
-    let secp = secp256k1::Secp256k1::verification_only();
-    let verified = match &session.recovered {
-        Some(transaction) => verify_poison_transaction(&session.built, transaction, &secp),
-        None => finalize_poison_transfer(&session.built, &session.signed, &secp),
-    }
-    .map_err(|error| error.to_string())?;
-    let coordinator = Coordinator::resume(
+    let verified = session
+        .built
+        .verify(&session.signed, session.recovered.as_ref())?;
+    let coordinator = session.built.open(
         &directory,
         bitcoin_cube,
         fork_cube,
-        &session.built,
         verified,
         production,
-        CHECK_POLICY,
-    )
-    .map_err(|error| match error {
-        claim_coordinator::Error::Journal(claim_workflow::Error::WrongIdentity) => {
-            OTHER_ACCOUNT.to_string()
-        }
-        other => describe(other),
-    })?;
+        true,
+    )?;
     session.phase = coordinator.phase();
     session.context = context;
     session.coordinator = Some(coordinator);
@@ -2688,7 +2836,17 @@ pub fn describe(error: claim_coordinator::Error) -> String {
             "Couldn't observe the chains ({:?} while reading {:?}).",
             failure.kind, failure.stage
         ),
-        E::Preflight(error) => format!("The Bitcoin node's preflight check failed ({error:?})."),
+        E::Preflight(crate::services::claim_preflight::Error::BothRoutesRejected {
+            local,
+            connect,
+        }) => {
+            format!("Your Bitcoin node rejected the transaction: {local}. Connect also rejected it: {connect}. This check did not broadcast anything.")
+        }
+        E::Preflight(crate::services::claim_preflight::Error::BackendChanged) => {
+            "This Vault's backend changed or stopped. Check its connection, then reopen Claim."
+                .into()
+        }
+        E::Preflight(error) => format!("The transaction preflight check failed ({error:?})."),
         E::PolicyRejected(policy) => match policy {
             crate::services::claim_preflight::NodePolicy::Rejected { reason } => {
                 format!("The Bitcoin node rejected the transaction: {reason}")

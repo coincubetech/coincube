@@ -47,7 +47,7 @@ fn pre_fork_coins_are_those_confirmed_below_the_fork_height() {
     let set = partition_coins(
         vec![
             coin(Some(89), false, false, 1), // pre-fork
-            coin(Some(90), false, false, 2), // the fork block: Bitcoin-only
+            coin(Some(90), false, false, 2), // fork block: ancestry remains unproven
             coin(Some(91), false, false, 3), // post-fork
             coin(None, false, false, 4),     // unconfirmed: neither
             coin(Some(10), true, false, 5),  // spent
@@ -65,6 +65,43 @@ fn pre_fork_coins_are_those_confirmed_below_the_fork_height() {
     );
     assert_eq!(set.post_fork, 2, "at and above the fork height");
     assert_eq!(set.tip_height, 105);
+    assert_eq!(
+        set.ancestry_candidates
+            .iter()
+            .map(|c| c.outpoint.vout)
+            .collect::<Vec<_>>(),
+        vec![2, 3]
+    );
+}
+
+#[test]
+fn ancestry_inventory_excludes_spent_immature_unconfirmed_and_impossible_heights() {
+    let set = partition_coins(
+        vec![
+            coin(Some(99), false, false, 1),
+            coin(Some(100), false, false, 2),
+            coin(Some(101), false, false, 3),
+            coin(Some(-1), false, false, 4),
+            coin(None, false, false, 5),
+            coin(Some(99), true, false, 6),
+            coin(Some(99), false, true, 7),
+            coin(Some(89), false, false, 8),
+        ],
+        90,
+        100,
+    );
+    assert_eq!(
+        set.ancestry_candidates
+            .iter()
+            .map(|c| c.outpoint.vout)
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    assert_eq!(set.post_fork, 2);
+    assert_eq!(set.pre_fork.len(), 1);
+    let invalid_tip = partition_coins(vec![coin(Some(1), false, false, 0)], 90, -1);
+    assert!(invalid_tip.pre_fork.is_empty());
+    assert!(invalid_tip.ancestry_candidates.is_empty());
 }
 
 #[test]
@@ -469,11 +506,11 @@ fn reviewer_claim_completion_without_daemon_must_not_panic() {
 mod flow {
     #[cfg(feature = "regtest-harness")]
     mod live_regtest;
+    mod preferred;
     use super::*;
     use crate::{daemon::model::GetInfoResult, signer::Signer};
     use coincube_core::{
         bip39::Mnemonic,
-        claim_finalize::finalize_poison_transfer,
         descriptors::{CoincubeDescriptor, CoincubePolicy, PathInfo},
         miniscript::{
             bitcoin::{
@@ -582,6 +619,8 @@ mod flow {
         previous: Transaction,
         submitted: Mutex<Option<Transaction>>,
         hits: Mutex<Vec<&'static str>>,
+        queried_txs: Mutex<Vec<Txid>>,
+        ancestry_coin: Option<Coin>,
         #[cfg(feature = "regtest-harness")]
         live: Option<live_regtest::LiveTransport>,
     }
@@ -617,7 +656,11 @@ mod flow {
             Ok(GetInfoResult {
                 version: String::new(),
                 network: Network::Bitcoin,
-                block_height: 105,
+                block_height: self
+                    .ancestry_coin
+                    .as_ref()
+                    .and_then(|c| c.block_height)
+                    .map_or(105, |h| h + 200),
                 sync: 1.0,
                 descriptors: GetInfoDescriptors {
                     main: self.config.main_descriptor.clone(),
@@ -684,7 +727,11 @@ mod flow {
                     });
                 }
             }
-            Ok(model::ListCoinsResult { coins: vec![coin] })
+            let mut coins = vec![coin];
+            if let Some(ancestry) = &self.ancestry_coin {
+                coins.push(ancestry.clone());
+            }
+            Ok(model::ListCoinsResult { coins })
         }
         async fn list_spend_txs(&self) -> Result<model::ListSpendResult, DaemonError> {
             self.hit("list_spend_txs");
@@ -724,6 +771,56 @@ mod flow {
         async fn reserve_change(&self) -> Result<ChildNumber, DaemonError> {
             self.hit("reserve_change");
             Ok(ChildNumber::from_normal_idx(12).unwrap())
+        }
+        #[cfg(feature = "regtest-harness")]
+        async fn claim_backend_binding(
+            &self,
+        ) -> Result<coincubed::poison_broadcast::ClaimBackendBinding, DaemonError> {
+            self.live
+                .as_ref()
+                .and_then(|live| live.bound.as_ref())
+                .ok_or(DaemonError::ClientNotSupported)?
+                .claim_backend_binding()
+                .await
+        }
+        #[cfg(feature = "regtest-harness")]
+        async fn submit_verified_poison_to_node(
+            &self,
+            verified: Arc<coincube_core::claim_finalize::VerifiedPoisonTransfer>,
+            binding: coincubed::poison_broadcast::ClaimBackendBinding,
+            gate: Arc<SubmissionGate>,
+        ) -> Result<SubmissionOutcome, DaemonError> {
+            self.hit("submit_verified_poison");
+            self.hit("submit_verified_poison_to_node");
+            let outcome = self
+                .live
+                .as_ref()
+                .and_then(|live| live.bound.as_ref())
+                .ok_or(DaemonError::ClientNotSupported)?
+                .submit_verified_poison_to_node(verified.clone(), binding, gate)
+                .await?;
+            *self.submitted.lock().unwrap() = Some(verified.transaction().clone());
+            Ok(outcome)
+        }
+        #[cfg(feature = "regtest-harness")]
+        async fn submit_verified_poison_to_connect(
+            &self,
+            verified: Arc<coincube_core::claim_finalize::VerifiedPoisonTransfer>,
+            origin: String,
+            binding: coincubed::poison_broadcast::ClaimBackendBinding,
+            gate: Arc<SubmissionGate>,
+        ) -> Result<SubmissionOutcome, DaemonError> {
+            self.hit("submit_verified_poison");
+            self.hit("submit_verified_poison_to_connect");
+            let outcome = self
+                .live
+                .as_ref()
+                .and_then(|live| live.bound.as_ref())
+                .ok_or(DaemonError::ClientNotSupported)?
+                .submit_verified_poison_to_connect(verified.clone(), origin, binding, gate)
+                .await?;
+            *self.submitted.lock().unwrap() = Some(verified.transaction().clone());
+            Ok(outcome)
         }
         async fn submit_verified_poison(
             &self,
@@ -786,6 +883,7 @@ mod flow {
             txids: &[Txid],
         ) -> Result<model::ListTransactionsResult, DaemonError> {
             self.hit("list_txs");
+            self.queried_txs.lock().unwrap().extend_from_slice(txids);
             let mut transactions = Vec::new();
             if txids.contains(&self.previous.compute_txid()) {
                 transactions.push(coincubed::commands::TransactionInfo {
@@ -985,6 +1083,8 @@ mod flow {
             previous: f.previous.clone(),
             submitted: Mutex::new(None),
             hits: Mutex::new(Vec::new()),
+            queried_txs: Mutex::new(Vec::new()),
+            ancestry_coin: None,
             #[cfg(feature = "regtest-harness")]
             live: None,
         });
@@ -1099,12 +1199,7 @@ mod flow {
             } = &p.stage
             {
                 assert!(
-                    finalize_poison_transfer(
-                        built,
-                        &signed,
-                        &secp256k1::Secp256k1::verification_only()
-                    )
-                    .is_err(),
+                    built.verify(&signed, None).is_err(),
                     "one signature cannot satisfy 2-of-3"
                 );
             } else {
@@ -1148,12 +1243,7 @@ mod flow {
         let final_tx = match &p.stage {
             Stage::Sign {
                 built: Some(built), ..
-            } => {
-                finalize_poison_transfer(built, &signed, &secp256k1::Secp256k1::verification_only())
-                    .unwrap()
-                    .transaction()
-                    .clone()
-            }
+            } => built.verify(&signed, None).unwrap().transaction().clone(),
             _ => panic!("the construction is still in the stage"),
         };
         assert_eq!(final_tx.compute_txid(), unsigned_txid);
@@ -1653,6 +1743,17 @@ mod flow {
     #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn fork_loader_preserves_pairing_and_requires_fresh_depth_before_signing() {
+        fork_loader_restart(false).await;
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn ancestry_fork_loader_restores_excluded_input_and_exact_witness() {
+        fork_loader_restart(true).await;
+    }
+
+    #[cfg(any(unix, windows))]
+    async fn fork_loader_restart(ancestry: bool) {
         use crate::app::settings::{update_settings_file, CubeSettings, VaultIdentity};
         let mut f = reach_review().await;
         reach_track(&mut f).await;
@@ -1692,9 +1793,205 @@ mod flow {
             previous: f.daemon.previous.clone(),
             submitted: Mutex::new(None),
             hits: Mutex::new(Vec::new()),
+            queried_txs: Mutex::new(Vec::new()),
+            ancestry_coin: None,
             #[cfg(feature = "regtest-harness")]
             live: None,
         });
+        let mut excluded = None;
+        if ancestry {
+            use coincube_core::{
+                claim_ancestry::{retained::RetainedPath, search::OwnedLink},
+                claim_finalize::finalize_ancestry_transfer,
+                claim_spend::create_ancestry_self_transfer,
+                miniscript::bitcoin::consensus::serialize,
+            };
+            let verify = secp256k1::Secp256k1::verification_only();
+            let mut root = f.daemon.previous.clone();
+            root.input[0].script_sig = coincube_core::miniscript::bitcoin::script::Builder::new()
+                .push_int(961_640)
+                .push_int(1)
+                .into_script();
+            root.output[0].script_pubkey = wallet
+                .main_descriptor
+                .receive_descriptor()
+                .derive(1.into(), &verify)
+                .script_pubkey();
+            let selected = OutPoint::new(root.compute_txid(), 0);
+            excluded = Some(selected.txid);
+            let path = RetainedPath::new(
+                selected,
+                vec![OwnedLink {
+                    transaction: serialize(&root),
+                    parent_input: None,
+                }],
+            )
+            .unwrap();
+            let coins = [
+                CandidateCoin {
+                    outpoint: selected,
+                    amount: root.output[0].value,
+                    deriv_index: 1.into(),
+                    is_change: false,
+                    must_select: true,
+                    sequence: None,
+                    ancestor_info: None,
+                },
+                CandidateCoin {
+                    outpoint: f.daemon.coin.outpoint,
+                    amount: f.daemon.coin.amount,
+                    deriv_index: f.daemon.coin.derivation_index,
+                    is_change: false,
+                    must_select: true,
+                    sequence: None,
+                    ancestor_info: None,
+                },
+            ];
+            let mut getter = TxMap(
+                [
+                    (root.compute_txid(), root),
+                    (f.daemon.previous.compute_txid(), f.daemon.previous.clone()),
+                ]
+                .into(),
+            );
+            let source = create_ancestry_self_transfer(
+                ChainId::Bitcoin,
+                &wallet.main_descriptor,
+                &verify,
+                &mut getter,
+                &coins,
+                12.into(),
+                5,
+                absolute::LockTime::ZERO,
+                &path.reverify().unwrap(),
+            )
+            .unwrap();
+            let psbt = f
+                .wallet
+                .signer
+                .as_ref()
+                .unwrap()
+                .sign_psbt(source.psbt().clone())
+                .unwrap();
+            let signed = finalize_ancestry_transfer(&source, &psbt, &verify).unwrap();
+            let directory = journal_directory(&f.datadir, &f.wallet);
+            // Use the panel's typed finalize/journal path before modeling a
+            // recorded submission. Public eligibility remains disabled.
+            std::fs::remove_file(directory.join("intent.json")).unwrap();
+            let mut session = finalize_and_journal(
+                Box::new(Construction::Ancestry {
+                    transfer: source,
+                    path,
+                }),
+                psbt,
+                f.daemon.clone(),
+                connect.clone(),
+                "bitcoin-cube".into(),
+                "fork-cube".into(),
+                directory.clone(),
+                1,
+                f.sender.subscribe(),
+                false,
+            )
+            .await
+            .unwrap();
+            assert_eq!(session.built.selected_ancestry_input(), Some(selected));
+            assert_eq!(session.phase(), Phase::Intent);
+            let context = session.context.clone();
+            assert!(session
+                .coordinator
+                .as_mut()
+                .unwrap()
+                .prepare_review(&context)
+                .await
+                .is_err());
+            drop(session);
+            let restored = restore_recorded_claim(
+                f.daemon.clone(),
+                f.wallet.clone(),
+                connect.clone(),
+                "bitcoin-cube".into(),
+                "fork-cube".into(),
+                directory.clone(),
+                1,
+                f.sender.subscribe(),
+            )
+            .await
+            .unwrap();
+            let RestartedState::Intent(restored) = restored.state else {
+                panic!("intent must resume for signing")
+            };
+            assert_eq!(restored.selected_ancestry_input(), Some(selected));
+            assert_eq!(
+                restored.psbt().unsigned_tx.compute_txid(),
+                signed.transaction().compute_txid()
+            );
+            drop(restored);
+            let file = directory.join("intent.json");
+            let mut journal: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+            journal["phase"] = json!("Tracking");
+            journal["signed_txid"] = json!(signed.transaction().compute_txid());
+            journal["bitcoin_transaction"] = json!(signed.transaction());
+            journal["bitcoin_attempts"] =
+                json!([{ "wtxid": signed.transaction().compute_wtxid() }]);
+            let before = serde_json::to_vec(&journal).unwrap();
+            std::fs::write(&file, &before).unwrap();
+            let restored = restore_recorded_claim(
+                f.daemon.clone(),
+                f.wallet.clone(),
+                connect.clone(),
+                "bitcoin-cube".into(),
+                "fork-cube".into(),
+                directory.clone(),
+                1,
+                f.sender.subscribe(),
+            )
+            .await
+            .unwrap();
+            let RestartedState::Bound(mut session) = restored.state else {
+                panic!("recorded ancestry must resume tracking")
+            };
+            assert_eq!(session.recovered.as_ref(), Some(signed.transaction()));
+            assert_eq!(session.built.selected_ancestry_input(), Some(selected));
+            rebind_session(
+                &mut session,
+                f.daemon.clone(),
+                connect.clone(),
+                "bitcoin-cube".into(),
+                "fork-cube".into(),
+                directory.clone(),
+                1,
+                f.sender.subscribe(),
+            )
+            .unwrap();
+            assert!(session.is_bound());
+            drop(session);
+            assert_eq!(std::fs::read(&file).unwrap(), before);
+            let mut altered = signed.transaction().clone();
+            altered.input[0].witness.clear();
+            journal["bitcoin_transaction"] = json!(altered);
+            std::fs::write(&file, serde_json::to_vec(&journal).unwrap()).unwrap();
+            let refused = restore_recorded_claim(
+                f.daemon.clone(),
+                f.wallet.clone(),
+                connect.clone(),
+                "bitcoin-cube".into(),
+                "fork-cube".into(),
+                directory,
+                1,
+                f.sender.subscribe(),
+            )
+            .await;
+            assert!(!matches!(
+                refused,
+                Ok(RestartedClaim {
+                    state: RestartedState::Bound(_),
+                    ..
+                })
+            ));
+            std::fs::write(&file, before).unwrap();
+        }
         let loaded = fork_load::load(
             &f.datadir,
             wallet.clone(),
@@ -1708,15 +2005,28 @@ mod flow {
         )
         .await
         .unwrap();
-        let psbt = fork_panel::tests::refused_signer_and_late_result(
-            f.datadir.clone(),
-            wallet.clone(),
-            vec![daemon.coin.clone()],
-            loaded,
-            daemon.clone(),
-            &f.cache,
-        )
-        .await;
+        let psbt = if ancestry {
+            let fork_load::Loaded::Signing {
+                mut preparation,
+                psbt,
+                context,
+            } = loaded
+            else {
+                panic!("an unsubmitted ancestry sweep must reopen for preparation");
+            };
+            assert!(preparation.check_signing(&context).await.is_err());
+            psbt
+        } else {
+            fork_panel::tests::refused_signer_and_late_result(
+                f.datadir.clone(),
+                wallet.clone(),
+                vec![daemon.coin.clone()],
+                loaded,
+                daemon.clone(),
+                &f.cache,
+            )
+            .await
+        };
         assert_eq!(
             psbt.psbt().unsigned_tx.input[0].previous_output,
             f.daemon.coin.outpoint
@@ -1843,6 +2153,12 @@ mod flow {
             1
         );
         assert!(daemon.submitted.lock().unwrap().is_none());
+        if let Some(excluded) = excluded {
+            assert!(
+                !daemon.queried_txs.lock().unwrap().contains(&excluded),
+                "the fork daemon must never be asked for the excluded Bitcoin transaction"
+            );
+        }
     }
 
     /// `reach_review`, then confirm → submit → track, asserting each.
@@ -2995,6 +3311,8 @@ mod flow {
             previous: f.daemon.previous.clone(),
             submitted: Mutex::new(None),
             hits: Mutex::new(Vec::new()),
+            queried_txs: Mutex::new(Vec::new()),
+            ancestry_coin: None,
             #[cfg(feature = "regtest-harness")]
             live: None,
         });
@@ -3257,6 +3575,8 @@ mod flow {
             previous: f.daemon.previous.clone(),
             submitted: Mutex::new(None),
             hits: Mutex::new(Vec::new()),
+            queried_txs: Mutex::new(Vec::new()),
+            ancestry_coin: None,
             #[cfg(feature = "regtest-harness")]
             live: None,
         });
@@ -4261,6 +4581,15 @@ mod flow {
         let (snapshot, attempts) = f.p.resubmission().expect("explicit resend review");
         assert_eq!(snapshot.txid, f.unsigned_txid);
         assert_eq!(attempts, 1);
+        // Model a stale queued reconfirmation action after the visible status
+        // changes. The state owner must preserve the active resend review.
+        if let Stage::Track { status, .. } = &mut f.p.stage {
+            *status = Some(Status::Observation(Assessment::Reorged));
+        }
+        assert!(outputs(f.p.reconfirm(false)).await.is_empty());
+        assert!(outputs(f.p.reconfirm(true)).await.is_empty());
+        assert!(f.p.resubmission().is_some());
+        assert_eq!(submissions(&f), 1);
         settle_recovery(&mut f, view::ClaimMessage::Refresh).await;
         assert!(f.p.resubmission().is_none());
         settle_recovery(&mut f, view::ClaimMessage::ConfirmResubmission).await;
@@ -4314,6 +4643,11 @@ mod flow {
             f.p.reconfirmation()
                 .expect("reconfirmation review displayed");
         assert_eq!(review.confirmed.hash, BlockHash::from_byte_array([7; 32]));
+        // A queued resend action cannot replace this reconfirmation review.
+        assert!(outputs(f.p.resubmit(false)).await.is_empty());
+        assert!(outputs(f.p.resubmit(true)).await.is_empty());
+        assert_eq!(f.p.reconfirmation().unwrap().confirmed, review.confirmed);
+        assert_eq!(submissions(&f), 1);
         assert_eq!(std::fs::read(&path).unwrap(), old);
         settle_recovery(&mut f, view::ClaimMessage::ConfirmReconfirmation).await;
         assert!(f.p.reconfirmation().is_none());
@@ -4370,4 +4704,57 @@ mod flow {
         );
         assert_eq!(submissions(&f), 1);
     }
+}
+
+#[test]
+fn ancestry_candidates_allow_search_outside_rdts_but_never_override_bad_observations() {
+    let mut p = panel(SINGLE_WSH);
+    p.pre.target = Some("fork-cube".into());
+    p.connect = Some(ConnectSession {
+        client: CoincubeClient::new(),
+        account: "7".into(),
+    });
+    for assessment in [
+        Assessment::RdtsScheduled,
+        Assessment::RdtsInactive,
+        Assessment::RdtsExpired,
+        Assessment::ExpiryMargin,
+    ] {
+        let mut checked = checked_ok(1_000_000);
+        checked.window.as_mut().unwrap().rdts = Err(assessment);
+        p.pre.checked = Some(checked);
+        assert!(!p.can_build(), "no candidate and no valid fallback");
+        p.pre
+            .checked
+            .as_mut()
+            .unwrap()
+            .coins
+            .as_mut()
+            .unwrap()
+            .ancestry_candidates
+            .push(coin(Some(95), false, false, 2));
+        assert!(
+            p.can_build(),
+            "candidate search should be possible: {:?}",
+            assessment
+        );
+        assert!(matches!(p.stage, Stage::Preconditions));
+    }
+    for assessment in [
+        Assessment::Unknown,
+        Assessment::InvalidPlan,
+        Assessment::Deployment(claim::DeploymentState::Malformed),
+    ] {
+        p.pre
+            .checked
+            .as_mut()
+            .unwrap()
+            .window
+            .as_mut()
+            .unwrap()
+            .rdts = Err(assessment);
+        assert!(!p.can_build(), "invalid observations remain refused");
+    }
+    p.pre.checked.as_mut().unwrap().window = Err("stale anchor".into());
+    assert!(!p.can_build());
 }

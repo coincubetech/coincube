@@ -12,7 +12,10 @@ use std::{
 mod ancestry;
 mod discovery;
 pub use ancestry::{CanonicalCoinbase, CoinbasePair};
-pub use discovery::{DiscoveredAncestry, DiscoveryError};
+pub use discovery::{
+    AncestryContext, CollectedAncestry, CollectedAncestrySweep, DiscoveredAncestry, DiscoveryError,
+    MAX_ANCESTRY_CANDIDATES,
+};
 
 const BODY_LIMIT: usize = 256 * 1024;
 const TRANSACTION_HEX_LIMIT: usize = 2 * coincube_core::claim_ancestry::MAX_TRANSACTION_BYTES;
@@ -68,6 +71,13 @@ impl HttpObservationSource {
             budget: None,
         })
     }
+    /// Stable identity shared with the Claim journal. Bind the admitted pair
+    /// through its fixed Bitcoin endpoint, without account tokens or credentials.
+    /// Preserve this encoding when reopening existing journals.
+    pub(crate) fn provider_identity(&self) -> String {
+        format!("bitcoin|{}/api/v1/esplora/bitcoin/mainnet", self.base)
+    }
+
     fn prefix(chain: ChainId) -> Result<&'static str, FailureKind> {
         match chain {
             ChainId::Bitcoin => Ok("bitcoin/mainnet"),

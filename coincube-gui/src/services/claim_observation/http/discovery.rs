@@ -1,5 +1,10 @@
 //! Bounded network discovery, retaining raw evidence without authorizing a spend.
 use super::*;
+mod binding;
+mod collect;
+mod preferred;
+mod sweep;
+pub use binding::AncestryContext;
 use coincube_core::{
     claim_ancestry::{
         self,
@@ -7,10 +12,13 @@ use coincube_core::{
     },
     miniscript::bitcoin::OutPoint,
 };
+pub use collect::CollectedAncestry;
+pub use preferred::MAX_ANCESTRY_CANDIDATES;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
 };
+pub use sweep::CollectedAncestrySweep;
 
 const MAX_REQUESTS: usize = 128;
 const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
@@ -48,6 +56,8 @@ pub enum DiscoveryError {
 }
 #[derive(Debug)]
 pub struct DiscoveredAncestry {
+    provider: String,
+    live_generation: watch::Receiver<u64>,
     links: Vec<OwnedLink>,
     pair: CoinbasePair,
     observed_at: i64,
@@ -142,6 +152,8 @@ impl HttpObservationSource {
             return Err(DiscoveryError::Observation(FailureKind::Cancelled));
         }
         Ok(DiscoveredAncestry {
+            provider: snapshot.provider_identity(),
+            live_generation: snapshot.generation.clone(),
             links: path.links().to_vec(),
             pair,
             observed_at,
@@ -182,6 +194,8 @@ impl HttpObservationSource {
                             Err(error) => return Err(observation(error)),
                             Ok((pair, observed_at)) => {
                                 return Ok(Some(DiscoveredAncestry {
+                                    provider: snapshot.provider_identity(),
+                                    live_generation: snapshot.generation.clone(),
                                     links: candidate.links,
                                     pair,
                                     observed_at,
