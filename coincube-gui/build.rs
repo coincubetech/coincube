@@ -14,16 +14,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    #[cfg(windows)]
-    {
-        // increase stack size to 8MB
-        println!("cargo:rustc-link-arg-bins=/STACK:8000000");
+    // Build scripts run on the host; select linker/resources by the target.
+    if std::env::var("CARGO_CFG_TARGET_OS")? == "windows" {
+        match std::env::var("CARGO_CFG_TARGET_ENV")?.as_str() {
+            "msvc" => println!("cargo:rustc-link-arg-bins=/STACK:8000000"),
+            "gnu" => println!("cargo:rustc-link-arg-bins=-Wl,--stack,8000000"),
+            other => return Err(format!("Unsupported Windows target environment: {other}").into()),
+        }
 
         // Windows resource configuration from master
         winresource::WindowsResource::new()
             .set_icon("../coincube-ui/static/logos/coincube-tenshu.ico")
-            .compile()
-            .unwrap();
+            .compile()?;
     }
 
     // gRPC proto codegen

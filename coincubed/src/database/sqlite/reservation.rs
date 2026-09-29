@@ -11,6 +11,32 @@ impl SqliteConn {
         descriptor: &CoincubeDescriptor,
         secp: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
     ) -> Result<ChangeReservation, ReservationError> {
+        self.allocate_change(chain, descriptor, secp, None)?
+            .ok_or(ReservationError::Storage)
+    }
+
+    pub(crate) fn commit_change_if_next(
+        &mut self,
+        chain: ChainId,
+        descriptor: &CoincubeDescriptor,
+        secp: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
+        index: ChildNumber,
+    ) -> Result<bool, ReservationError> {
+        if index.is_hardened() {
+            return Err(ReservationError::Exhausted);
+        }
+        Ok(self
+            .allocate_change(chain, descriptor, secp, Some(index))?
+            .is_some())
+    }
+
+    fn allocate_change(
+        &mut self,
+        chain: ChainId,
+        descriptor: &CoincubeDescriptor,
+        secp: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
+        expected: Option<ChildNumber>,
+    ) -> Result<Option<ChangeReservation>, ReservationError> {
         use ReservationError::{Exhausted, IdentityMismatch, Storage};
         // Every SQLite connection/process contends on the same writer lock, including
         // set_derivation_index. A connection-creation mutex alone would not suffice.
@@ -53,6 +79,9 @@ impl SqliteConn {
         }
         let next = change.checked_add(1).ok_or(Exhausted)?;
         let index = ChildNumber::from_normal_idx(next).map_err(|_| Exhausted)?;
+        if expected.is_some_and(|expected| expected != index) {
+            return Ok(None);
+        }
         let highest = (*receive).max(*change);
         // Refuse before writing if either branch's existing window, or the new
         // window, would cross into hardened derivation. No wraparound or panic.
@@ -81,10 +110,10 @@ impl SqliteConn {
                 .map_err(|_| Storage)?;
         }
         tx.commit().map_err(|_| Storage)?;
-        Ok(ChangeReservation {
+        Ok(Some(ChangeReservation {
             chain,
             descriptor: descriptor.clone(),
             index,
-        })
+        }))
     }
 }

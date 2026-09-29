@@ -1383,6 +1383,8 @@ CREATE TABLE labels (
             conn.db_address(&address).unwrap().derivation_index,
             3.into()
         );
+        // Close the SQLite file before directory removal on Windows.
+        drop(conn);
         fs::remove_dir_all(dir).unwrap();
         assert_eq!(
             db.reserve_change(ChainId::Bitcoin, &desc, &secp),
@@ -1422,6 +1424,51 @@ CREATE TABLE labels (
         assert_eq!(
             db.connection().unwrap().db_wallet().change_derivation_index,
             32.into()
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn claim_and_spend_change_commits_serialize_without_reuse() {
+        use crate::database::DatabaseInterface;
+        let (dir, options, _, db) = dummy_db();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let joins: Vec<_> = (0..8)
+            .map(|worker| {
+                let db = db.clone();
+                let desc = options.main_descriptor.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    let secp = secp256k1::Secp256k1::verification_only();
+                    barrier.wait();
+                    if worker % 2 == 0 {
+                        return db
+                            .reserve_change(ChainId::Bitcoin, &desc, &secp)
+                            .unwrap()
+                            .index();
+                    }
+                    loop {
+                        let current = db.connection().unwrap().db_wallet().change_derivation_index;
+                        let candidate = current.increment().unwrap();
+                        if db
+                            .commit_change_if_next(ChainId::Bitcoin, &desc, &secp, candidate)
+                            .unwrap()
+                        {
+                            return candidate;
+                        }
+                    }
+                })
+            })
+            .collect();
+        let mut indexes: Vec<u32> = joins
+            .into_iter()
+            .map(|join| u32::from(join.join().unwrap()))
+            .collect();
+        indexes.sort_unstable();
+        assert_eq!(indexes, (1..=8).collect::<Vec<_>>());
+        assert_eq!(
+            db.connection().unwrap().db_wallet().change_derivation_index,
+            8.into()
         );
         fs::remove_dir_all(dir).unwrap();
     }
@@ -1467,6 +1514,8 @@ CREATE TABLE labels (
                 .unwrap();
             assert_eq!(stored, invalid);
         }
+        // Close the SQLite file before directory removal on Windows.
+        drop(conn);
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -3855,6 +3904,8 @@ CREATE TABLE labels (
                 );
                 db.sanity_check(chain, &options.main_descriptor).unwrap();
                 assert_eq!(read_stored_identity(&db_path).unwrap().chain, chain);
+                // Close the SQLite file before directory removal on Windows.
+                drop(conn);
                 fs::remove_dir_all(tmp_dir).unwrap();
             }
         }
@@ -4451,6 +4502,8 @@ CREATE TABLE labels (
                 .psbt;
             assert_eq!(stored.inputs[0].proprietary.get(&key), Some(&value));
             assert_eq!(stored, psbt);
+            // Close the SQLite file before directory removal on Windows.
+            drop(conn);
             fs::remove_dir_all(tmp_dir).unwrap();
         }
 

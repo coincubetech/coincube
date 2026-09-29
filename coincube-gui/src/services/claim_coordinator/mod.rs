@@ -626,6 +626,9 @@ impl Coordinator {
                 }
             }
         };
+        // This bounds waiting for an answer; timeout means Uncertain. Evidence
+        // freshness is enforced by SubmissionGate::enter under the backend lock,
+        // before transport starts, not by this coordinator wait bound.
         let result = tokio::select! { biased;
             _ = cancelled => None,
             result = tokio::time::timeout(Duration::from_secs(30), self.services.submit(self.verified.clone(), Arc::new(gate))) => result.ok(),
