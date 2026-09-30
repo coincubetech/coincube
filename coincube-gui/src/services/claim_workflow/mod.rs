@@ -460,23 +460,38 @@ impl Controller {
         }
     }
     /// [`Self::reopen_settling`] for the synchronous Claim coordinator
-    /// constructors. Same retry and budget, but the wait blocks the calling
-    /// thread, so it must only run inside a spawned task, never in an iced
-    /// `update`. Every production caller builds its coordinator in a
-    /// `Task::perform` future.
+    /// constructors. Same retry and budget. The first attempt runs inline; only
+    /// a `Busy` wait blocks, and on a multi-thread tokio runtime (iced's
+    /// executor) that wait runs under [`tokio::task::block_in_place`], so the
+    /// runtime hands this worker's other tasks to another thread instead of
+    /// stalling them (`#610` review F1). Elsewhere, including a current-thread
+    /// test runtime, it sleeps the calling thread. It still must never run in
+    /// an iced `update`: every production caller builds its coordinator in a
+    /// `Task::perform` future. The wait is not cancellable, but it is bounded
+    /// by [`REOPEN_BUSY_BUDGET`].
     pub fn reopen_settling_blocking(
         directory: &Path,
         identity: &WalletIdentity,
         context: Context,
     ) -> Result<Self, Error> {
         let deadline = std::time::Instant::now() + REOPEN_BUSY_BUDGET;
-        loop {
+        let settle = || loop {
             match Self::reopen(directory, identity, context.clone()) {
                 Err(Error::Busy) if std::time::Instant::now() < deadline => {
                     std::thread::sleep(REOPEN_BUSY_POLL)
                 }
                 other => return other,
             }
+        };
+        match Self::reopen(directory, identity, context.clone()) {
+            Err(Error::Busy) => {
+                use tokio::runtime::{Handle, RuntimeFlavor};
+                match Handle::try_current().map(|h| h.runtime_flavor()) {
+                    Ok(RuntimeFlavor::MultiThread) => tokio::task::block_in_place(settle),
+                    _ => settle(),
+                }
+            }
+            other => other,
         }
     }
     fn valid_context(context: &Context) -> Result<(), Error> {

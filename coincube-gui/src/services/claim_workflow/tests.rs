@@ -469,36 +469,50 @@ fn reopen_settled_outwaits_only_a_transient_foreign_lock() {
     drop(reopened);
 }
 
-/// The production loaders' retry (`#607`) outwaits a transient foreign lock,
-/// returns every other verdict unchanged and still reports a lock that is never
-/// released. The paused clock pins the wall-clock deadline: tokio's auto-advanced
-/// time would end the wait before the holder's real 200 ms had passed.
+/// A second open file holding the journal's flock, standing in for a spawned
+/// child's inherited duplicate of a dropped owner's descriptor (#586). It is
+/// held until the returned sender signals, then released `after_ms` later, so a
+/// check made before the signal cannot race the release (`#610` review F4).
+#[cfg(unix)]
+fn gated_hold(
+    temp: &Temp,
+    after_ms: u64,
+) -> (std::sync::mpsc::Sender<()>, std::thread::JoinHandle<()>) {
+    use fs4::fs_std::FileExt;
+    use std::time::{Duration, Instant};
+    let foreign = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(temp.0.join("claim.lock"))
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !foreign.try_lock_exclusive().unwrap() {
+        assert!(Instant::now() < deadline, "foreign lock never became free");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let (release, signal) = std::sync::mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        signal.recv().unwrap();
+        std::thread::sleep(Duration::from_millis(after_ms));
+        drop(foreign);
+    });
+    (release, holder)
+}
+
+/// The production retry (`#607`) outwaits a transient foreign lock, returns
+/// every other verdict unchanged and still reports a lock that is never
+/// released. The paused clock pins the wall-clock deadline: tokio's
+/// auto-advanced time would end the wait before the holder's real 200 ms.
 #[cfg(unix)]
 #[tokio::test(start_paused = true)]
 async fn reopen_settling_outwaits_only_a_transient_foreign_lock() {
-    use fs4::fs_std::FileExt;
     use std::time::{Duration, Instant};
-    fn hold(temp: &Temp, for_ms: u64) -> std::thread::JoinHandle<()> {
-        let foreign = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(temp.0.join("claim.lock"))
-            .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !foreign.try_lock_exclusive().unwrap() {
-            assert!(Instant::now() < deadline, "foreign lock never became free");
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(for_ms));
-            drop(foreign);
-        })
-    }
     let temp = Temp::new();
     drop(controller(&temp));
-    let holder = hold(&temp, 200);
+    let (release, holder) = gated_hold(&temp, 200);
     let direct = Controller::reopen(&temp.0, &identity(), context());
     assert!(matches!(direct, Err(Error::Busy)), "{}", outcome(&direct));
+    release.send(()).unwrap();
     let mut changed = context();
     changed.provider.push('x');
     let reopened = Controller::reopen_settling(&temp.0, &identity(), changed).await;
@@ -508,7 +522,8 @@ async fn reopen_settling_outwaits_only_a_transient_foreign_lock() {
         "{}",
         outcome(&reopened)
     );
-    let holder = hold(&temp, 200);
+    let (release, holder) = gated_hold(&temp, 200);
+    release.send(()).unwrap();
     let reopened = Controller::reopen_settling(&temp.0, &identity(), context()).await;
     holder.join().unwrap();
     assert!(reopened.is_ok(), "{}", outcome(&reopened));
@@ -520,10 +535,96 @@ async fn reopen_settling_outwaits_only_a_transient_foreign_lock() {
     assert!(started.elapsed() < super::REOPEN_BUSY_BUDGET + Duration::from_secs(3));
     drop(reopened);
     // The coordinators' synchronous variant waits out the same transient hold.
-    let holder = hold(&temp, 200);
+    let (release, holder) = gated_hold(&temp, 200);
+    release.send(()).unwrap();
     let reopened = Controller::reopen_settling_blocking(&temp.0, &identity(), context());
     holder.join().unwrap();
     assert!(reopened.is_ok(), "{}", outcome(&reopened));
+}
+
+/// Only `Busy` is retried (`#610` review F2). With no lock holder, a refusal
+/// comes back from the first attempt, far inside the 2 s budget; retrying it
+/// would take the whole budget and return the same error.
+#[tokio::test]
+async fn reopen_settling_returns_other_refusals_at_once() {
+    use std::time::{Duration, Instant};
+    let quick = Duration::from_millis(500);
+    // No intent recorded: InvalidJournal.
+    let empty = Temp::new();
+    // A recorded intent under another provider: WrongIdentity.
+    let temp = Temp::new();
+    drop(controller(&temp));
+    let mut changed = context();
+    changed.provider.push('x');
+    type Expected = fn(&Result<Controller, Error>) -> bool;
+    let cases: [(&Temp, Context, Expected); 2] = [
+        (&empty, context(), |r| {
+            matches!(r, Err(Error::InvalidJournal))
+        }),
+        (&temp, changed, |r| matches!(r, Err(Error::WrongIdentity))),
+    ];
+    for (temp, context, expected) in cases {
+        let started = Instant::now();
+        let result = Controller::reopen_settling(&temp.0, &identity(), context.clone()).await;
+        assert!(expected(&result), "{}", outcome(&result));
+        assert!(
+            started.elapsed() < quick,
+            "async retried {}",
+            outcome(&result)
+        );
+        let started = Instant::now();
+        let result = Controller::reopen_settling_blocking(&temp.0, &identity(), context);
+        assert!(expected(&result), "{}", outcome(&result));
+        assert!(
+            started.elapsed() < quick,
+            "blocking retried {}",
+            outcome(&result)
+        );
+    }
+}
+
+/// On a one-worker multi-thread runtime, the blocking variant's `Busy` wait
+/// must not stall the runtime's other tasks (`#610` review F1): a ticker task
+/// keeps running while a coordinator-style reopen waits out a held lock.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn reopen_settling_blocking_does_not_stall_other_tasks() {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    use std::time::Duration;
+    let temp = Temp::new();
+    drop(controller(&temp));
+    let ticks = Arc::new(AtomicUsize::new(0));
+    let ticker = {
+        let ticks = ticks.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                ticks.fetch_add(1, Ordering::SeqCst);
+            }
+        })
+    };
+    let (release, holder) = gated_hold(&temp, 400);
+    let dir = temp.0.clone();
+    let observed = ticks.clone();
+    let reopen = tokio::spawn(async move {
+        let before = observed.load(Ordering::SeqCst);
+        release.send(()).unwrap();
+        let result = Controller::reopen_settling_blocking(&dir, &identity(), context());
+        (result.is_ok(), observed.load(Ordering::SeqCst) - before)
+    });
+    let (reopened, during) = reopen.await.unwrap();
+    holder.join().unwrap();
+    ticker.abort();
+    assert!(reopened);
+    // About 80 ticks fit in the 400 ms hold; a stalled worker gives none.
+    assert!(
+        during >= 10,
+        "ticker advanced only {} times during the wait",
+        during
+    );
 }
 
 // Public synthetic descriptor fixture shared with core claim_spend tests.
