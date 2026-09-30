@@ -184,6 +184,7 @@ impl From<commands::CommandError> for Error {
             commands::CommandError::RescanGenesis(..)
             | commands::CommandError::RescanTrigger(..)
             | commands::CommandError::ChainTipUnavailable(..)
+            | commands::CommandError::MempoolUnavailable(..)
             | commands::CommandError::ChangeReservation(
                 crate::database::ReservationError::Storage
                 | crate::database::ReservationError::Unsupported,

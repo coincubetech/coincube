@@ -600,23 +600,6 @@ pub fn pill_copy(status: &ReplayStatus, entangled: &[(usize, Entanglement)]) -> 
     }
 }
 
-/// Copy for the Bitcoin Cube's recovery and inheritance screens (`#276` I8):
-/// coins received before the fork also exist on Bitcoin Blake2b until a BTCB2
-/// Cube sweeps them. Display requires fresh positive fork-UTXO evidence
-/// bound to the current Bitcoin-owned outputs and session. Neither a missing
-/// split-completion marker nor an absent counterpart Cube proves unswept funds.
-pub const BITCOIN_CUBE_UNSWEPT_NOTICE: &str =
-    "These coins also exist on Bitcoin Blake2b until swept there.";
-
-/// The I8 line for a Cube, or `None` when it does not apply: only a
-/// Bitcoin (mainnet) Cube with known-unswept pre-fork coins shows it.
-pub fn bitcoin_cube_unswept_notice(chain: ChainId, unswept: Option<bool>) -> Option<&'static str> {
-    match (chain, unswept) {
-        (ChainId::Bitcoin, Some(true)) => Some(BITCOIN_CUBE_UNSWEPT_NOTICE),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1106,32 +1089,6 @@ mod tests {
             }),
             vec![(0, Entanglement::Entangled)]
         );
-    }
-
-    #[test]
-    fn i8_notice_is_copy_only_and_gated_to_a_bitcoin_cube_with_unswept_coins() {
-        assert_eq!(
-            bitcoin_cube_unswept_notice(ChainId::Bitcoin, Some(true)),
-            Some(BITCOIN_CUBE_UNSWEPT_NOTICE)
-        );
-        assert_eq!(
-            BITCOIN_CUBE_UNSWEPT_NOTICE,
-            "These coins also exist on Bitcoin Blake2b until swept there."
-        );
-        for (chain, unswept) in [
-            (ChainId::Bitcoin, None),
-            (ChainId::Bitcoin, Some(false)),
-            (ChainId::BitcoinBlake2b, Some(true)),
-            (ChainId::Testnet4, Some(true)),
-            (ChainId::Signet, Some(true)),
-        ] {
-            assert_eq!(
-                bitcoin_cube_unswept_notice(chain, unswept),
-                None,
-                "{:?}",
-                chain
-            );
-        }
     }
 
     /// B4.2 Bitcoin-regression matrix, row I5 — a Bitcoin-family Cube still
