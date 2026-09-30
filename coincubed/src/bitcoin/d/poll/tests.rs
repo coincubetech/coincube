@@ -976,3 +976,79 @@ fn rbfpsbt_spender_not_in_mempool_falls_back_to_min_feerate_and_other_rpc_errors
         vsize
     );
 }
+
+// `getmempoolentry` answers a coin-selection or replacement read cannot use.
+fn unusable_mempool_entries() -> Vec<Json> {
+    let good = mempool_entry_json();
+    let mut entries = Vec::new();
+    for (field, value) in [
+        ("vsize", serde_json::json!(0)),
+        ("vsize", serde_json::json!("141")),
+        ("ancestorsize", Json::Null),
+        ("fees", serde_json::json!(141)),
+    ] {
+        let mut bad = good.clone();
+        bad[field] = value;
+        entries.push(bad);
+    }
+    for field in ["base", "ancestor", "descendant"] {
+        let mut bad = good.clone();
+        bad["fees"][field] = serde_json::json!(-0.00000141);
+        entries.push(bad);
+        let mut bad = good.clone();
+        bad["fees"].as_object_mut().unwrap().remove(field);
+        entries.push(bad);
+    }
+    entries
+}
+
+#[test]
+fn malformed_mempool_entry_is_an_error_not_a_panic() {
+    use crate::commands::CommandError;
+    use std::{collections::HashMap, str::FromStr};
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let control = command_control(listener.local_addr().unwrap());
+    let (outpoint, txid) = stored_replaceable_spend(&control, &listener);
+    let unconfirmed = store_coin(&control, 200_000, None, true);
+    let destination =
+        bitcoin::Address::from_str("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4").unwrap();
+    let destinations = HashMap::from([(destination, 50_000)]);
+    let change_index = control.db.connection().change_index();
+
+    // An ancestor fee coin selection cannot represent (more than u32::MAX sat)
+    // is refused too, where it used to panic.
+    let mut huge_ancestor_fee = mempool_entry_json();
+    huge_ancestor_fee["fees"]["ancestor"] = serde_json::json!(43.0);
+    let mut createspend_entries = unusable_mempool_entries();
+    createspend_entries.push(huge_ancestor_fee);
+
+    for entry in createspend_entries {
+        let result = against_node(&listener, vec![("getmempoolentry", entry.clone())], || {
+            control.create_spend(&destinations, &[unconfirmed], 1, None)
+        });
+        assert!(
+            matches!(result, Err(CommandError::MempoolUnavailable(_))),
+            "createspend with {} returned {:?}",
+            entry,
+            result
+        );
+        assert!(!control.bitcoin.is_poisoned());
+        assert_eq!(control.db.connection().change_index(), change_index);
+    }
+    for entry in unusable_mempool_entries() {
+        let result = against_node(
+            &listener,
+            rbf_mempool_reads(outpoint, txid, entry.clone().into()),
+            || control.rbf_psbt(&txid, true, None),
+        );
+        assert!(
+            matches!(result, Err(CommandError::MempoolUnavailable(_))),
+            "rbfpsbt with {} returned {:?}",
+            entry,
+            result
+        );
+        assert!(!control.bitcoin.is_poisoned());
+        assert_eq!(control.db.connection().change_index(), change_index);
+    }
+}

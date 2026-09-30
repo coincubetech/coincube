@@ -675,21 +675,25 @@ impl DaemonControl {
 
     /// Ancestor size and fees of an unconfirmed coin's transaction, for coin
     /// selection. `Ok(None)` means the backend says it is not in the mempool;
-    /// an unreachable backend is an error, not a panic (#594).
+    /// an unreachable backend (#594) or an unusable answer (#597) is an error,
+    /// not a panic.
     fn ancestor_info(&self, txid: &bitcoin::Txid) -> Result<Option<AncestorInfo>, CommandError> {
-        Ok(self
-            .bitcoin
+        self.bitcoin
             .mempool_entry_result(txid)
             .map_err(CommandError::MempoolUnavailable)?
-            .map(|info| AncestorInfo {
-                vsize: info.ancestor_vsize,
-                fee: info
-                    .fees
-                    .ancestor
-                    .to_sat()
-                    .try_into()
-                    .expect("fee in sat should fit in u32"),
-            }))
+            .map(|info| {
+                let fee = info.fees.ancestor.to_sat();
+                Ok(AncestorInfo {
+                    vsize: info.ancestor_vsize,
+                    fee: fee.try_into().map_err(|_| {
+                        CommandError::MempoolUnavailable(format!(
+                            "ancestor fee of {} is {} sat, more than coin selection supports",
+                            txid, fee
+                        ))
+                    })?,
+                })
+            })
+            .transpose()
     }
 }
 
@@ -1451,23 +1455,32 @@ impl DaemonControl {
             // mempool": that would drop the RBF minimums (#594).
             .map_err(CommandError::MempoolUnavailable)?
             .into_iter()
-            .fold(
+            .try_fold(
                 (1, bitcoin::Amount::from_sat(0)),
                 |(min_feerate, descendant_fee), entry| {
+                    // A zero size or an overflowing fee is an unusable backend
+                    // answer: an error, not a panic under the backend lock (#597).
+                    let unusable = || {
+                        CommandError::MempoolUnavailable(format!(
+                            "unusable mempool entry while replacing {}: {:?}",
+                            txid, entry
+                        ))
+                    };
                     let entry_feerate = entry
                         .fees
                         .base
                         .checked_div(entry.vsize)
-                        .expect("Can't have a null vsize or tx would be invalid")
-                        .to_sat()
-                        .checked_add(1)
-                        .expect("Can't overflow or tx would be invalid");
-                    (
+                        .and_then(|feerate| feerate.to_sat().checked_add(1))
+                        .ok_or_else(unusable)?;
+                    let descendant_fee = descendant_fee
+                        .checked_add(entry.fees.descendant)
+                        .ok_or_else(unusable)?;
+                    Ok::<_, CommandError>((
                         std::cmp::max(min_feerate, entry_feerate),
-                        descendant_fee + entry.fees.descendant,
-                    )
+                        descendant_fee,
+                    ))
                 },
-            );
+            )?;
         // Check replacement transaction's target feerate, if set, is high enough,
         // and otherwise set it to the min feerate found above.
         let feerate_vb = if is_cancel {
