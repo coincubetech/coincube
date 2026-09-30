@@ -638,6 +638,20 @@ pub struct SigningCheck {
     not_after: Instant,
 }
 
+/// The retention refusal names its own cause; every other finalization
+/// failure is a binding mismatch with the owned construction.
+fn finish_error(error: coincube_core::claim_finalize::ClaimForkFinalizeError) -> Error {
+    use coincube_core::{
+        claim_finalize::ClaimForkFinalizeError, unified_finalize::UnifiedFinalizeError,
+    };
+    match error {
+        ClaimForkFinalizeError::Finalize(UnifiedFinalizeError::UnsafeLegacyAlternative {
+            ..
+        }) => Error::UnsafeLegacyAlternative,
+        _ => Error::InvalidBinding,
+    }
+}
+
 /// Owns the unsigned fork construction and the Claim journal while signatures
 /// are collected. Every new signing dispatch needs another fresh chain check.
 pub struct Preparation {
@@ -944,7 +958,7 @@ impl Preparation {
             signed,
             &coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::verification_only(),
         )
-        .map_err(|_| Error::InvalidBinding)?;
+        .map_err(finish_error)?;
         Ok(Coordinator {
             id: self.id,
             revision: self.revision,

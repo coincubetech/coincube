@@ -48,6 +48,9 @@ use tokio::sync::watch;
 pub enum Error {
     Unsupported,
     InvalidBinding,
+    /// The signed Claim fork sweep retains legacy signatures that could satisfy
+    /// an input without its unified one (`#582`, `#607`). Nothing was finalized.
+    UnsafeLegacyAlternative,
     Revoked,
     InvalidReview,
     ChangedReview,
