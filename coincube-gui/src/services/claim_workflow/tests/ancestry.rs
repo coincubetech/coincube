@@ -150,7 +150,7 @@ fn large_path_reopens_without_construction_or_submission_authority() {
     assert!(fs::metadata(temp.0.join("intent.json")).unwrap().len() > 1024 * 1024);
     let identity = c.identity().clone();
     drop(c);
-    let mut c = Controller::reopen(&temp.0, &identity, context()).unwrap();
+    let mut c = reopen_settled(&temp.0, &identity, context()).unwrap();
     assert_eq!(
         c.recorded_ancestry().unwrap().unwrap().encode(),
         path.encode()
@@ -211,11 +211,13 @@ fn tampered_ancestry_records_fail_reopen_without_rewriting_evidence() {
         let bytes = serde_json::to_vec(&value).unwrap();
         let file = temp.0.join("intent.json");
         fs::write(&file, &bytes).unwrap();
-        assert!(
-            Controller::reopen(&temp.0, &identity, context()).is_err(),
-            "mutation {}",
-            mutation
-        );
+        let reopened = reopen_settled(&temp.0, &identity, context());
+        let expected = if matches!(mutation, 2 | 3 | 8) {
+            matches!(reopened, Err(Error::InvalidJournal))
+        } else {
+            matches!(reopened, Err(Error::InvalidPlan))
+        };
+        assert!(expected, "mutation {}: {}", mutation, outcome(&reopened));
         assert_eq!(fs::read(file).unwrap(), bytes);
     }
 }
@@ -230,7 +232,7 @@ fn larger_ancestry_allowance_does_not_relax_legacy_journal_limit() {
     bytes.resize(1024 * 1024 + 1, b' ');
     fs::write(&file, &bytes).unwrap();
     assert!(matches!(
-        Controller::reopen(&temp.0, &identity(), context()),
+        reopen_settled(&temp.0, &identity(), context()),
         Err(Error::InvalidJournal)
     ));
     assert_eq!(fs::read(file).unwrap(), bytes);
@@ -278,7 +280,7 @@ fn restore_ancestry_rebuilds_intent_and_authenticates_recorded_witness_without_w
             .unwrap();
         }
         let before = fs::read(temp.0.join("intent.json")).unwrap();
-        let mut c = Controller::reopen(&temp.0, &identity, context()).unwrap();
+        let mut c = reopen_settled(&temp.0, &identity, context()).unwrap();
         let restored = c.restore_ancestry(&context(), built.descriptor(), &mut getter, &coins);
         if mode == 2 {
             assert!(matches!(restored, Err(Error::InvalidJournal)));
@@ -364,7 +366,7 @@ fn restore_ancestry_fork_uses_only_shared_inputs_and_rejects_saved_output_tamper
         let file = temp.0.join("intent.json");
         fs::write(&file, serde_json::to_vec(&intent).unwrap()).unwrap();
         let before = fs::read(&file).unwrap();
-        let mut c = Controller::reopen(&temp.0, &identity, context()).unwrap();
+        let mut c = reopen_settled(&temp.0, &identity, context()).unwrap();
         let (wrong, _) = fixture(12, false);
         let result = c.restore_ancestry_fork_sweep(
             &context(),
@@ -404,7 +406,7 @@ fn selected_input_hint_restores_owned_metadata_without_fork_transaction_lookup()
         drop(c);
         let file = temp.0.join("intent.json");
         let before = fs::read(&file).unwrap();
-        let mut c = Controller::reopen(&temp.0, &identity, context()).unwrap();
+        let mut c = reopen_settled(&temp.0, &identity, context()).unwrap();
         // The fork-side material has only the shared inputs. The excluded
         // transaction must come from the reverified retained path instead.
         let expected = coins.remove(0);
@@ -469,9 +471,13 @@ fn selected_input_hint_refuses_tampering_and_does_not_invent_legacy_ownership() 
         }
         fs::write(&file, serde_json::to_vec(&stored).unwrap()).unwrap();
         let before = fs::read(&file).unwrap();
-        let reopened = Controller::reopen(&temp.0, &identity, context());
+        let reopened = reopen_settled(&temp.0, &identity, context());
         if mode == "hardened" {
-            assert!(reopened.is_err());
+            assert!(
+                matches!(reopened, Err(Error::InvalidJournal)),
+                "{}",
+                outcome(&reopened)
+            );
         } else {
             let mut c = reopened.unwrap();
             let wrong = CoincubeDescriptor::from_str(
