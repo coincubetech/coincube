@@ -326,6 +326,33 @@ impl NodeFlavor {
         }
     }
 
+    /// Command-line arguments a managed `bitcoind` of this flavour is spawned
+    /// with, after `-chain`/`-datadir`. Decided by the binary actually being
+    /// launched, not the configured flavour: `select_managed_bitcoind_exe` can
+    /// fall back to the other Bitcoin flavour's binary.
+    ///
+    /// Knots launches a `tor` of its own whenever it cannot reach its Tor
+    /// control port (`-torexecute`, default `tor`), and tries again on every
+    /// reconnect backoff. With inbound Tor on, the managed node loses its
+    /// control port whenever the managed Tor stops under it, and a failed exec
+    /// in Knots v29.3's subprocess code closes a descriptor twice (#394,
+    /// #605). COINCUBE owns the Tor the node talks to (`node::tor`), so the
+    /// launch is switched off: `-torexecute=0` clears the command
+    /// (`TorControlThread`, `src/torcontrol.cpp:828-833` at
+    /// `v29.3.knots20260507`; the same code in `v29.4.1.knots20260508`), and
+    /// the option is accepted even by a build without the Tor subprocess
+    /// (registered as a hidden argument, `src/init.cpp:620-624`).
+    ///
+    /// Core has no such option, and an unknown command-line parameter is fatal
+    /// there (`Invalid parameter`, `src/common/args.cpp:234-239` at `v29.0`),
+    /// so Core gets none.
+    pub fn managed_spawn_args(self) -> &'static [&'static str] {
+        match self {
+            NodeFlavor::Core => &[],
+            NodeFlavor::Knots | NodeFlavor::KnotsBlake2b => &["-torexecute=0"],
+        }
+    }
+
     /// Human-readable name for UI copy and logs.
     pub fn display_name(self) -> &'static str {
         match self {
@@ -1364,8 +1391,9 @@ pub struct InternalBitcoindConfig {
     /// `listen=1`, `listenonion=1`, `discover=0` (and `torcontrol` once
     /// [`Self::tor_control_port`] is known), so bitcoind advertises itself as a
     /// v3 onion service and accepts inbound peers. The persisted marker is
-    /// `listenonion=1`. Off by default — absent keys parse back to all-off, so
-    /// existing datadirs are unchanged.
+    /// `listenonion=1`. Off by default — absent keys parse back to all-off —
+    /// and off is written as `listenonion=0`, so neither bitcoind flavour
+    /// falls back to its own onion-listening default (#598).
     pub inbound_tor: bool,
     /// Route *outbound* peer connections through Tor too, via `proxy=<socks>`.
     /// Only meaningful alongside `inbound_tor`. The persisted marker is the
@@ -1682,9 +1710,8 @@ impl InternalBitcoindConfig {
 
         // Inbound-over-Tor. All of these are global (non-network-scoped)
         // bitcoind options, so they belong in the section-less general part of
-        // the file. Emitted only when the feature is on;
-        // when off, the general section is untouched (so existing datadirs, and
-        // the default no-op state, produce a byte-identical file).
+        // the file. Emitted only when the feature is on; when off, the only
+        // Tor line is `listenonion=0` (see the `else` arm).
         if self.inbound_tor {
             let mut general = conf_ini.with_general_section();
             // Advertise + accept inbound peers as a v3 onion service. `discover=0`
@@ -1716,6 +1743,18 @@ impl InternalBitcoindConfig {
                     general.set("proxy", format!("{TOR_LOOPBACK_HOST}:{socks_port}"));
                 }
             }
+        } else {
+            // Inbound off must say so. bitcoind's `-listenonion` defaults to on
+            // whenever it listens, which it does by default, so a file silent
+            // on the key still starts the torcontrol thread. On Knots that
+            // thread, failing to reach a control port, launches `tor` itself
+            // (`-torexecute`, default `tor`), and on a machine with no `tor`
+            // the failed exec closes a pipe descriptor twice — the double
+            // close behind #394's lost block file (#598). With a `tor` it
+            // would instead publish an onion service the user never enabled.
+            // `listenonion=0` is also valid, and equally meant, on Core.
+            // It parses back as inbound off.
+            conf_ini.with_general_section().set("listenonion", "0");
         }
 
         // Mempool memory cap — a standalone resource key, emitted whenever set
@@ -1915,8 +1954,11 @@ fn ensure_data_carrier_size(coincube_datadir: &CoincubeDirectory) {
 /// Pick the managed `bitcoind` binary to launch for `configured_flavor`,
 /// preferring that flavour's versions (newest first) and falling back to the
 /// other flavour's only if none are installed. Returns the first existing
-/// `bitcoin-<version>/bin/bitcoind[.exe]` under the managed directory, or `None`
-/// when nothing is installed.
+/// `bitcoin-<version>/bin/bitcoind[.exe]` under the managed directory together
+/// with the flavour of that binary (from its version), or `None` when nothing
+/// is installed. The flavour returned is the one the spawn arguments follow
+/// ([`NodeFlavor::managed_spawn_args`]), since it differs from
+/// `configured_flavor` on a fallback.
 ///
 /// Only versions in [`CORE_VERSIONS`] / [`KNOTS_VERSIONS`] are candidates, so a
 /// Knots build we no longer ship — `29.3.knots20260508`, which enforces a stalled
@@ -1924,7 +1966,7 @@ fn ensure_data_carrier_size(coincube_datadir: &CoincubeDirectory) {
 fn select_managed_bitcoind_exe(
     coincube_datadir: &CoincubeDirectory,
     configured_flavor: NodeFlavor,
-) -> Option<PathBuf> {
+) -> Option<(PathBuf, NodeFlavor)> {
     // A Bitcoin flavour may fall back to the other Bitcoin flavour's binary
     // (same chain, same rules); the Bitcoin Blake2b flavour has no fallback and
     // is searched only under its own family root, so no Bitcoin chain ever
@@ -1938,8 +1980,13 @@ fn select_managed_bitcoind_exe(
     primary
         .iter()
         .chain(secondary.iter())
-        .map(|v| internal_bitcoind_exe_path_for(coincube_datadir, family, v))
-        .find(|path| path.exists())
+        .map(|v| {
+            (
+                internal_bitcoind_exe_path_for(coincube_datadir, family, v),
+                NodeFlavor::from_version(v),
+            )
+        })
+        .find(|(path, _)| path.exists())
 }
 
 /// Block until a managed bitcoind we just asked to `stop` is no longer reachable
@@ -2083,9 +2130,10 @@ impl Bitcoind {
         // the step's marker needs (Bitcoin family only).
         ensure_data_carrier_size(coincube_datadir);
         // Launch the binary the user asked for. Nothing in the conf forces our
-        // hand (it carries no Knots-only key), but the choice is still theirs: a
-        // machine with both flavours installed must launch the configured one
-        // rather than whichever is found first.
+        // hand (it carries no Knots-only key; those go on the command line,
+        // per binary — see `NodeFlavor::managed_spawn_args`), but the choice is
+        // still theirs: a machine with both flavours installed must launch the
+        // configured one rather than whichever is found first.
         let selected_exe = select_managed_bitcoind_exe(coincube_datadir, configured_flavor);
 
         // Is a managed node already running on this RPC endpoint? Its flavour
@@ -2159,10 +2207,10 @@ impl Bitcoind {
             running.stop();
             wait_for_internal_bitcoind_shutdown(&config);
         }
-        let bitcoind_exe_path =
+        let (bitcoind_exe_path, exe_flavor) =
             selected_exe.ok_or(StartInternalBitcoindError::ExecutableNotFound)?;
         info!(
-            "Found bitcoind executable at '{}'.",
+            "Found bitcoind executable at '{}' ({exe_flavor:?}).",
             bitcoind_exe_path.to_string_lossy()
         );
         let datadir_path_str = bitcoind_datadir
@@ -2180,10 +2228,19 @@ impl Bitcoind {
         #[cfg(target_os = "windows")]
         let datadir_path_str = datadir_path_str.replace("\\\\?\\", "").replace("\\\\?", "");
 
-        let args = vec![
+        // The flavour-specific arguments follow the binary being launched,
+        // which is not the configured flavour on a fallback: Core refuses an
+        // option it does not know, so a Knots-only one must never reach it.
+        let mut args = vec![
             format!("-chain={}", network.to_core_arg()),
             format!("-datadir={}", datadir_path_str),
         ];
+        args.extend(
+            exe_flavor
+                .managed_spawn_args()
+                .iter()
+                .map(|a| a.to_string()),
+        );
         // Build a fresh bitcoind command each spawn attempt (we may respawn if
         // the datadir lock isn't free yet — see the retry below).
         let spawn_bitcoind = || -> Result<std::process::Child, StartInternalBitcoindError> {
@@ -3002,8 +3059,11 @@ mod tests {
         conf.networks.insert(Network::Bitcoin, main_conf);
         conf.networks.insert(Network::Regtest, regtest_conf);
         conf_ini = conf.to_ini();
-        assert_eq!(conf_ini.len(), 3); // 2 network sections plus the empty general section
-        assert!(conf_ini.general_section().is_empty());
+        // 2 network sections plus the general section. Inbound-over-Tor is
+        // off, which is written down (#598) and is all that section holds.
+        assert_eq!(conf_ini.len(), 3);
+        assert_eq!(conf_ini.general_section().get("listenonion"), Some("0"));
+        assert_eq!(conf_ini.general_section().len(), 1);
         for (sec, prop) in &conf_ini {
             if let Some(sec) = sec {
                 let rpc_port = prop.get("rpcport").expect("rpcport");
@@ -3026,7 +3086,9 @@ mod tests {
                     panic!("Unexpected section");
                 }
             } else {
-                assert!(prop.is_empty())
+                // Inbound-over-Tor off, written down (#598).
+                assert_eq!(prop.len(), 1);
+                assert_eq!(prop.get("listenonion"), Some("0"));
             }
         }
     }
@@ -3254,15 +3316,21 @@ mod tests {
             rpc_auth: None,
         };
 
-        // Off by default: a Knots config emits none of the Tor keys, leaving the
-        // general section empty.
+        // Off by default: a Knots config says `listenonion=0` and emits none
+        // of the other Tor keys, and that parses back as off.
         let mut off = InternalBitcoindConfig::for_flavor(NodeFlavor::Knots);
         off.networks.insert(Network::Bitcoin, net.clone());
         assert!(!off.inbound_tor);
         let off_ini = off.to_ini();
+        assert_eq!(off_ini.general_section().get("listenonion"), Some("0"));
+        assert_eq!(off_ini.general_section().len(), 1);
+        assert!(
+            !InternalBitcoindConfig::from_ini(&off_ini)
+                .expect("parse inbound-off conf")
+                .inbound_tor
+        );
         for key in [
             "listen",
-            "listenonion",
             "discover",
             "torcontrol",
             "proxy",
@@ -3287,6 +3355,7 @@ mod tests {
         let general = on_ini.general_section();
         assert_eq!(general.get("listen"), Some("1"));
         assert_eq!(general.get("listenonion"), Some("1"));
+        assert_eq!(general.get_all("listenonion").count(), 1);
         assert_eq!(general.get("discover"), Some("0"));
         assert_eq!(general.get("maxuploadtarget"), Some("1000"));
         assert_eq!(general.get("maxconnections"), Some("20"));
@@ -3359,13 +3428,13 @@ mod tests {
         };
 
         // Untouched (None) on a plain Core config: no `maxmempool`, and the
-        // general section stays empty — byte-identical to today's output.
+        // general section holds only the inbound-off `listenonion=0`.
         let mut off = InternalBitcoindConfig::for_flavor(NodeFlavor::Core);
         off.networks.insert(Network::Bitcoin, net.clone());
         assert_eq!(off.max_mempool_mb, None);
         let off_ini = off.to_ini();
         assert!(off_ini.general_section().get("maxmempool").is_none());
-        assert!(off_ini.general_section().is_empty());
+        assert_eq!(off_ini.general_section().len(), 1);
 
         // Set on a Core config with inbound-over-Tor OFF: still emitted (proves
         // it is standalone, not Tor-gated, and not flavour-gated).
@@ -3457,16 +3526,23 @@ mod tests {
         // Knots conf -> Knots binary, even though Core is also installed.
         assert_eq!(
             select_managed_bitcoind_exe(&datadir, NodeFlavor::Knots),
-            Some(internal_bitcoind_exe_path(&datadir, KNOTS_VERSION))
+            Some((
+                internal_bitcoind_exe_path(&datadir, KNOTS_VERSION),
+                NodeFlavor::Knots
+            ))
         );
         // Core conf -> Core binary.
         assert_eq!(
             select_managed_bitcoind_exe(&datadir, NodeFlavor::Core),
-            Some(internal_bitcoind_exe_path(&datadir, CORE_VERSION))
+            Some((
+                internal_bitcoind_exe_path(&datadir, CORE_VERSION),
+                NodeFlavor::Core
+            ))
         );
 
         // Fallback: with only Knots installed, a Core conf still finds the
-        // Knots binary rather than failing to locate any executable.
+        // Knots binary rather than failing to locate any executable — and
+        // reports it as Knots, which is what its spawn arguments follow.
         let core_install = internal_bitcoind_exe_path(&datadir, CORE_VERSION)
             .parent()
             .unwrap()
@@ -3476,7 +3552,10 @@ mod tests {
         fs::remove_dir_all(&core_install).unwrap();
         assert_eq!(
             select_managed_bitcoind_exe(&datadir, NodeFlavor::Core),
-            Some(internal_bitcoind_exe_path(&datadir, KNOTS_VERSION))
+            Some((
+                internal_bitcoind_exe_path(&datadir, KNOTS_VERSION),
+                NodeFlavor::Knots
+            ))
         );
 
         let _ = fs::remove_dir_all(&base);
@@ -3526,7 +3605,7 @@ mod tests {
         fs::write(&pinned, b"fake bitcoind").unwrap();
         assert_eq!(
             select_managed_bitcoind_exe(&datadir, NodeFlavor::Knots),
-            Some(pinned)
+            Some((pinned, NodeFlavor::Knots))
         );
 
         let _ = fs::remove_dir_all(&base);
@@ -3547,7 +3626,7 @@ mod tests {
         assert_eq!(off.data_carrier_size, None);
         let off_ini = off.to_ini();
         assert!(off_ini.general_section().get("datacarriersize").is_none());
-        assert!(off_ini.general_section().is_empty());
+        assert_eq!(off_ini.general_section().len(), 1, "only `listenonion=0`");
 
         let mut on = InternalBitcoindConfig::for_flavor(NodeFlavor::Knots);
         on.data_carrier_size = Some(DATA_CARRIER_SIZE);
@@ -4060,22 +4139,22 @@ mod tests {
         assert_eq!(select_managed_bitcoind_exe(&root, NodeFlavor::Knots), None);
         assert_eq!(
             select_managed_bitcoind_exe(&root, NodeFlavor::KnotsBlake2b),
-            Some(blake2b_exe.clone())
+            Some((blake2b_exe.clone(), NodeFlavor::KnotsBlake2b))
         );
         // A Bitcoin Knots binary: Bitcoin providers resolve it (Core by
         // fallback, as before); the Blake2b provider still does not.
         let knots_exe = install(NodeChainFamily::Bitcoin, KNOTS_VERSION);
         assert_eq!(
             select_managed_bitcoind_exe(&root, NodeFlavor::Knots),
-            Some(knots_exe.clone())
+            Some((knots_exe.clone(), NodeFlavor::Knots))
         );
         assert_eq!(
             select_managed_bitcoind_exe(&root, NodeFlavor::Core),
-            Some(knots_exe)
+            Some((knots_exe, NodeFlavor::Knots))
         );
         assert_eq!(
             select_managed_bitcoind_exe(&root, NodeFlavor::KnotsBlake2b),
-            Some(blake2b_exe.clone())
+            Some((blake2b_exe.clone(), NodeFlavor::KnotsBlake2b))
         );
         // Remove the Blake2b binary: the Blake2b provider has no fallback.
         std::fs::remove_file(&blake2b_exe).unwrap();
@@ -4253,6 +4332,8 @@ mod tests {
         let rewritten = std::fs::read_to_string(&conf_path).unwrap();
         assert!(!rewritten.contains("consensusrules"), "{}", rewritten);
         assert!(rewritten.contains("datacarriersize=100"), "{}", rewritten);
+        // Inbound-over-Tor is off here, and the rewrite now says so (#598).
+        assert!(rewritten.contains("listenonion=0"), "{}", rewritten);
         let reloaded = InternalBitcoindConfig::from_file(&conf_path).unwrap();
         let main = &reloaded.networks[&Network::Bitcoin];
         assert_eq!(
@@ -4263,6 +4344,238 @@ mod tests {
         // Canonical already: the next start's rewrite is byte-identical.
         expect_absent_binary(Bitcoind::maybe_start(Network::Bitcoin, config, &root));
         assert_eq!(std::fs::read_to_string(&conf_path).unwrap(), rewritten);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // #605: a Knots binary is spawned with `-torexecute=0`, so losing its Tor
+    // control port never makes it launch a `tor` of its own; a Core binary is
+    // spawned without it, because Core refuses an unknown command-line option.
+    // The argument follows the binary actually launched, not the configured
+    // flavour, so both fallbacks are covered.
+    //
+    // Goes through `Bitcoind::maybe_start`'s own spawn: the managed binary is a
+    // script that records its argv and then waits. The RPC endpoint is a
+    // listener that answers every request with HTTP 403 — a non-transient
+    // error — once that record exists, so the start kills the child and
+    // returns instead of waiting for a node that will never come up.
+    #[cfg(unix)]
+    #[test]
+    fn the_spawned_binary_gets_torexecute_0_exactly_when_it_is_knots() {
+        use crate::node::revalidate::ManagedNodeState;
+        use std::io::{Read, Write};
+        use std::os::unix::fs::PermissionsExt;
+
+        struct Case {
+            configured: NodeFlavor,
+            installed: &'static str,
+            expect_torexecute: bool,
+        }
+        let cases = [
+            Case {
+                configured: NodeFlavor::Knots,
+                installed: KNOTS_VERSION,
+                expect_torexecute: true,
+            },
+            // Fallback: Knots configured, only Core installed.
+            Case {
+                configured: NodeFlavor::Knots,
+                installed: CORE_VERSION,
+                expect_torexecute: false,
+            },
+            Case {
+                configured: NodeFlavor::Core,
+                installed: CORE_VERSION,
+                expect_torexecute: false,
+            },
+            // Fallback: Core configured, only Knots installed.
+            Case {
+                configured: NodeFlavor::Core,
+                installed: KNOTS_VERSION,
+                expect_torexecute: true,
+            },
+        ];
+
+        for (i, case) in cases.iter().enumerate() {
+            let (base, root) = a_temp_coincube_datadir(&format!("spawn-args-{}", i));
+            std::fs::create_dir_all(internal_bitcoind_datadir(&root)).unwrap();
+            ManagedNodeState {
+                configured_flavor: Some(case.configured),
+                ..Default::default()
+            }
+            .save(&root)
+            .unwrap();
+
+            let exe = internal_bitcoind_exe_path(&root, case.installed);
+            let bin_dir = exe.parent().unwrap().to_path_buf();
+            std::fs::create_dir_all(&bin_dir).unwrap();
+            let argv_path = bin_dir.join("argv");
+            let argv_tmp = bin_dir.join("argv.tmp");
+            std::fs::write(
+                &exe,
+                format!(
+                    "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}' && mv '{}' '{}'\nexec sleep 30\n",
+                    argv_tmp.display(),
+                    argv_tmp.display(),
+                    argv_path.display()
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let server = {
+                let done = done.clone();
+                let argv_path = argv_path.clone();
+                std::thread::spawn(move || {
+                    for (n, stream) in listener.incoming().enumerate() {
+                        if done.load(std::sync::atomic::Ordering::SeqCst) {
+                            break;
+                        }
+                        let Ok(mut stream) = stream else { break };
+                        let _ = stream.set_read_timeout(Some(time::Duration::from_millis(200)));
+                        let _ = stream.read(&mut [0u8; 4096]);
+                        // The first request is the pre-spawn "is a node already
+                        // running?" check: answered at once. Every later one is
+                        // held until the spawned script has recorded its argv,
+                        // so the start cannot kill it first. Bounded, and a
+                        // second pre-spawn request would only cost its own 3 s
+                        // client timeout.
+                        let wait = if n == 0 { 0 } else { 20 };
+                        let deadline = time::Instant::now() + time::Duration::from_secs(wait);
+                        while !argv_path.exists() && time::Instant::now() < deadline {
+                            thread::sleep(time::Duration::from_millis(20));
+                        }
+                        let _ = stream.write_all(
+                            b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        );
+                        let _ = stream.flush();
+                    }
+                })
+            };
+            let config = BitcoindConfig {
+                rpc_auth: coincubed::config::BitcoindRpcAuth::UserPass(
+                    "user".to_string(),
+                    "pass".to_string(),
+                ),
+                addr,
+            };
+
+            match Bitcoind::maybe_start(Network::Bitcoin, config, &root) {
+                Err(StartInternalBitcoindError::BitcoinDError(_)) => {}
+                other => panic!(
+                    "case {i}: expected BitcoinDError from the stand-in endpoint, got {:?}",
+                    other.map(|_| ())
+                ),
+            }
+            done.store(true, std::sync::atomic::Ordering::SeqCst);
+            let _ = std::net::TcpStream::connect(addr);
+            server.join().unwrap();
+
+            let argv: Vec<String> = std::fs::read_to_string(&argv_path)
+                .unwrap_or_else(|e| panic!("case {}: the binary was not spawned: {}", i, e))
+                .lines()
+                .map(str::to_string)
+                .collect();
+            assert!(
+                argv.iter().any(|a| a == "-chain=main"),
+                "case {}: {:?}",
+                i,
+                argv
+            );
+            assert!(
+                argv.iter().any(|a| a.starts_with("-datadir=")),
+                "case {}: {:?}",
+                i,
+                argv
+            );
+            let torexecute: Vec<&String> = argv
+                .iter()
+                .filter(|a| a.starts_with("-torexecute"))
+                .collect();
+            if case.expect_torexecute {
+                assert_eq!(torexecute, ["-torexecute=0"], "case {}: {:?}", i, argv);
+            } else {
+                assert!(torexecute.is_empty(), "case {}: {:?}", i, argv);
+            }
+            let _ = std::fs::remove_dir_all(&base);
+        }
+    }
+
+    // #598: with `listenonion` unset, bitcoind listens and so defaults it on,
+    // and Knots 29.3 then launches `tor` itself when no control port answers —
+    // the subprocess path whose failed exec closes a descriptor twice (#394).
+    // The pre-spawn rewrite every start takes must therefore leave the file
+    // with exactly one `listenonion` line matching the user's choice: `0` for
+    // a file that predates the key (inbound off), and the inbound-on file's
+    // `1` kept as it was, with its companion keys, and no `0` beside it.
+    #[test]
+    fn start_writes_listenonion_for_both_inbound_states_before_the_spawn() {
+        use crate::node::revalidate::ManagedNodeState;
+        let (base, root) = a_temp_coincube_datadir("listenonion");
+        let bitcoin_datadir = internal_bitcoind_datadir(&root);
+        let conf_path = internal_bitcoind_config_path(&bitcoin_datadir);
+        let cookie_path = internal_bitcoind_cookie_path(&bitcoin_datadir, &Network::Bitcoin);
+        let config = BitcoindConfig {
+            rpc_auth: coincubed::config::BitcoindRpcAuth::CookieFile(cookie_path),
+            addr: std::net::SocketAddr::from(([127, 0, 0, 1], 1)),
+        };
+        ManagedNodeState {
+            configured_flavor: Some(NodeFlavor::Knots),
+            ..Default::default()
+        }
+        .save(&root)
+        .unwrap();
+        std::fs::create_dir_all(&bitcoin_datadir).unwrap();
+        let start = || match Bitcoind::maybe_start(Network::Bitcoin, config.clone(), &root) {
+            Err(StartInternalBitcoindError::ExecutableNotFound) => {}
+            other => panic!("expected ExecutableNotFound, got {:?}", other.map(|_| ())),
+        };
+        let listenonion_lines = |text: &str| -> Vec<String> {
+            text.lines()
+                .filter(|l| l.trim_start().starts_with("listenonion"))
+                .map(str::to_string)
+                .collect()
+        };
+
+        // Inbound off, as master wrote it: no key, and already carrying
+        // `datacarriersize=100`, so `ensure_data_carrier_size` has nothing to
+        // do and only the pre-spawn rewrite can add the line.
+        std::fs::write(
+            &conf_path,
+            "maxmempool=300\ndatacarriersize=100\n[main]\nrpcport=12345\nport=12346\nprune=15000\n",
+        )
+        .unwrap();
+        start();
+        let off = std::fs::read_to_string(&conf_path).unwrap();
+        assert_eq!(listenonion_lines(&off), vec!["listenonion=0"], "{}", off);
+        assert!(off.contains("datacarriersize=100"), "{}", off);
+        assert!(!off.contains("torcontrol"), "{}", off);
+        assert!(
+            !InternalBitcoindConfig::from_file(&conf_path)
+                .unwrap()
+                .inbound_tor
+        );
+
+        // Inbound on, as `prepare_inbound_tor` leaves it with Tor up.
+        std::fs::write(
+            &conf_path,
+            "listen=1\nlistenonion=1\ndiscover=0\ntorcontrol=127.0.0.1:9151\n\
+             datacarriersize=100\n[main]\nrpcport=12345\nport=12346\nprune=15000\n",
+        )
+        .unwrap();
+        start();
+        let on = std::fs::read_to_string(&conf_path).unwrap();
+        assert_eq!(listenonion_lines(&on), vec!["listenonion=1"], "{}", on);
+        assert!(on.contains("listen=1"), "{}", on);
+        assert!(on.contains("discover=0"), "{}", on);
+        assert!(on.contains("torcontrol=127.0.0.1:9151"), "{}", on);
+        assert!(on.contains("datacarriersize=100"), "{}", on);
+        let reloaded = InternalBitcoindConfig::from_file(&conf_path).unwrap();
+        assert!(reloaded.inbound_tor);
+        assert_eq!(reloaded.tor_control_port, Some(9151));
 
         let _ = std::fs::remove_dir_all(&base);
     }

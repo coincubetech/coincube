@@ -1979,7 +1979,9 @@ mod chain_identity_tests {
         );
         let rewritten = std::fs::read(&conf_path).unwrap();
         assert_ne!(rewritten, conf_bytes);
-        assert!(!String::from_utf8_lossy(&rewritten).contains("listenonion"));
+        let rewritten = String::from_utf8_lossy(&rewritten);
+        assert!(!rewritten.contains("listenonion=1"), "{}", rewritten);
+        assert!(rewritten.contains("listenonion=0"), "{}", rewritten);
         let _ = std::fs::remove_dir_all(root.path());
     }
 
