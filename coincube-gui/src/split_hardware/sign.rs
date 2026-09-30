@@ -6,10 +6,16 @@
 //! BIP44/49/84 account paths, or `wsh(multi)` / `wsh(sortedmulti)`. For a
 //! multisig policy the session first asks the device whether the policy is
 //! registered and registers it when it is not (`is_wallet_registered` then
-//! `register_wallet`). Whatever the device returns from registration (the
-//! Ledger HMAC) stays in this session's memory, wrapped in [`Zeroizing`], and
-//! is dropped with the session. Nothing is written to disk, so a new session
-//! registers the policy again (P6).
+//! `register_wallet`). Coincube writes nothing to disk. What happens to the
+//! registration depends on the device:
+//!
+//! - Ledger returns an HMAC instead of storing the policy. The HMAC stays in
+//!   this session's memory, wrapped in [`Zeroizing`], and is dropped with the
+//!   session, so the next session registers the policy again (P6).
+//! - Jade, Coldcard and BitBox02 store the registration on the device
+//!   itself. A later session finds it there
+//!   ([`RegistrationOutcome::AlreadyRegistered`]) and does not ask again,
+//!   until the user removes it in the device's settings.
 //!
 //! The device's output is not trusted. [`SigningSession::sign`] copies only
 //! new ECDSA partial signatures, for keys this device owns according to the
@@ -32,14 +38,16 @@
 //! |---|---|---|
 //! | Jade | listed handle | listed handle, after registration on the device |
 //! | Coldcard | listed handle | handle bound to the policy name |
-//! | BitBox02 | listed handle | handle bound to the policy |
+//! | BitBox02 | listed handle for `sh(wpkh)` and `wpkh`; `pkh` refused (bitbox-api has no P2PKH) | handle bound to the policy |
 //! | Ledger | handle bound to the default policy (no HMAC) | handle bound to the policy and the session HMAC |
 //! | Specter | listed handle | refused: the device cannot report registration |
 //!
-//! A bound handle comes from a caller-supplied [`PolicyBinder`]. No production
-//! binder exists yet; the caller that adds the GUI entry point provides one.
-//! Until then, [`NoBinder`] refuses the bound rows with
-//! [`SignError::NeedsPolicyBinding`].
+//! A bound handle comes from a caller-supplied [`PolicyBinder`], fixed when
+//! the session opens. No production binder exists yet; the caller that adds
+//! the GUI entry point provides one. Until then, [`NoBinder`] refuses the
+//! bound rows with [`SignError::NeedsPolicyBinding`] at
+//! [`SigningSession::open`], before the device is asked to register
+//! anything, so the user never approves a registration that cannot be used.
 
 use std::sync::Arc;
 
@@ -69,8 +77,21 @@ pub const STEP2_DEVICE_SHOWS_BITCOIN_WARNING: &str = "This step moves your BTCB2
 /// Step 1 carries a zero-value data output that some devices show oddly.
 pub const STEP1_DATA_OUTPUT_NOTE: &str = "This transaction includes a zero-value data output that separates your coins. Your device may show it as a data or unknown output with no amount.";
 
-/// Shown before the device asks the user to register a multisig policy.
-pub const REGISTRATION_NOTICE: &str = "Your hardware wallet will ask you to register this multisig wallet. Coincube keeps the registration only while this window is open, so you will be asked again next time.";
+/// Shown before a Ledger asks the user to register a multisig policy: its
+/// registration token lives only in this session's memory.
+pub const REGISTRATION_NOTICE_SESSION: &str = "Your hardware wallet will ask you to register this multisig wallet. Coincube keeps the registration only while this window is open, so you will be asked again next time.";
+
+/// Shown before a device that stores registrations (Jade, Coldcard,
+/// BitBox02) asks the user to register a multisig policy.
+pub const REGISTRATION_NOTICE_ON_DEVICE: &str = "Your hardware wallet will ask you to register this multisig wallet. The device keeps the registration, so it will not ask again next time. You can remove it later in the device's settings.";
+
+/// The registration notice that matches how `kind` keeps a registration.
+pub fn registration_notice(kind: DeviceKind) -> &'static str {
+    match kind {
+        DeviceKind::Ledger | DeviceKind::LedgerSimulator => REGISTRATION_NOTICE_SESSION,
+        _ => REGISTRATION_NOTICE_ON_DEVICE,
+    }
+}
 
 /// Device-visible name prefix for a registered Split policy.
 const POLICY_NAME_PREFIX: &str = "Split";
@@ -125,7 +146,8 @@ pub enum SignError {
     Fingerprint,
     /// The listed device is locked or unsupported.
     DeviceUnavailable,
-    /// This device class cannot register and check a multisig policy.
+    /// This device class cannot sign this shape: Specter multisig (it
+    /// cannot report registration) or BitBox02 `pkh` (no P2PKH support).
     UnsupportedDevice(DeviceKind),
     /// This device class signs only through a policy-bound handle, and the
     /// caller supplied no binder for it.
@@ -163,7 +185,7 @@ impl std::fmt::Display for SignError {
             Self::DeviceNotInPolicy => write!(f, "This hardware wallet holds none of this wallet's keys."),
             Self::Fingerprint => write!(f, "The device reported a different wallet fingerprint. Reconnect it and try again."),
             Self::DeviceUnavailable => write!(f, "Unlock the hardware wallet and open its Bitcoin app."),
-            Self::UnsupportedDevice(kind) => write!(f, "{kind} cannot register a multisig wallet for Split."),
+            Self::UnsupportedDevice(kind) => write!(f, "{kind} cannot sign this type of wallet for Split."),
             Self::NeedsPolicyBinding(kind) => write!(f, "{kind} cannot sign this wallet from Split yet."),
             Self::PolicyNotRegistered => write!(f, "Register the multisig wallet on the device before signing."),
             Self::RegistrationRefused => write!(f, "The multisig wallet was not registered on the device."),
@@ -356,7 +378,15 @@ pub fn signing_handle(kind: DeviceKind, shape: PolicyShape) -> Result<SigningHan
     Ok(match kind {
         DeviceKind::Ledger | DeviceKind::LedgerSimulator => SigningHandle::Bound,
         DeviceKind::Jade => SigningHandle::Listed,
+        // BitBox02 multisig must stay on the bound route: with no forced
+        // policy, bitbox-api 0.9.0 `script_config_from_utxo` reaches `todo!()`
+        // for a P2WSH input. `split_hw_sign_handle_table` pins this.
         DeviceKind::BitBox02 | DeviceKind::Coldcard if multisig => SigningHandle::Bound,
+        // bitbox-api 0.9.0 infers only p2wpkh, p2wpkh-p2sh and p2tr; a P2PKH
+        // input ends in `UnknownOutputType`, so refuse it before the device.
+        DeviceKind::BitBox02 if shape == PolicyShape::Singlesig(SinglesigScript::Pkh) => {
+            return Err(SignError::UnsupportedDevice(kind))
+        }
         DeviceKind::BitBox02 | DeviceKind::Coldcard => SigningHandle::Listed,
         // Specter's `is_wallet_registered` is unimplemented, so registration
         // could never be confirmed.
@@ -383,6 +413,10 @@ pub struct BindRequest<'a> {
 /// Coldcard `with_wallet_name`, BitBox02 `policy`).
 #[async_trait::async_trait]
 pub trait PolicyBinder: Send + Sync {
+    /// Whether this binder can open a bound handle for `kind`. A session
+    /// that needs a bound handle refuses at open when this is false.
+    fn can_bind(&self, kind: DeviceKind) -> bool;
+
     async fn bind(
         &self,
         request: BindRequest<'_>,
@@ -394,6 +428,10 @@ pub struct NoBinder;
 
 #[async_trait::async_trait]
 impl PolicyBinder for NoBinder {
+    fn can_bind(&self, _: DeviceKind) -> bool {
+        false
+    }
+
     async fn bind(
         &self,
         _: BindRequest<'_>,
@@ -425,6 +463,7 @@ pub struct SigningSession {
     fingerprint: Fingerprint,
     policy: DevicePolicy,
     handle: SigningHandle,
+    binder: Arc<dyn PolicyBinder>,
     registration: Option<Registration>,
 }
 
@@ -441,24 +480,34 @@ impl std::fmt::Debug for SigningSession {
 
 impl SigningSession {
     /// Opens a session on a listed device, rechecking its fingerprint.
-    pub async fn from_listed(hw: &HardwareWallet, policy: DevicePolicy) -> Result<Self, SignError> {
+    pub async fn from_listed(
+        hw: &HardwareWallet,
+        policy: DevicePolicy,
+        binder: Arc<dyn PolicyBinder>,
+    ) -> Result<Self, SignError> {
         match hw {
             HardwareWallet::Supported {
                 device,
                 fingerprint,
                 ..
-            } => Self::open(device.clone(), *fingerprint, policy).await,
+            } => Self::open(device.clone(), *fingerprint, policy, binder).await,
             _ => Err(SignError::DeviceUnavailable),
         }
     }
 
+    /// Refuses before any device prompt when the device class cannot sign
+    /// this shape, or needs a bound handle that `binder` cannot open.
     pub async fn open(
         device: Arc<dyn HWI + Send + Sync>,
         listed: Fingerprint,
         policy: DevicePolicy,
+        binder: Arc<dyn PolicyBinder>,
     ) -> Result<Self, SignError> {
         let kind = device.device_kind();
         let handle = signing_handle(kind, policy.shape)?;
+        if handle == SigningHandle::Bound && !binder.can_bind(kind) {
+            return Err(SignError::NeedsPolicyBinding(kind));
+        }
         if !policy.contains(listed) {
             return Err(SignError::DeviceNotInPolicy);
         }
@@ -475,6 +524,7 @@ impl SigningSession {
             fingerprint: listed,
             policy,
             handle,
+            binder,
             registration: None,
         })
     }
@@ -532,11 +582,7 @@ impl SigningSession {
 
     /// Asks the device to sign a copy of `psbt` and returns only the new
     /// ALL signatures for this device's keys, on an otherwise unchanged copy.
-    pub async fn sign(
-        &self,
-        psbt: &Psbt,
-        binder: &dyn PolicyBinder,
-    ) -> Result<UnverifiedDeviceSignatures, SignError> {
+    pub async fn sign(&self, psbt: &Psbt) -> Result<UnverifiedDeviceSignatures, SignError> {
         let multisig = self.policy.shape.is_multisig();
         if multisig && self.registration.is_none() {
             return Err(SignError::PolicyNotRegistered);
@@ -553,7 +599,8 @@ impl SigningSession {
             SigningHandle::Listed => self.device.clone(),
             SigningHandle::Bound => {
                 let hmac = self.registration.as_ref().and_then(|r| r.hmac.as_deref());
-                let bound = binder
+                let bound = self
+                    .binder
                     .bind(BindRequest {
                         kind: self.kind,
                         fingerprint: self.fingerprint,

@@ -5,7 +5,6 @@ use std::{
         atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
     },
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use async_hwi::{DeviceKind, HWI};
@@ -268,11 +267,17 @@ impl HWI for Fake {
 #[derive(Default)]
 struct FakeBinder {
     device: Option<Fake>,
+    /// Bind a different physical device than the listed one.
+    swap_seed: Option<u8>,
     seen: Mutex<Vec<(String, Option<[u8; 32]>)>>,
 }
 
 #[async_trait::async_trait]
 impl PolicyBinder for FakeBinder {
+    fn can_bind(&self, kind: DeviceKind) -> bool {
+        self.device.as_ref().is_some_and(|d| d.kind == kind)
+    }
+
     async fn bind(
         &self,
         request: BindRequest<'_>,
@@ -283,6 +288,9 @@ impl PolicyBinder for FakeBinder {
             .ok_or(async_hwi::Error::DeviceNotFound)?;
         assert_eq!(request.kind, device.kind);
         assert_eq!(request.fingerprint, fp(device.seed));
+        if let Some(seed) = self.swap_seed {
+            device.seed = seed;
+        }
         self.seen
             .lock()
             .unwrap()
@@ -296,11 +304,15 @@ impl PolicyBinder for FakeBinder {
     }
 }
 
-fn binder(device: &Fake) -> FakeBinder {
-    FakeBinder {
+fn binder(device: &Fake) -> Arc<FakeBinder> {
+    Arc::new(FakeBinder {
         device: Some(device.clone()),
         ..FakeBinder::default()
-    }
+    })
+}
+
+fn no_binder() -> Arc<dyn PolicyBinder> {
+    Arc::new(NoBinder)
 }
 
 fn sig_count(psbt: &Psbt) -> usize {
@@ -320,17 +332,24 @@ async fn split_hw_sign_singlesig_shapes_sign_and_finalize() {
             let policy = DevicePolicy::new(&descriptor).unwrap();
             assert_eq!(policy.shape(), PolicyShape::Singlesig(script));
             assert_eq!(policy.name(), "", "default policy is unnamed");
-            let mut session = SigningSession::open(device.arc(), fp(1), policy)
-                .await
-                .unwrap();
+            let binder = binder(&device);
+            let opened = SigningSession::open(device.arc(), fp(1), policy, binder.clone()).await;
+            if (kind, script) == (DeviceKind::BitBox02, SinglesigScript::Pkh) {
+                // bitbox-api has no P2PKH: refused before the device is used.
+                assert_eq!(
+                    opened.unwrap_err(),
+                    SignError::UnsupportedDevice(DeviceKind::BitBox02)
+                );
+                continue;
+            }
+            let mut session = opened.unwrap();
             assert_eq!(
                 session.register().await.unwrap(),
                 RegistrationOutcome::NotNeeded
             );
             assert_eq!(device.shared.register_calls.load(Ordering::SeqCst), 0);
-            let binder = binder(&device);
             let psbt = spend(&descriptor);
-            let mut signed = session.sign(&psbt, &binder).await.unwrap().into_psbt();
+            let mut signed = session.sign(&psbt).await.unwrap().into_psbt();
             assert_eq!(sig_count(&signed), 1, "{script:?} {kind}");
             assert_eq!(signed.unsigned_tx, psbt.unsigned_tx);
             // Ledger signs through a handle bound to the default policy
@@ -358,7 +377,7 @@ async fn split_hw_sign_multisig_registers_then_signs_2_of_3() {
 
         // Key 1 on a Jade: the device stores the registration.
         let jade = fake(DeviceKind::Jade, 1);
-        let mut session = SigningSession::open(jade.arc(), fp(1), policy.clone())
+        let mut session = SigningSession::open(jade.arc(), fp(1), policy.clone(), no_binder())
             .await
             .unwrap();
         assert_eq!(session.handle(), SigningHandle::Listed);
@@ -366,10 +385,10 @@ async fn split_hw_sign_multisig_registers_then_signs_2_of_3() {
             session.register().await.unwrap(),
             RegistrationOutcome::Registered
         );
-        let by_jade = session.sign(&psbt, &NoBinder).await.unwrap().into_psbt();
+        let by_jade = session.sign(&psbt).await.unwrap().into_psbt();
         assert_eq!(sig_count(&by_jade), 1);
         // A second session finds it already on the device.
-        let mut again = SigningSession::open(jade.arc(), fp(1), policy.clone())
+        let mut again = SigningSession::open(jade.arc(), fp(1), policy.clone(), no_binder())
             .await
             .unwrap();
         assert_eq!(
@@ -381,20 +400,17 @@ async fn split_hw_sign_multisig_registers_then_signs_2_of_3() {
         // Key 2 on a Ledger: registration returns a token that only this
         // session holds and that the bound handle signs with.
         let ledger = fake(DeviceKind::Ledger, 2);
-        let mut session = SigningSession::open(ledger.arc(), fp(2), policy.clone())
-            .await
-            .unwrap();
+        let ledger_binder = binder(&ledger);
+        let mut session =
+            SigningSession::open(ledger.arc(), fp(2), policy.clone(), ledger_binder.clone())
+                .await
+                .unwrap();
         assert_eq!(session.handle(), SigningHandle::Bound);
         assert_eq!(
             session.register().await.unwrap(),
             RegistrationOutcome::Registered
         );
-        let ledger_binder = binder(&ledger);
-        let by_ledger = session
-            .sign(&by_jade, &ledger_binder)
-            .await
-            .unwrap()
-            .into_psbt();
+        let by_ledger = session.sign(&by_jade).await.unwrap().into_psbt();
         assert_eq!(
             ledger_binder.seen.lock().unwrap().clone(),
             vec![(
@@ -418,24 +434,24 @@ async fn split_hw_sign_refuses_unregistered_policy() {
     // Signing before registering in this session is refused without
     // touching the device.
     let jade = fake(DeviceKind::Jade, 1);
-    let session = SigningSession::open(jade.arc(), fp(1), policy.clone())
+    let session = SigningSession::open(jade.arc(), fp(1), policy.clone(), no_binder())
         .await
         .unwrap();
     assert_eq!(
-        session.sign(&psbt, &NoBinder).await.unwrap_err(),
+        session.sign(&psbt).await.unwrap_err(),
         SignError::PolicyNotRegistered
     );
     assert_eq!(jade.shared.sign_calls.load(Ordering::SeqCst), 0);
 
     // The registration disappears from the device (wiped or replaced)
     // between registering and signing.
-    let mut session = SigningSession::open(jade.arc(), fp(1), policy.clone())
+    let mut session = SigningSession::open(jade.arc(), fp(1), policy.clone(), no_binder())
         .await
         .unwrap();
     session.register().await.unwrap();
     jade.shared.stored.lock().unwrap().clear();
     assert_eq!(
-        session.sign(&psbt, &NoBinder).await.unwrap_err(),
+        session.sign(&psbt).await.unwrap_err(),
         SignError::PolicyNotRegistered
     );
     assert_eq!(jade.shared.sign_calls.load(Ordering::SeqCst), 0);
@@ -443,13 +459,12 @@ async fn split_hw_sign_refuses_unregistered_policy() {
     // A Ledger handle bound with the wrong token does not report the
     // policy, so nothing is signed.
     let ledger = fake(DeviceKind::Ledger, 2);
-    let mut session = SigningSession::open(ledger.arc(), fp(2), policy.clone())
-        .await
-        .unwrap();
-    session.register().await.unwrap();
     struct WrongToken(Fake);
     #[async_trait::async_trait]
     impl PolicyBinder for WrongToken {
+        fn can_bind(&self, _: DeviceKind) -> bool {
+            true
+        }
         async fn bind(
             &self,
             r: BindRequest<'_>,
@@ -459,24 +474,25 @@ async fn split_hw_sign_refuses_unregistered_policy() {
             Ok(Arc::new(device))
         }
     }
+    let mut session = SigningSession::open(
+        ledger.arc(),
+        fp(2),
+        policy.clone(),
+        Arc::new(WrongToken(ledger.clone())),
+    )
+    .await
+    .unwrap();
+    session.register().await.unwrap();
     assert_eq!(
-        session
-            .sign(&psbt, &WrongToken(ledger.clone()))
-            .await
-            .unwrap_err(),
+        session.sign(&psbt).await.unwrap_err(),
         SignError::PolicyNotRegistered
-    );
-    // No binder at all: refused before the device is asked.
-    assert_eq!(
-        session.sign(&psbt, &NoBinder).await.unwrap_err(),
-        SignError::NeedsPolicyBinding(DeviceKind::Ledger)
     );
     assert_eq!(ledger.shared.sign_calls.load(Ordering::SeqCst), 0);
 
     // The user declines the registration.
     let mut refusing = fake(DeviceKind::Jade, 1);
     refusing.refuse_registration = true;
-    let mut session = SigningSession::open(refusing.arc(), fp(1), policy.clone())
+    let mut session = SigningSession::open(refusing.arc(), fp(1), policy.clone(), no_binder())
         .await
         .unwrap();
     assert_eq!(
@@ -484,7 +500,7 @@ async fn split_hw_sign_refuses_unregistered_policy() {
         SignError::RegistrationRefused
     );
     assert_eq!(
-        session.sign(&psbt, &NoBinder).await.unwrap_err(),
+        session.sign(&psbt).await.unwrap_err(),
         SignError::PolicyNotRegistered
     );
 
@@ -492,16 +508,92 @@ async fn split_hw_sign_refuses_unregistered_policy() {
     // singlesig still works.
     let specter = fake(DeviceKind::Specter, 1);
     assert_eq!(
-        SigningSession::open(specter.arc(), fp(1), policy.clone())
+        SigningSession::open(specter.arc(), fp(1), policy.clone(), no_binder())
             .await
             .unwrap_err(),
         SignError::UnsupportedDevice(DeviceKind::Specter)
     );
     let single = singlesig(SinglesigScript::Wpkh, 1);
-    let session = SigningSession::open(specter.arc(), fp(1), DevicePolicy::new(&single).unwrap())
+    let session = SigningSession::open(
+        specter.arc(),
+        fp(1),
+        DevicePolicy::new(&single).unwrap(),
+        no_binder(),
+    )
+    .await
+    .unwrap();
+    session.sign(&spend(&single)).await.unwrap();
+}
+
+/// F1: a device that signs only through a bound handle is refused at open
+/// when the caller has no binder, so the user is never asked to register
+/// (and Coldcard/BitBox02 never store) a policy that cannot be used.
+#[tokio::test]
+async fn split_hw_sign_no_binder_refuses_before_any_device_prompt() {
+    let multi = DevicePolicy::new(&multisig(true)).unwrap();
+    let single = DevicePolicy::new(&singlesig(SinglesigScript::Wpkh, 1)).unwrap();
+    for (kind, policy) in [
+        (DeviceKind::Coldcard, &multi),
+        (DeviceKind::BitBox02, &multi),
+        (DeviceKind::Ledger, &multi),
+        (DeviceKind::Ledger, &single),
+    ] {
+        let device = fake(kind, 1);
+        assert_eq!(
+            SigningSession::open(device.arc(), fp(1), policy.clone(), no_binder())
+                .await
+                .unwrap_err(),
+            SignError::NeedsPolicyBinding(kind),
+            "{kind}"
+        );
+        // A binder for another device class does not count either.
+        let other = binder(&fake(DeviceKind::Jade, 1));
+        assert_eq!(
+            SigningSession::open(device.arc(), fp(1), policy.clone(), other)
+                .await
+                .unwrap_err(),
+            SignError::NeedsPolicyBinding(kind),
+            "{kind}"
+        );
+        assert_eq!(device.shared.register_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(device.shared.sign_calls.load(Ordering::SeqCst), 0);
+        assert!(device.shared.stored.lock().unwrap().is_empty());
+    }
+    // With a binder for the class, the same device opens and registers.
+    let coldcard = fake(DeviceKind::Coldcard, 1);
+    let mut session = SigningSession::open(coldcard.arc(), fp(1), multi, binder(&coldcard))
         .await
         .unwrap();
-    session.sign(&spend(&single), &NoBinder).await.unwrap();
+    assert_eq!(
+        session.register().await.unwrap(),
+        RegistrationOutcome::Registered
+    );
+}
+
+/// F4: a bound handle that answers for another device is refused before it
+/// is asked to sign.
+#[tokio::test]
+async fn split_hw_sign_bound_handle_fingerprint_is_rechecked() {
+    let descriptor = singlesig(SinglesigScript::Wpkh, 1);
+    let ledger = fake(DeviceKind::Ledger, 1);
+    let swapped = Arc::new(FakeBinder {
+        device: Some(ledger.clone()),
+        swap_seed: Some(9),
+        ..FakeBinder::default()
+    });
+    let session = SigningSession::open(
+        ledger.arc(),
+        fp(1),
+        DevicePolicy::new(&descriptor).unwrap(),
+        swapped,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        session.sign(&spend(&descriptor)).await.unwrap_err(),
+        SignError::Fingerprint
+    );
+    assert_eq!(ledger.shared.sign_calls.load(Ordering::SeqCst), 0);
 }
 
 #[test]
@@ -516,6 +608,8 @@ fn split_hw_sign_handle_table() {
     for (kind, s, m) in [
         (DeviceKind::Jade, Ok(Listed), Ok(Listed)),
         (DeviceKind::Coldcard, Ok(Listed), Ok(Bound)),
+        // Multisig must stay Bound: bitbox-api reaches `todo!()` for P2WSH
+        // without a forced policy.
         (DeviceKind::BitBox02, Ok(Listed), Ok(Bound)),
         (DeviceKind::Ledger, Ok(Bound), Ok(Bound)),
         (DeviceKind::LedgerSimulator, Ok(Bound), Ok(Bound)),
@@ -528,6 +622,35 @@ fn split_hw_sign_handle_table() {
         assert_eq!(signing_handle(kind, single), s, "{kind}");
         assert_eq!(signing_handle(kind, multi), m, "{kind}");
     }
+    // BitBox02 cannot infer P2PKH; the other singlesig scripts are listed.
+    let pkh = PolicyShape::Singlesig(SinglesigScript::Pkh);
+    assert_eq!(
+        signing_handle(DeviceKind::BitBox02, pkh),
+        Err(SignError::UnsupportedDevice(DeviceKind::BitBox02))
+    );
+    assert_eq!(
+        signing_handle(
+            DeviceKind::BitBox02,
+            PolicyShape::Singlesig(SinglesigScript::ShWpkh)
+        ),
+        Ok(Listed)
+    );
+    for kind in [DeviceKind::Jade, DeviceKind::Coldcard, DeviceKind::Ledger] {
+        assert_eq!(signing_handle(kind, pkh), signing_handle(kind, single));
+    }
+}
+
+/// F2: only Ledger's registration is session-only; the others keep it.
+#[test]
+fn split_hw_sign_registration_notice_matches_device() {
+    for kind in [DeviceKind::Ledger, DeviceKind::LedgerSimulator] {
+        assert_eq!(registration_notice(kind), REGISTRATION_NOTICE_SESSION);
+    }
+    for kind in [DeviceKind::Jade, DeviceKind::Coldcard, DeviceKind::BitBox02] {
+        assert_eq!(registration_notice(kind), REGISTRATION_NOTICE_ON_DEVICE);
+    }
+    assert!(REGISTRATION_NOTICE_SESSION.contains("asked again next time"));
+    assert!(REGISTRATION_NOTICE_ON_DEVICE.contains("will not ask again"));
 }
 
 #[tokio::test]
@@ -546,11 +669,11 @@ async fn split_hw_sign_refuses_non_all_device_output() {
             let mut device = fake(DeviceKind::Jade, 1);
             device.sighash = sighash;
             device.hide_sighash_field = hide;
-            let session = SigningSession::open(device.arc(), fp(1), policy.clone())
+            let session = SigningSession::open(device.arc(), fp(1), policy.clone(), no_binder())
                 .await
                 .unwrap();
             assert_eq!(
-                session.sign(&psbt, &NoBinder).await.unwrap_err(),
+                session.sign(&psbt).await.unwrap_err(),
                 SignError::NonAllSighash { input: 0 },
                 "{sighash} hidden={hide}"
             );
@@ -561,23 +684,19 @@ async fn split_hw_sign_refuses_non_all_device_output() {
     // A PSBT that itself asks for a non-ALL sighash is refused before the
     // device sees it; an explicit ALL (0x01) is accepted like the default.
     let device = fake(DeviceKind::Jade, 1);
-    let session = SigningSession::open(device.arc(), fp(1), policy.clone())
+    let session = SigningSession::open(device.arc(), fp(1), policy.clone(), no_binder())
         .await
         .unwrap();
     let mut asks_single = psbt.clone();
     asks_single.inputs[0].sighash_type = Some(PsbtSighashType::from(EcdsaSighashType::Single));
     assert_eq!(
-        session.sign(&asks_single, &NoBinder).await.unwrap_err(),
+        session.sign(&asks_single).await.unwrap_err(),
         SignError::NonAllSighash { input: 0 }
     );
     assert_eq!(device.shared.sign_calls.load(Ordering::SeqCst), 0);
     let mut explicit_all = psbt.clone();
     explicit_all.inputs[0].sighash_type = Some(PsbtSighashType::from(EcdsaSighashType::All));
-    let mut signed = session
-        .sign(&explicit_all, &NoBinder)
-        .await
-        .unwrap()
-        .into_psbt();
+    let mut signed = session.sign(&explicit_all).await.unwrap().into_psbt();
     signed.finalize_mut(&secp()).unwrap();
 }
 
@@ -606,6 +725,25 @@ fn split_hw_sign_screens_untrusted_device_output() {
         accepted.inputs[0].redeem_script,
         original.inputs[0].redeem_script
     );
+
+    // F4: the device sets a non-ALL sighash field on the input while every
+    // signature byte is ALL. Only the field check catches this.
+    for sighash in [EcdsaSighashType::Single, EcdsaSighashType::None] {
+        let mut field_only = good.clone();
+        field_only.inputs[0].sighash_type = Some(PsbtSighashType::from(sighash));
+        assert!(field_only.inputs[0]
+            .partial_sigs
+            .values()
+            .all(|sig| sig.sighash_type == EcdsaSighashType::All));
+        assert_eq!(
+            accept_device_signatures(&original, &field_only, mine).unwrap_err(),
+            SignError::NonAllSighash { input: 0 }
+        );
+    }
+    // An explicit ALL field is fine.
+    let mut explicit = good.clone();
+    explicit.inputs[0].sighash_type = Some(PsbtSighashType::from(EcdsaSighashType::All));
+    accept_device_signatures(&original, &explicit, mine).unwrap();
 
     // A changed transaction.
     let mut changed = good.clone();
@@ -723,13 +861,18 @@ async fn split_hw_sign_policy_validation() {
     // The device must hold one of the keys, and must be the listed one.
     let policy = DevicePolicy::new(&multisig(true)).unwrap();
     assert_eq!(
-        SigningSession::open(fake(DeviceKind::Jade, 9).arc(), fp(9), policy.clone())
-            .await
-            .unwrap_err(),
+        SigningSession::open(
+            fake(DeviceKind::Jade, 9).arc(),
+            fp(9),
+            policy.clone(),
+            no_binder()
+        )
+        .await
+        .unwrap_err(),
         SignError::DeviceNotInPolicy
     );
     assert_eq!(
-        SigningSession::open(fake(DeviceKind::Jade, 3).arc(), fp(1), policy)
+        SigningSession::open(fake(DeviceKind::Jade, 3).arc(), fp(1), policy, no_binder())
             .await
             .unwrap_err(),
         SignError::Fingerprint
@@ -737,17 +880,12 @@ async fn split_hw_sign_policy_validation() {
 }
 
 fn temp_root() -> std::path::PathBuf {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let root = std::env::temp_dir().join(format!("coincube-split-hw-sign-{unique}"));
-    fs::create_dir(&root).unwrap();
-    root
+    crate::split_hardware::tests::unique_temp_root("coincube-split-hw-sign")
 }
 
-/// P6: the token stays in memory, nothing reaches the datadir, and a new
-/// session registers again.
+/// P6 (Ledger): the token stays in memory, nothing reaches the datadir, and a
+/// new session registers again. Devices that store the registration find it
+/// next time instead (see `split_hw_sign_multisig_registers_then_signs_2_of_3`).
 #[tokio::test]
 async fn split_hw_sign_session_persists_nothing_and_reregisters() {
     let root = temp_root();
@@ -769,12 +907,13 @@ async fn split_hw_sign_session_persists_nothing_and_reregisters() {
     let hmac_hex = hex::encode(token(policy.name(), &descriptor.to_string()));
 
     for session_number in 1..=2 {
-        let mut session = SigningSession::from_listed(&devices.list[0], policy.clone())
-            .await
-            .unwrap();
+        let mut session =
+            SigningSession::from_listed(&devices.list[0], policy.clone(), binder(&ledger))
+                .await
+                .unwrap();
         // A fresh session holds no registration, whatever an earlier one did.
         assert_eq!(
-            session.sign(&psbt, &binder(&ledger)).await.unwrap_err(),
+            session.sign(&psbt).await.unwrap_err(),
             SignError::PolicyNotRegistered
         );
         assert_eq!(
@@ -791,7 +930,7 @@ async fn split_hw_sign_session_persists_nothing_and_reregisters() {
             "{}",
             debug
         );
-        session.sign(&psbt, &binder(&ledger)).await.unwrap();
+        session.sign(&psbt).await.unwrap();
         drop(session);
     }
     assert!(!devices.persists_pairing());
@@ -806,7 +945,7 @@ async fn split_hw_sign_session_persists_nothing_and_reregisters() {
         reason: crate::hw::UnsupportedReason::AppIsNotOpen,
     };
     assert_eq!(
-        SigningSession::from_listed(&locked, policy)
+        SigningSession::from_listed(&locked, policy, no_binder())
             .await
             .unwrap_err(),
         SignError::DeviceUnavailable
