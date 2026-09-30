@@ -424,7 +424,13 @@ fn reopen_settled_outwaits_only_a_transient_foreign_lock() {
             .write(true)
             .open(temp.0.join("claim.lock"))
             .unwrap();
-        assert!(foreign.try_lock_exclusive().unwrap());
+        // The acquire races a concurrent spawn exactly as a reopen does, so it
+        // gets the same bounded wait.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !foreign.try_lock_exclusive().unwrap() {
+            assert!(Instant::now() < deadline, "foreign lock never became free");
+            std::thread::sleep(Duration::from_millis(10));
+        }
         let (release, signal) = std::sync::mpsc::channel();
         let holder = std::thread::spawn(move || {
             signal.recv().unwrap();
