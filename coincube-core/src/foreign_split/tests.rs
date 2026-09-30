@@ -19,6 +19,8 @@ const FORK: u64 = 900;
 type Mutation<T> = fn(&mut T);
 type Change = Box<dyn Fn(&mut Psbt)>;
 const FEERATE: u64 = 5;
+/// Observed Bitcoin tip height for locktime checks.
+const TIP: u32 = 860_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Shape {
@@ -168,7 +170,7 @@ fn inputs<'a>(source: &'a SplitSource, coins: &'a [SplitCoin]) -> SplitInputs<'a
         source,
         coins,
         fork_height: FORK,
-        destination: (SplitBranch::External, 9),
+        destination: 9,
     }
 }
 
@@ -181,7 +183,7 @@ fn marker() -> BlockHash {
 }
 
 fn create(inputs: &SplitInputs<'_>) -> Result<SplitStep1, Error> {
-    create_split_step1(inputs, FEERATE, LockTime::ZERO, marker())
+    create_split_step1(inputs, FEERATE, LockTime::ZERO, TIP, marker())
 }
 
 fn sign(psbt: &Psbt, signers: &[Xpriv]) -> Psbt {
@@ -468,17 +470,14 @@ fn inconsistent_coins_and_destinations_refuse() {
             ..inputs(source, coins)
         })
     };
-    let destination = (SplitBranch::External, 9);
+    let destination = 9;
     assert_eq!(run(&[], destination).unwrap_err(), Error::Empty);
     let duplicate = vec![good[0].clone(), good[0].clone()];
     assert_eq!(
         run(&duplicate, destination).unwrap_err(),
         Error::DuplicateInput(good[0].outpoint)
     );
-    assert_eq!(
-        run(&good, (SplitBranch::External, 1 << 31)).unwrap_err(),
-        Error::InvalidIndex
-    );
+    assert_eq!(run(&good, 1 << 31).unwrap_err(), Error::InvalidIndex);
     // The stated derivation must produce the authenticated script.
     let mut lying = good.clone();
     lying[0].index = 1;
@@ -503,23 +502,12 @@ fn inconsistent_coins_and_destinations_refuse() {
         run(&vout, destination).unwrap_err(),
         Error::InputAuthentication { .. }
     ));
-    // The destination must not be a spent script.
-    assert_eq!(
-        run(&good, (SplitBranch::Internal, 3)).unwrap_err(),
-        Error::DestinationNotFresh
-    );
-    // Internal coins and destinations need the internal descriptor.
+    // The destination must not be a spent script (coin 0 is receive index 0).
+    assert_eq!(run(&good, 0).unwrap_err(), Error::DestinationNotFresh);
+    // Internal coins need the internal descriptor.
     let external_only = SplitSource::new(source.external().clone(), None).unwrap();
     assert_eq!(
         create(&inputs(&external_only, &good)).unwrap_err(),
-        Error::MissingInternal
-    );
-    assert_eq!(
-        create(&SplitInputs {
-            destination: (SplitBranch::Internal, 9),
-            ..inputs(&external_only, &good[..1])
-        })
-        .unwrap_err(),
         Error::MissingInternal
     );
     // A fixed descriptor has one address: no fresh destination exists.
@@ -529,7 +517,7 @@ fn inconsistent_coins_and_destinations_refuse() {
     let fixed_coin = coin(&fixed, SplitBranch::External, 0, 100_000);
     assert_eq!(
         create(&SplitInputs {
-            destination: (SplitBranch::External, 0),
+            destination: 0,
             ..inputs(&fixed, std::slice::from_ref(&fixed_coin))
         })
         .unwrap_err(),
@@ -544,7 +532,7 @@ fn fee_rate_and_dust_bounds_refuse() {
     let inputs = inputs(&wallet.source, &coins);
     for feerate in [0, spend::MAX_FEERATE + 1] {
         assert_eq!(
-            create_split_step1(&inputs, feerate, LockTime::ZERO, marker()).unwrap_err(),
+            create_split_step1(&inputs, feerate, LockTime::ZERO, TIP, marker()).unwrap_err(),
             Error::Economics
         );
     }
@@ -557,6 +545,7 @@ fn fee_rate_and_dust_bounds_refuse() {
         },
         spend::MAX_FEERATE,
         LockTime::ZERO,
+        TIP,
         marker()
     )
     .is_ok());
@@ -567,10 +556,10 @@ fn fee_rate_and_dust_bounds_refuse() {
     };
     // 1,500 sats cannot pay ~160 vB at 10 sat/vB and keep a non-dust output.
     assert_eq!(
-        create_split_step1(&small_inputs, 10, LockTime::ZERO, marker()).unwrap_err(),
+        create_split_step1(&small_inputs, 10, LockTime::ZERO, TIP, marker()).unwrap_err(),
         Error::Economics
     );
-    assert!(create_split_step1(&small_inputs, 1, LockTime::ZERO, marker()).is_ok());
+    assert!(create_split_step1(&small_inputs, 1, LockTime::ZERO, TIP, marker()).is_ok());
 }
 
 #[test]
@@ -580,9 +569,9 @@ fn reconstruction_rebuilds_the_exact_recorded_step() {
         let coins = coins(&wallet.source);
         let inputs = inputs(&wallet.source, &coins);
         let locktime = LockTime::from_height(850_000).unwrap();
-        let step = create_split_step1(&inputs, 7, locktime, marker()).unwrap();
+        let step = create_split_step1(&inputs, 7, locktime, TIP, marker()).unwrap();
         let recorded = step.psbt().unsigned_tx.clone();
-        let rebuilt = reconstruct_split_step1(&inputs, &recorded).unwrap();
+        let rebuilt = reconstruct_split_step1(&inputs, &recorded, TIP).unwrap();
         // Every field is rebuilt, not restored, and still identical.
         assert_eq!(rebuilt.psbt(), step.psbt(), "{shape:?}");
         assert_eq!(rebuilt.fee(), step.fee());
@@ -604,7 +593,8 @@ fn reconstruction_rebuilds_the_exact_recorded_step() {
                 coins: &reversed,
                 ..inputs
             },
-            &recorded
+            &recorded,
+            TIP
         )
         .is_ok());
     }
@@ -620,7 +610,7 @@ fn reconstruction_refuses_a_substituted_or_uneconomic_record() {
     let refuse = |mutate: &dyn Fn(&mut Transaction)| {
         let mut tx = recorded.clone();
         mutate(&mut tx);
-        reconstruct_split_step1(&inputs, &tx).unwrap_err()
+        reconstruct_split_step1(&inputs, &tx, TIP).unwrap_err()
     };
     assert!(matches!(
         refuse(&|tx| {
@@ -679,7 +669,8 @@ fn reconstruction_refuses_a_substituted_or_uneconomic_record() {
                 coins: &coins[..1],
                 ..inputs
             },
-            &recorded
+            &recorded,
+            TIP
         )
         .unwrap_err(),
         Error::Recorded(_) | Error::Economics
@@ -692,7 +683,8 @@ fn reconstruction_refuses_a_substituted_or_uneconomic_record() {
                 coins: &swapped,
                 ..inputs
             },
-            &recorded
+            &recorded,
+            TIP
         )
         .unwrap_err(),
         Error::Recorded(_)
@@ -700,10 +692,11 @@ fn reconstruction_refuses_a_substituted_or_uneconomic_record() {
     assert!(matches!(
         reconstruct_split_step1(
             &SplitInputs {
-                destination: (SplitBranch::External, 10),
+                destination: 10,
                 ..inputs
             },
-            &recorded
+            &recorded,
+            TIP
         )
         .unwrap_err(),
         Error::Recorded(_)
@@ -711,7 +704,7 @@ fn reconstruction_refuses_a_substituted_or_uneconomic_record() {
     // A higher fee than estimated is fine when within bounds.
     let mut higher = recorded.clone();
     higher.output[1].value -= Amount::from_sat(1_000);
-    let rebuilt = reconstruct_split_step1(&inputs, &higher).unwrap();
+    let rebuilt = reconstruct_split_step1(&inputs, &higher, TIP).unwrap();
     assert_eq!(rebuilt.fee(), step.fee() + Amount::from_sat(1_000));
 }
 
@@ -864,4 +857,222 @@ fn a_legacy_only_step_has_no_witness_overhead() {
     assert!(tx.input.iter().all(|i| i.witness.is_empty()));
     // P2PKH signatures are 71-73 bytes: the estimate is within a few vbytes.
     assert!(step.maximum_signed_vbytes() - (tx.vsize() as u64) <= 4);
+}
+
+#[test]
+fn destination_must_clear_core_relay_dust_for_each_shape() {
+    for shape in SHAPES {
+        let wallet = wallet(shape);
+        let script = wallet
+            .source
+            .derive(SplitBranch::External, 9)
+            .unwrap()
+            .script_pubkey();
+        // Core's dust threshold at the default dust relay fee.
+        let core_dust = script.minimal_non_dust().to_sat();
+        let expected = match shape {
+            Shape::Pkh => 546,
+            Shape::ShWpkh => 540,
+            Shape::Wpkh => 294,
+            Shape::WshSortedMulti | Shape::WshMulti => 330,
+        };
+        assert_eq!(core_dust, expected, "{shape:?}");
+        let floor = core_dust.max(spend::DUST_OUTPUT_SATS);
+        // The worst-case size does not depend on the coin's value.
+        let probe = vec![coin(&wallet.source, SplitBranch::External, 0, 100_000)];
+        let vbytes = create(&SplitInputs {
+            coins: &probe,
+            ..inputs(&wallet.source, &probe)
+        })
+        .unwrap()
+        .maximum_signed_vbytes();
+        let at = |sats: u64| {
+            let coins = vec![coin(&wallet.source, SplitBranch::External, 0, sats)];
+            let inputs = inputs(&wallet.source, &coins);
+            create_split_step1(&inputs, 1, LockTime::ZERO, TIP, marker())
+        };
+        let step = at(vbytes + floor).unwrap();
+        assert_eq!(step.psbt().unsigned_tx.output[1].value.to_sat(), floor);
+        assert_eq!(
+            at(vbytes + floor - 1).unwrap_err(),
+            Error::Economics,
+            "{shape:?}"
+        );
+
+        // Reconstruction and finalization apply the same floor.
+        let coins = vec![coin(
+            &wallet.source,
+            SplitBranch::External,
+            0,
+            vbytes + floor,
+        )];
+        let inputs = inputs(&wallet.source, &coins);
+        let mut below = step.psbt().unsigned_tx.clone();
+        below.output[1].value = Amount::from_sat(floor - 1);
+        assert_eq!(
+            reconstruct_split_step1(&inputs, &below, TIP).unwrap_err(),
+            Error::Economics,
+            "{shape:?}"
+        );
+        assert!(finalize(&step, &sign(step.psbt(), &wallet.signers)).is_ok());
+    }
+}
+
+#[test]
+fn change_descriptor_must_be_the_same_wallet() {
+    for shape in SHAPES {
+        // The fixture's external/internal pair differs only in the branch step.
+        let wallet = wallet(shape);
+        let external = wallet.source.external().clone();
+        let internal = wallet.source.internal().unwrap().clone();
+        assert!(SplitSource::new(external.clone(), Some(internal)).is_ok());
+        // Another shape of the same keys is not the same wallet.
+        let other_shape = self::wallet(if shape == Shape::Wpkh {
+            Shape::Pkh
+        } else {
+            Shape::Wpkh
+        });
+        assert_eq!(
+            SplitSource::new(external.clone(), other_shape.source.internal().cloned()),
+            Err(Error::UnrelatedInternal),
+            "{shape:?}"
+        );
+    }
+    let a = account(&master(1), "m/84'/0'/0'");
+    let b = account(&master(7), "m/84'/0'/0'");
+    let c = account(&master(1), "m/84'/0'/1'");
+    let external = descriptor(&format!("wpkh({a}/0/*)"));
+    for (internal, ok) in [
+        (format!("wpkh({a}/1/*)"), true),
+        // Unrelated master: step 1 would otherwise be able to pay another wallet.
+        (format!("wpkh({b}/1/*)"), false),
+        // Same master, other account.
+        (format!("wpkh({c}/1/*)"), false),
+        // A different path shape.
+        (format!("wpkh({a}/1/0/*)"), false),
+        (format!("pkh({a}/1/*)"), false),
+    ] {
+        assert_eq!(
+            SplitSource::new(external.clone(), Some(descriptor(&internal))).is_ok(),
+            ok,
+            "{internal}"
+        );
+        if !ok {
+            assert_eq!(
+                SplitSource::new(external.clone(), Some(descriptor(&internal))),
+                Err(Error::UnrelatedInternal)
+            );
+        }
+    }
+    // Multisig: key order, threshold and every key's origin must match.
+    let keys: Vec<_> = (1..=3)
+        .map(|seed| account(&master(seed), "m/48'/0'/0'/2'"))
+        .collect();
+    let multi = |name: &str, k: usize, order: [usize; 3], branch: [u32; 3]| {
+        descriptor(&format!(
+            "wsh({name}({k},{}/{}/*,{}/{}/*,{}/{}/*))",
+            keys[order[0]], branch[0], keys[order[1]], branch[1], keys[order[2]], branch[2]
+        ))
+    };
+    let external = multi("sortedmulti", 2, [0, 1, 2], [0, 0, 0]);
+    for (internal, ok) in [
+        (multi("sortedmulti", 2, [0, 1, 2], [1, 1, 1]), true),
+        (multi("sortedmulti", 1, [0, 1, 2], [1, 1, 1]), false),
+        (multi("multi", 2, [0, 1, 2], [1, 1, 1]), false),
+        (multi("sortedmulti", 2, [1, 0, 2], [1, 1, 1]), false),
+    ] {
+        assert_eq!(
+            SplitSource::new(external.clone(), Some(internal.clone())).is_ok(),
+            ok,
+            "{internal}"
+        );
+    }
+    let stranger = account(&master(9), "m/48'/0'/0'/2'");
+    let swapped = descriptor(&format!(
+        "wsh(sortedmulti(2,{}/1/*,{}/1/*,{stranger}/1/*))",
+        keys[0], keys[1]
+    ));
+    assert_eq!(
+        SplitSource::new(external, Some(swapped)),
+        Err(Error::UnrelatedInternal)
+    );
+}
+
+#[test]
+fn a_non_all_signature_byte_refuses_without_an_input_request() {
+    // The input-level request stays absent: only the signature's own
+    // trailing sighash byte says it is not ALL.
+    let wallet = wallet(Shape::Wpkh);
+    let coins = coins(&wallet.source);
+    let step = create(&inputs(&wallet.source, &coins)).unwrap();
+    for other in [
+        EcdsaSighashType::None,
+        EcdsaSighashType::Single,
+        EcdsaSighashType::AllPlusAnyoneCanPay,
+    ] {
+        // A genuine `other` signature, with the request removed afterwards.
+        let mut requested = step.psbt().clone();
+        requested.inputs[1].sighash_type = Some(PsbtSighashType::from(other));
+        let mut genuine = sign(&requested, &wallet.signers);
+        genuine.inputs[1].sighash_type = None;
+        assert_eq!(
+            finalize(&step, &genuine).unwrap_err(),
+            FinalizeError::UnsupportedSighash,
+            "{other:?}"
+        );
+        // An ALL signature whose byte is relabeled.
+        let mut relabeled = sign(step.psbt(), &wallet.signers);
+        for signature in relabeled.inputs[1].partial_sigs.values_mut() {
+            signature.sighash_type = other;
+        }
+        assert!(relabeled.inputs.iter().all(|i| i.sighash_type.is_none()));
+        assert_eq!(
+            finalize(&step, &relabeled).unwrap_err(),
+            FinalizeError::UnsupportedSighash,
+            "{other:?}"
+        );
+    }
+}
+
+#[test]
+fn locktime_must_be_a_height_at_or_below_the_tip() {
+    let wallet = wallet(Shape::Wpkh);
+    let coins = coins(&wallet.source);
+    let inputs = inputs(&wallet.source, &coins);
+    let build = |locktime: LockTime| create_split_step1(&inputs, FEERATE, locktime, TIP, marker());
+    for ok in [0, 1, TIP - 100, TIP] {
+        assert!(build(LockTime::from_height(ok).unwrap()).is_ok(), "{}", ok);
+    }
+    for refused in [
+        LockTime::from_height(TIP + 1).unwrap(),
+        LockTime::from_height(499_999_999).unwrap(),
+        // Time-based locktimes, including a far-future one.
+        LockTime::from_time(500_000_000).unwrap(),
+        LockTime::from_time(4_000_000_000).unwrap(),
+    ] {
+        assert_eq!(build(refused).unwrap_err(), Error::Locktime, "{refused:?}");
+    }
+
+    // Reconstruction checks the recorded locktime against the current tip.
+    let step = build(LockTime::from_height(TIP).unwrap()).unwrap();
+    let recorded = step.psbt().unsigned_tx.clone();
+    assert!(reconstruct_split_step1(&inputs, &recorded, TIP).is_ok());
+    // A later tip still accepts an earlier locktime.
+    assert!(reconstruct_split_step1(&inputs, &recorded, TIP + 50).is_ok());
+    assert_eq!(
+        reconstruct_split_step1(&inputs, &recorded, TIP - 1).unwrap_err(),
+        Error::Locktime
+    );
+    for locktime in [
+        LockTime::from_height(TIP + 1).unwrap(),
+        LockTime::from_time(4_000_000_000).unwrap(),
+    ] {
+        let mut tx = recorded.clone();
+        tx.lock_time = locktime;
+        assert_eq!(
+            reconstruct_split_step1(&inputs, &tx, TIP).unwrap_err(),
+            Error::Locktime,
+            "{locktime:?}"
+        );
+    }
 }

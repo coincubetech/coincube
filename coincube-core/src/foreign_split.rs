@@ -80,9 +80,11 @@ pub enum Error {
     /// Not one of the supported shapes, or keys that cannot be derived
     /// unambiguously (multipath, hardened steps or hardened wildcard).
     UnsupportedDescriptor,
-    /// A coin or destination on the internal branch without an internal
-    /// descriptor.
+    /// A coin on the internal branch without an internal descriptor.
     MissingInternal,
+    /// The internal (change) descriptor is not the external descriptor's
+    /// wallet: it must differ only in each key's final, branch step.
+    UnrelatedInternal,
     Empty,
     DuplicateInput(OutPoint),
     /// A hardened (or out-of-range) derivation index.
@@ -101,6 +103,8 @@ pub enum Error {
     /// non-ranged descriptor, which has only one address).
     DestinationNotFresh,
     Economics,
+    /// Not a block-height locktime at or below the observed Bitcoin tip.
+    Locktime,
     /// A recorded transaction is not an owned step-1 construction.
     Recorded(&'static str),
 }
@@ -114,6 +118,9 @@ impl fmt::Display for Error {
             Self::Taproot => f.write_str("Taproot wallets can be scanned but not split"),
             Self::UnsupportedDescriptor => f.write_str("Unsupported foreign wallet descriptor"),
             Self::MissingInternal => f.write_str("The wallet's change descriptor is required"),
+            Self::UnrelatedInternal => {
+                f.write_str("The change descriptor does not belong to the same wallet")
+            }
             Self::Empty => f.write_str("No coins selected"),
             Self::DuplicateInput(outpoint) => write!(f, "Coin {outpoint} selected twice"),
             Self::InvalidIndex => f.write_str("Hardened or invalid derivation index"),
@@ -130,6 +137,7 @@ impl fmt::Display for Error {
                 f.write_str("Step 1 needs a fresh address of the same wallet")
             }
             Self::Economics => f.write_str("Fee or amount outside the allowed bounds"),
+            Self::Locktime => f.write_str("Locktime must be a block height not above the tip"),
             Self::Recorded(reason) => f.write_str(reason),
         }
     }
@@ -151,6 +159,9 @@ impl SplitSource {
         check_shape(&external)?;
         if let Some(internal) = &internal {
             check_shape(internal)?;
+            if !same_wallet(&external, internal) {
+                return Err(Error::UnrelatedInternal);
+            }
         }
         Ok(Self { external, internal })
     }
@@ -184,6 +195,58 @@ impl SplitSource {
         }
         Ok(definite)
     }
+}
+
+fn keys(descriptor: &Descriptor<DescriptorPublicKey>) -> Vec<DescriptorPublicKey> {
+    let mut keys = Vec::new();
+    descriptor.for_each_key(|key| {
+        keys.push(key.clone());
+        true
+    });
+    keys
+}
+
+/// Whether `internal` is `external` with only each extended key's final
+/// derivation step changed (the receive/change branch), everything else,
+/// including the script structure, key order and origins, being identical.
+fn same_wallet(
+    external: &Descriptor<DescriptorPublicKey>,
+    internal: &Descriptor<DescriptorPublicKey>,
+) -> bool {
+    let (outer, inner) = (keys(external), keys(internal));
+    if outer.len() != inner.len() {
+        return false;
+    }
+    let paired = outer.iter().zip(&inner).all(|pair| match pair {
+        (DescriptorPublicKey::Single(a), DescriptorPublicKey::Single(b)) => a == b,
+        (DescriptorPublicKey::XPub(a), DescriptorPublicKey::XPub(b)) => {
+            let (pa, pb) = (a.derivation_path.as_ref(), b.derivation_path.as_ref());
+            a.origin == b.origin
+                && a.xkey == b.xkey
+                && a.wildcard == b.wildcard
+                && !pa.is_empty()
+                && pa.len() == pb.len()
+                && pa[..pa.len() - 1] == pb[..pb.len() - 1]
+        }
+        _ => false,
+    });
+    if !paired {
+        return false;
+    }
+    // Same structure: substitute the paired keys textually and compare.
+    // Placeholders keep one substitution from matching another's output.
+    let body = |d: &Descriptor<DescriptorPublicKey>| {
+        let text = d.to_string();
+        text.split('#').next().unwrap_or_default().to_owned()
+    };
+    let mut renamed = body(external);
+    for (index, key) in outer.iter().enumerate() {
+        renamed = renamed.replace(&key.to_string(), &format!("\u{0}{index}\u{0}"));
+    }
+    for (index, key) in inner.iter().enumerate() {
+        renamed = renamed.replace(&format!("\u{0}{index}\u{0}"), &key.to_string());
+    }
+    renamed == body(internal)
 }
 
 fn check_shape(descriptor: &Descriptor<DescriptorPublicKey>) -> Result<(), Error> {
@@ -254,10 +317,11 @@ pub struct SplitInputs<'a> {
     pub coins: &'a [SplitCoin],
     /// From the authenticated BTCB2 network anchor; never a constant.
     pub fork_height: u64,
-    /// A fresh address of the same foreign wallet. Freshness is the caller's
-    /// proof (for example the two-chain inventory's `FreshIndex::Proven`);
-    /// this module only refuses a destination that is one of the spent scripts.
-    pub destination: (SplitBranch, u32),
+    /// Receive (external) index of a fresh address of the same foreign
+    /// wallet. Only the receive branch is allowed: it is the branch whose
+    /// freshness the two-chain inventory proves (`FreshIndex::Proven`). This
+    /// module only refuses a destination that is one of the spent scripts.
+    pub destination: u32,
 }
 
 /// An unsigned step 1 with no public-field or deserialization bypass. It
@@ -269,7 +333,7 @@ pub struct SplitStep1 {
     source: SplitSource,
     /// Branch and index of each transaction input, in input order.
     inputs: Vec<(SplitBranch, u32)>,
-    destination: (SplitBranch, u32),
+    destination: u32,
     fork_marker: BlockHash,
     maximum_signed_vbytes: u64,
     /// Sum of the authenticated spent outputs.
@@ -286,7 +350,8 @@ impl SplitStep1 {
     pub fn source(&self) -> &SplitSource {
         &self.source
     }
-    pub fn destination(&self) -> (SplitBranch, u32) {
+    /// Receive index of the destination.
+    pub fn destination(&self) -> u32 {
         self.destination
     }
     /// The caller-supplied fork label in the poison payload. Not chain evidence.
@@ -387,8 +452,9 @@ fn plan(inputs: &SplitInputs<'_>, fork_marker: BlockHash) -> Result<Plan, Error>
             definite,
         });
     }
-    let (branch, index) = inputs.destination;
-    let destination = inputs.source.derive(branch, index)?;
+    let destination = inputs
+        .source
+        .derive(SplitBranch::External, inputs.destination)?;
     let destination_script = destination.script_pubkey();
     if selected
         .iter()
@@ -490,14 +556,21 @@ fn unsigned_transaction(
 
 /// Fee bounds shared by construction, reconstruction and finalization: at
 /// least 1 sat/vB at the worst-case size, at most `MAX_FEERATE` there and
-/// `MAX_FEE`, and a non-dust destination.
-fn check_economics(total: u64, destination: u64, maximum_signed_vbytes: u64) -> Result<(), Error> {
+/// `MAX_FEE`, and a destination above both the wallet's dust floor and Core's
+/// relay dust threshold for its script (546 sats for P2PKH, 540 for P2SH).
+fn check_economics(
+    total: u64,
+    destination: u64,
+    destination_script: &bitcoin::Script,
+    maximum_signed_vbytes: u64,
+) -> Result<(), Error> {
     let fee = total.checked_sub(destination).ok_or(Error::Economics)?;
     let ceiling = maximum_signed_vbytes
         .checked_mul(spend::MAX_FEERATE)
         .ok_or(Error::Economics)?
         .min(spend::MAX_FEE.to_sat());
-    if destination < spend::DUST_OUTPUT_SATS || fee < maximum_signed_vbytes || fee > ceiling {
+    let dust = spend::DUST_OUTPUT_SATS.max(destination_script.minimal_non_dust().to_sat());
+    if destination < dust || fee < maximum_signed_vbytes || fee > ceiling {
         return Err(Error::Economics);
     }
     Ok(())
@@ -509,13 +582,17 @@ fn check_economics(total: u64, destination: u64, maximum_signed_vbytes: u64) -> 
 /// The fee is `feerate_vb` times the worst-case signed size; the poison output
 /// is charged before any signature exists. Inputs are ordered by outpoint and
 /// the result is deterministic. `fork_marker` is labeling, not chain evidence.
-/// `locktime` is the caller's anti-fee-sniping choice.
+/// `locktime` is the caller's anti-fee-sniping choice; it must be a block
+/// height no greater than `bitcoin_tip_height`, the observed Bitcoin tip, so
+/// the transaction is final for the next block.
 pub fn create_split_step1(
     inputs: &SplitInputs<'_>,
     feerate_vb: u64,
     locktime: LockTime,
+    bitcoin_tip_height: u32,
     fork_marker: BlockHash,
 ) -> Result<SplitStep1, Error> {
+    check_locktime(locktime, bitcoin_tip_height)?;
     let plan = plan(inputs, fork_marker)?;
     if !(1..=spend::MAX_FEERATE).contains(&feerate_vb) {
         return Err(Error::Economics);
@@ -525,8 +602,23 @@ pub fn create_split_step1(
         .checked_mul(feerate_vb)
         .ok_or(Error::Economics)?;
     let value = plan.total.checked_sub(fee).ok_or(Error::Economics)?;
-    check_economics(plan.total, value, plan.maximum_signed_vbytes)?;
+    check_economics(
+        plan.total,
+        value,
+        &plan.destination.script_pubkey(),
+        plan.maximum_signed_vbytes,
+    )?;
     build(inputs, plan, Amount::from_sat(value), locktime, fork_marker)
+}
+
+/// Block-height locktimes only (a time-based value cannot be checked against
+/// a height observation), and never above the tip: Core treats a transaction
+/// as final for the next block only when its height locktime is below it.
+fn check_locktime(locktime: LockTime, bitcoin_tip_height: u32) -> Result<(), Error> {
+    match locktime {
+        LockTime::Blocks(height) if height.to_consensus_u32() <= bitcoin_tip_height => Ok(()),
+        _ => Err(Error::Locktime),
+    }
 }
 
 fn build(
@@ -578,11 +670,14 @@ fn build(
 /// the record; only the destination amount (so the original fee estimate need
 /// not survive a restart), the locktime and the poison's fork label are read
 /// from it, and the whole transaction must then match. Economics are checked
-/// again. The caller binds the fork label, destination and txid to its intent.
-/// This reserves nothing and authorizes no submission.
+/// again, and the recorded locktime must still be a block height at or below
+/// `bitcoin_tip_height`, the currently observed Bitcoin tip. The caller binds
+/// the fork label, destination and txid to its intent. This reserves nothing
+/// and authorizes no submission.
 pub fn reconstruct_split_step1(
     inputs: &SplitInputs<'_>,
     recorded: &Transaction,
+    bitcoin_tip_height: u32,
 ) -> Result<SplitStep1, Error> {
     if recorded.output.len() != 2 {
         return Err(Error::Recorded("Recorded step 1 must have two outputs"));
@@ -591,7 +686,13 @@ pub fn reconstruct_split_step1(
         .ok_or(Error::Recorded("Recorded poison payload is invalid"))?;
     let plan = plan(inputs, fork_marker)?;
     let value = recorded.output[1].value;
-    check_economics(plan.total, value.to_sat(), plan.maximum_signed_vbytes)?;
+    check_locktime(recorded.lock_time, bitcoin_tip_height)?;
+    check_economics(
+        plan.total,
+        value.to_sat(),
+        &plan.destination.script_pubkey(),
+        plan.maximum_signed_vbytes,
+    )?;
     let rebuilt = build(inputs, plan, value, recorded.lock_time, fork_marker)?;
     if rebuilt.psbt.unsigned_tx != *recorded {
         return Err(Error::Recorded(
@@ -732,8 +833,13 @@ pub fn finalize_split_step1<C: secp256k1::Verification>(
         .try_fold(0u64, |sum, output| sum.checked_add(output.value.to_sat()))
         .ok_or(FinalizeError::Economics)?;
     let value = signed.unsigned_tx.output[1].value.to_sat();
-    check_economics(total, value, construction.maximum_signed_vbytes)
-        .map_err(|_| FinalizeError::Economics)?;
+    check_economics(
+        total,
+        value,
+        &signed.unsigned_tx.output[1].script_pubkey,
+        construction.maximum_signed_vbytes,
+    )
+    .map_err(|_| FinalizeError::Economics)?;
 
     let mut finalized = signed.clone();
     finalized
