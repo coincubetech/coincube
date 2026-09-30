@@ -256,6 +256,10 @@ pub struct ScanReport {
     chain: ChainId,
     generation: u64,
     tip: BlockHash,
+    /// Height of `tip`, read at the start of the scan and bound to it: the
+    /// block was in the best chain and the tip did not move before the scan
+    /// finished.
+    tip_height: u32,
     /// Fork activation height from the authenticated BTCB2 network anchor
     /// observed at the scan tip. Never a local constant.
     fork_height: Option<u64>,
@@ -299,6 +303,15 @@ impl ScanReport {
     pub fn tip(&self) -> BlockHash {
         self.tip
     }
+    /// Height of [`Self::tip`] on this report's chain.
+    pub fn tip_height(&self) -> u32 {
+        self.tip_height
+    }
+    #[cfg(test)]
+    pub(crate) fn with_tip_height(mut self, tip_height: u32) -> Self {
+        self.tip_height = tip_height;
+        self
+    }
     pub fn addresses_scanned(&self) -> u32 {
         self.addresses
     }
@@ -316,6 +329,7 @@ impl ScanReport {
             chain,
             generation,
             tip,
+            tip_height: 0,
             fork_height: None,
             addresses: 1,
             coverage: Vec::new(),
@@ -354,6 +368,8 @@ struct Status {
 #[async_trait]
 trait Source: Send + Sync {
     async fn tip(&self, chain: ChainId) -> Result<BlockHash, ScanError>;
+    /// Height of `tip`, which must be a block in the best chain.
+    async fn tip_height(&self, chain: ChainId, tip: BlockHash) -> Result<u32, ScanError>;
     /// The BTCB2 anchor's tip and its active fork height, if reported.
     async fn anchor(&self) -> Result<(BlockHash, Option<u64>), ScanError>;
     async fn stats(&self, chain: ChainId, address: &str) -> Result<Stats, ScanError>;
@@ -399,6 +415,8 @@ async fn collect(
 ) -> Result<ScanReport, ScanError> {
     plan.validate()?;
     let before = source.tip(plan.chain).await?;
+    // Bound to `before`: the closing tip recheck below proves it still held.
+    let tip_height = source.tip_height(plan.chain, before).await?;
     let mut fork_height = None;
     if plan.chain == ChainId::BitcoinBlake2b {
         let (anchor, fork) = source.anchor().await?;
@@ -411,6 +429,7 @@ async fn collect(
         chain: plan.chain,
         generation,
         tip: before,
+        tip_height,
         fork_height,
         addresses: 0,
         coverage: Vec::new(),

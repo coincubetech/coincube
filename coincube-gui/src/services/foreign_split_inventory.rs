@@ -7,6 +7,13 @@
 //! scanner's anonymous HTTP client, so no account credential reaches an Esplora
 //! route (#542). Only the BTCB2 fork-height observation uses the account.
 //!
+//! The one exception to "display only" is [`SplitInventory::splittable_coins`]:
+//! the pre-fork coins present, unspent and identically confirmed on both
+//! chains, carried as `coincube_core::foreign_split::SplitCoin` inputs for
+//! Split step 1 construction. They are scan evidence of the moment, not proof
+//! that a coin is still unspent when a transaction is built or broadcast; a
+//! restart re-authenticates through `authenticate_outpoints` in `split_evidence`.
+//!
 //! Absence on the other chain is display evidence only. In particular a
 //! Bitcoin output confirmed after the fork is at most a *candidate* input
 //! poison: `coincube_core::claim` states that an absent txid or a post-fork
@@ -20,6 +27,8 @@ use std::{
 
 use coincube_core::{
     chain::ChainId,
+    claim::BlockRef,
+    foreign_split::{SplitBranch, SplitCoin},
     miniscript::bitcoin::{BlockHash, OutPoint},
 };
 use tokio::sync::watch;
@@ -107,7 +116,11 @@ pub struct SplitInventory {
     fork_height: u64,
     btcb2_tip: BlockHash,
     bitcoin_tip: BlockHash,
+    btcb2_tip_height: u32,
+    bitcoin_tip_height: u32,
     splittable: Vec<InventoryCoin>,
+    /// Same coins and order as `splittable`, with step-1 inputs.
+    splittable_coins: Vec<SplitCoin>,
     spent_on_bitcoin: Vec<InventoryCoin>,
     spent_on_btcb2: Vec<InventoryCoin>,
     btcb2_post_fork: Vec<InventoryCoin>,
@@ -129,6 +142,22 @@ impl SplitInventory {
     }
     pub fn bitcoin_tip(&self) -> BlockHash {
         self.bitcoin_tip
+    }
+    /// Height of [`Self::btcb2_tip`].
+    pub fn btcb2_tip_height(&self) -> u32 {
+        self.btcb2_tip_height
+    }
+    /// Height of [`Self::bitcoin_tip`]; the step-1 locktime bound.
+    pub fn bitcoin_tip_height(&self) -> u32 {
+        self.bitcoin_tip_height
+    }
+    /// The splittable coins as step-1 inputs: the authenticated previous
+    /// transaction and the confirming block on each chain, which are the same
+    /// block below the fork height. Post-fork, pending, one-chain and
+    /// disagreeing coins are never here. This is scan-time evidence, not
+    /// proof the coins are still unspent.
+    pub fn splittable_coins(&self) -> Vec<SplitCoin> {
+        self.splittable_coins.clone()
     }
     /// Pre-fork outpoints unspent on both chains with identical prevouts and
     /// the same shared confirming block.
@@ -189,7 +218,10 @@ impl SplitInventory {
             fork_height: fork,
             btcb2_tip: btcb2.tip(),
             bitcoin_tip: bitcoin.tip(),
+            btcb2_tip_height: btcb2.tip_height(),
+            bitcoin_tip_height: bitcoin.tip_height(),
             splittable: Vec::new(),
+            splittable_coins: Vec::new(),
             spent_on_bitcoin: Vec::new(),
             spent_on_btcb2: Vec::new(),
             btcb2_post_fork: Vec::new(),
@@ -227,6 +259,7 @@ impl SplitInventory {
                 {
                     return Err(InventoryError::Inconsistent(coin.outpoint));
                 }
+                inventory.splittable_coins.push(split_coin(other, coin)?);
                 inventory.splittable.push(InventoryCoin::of(coin));
             } else {
                 // Unconfirmed, or replayed onto both chains after the fork.
@@ -252,6 +285,37 @@ impl SplitInventory {
         }
         Ok(inventory)
     }
+}
+
+/// A shared pre-fork coin as a step-1 input. Both previous transactions are
+/// txid-authenticated by the scanner and both confirmations were checked
+/// equal by the caller; refuse anyway if either is missing.
+fn split_coin(
+    bitcoin: &DiscoveredCoin,
+    btcb2: &DiscoveredCoin,
+) -> Result<SplitCoin, InventoryError> {
+    let block = |coin: &DiscoveredCoin| match (coin.confirmed, coin.block_height, coin.block_hash) {
+        (true, Some(height), Some(hash)) => Ok(BlockRef {
+            height: u64::from(height),
+            hash,
+        }),
+        _ => Err(InventoryError::Inconsistent(coin.outpoint)),
+    };
+    let (bitcoin_block, btcb2_block) = (block(bitcoin)?, block(btcb2)?);
+    if bitcoin_block != btcb2_block || bitcoin.previous.compute_txid() != btcb2.outpoint.txid {
+        return Err(InventoryError::Inconsistent(btcb2.outpoint));
+    }
+    Ok(SplitCoin {
+        outpoint: btcb2.outpoint,
+        branch: match btcb2.branch {
+            Branch::External => SplitBranch::External,
+            Branch::Internal => SplitBranch::Internal,
+        },
+        index: btcb2.index,
+        previous: btcb2.previous.clone(),
+        bitcoin_block: Some(bitcoin_block),
+        btcb2_block: Some(btcb2_block),
+    })
 }
 
 fn side(fork: u64, coin: &DiscoveredCoin) -> ForkSide {
@@ -330,10 +394,11 @@ pub fn bitcoin_plan(btcb2: &ScanPlan) -> Result<ScanPlan, InventoryError> {
     })
 }
 
-/// BTCB2 report retained for the existing handoff, plus the joined inventory.
+/// Both chains' reports, retained for the handoff, plus the joined inventory.
 #[derive(Debug, Clone)]
 pub struct TwoChainScan {
     pub btcb2: ScanReport,
+    pub bitcoin: ScanReport,
     pub inventory: SplitInventory,
 }
 
@@ -383,7 +448,11 @@ where
         return Err(InventoryError::Stale);
     }
     let inventory = SplitInventory::join(&btcb2, &bitcoin, expected, external_ranged)?;
-    Ok(TwoChainScan { btcb2, inventory })
+    Ok(TwoChainScan {
+        btcb2,
+        bitcoin,
+        inventory,
+    })
 }
 
 #[cfg(test)]
@@ -525,6 +594,50 @@ mod tests {
             vec![replayed.outpoint, bitcoin_unconfirmed.outpoint]
         );
         assert_eq!(inventory.fresh_receive(), FreshIndex::Proven(6));
+    }
+
+    /// #568 B1a: each splittable coin is a step-1 input with its previous
+    /// transaction and the same pre-fork block on both chains; nothing else
+    /// becomes one. Both tip heights are kept.
+    #[test]
+    fn split_splittable_coins_are_step1_inputs_with_both_blocks() {
+        let both = coin(1, 0, 1_000, Some(90));
+        let post = coin(2, 1, 2_000, Some(150));
+        let pending = coin(3, 2, 3_000, None);
+        let btcb2_only = coin(4, 3, 4_000, Some(91));
+        let btcb2 = report(
+            ChainId::BitcoinBlake2b,
+            vec![both.clone(), post.clone(), pending.clone(), btcb2_only],
+            walk(26, Some(3)),
+        )
+        .with_tip_height(210);
+        let bitcoin = report(
+            ChainId::Bitcoin,
+            vec![both.clone(), post, pending],
+            walk(26, Some(3)),
+        )
+        .with_tip_height(220);
+        let inventory = SplitInventory::join(&btcb2, &bitcoin, 5, true).unwrap();
+        assert_eq!(
+            (inventory.btcb2_tip_height(), inventory.bitcoin_tip_height()),
+            (210, 220)
+        );
+        let block = Some(BlockRef {
+            height: 90,
+            hash: hash(90),
+        });
+        assert_eq!(
+            inventory.splittable_coins(),
+            vec![SplitCoin {
+                outpoint: both.outpoint,
+                branch: SplitBranch::External,
+                index: 0,
+                previous: both.previous.clone(),
+                bitcoin_block: block,
+                btcb2_block: block,
+            }]
+        );
+        assert_eq!(outpoints(inventory.splittable()), vec![both.outpoint]);
     }
 
     #[test]
@@ -796,16 +909,22 @@ mod tests {
             })
         }
         let mocks: Vec<_> = vec![
-            ("blocks/tip/hash".to_string(), "11".repeat(32)),
+            ("blocks/tip/hash".to_string(), "11".repeat(32), 2),
+            (
+                format!("block/{}/status", "11".repeat(32)),
+                r#"{"in_best_chain":true,"height":900000}"#.into(),
+                1,
+            ),
             (
                 format!("address/{address}"),
                 r#"{"chain_stats":{"tx_count":0},"mempool_stats":{"tx_count":0}}"#.into(),
+                2,
             ),
-            (format!("address/{address}/utxo"), "[]".into()),
+            (format!("address/{address}/utxo"), "[]".into(), 2),
         ]
         .into_iter()
-        .map(|(path, body)| {
-            server.mock(|when, then| {
+        .map(|(path, body, hits)| {
+            let mock = server.mock(|when, then| {
                 when.method(GET)
                     .path(format!("/api/v1/esplora/bitcoin/mainnet/{path}"))
                     .matches(anonymous);
@@ -814,7 +933,8 @@ mod tests {
                     .header("X-Cache", "BYPASS")
                     .header("Cache-Control", "no-store")
                     .body(body);
-            })
+            });
+            (mock, hits)
         })
         .collect();
         let mut plan = btcb2_plan();
@@ -831,8 +951,9 @@ mod tests {
             .unwrap();
         assert_eq!(report.chain(), ChainId::Bitcoin);
         assert_eq!(report.fork_height(), None);
-        for mock in mocks {
-            mock.assert_hits(2);
+        assert_eq!(report.tip_height(), 900_000);
+        for (mock, hits) in mocks {
+            mock.assert_hits(hits);
         }
     }
 
