@@ -107,6 +107,12 @@ pub enum Error {
     Locktime,
     /// A recorded transaction is not an owned step-1 construction.
     Recorded(&'static str),
+    /// Step 2 runs on Bitcoin Blake2b mainnet or testnet4 only.
+    NotBitcoinBlake2b(ChainId),
+    /// Step 2's coins are not exactly step 1's claimed prevouts.
+    ClaimedMismatch,
+    /// Step 2's target is empty, provably unspendable, or a spent script.
+    InvalidTarget,
 }
 
 impl fmt::Display for Error {
@@ -139,6 +145,16 @@ impl fmt::Display for Error {
             Self::Economics => f.write_str("Fee or amount outside the allowed bounds"),
             Self::Locktime => f.write_str("Locktime must be a block height not above the tip"),
             Self::Recorded(reason) => f.write_str(reason),
+            Self::NotBitcoinBlake2b(chain) => {
+                write!(
+                    f,
+                    "Split step 2 runs on Bitcoin Blake2b only, not {chain:?}"
+                )
+            }
+            Self::ClaimedMismatch => {
+                f.write_str("Step 2 must spend exactly the coins step 1 claimed")
+            }
+            Self::InvalidTarget => f.write_str("Step 2 target address is not usable"),
         }
     }
 }
@@ -207,8 +223,9 @@ fn keys(descriptor: &Descriptor<DescriptorPublicKey>) -> Vec<DescriptorPublicKey
 }
 
 /// Whether `internal` is `external` with only each extended key's final
-/// derivation step changed (the receive/change branch), everything else,
-/// including the script structure, key order and origins, being identical.
+/// derivation step changed (the receive/change branch), the same way on every
+/// key, and everything else, including the script structure, key order and
+/// origins, identical.
 fn same_wallet(
     external: &Descriptor<DescriptorPublicKey>,
     internal: &Descriptor<DescriptorPublicKey>,
@@ -231,6 +248,22 @@ fn same_wallet(
         _ => false,
     });
     if !paired {
+        return false;
+    }
+    // Every extended key moves between the same pair of branch steps (for
+    // example `/0` to `/1`): one branch step for the whole wallet (#568 I1).
+    let branch_steps: BTreeSet<_> = outer
+        .iter()
+        .zip(&inner)
+        .filter_map(|pair| match pair {
+            (DescriptorPublicKey::XPub(a), DescriptorPublicKey::XPub(b)) => Some((
+                a.derivation_path.as_ref().last().copied(),
+                b.derivation_path.as_ref().last().copied(),
+            )),
+            _ => None,
+        })
+        .collect();
+    if branch_steps.len() > 1 {
         return false;
     }
     // Same structure: substitute the paired keys textually and compare.
@@ -741,10 +774,12 @@ pub enum FinalizeError {
     /// Not enough valid signatures to satisfy every input.
     Unsatisfied,
     InvalidWitness,
+    /// Step 2: the supplied coins or source are not the construction's.
+    CoinsChanged,
 }
 impl fmt::Display for FinalizeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Split step 1 finalization refused: {self:?}")
+        write!(f, "Split finalization refused: {self:?}")
     }
 }
 impl std::error::Error for FinalizeError {}
@@ -1014,6 +1049,12 @@ fn verify_retained_witness<C: secp256k1::Verification>(
     }
     Ok(counts)
 }
+
+mod step2;
+pub use step2::{
+    create_split_step2, finalize_split_step2, reconstruct_split_step2, SplitStep2,
+    SplitStep2Inputs, VerifiedSplitStep2,
+};
 
 #[cfg(test)]
 #[path = "foreign_split/tests.rs"]
