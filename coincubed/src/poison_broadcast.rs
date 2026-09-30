@@ -10,6 +10,7 @@ use coincube_core::{
     chain::ChainId,
     claim_finalize::{VerifiedAncestryTransfer, VerifiedClaimForkSweep, VerifiedPoisonTransfer},
     descriptors::CoincubeDescriptor,
+    foreign_split::VerifiedSplitStep1,
 };
 use miniscript::bitcoin::{Transaction, Txid, Wtxid};
 use std::sync::{
@@ -119,6 +120,15 @@ impl SubmissionGate {
     ) -> (Self, SubmissionRevoker) {
         Self::for_transaction(verified.chain(), verified.transaction(), not_after)
     }
+    /// Split (#568) step-1 transport gate only. Fresh two-chain evidence,
+    /// explicit approval and the durable Split submission intent remain the
+    /// coordinator's responsibility; verified signatures are not permission.
+    pub fn for_split_step1(
+        verified: &VerifiedSplitStep1,
+        not_after: std::time::Instant,
+    ) -> (Self, SubmissionRevoker) {
+        Self::for_transaction(verified.chain(), verified.transaction(), not_after)
+    }
     fn for_transaction(
         chain: ChainId,
         transaction: &Transaction,
@@ -173,6 +183,52 @@ impl SubmissionRevoker {
     pub fn state(&self) -> SubmissionState {
         state(self.state.load(Ordering::SeqCst))
     }
+}
+
+/// Daemonless Split (#568) step-1 transport: submit the exact verified bytes
+/// once to the fixed Bitcoin mainnet Connect endpoint at `origin`. A Split has
+/// no Bitcoin Cube and so no daemon, descriptor or backend binding (D5); this
+/// is the only route. Blocking: async callers run it on a blocking worker.
+///
+/// The caller must first join fresh chain observations and operator
+/// preflight of this exact witness at this origin, obtain explicit user
+/// approval and durably record the Split submission intent. The artifact and
+/// gate grant nothing. No daemon RPC or `DaemonControl` method exposes this,
+/// and there is no retry, redirect, proxy or fallback: a transport failure
+/// after the gate was entered is `Uncertain` and must only be reconciled.
+pub fn submit_verified_split_step1_to_connect(
+    verified: &VerifiedSplitStep1,
+    gate: &SubmissionGate,
+    origin: &str,
+) -> Result<SubmissionOutcome, SubmissionError> {
+    // Bitcoin mainnet only: the Connect route is fixed to it, and Testnet4
+    // stays refused until a route for it is verified.
+    if verified.chain() != ChainId::Bitcoin {
+        return Err(SubmissionError::UnsupportedChain);
+    }
+    let transaction = verified.transaction();
+    let txid = transaction.compute_txid();
+    let wtxid = transaction.compute_wtxid();
+    if gate.chain != ChainId::Bitcoin || gate.txid != txid || gate.wtxid != wtxid {
+        return Err(SubmissionError::GateMismatch);
+    }
+    let request = connect_transport::PreparedConnect::new(origin, transaction)
+        .map_err(|_| SubmissionError::BackendUnavailable)?;
+    // With no backend lock to hold the worker, a test acts between the two
+    // rendezvous: after preparation, before the gate is entered.
+    #[cfg(test)]
+    if let Some(barrier) = &gate.before_lock {
+        barrier.wait();
+        barrier.wait();
+    }
+    // Linearization point: revocation or expiry wins before this atomic
+    // transition; afterwards the one attempt has started. Nothing between it
+    // and the request can fail or wait on another lock.
+    gate.enter()?;
+    request
+        .send()
+        .map_err(|_| SubmissionError::Uncertain { txid, wtxid })?;
+    Ok(SubmissionOutcome::UpstreamAccepted { txid, wtxid })
 }
 
 impl DaemonControl {
@@ -424,5 +480,7 @@ impl DaemonControl {
     }
 }
 
+#[cfg(test)]
+mod split_tests;
 #[cfg(test)]
 mod tests;
