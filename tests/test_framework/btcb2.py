@@ -63,6 +63,17 @@ RDTS_EXPIRY_FAR_FUTURE = 4102444800
 
 # Regtest coinbase maturity.
 COINBASE_MATURITY = 100
+# Knots rejects transactions with locktime 21 as CAT-21 parasites. Its wallet
+# normally uses the tip height but may subtract up to 99 blocks for
+# anti-fee-sniping, so ordinary wallet sends are guaranteed clear of 21 only
+# once the tip reaches 121.
+KNOTS_CAT21_LOCKTIME = 21
+WALLET_ANTI_FEE_SNIPING_MAX_DEPTH = 99
+PREFORK_FUNDING_START_HEIGHT = (
+    KNOTS_CAT21_LOCKTIME + WALLET_ANTI_FEE_SNIPING_MAX_DEPTH + 1
+)
+# Three funding transactions each confirm in their own pre-fork block.
+MIN_ACTIVATION_HEIGHT = PREFORK_FUNDING_START_HEIGHT + 4
 
 
 def missing_binaries():
@@ -195,13 +206,20 @@ class TwoChainRegtest:
     def __init__(
         self,
         directory,
-        activation_height=110,
+        activation_height=130,
         post_fork_blocks_blake2b=6,
         legacy_path=None,
         blake2b_path=None,
         electrs_path=None,
         csv_value=10,
+        public_descriptor=None,
     ):
+        if activation_height < MIN_ACTIVATION_HEIGHT:
+            raise ValueError(
+                "activation_height must be at least "
+                f"{MIN_ACTIVATION_HEIGHT} so pre-fork wallet funding cannot "
+                f"choose Knots-reserved locktime {KNOTS_CAT21_LOCKTIME}"
+            )
         self.directory = directory
         self.activation_height = activation_height
         self.post_fork_blocks_blake2b = post_fork_blocks_blake2b
@@ -209,6 +227,7 @@ class TwoChainRegtest:
         self.blake2b_path = blake2b_path or KNOTS_BLAKE2B_PATH
         self.electrs_path = electrs_path or ELECTRS_BLAKE2B_PATH
         self.csv_value = csv_value
+        self.public_descriptor = public_descriptor
 
         self.home_dir = os.path.join(directory, "home-sandbox")
         self.legacy_dir = os.path.join(directory, "knots-legacy")
@@ -275,17 +294,24 @@ class TwoChainRegtest:
 
     def _start_legacy_and_fund(self):
         n = self.activation_height
-        self.legacy = self._new_node(self.legacy_dir, self.legacy_path)
+        self.legacy = self._new_node(self.legacy_dir, self.legacy_path, ["-datacarriersize=100"])
         self.legacy.startup()
         rpc = self.legacy.rpc
         rpc.createwallet(rpc.wallet_name, False, False, "", False, True, True)
-        # Mature one coinbase for funding.
-        self.legacy.generate_block(COINBASE_MATURITY + 1)
-        assert rpc.getblockcount() == COINBASE_MATURITY + 1
+        # Mature one coinbase and move beyond every anti-fee-sniping locktime
+        # that Knots reserves for CAT-21. Otherwise a wallet send can randomly
+        # choose locktime 21 and never enter the mempool.
+        self.legacy.generate_block(PREFORK_FUNDING_START_HEIGHT)
+        assert rpc.getblockcount() == PREFORK_FUNDING_START_HEIGHT
 
         # The Vault: 2-of-3 primary path, 1-key recovery path after `csv_value`.
-        self.signer = MultiSigner(3, {self.csv_value: 1}, is_taproot=False)
-        self.desc = vault_descriptor(self.signer, self.csv_value)
+        if self.public_descriptor is None:
+            self.signer = MultiSigner(3, {self.csv_value: 1}, is_taproot=False)
+            self.desc = vault_descriptor(self.signer, self.csv_value)
+        else:
+            # The GUI child owns the synthetic signing keys; the harness only
+            # receives its public descriptor and funds the same scripts.
+            self.desc = Descriptor.from_str(self.public_descriptor)
         receive_desc, _ = self.desc.singlepath_descriptors()
         checksummed = rpc.getdescriptorinfo(str(receive_desc))["descriptor"]
         self.vault_addresses = rpc.deriveaddresses(checksummed, [0, 3])

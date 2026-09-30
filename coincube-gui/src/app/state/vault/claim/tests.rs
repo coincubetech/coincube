@@ -47,7 +47,7 @@ fn pre_fork_coins_are_those_confirmed_below_the_fork_height() {
     let set = partition_coins(
         vec![
             coin(Some(89), false, false, 1), // pre-fork
-            coin(Some(90), false, false, 2), // the fork block: Bitcoin-only
+            coin(Some(90), false, false, 2), // fork block: ancestry remains unproven
             coin(Some(91), false, false, 3), // post-fork
             coin(None, false, false, 4),     // unconfirmed: neither
             coin(Some(10), true, false, 5),  // spent
@@ -65,13 +65,49 @@ fn pre_fork_coins_are_those_confirmed_below_the_fork_height() {
     );
     assert_eq!(set.post_fork, 2, "at and above the fork height");
     assert_eq!(set.tip_height, 105);
+    assert_eq!(
+        set.ancestry_candidates
+            .iter()
+            .map(|c| c.outpoint.vout)
+            .collect::<Vec<_>>(),
+        vec![2, 3]
+    );
 }
 
 #[test]
-fn vault_shape_refusal_admits_single_key_p2wsh_only() {
+fn ancestry_inventory_excludes_spent_immature_unconfirmed_and_impossible_heights() {
+    let set = partition_coins(
+        vec![
+            coin(Some(99), false, false, 1),
+            coin(Some(100), false, false, 2),
+            coin(Some(101), false, false, 3),
+            coin(Some(-1), false, false, 4),
+            coin(None, false, false, 5),
+            coin(Some(99), true, false, 6),
+            coin(Some(99), false, true, 7),
+            coin(Some(89), false, false, 8),
+        ],
+        90,
+        100,
+    );
+    assert_eq!(
+        set.ancestry_candidates
+            .iter()
+            .map(|c| c.outpoint.vout)
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    assert_eq!(set.post_fork, 2);
+    assert_eq!(set.pre_fork.len(), 1);
+    let invalid_tip = partition_coins(vec![coin(Some(1), false, false, 0)], 90, -1);
+    assert!(invalid_tip.pre_fork.is_empty());
+    assert!(invalid_tip.ancestry_candidates.is_empty());
+}
+
+#[test]
+fn vault_shape_refusal_admits_single_and_multi_key_p2wsh() {
     assert_eq!(vault_shape_refusal(&wallet(SINGLE_WSH)), None);
-    let multi = vault_shape_refusal(&wallet(MULTI_WSH)).expect("multisig primary refused");
-    assert!(multi.contains("single-key"), "{}", multi);
+    assert_eq!(vault_shape_refusal(&wallet(MULTI_WSH)), None);
     let taproot = vault_shape_refusal(&wallet(TAPROOT)).expect("taproot refused");
     assert!(taproot.contains("Taproot"), "{}", taproot);
 }
@@ -183,10 +219,12 @@ fn checked_ok(now: i64) -> Checked {
 /// probe can change never offers a retry.
 #[test]
 fn refusals_come_in_actionable_order() {
-    let mut p = panel(MULTI_WSH);
+    let mut p = panel(TAPROOT);
     let target = p.refusal().unwrap();
     assert!(
-        target.reason.contains("Create the claim target"),
+        target
+            .reason
+            .contains("No unique valid Bitcoin Blake2b Cube"),
         "{}",
         target.reason
     );
@@ -194,7 +232,7 @@ fn refusals_come_in_actionable_order() {
 
     p.pre.target = Some("fork-cube".into());
     let shape = p.refusal().unwrap();
-    assert!(shape.reason.contains("single-key"), "{}", shape.reason);
+    assert!(shape.reason.contains("Taproot"), "{}", shape.reason);
     assert!(!shape.retry);
 
     let mut p = panel(SINGLE_WSH);
@@ -466,11 +504,13 @@ fn reviewer_claim_completion_without_daemon_must_not_panic() {
 // Windows; shared helper definitions also serve the Unix-only flow cases.
 #[cfg_attr(not(unix), allow(dead_code, unused_imports))]
 mod flow {
+    #[cfg(feature = "regtest-harness")]
+    mod live_regtest;
+    mod preferred;
     use super::*;
     use crate::{daemon::model::GetInfoResult, signer::Signer};
     use coincube_core::{
         bip39::Mnemonic,
-        claim_finalize::finalize_poison_transfer,
         descriptors::{CoincubeDescriptor, CoincubePolicy, PathInfo},
         miniscript::{
             bitcoin::{
@@ -504,22 +544,33 @@ mod flow {
         .unwrap()
     }
 
-    /// A single-key P2WSH Vault (primary: the hot key; recovery: another key
+    /// A P2WSH Vault (primary: one key or 2-of-3; recovery: a distinct key
     /// after 46 blocks) and one 100 000-sat coin it received at height 50.
     struct Fixture {
         descriptor: CoincubeDescriptor,
         hot: MasterSigner,
+        second: Option<MasterSigner>,
         previous: Transaction,
         coin: Coin,
     }
 
-    fn fixture() -> Fixture {
+    fn fixture_with_multisig(multi: bool) -> Fixture {
         let secp = secp256k1::Secp256k1::new();
         let hot = signer(40);
         let recovery = signer(42);
+        let second = signer(41);
+        let spare = signer(43);
+        let primary = if multi {
+            PathInfo::Multi(
+                2,
+                vec![key(&hot, &secp), key(&second, &secp), key(&spare, &secp)],
+            )
+        } else {
+            PathInfo::Single(key(&hot, &secp))
+        };
         let descriptor = CoincubeDescriptor::new(
             CoincubePolicy::new_legacy(
-                PathInfo::Single(key(&hot, &secp)),
+                primary,
                 std::iter::once((46, PathInfo::Single(key(&recovery, &secp)))).collect(),
             )
             .unwrap(),
@@ -552,6 +603,7 @@ mod flow {
         Fixture {
             descriptor,
             hot,
+            second: multi.then_some(second),
             previous,
             coin,
         }
@@ -565,7 +617,12 @@ mod flow {
         config: coincubed::config::Config,
         coin: Coin,
         previous: Transaction,
+        submitted: Mutex<Option<Transaction>>,
         hits: Mutex<Vec<&'static str>>,
+        queried_txs: Mutex<Vec<Txid>>,
+        ancestry_coin: Option<Coin>,
+        #[cfg(feature = "regtest-harness")]
+        live: Option<live_regtest::LiveTransport>,
     }
     impl FlowDaemon {
         fn hit(&self, name: &'static str) {
@@ -592,10 +649,18 @@ mod flow {
         }
         async fn get_info(&self) -> Result<model::GetInfoResult, DaemonError> {
             self.hit("get_info");
+            #[cfg(feature = "regtest-harness")]
+            if let Some(live) = &self.live {
+                return Ok(live.info(&self.config));
+            }
             Ok(GetInfoResult {
                 version: String::new(),
                 network: Network::Bitcoin,
-                block_height: 105,
+                block_height: self
+                    .ancestry_coin
+                    .as_ref()
+                    .and_then(|c| c.block_height)
+                    .map_or(105, |h| h + 200),
                 sync: 1.0,
                 descriptors: GetInfoDescriptors {
                     main: self.config.main_descriptor.clone(),
@@ -622,7 +687,22 @@ mod flow {
             _: usize,
             _: Option<ChildNumber>,
         ) -> Result<model::ListRevealedAddressesResult, DaemonError> {
-            unreachable!()
+            self.hit("list_revealed_addresses");
+            let index = ChildNumber::from_normal_idx(12).unwrap();
+            Ok(model::ListRevealedAddressesResult {
+                addresses: vec![coincubed::commands::ListRevealedAddressesEntry {
+                    index,
+                    address: self
+                        .config
+                        .main_descriptor
+                        .change_descriptor()
+                        .derive(index, &secp256k1::Secp256k1::verification_only())
+                        .address(Network::Bitcoin),
+                    label: None,
+                    used_count: 0,
+                }],
+                continue_from: None,
+            })
         }
         async fn update_deriv_indexes(
             &self,
@@ -634,13 +714,27 @@ mod flow {
         async fn list_coins(
             &self,
             statuses: &[CoinStatus],
-            _: &[OutPoint],
+            outpoints: &[OutPoint],
         ) -> Result<model::ListCoinsResult, DaemonError> {
             self.hit("list_coins");
-            assert_eq!(statuses, &[CoinStatus::Confirmed]);
-            Ok(model::ListCoinsResult {
-                coins: vec![self.coin.clone()],
-            })
+            assert!(statuses.is_empty() || statuses == [CoinStatus::Confirmed]);
+            let mut coin = self.coin.clone();
+            if statuses.is_empty() {
+                if let Some(tx) = self.submitted.lock().unwrap().as_ref() {
+                    coin.spend_info = Some(coincubed::commands::LCSpendInfo {
+                        txid: tx.compute_txid(),
+                        height: None,
+                    });
+                }
+            }
+            let mut coins = vec![coin];
+            if let Some(ancestry) = &self.ancestry_coin {
+                coins.push(ancestry.clone());
+            }
+            if !outpoints.is_empty() {
+                coins.retain(|coin| outpoints.contains(&coin.outpoint));
+            }
+            Ok(model::ListCoinsResult { coins })
         }
         async fn list_spend_txs(&self) -> Result<model::ListSpendResult, DaemonError> {
             self.hit("list_spend_txs");
@@ -681,16 +775,151 @@ mod flow {
             self.hit("reserve_change");
             Ok(ChildNumber::from_normal_idx(12).unwrap())
         }
+        #[cfg(feature = "regtest-harness")]
+        async fn claim_backend_binding(
+            &self,
+        ) -> Result<coincubed::poison_broadcast::ClaimBackendBinding, DaemonError> {
+            self.live
+                .as_ref()
+                .and_then(|live| live.bound.as_ref())
+                .ok_or(DaemonError::ClientNotSupported)?
+                .claim_backend_binding()
+                .await
+        }
+        #[cfg(feature = "regtest-harness")]
+        async fn submit_verified_poison_to_node(
+            &self,
+            verified: Arc<coincube_core::claim_finalize::VerifiedPoisonTransfer>,
+            binding: coincubed::poison_broadcast::ClaimBackendBinding,
+            gate: Arc<SubmissionGate>,
+        ) -> Result<SubmissionOutcome, DaemonError> {
+            self.hit("submit_verified_poison");
+            self.hit("submit_verified_poison_to_node");
+            let outcome = self
+                .live
+                .as_ref()
+                .and_then(|live| live.bound.as_ref())
+                .ok_or(DaemonError::ClientNotSupported)?
+                .submit_verified_poison_to_node(verified.clone(), binding, gate)
+                .await?;
+            *self.submitted.lock().unwrap() = Some(verified.transaction().clone());
+            Ok(outcome)
+        }
+        #[cfg(feature = "regtest-harness")]
+        async fn submit_verified_poison_to_connect(
+            &self,
+            verified: Arc<coincube_core::claim_finalize::VerifiedPoisonTransfer>,
+            origin: String,
+            binding: coincubed::poison_broadcast::ClaimBackendBinding,
+            gate: Arc<SubmissionGate>,
+        ) -> Result<SubmissionOutcome, DaemonError> {
+            self.hit("submit_verified_poison");
+            self.hit("submit_verified_poison_to_connect");
+            let outcome = self
+                .live
+                .as_ref()
+                .and_then(|live| live.bound.as_ref())
+                .ok_or(DaemonError::ClientNotSupported)?
+                .submit_verified_poison_to_connect(verified.clone(), origin, binding, gate)
+                .await?;
+            *self.submitted.lock().unwrap() = Some(verified.transaction().clone());
+            Ok(outcome)
+        }
         async fn submit_verified_poison(
             &self,
             verified: Arc<coincube_core::claim_finalize::VerifiedPoisonTransfer>,
             _gate: Arc<SubmissionGate>,
         ) -> Result<SubmissionOutcome, DaemonError> {
             self.hit("submit_verified_poison");
+            #[cfg(feature = "regtest-harness")]
+            if let Some(live) = &self.live {
+                let outcome = live
+                    .transport
+                    .submit_poison(&verified, &_gate)
+                    .map_err(DaemonError::PoisonSubmission)?;
+                *self.submitted.lock().unwrap() = Some(verified.transaction().clone());
+                return Ok(outcome);
+            }
+            *self.submitted.lock().unwrap() = Some(verified.transaction().clone());
             Ok(SubmissionOutcome::UpstreamAccepted {
                 txid: verified.transaction().compute_txid(),
                 wtxid: verified.transaction().compute_wtxid(),
             })
+        }
+        #[cfg(feature = "regtest-harness")]
+        async fn submit_verified_ancestry_to_node(
+            &self,
+            verified: Arc<coincube_core::claim_finalize::VerifiedAncestryTransfer>,
+            binding: coincubed::poison_broadcast::ClaimBackendBinding,
+            gate: Arc<SubmissionGate>,
+        ) -> Result<SubmissionOutcome, DaemonError> {
+            self.hit("submit_verified_poison");
+            self.hit("submit_verified_poison_to_node");
+            let outcome = self
+                .live
+                .as_ref()
+                .and_then(|live| live.bound.as_ref())
+                .ok_or(DaemonError::ClientNotSupported)?
+                .submit_verified_ancestry_to_node(verified.clone(), binding, gate)
+                .await?;
+            *self.submitted.lock().unwrap() = Some(verified.transaction().clone());
+            Ok(outcome)
+        }
+        #[cfg(feature = "regtest-harness")]
+        async fn submit_verified_ancestry_to_connect(
+            &self,
+            verified: Arc<coincube_core::claim_finalize::VerifiedAncestryTransfer>,
+            origin: String,
+            binding: coincubed::poison_broadcast::ClaimBackendBinding,
+            gate: Arc<SubmissionGate>,
+        ) -> Result<SubmissionOutcome, DaemonError> {
+            self.hit("submit_verified_poison");
+            self.hit("submit_verified_poison_to_connect");
+            let outcome = self
+                .live
+                .as_ref()
+                .and_then(|live| live.bound.as_ref())
+                .ok_or(DaemonError::ClientNotSupported)?
+                .submit_verified_ancestry_to_connect(verified.clone(), origin, binding, gate)
+                .await?;
+            *self.submitted.lock().unwrap() = Some(verified.transaction().clone());
+            Ok(outcome)
+        }
+        async fn submit_verified_ancestry(
+            &self,
+            verified: Arc<coincube_core::claim_finalize::VerifiedAncestryTransfer>,
+            _gate: Arc<SubmissionGate>,
+        ) -> Result<SubmissionOutcome, DaemonError> {
+            self.hit("submit_verified_poison");
+            #[cfg(feature = "regtest-harness")]
+            if let Some(live) = &self.live {
+                let outcome = live
+                    .transport
+                    .submit_ancestry(&verified, &_gate)
+                    .map_err(DaemonError::PoisonSubmission)?;
+                *self.submitted.lock().unwrap() = Some(verified.transaction().clone());
+                return Ok(outcome);
+            }
+            *self.submitted.lock().unwrap() = Some(verified.transaction().clone());
+            Ok(SubmissionOutcome::UpstreamAccepted {
+                txid: verified.transaction().compute_txid(),
+                wtxid: verified.transaction().compute_wtxid(),
+            })
+        }
+        #[cfg(feature = "regtest-harness")]
+        async fn submit_verified_claim_fork(
+            &self,
+            verified: Arc<coincube_core::claim_finalize::VerifiedClaimForkSweep>,
+            gate: Arc<SubmissionGate>,
+        ) -> Result<SubmissionOutcome, DaemonError> {
+            let live = self.live.as_ref().ok_or(DaemonError::ClientNotSupported)?;
+            self.hit("submit_verified_claim_fork");
+            let outcome = live
+                .transport
+                .submit_fork(&verified, &gate)
+                .map_err(DaemonError::PoisonSubmission)?;
+            *self.submitted.lock().unwrap() = Some(verified.transaction().clone());
+            Ok(outcome)
         }
         async fn start_rescan(&self, _: u32) -> Result<(), DaemonError> {
             unreachable!()
@@ -717,14 +946,25 @@ mod flow {
             txids: &[Txid],
         ) -> Result<model::ListTransactionsResult, DaemonError> {
             self.hit("list_txs");
-            assert_eq!(txids, &[self.previous.compute_txid()]);
-            Ok(model::ListTransactionsResult {
-                transactions: vec![coincubed::commands::TransactionInfo {
+            self.queried_txs.lock().unwrap().extend_from_slice(txids);
+            let mut transactions = Vec::new();
+            if txids.contains(&self.previous.compute_txid()) {
+                transactions.push(coincubed::commands::TransactionInfo {
                     tx: self.previous.clone(),
-                    height: Some(50),
+                    height: self.coin.block_height,
                     time: None,
-                }],
-            })
+                });
+            }
+            if let Some(tx) = self.submitted.lock().unwrap().as_ref() {
+                if txids.contains(&tx.compute_txid()) {
+                    transactions.push(coincubed::commands::TransactionInfo {
+                        tx: tx.clone(),
+                        height: None,
+                        time: None,
+                    });
+                }
+            }
+            Ok(model::ListTransactionsResult { transactions })
         }
         async fn get_labels(
             &self,
@@ -813,7 +1053,12 @@ mod flow {
     /// back unpolled, so a test can change the panel's context between its
     /// dispatch and its result, as a sign-out does.
     async fn reach_signed() -> (Flow, Task<Message>) {
-        let f = fixture();
+        reach_signed_with_multisig(false).await
+    }
+
+    async fn reach_signed_with_multisig(multi: bool) -> (Flow, Task<Message>) {
+        let f = fixture_with_multisig(multi);
+        let second = f.second;
         let server = MockServer::start_async().await;
         let now = unix_now();
         let fork_hash = "07".repeat(32);
@@ -899,7 +1144,12 @@ mod flow {
             config,
             coin: f.coin.clone(),
             previous: f.previous.clone(),
+            submitted: Mutex::new(None),
             hits: Mutex::new(Vec::new()),
+            queried_txs: Mutex::new(Vec::new()),
+            ancestry_coin: None,
+            #[cfg(feature = "regtest-harness")]
+            live: None,
         });
         let dyn_daemon: Arc<dyn Daemon + Sync + Send> = daemon.clone();
         let mut wallet = Wallet::new(f.descriptor.clone());
@@ -994,7 +1244,7 @@ mod flow {
             Message::View(view::Message::Spend(view::SpendTxMessage::Sign)),
         );
         drop(opened);
-        let (unsigned, fingerprint) = match &p.stage {
+        let (unsigned, mut fingerprint) = match &p.stage {
             Stage::Sign { psbt, .. } => {
                 assert!(psbt.modal.is_some(), "the picker is open");
                 (
@@ -1006,17 +1256,57 @@ mod flow {
         };
         drop(view::vault::claim::view(&menu, &cache, &p));
         let signed = wallet.signer.as_ref().unwrap().sign_psbt(unsigned).unwrap();
+        let signed = if let Some(second) = second {
+            if let Stage::Sign {
+                built: Some(built), ..
+            } = &p.stage
+            {
+                assert!(
+                    built.verify(&signed, None).is_err(),
+                    "one signature cannot satisfy 2-of-3"
+                );
+            } else {
+                panic!("construction retained before threshold");
+            }
+            let first = p.update(
+                Some(dyn_daemon.clone()),
+                &cache,
+                Message::Signed(fingerprint, Ok(signed)),
+            );
+            for result in outputs(first).await {
+                assert!(outputs(p.update(Some(dyn_daemon.clone()), &cache, result))
+                    .await
+                    .is_empty());
+            }
+            assert!(!journal_directory(&datadir, &wallet)
+                .join("intent.json")
+                .exists());
+            assert!(!daemon.hits().contains(&"submit_verified_poison"));
+            let psbt = match &p.stage {
+                Stage::Sign {
+                    psbt,
+                    built: Some(_),
+                    finalizing: None,
+                    ..
+                } => {
+                    assert!(psbt.modal.is_some(), "picker stays open below threshold");
+                    psbt.tx.psbt.clone()
+                }
+                _ => panic!("one signature must remain at Sign"),
+            };
+            fingerprint = second.fingerprint(&secp256k1::Secp256k1::new());
+            second
+                .sign_psbt(psbt, &secp256k1::Secp256k1::new())
+                .unwrap()
+        } else {
+            signed
+        };
         // The preflight answers for exactly the transaction that will be
         // submitted, so it is registered once the witness is known.
         let final_tx = match &p.stage {
             Stage::Sign {
                 built: Some(built), ..
-            } => {
-                finalize_poison_transfer(built, &signed, &secp256k1::Secp256k1::verification_only())
-                    .unwrap()
-                    .transaction()
-                    .clone()
-            }
+            } => built.verify(&signed, None).unwrap().transaction().clone(),
             _ => panic!("the construction is still in the stage"),
         };
         assert_eq!(final_tx.compute_txid(), unsigned_txid);
@@ -1083,7 +1373,7 @@ mod flow {
         )
     }
 
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     #[tokio::test]
     async fn unsupported_journal_platform_refuses_before_review_or_submission() {
         let (mut f, ready) = reach_signed().await;
@@ -1119,6 +1409,31 @@ mod flow {
         let _ = std::fs::remove_dir_all(&f.root);
     }
 
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn two_of_three_signs_through_psbt_state_then_finalizes_and_journals() {
+        let (mut f, ready) = reach_signed_with_multisig(true).await;
+        let mut produced = outputs(ready).await;
+        assert_eq!(produced.len(), 1);
+        assert!(
+            matches!(&produced[0], Message::Claim(ClaimEvent::Ready(_, Ok(_)))),
+            "{:?}",
+            produced
+        );
+        let review =
+            f.p.update(Some(f.dyn_daemon.clone()), &f.cache, produced.remove(0));
+        assert!(journal_directory(&f.datadir, &f.wallet)
+            .join("intent.json")
+            .is_file());
+        for result in outputs(review).await {
+            let _ = f.p.update(Some(f.dyn_daemon.clone()), &f.cache, result);
+        }
+        assert!(matches!(&f.p.stage, Stage::Review { .. }));
+        assert_eq!(submissions(&f), 0);
+        drop(f.p);
+        let _ = std::fs::remove_dir_all(&f.root);
+    }
+
     /// `reach_signed`, then finalise → journal → review, asserting each.
     async fn reach_review() -> Flow {
         let (mut f, ready) = reach_signed().await;
@@ -1150,6 +1465,763 @@ mod flow {
         assert_eq!(snapshot.observations.bitcoin.tip.height, 105);
         assert_eq!(snapshot.observations.fork.tip.height, 100);
         f
+    }
+
+    async fn reopen(f: &mut Flow) {
+        let panel = ClaimStep1Panel::new(
+            f.wallet.clone(),
+            f.datadir.clone(),
+            "bitcoin-cube".into(),
+            f.sender.subscribe(),
+            f.p.connect.clone(),
+        );
+        f.p = panel;
+        let task = f.p.reload(Some(f.dyn_daemon.clone()), None);
+        for event in outputs(task).await {
+            let next = f.p.update(Some(f.dyn_daemon.clone()), &f.cache, event);
+            for event in outputs(next).await {
+                let _ = f.p.update(Some(f.dyn_daemon.clone()), &f.cache, event);
+            }
+        }
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn restart_intent_recovers_exact_plan_for_resigning_without_new_reservation() {
+        let mut f = reach_review().await;
+        let path = journal_directory(&f.datadir, &f.wallet).join("intent.json");
+        let journal = std::fs::read(&path).unwrap();
+        let reservations = f
+            .daemon
+            .hits()
+            .iter()
+            .filter(|v| **v == "reserve_change")
+            .count();
+        reopen(&mut f).await;
+        assert!(f.p.resuming);
+        match &f.p.stage {
+            Stage::Plan { built } => {
+                assert_eq!(built.psbt().unsigned_tx.compute_txid(), f.unsigned_txid)
+            }
+            _ => panic!("recorded plan review missing"),
+        }
+        assert_eq!(submissions(&f), 0);
+        assert_eq!(std::fs::read(&path).unwrap(), journal);
+        assert!(!f.daemon.hits().contains(&"list_revealed_addresses"));
+        f.p.start_signing();
+        let _ = f.p.update(
+            Some(f.dyn_daemon.clone()),
+            &f.cache,
+            Message::View(view::Message::Spend(view::SpendTxMessage::Sign)),
+        );
+        let unsigned = match &f.p.stage {
+            Stage::Sign { psbt, .. } => psbt.tx.psbt.clone(),
+            _ => panic!("signing restored plan"),
+        };
+        let signer = f.wallet.signer.as_ref().unwrap();
+        let signed = signer.sign_psbt(unsigned).unwrap();
+        let task = f.p.update(
+            Some(f.dyn_daemon.clone()),
+            &f.cache,
+            Message::Signed(signer.fingerprint(), Ok(signed)),
+        );
+        let mut messages: std::collections::VecDeque<_> = outputs(task).await.into();
+        let mut count = 0;
+        while let Some(message) = messages.pop_front() {
+            count += 1;
+            assert!(count < 16, "restart did not settle");
+            messages
+                .extend(outputs(f.p.update(Some(f.dyn_daemon.clone()), &f.cache, message)).await);
+        }
+        assert_eq!(review_snapshot(&f.p).txid, f.unsigned_txid);
+        assert_eq!(std::fs::read(path).unwrap(), journal);
+        assert_eq!(submissions(&f), 0);
+        assert_eq!(
+            f.daemon
+                .hits()
+                .iter()
+                .filter(|v| **v == "reserve_change")
+                .count(),
+            reservations
+        );
+        drop(f.p);
+        let _ = std::fs::remove_dir_all(f.root);
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn restart_legacy_index_fallback_and_tampered_hint_are_checked() {
+        let mut f = reach_review().await;
+        let path = journal_directory(&f.datadir, &f.wallet).join("intent.json");
+        let mut journal: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        // Release the journal owner before simulating an older on-disk record.
+        f.p.revoke();
+        f.p.stage = Stage::Preconditions;
+        journal["version"] = 1.into();
+        journal
+            .as_object_mut()
+            .unwrap()
+            .remove("bitcoin_change_index");
+        std::fs::write(&path, serde_json::to_vec(&journal).unwrap()).unwrap();
+        reopen(&mut f).await;
+        assert!(matches!(f.p.stage, Stage::Plan { .. }));
+        assert!(f.daemon.hits().contains(&"list_revealed_addresses"));
+        journal["version"] = 4.into();
+        journal["bitcoin_change_index"] = 13.into();
+        std::fs::write(&path, serde_json::to_vec(&journal).unwrap()).unwrap();
+        reopen(&mut f).await;
+        assert!(!matches!(
+            f.p.stage,
+            Stage::Plan { .. } | Stage::Sign { .. }
+        ));
+        assert!(f.p.restart_error.is_some());
+        assert_eq!(submissions(&f), 0);
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn restart_result_after_revocation_cannot_rebind_or_enable_build() {
+        let mut f = reach_review().await;
+        f.p = ClaimStep1Panel::new(
+            f.wallet.clone(),
+            f.datadir.clone(),
+            "bitcoin-cube".into(),
+            f.sender.subscribe(),
+            f.p.connect.clone(),
+        );
+        assert!(outputs(f.p.reload(None, None)).await.is_empty());
+        assert!(!f.p.can_build());
+        let task = f.p.reload(Some(f.dyn_daemon.clone()), None);
+        f.p.revoke();
+        f.sender.send_modify(|n| *n += 1);
+        for message in outputs(task).await {
+            assert!(
+                outputs(f.p.update(Some(f.dyn_daemon.clone()), &f.cache, message))
+                    .await
+                    .is_empty()
+            );
+        }
+        assert!(f.p.restart_pending);
+        assert!(!f.p.can_build());
+        assert!(f.p.revoker.is_none());
+        assert_eq!(submissions(&f), 0);
+        drop(f.p);
+        let _ = std::fs::remove_dir_all(f.root);
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn restart_recorded_submission_tracks_verified_witness_without_resubmitting() {
+        let mut f = reach_review().await;
+        reach_track(&mut f).await;
+        reopen(&mut f).await;
+        assert!(
+            matches!(
+                &f.p.stage,
+                Stage::Track {
+                    session: Some(_),
+                    error: None,
+                    ..
+                }
+            ),
+            "{:?}",
+            f.p.restart_error
+        );
+        assert_eq!(submissions(&f), 1);
+        drop(f.p);
+        let _ = std::fs::remove_dir_all(f.root);
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn restart_uses_stored_signed_bytes_but_verifies_their_signatures() {
+        for corrupt in [false, true] {
+            let mut f = reach_review().await;
+            reach_track(&mut f).await;
+            *f.daemon.submitted.lock().unwrap() = None;
+            if corrupt {
+                let path = journal_directory(&f.datadir, &f.wallet).join("intent.json");
+                let mut journal: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                let mut tx: Transaction =
+                    serde_json::from_value(journal["bitcoin_transaction"].clone()).unwrap();
+                tx.input[0].witness =
+                    coincube_core::miniscript::bitcoin::Witness::from_slice(&[vec![1u8]]);
+                journal["bitcoin_transaction"] = serde_json::to_value(&tx).unwrap();
+                journal["bitcoin_attempts"][0]["wtxid"] =
+                    serde_json::to_value(tx.compute_wtxid()).unwrap();
+                std::fs::write(path, serde_json::to_vec(&journal).unwrap()).unwrap();
+            }
+            reopen(&mut f).await;
+            if corrupt {
+                assert!(f.p.restart_error.is_some());
+                assert!(!f.p.can_build());
+            } else {
+                assert!(matches!(
+                    &f.p.stage,
+                    Stage::Track {
+                        session: Some(_),
+                        error: None,
+                        ..
+                    }
+                ));
+            }
+            assert_eq!(submissions(&f), 1);
+            drop(f.p);
+            let _ = std::fs::remove_dir_all(f.root);
+        }
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn restart_missing_witness_is_track_only_and_wrong_account_is_refused() {
+        let mut f = reach_review().await;
+        reach_track(&mut f).await;
+        *f.daemon.submitted.lock().unwrap() = None;
+        // A legacy journal has no recoverable signed bytes of its own.
+        let path = journal_directory(&f.datadir, &f.wallet).join("intent.json");
+        let mut journal: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        journal["version"] = serde_json::json!(4);
+        journal
+            .as_object_mut()
+            .unwrap()
+            .remove("bitcoin_transaction");
+        journal.as_object_mut().unwrap().remove("bitcoin_attempts");
+        std::fs::write(&path, serde_json::to_vec(&journal).unwrap()).unwrap();
+        reopen(&mut f).await;
+        assert!(matches!(
+            &f.p.stage,
+            Stage::Track {
+                session: None,
+                outcome: Outcome::Recorded { .. },
+                ..
+            }
+        ));
+        let task = f.p.update(
+            Some(f.dyn_daemon.clone()),
+            &f.cache,
+            Message::View(view::Message::Claim(view::ClaimMessage::Confirm)),
+        );
+        assert!(outputs(task).await.is_empty());
+        assert_eq!(submissions(&f), 1);
+        f.p.connect.as_mut().unwrap().account = "someone-else".into();
+        reopen(&mut f).await;
+        assert_eq!(f.p.restart_error.as_deref(), Some(OTHER_ACCOUNT));
+        assert!(!f.p.can_build());
+        assert_eq!(submissions(&f), 1);
+        drop(f.p);
+        let _ = std::fs::remove_dir_all(f.root);
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn confirmed_handoff_releases_journal_and_does_not_reacquire_in_background() {
+        use crate::app::settings::{update_settings_file, CubeSettings, VaultIdentity};
+        let mut f = reach_review().await;
+        assert!(f.p.take_fork_handoff().is_err());
+        reach_track(&mut f).await;
+        assert!(f.p.take_fork_handoff().is_err()); // no Bitcoin confirmation yet
+        for (chain, id) in [
+            (ChainId::Bitcoin, "bitcoin-cube"),
+            (ChainId::BitcoinBlake2b, "fork-cube"),
+        ] {
+            let cube = CubeSettings::new_with_raw_id(id.into(), id.into(), chain).with_vault(
+                VaultIdentity::new(f.wallet.id(), Some(&f.wallet.main_descriptor)),
+            );
+            update_settings_file(&f.datadir.network_directory(chain), |mut settings| {
+                settings.cubes = vec![cube];
+                Some(settings)
+            })
+            .await
+            .unwrap();
+        }
+        // Only a previously collected eligible tracking view offers navigation;
+        // this fixture does not claim current permission to sign on the fork.
+        if let Stage::Track { status, .. } = &mut f.p.stage {
+            *status = Some(Status::Observation(
+                Assessment::ObservationsEligibleForPreflight,
+            ));
+        }
+        let context = match &f.p.stage {
+            Stage::Track {
+                session: Some(session),
+                ..
+            } => session.context.clone(),
+            _ => panic!("tracked"),
+        };
+        let mut fork_wallet = (*f.wallet).clone();
+        fork_wallet.chain = ChainId::BitcoinBlake2b;
+        let discovered =
+            crate::app::claim_intent::ForkHandoff::discover(&f.datadir, "fork-cube", &fork_wallet)
+                .unwrap();
+        assert_eq!(discovered.bitcoin_cube(), "bitcoin-cube");
+        let pair = f.p.take_fork_handoff().unwrap();
+        assert_eq!(pair.bitcoin_cube(), "bitcoin-cube");
+        assert_eq!(pair.fork_cube(), "fork-cube");
+        assert!(!f.p.can_continue_on_fork());
+        assert!(f.p.handoff_pending);
+        assert!(outputs(f.p.recover(Some(f.dyn_daemon.clone())))
+            .await
+            .is_empty());
+        // Reopening proves the Bitcoin panel released the actual exclusive lock.
+        let identity = crate::services::claim_workflow::WalletIdentity {
+            bitcoin_cube: "bitcoin-cube".into(),
+            fork_cube: "fork-cube".into(),
+            descriptor_digest: coincube_core::miniscript::bitcoin::hashes::sha256::Hash::hash(
+                f.wallet.main_descriptor.to_string().as_bytes(),
+            ),
+        };
+        let reopened = crate::services::claim_workflow::Controller::reopen(
+            &journal_directory(&f.datadir, &f.wallet),
+            &identity,
+            context,
+        );
+        assert!(reopened.is_ok(), "{:?}", reopened.err());
+        drop(reopened);
+        f.p.return_from_fork();
+        assert!(!f.p.handoff_pending);
+        assert!(f.p.restart_pending);
+        update_settings_file(
+            &f.datadir.network_directory(ChainId::Bitcoin),
+            |mut settings| {
+                let mut second = settings.cubes[0].clone();
+                second.id = "other-source".into();
+                settings.cubes.push(second);
+                Some(settings)
+            },
+        )
+        .await
+        .unwrap();
+        assert!(crate::app::claim_intent::ForkHandoff::discover(
+            &f.datadir,
+            "fork-cube",
+            &fork_wallet
+        )
+        .is_none());
+        assert_eq!(submissions(&f), 1);
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn fork_loader_preserves_pairing_and_requires_fresh_depth_before_signing() {
+        fork_loader_restart(false).await;
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn ancestry_fork_loader_restores_excluded_input_and_exact_witness() {
+        fork_loader_restart(true).await;
+    }
+
+    #[cfg(any(unix, windows))]
+    async fn fork_loader_restart(ancestry: bool) {
+        use crate::app::settings::{update_settings_file, CubeSettings, VaultIdentity};
+        let mut f = reach_review().await;
+        reach_track(&mut f).await;
+        let connect = f.p.connect.clone().unwrap();
+        f.p.revoke();
+        f.p.stage = Stage::Preconditions; // release the Bitcoin journal owner
+        let mut wallet = (*f.wallet).clone();
+        wallet.chain = ChainId::BitcoinBlake2b;
+        wallet.pinned_at = Some(77);
+        let wallet = Arc::new(wallet);
+        for (chain, id, vault) in [
+            (ChainId::Bitcoin, "bitcoin-cube", f.wallet.clone()),
+            (ChainId::BitcoinBlake2b, "fork-cube", wallet.clone()),
+        ] {
+            let cube = CubeSettings::new_with_raw_id(id.into(), id.into(), chain)
+                .with_vault(VaultIdentity::new(vault.id(), Some(&vault.main_descriptor)));
+            update_settings_file(&f.datadir.network_directory(chain), |mut settings| {
+                settings.cubes = vec![cube];
+                Some(settings)
+            })
+            .await
+            .unwrap();
+        }
+        let mut config = f.daemon.config.clone();
+        config.bitcoin_config.chain = ChainId::BitcoinBlake2b;
+        if let Some(coincubed::config::BitcoinBackend::Esplora(selection)) =
+            &mut config.bitcoin_backend
+        {
+            selection.addr = format!(
+                "{}/api/v1/esplora/bitcoin-blake2b/mainnet",
+                f._server.base_url()
+            );
+        }
+        let daemon = Arc::new(FlowDaemon {
+            config,
+            coin: f.daemon.coin.clone(),
+            previous: f.daemon.previous.clone(),
+            submitted: Mutex::new(None),
+            hits: Mutex::new(Vec::new()),
+            queried_txs: Mutex::new(Vec::new()),
+            ancestry_coin: None,
+            #[cfg(feature = "regtest-harness")]
+            live: None,
+        });
+        let mut excluded = None;
+        if ancestry {
+            use coincube_core::{
+                claim_ancestry::{retained::RetainedPath, search::OwnedLink},
+                claim_finalize::finalize_ancestry_transfer,
+                claim_spend::create_ancestry_self_transfer,
+                miniscript::bitcoin::consensus::serialize,
+            };
+            let verify = secp256k1::Secp256k1::verification_only();
+            let mut root = f.daemon.previous.clone();
+            root.input[0].script_sig = coincube_core::miniscript::bitcoin::script::Builder::new()
+                .push_int(961_640)
+                .push_int(1)
+                .into_script();
+            root.output[0].script_pubkey = wallet
+                .main_descriptor
+                .receive_descriptor()
+                .derive(1.into(), &verify)
+                .script_pubkey();
+            let selected = OutPoint::new(root.compute_txid(), 0);
+            excluded = Some(selected.txid);
+            let path = RetainedPath::new(
+                selected,
+                vec![OwnedLink {
+                    transaction: serialize(&root),
+                    parent_input: None,
+                }],
+            )
+            .unwrap();
+            let coins = [
+                CandidateCoin {
+                    outpoint: selected,
+                    amount: root.output[0].value,
+                    deriv_index: 1.into(),
+                    is_change: false,
+                    must_select: true,
+                    sequence: None,
+                    ancestor_info: None,
+                },
+                CandidateCoin {
+                    outpoint: f.daemon.coin.outpoint,
+                    amount: f.daemon.coin.amount,
+                    deriv_index: f.daemon.coin.derivation_index,
+                    is_change: false,
+                    must_select: true,
+                    sequence: None,
+                    ancestor_info: None,
+                },
+            ];
+            let mut getter = TxMap(
+                [
+                    (root.compute_txid(), root),
+                    (f.daemon.previous.compute_txid(), f.daemon.previous.clone()),
+                ]
+                .into(),
+            );
+            let source = create_ancestry_self_transfer(
+                ChainId::Bitcoin,
+                &wallet.main_descriptor,
+                &verify,
+                &mut getter,
+                &coins,
+                12.into(),
+                5,
+                absolute::LockTime::ZERO,
+                &path.reverify().unwrap(),
+            )
+            .unwrap();
+            let psbt = f
+                .wallet
+                .signer
+                .as_ref()
+                .unwrap()
+                .sign_psbt(source.psbt().clone())
+                .unwrap();
+            let signed = finalize_ancestry_transfer(&source, &psbt, &verify).unwrap();
+            let directory = journal_directory(&f.datadir, &f.wallet);
+            // Use the panel's typed finalize/journal path before modeling a
+            // recorded submission. Public eligibility remains disabled.
+            std::fs::remove_file(directory.join("intent.json")).unwrap();
+            let mut session = finalize_and_journal(
+                Box::new(Construction::Ancestry {
+                    transfer: source,
+                    path,
+                }),
+                psbt,
+                f.daemon.clone(),
+                connect.clone(),
+                "bitcoin-cube".into(),
+                "fork-cube".into(),
+                directory.clone(),
+                1,
+                f.sender.subscribe(),
+                false,
+            )
+            .await
+            .unwrap();
+            assert_eq!(session.built.selected_ancestry_input(), Some(selected));
+            assert_eq!(session.phase(), Phase::Intent);
+            let context = session.context.clone();
+            assert!(session
+                .coordinator
+                .as_mut()
+                .unwrap()
+                .prepare_review(&context)
+                .await
+                .is_err());
+            drop(session);
+            let restored = restore_recorded_claim(
+                f.daemon.clone(),
+                f.wallet.clone(),
+                connect.clone(),
+                "bitcoin-cube".into(),
+                "fork-cube".into(),
+                directory.clone(),
+                1,
+                f.sender.subscribe(),
+            )
+            .await
+            .unwrap();
+            let RestartedState::Intent(restored) = restored.state else {
+                panic!("intent must resume for signing")
+            };
+            assert_eq!(restored.selected_ancestry_input(), Some(selected));
+            assert_eq!(
+                restored.psbt().unsigned_tx.compute_txid(),
+                signed.transaction().compute_txid()
+            );
+            drop(restored);
+            let file = directory.join("intent.json");
+            let mut journal: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+            journal["phase"] = json!("Tracking");
+            journal["signed_txid"] = json!(signed.transaction().compute_txid());
+            journal["bitcoin_transaction"] = json!(signed.transaction());
+            journal["bitcoin_attempts"] =
+                json!([{ "wtxid": signed.transaction().compute_wtxid() }]);
+            let before = serde_json::to_vec(&journal).unwrap();
+            std::fs::write(&file, &before).unwrap();
+            let restored = restore_recorded_claim(
+                f.daemon.clone(),
+                f.wallet.clone(),
+                connect.clone(),
+                "bitcoin-cube".into(),
+                "fork-cube".into(),
+                directory.clone(),
+                1,
+                f.sender.subscribe(),
+            )
+            .await
+            .unwrap();
+            let RestartedState::Bound(mut session) = restored.state else {
+                panic!("recorded ancestry must resume tracking")
+            };
+            assert_eq!(session.recovered.as_ref(), Some(signed.transaction()));
+            assert_eq!(session.built.selected_ancestry_input(), Some(selected));
+            rebind_session(
+                &mut session,
+                f.daemon.clone(),
+                connect.clone(),
+                "bitcoin-cube".into(),
+                "fork-cube".into(),
+                directory.clone(),
+                1,
+                f.sender.subscribe(),
+            )
+            .unwrap();
+            assert!(session.is_bound());
+            drop(session);
+            assert_eq!(std::fs::read(&file).unwrap(), before);
+            let mut altered = signed.transaction().clone();
+            altered.input[0].witness.clear();
+            journal["bitcoin_transaction"] = json!(altered);
+            std::fs::write(&file, serde_json::to_vec(&journal).unwrap()).unwrap();
+            let refused = restore_recorded_claim(
+                f.daemon.clone(),
+                f.wallet.clone(),
+                connect.clone(),
+                "bitcoin-cube".into(),
+                "fork-cube".into(),
+                directory,
+                1,
+                f.sender.subscribe(),
+            )
+            .await;
+            assert!(!matches!(
+                refused,
+                Ok(RestartedClaim {
+                    state: RestartedState::Bound(_),
+                    ..
+                })
+            ));
+            std::fs::write(&file, before).unwrap();
+        }
+        let loaded = fork_load::load(
+            &f.datadir,
+            wallet.clone(),
+            daemon.clone(),
+            connect.clone(),
+            "bitcoin-cube",
+            "fork-cube",
+            1,
+            f.sender.subscribe(),
+            3,
+        )
+        .await
+        .unwrap();
+        let psbt = if ancestry {
+            let fork_load::Loaded::Signing {
+                mut preparation,
+                psbt,
+                context,
+            } = loaded
+            else {
+                panic!("an unsubmitted ancestry sweep must reopen for preparation");
+            };
+            assert!(preparation.check_signing(&context).await.is_err());
+            psbt
+        } else {
+            fork_panel::tests::refused_signer_and_late_result(
+                f.datadir.clone(),
+                wallet.clone(),
+                vec![daemon.coin.clone()],
+                loaded,
+                daemon.clone(),
+                &f.cache,
+            )
+            .await
+        };
+        assert_eq!(
+            psbt.psbt().unsigned_tx.input[0].previous_output,
+            f.daemon.coin.outpoint
+        );
+        assert_eq!(
+            daemon
+                .hits()
+                .iter()
+                .filter(|name| **name == "reserve_change")
+                .count(),
+            1
+        );
+        // Only the original Bitcoin submission has occurred.
+        assert_eq!(submissions(&f), 1);
+
+        // Model a durable submitted record and a node-recovered legacy witness.
+        // Journal data alone must never turn a submitted sweep back into signing.
+        use coincube_core::miniscript::psbt::PsbtExt;
+        let secp = secp256k1::Secp256k1::verification_only();
+        let mut signed = f
+            .wallet
+            .signer
+            .as_ref()
+            .unwrap()
+            .sign_psbt(psbt.psbt().clone())
+            .unwrap();
+        signed.finalize_mut(&secp).unwrap();
+        let transaction = signed.extract(&secp).unwrap();
+        let path = journal_directory(&f.datadir, &f.wallet).join("intent.json");
+        let mut journal: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        journal["phase"] = serde_json::to_value(Phase::Tracking).unwrap();
+        journal["fork_sweep"] = serde_json::to_value(&psbt.psbt().unsigned_tx).unwrap();
+        journal["fork_change_index"] = 12.into();
+        journal["fork_submission"] = serde_json::json!({"txid": transaction.compute_txid(), "wtxid": transaction.compute_wtxid()});
+        std::fs::write(&path, serde_json::to_vec(&journal).unwrap()).unwrap();
+        *daemon.submitted.lock().unwrap() = Some(transaction.clone());
+        let loaded = fork_load::load(
+            &f.datadir,
+            wallet.clone(),
+            daemon.clone(),
+            connect.clone(),
+            "bitcoin-cube",
+            "fork-cube",
+            1,
+            f.sender.subscribe(),
+            0,
+        )
+        .await
+        .unwrap();
+        fork_panel::tests::recorded_submission_cannot_sign_or_confirm(
+            f.datadir.clone(),
+            wallet.clone(),
+            loaded,
+            daemon.clone(),
+            &f.cache,
+        )
+        .await;
+        let mut altered = transaction;
+        altered.input[0].witness.clear();
+        *daemon.submitted.lock().unwrap() = Some(altered);
+        assert!(fork_load::load(
+            &f.datadir,
+            wallet.clone(),
+            daemon.clone(),
+            connect.clone(),
+            "bitcoin-cube",
+            "fork-cube",
+            1,
+            f.sender.subscribe(),
+            0
+        )
+        .await
+        .is_err());
+        *daemon.submitted.lock().unwrap() = None;
+        assert!(fork_load::load(
+            &f.datadir,
+            wallet.clone(),
+            daemon.clone(),
+            connect.clone(),
+            "bitcoin-cube",
+            "fork-cube",
+            1,
+            f.sender.subscribe(),
+            0
+        )
+        .await
+        .is_err());
+        let mut other_account = connect.clone();
+        other_account.account = "other-account".into();
+        assert!(fork_load::load(
+            &f.datadir,
+            wallet.clone(),
+            daemon.clone(),
+            other_account,
+            "bitcoin-cube",
+            "fork-cube",
+            1,
+            f.sender.subscribe(),
+            3
+        )
+        .await
+        .is_err());
+        f.sender.send(2).unwrap();
+        assert!(fork_load::load(
+            &f.datadir,
+            wallet,
+            daemon.clone(),
+            connect,
+            "bitcoin-cube",
+            "fork-cube",
+            1,
+            f.sender.subscribe(),
+            3
+        )
+        .await
+        .is_err());
+        assert_eq!(
+            daemon
+                .hits()
+                .iter()
+                .filter(|name| **name == "reserve_change")
+                .count(),
+            1
+        );
+        assert!(daemon.submitted.lock().unwrap().is_none());
+        if let Some(excluded) = excluded {
+            assert!(
+                !daemon.queried_txs.lock().unwrap().contains(&excluded),
+                "the fork daemon must never be asked for the excluded Bitcoin transaction"
+            );
+        }
     }
 
     /// `reach_review`, then confirm → submit → track, asserting each.
@@ -1296,7 +2368,7 @@ mod flow {
         seen
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn step_one_runs_from_preconditions_to_tracking_through_the_panel() {
         // `sender` stays alive: closing the generation channel is itself a
@@ -1381,7 +2453,7 @@ mod flow {
     /// review at once: the coordinator is revoked synchronously, a
     /// confirmation has nothing to act on, the daemon is never asked to
     /// submit, and the journal stays at intent. With and without the bump.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn a_sign_out_between_review_and_confirm_refuses_the_submission() {
         for bump_generation in [false, true] {
@@ -1415,7 +2487,7 @@ mod flow {
     /// generation: it is refused before anything is journaled, the
     /// construction and its signatures come back to the Sign stage, and a
     /// confirmation has nothing to submit. Signing in again records it.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn reviewer_logout_before_finalize_must_not_reauthorize_submission() {
         let (mut f, ready) = reach_signed().await;
@@ -1488,7 +2560,7 @@ mod flow {
     /// The session is installed revoked — the journal is the record — with
     /// no review to confirm and none prepared; a confirmation, and a "review
     /// again" without a session, submit nothing.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn a_sign_out_after_the_intent_is_journaled_installs_a_revoked_review() {
         let (mut f, ready) = reach_signed().await;
@@ -1530,7 +2602,7 @@ mod flow {
     /// digest is account and provider, not generation), the construction is
     /// re-validated, the signatures re-verified — and the claim goes on to
     /// a fresh review and a submission, exactly once.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn signing_in_again_with_the_same_account_rebinds_and_submits() {
         let mut f = reach_review().await;
@@ -1571,7 +2643,7 @@ mod flow {
     /// the re-bind is refused by the journal's identity check, the session
     /// stays unbound and the intent untouched; the right account then
     /// continues.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn signing_in_with_another_account_is_refused() {
         let mut f = reach_review().await;
@@ -1630,7 +2702,7 @@ mod flow {
     /// Finding 2's Some→Some half, at the panel: a session replaced by
     /// another credential revokes the coordinator and withdraws the review;
     /// the same session again replaces nothing.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn a_replaced_session_revokes_and_withdraws_the_review() {
         let mut f = reach_review().await;
@@ -1661,7 +2733,7 @@ mod flow {
     /// Finding 5 at Track: a sign-out after the submission, then the same
     /// account back — re-bound and reconciled, never resubmitted (the
     /// coordinator refuses a review once a submission is recorded).
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn signing_in_again_at_tracking_reconciles_without_resubmitting() {
         let mut f = reach_review().await;
@@ -1712,7 +2784,7 @@ mod flow {
 
     /// A cancel while the finalise task holds the construction is refused:
     /// the result decides whether the attempt was journaled.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn cancel_is_refused_while_finalising() {
         let (mut f, ready) = reach_signed().await;
@@ -1761,7 +2833,7 @@ mod flow {
     /// Control for the test above: with the session intact the same
     /// confirmation submits (the full flow proves it), and `revoke` alone —
     /// what Cube lock, tab close and `Drop` call — is enough to refuse.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn revoke_alone_refuses_the_submission() {
         let Flow {
@@ -1799,7 +2871,7 @@ mod flow {
     /// way (Gandalf's reviewer probe: this test had only traversed them).
     /// Not a pixel test — a guard against a view that panics on a state the
     /// panel can reach.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn every_stage_renders() {
         let menu = Menu::Vault(crate::app::menu::VaultSubMenu::Claim);
@@ -1935,7 +3007,7 @@ mod flow {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn reviewer_global_logout_then_refresh_must_require_new_signin() {
         // App setup may wait on the suite's session guard. Observe only after it.
@@ -1976,7 +3048,7 @@ mod flow {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn reviewer_dead_bearer_rebind_refuses_before_submit() {
         let mut f = reach_review().await;
@@ -2017,7 +3089,7 @@ mod flow {
         let _ = std::fs::remove_dir_all(&f.root);
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn reviewer_rebound_arriving_after_logout_stays_revoked() {
         let mut f = reach_review().await;
@@ -2045,7 +3117,7 @@ mod flow {
         let _ = std::fs::remove_dir_all(&f.root);
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn reviewer_backend_switch_inflight_must_not_rebind_old_daemon() {
         let app = reviewer_blank_app();
@@ -2121,7 +3193,7 @@ mod flow {
     /// established in this tab (`SessionLoaded` through its own Connect
     /// panel) lifts the hold; the next account message then re-binds, and
     /// the claim submits exactly once.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn a_global_sign_out_holds_the_claim_until_a_sign_in_in_this_tab() {
         let app = reviewer_blank_app();
@@ -2274,7 +3346,7 @@ mod flow {
     /// so and binds nothing); `DaemonRestarted(Started)` installs the new
     /// daemon and the claim re-binds to it — a fresh review, one submission
     /// through the installed daemon, none through the superseded one.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn a_settled_backend_switch_rebinds_to_the_installed_daemon() {
         let app = reviewer_blank_app();
@@ -2300,7 +3372,12 @@ mod flow {
             config: f.daemon.config.clone(),
             coin: f.daemon.coin.clone(),
             previous: f.daemon.previous.clone(),
+            submitted: Mutex::new(None),
             hits: Mutex::new(Vec::new()),
+            queried_txs: Mutex::new(Vec::new()),
+            ancestry_coin: None,
+            #[cfg(feature = "regtest-harness")]
+            live: None,
         });
         let installed_dyn: Arc<dyn Daemon + Sync + Send> = installed.clone();
         let settle = app.update(Message::DaemonRestarted(
@@ -2337,7 +3414,7 @@ mod flow {
     /// panicked switch leaves it held with the unknown-state copy and no
     /// re-bind to the daemon the App keeps. Refresh binds nothing in the
     /// held states; a confirmation submits nothing.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn failed_and_panicked_backend_switches_hold_or_recover_truthfully() {
         use crate::app::{error::Error, DaemonRestart};
@@ -2452,7 +3529,7 @@ mod flow {
         app.cache.connect_authenticated = true;
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn reviewer_sibling_setsession_must_not_require_spurious_logout() {
         let first = reviewer_blank_app();
@@ -2492,7 +3569,7 @@ mod flow {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn reviewer_originating_setsession_lifts_hold_after_gui_broadcast() {
         let first = reviewer_blank_app();
@@ -2545,7 +3622,7 @@ mod flow {
         let _ = std::fs::remove_dir_all(&f.root);
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn reviewer_late_ready_after_switch_settlement_rebinds_only_installed_daemon() {
         let blank = reviewer_blank_app();
@@ -2559,7 +3636,12 @@ mod flow {
             config: f.daemon.config.clone(),
             coin: f.daemon.coin.clone(),
             previous: f.daemon.previous.clone(),
+            submitted: Mutex::new(None),
             hits: Mutex::new(Vec::new()),
+            queried_txs: Mutex::new(Vec::new()),
+            ancestry_coin: None,
+            #[cfg(feature = "regtest-harness")]
+            live: None,
         });
         let installed_dyn: Arc<dyn Daemon + Sync + Send> = installed.clone();
         let settle = app.update(Message::DaemonRestarted(
@@ -2593,7 +3675,7 @@ mod flow {
         let _ = std::fs::remove_dir_all(&f.root);
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn reviewer_panicked_switch_can_be_retried_through_settings_message() {
         let blank = reviewer_blank_app();
@@ -2622,7 +3704,7 @@ mod flow {
         let _ = std::fs::remove_dir_all(&f.root);
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn reviewer_sessionloaded_queued_before_logout_must_not_lift_hold() {
         let blank = reviewer_blank_app();
@@ -2692,7 +3774,7 @@ mod flow {
     /// A sibling same-account `SetSession` after a log-out leaves the hold
     /// in place: nothing this tab does re-binds, zero submissions, the
     /// sign-out copy stays. (P2: a sibling sign-in never lifts a hold.)
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn a_sibling_same_account_sign_in_after_a_log_out_leaves_the_hold() {
         let first = reviewer_blank_app();
@@ -2730,7 +3812,7 @@ mod flow {
     /// A sibling sign-in of another Connect account holds the claim here,
     /// says why, and binds nothing; a real sign-in in this tab afterwards
     /// re-binds and submits once. (P2: another account, and the P1 lift.)
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn a_sibling_sign_in_of_another_account_holds_until_this_tab_signs_in() {
         let first = reviewer_blank_app();
@@ -2846,7 +3928,7 @@ mod flow {
         drive_claim_messages(app, gate).await;
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn round4_old_sessionloaded_cannot_relabel_a_new_other_account_token() {
         let blank = reviewer_blank_app();
@@ -2940,7 +4022,7 @@ mod flow {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn round4_late_reviewed_after_logout_must_preserve_hold_copy() {
         let blank = reviewer_blank_app();
@@ -2994,7 +4076,7 @@ mod flow {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn round4_obsolete_refresh_failure_must_not_log_out_new_session() {
         let first = reviewer_blank_app();
@@ -3048,7 +4130,7 @@ mod flow {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn round4_current_refresh_auth_failure_still_logs_out() {
         let first = reviewer_blank_app();
@@ -3085,7 +4167,7 @@ mod flow {
         let _ = std::fs::remove_dir_all(&f.root);
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn round4_real_refresh_and_otp_capture_spawn_epoch_across_two_holds() {
         use crate::app::state::connect::account::ConnectFlowStep;
@@ -3271,7 +4353,7 @@ mod flow {
     // log-out, arriving after both tabs freshly signed in as another
     // account, is dropped by its own panel — and, since round 6, never
     // broadcast as a sign-in to the sibling either.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn round5_stale_setsession_must_not_broadcast_a_discarded_account() {
         let first = reviewer_blank_app();
@@ -3359,7 +4441,7 @@ mod flow {
             "GUI broadcast a stale SetSession before its panel dropped it"
         );
     }
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn round7_late_submitted_refusal_preserves_signout_instruction() {
         let blank = reviewer_blank_app();
@@ -3394,7 +4476,7 @@ mod flow {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn round7_late_submitted_success_preserves_signout_instruction() {
         let blank = reviewer_blank_app();
@@ -3446,7 +4528,7 @@ mod flow {
             "late Submitted success erased the sign-in instruction"
         );
     }
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn late_submitted_after_revocation_preserves_hold_with_connect_present() {
         for hold in [Some(SIGNED_IN_ELSEWHERE), None] {
@@ -3476,4 +4558,266 @@ mod flow {
             let _ = std::fs::remove_dir_all(&f.root);
         }
     }
+    async fn set_confirmation(f: &mut Flow, byte: u8, height: u32) {
+        // httpmock 0.7 exposes reset through its loopback management endpoint.
+        reqwest::Client::new()
+            .delete(format!("{}/__httpmock__/mocks", f._server.base_url()))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        let now = unix_now();
+        let inclusion = format!("{byte:02x}").repeat(32);
+        let bitcoin_tip = if height == 105 {
+            inclusion.clone()
+        } else {
+            "01".repeat(32)
+        };
+        let fork_tip = "02".repeat(32);
+        f._server.mock_async(|when, then| {
+            when.method(GET).path("/api/v1/connect/networks/bitcoin-blake2b/anchor");
+            then.status(200).json_body(json!({"success":true,"data":{
+                "network":"bitcoin-blake2b","state":"available","anchor":{
+                    "tip_hash":fork_tip,"tip_height":100,"tip_median_time_past":now,"observed_at":now,
+                    "observation":{"tip_height":100,"fork":{"height":90,"active":true},
+                        "rdts":{"state":"flagday","flagday":{"height":90,"expiry_time":now + EXPIRY_MARGIN_SECONDS + 3600,"active":true}}}
+                }}}));
+        }).await;
+        for (path, body) in [
+            ("bitcoin/mainnet/blocks/tip/hash", bitcoin_tip.clone()),
+            ("bitcoin/mainnet/block-height/105", bitcoin_tip.clone()),
+            ("bitcoin/mainnet/block-height/100", inclusion.clone()),
+            ("bitcoin-blake2b/mainnet/block-height/100", fork_tip),
+        ] {
+            f._server
+                .mock_async(|when, then| {
+                    when.method(GET).path(format!("/api/v1/esplora/{path}"));
+                    fresh(then.status(200)).body(body);
+                })
+                .await;
+        }
+        f._server
+            .mock_async(|when, then| {
+                when.method(GET).path(format!(
+                    "/api/v1/esplora/bitcoin/mainnet/block/{bitcoin_tip}/status"
+                ));
+                fresh(then.status(200)).json_body(json!({"in_best_chain":true,"height":105}));
+            })
+            .await;
+        f._server.mock_async(|when, then| {
+            when.method(GET).path(format!("/api/v1/esplora/bitcoin/mainnet/tx/{}", f.unsigned_txid));
+            fresh(then.status(200)).json_body(json!({"txid":f.unsigned_txid,"status":{"confirmed":true,"block_height":height,"block_hash":inclusion}}));
+        }).await;
+        f._server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path_contains("/api/v1/esplora/bitcoin-blake2b/mainnet/tx/");
+                fresh(then.status(404));
+            })
+            .await;
+    }
+    async fn settle_recovery(f: &mut Flow, intent: view::ClaimMessage) {
+        let task = f.p.update(
+            Some(f.dyn_daemon.clone()),
+            &f.cache,
+            Message::View(view::Message::Claim(intent)),
+        );
+        let mut messages: std::collections::VecDeque<_> = outputs(task).await.into();
+        let mut count = 0;
+        while let Some(message) = messages.pop_front() {
+            count += 1;
+            assert!(count < 10);
+            messages
+                .extend(outputs(f.p.update(Some(f.dyn_daemon.clone()), &f.cache, message)).await);
+        }
+    }
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn resubmission_panel_requires_review_refresh_withdraws_and_logout_drops_late_review() {
+        let mut f = reach_review().await;
+        reach_track(&mut f).await;
+        settle_recovery(&mut f, view::ClaimMessage::Refresh).await;
+        settle_recovery(&mut f, view::ClaimMessage::ConfirmResubmission).await;
+        assert_eq!(submissions(&f), 1);
+        settle_recovery(&mut f, view::ClaimMessage::ReviewResubmission).await;
+        let (snapshot, attempts) = f.p.resubmission().expect("explicit resend review");
+        assert_eq!(snapshot.txid, f.unsigned_txid);
+        assert_eq!(attempts, 1);
+        // Model a stale queued reconfirmation action after the visible status
+        // changes. The state owner must preserve the active resend review.
+        if let Stage::Track { status, .. } = &mut f.p.stage {
+            *status = Some(Status::Observation(Assessment::Reorged));
+        }
+        assert!(outputs(f.p.reconfirm(false)).await.is_empty());
+        assert!(outputs(f.p.reconfirm(true)).await.is_empty());
+        assert!(f.p.resubmission().is_some());
+        assert_eq!(submissions(&f), 1);
+        settle_recovery(&mut f, view::ClaimMessage::Refresh).await;
+        assert!(f.p.resubmission().is_none());
+        settle_recovery(&mut f, view::ClaimMessage::ConfirmResubmission).await;
+        assert_eq!(submissions(&f), 1);
+        settle_recovery(&mut f, view::ClaimMessage::ReviewResubmission).await;
+        settle_recovery(&mut f, view::ClaimMessage::ConfirmResubmission).await;
+        assert_eq!(submissions(&f), 2);
+        assert!(f.p.resubmission().is_none());
+        settle_recovery(&mut f, view::ClaimMessage::ConfirmResubmission).await;
+        assert_eq!(submissions(&f), 2);
+        let task = f.p.resubmit(false);
+        let messages = outputs(task).await;
+        assert!(!messages.is_empty());
+        f.p.set_connect(None);
+        for message in messages {
+            assert!(
+                outputs(f.p.update(Some(f.dyn_daemon.clone()), &f.cache, message))
+                    .await
+                    .is_empty()
+            );
+        }
+        assert!(f.p.resubmission().is_none());
+        settle_recovery(&mut f, view::ClaimMessage::ConfirmResubmission).await;
+        assert_eq!(submissions(&f), 2);
+        drop(f.p);
+        let _ = std::fs::remove_dir_all(f.root);
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn reconfirmation_panel_requires_review_and_keeps_one_submission() {
+        let mut f = reach_review().await;
+        reach_track(&mut f).await;
+        set_confirmation(&mut f, 6, 100).await;
+        settle_recovery(&mut f, view::ClaimMessage::Refresh).await;
+        set_confirmation(&mut f, 7, 100).await;
+        settle_recovery(&mut f, view::ClaimMessage::Refresh).await;
+        assert!(matches!(
+            f.p.stage(),
+            StageView::Track {
+                status: Some(Status::Observation(Assessment::Reorged)),
+                ..
+            }
+        ));
+        let path = journal_directory(&f.datadir, &f.wallet).join("intent.json");
+        let old = std::fs::read(&path).unwrap();
+        settle_recovery(&mut f, view::ClaimMessage::ConfirmReconfirmation).await;
+        assert_eq!(std::fs::read(&path).unwrap(), old);
+        settle_recovery(&mut f, view::ClaimMessage::ReviewReconfirmation).await;
+        let review =
+            f.p.reconfirmation()
+                .expect("reconfirmation review displayed");
+        assert_eq!(review.confirmed.hash, BlockHash::from_byte_array([7; 32]));
+        // A queued resend action cannot replace this reconfirmation review.
+        assert!(outputs(f.p.resubmit(false)).await.is_empty());
+        assert!(outputs(f.p.resubmit(true)).await.is_empty());
+        assert_eq!(f.p.reconfirmation().unwrap().confirmed, review.confirmed);
+        assert_eq!(submissions(&f), 1);
+        assert_eq!(std::fs::read(&path).unwrap(), old);
+        settle_recovery(&mut f, view::ClaimMessage::ConfirmReconfirmation).await;
+        assert!(f.p.reconfirmation().is_none());
+        assert!(matches!(
+            f.p.stage(),
+            StageView::Track {
+                status: Some(Status::Observation(
+                    Assessment::ObservationsEligibleForPreflight
+                )),
+                ..
+            }
+        ));
+        assert_eq!(submissions(&f), 1);
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(saved["inclusion_history"].as_array().unwrap().len(), 1);
+        set_confirmation(&mut f, 8, 105).await;
+        settle_recovery(&mut f, view::ClaimMessage::Refresh).await;
+        settle_recovery(&mut f, view::ClaimMessage::ReviewReconfirmation).await;
+        assert!(f.p.reconfirmation().is_some());
+        settle_recovery(&mut f, view::ClaimMessage::ConfirmReconfirmation).await;
+        assert!(matches!(
+            f.p.stage(),
+            StageView::Track {
+                status: Some(Status::Observation(Assessment::WaitingForDepth {
+                    confirmations: 1
+                })),
+                ..
+            }
+        ));
+        assert!(!f.p.can_continue_on_fork());
+        assert_eq!(submissions(&f), 1);
+
+        set_confirmation(&mut f, 9, 100).await;
+        settle_recovery(&mut f, view::ClaimMessage::Refresh).await;
+        let before =
+            std::fs::read(journal_directory(&f.datadir, &f.wallet).join("intent.json")).unwrap();
+        let task = f.p.reconfirm(false);
+        let messages = outputs(task).await;
+        assert!(!messages.is_empty());
+        f.p.set_connect(None);
+        for message in messages {
+            assert!(
+                outputs(f.p.update(Some(f.dyn_daemon.clone()), &f.cache, message))
+                    .await
+                    .is_empty()
+            );
+        }
+        assert!(f.p.reconfirmation().is_none());
+        settle_recovery(&mut f, view::ClaimMessage::ConfirmReconfirmation).await;
+        assert_eq!(
+            std::fs::read(journal_directory(&f.datadir, &f.wallet).join("intent.json")).unwrap(),
+            before
+        );
+        assert_eq!(submissions(&f), 1);
+    }
+}
+
+#[test]
+fn ancestry_candidates_allow_search_outside_rdts_but_never_override_bad_observations() {
+    let mut p = panel(SINGLE_WSH);
+    p.pre.target = Some("fork-cube".into());
+    p.connect = Some(ConnectSession {
+        client: CoincubeClient::new(),
+        account: "7".into(),
+    });
+    for assessment in [
+        Assessment::RdtsScheduled,
+        Assessment::RdtsInactive,
+        Assessment::RdtsExpired,
+        Assessment::ExpiryMargin,
+    ] {
+        let mut checked = checked_ok(1_000_000);
+        checked.window.as_mut().unwrap().rdts = Err(assessment);
+        p.pre.checked = Some(checked);
+        assert!(!p.can_build(), "no candidate and no valid fallback");
+        p.pre
+            .checked
+            .as_mut()
+            .unwrap()
+            .coins
+            .as_mut()
+            .unwrap()
+            .ancestry_candidates
+            .push(coin(Some(95), false, false, 2));
+        assert!(
+            p.can_build(),
+            "candidate search should be possible: {:?}",
+            assessment
+        );
+        assert!(matches!(p.stage, Stage::Preconditions));
+    }
+    for assessment in [
+        Assessment::Unknown,
+        Assessment::InvalidPlan,
+        Assessment::Deployment(claim::DeploymentState::Malformed),
+    ] {
+        p.pre
+            .checked
+            .as_mut()
+            .unwrap()
+            .window
+            .as_mut()
+            .unwrap()
+            .rdts = Err(assessment);
+        assert!(!p.can_build(), "invalid observations remain refused");
+    }
+    p.pre.checked.as_mut().unwrap().window = Err("stale anchor".into());
+    assert!(!p.can_build());
 }

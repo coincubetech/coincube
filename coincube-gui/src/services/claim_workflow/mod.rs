@@ -1,5 +1,9 @@
 //! Restart-safe intent bookkeeping only. No signing/broadcast/UI entry point.
+mod ancestry;
+pub(crate) use ancestry::RecoveryObservation;
 mod journal;
+mod recovery;
+mod reorg;
 use super::claim_observation::{CollectedAssessment, Failure, ObservationBundle};
 use coincube_core::{
     chain::ChainId,
@@ -7,10 +11,17 @@ use coincube_core::{
     miniscript::bitcoin::{
         consensus,
         hashes::{sha256, Hash},
-        Transaction, Txid,
+        Transaction, Txid, Wtxid,
     },
 };
 use journal::Journal;
+pub use recovery::BitcoinSubmissionAttempt;
+pub use reorg::Reconfirmation;
+
+/// Establish platform-specific journal privacy before constructing a controller.
+pub fn prepare_directory(directory: &std::path::Path) -> Result<(), Error> {
+    journal::prepare_directory(directory)
+}
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -61,12 +72,44 @@ pub enum Phase {
 #[serde(deny_unknown_fields)]
 struct Intent {
     version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ancestry: Option<ancestry::StoredAncestry>,
     identity: WalletIdentity,
     plan: ClaimPlan,
     unsigned_digest: sha256::Hash,
     context_digest: sha256::Hash,
     signed_txid: Option<Txid>,
     phase: Phase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fork_sweep: Option<Transaction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fork_change_index: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bitcoin_change_index: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fork_submission: Option<RecordedForkSubmission>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    inclusion_history: Vec<Reconfirmation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bitcoin_transaction: Option<Transaction>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    bitcoin_attempts: Vec<BitcoinSubmissionAttempt>,
+}
+/// A possible submission, not evidence of acceptance or confirmation. Reading
+/// this journal record never permits a retry, even after an app restart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecordedForkSubmission {
+    txid: Txid,
+    wtxid: Wtxid,
+}
+impl RecordedForkSubmission {
+    pub fn txid(&self) -> Txid {
+        self.txid
+    }
+    pub fn wtxid(&self) -> Wtxid {
+        self.wtxid
+    }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
@@ -103,7 +146,13 @@ pub struct Controller {
     revision: u64,
     pending: bool,
     status: Status,
-    fresh: Option<ObservationBundle>,
+    fresh: Option<FreshObservation>,
+}
+/// An ancestry check retains its live, non-serializable proof alongside the
+/// exact observations. Journal recovery never reconstructs this authority.
+struct FreshObservation {
+    observations: ObservationBundle,
+    ancestry: Option<crate::services::claim_observation::http::CollectedAncestry>,
 }
 fn digest(tx: &Transaction) -> sha256::Hash {
     sha256::Hash::hash(&consensus::serialize(tx))
@@ -117,8 +166,19 @@ fn context_digest(context: &Context) -> sha256::Hash {
 }
 fn validate(intent: &Intent) -> Result<(), Error> {
     let p = &intent.plan;
-    if intent.version != 1
-        || intent.identity.bitcoin_cube.is_empty()
+    if !matches!(
+        (
+            intent.version,
+            intent.fork_sweep.is_some(),
+            intent.fork_change_index,
+            intent.bitcoin_change_index,
+        ),
+        (1 | 5 | 6, false, None, None)
+            | (2 | 5 | 6, true, None, None)
+            | (3 | 5 | 6, true, Some(0..=0x7fff_ffff), None)
+            | (4..=7, false, None, Some(0..=0x7fff_ffff))
+            | (4..=7, true, Some(0..=0x7fff_ffff), Some(0..=0x7fff_ffff))
+    ) || intent.identity.bitcoin_cube.is_empty()
         || intent.identity.fork_cube.is_empty()
         || intent.identity.bitcoin_cube.len() > 256
         || intent.identity.fork_cube.len() > 256
@@ -128,12 +188,10 @@ fn validate(intent: &Intent) -> Result<(), Error> {
             (ChainId::Bitcoin, ChainId::BitcoinBlake2b)
                 | (ChainId::Testnet4, ChainId::BitcoinBlake2bTestnet4)
         )
-        || p.poison != Poison::OpReturn
         || p.step1.input.is_empty()
         || p.step1.input.iter().any(|i| {
             !i.script_sig.is_empty() || !i.witness.is_empty() || i.previous_output.is_null()
         })
-        || p.claimed_prevouts.len() != p.step1.input.len()
         || p.step1
             .input
             .iter()
@@ -146,15 +204,6 @@ fn validate(intent: &Intent) -> Result<(), Error> {
             .collect::<std::collections::BTreeSet<_>>()
             .len()
             != p.claimed_prevouts.len()
-        || p.step1
-            .input
-            .iter()
-            .any(|i| !p.claimed_prevouts.contains(&i.previous_output))
-        || !p
-            .step1
-            .output
-            .iter()
-            .any(|o| o.script_pubkey.is_op_return() && o.script_pubkey.len() > 83)
         || intent.unsigned_digest != digest(&p.step1)
         || intent
             .signed_txid
@@ -163,6 +212,37 @@ fn validate(intent: &Intent) -> Result<(), Error> {
     {
         return Err(Error::InvalidPlan);
     }
+    ancestry::validate_poison(intent)?;
+    if let Some(sweep) = &intent.fork_sweep {
+        let inputs: std::collections::BTreeSet<_> =
+            sweep.input.iter().map(|i| i.previous_output).collect();
+        let claimed: std::collections::BTreeSet<_> = p.claimed_prevouts.iter().copied().collect();
+        if intent.phase != Phase::Tracking
+            || intent.signed_txid.is_none()
+            || inputs.len() != sweep.input.len()
+            || inputs != claimed
+            || sweep
+                .input
+                .iter()
+                .any(|i| !i.script_sig.is_empty() || !i.witness.is_empty())
+            || sweep.output.len() != 1
+            || !sweep.output[0].script_pubkey.is_p2wsh()
+            || sweep.output[0].value == coincube_core::miniscript::bitcoin::Amount::ZERO
+        {
+            return Err(Error::InvalidPlan);
+        }
+    }
+    if let Some(submission) = intent.fork_submission {
+        if intent
+            .fork_sweep
+            .as_ref()
+            .is_none_or(|sweep| sweep.compute_txid() != submission.txid)
+        {
+            return Err(Error::InvalidPlan);
+        }
+    }
+    reorg::validate_history(intent)?;
+    recovery::validate_record(intent)?;
     Ok(())
 }
 impl Controller {
@@ -200,6 +280,7 @@ impl Controller {
                 previous_confirmation: None,
             },
             context,
+            Some(u32::from(artifact.change_index())),
         )
     }
     /// Restart never restores the builder artifact. A caller must reconstruct it
@@ -215,12 +296,38 @@ impl Controller {
             || digest(&artifact.psbt().unsigned_tx) != self.intent.unsigned_digest
             || sha256::Hash::hash(artifact.descriptor().to_string().as_bytes())
                 != self.intent.identity.descriptor_digest
+            || self
+                .intent
+                .bitcoin_change_index
+                .is_some_and(|index| index != u32::from(artifact.change_index()))
         {
             self.construction_verified = false;
             return Err(Error::WrongIdentity);
         }
+        // Older records gain the hint only after the owned builder has
+        // reproduced the exact transaction. A v2 fork plan must first acquire
+        // its fork index through prepare_fork_sweep before upgrading to v4.
+        if self.intent.bitcoin_change_index.is_none()
+            && (self.intent.fork_sweep.is_none() || self.intent.fork_change_index.is_some())
+        {
+            let mut next = self.intent.clone();
+            next.version = next.version.max(4);
+            next.bitcoin_change_index = Some(u32::from(artifact.change_index()));
+            validate(&next)?;
+            self.journal.store(&next)?;
+            self.intent = next;
+        }
         self.construction_verified = true;
         Ok(())
+    }
+    /// Untrusted derivation hint only. Reconstruct the complete owned Bitcoin
+    /// transaction and revalidate it before using the journal for any action.
+    pub fn recorded_bitcoin_change_index(
+        &self,
+    ) -> Option<coincube_core::miniscript::bitcoin::bip32::ChildNumber> {
+        self.intent.bitcoin_change_index.and_then(|index| {
+            coincube_core::miniscript::bitcoin::bip32::ChildNumber::from_normal_idx(index).ok()
+        })
     }
     pub fn identity(&self) -> &WalletIdentity {
         &self.intent.identity
@@ -231,15 +338,47 @@ impl Controller {
         identity: WalletIdentity,
         plan: ClaimPlan,
         context: Context,
+        bitcoin_change_index: Option<u32>,
+    ) -> Result<Self, Error> {
+        Self::create_intent_with_ancestry(
+            directory,
+            identity,
+            plan,
+            context,
+            bitcoin_change_index,
+            None,
+        )
+    }
+    fn create_intent_with_ancestry(
+        directory: &Path,
+        identity: WalletIdentity,
+        plan: ClaimPlan,
+        context: Context,
+        bitcoin_change_index: Option<u32>,
+        ancestry: Option<ancestry::StoredAncestry>,
     ) -> Result<Self, Error> {
         let intent = Intent {
-            version: 1,
+            version: if ancestry.is_some() {
+                7
+            } else if bitcoin_change_index.is_some() {
+                4
+            } else {
+                1
+            },
+            ancestry,
             identity,
             unsigned_digest: digest(&plan.step1),
             context_digest: context_digest(&context),
             plan,
             signed_txid: None,
             phase: Phase::Intent,
+            fork_sweep: None,
+            fork_change_index: None,
+            bitcoin_change_index,
+            fork_submission: None,
+            inclusion_history: Vec::new(),
+            bitcoin_transaction: None,
+            bitcoin_attempts: Vec::new(),
         };
         validate(&intent)?;
         Self::valid_context(&context)?;
@@ -344,6 +483,49 @@ impl Controller {
         policy: Policy,
         now: i64,
     ) -> Result<Status, Error> {
+        self.apply_collected(
+            ticket,
+            current,
+            result.map(|collected| (collected, None)),
+            policy,
+            now,
+        )
+    }
+
+    /// Consume a fresh collection rather than accepting an ancestry eligibility
+    /// boolean. Provider, generation, path and plan are checked against this
+    /// controller, and the proof is retained only for the current check.
+    pub fn apply_ancestry_observation(
+        &mut self,
+        ticket: Ticket,
+        current: &Context,
+        result: Result<crate::services::claim_observation::http::CollectedAncestry, Failure>,
+        policy: Policy,
+        now: i64,
+    ) -> Result<Status, Error> {
+        self.apply_collected(
+            ticket,
+            current,
+            result.map(|collected| (collected.assessment(), Some(collected))),
+            policy,
+            now,
+        )
+    }
+
+    fn apply_collected(
+        &mut self,
+        ticket: Ticket,
+        current: &Context,
+        result: Result<
+            (
+                CollectedAssessment,
+                Option<crate::services::claim_observation::http::CollectedAncestry>,
+            ),
+            Failure,
+        >,
+        policy: Policy,
+        now: i64,
+    ) -> Result<Status, Error> {
         self.ensure_context(current)?;
         if ticket.controller != self.id
             || !self.pending
@@ -355,7 +537,7 @@ impl Controller {
             return Err(Error::LateObservation);
         }
         self.clear_check();
-        let result = match result {
+        let (result, ancestry) = match result {
             Ok(result) => result,
             Err(_) => {
                 self.status = Status::Unavailable;
@@ -371,15 +553,11 @@ impl Controller {
             self.status = Status::Observation(Assessment::NeedsPreflightRecheck);
             return Ok(self.status);
         }
-        let assessment = claim::assess(
-            &self.intent.plan,
-            o.bitcoin,
-            o.fork,
-            o.deployment,
-            policy,
-            now,
-            Some(o.preflight),
-        );
+        let fresh = FreshObservation {
+            observations: o,
+            ancestry,
+        };
+        let assessment = self.assess_fresh(&fresh, policy, now)?;
         self.status = Status::Observation(assessment);
         if matches!(
             assessment,
@@ -394,15 +572,155 @@ impl Controller {
                     next.phase = Phase::Tracking;
                 }
             }
-            if let Err(error) = self.journal.store(&next) {
+            let changed = next.plan.previous_confirmation != self.intent.plan.previous_confirmation
+                || next.phase != self.intent.phase;
+            if changed {
+                if let Err(error) = self.journal.store(&next) {
+                    self.clear_check();
+                    return Err(error);
+                }
+                self.intent = next;
+            } else if let Err(error) = self.journal.ensure_current() {
                 self.clear_check();
                 return Err(error);
             }
-            self.intent = next;
-            self.fresh = Some(o);
+            self.fresh = Some(fresh);
         }
         Ok(self.status)
     }
+    /// Persist the exact fork-side unsigned plan only after a fresh depth/tip
+    /// assessment of the Bitcoin poison. This is a restart record, not signing
+    /// or broadcast permission. Replacing an existing plan is refused.
+    pub fn prepare_fork_sweep(
+        &mut self,
+        current: &Context,
+        sweep: &coincube_core::claim_spend::ClaimForkSweep,
+        policy: Policy,
+        now: i64,
+    ) -> Result<(), Error> {
+        self.ensure_context(current)?;
+        let observations = self.fresh.take().ok_or(Error::Unchecked)?;
+        self.status = Status::Unchecked;
+        if !self.construction_verified || self.intent.phase != Phase::Tracking {
+            return Err(Error::Unchecked);
+        }
+        if sweep.chain() != self.intent.plan.fork_chain
+            || Some(sweep.bitcoin_step1()) != self.intent.signed_txid
+            || sha256::Hash::hash(sweep.descriptor().to_string().as_bytes())
+                != self.intent.identity.descriptor_digest
+        {
+            return Err(Error::WrongIdentity);
+        }
+        let assessment = self.assess_fresh(&observations, policy, now)?;
+        if assessment != Assessment::ObservationsEligibleForPreflight {
+            return Err(Error::Unchecked);
+        }
+        if self.intent.fork_submission.is_some() {
+            return Err(Error::Conflict);
+        }
+        let transaction = &sweep.psbt().unsigned_tx;
+        let change_index = u32::from(sweep.change_index());
+        if let Some(recorded) = &self.intent.fork_sweep {
+            if recorded != transaction
+                || self
+                    .intent
+                    .fork_change_index
+                    .is_some_and(|index| index != change_index)
+            {
+                return Err(Error::Conflict);
+            }
+            if self.intent.fork_change_index.is_some() {
+                return Ok(());
+            }
+            // Upgrade a v2 plan only after the same fresh observations and
+            // authenticated construction required for initial admission.
+        }
+        let mut next = self.intent.clone();
+        next.version = next.version.max(if next.bitcoin_change_index.is_some() {
+            4
+        } else {
+            3
+        });
+        next.fork_sweep = Some(transaction.clone());
+        next.fork_change_index = Some(change_index);
+        validate(&next)?;
+        self.journal.store(&next)?;
+        self.intent = next;
+        Ok(())
+    }
+    /// An untrusted restart record. The ordinary fork builder and current chain
+    /// checks must reconstruct/revalidate it before use; this returns no authority.
+    pub fn recorded_fork_sweep(&self) -> Option<&Transaction> {
+        self.intent.fork_sweep.as_ref()
+    }
+
+    /// An untrusted derivation hint for rebuilding the recorded fork output.
+    /// Recovery must derive the script and match the complete transaction; this
+    /// index is not evidence of ownership or permission to reuse an address.
+    /// Older v2 records have no hint and require wallet-based discovery.
+    pub fn recorded_fork_change_index(
+        &self,
+    ) -> Option<coincube_core::miniscript::bitcoin::bip32::ChildNumber> {
+        self.intent.fork_change_index.and_then(|index| {
+            coincube_core::miniscript::bitcoin::bip32::ChildNumber::from_normal_idx(index).ok()
+        })
+    }
+
+    /// Durably mark a fork submission as uncertain before the coordinator can
+    /// perform network I/O. Requires the exact verified signed construction and
+    /// another fresh Bitcoin depth/tip assessment after signing. The coordinator
+    /// must additionally enforce current fork-backend policy and generation.
+    /// Failure to write the journal must prevent the send; a saved intent must
+    /// never be interpreted as permission to retry after an ambiguous outcome.
+    pub fn record_fork_broadcast_intent(
+        &mut self,
+        current: &Context,
+        signed: &coincube_core::claim_finalize::VerifiedClaimForkSweep,
+        policy: Policy,
+        now: i64,
+    ) -> Result<(), Error> {
+        self.ensure_context(current)?;
+        let observations = self.fresh.take().ok_or(Error::Unchecked)?;
+        self.status = Status::Unchecked;
+        if !self.construction_verified || self.intent.phase != Phase::Tracking {
+            return Err(Error::Unchecked);
+        }
+        if self.intent.fork_submission.is_some() {
+            return Err(Error::Conflict);
+        }
+        if signed.chain() != self.intent.plan.fork_chain
+            || Some(signed.bitcoin_step1()) != self.intent.signed_txid
+            || sha256::Hash::hash(signed.descriptor().to_string().as_bytes())
+                != self.intent.identity.descriptor_digest
+        {
+            return Err(Error::WrongIdentity);
+        }
+        let mut unsigned = signed.transaction().clone();
+        for input in &mut unsigned.input {
+            input.witness.clear();
+        }
+        if self.intent.fork_sweep.as_ref() != Some(&unsigned) {
+            return Err(Error::InvalidPlan);
+        }
+        if self.assess_fresh(&observations, policy, now)?
+            != Assessment::ObservationsEligibleForPreflight
+        {
+            return Err(Error::Unchecked);
+        }
+        let mut next = self.intent.clone();
+        next.fork_submission = Some(RecordedForkSubmission {
+            txid: signed.transaction().compute_txid(),
+            wtxid: signed.transaction().compute_wtxid(),
+        });
+        validate(&next)?;
+        self.journal.store(&next)?;
+        self.intent = next;
+        Ok(())
+    }
+    pub fn recorded_fork_submission(&self) -> Option<RecordedForkSubmission> {
+        self.intent.fork_submission
+    }
+
     /// Durably record a possible external broadcast *before* it is attempted.
     /// This checks unsigned identity only, NOT witness validity or mempool policy.
     /// It returns no broadcast or step-two authorization and performs no network I/O.
@@ -420,15 +738,7 @@ impl Controller {
         }
         let observations = self.fresh.take().ok_or(Error::Unchecked)?;
         self.status = Status::Unchecked;
-        let assessment = claim::assess(
-            &self.intent.plan,
-            observations.bitcoin,
-            observations.fork,
-            observations.deployment,
-            policy,
-            now,
-            Some(observations.preflight),
-        );
+        let assessment = self.assess_fresh(&observations, policy, now)?;
         if assessment != Assessment::WaitingForConfirmation || self.intent.phase != Phase::Intent {
             return Err(Error::Unchecked);
         }
@@ -444,11 +754,16 @@ impl Controller {
         let mut next = self.intent.clone();
         next.signed_txid = Some(signed.compute_txid());
         next.phase = Phase::BroadcastUncertain;
+        next.version = next.version.max(6);
+        next.bitcoin_transaction = Some(signed.clone());
+        next.bitcoin_attempts.push(BitcoinSubmissionAttempt {
+            wtxid: Some(signed.compute_wtxid()),
+        });
         validate(&next)?;
         self.journal.store(&next)?;
         self.intent = next;
         Ok(())
     }
 }
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(unix, windows)))]
 mod tests;

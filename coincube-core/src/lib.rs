@@ -1,6 +1,7 @@
 pub mod border_wallet;
 pub mod chain;
 pub mod claim;
+pub mod claim_ancestry;
 pub mod claim_finalize;
 pub mod claim_spend;
 pub mod descriptors;

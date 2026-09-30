@@ -4252,6 +4252,7 @@ mod tests {
         ));
         let rewritten = std::fs::read_to_string(&conf_path).unwrap();
         assert!(!rewritten.contains("consensusrules"), "{}", rewritten);
+        assert!(rewritten.contains("datacarriersize=100"), "{}", rewritten);
         let reloaded = InternalBitcoindConfig::from_file(&conf_path).unwrap();
         let main = &reloaded.networks[&Network::Bitcoin];
         assert_eq!(

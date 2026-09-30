@@ -24,8 +24,8 @@
 //!   is amber and acknowledgeable, never blocked — a lookup that has not
 //!   happened is not evidence either way.
 //! - *Split — cannot replay*: positive poison-split evidence for every input.
-//!   Wired here, unreachable by construction until Lane B1.5 defines the
-//!   evidence ([`SplitEvidence`] has no values yet).
+//!   Minted only by fresh Claim checks, bound to the owned construction and
+//!   current session; it never substitutes for verified final signatures.
 //! - *Unknown / not yet checked*: no signatures, not enough of them, or the
 //!   verifier refused the PSBT.
 
@@ -74,13 +74,7 @@ pub enum UnknownReason {
     Refused(String),
 }
 
-/// Positive poison-split evidence for every input of a spend. Lane B1.5
-/// records it (step 1 confirmed with depth, `split_completed_at_height` on
-/// both Cubes); until then this type has no values, so
-/// [`ReplayStatus::Split`] cannot be produced by any code path — see
-/// `split_is_unreachable_by_construction`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SplitEvidence {}
+pub use crate::services::claim_coordinator::fork::SplitEvidence;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReplayStatus {
@@ -94,12 +88,6 @@ pub enum ReplayStatus {
 }
 
 impl ReplayStatus {
-    /// The only constructor of [`Self::Split`]. Uninhabited argument: no
-    /// caller can reach this until B1.5 gives [`SplitEvidence`] a value.
-    pub fn from_split_evidence(evidence: SplitEvidence) -> Self {
-        match evidence {}
-    }
-
     /// Whether the finaliser would produce a transaction from the current
     /// signatures — the BTCB2 notion of "ready to broadcast".
     pub fn is_finalisable(&self) -> bool {
@@ -117,20 +105,17 @@ impl ReplayStatus {
 
 /// Derive the replay status of a Bitcoin Blake2b spend from its signatures.
 ///
-/// `split` is the poison-split evidence, which wins over signatures when
-/// present (a split step-2 sweep is legacy-signed and *cannot* replay because
-/// its inputs are already spent on Bitcoin). It is always `None` today.
+/// `split` is fresh, transaction-bound poison evidence. A Split result still
+/// requires successful retained-witness finalization; stale or mismatched
+/// evidence refuses the Claim review instead of opening an acknowledgement path.
 ///
 /// Callers must gate on the chain: this is meaningless — and never shown —
 /// for a Bitcoin-family Cube.
 pub fn replay_status(
     psbt: &Psbt,
     secp: &secp256k1::Secp256k1<impl secp256k1::Verification>,
-    split: Option<SplitEvidence>,
+    split: Option<&SplitEvidence>,
 ) -> ReplayStatus {
-    if let Some(evidence) = split {
-        return ReplayStatus::from_split_evidence(evidence);
-    }
     let unified = match UnifiedPsbt::from_psbt(psbt.clone()) {
         Ok(unified) => unified,
         Err(e) => return ReplayStatus::Unknown(UnknownReason::Refused(e.to_string())),
@@ -152,6 +137,13 @@ pub fn replay_status(
     }
     match finalize_p2wsh_all_unified(&unified, secp) {
         Ok(finalized) => {
+            if let Some(evidence) = split {
+                return if evidence.matches(&unified) {
+                    ReplayStatus::Split
+                } else {
+                    expired_split_status()
+                };
+            }
             let inputs: Vec<usize> = finalized
                 .inputs
                 .iter()
@@ -170,6 +162,12 @@ pub fn replay_status(
         }
         Err(e) => ReplayStatus::Unknown(UnknownReason::Refused(e.to_string())),
     }
+}
+
+fn expired_split_status() -> ReplayStatus {
+    ReplayStatus::Unknown(UnknownReason::Refused(
+        "Claim checks expired or changed. Check both chains again.".to_string(),
+    ))
 }
 
 /// Why a Bitcoin Blake2b PSBT must not be handed to any signer.
@@ -320,7 +318,8 @@ pub(crate) fn counting_projection(psbt: &Psbt) -> Psbt {
 /// [`entangled_inputs`], so a lookup landing after a signature still shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplayReview {
-    pub status: ReplayStatus,
+    status: ReplayStatus,
+    split: Option<std::sync::Arc<SplitEvidence>>,
     /// SHA-256 of the serialised PSBT the status was derived from: the exact
     /// signatures the user is looking at.
     psbt_digest: [u8; 32],
@@ -337,8 +336,32 @@ impl ReplayReview {
     pub fn new(psbt: &Psbt, secp: &secp256k1::Secp256k1<impl secp256k1::Verification>) -> Self {
         Self {
             status: replay_status(psbt, secp, None),
+            split: None,
             psbt_digest: psbt_digest(psbt),
             acknowledged_for: None,
+        }
+    }
+
+    pub fn with_split(
+        psbt: &Psbt,
+        secp: &secp256k1::Secp256k1<impl secp256k1::Verification>,
+        evidence: std::sync::Arc<SplitEvidence>,
+    ) -> Self {
+        Self {
+            status: replay_status(psbt, secp, Some(&evidence)),
+            split: Some(evidence),
+            psbt_digest: psbt_digest(psbt),
+            acknowledged_for: None,
+        }
+    }
+
+    /// Signature verification may be cached; the Claim evidence's lifetime may
+    /// not. Views and dispatch gates must use this accessor on every read.
+    pub fn status(&self) -> ReplayStatus {
+        if self.split.as_ref().is_some_and(|proof| !proof.is_live()) {
+            expired_split_status()
+        } else {
+            self.status.clone()
         }
     }
 
@@ -349,7 +372,10 @@ impl ReplayReview {
         psbt: &Psbt,
         secp: &secp256k1::Secp256k1<impl secp256k1::Verification>,
     ) -> Self {
-        let mut next = Self::new(psbt, secp);
+        let mut next = match &self.split {
+            Some(evidence) => Self::with_split(psbt, secp, evidence.clone()),
+            None => Self::new(psbt, secp),
+        };
         if self.acknowledged_for == Some(next.psbt_digest) {
             next.acknowledged_for = self.acknowledged_for;
         }
@@ -378,15 +404,18 @@ impl ReplayReview {
     /// replay-capable signature can be added. `entangled` is
     /// [`entangled_inputs`] resolved from the cache at the time of the check.
     pub fn signatures_complete(&self, entangled: &[(usize, Entanglement)]) -> bool {
-        self.status.is_finalisable() && blocked_entangled_inputs(&self.status, entangled).is_empty()
+        let status = self.status();
+        status.is_finalisable() && blocked_entangled_inputs(&status, entangled).is_empty()
     }
 
     /// Whether the spend may be broadcast: [`Self::signatures_complete`], and
     /// acknowledged when it is replayable. The acknowledgement never
     /// substitutes for a required signature on a known-entangled input.
     pub fn broadcast_ready(&self, entangled: &[(usize, Entanglement)]) -> bool {
-        self.signatures_complete(entangled)
-            && (!self.status.needs_acknowledgement() || self.acknowledged())
+        let status = self.status();
+        status.is_finalisable()
+            && blocked_entangled_inputs(&status, entangled).is_empty()
+            && (!status.needs_acknowledgement() || self.acknowledged())
     }
 }
 
@@ -478,12 +507,12 @@ pub fn not_ready_reason(
     if checking {
         return CHECKING_COPY.to_string();
     }
-    let blocked = blocked_entangled_inputs(&review.status, entangled);
+    let blocked = blocked_entangled_inputs(&review.status(), entangled);
     if let Some(required) = blocked_entangled_copy(&blocked) {
         return required;
     }
-    let (label, _) = pill_copy(&review.status, entangled);
-    if review.status.needs_acknowledgement() && !review.acknowledged() {
+    let (label, _) = pill_copy(&review.status(), entangled);
+    if review.status().needs_acknowledgement() && !review.acknowledged() {
         return format!("{label}. Tick \"{REPLAYABLE_ACKNOWLEDGEMENT}\" to send.");
     }
     label
@@ -573,10 +602,9 @@ pub fn pill_copy(status: &ReplayStatus, entangled: &[(usize, Entanglement)]) -> 
 
 /// Copy for the Bitcoin Cube's recovery and inheritance screens (`#276` I8):
 /// coins received before the fork also exist on Bitcoin Blake2b until a BTCB2
-/// Cube sweeps them. Copy only, no behaviour: shown when a Bitcoin Cube
-/// holds pre-fork coins that no BTCB2 Cube has swept — a fact Lane B1.5
-/// records (`split_completed_at_height`). Until it does, nothing supplies
-/// `Some(true)`, so the line is never rendered.
+/// Cube sweeps them. Display requires fresh positive fork-UTXO evidence
+/// bound to the current Bitcoin-owned outputs and session. Neither a missing
+/// split-completion marker nor an absent counterpart Cube proves unswept funds.
 pub const BITCOIN_CUBE_UNSWEPT_NOTICE: &str =
     "These coins also exist on Bitcoin Blake2b until swept there.";
 
@@ -602,14 +630,7 @@ mod tests {
     }
 
     #[test]
-    fn split_is_unreachable_by_construction() {
-        // `SplitEvidence` has no values: an `Option` of it can only be `None`
-        // (its size is that of the unit `None`), so `replay_status` can never
-        // take the `Split` branch. The state itself is wired — it renders —
-        // and Lane B1.5 gives the type a value when it records poison-split
-        // evidence. `Option<SplitEvidence>` being zero-sized is the proof: a
-        // type with even one value would need a discriminant.
-        assert_eq!(std::mem::size_of::<Option<SplitEvidence>>(), 0);
+    fn ordinary_signatures_do_not_create_split_evidence() {
         let f = fixture();
         let signed = legacy(&legacy(&f.psbt, &f.signers[0]), &f.signers[1]);
         assert!(!matches!(
@@ -898,7 +919,7 @@ mod tests {
         //    after the tick — the check that distinguishes a requirement
         //    from a warning.
         assert_eq!(
-            blocked_entangled_inputs(&review.status, &entangled),
+            blocked_entangled_inputs(&review.status(), &entangled),
             vec![0]
         );
         assert!(!review.signatures_complete(&entangled));
@@ -920,7 +941,7 @@ mod tests {
         //    the gate must not over-block a spend nobody has looked up yet.
         let unknown = [(0, Entanglement::Unknown)];
         let mut review = ReplayReview::new(&legacy_only, &secp);
-        assert!(blocked_entangled_inputs(&review.status, &unknown).is_empty());
+        assert!(blocked_entangled_inputs(&review.status(), &unknown).is_empty());
         assert!(review.signatures_complete(&unknown));
         assert!(!review.broadcast_ready(&unknown));
         review.set_acknowledged(true);
