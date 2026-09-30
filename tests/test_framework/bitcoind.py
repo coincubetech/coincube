@@ -77,6 +77,9 @@ class Bitcoind(BitcoinBackend):
         # Indexer fixtures may install a synchronization barrier before a
         # destructive chain edit. Bitcoind-only tests leave this unset.
         self.before_reorg = None
+        # Blocks the harness has asked this node to invalidate. Core refuses
+        # to serve them to peers, which StaleBlockRequestWatchdog relies on.
+        self.invalidated_blocks = []
 
         regtestdir = os.path.join(bitcoin_dir, "regtest")
         if not os.path.exists(regtestdir):
@@ -191,6 +194,9 @@ class Bitcoind(BitcoinBackend):
         """Invalidate a block after attached indexers have reached Core's tip."""
         if self.before_reorg is not None:
             self.before_reorg()
+        # Record the invalidation before making it: Core can refuse an
+        # indexer's request for the block while the RPC is still running.
+        self.invalidated_blocks.append(block_hash)
         self.rpc.invalidateblock(block_hash)
 
     def invalidate_remine(self, height):
