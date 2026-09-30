@@ -101,6 +101,10 @@ enum Fault {
     Generation,
 }
 struct Fixture {
+    bitcoin_states: Option<[TransactionObservation; 2]>,
+    sweep: TransactionObservation,
+    sweep_changes: bool,
+    sweep_calls: AtomicUsize,
     fault: Fault,
     anchor: NetworkAnchorStatus,
     tip_height: u64,
@@ -116,6 +120,10 @@ impl Fixture {
     fn new(fault: Fault) -> Self {
         let (sender, _) = watch::channel(7);
         Self {
+            bitcoin_states: None,
+            sweep: TransactionObservation::Absent,
+            sweep_changes: false,
+            sweep_calls: AtomicUsize::new(0),
             fault,
             anchor: anchor(),
             tip_height: 105,
@@ -190,6 +198,15 @@ impl ObservationSource for Fixture {
         id: Txid,
     ) -> Result<FreshRead<TransactionObservation>, FailureKind> {
         self.record(chain);
+        if id == txid(9) {
+            let n = self.sweep_calls.fetch_add(1, Ordering::SeqCst);
+            let value = if self.sweep_changes && n > 0 {
+                TransactionObservation::Absent
+            } else {
+                self.sweep
+            };
+            return Ok(response(chain, value, 10_000));
+        }
         let n = self.tx_calls.fetch_add(1, Ordering::SeqCst);
         if chain.is_blake2b() && matches!(self.fault, Fault::Service503) {
             return Err(FailureKind::Http(503));
@@ -205,6 +222,8 @@ impl ObservationSource for Fixture {
             } else {
                 TransactionObservation::Absent
             }
+        } else if let Some(states) = self.bitcoin_states {
+            states[(n / 2).min(1)]
         } else {
             TransactionObservation::Confirmed {
                 txid: id,
@@ -554,4 +573,173 @@ fn collection_future_can_be_owned_by_a_send_task() {
         Duration::from_secs(1),
         f.context(),
     ));
+}
+
+#[tokio::test]
+async fn fork_sweep_tracking_distinguishes_absence_mempool_and_current_inclusion() {
+    for state in [
+        TransactionObservation::Absent,
+        TransactionObservation::Unconfirmed { txid: txid(9) },
+        TransactionObservation::Confirmed {
+            txid: txid(9),
+            block: BlockRef {
+                height: 100,
+                hash: hash(2),
+            },
+        },
+    ] {
+        let mut f = Fixture::new(Fault::None);
+        f.sweep = state;
+        let tracked = collect_sweep(
+            &f,
+            &plan(),
+            txid(9),
+            policy(),
+            Duration::from_secs(1),
+            f.context(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(tracked.transaction, state);
+        assert_eq!(
+            tracked.assessment.assessment,
+            Assessment::ObservationsEligibleForPreflight
+        );
+        assert_eq!(f.sweep_calls.load(Ordering::SeqCst), 2);
+    }
+}
+
+#[tokio::test]
+async fn fork_sweep_tracking_refuses_wrong_identity_reorg_and_changed_inclusion() {
+    for (state, changed) in [
+        (TransactionObservation::Unconfirmed { txid: txid(8) }, false),
+        (
+            TransactionObservation::Confirmed {
+                txid: txid(9),
+                block: BlockRef {
+                    height: 101,
+                    hash: hash(2),
+                },
+            },
+            false,
+        ),
+        (
+            TransactionObservation::Confirmed {
+                txid: txid(9),
+                block: BlockRef {
+                    height: 100,
+                    hash: hash(3),
+                },
+            },
+            false,
+        ),
+        (
+            TransactionObservation::Confirmed {
+                txid: txid(9),
+                block: BlockRef {
+                    height: 100,
+                    hash: hash(2),
+                },
+            },
+            true,
+        ),
+    ] {
+        let mut f = Fixture::new(Fault::None);
+        f.sweep = state;
+        f.sweep_changes = changed;
+        assert!(collect_sweep(
+            &f,
+            &plan(),
+            txid(9),
+            policy(),
+            Duration::from_secs(1),
+            f.context()
+        )
+        .await
+        .is_err());
+    }
+    let f = Fixture::new(Fault::None);
+    let context = f.context();
+    f.sender.send_replace(8);
+    assert_eq!(
+        collect_sweep(
+            &f,
+            &plan(),
+            txid(9),
+            policy(),
+            Duration::from_secs(1),
+            context
+        )
+        .await
+        .unwrap_err()
+        .kind,
+        FailureKind::Cancelled
+    );
+}
+
+#[tokio::test]
+async fn fork_sweep_inclusion_does_not_hide_insufficient_bitcoin_depth() {
+    let mut f = Fixture::new(Fault::None);
+    f.tip_height = 104;
+    f.sweep = TransactionObservation::Confirmed {
+        txid: txid(9),
+        block: BlockRef {
+            height: 100,
+            hash: hash(2),
+        },
+    };
+    let tracked = collect_sweep(
+        &f,
+        &plan(),
+        txid(9),
+        policy(),
+        Duration::from_secs(1),
+        f.context(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        tracked.assessment.assessment,
+        Assessment::WaitingForDepth { confirmations: 5 }
+    );
+}
+
+#[tokio::test]
+async fn recovery_preserves_absent_and_mempool_states_and_refuses_transitions() {
+    let p = plan();
+    let absent = TransactionObservation::Absent;
+    let mempool = TransactionObservation::Unconfirmed {
+        txid: p.step1.compute_txid(),
+    };
+    for state in [absent, mempool] {
+        let mut f = Fixture::new(Fault::None);
+        f.bitcoin_states = Some([state, state]);
+        let result = f.run(&p).await.unwrap();
+        assert_eq!(result.observations.bitcoin_transaction, state);
+        assert_eq!(
+            result.observations.bitcoin.location,
+            TransactionLocation::Unconfirmed
+        );
+        assert_eq!(result.assessment, Assessment::WaitingForConfirmation);
+    }
+    let confirmed = TransactionObservation::Confirmed {
+        txid: p.step1.compute_txid(),
+        block: BlockRef {
+            height: 100,
+            hash: hash(5),
+        },
+    };
+    for states in [
+        [absent, mempool],
+        [mempool, absent],
+        [absent, confirmed],
+        [confirmed, absent],
+    ] {
+        let mut f = Fixture::new(Fault::None);
+        f.bitcoin_states = Some(states);
+        assert_eq!(
+            f.run(&p).await.unwrap_err(),
+            failure(Stage::Preflight, FailureKind::Changed)
+        );
+    }
 }

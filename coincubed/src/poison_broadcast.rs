@@ -1,7 +1,17 @@
 //! Exact-byte transport only. This module grants no Claim/broadcast authorization.
+mod binding;
+mod connect_transport;
+mod node_transport;
+#[cfg(feature = "regtest-harness")]
+pub mod regtest_harness;
 use crate::DaemonControl;
-use coincube_core::{chain::ChainId, claim_finalize::VerifiedPoisonTransfer};
-use miniscript::bitcoin::{Txid, Wtxid};
+pub use binding::ClaimBackendBinding;
+use coincube_core::{
+    chain::ChainId,
+    claim_finalize::{VerifiedAncestryTransfer, VerifiedClaimForkSweep, VerifiedPoisonTransfer},
+    descriptors::CoincubeDescriptor,
+};
+use miniscript::bitcoin::{Transaction, Txid, Wtxid};
 use std::sync::{
     atomic::{AtomicU8, Ordering},
     Arc,
@@ -26,19 +36,21 @@ pub enum SubmissionError {
 impl std::fmt::Display for SubmissionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::UnsupportedChain => f.write_str("Poison submission requires Bitcoin mainnet"),
+            Self::UnsupportedChain => {
+                f.write_str("Claim submission chain is unsupported or mismatched")
+            }
             Self::BackendUnavailable => {
-                f.write_str("Bitcoin backend is unavailable before submission")
+                f.write_str("Chain backend is unavailable before submission")
             }
             Self::GateMismatch => f.write_str("Submission gate belongs to another transaction"),
             Self::Expired => f.write_str("Submission evidence expired before transport started"),
             Self::Revoked => f.write_str("Submission was revoked before transport started"),
             Self::AlreadyStarted => f.write_str("Submission gate was already consumed"),
             Self::DescriptorMismatch => {
-                f.write_str("Poison construction belongs to another descriptor")
+                f.write_str("Claim construction belongs to another descriptor")
             }
             Self::Uncertain { .. } => f.write_str(
-                "Poison submission may have been accepted; reconcile the exact transaction",
+                "Claim submission may have been accepted; reconcile the exact transaction",
             ),
         }
     }
@@ -89,13 +101,36 @@ impl SubmissionGate {
         verified: &VerifiedPoisonTransfer,
         not_after: std::time::Instant,
     ) -> (Self, SubmissionRevoker) {
+        Self::for_transaction(verified.chain(), verified.transaction(), not_after)
+    }
+    /// Ancestry transport only. Fresh chain qualification and durable consent
+    /// remain the coordinator's responsibility; signatures are not authorization.
+    pub fn for_ancestry(
+        verified: &VerifiedAncestryTransfer,
+        not_after: std::time::Instant,
+    ) -> (Self, SubmissionRevoker) {
+        Self::for_transaction(verified.chain(), verified.transaction(), not_after)
+    }
+    /// Fork transport gate only. Fresh split evidence, approval and durable
+    /// submission intent remain the coordinator's responsibility.
+    pub fn for_claim_fork(
+        verified: &VerifiedClaimForkSweep,
+        not_after: std::time::Instant,
+    ) -> (Self, SubmissionRevoker) {
+        Self::for_transaction(verified.chain(), verified.transaction(), not_after)
+    }
+    fn for_transaction(
+        chain: ChainId,
+        transaction: &Transaction,
+        not_after: std::time::Instant,
+    ) -> (Self, SubmissionRevoker) {
         let state = Arc::new(AtomicU8::new(0));
         (
             Self {
                 state: state.clone(),
-                chain: verified.chain(),
-                txid: verified.transaction().compute_txid(),
-                wtxid: verified.transaction().compute_wtxid(),
+                chain,
+                txid: transaction.compute_txid(),
+                wtxid: transaction.compute_wtxid(),
                 not_after,
                 #[cfg(test)]
                 before_lock: None,
@@ -159,13 +194,209 @@ impl DaemonControl {
         {
             return Err(SubmissionError::UnsupportedChain);
         }
-        if &self.config.main_descriptor != verified.descriptor() {
+        self.submit_exact_claim_transaction(
+            verified.chain(),
+            verified.descriptor(),
+            verified.transaction(),
+            gate,
+        )
+    }
+
+    /// Exact-byte ancestry transport, with no RPC exposure or automatic retry.
+    /// The caller must first qualify ancestry against fresh chain observations,
+    /// preflight this witness, obtain consent and persist uncertain intent.
+    pub fn submit_verified_ancestry(
+        &self,
+        verified: &VerifiedAncestryTransfer,
+        gate: &SubmissionGate,
+    ) -> Result<SubmissionOutcome, SubmissionError> {
+        if self.config.bitcoin_config.chain != ChainId::Bitcoin
+            || verified.chain() != ChainId::Bitcoin
+        {
+            return Err(SubmissionError::UnsupportedChain);
+        }
+        self.submit_exact_claim_transaction(
+            verified.chain(),
+            verified.descriptor(),
+            verified.transaction(),
+            gate,
+        )
+    }
+
+    /// Dormant embedded fork transport; no RPC exposes this opaque artifact.
+    /// The caller must first verify fresh Bitcoin poison confirmation, fork
+    /// inputs and tips, obtain approval and persist uncertain submission intent.
+    /// Verified signatures alone do not prove replay safety or grant permission.
+    /// Like step one, testnet transport remains disabled pending route testing.
+    pub fn submit_verified_claim_fork(
+        &self,
+        verified: &VerifiedClaimForkSweep,
+        gate: &SubmissionGate,
+    ) -> Result<SubmissionOutcome, SubmissionError> {
+        if self.config.bitcoin_config.chain != ChainId::BitcoinBlake2b
+            || verified.chain() != ChainId::BitcoinBlake2b
+        {
+            return Err(SubmissionError::UnsupportedChain);
+        }
+        self.submit_exact_claim_transaction(
+            verified.chain(),
+            verified.descriptor(),
+            verified.transaction(),
+            gate,
+        )
+    }
+
+    /// Submit the exact verified Bitcoin witness to the bound configured node.
+    /// The coordinator must preflight this route, obtain consent and journal
+    /// uncertain intent first. This method is not exposed over daemon RPC.
+    pub fn submit_verified_poison_to_node(
+        &self,
+        verified: &VerifiedPoisonTransfer,
+        binding: &ClaimBackendBinding,
+        gate: &SubmissionGate,
+    ) -> Result<SubmissionOutcome, SubmissionError> {
+        self.submit_exact_bound_claim(
+            verified.chain(),
+            verified.descriptor(),
+            verified.transaction(),
+            binding,
+            gate,
+            None,
+        )
+    }
+
+    /// Same bound, single-attempt route for a verified ancestry transaction.
+    pub fn submit_verified_ancestry_to_node(
+        &self,
+        verified: &VerifiedAncestryTransfer,
+        binding: &ClaimBackendBinding,
+        gate: &SubmissionGate,
+    ) -> Result<SubmissionOutcome, SubmissionError> {
+        self.submit_exact_bound_claim(
+            verified.chain(),
+            verified.descriptor(),
+            verified.transaction(),
+            binding,
+            gate,
+            None,
+        )
+    }
+
+    /// Submit once to the fixed Bitcoin Connect endpoint. The caller must bind
+    /// this origin to fresh operator preflight, user consent and durable intent.
+    pub fn submit_verified_poison_to_connect(
+        &self,
+        verified: &VerifiedPoisonTransfer,
+        binding: &ClaimBackendBinding,
+        gate: &SubmissionGate,
+        origin: &str,
+    ) -> Result<SubmissionOutcome, SubmissionError> {
+        self.submit_exact_bound_claim(
+            verified.chain(),
+            verified.descriptor(),
+            verified.transaction(),
+            binding,
+            gate,
+            Some(origin),
+        )
+    }
+
+    /// Submit once to the fixed Bitcoin Connect endpoint. The caller must bind
+    /// this origin to fresh operator preflight, user consent and durable intent.
+    pub fn submit_verified_ancestry_to_connect(
+        &self,
+        verified: &VerifiedAncestryTransfer,
+        binding: &ClaimBackendBinding,
+        gate: &SubmissionGate,
+        origin: &str,
+    ) -> Result<SubmissionOutcome, SubmissionError> {
+        self.submit_exact_bound_claim(
+            verified.chain(),
+            verified.descriptor(),
+            verified.transaction(),
+            binding,
+            gate,
+            Some(origin),
+        )
+    }
+
+    fn submit_exact_bound_claim(
+        &self,
+        chain: ChainId,
+        descriptor: &CoincubeDescriptor,
+        transaction: &Transaction,
+        binding: &ClaimBackendBinding,
+        gate: &SubmissionGate,
+        connect_origin: Option<&str>,
+    ) -> Result<SubmissionOutcome, SubmissionError> {
+        if chain != ChainId::Bitcoin || self.config.bitcoin_config.chain != chain {
+            return Err(SubmissionError::UnsupportedChain);
+        }
+        if &self.config.main_descriptor != descriptor {
             return Err(SubmissionError::DescriptorMismatch);
         }
-        let transaction = verified.transaction();
         let txid = transaction.compute_txid();
         let wtxid = transaction.compute_wtxid();
-        if gate.chain != verified.chain() || gate.txid != txid || gate.wtxid != wtxid {
+        if gate.chain != chain || gate.txid != txid || gate.wtxid != wtxid {
+            return Err(SubmissionError::GateMismatch);
+        }
+        if !binding.matches(self) {
+            return Err(SubmissionError::BackendUnavailable);
+        }
+        enum Prepared {
+            Node(node_transport::PreparedNode),
+            Connect(connect_transport::PreparedConnect),
+        }
+        let prepared = match connect_origin {
+            Some(origin) => Prepared::Connect(
+                connect_transport::PreparedConnect::new(origin, transaction)
+                    .map_err(|_| SubmissionError::BackendUnavailable)?,
+            ),
+            None => {
+                let Some(crate::config::BitcoinBackend::Bitcoind(node)) =
+                    &self.config.bitcoin_backend
+                else {
+                    return Err(SubmissionError::BackendUnavailable);
+                };
+                Prepared::Node(
+                    node_transport::PreparedNode::new(node, transaction)
+                        .map_err(|_| SubmissionError::BackendUnavailable)?,
+                )
+            }
+        };
+        #[cfg(test)]
+        if let Some(barrier) = &gate.before_lock {
+            barrier.wait();
+        }
+        let _backend = self
+            .bitcoin
+            .lock()
+            .map_err(|_| SubmissionError::BackendUnavailable)?;
+        if !binding.matches(self) {
+            return Err(SubmissionError::BackendUnavailable);
+        }
+        gate.enter()?;
+        match prepared {
+            Prepared::Node(request) => request.send(),
+            Prepared::Connect(request) => request.send(),
+        }
+        .map_err(|_| SubmissionError::Uncertain { txid, wtxid })?;
+        Ok(SubmissionOutcome::UpstreamAccepted { txid, wtxid })
+    }
+
+    fn submit_exact_claim_transaction(
+        &self,
+        chain: ChainId,
+        descriptor: &CoincubeDescriptor,
+        transaction: &Transaction,
+        gate: &SubmissionGate,
+    ) -> Result<SubmissionOutcome, SubmissionError> {
+        if &self.config.main_descriptor != descriptor {
+            return Err(SubmissionError::DescriptorMismatch);
+        }
+        let txid = transaction.compute_txid();
+        let wtxid = transaction.compute_wtxid();
+        if gate.chain != chain || gate.txid != txid || gate.wtxid != wtxid {
             return Err(SubmissionError::GateMismatch);
         }
         #[cfg(test)]

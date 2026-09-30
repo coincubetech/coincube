@@ -1,4 +1,7 @@
 import copy
+import hashlib
+import json
+import socket
 
 from fixtures import *
 from test_framework.utils import (
@@ -19,6 +22,78 @@ def get_coin(coincubed, outpoint_or_txid):
     return next(
         c for c in coincubed.rpc.listcoins()["coins"] if outpoint_or_txid in c["outpoint"]
     )
+
+
+def send_electrum_request(sock, method, params):
+    request = {"jsonrpc": "2.0", "id": 0, "method": method, "params": params}
+    sock.sendall(json.dumps(request).encode() + b"\n")
+
+
+def electrum_request(electrs, method, params):
+    """Send one Electrum request and return its result."""
+    with socket.create_connection(("127.0.0.1", electrs.rpcport), timeout=30) as sock:
+        send_electrum_request(sock, method, params)
+        with sock.makefile("rb") as stream:
+            response = json.loads(stream.readline())
+    assert response.get("error") is None, response
+    return response["result"]
+
+
+@pytest.mark.skipif(
+    BITCOIN_BACKEND_TYPE is not BitcoinBackendType.Electrs,
+    reason="Electrs fetches history blocks from Core over P2P",
+)
+def test_electrs_recovers_from_a_refused_stale_block(bitcoind, bitcoin_backend):
+    """Regression for #577, without coincubed in the loop.
+
+    After `invalidateblock`, Electrs still indexes the old branch until Core's
+    new branch outgrows it. A history lookup in that window asks Core for an
+    invalidated block; Core refuses it silently and Electrs 0.10 waits for it
+    forever. First show the stall persists without the fixture's watchdog,
+    even once a longer replacement branch exists, then that the watchdog
+    restarts Electrs and it indexes the new branch.
+    """
+    electrs = bitcoin_backend
+    electrs.stale_block_watchdog.stop()
+
+    addr = bitcoind.rpc.getnewaddress()
+    txid = bitcoind.rpc.sendtoaddress(addr, 1)
+    bitcoind.generate_block(1, wait_for_mempool=txid)
+    stale_block = bitcoind.rpc.getbestblockhash()
+    bitcoind.generate_block(2)
+    script_pubkey = bytes.fromhex(bitcoind.rpc.getaddressinfo(addr)["scriptPubKey"])
+    scripthash = hashlib.sha256(script_pubkey).digest()[::-1].hex()
+
+    # The fixture's barrier makes Electrs index the old tip first.
+    bitcoind.invalidate_block(stale_block)
+    # Keep the connection open until Core has refused the block, so Electrs
+    # cannot drop the request as coming from a departed client.
+    with socket.create_connection(("127.0.0.1", electrs.rpcport), timeout=30) as sock:
+        send_electrum_request(sock, "blockchain.scripthash.get_history", [scripthash])
+        bitcoind.wait_for_log(
+            r"ignoring request from peer=\d+ for old block that isn't in the main chain"
+        )
+    bitcoind.generate_empty_blocks(4)
+    new_tip = bitcoind.rpc.getbestblockhash()
+    with pytest.raises(TimeoutError, match="did not index tip"):
+        electrs.wait_for_tip(new_tip, timeout=10)
+
+    watchdog = StaleBlockRequestWatchdog(bitcoind, electrs)
+    watchdog.start()
+    try:
+        electrs.wait_for_tip(new_tip)
+    finally:
+        watchdog.stop()
+    assert [r["block"] for r in watchdog.restarts] == [stale_block]
+    assert watchdog.ignored == []
+
+    # The restarted Electrs answers from the new branch, which does not
+    # confirm the deposit (it may be back in the mempool, or evicted if the
+    # reorg made its coinbase input immature).
+    history = electrum_request(
+        electrs, "blockchain.scripthash.get_history", [scripthash]
+    )
+    assert all(h["tx_hash"] == txid and h["height"] <= 0 for h in history), history
 
 
 def test_reorg_detection(coincubed, bitcoind):

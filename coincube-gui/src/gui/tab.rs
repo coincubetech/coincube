@@ -404,6 +404,8 @@ async fn run_local_duress_activation(root: &std::path::Path, account_id: Option<
 
 #[derive(Debug)]
 pub enum Message {
+    OpenForkClaim(app::claim_intent::ForkHandoff),
+    OpenBitcoinClaim(app::claim_intent::ForkHandoff),
     ForkAsync(u64, Box<Message>),
     ForkTaskFinished(u64, u64),
     Launch(home::Message),
@@ -2006,6 +2008,22 @@ impl Tab {
                             }
                             Err(error) => Task::done(Message::Run(app::Message::View(
                                 app::view::Message::ShowError(error.to_string()),
+                            ))),
+                        }
+                    }
+                    app::Message::View(app::view::Message::ReturnBitcoinClaim) => {
+                        match app.return_bitcoin_claim_handoff() {
+                            Ok(handoff) => Task::done(Message::OpenBitcoinClaim(handoff)),
+                            Err(error) => Task::done(Message::Run(app::Message::View(
+                                app::view::Message::ShowError(error),
+                            ))),
+                        }
+                    }
+                    app::Message::View(app::view::Message::ContinueForkClaim) => {
+                        match app.continue_claim_handoff() {
+                            Ok(handoff) => Task::done(Message::OpenForkClaim(handoff)),
+                            Err(error) => Task::done(Message::Run(app::Message::View(
+                                app::view::Message::ShowError(error),
                             ))),
                         }
                     }
@@ -3927,6 +3945,7 @@ pub fn create_app_with_remote_backend(
     App::new(
         Cache {
             app_generation: crate::app::cache::AppGeneration::next(),
+            unswept_notice: None,
             connect_transport_key: None,
             cube_encryption_key: None,
             network,
@@ -3942,6 +3961,7 @@ pub fn create_app_with_remote_backend(
             btcb2_server_enabled: false,
             // Resolved from disk in `App::new_inner`.
             btcb2_already_claimed: false,
+            btcb2_claim_resume: false,
             // Liquid sunset gate. Both halves are filled in later: the local
             // half in `App::new` (from whether the Liquid SDK actually
             // connected), the server half when `/connect/features` loads.

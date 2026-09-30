@@ -18,9 +18,14 @@ import pytest
 from fixtures import *
 from test_framework.btcb2 import (
     ELECTRS_BLAKE2B_COMMIT,
+    KNOTS_CAT21_LOCKTIME,
     KNOTS_BLAKE2B_VERSION,
     KNOTS_LEGACY_VERSION,
+    MIN_ACTIVATION_HEIGHT,
+    PREFORK_FUNDING_START_HEIGHT,
     RDTS_EXPIRY_FAR_FUTURE,
+    TwoChainRegtest,
+    WALLET_ANTI_FEE_SNIPING_MAX_DEPTH,
 )
 from test_framework.authproxy import JSONRPCException
 from test_framework.utils import wait_for
@@ -55,6 +60,26 @@ def test_node_builds_are_the_pinned_ones(two_chain):
     ), KNOTS_BLAKE2B_VERSION
     assert two_chain.legacy.rpc.getblockchaininfo()["chain"] == "regtest"
     assert two_chain.blake2b.rpc.getblockchaininfo()["chain"] == "regtest"
+
+
+def test_prefork_funding_start_is_clear_of_cat21_locktime():
+    """Every possible anti-fee-sniping locktime stays above Knots' CAT-21 value."""
+    assert (
+        PREFORK_FUNDING_START_HEIGHT - WALLET_ANTI_FEE_SNIPING_MAX_DEPTH
+        > KNOTS_CAT21_LOCKTIME
+    )
+    with pytest.raises(ValueError, match=f"at least {MIN_ACTIVATION_HEIGHT}"):
+        TwoChainRegtest("/unused", activation_height=MIN_ACTIVATION_HEIGHT - 1)
+
+
+def test_prefork_wallet_funding_cannot_choose_cat21_locktime(two_chain):
+    """The live fixture's randomized funding locktimes stay above CAT-21."""
+    assert two_chain.activation_height > PREFORK_FUNDING_START_HEIGHT + len(
+        two_chain.prefork_txids
+    )
+    for txid in two_chain.prefork_txids:
+        decoded = two_chain.legacy.rpc.gettransaction(txid, True, True)["decoded"]
+        assert decoded["locktime"] > KNOTS_CAT21_LOCKTIME
 
 
 def test_chains_share_history_then_diverge_at_activation(two_chain):

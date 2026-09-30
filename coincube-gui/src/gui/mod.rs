@@ -459,6 +459,59 @@ impl GUI {
                     Task::none()
                 }
             }
+            Message::Pane(
+                origin,
+                pane::Message::View(pane::ViewMessage::OpenBitcoinClaim(handoff)),
+            ) => {
+                // Reuse an already-unlocked source in any pane. Opening a second
+                // daemon for it could contend with the original wallet owner.
+                let existing = self.panes.iter().find_map(|(pane_id, pane)| {
+                    pane.tabs
+                        .iter()
+                        .enumerate()
+                        .find_map(|(index, tab)| match &tab.state {
+                            tab::State::App(app)
+                                if handoff.matches_root(app.datadir())
+                                    && app.cube_settings().network
+                                        == crate::chain::ChainId::Bitcoin
+                                    && app.cube_settings().id == handoff.bitcoin_cube() =>
+                            {
+                                Some((*pane_id, index, tab.id))
+                            }
+                            _ => None,
+                        })
+                });
+                if let Some((pane_id, index, tab_id)) = existing {
+                    if let Some(pane) = self.panes.get_mut(pane_id) {
+                        if let tab::State::App(app) = &mut pane.tabs[index].state {
+                            let task = app.resume_returned_bitcoin_claim(&handoff).unwrap_or_else(
+                                |error| {
+                                    Task::done(crate::app::Message::View(
+                                        crate::app::view::Message::ShowError(error),
+                                    ))
+                                },
+                            );
+                            pane.focused_tab = index;
+                            self.focus = Some(pane_id);
+                            return task.map(move |message| {
+                                Message::Pane(
+                                    pane_id,
+                                    pane::Message::Tab(tab_id, tab::Message::Run(message)),
+                                )
+                            });
+                        }
+                    }
+                }
+                if let Some(pane) = self.panes.get_mut(origin) {
+                    pane.update(
+                        pane::Message::View(pane::ViewMessage::OpenBitcoinClaim(handoff)),
+                        &self.config,
+                    )
+                    .map(move |message| Message::Pane(origin, message))
+                } else {
+                    Task::none()
+                }
+            }
             Message::Pane(_, pane::Message::View(pane::ViewMessage::ToggleTheme)) => {
                 self.update(Message::ToggleTheme)
             }
@@ -1384,5 +1437,134 @@ impl GUI {
                 ),
             )
         )
+    }
+}
+
+#[cfg(test)]
+mod claim_return_routing_tests {
+    use super::*;
+    use crate::app::{
+        self,
+        menu::{Menu, VaultSubMenu},
+        view,
+    };
+    use iced::futures::StreamExt;
+
+    #[test]
+    fn claim_return_routes_to_existing_tab_across_panes_and_refuses_wrong_wallet() {
+        // Real GUI/App values need the same stack allowance as the app thread.
+        let result = std::thread::Builder::new()
+            .name("claim-return-routing".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(check_routes())
+            })
+            .unwrap()
+            .join();
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    #[allow(clippy::await_holding_lock)] // serialize process-global Claim intent and PIN sessions
+    async fn check_routes() {
+        let _guard = app::session::test_guard();
+        for cross_pane in [false, true] {
+            for wrong_wallet in [false, true] {
+                let (app, handoff, path) =
+                    app::claim_step1_tests::returning_claim_fixture(wrong_wallet);
+                let root = app.datadir().clone();
+                let (home, startup) = home::Home::new_for_chain(root.clone(), None);
+                drop(startup);
+                let origin_pane = pane::Pane::new_with_tab(tab::State::Home(home));
+                let (mut panes, origin) = pane_grid::State::new(origin_pane);
+                let (target, index, tab_id) = if cross_pane {
+                    let (target, _) = panes
+                        .split(
+                            pane_grid::Axis::Vertical,
+                            origin,
+                            pane::Pane::new_with_tab(tab::State::App(app)),
+                        )
+                        .unwrap();
+                    (target, 0, 1)
+                } else {
+                    panes
+                        .get_mut(origin)
+                        .unwrap()
+                        .tabs
+                        .push(tab::Tab::new(2, tab::State::App(app)));
+                    (origin, 1, 2)
+                };
+                let mut gui = GUI {
+                    panes,
+                    focus: Some(origin),
+                    config: Config::new(root, None),
+                    window_id: None,
+                    window_init: None,
+                    window_config: None,
+                    global_cache: GlobalCache::default(),
+                    theme_mode: Default::default(),
+                };
+                let task = gui.update(Message::Pane(
+                    origin,
+                    pane::Message::View(pane::ViewMessage::OpenBitcoinClaim(handoff)),
+                ));
+                assert_eq!(gui.focus, Some(target));
+                assert_eq!(gui.panes.get(target).unwrap().focused_tab, index);
+                assert_eq!(
+                    gui.panes.iter().map(|(_, p)| p.tabs.len()).sum::<usize>(),
+                    2,
+                    "return must not create a second wallet owner"
+                );
+                assert!(matches!(
+                    gui.panes.get(target).unwrap().tabs[index].state,
+                    tab::State::App(_)
+                ));
+                let mut stream =
+                    iced_runtime::task::into_stream(task).expect("navigation or refusal");
+                let mut outputs = 0;
+                while let Some(action) = stream.next().await {
+                    if let iced_runtime::Action::Output(message) = action {
+                        outputs += 1;
+                        match message {
+                            Message::Pane(
+                                pane_id,
+                                pane::Message::Tab(id, tab::Message::Run(message)),
+                            ) => {
+                                assert_eq!(
+                                    (pane_id, id),
+                                    (target, tab_id),
+                                    "route back to the selected owner"
+                                );
+                                if wrong_wallet {
+                                    assert!(
+                                        matches!(message, AppMessage::View(view::Message::ShowError(ref error))
+                                        if error.contains("does not match"))
+                                    );
+                                } else {
+                                    assert!(matches!(
+                                        message,
+                                        AppMessage::View(view::Message::Menu(Menu::Vault(
+                                            VaultSubMenu::Claim
+                                        )))
+                                    ));
+                                }
+                            }
+                            other => panic!("unexpected return route: {:?}", other),
+                        }
+                    }
+                }
+                assert_eq!(
+                    outputs, 1,
+                    "exactly one navigation or refusal, no duplicate startup"
+                );
+                drop(gui);
+                std::fs::remove_dir_all(path).unwrap();
+            }
+        }
     }
 }

@@ -150,6 +150,18 @@ pub async fn update_settings_file<F>(
 where
     F: FnOnce(Settings) -> Option<Settings>,
 {
+    update_settings_file_checked(network_dir, |settings| Ok(updater(settings))).await
+}
+
+/// Fallible mutations preserve each chain's existing writer lock and refuse
+/// before serializing or replacing the contents when the updater returns Err.
+pub(crate) async fn update_settings_file_checked<F>(
+    network_dir: &NetworkDirectory,
+    updater: F,
+) -> Result<(), SettingsError>
+where
+    F: FnOnce(Settings) -> Result<Option<Settings>, SettingsError>,
+{
     if matches!(
         network_dir
             .path()
@@ -157,7 +169,7 @@ where
             .and_then(|name| name.to_str()),
         Some("bitcoin-blake2b" | "bitcoin-blake2b-testnet4")
     ) {
-        return update_fork_settings_file(network_dir, updater, std::future::ready(())).await;
+        return update_fork_settings_checked(network_dir, updater).await;
     }
     let path = network_dir.path().join(SETTINGS_FILE_NAME);
 
@@ -230,7 +242,7 @@ where
         Settings::default()
     };
 
-    let settings = updater(settings);
+    let settings = updater(settings)?;
 
     // If updater returns None, delete the file. Drop the locked handle first so
     // the file isn't held open when we unlink it (required on Windows).
@@ -281,6 +293,7 @@ where
 /// Fork writers lock a stable sibling inode: replacing the data file must not
 /// let a waiter acquire an obsolete inode and overwrite a newer writer.
 /// The awaited hook is normally ready; tests pause at the last cancellable point.
+#[cfg(test)]
 async fn update_fork_settings_file<F, P>(
     network_dir: &NetworkDirectory,
     updater: F,
@@ -657,6 +670,12 @@ pub enum CubeConnectState {
 /// Cubes represent user accounts that can contain multiple features (Vault, Liquid wallet, etc.)
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CubeSettings {
+    /// Historical Claim completion height on the fork. Never spending or replay authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub split_completed_at_height: Option<u64>,
+    /// Which Claim sweep the historical completion marker describes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub split_completion_txid: Option<coincube_core::miniscript::bitcoin::Txid>,
     pub id: String,
     pub name: String,
     /// The chain this Cube lives on — its *identity*, which decides the
@@ -918,6 +937,8 @@ impl CubeSettings {
     /// force a lossy fallback).
     pub fn new_with_raw_id<C: Into<ChainId>>(id: String, name: String, network: C) -> Self {
         Self {
+            split_completed_at_height: None,
+            split_completion_txid: None,
             id,
             name,
             network: network.into(),

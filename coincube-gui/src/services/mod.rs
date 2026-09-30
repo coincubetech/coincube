@@ -1,4 +1,5 @@
 pub mod branta;
+pub(crate) mod claim_ancestry_gate;
 pub mod claim_coordinator;
 pub mod claim_observation;
 pub mod connect;
@@ -6,6 +7,7 @@ pub mod feeestimation;
 pub mod fiat;
 pub mod foreign_psbt;
 pub mod foreign_scan;
+pub mod foreign_split_inventory;
 pub mod foreign_wallet_source;
 
 pub mod http;
