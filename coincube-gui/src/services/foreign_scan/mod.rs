@@ -138,6 +138,10 @@ impl ScanDescriptor {
             claim_authorization: false,
         }
     }
+    /// Whether the descriptor has a wildcard, i.e. more than one address.
+    pub fn is_ranged(&self) -> bool {
+        self.descriptor.has_wildcard()
+    }
     pub fn is_taproot(&self) -> bool {
         matches!(self.descriptor, Descriptor::Tr(_))
     }
@@ -228,6 +232,23 @@ pub enum ForkSide {
     Unknown,
 }
 
+/// The exact index range one branch walk proved, and the highest index whose
+/// address had any chain or mempool history. Indices in
+/// `start..end_exclusive` above `last_used` were observed unused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BranchCoverage {
+    pub branch: Branch,
+    pub start: u32,
+    pub end_exclusive: u32,
+    pub last_used: Option<u32>,
+}
+
+impl BranchCoverage {
+    pub fn contains(&self, index: u32) -> bool {
+        (self.start..self.end_exclusive).contains(&index)
+    }
+}
+
 /// Complete only within the caller's bounded history-gap policy. No exclusive
 /// funds classification and no conversion into a signing or Claim capability.
 #[derive(Debug, Clone)]
@@ -239,9 +260,18 @@ pub struct ScanReport {
     /// observed at the scan tip. Never a local constant.
     fork_height: Option<u64>,
     addresses: u32,
+    coverage: Vec<BranchCoverage>,
     coins: Vec<DiscoveredCoin>,
 }
 impl ScanReport {
+    pub fn coverage(&self, branch: Branch) -> Option<BranchCoverage> {
+        self.coverage.iter().copied().find(|c| c.branch == branch)
+    }
+    #[cfg(test)]
+    pub(crate) fn with_coverage(mut self, coverage: Vec<BranchCoverage>) -> Self {
+        self.coverage = coverage;
+        self
+    }
     pub fn fork_height(&self) -> Option<u64> {
         self.fork_height
     }
@@ -288,6 +318,7 @@ impl ScanReport {
             tip,
             fork_height: None,
             addresses: 1,
+            coverage: Vec::new(),
             coins,
         }
     }
@@ -382,12 +413,14 @@ async fn collect(
         tip: before,
         fork_height,
         addresses: 0,
+        coverage: Vec::new(),
         coins: Vec::new(),
     };
     let mut outpoints = BTreeSet::new();
     let mut scripts = BTreeSet::new();
     for range in &plan.branches {
         let mut gap = 0;
+        let mut last_used = None;
         let mut finished = false;
         for index in range.start..range.end_exclusive {
             if report.addresses >= MAX_ADDRESSES {
@@ -452,8 +485,17 @@ async fn collect(
                 return Err(ScanError::Changed);
             }
             report.addresses += 1;
+            if stats.used() {
+                last_used = Some(index);
+            }
             gap = if stats.used() { 0 } else { gap + 1 };
             if gap >= plan.gap || !range.descriptor.descriptor.has_wildcard() {
+                report.coverage.push(BranchCoverage {
+                    branch: range.descriptor.branch,
+                    start: range.start,
+                    end_exclusive: index + 1,
+                    last_used,
+                });
                 finished = true;
                 break;
             }
