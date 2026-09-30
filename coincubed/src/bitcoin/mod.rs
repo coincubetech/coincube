@@ -501,6 +501,23 @@ pub trait BitcoinInterface: Send {
     ///
     /// Returns `None` if the transaction is not in the mempool.
     fn mempool_entry(&self, txid: &bitcoin::Txid) -> Option<MempoolEntry>;
+
+    /// Fallible [`Self::mempool_spenders`] for RPC commands (#594): an empty list
+    /// is the backend saying nothing spends these outpoints; an unreachable
+    /// backend is an `Err`.
+    fn mempool_spenders_result(
+        &self,
+        outpoints: &[bitcoin::OutPoint],
+    ) -> Result<Vec<MempoolEntry>, String> {
+        Ok(self.mempool_spenders(outpoints))
+    }
+
+    /// Fallible [`Self::mempool_entry`] for RPC commands (#594): `Ok(None)` is the
+    /// backend saying the transaction is not in its mempool; an unreachable
+    /// backend is an `Err`.
+    fn mempool_entry_result(&self, txid: &bitcoin::Txid) -> Result<Option<MempoolEntry>, String> {
+        Ok(self.mempool_entry(txid))
+    }
 }
 
 impl BitcoinInterface for d::BitcoinD {
@@ -959,6 +976,31 @@ impl BitcoinInterface for d::BitcoinD {
 
     fn mempool_entry(&self, txid: &bitcoin::Txid) -> Option<MempoolEntry> {
         self.mempool_entry(txid)
+    }
+
+    fn mempool_spenders_result(
+        &self,
+        outpoints: &[bitcoin::OutPoint],
+    ) -> Result<Vec<MempoolEntry>, String> {
+        let mut entries = Vec::new();
+        for txid in self
+            .mempool_txs_spending_prevouts_result(outpoints)
+            .map_err(|e| e.to_string())?
+        {
+            // A spender that left the mempool since the first read is skipped,
+            // as in `mempool_spenders`.
+            if let Some(entry) = self
+                .mempool_entry_result(&txid)
+                .map_err(|e| e.to_string())?
+            {
+                entries.push(entry);
+            }
+        }
+        Ok(entries)
+    }
+
+    fn mempool_entry_result(&self, txid: &bitcoin::Txid) -> Result<Option<MempoolEntry>, String> {
+        self.mempool_entry_result(txid).map_err(|e| e.to_string())
     }
 }
 
@@ -1496,6 +1538,17 @@ impl BitcoinInterface for sync::Arc<sync::Mutex<dyn BitcoinInterface + 'static>>
 
     fn mempool_entry(&self, txid: &bitcoin::Txid) -> Option<MempoolEntry> {
         self.lock().unwrap().mempool_entry(txid)
+    }
+
+    fn mempool_spenders_result(
+        &self,
+        outpoints: &[bitcoin::OutPoint],
+    ) -> Result<Vec<MempoolEntry>, String> {
+        self.lock().unwrap().mempool_spenders_result(outpoints)
+    }
+
+    fn mempool_entry_result(&self, txid: &bitcoin::Txid) -> Result<Option<MempoolEntry>, String> {
+        self.lock().unwrap().mempool_entry_result(txid)
     }
 }
 
