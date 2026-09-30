@@ -4329,10 +4329,12 @@ mod tests {
                 .collect()
         };
 
-        // Inbound off, as every file before this change was written: no key.
+        // Inbound off, as master wrote it: no key, and already carrying
+        // `datacarriersize=100`, so `ensure_data_carrier_size` has nothing to
+        // do and only the pre-spawn rewrite can add the line.
         std::fs::write(
             &conf_path,
-            "maxmempool=300\n[main]\nrpcport=12345\nport=12346\nprune=15000\n",
+            "maxmempool=300\ndatacarriersize=100\n[main]\nrpcport=12345\nport=12346\nprune=15000\n",
         )
         .unwrap();
         start();
@@ -4350,7 +4352,7 @@ mod tests {
         std::fs::write(
             &conf_path,
             "listen=1\nlistenonion=1\ndiscover=0\ntorcontrol=127.0.0.1:9151\n\
-             [main]\nrpcport=12345\nport=12346\nprune=15000\n",
+             datacarriersize=100\n[main]\nrpcport=12345\nport=12346\nprune=15000\n",
         )
         .unwrap();
         start();

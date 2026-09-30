@@ -130,7 +130,7 @@ means a separate machine/host running `tor` + a Bitcoin client, or
 | # | Scenario | Steps | Expected |
 | --- | --- | --- | --- |
 | 1 | **Enable → reachable** | Fresh Knots setup (default ON) → let Tor bootstrap and `bitcoind` start | `bitcoin-cli getnetworkinfo` shows a `.onion` in `localaddresses`; the onion is reachable from an external Tor client; `getpeerinfo` eventually shows peers with `inbound: true` |
-| 2 | **Disable → listen off** | Settings → "Inbound connections" → toggle off → restart node | `bitcoin.conf` has no `listen`/`listenonion`/`torcontrol`/`proxy`; `getnetworkinfo.localaddresses` has no onion; no managed `tor` process; node runs outbound-only |
+| 2 | **Disable → listen off** | Settings → "Inbound connections" → toggle off → restart node | `bitcoin.conf` has `listenonion=0` and no `listen`/`torcontrol`/`proxy`; `getnetworkinfo.localaddresses` has no onion; no managed `tor` process; node runs outbound-only |
 | 3 | **Tor crash → fail-safe** | With inbound on, kill the `tor` process (or point the binary at a bad path) → restart node | `bitcoind` still starts and syncs (outbound-only); logs show "inbound unavailable, running outbound-only"; the preference sidecar still says enabled (retried next launch) |
 | 4 | **Bandwidth cap honoured** | Inbound on, default cap | `getnetworkinfo.uploadtarget.target_bytes` ≈ the configured MiB/day; `getnettotals` upload stays bounded. Toggle "Limit upload" off → `maxuploadtarget` omitted → `uploadtarget.target_bytes = 0` |
 | 5 | **Outbound-via-Tor sub-toggle** | Toggle the sub-toggle, restart | On: `bitcoin.conf` has `proxy=127.0.0.1:<socks>`, outbound peers are `.onion`/via Tor. Off: no `proxy` line, outbound is clearnet |
