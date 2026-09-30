@@ -110,7 +110,8 @@ pub async fn load(
         descriptor_digest: sha256::Hash::hash(wallet.main_descriptor.to_string().as_bytes()),
     };
     let directory = pair.journal_directory(root);
-    let mut controller = Controller::reopen(&directory, &identity, context.clone())
+    let mut controller = Controller::reopen_settling(&directory, &identity, context.clone())
+        .await
         .map_err(|e| super::describe(crate::services::claim_coordinator::Error::Journal(e)))?;
     let plan = controller.plan();
     if plan.bitcoin_chain != ChainId::Bitcoin

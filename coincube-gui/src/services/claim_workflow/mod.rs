@@ -18,6 +18,11 @@ use journal::Journal;
 pub use recovery::BitcoinSubmissionAttempt;
 pub use reorg::Reconfirmation;
 
+/// Upper bound on how long [`Controller::reopen_settling`] waits out `Busy`.
+pub const REOPEN_BUSY_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
+/// Interval between [`Controller::reopen_settling`] attempts.
+pub const REOPEN_BUSY_POLL: std::time::Duration = std::time::Duration::from_millis(20);
+
 /// Establish platform-specific journal privacy before constructing a controller.
 pub fn prepare_directory(directory: &std::path::Path) -> Result<(), Error> {
     journal::prepare_directory(directory)
@@ -424,6 +429,55 @@ impl Controller {
             status: Status::Unchecked,
             fresh: None,
         })
+    }
+    /// [`Self::reopen`] that waits out a lock about to be released, for the
+    /// Claim loaders (`#607`). The journal is reopened right after its previous
+    /// owner was dropped. On Unix a child this process spawns in that window
+    /// (Spark bridge, bitcoind, Tor) holds a duplicate of the dropped owner's
+    /// `claim.lock` descriptor until it execs, and `flock` belongs to the open
+    /// file, so the first reopen can see [`Error::Busy`] for a moment (`#586`).
+    ///
+    /// Only `Busy` is retried, every [`REOPEN_BUSY_POLL`] until
+    /// [`REOPEN_BUSY_BUDGET`] of wall-clock time has passed, with an async sleep
+    /// so no thread is blocked. Every other result returns at once. A lock that
+    /// is still held at the deadline, such as a live Claim in another tab, is
+    /// reported as `Busy` as before.
+    pub async fn reopen_settling(
+        directory: &Path,
+        identity: &WalletIdentity,
+        context: Context,
+    ) -> Result<Self, Error> {
+        // Wall clock, not tokio's: a paused test clock must not end the wait
+        // before a real lock holder has had any real time to let go.
+        let deadline = std::time::Instant::now() + REOPEN_BUSY_BUDGET;
+        loop {
+            match Self::reopen(directory, identity, context.clone()) {
+                Err(Error::Busy) if std::time::Instant::now() < deadline => {
+                    tokio::time::sleep(REOPEN_BUSY_POLL).await
+                }
+                other => return other,
+            }
+        }
+    }
+    /// [`Self::reopen_settling`] for the synchronous Claim coordinator
+    /// constructors. Same retry and budget, but the wait blocks the calling
+    /// thread, so it must only run inside a spawned task, never in an iced
+    /// `update`. Every production caller builds its coordinator in a
+    /// `Task::perform` future.
+    pub fn reopen_settling_blocking(
+        directory: &Path,
+        identity: &WalletIdentity,
+        context: Context,
+    ) -> Result<Self, Error> {
+        let deadline = std::time::Instant::now() + REOPEN_BUSY_BUDGET;
+        loop {
+            match Self::reopen(directory, identity, context.clone()) {
+                Err(Error::Busy) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(REOPEN_BUSY_POLL)
+                }
+                other => return other,
+            }
+        }
     }
     fn valid_context(context: &Context) -> Result<(), Error> {
         if context.account.is_empty() || context.provider.is_empty() {

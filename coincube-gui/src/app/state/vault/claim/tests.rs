@@ -1773,11 +1773,14 @@ mod flow {
                 f.wallet.main_descriptor.to_string().as_bytes(),
             ),
         };
-        let reopened = crate::services::claim_workflow::Controller::reopen(
+        // Settling: the release may land just after the panel's task returns
+        // (`#607`); a lock that is never released is still `Busy` after 2 s.
+        let reopened = crate::services::claim_workflow::Controller::reopen_settling(
             &journal_directory(&f.datadir, &f.wallet),
             &identity,
             context,
-        );
+        )
+        .await;
         assert!(reopened.is_ok(), "{:?}", reopened.err());
         drop(reopened);
         f.p.return_from_fork();

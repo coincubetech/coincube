@@ -208,7 +208,8 @@ impl Coordinator {
             fork_cube,
             descriptor_digest: sha256::Hash::hash(source.descriptor().to_string().as_bytes()),
         };
-        let mut controller = Controller::reopen(directory, &identity, context.clone())?;
+        let mut controller =
+            Controller::reopen_settling_blocking(directory, &identity, context.clone())?;
         source.revalidate(&mut controller, &context)?;
         if controller.signed_txid() != Some(construction.bitcoin_step1()) {
             return Err(Error::InvalidBinding);
@@ -750,7 +751,8 @@ impl Preparation {
             fork_cube,
             descriptor_digest: sha256::Hash::hash(source.descriptor().to_string().as_bytes()),
         };
-        let mut controller = Controller::reopen(directory, &identity, context.clone())?;
+        let mut controller =
+            Controller::reopen_settling_blocking(directory, &identity, context.clone())?;
         source.revalidate(&mut controller, &context)?;
         if controller.signed_txid() != Some(construction.bitcoin_step1()) {
             return Err(Error::InvalidBinding);

@@ -469,6 +469,63 @@ fn reopen_settled_outwaits_only_a_transient_foreign_lock() {
     drop(reopened);
 }
 
+/// The production loaders' retry (`#607`) outwaits a transient foreign lock,
+/// returns every other verdict unchanged and still reports a lock that is never
+/// released. The paused clock pins the wall-clock deadline: tokio's auto-advanced
+/// time would end the wait before the holder's real 200 ms had passed.
+#[cfg(unix)]
+#[tokio::test(start_paused = true)]
+async fn reopen_settling_outwaits_only_a_transient_foreign_lock() {
+    use fs4::fs_std::FileExt;
+    use std::time::{Duration, Instant};
+    fn hold(temp: &Temp, for_ms: u64) -> std::thread::JoinHandle<()> {
+        let foreign = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(temp.0.join("claim.lock"))
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !foreign.try_lock_exclusive().unwrap() {
+            assert!(Instant::now() < deadline, "foreign lock never became free");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(for_ms));
+            drop(foreign);
+        })
+    }
+    let temp = Temp::new();
+    drop(controller(&temp));
+    let holder = hold(&temp, 200);
+    let direct = Controller::reopen(&temp.0, &identity(), context());
+    assert!(matches!(direct, Err(Error::Busy)), "{}", outcome(&direct));
+    let mut changed = context();
+    changed.provider.push('x');
+    let reopened = Controller::reopen_settling(&temp.0, &identity(), changed).await;
+    holder.join().unwrap();
+    assert!(
+        matches!(reopened, Err(Error::WrongIdentity)),
+        "{}",
+        outcome(&reopened)
+    );
+    let holder = hold(&temp, 200);
+    let reopened = Controller::reopen_settling(&temp.0, &identity(), context()).await;
+    holder.join().unwrap();
+    assert!(reopened.is_ok(), "{}", outcome(&reopened));
+    // A live owner that never lets go: Busy once the 2 s budget has passed.
+    let started = Instant::now();
+    let blocked = Controller::reopen_settling(&temp.0, &identity(), context()).await;
+    assert!(matches!(blocked, Err(Error::Busy)), "{}", outcome(&blocked));
+    assert!(started.elapsed() >= super::REOPEN_BUSY_BUDGET);
+    assert!(started.elapsed() < super::REOPEN_BUSY_BUDGET + Duration::from_secs(3));
+    drop(reopened);
+    // The coordinators' synchronous variant waits out the same transient hold.
+    let holder = hold(&temp, 200);
+    let reopened = Controller::reopen_settling_blocking(&temp.0, &identity(), context());
+    holder.join().unwrap();
+    assert!(reopened.is_ok(), "{}", outcome(&reopened));
+}
+
 // Public synthetic descriptor fixture shared with core claim_spend tests.
 const WSH_DESC: &str = "wsh(or_d(multi(1,[573fb35b/48'/1'/0'/2']tpubDFKp9T7WAYDcENSjoifkrpq1gMDF47KGJcJrpxzX23Qor8wuGbrEVs9utNq1MDS8E2WXJSBk1qoPQLpwyokW7DiUNPwFuxQkL7owNkLAb9W/<0;1>/*,[573fb35c/48'/1'/1'/2']tpubDFGezyzuHJPhdP3jHGW7v7Hwes4Hihqv5W2yyCmRY9VZJCRchETvxrMC8uECeJZdxQ14V4iD4DecoArkUSDwj8ogYE9WEv4MNZr12thNHCs/<0;1>/*),and_v(v:multi(2,[573fb35b/48'/1'/2'/2']tpubDDwxQauiaU964vPzt5Vd7jnDHEUtp2Vc34PaWpEXg5TQ3bRccxnc1MKKh88Hi7xiMeZo9Tm6fBcq4UGXqnDtGUniJLjqAD8SjQ8Eci3aSR7/<0;1>/*,[573fb35c/48'/1'/3'/2']tpubDE37XAVB5CQ1x85md3BQ5uHCoMwT5fgT8X13zzCUQ3x5o2jskYxKjj7Qcxt1Jpj4QB8tqspn2dooPCekRuQDYrDHov7J1ueUNu2wcvgRDxr/<0;1>/*),older(1000))))#fccaqlhh";
 

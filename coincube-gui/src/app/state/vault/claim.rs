@@ -2494,8 +2494,10 @@ async fn restore_recorded_claim(
         fork_cube: fork_cube.clone(),
         descriptor_digest: sha256::Hash::hash(wallet.main_descriptor.to_string().as_bytes()),
     };
-    let mut controller = claim_workflow::Controller::reopen(&directory, &identity, context.clone())
-        .map_err(|e| describe(claim_coordinator::Error::Journal(e)))?;
+    let mut controller =
+        claim_workflow::Controller::reopen_settling(&directory, &identity, context.clone())
+            .await
+            .map_err(|e| describe(claim_coordinator::Error::Journal(e)))?;
     let plan = controller.plan();
     let change_hint = controller.recorded_bitcoin_change_index();
     let phase = controller.phase();

@@ -642,7 +642,7 @@ impl Coordinator {
             descriptor_digest: sha256::Hash::hash(construction.descriptor().to_string().as_bytes()),
         };
         let mut controller = if resume {
-            Controller::reopen(directory, &identity, context.clone())?
+            Controller::reopen_settling_blocking(directory, &identity, context.clone())?
         } else {
             Controller::create(
                 directory,
