@@ -473,6 +473,61 @@ fn fork_finalizer_rejects_changed_construction_and_tampered_signatures() {
     }
 }
 
+#[test]
+fn fork_finalizer_refuses_a_retained_legacy_alternative_to_a_unified_witness() {
+    use crate::{
+        psbt_unified::{merge_signatures, UnifiedPsbt},
+        unified_finalize::UnifiedFinalizeError,
+        unified_signing::sign_p2wsh_all_unified,
+    };
+    let secp = secp256k1::Secp256k1::new();
+    for chain in [ChainId::Bitcoin, ChainId::Testnet4] {
+        let (sweep, signers) = fork_fixture(chain);
+        let unified = sign_p2wsh_all_unified(
+            &signers[0],
+            &UnifiedPsbt::from_psbt(sweep.psbt().clone()).unwrap(),
+            &secp,
+        )
+        .unwrap();
+        // Legacy signatures are collected on the ordinary PSBT and merged in.
+        let with_legacy = |indices: &[usize]| {
+            let legacy = indices.iter().fold(sweep.psbt().clone(), |psbt, i| {
+                signers[*i].sign_psbt(psbt, &secp).unwrap()
+            });
+            let mut mixed = unified.clone();
+            merge_signatures(&mut mixed, &UnifiedPsbt::from_psbt(legacy).unwrap()).unwrap();
+            mixed
+        };
+        // One legacy signature completes the mixed witness and cannot satisfy
+        // multi(2) on its own: accepted.
+        let verified = finalize_claim_fork_sweep(&sweep, &with_legacy(&[1]), &secp).unwrap();
+        assert!(verified
+            .inputs()
+            .iter()
+            .all(|r| r.unified_used == 1 && r.legacy_used == 1));
+        // Two retained legacy signatures satisfy multi(2) without the unified
+        // one, so a standard PSBT consumer could build a replayable witness.
+        let refused = finalize_claim_fork_sweep(&sweep, &with_legacy(&[1, 2]), &secp);
+        assert!(
+            matches!(
+                refused,
+                Err(ClaimForkFinalizeError::Finalize(
+                    UnifiedFinalizeError::UnsafeLegacyAlternative {
+                        input: 0,
+                        legacy_signatures: 2,
+                    }
+                ))
+            ),
+            "{:?}",
+            refused.as_ref().map(|v| v.inputs())
+        );
+        // Recovering the published mixed witness is not a retention decision.
+        let restored =
+            verify_claim_fork_transaction(&sweep, verified.transaction(), &secp).unwrap();
+        assert_eq!(restored.transaction(), verified.transaction());
+    }
+}
+
 fn ancestry_fixture(
     recovery: bool,
 ) -> (crate::claim_spend::AncestrySelfTransfer, Vec<MasterSigner>) {

@@ -228,6 +228,13 @@ impl DaemonControl {
     /// inputs and tips, obtain approval and persist uncertain submission intent.
     /// Verified signatures alone do not prove replay safety or grant permission.
     /// Like step one, testnet transport remains disabled pending route testing.
+    ///
+    /// This route holds no signing PSBT, only finalised bytes, so it cannot
+    /// run the unsafe-legacy-alternative refusal itself (`#582`). The refusal
+    /// runs in `finalize_claim_fork_sweep`, the only constructor of the
+    /// artifact that reads a PSBT; the other, `verify_claim_fork_transaction`,
+    /// rebuilds an already-published witness that the coordinator will not
+    /// record for submission again.
     pub fn submit_verified_claim_fork(
         &self,
         verified: &VerifiedClaimForkSweep,
