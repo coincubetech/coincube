@@ -79,12 +79,20 @@ impl Notice {
     }
 }
 
+/// Copy for the Bitcoin Cube's recovery screens (`coincube-api#276` I8):
+/// coins received before the fork also exist on Bitcoin Blake2b until a
+/// BTCB2 Cube sweeps them. This is the only copy of the line; the owner kept
+/// this shipped wording on 2026-09-30 (#556). Display is gated by
+/// [`Notice::visible`], never by this constant.
+pub const UNSWEPT_RECOVERY_NOTICE: &str =
+    "Some of this Cube’s coins also exist on Bitcoin Blake2b until swept there.";
+
 impl Cache {
     pub fn unswept_recovery_notice(&self) -> Option<&'static str> {
         self.unswept_notice
             .as_ref()
             .filter(|notice| notice.visible(self, Instant::now()))
-            .map(|_| "Some of this Cube’s coins also exist on Bitcoin Blake2b until swept there.")
+            .map(|_| UNSWEPT_RECOVERY_NOTICE)
     }
 }
 
@@ -166,9 +174,16 @@ mod tests {
         altered = cache.clone();
         altered.btcb2_server_enabled = false;
         assert!(altered.unswept_recovery_notice().is_none());
-        altered = cache.clone();
-        altered.fiat_chain = ChainId::BitcoinBlake2b;
-        assert!(altered.unswept_recovery_notice().is_none());
+        for chain in [
+            ChainId::BitcoinBlake2b,
+            ChainId::Testnet4,
+            ChainId::Signet,
+            ChainId::Regtest,
+        ] {
+            altered = cache.clone();
+            altered.fiat_chain = chain;
+            assert!(altered.unswept_recovery_notice().is_none(), "{:?}", chain);
+        }
         assert!(!cache
             .unswept_notice
             .as_ref()
@@ -327,5 +342,128 @@ mod tests {
         });
         assert!(app.cache.unswept_recovery_notice().is_none());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// #556 owner decision (2026-09-30): the shipped wording is the approved
+    /// line. Pins the exact bytes (including the typographic apostrophe) and
+    /// that both recovery surfaces render that line, and only while the
+    /// evidence is visible. Driven through the real view functions and the
+    /// widget tree's text operation, so a surface that drops the notice or
+    /// renders a second copy of the string fails here.
+    #[tokio::test]
+    async fn unswept_notice_renders_the_pinned_line_on_both_recovery_surfaces() {
+        use crate::app::{
+            menu::{CubeSettingsOption, CubeSubMenu, Menu, VaultSubMenu},
+            settings::{fiat::PriceSetting, unit::UnitSetting},
+            state::settings::general::{BackupSeedState, SettingsSection},
+            view::{settings::general::settings_content_section, vault::recovery::recovery},
+        };
+        use coincube_ui::widget::Element;
+        use iced::advanced::{
+            layout,
+            renderer::Headless,
+            widget::{Id, Operation, Tree},
+            Layout,
+        };
+
+        assert_eq!(
+            UNSWEPT_RECOVERY_NOTICE,
+            "Some of this Cube\u{2019}s coins also exist on Bitcoin Blake2b until swept there."
+        );
+
+        #[derive(Default)]
+        struct Labels(Vec<String>);
+        impl Operation for Labels {
+            fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+                operate(self);
+            }
+            fn text(&mut self, _: Option<&Id>, _: iced::Rectangle, text: &str) {
+                self.0.push(text.to_owned());
+            }
+        }
+        let renderer = <iced::Renderer as Headless>::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        )
+        .await
+        .expect("software renderer available for view regression");
+        let labels = |mut element: Element<'_, crate::app::view::Message>| {
+            let mut tree = Tree::new(element.as_widget());
+            let node = element.as_widget_mut().layout(
+                &mut tree,
+                &renderer,
+                &layout::Limits::new(iced::Size::ZERO, iced::Size::new(1200.0, 1600.0)),
+            );
+            let mut labels = Labels::default();
+            element
+                .as_widget_mut()
+                .operate(&mut tree, Layout::new(&node), &renderer, &mut labels);
+            labels.0
+        };
+
+        let vault_menu = Menu::Vault(VaultSubMenu::Recovery);
+        let settings_menu = Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::Recovery));
+        let price = PriceSetting::default();
+        let unit = UnitSetting::default();
+        let backup = BackupSeedState::None;
+        let pin = crate::pin_input::PinInput::default();
+        let surfaces = |cache: &Cache| {
+            [
+                (
+                    "vault recovery",
+                    labels(recovery(&vault_menu, cache, Vec::new(), None)),
+                ),
+                (
+                    "settings recovery",
+                    labels(settings_content_section(
+                        SettingsSection::Recovery,
+                        &settings_menu,
+                        cache,
+                        &price,
+                        &unit,
+                        &[],
+                        false,
+                        &backup,
+                        &pin,
+                        None,
+                        None,
+                        None,
+                    )),
+                ),
+            ]
+        };
+
+        let (cache, _live) = setup();
+        assert_eq!(
+            cache.unswept_recovery_notice(),
+            Some(UNSWEPT_RECOVERY_NOTICE)
+        );
+        for (surface, rendered) in surfaces(&cache) {
+            assert_eq!(
+                rendered
+                    .iter()
+                    .filter(|s| s.as_str() == UNSWEPT_RECOVERY_NOTICE)
+                    .count(),
+                1,
+                "{}: {:?}",
+                surface,
+                rendered
+            );
+        }
+
+        let mut hidden = cache.clone();
+        hidden.connect_authenticated = false;
+        assert_eq!(hidden.unswept_recovery_notice(), None);
+        for (surface, rendered) in surfaces(&hidden) {
+            assert!(
+                !rendered
+                    .iter()
+                    .any(|s| s.contains("Bitcoin Blake2b until swept")),
+                "{}: {:?}",
+                surface,
+                rendered
+            );
+        }
     }
 }
