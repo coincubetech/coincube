@@ -581,6 +581,77 @@ fn fork_transport_binds_chain_descriptor_and_exact_witness_then_sends_once() {
     );
 }
 
+/// The daemon's Claim fork route, from the signing PSBT to the transport: the
+/// coordinator finalises (`Preparation::finish`), then submits the artifact.
+fn submit_fork_psbt(
+    daemon: &DaemonControl,
+    sweep: &coincube_core::claim_spend::ClaimForkSweep,
+    signed: &coincube_core::psbt_unified::UnifiedPsbt,
+) -> Result<SubmissionOutcome, String> {
+    let secp = secp256k1::Secp256k1::verification_only();
+    let verified = coincube_core::claim_finalize::finalize_claim_fork_sweep(sweep, signed, &secp)
+        .map_err(|e| format!("{:?}", e))?;
+    let (gate, _) = SubmissionGate::for_claim_fork(
+        &verified,
+        std::time::Instant::now() + Duration::from_secs(60),
+    );
+    daemon
+        .submit_verified_claim_fork(&verified, &gate)
+        .map_err(|e| format!("{:?}", e))
+}
+
+#[test]
+fn fork_transport_never_receives_a_psbt_retaining_a_legacy_alternative() {
+    use coincube_core::{
+        psbt_unified::{merge_signatures, UnifiedPsbt},
+        unified_signing::sign_p2wsh_all_unified,
+    };
+    let (sweep, signers) = fork_fixture(ChainId::Bitcoin);
+    let secp = secp256k1::Secp256k1::new();
+    let unified = sign_p2wsh_all_unified(
+        &signers[0],
+        &UnifiedPsbt::from_psbt(sweep.psbt().clone()).unwrap(),
+        &secp,
+    )
+    .unwrap();
+    let with_legacy = |indices: &[usize]| {
+        let legacy = indices.iter().fold(sweep.psbt().clone(), |psbt, i| {
+            signers[*i].sign_psbt(psbt, &secp).unwrap()
+        });
+        let mut mixed = unified.clone();
+        merge_signatures(&mut mixed, &UnifiedPsbt::from_psbt(legacy).unwrap()).unwrap();
+        mixed
+    };
+    let backend = Arc::new(Mutex::new(DummyBitcoind::new()));
+    let daemon = control(
+        ChainId::BitcoinBlake2b,
+        sweep.descriptor().clone(),
+        backend.clone(),
+    );
+    // The retained legacy signatures of keys 1 and 2 meet multi(2) without the
+    // unified signature: refused before any artifact reaches the transport.
+    let refused = submit_fork_psbt(&daemon, &sweep, &with_legacy(&[1, 2]));
+    assert!(
+        refused
+            .as_ref()
+            .is_err_and(|e| e.contains("UnsafeLegacyAlternative")),
+        "{:?}",
+        refused
+    );
+    assert!(backend
+        .lock()
+        .unwrap()
+        .broadcasted
+        .lock()
+        .unwrap()
+        .is_empty());
+    // Control: the unified signature plus the one legacy signature it needs.
+    let sent = submit_fork_psbt(&daemon, &sweep, &with_legacy(&[1])).unwrap();
+    let SubmissionOutcome::UpstreamAccepted { txid, .. } = sent;
+    assert_eq!(txid, sweep.psbt().unsigned_tx.compute_txid());
+    assert_eq!(backend.lock().unwrap().broadcasted.lock().unwrap().len(), 1);
+}
+
 #[test]
 fn fork_transport_revocation_expiry_testnet_refusal_and_uncertain_response() {
     let verified = verified_fork(ChainId::Bitcoin, &[0, 1]);
