@@ -1391,8 +1391,9 @@ pub struct InternalBitcoindConfig {
     /// `listen=1`, `listenonion=1`, `discover=0` (and `torcontrol` once
     /// [`Self::tor_control_port`] is known), so bitcoind advertises itself as a
     /// v3 onion service and accepts inbound peers. The persisted marker is
-    /// `listenonion=1`. Off by default — absent keys parse back to all-off, so
-    /// existing datadirs are unchanged.
+    /// `listenonion=1`. Off by default — absent keys parse back to all-off —
+    /// and off is written as `listenonion=0`, so neither bitcoind flavour
+    /// falls back to its own onion-listening default (#598).
     pub inbound_tor: bool,
     /// Route *outbound* peer connections through Tor too, via `proxy=<socks>`.
     /// Only meaningful alongside `inbound_tor`. The persisted marker is the
@@ -1709,9 +1710,8 @@ impl InternalBitcoindConfig {
 
         // Inbound-over-Tor. All of these are global (non-network-scoped)
         // bitcoind options, so they belong in the section-less general part of
-        // the file. Emitted only when the feature is on;
-        // when off, the general section is untouched (so existing datadirs, and
-        // the default no-op state, produce a byte-identical file).
+        // the file. Emitted only when the feature is on; when off, the only
+        // Tor line is `listenonion=0` (see the `else` arm).
         if self.inbound_tor {
             let mut general = conf_ini.with_general_section();
             // Advertise + accept inbound peers as a v3 onion service. `discover=0`
@@ -1743,6 +1743,18 @@ impl InternalBitcoindConfig {
                     general.set("proxy", format!("{TOR_LOOPBACK_HOST}:{socks_port}"));
                 }
             }
+        } else {
+            // Inbound off must say so. bitcoind's `-listenonion` defaults to on
+            // whenever it listens, which it does by default, so a file silent
+            // on the key still starts the torcontrol thread. On Knots that
+            // thread, failing to reach a control port, launches `tor` itself
+            // (`-torexecute`, default `tor`), and on a machine with no `tor`
+            // the failed exec closes a pipe descriptor twice — the double
+            // close behind #394's lost block file (#598). With a `tor` it
+            // would instead publish an onion service the user never enabled.
+            // `listenonion=0` is also valid, and equally meant, on Core.
+            // It parses back as inbound off.
+            conf_ini.with_general_section().set("listenonion", "0");
         }
 
         // Mempool memory cap — a standalone resource key, emitted whenever set
@@ -3047,8 +3059,11 @@ mod tests {
         conf.networks.insert(Network::Bitcoin, main_conf);
         conf.networks.insert(Network::Regtest, regtest_conf);
         conf_ini = conf.to_ini();
-        assert_eq!(conf_ini.len(), 3); // 2 network sections plus the empty general section
-        assert!(conf_ini.general_section().is_empty());
+        // 2 network sections plus the general section. Inbound-over-Tor is
+        // off, which is written down (#598) and is all that section holds.
+        assert_eq!(conf_ini.len(), 3);
+        assert_eq!(conf_ini.general_section().get("listenonion"), Some("0"));
+        assert_eq!(conf_ini.general_section().len(), 1);
         for (sec, prop) in &conf_ini {
             if let Some(sec) = sec {
                 let rpc_port = prop.get("rpcport").expect("rpcport");
@@ -3071,7 +3086,9 @@ mod tests {
                     panic!("Unexpected section");
                 }
             } else {
-                assert!(prop.is_empty())
+                // Inbound-over-Tor off, written down (#598).
+                assert_eq!(prop.len(), 1);
+                assert_eq!(prop.get("listenonion"), Some("0"));
             }
         }
     }
@@ -3299,15 +3316,21 @@ mod tests {
             rpc_auth: None,
         };
 
-        // Off by default: a Knots config emits none of the Tor keys, leaving the
-        // general section empty.
+        // Off by default: a Knots config says `listenonion=0` and emits none
+        // of the other Tor keys, and that parses back as off.
         let mut off = InternalBitcoindConfig::for_flavor(NodeFlavor::Knots);
         off.networks.insert(Network::Bitcoin, net.clone());
         assert!(!off.inbound_tor);
         let off_ini = off.to_ini();
+        assert_eq!(off_ini.general_section().get("listenonion"), Some("0"));
+        assert_eq!(off_ini.general_section().len(), 1);
+        assert!(
+            !InternalBitcoindConfig::from_ini(&off_ini)
+                .expect("parse inbound-off conf")
+                .inbound_tor
+        );
         for key in [
             "listen",
-            "listenonion",
             "discover",
             "torcontrol",
             "proxy",
@@ -3332,6 +3355,7 @@ mod tests {
         let general = on_ini.general_section();
         assert_eq!(general.get("listen"), Some("1"));
         assert_eq!(general.get("listenonion"), Some("1"));
+        assert_eq!(general.get_all("listenonion").count(), 1);
         assert_eq!(general.get("discover"), Some("0"));
         assert_eq!(general.get("maxuploadtarget"), Some("1000"));
         assert_eq!(general.get("maxconnections"), Some("20"));
@@ -3404,13 +3428,13 @@ mod tests {
         };
 
         // Untouched (None) on a plain Core config: no `maxmempool`, and the
-        // general section stays empty — byte-identical to today's output.
+        // general section holds only the inbound-off `listenonion=0`.
         let mut off = InternalBitcoindConfig::for_flavor(NodeFlavor::Core);
         off.networks.insert(Network::Bitcoin, net.clone());
         assert_eq!(off.max_mempool_mb, None);
         let off_ini = off.to_ini();
         assert!(off_ini.general_section().get("maxmempool").is_none());
-        assert!(off_ini.general_section().is_empty());
+        assert_eq!(off_ini.general_section().len(), 1);
 
         // Set on a Core config with inbound-over-Tor OFF: still emitted (proves
         // it is standalone, not Tor-gated, and not flavour-gated).
@@ -3602,7 +3626,7 @@ mod tests {
         assert_eq!(off.data_carrier_size, None);
         let off_ini = off.to_ini();
         assert!(off_ini.general_section().get("datacarriersize").is_none());
-        assert!(off_ini.general_section().is_empty());
+        assert_eq!(off_ini.general_section().len(), 1, "only `listenonion=0`");
 
         let mut on = InternalBitcoindConfig::for_flavor(NodeFlavor::Knots);
         on.data_carrier_size = Some(DATA_CARRIER_SIZE);
@@ -4308,6 +4332,8 @@ mod tests {
         let rewritten = std::fs::read_to_string(&conf_path).unwrap();
         assert!(!rewritten.contains("consensusrules"), "{}", rewritten);
         assert!(rewritten.contains("datacarriersize=100"), "{}", rewritten);
+        // Inbound-over-Tor is off here, and the rewrite now says so (#598).
+        assert!(rewritten.contains("listenonion=0"), "{}", rewritten);
         let reloaded = InternalBitcoindConfig::from_file(&conf_path).unwrap();
         let main = &reloaded.networks[&Network::Bitcoin];
         assert_eq!(
@@ -4476,6 +4502,82 @@ mod tests {
             }
             let _ = std::fs::remove_dir_all(&base);
         }
+    }
+
+    // #598: with `listenonion` unset, bitcoind listens and so defaults it on,
+    // and Knots 29.3 then launches `tor` itself when no control port answers —
+    // the subprocess path whose failed exec closes a descriptor twice (#394).
+    // The pre-spawn rewrite every start takes must therefore leave the file
+    // with exactly one `listenonion` line matching the user's choice: `0` for
+    // a file that predates the key (inbound off), and the inbound-on file's
+    // `1` kept as it was, with its companion keys, and no `0` beside it.
+    #[test]
+    fn start_writes_listenonion_for_both_inbound_states_before_the_spawn() {
+        use crate::node::revalidate::ManagedNodeState;
+        let (base, root) = a_temp_coincube_datadir("listenonion");
+        let bitcoin_datadir = internal_bitcoind_datadir(&root);
+        let conf_path = internal_bitcoind_config_path(&bitcoin_datadir);
+        let cookie_path = internal_bitcoind_cookie_path(&bitcoin_datadir, &Network::Bitcoin);
+        let config = BitcoindConfig {
+            rpc_auth: coincubed::config::BitcoindRpcAuth::CookieFile(cookie_path),
+            addr: std::net::SocketAddr::from(([127, 0, 0, 1], 1)),
+        };
+        ManagedNodeState {
+            configured_flavor: Some(NodeFlavor::Knots),
+            ..Default::default()
+        }
+        .save(&root)
+        .unwrap();
+        std::fs::create_dir_all(&bitcoin_datadir).unwrap();
+        let start = || match Bitcoind::maybe_start(Network::Bitcoin, config.clone(), &root) {
+            Err(StartInternalBitcoindError::ExecutableNotFound) => {}
+            other => panic!("expected ExecutableNotFound, got {:?}", other.map(|_| ())),
+        };
+        let listenonion_lines = |text: &str| -> Vec<String> {
+            text.lines()
+                .filter(|l| l.trim_start().starts_with("listenonion"))
+                .map(str::to_string)
+                .collect()
+        };
+
+        // Inbound off, as master wrote it: no key, and already carrying
+        // `datacarriersize=100`, so `ensure_data_carrier_size` has nothing to
+        // do and only the pre-spawn rewrite can add the line.
+        std::fs::write(
+            &conf_path,
+            "maxmempool=300\ndatacarriersize=100\n[main]\nrpcport=12345\nport=12346\nprune=15000\n",
+        )
+        .unwrap();
+        start();
+        let off = std::fs::read_to_string(&conf_path).unwrap();
+        assert_eq!(listenonion_lines(&off), vec!["listenonion=0"], "{}", off);
+        assert!(off.contains("datacarriersize=100"), "{}", off);
+        assert!(!off.contains("torcontrol"), "{}", off);
+        assert!(
+            !InternalBitcoindConfig::from_file(&conf_path)
+                .unwrap()
+                .inbound_tor
+        );
+
+        // Inbound on, as `prepare_inbound_tor` leaves it with Tor up.
+        std::fs::write(
+            &conf_path,
+            "listen=1\nlistenonion=1\ndiscover=0\ntorcontrol=127.0.0.1:9151\n\
+             datacarriersize=100\n[main]\nrpcport=12345\nport=12346\nprune=15000\n",
+        )
+        .unwrap();
+        start();
+        let on = std::fs::read_to_string(&conf_path).unwrap();
+        assert_eq!(listenonion_lines(&on), vec!["listenonion=1"], "{}", on);
+        assert!(on.contains("listen=1"), "{}", on);
+        assert!(on.contains("discover=0"), "{}", on);
+        assert!(on.contains("torcontrol=127.0.0.1:9151"), "{}", on);
+        assert!(on.contains("datacarriersize=100"), "{}", on);
+        let reloaded = InternalBitcoindConfig::from_file(&conf_path).unwrap();
+        assert!(reloaded.inbound_tor);
+        assert_eq!(reloaded.tor_control_port, Some(9151));
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// A stand-in for a managed node that is already up on the endpoint:
