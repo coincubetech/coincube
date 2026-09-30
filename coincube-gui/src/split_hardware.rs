@@ -9,6 +9,11 @@
 //! device list is session-only (no BitBox02 pairing written) and the account
 //! lives in memory until cancel, disconnect or a changed choice clears it.
 //! Taproot (BIP86) is deliberately not offered.
+//!
+//! [`sign`] holds the separate hardware signing session (slice B4a). It has
+//! no GUI caller yet, and the account source above still never signs.
+
+pub mod sign;
 
 use std::sync::Arc;
 
