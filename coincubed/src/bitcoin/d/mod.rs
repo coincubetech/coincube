@@ -1023,7 +1023,18 @@ impl BitcoinD {
     }
 
     fn list_descriptors(&self) -> Vec<ListDescEntry> {
-        self.make_wallet_request("listdescriptors", None)
+        Self::parse_list_descriptors(self.make_wallet_request("listdescriptors", None))
+    }
+
+    /// [`Self::list_descriptors`] for the rescan command: an unreachable node is
+    /// an error for the caller to surface, not a panic.
+    fn list_descriptors_result(&self) -> Result<Vec<ListDescEntry>, BitcoindError> {
+        self.make_faillible_wallet_request("listdescriptors", None)
+            .map(Self::parse_list_descriptors)
+    }
+
+    fn parse_list_descriptors(response: Json) -> Vec<ListDescEntry> {
+        response
             .get("descriptors")
             .and_then(Json::as_array)
             .expect("Missing or invalid 'descriptors' field in 'listdescriptors' response")
@@ -1220,6 +1231,13 @@ impl BitcoinD {
         self.make_node_request("getblockchaininfo", None)
     }
 
+    /// `getblockchaininfo` for RPC commands (#589). Keeps the interactive retry
+    /// budget of [`Self::block_chain_info`], but a node still unreachable after
+    /// it is an error the command returns, not a daemon panic.
+    fn block_chain_info_result(&self) -> Result<Json, BitcoindError> {
+        self.make_fallible_node_request("getblockchaininfo", None)
+    }
+
     /// Poll reads do not consume the minute-long interactive retry budget.
     /// A failed attempt returns to the scheduler; cookie rotation still gets
     /// the single credential-refresh retry in make_request_inner.
@@ -1291,6 +1309,28 @@ impl BitcoinD {
         Ok(BlockChainTip { hash, height })
     }
 
+    /// [`Self::chain_tip`] for RPC commands (#589): an outage that outlasts the
+    /// retry budget, or a malformed answer, is returned rather than panicking.
+    /// The poller keeps using [`Self::try_chain_tip`], which does not retry.
+    pub fn chain_tip_result(&self) -> Result<BlockChainTip, BitcoindError> {
+        // One response binds the height and hash, avoiding a two-RPC race.
+        let chain_info = self.block_chain_info_result()?;
+        let malformed =
+            |what: &str| BitcoindError::MalformedResponse(format!("getblockchaininfo: {what}"));
+        let hash = chain_info
+            .get("bestblockhash")
+            .and_then(Json::as_str)
+            .and_then(|hash| bitcoin::BlockHash::from_str(hash).ok())
+            .ok_or_else(|| malformed("invalid bestblockhash"))?;
+        let height = chain_info
+            .get("blocks")
+            .and_then(Json::as_i64)
+            .and_then(|height| <i32 as std::convert::TryFrom<i64>>::try_from(height).ok())
+            .filter(|height| *height >= 0)
+            .ok_or_else(|| malformed("invalid blocks"))?;
+        Ok(BlockChainTip { hash, height })
+    }
+
     pub fn chain_tip(&self) -> BlockChainTip {
         // We use getblockchaininfo to avoid a race between getblockcount and getblockhash
         let chain_info = self.block_chain_info();
@@ -1312,13 +1352,19 @@ impl BitcoinD {
     }
 
     pub fn get_block_hash(&self, height: i32) -> Option<bitcoin::BlockHash> {
-        Some(
-            self.make_fallible_node_request("getblockhash", params!(Json::Number(height.into()),))
-                .ok()?
-                .as_str()
-                .and_then(|s| bitcoin::BlockHash::from_str(s).ok())
-                .expect("bitcoind must send valid block hashes"),
-        )
+        self.get_block_hash_result(height).ok()
+    }
+
+    /// Preserve RPC errors for callers that can surface or retry the failure.
+    pub fn get_block_hash_result(&self, height: i32) -> Result<bitcoin::BlockHash, BitcoindError> {
+        self.make_fallible_node_request("getblockhash", params!(Json::Number(height.into()),))?
+            .as_str()
+            .and_then(|s| bitcoin::BlockHash::from_str(s).ok())
+            .ok_or_else(|| {
+                BitcoindError::MalformedResponse(
+                    "getblockhash returned an invalid block hash".into(),
+                )
+            })
     }
 
     pub fn list_since_block(&self, block_hash: &bitcoin::BlockHash) -> LSBlockRes {
@@ -1502,51 +1548,22 @@ impl BitcoinD {
     }
 
     pub fn get_block_stats(&self, blockhash: bitcoin::BlockHash) -> Option<BlockStats> {
-        let res = match self.make_fallible_node_request(
+        self.get_block_stats_result(blockhash)
+            .map_err(|error| {
+                log::warn!("Error when fetching block header {}: {}", blockhash, error);
+            })
+            .ok()
+    }
+
+    pub fn get_block_stats_result(
+        &self,
+        blockhash: bitcoin::BlockHash,
+    ) -> Result<BlockStats, BitcoindError> {
+        let response = self.make_fallible_node_request(
             "getblockheader",
             params!(Json::String(blockhash.to_string()),),
-        ) {
-            Ok(res) => res,
-            Err(e) => {
-                log::warn!("Error when fetching block header {}: {}", blockhash, e);
-                return None;
-            }
-        };
-        let confirmations = res
-            .get("confirmations")
-            .and_then(Json::as_i64)
-            .expect("Invalid confirmations in `getblockheader` response: not an i64")
-            as i32;
-        let previous_blockhash = res
-            .get("previousblockhash")
-            .and_then(Json::as_str)
-            .map(|s| {
-                bitcoin::BlockHash::from_str(s)
-                    .expect("Invalid previousblockhash in `getblockheader` response")
-            });
-        let height = res
-            .get("height")
-            .and_then(Json::as_i64)
-            .expect("Invalid height in `getblockheader` response: not an i64")
-            as i32;
-        let time = res
-            .get("time")
-            .and_then(Json::as_u64)
-            .expect("Invalid timestamp in `getblockheader` response: not an u64")
-            as u32;
-        let median_time_past = res
-            .get("mediantime")
-            .and_then(Json::as_u64)
-            .expect("Invalid median timestamp in `getblockheader` response: not an u64")
-            as u32;
-        Some(BlockStats {
-            confirmations,
-            previous_blockhash,
-            height,
-            blockhash,
-            time,
-            median_time_past,
-        })
+        )?;
+        parse_block_stats(blockhash, response)
     }
 
     pub fn broadcast_tx(&self, tx: &bitcoin::Transaction) -> Result<(), BitcoindError> {
@@ -1563,17 +1580,17 @@ impl BitcoinD {
         &self,
         descs: &[&Descriptor<DescriptorPublicKey>],
         timestamp: u32,
-    ) -> bool {
-        let current_descs = self.list_descriptors();
+    ) -> Result<bool, BitcoindError> {
+        let current_descs = self.list_descriptors_result()?;
 
         for desc in descs {
             let present = current_descs_contain_desc_timestamp(&current_descs, desc, timestamp);
             if !present {
-                return false;
+                return Ok(false);
             }
         }
 
-        true
+        Ok(true)
     }
 
     /// A snapshot of the node's view of the chain: how far it has validated, how
@@ -1800,7 +1817,7 @@ impl BitcoinD {
 
     // Make sure the bitcoind has enough blocks to rescan up to this timestamp.
     fn check_prune_height(&self, timestamp: u32) -> Result<(), BitcoindError> {
-        let chain_info = self.block_chain_info();
+        let chain_info = self.block_chain_info_result()?;
         let first_block_height = if let Some(h) = chain_info.get("pruneheight") {
             h
         } else {
@@ -1812,7 +1829,14 @@ impl BitcoinD {
             .expect("Height must be an integer")
             .try_into()
             .expect("Height must fit in a i32");
-        if let Some(tip) = self.tip_before_timestamp(timestamp) {
+        // Not `tip_before_timestamp`: its tip read panics on an outage (#589).
+        let tip = self.chain_tip_result()?;
+        if let Some(tip) = block_before_date(
+            timestamp,
+            tip,
+            |h| self.get_block_hash(h),
+            |h| self.get_block_stats(h),
+        ) {
             if tip.height >= prune_height {
                 return Ok(());
             }
@@ -1831,7 +1855,7 @@ impl BitcoinD {
         // have a range inclusive of the existing ones. We always use 0 as the initial index so
         // this is just determining the maximum index to use.
         let max_range = self
-            .list_descriptors()
+            .list_descriptors_result()?
             .into_iter()
             // 1_000 is bitcoind's default and what we use at initial import.
             .fold(1_000, |range, entry| {
@@ -1879,7 +1903,7 @@ impl BitcoinD {
             }
 
             i += 1;
-            if self.check_descs_timestamp(&descs, timestamp) {
+            if self.check_descs_timestamp(&descs, timestamp)? {
                 return Ok(());
             } else if i >= NUM_RETRIES {
                 return Err(BitcoindError::StartRescan);
@@ -1892,7 +1916,19 @@ impl BitcoinD {
 
     /// Get the progress of the ongoing rescan, if there is any.
     pub fn rescan_progress(&self) -> Option<f64> {
-        self.make_wallet_request("getwalletinfo", None)
+        Self::parse_rescan_progress(&self.make_wallet_request("getwalletinfo", None))
+    }
+
+    /// [`Self::rescan_progress`] for RPC commands (#589): `Ok(None)` means the
+    /// node answered that no rescan is running; an outage is an `Err`, never
+    /// "not rescanning".
+    pub fn rescan_progress_result(&self) -> Result<Option<f64>, BitcoindError> {
+        self.make_faillible_wallet_request("getwalletinfo", None)
+            .map(|info| Self::parse_rescan_progress(&info))
+    }
+
+    fn parse_rescan_progress(wallet_info: &Json) -> Option<f64> {
+        wallet_info
             .get("scanning")
             // If no rescan is ongoing, it will fail cause it would be 'false'
             .and_then(Json::as_object)
@@ -2468,6 +2504,31 @@ impl From<Json> for GetTxRes {
     }
 }
 
+fn parse_block_stats(
+    blockhash: bitcoin::BlockHash,
+    response: Json,
+) -> Result<BlockStats, BitcoindError> {
+    #[derive(serde::Deserialize)]
+    struct Header {
+        confirmations: i32,
+        previousblockhash: Option<bitcoin::BlockHash>,
+        height: i32,
+        time: u32,
+        mediantime: u32,
+    }
+    let header: Header = serde_json::from_value(response).map_err(|error| {
+        BitcoindError::MalformedResponse(format!("invalid getblockheader: {error}"))
+    })?;
+    Ok(BlockStats {
+        blockhash,
+        confirmations: header.confirmations,
+        previous_blockhash: header.previousblockhash,
+        height: header.height,
+        time: header.time,
+        median_time_past: header.mediantime,
+    })
+}
+
 #[derive(Debug, Clone)]
 pub struct BlockStats {
     pub confirmations: i32,
@@ -2589,6 +2650,31 @@ impl From<&&Json> for MempoolEntryFees {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn malformed_block_stats_are_errors_and_a_later_response_recovers() {
+        let hash = bitcoin::BlockHash::from_str(
+            "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f",
+        )
+        .unwrap();
+        let good = serde_json::json!({"confirmations":1,"height":0,"time":1231006505,"mediantime":1231006505});
+        for (field, value) in [
+            ("time", serde_json::json!(4294967296_u64)),
+            ("height", serde_json::json!(2147483648_i64)),
+            ("confirmations", serde_json::json!("one")),
+            ("previousblockhash", serde_json::json!("invalid")),
+            ("mediantime", serde_json::Value::Null),
+        ] {
+            let mut bad = good.clone();
+            bad[field] = value;
+            assert!(matches!(
+                parse_block_stats(hash, bad),
+                Err(BitcoindError::MalformedResponse(_))
+            ));
+        }
+        assert!(parse_block_stats(hash, serde_json::json!({})).is_err());
+        assert_eq!(parse_block_stats(hash, good).unwrap().time, 1231006505);
+    }
 
     fn rpc_err(code: i32) -> BitcoindError {
         BitcoindError::Server(jsonrpc::error::Error::Rpc(jsonrpc::error::RpcError {

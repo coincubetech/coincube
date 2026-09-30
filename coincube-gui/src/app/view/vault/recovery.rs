@@ -40,6 +40,7 @@ pub fn recovery<'a>(
         Column::new()
             .push(Container::new(h3("Recovery").bold()).width(Length::Fill))
             .push(Container::new(text(INFO_TEXT)))
+            .push(cache.unswept_recovery_notice().map(text))
             .push(Space::new().height(Length::Fixed(20.0)))
             .push(
                 Container::new(

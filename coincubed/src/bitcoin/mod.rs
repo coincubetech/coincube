@@ -35,6 +35,27 @@ pub struct BlockChainTip {
     pub height: i32,
 }
 
+/// A failed backend lookup is not an invariant failure of the chain itself.
+/// Keep the original error typed so startup can surface admission refusals.
+#[derive(Debug)]
+pub enum GenesisError {
+    Bitcoind(Box<BitcoindError>),
+    Electrum(Box<electrum::client::Error>),
+    Esplora(Box<esplora::client::Error>),
+}
+
+impl fmt::Display for GenesisError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Bitcoind(error) => write!(f, "Genesis lookup failed: {}", error),
+            Self::Electrum(error) => write!(f, "Genesis lookup failed: {}", error),
+            Self::Esplora(error) => write!(f, "Genesis lookup failed: {}", error),
+        }
+    }
+}
+
+impl std::error::Error for GenesisError {}
+
 impl fmt::Display for BlockChainTip {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "({},{})", self.height, self.hash)
@@ -285,9 +306,9 @@ pub trait BitcoinInterface: Send {
         None
     }
 
-    fn genesis_block_timestamp(&self) -> u32;
+    fn genesis_block_timestamp(&self) -> Result<u32, GenesisError>;
 
-    fn genesis_block(&self) -> BlockChainTip;
+    fn genesis_block(&self) -> Result<BlockChainTip, GenesisError>;
 
     /// Get the progress of the block chain synchronization.
     /// Returns a rounded up percentage between 0 and 1. Use the `is_synced` method to be sure the
@@ -304,6 +325,13 @@ pub trait BitcoinInterface: Send {
 
     /// Fallible polling read; an outage is not a different or missing chain tip.
     fn try_chain_tip(&self) -> Result<BlockChainTip, String> {
+        Ok(self.chain_tip())
+    }
+
+    /// Fallible read of the best block for RPC commands (#589). Unlike
+    /// [`Self::try_chain_tip`] it may use the backend's interactive retry budget;
+    /// unlike [`Self::chain_tip`] an outage outlasting it is an error, not a panic.
+    fn chain_tip_result(&self) -> Result<BlockChainTip, String> {
         Ok(self.chain_tip())
     }
 
@@ -449,6 +477,12 @@ pub trait BitcoinInterface: Send {
 
     /// Rescan progress percentage. Between 0 and 1.
     fn rescan_progress(&self) -> Option<f64>;
+
+    /// Fallible [`Self::rescan_progress`] for RPC commands (#589): `Ok(None)` is
+    /// the backend saying no rescan runs; an unreachable backend is an `Err`.
+    fn rescan_progress_result(&self) -> Result<Option<f64>, String> {
+        Ok(self.rescan_progress())
+    }
 
     /// Get the last block chain tip with a timestamp below this. Timestamp must be a valid block
     /// timestamp.
@@ -625,21 +659,21 @@ impl BitcoinInterface for d::BitcoinD {
         Some(self.backend_id())
     }
 
-    fn genesis_block_timestamp(&self) -> u32 {
-        self.get_block_stats(
-            self.get_block_hash(0)
-                .expect("Genesis block hash must always be there"),
-        )
-        .expect("Genesis block must always be there")
-        .time
+    fn genesis_block_timestamp(&self) -> Result<u32, GenesisError> {
+        let hash = self
+            .get_block_hash_result(0)
+            .map_err(|error| GenesisError::Bitcoind(Box::new(error)))?;
+        self.get_block_stats_result(hash)
+            .map(|stats| stats.time)
+            .map_err(|error| GenesisError::Bitcoind(Box::new(error)))
     }
 
-    fn genesis_block(&self) -> BlockChainTip {
+    fn genesis_block(&self) -> Result<BlockChainTip, GenesisError> {
         let height = 0;
         let hash = self
-            .get_block_hash(height)
-            .expect("Genesis block hash must always be there");
-        BlockChainTip { hash, height }
+            .get_block_hash_result(height)
+            .map_err(|error| GenesisError::Bitcoind(Box::new(error)))?;
+        Ok(BlockChainTip { hash, height })
     }
 
     fn sync_progress(&self) -> SyncProgress {
@@ -652,6 +686,10 @@ impl BitcoinInterface for d::BitcoinD {
 
     fn try_chain_tip(&self) -> Result<BlockChainTip, String> {
         self.try_chain_tip()
+    }
+
+    fn chain_tip_result(&self) -> Result<BlockChainTip, String> {
+        self.chain_tip_result().map_err(|e| e.to_string())
     }
 
     fn try_sync_progress(&self) -> Result<SyncProgress, String> {
@@ -886,12 +924,22 @@ impl BitcoinInterface for d::BitcoinD {
         self.rescan_progress()
     }
 
+    fn rescan_progress_result(&self) -> Result<Option<f64>, String> {
+        self.rescan_progress_result().map_err(|e| e.to_string())
+    }
+
     fn block_before_date(&self, timestamp: u32) -> Option<BlockChainTip> {
         self.tip_before_timestamp(timestamp)
     }
 
     fn tip_time(&self) -> Option<u32> {
-        let tip = self.chain_tip();
+        // Only RPC commands ask for this (start_rescan, anti-fee-sniping), so a
+        // node that stays down past the retry budget must yield `None` for them
+        // to report, not panic the daemon through `chain_tip` (#589).
+        let tip = self
+            .chain_tip_result()
+            .map_err(|e| log::warn!("Cannot read the chain tip for its timestamp: {}", e))
+            .ok()?;
         Some(self.get_block_stats(tip.hash)?.time)
     }
 
@@ -1049,16 +1097,16 @@ impl BitcoinInterface for electrum::Electrum {
         spent_coins_from(&self.wallet_coins(Some(&ops)), outpoints)
     }
 
-    fn genesis_block_timestamp(&self) -> u32 {
+    fn genesis_block_timestamp(&self) -> Result<u32, GenesisError> {
         self.client()
             .genesis_block_timestamp()
-            .expect("Genesis block timestamp must always be there")
+            .map_err(|error| GenesisError::Electrum(Box::new(error)))
     }
 
-    fn genesis_block(&self) -> BlockChainTip {
+    fn genesis_block(&self) -> Result<BlockChainTip, GenesisError> {
         self.client()
             .genesis_block()
-            .expect("Genesis block must always be there")
+            .map_err(|error| GenesisError::Electrum(Box::new(error)))
     }
 
     fn chain_tip(&self) -> BlockChainTip {
@@ -1135,7 +1183,7 @@ impl BitcoinInterface for electrum::Electrum {
     }
 
     fn block_before_date(&self, _timestamp: u32) -> Option<BlockChainTip> {
-        Some(self.genesis_block())
+        self.genesis_block().ok()
     }
 
     fn tip_time(&self) -> Option<u32> {
@@ -1187,16 +1235,18 @@ impl BitcoinInterface for esplora::Esplora {
         spent_coins_from(&self.wallet_coins(Some(&ops)), outpoints)
     }
 
-    fn genesis_block_timestamp(&self) -> u32 {
-        self.client().genesis_block_timestamp().unwrap_or(0)
+    fn genesis_block_timestamp(&self) -> Result<u32, GenesisError> {
+        self.client()
+            .genesis_block_timestamp()
+            .map_err(|error| GenesisError::Esplora(Box::new(error)))
     }
 
-    fn genesis_block(&self) -> BlockChainTip {
+    fn genesis_block(&self) -> Result<BlockChainTip, GenesisError> {
         let hash = self
             .client()
             .genesis_block_hash()
-            .expect("Genesis block hash must always be there");
-        BlockChainTip { hash, height: 0 }
+            .map_err(|error| GenesisError::Esplora(Box::new(error)))?;
+        Ok(BlockChainTip { hash, height: 0 })
     }
 
     fn chain_tip(&self) -> BlockChainTip {
@@ -1263,7 +1313,7 @@ impl BitcoinInterface for esplora::Esplora {
     }
 
     fn block_before_date(&self, _timestamp: u32) -> Option<BlockChainTip> {
-        Some(self.genesis_block())
+        self.genesis_block().ok()
     }
 
     fn tip_time(&self) -> Option<u32> {
@@ -1322,11 +1372,11 @@ impl BitcoinInterface for sync::Arc<sync::Mutex<dyn BitcoinInterface + 'static>>
         self.lock().unwrap().backend_id()
     }
 
-    fn genesis_block_timestamp(&self) -> u32 {
+    fn genesis_block_timestamp(&self) -> Result<u32, GenesisError> {
         self.lock().unwrap().genesis_block_timestamp()
     }
 
-    fn genesis_block(&self) -> BlockChainTip {
+    fn genesis_block(&self) -> Result<BlockChainTip, GenesisError> {
         self.lock().unwrap().genesis_block()
     }
 
@@ -1340,6 +1390,10 @@ impl BitcoinInterface for sync::Arc<sync::Mutex<dyn BitcoinInterface + 'static>>
 
     fn try_chain_tip(&self) -> Result<BlockChainTip, String> {
         self.lock().unwrap().try_chain_tip()
+    }
+
+    fn chain_tip_result(&self) -> Result<BlockChainTip, String> {
+        self.lock().unwrap().chain_tip_result()
     }
 
     fn try_sync_progress(&self) -> Result<SyncProgress, String> {
@@ -1417,6 +1471,10 @@ impl BitcoinInterface for sync::Arc<sync::Mutex<dyn BitcoinInterface + 'static>>
         self.lock().unwrap().rescan_progress()
     }
 
+    fn rescan_progress_result(&self) -> Result<Option<f64>, String> {
+        self.lock().unwrap().rescan_progress_result()
+    }
+
     fn block_before_date(&self, timestamp: u32) -> Option<BlockChainTip> {
         self.lock().unwrap().block_before_date(timestamp)
     }
@@ -1476,4 +1534,50 @@ pub struct Coin {
     pub block_info: Option<BlockInfo>,
     pub spend_txid: Option<bitcoin::Txid>,
     pub spend_block: Option<BlockInfo>,
+}
+
+#[cfg(test)]
+mod genesis_tests {
+    use super::*;
+    use bitcoin::hashes::Hash;
+
+    #[test]
+    fn unavailable_esplora_returns_genesis_error_and_no_rescan_block() {
+        const DESCRIPTOR: &str = concat!(
+            "wsh(andor(pk([aabbccdd]xpub68JJTXc1MWK8KLW4HGLXZBJknja7kDUJuFHnM424LbziEXsfkh1WQCiEjjHw4z",
+            "LqSUm4rvhgyGkkuRowE9tCJSgt3TQB5J3SKAbZ2SdcKST/<0;1>/*),older(10000),pk([aabbccdd]xpub68JJT",
+            "Xc1MWK8PEQozKsRatrUHXKFNkD1Cb1BuQU9Xr5moCv87anqGyXLyUd4KpnDyZgo3gz4aN1r3NiaoweFW8Uut",
+            "BsBbgKHzaD5HkTkifK/<0;1>/*)))#3xh8xmhn"
+        );
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        let client = esplora::client::Client::new(
+            &crate::config::EsploraConfig {
+                addr,
+                token: None,
+                fallback_addr: None,
+                fallback_token: None,
+                secondary_fallback_addr: None,
+                secondary_fallback_token: None,
+            },
+            sync::Arc::new(sync::atomic::AtomicBool::new(false)),
+        )
+        .unwrap();
+        let wallet = electrum::wallet::BdkWallet::new(
+            &DESCRIPTOR.parse().unwrap(),
+            bitcoin::BlockHash::all_zeros(),
+            None,
+            &[],
+            &[],
+            0.into(),
+            0.into(),
+        );
+        let backend = esplora::Esplora::new(client, wallet, false).unwrap();
+        let error = backend.genesis_block().unwrap_err();
+        assert!(
+            matches!(error, GenesisError::Esplora(error) if matches!(*error, esplora::client::Error::AllCooling))
+        );
+        assert_eq!(backend.block_before_date(0), None);
+    }
 }

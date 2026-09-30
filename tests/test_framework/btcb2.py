@@ -63,6 +63,17 @@ RDTS_EXPIRY_FAR_FUTURE = 4102444800
 
 # Regtest coinbase maturity.
 COINBASE_MATURITY = 100
+# Knots rejects transactions with locktime 21 as CAT-21 parasites. Its wallet
+# normally uses the tip height but may subtract up to 99 blocks for
+# anti-fee-sniping, so ordinary wallet sends are guaranteed clear of 21 only
+# once the tip reaches 121.
+KNOTS_CAT21_LOCKTIME = 21
+WALLET_ANTI_FEE_SNIPING_MAX_DEPTH = 99
+PREFORK_FUNDING_START_HEIGHT = (
+    KNOTS_CAT21_LOCKTIME + WALLET_ANTI_FEE_SNIPING_MAX_DEPTH + 1
+)
+# Three funding transactions each confirm in their own pre-fork block.
+MIN_ACTIVATION_HEIGHT = PREFORK_FUNDING_START_HEIGHT + 4
 
 
 def missing_binaries():
@@ -90,6 +101,80 @@ def _child_env(home_dir):
         "XDG_DATA_HOME": os.path.join(home_dir, ".local", "share"),
         "XDG_CACHE_HOME": os.path.join(home_dir, ".cache"),
     }
+
+
+# Lines Knots logs when it holds a block-file handle it cannot use (#394).
+# `Unable to open file` is here to tell a failed open apart from the observed
+# failure, which is a *successful* open followed by a failing seek and close.
+BLOCK_FILE_ERRORS = (
+    "Unable to seek to position",
+    "Unable to close file",
+    "Unable to open file",
+    "ReadRawBlock: OpenBlockFile failed",
+    "ReadBlock: OpenBlockFile failed",
+)
+
+
+def node_block_file_errors(node):
+    """Block-file error lines from the node's own debug.log."""
+    debug_log = os.path.join(node.bitcoin_dir, "regtest", "debug.log")
+    try:
+        with open(debug_log, "r", errors="replace") as f:
+            return [
+                line.rstrip()
+                for line in f
+                if any(marker in line for marker in BLOCK_FILE_ERRORS)
+            ]
+    except OSError as e:
+        return [f"(could not read {debug_log}: {e})"]
+
+
+def reread_every_block(node):
+    """Re-request every block over RPC; returns `{height: error}` for failures.
+
+    This is a re-read of the exact same data, not a retry that papers over the
+    failure: in #394 the node serves a block and then cannot. Whether the same
+    read succeeds moments later is what separates a transient descriptor fault
+    from block data that is actually unreadable, and it is evidence a restart
+    would destroy.
+    """
+    failures = {}
+    try:
+        tip = node.rpc.getblockcount()
+    except Exception as e:
+        return {"getblockcount": repr(e)}
+    for height in range(tip + 1):
+        try:
+            node.rpc.getblock(node.rpc.getblockhash(height), 0)
+        except Exception as e:
+            failures[height] = repr(e)
+    return failures
+
+
+def node_block_file_report(node, label, context="block-file failure"):
+    """What the node itself says about its block files, plus an exact re-read."""
+    errors = node_block_file_errors(node)
+    lines = [f"{label}: {context}."]
+    if errors:
+        lines.append(f"{label} block-file errors in debug.log ({len(errors)}):")
+        lines.extend(f"  {line}" for line in errors[-20:])
+    else:
+        lines.append(f"{label} logged no block-file error; the fault is elsewhere.")
+    failures = reread_every_block(node)
+    if failures:
+        lines.append(
+            f"{label} re-read of every block still fails at: "
+            + ", ".join(f"{h}: {e}" for h, e in sorted(failures.items())[:10])
+        )
+    else:
+        lines.append(
+            f"{label} re-read of every block succeeded, so the block data is "
+            "readable now and the earlier failure was transient."
+        )
+    strace_log = getattr(node, "strace_log", None)
+    if strace_log and os.path.exists(strace_log):
+        lines.append(f"{label} syscall trace: {strace_log}")
+    return "\n".join(lines)
 
 
 def _xpub_fingerprint(hd):
@@ -121,13 +206,20 @@ class TwoChainRegtest:
     def __init__(
         self,
         directory,
-        activation_height=110,
+        activation_height=130,
         post_fork_blocks_blake2b=6,
         legacy_path=None,
         blake2b_path=None,
         electrs_path=None,
         csv_value=10,
+        public_descriptor=None,
     ):
+        if activation_height < MIN_ACTIVATION_HEIGHT:
+            raise ValueError(
+                "activation_height must be at least "
+                f"{MIN_ACTIVATION_HEIGHT} so pre-fork wallet funding cannot "
+                f"choose Knots-reserved locktime {KNOTS_CAT21_LOCKTIME}"
+            )
         self.directory = directory
         self.activation_height = activation_height
         self.post_fork_blocks_blake2b = post_fork_blocks_blake2b
@@ -135,6 +227,7 @@ class TwoChainRegtest:
         self.blake2b_path = blake2b_path or KNOTS_BLAKE2B_PATH
         self.electrs_path = electrs_path or ELECTRS_BLAKE2B_PATH
         self.csv_value = csv_value
+        self.public_descriptor = public_descriptor
 
         self.home_dir = os.path.join(directory, "home-sandbox")
         self.legacy_dir = os.path.join(directory, "knots-legacy")
@@ -201,17 +294,24 @@ class TwoChainRegtest:
 
     def _start_legacy_and_fund(self):
         n = self.activation_height
-        self.legacy = self._new_node(self.legacy_dir, self.legacy_path)
+        self.legacy = self._new_node(self.legacy_dir, self.legacy_path, ["-datacarriersize=100"])
         self.legacy.startup()
         rpc = self.legacy.rpc
         rpc.createwallet(rpc.wallet_name, False, False, "", False, True, True)
-        # Mature one coinbase for funding.
-        self.legacy.generate_block(COINBASE_MATURITY + 1)
-        assert rpc.getblockcount() == COINBASE_MATURITY + 1
+        # Mature one coinbase and move beyond every anti-fee-sniping locktime
+        # that Knots reserves for CAT-21. Otherwise a wallet send can randomly
+        # choose locktime 21 and never enter the mempool.
+        self.legacy.generate_block(PREFORK_FUNDING_START_HEIGHT)
+        assert rpc.getblockcount() == PREFORK_FUNDING_START_HEIGHT
 
         # The Vault: 2-of-3 primary path, 1-key recovery path after `csv_value`.
-        self.signer = MultiSigner(3, {self.csv_value: 1}, is_taproot=False)
-        self.desc = vault_descriptor(self.signer, self.csv_value)
+        if self.public_descriptor is None:
+            self.signer = MultiSigner(3, {self.csv_value: 1}, is_taproot=False)
+            self.desc = vault_descriptor(self.signer, self.csv_value)
+        else:
+            # The GUI child owns the synthetic signing keys; the harness only
+            # receives its public descriptor and funds the same scripts.
+            self.desc = Descriptor.from_str(self.public_descriptor)
         receive_desc, _ = self.desc.singlepath_descriptors()
         checksummed = rpc.getdescriptorinfo(str(receive_desc))["descriptor"]
         self.vault_addresses = rpc.deriveaddresses(checksummed, [0, 3])
@@ -245,9 +345,16 @@ class TwoChainRegtest:
     def _fork(self):
         """Give node B node A's history up to `activation_height - 1`."""
         self.legacy.stop()
-        shutil.copytree(self.legacy_dir, self.blake2b_dir)
-        # The copy carries node A's log and bitcoin.conf; both are rewritten by
-        # the Bitcoind constructor (new ports) and TailableProc (new log).
+        # `strace.log` is excluded so node B's trace is its own: strace appends
+        # (#394), and a copied trace would read as node B having made node A's
+        # calls. The copy still carries node A's log and bitcoin.conf; both are
+        # rewritten by the Bitcoind constructor (new ports) and TailableProc
+        # (new log).
+        shutil.copytree(
+            self.legacy_dir,
+            self.blake2b_dir,
+            ignore=shutil.ignore_patterns("strace.log"),
+        )
         self.blake2b = self._new_node(
             self.blake2b_dir,
             self.blake2b_path,
@@ -292,7 +399,36 @@ class TwoChainRegtest:
         self.poison_raw_hex = signed["hex"]
         self.poison_outpoint = (poison_txid, 0, Decimal(str(cb_out["value"])) - fee)
 
+    @staticmethod
+    def _preflight_block_data(node, label):
+        """Read every block the indexer will need, not only the current tip.
+
+        This diagnoses an unreadable copied/history block before a fetcher
+        panics. It is not a flush/durability guarantee and does not retry or
+        restart a node that cannot serve its data (#394).
+        """
+        tip = node.rpc.getblockcount()
+        expected_tip = node.rpc.getblockhash(tip)
+        for height in range(tip + 1):
+            block_hash = "unresolved"
+            try:
+                block_hash = node.rpc.getblockhash(height)
+                raw = node.rpc.getblock(block_hash, 0)
+                if not isinstance(raw, str) or len(bytes.fromhex(raw)) < 80:
+                    raise ValueError("missing or malformed raw block data")
+            except Exception as error:
+                raise RuntimeError(
+                    f"{label} block-data preflight failed at height {height}, "
+                    f"hash {block_hash}, tip {tip}: {error}"
+                ) from error
+        if node.rpc.getbestblockhash() != expected_tip:
+            raise RuntimeError(f"{label} chain changed during block-data preflight")
+        logging.info("%s preflight read every block through height %s", label, tip)
+
     def _start_indexers(self):
+        for node, label in ((self.legacy, "knots-legacy"),
+                            (self.blake2b, "knots-blake2b")):
+            self._preflight_block_data(node, label)
         self.electrs_legacy = EsploraElectrs(
             electrs_dir=self.electrs_legacy_dir,
             bitcoind_dir=self.legacy_dir,
@@ -305,13 +441,18 @@ class TwoChainRegtest:
             bitcoind_rpcport=self.blake2b.rpcport,
             electrs_path=self.electrs_path,
         )
-        for electrs, node in (
-            (self.electrs_legacy, self.legacy),
-            (self.electrs_blake2b, self.blake2b),
+        for electrs, node, label in (
+            (self.electrs_legacy, self.legacy, "knots-legacy"),
+            (self.electrs_blake2b, self.blake2b, "knots-blake2b"),
         ):
             electrs.env.update(_child_env(self.home_dir))
-            electrs.startup()
-            electrs.wait_for_tip(node.rpc.getbestblockhash(), timeout=TIMEOUT * 3)
+            try:
+                electrs.startup()
+                electrs.wait_for_tip(node.rpc.getbestblockhash(), timeout=TIMEOUT * 3)
+            except Exception as error:
+                raise RuntimeError(
+                    node_block_file_report(node, label, "indexer startup failed")
+                ) from error
 
     def _start_daemons(self):
         for d in (self.coincubed_legacy_dir, self.coincubed_blake2b_dir):

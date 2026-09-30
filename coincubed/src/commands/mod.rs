@@ -99,7 +99,11 @@ pub enum CommandError {
     InsaneRescanTimestamp(u32),
     /// An error that might occur in the racy rescan triggering logic.
     RescanTrigger(String),
+    /// The backend could not establish the genesis timestamp; no rescan started.
+    RescanGenesis(String),
     RecoveryNotAvailable,
+    /// The backend could not report its chain tip; nothing was created. Retryable.
+    ChainTipUnavailable(String),
     // Include timelock in error as it may not have been set explicitly by the user.
     OutpointNotRecoverable(bitcoin::OutPoint, /* timelock */ u16),
     /// Overflowing or unhardened derivation index.
@@ -182,7 +186,12 @@ impl fmt::Display for CommandError {
                 "There is already a rescan ongoing. Please wait for it to complete first."
             ),
             Self::InsaneRescanTimestamp(t) => write!(f, "Insane timestamp '{}'.", t),
+            Self::RescanGenesis(e) => write!(f, "Cannot determine rescan lower bound: {e}"),
             Self::RescanTrigger(e) => write!(f, "Error while starting rescan: '{}'", e),
+            Self::ChainTipUnavailable(e) => write!(
+                f,
+                "Cannot read the current chain tip; retry when the backend is available: {e}"
+            ),
             Self::RecoveryNotAvailable => write!(
                 f,
                 "No coin currently spendable through this timelocked recovery path."
@@ -640,13 +649,21 @@ impl DaemonControl {
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .expect("time measured now cannot be before unix epoch");
-        let tip_time = self.bitcoin.tip_time();
-        let tip_height: u32 = self
-            .bitcoin
-            .chain_tip()
-            .height
-            .try_into()
-            .expect("block height must fit in u32");
+        // A backend we cannot reach degrades like a stale tip does: no
+        // anti-fee-sniping locktime, rather than a panic mid-spend (#589).
+        let (tip_height, tip_time) = match self.bitcoin.chain_tip_result() {
+            Ok(tip) => (
+                tip.height.try_into().expect("block height must fit in u32"),
+                self.bitcoin.tip_time(),
+            ),
+            Err(e) => {
+                log::warn!(
+                    "Cannot read the chain tip, not setting an anti-fee-sniping locktime: {}",
+                    e
+                );
+                (0, None)
+            }
+        };
         spend::anti_fee_sniping_locktime(now, tip_height, tip_time)
     }
 }
@@ -715,9 +732,17 @@ impl DaemonControl {
         let wallet = db_conn.wallet();
         let receive_index: u32 = db_conn.receive_index().into();
         let change_index: u32 = db_conn.change_index().into();
-        let rescan_progress = wallet
-            .rescan_timestamp
-            .map(|_| self.bitcoin.rescan_progress().unwrap_or(1.0));
+        let rescan_progress = wallet.rescan_timestamp.map(|_| {
+            match self.bitcoin.rescan_progress_result() {
+                Ok(progress) => progress.unwrap_or(1.0),
+                // The rescan is still recorded as pending. An unreachable node
+                // is neither completion (1.0) nor a reason to panic (#589).
+                Err(e) => {
+                    log::warn!("Cannot read the rescan progress: {}", e);
+                    0.0
+                }
+            }
+        });
         // Split the poller's single chain alert into the two distinct fields it drives.
         // Read once so the two can never disagree, and keep an unknown divergence out of
         // `refused_reorg_depth`: it is not a rollback of a known depth.
@@ -1615,17 +1640,30 @@ impl DaemonControl {
     /// The date must be after the genesis block time and before the current tip blocktime.
     pub fn start_rescan(&mut self, timestamp: u32) -> Result<(), CommandError> {
         let mut db_conn = self.db.connection();
-        let genesis_timestamp = self.bitcoin.genesis_block_timestamp();
-
-        let future_timestamp = self
+        let genesis_timestamp = self
             .bitcoin
-            .tip_time()
-            .map(|t| timestamp >= t)
-            .unwrap_or(false);
-        if timestamp < genesis_timestamp || future_timestamp {
+            .genesis_block_timestamp()
+            .map_err(|error| CommandError::RescanGenesis(error.to_string()))?;
+
+        let tip_timestamp = self.bitcoin.tip_time().ok_or_else(|| {
+            CommandError::RescanTrigger(
+                "Cannot determine current tip timestamp; retry when the backend is available"
+                    .into(),
+            )
+        })?;
+        if timestamp < genesis_timestamp || timestamp >= tip_timestamp {
             return Err(CommandError::InsaneRescanTimestamp(timestamp));
         }
-        if db_conn.rescan_timestamp().is_some() || self.bitcoin.rescan_progress().is_some() {
+        let backend_rescanning = self
+            .bitcoin
+            .rescan_progress_result()
+            .map_err(|e| {
+                CommandError::RescanTrigger(format!(
+                    "Cannot determine whether the backend is rescanning; retry when it is available: {e}"
+                ))
+            })?
+            .is_some();
+        if db_conn.rescan_timestamp().is_some() || backend_rescanning {
             return Err(CommandError::AlreadyRescanning);
         }
 
@@ -1693,7 +1731,11 @@ impl DaemonControl {
 
         // Query the coins that we can spend through the specified recovery path (if no recovery
         // path specified, use the first available one) from the database.
-        let current_height = self.bitcoin.chain_tip().height;
+        let current_height = self
+            .bitcoin
+            .chain_tip_result()
+            .map_err(CommandError::ChainTipUnavailable)?
+            .height;
         let timelock =
             timelock.unwrap_or_else(|| self.config.main_descriptor.first_timelock_value());
         let height_delta: i32 = timelock.into();
@@ -2041,6 +2083,62 @@ mod tests {
         fn connection(&self) -> Box<dyn DatabaseConnection> {
             self.inner.connection()
         }
+    }
+
+    #[test]
+    fn rescan_genesis_failure_is_retryable_without_recording_success() {
+        let backend = std::sync::Arc::new(std::sync::Mutex::new(DummyBitcoind::new()));
+        let interface: std::sync::Arc<std::sync::Mutex<dyn crate::bitcoin::BitcoinInterface>> =
+            backend.clone();
+        let daemon = DummyCoincube::new(interface, DummyDatabase::new());
+        let mut control = daemon.control().clone();
+        daemon.shutdown();
+        backend.lock().unwrap().genesis_error = Some(crate::connect::AdmissionError::Unavailable);
+        assert!(matches!(
+            control.start_rescan(1231006506),
+            Err(CommandError::RescanGenesis(_))
+        ));
+        assert!(control.db.connection().rescan_timestamp().is_none());
+        assert!(backend.lock().unwrap().rescan_requests.is_empty());
+        backend.lock().unwrap().genesis_error = None;
+        backend.lock().unwrap().tip_timestamp = Some(1231006600);
+        assert!(matches!(
+            control.start_rescan(1231006504),
+            Err(CommandError::InsaneRescanTimestamp(_))
+        ));
+        control.start_rescan(1231006506).unwrap();
+        assert_eq!(control.db.connection().rescan_timestamp(), Some(1231006506));
+        assert_eq!(backend.lock().unwrap().rescan_requests, vec![1231006506]);
+    }
+
+    #[test]
+    fn rescan_missing_tip_is_retryable_and_never_records_or_triggers_a_scan() {
+        let backend = std::sync::Arc::new(std::sync::Mutex::new(DummyBitcoind::new()));
+        let interface: std::sync::Arc<std::sync::Mutex<dyn crate::bitcoin::BitcoinInterface>> =
+            backend.clone();
+        let daemon = DummyCoincube::new(interface, DummyDatabase::new());
+        let mut control = daemon.control().clone();
+        daemon.shutdown();
+        for timestamp in [1231006506, 1231006600, 1231006601] {
+            assert!(matches!(
+                control.start_rescan(timestamp),
+                Err(CommandError::RescanTrigger(_))
+            ));
+            assert!(control.db.connection().rescan_timestamp().is_none());
+            assert!(backend.lock().unwrap().rescan_requests.is_empty());
+        }
+        backend.lock().unwrap().tip_timestamp = Some(1231006600);
+        for timestamp in [1231006600, 1231006601] {
+            assert!(matches!(
+                control.start_rescan(timestamp),
+                Err(CommandError::InsaneRescanTimestamp(_))
+            ));
+            assert!(control.db.connection().rescan_timestamp().is_none());
+            assert!(backend.lock().unwrap().rescan_requests.is_empty());
+        }
+        control.start_rescan(1231006506).unwrap();
+        assert_eq!(control.db.connection().rescan_timestamp(), Some(1231006506));
+        assert_eq!(backend.lock().unwrap().rescan_requests, vec![1231006506]);
     }
 
     #[test]

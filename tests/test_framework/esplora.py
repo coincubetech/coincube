@@ -153,8 +153,23 @@ class EsploraElectrs(BitcoinBackend):
     def startup(self):
         try:
             self.start()
-        except Exception:
-            self.stop()
+        except Exception as error:
+            cleanup_error = None
+            try:
+                self.stop()
+            except Exception as failure:
+                cleanup_error = failure
+            with self.logs_cond:
+                tail = "\n".join(self.logs[-40:])[-8192:]
+            diagnostic = f"{self.prefix} startup failed; last process log lines:\n{tail}"
+            if cleanup_error is not None:
+                diagnostic += f"\nCleanup also failed: {cleanup_error}"
+            # Preserve the original exception type (including missing binaries).
+            # Python 3.11+ renders notes with the traceback; older runners still
+            # capture the diagnostic in pytest's error log.
+            if hasattr(error, "add_note"):
+                error.add_note(diagnostic)
+            logging.error(diagnostic)
             raise
 
     def _tip_hash_or_none(self):

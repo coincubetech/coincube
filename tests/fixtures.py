@@ -3,7 +3,7 @@ from bip32.utils import _pubkey_to_fingerprint
 from bip380.descriptors import Descriptor
 from concurrent import futures
 from test_framework.bitcoind import Bitcoind
-from test_framework.electrs import Electrs
+from test_framework.electrs import Electrs, StaleBlockRequestWatchdog
 from test_framework.coincubed import Coincubed
 from test_framework.signer import SingleSigner, MultiSigner
 from test_framework.utils import (
@@ -145,9 +145,15 @@ def bitcoin_backend(directory, bitcoind):
         bitcoind.before_reorg = lambda: electrs.wait_for_tip(
             bitcoind.rpc.getbestblockhash()
         )
+        # That barrier cannot cover requests made after the invalidation: a
+        # history lookup can still ask Core for a block it now refuses to
+        # serve, and Electrs then waits for it forever (#577).
+        electrs.stale_block_watchdog = StaleBlockRequestWatchdog(bitcoind, electrs)
+        electrs.stale_block_watchdog.start()
         try:
             yield electrs
         finally:
+            electrs.stale_block_watchdog.stop()
             bitcoind.before_reorg = None
             electrs.cleanup()
     else:

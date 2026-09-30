@@ -178,6 +178,10 @@ zip = { version = "0.6", default-features = false, features = [
 # (make-credential) and version 8 (`pPRFGlobalEval` on get-assertion), probed at
 # runtime rather than assumed.
 windows = { version = "0.61", features = [
+	"Win32_Security",
+	"Win32_Security_Authorization",
+	"Win32_Storage_FileSystem",
+	"Win32_System_Threading",
 	"Win32_Foundation",
 	"Win32_Networking_WindowsWebServices",
 	"Win32_UI_WindowsAndMessaging",
@@ -243,6 +247,8 @@ tokio = { version = "1", features = ["rt", "macros", "test-util"] }
 httpmock = "0.7"
 
 [features]
+# Explicit opt-in for disposable loopback regtest integration.
+regtest-harness = ["coincubed/regtest-harness"]
 # Opt-in tests that hit a real `coincube-api` dev endpoint. Requires
 # the `COINCUBE_API_URL` env var (and, for the auth-flavoured tests,
 # `COINCUBE_INTEGRATION_TOKEN`) at run time. Always off in the default

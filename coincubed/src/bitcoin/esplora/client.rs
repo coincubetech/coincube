@@ -454,12 +454,28 @@ impl Client {
         self.try_in_order_checked(op, true)
     }
 
-    fn try_in_order_checked<T, F>(&self, mut op: F, check_after: bool) -> Result<T, Error>
+    fn try_in_order_checked<T, F>(&self, op: F, check_after: bool) -> Result<T, Error>
     where
         F: FnMut(&esplora_client::blocking::BlockingClient) -> Result<T, esplora_client::Error>,
     {
+        self.try_in_order_validated(op, check_after, Ok)
+    }
+
+    /// Validate a successful response before accepting its provider. Semantic
+    /// failures try the next provider without pretending to be transport errors
+    /// or cooling an otherwise reachable upstream.
+    fn try_in_order_validated<T, U, F, V>(
+        &self,
+        mut op: F,
+        check_after: bool,
+        mut validate: V,
+    ) -> Result<U, Error>
+    where
+        F: FnMut(&esplora_client::blocking::BlockingClient) -> Result<T, esplora_client::Error>,
+        V: FnMut(T) -> Result<U, Error>,
+    {
         let transport_backoff = transport_cooldown(self.providers.len());
-        let mut last_result: Option<Result<T, esplora_client::Error>> = None;
+        let mut last_error = None;
         for provider in &self.providers {
             // Bail out between providers if the daemon is shutting down, so a
             // dead/throttled provider chain can't keep `stop()` blocked. The
@@ -499,59 +515,59 @@ impl Client {
                         .map_err(|error| admission_error(provider, error))?;
                 }
             }
-            if result.is_ok() {
-                provider.clear_cooldown();
-                return result.map_err(|e| Error::Client(Box::new(e)));
+            let retryable = should_fall_back(&result);
+            let throttled = is_throttled(&result);
+            let transport_failure = is_transport_failure(&result);
+            let error = match result {
+                Ok(value) => {
+                    provider.clear_cooldown();
+                    match validate(value) {
+                        Ok(value) => return Ok(value),
+                        Err(error) => {
+                            last_error = Some(error);
+                            continue;
+                        }
+                    }
+                }
+                Err(error) => error,
+            };
+            if !retryable {
+                return Err(Error::Client(Box::new(error)));
             }
-            if !should_fall_back(&result) {
-                // Non-retryable error (e.g. 400, 404). The caller wants
-                // this exact answer — don't keep dialling.
-                return result.map_err(|e| Error::Client(Box::new(e)));
-            }
-            if is_throttled(&result) {
+            if throttled {
                 provider.enter_cooldown(RATE_LIMIT_COOLDOWN);
-                if let Err(ref e) = result {
-                    log::warn!(
-                        "Esplora {} throttled ({}); cooling for {:?} and trying next provider",
-                        provider.name,
-                        e,
-                        RATE_LIMIT_COOLDOWN,
-                    );
-                }
-            } else if is_transport_failure(&result) {
-                // Unreachable provider (timeout/connection error). Cool it down
-                // so subsequent calls skip it instead of re-paying the request
-                // timeout every time — the repeated-stall bug. 5xx falls to the
-                // branch below and is NOT cooled (it usually clears within a
-                // tick).
+                log::warn!(
+                    "Esplora {} throttled ({}); cooling for {:?} and trying next provider",
+                    provider.name,
+                    error,
+                    RATE_LIMIT_COOLDOWN,
+                );
+            } else if transport_failure {
+                // Reachability errors cool down; 5xx responses do not.
                 provider.enter_cooldown(transport_backoff);
-                if let Err(ref e) = result {
-                    log::warn!(
-                        "Esplora {} unreachable ({}); cooling for {:?} and trying next provider",
-                        provider.name,
-                        e,
-                        transport_backoff,
-                    );
-                }
-            } else if let Err(ref e) = result {
+                log::warn!(
+                    "Esplora {} unreachable ({}); cooling for {:?} and trying next provider",
+                    provider.name,
+                    error,
+                    transport_backoff,
+                );
+            } else {
                 log::warn!(
                     "Esplora {} failed ({}); trying next provider",
                     provider.name,
-                    e,
+                    error
                 );
             }
-            last_result = Some(result);
+            last_error = Some(Error::Client(Box::new(error)));
         }
+
         // Every provider either failed retryably or was on cooldown.
         // Surface the last real result if we have one; otherwise the
         // entire chain was on cooldown — return the typed
         // [`Error::AllCooling`] so the poller can log it at a sane
         // level and back off longer than its normal 2s retry, since
         // a cooldown won't lift for minutes.
-        match last_result {
-            Some(r) => r.map_err(|e| Error::Client(Box::new(e))),
-            None => Err(Error::AllCooling),
-        }
+        Err(last_error.unwrap_or(Error::AllCooling))
     }
 
     /// Get the genesis block hash (block at height 0).
@@ -633,16 +649,23 @@ impl Client {
     /// list or a timestamp outside `u32` is an [`Error::TipMetadata`], never a
     /// default.
     ///
-    /// Provider selection, cooldown and shutdown semantics are unchanged: the
-    /// single request goes through [`Self::try_in_order`] like every other call.
+    /// Empty/overflow metadata tries the next eligible provider without a
+    /// transport cooldown. If no provider succeeds, return the last attempted
+    /// provider's error. HTTP refusal, cooldown, admission and shutdown rules
+    /// retain their usual behavior.
     pub fn tip_time(&self) -> Result<u32, Error> {
-        let summaries = self.try_in_order(|client| client.get_blocks(None))?;
-        let tip = summaries
-            .iter()
-            .max_by_key(|summary| summary.time.height)
-            .ok_or(Error::TipMetadata("`/blocks` returned no block summaries"))?;
-        u32::try_from(tip.time.timestamp)
-            .map_err(|_| Error::TipMetadata("tip timestamp does not fit in u32"))
+        self.try_in_order_validated(
+            |client| client.get_blocks(None),
+            true,
+            |summaries| {
+                let tip = summaries
+                    .iter()
+                    .max_by_key(|summary| summary.time.height)
+                    .ok_or(Error::TipMetadata("`/blocks` returned no block summaries"))?;
+                u32::try_from(tip.time.timestamp)
+                    .map_err(|_| Error::TipMetadata("tip timestamp does not fit in u32"))
+            },
+        )
     }
 
     /// Broadcast a transaction to the network.
@@ -727,6 +750,49 @@ mod tests {
         )
         .unwrap()
     }
+    #[test]
+    fn admitted_proxy_reads_and_broadcast_never_send_account_credentials() {
+        use bitcoin::hashes::Hash;
+        let hash = bitcoin::BlockHash::from_byte_array([7; 32]);
+        // Synthetic transport payload only; this mock grants no node acceptance.
+        let tx = bitcoin::Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![bitcoin::TxIn::default()],
+            output: vec![],
+        };
+        let server = mock_esplora(StdHashMap::from([
+            ("/block-height/900000", (200, hash.to_string())),
+            ("/tx", (200, tx.compute_txid().to_string())),
+        ]));
+        let authority = authority_fixture(hash);
+        let client = Client::new_for_connect(
+            backend_fixture(&server, authority.clone()),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap();
+        client.broadcast_tx(&tx).unwrap();
+        let heads = server.heads.lock().unwrap();
+        assert!(heads
+            .iter()
+            .any(|h| h.starts_with("GET /block-height/900000 ")));
+        assert!(heads.iter().any(|h| h.starts_with("POST /tx ")));
+        assert!(heads
+            .iter()
+            .all(|head| !head.to_ascii_lowercase().contains("authorization:")));
+        assert!(heads.iter().all(|head| !head.contains("synthetic-jwt")));
+        drop(heads);
+        // Dropping credentials from proxy HTTP must not bypass authenticated
+        // authority checks, including their post-admission revocation state.
+        authority.0.lock().unwrap().hash = bitcoin::BlockHash::from_byte_array([8; 32]);
+        let before = server.requests().iter().filter(|p| *p == "/tx").count();
+        assert!(client.broadcast_tx(&tx).is_err());
+        assert_eq!(
+            server.requests().iter().filter(|p| *p == "/tx").count(),
+            before
+        );
+    }
+
     #[test]
     fn admitted_operation_accepts_growth_and_lag_is_typed_without_fallback() {
         use bitcoin::hashes::Hash;
@@ -1440,6 +1506,7 @@ mod tests {
         base: String,
         addr: std::net::SocketAddr,
         requests: Arc<Mutex<Vec<String>>>,
+        heads: Arc<Mutex<Vec<String>>>,
         stop: Arc<AtomicBool>,
         thread: Option<std::thread::JoinHandle<()>>,
     }
@@ -1561,6 +1628,8 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let base = format!("http://{}", addr);
         let requests: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let heads = Arc::new(Mutex::new(Vec::new()));
+        let seen_heads = heads.clone();
         let stop = Arc::new(AtomicBool::new(false));
         let seen = requests.clone();
         let stopping = stop.clone();
@@ -1590,6 +1659,7 @@ mod tests {
                     .and_then(|l| l.split_whitespace().nth(1))
                     .unwrap_or("")
                     .to_string();
+                seen_heads.lock().unwrap().push(head);
                 seen.lock().unwrap().push(path.clone());
                 let (status, body) = routes
                     .get(path.as_str())
@@ -1616,6 +1686,7 @@ mod tests {
             base,
             addr,
             requests,
+            heads,
             stop,
             thread: Some(thread),
         }
@@ -1851,6 +1922,65 @@ mod tests {
         for m in [&mock, &mock2] {
             assert_eq!(m.requests(), vec!["/blocks".to_string()]);
         }
+    }
+
+    #[test]
+    fn tip_time_semantic_failures_try_healthy_fallback_without_cooling() {
+        for body in [
+            "[]".to_string(),
+            blocks_json(&[bitcoin_summary(H1, 1, u64::from(u32::MAX) + 1, H0)]),
+        ] {
+            let bad = mock_esplora(routes((200, body)));
+            let good = mock_esplora(routes((
+                200,
+                blocks_json(&[bitcoin_summary(H1, 1, 1234, H0)]),
+            )));
+            let client = client_with(vec![bad.provider("bad"), good.provider("good")]);
+            for _ in 0..2 {
+                assert_eq!(client.tip_time().unwrap(), 1234);
+                assert!(client.providers.iter().all(|p| !p.is_cooling()));
+            }
+            assert_eq!(bad.requests().len(), 2);
+            assert_eq!(good.requests().len(), 2);
+        }
+    }
+
+    #[test]
+    fn tip_time_all_unusable_returns_last_metadata_error() {
+        let empty = mock_esplora(routes((200, "[]".to_string())));
+        let overflow = mock_esplora(routes((
+            200,
+            blocks_json(&[bitcoin_summary(H1, 1, u64::from(u32::MAX) + 1, H0)]),
+        )));
+        let client = client_with(vec![empty.provider("empty"), overflow.provider("overflow")]);
+        assert!(matches!(
+            client.tip_time(),
+            Err(Error::TipMetadata("tip timestamp does not fit in u32"))
+        ));
+        assert_eq!(empty.requests().len(), 1);
+        assert_eq!(overflow.requests().len(), 1);
+        assert!(client.providers.iter().all(|p| !p.is_cooling()));
+    }
+
+    #[test]
+    fn semantic_fallback_still_obeys_shutdown() {
+        let first = mock_esplora(routes((200, "[]".to_string())));
+        let second = mock_esplora(routes((200, "[]".to_string())));
+        let client = client_with(vec![first.provider("first"), second.provider("second")]);
+        let mut attempts = 0;
+        let result: Result<(), Error> = client.try_in_order_validated(
+            |_| {
+                attempts += 1;
+                Ok(())
+            },
+            true,
+            |_| {
+                client.abort.store(true, Ordering::Relaxed);
+                Err(Error::TipMetadata("empty"))
+            },
+        );
+        assert!(matches!(result, Err(Error::Aborted)));
+        assert_eq!(attempts, 1);
     }
 
     #[test]

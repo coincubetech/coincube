@@ -60,12 +60,20 @@ pub fn items(ctx: &NavContext) -> Vec<SubItem> {
     // account has no fork grant: an account without it has no BTCB2 at all,
     // which is not a per-Cube state the user can act on. Inserted before
     // Settings so the rail keeps Settings last.
-    if crate::app::features::claim_blake2b(ctx.claim_source_cube()).is_available() {
+    let resume_fork = ctx.network == crate::chain::ChainId::BitcoinBlake2b
+        && ctx.has_vault
+        && ctx.btcb2_server_enabled
+        && ctx.btcb2_claim_resume;
+    if resume_fork || crate::app::features::claim_blake2b(ctx.claim_source_cube()).is_available() {
         let settings_at = items.len().saturating_sub(1);
         items.insert(
             settings_at,
             SubItem::new(
-                "Claim BTCB2",
+                if resume_fork {
+                    "Resume Claim"
+                } else {
+                    "Claim BTCB2"
+                },
                 recovery_icon,
                 Menu::Vault(VaultSubMenu::Claim),
                 |m| matches!(m, Menu::Vault(VaultSubMenu::Claim)),
@@ -100,6 +108,7 @@ mod tests {
             connect_stream_status: status,
             btcb2_server_enabled,
             btcb2_already_claimed,
+            btcb2_claim_resume: false,
         }
     }
 
@@ -168,5 +177,15 @@ mod tests {
             ))),
             labels(&ungranted)
         );
+    }
+    #[test]
+    fn fork_resume_entry_requires_an_existing_pair_and_account_grant() {
+        let status = crate::app::ConnectionStatus::default();
+        let mut context = ctx(&status, crate::chain::ChainId::BitcoinBlake2b, true, false);
+        assert!(!labels(&items(&context)).contains(&"Resume Claim"));
+        context.btcb2_claim_resume = true;
+        assert!(labels(&items(&context)).contains(&"Resume Claim"));
+        context.btcb2_server_enabled = false;
+        assert!(!labels(&items(&context)).contains(&"Resume Claim"));
     }
 }

@@ -198,6 +198,17 @@ impl fmt::Display for StartupError {
 
 impl error::Error for StartupError {}
 
+impl From<crate::bitcoin::GenesisError> for StartupError {
+    fn from(error: crate::bitcoin::GenesisError) -> Self {
+        use crate::bitcoin::GenesisError;
+        match error {
+            GenesisError::Bitcoind(error) => Self::Bitcoind(*error),
+            GenesisError::Electrum(error) => Self::Electrum(ElectrumError::Client(*error)),
+            GenesisError::Esplora(error) => connect_startup_error(*error),
+        }
+    }
+}
+
 impl From<io::Error> for StartupError {
     fn from(e: io::Error) -> Self {
         Self::Io(e)
@@ -985,7 +996,7 @@ impl DaemonHandle {
             config.main_descriptor.clone(),
             sync_progress_cache.clone(),
             reorg_alert_cache.clone(),
-        );
+        )?;
         let (poller_sender, poller_receiver) = mpsc::sync_channel(1);
         let poller_handle = thread::Builder::new()
             .name("Bitcoin Network poller".to_string())
@@ -1447,7 +1458,7 @@ mod tests {
         thread, time,
     };
 
-    // Read all bytes from the socket until the end of a JSON object, good enough approximation.
+    // Validate one complete JSON object without waiting for the peer to close the socket.
     fn read_til_json_end(stream: &mut net::TcpStream) {
         stream
             .set_read_timeout(Some(time::Duration::from_secs(5)))
@@ -1461,12 +1472,12 @@ mod tests {
                 "connection closed before the JSON body"
             );
 
-            if line.starts_with("Authorization") {
-                let mut buf = Vec::new();
-                reader.read_until(b'}', &mut buf).unwrap();
-                assert_eq!(
-                    buf.last(),
-                    Some(&b'}'),
+            if line == "\r\n" || line == "\n" {
+                let body = serde_json::Deserializer::from_reader(&mut reader)
+                    .into_iter::<serde_json::Value>()
+                    .next();
+                assert!(
+                    matches!(body, Some(Ok(value)) if value.is_object()),
                     "connection closed before the JSON body ended"
                 );
                 return;
@@ -1495,6 +1506,41 @@ mod tests {
             .unwrap();
         drop(client);
         read_til_json_end(&mut server);
+    }
+
+    #[test]
+    #[should_panic(expected = "connection closed before the JSON body ended")]
+    fn json_fixture_rejects_truncated_outer_object() {
+        let listener = net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        client
+            .write_all(b"Authorization: synthetic\r\n\r\n{\"params\":{\"nested\":true}")
+            .unwrap();
+        drop(client);
+        read_til_json_end(&mut server);
+    }
+
+    #[test]
+    fn json_fixture_completes_nested_object_without_socket_eof() {
+        let listener = net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        let worker = thread::spawn(move || {
+            read_til_json_end(&mut server);
+            server.write_all(b"accepted").unwrap();
+        });
+        client
+            .write_all(b"POST / HTTP/1.1\r\nAuthorization: synthetic\r\nContent-Type: application/json\r\n\r\n{\"params\":{\"nested\":\"}\"},\"id\":1}")
+            .unwrap();
+        // Keep the write side open: the fixture must respond before EOF.
+        client
+            .set_read_timeout(Some(time::Duration::from_secs(2)))
+            .unwrap();
+        let mut response = [0; 8];
+        std::io::Read::read_exact(&mut client, &mut response).unwrap();
+        assert_eq!(&response, b"accepted");
+        worker.join().unwrap();
     }
 
     // Respond to the two "echo" sent at startup to sanity check the connection
@@ -1673,6 +1719,82 @@ mod tests {
     // bitcoind interface, and use the DummyCoincube from testutils to sanity check the startup.
     // Note that startup as checked by this unit test is also tested in the functional test
     // framework.
+    #[test]
+    fn genesis_esplora_errors_preserve_admission_classification() {
+        use crate::bitcoin::{esplora::client::Error, GenesisError};
+        for (error, expected) in [
+            (Error::AllCooling, connect::AdmissionError::Throttled),
+            (Error::Aborted, connect::AdmissionError::Aborted),
+            (
+                Error::Admission(connect::AdmissionError::Unavailable),
+                connect::AdmissionError::Unavailable,
+            ),
+            (
+                Error::Admission(connect::AdmissionError::HashMismatch),
+                connect::AdmissionError::HashMismatch,
+            ),
+        ] {
+            let startup = StartupError::from(GenesisError::Esplora(Box::new(error)));
+            assert!(
+                matches!(startup, StartupError::ConnectAdmission(actual) if actual == expected)
+            );
+        }
+    }
+
+    #[test]
+    fn bitcoind_genesis_lookup_preserves_rpc_and_malformed_response_errors() {
+        use crate::bitcoin::{BitcoinInterface, GenesisError};
+        for (payload, rpc_failure) in [
+            (
+                r#"{"jsonrpc":"2.0","id":1,"result":null,"error":{"code":-8,"message":"synthetic unavailable"}}"#,
+                true,
+            ),
+            (
+                r#"{"jsonrpc":"2.0","id":1,"result":"not-a-block-hash"}"#,
+                false,
+            ),
+        ] {
+            let listener = net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = thread::spawn(move || {
+                complete_sanity_check(&listener);
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(time::Duration::from_secs(3)))
+                    .unwrap();
+                read_til_json_end(&mut stream);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    payload.len(),
+                    payload
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            });
+            let backend = BitcoinD::new(
+                &config::BitcoindConfig {
+                    addr,
+                    rpc_auth: config::BitcoindRpcAuth::UserPass(
+                        "synthetic".into(),
+                        "synthetic".into(),
+                    ),
+                },
+                "synthetic-wallet".into(),
+            )
+            .unwrap();
+            let error = backend.genesis_block().unwrap_err();
+            match error {
+                GenesisError::Bitcoind(error) if rpc_failure => {
+                    assert!(matches!(*error, BitcoindError::Server(_)))
+                }
+                GenesisError::Bitcoind(error) => {
+                    assert!(matches!(*error, BitcoindError::MalformedResponse(_)))
+                }
+                other => panic!("unexpected genesis error: {:?}", other),
+            }
+            server.join().unwrap();
+        }
+    }
+
     #[test]
     fn daemon_startup() {
         // This exercises a startup path with a known thread race: the poller can
@@ -2120,9 +2242,9 @@ mod tests {
                     if !head.ends_with("\r\n\r\n") {
                         continue;
                     }
-                    assert!(head
-                        .to_ascii_lowercase()
-                        .contains("authorization: bearer synthetic-jwt"));
+                    // Authenticated admission is handled by Authority above;
+                    // Esplora chain reads must never carry the Connect token.
+                    assert!(!head.to_ascii_lowercase().contains("authorization:"));
                     let path = head.split_whitespace().nth(1).unwrap().to_string();
                     serving_requests.lock().unwrap().push(path.clone());
                     let (status, body) = match path.as_str() {

@@ -1,12 +1,28 @@
+#[cfg(not(windows))]
+use std::fs::OpenOptions;
+#[cfg(windows)]
+mod windows;
+
 use super::{Error, Intent};
 use fs4::fs_std::FileExt;
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
-const MAX_BYTES: u64 = 1024 * 1024;
+const LEGACY_MAX_BYTES: u64 = 1024 * 1024;
+// One bounded hex ancestry record, atomically replaced with its intent. No
+// second file can get out of sync with the selected input or transaction.
+const MAX_BYTES: u64 =
+    LEGACY_MAX_BYTES + 2 * coincube_core::claim_ancestry::retained::MAX_ENCODED_BYTES as u64 + 1024;
+fn intent_limit(intent: &Intent) -> u64 {
+    if intent.version == 7 && intent.ancestry.is_some() {
+        MAX_BYTES
+    } else {
+        LEGACY_MAX_BYTES
+    }
+}
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 /// Stable lock inode is never renamed or unlinked. All cooperating owners hold
@@ -14,6 +30,8 @@ static NEXT: AtomicU64 = AtomicU64::new(0);
 pub(super) struct Journal {
     directory: PathBuf,
     _lock: File,
+    #[cfg(windows)]
+    _directory: windows::Directory,
     snapshot: Option<Vec<u8>>,
     poisoned: bool,
 }
@@ -39,29 +57,75 @@ fn private_file(path: &Path, create: bool) -> Result<File, Error> {
         }
         Ok(file)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        windows::file(path, create).map_err(Error::Io)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (path, create);
         Err(Error::UnsupportedPlatform)
     }
 }
+/// Create the private journal directory without following a final-component
+/// symlink or changing permissions on an existing object. Platform backends
+/// must establish privacy at creation, before any intent can be written.
+pub(super) fn prepare_directory(directory: &Path) -> Result<(), Error> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        // A freshly installed wallet may not have materialized all parents yet.
+        // New components are private; existing components are never chmodded.
+        match fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(directory)
+        {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+        validate_directory(directory)
+    }
+    #[cfg(windows)]
+    {
+        windows::Directory::open(directory, true)
+            .map(|_| ())
+            .map_err(Error::Io)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = directory;
+        Err(Error::UnsupportedPlatform)
+    }
+}
+
+#[cfg(unix)]
+fn validate_directory(directory: &Path) -> Result<(), Error> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = fs::symlink_metadata(directory)?;
+    if !metadata.is_dir()
+        || metadata.mode() & 0o077 != 0
+        || metadata.uid() != unsafe { libc::geteuid() }
+    {
+        return Err(Error::InvalidJournal);
+    }
+    Ok(())
+}
+
 impl Journal {
     pub(super) fn open(directory: &Path) -> Result<Self, Error> {
         #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            let metadata = fs::symlink_metadata(directory)?;
-            if !metadata.is_dir()
-                || metadata.mode() & 0o077 != 0
-                || metadata.uid() != unsafe { libc::geteuid() }
-            {
-                return Err(Error::InvalidJournal);
-            }
-        }
-        #[cfg(not(unix))]
+        validate_directory(directory)?;
+        #[cfg(not(any(unix, windows)))]
         {
             return Err(Error::UnsupportedPlatform);
         }
+        #[cfg(windows)]
+        let pinned_directory = windows::Directory::open(directory, false)?;
+        #[cfg(windows)]
+        let directory = pinned_directory.path.clone();
+        #[cfg(not(windows))]
         let directory = fs::canonicalize(directory)?;
         let lock = private_file(&directory.join("claim.lock"), true)?;
         if !lock.try_lock_exclusive()? {
@@ -70,6 +134,8 @@ impl Journal {
         let mut journal = Self {
             directory,
             _lock: lock,
+            #[cfg(windows)]
+            _directory: pinned_directory,
             snapshot: None,
             poisoned: false,
         };
@@ -97,10 +163,17 @@ impl Journal {
     pub(super) fn load(&self) -> Result<Option<Intent>, Error> {
         self.snapshot
             .as_ref()
-            .map(|bytes| serde_json::from_slice(bytes).map_err(|_| Error::InvalidJournal))
+            .map(|bytes| {
+                let intent: Intent =
+                    serde_json::from_slice(bytes).map_err(|_| Error::InvalidJournal)?;
+                if bytes.len() as u64 > intent_limit(&intent) {
+                    return Err(Error::InvalidJournal);
+                }
+                Ok(intent)
+            })
             .transpose()
     }
-    pub(super) fn store(&mut self, intent: &Intent) -> Result<(), Error> {
+    pub(super) fn ensure_current(&mut self) -> Result<(), Error> {
         if self.poisoned {
             return Err(Error::InvalidJournal);
         }
@@ -116,8 +189,12 @@ impl Journal {
             self.poisoned = true;
             return Err(Error::Conflict);
         }
+        Ok(())
+    }
+    pub(super) fn store(&mut self, intent: &Intent) -> Result<(), Error> {
+        self.ensure_current()?;
         let bytes = serde_json::to_vec(intent).map_err(|_| Error::InvalidJournal)?;
-        if bytes.len() as u64 > MAX_BYTES {
+        if bytes.len() as u64 > intent_limit(intent) {
             return Err(Error::InvalidJournal);
         }
         let path = self.directory.join(format!(
@@ -127,19 +204,36 @@ impl Journal {
         ));
         let mut created = false;
         let result = (|| -> Result<(), Error> {
-            let mut options = OpenOptions::new();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-            }
-            let mut file = options.open(&path)?;
+            #[cfg(not(windows))]
+            let mut file = {
+                let mut options = OpenOptions::new();
+                options.write(true).create_new(true);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+                }
+                options.open(&path)?
+            };
+            #[cfg(windows)]
+            let mut file = windows::temporary(&path)?;
             created = true;
+            #[cfg(test)]
+            crash_boundary("created", &self.directory, intent);
             file.write_all(&bytes)?;
             file.sync_all()?;
-            fs::rename(&path, self.directory.join("intent.json"))?;
-            File::open(&self.directory)?.sync_all()?;
+            #[cfg(test)]
+            crash_boundary("flushed", &self.directory, intent);
+            drop(file);
+            #[cfg(windows)]
+            windows::replace(&path, &self.directory.join("intent.json"))?;
+            #[cfg(not(windows))]
+            {
+                fs::rename(&path, self.directory.join("intent.json"))?;
+                File::open(&self.directory)?.sync_all()?;
+            }
+            #[cfg(test)]
+            crash_boundary("replaced", &self.directory, intent);
             Ok(())
         })();
         if result.is_err() {
@@ -153,5 +247,27 @@ impl Journal {
         }
         self.snapshot = Some(bytes);
         Ok(())
+    }
+}
+
+// Only the explicitly selected subprocess fixture can pause here. Production
+// builds contain neither the environment hooks nor the pause.
+#[cfg(test)]
+fn crash_boundary(stage: &str, directory: &Path, intent: &Intent) {
+    if intent.phase != super::Phase::BroadcastUncertain
+        || std::env::var("COINCUBE_TEST_CLAIM_CRASH_STAGE")
+            .ok()
+            .as_deref()
+            != Some(stage)
+        || std::env::var_os("COINCUBE_TEST_CLAIM_CRASH_DIRECTORY")
+            .is_none_or(|path| Path::new(&path) != directory)
+    {
+        return;
+    }
+    use std::io::Write;
+    println!("CLAIM_WRITE_BOUNDARY_REACHED");
+    std::io::stdout().flush().unwrap();
+    loop {
+        std::thread::park();
     }
 }

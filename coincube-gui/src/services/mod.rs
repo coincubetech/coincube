@@ -1,4 +1,5 @@
 pub mod branta;
+pub(crate) mod claim_ancestry_gate;
 pub mod claim_coordinator;
 pub mod claim_observation;
 pub mod connect;
