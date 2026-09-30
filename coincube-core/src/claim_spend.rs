@@ -1667,4 +1667,29 @@ mod tests {
             Err(Error::Spend(SpendCreationError::InputAuthentication(..)))
         ));
     }
+    /// Golden bytes pinned before the OP_RETURN builder was shared with
+    /// Split step 1. Any change to Claim's poison payload, output order,
+    /// economics or PSBT metadata fails here.
+    #[test]
+    fn claim_poison_bytes_are_pinned() {
+        for (chain, script_hex, psbt_digest) in [
+            (
+                ChainId::Bitcoin,
+                "6a4c57434f494e435542452d53504c495401002a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a749deaf27f2caf93c571f4cbe3c4450d6eb6ac07fc0885c8a9948bd32bb5c0d500000000000000",
+                "2d2675c76bd4b96aa57fa42c6476a1d1def276775dd281bbdab9a1d3a22f19ba",
+            ),
+            (
+                ChainId::Testnet4,
+                "6a4c57434f494e435542452d53504c495401012a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a749deaf27f2caf93c571f4cbe3c4450d6eb6ac07fc0885c8a9948bd32bb5c0d500000000000000",
+                "207980e684e5c252d2a15ec66b38f88d1fb5ece762d2df0fcb0d20ef415f7e94",
+            ),
+        ] {
+            let (desc, coins, mut getter) = fixture();
+            let built = build(chain, &desc, &coins, &mut getter, 10, 5).unwrap();
+            let tx = &built.psbt.unsigned_tx;
+            let digest = sha256::Hash::hash(&built.psbt.serialize()).to_string();
+            assert_eq!(tx.output[0].script_pubkey.to_hex_string(), script_hex);
+            assert_eq!(digest, psbt_digest);
+        }
+    }
 }
