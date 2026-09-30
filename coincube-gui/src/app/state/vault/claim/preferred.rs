@@ -1,5 +1,10 @@
 //! Prefer positively qualified ancestry; provider failures never select fallback.
+//!
+//! While the production ancestry gate is closed no ancestry construction could
+//! be signed, so the build makes no discovery request and uses OP_RETURN, with
+//! its RDTS timing refusals (#547).
 use super::*;
+use crate::services::claim_ancestry_gate;
 use crate::services::claim_observation::http::{AncestryContext, MAX_ANCESTRY_CANDIDATES};
 use coincube_core::claim::PreflightTips;
 use coincube_core::{
@@ -44,6 +49,14 @@ pub(super) async fn build_preferred(
     }
     let context = production.context().clone();
     drop(production);
+    if !claim_ancestry_gate::discovery_open(&connect.client) {
+        return tokio::time::timeout(
+            CHECK_POLICY.collection_budget,
+            op_return(daemon, wallet, coins, feerate_vb, &window, &current),
+        )
+        .await
+        .map_err(|_| "The Claim input search timed out. Read the Vault again.".to_string())?;
+    }
     let source = HttpObservationSource::new(
         connect.client,
         ChainId::Bitcoin,
@@ -76,12 +89,7 @@ pub(super) async fn build_preferred(
                 return Err("No input qualified within the 32-candidate ancestry search limit; remaining inputs were not checked.".into());
             }
             // An absent qualifying input is not permission to ignore RDTS.
-            if let Err(assessment) = window.rdts {
-                return Err(rdts_refusal(assessment, &window));
-            }
-            let result = build(daemon, wallet, coins, feerate_vb, window.fork_hash).await;
-            current()?;
-            return result;
+            return op_return(daemon, wallet, coins, feerate_vb, &window, &current).await;
         };
         let path = proof
             .retained_path()
@@ -216,4 +224,21 @@ pub(super) async fn build_preferred(
     })
     .await
     .map_err(|_| "The Claim input search timed out. Read the Vault again.".to_string())?
+}
+
+/// The OP_RETURN construction, refused while RDTS disallows it.
+async fn op_return(
+    daemon: Arc<dyn Daemon + Send + Sync>,
+    wallet: Arc<Wallet>,
+    coins: CoinSet,
+    feerate_vb: u64,
+    window: &ForkWindow,
+    current: &impl Fn() -> Result<(), String>,
+) -> Result<Box<Construction>, String> {
+    if let Err(assessment) = window.rdts {
+        return Err(rdts_refusal(assessment, window));
+    }
+    let result = build(daemon, wallet, coins, feerate_vb, window.fork_hash).await;
+    current()?;
+    result
 }

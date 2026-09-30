@@ -860,16 +860,19 @@ impl ClaimStep1Panel {
                     // These timing states only disallow OP_RETURN. Candidates
                     // permit a bounded proof search, never signing authority;
                     // build_preferred independently refuses invalid fallback.
-                    let can_search_ancestry = matches!(
-                        assessment,
-                        Assessment::RdtsScheduled
-                            | Assessment::RdtsInactive
-                            | Assessment::RdtsExpired
-                            | Assessment::ExpiryMargin
-                    ) && checked
-                        .coins
-                        .as_ref()
-                        .is_ok_and(|coins| !coins.ancestry_candidates.is_empty());
+                    // A closed ancestry gate permits no search at all (#547).
+                    let can_search_ancestry = self.ancestry_discovery_open()
+                        && matches!(
+                            assessment,
+                            Assessment::RdtsScheduled
+                                | Assessment::RdtsInactive
+                                | Assessment::RdtsExpired
+                                | Assessment::ExpiryMargin
+                        )
+                        && checked
+                            .coins
+                            .as_ref()
+                            .is_ok_and(|coins| !coins.ancestry_candidates.is_empty());
                     if !can_search_ancestry {
                         return refuse(&rdts_refusal(assessment, window), false);
                     }
@@ -892,6 +895,14 @@ impl ClaimStep1Panel {
             return refuse(&format!("Couldn't fetch a fee rate: {reason}"), true);
         }
         None
+    }
+
+    /// Whether a build may search for a Bitcoin-only input. While the
+    /// production ancestry gate is closed it never does: OP_RETURN only.
+    pub fn ancestry_discovery_open(&self) -> bool {
+        self.connect
+            .as_ref()
+            .is_some_and(|c| crate::services::claim_ancestry_gate::discovery_open(&c.client))
     }
 
     /// Whether the Build button may be offered: every precondition holds and
