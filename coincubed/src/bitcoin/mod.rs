@@ -504,7 +504,12 @@ pub trait BitcoinInterface: Send {
 
     /// Fallible [`Self::mempool_spenders`] for RPC commands (#594): an empty list
     /// is the backend saying nothing spends these outpoints; an unreachable
-    /// backend is an `Err`.
+    /// backend, or an answer that cannot be used, is an `Err`.
+    ///
+    /// bitcoind and Electrum override this (#597). The default wraps the
+    /// infallible read and so can never return `Err`: a backend that keeps it
+    /// (Esplora, which has no mempool reads and always answers empty) cannot
+    /// tell an outage apart from "nothing spends these outpoints".
     fn mempool_spenders_result(
         &self,
         outpoints: &[bitcoin::OutPoint],
@@ -514,7 +519,12 @@ pub trait BitcoinInterface: Send {
 
     /// Fallible [`Self::mempool_entry`] for RPC commands (#594): `Ok(None)` is the
     /// backend saying the transaction is not in its mempool; an unreachable
-    /// backend is an `Err`.
+    /// backend, or an answer that cannot be used, is an `Err`.
+    ///
+    /// bitcoind and Electrum override this (#597). The default wraps the
+    /// infallible read and so can never return `Err`: a backend that keeps it
+    /// (Esplora, which has no mempool reads and always answers `None`) cannot
+    /// tell an outage apart from "not in the mempool".
     fn mempool_entry_result(&self, txid: &bitcoin::Txid) -> Result<Option<MempoolEntry>, String> {
         Ok(self.mempool_entry(txid))
     }
@@ -1200,6 +1210,23 @@ impl BitcoinInterface for electrum::Electrum {
         self.client()
             .mempool_spenders(outpoints)
             .unwrap_or_default()
+    }
+
+    // The client already tells absence from failure: a transaction the server
+    // does not know is skipped (an Electrum `Protocol` error reply for the
+    // requested txid, see `BdkElectrumClient::populate_with_txids`), and an
+    // unspent outpoint has no spender. Only a failed exchange is an `Err`.
+    fn mempool_spenders_result(
+        &self,
+        outpoints: &[bitcoin::OutPoint],
+    ) -> Result<Vec<MempoolEntry>, String> {
+        self.client()
+            .mempool_spenders(outpoints)
+            .map_err(|e| e.to_string())
+    }
+
+    fn mempool_entry_result(&self, txid: &bitcoin::Txid) -> Result<Option<MempoolEntry>, String> {
+        self.client().mempool_entry(txid).map_err(|e| e.to_string())
     }
 
     fn sync_progress(&self) -> SyncProgress {

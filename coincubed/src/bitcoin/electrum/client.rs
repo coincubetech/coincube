@@ -55,6 +55,15 @@ pub struct Client(BdkElectrumClient<electrum_client::Client>);
 impl Client {
     /// Create a new client and perform sanity checks.
     pub fn new(electrum_config: &config::ElectrumConfig) -> Result<Self, Error> {
+        Self::with_retries(electrum_config, RETRY_LIMIT)
+    }
+
+    /// [`Self::new`] with `retries` in place of [`RETRY_LIMIT`], so a test can
+    /// observe an outage without waiting out the back-off.
+    pub(crate) fn with_retries(
+        electrum_config: &config::ElectrumConfig,
+        retries: u8,
+    ) -> Result<Self, Error> {
         // First use a dummy config to check connectivity (no retries, short timeout).
         let dummy_config = Config::builder()
             .retry(0)
@@ -68,7 +77,7 @@ impl Client {
 
         // Now connection has been checked, create client with required retries and timeout.
         let config = Config::builder()
-            .retry(RETRY_LIMIT)
+            .retry(retries)
             .timeout(Some(RPC_SOCKET_TIMEOUT))
             .validate_domain(electrum_config.validate_domain)
             .build();

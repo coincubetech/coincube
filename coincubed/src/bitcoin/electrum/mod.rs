@@ -8,6 +8,8 @@ use bdk_electrum::bdk_chain::{
 };
 
 pub mod client;
+#[cfg(test)]
+mod tests;
 pub mod utils;
 pub mod wallet;
 use crate::bitcoin::{Block, BlockChainTip, Coin};
