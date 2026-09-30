@@ -12,8 +12,11 @@ pub fn height_i32_from_u32(height: u32) -> i32 {
     height.try_into().expect("height must fit into i32")
 }
 
-pub fn height_i32_from_usize(height: usize) -> i32 {
-    height.try_into().expect("height must fit into i32")
+/// A block height reported by the Electrum server, or `None` if it does not fit
+/// into our `i32` heights. The value comes off the wire, so it is checked
+/// rather than trusted: a panic here would be under the backend lock (#616).
+pub fn height_i32_from_usize(height: usize) -> Option<i32> {
+    height.try_into().ok()
 }
 
 pub fn height_usize_from_i32(height: i32) -> usize {

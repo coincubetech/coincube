@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import random
+import re
 import socket
 import urllib.error
 import urllib.request
@@ -25,6 +26,12 @@ from test_framework.utils import (
 )
 
 ELECTRS_BLAKE2B_PATH = os.getenv("ELECTRS_BLAKE2B_PATH")
+
+# The last line of electrs' index update (`Indexer::update`, schema.rs at the
+# pinned commit), logged at DEBUG (`-vvv`) once the block's transactions and
+# history have been written. The header tip that `/blocks/tip/hash` serves
+# moves at the *start* of the same update, before either is written (#617).
+_SYNCED_TIP_RE = re.compile(r"updating synced tip to ([0-9a-f]{64})")
 
 # Listener ports for electrs are picked *below* the kernel's ephemeral range
 # (Linux 32768-60999, macOS 49152-65535) rather than with ephemeral_port_reserve.
@@ -178,13 +185,48 @@ class EsploraElectrs(BitcoinBackend):
         except (urllib.error.URLError, OSError):
             return None
 
-    def wait_for_tip(self, block_hash, timeout=TIMEOUT):
-        """Block until the indexer's tip is `block_hash` (fails at once if it exits)."""
+    def synced_tip(self):
+        """The tip of electrs' last completed index update, from its log, or
+        None before the first one. Logs survive a restart; the restarted
+        process's first update logs its own line after them."""
+        with self.logs_cond:
+            for line in reversed(self.logs):
+                match = _SYNCED_TIP_RE.search(line)
+                if match:
+                    return match.group(1)
+        return None
+
+    def _confirmed_or_none(self, txid):
+        try:
+            return self.rest(f"/tx/{txid}/status", timeout=2).get("confirmed")
+        except (urllib.error.URLError, OSError, ValueError, AttributeError):
+            return None
+
+    def _tip_state(self, confirmed_txids):
+        return (
+            self._tip_hash_or_none(),
+            self.synced_tip(),
+            {txid: self._confirmed_or_none(txid) for txid in confirmed_txids},
+        )
+
+    def wait_for_tip(self, block_hash, timeout=TIMEOUT, confirmed_txids=()):
+        """Block until the indexer's tip is `block_hash` and electrs can serve its
+        transactions (fails at once if it exits).
+
+        `/blocks/tip/hash` alone is not enough: electrs moves that header tip
+        before it writes the block's transactions and history, so a read right
+        after it can 404 a transaction the block contains (#617). This also
+        waits for the update's closing "synced tip" log line for `block_hash`,
+        and for each of `confirmed_txids` to read as confirmed."""
         wait_for_while_condition_holds(
-            lambda: self._tip_hash_or_none() == block_hash,
+            lambda: self._tip_state(confirmed_txids)
+            == (block_hash, block_hash, {txid: True for txid in confirmed_txids}),
             lambda: self.running,
             timeout=timeout,
-            debug_fn=lambda: f"{self.prefix} tip {self._tip_hash_or_none()} != {block_hash}",
+            debug_fn=lambda: (
+                f"{self.prefix} (tip, synced tip, confirmed) "
+                f"{self._tip_state(confirmed_txids)} != {block_hash}"
+            ),
         )
 
     def stop(self):
