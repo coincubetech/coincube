@@ -5,6 +5,7 @@ pub mod claim_ancestry;
 pub mod claim_finalize;
 pub mod claim_spend;
 pub mod descriptors;
+pub mod foreign_split;
 pub mod psbt_unified;
 pub mod random;
 pub mod seed_crypt;
