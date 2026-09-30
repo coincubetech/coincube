@@ -380,10 +380,10 @@ impl Controller {
 
     /// Bind a freshly verified signed step 1 after
     /// [`Self::revalidate_split_construction`]. Once a submission was
-    /// recorded the signed bytes are immutable: only the identical
-    /// transaction binds. Before that (phase Intent, nothing ever sent) a
-    /// re-signed transaction replaces the recorded one and its txid becomes
-    /// the tracked txid.
+    /// recorded or an inclusion observed, the signed bytes are immutable:
+    /// only the identical transaction binds. Before that (phase Intent,
+    /// nothing sent or seen) a re-signed transaction replaces the recorded
+    /// one and its txid becomes the tracked txid.
     pub fn bind_recovered_split_transaction(
         &mut self,
         current: &Context,
@@ -403,7 +403,12 @@ impl Controller {
         if self.intent.bitcoin_transaction.as_ref() == Some(tx) {
             return Ok(());
         }
-        if self.intent.phase != Phase::Intent {
+        // Same rule as abandon_split: once a submission was recorded or an
+        // inclusion observed, the recorded bytes may be on chain (#622 F1).
+        if self.intent.phase != Phase::Intent
+            || self.intent.plan.previous_confirmation.is_some()
+            || !self.intent.inclusion_history.is_empty()
+        {
             return Err(Error::Conflict);
         }
         let mut next = self.intent.clone();
@@ -504,4 +509,4 @@ impl Controller {
 }
 
 #[cfg(all(test, any(unix, windows)))]
-mod tests;
+pub(super) mod tests;

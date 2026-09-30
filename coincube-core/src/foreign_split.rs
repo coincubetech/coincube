@@ -162,6 +162,10 @@ impl fmt::Display for Error {
 }
 impl std::error::Error for Error {}
 
+/// Domain separation for [`SplitSource::digest`]: no other hashed identity
+/// can share its preimage.
+pub const SPLIT_SOURCE_DIGEST_TAG: &[u8] = b"coincube/split-source/v1";
+
 /// The foreign wallet's public descriptors, checked against the Split matrix.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SplitSource {
@@ -192,14 +196,16 @@ impl SplitSource {
         self.internal.as_ref()
     }
 
-    /// The source identity (owner decision D9): SHA-256 over each
-    /// descriptor's canonical text with its checksum, tagged by branch and
-    /// length-prefixed so the pair cannot be re-split. It names the wallet
+    /// The source identity (owner decision D9): SHA-256 over the domain tag
+    /// [`SPLIT_SOURCE_DIGEST_TAG`], then each descriptor's canonical text
+    /// with its checksum, tagged by branch and length-prefixed so the pair
+    /// cannot be re-split. It names the wallet
     /// in the Split journal and in the target Cube's `split_from`; it is not
     /// a secret and not evidence of ownership.
     pub fn digest(&self) -> bitcoin::hashes::sha256::Hash {
         use bitcoin::hashes::HashEngine;
         let mut engine = bitcoin::hashes::sha256::Hash::engine();
+        engine.input(SPLIT_SOURCE_DIGEST_TAG);
         for (tag, descriptor) in [(0_u8, Some(&self.external)), (1, self.internal.as_ref())] {
             engine.input(&[tag]);
             match descriptor {

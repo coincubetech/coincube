@@ -1077,7 +1077,8 @@ fn locktime_must_be_a_height_at_or_below_the_tip() {
     }
 }
 
-/// D9 source digest: tagged and length-prefixed over each descriptor's
+/// D9 source digest: domain-tagged (`coincube/split-source/v1`), then
+/// branch-tagged and length-prefixed over each descriptor's
 /// canonical text, so the receive-only and paired sources differ, every
 /// shape differs, and the value is pinned (`split_from` and the Split
 /// journal store it).
@@ -1098,6 +1099,6 @@ fn split_source_digest_is_canonical_and_pinned() {
     assert_eq!(paired.digest(), wallet(Shape::Wpkh).source.digest());
     assert_eq!(
         paired.digest().to_string(),
-        "5c33200468e8e8e43abe603ab1fc8b09e9b1a2bba0c1e9790d8511d98234e9eb"
+        "be64de72f4745a148474c2b1c06112619c8ba5d05950c9321bd568aa5ff399d9"
     );
 }

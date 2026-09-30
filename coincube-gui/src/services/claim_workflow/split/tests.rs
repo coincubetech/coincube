@@ -736,6 +736,61 @@ fn split_resigning_before_submission_moves_the_tracked_txid() {
     assert_eq!(reopen(&temp, &step1).unwrap().plan().step1_txid(), tracked);
 }
 
+/// Review F1 (#622): an observed inclusion of the recorded step 1 keeps
+/// phase Intent (no submission was recorded), but those bytes may be on
+/// chain. A re-signed step 1 must not replace them, or the journal would
+/// track a txid that is not on chain and could neither progress nor be
+/// abandoned.
+#[test]
+fn split_observed_inclusion_blocks_rebinding_a_resigned_step1() {
+    let (wallet, step1, signed) = setup(Shape::Pkh);
+    let recorded = signed.transaction().compute_txid();
+    let temp = Temp::new();
+    let mut c = create(&temp, &step1, &signed);
+    assert_eq!(
+        refresh(
+            &mut c,
+            observation(recorded, Bitcoin::Confirmed { depth: 1 })
+        ),
+        Status::Observation(Assessment::WaitingForDepth { confirmations: 1 })
+    );
+    assert_eq!(c.phase(), Phase::Intent);
+    assert!(c.last_inclusion().is_some());
+    drop(c);
+    let mut c = reopen(&temp, &step1).unwrap();
+    c.revalidate_split_construction(&context(), &step1, FORK)
+        .unwrap();
+    let resigned = resign_pkh(&step1, &wallet.signers[0], 3);
+    assert_ne!(resigned.transaction().compute_txid(), recorded);
+    assert!(matches!(
+        c.bind_recovered_split_transaction(&context(), &resigned),
+        Err(Error::Conflict)
+    ));
+    assert_eq!(c.plan().step1_txid(), recorded);
+    assert_eq!(c.recorded_bitcoin_transaction(), Some(signed.transaction()));
+    // The recorded bytes still bind, and the journal keeps seeing them.
+    c.bind_recovered_split_transaction(&context(), &signed)
+        .unwrap();
+    assert_eq!(
+        refresh(
+            &mut c,
+            observation(recorded, Bitcoin::Confirmed { depth: 6 })
+        ),
+        Status::Observation(Assessment::ObservationsEligibleForPreflight)
+    );
+    drop(c);
+    assert_eq!(reopen(&temp, &step1).unwrap().plan().step1_txid(), recorded);
+}
+
+/// A Split controller as created: phase Intent, construction verified, no
+/// fresh observation. For the Claim-only guard tests in `claim_workflow`.
+pub(in crate::services::claim_workflow) fn created_split(
+    directory: &std::path::Path,
+) -> Controller {
+    let (_, step1, signed) = setup(Shape::Pkh);
+    Controller::create_split(directory, TARGET.into(), &step1, &signed, FORK, context()).unwrap()
+}
+
 /// P2: the descriptors are deleted on abandonment (the whole intent) and at
 /// completion (the descriptors only); the file stays owner-only.
 #[test]

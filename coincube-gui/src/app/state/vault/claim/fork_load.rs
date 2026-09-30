@@ -114,8 +114,12 @@ pub async fn load(
         .await
         .map_err(|e| super::describe(crate::services::claim_coordinator::Error::Journal(e)))?;
     let plan = controller.plan();
+    // A Claim loader: the identity above has a Bitcoin Cube, which no Split
+    // journal has, so a tracked (Split) plan cannot reach here. Refuse one
+    // anyway rather than rely on that (#622 F3).
     if plan.bitcoin_chain != ChainId::Bitcoin
         || plan.fork_chain != wallet.chain
+        || plan.tracked_txid.is_some()
         || controller.signed_txid() != Some(plan.step1_txid())
     {
         return Err("The Bitcoin step must be recorded before continuing this Claim.".into());
