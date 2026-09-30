@@ -466,9 +466,10 @@ pub trait SweepFeeSource: Send + Sync {
     async fn mid_priority_sat_vb(&self) -> Option<u64>;
 }
 
-/// Production source. Tenshu has no BTCB2-chain-scoped fee estimator yet
-/// (#568 decision 4), and Bitcoin mainnet fees do not describe the BTCB2
-/// mempool, so the review shows fees as unavailable.
+/// The fail-closed source when no Connect account session can read the
+/// BTCB2 estimate (`ConnectBtcb2Fees` in `split_fees`, #568 D4). Bitcoin
+/// mainnet fees do not describe the BTCB2 mempool, so the review shows fees
+/// as unavailable.
 pub struct UnavailableBtcb2Fees;
 
 #[async_trait::async_trait]

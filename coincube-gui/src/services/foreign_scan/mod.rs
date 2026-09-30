@@ -154,6 +154,10 @@ impl ScanDescriptor {
             1
         }
     }
+    /// The parsed public descriptor.
+    pub(crate) fn descriptor(&self) -> &Descriptor<DescriptorPublicKey> {
+        &self.descriptor
+    }
     pub(crate) fn canonical(&self) -> String {
         self.descriptor.to_string()
     }
