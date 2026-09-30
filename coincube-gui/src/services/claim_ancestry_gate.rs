@@ -25,6 +25,22 @@ pub(crate) fn authorization() -> Option<Authorization> {
     ENABLED.then_some(Authorization(()))
 }
 
+/// Whether a Claim build may search for a Bitcoin-only input (#547).
+///
+/// A construction found while the gate is closed could never be signed, so a
+/// closed gate means no ancestry discovery at all: the build uses OP_RETURN,
+/// whose timing refusals then apply unchanged. Tests may open discovery on a
+/// specific client; that never grants [`authorization`].
+pub(crate) fn discovery_open(client: &crate::services::coincube::CoincubeClient) -> bool {
+    #[cfg(test)]
+    if client.ancestry_discovery_opened_for_test() {
+        return true;
+    }
+    #[cfg(not(test))]
+    let _ = client;
+    authorization().is_some()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -32,6 +48,14 @@ mod tests {
     #[test]
     fn production_ancestry_stays_closed_pending_acceptance() {
         assert!(authorization().is_none());
+        let mut client = crate::services::coincube::CoincubeClient::for_test("http://127.0.0.1:1");
+        assert!(!discovery_open(&client));
+        client.open_ancestry_discovery_for_test();
+        assert!(discovery_open(&client));
+        assert!(
+            authorization().is_none(),
+            "opening discovery never authorizes"
+        );
         assert_eq!(
             CLOSED_MESSAGE,
             "Bitcoin-only input signing is not available yet."

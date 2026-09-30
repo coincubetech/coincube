@@ -23,6 +23,20 @@ Bundle) runs alongside `bitcoind`, and `bitcoind` is configured with:
 - `maxuploadtarget` (default **~1 GB/day**) and `maxconnections` (default **20**)
   — always set when inbound is on; the metered-data protection.
 
+A **Knots** `bitcoind` is also always spawned with `-torexecute=0` on its command
+line, whatever the inbound setting (`NodeFlavor::managed_spawn_args`). Without it,
+Knots launches a `tor` of its own whenever it cannot reach its control port, and
+tries again on every reconnect backoff — which, with inbound on, is whenever the
+managed Tor stops under a running node (the loader restarting Tor, a failed Tor
+start that leaves the old node running, or the Tor process dying). When no `tor`
+binary is on `PATH` that exec fails, and Knots v29.3's failed-exec path closes a
+file descriptor twice (#394, #605). COINCUBE owns the Tor the node talks to, so
+the node never needs to start one. The flag is chosen by the binary actually
+launched, not the configured flavour, because Core rejects an unknown
+command-line option at startup (and the launcher can fall back to the other
+flavour's binary). It is not written into `bitcoin.conf`, which Core and the
+Knots/Core fallback share.
+
 Clearnet inbound, UPnP/NAT-PMP, and I2P are **out of scope** for v1.
 
 ## Default ON, with a one-click opt-out
@@ -63,6 +77,7 @@ Serving continuously through sleep would require an OS-specific sleep inhibitor
 | Concern | Where |
 | --- | --- |
 | Config emission/parse (`listen`/`torcontrol`/`proxy`/caps) | [`InternalBitcoindConfig`](../coincube-gui/src/node/bitcoind.rs) `to_ini`/`from_ini` |
+| Knots-only spawn argument (`-torexecute=0`) | [`NodeFlavor::managed_spawn_args`](../coincube-gui/src/node/bitcoind.rs), applied in `Bitcoind::maybe_start` |
 | Tor binary URLs, version pin, dirs | [`node/bitcoind.rs`](../coincube-gui/src/node/bitcoind.rs) (`TOR_VERSION`, `tor_asset_url`, `internal_tor_*`) |
 | Download + PGP-verified install | [`installer/step/node/bitcoind.rs`](../coincube-gui/src/installer/step/node/bitcoind.rs) (`install_tor`, `DownloadVerification::for_tor`) |
 | Tor lifecycle, preference, fail-safe | [`node/tor.rs`](../coincube-gui/src/node/tor.rs) |
@@ -130,8 +145,8 @@ means a separate machine/host running `tor` + a Bitcoin client, or
 | # | Scenario | Steps | Expected |
 | --- | --- | --- | --- |
 | 1 | **Enable → reachable** | Fresh Knots setup (default ON) → let Tor bootstrap and `bitcoind` start | `bitcoin-cli getnetworkinfo` shows a `.onion` in `localaddresses`; the onion is reachable from an external Tor client; `getpeerinfo` eventually shows peers with `inbound: true` |
-| 2 | **Disable → listen off** | Settings → "Inbound connections" → toggle off → restart node | `bitcoin.conf` has no `listen`/`listenonion`/`torcontrol`/`proxy`; `getnetworkinfo.localaddresses` has no onion; no managed `tor` process; node runs outbound-only |
-| 3 | **Tor crash → fail-safe** | With inbound on, kill the `tor` process (or point the binary at a bad path) → restart node | `bitcoind` still starts and syncs (outbound-only); logs show "inbound unavailable, running outbound-only"; the preference sidecar still says enabled (retried next launch) |
+| 2 | **Disable → listen off** | Settings → "Inbound connections" → toggle off → restart node | `bitcoin.conf` has `listenonion=0` and no `listen`/`torcontrol`/`proxy`; `getnetworkinfo.localaddresses` has no onion; no managed `tor` process; node runs outbound-only |
+| 3 | **Tor crash → fail-safe** | With inbound on, kill the `tor` process (or point the binary at a bad path) → restart node | Before the restart, the running Knots node only retries its control port: `ps` shows `-torexecute=0` in its arguments, no new `tor` process appears, and with `-debug=tor` its `debug.log` shows "retrying" but never "trying to launch via". After the restart, `bitcoind` still starts and syncs (outbound-only); logs show "inbound unavailable, running outbound-only"; the preference sidecar still says enabled (retried next launch) |
 | 4 | **Bandwidth cap honoured** | Inbound on, default cap | `getnetworkinfo.uploadtarget.target_bytes` ≈ the configured MiB/day; `getnettotals` upload stays bounded. Toggle "Limit upload" off → `maxuploadtarget` omitted → `uploadtarget.target_bytes = 0` |
 | 5 | **Outbound-via-Tor sub-toggle** | Toggle the sub-toggle, restart | On: `bitcoin.conf` has `proxy=127.0.0.1:<socks>`, outbound peers are `.onion`/via Tor. Off: no `proxy` line, outbound is clearnet |
 | 6 | **Config round-trips** | Enable, restart twice | `bitcoin.conf` inbound keys stable across restarts; fresh Tor ports each run; `bitcoind` re-adds the *same* onion address (persistent key) |
@@ -143,6 +158,7 @@ means a separate machine/host running `tor` + a Bitcoin client, or
 ### Automated coverage
 
 - `node::bitcoind::tests::tor_inbound_emission` — config emission/round-trip.
+- `node::bitcoind::tests::the_spawned_binary_gets_torexecute_0_exactly_when_it_is_knots` — through `Bitcoind::maybe_start`'s spawn: a Knots binary gets `-torexecute=0`, a Core one does not, including both cross-flavour fallbacks.
 - `installer::step::node::bitcoind::tests::{tor_detached_signature_verification, tor_asset_urls, tor_verification}` — the vendored key verifies the real Tor manifest; URL construction; verification wiring.
 - `node::tor::tests::{bootstrap_line_detection, torrc_has_required_directives, preference_defaults_and_roundtrip, prepare_is_failsafe_without_tor_binary, duress_targets_tor_data_and_onion_keys_not_blockchain}`.
 - `gui::tab::duress_wipe_target_tests::wipes_all_cube_material_and_preserves_connect_auth` — onion key wiped, blockchain preserved.

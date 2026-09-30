@@ -4776,8 +4776,11 @@ mod flow {
 fn ancestry_candidates_allow_search_outside_rdts_but_never_override_bad_observations() {
     let mut p = panel(SINGLE_WSH);
     p.pre.target = Some("fork-cube".into());
+    // Discovery opened for the test; the closed-gate case is the next test.
+    let mut client = CoincubeClient::new();
+    client.open_ancestry_discovery_for_test();
     p.connect = Some(ConnectSession {
-        client: CoincubeClient::new(),
+        client,
         account: "7".into(),
     });
     for assessment in [
@@ -4823,4 +4826,44 @@ fn ancestry_candidates_allow_search_outside_rdts_but_never_override_bad_observat
     }
     p.pre.checked.as_mut().unwrap().window = Err("stale anchor".into());
     assert!(!p.can_build());
+}
+
+/// #547 (547-A): while the ancestry gate is closed a candidate never licenses
+/// a search, so an RDTS window that disallows OP_RETURN shows its timing
+/// refusal instead of offering a build that could not be signed.
+#[test]
+fn closed_gate_candidates_never_bypass_the_op_return_timing_refusal() {
+    assert!(crate::services::claim_ancestry_gate::authorization().is_none());
+    let mut p = panel(SINGLE_WSH);
+    p.pre.target = Some("fork-cube".into());
+    p.connect = Some(ConnectSession {
+        client: CoincubeClient::new(),
+        account: "7".into(),
+    });
+    for assessment in [
+        Assessment::RdtsScheduled,
+        Assessment::RdtsInactive,
+        Assessment::RdtsExpired,
+        Assessment::ExpiryMargin,
+    ] {
+        let mut checked = checked_ok(1_000_000);
+        checked.window.as_mut().unwrap().rdts = Err(assessment);
+        checked
+            .coins
+            .as_mut()
+            .unwrap()
+            .ancestry_candidates
+            .push(coin(Some(95), false, false, 2));
+        let window = checked.window.clone().unwrap();
+        p.pre.checked = Some(checked);
+        assert!(
+            !p.can_build(),
+            "a closed gate cannot search ancestry: {:?}",
+            assessment
+        );
+        let refusal = p.refusal().expect("the OP_RETURN timing refusal");
+        assert_eq!(refusal.reason, rdts_refusal(assessment, &window));
+        assert!(!refusal.retry);
+        assert!(matches!(p.stage, Stage::Preconditions));
+    }
 }

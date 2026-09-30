@@ -104,6 +104,8 @@ pub enum CommandError {
     RecoveryNotAvailable,
     /// The backend could not report its chain tip; nothing was created. Retryable.
     ChainTipUnavailable(String),
+    /// The backend could not report its mempool; nothing was created. Retryable.
+    MempoolUnavailable(String),
     // Include timelock in error as it may not have been set explicitly by the user.
     OutpointNotRecoverable(bitcoin::OutPoint, /* timelock */ u16),
     /// Overflowing or unhardened derivation index.
@@ -191,6 +193,10 @@ impl fmt::Display for CommandError {
             Self::ChainTipUnavailable(e) => write!(
                 f,
                 "Cannot read the current chain tip; retry when the backend is available: {e}"
+            ),
+            Self::MempoolUnavailable(e) => write!(
+                f,
+                "Cannot read the backend's mempool; retry when the backend is available: {e}"
             ),
             Self::RecoveryNotAvailable => write!(
                 f,
@@ -666,6 +672,25 @@ impl DaemonControl {
         };
         spend::anti_fee_sniping_locktime(now, tip_height, tip_time)
     }
+
+    /// Ancestor size and fees of an unconfirmed coin's transaction, for coin
+    /// selection. `Ok(None)` means the backend says it is not in the mempool;
+    /// an unreachable backend is an error, not a panic (#594).
+    fn ancestor_info(&self, txid: &bitcoin::Txid) -> Result<Option<AncestorInfo>, CommandError> {
+        Ok(self
+            .bitcoin
+            .mempool_entry_result(txid)
+            .map_err(CommandError::MempoolUnavailable)?
+            .map(|info| AncestorInfo {
+                vsize: info.ancestor_vsize,
+                fee: info
+                    .fees
+                    .ancestor
+                    .to_sat()
+                    .try_into()
+                    .expect("fee in sat should fit in u32"),
+            }))
+    }
 }
 
 impl DaemonControl {
@@ -1097,37 +1122,26 @@ impl DaemonControl {
                 .into_iter()
                 .filter_map(|(op, c)| {
                     if c.block_info.is_some() {
-                        Some((c, None)) // confirmed coins have no ancestor info
+                        Some(Ok((c, None))) // confirmed coins have no ancestor info
                     } else if c.is_from_self {
                         // In case the mempool_entry is None, the coin will be included without
                         // any ancestor info.
-                        Some((
-                            c,
-                            self.bitcoin
-                                .mempool_entry(&op.txid)
-                                .map(|info| AncestorInfo {
-                                    vsize: info.ancestor_vsize,
-                                    fee: info
-                                        .fees
-                                        .ancestor
-                                        .to_sat()
-                                        .try_into()
-                                        .expect("fee in sat should fit in u32"),
-                                }),
-                        ))
+                        Some(self.ancestor_info(&op.txid).map(|info| (c, info)))
                     } else {
                         None
                     }
                 })
-                .map(|(c, ancestor_info)| {
-                    coin_to_candidate(
-                        &c,
-                        /*must_select=*/ false,
-                        /*sequence=*/ None,
-                        ancestor_info,
-                    )
+                .map(|res| {
+                    res.map(|(c, ancestor_info)| {
+                        coin_to_candidate(
+                            &c,
+                            /*must_select=*/ false,
+                            /*sequence=*/ None,
+                            ancestor_info,
+                        )
+                    })
                 })
-                .collect()
+                .collect::<Result<_, _>>()?
         } else {
             // Query from DB and sanity check the provided coins to spend.
             let coins = db_conn.coins(&[], coins_outpoints);
@@ -1147,28 +1161,18 @@ impl DaemonControl {
                         // We include any non-change coins here as they have been selected by the caller.
                         // If the unconfirmed coin's transaction is no longer in the mempool, keep the
                         // coin as a candidate but without any ancestor info (same as confirmed candidate).
-                        self.bitcoin
-                            .mempool_entry(&op.txid)
-                            .map(|info| AncestorInfo {
-                                vsize: info.ancestor_vsize,
-                                fee: info
-                                    .fees
-                                    .ancestor
-                                    .to_sat()
-                                    .try_into()
-                                    .expect("fee in sat should fit in u32"),
-                            })
+                        self.ancestor_info(&op.txid)?
                     } else {
                         None
                     };
-                    coin_to_candidate(
+                    Ok(coin_to_candidate(
                         &c,
                         /*must_select=*/ true,
                         /*sequence=*/ None,
                         ancestor_info,
-                    )
+                    ))
                 })
-                .collect()
+                .collect::<Result<_, CommandError>>()?
         };
 
         // Create the PSBT. A concurrent Claim or ordinary spend may reserve the address
@@ -1442,7 +1446,10 @@ impl DaemonControl {
         // no minimum absolute fee and the minimum feerate is 1, the minimum relay feerate.
         let (min_feerate_vb, descendant_fees) = self
             .bitcoin
-            .mempool_spenders(&prev_outpoints)
+            .mempool_spenders_result(&prev_outpoints)
+            // An unreachable node is not "the replaced transaction left the
+            // mempool": that would drop the RBF minimums (#594).
+            .map_err(CommandError::MempoolUnavailable)?
             .into_iter()
             .fold(
                 (1, bitcoin::Amount::from_sat(0)),

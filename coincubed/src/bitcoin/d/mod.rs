@@ -1954,17 +1954,26 @@ impl BitcoinD {
     /// Get mempool entry of the given transaction.
     /// Returns `None` if it is not in the mempool.
     pub fn mempool_entry(&self, txid: &bitcoin::Txid) -> Option<MempoolEntry> {
+        self.mempool_entry_result(txid)
+            .unwrap_or_else(|e| panic!("Unexpected error returned by bitcoind {}", e))
+    }
+
+    /// [`Self::mempool_entry`] for RPC commands (#594): `Ok(None)` is the node
+    /// saying the transaction is not in its mempool; a node still unreachable
+    /// after the retry budget is an `Err`, never "not in the mempool".
+    pub fn mempool_entry_result(
+        &self,
+        txid: &bitcoin::Txid,
+    ) -> Result<Option<MempoolEntry>, BitcoindError> {
         match self
             .make_fallible_node_request("getmempoolentry", params!(Json::String(txid.to_string())))
         {
-            Ok(json) => Some(MempoolEntry::from(json)),
+            Ok(json) => Ok(Some(MempoolEntry::from(json))),
             Err(BitcoindError::Server(jsonrpc::Error::Rpc(jsonrpc::error::RpcError {
                 code: -5,
                 ..
-            }))) => None,
-            Err(e) => {
-                panic!("Unexpected error returned by bitcoind {}", e);
-            }
+            }))) => Ok(None),
+            Err(e) => Err(e),
         }
     }
 
@@ -1973,19 +1982,32 @@ impl BitcoinD {
         &self,
         outpoints: &[bitcoin::OutPoint],
     ) -> Vec<bitcoin::Txid> {
+        self.mempool_txs_spending_prevouts_result(outpoints)
+            .unwrap_or_else(|e| panic!("Unexpected error returned by bitcoind {}", e))
+    }
+
+    /// [`Self::mempool_txs_spending_prevouts`] for RPC commands (#594): an
+    /// outage outlasting the retry budget, or a malformed answer, is returned
+    /// rather than panicking.
+    pub fn mempool_txs_spending_prevouts_result(
+        &self,
+        outpoints: &[bitcoin::OutPoint],
+    ) -> Result<Vec<bitcoin::Txid>, BitcoindError> {
         let prevouts: Json = outpoints
             .iter()
             .map(|op| serde_json::json!({"txid": op.txid.to_string(), "vout": op.vout}))
             .collect();
-        self.make_node_request("gettxspendingprevout", params!(prevouts))
+        let malformed =
+            |what: &str| BitcoindError::MalformedResponse(format!("gettxspendingprevout: {what}"));
+        self.make_fallible_node_request("gettxspendingprevout", params!(prevouts))?
             .as_array()
-            .expect("Always returns an array")
+            .ok_or_else(|| malformed("not an array"))?
             .iter()
             .filter_map(|e| {
                 e.get("spendingtxid").map(|e| {
                     e.as_str()
                         .and_then(|s| bitcoin::Txid::from_str(s).ok())
-                        .expect("Must be a valid txid if present")
+                        .ok_or_else(|| malformed("invalid spendingtxid"))
                 })
             })
             .collect()

@@ -188,6 +188,69 @@ mod tests {
         assert!(uuid::Uuid::parse_str(&target_cube_id(&a)).is_ok());
     }
 
+    /// Golden vectors for the frozen `/v1/` Claim target identity (#501; the
+    /// owner kept `Uuid::from_bytes` on 2026-09-30).
+    ///
+    /// **Changing any expected value breaks existing Claim targets.** A target's
+    /// seed file is encrypted with its Cube id as associated data, so an
+    /// interrupted install can only resume if a retry re-derives the exact same
+    /// id, and completed targets, their settings and Claim journals are keyed by
+    /// it. A different derivation (for example `Uuid::new_v8`, which rewrites the
+    /// version and variant bits, or another domain string) needs a versioned
+    /// `/v2/` migration that still reads `/v1/` ids — not an edit here.
+    ///
+    /// The values were computed once, independently of this code, as the first
+    /// 16 bytes of `SHA-256("coincube/btcb2-claim-target/v1/bitcoin-blake2b/" ||
+    /// source_cube_id)` formatted as a UUID. Only the source Cube id is an
+    /// input: each id is checked across single-key and 2-of-2 multisig P2WSH
+    /// and Taproot descriptors, and across a mainnet and a Testnet4 source
+    /// Cube, and must give the same target id for all of them.
+    #[test]
+    fn the_target_cube_id_matches_the_frozen_v1_golden_vectors() {
+        use std::str::FromStr;
+        const SINGLE_KEY_WSH_MAINNET: &str = "wsh(or_d(pk([aabbccdd]xpub6Eze7yAT3Y1wGrnzedCNVYDXUqa9NmHVWck5emBaTbXtURbe1NWZbK9bsz1TiVE7Cz341PMTfYgFw1KdLWdzcM1UMFTcdQfCYhhXZ2HJvTW/<0;1>/*),and_v(v:pkh([aabbccdd]xpub688Hn4wScQAAiYJLPg9yH27hUpfZAUnmJejRQBCiwfP5PEDzjWMNW1wChcninxr5gyavFqbbDjdV1aK5USJz8NDVjUy7FRQaaqqXHh5SbXe/<0;1>/*),older(52560))))#7437yjrs";
+        const MULTISIG_WSH_MAINNET: &str = "wsh(or_d(multi(2,[aabbccdd]xpub6Eze7yAT3Y1wGrnzedCNVYDXUqa9NmHVWck5emBaTbXtURbe1NWZbK9bsz1TiVE7Cz341PMTfYgFw1KdLWdzcM1UMFTcdQfCYhhXZ2HJvTW/<0;1>/*,[00112233]xpub6FC8vmQGGfSuQGfKG5L73fZ7WjXit8TzfJYDKwTtHkhrbAhU5Kma41oenVq6aMnpgULJRXpQuxnVysyfdpRhVgD6vYe7XLbFDhmvYmDrAVq/<0;1>/*),and_v(v:pkh([abcdef01]xpub688Hn4wScQAAiYJLPg9yH27hUpfZAUnmJejRQBCiwfP5PEDzjWMNW1wChcninxr5gyavFqbbDjdV1aK5USJz8NDVjUy7FRQaaqqXHh5SbXe/<0;1>/*),older(52560))))#3r9ypsrz";
+        const SINGLE_KEY_WSH_TESTNET: &str = "wsh(or_d(pk([92162c45]tpubD6NzVbkrYhZ4WzTf9SsD6h7AH7oQEippXK2KP8qvhMMqFoNeN5YFVi7vRyeRSDGtgd2bPyMxUNmHui8t5yCgszxPPxMafu1VVzDpg9aruYW/<0;1>/*),and_v(v:pkh([abcdef01]tpubD6NzVbkrYhZ4Wdgu2yfdmrce5g4fiH1ZLmKhewsnNKupbi4sxjH1ZVAorkBLWSkhsjhg8kiq8C4BrBjMy3SjAKDyDdbuvUa1ToAHbiR98js/<0;1>/*),older(2))))#ravw7jw5";
+        const GOLDEN: [(&str, &str); 3] = [
+            ("cube-a", "75a3ca8e-377c-06e7-f80c-c3bbf8f81839"),
+            ("cube-b", "e9e43605-fc92-7ffa-c44f-27d279e93a1c"),
+            (
+                "3f2b8c1e-9d4a-4e7b-8c21-5a6f0d9e1b47",
+                "9e4f5672-4447-538a-1a99-6bad6040a052",
+            ),
+        ];
+        let sources = [
+            (SINGLE_KEY_WSH_MAINNET, ChainId::Bitcoin, Network::Bitcoin),
+            (MULTISIG_WSH_MAINNET, ChainId::Bitcoin, Network::Bitcoin),
+            (DESC, ChainId::Bitcoin, Network::Bitcoin),
+            (SINGLE_KEY_WSH_TESTNET, ChainId::Testnet4, Network::Testnet4),
+        ];
+        for (source_id, expected) in GOLDEN {
+            for (descriptor, chain, network) in sources {
+                let source = ClaimSource {
+                    cube: crate::app::settings::CubeSettings::new_with_raw_id(
+                        source_id.into(),
+                        "Savings".into(),
+                        chain,
+                    ),
+                    descriptor: coincube_core::descriptors::CoincubeDescriptor::from_str(
+                        descriptor,
+                    )
+                    .unwrap(),
+                    signer: Arc::new(Signer::generate(network).unwrap()),
+                };
+                assert_eq!(
+                    target_cube_id(&source),
+                    expected,
+                    "source {} ({:?}, {})",
+                    source_id,
+                    chain,
+                    descriptor
+                );
+            }
+        }
+    }
+
     #[test]
     fn the_target_alias_defaults_to_the_source_name_plus_the_chain() {
         assert_eq!(source("Savings").default_target_alias(), "Savings · BTCB2");
