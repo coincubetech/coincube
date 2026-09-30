@@ -413,6 +413,15 @@ pub fn verify_claim_fork_transaction<C: secp256k1::Verification>(
     if verified.transaction() != transaction {
         return Err(invalid());
     }
+    // The retention refusal is skipped here by design, and it also cannot fire
+    // (`#607`). A witness carries one satisfaction, so next to a unified
+    // signature a k-of-n branch holds at most k-1 legacy signatures, and those
+    // cannot satisfy it alone. Only a key shared across spending paths could
+    // break that; debug builds check it so the skip is revisited if it does.
+    debug_assert!(
+        crate::unified_finalize::ensure_no_unsafe_legacy_alternative(&recovered, secp).is_ok(),
+        "a recovered Claim fork witness retained a legacy alternative: the k-1 invariant broke"
+    );
     Ok(verified)
 }
 

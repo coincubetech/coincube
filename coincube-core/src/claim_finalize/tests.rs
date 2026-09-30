@@ -528,6 +528,47 @@ fn fork_finalizer_refuses_a_retained_legacy_alternative_to_a_unified_witness() {
     }
 }
 
+/// `#607`: the recovery path skips the retention refusal. It is still tracked
+/// when the PSBT that produced the witness would itself be refused, because
+/// the published witness keeps only k-1 legacy signatures beside the unified
+/// one (the invariant `verify_claim_fork_transaction` debug-asserts).
+#[test]
+fn recovery_tracks_a_witness_whose_signing_psbt_was_refused() {
+    use crate::{
+        psbt_unified::{merge_signatures, UnifiedPsbt},
+        unified_finalize::{ensure_no_unsafe_legacy_alternative, UnifiedFinalizeError},
+        unified_signing::sign_p2wsh_all_unified,
+    };
+    let secp = secp256k1::Secp256k1::new();
+    for chain in [ChainId::Bitcoin, ChainId::Testnet4] {
+        let (sweep, signers) = fork_fixture(chain);
+        let mut over_signed = sign_p2wsh_all_unified(
+            &signers[0],
+            &UnifiedPsbt::from_psbt(sweep.psbt().clone()).unwrap(),
+            &secp,
+        )
+        .unwrap();
+        let legacy = [1, 2].iter().fold(sweep.psbt().clone(), |psbt, i| {
+            signers[*i].sign_psbt(psbt, &secp).unwrap()
+        });
+        merge_signatures(&mut over_signed, &UnifiedPsbt::from_psbt(legacy).unwrap()).unwrap();
+        assert!(matches!(
+            ensure_no_unsafe_legacy_alternative(&over_signed, &secp),
+            Err(UnifiedFinalizeError::UnsafeLegacyAlternative { .. })
+        ));
+        assert!(finalize_claim_fork_sweep(&sweep, &over_signed, &secp).is_err());
+        // Finalization without the refusal publishes unified + one legacy.
+        let published = finalize_owned_claim_fork_sweep(&sweep, &over_signed, &secp).unwrap();
+        assert!(published
+            .inputs()
+            .iter()
+            .all(|r| r.unified_used == 1 && r.legacy_used == 1));
+        let restored =
+            verify_claim_fork_transaction(&sweep, published.transaction(), &secp).unwrap();
+        assert_eq!(restored.transaction(), published.transaction());
+    }
+}
+
 fn ancestry_fixture(
     recovery: bool,
 ) -> (crate::claim_spend::AncestrySelfTransfer, Vec<MasterSigner>) {

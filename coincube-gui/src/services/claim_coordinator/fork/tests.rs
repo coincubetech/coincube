@@ -807,6 +807,59 @@ async fn signing_journal_failure_and_incomplete_signatures_never_advance() {
     assert_eq!(h.calls.load(Ordering::SeqCst), 0);
 }
 
+/// `#607`: a signed sweep that keeps legacy signatures able to satisfy
+/// multi(2) without its unified one is refused as itself, not as a chain
+/// binding mismatch, and nothing reaches the submission services.
+#[tokio::test]
+async fn finish_names_a_retained_legacy_alternative() {
+    use coincube_core::{psbt_unified::merge_signatures, unified_signing::sign_p2wsh_all_unified};
+    let secp = secp256k1::Secp256k1::new();
+    let signer = |b: u8| {
+        MasterSigner::from_mnemonic(Network::Bitcoin, Mnemonic::from_entropy(&[b; 16]).unwrap())
+            .unwrap()
+    };
+    // Unified from the third multi(2) key, plus the given legacy signers.
+    let mixed = |psbt: coincube_core::miniscript::bitcoin::psbt::Psbt, legacy: &[u8]| {
+        let unified = coincube_core::psbt_unified::UnifiedPsbt::from_psbt(psbt.clone()).unwrap();
+        let mut signed = sign_p2wsh_all_unified(&signer(42), &unified, &secp).unwrap();
+        let legacy = legacy
+            .iter()
+            .fold(psbt, |psbt, b| signer(*b).sign_psbt(psbt, &secp).unwrap());
+        merge_signatures(
+            &mut signed,
+            &coincube_core::psbt_unified::UnifiedPsbt::from_psbt(legacy).unwrap(),
+        )
+        .unwrap();
+        signed
+    };
+    for (legacy, refused) in [(&[40u8][..], false), (&[40u8, 41][..], true)] {
+        let mut h = PreparingHarness::new().await;
+        let check = h.preparation.check_signing(&context()).await.unwrap();
+        let psbt = h
+            .preparation
+            .signing_psbt(check, &h.psbt(), &context())
+            .unwrap();
+        let finished = h.preparation.finish(&mixed(psbt, legacy), &context());
+        if refused {
+            let Err(error) = finished else {
+                panic!("two retained legacy signatures were finalized");
+            };
+            assert!(
+                matches!(error, Error::UnsafeLegacyAlternative),
+                "{:?}",
+                error
+            );
+            assert_eq!(
+                crate::app::state::vault::claim::describe(error),
+                crate::app::state::vault::claim::UNSAFE_LEGACY_ALTERNATIVE
+            );
+        } else {
+            assert!(finished.is_ok(), "{:?}", finished.err());
+        }
+        assert_eq!(h.calls.load(Ordering::SeqCst), 0);
+    }
+}
+
 #[tokio::test]
 async fn signing_preserves_partial_signatures_and_refuses_replaced_metadata() {
     let mut h = PreparingHarness::new().await;

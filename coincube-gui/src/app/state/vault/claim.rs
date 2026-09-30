@@ -139,6 +139,11 @@ pub const SIGNED_OUT_AT_SIGN: &str =
 /// construction and every signature are kept, nothing was recorded.
 pub const SIGNED_OUT_BEFORE_RECORD: &str =
     "Signed out of Connect before the claim was recorded. Sign in again to record and submit it.";
+/// A signed Claim fork sweep retained legacy signatures that could satisfy it
+/// without the unified one, so finalization refused it (`#607`). Wording
+/// follows `replay::UNSAFE_LEGACY_POLICY_COPY`. Reopening Claim resumes signing
+/// from the unsigned construction (`fork_load::load`), so the next step is real.
+pub const UNSAFE_LEGACY_ALTERNATIVE: &str = "The signed claim retains legacy signatures that can independently spend its coins, so it was not finalized and nothing was submitted. Reopen Claim to sign again from the unsigned transaction, collecting only the signatures it needs. Legacy signatures already held by another device or an exported copy can't be revoked.";
 /// The journal belongs to another Connect account than the one signed in.
 pub const OTHER_ACCOUNT: &str = "This claim was recorded under a different Connect account. Sign in with that account to continue.";
 /// A step that reads or writes through the Vault's daemon was asked for
@@ -2505,8 +2510,10 @@ async fn restore_recorded_claim(
         fork_cube: fork_cube.clone(),
         descriptor_digest: sha256::Hash::hash(wallet.main_descriptor.to_string().as_bytes()),
     };
-    let mut controller = claim_workflow::Controller::reopen(&directory, &identity, context.clone())
-        .map_err(|e| describe(claim_coordinator::Error::Journal(e)))?;
+    let mut controller =
+        claim_workflow::Controller::reopen_settling(&directory, &identity, context.clone())
+            .await
+            .map_err(|e| describe(claim_coordinator::Error::Journal(e)))?;
     let plan = controller.plan();
     let change_hint = controller.recorded_bitcoin_change_index();
     let phase = controller.phase();
@@ -2851,6 +2858,7 @@ pub fn describe(error: claim_coordinator::Error) -> String {
             "The claim's chain binding didn't match this Vault. Reopen the Cube and try again."
                 .to_string()
         }
+        E::UnsafeLegacyAlternative => UNSAFE_LEGACY_ALTERNATIVE.to_string(),
         E::Revoked => SESSION_ENDED.to_string(),
         E::InvalidReview | E::ChangedReview => {
             "What you reviewed has changed since. Review the transaction again.".to_string()
