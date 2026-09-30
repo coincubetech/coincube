@@ -383,6 +383,12 @@ def test_split_step1_consensus(split_chains, shape, record_property):
     record_property(f"{shape}_maximum_signed_vbytes", built["maximum_signed_vbytes"])
 
     # Refused by the BTCB2 node: by relay policy, and by consensus in a block.
+    # The locktime is Bitcoin's tip, and earlier shapes mined Bitcoin only.
+    # Bring BTCB2 level first so the candidate block is final there and the
+    # poison, not the locktime, is what consensus refuses.
+    if b.rpc.getblockcount() < tip:
+        b.generate_block(tip - b.rpc.getblockcount())
+    assert b.rpc.getblockcount() >= tip
     verdict_b = b.rpc.testmempoolaccept([step1])[0]
     assert not verdict_b["allowed"], verdict_b
     assert verdict_b["reject-reason"] == "scriptpubkey", verdict_b
