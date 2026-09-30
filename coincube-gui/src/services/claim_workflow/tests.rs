@@ -416,38 +416,44 @@ fn reopen_settled_outwaits_only_a_transient_foreign_lock() {
     use fs4::fs_std::FileExt;
     use std::time::{Duration, Instant};
     // A second open file holding the flock stands in for a spawned child's
-    // inherited duplicate of the dropped owner's descriptor (#586).
-    fn hold_briefly(temp: &Temp) -> std::thread::JoinHandle<()> {
+    // inherited duplicate of the dropped owner's descriptor (#586). It is held
+    // until the test signals, then released 200 ms later.
+    fn hold(temp: &Temp) -> (std::sync::mpsc::Sender<()>, std::thread::JoinHandle<()>) {
         let foreign = fs::OpenOptions::new()
             .read(true)
             .write(true)
             .open(temp.0.join("claim.lock"))
             .unwrap();
         assert!(foreign.try_lock_exclusive().unwrap());
-        std::thread::spawn(move || {
+        let (release, signal) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            signal.recv().unwrap();
             std::thread::sleep(Duration::from_millis(200));
             drop(foreign);
-        })
+        });
+        (release, holder)
     }
     let temp = Temp::new();
     drop(controller(&temp));
-    // The plain reopen reports the transient holder as Busy: the CI failure.
-    let release = hold_briefly(&temp);
+    // While the holder keeps the lock, a plain reopen is Busy: the CI failure.
+    let (release, holder) = hold(&temp);
     let direct = Controller::reopen(&temp.0, &identity(), context());
     assert!(matches!(direct, Err(Error::Busy)), "{}", outcome(&direct));
     // Once the holder lets go, the real verdict comes through unchanged.
+    release.send(()).unwrap();
     let mut changed = context();
     changed.provider.push('x');
     let reopened = reopen_settled(&temp.0, &identity(), changed);
-    release.join().unwrap();
+    holder.join().unwrap();
     assert!(
         matches!(reopened, Err(Error::WrongIdentity)),
         "{}",
         outcome(&reopened)
     );
-    let release = hold_briefly(&temp);
+    let (release, holder) = hold(&temp);
+    release.send(()).unwrap();
     let reopened = reopen_settled(&temp.0, &identity(), context());
-    release.join().unwrap();
+    holder.join().unwrap();
     assert!(reopened.is_ok(), "{}", outcome(&reopened));
     // A holder that never lets go is still reported as Busy after the deadline.
     let started = Instant::now();
