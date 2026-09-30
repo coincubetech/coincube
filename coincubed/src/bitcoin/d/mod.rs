@@ -13,7 +13,7 @@ use utils::{block_before_date, roundup_progress};
 use std::{
     cmp,
     collections::{HashMap, HashSet},
-    convert::TryInto,
+    convert::{TryFrom, TryInto},
     fs, io,
     str::FromStr,
     sync::RwLock,
@@ -1968,7 +1968,7 @@ impl BitcoinD {
         match self
             .make_fallible_node_request("getmempoolentry", params!(Json::String(txid.to_string())))
         {
-            Ok(json) => Ok(Some(MempoolEntry::from(json))),
+            Ok(json) => MempoolEntry::try_from(json).map(Some),
             Err(BitcoindError::Server(jsonrpc::Error::Rpc(jsonrpc::error::RpcError {
                 code: -5,
                 ..
@@ -2612,27 +2612,47 @@ pub struct MempoolEntry {
     pub fees: MempoolEntryFees,
 }
 
-impl From<Json> for MempoolEntry {
-    fn from(json: Json) -> MempoolEntry {
+impl TryFrom<Json> for MempoolEntry {
+    type Error = BitcoindError;
+
+    /// Parse a `getmempoolentry` answer. A missing or out-of-range field is a
+    /// [`BitcoindError::MalformedResponse`], not a panic (#597): on the command
+    /// path the caller holds the backend lock, and a panic there would poison it.
+    fn try_from(json: Json) -> Result<MempoolEntry, BitcoindError> {
+        let malformed =
+            |what: &str| BitcoindError::MalformedResponse(format!("getmempoolentry: {what}"));
         let vsize = json
             .get("vsize")
             .and_then(Json::as_u64)
-            .expect("Must be present in bitcoind response");
+            // A transaction has a size: a zero here would divide by zero when
+            // computing its feerate.
+            .filter(|vsize| *vsize > 0)
+            .ok_or_else(|| malformed("missing or invalid vsize"))?;
         let ancestor_vsize = json
             .get("ancestorsize")
             .and_then(Json::as_u64)
-            .expect("Must be present in bitcoind response");
+            .ok_or_else(|| malformed("missing or invalid ancestorsize"))?;
         let fees = json
             .get("fees")
-            .as_ref()
-            .expect("Must be present in bitcoind response")
-            .into();
+            .and_then(Json::as_object)
+            .ok_or_else(|| malformed("missing or invalid fees"))?;
+        let amount = |field: &str| {
+            fees.get(field)
+                .and_then(Json::as_f64)
+                .and_then(|a| bitcoin::Amount::from_btc(a).ok())
+                .ok_or_else(|| malformed(&format!("missing or invalid fees.{field}")))
+        };
+        let fees = MempoolEntryFees {
+            base: amount("base")?,
+            ancestor: amount("ancestor")?,
+            descendant: amount("descendant")?,
+        };
 
-        MempoolEntry {
+        Ok(MempoolEntry {
             vsize,
             ancestor_vsize,
             fees,
-        }
+        })
     }
 }
 
@@ -2643,35 +2663,42 @@ pub struct MempoolEntryFees {
     pub descendant: bitcoin::Amount,
 }
 
-impl From<&&Json> for MempoolEntryFees {
-    fn from(json: &&Json) -> MempoolEntryFees {
-        let json = json.as_object().expect("fees must be an object");
-        let base = json
-            .get("base")
-            .and_then(Json::as_f64)
-            .and_then(|a| bitcoin::Amount::from_btc(a).ok())
-            .expect("Must be present and a valid amount");
-        let ancestor = json
-            .get("ancestor")
-            .and_then(Json::as_f64)
-            .and_then(|a| bitcoin::Amount::from_btc(a).ok())
-            .expect("Must be present and a valid amount");
-        let descendant = json
-            .get("descendant")
-            .and_then(Json::as_f64)
-            .and_then(|a| bitcoin::Amount::from_btc(a).ok())
-            .expect("Must be present and a valid amount");
-        MempoolEntryFees {
-            base,
-            ancestor,
-            descendant,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn malformed_mempool_entries_are_errors_not_panics() {
+        let good = serde_json::json!({
+            "vsize": 141,
+            "ancestorsize": 282,
+            "fees": {"base": 0.00000141, "ancestor": 0.00000282, "descendant": 0.00000141},
+        });
+        let entry = MempoolEntry::try_from(good.clone()).unwrap();
+        assert_eq!((entry.vsize, entry.ancestor_vsize), (141, 282));
+        assert_eq!(entry.fees.ancestor.to_sat(), 282);
+        for (field, value) in [
+            ("vsize", serde_json::json!(0)),
+            ("vsize", serde_json::json!(-1)),
+            ("ancestorsize", serde_json::json!("282")),
+            ("fees", serde_json::json!([])),
+        ] {
+            let mut bad = good.clone();
+            bad[field] = value;
+            assert!(matches!(
+                MempoolEntry::try_from(bad),
+                Err(BitcoindError::MalformedResponse(_))
+            ));
+        }
+        for field in ["base", "ancestor", "descendant"] {
+            let mut bad = good.clone();
+            bad["fees"][field] = serde_json::json!(-0.00000141);
+            assert!(MempoolEntry::try_from(bad).is_err());
+            let mut bad = good.clone();
+            bad["fees"].as_object_mut().unwrap().remove(field);
+            assert!(MempoolEntry::try_from(bad).is_err());
+        }
+    }
 
     #[test]
     fn malformed_block_stats_are_errors_and_a_later_response_recovers() {

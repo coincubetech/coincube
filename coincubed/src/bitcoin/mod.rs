@@ -504,7 +504,12 @@ pub trait BitcoinInterface: Send {
 
     /// Fallible [`Self::mempool_spenders`] for RPC commands (#594): an empty list
     /// is the backend saying nothing spends these outpoints; an unreachable
-    /// backend is an `Err`.
+    /// backend, or an answer that cannot be used, is an `Err`.
+    ///
+    /// bitcoind and Electrum override this (#597). The default wraps the
+    /// infallible read and so can never return `Err`: a backend that keeps it
+    /// (Esplora, which has no mempool reads and always answers empty) cannot
+    /// tell an outage apart from "nothing spends these outpoints".
     fn mempool_spenders_result(
         &self,
         outpoints: &[bitcoin::OutPoint],
@@ -514,7 +519,12 @@ pub trait BitcoinInterface: Send {
 
     /// Fallible [`Self::mempool_entry`] for RPC commands (#594): `Ok(None)` is the
     /// backend saying the transaction is not in its mempool; an unreachable
-    /// backend is an `Err`.
+    /// backend, or an answer that cannot be used, is an `Err`.
+    ///
+    /// bitcoind and Electrum override this (#597). The default wraps the
+    /// infallible read and so can never return `Err`: a backend that keeps it
+    /// (Esplora, which has no mempool reads and always answers `None`) cannot
+    /// tell an outage apart from "not in the mempool".
     fn mempool_entry_result(&self, txid: &bitcoin::Txid) -> Result<Option<MempoolEntry>, String> {
         Ok(self.mempool_entry(txid))
     }
@@ -1200,6 +1210,32 @@ impl BitcoinInterface for electrum::Electrum {
         self.client()
             .mempool_spenders(outpoints)
             .unwrap_or_default()
+    }
+
+    // The client tells a failed exchange apart from absence: a connection that
+    // fails past the retries is an `Err`, and so is a hole left in the fee walk
+    // by a refused ancestor (`client::Error::IncompleteMempoolGraph`). An unspent
+    // outpoint has no spender.
+    //
+    // Limitation (#597 review): absence is not only "unknown transaction". BDK's
+    // `populate_with_txids` skips a requested txid on *any* server error reply
+    // (`electrum_client::Error::Protocol`): electrs relaying a failed daemon call
+    // ("daemon error: ..."), or a Fulcrum/ElectrumX rate limit, also reads as
+    // "not in the mempool". createspend may then use an unconfirmed coin without
+    // its ancestors' size and fees and underpay the CPFP package (no funds at
+    // risk). rbfpsbt is mostly unaffected: the spender is fetched while syncing
+    // the outpoints, where an error reply is an `Err`.
+    fn mempool_spenders_result(
+        &self,
+        outpoints: &[bitcoin::OutPoint],
+    ) -> Result<Vec<MempoolEntry>, String> {
+        self.client()
+            .mempool_spenders(outpoints)
+            .map_err(|e| e.to_string())
+    }
+
+    fn mempool_entry_result(&self, txid: &bitcoin::Txid) -> Result<Option<MempoolEntry>, String> {
+        self.client().mempool_entry(txid).map_err(|e| e.to_string())
     }
 
     fn sync_progress(&self) -> SyncProgress {
