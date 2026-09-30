@@ -416,6 +416,11 @@ fn scripted_node(
     script: Vec<(&'static str, Json)>,
     stop: std::sync::mpsc::Receiver<()>,
 ) -> thread::JoinHandle<()> {
+    // The stop signal and deadline are only checked between connections, so
+    // accept must not block. Set it on this handle: a `try_clone`d Windows
+    // socket does not keep the original's nonblocking mode, and a blocking
+    // accept here hung the Windows CI job after the command had returned.
+    listener.set_nonblocking(true).unwrap();
     thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(120);
         let mut script = script.into_iter();
