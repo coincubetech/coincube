@@ -14,6 +14,8 @@ pub mod split_fees;
 pub mod split_psbt_file;
 pub mod split_source;
 #[cfg(test)]
+pub(crate) mod split_test_connect;
+#[cfg(test)]
 pub(crate) mod split_test_wallets;
 
 pub mod http;

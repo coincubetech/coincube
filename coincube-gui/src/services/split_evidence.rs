@@ -3,19 +3,26 @@
 //!
 //! The two-chain inventory proves coins through the unspent-output scan, so it
 //! cannot describe a coin after step 1 has spent it on Bitcoin. Restart and
-//! reconstruction instead authenticate each recorded outpoint directly, with
-//! fresh (`no-store`) Connect Esplora reads:
+//! reconstruction instead authenticate each recorded outpoint directly:
 //!
-//! - the previous transaction, whose txid must equal the outpoint's;
-//! - its confirming block on Bitcoin and on BTCB2, each still the block at that
-//!   height in the chain's best chain, both below the observed fork height and
-//!   the same block on both chains (shared pre-fork history);
-//! - the outpoint still unspent on BTCB2 (step 2 needs it there).
+//! - the previous transaction, whose txid must equal the outpoint's. Its bytes
+//!   are immutable once the txid matches, so this is the one read that may be
+//!   served from Connect's cache (the route Claim's ancestry reads use);
+//! - fresh (`no-store`) reads of its confirming block on Bitcoin and on BTCB2,
+//!   each still the block at that height in the chain's best chain, both below
+//!   the observed fork height and the same block on both chains (shared
+//!   pre-fork history);
+//! - a fresh read of the BTCB2 unspent outputs of the output's own address,
+//!   which must list the outpoint (step 2 needs it unspent there). The
+//!   outpoint was just shown confirmed on BTCB2, so its absence means spent.
 //!
-//! The Bitcoin outspend is deliberately never read: a coin spent by step 1 on
-//! Bitcoin authenticates the same as an unspent one. Both tips are read before
-//! and after and must not move. Every read must be fresh within the caller's
-//! age bound. The result is [`SplitCoin`] input for
+//! Every fresh read uses a path on Connect's fresh-observation allowlist
+//! (coincube-api `IsFreshObservationPath`): `blocks/tip/hash`,
+//! `block/{hash}/status`, `block-height/{n}`, `tx/{txid}` and
+//! `address/{address}/utxo`. The Bitcoin spent state is deliberately never
+//! read: a coin spent by step 1 on Bitcoin authenticates the same as an
+//! unspent one. Both tips are read before and after and must not move. Every
+//! fresh read must be within the caller's age bound. The result is [`SplitCoin`] input for
 //! `coincube_core::foreign_split`; it proves nothing about scripts (the core
 //! construction checks those), grants no spend or broadcast authority and is
 //! stale as soon as it is returned.
@@ -46,9 +53,9 @@ pub const MAX_EVIDENCE_AGE_SECONDS: i64 = 90;
 /// Most outpoints one call authenticates.
 pub const MAX_OUTPOINTS: usize = 250;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
-/// A previous transaction up to 1 MB, hex encoded.
-const TRANSACTION_HEX_LIMIT: usize = 2 * 1_000_000;
 const JSON_LIMIT: usize = 64 * 1024;
+/// An address's unspent-output list (the foreign scanner's per-response cap).
+const UTXO_LIST_LIMIT: usize = 2 * 1024 * 1024;
 
 /// One recorded step-1 input: where it is and which wallet address it pays.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,14 +63,6 @@ pub struct RecordedOutpoint {
     pub outpoint: OutPoint,
     pub branch: SplitBranch,
     pub index: u32,
-}
-
-/// The outpoint's spent state on one chain, from a fresh read.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Outspend {
-    Unspent,
-    /// Spent, confirmed or in the mempool.
-    Spent,
 }
 
 /// Fresh chain reads, one immutable Connect context. Implementations bind
@@ -82,18 +81,20 @@ pub trait SplitEvidenceSource: Send + Sync {
         chain: ChainId,
         height: u64,
     ) -> Result<FreshRead<BlockHash>, FailureKind>;
-    /// The full previous transaction. Implementations need not check its txid;
-    /// [`authenticate_outpoints`] does.
+    /// The full previous transaction. It may come from a cache: its txid,
+    /// which [`authenticate_outpoints`] checks, binds its content.
     async fn previous_transaction(
         &self,
         chain: ChainId,
         txid: Txid,
-    ) -> Result<FreshRead<Transaction>, FailureKind>;
-    async fn outspend(
+    ) -> Result<Transaction, FailureKind>;
+    /// A fresh read of the unspent outputs (confirmed or in the mempool, not
+    /// spent in the mempool) paying `address`.
+    async fn unspent_outputs(
         &self,
         chain: ChainId,
-        outpoint: OutPoint,
-    ) -> Result<FreshRead<Outspend>, FailureKind>;
+        address: &str,
+    ) -> Result<FreshRead<Vec<OutPoint>>, FailureKind>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,6 +110,8 @@ pub enum EvidenceFailure {
     TxidMismatch,
     /// The previous transaction has no such output.
     MissingOutput,
+    /// The output's script has no address, so its BTCB2 state cannot be read.
+    NoAddress,
     /// Absent or unconfirmed on this chain.
     NotConfirmed(ChainId),
     /// The confirming block is not the chain's block at that height.
@@ -117,7 +120,8 @@ pub enum EvidenceFailure {
     PostFork,
     /// The chains name different confirming blocks.
     ChainsDisagree,
-    /// Already spent on BTCB2: step 2 could not spend it.
+    /// Not among its address's BTCB2 unspent outputs: spent there (step 2
+    /// could not spend it).
     Btcb2Spent,
     /// A tip moved while collecting.
     Changed(ChainId),
@@ -207,18 +211,18 @@ pub async fn authenticate_outpoints(
             .previous_transaction(ChainId::Bitcoin, coin.outpoint.txid)
             .await
             .map_err(read(ChainId::Bitcoin))?;
-        fresh(ChainId::Bitcoin, previous.observed_at(), at)?;
-        let previous = previous.value().clone();
         if previous.compute_txid() != coin.outpoint.txid {
             return Err(refuse(at, EvidenceFailure::TxidMismatch));
         }
-        if usize::try_from(coin.outpoint.vout)
+        let output = usize::try_from(coin.outpoint.vout)
             .ok()
             .and_then(|vout| previous.output.get(vout))
-            .is_none()
-        {
-            return Err(refuse(at, EvidenceFailure::MissingOutput));
-        }
+            .ok_or_else(|| refuse(at, EvidenceFailure::MissingOutput))?;
+        // BTCB2 keeps Bitcoin's address encoding (Connect validates it so).
+        let address =
+            bitcoin::Address::from_script(&output.script_pubkey, bitcoin::Network::Bitcoin)
+                .map_err(|_| refuse(at, EvidenceFailure::NoAddress))?
+                .to_string();
 
         let mut blocks = Vec::with_capacity(2);
         for chain in [ChainId::Bitcoin, ChainId::BitcoinBlake2b] {
@@ -256,12 +260,12 @@ pub async fn authenticate_outpoints(
             return Err(refuse(at, EvidenceFailure::ChainsDisagree));
         }
 
-        let spent = source
-            .outspend(ChainId::BitcoinBlake2b, coin.outpoint)
+        let unspent = source
+            .unspent_outputs(ChainId::BitcoinBlake2b, &address)
             .await
             .map_err(read(ChainId::BitcoinBlake2b))?;
-        fresh(ChainId::BitcoinBlake2b, spent.observed_at(), at)?;
-        if *spent.value() != Outspend::Unspent {
+        fresh(ChainId::BitcoinBlake2b, unspent.observed_at(), at)?;
+        if !unspent.value().contains(&coin.outpoint) {
             return Err(refuse(at, EvidenceFailure::Btcb2Spent));
         }
 
@@ -290,10 +294,11 @@ pub async fn authenticate_outpoints(
     })
 }
 
-/// Anonymous, fresh-only reads from Connect's Esplora proxy for the two
-/// routes the Claim observation source has no method for (previous
-/// transaction bytes and outspends) and for the Bitcoin fee estimate. No
-/// account header is sent, redirects are never followed, every response must
+/// Anonymous, fresh-only reads from Connect's Esplora proxy for the paths the
+/// Claim observation source has no method for: an address's unspent outputs
+/// and fee estimates. Only paths on Connect's fresh-observation allowlist are
+/// requested (Connect answers any other fresh path with 400). No account
+/// header is sent, redirects are never followed, every response must
 /// acknowledge the fresh-read contract (`X-Coincube-Observation: fresh`,
 /// `X-Cache: BYPASS`, `Cache-Control: no-store`), and a changed generation
 /// cancels an in-flight read.
@@ -412,46 +417,31 @@ impl ConnectEsplora {
         result
     }
 
-    /// The full transaction, strict hex. The caller checks its txid.
-    pub async fn transaction_bytes(
+    /// The outpoints of an address's unspent outputs.
+    pub async fn unspent_outputs(
         &self,
         chain: ChainId,
-        txid: Txid,
-    ) -> Result<FreshRead<Transaction>, FailureKind> {
-        let read = self
-            .fresh(chain, &format!("tx/{txid}/hex"), TRANSACTION_HEX_LIMIT)
-            .await?;
-        let raw = hex::decode(read.value()).map_err(|_| FailureKind::Malformed)?;
-        let transaction: Transaction =
-            bitcoin::consensus::deserialize(&raw).map_err(|_| FailureKind::Malformed)?;
-        FreshRead::from_response(chain, transaction, read.observed_at(), &fresh_headers())
-    }
-
-    pub async fn outspend(
-        &self,
-        chain: ChainId,
-        outpoint: OutPoint,
-    ) -> Result<FreshRead<Outspend>, FailureKind> {
+        address: &str,
+    ) -> Result<FreshRead<Vec<OutPoint>>, FailureKind> {
         #[derive(Deserialize)]
-        struct Body {
-            spent: bool,
+        struct Utxo {
+            txid: Txid,
+            vout: u32,
+        }
+        if address.is_empty() || !address.bytes().all(|b| b.is_ascii_alphanumeric()) {
+            return Err(FailureKind::Malformed);
         }
         let read = self
-            .fresh(
-                chain,
-                &format!("tx/{}/outspend/{}", outpoint.txid, outpoint.vout),
-                JSON_LIMIT,
-            )
+            .fresh(chain, &format!("address/{address}/utxo"), UTXO_LIST_LIMIT)
             .await?;
-        let body: Body =
+        let utxos: Vec<Utxo> =
             serde_json::from_slice(read.value()).map_err(|_| FailureKind::Malformed)?;
         FreshRead::from_response(
             chain,
-            if body.spent {
-                Outspend::Spent
-            } else {
-                Outspend::Unspent
-            },
+            utxos
+                .into_iter()
+                .map(|utxo| OutPoint::new(utxo.txid, utxo.vout))
+                .collect(),
             read.observed_at(),
             &fresh_headers(),
         )
@@ -483,7 +473,9 @@ fn fresh_headers() -> HeaderMap {
 }
 
 /// Production source: the Claim observation source for tips, transaction
-/// status and block hashes, and [`ConnectEsplora`] for the rest. Both share
+/// status, block hashes and the txid-checked previous transaction (its
+/// ancestry route, limited to `claim_ancestry::MAX_TRANSACTION_BYTES`), and
+/// [`ConnectEsplora`] for unspent outputs. Both share
 /// the caller's generation.
 pub struct ConnectSplitEvidence {
     observation: HttpObservationSource,
@@ -545,15 +537,17 @@ impl SplitEvidenceSource for ConnectSplitEvidence {
         &self,
         chain: ChainId,
         txid: Txid,
-    ) -> Result<FreshRead<Transaction>, FailureKind> {
-        self.esplora.transaction_bytes(chain, txid).await
+    ) -> Result<Transaction, FailureKind> {
+        // Txid-checked, bounded, anonymous; not a fresh read (see above).
+        let raw = self.observation.ancestry_transaction(chain, txid).await?;
+        bitcoin::consensus::deserialize(&raw).map_err(|_| FailureKind::Malformed)
     }
-    async fn outspend(
+    async fn unspent_outputs(
         &self,
         chain: ChainId,
-        outpoint: OutPoint,
-    ) -> Result<FreshRead<Outspend>, FailureKind> {
-        self.esplora.outspend(chain, outpoint).await
+        address: &str,
+    ) -> Result<FreshRead<Vec<OutPoint>>, FailureKind> {
+        self.esplora.unspent_outputs(chain, address).await
     }
 }
 

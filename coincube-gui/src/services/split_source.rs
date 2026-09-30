@@ -4,7 +4,7 @@
 //! descriptors key by key and refuses any pair that differs in more than each
 //! key's final branch step. Some genuine exports of one wallet fail that
 //! literal comparison (#568, finding I2). This module either canonicalizes
-//! them, when the rewrite provably keeps every derived script, or refuses with
+//! them, when the rewrite keeps every derived script by construction, or refuses with
 //! a message that says what to export instead:
 //!
 //! - `sortedmulti` keys listed in another order: canonicalized. The script
@@ -19,8 +19,9 @@
 //!   be proven from the children, so they cannot be paired safely.
 //! - The same extended key used twice in one descriptor: refused.
 //!
-//! Every canonicalized descriptor is checked to derive the same scripts as the
-//! descriptor it replaces before the core check runs. Nothing here reads a
+//! Both rewrites preserve every script by construction. As defense in depth,
+//! each canonicalized descriptor is also checked to derive the same scripts as
+//! the descriptor it replaces at three indices before the core check runs. Nothing here reads a
 //! chain or grants spend authority.
 
 use std::{fmt, str::FromStr};
@@ -36,7 +37,7 @@ use coincube_core::{
 
 use super::foreign_scan::{Branch, ScanDescriptor};
 
-/// Indices compared when proving a canonicalized descriptor unchanged.
+/// Indices spot-checked after canonicalizing (not a proof; see module docs).
 const CHECKED_INDICES: [u32; 3] = [0, 1, 1_000];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,8 +93,8 @@ impl fmt::Display for SourceError {
 
 impl std::error::Error for SourceError {}
 
-/// The step-1 source for the scanned wallet, canonicalized where that is
-/// provably script-preserving (see the module documentation).
+/// The step-1 source for the scanned wallet, canonicalized only by the two
+/// script-preserving rewrites in the module documentation.
 pub fn split_source(
     external: &ScanDescriptor,
     internal: Option<&ScanDescriptor>,

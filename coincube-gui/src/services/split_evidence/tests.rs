@@ -36,7 +36,8 @@ struct Chains {
     status: HashMap<(ChainId, Txid), TransactionObservation>,
     canonical: HashMap<(ChainId, u64), BlockHash>,
     btcb2_spent: BTreeSet<OutPoint>,
-    outspend_chains: Arc<Mutex<Vec<ChainId>>>,
+    /// Chain and address of every unspent-output read.
+    utxo_reads: Arc<Mutex<Vec<(ChainId, String)>>>,
     /// Observation stamp per chain.
     stamp: HashMap<ChainId, i64>,
     stale_status: bool,
@@ -52,7 +53,7 @@ impl Chains {
             status: HashMap::new(),
             canonical: HashMap::new(),
             btcb2_spent: BTreeSet::new(),
-            outspend_chains: Arc::default(),
+            utxo_reads: Arc::default(),
             stamp: HashMap::from([(ChainId::Bitcoin, NOW), (ChainId::BitcoinBlake2b, NOW)]),
             stale_status: false,
         };
@@ -138,30 +139,44 @@ impl SplitEvidenceSource for Chains {
         &self,
         chain: ChainId,
         txid: Txid,
-    ) -> Result<FreshRead<Transaction>, FailureKind> {
-        let tx = self
-            .previous
+    ) -> Result<Transaction, FailureKind> {
+        let _ = chain;
+        self.previous
             .get(&txid)
             .cloned()
-            .ok_or(FailureKind::Http(404))?;
-        Ok(fresh(chain, tx, self.stamp[&chain]))
+            .ok_or(FailureKind::Http(404))
     }
-    async fn outspend(
+    async fn unspent_outputs(
         &self,
         chain: ChainId,
-        outpoint: OutPoint,
-    ) -> Result<FreshRead<Outspend>, FailureKind> {
-        self.outspend_chains.lock().unwrap().push(chain);
-        let spent = chain == ChainId::BitcoinBlake2b && self.btcb2_spent.contains(&outpoint);
-        Ok(fresh(
-            chain,
-            if spent {
-                Outspend::Spent
-            } else {
-                Outspend::Unspent
-            },
-            self.stamp[&chain],
-        ))
+        address: &str,
+    ) -> Result<FreshRead<Vec<OutPoint>>, FailureKind> {
+        self.utxo_reads
+            .lock()
+            .unwrap()
+            .push((chain, address.to_owned()));
+        let unspent = self
+            .previous
+            .values()
+            .flat_map(|tx| {
+                let txid = tx.compute_txid();
+                tx.output
+                    .iter()
+                    .enumerate()
+                    .filter_map(move |(vout, output)| {
+                        let paid = bitcoin::Address::from_script(
+                            &output.script_pubkey,
+                            bitcoin::Network::Bitcoin,
+                        )
+                        .is_ok_and(|a| a.to_string() == address);
+                        paid.then(|| OutPoint::new(txid, vout as u32))
+                    })
+            })
+            .filter(|outpoint| {
+                chain != ChainId::BitcoinBlake2b || !self.btcb2_spent.contains(outpoint)
+            })
+            .collect();
+        Ok(fresh(chain, unspent, self.stamp[&chain]))
     }
 }
 
@@ -303,7 +318,7 @@ fn failure(result: Result<AuthenticatedOutpoints, EvidenceError>) -> EvidenceFai
 }
 
 #[tokio::test]
-async fn split_authentication_works_when_spent_on_bitcoin_and_never_reads_its_outspend() {
+async fn split_authentication_works_when_spent_on_bitcoin_and_never_reads_its_state() {
     let wallet = fixture::wallet(Shape::Wpkh);
     let shared = fixture::shared_coins(&wallet);
     let chains = Chains::of(&shared);
@@ -313,13 +328,23 @@ async fn split_authentication_works_when_spent_on_bitcoin_and_never_reads_its_ou
         authenticated.bitcoin_tip.height,
         u64::from(fixture::BITCOIN_TIP_HEIGHT)
     );
-    assert!(chains
-        .outspend_chains
-        .lock()
-        .unwrap()
+    // Only BTCB2 spent state is read, at each coin's own address.
+    let reads = chains.utxo_reads.lock().unwrap().clone();
+    let addresses: Vec<_> = shared
         .iter()
-        .all(|chain| *chain == ChainId::BitcoinBlake2b));
-    assert_eq!(chains.outspend_chains.lock().unwrap().len(), 2);
+        .map(|coin| {
+            (
+                ChainId::BitcoinBlake2b,
+                bitcoin::Address::from_script(
+                    &coin.output.script_pubkey,
+                    bitcoin::Network::Bitcoin,
+                )
+                .unwrap()
+                .to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(reads, addresses);
 }
 
 #[tokio::test]
@@ -383,6 +408,26 @@ async fn split_authentication_refuses_a_substituted_previous_transaction() {
     assert_eq!(
         failure(authenticate(&chains, &shared).await),
         EvidenceFailure::TxidMismatch
+    );
+    // An output with no address (here OP_RETURN) cannot be read on BTCB2.
+    let mut chains = Chains::of(&shared);
+    let mut unaddressed = shared[0].previous.clone();
+    unaddressed.output[1].script_pubkey = bitcoin::ScriptBuf::new_op_return([1]);
+    let unaddressed_txid = unaddressed.compute_txid();
+    chains.previous.insert(unaddressed_txid, unaddressed);
+    let mut no_address = recorded(&shared);
+    no_address[0].outpoint = OutPoint::new(unaddressed_txid, 1);
+    assert_eq!(
+        authenticate_outpoints(
+            &chains,
+            &no_address,
+            fixture::FORK,
+            MAX_EVIDENCE_AGE_SECONDS
+        )
+        .await
+        .unwrap_err()
+        .failure,
+        EvidenceFailure::NoAddress
     );
     // A vout the transaction does not have.
     let chains = Chains::of(&shared);
@@ -499,184 +544,333 @@ async fn split_authentication_refuses_moving_tips_and_bad_sets() {
 
 mod http {
     use super::*;
+    use crate::services::split_test_connect::{serve_cached, serve_fresh, strict};
     use httpmock::prelude::*;
 
-    fn anonymous(request: &HttpMockRequest) -> bool {
-        request.headers.as_ref().is_none_or(|headers| {
-            headers.iter().all(|(name, _)| {
-                ![
-                    "authorization",
-                    "cookie",
-                    "x-device-fingerprint",
-                    "x-device-name",
-                ]
-                .iter()
-                .any(|bad| name.eq_ignore_ascii_case(bad))
-            })
-        })
-    }
-
-    fn esplora(server: &MockServer) -> (ConnectEsplora, watch::Sender<u64>) {
+    fn client(server: &MockServer) -> CoincubeClient {
         let mut client = CoincubeClient::for_test(server.base_url());
         client.set_token("synthetic-split-token");
-        let (sender, generation) = watch::channel(3);
-        (
-            ConnectEsplora::new(
-                &client,
-                CollectionContext {
-                    expected_generation: 3,
-                    generation,
-                },
-            )
-            .unwrap(),
-            sender,
-        )
+        client
     }
 
-    fn serve<'a>(
+    fn address(coin: &DiscoveredCoin) -> String {
+        bitcoin::Address::from_script(&coin.output.script_pubkey, bitcoin::Network::Bitcoin)
+            .unwrap()
+            .to_string()
+    }
+
+    /// Serve both chains as Connect would, through the strict fresh-path
+    /// model. Returns the 400 refusal mock.
+    fn serve_chains<'a>(
         server: &'a MockServer,
-        path: &str,
-        body: &str,
-        markers: bool,
+        coins: &[DiscoveredCoin],
+        btcb2_spent: &[OutPoint],
     ) -> httpmock::Mock<'a> {
-        server.mock(|when, then| {
-            when.method(GET)
-                .path(format!("/api/v1/esplora/{path}"))
-                .header("x-coincube-observation", "fresh")
-                .matches(anonymous);
-            let then = then.status(200).body(body);
-            if markers {
-                then.header("X-Coincube-Observation", "fresh")
-                    .header("X-Cache", "BYPASS")
-                    .header("Cache-Control", "no-store");
+        let refusal = strict(server);
+        for (network, height) in [
+            ("bitcoin", fixture::BITCOIN_TIP_HEIGHT),
+            ("bitcoin-blake2b", fixture::BTCB2_TIP_HEIGHT),
+        ] {
+            let tip = fixture::block_hash(u64::from(height));
+            serve_fresh(server, network, "/blocks/tip/hash", &tip.to_string());
+            serve_fresh(
+                server,
+                network,
+                &format!("/block/{tip}/status"),
+                &format!(r#"{{"in_best_chain":true,"height":{height},"next_best":null}}"#),
+            );
+            serve_fresh(
+                server,
+                network,
+                &format!("/block-height/{height}"),
+                &tip.to_string(),
+            );
+            for coin in coins {
+                let (h, hash) = (coin.block_height.unwrap(), coin.block_hash.unwrap());
+                let txid = coin.outpoint.txid;
+                serve_fresh(
+                    server,
+                    network,
+                    &format!("/tx/{txid}"),
+                    &format!(
+                        r#"{{"txid":"{txid}","status":{{"confirmed":true,"block_height":{h},"block_hash":"{hash}"}}}}"#
+                    ),
+                );
+                serve_fresh(
+                    server,
+                    network,
+                    &format!("/block-height/{h}"),
+                    &hash.to_string(),
+                );
             }
-        })
+        }
+        for coin in coins {
+            serve_cached(
+                server,
+                "bitcoin",
+                &format!("/tx/{}/hex", coin.outpoint.txid),
+                &coincube_core::miniscript::bitcoin::consensus::encode::serialize_hex(
+                    &coin.previous,
+                ),
+            );
+            let listed = if btcb2_spent.contains(&coin.outpoint) {
+                "[]".to_owned()
+            } else {
+                format!(
+                    r#"[{{"txid":"{}","vout":{},"value":{},"status":{{"confirmed":true}}}}]"#,
+                    coin.outpoint.txid,
+                    coin.outpoint.vout,
+                    coin.output.value.to_sat()
+                )
+            };
+            serve_fresh(
+                server,
+                "bitcoin-blake2b",
+                &format!("/address/{}/utxo", address(coin)),
+                &listed,
+            );
+        }
+        refusal
+    }
+
+    /// P2 (#615 review): the production reader authenticates against the
+    /// real Connect contract. Its only fresh reads are allowlisted paths; the
+    /// previous transaction comes from the txid-checked cached route.
+    #[tokio::test]
+    async fn split_production_reader_authenticates_through_connect_allowed_paths() {
+        let wallet = fixture::wallet(Shape::Wpkh);
+        let shared = fixture::shared_coins(&wallet);
+        let server = MockServer::start();
+        let refusal = serve_chains(&server, &shared, &[]);
+        let (_sender, generation) = watch::channel(3);
+        let source = ConnectSplitEvidence::new(client(&server), 3, generation).unwrap();
+        let authenticated = authenticate_outpoints(
+            &source,
+            &recorded(&shared),
+            fixture::FORK,
+            MAX_EVIDENCE_AGE_SECONDS,
+        )
+        .await
+        .unwrap();
+        assert_eq!(authenticated.coins.len(), 2);
+        assert_eq!(
+            authenticated.btcb2_tip.height,
+            u64::from(fixture::BTCB2_TIP_HEIGHT)
+        );
+        refusal.assert_hits(0);
+
+        // Spent on BTCB2: its address no longer lists it.
+        let server = MockServer::start();
+        let refusal = serve_chains(&server, &shared, &[shared[1].outpoint]);
+        let (_sender, generation) = watch::channel(3);
+        let source = ConnectSplitEvidence::new(client(&server), 3, generation).unwrap();
+        let error = authenticate_outpoints(
+            &source,
+            &recorded(&shared),
+            fixture::FORK,
+            MAX_EVIDENCE_AGE_SECONDS,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            (error.outpoint, error.failure),
+            (Some(shared[1].outpoint), EvidenceFailure::Btcb2Spent)
+        );
+        refusal.assert_hits(0);
     }
 
     #[tokio::test]
-    async fn split_outspend_and_previous_transaction_are_fresh_anonymous_reads() {
+    async fn split_unspent_outputs_are_fresh_anonymous_reads() {
         let wallet = fixture::wallet(Shape::Wpkh);
         let coin = &fixture::shared_coins(&wallet)[0];
         let server = MockServer::start();
-        let (esplora, sender) = esplora(&server);
-        let outpoint = coin.outpoint;
-        let spent = serve(
+        let refusal = strict(&server);
+        let (sender, generation) = watch::channel(3);
+        let esplora = ConnectEsplora::new(
+            &client(&server),
+            CollectionContext {
+                expected_generation: 3,
+                generation,
+            },
+        )
+        .unwrap();
+        let listed = serve_fresh(
             &server,
+            "bitcoin-blake2b",
+            &format!("/address/{}/utxo", address(coin)),
             &format!(
-                "bitcoin-blake2b/mainnet/tx/{}/outspend/{}",
-                outpoint.txid, outpoint.vout
+                r#"[{{"txid":"{}","vout":{},"value":1,"status":{{"confirmed":false}}}}]"#,
+                coin.outpoint.txid, coin.outpoint.vout
             ),
-            r#"{"spent":true,"txid":"00","vin":0,"status":{"confirmed":false}}"#,
-            true,
-        );
-        assert_eq!(
-            *esplora
-                .outspend(ChainId::BitcoinBlake2b, outpoint)
-                .await
-                .unwrap()
-                .value(),
-            Outspend::Spent
-        );
-        spent.assert();
-        let hex =
-            coincube_core::miniscript::bitcoin::consensus::encode::serialize_hex(&coin.previous);
-        let previous = serve(
-            &server,
-            &format!("bitcoin/mainnet/tx/{}/hex", outpoint.txid),
-            &hex,
-            true,
         );
         assert_eq!(
             esplora
-                .transaction_bytes(ChainId::Bitcoin, outpoint.txid)
+                .unspent_outputs(ChainId::BitcoinBlake2b, &address(coin))
                 .await
                 .unwrap()
                 .value(),
-            &coin.previous
+            &vec![coin.outpoint]
         );
-        previous.assert();
+        listed.assert();
         // A cache hit without the fresh-read acknowledgement is refused.
-        let unmarked = serve(
-            &server,
-            &format!(
-                "bitcoin/mainnet/tx/{}/outspend/{}",
-                outpoint.txid, outpoint.vout
-            ),
-            r#"{"spent":false}"#,
-            false,
-        );
+        let unmarked = server.mock(|when, then| {
+            when.method(GET).path(format!(
+                "/api/v1/esplora/bitcoin/mainnet/address/{}/utxo",
+                address(coin)
+            ));
+            then.status(200).body("[]");
+        });
         assert!(matches!(
-            esplora.outspend(ChainId::Bitcoin, outpoint).await,
+            esplora
+                .unspent_outputs(ChainId::Bitcoin, &address(coin))
+                .await,
             Err(FailureKind::FreshnessUnverified)
         ));
         unmarked.assert();
-        // 404 is a failure, never "unspent"; other chains are refused.
+        // Connect's 400 for a path it does not allow is an error, never "spent".
         assert!(matches!(
             esplora
-                .outspend(ChainId::BitcoinBlake2b, OutPoint::new(outpoint.txid, 7))
+                .unspent_outputs(ChainId::BitcoinBlake2b, "notanaddress")
                 .await,
-            Err(FailureKind::Http(404))
+            Err(FailureKind::Http(400))
+        ));
+        refusal.assert_hits(1);
+        assert!(matches!(
+            esplora
+                .unspent_outputs(ChainId::BitcoinBlake2b, "a/b")
+                .await,
+            Err(FailureKind::Malformed)
         ));
         assert!(matches!(
-            esplora.outspend(ChainId::Testnet4, outpoint).await,
+            esplora
+                .unspent_outputs(ChainId::Testnet4, &address(coin))
+                .await,
             Err(FailureKind::WrongChain)
         ));
         // A revoked generation reads nothing.
         sender.send_replace(4);
         assert!(matches!(
-            esplora.outspend(ChainId::BitcoinBlake2b, outpoint).await,
+            esplora
+                .unspent_outputs(ChainId::BitcoinBlake2b, &address(coin))
+                .await,
             Err(FailureKind::Cancelled)
         ));
-        spent.assert_hits(1);
+        listed.assert_hits(1);
     }
+}
+
+/// Every identifier with the text before it (trailing whitespace removed).
+fn identifiers(text: &str) -> Vec<(&str, &str)> {
+    let mut found = Vec::new();
+    let mut start = None;
+    for (index, c) in text
+        .char_indices()
+        .chain(std::iter::once((text.len(), ' ')))
+    {
+        let word = c.is_ascii_alphanumeric() || c == '_';
+        match (word, start) {
+            (true, None) => start = Some(index),
+            (false, Some(from)) => {
+                found.push((&text[from..index], text[..from].trim_end()));
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    found
 }
 
 /// D1: nothing in this slice gains a GUI caller. The evidence, source and
 /// file modules are reached only from their own tests; the fee sources only
 /// through `app::split_fee_source`, which already priced the review.
+///
+/// Matches identifiers, not paths, so an alias (`use ...::split_source as
+/// x`), a glob or a re-export still has to name the module or item somewhere.
 #[test]
 fn split_b1a_services_have_no_new_gui_callers() {
-    fn walk(dir: &std::path::Path, hits: &mut Vec<(String, String)>) {
+    const MODULES: [&str; 6] = [
+        "split_evidence",
+        "split_source",
+        "split_psbt_file",
+        "split_fees",
+        "split_test_wallets",
+        "split_test_connect",
+    ];
+    const ITEMS: [&str; 8] = [
+        "splittable_coins",
+        "authenticate_outpoints",
+        "ConnectSplitEvidence",
+        "ConnectEsplora",
+        "ConnectBitcoinFees",
+        "ConnectBtcb2Fees",
+        "btcb2_fee_source",
+        "bitcoin_step1_feerate",
+    ];
+    const OWN_FILES: [&str; 7] = [
+        "src/services/split_evidence.rs",
+        "src/services/split_evidence/tests.rs",
+        "src/services/split_fees.rs",
+        "src/services/split_psbt_file.rs",
+        "src/services/split_source.rs",
+        "src/services/split_test_wallets.rs",
+        "src/services/split_test_connect.rs",
+    ];
+    fn walk(dir: &std::path::Path, files: &mut Vec<(String, String)>) {
         for entry in std::fs::read_dir(dir).unwrap() {
             let path = entry.unwrap().path();
             if path.is_dir() {
-                walk(&path, hits);
+                walk(&path, files);
             } else if path.extension().is_some_and(|e| e == "rs") {
-                let text = std::fs::read_to_string(&path).unwrap();
-                for needle in [
-                    "split_evidence::",
-                    "split_source::",
-                    "split_psbt_file::",
-                    "split_fees::",
-                    "splittable_coins(",
-                ] {
-                    if text.contains(needle) {
-                        hits.push((
-                            path.strip_prefix(env!("CARGO_MANIFEST_DIR"))
-                                .unwrap()
-                                .to_string_lossy()
-                                .into_owned(),
-                            needle.to_owned(),
-                        ));
-                    }
-                }
+                files.push((
+                    path.strip_prefix(env!("CARGO_MANIFEST_DIR"))
+                        .unwrap()
+                        .to_string_lossy()
+                        .replace('\\', "/"),
+                    std::fs::read_to_string(&path).unwrap(),
+                ));
             }
         }
     }
-    let mut hits = Vec::new();
+    let mut files = Vec::new();
     walk(
         &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
-        &mut hits,
+        &mut files,
     );
-    hits.sort();
-    let allowed = |file: &str, needle: &str| {
-        file.starts_with("src/services/split_")
-            || (file == "src/services/foreign_split_inventory.rs" && needle == "splittable_coins(")
-            || (file == "src/app/mod.rs" && needle == "split_fees::")
+    let allowed = |file: &str, ident: &str| {
+        OWN_FILES.contains(&file)
+            || (file == "src/services/mod.rs" && MODULES.contains(&ident))
+            || (file == "src/services/foreign_split_inventory.rs"
+                && [
+                    "splittable_coins",
+                    "authenticate_outpoints",
+                    "split_evidence",
+                ]
+                .contains(&ident))
+            || (file == "src/services/foreign_psbt.rs"
+                && ["ConnectBtcb2Fees", "split_fees"].contains(&ident))
+            || (file == "src/app/mod.rs" && ["split_fees", "btcb2_fee_source"].contains(&ident))
     };
-    let unexpected: Vec<_> = hits
-        .iter()
-        .filter(|(file, needle)| !allowed(file, needle))
-        .collect();
+    let mut unexpected = Vec::new();
+    for (file, text) in &files {
+        for (ident, before) in identifiers(text) {
+            // `claim_coordinator` has an unrelated `split_evidence` method;
+            // a method definition or call is not a path to these modules.
+            let method = before.ends_with('.') || before.ends_with("fn");
+            if (MODULES.contains(&ident) || ITEMS.contains(&ident))
+                && !(method && MODULES.contains(&ident))
+                && !allowed(file, ident)
+            {
+                unexpected.push((file.clone(), ident.to_owned()));
+            }
+        }
+        // The app may only reach the BTCB2 review fee source.
+        if file == "src/app/mod.rs" {
+            assert_eq!(
+                text.matches("split_fees").count(),
+                text.matches("split_fees::btcb2_fee_source(").count(),
+                "app/mod.rs uses split_fees beyond the review fee source"
+            );
+        }
+    }
     assert!(unexpected.is_empty(), "{:?}", unexpected);
 }

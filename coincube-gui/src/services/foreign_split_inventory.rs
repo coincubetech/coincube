@@ -302,7 +302,7 @@ fn split_coin(
         _ => Err(InventoryError::Inconsistent(coin.outpoint)),
     };
     let (bitcoin_block, btcb2_block) = (block(bitcoin)?, block(btcb2)?);
-    if bitcoin_block != btcb2_block || bitcoin.previous.compute_txid() != btcb2.outpoint.txid {
+    if bitcoin_block != btcb2_block || btcb2.previous.compute_txid() != btcb2.outpoint.txid {
         return Err(InventoryError::Inconsistent(btcb2.outpoint));
     }
     Ok(SplitCoin {

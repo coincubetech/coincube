@@ -183,6 +183,7 @@ mod tests {
             (r#"{"6":2}"#, false, None),
         ] {
             let server = MockServer::start();
+            let refusal = crate::services::split_test_connect::strict(&server);
             let btcb2 = quote(&server, "bitcoin-blake2b", body, fresh);
             let bitcoin = quote(&server, "bitcoin", r#"{"6":7}"#, true);
             let source = btcb2_fee_source(Some(client(&server)));
@@ -190,6 +191,7 @@ mod tests {
             assert_eq!(btcb2_sweep_feerate(&*source).await, expected, "{body}");
             btcb2.assert_hits(1);
             bitcoin.assert_hits(0);
+            refusal.assert_hits(0);
             // Never a step-1 price.
             assert_eq!(bitcoin_step1_feerate(&*source).await, None);
         }
@@ -226,12 +228,14 @@ mod tests {
             (r#"{"6":4}"#, false, None),
         ] {
             let server = MockServer::start();
+            let refusal = crate::services::split_test_connect::strict(&server);
             let bitcoin = quote(&server, "bitcoin", body, fresh);
             let btcb2 = quote(&server, "bitcoin-blake2b", r#"{"6":7}"#, true);
             let source = ConnectBitcoinFees::new(&client(&server)).unwrap();
             assert_eq!(bitcoin_step1_feerate(&source).await, expected, "{body}");
             bitcoin.assert_hits(1);
             btcb2.assert_hits(0);
+            refusal.assert_hits(0);
             assert_eq!(btcb2_sweep_feerate(&source).await, None);
         }
         let server = MockServer::start();

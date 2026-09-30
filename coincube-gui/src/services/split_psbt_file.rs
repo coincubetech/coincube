@@ -11,9 +11,11 @@
 //! explicit `SIGHASH_ALL` request must equal the construction, and every
 //! supplied signature must verify for its input. A file that satisfies every
 //! input is also finalizable; one that holds only some signatures (one
-//! cosigner of a multisig) is accepted as a partial. Anything else, including
-//! another transaction, changed metadata, a non-`ALL` sighash or a bad
-//! signature, refuses the file by position. Nothing here finalizes for
+//! cosigner of a multisig) is accepted as a partial, but a returned file must
+//! carry at least one signature. A file the wallet already finalized is
+//! refused with its own message (Split finalizes and checks the witness
+//! itself). Anything else, including another transaction, changed metadata,
+//! a non-`ALL` sighash or a bad signature, refuses the file by position. Nothing here finalizes for
 //! broadcast, persists state or reads a chain; a PSBT holds only public data.
 
 use std::{fmt, io::Read, path::Path};
@@ -44,6 +46,10 @@ pub enum FileError {
     NotPsbt,
     /// The file is not the construction plus valid `SIGHASH_ALL` signatures.
     Refused(FinalizeError),
+    /// A returned file with no signature (for example the exported one).
+    Unsigned,
+    /// The wallet finalized the PSBT instead of returning its signatures.
+    Finalized,
     NoFiles,
     TooManyFiles,
     /// Returned file at this position (0-based) refused.
@@ -70,6 +76,12 @@ impl fmt::Display for FileError {
                 write!(f, "Input {input} has a signature that does not verify.")
             }
             Self::Refused(other) => write!(f, "The PSBT was refused: {other:?}."),
+            Self::Unsigned => f.write_str(
+                "This PSBT has no signatures. Choose the file your wallet saved after signing.",
+            ),
+            Self::Finalized => f.write_str(
+                "Your wallet finalized this PSBT. Sign it again without finalizing (some wallets call this \"sign only\" or turn off \"finalize\"), then load that file.",
+            ),
             Self::NoFiles => f.write_str("Choose at least one signed PSBT file."),
             Self::TooManyFiles => write!(f, "Combine at most {MAX_COMBINED_FILES} files."),
             Self::File(index, error) => write!(f, "File {}: {error}", index + 1),
@@ -88,8 +100,9 @@ pub fn encode(psbt: &Psbt, encoding: Encoding) -> Vec<u8> {
     }
 }
 
-/// Binary when it starts with the BIP 174 magic, otherwise base64 text
-/// (surrounding whitespace ignored). Returns the detected encoding.
+/// Binary when it starts with the BIP 174 magic, otherwise base64 text (all
+/// ASCII whitespace ignored, so line-wrapped text loads). Returns the
+/// detected encoding.
 pub fn decode(bytes: &[u8]) -> Result<(Psbt, Encoding), FileError> {
     if bytes.len() as u64 > MAX_FILE_BYTES {
         return Err(FileError::TooLarge);
@@ -99,9 +112,11 @@ pub fn decode(bytes: &[u8]) -> Result<(Psbt, Encoding), FileError> {
             .map(|psbt| (psbt, Encoding::Binary))
             .map_err(|_| FileError::NotPsbt);
     }
-    let text = std::str::from_utf8(bytes)
+    let text: String = std::str::from_utf8(bytes)
         .map_err(|_| FileError::NotPsbt)?
-        .trim();
+        .chars()
+        .filter(|c| !c.is_ascii_whitespace())
+        .collect();
     let raw = base64::engine::general_purpose::STANDARD
         .decode(text)
         .map_err(|_| FileError::NotPsbt)?;
@@ -130,13 +145,29 @@ pub fn load(path: &Path) -> Result<Psbt, FileError> {
     decode(&bytes).map(|(psbt, _)| psbt)
 }
 
-/// Whether `psbt` is the exact construction plus valid `SIGHASH_ALL`
-/// signatures. A partial (not every input satisfied) is accepted.
+/// Whether `psbt` is the exact construction plus at least one valid
+/// `SIGHASH_ALL` signature. A partial (not every input satisfied) is
+/// accepted; an unsigned or finalized file is not.
 pub fn verify(construction: &SplitStep1, psbt: &Psbt) -> Result<(), FileError> {
+    if psbt
+        .inputs
+        .iter()
+        .any(|input| input.final_script_sig.is_some() || input.final_script_witness.is_some())
+    {
+        return Err(FileError::Finalized);
+    }
+    if psbt
+        .inputs
+        .iter()
+        .all(|input| input.partial_sigs.is_empty())
+    {
+        return Err(FileError::Unsigned);
+    }
     let secp = secp256k1::Secp256k1::verification_only();
     match finalize_split_step1(construction, psbt, &secp) {
         // `Unsatisfied` is returned only after the construction, sighash,
-        // signature and economics checks all passed.
+        // signature and economics checks all passed (core's current order,
+        // pinned by `split_psbt_partial_with_a_bad_signature_is_refused`).
         Ok(_) | Err(FinalizeError::Unsatisfied) => Ok(()),
         Err(error) => Err(FileError::Refused(error)),
     }
@@ -242,11 +273,74 @@ mod tests {
             std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
         }
         // Base64 text with surrounding whitespace, as pasted.
-        let text = format!(
-            "\n  {}\r\n",
-            String::from_utf8(encode(step1.psbt(), Encoding::Base64)).unwrap()
-        );
+        let base64 = String::from_utf8(encode(step1.psbt(), Encoding::Base64)).unwrap();
+        let text = format!("\n  {}\r\n", base64);
         assert_eq!(decode(text.as_bytes()).unwrap().0, *step1.psbt());
+        // Line-wrapped at 64 columns, as some wallets save it.
+        let wrapped: Vec<String> = base64
+            .as_bytes()
+            .chunks(64)
+            .map(|line| String::from_utf8(line.to_vec()).unwrap())
+            .collect();
+        assert_eq!(
+            decode(wrapped.join("\r\n").as_bytes()).unwrap().0,
+            *step1.psbt()
+        );
+    }
+
+    /// F3/F7 (#615 review): a returned file must carry a signature, and a
+    /// finalized file is refused with its own message.
+    #[test]
+    fn split_psbt_file_refuses_unsigned_and_finalized_files() {
+        let (step1, signers) = construction(Shape::Wpkh);
+        assert_eq!(verify(&step1, step1.psbt()), Err(FileError::Unsigned));
+        assert_eq!(
+            combine(&step1, &[step1.psbt().clone()]),
+            Err(FileError::File(0, Box::new(FileError::Unsigned)))
+        );
+        let signed = sign(step1.psbt(), &signers[0]);
+        assert_eq!(
+            combine(&step1, &[signed.clone(), step1.psbt().clone()]),
+            Err(FileError::File(1, Box::new(FileError::Unsigned)))
+        );
+        let mut finalized = signed;
+        coincube_core::miniscript::psbt::PsbtExt::finalize_mut(
+            &mut finalized,
+            &secp256k1::Secp256k1::verification_only(),
+        )
+        .unwrap();
+        assert_eq!(verify(&step1, &finalized), Err(FileError::Finalized));
+        assert!(FileError::Finalized
+            .to_string()
+            .contains("without finalizing"));
+        assert!(FileError::Unsigned.to_string().contains("no signatures"));
+    }
+
+    /// F4 (#615 review): one cosigner's partial file with an invalid
+    /// signature under that cosigner's own key is refused. Partial files are
+    /// accepted through `FinalizeError::Unsatisfied`, so this pins that core
+    /// checks every signature before it tries to finalize.
+    #[test]
+    fn split_psbt_partial_with_a_bad_signature_is_refused() {
+        for shape in [Shape::WshSortedMulti, Shape::WshMulti] {
+            let (step1, signers) = construction(shape);
+            let partial = sign(step1.psbt(), &signers[0]);
+            verify(&step1, &partial).unwrap();
+            let mut bad = partial.clone();
+            let foreign = *partial.inputs[0].partial_sigs.values().next().unwrap();
+            let own = bad.inputs[1].partial_sigs.values_mut().next().unwrap();
+            *own = foreign;
+            assert_eq!(
+                verify(&step1, &bad),
+                Err(FileError::Refused(FinalizeError::InvalidSignature {
+                    input: 1
+                }))
+            );
+            assert!(matches!(
+                combine(&step1, &[bad, sign(step1.psbt(), &signers[1])]),
+                Err(FileError::File(0, _))
+            ));
+        }
     }
 
     #[test]
