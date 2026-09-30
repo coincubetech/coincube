@@ -5,15 +5,9 @@
 //! exclusivity nor that RDTS is active. Do not sign or broadcast based on this
 //! result alone. No seed, wallet storage or network operations occur here.
 
-use std::{collections::BTreeSet, convert::TryFrom, fmt};
+use std::{collections::BTreeSet, fmt};
 
-use miniscript::bitcoin::{
-    self,
-    absolute::LockTime,
-    bip32::ChildNumber,
-    hashes::{sha256, Hash},
-    secp256k1,
-};
+use miniscript::bitcoin::{self, absolute::LockTime, bip32::ChildNumber, secp256k1};
 
 use crate::{
     chain::ChainId,
@@ -22,6 +16,7 @@ use crate::{
         self, AddrInfo, CandidateCoin, SpendCreationError, SpendOutputAddress, SpendTxFees,
         TxGetter,
     },
+    split_poison::{split_poison_fork_marker, split_poison_script},
 };
 
 #[derive(Debug)]
@@ -121,9 +116,9 @@ fn create_self_transfer(
     locktime: LockTime,
     fork_marker: Option<bitcoin::BlockHash>,
 ) -> Result<PoisonSelfTransfer, Error> {
-    let (network, chain_byte) = match chain {
-        ChainId::Bitcoin => (bitcoin::Network::Bitcoin, 0),
-        ChainId::Testnet4 => (bitcoin::Network::Testnet4, 1),
+    let network = match chain {
+        ChainId::Bitcoin => bitcoin::Network::Bitcoin,
+        ChainId::Testnet4 => bitcoin::Network::Testnet4,
         _ => {
             return Err(Error::InvalidRequest(
                 "Bitcoin mainnet or testnet4 source required",
@@ -162,26 +157,13 @@ fn create_self_transfer(
             ));
         }
     }
-    let poison = fork_marker.map(|fork_marker| {
-        // Sorted outpoints make the labeling independent of input presentation order.
-        let bytes: Vec<_> = seen
-            .iter()
-            .flat_map(bitcoin::consensus::serialize)
-            .collect();
-        let commitment = sha256::Hash::hash(&bytes);
-        let mut payload = [0u8; 87];
-        payload[..14].copy_from_slice(b"COINCUBE-SPLIT");
-        payload[14] = 1; // payload format version
-        payload[15] = chain_byte;
-        payload[16..48].copy_from_slice(fork_marker.as_byte_array());
-        payload[48..80].copy_from_slice(commitment.as_byte_array());
-        let poison = bitcoin::ScriptBuf::new_op_return(
-            bitcoin::script::PushBytesBuf::try_from(payload.to_vec())
-                .expect("fixed 87-byte payload fits script push limits"),
-        );
-        debug_assert_eq!(poison.len(), 90);
-        poison
-    });
+    let poison = fork_marker
+        .map(|fork_marker| {
+            split_poison_script(chain, fork_marker, &seen).ok_or(Error::InvalidRequest(
+                "Bitcoin mainnet or testnet4 source required",
+            ))
+        })
+        .transpose()?;
     let selected: Vec<_> = coins
         .iter()
         .map(|coin| CandidateCoin {
@@ -663,24 +645,13 @@ pub fn reconstruct_poison_self_transfer(
     change_index: ChildNumber,
     recorded: &bitcoin::Transaction,
 ) -> Result<PoisonSelfTransfer, Error> {
-    use bitcoin::script::Instruction;
     if recorded.output.len() != 2 {
         return Err(Error::InvalidRequest(
             "Recorded poison must have two outputs",
         ));
     }
-    let mut instructions = recorded.output[0].script_pubkey.instructions();
-    if instructions.next() != Some(Ok(Instruction::Op(bitcoin::opcodes::all::OP_RETURN))) {
-        return Err(Error::InvalidRequest("Recorded poison payload is invalid"));
-    }
-    let Some(Ok(Instruction::PushBytes(payload))) = instructions.next() else {
-        return Err(Error::InvalidRequest("Recorded poison payload is invalid"));
-    };
-    if payload.len() != 87 || instructions.next().is_some() {
-        return Err(Error::InvalidRequest("Recorded poison payload is invalid"));
-    }
-    let marker = bitcoin::BlockHash::from_slice(&payload.as_bytes()[16..48])
-        .map_err(|_| Error::InvalidRequest("Recorded fork label is invalid"))?;
+    let marker = split_poison_fork_marker(&recorded.output[0].script_pubkey)
+        .ok_or(Error::InvalidRequest("Recorded poison payload is invalid"))?;
     let mut rebuilt = create_poison_self_transfer(
         chain,
         descriptor,
@@ -707,7 +678,10 @@ pub fn reconstruct_poison_self_transfer(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bitcoin::{Amount, OutPoint, Transaction, TxIn, TxOut};
+    use bitcoin::{
+        hashes::{sha256, Hash},
+        Amount, OutPoint, Transaction, TxIn, TxOut,
+    };
     use std::{collections::HashMap, str::FromStr};
     const WSH_DESC: &str = "wsh(or_d(multi(1,[573fb35b/48'/1'/0'/2']tpubDFKp9T7WAYDcENSjoifkrpq1gMDF47KGJcJrpxzX23Qor8wuGbrEVs9utNq1MDS8E2WXJSBk1qoPQLpwyokW7DiUNPwFuxQkL7owNkLAb9W/<0;1>/*,[573fb35c/48'/1'/1'/2']tpubDFGezyzuHJPhdP3jHGW7v7Hwes4Hihqv5W2yyCmRY9VZJCRchETvxrMC8uECeJZdxQ14V4iD4DecoArkUSDwj8ogYE9WEv4MNZr12thNHCs/<0;1>/*),and_v(v:multi(2,[573fb35b/48'/1'/2'/2']tpubDDwxQauiaU964vPzt5Vd7jnDHEUtp2Vc34PaWpEXg5TQ3bRccxnc1MKKh88Hi7xiMeZo9Tm6fBcq4UGXqnDtGUniJLjqAD8SjQ8Eci3aSR7/<0;1>/*,[573fb35c/48'/1'/3'/2']tpubDE37XAVB5CQ1x85md3BQ5uHCoMwT5fgT8X13zzCUQ3x5o2jskYxKjj7Qcxt1Jpj4QB8tqspn2dooPCekRuQDYrDHov7J1ueUNu2wcvgRDxr/<0;1>/*),older(1000))))#fccaqlhh";
     const TR_DESC: &str = "tr(tpubD6NzVbkrYhZ4YdBUPkUhDYj6Sd1QK8vgiCf5RwHnAnSNK5ozemAZzPTYZbgQq4diod7oxFJJYGa8FNRHzRo7URkixzQTuudh38xRRdSc4Hu/<0;1>/*,{and_v(v:multi_a(1,[ffd63c8d/48'/1'/0'/2']tpubDExA3EC3iAsPxPhFn4j6gMiVup6V2eH3qKyk69RcTc9TTNRfFYVPad8bJD5FCHVQxyBT4izKsvr7Btd2R4xmQ1hZkvsqGBaeE82J71uTK4N/<2;3>/*,[da2ee873/48'/1'/0'/2']tpubDEbXY6RbN9mxAvQW797WxReGGkrdyRfdYcehVVaQQcQ3kyfhxSMcnU9qGpUVRHXXALvBtc99jcuxx5tkzcLaJbAukSNpP9h2ti4XFRosv1g/<2;3>/*),older(2)),multi_a(2,[ffd63c8d/48'/1'/0'/2']tpubDExA3EC3iAsPxPhFn4j6gMiVup6V2eH3qKyk69RcTc9TTNRfFYVPad8bJD5FCHVQxyBT4izKsvr7Btd2R4xmQ1hZkvsqGBaeE82J71uTK4N/<0;1>/*,[da2ee873/48'/1'/0'/2']tpubDEbXY6RbN9mxAvQW797WxReGGkrdyRfdYcehVVaQQcQ3kyfhxSMcnU9qGpUVRHXXALvBtc99jcuxx5tkzcLaJbAukSNpP9h2ti4XFRosv1g/<0;1>/*)})";

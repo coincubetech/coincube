@@ -10,6 +10,7 @@ pub mod random;
 pub mod seed_crypt;
 pub mod signer;
 pub mod spend;
+pub mod split_poison;
 pub mod unified_finalize;
 pub mod unified_foreign;
 pub mod unified_sighash;
