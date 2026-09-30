@@ -22,7 +22,7 @@ use crate::{
     services::{
         coincube::CoincubeClient,
         foreign_scan::{self, Branch, BranchRange, ForkSide, ScanDescriptor, ScanError, ScanPlan},
-        foreign_split_inventory::{self, FreshIndex, InventoryError, SplitInventory},
+        foreign_split_inventory::{self, FreshIndex, InventoryError, SplitInventory, TwoChainScan},
     },
     split_hardware::{self, HardwareMessage, HardwareSource},
 };
@@ -140,6 +140,7 @@ pub enum Message {
 #[derive(Debug, Clone)]
 pub struct ScanEvidence {
     report: foreign_scan::ScanReport,
+    bitcoin: foreign_scan::ScanReport,
     inventory: SplitInventory,
     external: ScanDescriptor,
     internal: Option<ScanDescriptor>,
@@ -150,11 +151,15 @@ impl ScanEvidence {
     /// Summarise authenticated evidence. Sums are checked: an overflow means
     /// the evidence is not coherent, so no summary (and no handoff) exists.
     fn new(
-        report: foreign_scan::ScanReport,
-        inventory: SplitInventory,
+        scan: TwoChainScan,
         external: ScanDescriptor,
         internal: Option<ScanDescriptor>,
     ) -> Result<Self, String> {
+        let TwoChainScan {
+            btcb2: report,
+            bitcoin,
+            inventory,
+        } = scan;
         let overflow =
             || "The scan totals are out of range. No balance conclusion was made.".to_string();
         let (mut pre_fork, mut pre_fork_sats, mut post_fork, mut unclassified) = (0, 0_u64, 0, 0);
@@ -193,6 +198,7 @@ impl ScanEvidence {
         };
         Ok(Self {
             report,
+            bitcoin,
             inventory,
             external,
             internal,
@@ -302,6 +308,8 @@ impl SplitWalletPanel {
         }
         let ScanEvidence {
             report,
+            bitcoin,
+            inventory,
             external,
             internal,
             ..
@@ -311,7 +319,11 @@ impl SplitWalletPanel {
             target_source,
             account_session_generation,
             client,
-            report,
+            TwoChainScan {
+                btcb2: report,
+                bitcoin,
+                inventory,
+            },
             external,
             internal,
         );
@@ -421,9 +433,7 @@ impl SplitWalletPanel {
                         foreign_split_inventory::scan(client, plan, generation, receiver)
                             .await
                             .map_err(inventory_error_copy)
-                            .and_then(|two| {
-                                ScanEvidence::new(two.btcb2, two.inventory, external, internal)
-                            })
+                            .and_then(|two| ScanEvidence::new(two, external, internal))
                             .map(Arc::new)
                     },
                     move |result| Message::Scanned(result, generation, session_generation),
@@ -747,11 +757,20 @@ mod tests {
         let inventory =
             SplitInventory::join(&report, &bitcoin, report.generation(), false).unwrap();
         let external = ScanDescriptor::parse(Branch::External, FIXED_DESCRIPTOR).unwrap();
-        ScanEvidence::new(report, inventory, external, None).unwrap()
+        ScanEvidence::new(
+            TwoChainScan {
+                btcb2: report,
+                bitcoin,
+                inventory,
+            },
+            external,
+            None,
+        )
+        .unwrap()
     }
 
-    /// A joined inventory against an empty, fully covered Bitcoin report.
-    fn empty_bitcoin_inventory(report: &foreign_scan::ScanReport) -> SplitInventory {
+    /// Both reports joined against an empty, fully covered Bitcoin report.
+    fn empty_bitcoin_scan(report: foreign_scan::ScanReport) -> TwoChainScan {
         let bitcoin = foreign_scan::ScanReport::for_test(
             ChainId::Bitcoin,
             report.generation(),
@@ -759,7 +778,12 @@ mod tests {
             Vec::new(),
         )
         .with_coverage(walk());
-        SplitInventory::join(report, &bitcoin, report.generation(), true).unwrap()
+        let inventory = SplitInventory::join(&report, &bitcoin, report.generation(), true).unwrap();
+        TwoChainScan {
+            btcb2: report,
+            bitcoin,
+            inventory,
+        }
     }
 
     fn target() -> TargetCube {
@@ -904,6 +928,18 @@ mod tests {
             .unwrap();
         assert_eq!(intent.report.generation(), 17);
         assert_eq!(intent.report.tip(), BlockHash::from_byte_array([9; 32]));
+        // #568 B1a: the Bitcoin scan and the joined inventory travel too.
+        assert_eq!(intent.bitcoin_report.chain(), ChainId::Bitcoin);
+        assert_eq!(intent.bitcoin_report.generation(), 17);
+        assert_eq!(
+            intent.bitcoin_report.tip(),
+            BlockHash::from_byte_array([8; 32])
+        );
+        assert_eq!(intent.inventory.generation(), 17);
+        assert_eq!(
+            intent.inventory.bitcoin_tip(),
+            BlockHash::from_byte_array([8; 32])
+        );
         assert_eq!(
             intent.external.canonical(),
             ScanDescriptor::parse(Branch::External, FIXED_DESCRIPTOR)
@@ -1184,8 +1220,7 @@ mod tests {
         )
         .with_fork_height(Some(100))
         .with_coverage(walk());
-        let inventory = empty_bitcoin_inventory(&report);
-        assert!(ScanEvidence::new(report.clone(), inventory, external, None).is_err());
+        assert!(ScanEvidence::new(empty_bitcoin_scan(report.clone()), external, None).is_err());
 
         // The two-chain splittable total is checked the same way.
         let bitcoin = foreign_scan::ScanReport::for_test(
@@ -1221,8 +1256,7 @@ mod tests {
         )
         .with_fork_height(Some(100))
         .with_coverage(walk());
-        let inventory = empty_bitcoin_inventory(&report);
-        let evidence = ScanEvidence::new(report, inventory, tr, None).unwrap();
+        let evidence = ScanEvidence::new(empty_bitcoin_scan(report), tr, None).unwrap();
         assert!(!evidence.summary.signable);
         let mut signable = evidence.summary.clone();
         signable.pre_fork = 1;

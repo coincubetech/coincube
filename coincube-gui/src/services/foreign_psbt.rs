@@ -26,7 +26,7 @@ use crate::{
         settings::{CubeSettings, WalletId},
         wallet::{descriptor_id_fingerprint, Wallet},
     },
-    daemon::model::GetAddressResult,
+    daemon::model::{GetAddressResult, GetInfoResult, ListCoinsEntry},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,6 +54,13 @@ pub enum ForeignPsbtError {
     Taproot,
     /// No observed fork height, so no coin can be classified as pre-fork.
     ForkUnknown,
+    /// The reserved target address already has history in the target Vault.
+    TargetUsed,
+    /// The target Vault's daemon cannot prove the reserved address unused:
+    /// it is not fully synced, has not completed a poll since the reservation,
+    /// is rescanning, holds back a reorg or diverged, or has not recorded the
+    /// reservation.
+    TargetFreshnessUnknown,
 }
 
 /// Explicit change selection. The amount is never inferred by the handoff.
@@ -62,8 +69,27 @@ pub struct ForeignChange {
     pub amount: Amount,
 }
 
+/// What the target Vault's daemon reported for a Split destination: the
+/// address `get_new_address` reserved, then `get_info` and the coin listing
+/// of every status, both taken after the reservation and after a successful
+/// poll that finished no earlier than the reservation. The daemon's history is
+/// the only evidence of address use, so each observation is required.
+#[derive(Debug, Clone)]
+pub struct TargetReservation {
+    pub reserved: GetAddressResult,
+    /// Unix seconds taken immediately before `get_new_address`. `info` must
+    /// show a successful poll at or after this time.
+    pub requested_at: u32,
+    pub info: GetInfoResult,
+    /// `list_coins` with no status or outpoint filter: unconfirmed,
+    /// confirmed, spending and spent coins alike.
+    pub coins: Vec<ListCoinsEntry>,
+}
+
 /// Opaque proof that a daemon-reserved receive address belongs to the exact
-/// selected BTCB2 Cube and its currently loaded Vault descriptor.
+/// selected BTCB2 Cube and its currently loaded Vault descriptor, and that it
+/// is fresh: the daemon, fully synced, has recorded the reservation and knows
+/// no coin (of any status) ever paid to it (#571 P3-2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TargetAddressEvidence {
     cube_id: String,
@@ -78,9 +104,10 @@ impl TargetAddressEvidence {
     pub fn authenticate(
         cube: &CubeSettings,
         wallet: &Wallet,
-        reserved: &GetAddressResult,
+        reservation: &TargetReservation,
         generation: u64,
     ) -> Result<Self, ForeignPsbtError> {
+        let reserved = &reservation.reserved;
         if cube.id.is_empty()
             || cube.network != ChainId::BitcoinBlake2b
             || wallet.chain != ChainId::BitcoinBlake2b
@@ -103,12 +130,14 @@ impl TargetAddressEvidence {
         if derived != reserved.address {
             return Err(ForeignPsbtError::TargetAddress);
         }
+        let script_pubkey = derived.script_pubkey();
+        check_target_fresh(wallet, reservation, &script_pubkey)?;
         Ok(Self {
             cube_id: cube.id.clone(),
             vault_id: wallet.id(),
             vault_fingerprint,
             derivation_index: reserved.derivation_index,
-            script_pubkey: derived.script_pubkey(),
+            script_pubkey,
             generation,
         })
     }
@@ -124,6 +153,47 @@ impl TargetAddressEvidence {
     pub fn derivation_index(&self) -> bitcoin::bip32::ChildNumber {
         self.derivation_index
     }
+}
+
+/// Fail closed unless the target daemon proves the reserved receive address
+/// unused. The listing must come from this Vault's descriptor; the daemon must
+/// be fully synced, have completed a poll at or after the reservation time
+/// (Electrum/Esplora report `sync == 1.0` before any poll), with no rescan,
+/// held-back reorg or divergence; its receive
+/// index must already cover the reservation; and no coin of any status may pay
+/// the reserved script or sit at the reserved receive index.
+fn check_target_fresh(
+    wallet: &Wallet,
+    reservation: &TargetReservation,
+    script_pubkey: &bitcoin::Script,
+) -> Result<(), ForeignPsbtError> {
+    let info = &reservation.info;
+    if info.descriptors.main != wallet.main_descriptor {
+        return Err(ForeignPsbtError::TargetChanged);
+    }
+    let index = u32::from(reservation.reserved.derivation_index);
+    // `sync` is rounded up to exactly 1.0 when complete; NaN fails.
+    let synced = info.sync >= 1.0;
+    let polled_since = info
+        .last_poll_timestamp
+        .is_some_and(|polled| polled >= reservation.requested_at);
+    if !synced
+        || !polled_since
+        || info.rescan_progress.is_some()
+        || info.refused_reorg_depth.is_some()
+        || info.chain_divergence
+        || info.receive_index < index
+    {
+        return Err(ForeignPsbtError::TargetFreshnessUnknown);
+    }
+    let used = reservation.coins.iter().any(|coin| {
+        coin.address.script_pubkey().as_script() == script_pubkey
+            || (!coin.is_change && u32::from(coin.derivation_index) == index)
+    });
+    if used {
+        return Err(ForeignPsbtError::TargetUsed);
+    }
+    Ok(())
 }
 
 /// Current UI/session identity supplied again at import time. Its descriptor
@@ -396,9 +466,10 @@ pub trait SweepFeeSource: Send + Sync {
     async fn mid_priority_sat_vb(&self) -> Option<u64>;
 }
 
-/// Production source. Tenshu has no BTCB2-chain-scoped fee estimator yet
-/// (#568 decision 4), and Bitcoin mainnet fees do not describe the BTCB2
-/// mempool, so the review shows fees as unavailable.
+/// The fail-closed source when no Connect account session can read the
+/// BTCB2 estimate (`ConnectBtcb2Fees` in `split_fees`, #568 D4). Bitcoin
+/// mainnet fees do not describe the BTCB2 mempool, so the review shows fees
+/// as unavailable.
 pub struct UnavailableBtcb2Fees;
 
 #[async_trait::async_trait]
@@ -711,19 +782,95 @@ mod tests {
 
     fn target_evidence(cube_id: &str, index: u32, generation: u64) -> TargetAddressEvidence {
         let (descriptor, wallet, cube) = target_context(cube_id);
-        let derivation_index = ChildNumber::from_normal_idx(index).unwrap();
-        let secp = secp256k1::Secp256k1::verification_only();
-        let address = descriptor
-            .receive_descriptor()
-            .derive(derivation_index, &secp)
-            .address(bitcoin::Network::Bitcoin);
         TargetAddressEvidence::authenticate(
             &cube,
             &wallet,
-            &GetAddressResult::new(address, derivation_index),
+            &fresh_reservation(&descriptor, index),
             generation,
         )
         .unwrap()
+    }
+
+    fn receive_address(descriptor: &CoincubeDescriptor, index: u32) -> bitcoin::Address {
+        let secp = secp256k1::Secp256k1::verification_only();
+        descriptor
+            .receive_descriptor()
+            .derive(ChildNumber::from_normal_idx(index).unwrap(), &secp)
+            .address(bitcoin::Network::Bitcoin)
+    }
+
+    /// Reservation time used by the fixtures (Unix seconds).
+    const RESERVED_AT: u32 = 1_800_000_000;
+
+    /// A synced daemon that has just reserved receive `index`, polled after
+    /// the reservation, and knows no coin in the Vault.
+    fn fresh_reservation(descriptor: &CoincubeDescriptor, index: u32) -> TargetReservation {
+        reservation_at(
+            descriptor,
+            index,
+            receive_address(descriptor, index),
+            Vec::new(),
+        )
+    }
+
+    fn reservation_at(
+        descriptor: &CoincubeDescriptor,
+        index: u32,
+        address: bitcoin::Address,
+        coins: Vec<ListCoinsEntry>,
+    ) -> TargetReservation {
+        TargetReservation {
+            reserved: GetAddressResult::new(address, ChildNumber::from_normal_idx(index).unwrap()),
+            requested_at: RESERVED_AT,
+            info: GetInfoResult {
+                version: String::new(),
+                network: bitcoin::Network::Bitcoin,
+                block_height: 1_000,
+                sync: 1.0,
+                descriptors: coincubed::commands::GetInfoDescriptors {
+                    main: descriptor.clone(),
+                },
+                rescan_progress: None,
+                refused_reorg_depth: None,
+                chain_divergence: false,
+                timestamp: 0,
+                last_poll_timestamp: Some(RESERVED_AT + 1),
+                receive_index: index,
+                change_index: 0,
+            },
+            coins,
+        }
+    }
+
+    fn vault_coin(
+        descriptor: &CoincubeDescriptor,
+        index: u32,
+        is_change: bool,
+        spent: bool,
+    ) -> ListCoinsEntry {
+        let secp = secp256k1::Secp256k1::verification_only();
+        let child = ChildNumber::from_normal_idx(index).unwrap();
+        let branch = if is_change {
+            descriptor.change_descriptor()
+        } else {
+            descriptor.receive_descriptor()
+        };
+        ListCoinsEntry {
+            amount: Amount::from_sat(5_000),
+            outpoint: OutPoint::new(bitcoin::Txid::from_byte_array([index as u8; 32]), 0),
+            address: branch
+                .derive(child, &secp)
+                .address(bitcoin::Network::Bitcoin),
+            block_height: Some(800),
+            derivation_index: child,
+            spend_info: spent.then_some(coincubed::commands::LCSpendInfo {
+                txid: bitcoin::Txid::from_byte_array([0xee; 32]),
+                height: Some(801),
+            }),
+            is_immature: false,
+            is_change,
+            is_from_self: false,
+        }
     }
 
     fn fixture() -> (
@@ -1403,12 +1550,6 @@ mod tests {
     #[test]
     fn target_authentication_rejects_wrong_vault_and_arbitrary_address() {
         let (descriptor, wallet, cube) = target_context("vault-a");
-        let secp = secp256k1::Secp256k1::verification_only();
-        let index = ChildNumber::from_normal_idx(11).unwrap();
-        let valid = descriptor
-            .receive_descriptor()
-            .derive(index, &secp)
-            .address(bitcoin::Network::Bitcoin);
 
         let wrong_wallet = Wallet::new(descriptor.clone())
             .with_chain(ChainId::BitcoinBlake2b)
@@ -1417,26 +1558,126 @@ mod tests {
             TargetAddressEvidence::authenticate(
                 &cube,
                 &wrong_wallet,
-                &GetAddressResult::new(valid, index),
+                &fresh_reservation(&descriptor, 11),
                 9,
             )
             .unwrap_err(),
             ForeignPsbtError::TargetChanged
         );
 
-        let arbitrary = descriptor
-            .receive_descriptor()
-            .derive(ChildNumber::from_normal_idx(12).unwrap(), &secp)
-            .address(bitcoin::Network::Bitcoin);
+        let arbitrary = receive_address(&descriptor, 12);
         assert_eq!(
             TargetAddressEvidence::authenticate(
                 &cube,
                 &wallet,
-                &GetAddressResult::new(arbitrary, index),
+                &reservation_at(&descriptor, 11, arbitrary, Vec::new()),
                 9,
             )
             .unwrap_err(),
             ForeignPsbtError::TargetAddress
+        );
+    }
+
+    /// #571 P3-2: owning the address is not enough. A reserved receive
+    /// address the Vault has already used (by any coin status, on either
+    /// matching evidence) is refused, and so is any daemon view that cannot
+    /// prove it unused.
+    #[test]
+    fn target_authentication_requires_a_provably_unused_address() {
+        let (descriptor, wallet, cube) = target_context("vault-a");
+        let authenticate = |reservation: &TargetReservation| {
+            TargetAddressEvidence::authenticate(&cube, &wallet, reservation, 9)
+        };
+        let fresh = fresh_reservation(&descriptor, 11);
+        let evidence = authenticate(&fresh).unwrap();
+        assert_eq!(
+            evidence.derivation_index(),
+            ChildNumber::from_normal_idx(11).unwrap()
+        );
+
+        // Coins elsewhere in the Vault do not make index 11 used: other
+        // receive indexes, and a change coin at the same numeric index
+        // (a different script).
+        let mut unrelated = fresh.clone();
+        unrelated.coins = vec![
+            vault_coin(&descriptor, 10, false, true),
+            vault_coin(&descriptor, 12, false, false),
+            vault_coin(&descriptor, 11, true, false),
+        ];
+        unrelated.info.receive_index = 12;
+        assert_eq!(authenticate(&unrelated).unwrap(), evidence);
+
+        // A used address: an unspent, then a spent coin at the reserved index.
+        for spent in [false, true] {
+            let mut used = fresh.clone();
+            used.coins = vec![vault_coin(&descriptor, 11, false, spent)];
+            assert_eq!(
+                authenticate(&used).unwrap_err(),
+                ForeignPsbtError::TargetUsed,
+                "spent={}",
+                spent
+            );
+        }
+        // Either match alone is use: the script (whatever index the daemon
+        // recorded) or the receive index (whatever address it reported).
+        let mut by_script = fresh.clone();
+        let mut coin = vault_coin(&descriptor, 11, false, false);
+        coin.derivation_index = ChildNumber::from_normal_idx(500).unwrap();
+        by_script.coins = vec![coin];
+        assert_eq!(
+            authenticate(&by_script).unwrap_err(),
+            ForeignPsbtError::TargetUsed
+        );
+        let mut by_index = fresh.clone();
+        let mut coin = vault_coin(&descriptor, 11, false, false);
+        coin.address = receive_address(&descriptor, 500);
+        by_index.coins = vec![coin];
+        assert_eq!(
+            authenticate(&by_index).unwrap_err(),
+            ForeignPsbtError::TargetUsed
+        );
+
+        // The daemon cannot prove freshness.
+        let unproven: [fn(&mut GetInfoResult); 9] = [
+            // #592 F1: Electrum/Esplora report sync 1.0 before any poll. A
+            // daemon that never polled, or last polled before the
+            // reservation, has not looked at the chain for this address.
+            |i| i.last_poll_timestamp = None,
+            |i| i.last_poll_timestamp = Some(RESERVED_AT - 1),
+            |i| i.sync = 0.999,
+            |i| i.sync = f64::NAN,
+            |i| i.rescan_progress = Some(0.5),
+            |i| i.refused_reorg_depth = Some(7),
+            |i| i.chain_divergence = true,
+            // The reservation is not recorded by this daemon.
+            |i| i.receive_index = 10,
+            |i| i.receive_index = 0,
+        ];
+        for (n, mutate) in unproven.iter().enumerate() {
+            let mut reservation = fresh.clone();
+            mutate(&mut reservation.info);
+            assert_eq!(
+                authenticate(&reservation).unwrap_err(),
+                ForeignPsbtError::TargetFreshnessUnknown,
+                "case {}",
+                n
+            );
+        }
+        // A poll in the same second as the reservation, or later, counts.
+        for polled in [RESERVED_AT, RESERVED_AT + 60] {
+            let mut reservation = fresh.clone();
+            reservation.info.last_poll_timestamp = Some(polled);
+            assert_eq!(authenticate(&reservation).unwrap(), evidence);
+        }
+        // The history belongs to another descriptor.
+        let mut other = fresh.clone();
+        other.info.descriptors.main = CoincubeDescriptor::from_str(
+            "wsh(or_d(pk([ffd63c8d/48'/1'/0'/2']tpubDExA3EC3iAsPxPhFn4j6gMiVup6V2eH3qKyk69RcTc9TTNRfFYVPad8bJD5FCHVQxyBT4izKsvr7Btd2R4xmQ1hZkvsqGBaeE82J71uTK4N/<0;1>/*),and_v(v:pkh([de6eb005/48'/1'/0'/2']tpubDFGuYfS2JwiUSEXiQuNGdT3R7WTDhbaE6jbUhgYSSdhmfQcSx7ZntMPPv7nrkvAqjpj3jX9wbhSGMeKVao4qAzhbNyBi7iQmv5xxQk6H6jz/<0;1>/*),older(3))))",
+        )
+        .unwrap();
+        assert_eq!(
+            authenticate(&other).unwrap_err(),
+            ForeignPsbtError::TargetChanged
         );
     }
 

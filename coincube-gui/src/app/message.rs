@@ -70,12 +70,19 @@ pub enum Message {
     Claim(super::state::vault::claim::ClaimEvent),
     ForkClaim(Box<super::state::vault::claim::fork_panel::Event>),
     ForkClaimOpened(Box<super::state::vault::claim::fork_load::Opened>),
-    /// Completion of the read-only Split destination reservation and bounded
-    /// BTCB2 fee-rate lookup (`None` = unavailable). It never carries a PSBT
-    /// or signing capability.
+    /// Completion of the read-only Split destination reservation (with the
+    /// daemon's post-reservation sync state and coin history, to prove the
+    /// address fresh) and bounded BTCB2 fee-rate lookup (`None` =
+    /// unavailable). It never carries a PSBT or signing capability.
     SplitTargetPrepared {
         generation: u64,
-        result: Result<(GetAddressResult, Option<u64>), String>,
+        result: Result<
+            (
+                Box<crate::services::foreign_psbt::TargetReservation>,
+                Option<u64>,
+            ),
+            String,
+        >,
     },
     LoadDaemonConfig(Box<DaemonConfig>),
     DaemonConfigLoaded(Result<(), Error>),

@@ -11,9 +11,11 @@ use crate::services::{
     http::ResponseExt,
 };
 
-/// Conservative desktop freshness limit, also applied to already-cached quotes.
-/// API policy may be stricter; its `stale` flag is always authoritative.
-pub const MAX_QUOTE_AGE: u64 = 120;
+/// Desktop freshness limit in seconds, applied to `updated_at`, every source
+/// `at`, and already-cached quotes. It matches the Connect API's default
+/// `FRESH_FOR` of 5 minutes (coincube-api#298). API policy may be stricter;
+/// its `stale` flag is always authoritative.
+pub const MAX_QUOTE_AGE: u64 = 300;
 pub const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
 #[derive(Debug, Clone, Deserialize)]
@@ -154,10 +156,10 @@ mod tests {
     #[test]
     fn quote_matrix_requires_both_sources_and_fresh_matching_aggregate() {
         assert_eq!(
-            quote().usable_price(Currency::USD, 1120).unwrap().value,
+            quote().usable_price(Currency::USD, 1300).unwrap().value,
             102.0
         );
-        assert!(quote().usable_price(Currency::USD, 1121).is_err());
+        assert!(quote().usable_price(Currency::USD, 1301).is_err());
         assert!(quote().usable_price(Currency::EUR, 1001).is_err());
         assert!(quote().usable_price(Currency::USD, 999).is_err());
         let variants: [fn(&mut Btcb2Quote); 13] = [
@@ -189,6 +191,26 @@ mod tests {
                 q
             );
         }
+    }
+
+    /// coincube-api#298: the owner set the quote freshness limit to 5 minutes
+    /// and kept the 10% spread threshold.
+    #[test]
+    fn freshness_limit_is_five_minutes_and_spread_stays_ten_percent() {
+        assert_eq!(MAX_QUOTE_AGE, 300);
+        assert!(timestamp_fresh(1000, 1121));
+        assert!(timestamp_fresh(1000, 1300));
+        assert!(!timestamp_fresh(1000, 1301));
+        // Spread exactly 10% of the median is accepted; just above is refused.
+        let mut at_limit = quote();
+        at_limit.sources[0].price = 95.0;
+        at_limit.sources[1].price = 105.0;
+        at_limit.price = 100.0;
+        assert!(at_limit.usable_price(Currency::USD, 1001).is_ok());
+        let mut over = at_limit.clone();
+        over.sources[0].price = 94.9;
+        over.price = 99.95;
+        assert!(over.usable_price(Currency::USD, 1001).is_err());
     }
 
     #[tokio::test]

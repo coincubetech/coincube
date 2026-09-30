@@ -64,6 +64,9 @@ impl Source for Fake {
             [if self.changed && n > 0 { 2 } else { 1 }; 32],
         ))
     }
+    async fn tip_height(&self, _: ChainId, tip: BlockHash) -> Result<u32, ScanError> {
+        Ok(u32::from(tip.to_byte_array()[0]) + 800_000)
+    }
     async fn anchor(&self) -> Result<(BlockHash, Option<u64>), ScanError> {
         Ok((BlockHash::from_byte_array([1; 32]), Some(100)))
     }
@@ -167,6 +170,210 @@ fn descriptor_capabilities_are_scan_only_and_ambiguous_or_secret_paths_refuse() 
     let mut p = plan(3);
     p.chain = ChainId::BitcoinBlake2bTestnet4;
     assert_eq!(p.validate(), Err(ScanError::UnsupportedChain));
+}
+
+/// #568 criterion 3: every accepted shape parses with and without key
+/// origins, and the origin is a label only (same scripts, same routes). The
+/// refusals hold for every shape, not only `wpkh`.
+#[test]
+fn descriptor_matrix_covers_every_shape_with_and_without_origins() {
+    let secp = Secp256k1::new();
+    let xpriv = |seed: u8| Xpriv::new_master(bitcoin::Network::Bitcoin, &[seed; 32]).unwrap();
+    let xpub = |seed: u8| Xpub::from_priv(&secp, &xpriv(seed));
+    let single =
+        |seed: u8| bitcoin::PublicKey::new(xpriv(seed).private_key.public_key(&secp)).to_string();
+    // Key expressions for one or three keys, with a caller-chosen suffix and an
+    // optional origin per key. Hardened origins are labels; only a hardened
+    // derivation *suffix* is refused.
+    let key = |seed: u8, origin: Option<&str>, suffix: &str| match origin {
+        Some(origin) => format!("[{origin}]{}{suffix}", xpub(seed)),
+        None => format!("{}{suffix}", xpub(seed)),
+    };
+    type Shape = fn(&[String]) -> String;
+    let shapes: [(&str, Shape, usize, bool); 6] = [
+        ("wpkh", |k| format!("wpkh({})", k[0]), 1, true),
+        ("sh(wpkh)", |k| format!("sh(wpkh({}))", k[0]), 1, true),
+        ("pkh", |k| format!("pkh({})", k[0]), 1, true),
+        (
+            "wsh(multi)",
+            |k| format!("wsh(multi(2,{},{},{}))", k[0], k[1], k[2]),
+            3,
+            true,
+        ),
+        (
+            "wsh(sortedmulti)",
+            |k| format!("wsh(sortedmulti(2,{},{},{}))", k[0], k[1], k[2]),
+            3,
+            true,
+        ),
+        // Scan-only: no signing route of any kind, with or without origin.
+        ("tr", |k| format!("tr({})", k[0]), 1, false),
+    ];
+    let origins = [
+        "d34db33f/84h/0h/0h",
+        "0badc0de/48h/0h/0h/2h",
+        "cafef00d/48'/0'/0'/2'",
+    ];
+    let keys = |count: usize, with_origin: bool, suffix: &str| -> Vec<String> {
+        (0..count)
+            .map(|i| key(50 + i as u8, with_origin.then_some(origins[i]), suffix))
+            .collect()
+    };
+    let routes = |psbt_file| Capabilities {
+        scan: true,
+        signing: SigningRoutes {
+            psbt_file,
+            // Not implemented for any foreign shape: unsupported signing
+            // combinations fail closed.
+            in_app_hardware: false,
+            seed_unified: false,
+        },
+        claim_authorization: false,
+    };
+
+    for (name, shape, count, psbt_file) in shapes {
+        let bare = ScanDescriptor::parse(Branch::External, &shape(&keys(count, false, "/0/*")))
+            .unwrap_or_else(|e| panic!("{} without origin: {:?}", name, e));
+        let with_origin =
+            ScanDescriptor::parse(Branch::Internal, &shape(&keys(count, true, "/1/*")))
+                .unwrap_or_else(|e| panic!("{} with origin: {:?}", name, e));
+        let same_branch_origin =
+            ScanDescriptor::parse(Branch::External, &shape(&keys(count, true, "/0/*"))).unwrap();
+        for d in [&bare, &with_origin, &same_branch_origin] {
+            assert_eq!(d.capabilities(), routes(psbt_file), "{}", name);
+            assert_eq!(d.is_taproot(), name == "tr", "{}", name);
+            assert!(d.is_ranged(), "{}", name);
+            assert_eq!(d.end_exclusive(100), 100, "{}", name);
+        }
+        assert_eq!(with_origin.branch(), Branch::Internal);
+        // The origin is kept for the signer but never changes an address.
+        assert!(
+            same_branch_origin.canonical().contains("[d34db33f/"),
+            "{}",
+            name
+        );
+        for index in [0, 1, 99] {
+            assert_eq!(
+                bare.script(index).unwrap(),
+                same_branch_origin.script(index).unwrap(),
+                "{name} at {index}"
+            );
+        }
+        // Mixed: only some multisig keys carry an origin.
+        if count == 3 {
+            let mut mixed = keys(count, true, "/0/*");
+            mixed[1] = key(51, None, "/0/*");
+            let d = ScanDescriptor::parse(Branch::External, &shape(&mixed)).unwrap();
+            assert_eq!(d.script(5).unwrap(), bare.script(5).unwrap(), "{}", name);
+        }
+
+        // Refusals, each with and without origins.
+        for with_origin in [false, true] {
+            let origin_of = |i: usize| with_origin.then_some(origins[i]);
+            let refused = [
+                // Hardened public derivation (suffix step and wildcard).
+                ("hardened step", keys(count, with_origin, "/0h/*")),
+                ("hardened wildcard", keys(count, with_origin, "/0/*h")),
+                // Ambiguous multipath.
+                ("multipath", keys(count, with_origin, "/<0;1>/*")),
+                // Private key in the last position (a multisig admits it in
+                // any slot, so a single secret refuses the whole descriptor).
+                ("private xprv", {
+                    let mut k = keys(count, with_origin, "/0/*");
+                    let last = count - 1;
+                    k[last] = match origin_of(last) {
+                        Some(o) => format!("[{o}]{}/0/*", xpriv(60)),
+                        None => format!("{}/0/*", xpriv(60)),
+                    };
+                    k
+                }),
+                ("private wif", {
+                    let mut k = keys(count, with_origin, "/0/*");
+                    let wif =
+                        bitcoin::PrivateKey::new(xpriv(61).private_key, bitcoin::Network::Bitcoin)
+                            .to_wif();
+                    k[0] = match origin_of(0) {
+                        Some(o) => format!("[{o}]{wif}"),
+                        None => wif,
+                    };
+                    k
+                }),
+                // Non-mainnet extended key.
+                ("testnet xpub", {
+                    let mut k = keys(count, with_origin, "/0/*");
+                    let tpub = Xpub::from_priv(
+                        &secp,
+                        &Xpriv::new_master(bitcoin::Network::Testnet, &[62; 32]).unwrap(),
+                    );
+                    k[0] = match origin_of(0) {
+                        Some(o) => format!("[{o}]{tpub}/0/*"),
+                        None => format!("{tpub}/0/*"),
+                    };
+                    k
+                }),
+            ];
+            for (why, k) in refused {
+                let text = shape(&k);
+                assert_eq!(
+                    ScanDescriptor::parse(Branch::External, &text).unwrap_err(),
+                    ScanError::Descriptor,
+                    "{name} {why} origin={with_origin}: {text}"
+                );
+            }
+        }
+    }
+
+    // Single (non-extended) public keys are fixed, one-address descriptors,
+    // with or without an origin; a compressed key is required by segwit.
+    for (text, psbt_file) in [
+        (format!("wpkh({})", single(70)), true),
+        (
+            format!("wpkh([d34db33f/84h/0h/0h/0/5]{})", single(70)),
+            true,
+        ),
+        (
+            format!("sh(wpkh([d34db33f/49h/0h/0h/0/5]{}))", single(70)),
+            true,
+        ),
+        (format!("pkh([d34db33f/44h/0h/0h/0/5]{})", single(70)), true),
+        (
+            format!(
+                "wsh(sortedmulti(2,[d34db33f/48h/0h/0h/2h/0/0]{},{},{}))",
+                single(71),
+                single(72),
+                single(73)
+            ),
+            true,
+        ),
+    ] {
+        let d = ScanDescriptor::parse(Branch::External, &text).unwrap();
+        assert!(!d.is_ranged(), "{}", text);
+        assert_eq!(d.end_exclusive(100), 1, "{}", text);
+        assert_eq!(d.capabilities(), routes(psbt_file), "{}", text);
+    }
+
+    // Unsupported forms fail closed with or without origins.
+    let o = origins[0];
+    let k = xpub(80);
+    for text in [
+        format!("tr([{o}]{k}/0/*,pk([{o}]{k}/1/*))"),
+        format!("wsh(pk([{o}]{k}/0/*))"),
+        format!("sh(wsh(multi(1,[{o}]{k}/0/*)))"),
+        format!("sh(multi(1,[{o}]{k}/0/*))"),
+        format!("sh(sortedmulti(1,{k}/0/*))"),
+        format!("pk([{o}]{k}/0/*)"),
+        format!("combo([{o}]{k}/0/*)"),
+        "addr(bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq)".to_string(),
+        // Malformed origin fingerprint.
+        format!("wpkh([d34db3/84h/0h/0h]{k}/0/*)"),
+    ] {
+        assert_eq!(
+            ScanDescriptor::parse(Branch::External, &text).unwrap_err(),
+            ScanError::Descriptor,
+            "{}",
+            text
+        );
+    }
 }
 
 #[test]
@@ -286,6 +493,19 @@ async fn http_complete_bounded_scan_and_inflight_generation_cancel() {
             .header("Cache-Control", "no-store")
             .body("11".repeat(32));
     });
+    let status = server.mock(|when, then| {
+        when.method(GET)
+            .path(format!(
+                "/api/v1/esplora/bitcoin/mainnet/block/{}/status",
+                "11".repeat(32)
+            ))
+            .header("x-coincube-observation", "fresh");
+        then.status(200)
+            .header("X-Coincube-Observation", "fresh")
+            .header("X-Cache", "BYPASS")
+            .header("Cache-Control", "no-store")
+            .body(r#"{"in_best_chain":true,"height":912345,"next_best":null}"#);
+    });
     let mut mocks = Vec::new();
     for index in 0..2 {
         let addr = bitcoin::Address::from_script(
@@ -321,7 +541,9 @@ async fn http_complete_bounded_scan_and_inflight_generation_cancel() {
     p.chain = ChainId::Bitcoin;
     let result = scan(client.clone(), p, 1, rx).await.unwrap();
     assert_eq!(result.addresses_scanned(), 2);
+    assert_eq!(result.tip_height(), 912_345);
     tip.assert_hits(2);
+    status.assert_hits(1);
     for m in mocks {
         m.assert_hits(2);
     }
@@ -425,5 +647,45 @@ async fn confirming_height_and_observed_fork_height_classify_coins() {
         // Without an observed fork height nothing is classifiable.
         let unknown = report.clone().with_fork_height(None);
         assert_eq!(unknown.fork_side(coin), ForkSide::Unknown);
+    }
+}
+
+/// The report's tip height is read for the scan's own tip, and a tip that has
+/// left the best chain, or a status without a height, fails the scan.
+#[tokio::test]
+async fn split_tip_height_is_bound_to_the_scanned_tip() {
+    let report = collect(&Fake::empty(), &plan(4), 7).await.unwrap();
+    assert_eq!(report.tip(), BlockHash::from_byte_array([1; 32]));
+    assert_eq!(report.tip_height(), 800_001);
+
+    use httpmock::prelude::*;
+    for (body, expected) in [
+        (
+            r#"{"in_best_chain":false,"height":5,"next_best":null}"#,
+            Err(ScanError::Changed),
+        ),
+        (r#"{"in_best_chain":true}"#, Err(ScanError::Malformed)),
+        (r#"{"in_best_chain":true,"height":7}"#, Ok(7)),
+    ] {
+        let server = MockServer::start();
+        let tip = BlockHash::from_byte_array([9; 32]);
+        let mock = server.mock(|when, then| {
+            when.method(GET).path(format!(
+                "/api/v1/esplora/bitcoin-blake2b/mainnet/block/{tip}/status"
+            ));
+            then.status(200)
+                .header("X-Coincube-Observation", "fresh")
+                .header("X-Cache", "BYPASS")
+                .header("Cache-Control", "no-store")
+                .body(body);
+        });
+        let mut client = CoincubeClient::for_test(server.base_url());
+        client.set_token("synthetic");
+        let source = http::HttpSource::new(client).unwrap();
+        assert_eq!(
+            source.tip_height(ChainId::BitcoinBlake2b, tip).await,
+            expected
+        );
+        mock.assert();
     }
 }

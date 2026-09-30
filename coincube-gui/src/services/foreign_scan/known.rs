@@ -237,6 +237,9 @@ mod tests {
         async fn tip(&self, _: ChainId) -> Result<BlockHash, ScanError> {
             Ok(BlockHash::from_byte_array([1; 32]))
         }
+        async fn tip_height(&self, _: ChainId, _: BlockHash) -> Result<u32, ScanError> {
+            unreachable!("known-output collection reads no tip height")
+        }
         async fn anchor(&self) -> Result<(BlockHash, Option<u64>), ScanError> {
             Ok((self.tip(ChainId::BitcoinBlake2b).await?, None))
         }

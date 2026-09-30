@@ -175,7 +175,7 @@ fn preconditions_view<'a>(
             match (checked.map(|c| &c.coins), coins) {
                 (None, _) => "Reading this Vault's coins…".to_string(),
                 (Some(Err(_)), _) => "Couldn't read this Vault's coins.".to_string(),
-                (_, Some(c)) => coins_detail(c, cache),
+                (_, Some(c)) => coins_detail(c, cache, panel.ancestry_discovery_open()),
                 (Some(Ok(_)), None) => String::new(),
             },
         ))
@@ -253,7 +253,7 @@ fn rdts_detail(window: &ForkWindow) -> String {
     }
 }
 
-fn coins_detail(coins: &CoinSet, cache: &Cache) -> String {
+fn coins_detail(coins: &CoinSet, cache: &Cache, ancestry_discovery: bool) -> String {
     let total: Amount = coins.pre_fork.iter().map(|c| c.amount).sum();
     let mut detail = format!(
         "{} coin{} from before the fork, {}.",
@@ -271,6 +271,11 @@ fn coins_detail(coins: &CoinSet, cache: &Cache) -> String {
             if coins.post_fork == 1 { "" } else { "s" },
             if coins.post_fork == 1 { "is" } else { "are" },
         ));
+        if !ancestry_discovery {
+            // #547: while the ancestry gate is closed this step never
+            // searches for a Bitcoin-only input; it splits with OP_RETURN.
+            detail.push_str(" Input poison is not available yet, so this step uses OP_RETURN.");
+        }
     }
     detail
 }
@@ -627,6 +632,26 @@ fn track_view<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #547: with post-fork coins and the ancestry gate closed, the panel says
+    /// input poison is unavailable; with none, or with discovery open, it
+    /// says nothing about it.
+    #[test]
+    fn post_fork_coins_say_input_poison_is_not_available_while_closed() {
+        let cache = Cache::default();
+        let coins = |post_fork| CoinSet {
+            pre_fork: Vec::new(),
+            post_fork,
+            ancestry_candidates: Vec::new(),
+            tip_height: 0,
+        };
+        let notice = "Input poison is not available yet, so this step uses OP_RETURN.";
+        let closed = coins_detail(&coins(2), &cache, false);
+        assert!(closed.contains("2 newer coins are left out"), "{}", closed);
+        assert!(closed.ends_with(notice), "{}", closed);
+        assert!(!coins_detail(&coins(0), &cache, false).contains("Input poison"));
+        assert!(!coins_detail(&coins(2), &cache, true).contains("Input poison"));
+    }
 
     #[test]
     fn reconfirmation_review_never_competes_with_an_existing_recovery_review() {

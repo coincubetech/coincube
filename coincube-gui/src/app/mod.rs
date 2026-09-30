@@ -943,11 +943,74 @@ enum SplitHandoff {
     },
 }
 
-/// The fee source for a BTCB2 Split review. Tenshu has no BTCB2-chain-scoped
-/// estimator yet, so this is always unavailable; the Bitcoin mainnet
-/// `FeeEstimator` must never price a BTCB2 sweep.
-fn split_fee_source() -> std::sync::Arc<dyn crate::services::foreign_psbt::SweepFeeSource> {
-    std::sync::Arc::new(crate::services::foreign_psbt::UnavailableBtcb2Fees)
+/// The fee source for a BTCB2 Split review: Connect's BTCB2 Esplora estimate
+/// for the bound account session (#568 D4), unavailable without one. It fails
+/// closed; the Bitcoin mainnet `FeeEstimator` must never price a BTCB2 sweep.
+fn split_fee_source(
+    client: Option<crate::services::coincube::CoincubeClient>,
+) -> std::sync::Arc<dyn crate::services::foreign_psbt::SweepFeeSource> {
+    crate::services::split_fees::btcb2_fee_source(client)
+}
+
+/// How long a Split reservation waits for the daemon's first successful poll
+/// after the reservation before the review is refused as unprovable.
+const SPLIT_TARGET_POLL_BOUND: Duration = Duration::from_secs(30);
+
+fn unix_now_secs() -> u32 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| <u32 as std::convert::TryFrom<u64>>::try_from(d.as_secs()).unwrap_or(u32::MAX))
+        .unwrap_or(0)
+}
+
+/// Reserve a Split destination, then read the daemon's sync state and full
+/// coin history *after* the reservation, so `TargetAddressEvidence` can prove
+/// the reserved address unused rather than merely owned by the Vault.
+///
+/// Electrum/Esplora report `sync == 1.0` even before the first poll, so the
+/// sync figure alone proves nothing (#592 F1). The reservation time is taken
+/// before `get_new_address`; a poll is requested, and coins are listed only
+/// once `get_info` shows a successful poll at or after that time. If none
+/// lands within `poll_bound`, the last observation is returned and
+/// `authenticate` refuses it as `TargetFreshnessUnknown`.
+async fn reserve_split_target(
+    daemon: Arc<dyn Daemon + Sync + Send>,
+    poll_bound: Duration,
+) -> Result<crate::services::foreign_psbt::TargetReservation, String> {
+    let requested_at = unix_now_secs();
+    let reserved = daemon
+        .get_new_address()
+        .await
+        .map_err(|error| error.to_string())?;
+    // A failed nudge is not fatal: the poller may still run on its own, and
+    // the poll-time check below fails closed either way.
+    if let Err(error) = daemon.request_sync().await {
+        warn!("Split target: request_sync failed: {}", error);
+    }
+    let polled = |info: &crate::daemon::model::GetInfoResult| {
+        info.last_poll_timestamp
+            .is_some_and(|polled| polled >= requested_at)
+    };
+    let interval = poll_bound.min(Duration::from_millis(500));
+    let deadline = tokio::time::Instant::now() + poll_bound;
+    let info = loop {
+        let info = daemon.get_info().await.map_err(|error| error.to_string())?;
+        if polled(&info) || tokio::time::Instant::now() >= deadline {
+            break info;
+        }
+        tokio::time::sleep(interval).await;
+    };
+    let coins = daemon
+        .list_coins(&[], &[])
+        .await
+        .map_err(|error| error.to_string())?
+        .coins;
+    Ok(crate::services::foreign_psbt::TargetReservation {
+        reserved,
+        requested_at,
+        info,
+        coins,
+    })
 }
 
 fn split_review_error(error: crate::services::foreign_psbt::ForeignPsbtError) -> String {
@@ -959,6 +1022,15 @@ fn split_review_error(error: crate::services::foreign_psbt::ForeignPsbtError) ->
         E::Unconfirmed => "Wait for every discovered output to confirm, then scan again.".to_string(),
         E::Economics => "The pre-fork total cannot cover the maximum fee at this fee rate while leaving a spendable amount.".to_string(),
         _ => "The source evidence cannot produce a safe sweep review. Scan again.".to_string(),
+    }
+}
+
+fn split_target_error(error: crate::services::foreign_psbt::ForeignPsbtError) -> String {
+    use crate::services::foreign_psbt::ForeignPsbtError as E;
+    match error {
+        E::TargetUsed => "The destination address Tenshu reserved has already been used in this Vault, so it is not a fresh address. Split was cancelled; scan again.".to_string(),
+        E::TargetFreshnessUnknown => "This Vault has not finished syncing since the destination address was reserved, so Tenshu cannot prove the address is unused. Wait for sync to finish, then scan again.".to_string(),
+        _ => "The reserved address did not match this Cube and Vault.".to_string(),
     }
 }
 
@@ -3671,15 +3743,14 @@ impl App {
         self.split_handoff_generation = self.split_handoff_generation.wrapping_add(1);
         let generation = self.split_handoff_generation;
         self.split_handoff = Some(SplitHandoff::Reserving(intent));
+        let fees = split_fee_source(self.fork_connect_client.clone());
         Task::perform(
             async move {
-                let fees = split_fee_source();
-                let (address, feerate) = tokio::join!(
-                    daemon.get_new_address(),
+                let (reservation, feerate) = tokio::join!(
+                    reserve_split_target(daemon, SPLIT_TARGET_POLL_BOUND),
                     crate::services::foreign_psbt::btcb2_sweep_feerate(&*fees)
                 );
-                let address = address.map_err(|error| error.to_string())?;
-                Ok((address, feerate))
+                Ok((Box::new(reservation?), feerate))
             },
             move |result| Message::SplitTargetPrepared { generation, result },
         )
@@ -5009,7 +5080,7 @@ impl App {
                             .to_string(),
                     )));
                 }
-                let prepared = result.and_then(|(reserved, feerate)| {
+                let prepared = result.and_then(|(reservation, feerate)| {
                     let wallet = self
                         .wallet
                         .as_ref()
@@ -5018,12 +5089,10 @@ impl App {
                         crate::services::foreign_psbt::TargetAddressEvidence::authenticate(
                             &self.cube_settings,
                             wallet,
-                            &reserved,
+                            &reservation,
                             intent.scan_generation(),
                         )
-                        .map_err(|_| {
-                            "The reserved address did not match this Cube and Vault.".to_string()
-                        })?;
+                        .map_err(split_target_error)?;
                     let session = || crate::services::foreign_psbt::ForeignSession {
                         chain: self.cube_settings.network,
                         generation: intent.scan_generation(),
@@ -5046,7 +5115,12 @@ impl App {
                         })
                         .transpose()
                         .map_err(split_review_error)?;
-                    Ok((target, reserved.address.to_string(), sweep, economics))
+                    Ok((
+                        target,
+                        reservation.reserved.address.to_string(),
+                        sweep,
+                        economics,
+                    ))
                 });
                 match prepared {
                     Ok((target, address, sweep, economics)) => {
@@ -8210,6 +8284,339 @@ fn restart_daemon_blocking(
 mod tests {
     use super::*;
 
+    /// Serves a Split target reservation: records the call order and the
+    /// `list_coins` filters, and holds a configurable coin history.
+    mod split_target {
+        use crate::daemon::{model, Daemon, DaemonBackend, DaemonError};
+        use crate::dir::CoincubeDirectory;
+        use coincube_core::descriptors::CoincubeDescriptor;
+        use coincube_core::miniscript::bitcoin::{
+            address, bip32::ChildNumber, psbt::Psbt, Address, Network, OutPoint, Txid,
+        };
+        use coincubed::bip329::Labels;
+        use coincubed::commands::{CoinStatus, LabelItem, UpdateDerivIndexesResult};
+        use std::collections::{HashMap, HashSet};
+        use std::sync::Mutex;
+
+        /// When the fake's poller completes a poll.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub(super) enum Polls {
+            /// Never polled: Electrum/Esplora still report sync 1.0 (#592 F1).
+            Never,
+            /// Last polled long before any reservation, and never again.
+            Stale,
+            /// A requested sync completes a poll at the current time.
+            OnRequest,
+        }
+
+        /// `coins` is the on-chain history. Like the real daemon, the fake
+        /// only knows it after a poll that completed after the request.
+        #[derive(Debug)]
+        pub(super) struct SplitTargetDaemon {
+            pub descriptor: CoincubeDescriptor,
+            pub index: u32,
+            pub coins: Vec<model::ListCoinsEntry>,
+            pub polls: Polls,
+            pub calls: Mutex<Vec<String>>,
+        }
+
+        impl SplitTargetDaemon {
+            fn called(&self, name: &str) -> bool {
+                self.calls.lock().unwrap().iter().any(|c| c == name)
+            }
+            fn last_poll(&self) -> Option<u32> {
+                match self.polls {
+                    Polls::Never => None,
+                    Polls::Stale => Some(1),
+                    Polls::OnRequest => self
+                        .called("request_sync")
+                        .then(super::super::unix_now_secs),
+                }
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl Daemon for SplitTargetDaemon {
+            fn backend(&self) -> DaemonBackend {
+                DaemonBackend::EmbeddedCoincubed(None)
+            }
+            fn config(&self) -> Option<&coincubed::config::Config> {
+                None
+            }
+            async fn is_alive(&self, _: &CoincubeDirectory, _: Network) -> Result<(), DaemonError> {
+                unreachable!()
+            }
+            async fn stop(&self) -> Result<(), DaemonError> {
+                unreachable!()
+            }
+            async fn get_info(&self) -> Result<model::GetInfoResult, DaemonError> {
+                // Taken after the reservation, so the receive index covers it.
+                let receive_index = if self.called("get_new_address") {
+                    self.index
+                } else {
+                    0
+                };
+                let last_poll_timestamp = self.last_poll();
+                self.calls.lock().unwrap().push("get_info".into());
+                Ok(model::GetInfoResult {
+                    version: String::new(),
+                    network: Network::Bitcoin,
+                    block_height: 1_000,
+                    sync: 1.0,
+                    descriptors: coincubed::commands::GetInfoDescriptors {
+                        main: self.descriptor.clone(),
+                    },
+                    rescan_progress: None,
+                    refused_reorg_depth: None,
+                    chain_divergence: false,
+                    timestamp: 0,
+                    last_poll_timestamp,
+                    receive_index,
+                    change_index: 0,
+                })
+            }
+            async fn request_sync(&self) -> Result<(), DaemonError> {
+                self.calls.lock().unwrap().push("request_sync".into());
+                Ok(())
+            }
+            async fn get_new_address(&self) -> Result<model::GetAddressResult, DaemonError> {
+                self.calls.lock().unwrap().push("get_new_address".into());
+                let secp =
+                    coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::verification_only();
+                let index = ChildNumber::from_normal_idx(self.index).unwrap();
+                Ok(model::GetAddressResult::new(
+                    self.descriptor
+                        .receive_descriptor()
+                        .derive(index, &secp)
+                        .address(Network::Bitcoin),
+                    index,
+                ))
+            }
+            async fn list_revealed_addresses(
+                &self,
+                _: bool,
+                _: bool,
+                _: usize,
+                _: Option<ChildNumber>,
+            ) -> Result<model::ListRevealedAddressesResult, DaemonError> {
+                unreachable!()
+            }
+            async fn update_deriv_indexes(
+                &self,
+                _: Option<u32>,
+                _: Option<u32>,
+            ) -> Result<UpdateDerivIndexesResult, DaemonError> {
+                unreachable!()
+            }
+            async fn list_coins(
+                &self,
+                statuses: &[CoinStatus],
+                outpoints: &[OutPoint],
+            ) -> Result<model::ListCoinsResult, DaemonError> {
+                // Only an unfiltered listing covers spent history.
+                let call = if statuses.is_empty() && outpoints.is_empty() {
+                    "list_coins(all)"
+                } else {
+                    "list_coins(filtered)"
+                };
+                // The daemon knows on-chain history only after a poll that
+                // follows the request; before that its coin table is empty.
+                let coins = if self.polls == Polls::OnRequest && self.called("request_sync") {
+                    self.coins.clone()
+                } else {
+                    Vec::new()
+                };
+                self.calls.lock().unwrap().push(call.into());
+                Ok(model::ListCoinsResult { coins })
+            }
+            async fn list_spend_txs(&self) -> Result<model::ListSpendResult, DaemonError> {
+                unreachable!()
+            }
+            async fn create_spend_tx(
+                &self,
+                _: &[OutPoint],
+                _: &HashMap<Address<address::NetworkUnchecked>, u64>,
+                _: u64,
+                _: Option<Address<address::NetworkUnchecked>>,
+            ) -> Result<model::CreateSpendResult, DaemonError> {
+                unreachable!()
+            }
+            async fn rbf_psbt(
+                &self,
+                _: &Txid,
+                _: bool,
+                _: Option<u64>,
+            ) -> Result<model::CreateSpendResult, DaemonError> {
+                unreachable!()
+            }
+            async fn update_spend_tx(&self, _: &Psbt) -> Result<(), DaemonError> {
+                unreachable!()
+            }
+            async fn delete_spend_tx(&self, _: &Txid) -> Result<(), DaemonError> {
+                unreachable!()
+            }
+            async fn broadcast_spend_tx(&self, _: &Txid) -> Result<(), DaemonError> {
+                unreachable!()
+            }
+            async fn start_rescan(&self, _: u32) -> Result<(), DaemonError> {
+                unreachable!()
+            }
+            async fn list_confirmed_txs(
+                &self,
+                _: u32,
+                _: u32,
+                _: u64,
+            ) -> Result<model::ListTransactionsResult, DaemonError> {
+                unreachable!()
+            }
+            async fn create_recovery(
+                &self,
+                _: Address<address::NetworkUnchecked>,
+                _: &[OutPoint],
+                _: u64,
+                _: Option<u16>,
+            ) -> Result<Psbt, DaemonError> {
+                unreachable!()
+            }
+            async fn list_txs(
+                &self,
+                _: &[Txid],
+            ) -> Result<model::ListTransactionsResult, DaemonError> {
+                unreachable!()
+            }
+            async fn get_labels(
+                &self,
+                _: &HashSet<LabelItem>,
+            ) -> Result<HashMap<String, String>, DaemonError> {
+                unreachable!()
+            }
+            async fn update_labels(
+                &self,
+                _: &HashMap<LabelItem, Option<String>>,
+            ) -> Result<(), DaemonError> {
+                unreachable!()
+            }
+            async fn get_labels_bip329(&self, _: u32, _: u32) -> Result<Labels, DaemonError> {
+                unreachable!()
+            }
+        }
+    }
+
+    /// #571 P3-2 at the call site: the Split destination is reserved first,
+    /// then the daemon's sync state and *unfiltered* coin history are read,
+    /// and a reserved address the Vault already used never becomes target
+    /// evidence (so no review is shown).
+    #[test]
+    fn split_target_reservation_proves_the_address_unused() {
+        use crate::services::foreign_psbt::{ForeignPsbtError, TargetAddressEvidence};
+        use coincube_core::miniscript::bitcoin::{
+            bip32::ChildNumber, hashes::Hash, Amount, Network, OutPoint, Txid,
+        };
+        use std::str::FromStr;
+        let descriptor = coincube_core::descriptors::CoincubeDescriptor::from_str(
+            "wsh(or_d(pk([f5acc2fd]tpubD6NzVbkrYhZ4YgUx2ZLNt2rLYAMTdYysCRzKoLu2BeSHKvzqPaBDvf17GeBPnExUVPkuBpx4kniP964e2MxyzzazcXLptxLXModSVCVEV1T/<0;1>/*),and_v(v:pkh([8a64f2a9]tpubD6NzVbkrYhZ4WmzFjvQrp7sDa4ECUxTi9oby8K4FZkd3XCBtEdKwUiQyYJaxiJo5y42gyDWEczrFpozEjeLxMPxjf2WtkfcbpUdfvNnozWF/<0;1>/*),older(10))))#d72le4dr"
+        ).unwrap();
+        let chain = crate::chain::ChainId::BitcoinBlake2b;
+        let wallet = Wallet::new(descriptor.clone())
+            .with_chain(chain)
+            .with_pinned_at(Some(42));
+        let cube = settings::CubeSettings::new_with_raw_id("target".into(), "Target".into(), chain)
+            .with_vault(settings::VaultIdentity::new(wallet.id(), Some(&descriptor)));
+        let secp = coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::verification_only();
+        let used_coin = |spent: bool| crate::daemon::model::ListCoinsEntry {
+            amount: Amount::from_sat(1_000),
+            outpoint: OutPoint::new(Txid::from_byte_array([1; 32]), 0),
+            address: descriptor
+                .receive_descriptor()
+                .derive(ChildNumber::from_normal_idx(3).unwrap(), &secp)
+                .address(Network::Bitcoin),
+            block_height: Some(900),
+            derivation_index: ChildNumber::from_normal_idx(3).unwrap(),
+            spend_info: spent.then_some(coincubed::commands::LCSpendInfo {
+                txid: Txid::from_byte_array([2; 32]),
+                height: Some(901),
+            }),
+            is_immature: false,
+            is_change: false,
+            is_from_self: false,
+        };
+        use split_target::Polls;
+        let run = |coins, polls| {
+            let daemon = Arc::new(split_target::SplitTargetDaemon {
+                descriptor: descriptor.clone(),
+                index: 3,
+                coins,
+                polls,
+                calls: Default::default(),
+            });
+            let reservation = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(reserve_split_target(
+                    daemon.clone(),
+                    Duration::from_millis(50),
+                ))
+                .unwrap();
+            let calls = daemon.calls.lock().unwrap().clone();
+            (reservation, calls)
+        };
+
+        let (fresh, calls) = run(Vec::new(), Polls::OnRequest);
+        // Reserve, request a poll, wait for it, and only then list coins.
+        assert_eq!(
+            calls,
+            [
+                "get_new_address",
+                "request_sync",
+                "get_info",
+                "list_coins(all)"
+            ]
+        );
+        assert!(fresh
+            .info
+            .last_poll_timestamp
+            .is_some_and(|t| t >= fresh.requested_at));
+        let evidence = TargetAddressEvidence::authenticate(&cube, &wallet, &fresh, 7).unwrap();
+        assert_eq!(
+            evidence.derivation_index(),
+            ChildNumber::from_normal_idx(3).unwrap()
+        );
+
+        for spent in [false, true] {
+            let (used, _) = run(vec![used_coin(spent)], Polls::OnRequest);
+            assert_eq!(
+                TargetAddressEvidence::authenticate(&cube, &wallet, &used, 7).unwrap_err(),
+                ForeignPsbtError::TargetUsed,
+                "spent={}",
+                spent
+            );
+        }
+        // #592 F1: first open of a Vault whose index 3 is used on chain. The
+        // backend reports sync 1.0 but has not polled (or polled only before
+        // the reservation), so its coin table is empty: never fresh.
+        for polls in [Polls::Never, Polls::Stale] {
+            let (unpolled, calls) = run(vec![used_coin(false)], polls);
+            assert!(unpolled.coins.is_empty());
+            assert_eq!(unpolled.info.sync, 1.0);
+            // It waited (re-reading get_info) until the bound, then gave up.
+            assert!(
+                calls.iter().filter(|c| *c == "get_info").count() >= 2,
+                "{:?}",
+                calls
+            );
+            assert_eq!(
+                TargetAddressEvidence::authenticate(&cube, &wallet, &unpolled, 7).unwrap_err(),
+                ForeignPsbtError::TargetFreshnessUnknown,
+                "{:?}",
+                polls
+            );
+        }
+        assert!(split_target_error(ForeignPsbtError::TargetUsed).contains("already been used"));
+        assert!(split_target_error(ForeignPsbtError::TargetFreshnessUnknown)
+            .contains("not finished syncing"));
+    }
+
     /// #576 review F1: a fork open refused before `new_inner` must still
     /// consume the Split handoff, so it cannot fire on a later open.
     #[test]
@@ -8251,16 +8658,24 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    /// #568 A1: the Split review is priced only by a BTCB2-scoped source, and
-    /// none exists yet, so fees are unavailable instead of Bitcoin mainnet's.
+    /// #568 A1/D4: the Split review is priced only by a BTCB2-scoped source,
+    /// Connect's BTCB2 estimate, and is unavailable without an account session
+    /// or when Connect cannot answer, never Bitcoin mainnet's.
     #[tokio::test]
-    async fn split_review_fee_source_is_btcb2_scoped_and_unavailable() {
-        let source = split_fee_source();
-        assert_eq!(source.chain(), crate::chain::ChainId::BitcoinBlake2b);
-        assert_eq!(
-            crate::services::foreign_psbt::btcb2_sweep_feerate(&*source).await,
-            None
-        );
+    async fn split_review_fee_source_is_btcb2_scoped_and_fails_closed() {
+        for client in [
+            None,
+            Some(crate::services::coincube::CoincubeClient::for_test(
+                "http://127.0.0.1:1".to_owned(),
+            )),
+        ] {
+            let source = split_fee_source(client);
+            assert_eq!(source.chain(), crate::chain::ChainId::BitcoinBlake2b);
+            assert_eq!(
+                crate::services::foreign_psbt::btcb2_sweep_feerate(&*source).await,
+                None
+            );
+        }
     }
 
     #[test]

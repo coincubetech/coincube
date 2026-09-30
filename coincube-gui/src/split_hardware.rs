@@ -9,6 +9,11 @@
 //! device list is session-only (no BitBox02 pairing written) and the account
 //! lives in memory until cancel, disconnect or a changed choice clears it.
 //! Taproot (BIP86) is deliberately not offered.
+//!
+//! [`sign`] holds the separate hardware signing session (slice B4a). It has
+//! no GUI caller yet, and the account source above still never signs.
+
+pub mod sign;
 
 use std::sync::Arc;
 
@@ -479,6 +484,7 @@ pub(crate) mod tests {
     use coincube_core::miniscript::bitcoin::{bip32::Xpriv, secp256k1::Secp256k1, Psbt};
     use std::{
         fs,
+        sync::atomic::{AtomicUsize, Ordering},
         time::{SystemTime, UNIX_EPOCH},
     };
 
@@ -553,14 +559,26 @@ pub(crate) mod tests {
         })
     }
 
-    fn temp_root() -> std::path::PathBuf {
+    /// A fresh, empty directory. Nanoseconds alone collided when tests ran
+    /// in parallel ("File exists"), so the name also carries the process id
+    /// and a per-process counter.
+    pub(crate) fn unique_temp_root(prefix: &str) -> std::path::PathBuf {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!("coincube-split-hw-{unique}"));
+        let root = std::env::temp_dir().join(format!(
+            "{prefix}-{}-{}-{unique}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
         fs::create_dir(&root).unwrap();
         root
+    }
+
+    fn temp_root() -> std::path::PathBuf {
+        unique_temp_root("coincube-split-hw")
     }
 
     fn source_with(device: Arc<dyn HWI + Send + Sync>, root: &std::path::Path) -> HardwareSource {

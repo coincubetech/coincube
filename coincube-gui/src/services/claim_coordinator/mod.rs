@@ -48,6 +48,9 @@ use tokio::sync::watch;
 pub enum Error {
     Unsupported,
     InvalidBinding,
+    /// The signed Claim fork sweep retains legacy signatures that could satisfy
+    /// an input without its unified one (`#582`, `#607`). Nothing was finalized.
+    UnsafeLegacyAlternative,
     Revoked,
     InvalidReview,
     ChangedReview,
@@ -642,7 +645,7 @@ impl Coordinator {
             descriptor_digest: sha256::Hash::hash(construction.descriptor().to_string().as_bytes()),
         };
         let mut controller = if resume {
-            Controller::reopen(directory, &identity, context.clone())?
+            Controller::reopen_settling_blocking(directory, &identity, context.clone())?
         } else {
             Controller::create(
                 directory,

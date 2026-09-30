@@ -407,15 +407,41 @@ fn an_assumed_conflicting_spend_does_not_expire_the_coin() {
     assert!(expired.is_empty());
 }
 
+/// How `scripted_node` answers one RPC.
+#[derive(Clone)]
+enum Reply {
+    /// A successful call returning this `result`.
+    Result(Json),
+    /// The node's JSON-RPC error reply, sent as bitcoind does: HTTP 500 with
+    /// `{"result": null, "error": {"code": .., "message": ..}}` (#597).
+    Error(i64, &'static str),
+}
+
+impl From<Json> for Reply {
+    fn from(result: Json) -> Reply {
+        Reply::Result(result)
+    }
+}
+
+// bitcoind's `getmempoolentry` reply for a transaction not in its mempool
+// (`RPC_INVALID_ADDRESS_OR_KEY`).
+fn not_in_mempool() -> Reply {
+    Reply::Error(-5, "Transaction not in mempool")
+}
+
 // A node that answers `script` in order, then goes away: every later connection
 // is closed before an HTTP reply (a real retryable transport failure) until
 // `stop` fires. Unlike `responses`, a reply the client no longer reads (the
 // fire-and-forget `importdescriptors`) is not an error.
-fn scripted_node(
+fn scripted_node<R: Into<Reply>>(
     listener: TcpListener,
-    script: Vec<(&'static str, Json)>,
+    script: Vec<(&'static str, R)>,
     stop: std::sync::mpsc::Receiver<()>,
 ) -> thread::JoinHandle<()> {
+    let script: Vec<(&'static str, Reply)> = script
+        .into_iter()
+        .map(|(method, reply)| (method, reply.into()))
+        .collect();
     // The stop signal and deadline are only checked between connections, so
     // accept must not block. Set it on this handle: a `try_clone`d Windows
     // socket does not keep the original's nonblocking mode, and a blocking
@@ -437,7 +463,7 @@ fn scripted_node(
                 }
                 other => panic!("RPC test accept failed: {:?}", other),
             };
-            let Some((method, result)) = script.next() else {
+            let Some((method, reply)) = script.next() else {
                 drop(stream);
                 continue;
             };
@@ -465,9 +491,18 @@ fn scripted_node(
             stream.read_exact(&mut body).unwrap();
             let request: Json = serde_json::from_slice(&body).unwrap();
             assert_eq!(request["method"], method, "unexpected RPC order");
-            let body =
-                serde_json::json!({"result":result,"error":null,"id":request["id"]}).to_string();
-            let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+            let (status, body) = match reply {
+                Reply::Result(result) => (
+                    "200 OK",
+                    serde_json::json!({"result":result,"error":null,"id":request["id"]}),
+                ),
+                Reply::Error(code, message) => (
+                    "500 Internal Server Error",
+                    serde_json::json!({"result":null,"error":{"code":code,"message":message},"id":request["id"]}),
+                ),
+            };
+            let body = body.to_string();
+            let _ = write!(stream, "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", status, body.len(), body);
         }
     })
 }
@@ -596,4 +631,424 @@ fn command_reads_during_a_node_outage_do_not_panic_or_claim_completion() {
         control.create_recovery(address, &[], 2, None),
         Err(CommandError::ChainTipUnavailable(_))
     ));
+}
+
+/// Run `call` while `scripted_node` answers `script` on `listener`.
+fn against_node<T, R: Into<Reply>>(
+    listener: &TcpListener,
+    script: Vec<(&'static str, R)>,
+    call: impl FnOnce() -> T,
+) -> T {
+    let (stop, stopped) = std::sync::mpsc::channel();
+    let node = scripted_node(listener.try_clone().unwrap(), script, stopped);
+    let result = call();
+    stop.send(()).unwrap();
+    node.join().unwrap();
+    result
+}
+
+/// A wallet coin of `amount` sats paid to our receive index 0, with its funding
+/// transaction stored so a spend of it can be built.
+fn store_coin(
+    control: &crate::DaemonControl,
+    amount: u64,
+    block_info: Option<crate::database::BlockInfo>,
+    is_from_self: bool,
+) -> bitcoin::OutPoint {
+    use bitcoin::{absolute, bip32, transaction::Version};
+    let script_pubkey = control
+        .config
+        .main_descriptor
+        .receive_descriptor()
+        .derive(bip32::ChildNumber::from(0), &control.secp)
+        .script_pubkey();
+    let funding = bitcoin::Transaction {
+        version: Version::TWO,
+        lock_time: absolute::LockTime::ZERO,
+        input: vec![bitcoin::TxIn {
+            previous_output: bitcoin::OutPoint::null(),
+            script_sig: bitcoin::ScriptBuf::from_bytes(vec![0x51]),
+            sequence: bitcoin::Sequence::MAX,
+            witness: bitcoin::Witness::default(),
+        }],
+        output: vec![bitcoin::TxOut {
+            value: bitcoin::Amount::from_sat(amount),
+            script_pubkey,
+        }],
+    };
+    let outpoint = bitcoin::OutPoint::new(funding.compute_txid(), 0);
+    let mut db_conn = control.db.connection();
+    db_conn.new_txs(std::slice::from_ref(&funding));
+    db_conn.new_unspent_coins(&[crate::database::Coin {
+        outpoint,
+        is_immature: false,
+        block_info,
+        amount: bitcoin::Amount::from_sat(amount),
+        derivation_index: 0.into(),
+        is_change: false,
+        spend_txid: None,
+        spend_block: None,
+        is_from_self,
+    }]);
+    outpoint
+}
+
+// `getmempoolentry` for a 141 vB transaction paying 1 sat/vB, alone in the mempool.
+fn mempool_entry_json() -> Json {
+    serde_json::json!({
+        "vsize": 141,
+        "ancestorsize": 141,
+        "fees": {"base": 0.00000141, "modified": 0.00000141, "ancestor": 0.00000141, "descendant": 0.00000141},
+    })
+}
+
+// The reads the anti-fee-sniping locktime makes once a spend is built (#589).
+fn locktime_reads() -> Vec<(&'static str, Json)> {
+    let chain_info = serde_json::json!({"bestblockhash": bitcoin::BlockHash::from_byte_array([1; 32]), "blocks": 200});
+    vec![
+        ("getblockchaininfo", chain_info.clone()),
+        ("getblockchaininfo", chain_info),
+        (
+            "getblockheader",
+            serde_json::json!({"confirmations":1,"height":200,"time":1_700_000_000u32,"mediantime":1_700_000_000u32}),
+        ),
+    ]
+}
+
+#[test]
+fn createspend_mempool_outage_is_a_retryable_error_not_a_panic() {
+    use crate::commands::{CommandError, CreateSpendResult};
+    use std::{collections::HashMap, str::FromStr};
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let control = command_control(listener.local_addr().unwrap());
+    // An unconfirmed coin from one of our own transactions: coin selection
+    // asks the node for its ancestors, whether we pick it or it is picked.
+    let outpoint = store_coin(&control, 100_000, None, true);
+    let destination =
+        bitcoin::Address::from_str("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4").unwrap();
+    let destinations = HashMap::from([(destination, 50_000)]);
+    let change_index = control.db.connection().change_index();
+
+    for coins in [vec![], vec![outpoint]] {
+        // The node is down for the ancestor read: an error the caller can retry,
+        // no change address consumed, and the backend lock still usable.
+        let result = against_node(&listener, Vec::<(_, Json)>::new(), || {
+            control.create_spend(&destinations, &coins, 1, None)
+        });
+        assert!(
+            matches!(result, Err(CommandError::MempoolUnavailable(_))),
+            "outage with coins {:?} returned {:?}",
+            coins,
+            result
+        );
+        assert!(!control.bitcoin.is_poisoned());
+        assert_eq!(control.db.connection().change_index(), change_index);
+    }
+
+    // The node is back: the same command succeeds.
+    let mut script = vec![("getmempoolentry", mempool_entry_json())];
+    script.extend(locktime_reads());
+    let result = against_node(&listener, script, || {
+        control.create_spend(&destinations, &[outpoint], 1, None)
+    });
+    assert!(
+        matches!(result, Ok(CreateSpendResult::Success { .. })),
+        "{:?}",
+        result
+    );
+}
+
+/// A stored, unconfirmed 1 sat/vB spend of a confirmed wallet coin, ready to be
+/// replaced: the spent coin's outpoint and the spend's txid.
+fn stored_replaceable_spend(
+    control: &crate::DaemonControl,
+    listener: &TcpListener,
+) -> (bitcoin::OutPoint, bitcoin::Txid) {
+    use crate::commands::CreateSpendResult;
+    use std::{collections::HashMap, str::FromStr};
+    // A confirmed coin needs no mempool read to spend.
+    let outpoint = store_coin(
+        control,
+        100_000,
+        Some(crate::database::BlockInfo {
+            height: 100,
+            time: 1_600_000_000,
+        }),
+        false,
+    );
+    let destination =
+        bitcoin::Address::from_str("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4").unwrap();
+    let psbt = match against_node(listener, locktime_reads(), || {
+        control.create_spend(
+            &HashMap::from([(destination, 50_000)]),
+            &[outpoint],
+            1,
+            None,
+        )
+    }) {
+        Ok(CreateSpendResult::Success { psbt, .. }) => psbt,
+        other => panic!("could not build the spend to replace: {:?}", other),
+    };
+    let txid = psbt.unsigned_tx.compute_txid();
+    let mut db_conn = control.db.connection();
+    db_conn.store_spend(&psbt);
+    db_conn.spend_coins(&[(outpoint, txid)]);
+    (outpoint, txid)
+}
+
+#[test]
+fn rbfpsbt_mempool_outage_is_a_retryable_error_not_a_panic() {
+    use crate::commands::{CommandError, CreateSpendResult};
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let control = command_control(listener.local_addr().unwrap());
+    let (outpoint, txid) = stored_replaceable_spend(&control, &listener);
+    let change_index = control.db.connection().change_index();
+
+    // Every read `rbfpsbt` makes against bitcoind, in order.
+    let mut script = vec![
+        (
+            "gettxspendingprevout",
+            serde_json::json!([{"txid": outpoint.txid.to_string(), "vout": outpoint.vout, "spendingtxid": txid.to_string()}]),
+        ),
+        ("getmempoolentry", mempool_entry_json()),
+    ];
+    // The node drops before each mempool read in turn. An outage is not "the
+    // replaced transaction left the mempool": it must come back as an error,
+    // with the backend lock still usable, where it used to panic the daemon.
+    for answered in 0..script.len() {
+        let result = against_node(&listener, script[..answered].to_vec(), || {
+            control.rbf_psbt(&txid, true, None)
+        });
+        assert!(
+            matches!(result, Err(CommandError::MempoolUnavailable(_))),
+            "outage after {} answered reads returned {:?}",
+            answered,
+            result
+        );
+        assert!(!control.bitcoin.is_poisoned());
+        assert_eq!(control.db.connection().change_index(), change_index);
+    }
+
+    // The node is back: the same command succeeds, above the replaced feerate.
+    script.extend(locktime_reads());
+    let psbt = match against_node(&listener, script, || control.rbf_psbt(&txid, true, None)) {
+        Ok(CreateSpendResult::Success { psbt, .. }) => psbt,
+        other => panic!("replacement failed once the node was back: {:?}", other),
+    };
+    let fee = psbt.fee().unwrap().to_sat();
+    let vsize = psbt.unsigned_tx.vsize() as u64;
+    assert!(fee >= 2 * vsize, "fee {} for {} vB", fee, vsize);
+}
+
+// The mempool reads of a replacement: `outpoint` is spent by `txid` in the
+// node's mempool, whose entry the node answers with `entry`.
+fn rbf_mempool_reads(
+    outpoint: bitcoin::OutPoint,
+    txid: bitcoin::Txid,
+    entry: Reply,
+) -> Vec<(&'static str, Reply)> {
+    vec![
+        (
+            "gettxspendingprevout",
+            serde_json::json!([{"txid": outpoint.txid.to_string(), "vout": outpoint.vout, "spendingtxid": txid.to_string()}]).into(),
+        ),
+        ("getmempoolentry", entry),
+    ]
+}
+
+fn replies(script: Vec<(&'static str, Json)>) -> Vec<(&'static str, Reply)> {
+    script
+        .into_iter()
+        .map(|(method, result)| (method, result.into()))
+        .collect()
+}
+
+// Other JSON-RPC errors `getmempoolentry` could answer with: none of them says
+// the transaction is absent.
+const NOT_ABSENCE: [(i64, &str); 3] = [
+    (-1, "misc error"),
+    (-8, "invalid parameter"),
+    (-32603, "internal error"),
+];
+
+#[test]
+fn createspend_not_in_mempool_reply_is_absence_and_other_rpc_errors_are_errors() {
+    use crate::commands::{CommandError, CreateSpendResult};
+    use std::{collections::HashMap, str::FromStr};
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let control = command_control(listener.local_addr().unwrap());
+    // An unconfirmed coin from one of our own transactions: coin selection asks
+    // the node for its ancestors.
+    let outpoint = store_coin(&control, 100_000, None, true);
+    let destination =
+        bitcoin::Address::from_str("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4").unwrap();
+    let destinations = HashMap::from([(destination, 50_000)]);
+    let change_index = control.db.connection().change_index();
+
+    for coins in [vec![], vec![outpoint]] {
+        // Any other error reply is not "not in the mempool": the command fails
+        // with a retryable error and consumes nothing.
+        for (code, message) in NOT_ABSENCE {
+            let result = against_node(
+                &listener,
+                vec![("getmempoolentry", Reply::Error(code, message))],
+                || control.create_spend(&destinations, &coins, 1, None),
+            );
+            assert!(
+                matches!(result, Err(CommandError::MempoolUnavailable(_))),
+                "RPC error {} with coins {:?} returned {:?}",
+                code,
+                coins,
+                result
+            );
+            assert!(!control.bitcoin.is_poisoned());
+            assert_eq!(control.db.connection().change_index(), change_index);
+        }
+    }
+
+    // bitcoind's -5 reply is the node saying the transaction left its mempool:
+    // the coin is used without ancestor info, as before #594.
+    for coins in [vec![], vec![outpoint]] {
+        let mut script = vec![("getmempoolentry", not_in_mempool())];
+        script.extend(replies(locktime_reads()));
+        let result = against_node(&listener, script, || {
+            control.create_spend(&destinations, &coins, 1, None)
+        });
+        assert!(
+            matches!(result, Ok(CreateSpendResult::Success { .. })),
+            "-5 with coins {:?} returned {:?}",
+            coins,
+            result
+        );
+    }
+}
+
+#[test]
+fn rbfpsbt_spender_not_in_mempool_falls_back_to_min_feerate_and_other_rpc_errors_are_errors() {
+    use crate::commands::{CommandError, CreateSpendResult};
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let control = command_control(listener.local_addr().unwrap());
+    let (outpoint, txid) = stored_replaceable_spend(&control, &listener);
+    let change_index = control.db.connection().change_index();
+
+    // An error reply to either read that does not say "absent" is an error the
+    // caller can retry, not a replacement that drops the RBF minimums.
+    let mut scripts = vec![vec![(
+        "gettxspendingprevout",
+        Reply::Error(-8, "invalid parameter"),
+    )]];
+    for (code, message) in NOT_ABSENCE {
+        scripts.push(rbf_mempool_reads(
+            outpoint,
+            txid,
+            Reply::Error(code, message),
+        ));
+    }
+    for script in scripts {
+        let result = against_node(&listener, script, || control.rbf_psbt(&txid, true, None));
+        assert!(
+            matches!(result, Err(CommandError::MempoolUnavailable(_))),
+            "{:?}",
+            result
+        );
+        assert!(!control.bitcoin.is_poisoned());
+        assert_eq!(control.db.connection().change_index(), change_index);
+    }
+
+    // The spender left the mempool between the two reads (-5): there is no
+    // replaced feerate to beat, so the cancel falls back to the minimum of 1 sat/vB.
+    let mut script = rbf_mempool_reads(outpoint, txid, not_in_mempool());
+    script.extend(replies(locktime_reads()));
+    let psbt = match against_node(&listener, script, || control.rbf_psbt(&txid, true, None)) {
+        Ok(CreateSpendResult::Success { psbt, .. }) => psbt,
+        other => panic!("-5 for the spender returned {:?}", other),
+    };
+    let fee = psbt.fee().unwrap().to_sat();
+    let vsize = psbt.unsigned_tx.vsize() as u64;
+    assert!(
+        fee >= vsize && fee < 2 * vsize,
+        "fee {} for {} vB",
+        fee,
+        vsize
+    );
+}
+
+// `getmempoolentry` answers a coin-selection or replacement read cannot use.
+fn unusable_mempool_entries() -> Vec<Json> {
+    let good = mempool_entry_json();
+    let mut entries = Vec::new();
+    for (field, value) in [
+        ("vsize", serde_json::json!(0)),
+        ("vsize", serde_json::json!("141")),
+        ("ancestorsize", Json::Null),
+        ("fees", serde_json::json!(141)),
+    ] {
+        let mut bad = good.clone();
+        bad[field] = value;
+        entries.push(bad);
+    }
+    for field in ["base", "ancestor", "descendant"] {
+        let mut bad = good.clone();
+        bad["fees"][field] = serde_json::json!(-0.00000141);
+        entries.push(bad);
+        let mut bad = good.clone();
+        bad["fees"].as_object_mut().unwrap().remove(field);
+        entries.push(bad);
+    }
+    entries
+}
+
+#[test]
+fn malformed_mempool_entry_is_an_error_not_a_panic() {
+    use crate::commands::CommandError;
+    use std::{collections::HashMap, str::FromStr};
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let control = command_control(listener.local_addr().unwrap());
+    let (outpoint, txid) = stored_replaceable_spend(&control, &listener);
+    let unconfirmed = store_coin(&control, 200_000, None, true);
+    let destination =
+        bitcoin::Address::from_str("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4").unwrap();
+    let destinations = HashMap::from([(destination, 50_000)]);
+    let change_index = control.db.connection().change_index();
+
+    // An ancestor fee coin selection cannot represent (more than u32::MAX sat)
+    // is refused too, where it used to panic.
+    let mut huge_ancestor_fee = mempool_entry_json();
+    huge_ancestor_fee["fees"]["ancestor"] = serde_json::json!(43.0);
+    let mut createspend_entries = unusable_mempool_entries();
+    createspend_entries.push(huge_ancestor_fee);
+
+    for entry in createspend_entries {
+        let result = against_node(&listener, vec![("getmempoolentry", entry.clone())], || {
+            control.create_spend(&destinations, &[unconfirmed], 1, None)
+        });
+        assert!(
+            matches!(result, Err(CommandError::MempoolUnavailable(_))),
+            "createspend with {} returned {:?}",
+            entry,
+            result
+        );
+        assert!(!control.bitcoin.is_poisoned());
+        assert_eq!(control.db.connection().change_index(), change_index);
+    }
+    for entry in unusable_mempool_entries() {
+        let result = against_node(
+            &listener,
+            rbf_mempool_reads(outpoint, txid, entry.clone().into()),
+            || control.rbf_psbt(&txid, true, None),
+        );
+        assert!(
+            matches!(result, Err(CommandError::MempoolUnavailable(_))),
+            "rbfpsbt with {} returned {:?}",
+            entry,
+            result
+        );
+        assert!(!control.bitcoin.is_poisoned());
+        assert_eq!(control.db.connection().change_index(), change_index);
+    }
 }

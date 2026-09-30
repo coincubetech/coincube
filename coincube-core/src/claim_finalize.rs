@@ -269,7 +269,32 @@ pub fn validate_claim_fork_signing(
 /// Both unified and legacy signatures are cryptographically checked by the
 /// existing finalizer. A legacy-only report still requires fresh poison proof
 /// from the coordinator before any replay-safety claim or submission.
+///
+/// The PSBT is also refused when an input could be finalised with a unified
+/// signature while the legacy signatures it retains independently satisfy the
+/// script ([`ensure_no_unsafe_legacy_alternative`], `#582`). This is the only
+/// constructor of a [`VerifiedClaimForkSweep`] that reads a signing PSBT, so
+/// the Claim submission route, which receives only the finalised artifact,
+/// never sees such a PSBT.
+///
+/// [`ensure_no_unsafe_legacy_alternative`]: crate::unified_finalize::ensure_no_unsafe_legacy_alternative
 pub fn finalize_claim_fork_sweep<C: secp256k1::Verification>(
+    construction: &crate::claim_spend::ClaimForkSweep,
+    signed: &crate::psbt_unified::UnifiedPsbt,
+    secp: &secp256k1::Secp256k1<C>,
+) -> Result<VerifiedClaimForkSweep, ClaimForkFinalizeError> {
+    let verified = finalize_owned_claim_fork_sweep(construction, signed, secp)?;
+    crate::unified_finalize::ensure_no_unsafe_legacy_alternative(signed, secp)
+        .map_err(ClaimForkFinalizeError::Finalize)?;
+    Ok(verified)
+}
+
+/// Construction binding and cryptographic finalisation, without the retention
+/// refusal. Recovery uses it directly: its PSBT is rebuilt from a witness that
+/// was already published, holds only the signatures that witness carries, and
+/// is never stored or exported. Refusing it could not withdraw the published
+/// bytes; it would only stop the wallet tracking them.
+fn finalize_owned_claim_fork_sweep<C: secp256k1::Verification>(
     construction: &crate::claim_spend::ClaimForkSweep,
     signed: &crate::psbt_unified::UnifiedPsbt,
     secp: &secp256k1::Secp256k1<C>,
@@ -384,10 +409,19 @@ pub fn verify_claim_fork_transaction<C: secp256k1::Verification>(
             }
         }
     }
-    let verified = finalize_claim_fork_sweep(construction, &recovered, secp)?;
+    let verified = finalize_owned_claim_fork_sweep(construction, &recovered, secp)?;
     if verified.transaction() != transaction {
         return Err(invalid());
     }
+    // The retention refusal is skipped here by design, and it also cannot fire
+    // (`#607`). A witness carries one satisfaction, so next to a unified
+    // signature a k-of-n branch holds at most k-1 legacy signatures, and those
+    // cannot satisfy it alone. Only a key shared across spending paths could
+    // break that; debug builds check it so the skip is revisited if it does.
+    debug_assert!(
+        crate::unified_finalize::ensure_no_unsafe_legacy_alternative(&recovered, secp).is_ok(),
+        "a recovered Claim fork witness retained a legacy alternative: the k-1 invariant broke"
+    );
     Ok(verified)
 }
 

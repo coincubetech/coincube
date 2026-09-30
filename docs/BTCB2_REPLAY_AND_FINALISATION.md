@@ -298,10 +298,12 @@ input's report. Stored PSBTs round-trip the proprietary records unchanged.
   replay-capable key gets a non-blocking notice ("spends from this path can be
   replayed onto Bitcoin unless the coins were split first"). Devices stay
   selectable.
-- **I8** (`replay::bitcoin_cube_unswept_notice`): copy only — "These coins
-  also exist on Bitcoin Blake2b until swept there." — rendered for a Bitcoin
-  Cube only once Lane B1.5 records what has been swept; nothing supplies that
-  yet.
+- **I8** (`unswept_notice::UNSWEPT_RECOVERY_NOTICE`): display only — "Some
+  of this Cube’s coins also exist on Bitcoin Blake2b until swept there." —
+  rendered on the Vault Recovery and Settings → Recovery screens of a Bitcoin
+  Cube only while fresh positive fork-UTXO evidence matches its current owned
+  pre-fork outputs and session (`Cache::unswept_recovery_notice`). It grants
+  no spending or Claim authority.
 
 ## Not in this slice
 

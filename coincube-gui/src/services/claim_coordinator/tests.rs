@@ -431,7 +431,7 @@ async fn real_evidence_and_final_witness_join_before_durable_submission() {
     ));
     let identity = h.coordinator.controller.identity().clone();
     drop(h.coordinator);
-    let reopened = Controller::reopen(&h.temp.0, &identity, context()).unwrap();
+    let reopened = Controller::reopen_settling_blocking(&h.temp.0, &identity, context()).unwrap();
     assert_eq!(reopened.phase(), Phase::BroadcastUncertain);
     assert_eq!(reopened.status(), Status::Unchecked);
 }
@@ -1175,7 +1175,7 @@ async fn resubmission_requires_a_new_explicit_review_and_records_before_transpor
     assert_eq!(h.calls.load(Ordering::SeqCst), 2);
     let identity = h.coordinator.controller.identity().clone();
     drop(h.coordinator);
-    let c = Controller::reopen(&h.temp.0, &identity, context()).unwrap();
+    let c = Controller::reopen_settling_blocking(&h.temp.0, &identity, context()).unwrap();
     assert_eq!(c.status(), Status::Unchecked);
     assert_eq!(c.bitcoin_submission_attempts().len(), 2);
 }
@@ -1368,7 +1368,7 @@ async fn cancelled_resubmission_retains_the_attempt_without_an_automatic_retry()
     );
     let identity = h.coordinator.controller.identity().clone();
     drop(h.coordinator);
-    let c = Controller::reopen(&h.temp.0, &identity, context()).unwrap();
+    let c = Controller::reopen_settling_blocking(&h.temp.0, &identity, context()).unwrap();
     assert_eq!(c.bitcoin_submission_attempts().len(), 2);
     assert_eq!(c.status(), Status::Unchecked);
 }

@@ -2,12 +2,14 @@ use std::collections::HashMap;
 
 use bdk_electrum::bdk_chain::{
     bitcoin::{self, bip32::ChildNumber, BlockHash, OutPoint},
-    local_chain::{CannotConnectError, LocalChain},
+    local_chain::{CannotConnectError, CheckPoint, LocalChain},
     spk_client::{FullScanRequest, SyncRequest},
     ChainPosition,
 };
 
 pub mod client;
+#[cfg(test)]
+mod tests;
 pub mod utils;
 pub mod wallet;
 use crate::bitcoin::{Block, BlockChainTip, Coin};
@@ -47,6 +49,20 @@ impl std::fmt::Display for ElectrumError {
             ),
         }
     }
+}
+
+/// Refuse a chain update whose tip height does not fit into our `i32` heights,
+/// before any of it is applied (#616). BDK takes the tip height from the server
+/// as a `u32`; applied, it would make every later read of the wallet tip panic
+/// under the backend lock. The rest of the update is at or below its tip.
+fn check_update_height(chain_update: &CheckPoint) -> Result<(), ElectrumError> {
+    let height = chain_update.height();
+    if utils::height_i32_from_usize(height as usize).is_none() {
+        return Err(ElectrumError::Client(client::Error::HeightOutOfRange(
+            height.into(),
+        )));
+    }
+    Ok(())
 }
 
 /// Interface for Electrum backend.
@@ -170,6 +186,7 @@ impl Electrum {
                 .client
                 .sync_with_confirmation_time_height_anchor(request, FETCH_PREV_TXOUTS)
                 .map_err(ElectrumError::Client)?;
+            check_update_height(&sync_result.chain_update)?;
             log::debug!("Sync complete.");
             (sync_result.chain_update, sync_result.graph_update, None)
         } else {
@@ -188,6 +205,9 @@ impl Electrum {
                     FETCH_PREV_TXOUTS,
                 )
                 .map_err(ElectrumError::Client)?;
+            // Checked before clearing `full_scan`, so a refused update is retried
+            // as the same full scan.
+            check_update_height(&scan_result.chain_update)?;
             // A full scan only makes sense to do once, in most cases. Don't do it again unless
             // explicitly asked to by a user.
             self.full_scan = false;

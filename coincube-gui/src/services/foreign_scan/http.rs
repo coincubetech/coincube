@@ -107,6 +107,23 @@ impl Source for HttpSource {
         }
         BlockHash::from_str(hash).map_err(|_| ScanError::Malformed)
     }
+    async fn tip_height(&self, chain: ChainId, tip: BlockHash) -> Result<u32, ScanError> {
+        #[derive(Deserialize)]
+        struct BlockStatus {
+            in_best_chain: bool,
+            height: Option<u32>,
+        }
+        let status: BlockStatus = serde_json::from_slice(
+            &self
+                .get(chain, &format!("block/{tip}/status"), true)
+                .await?,
+        )
+        .map_err(|_| ScanError::Malformed)?;
+        if !status.in_best_chain {
+            return Err(ScanError::Changed);
+        }
+        status.height.ok_or(ScanError::Malformed)
+    }
     async fn anchor(&self) -> Result<(BlockHash, Option<u64>), ScanError> {
         let status = self
             .authenticated

@@ -208,7 +208,8 @@ impl Coordinator {
             fork_cube,
             descriptor_digest: sha256::Hash::hash(source.descriptor().to_string().as_bytes()),
         };
-        let mut controller = Controller::reopen(directory, &identity, context.clone())?;
+        let mut controller =
+            Controller::reopen_settling_blocking(directory, &identity, context.clone())?;
         source.revalidate(&mut controller, &context)?;
         if controller.signed_txid() != Some(construction.bitcoin_step1()) {
             return Err(Error::InvalidBinding);
@@ -637,6 +638,20 @@ pub struct SigningCheck {
     not_after: Instant,
 }
 
+/// The retention refusal names its own cause; every other finalization
+/// failure is a binding mismatch with the owned construction.
+fn finish_error(error: coincube_core::claim_finalize::ClaimForkFinalizeError) -> Error {
+    use coincube_core::{
+        claim_finalize::ClaimForkFinalizeError, unified_finalize::UnifiedFinalizeError,
+    };
+    match error {
+        ClaimForkFinalizeError::Finalize(UnifiedFinalizeError::UnsafeLegacyAlternative {
+            ..
+        }) => Error::UnsafeLegacyAlternative,
+        _ => Error::InvalidBinding,
+    }
+}
+
 /// Owns the unsigned fork construction and the Claim journal while signatures
 /// are collected. Every new signing dispatch needs another fresh chain check.
 pub struct Preparation {
@@ -750,7 +765,8 @@ impl Preparation {
             fork_cube,
             descriptor_digest: sha256::Hash::hash(source.descriptor().to_string().as_bytes()),
         };
-        let mut controller = Controller::reopen(directory, &identity, context.clone())?;
+        let mut controller =
+            Controller::reopen_settling_blocking(directory, &identity, context.clone())?;
         source.revalidate(&mut controller, &context)?;
         if controller.signed_txid() != Some(construction.bitcoin_step1()) {
             return Err(Error::InvalidBinding);
@@ -942,7 +958,7 @@ impl Preparation {
             signed,
             &coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::verification_only(),
         )
-        .map_err(|_| Error::InvalidBinding)?;
+        .map_err(finish_error)?;
         Ok(Coordinator {
             id: self.id,
             revision: self.revision,

@@ -34,6 +34,15 @@ const RETRY_LIMIT: u8 = 6;
 pub enum Error {
     Server(electrum_client::Error),
     TipChanged(BlockId, BlockId),
+    /// The server's answers did not give us what a mempool entry's fees need
+    /// (e.g. it refused an ancestor's parent transaction, so an input's value
+    /// is unknown). Returned rather than panicking: on the command path the
+    /// caller holds the backend lock (#597).
+    IncompleteMempoolGraph(bitcoin::Txid, String),
+    /// The server reported a block height our `i32` heights cannot hold.
+    /// Returned rather than panicking: the poller and the RPC commands both
+    /// read the tip while holding the backend lock (#616).
+    HeightOutOfRange(u64),
 }
 
 impl std::fmt::Display for Error {
@@ -46,6 +55,16 @@ impl std::fmt::Display for Error {
                 tip_from_block_id(*expected),
                 tip_from_block_id(*actual),
             ),
+            Error::IncompleteMempoolGraph(txid, e) => write!(
+                f,
+                "Electrum error: cannot compute the mempool fees of '{}': {}.",
+                txid, e
+            ),
+            Error::HeightOutOfRange(height) => write!(
+                f,
+                "Electrum error: the server reported an out-of-range block height {}.",
+                height
+            ),
         }
     }
 }
@@ -55,6 +74,15 @@ pub struct Client(BdkElectrumClient<electrum_client::Client>);
 impl Client {
     /// Create a new client and perform sanity checks.
     pub fn new(electrum_config: &config::ElectrumConfig) -> Result<Self, Error> {
+        Self::with_retries(electrum_config, RETRY_LIMIT)
+    }
+
+    /// [`Self::new`] with `retries` in place of [`RETRY_LIMIT`], so a test can
+    /// observe an outage without waiting out the back-off.
+    pub(crate) fn with_retries(
+        electrum_config: &config::ElectrumConfig,
+        retries: u8,
+    ) -> Result<Self, Error> {
         // First use a dummy config to check connectivity (no retries, short timeout).
         let dummy_config = Config::builder()
             .retry(0)
@@ -68,7 +96,7 @@ impl Client {
 
         // Now connection has been checked, create client with required retries and timeout.
         let config = Config::builder()
-            .retry(RETRY_LIMIT)
+            .retry(retries)
             .timeout(Some(RPC_SOCKET_TIMEOUT))
             .validate_domain(electrum_config.validate_domain)
             .build();
@@ -84,9 +112,13 @@ impl Client {
             .inner
             .block_headers_subscribe()
             .map_err(Error::Server)
-            .map(|notif| BlockChainTip {
-                height: height_i32_from_usize(notif.height),
-                hash: notif.header.block_hash(),
+            .and_then(|notif| {
+                let height = height_i32_from_usize(notif.height)
+                    .ok_or(Error::HeightOutOfRange(notif.height as u64))?;
+                Ok(BlockChainTip {
+                    height,
+                    hash: notif.header.block_hash(),
+                })
             })
     }
 
@@ -318,10 +350,23 @@ impl Client {
         }
         let mut entries = Vec::new();
         for tx in txs {
+            // Each fee needs every input's value, which only the server's answers
+            // provide: a transaction it refused leaves a hole, reported as an
+            // error rather than a panic.
+            let incomplete =
+                |txid: bitcoin::Txid, what: String| Error::IncompleteMempoolGraph(txid, what);
+            let fee_of = |tx: &bitcoin::Transaction| {
+                graph
+                    .calculate_fee(tx)
+                    .map_err(|e| incomplete(tx.compute_txid(), e.to_string()))
+            };
+            let add = |txid: bitcoin::Txid, total: bitcoin::Amount, fee: bitcoin::Amount| {
+                total
+                    .checked_add(fee)
+                    .ok_or_else(|| incomplete(txid, "fee total overflows".to_string()))
+            };
             // Now iterate over ancestors and descendants in the graph.
-            let base_fee = graph
-                .calculate_fee(&tx)
-                .expect("all required txs are in graph");
+            let base_fee = fee_of(&tx)?;
             let base_size = tx.vsize();
             // Ancestor & descendant fees include those of `txid`.
             let mut desc_fees = base_fee;
@@ -334,11 +379,8 @@ impl Client {
                 log::debug!("Getting fee for desc txid '{}'.", desc_txid);
                 let desc_tx = graph
                     .get_tx(desc_txid)
-                    .expect("all descendant txs are in graph");
-                let fee = graph
-                    .calculate_fee(&desc_tx)
-                    .expect("all required txs are in graph");
-                desc_fees += fee;
+                    .ok_or_else(|| incomplete(desc_txid, "descendant not in graph".to_string()))?;
+                desc_fees = add(desc_txid, desc_fees, fee_of(&desc_tx)?)?;
             }
             for anc_tx in graph.walk_ancestors(tx, |_, anc_tx| Some(anc_tx)) {
                 log::debug!(
@@ -350,10 +392,7 @@ impl Client {
                     local_chain.tip().block_id(),
                     anc_tx.compute_txid(),
                 ) {
-                    let fee = graph
-                        .calculate_fee(&anc_tx)
-                        .expect("all required txs are in graph");
-                    anc_fees += fee;
+                    anc_fees = add(anc_tx.compute_txid(), anc_fees, fee_of(&anc_tx)?)?;
                     anc_size += anc_tx.vsize();
                 } else {
                     log::debug!(

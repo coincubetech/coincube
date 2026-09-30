@@ -15,6 +15,7 @@ use crate::{
     services::{
         coincube::CoincubeClient,
         foreign_scan::{ScanDescriptor, ScanReport},
+        foreign_split_inventory::{SplitInventory, TwoChainScan},
     },
 };
 
@@ -30,7 +31,12 @@ pub struct SplitIntent {
     account_session_generation: u64,
     scan_generation: u64,
     session_binding: [u8; 32],
+    /// The BTCB2 scan.
     pub report: ScanReport,
+    /// The Bitcoin scan of the same descriptors and generation.
+    pub bitcoin_report: ScanReport,
+    /// Both scans joined; carries the step-1 inputs and fresh receive index.
+    pub inventory: SplitInventory,
     pub external: ScanDescriptor,
     pub internal: Option<ScanDescriptor>,
 }
@@ -41,14 +47,24 @@ impl SplitIntent {
         target_source: ChainId,
         account_session_generation: u64,
         client: &CoincubeClient,
-        report: ScanReport,
+        scan: TwoChainScan,
         external: ScanDescriptor,
         internal: Option<ScanDescriptor>,
     ) -> Option<Self> {
+        let TwoChainScan {
+            btcb2: report,
+            bitcoin: bitcoin_report,
+            inventory,
+        } = scan;
         let scan_generation = report.generation();
         if target_cube_id.is_empty()
             || target_source != ChainId::BitcoinBlake2b
             || report.chain() != target_source
+            || bitcoin_report.chain() != ChainId::Bitcoin
+            || bitcoin_report.generation() != scan_generation
+            || inventory.generation() != scan_generation
+            || inventory.btcb2_tip() != report.tip()
+            || inventory.bitcoin_tip() != bitcoin_report.tip()
             || external.branch() != crate::services::foreign_scan::Branch::External
             || internal.as_ref().is_some_and(|descriptor| {
                 descriptor.branch() != crate::services::foreign_scan::Branch::Internal
@@ -64,6 +80,8 @@ impl SplitIntent {
             scan_generation,
             session_binding: bind(client)?,
             report,
+            bitcoin_report,
+            inventory,
             external,
             internal,
         })
@@ -91,6 +109,8 @@ impl SplitIntent {
 
     pub fn is_internally_current(&self) -> bool {
         self.scan_generation == self.report.generation()
+            && self.scan_generation == self.bitcoin_report.generation()
+            && self.scan_generation == self.inventory.generation()
             && self.report.chain() == self.target_source
             && self.created.elapsed() <= MAX_AGE
     }
@@ -158,7 +178,6 @@ pub fn take_for_open(cube_id: &str, source: ChainId) -> Option<SplitIntent> {
 /// clear it).
 #[cfg(test)]
 pub(crate) fn arm_fresh_for_test(cube_id: &str) {
-    use coincube_core::miniscript::bitcoin::{hashes::Hash, BlockHash};
     let mut client = CoincubeClient::new();
     client.set_token("split-exit-fixture");
     arm(SplitIntent::new(
@@ -166,12 +185,7 @@ pub(crate) fn arm_fresh_for_test(cube_id: &str) {
         ChainId::BitcoinBlake2b,
         0,
         &client,
-        ScanReport::for_test(
-            ChainId::BitcoinBlake2b,
-            1,
-            BlockHash::from_byte_array([3; 32]),
-            Vec::new(),
-        ),
+        empty_scan_for_test(1),
         ScanDescriptor::parse(
             crate::services::foreign_scan::Branch::External,
             "wpkh(02c6047f9441ed7d6d3045406e95c07cd85aeb5c6b7a3c2e21b73cdb1e24ff3a64)",
@@ -182,6 +196,35 @@ pub(crate) fn arm_fresh_for_test(cube_id: &str) {
     .expect("fixture intent"));
 }
 
+/// A complete, empty two-chain scan of `generation`.
+#[cfg(test)]
+pub(crate) fn empty_scan_for_test(generation: u64) -> TwoChainScan {
+    use coincube_core::miniscript::bitcoin::{hashes::Hash, BlockHash};
+    let report = |chain, byte| {
+        ScanReport::for_test(
+            chain,
+            generation,
+            BlockHash::from_byte_array([byte; 32]),
+            Vec::new(),
+        )
+        .with_coverage(vec![crate::services::foreign_scan::BranchCoverage {
+            branch: crate::services::foreign_scan::Branch::External,
+            start: 0,
+            end_exclusive: 1,
+            last_used: None,
+        }])
+    };
+    let btcb2 = report(ChainId::BitcoinBlake2b, 3).with_fork_height(Some(100));
+    let bitcoin = report(ChainId::Bitcoin, 4);
+    let inventory =
+        SplitInventory::join(&btcb2, &bitcoin, generation, false).expect("empty scans join");
+    TwoChainScan {
+        btcb2,
+        bitcoin,
+        inventory,
+    }
+}
+
 pub fn clear() {
     with_slot(|slot| *slot = None);
 }
@@ -189,7 +232,6 @@ pub fn clear() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use coincube_core::miniscript::bitcoin::{hashes::Hash, BlockHash};
 
     fn intent(target: &str, client: &CoincubeClient, generation: u64) -> SplitIntent {
         SplitIntent::new(
@@ -197,12 +239,7 @@ mod tests {
             ChainId::BitcoinBlake2b,
             7,
             client,
-            ScanReport::for_test(
-                ChainId::BitcoinBlake2b,
-                generation,
-                BlockHash::from_byte_array([3; 32]),
-                Vec::new(),
-            ),
+            empty_scan_for_test(generation),
             ScanDescriptor::parse(
                 crate::services::foreign_scan::Branch::External,
                 "wpkh(02c6047f9441ed7d6d3045406e95c07cd85aeb5c6b7a3c2e21b73cdb1e24ff3a64)",
@@ -211,6 +248,57 @@ mod tests {
             None,
         )
         .unwrap()
+    }
+
+    /// #568 B1a: the intent carries both scans and their join, all of one
+    /// generation; a mismatched Bitcoin report or inventory is refused.
+    #[test]
+    fn split_intent_requires_matching_bitcoin_report_and_inventory() {
+        let mut client = CoincubeClient::new();
+        client.set_token("session-a");
+        let external = || {
+            ScanDescriptor::parse(
+                crate::services::foreign_scan::Branch::External,
+                "wpkh(02c6047f9441ed7d6d3045406e95c07cd85aeb5c6b7a3c2e21b73cdb1e24ff3a64)",
+            )
+            .unwrap()
+        };
+        let make = |scan: TwoChainScan| {
+            SplitIntent::new(
+                "cube-a".to_owned(),
+                ChainId::BitcoinBlake2b,
+                7,
+                &client,
+                scan,
+                external(),
+                None,
+            )
+        };
+        let intent = make(empty_scan_for_test(9)).unwrap();
+        assert_eq!(intent.bitcoin_report.chain(), ChainId::Bitcoin);
+        assert_eq!(intent.inventory.generation(), 9);
+
+        let mut other_generation = empty_scan_for_test(9);
+        other_generation.bitcoin = empty_scan_for_test(8).bitcoin;
+        let mut btcb2_as_bitcoin = empty_scan_for_test(9);
+        btcb2_as_bitcoin.bitcoin = btcb2_as_bitcoin.btcb2.clone();
+        let mut stale_inventory = empty_scan_for_test(9);
+        stale_inventory.inventory = empty_scan_for_test(8).inventory;
+        let mut other_tip = empty_scan_for_test(9);
+        other_tip.bitcoin = crate::services::foreign_scan::ScanReport::for_test(
+            ChainId::Bitcoin,
+            9,
+            coincube_core::miniscript::bitcoin::hashes::Hash::from_byte_array([5; 32]),
+            Vec::new(),
+        );
+        for scan in [
+            other_generation,
+            btcb2_as_bitcoin,
+            stale_inventory,
+            other_tip,
+        ] {
+            assert!(make(scan).is_none());
+        }
     }
 
     #[test]
