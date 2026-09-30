@@ -1212,10 +1212,19 @@ impl BitcoinInterface for electrum::Electrum {
             .unwrap_or_default()
     }
 
-    // The client already tells absence from failure: a transaction the server
-    // does not know is skipped (an Electrum `Protocol` error reply for the
-    // requested txid, see `BdkElectrumClient::populate_with_txids`), and an
-    // unspent outpoint has no spender. Only a failed exchange is an `Err`.
+    // The client tells a failed exchange apart from absence: a connection that
+    // fails past the retries is an `Err`, and so is a hole left in the fee walk
+    // by a refused ancestor (`client::Error::IncompleteMempoolGraph`). An unspent
+    // outpoint has no spender.
+    //
+    // Limitation (#597 review): absence is not only "unknown transaction". BDK's
+    // `populate_with_txids` skips a requested txid on *any* server error reply
+    // (`electrum_client::Error::Protocol`): electrs relaying a failed daemon call
+    // ("daemon error: ..."), or a Fulcrum/ElectrumX rate limit, also reads as
+    // "not in the mempool". createspend may then use an unconfirmed coin without
+    // its ancestors' size and fees and underpay the CPFP package (no funds at
+    // risk). rbfpsbt is mostly unaffected: the spender is fetched while syncing
+    // the outpoints, where an error reply is an `Err`.
     fn mempool_spenders_result(
         &self,
         outpoints: &[bitcoin::OutPoint],

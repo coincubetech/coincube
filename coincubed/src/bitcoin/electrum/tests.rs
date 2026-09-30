@@ -28,10 +28,10 @@ enum Answer {
 }
 
 /// A regtest Electrum server whose chain is the genesis block alone, answering
-/// every request by method name with `answer`.
+/// every request with `answer(method, params)`.
 fn scripted_server(
     listener: TcpListener,
-    answer: impl Fn(&str) -> Answer + Send + Sync + 'static,
+    answer: impl Fn(&str, &Json) -> Answer + Send + Sync + 'static,
     stop: mpsc::Receiver<()>,
 ) -> thread::JoinHandle<()> {
     // Nonblocking on this handle, so the stop signal is seen between
@@ -80,7 +80,7 @@ fn scripted_server(
                     let mut replies = Vec::new();
                     for request in requests {
                         let method = request["method"].as_str().unwrap();
-                        let (key, value) = match answer(method) {
+                        let (key, value) = match answer(method, &request["params"]) {
                             Answer::Result(result) => ("result", result),
                             Answer::Error(error) => ("error", error),
                             Answer::Drop => {
@@ -120,7 +120,7 @@ fn chain_answer(method: &str) -> Option<Answer> {
 /// Run `call` against an Electrum backend (no retries) connected to a server
 /// answering with `answer`.
 fn against_server<T>(
-    answer: impl Fn(&str) -> Answer + Send + Sync + 'static,
+    answer: impl Fn(&str, &Json) -> Answer + Send + Sync + 'static,
     call: impl FnOnce(&Electrum) -> T,
 ) -> T {
     const DESCRIPTOR: &str = concat!(
@@ -160,6 +160,10 @@ fn against_server<T>(
     result
 }
 
+// How electrum-client reports a request that failed on the connection, after
+// its retries (`Error::AllAttemptsErrored`): not a server error reply.
+const TRANSPORT_FAILURE: &str = "Made one or multiple attempts, all errored";
+
 // Electrum's reply for a transaction it does not know.
 fn unknown_tx() -> Answer {
     Answer::Error(serde_json::json!({
@@ -176,7 +180,7 @@ fn electrum_mempool_entry_is_absent_for_an_unknown_tx_and_an_error_in_an_outage(
 
     // The server answers that it does not know the transaction: not in the mempool.
     let entry = against_server(
-        |method| {
+        |method, _| {
             chain_answer(method).unwrap_or_else(|| match method {
                 "blockchain.transaction.get" => unknown_tx(),
                 other => panic!("unexpected Electrum request {}", other),
@@ -194,7 +198,7 @@ fn electrum_mempool_entry_is_absent_for_an_unknown_tx_and_an_error_in_an_outage(
         "blockchain.transaction.get",
     ] {
         let entry = against_server(
-            move |method| {
+            move |method, _| {
                 if method == outage {
                     return Answer::Drop;
                 }
@@ -202,7 +206,12 @@ fn electrum_mempool_entry_is_absent_for_an_unknown_tx_and_an_error_in_an_outage(
             },
             |backend| backend.mempool_entry_result(&txid),
         );
-        assert!(entry.is_err(), "outage at {} returned {:?}", outage, entry);
+        assert!(
+            matches!(&entry, Err(e) if e.contains(TRANSPORT_FAILURE)),
+            "outage at {} returned {:?}",
+            outage,
+            entry
+        );
     }
 }
 
@@ -239,7 +248,7 @@ fn electrum_mempool_spenders_are_empty_for_an_unspent_outpoint_and_an_error_in_a
     let spenders = {
         let answer = answer.clone();
         against_server(
-            move |method| answer(method),
+            move |method, _| answer(method),
             |backend| backend.mempool_spenders_result(&[outpoint]),
         )
     };
@@ -260,7 +269,7 @@ fn electrum_mempool_spenders_are_empty_for_an_unspent_outpoint_and_an_error_in_a
     ] {
         let answer = answer.clone();
         let spenders = against_server(
-            move |method| {
+            move |method, _| {
                 if method == outage {
                     return Answer::Drop;
                 }
@@ -269,10 +278,79 @@ fn electrum_mempool_spenders_are_empty_for_an_unspent_outpoint_and_an_error_in_a
             |backend| backend.mempool_spenders_result(&[outpoint]),
         );
         assert!(
-            spenders.is_err(),
+            matches!(&spenders, Err(e) if e.contains(TRANSPORT_FAILURE)),
             "outage at {} returned {:?}",
             outage,
             spenders
         );
     }
+}
+
+#[test]
+fn electrum_mempool_entry_with_a_refused_ancestor_parent_is_an_error_not_a_panic() {
+    // T spends the unconfirmed A, which spends Q. The server serves T and A
+    // but answers "no such transaction" for Q, so A's fee cannot be computed:
+    // this used to panic under the backend lock (MissingTxOut).
+    let q =
+        bitcoin::Txid::from_str("4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b")
+            .unwrap();
+    let spend = |prevout: OutPoint, value: u64| bitcoin::Transaction {
+        version: Version::TWO,
+        lock_time: absolute::LockTime::ZERO,
+        input: vec![bitcoin::TxIn {
+            previous_output: prevout,
+            script_sig: bitcoin::ScriptBuf::new(),
+            sequence: bitcoin::Sequence::ENABLE_RBF_NO_LOCKTIME,
+            witness: bitcoin::Witness::default(),
+        }],
+        output: vec![bitcoin::TxOut {
+            value: bitcoin::Amount::from_sat(value),
+            script_pubkey: bitcoin::ScriptBuf::from_bytes(vec![0x51]),
+        }],
+    };
+    let a = spend(OutPoint::new(q, 0), 90_000);
+    let t = spend(OutPoint::new(a.compute_txid(), 0), 80_000);
+    let (a_id, t_id) = (a.compute_txid(), t.compute_txid());
+    let answer = Arc::new(move |method: &str, params: &Json| {
+        chain_answer(method).unwrap_or_else(|| match method {
+            "blockchain.transaction.get" => match params[0].as_str() {
+                Some(id) if id == a_id.to_string() => {
+                    Answer::Result(Json::String(serialize_hex(&a)))
+                }
+                Some(id) if id == t_id.to_string() => {
+                    Answer::Result(Json::String(serialize_hex(&t)))
+                }
+                _ => unknown_tx(),
+            },
+            // Both unconfirmed, paying to the same script.
+            "blockchain.scripthash.get_history" => Answer::Result(serde_json::json!([
+                {"tx_hash": a_id.to_string(), "height": 0},
+                {"tx_hash": t_id.to_string(), "height": 0},
+            ])),
+            other => panic!("unexpected Electrum request {}", other),
+        })
+    });
+
+    let entry = {
+        let answer = answer.clone();
+        against_server(
+            move |method, params| answer(method, params),
+            |backend| backend.mempool_entry_result(&t_id),
+        )
+    };
+    assert!(
+        matches!(&entry, Err(e) if e.contains("cannot compute the mempool fees")),
+        "{:?}",
+        entry
+    );
+    // The same walk runs for the spenders of A's output (T), as rbfpsbt reads them.
+    let spenders = against_server(
+        move |method, params| answer(method, params),
+        |backend| backend.mempool_spenders_result(&[OutPoint::new(a_id, 0)]),
+    );
+    assert!(
+        matches!(&spenders, Err(e) if e.contains("cannot compute the mempool fees")),
+        "{:?}",
+        spenders
+    );
 }
