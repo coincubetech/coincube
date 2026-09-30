@@ -386,7 +386,8 @@ def test_gui_claims_both_chains_and_recovers_remined_bitcoin(tmp_path, record_pr
         assert again["submission_calls"] == 1, again
         for depth, added in ((1, 1), (5, 4)):
             node.generate_block(added, wait_for_mempool=submitted["txid"] if depth == 1 else None)
-            harness.electrs_legacy.wait_for_tip(node.rpc.getbestblockhash())
+            harness.electrs_legacy.wait_for_tip(node.rpc.getbestblockhash(),
+                                                confirmed_txids=[submitted["txid"]])
             shallow = child.send({"command": "refresh"})
             assert shallow["tracking"] == {
                 "status": f"Some(Observation(WaitingForDepth {{ confirmations: {depth} }}))",
@@ -399,7 +400,8 @@ def test_gui_claims_both_chains_and_recovers_remined_bitcoin(tmp_path, record_pr
             unchanged = child.send({"command": "refresh"})
             assert unchanged["journal"] == journal and unchanged["tracking"] == shallow["tracking"]
         node.generate_block(1)
-        harness.electrs_legacy.wait_for_tip(node.rpc.getbestblockhash())
+        harness.electrs_legacy.wait_for_tip(node.rpc.getbestblockhash(),
+                                            confirmed_txids=[submitted["txid"]])
         tracked = child.send({"command": "refresh"})
         assert tracked["stage"] == "track" and tracked["submission_calls"] == 1
         assert tracked["tracking"] == {"status": "Some(Observation(ObservationsEligibleForPreflight))",
@@ -433,7 +435,8 @@ def test_gui_claims_both_chains_and_recovers_remined_bitcoin(tmp_path, record_pr
         fork_node.generate_block(1, wait_for_mempool=fork_tx["txid"])
         fork_block = fork_node.rpc.getbestblockhash()
         fork_height = fork_node.rpc.getblockcount()
-        harness.electrs_blake2b.wait_for_tip(fork_block)
+        # The refresh reads the sweep once and does not retry (#617).
+        harness.electrs_blake2b.wait_for_tip(fork_block, confirmed_txids=[fork_tx["txid"]])
         completed = child.send({"command": "fork_refresh"})
         assert completed["fork"]["tracking"]["saved"] is (not ancestry), completed
         assert completed["fork"]["tracking"]["transaction"].startswith("Confirmed"), completed
@@ -524,7 +527,7 @@ def test_gui_claims_both_chains_and_recovers_remined_bitcoin(tmp_path, record_pr
         new_inclusion = {"height": node.rpc.getblockcount(), "hash": new_block}
         new_actual = node.rpc.getrawtransaction(submitted["txid"], True, new_block)
         assert new_actual["hex"] == submitted["raw"] and new_actual["hash"] == submitted["wtxid"]
-        harness.electrs_legacy.wait_for_tip(new_block)
+        harness.electrs_legacy.wait_for_tip(new_block, confirmed_txids=[submitted["txid"]])
         returned = child.send({"command": "bitcoin_return"})
         assert returned["tracking"]["status"] == "Some(Observation(Reorged))", returned
         review = child.send({"command": "review_reconfirmation"})
@@ -540,7 +543,8 @@ def test_gui_claims_both_chains_and_recovers_remined_bitcoin(tmp_path, record_pr
         duplicate = child.send({"command": "confirm_reconfirmation"})
         assert duplicate["journal"] == confirmed["journal"] and duplicate["submission_calls"] == 0
         node.generate_block(5)
-        harness.electrs_legacy.wait_for_tip(node.rpc.getbestblockhash())
+        harness.electrs_legacy.wait_for_tip(node.rpc.getbestblockhash(),
+                                            confirmed_txids=[submitted["txid"]])
         recovered = child.send({"command": "refresh"})
         assert recovered["tracking"]["status"] == "Some(Observation(ObservationsEligibleForPreflight))", recovered
         assert recovered["submission_calls"] == 0

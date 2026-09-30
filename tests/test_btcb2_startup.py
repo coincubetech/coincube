@@ -85,3 +85,68 @@ def test_indexer_startup_checks_both_nodes_before_launch():
         harness._start_indexers()
     assert harness.legacy.rpc.getblock.call_count == 4
     assert harness.blake2b.rpc.getblock.call_count == 1
+
+
+# Block hashes and a txid, as electrs logs and serves them.
+HEADER_TIP, EARLIER_TIP, SWEEP = "0b" * 32, "33" * 32, "d1" * 32
+
+
+def indexer_serving(tmp_path, tip, confirmed):
+    """An EsploraElectrs whose REST API serves `tip` as its header tip and
+    `confirmed[txid]` as each transaction's status; its log is set by the test."""
+    process = EsploraElectrs.__new__(EsploraElectrs)
+    TailableProc.__init__(process, str(tmp_path), verbose=False)
+    process.prefix = "electrs-blake2b"
+    process.running = True
+
+    def rest(path, timeout=10):
+        if path == "/blocks/tip/hash":
+            return tip
+        txid = path.removeprefix("/tx/").removesuffix("/status")
+        assert path == f"/tx/{txid}/status", path
+        return {"confirmed": confirmed[txid]}
+
+    process.rest = rest
+    return process
+
+
+def synced(block_hash):
+    # How TailableProc records the line electrs logs at the end of an update.
+    return f"b'DEBUG - updating synced tip to {block_hash}'"
+
+
+def test_wait_for_tip_waits_for_the_index_update_not_the_header_tip(tmp_path):
+    confirmed = {SWEEP: False}
+    process = indexer_serving(tmp_path, HEADER_TIP, confirmed)
+    # The #610 failure (#617): electrs had applied the new block's header, so
+    # `/blocks/tip/hash` served it, but had not finished writing the block's
+    # transactions. A read of the sweep in that window was a 404.
+    process.logs = [
+        synced(EARLIER_TIP),
+        f"b'DEBUG - downloading new block headers (232 already indexed) from {HEADER_TIP}'",
+        "b'DEBUG - applying 1 new headers from height 232'",
+        "b'DEBUG - adding transactions from 1 blocks using Bitcoind'",
+    ]
+    with pytest.raises(ValueError, match="Error waiting"):
+        process.wait_for_tip(HEADER_TIP, timeout=1)
+
+    # The update's last line: transactions and history are written.
+    process.logs.append(synced(HEADER_TIP))
+    process.wait_for_tip(HEADER_TIP, timeout=5)
+    # A transaction the test mined must also read as confirmed.
+    with pytest.raises(ValueError, match="Error waiting"):
+        process.wait_for_tip(HEADER_TIP, timeout=1, confirmed_txids=[SWEEP])
+    confirmed[SWEEP] = True
+    process.wait_for_tip(HEADER_TIP, timeout=5, confirmed_txids=[SWEEP])
+
+
+def test_wait_for_tip_needs_the_latest_update_to_be_for_that_tip(tmp_path):
+    # Back on an earlier tip after a reorg: the header tip is already back, but
+    # the update indexing it has not finished. Its old line must not count.
+    process = indexer_serving(tmp_path, EARLIER_TIP, {})
+    process.logs = [synced(EARLIER_TIP), synced(HEADER_TIP)]
+    with pytest.raises(ValueError, match="Error waiting"):
+        process.wait_for_tip(EARLIER_TIP, timeout=1)
+    assert process.synced_tip() == HEADER_TIP
+    process.logs.append(synced(EARLIER_TIP))
+    process.wait_for_tip(EARLIER_TIP, timeout=5)
