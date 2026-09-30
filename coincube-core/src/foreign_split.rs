@@ -107,6 +107,14 @@ pub enum Error {
     Locktime,
     /// A recorded transaction is not an owned step-1 construction.
     Recorded(&'static str),
+    /// Step 2 runs on Bitcoin Blake2b mainnet or testnet4 only.
+    NotBitcoinBlake2b(ChainId),
+    /// Step 2's coins are not exactly step 1's claimed prevouts.
+    ClaimedMismatch,
+    /// Step 2's target is not a P2WSH or P2TR script (the only Cube Vault
+    /// address types), or is one of the foreign wallet's own scripts within
+    /// the scanner's gap of a claimed coin's index.
+    InvalidTarget,
 }
 
 impl fmt::Display for Error {
@@ -139,6 +147,16 @@ impl fmt::Display for Error {
             Self::Economics => f.write_str("Fee or amount outside the allowed bounds"),
             Self::Locktime => f.write_str("Locktime must be a block height not above the tip"),
             Self::Recorded(reason) => f.write_str(reason),
+            Self::NotBitcoinBlake2b(chain) => {
+                write!(
+                    f,
+                    "Split step 2 runs on Bitcoin Blake2b only, not {chain:?}"
+                )
+            }
+            Self::ClaimedMismatch => {
+                f.write_str("Step 2 must spend exactly the coins step 1 claimed")
+            }
+            Self::InvalidTarget => f.write_str("Step 2 target address is not usable"),
         }
     }
 }
@@ -207,8 +225,9 @@ fn keys(descriptor: &Descriptor<DescriptorPublicKey>) -> Vec<DescriptorPublicKey
 }
 
 /// Whether `internal` is `external` with only each extended key's final
-/// derivation step changed (the receive/change branch), everything else,
-/// including the script structure, key order and origins, being identical.
+/// derivation step changed (the receive/change branch), the same way on every
+/// key, and everything else, including the script structure, key order and
+/// origins, identical.
 fn same_wallet(
     external: &Descriptor<DescriptorPublicKey>,
     internal: &Descriptor<DescriptorPublicKey>,
@@ -231,6 +250,22 @@ fn same_wallet(
         _ => false,
     });
     if !paired {
+        return false;
+    }
+    // Every extended key moves between the same pair of branch steps (for
+    // example `/0` to `/1`): one branch step for the whole wallet (#568 I1).
+    let branch_steps: BTreeSet<_> = outer
+        .iter()
+        .zip(&inner)
+        .filter_map(|pair| match pair {
+            (DescriptorPublicKey::XPub(a), DescriptorPublicKey::XPub(b)) => Some((
+                a.derivation_path.as_ref().last().copied(),
+                b.derivation_path.as_ref().last().copied(),
+            )),
+            _ => None,
+        })
+        .collect();
+    if branch_steps.len() > 1 {
         return false;
     }
     // Same structure: substitute the paired keys textually and compare.
@@ -412,24 +447,65 @@ fn plan(inputs: &SplitInputs<'_>, fork_marker: BlockHash) -> Result<Plan, Error>
     if !matches!(inputs.chain, ChainId::Bitcoin | ChainId::Testnet4) {
         return Err(Error::UnsupportedChain(inputs.chain));
     }
-    if inputs.coins.is_empty() {
+    let Selection {
+        selected,
+        outpoints,
+        total,
+    } = select(inputs.source, inputs.coins, inputs.fork_height)?;
+    let destination = inputs
+        .source
+        .derive(SplitBranch::External, inputs.destination)?;
+    let destination_script = destination.script_pubkey();
+    if selected
+        .iter()
+        .any(|input| input.output.script_pubkey == destination_script)
+    {
+        return Err(Error::DestinationNotFresh);
+    }
+    let poison = split_poison_script(inputs.chain, fork_marker, &outpoints)
+        .ok_or(Error::UnsupportedChain(inputs.chain))?;
+    let maximum_signed_vbytes = maximum_signed_vbytes(
+        &selected,
+        step1_outputs(poison.clone(), destination_script, Amount::ZERO),
+    )?;
+    Ok(Plan {
+        selected,
+        destination,
+        poison,
+        total,
+        maximum_signed_vbytes,
+    })
+}
+
+struct Selection {
+    /// Ordered by outpoint.
+    selected: Vec<Selected>,
+    outpoints: BTreeSet<OutPoint>,
+    total: u64,
+}
+
+/// Authenticate every coin against its stated derivation and require it to be
+/// shared pre-fork history on both chains. Shared by both steps: step 2 spends
+/// the same original outpoints on BTCB2.
+fn select(source: &SplitSource, coins: &[SplitCoin], fork_height: u64) -> Result<Selection, Error> {
+    if coins.is_empty() {
         return Err(Error::Empty);
     }
-    let mut coins: Vec<_> = inputs.coins.iter().collect();
+    let mut coins: Vec<_> = coins.iter().collect();
     coins.sort_by_key(|coin| coin.outpoint);
-    let mut seen = BTreeSet::new();
+    let mut outpoints = BTreeSet::new();
     let mut selected = Vec::with_capacity(coins.len());
     let mut total = 0u64;
     for coin in coins {
-        if !seen.insert(coin.outpoint) {
+        if !outpoints.insert(coin.outpoint) {
             return Err(Error::DuplicateInput(coin.outpoint));
         }
-        coin.splittable(inputs.fork_height)
+        coin.splittable(fork_height)
             .map_err(|reason| Error::NotSplittable {
                 outpoint: coin.outpoint,
                 reason,
             })?;
-        let definite = inputs.source.derive(coin.branch, coin.index)?;
+        let definite = source.derive(coin.branch, coin.index)?;
         let output =
             spend::authenticate_previous_output(&coin.outpoint, Some(&coin.previous), None)
                 .map_err(|reason| Error::InputAuthentication {
@@ -452,25 +528,10 @@ fn plan(inputs: &SplitInputs<'_>, fork_marker: BlockHash) -> Result<Plan, Error>
             definite,
         });
     }
-    let destination = inputs
-        .source
-        .derive(SplitBranch::External, inputs.destination)?;
-    let destination_script = destination.script_pubkey();
-    if selected
-        .iter()
-        .any(|input| input.output.script_pubkey == destination_script)
-    {
-        return Err(Error::DestinationNotFresh);
-    }
-    let poison = split_poison_script(inputs.chain, fork_marker, &seen)
-        .ok_or(Error::UnsupportedChain(inputs.chain))?;
-    let maximum_signed_vbytes = maximum_signed_vbytes(&selected, &poison, &destination_script)?;
-    Ok(Plan {
+    Ok(Selection {
         selected,
-        destination,
-        poison,
+        outpoints,
         total,
-        maximum_signed_vbytes,
     })
 }
 
@@ -478,13 +539,10 @@ fn is_segwit(descriptor: &Descriptor<DefiniteDescriptorKey>) -> bool {
     !matches!(descriptor, Descriptor::Pkh(_))
 }
 
-/// Worst-case signed virtual size of the two-output step 1 (the poison output
-/// is charged in full). Same method as the BTCB2 sweep review.
-fn maximum_signed_vbytes(
-    selected: &[Selected],
-    poison: &ScriptBuf,
-    destination: &ScriptBuf,
-) -> Result<u64, Error> {
+/// Worst-case signed virtual size of a transaction spending `selected` to
+/// `outputs` (a poison output is charged in full). Same method as the BTCB2
+/// sweep review.
+fn maximum_signed_vbytes(selected: &[Selected], outputs: Vec<TxOut>) -> Result<u64, Error> {
     let mut satisfaction = 0u64;
     for input in selected {
         satisfaction = satisfaction
@@ -497,13 +555,7 @@ fn maximum_signed_vbytes(
             )
             .ok_or(Error::Economics)?;
     }
-    let unsigned = unsigned_transaction(
-        selected,
-        poison.clone(),
-        destination.clone(),
-        Amount::ZERO,
-        LockTime::ZERO,
-    );
+    let unsigned = unsigned_transaction(selected, outputs, LockTime::ZERO);
     // `max_weight_to_satisfy` measures from an input already carrying its
     // empty witness-stack byte; the unsigned serialization has no witness
     // section. A witness transaction needs marker+flag and that byte for every
@@ -523,11 +575,23 @@ fn maximum_signed_vbytes(
         .ok_or(Error::Economics)
 }
 
+/// Step 1's outputs: the value-0 poison, then the fresh destination.
+fn step1_outputs(poison: ScriptBuf, destination: ScriptBuf, value: Amount) -> Vec<TxOut> {
+    vec![
+        TxOut {
+            value: Amount::ZERO,
+            script_pubkey: poison,
+        },
+        TxOut {
+            value,
+            script_pubkey: destination,
+        },
+    ]
+}
+
 fn unsigned_transaction(
     selected: &[Selected],
-    poison: ScriptBuf,
-    destination: ScriptBuf,
-    value: Amount,
+    output: Vec<TxOut>,
     locktime: LockTime,
 ) -> Transaction {
     Transaction {
@@ -541,16 +605,7 @@ fn unsigned_transaction(
                 ..TxIn::default()
             })
             .collect(),
-        output: vec![
-            TxOut {
-                value: Amount::ZERO,
-                script_pubkey: poison,
-            },
-            TxOut {
-                value,
-                script_pubkey: destination,
-            },
-        ],
+        output,
     }
 }
 
@@ -630,22 +685,10 @@ fn build(
 ) -> Result<SplitStep1, Error> {
     let tx = unsigned_transaction(
         &plan.selected,
-        plan.poison.clone(),
-        plan.destination.script_pubkey(),
-        value,
+        step1_outputs(plan.poison.clone(), plan.destination.script_pubkey(), value),
         locktime,
     );
-    let mut psbt = Psbt::from_unsigned_tx(tx).map_err(|_| Error::Economics)?;
-    for (index, input) in plan.selected.iter().enumerate() {
-        psbt.inputs[index].non_witness_utxo = Some(input.previous.clone());
-        // BIP 174: witness_utxo only for segwit spends. Legacy P2PKH signers
-        // use the full previous transaction.
-        if is_segwit(&input.definite) {
-            psbt.inputs[index].witness_utxo = Some(input.output.clone());
-        }
-        psbt.update_input_with_descriptor(index, &input.definite)
-            .map_err(|_| Error::UnsupportedDescriptor)?;
-    }
+    let mut psbt = psbt_for(tx, &plan.selected)?;
     // Marks output 1 as the wallet's own to signers.
     psbt.update_output_with_descriptor(1, &plan.destination)
         .map_err(|_| Error::UnsupportedDescriptor)?;
@@ -663,6 +706,23 @@ fn build(
         maximum_signed_vbytes: plan.maximum_signed_vbytes,
         total: plan.total,
     })
+}
+
+/// The unsigned PSBT with each input's full previous transaction, its
+/// witness UTXO when segwit, and the descriptor's scripts and key origins.
+fn psbt_for(tx: Transaction, selected: &[Selected]) -> Result<Psbt, Error> {
+    let mut psbt = Psbt::from_unsigned_tx(tx).map_err(|_| Error::Economics)?;
+    for (index, input) in selected.iter().enumerate() {
+        psbt.inputs[index].non_witness_utxo = Some(input.previous.clone());
+        // BIP 174: witness_utxo only for segwit spends. Legacy P2PKH signers
+        // use the full previous transaction.
+        if is_segwit(&input.definite) {
+            psbt.inputs[index].witness_utxo = Some(input.output.clone());
+        }
+        psbt.update_input_with_descriptor(index, &input.definite)
+            .map_err(|_| Error::UnsupportedDescriptor)?;
+    }
+    Ok(psbt)
 }
 
 /// Rebuild an exact recorded step 1 from freshly authenticated coins. All
@@ -716,10 +776,12 @@ pub enum FinalizeError {
     /// Not enough valid signatures to satisfy every input.
     Unsatisfied,
     InvalidWitness,
+    /// Step 2: the supplied coins or source are not the construction's.
+    CoinsChanged,
 }
 impl fmt::Display for FinalizeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Split step 1 finalization refused: {self:?}")
+        write!(f, "Split finalization refused: {self:?}")
     }
 }
 impl std::error::Error for FinalizeError {}
@@ -770,6 +832,36 @@ pub fn finalize_split_step1<C: secp256k1::Verification>(
     secp: &secp256k1::Secp256k1<C>,
 ) -> Result<VerifiedSplitStep1, FinalizeError> {
     let original = &construction.psbt;
+    check_signed_construction(original, signed)?;
+    let prevouts =
+        verify_partial_signatures(&construction.source, &construction.inputs, signed, secp)?;
+    let total = prevouts
+        .iter()
+        .try_fold(0u64, |sum, output| sum.checked_add(output.value.to_sat()))
+        .ok_or(FinalizeError::Economics)?;
+    let value = signed.unsigned_tx.output[1].value.to_sat();
+    check_economics(
+        total,
+        value,
+        &signed.unsigned_tx.output[1].script_pubkey,
+        construction.maximum_signed_vbytes,
+    )
+    .map_err(|_| FinalizeError::Economics)?;
+    let (transaction, signatures_per_input) =
+        finalize_and_replay(original, signed, &prevouts, secp)?;
+    Ok(VerifiedSplitStep1 {
+        construction_txid: original.unsigned_tx.compute_txid(),
+        transaction,
+        chain: construction.chain,
+        fee: Amount::from_sat(total - value),
+        signatures_per_input,
+    })
+}
+
+/// The signed PSBT must be the exact construction plus `partial_sigs`, with
+/// every input request absent or `SIGHASH_ALL` and every signature byte
+/// `SIGHASH_ALL`. Shared by both steps.
+fn check_signed_construction(original: &Psbt, signed: &Psbt) -> Result<(), FinalizeError> {
     if signed.unsigned_tx != original.unsigned_tx
         || signed.inputs.len() != original.inputs.len()
         || signed.outputs.len() != original.outputs.len()
@@ -794,7 +886,19 @@ pub fn finalize_split_step1<C: secp256k1::Verification>(
     if normalized != *original {
         return Err(FinalizeError::ConstructionChanged);
     }
+    Ok(())
+}
 
+/// Authenticate each input's previous output against the construction's own
+/// derivation, then verify every supplied partial signature (surplus ones
+/// included): by a key the input commits to, compressed on segwit, and valid
+/// over the `SIGHASH_ALL` digest. Returns the authenticated previous outputs.
+fn verify_partial_signatures<C: secp256k1::Verification>(
+    source: &SplitSource,
+    derivations: &[(SplitBranch, u32)],
+    signed: &Psbt,
+    secp: &secp256k1::Secp256k1<C>,
+) -> Result<Vec<TxOut>, FinalizeError> {
     let mut prevouts = Vec::with_capacity(signed.inputs.len());
     let mut cache = SighashCache::new(&signed.unsigned_tx);
     for (index, input) in signed.inputs.iter().enumerate() {
@@ -804,9 +908,8 @@ pub fn finalize_split_step1<C: secp256k1::Verification>(
             input.witness_utxo.as_ref(),
         )
         .map_err(|_| FinalizeError::InputAuthentication)?;
-        let (branch, derivation) = construction.inputs[index];
-        let definite = construction
-            .source
+        let (branch, derivation) = derivations[index];
+        let definite = source
             .derive(branch, derivation)
             .map_err(|_| FinalizeError::InputAuthentication)?;
         if definite.script_pubkey() != output.script_pubkey {
@@ -828,19 +931,17 @@ pub fn finalize_split_step1<C: secp256k1::Verification>(
         }
         prevouts.push(output);
     }
-    let total = prevouts
-        .iter()
-        .try_fold(0u64, |sum, output| sum.checked_add(output.value.to_sat()))
-        .ok_or(FinalizeError::Economics)?;
-    let value = signed.unsigned_tx.output[1].value.to_sat();
-    check_economics(
-        total,
-        value,
-        &signed.unsigned_tx.output[1].script_pubkey,
-        construction.maximum_signed_vbytes,
-    )
-    .map_err(|_| FinalizeError::Economics)?;
+    Ok(prevouts)
+}
 
+/// Miniscript's finalizer and extractor, then an interpreter replay of every
+/// retained witness. Returns the transaction and signatures per input.
+fn finalize_and_replay<C: secp256k1::Verification>(
+    original: &Psbt,
+    signed: &Psbt,
+    prevouts: &[TxOut],
+    secp: &secp256k1::Secp256k1<C>,
+) -> Result<(Transaction, Vec<usize>), FinalizeError> {
     let mut finalized = signed.clone();
     finalized
         .finalize_mut(secp)
@@ -849,14 +950,8 @@ pub fn finalize_split_step1<C: secp256k1::Verification>(
     let transaction = finalized
         .extract(secp)
         .map_err(|_| FinalizeError::InvalidWitness)?;
-    let signatures_per_input = verify_retained_witness(&transaction, original, &prevouts, secp)?;
-    Ok(VerifiedSplitStep1 {
-        construction_txid: original.unsigned_tx.compute_txid(),
-        transaction,
-        chain: construction.chain,
-        fee: Amount::from_sat(total - value),
-        signatures_per_input,
-    })
+    let signatures_per_input = verify_retained_witness(&transaction, original, prevouts, secp)?;
+    Ok((transaction, signatures_per_input))
 }
 
 /// The `SIGHASH_ALL` digest for one input of a supported shape, with the
@@ -956,6 +1051,12 @@ fn verify_retained_witness<C: secp256k1::Verification>(
     }
     Ok(counts)
 }
+
+mod step2;
+pub use step2::{
+    create_split_step2, finalize_split_step2, reconstruct_split_step2, SplitStep2,
+    SplitStep2Inputs, VerifiedSplitStep2,
+};
 
 #[cfg(test)]
 #[path = "foreign_split/tests.rs"]
