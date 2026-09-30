@@ -143,6 +143,7 @@ jobs:
         run: |
           cargo build --release --package coincubed
           cargo build --release --package coincube-core --example claim_regtest_vectors
+          cargo build --release --package coincube-core --example split_regtest_vectors
 
       - name: Build headless Claim panel test driver
         if: ${{ !inputs.probe_only }}
@@ -197,6 +198,7 @@ jobs:
           # A missing binary fails the run instead of skipping the tests.
           BTCB2_HARNESS_REQUIRED: "1"
           CLAIM_REGTEST_TOOL_PATH: ${{ github.workspace }}/target/release/examples/claim_regtest_vectors
+          SPLIT_REGTEST_TOOL_PATH: ${{ github.workspace }}/target/release/examples/split_regtest_vectors
           # Failing tests keep their datadirs here so the logs can be collected.
           TEST_DIR: ${{ github.workspace }}/test-datadirs
           # Per-thread syscall tracing of the Knots nodes, dispatch-only (#394).
@@ -214,11 +216,12 @@ jobs:
           "$KNOTS_LEGACY_PATH" --version | head -1
           # B4.1 proves the harness; B4.2 runs the QA matrices on it; the three
           # test_btcb2_claim_* modules run Claim end to end on both chains;
+          # test_btcb2_split_consensus.py runs Split step 1 on both (#568);
           # test_btcb2_blockfile.py drives concurrent getblock batches at one
           # node to reproduce the block-file fault in #394. The modules are
           # named explicitly: a bare `pytest tests/` here would also pull in
           # the functional suite, which this job does not set up.
-          modules="tests/test_btcb2_harness.py tests/test_btcb2_b42_matrices.py tests/test_btcb2_blockfile.py tests/test_btcb2_claim_consensus.py tests/test_btcb2_claim_ancestry_consensus.py tests/test_btcb2_claim_gui.py"
+          modules="tests/test_btcb2_harness.py tests/test_btcb2_b42_matrices.py tests/test_btcb2_blockfile.py tests/test_btcb2_claim_consensus.py tests/test_btcb2_claim_ancestry_consensus.py tests/test_btcb2_claim_gui.py tests/test_btcb2_split_consensus.py"
           # The stress reproduction itself runs only when it is asked for: it
           # reproduces a node defect nothing here can fix, about one attempt in
           # eight, and a pull request is not the place to discover that. Its

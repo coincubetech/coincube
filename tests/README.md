@@ -106,6 +106,22 @@ and a fork sweep excluding that input. It tests construction and consensus;
 it does not admit regtest as mainnet historical proof or exercise automatic
 input preference and coordinator authorization.
 
+Split step 1 (#568) has its own test-only bridge:
+
+```sh
+cargo build --release --package coincube-core --example split_regtest_vectors
+export SPLIT_REGTEST_TOOL_PATH="$PWD/target/release/examples/split_regtest_vectors"
+pytest tests/test_btcb2_split_consensus.py -vvv
+```
+
+It funds one foreign wallet per supported shape (`pkh`, `sh(wpkh)`, `wpkh`,
+2-of-3 `wsh(multi)` and `wsh(sortedmulti)`) before the fork, runs only the two
+nodes, and checks: acceptance on Bitcoin with a signed vsize within the
+construction's estimate, mempool and block rejection on BTCB2, implicit and
+explicit `SIGHASH_ALL` giving identical transactions, and an `invalidateblock`
+reorg that returns the spent outpoints to Bitcoin's UTXO set. Its offline cases
+need only the bridge. Step 2 is not covered yet.
+
 A separate headless GUI test drives the production Claim panel's build, signer
 picker, software signing, review, explicit confirmation and confirmation tracking.
 It sends through the opt-in gated regtest transport and independently checks the
