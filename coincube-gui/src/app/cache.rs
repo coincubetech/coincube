@@ -143,6 +143,17 @@ pub struct Cache {
     pub has_vault: bool,
     /// Display name of the current Cube
     pub cube_name: String,
+    /// The Connect account that owns this Cube
+    /// ([`crate::app::settings::CubeSettings::connect_owner`]). Lets the Vault
+    /// signing picker tell a user signed in under a different account to switch
+    /// accounts. `None` when unknown (Cube registered before owners were
+    /// recorded, or never registered).
+    pub cube_connect_owner: Option<crate::app::settings::ConnectOwner>,
+    /// Connect refused to register this Cube because a different account
+    /// owns it (`CUBE_OWNED_BY_ANOTHER_ACCOUNT`). Authoritative even when
+    /// [`Self::cube_connect_owner`] is unknown. Mirrored from the Connect
+    /// cube panel every tick.
+    pub cube_owned_by_other_account: bool,
     /// Whether the user has completed the master seed backup flow for this
     /// Cube. Drives the soft "not backed up" warning banners on the Vault
     /// and Liquid home screens. Mirrors `CubeSettings::backed_up`.
@@ -357,6 +368,8 @@ impl std::default::Default for Cache {
             has_connect_session: false,
             has_vault: false,
             cube_name: String::new(),
+            cube_connect_owner: None,
+            cube_owned_by_other_account: false,
             current_cube_backed_up: false,
             backup_warning_dismissed: false,
             spark_notice: None,

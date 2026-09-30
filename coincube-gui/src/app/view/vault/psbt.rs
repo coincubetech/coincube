@@ -1428,6 +1428,11 @@ pub enum SigningKeyState {
     /// clickable "Sign in to Connect" affordance so the user can authenticate
     /// (which then resolves any Keychain signers among these rows).
     NeedsSignIn(String),
+    /// Unidentified key while Connect is signed in, but Keychain signing never
+    /// came up for this Cube — the session is most likely for a different
+    /// account than the one that created it. Carries the explanation and a
+    /// "Switch account" affordance that leads to the Connect overview.
+    NeedsAccountSwitch(String),
 }
 
 pub struct SigningKeyRow {
@@ -1541,6 +1546,15 @@ fn signing_key_row(row: &SigningKeyRow, color: iced::Color) -> Element<'static, 
                 // tab for sign-in) without routing through the PSBT panel, so
                 // the picker stays open behind the new tab.
                 button::secondary(None, "Sign in to Connect").on_press(Message::OpenConnectSignIn),
+            )
+            .into(),
+        SigningKeyState::NeedsAccountSwitch(reason) => Column::new()
+            .spacing(6)
+            .align_x(Alignment::End)
+            .push(p1_regular(reason.clone()).style(theme::text::secondary))
+            .push(
+                button::secondary(None, "Switch account")
+                    .on_press(Message::OpenConnectSwitchAccount),
             )
             .into(),
         SigningKeyState::Retry(idx) => button::secondary(Some(icon::reload_icon()), "Retry")

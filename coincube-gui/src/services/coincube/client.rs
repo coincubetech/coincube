@@ -3303,6 +3303,42 @@ mod cube_member_tests {
         );
     }
 
+    #[tokio::test]
+    async fn register_cube_409_owned_by_another_account_is_recognised() {
+        // A Cube UUID registered under a different Connect account is refused
+        // with 409 `CUBE_OWNED_BY_ANOTHER_ACCOUNT`; the Vault signing picker
+        // keys its "switch accounts" prompt off this.
+        use crate::services::coincube::RegisterCubeRequest;
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(Method::POST).path("/api/v1/connect/cubes");
+            then.status(409)
+                .header("content-type", "application/json")
+                .json_body(json!({
+                    "success": false,
+                    "error": {
+                        "code": "CUBE_OWNED_BY_ANOTHER_ACCOUNT",
+                        "message": "This cube is registered to a different account"
+                    }
+                }));
+        });
+
+        let client = CoincubeClient::for_test(server.base_url());
+        let err = client
+            .register_cube(RegisterCubeRequest {
+                uuid: "00000000-0000-4000-8000-000000000001".to_string(),
+                name: "cube".to_string(),
+                network: "testnet4".to_string(),
+                has_vault: None,
+                spark_stable_balance: None,
+            })
+            .await
+            .expect_err("expected 409");
+        mock.assert();
+        assert!(err.is_cube_owned_by_another_account(), "got: {:?}", err);
+        assert!(!err.is_key_already_used_in_vault());
+    }
+
     #[test]
     fn add_vault_member_role_chooser_hides_keyholder_on_active_vault() {
         // W16-desktop: the Keyholder role must not be offered when the

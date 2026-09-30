@@ -824,7 +824,8 @@ impl PsbtState {
                     self.tx.recovery_timelock(),
                     keychain,
                     true,
-                );
+                )
+                .with_connect_account(ConnectAccountStatus::from_cache(cache));
                 let cmd = modal.load(daemon);
                 self.modal = Some(PsbtModal::Sign(modal));
                 return Task::batch([cmd, kc_launch]);
@@ -1317,6 +1318,46 @@ impl Modal for BroadcastModal {
 /// "Keychain signing needs Connect" dialog. Pure UI — its two actions
 /// (sign in / pair a phone) are handled in `PsbtState::update`, which
 /// clears this modal and emits the matching navigation message.
+/// The signed-in Connect account relative to the Cube's owner
+/// ([`crate::app::settings::CubeSettings::connect_owner`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConnectAccountStatus {
+    /// No Connect session.
+    SignedOut,
+    /// Signed in as the account that owns this Cube.
+    Owner,
+    /// Signed in as a different account than the owner. `owner_email` is the
+    /// locally recorded owner, when known — the server never discloses it.
+    OtherAccount { owner_email: Option<String> },
+    /// Signed in, but the Cube's owner was never recorded.
+    SignedInUnknownOwner,
+}
+
+impl ConnectAccountStatus {
+    fn from_cache(cache: &Cache) -> Self {
+        if !connect_session_available(cache) {
+            return Self::SignedOut;
+        }
+        // The server refused to register this Cube for the signed-in account:
+        // authoritative, and the only signal for Cubes with no recorded owner.
+        if cache.cube_owned_by_other_account {
+            return Self::OtherAccount {
+                owner_email: cache.cube_connect_owner.as_ref().map(|o| o.email.clone()),
+            };
+        }
+        match (&cache.cube_connect_owner, cache.connect_email.as_deref()) {
+            (Some(owner), Some(email)) if owner.is_email(email) => Self::Owner,
+            (Some(owner), Some(_)) => Self::OtherAccount {
+                owner_email: Some(owner.email.clone()),
+            },
+            // Session without a known email can't be compared: don't accuse
+            // the user of being on the wrong account.
+            (Some(_), None) => Self::Owner,
+            (None, _) => Self::SignedInUnknownOwner,
+        }
+    }
+}
+
 pub struct KeychainUnavailableModal {
     /// Whether the user already has Connect tokens. When true the blocker
     /// is device/stream readiness rather than a missing sign-in, which the
@@ -1708,6 +1749,10 @@ pub struct SignModal {
     /// Home send-to-self transfer), which suppresses keychain rows entirely
     /// regardless of Connect state.
     keychain_enabled: bool,
+    /// Which Connect account (if any) is signed in relative to this Cube's
+    /// owner, at picker-open time. Decides what unresolved Keychain rows ask
+    /// for: a sign-in, or a switch to the owning account.
+    connect_account: ConnectAccountStatus,
     /// Spending-path identities the user has expanded, keyed the same way as
     /// `ToggleSpendPath`: `None` = primary, `Some(seq)` = a recovery path.
     /// Inactive cards default to collapsed.
@@ -1739,8 +1784,17 @@ impl SignModal {
             border_wallet_recon: None,
             keychain,
             keychain_enabled,
+            connect_account: ConnectAccountStatus::SignedOut,
             expanded_paths: HashSet::new(),
         }
+    }
+
+    /// Record the Connect account state, so unresolved Keychain rows ask
+    /// the user to switch accounts rather than to sign in when they're
+    /// already signed in as someone else.
+    pub fn with_connect_account(mut self, status: ConnectAccountStatus) -> Self {
+        self.connect_account = status;
+        self
     }
 
     /// The Entropy Grid phrase for `fingerprint`, if this machine can still
@@ -2148,10 +2202,43 @@ impl SignModal {
         // clickable "Sign in to Connect" so any Keychain signer among these
         // rows can be resolved.
         if self.keychain_enabled && self.keychain.is_none() {
-            return (
-                Kind::Unknown,
-                St::NeedsSignIn("Connect a device to sign with this key.".to_string()),
-            );
+            match &self.connect_account {
+                ConnectAccountStatus::SignedOut => {
+                    return (
+                        Kind::Unknown,
+                        St::NeedsSignIn("Connect a device to sign with this key.".to_string()),
+                    );
+                }
+                ConnectAccountStatus::OtherAccount { owner_email } => {
+                    let reason = match owner_email {
+                        Some(email) => format!(
+                            "This Cube belongs to {}. Switch to that account to sign with \
+                             this key.",
+                            email
+                        ),
+                        None => "This Cube belongs to a different Connect account. Switch \
+                                 accounts to sign with this key."
+                            .to_string(),
+                    };
+                    return (Kind::Unknown, St::NeedsAccountSwitch(reason));
+                }
+                // Owner unrecorded (a Cube registered before owners were
+                // tracked): signed in, yet Keychain never came up — most
+                // likely the wrong account, but we can't name the right one.
+                ConnectAccountStatus::SignedInUnknownOwner => {
+                    return (
+                        Kind::Unknown,
+                        St::NeedsAccountSwitch(
+                            "You may be signed in under a different account than the one that \
+                             created this Cube. Switch accounts to sign with this key."
+                                .to_string(),
+                        ),
+                    );
+                }
+                // Right account; Keychain just isn't up (yet). Fall through
+                // to the plain device hint — neither button would help.
+                ConnectAccountStatus::Owner => {}
+            }
         }
         (
             Kind::Unknown,
@@ -3332,6 +3419,105 @@ mod tests {
             &row.state,
             SigningKeyState::Disabled(reason) if reason.contains("Connect this signing device")
         )));
+    }
+
+    #[test]
+    fn signing_paths_ask_a_signed_in_non_owner_to_switch_accounts() {
+        use view::vault::psbt::SigningKeyState;
+
+        let primary_states = |status: ConnectAccountStatus| {
+            SignModal::new(
+                HashSet::new(),
+                Arc::new(wallet()),
+                CoincubeDirectory::new(PathBuf::new()),
+                Network::Signet,
+                false,
+                None,
+                None,
+                true,
+            )
+            .with_connect_account(status)
+            .signing_paths()
+            .into_iter()
+            .find(|p| p.is_primary)
+            .unwrap()
+            .keys
+            .into_iter()
+            .map(|row| row.state)
+            .collect::<Vec<_>>()
+        };
+
+        let other = primary_states(ConnectAccountStatus::OtherAccount {
+            owner_email: Some("owner@example.com".to_string()),
+        });
+        assert!(other.iter().all(|s| matches!(
+            s,
+            SigningKeyState::NeedsAccountSwitch(reason) if reason.contains("owner@example.com")
+        )));
+
+        let anonymous = primary_states(ConnectAccountStatus::OtherAccount { owner_email: None });
+        assert!(anonymous.iter().all(|s| matches!(
+            s,
+            SigningKeyState::NeedsAccountSwitch(reason) if reason.contains("different Connect account")
+        )));
+
+        let unknown = primary_states(ConnectAccountStatus::SignedInUnknownOwner);
+        assert!(unknown
+            .iter()
+            .all(|s| matches!(s, SigningKeyState::NeedsAccountSwitch(_))));
+
+        // The owner is signed in: no button would help, so neither is offered.
+        let owner = primary_states(ConnectAccountStatus::Owner);
+        assert!(owner
+            .iter()
+            .all(|s| matches!(s, SigningKeyState::Disabled(_))));
+    }
+
+    #[test]
+    fn connect_account_status_compares_the_session_to_the_cube_owner() {
+        let owner = crate::app::settings::ConnectOwner {
+            user_id: 1,
+            email: "owner@example.com".to_string(),
+        };
+        let cache =
+            |owner: Option<crate::app::settings::ConnectOwner>, email: Option<&str>| Cache {
+                has_connect_session: email.is_some(),
+                connect_email: email.map(str::to_string),
+                cube_connect_owner: owner,
+                ..Cache::default()
+            };
+
+        assert_eq!(
+            ConnectAccountStatus::from_cache(&cache(Some(owner.clone()), None)),
+            ConnectAccountStatus::SignedOut
+        );
+        assert_eq!(
+            ConnectAccountStatus::from_cache(&cache(
+                Some(owner.clone()),
+                Some("OWNER@example.com")
+            )),
+            ConnectAccountStatus::Owner
+        );
+        assert_eq!(
+            ConnectAccountStatus::from_cache(&cache(Some(owner), Some("other@example.com"))),
+            ConnectAccountStatus::OtherAccount {
+                owner_email: Some("owner@example.com".to_string())
+            }
+        );
+        assert_eq!(
+            ConnectAccountStatus::from_cache(&cache(None, Some("other@example.com"))),
+            ConnectAccountStatus::SignedInUnknownOwner
+        );
+
+        // The server's refusal wins, even with no recorded owner.
+        let refused = Cache {
+            cube_owned_by_other_account: true,
+            ..cache(None, Some("other@example.com"))
+        };
+        assert_eq!(
+            ConnectAccountStatus::from_cache(&refused),
+            ConnectAccountStatus::OtherAccount { owner_email: None }
+        );
     }
 
     #[tokio::test]

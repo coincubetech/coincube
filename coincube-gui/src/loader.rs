@@ -903,6 +903,8 @@ pub async fn load_application(
         has_connect_session: false,
         has_vault: true,
         cube_name: config.cube_settings.name.clone(),
+        cube_connect_owner: config.cube_settings.connect_owner.clone(),
+        cube_owned_by_other_account: false,
         current_cube_backed_up: config.cube_settings.backed_up,
         backup_warning_dismissed: false,
         spark_notice: None,
