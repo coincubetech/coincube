@@ -42,6 +42,37 @@ fn identity() -> WalletIdentity {
         descriptor_digest: sha256::Hash::hash(b"synthetic-descriptor"),
     }
 }
+/// Reopen a journal whose previous owner was just dropped (#586).
+///
+/// While another test in this binary spawns a process, the child can briefly
+/// hold duplicates of this process's descriptors until it execs, including
+/// the dropped owner's `claim.lock`. `flock` belongs to the open file, not the
+/// descriptor, so the first reopen can see `Busy` for a moment. Only `Busy` is
+/// retried, every 10 ms for at most 5 s. Every other result, and a `Busy`
+/// that outlasts the deadline, is returned unchanged.
+fn reopen_settled(
+    directory: &std::path::Path,
+    identity: &WalletIdentity,
+    context: Context,
+) -> Result<Controller, Error> {
+    use std::time::{Duration, Instant};
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match Controller::reopen(directory, identity, context.clone()) {
+            Err(Error::Busy) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10))
+            }
+            result => return result,
+        }
+    }
+}
+/// Names a reopen result in assertion messages; `Controller` is not `Debug`.
+fn outcome(result: &Result<Controller, Error>) -> String {
+    match result {
+        Ok(_) => "Ok(Controller)".into(),
+        Err(error) => format!("Err({:?})", error),
+    }
+}
 fn hash(n: u8) -> BlockHash {
     BlockHash::from_byte_array([n; 32])
 }
@@ -167,7 +198,7 @@ fn restart_is_unchecked_and_never_restores_construction_authority() {
     );
     assert!(c.last_inclusion().is_some());
     drop(c);
-    let mut c = Controller::reopen(&temp.0, &identity(), context()).unwrap();
+    let mut c = reopen_settled(&temp.0, &identity(), context()).unwrap();
     assert_eq!(c.status(), Status::Unchecked);
     assert!(c.last_inclusion().is_some());
     assert!(!c.construction_verified);
@@ -186,7 +217,7 @@ fn uncertain_broadcast_is_durable_and_reconciled_only_by_fresh_queries() {
     assert_eq!(c.phase(), Phase::BroadcastUncertain);
     let id = c.signed_txid();
     drop(c);
-    let mut c = Controller::reopen(&temp.0, &identity(), context()).unwrap();
+    let mut c = reopen_settled(&temp.0, &identity(), context()).unwrap();
     assert_eq!(c.signed_txid(), id);
     refresh(&mut c, observation(false), 10000);
     assert_eq!(c.phase(), Phase::BroadcastUncertain);
@@ -303,10 +334,12 @@ fn lock_conflicts_identity_mismatch_and_private_permissions_fail_closed() {
     drop(c);
     let mut wrong = identity();
     wrong.fork_cube.push('x');
-    assert!(matches!(
-        Controller::reopen(&temp.0, &wrong, context()),
-        Err(Error::WrongIdentity)
-    ));
+    let reopened = reopen_settled(&temp.0, &wrong, context());
+    assert!(
+        matches!(reopened, Err(Error::WrongIdentity)),
+        "{}",
+        outcome(&reopened)
+    );
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -315,10 +348,12 @@ fn lock_conflicts_identity_mismatch_and_private_permissions_fail_closed() {
             fs::Permissions::from_mode(0o644),
         )
         .unwrap();
-        assert!(matches!(
-            Controller::reopen(&temp.0, &identity(), context()),
-            Err(Error::InvalidJournal)
-        ));
+        let reopened = reopen_settled(&temp.0, &identity(), context());
+        assert!(
+            matches!(reopened, Err(Error::InvalidJournal)),
+            "{}",
+            outcome(&reopened)
+        );
     }
 }
 #[cfg(unix)]
@@ -351,24 +386,87 @@ fn restart_rejects_different_account_or_provider_but_not_new_generation() {
     drop(controller(&temp));
     let mut changed = context();
     changed.account.push('x');
-    assert!(matches!(
-        Controller::reopen(&temp.0, &identity(), changed),
-        Err(Error::WrongIdentity)
-    ));
+    let reopened = reopen_settled(&temp.0, &identity(), changed);
+    assert!(
+        matches!(reopened, Err(Error::WrongIdentity)),
+        "account change: {}",
+        outcome(&reopened)
+    );
     let mut changed = context();
     changed.provider.push('x');
-    assert!(matches!(
-        Controller::reopen(&temp.0, &identity(), changed),
-        Err(Error::WrongIdentity)
-    ));
+    let reopened = reopen_settled(&temp.0, &identity(), changed);
+    assert!(
+        matches!(reopened, Err(Error::WrongIdentity)),
+        "provider change: {}",
+        outcome(&reopened)
+    );
     let mut renewed = context();
     renewed.generation += 1;
     assert_eq!(
-        Controller::reopen(&temp.0, &identity(), renewed)
+        reopen_settled(&temp.0, &identity(), renewed)
             .unwrap()
             .status(),
         Status::Unchecked
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn reopen_settled_outwaits_only_a_transient_foreign_lock() {
+    use fs4::fs_std::FileExt;
+    use std::time::{Duration, Instant};
+    // A second open file holding the flock stands in for a spawned child's
+    // inherited duplicate of the dropped owner's descriptor (#586). It is held
+    // until the test signals, then released 200 ms later.
+    fn hold(temp: &Temp) -> (std::sync::mpsc::Sender<()>, std::thread::JoinHandle<()>) {
+        let foreign = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(temp.0.join("claim.lock"))
+            .unwrap();
+        // The acquire races a concurrent spawn exactly as a reopen does, so it
+        // gets the same bounded wait.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !foreign.try_lock_exclusive().unwrap() {
+            assert!(Instant::now() < deadline, "foreign lock never became free");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let (release, signal) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            signal.recv().unwrap();
+            std::thread::sleep(Duration::from_millis(200));
+            drop(foreign);
+        });
+        (release, holder)
+    }
+    let temp = Temp::new();
+    drop(controller(&temp));
+    // While the holder keeps the lock, a plain reopen is Busy: the CI failure.
+    let (release, holder) = hold(&temp);
+    let direct = Controller::reopen(&temp.0, &identity(), context());
+    assert!(matches!(direct, Err(Error::Busy)), "{}", outcome(&direct));
+    // Once the holder lets go, the real verdict comes through unchanged.
+    release.send(()).unwrap();
+    let mut changed = context();
+    changed.provider.push('x');
+    let reopened = reopen_settled(&temp.0, &identity(), changed);
+    holder.join().unwrap();
+    assert!(
+        matches!(reopened, Err(Error::WrongIdentity)),
+        "{}",
+        outcome(&reopened)
+    );
+    let (release, holder) = hold(&temp);
+    release.send(()).unwrap();
+    let reopened = reopen_settled(&temp.0, &identity(), context());
+    holder.join().unwrap();
+    assert!(reopened.is_ok(), "{}", outcome(&reopened));
+    // A holder that never lets go is still reported as Busy after the deadline.
+    let started = Instant::now();
+    let blocked = reopen_settled(&temp.0, &identity(), context());
+    assert!(matches!(blocked, Err(Error::Busy)), "{}", outcome(&blocked));
+    assert!(started.elapsed() >= Duration::from_secs(5));
+    drop(reopened);
 }
 
 // Public synthetic descriptor fixture shared with core claim_spend tests.
@@ -440,7 +538,7 @@ fn public_admission_and_restart_revalidation_bind_the_opaque_artifact() {
     assert_eq!(c.plan().fork_chain, ChainId::BitcoinBlake2bTestnet4);
     let identity = c.identity().clone();
     drop(c);
-    let mut c = Controller::reopen(&temp.0, &identity, context()).unwrap();
+    let mut c = reopen_settled(&temp.0, &identity, context()).unwrap();
     assert!(!c.construction_verified);
     assert!(matches!(
         c.revalidate_construction(&context(), &artifact(11)),
@@ -471,11 +569,11 @@ fn public_admission_and_restart_revalidation_bind_the_opaque_artifact() {
     c.intent.bitcoin_change_index = None;
     c.journal.store(&c.intent).unwrap();
     drop(c);
-    let mut c = Controller::reopen(&temp.0, &identity, context()).unwrap();
+    let mut c = reopen_settled(&temp.0, &identity, context()).unwrap();
     assert!(c.recorded_bitcoin_change_index().is_none());
     c.revalidate_construction(&context(), &built).unwrap();
     drop(c);
-    let c = Controller::reopen(&temp.0, &identity, context()).unwrap();
+    let c = reopen_settled(&temp.0, &identity, context()).unwrap();
     assert_eq!(
         c.recorded_bitcoin_change_index(),
         Some(built.change_index())
@@ -491,10 +589,12 @@ fn corrupted_unsigned_bytes_are_not_restored_as_valid_intent() {
     let mut intent: Intent = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     intent.plan.step1.output[0].value = Amount::from_sat(1);
     fs::write(&path, serde_json::to_vec(&intent).unwrap()).unwrap();
-    assert!(matches!(
-        Controller::reopen(&temp.0, &identity(), context()),
-        Err(Error::InvalidPlan)
-    ));
+    let reopened = reopen_settled(&temp.0, &identity(), context());
+    assert!(
+        matches!(reopened, Err(Error::InvalidPlan)),
+        "{}",
+        outcome(&reopened)
+    );
 }
 #[cfg(unix)]
 #[test]
@@ -508,7 +608,12 @@ fn journal_symlink_is_rejected_without_touching_target() {
     fs::rename(&path, &target).unwrap();
     let bytes = fs::read(&target).unwrap();
     symlink(&target, &path).unwrap();
-    assert!(Controller::reopen(&temp.0, &identity(), context()).is_err());
+    let reopened = reopen_settled(&temp.0, &identity(), context());
+    assert!(
+        reopened.is_err() && !matches!(reopened, Err(Error::Busy)),
+        "{}",
+        outcome(&reopened)
+    );
     assert_eq!(fs::read(target).unwrap(), bytes);
 }
 
@@ -743,7 +848,7 @@ fn fork_plan_requires_fresh_depth_and_survives_restart_without_authority() {
         Err(Error::Conflict)
     ));
     drop(c);
-    let mut c = Controller::reopen(&temp.0, &wallet, context()).unwrap();
+    let mut c = reopen_settled(&temp.0, &wallet, context()).unwrap();
     assert_eq!(c.recorded_fork_sweep(), Some(&sweep.psbt().unsigned_tx));
     assert_eq!(c.recorded_fork_change_index(), Some(20.into()));
     assert_eq!(c.status(), Status::Unchecked);
@@ -818,7 +923,7 @@ fn fork_plan_requires_fresh_depth_and_survives_restart_without_authority() {
     assert_eq!(recorded.wtxid(), signed.transaction().compute_wtxid());
     assert!(c.fresh.is_none());
     drop(c);
-    let mut c = Controller::reopen(&temp.0, &wallet, context()).unwrap();
+    let mut c = reopen_settled(&temp.0, &wallet, context()).unwrap();
     assert_eq!(c.recorded_fork_submission(), Some(recorded));
     c.revalidate_construction(&context(), &source).unwrap();
     let obs = real_observation(&c, 6);
@@ -861,7 +966,7 @@ fn fork_plan_requires_fresh_depth_and_survives_restart_without_authority() {
     assert_eq!(c.recorded_fork_sweep().cloned(), before_sweep);
     assert_eq!(c.bitcoin_submission_attempts()[0].wtxid(), None);
     drop(c);
-    let mut c = Controller::reopen(&temp.0, &wallet, context()).unwrap();
+    let mut c = reopen_settled(&temp.0, &wallet, context()).unwrap();
     c.revalidate_construction(&context(), &source).unwrap();
     assert_eq!(c.recorded_fork_submission(), Some(recorded));
     assert_eq!(c.recorded_fork_sweep().cloned(), before_sweep);
@@ -945,7 +1050,7 @@ fn explicit_reconfirmation_preserves_history_and_never_restores_submission() {
         Err(Error::Unchecked)
     ));
     drop(c);
-    let mut c = Controller::reopen(&temp.0, &identity(), context()).unwrap();
+    let mut c = reopen_settled(&temp.0, &identity(), context()).unwrap();
     assert_eq!(c.intent.version, 6);
     assert_eq!(c.intent.inclusion_history.len(), 1);
     assert_eq!(c.status(), Status::Unchecked);
@@ -1016,7 +1121,7 @@ fn signed_bytes_and_attempt_are_durable_without_restart_authority() {
         Some(tx.compute_wtxid())
     );
     drop(c);
-    let c = Controller::reopen(&temp.0, &identity(), context()).unwrap();
+    let c = reopen_settled(&temp.0, &identity(), context()).unwrap();
     assert_eq!(c.status(), Status::Unchecked);
     assert!(!c.construction_verified);
     assert_eq!(c.recorded_bitcoin_transaction(), Some(&tx));
@@ -1057,7 +1162,7 @@ fn legacy_recovered_witness_does_not_rewrite_unknown_original_attempt() {
     c.journal.store(&c.intent).unwrap();
     let identity = c.identity().clone();
     drop(c);
-    let mut c = Controller::reopen(&temp.0, &identity, context()).unwrap();
+    let mut c = reopen_settled(&temp.0, &identity, context()).unwrap();
     assert!(c
         .bind_recovered_bitcoin_transaction(&context(), &verified)
         .is_err());
@@ -1079,7 +1184,7 @@ fn legacy_recovered_witness_does_not_rewrite_unknown_original_attempt() {
     ));
     assert_eq!(fs::read(temp.0.join("intent.json")).unwrap(), before);
     drop(c);
-    let c = Controller::reopen(&temp.0, &identity, context()).unwrap();
+    let c = reopen_settled(&temp.0, &identity, context()).unwrap();
     assert_eq!(c.bitcoin_submission_attempts()[0].wtxid(), None);
     assert_eq!(
         c.recorded_bitcoin_transaction(),
@@ -1183,7 +1288,7 @@ fn process_crash_releases_lock_and_recovers_only_complete_intents() {
         reader.join().unwrap();
         assert!(reached.is_ok(), "child did not reach {}: {}", stage, status);
         assert!(!status.success());
-        let mut recovered = Controller::reopen(&directory, &identity(), context()).unwrap();
+        let mut recovered = reopen_settled(&directory, &identity(), context()).unwrap();
         assert_eq!(recovered.status(), Status::Unchecked);
         assert_eq!(
             recovered.phase(),
