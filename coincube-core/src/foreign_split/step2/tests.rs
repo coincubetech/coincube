@@ -529,40 +529,99 @@ fn coins_must_be_exactly_the_claimed_prevouts() {
 }
 
 #[test]
-fn target_must_be_usable_and_clear_its_dust_floor() {
+fn target_must_be_a_vault_address_type() {
     let fixture = Fixture::new(Shape::Wpkh);
     let source = &fixture.wallet.source;
     let with = |target: &bitcoin::Script| {
         create(&inputs(source, &fixture.coins, &fixture.claimed, target))
     };
-    let spent = fixture.coins[0].previous.output[1].script_pubkey.clone();
-    for target in [
-        ScriptBuf::new(),
-        ScriptBuf::new_op_return(bitcoin::script::PushBytesBuf::try_from(vec![1u8]).unwrap()),
-        spent,
-    ] {
-        assert_eq!(with(&target).unwrap_err(), Error::InvalidTarget, "{target}");
-    }
-    // Any other address type is a usable target, Taproot included.
     let secp = secp256k1::Secp256k1::new();
-    let key = master(8).private_key.x_only_public_key(&secp).0;
-    let fresh_own = source
-        .derive(SplitBranch::External, 20)
-        .unwrap()
-        .script_pubkey()
-        .to_owned();
-    let other_pkh = ScriptBuf::new_p2pkh(
-        &PublicKey::new(master(8).private_key.public_key(&secp)).pubkey_hash(),
-    );
+    let key = PublicKey::new(master(8).private_key.public_key(&secp));
+    let push = |data: Vec<u8>| bitcoin::script::PushBytesBuf::try_from(data).unwrap();
+    let refused: Vec<(&str, ScriptBuf)> = vec![
+        ("empty", ScriptBuf::new()),
+        ("OP_RETURN", ScriptBuf::new_op_return(push(vec![1]))),
+        (
+            "OP_FALSE OP_RETURN",
+            bitcoin::script::Builder::new()
+                .push_opcode(bitcoin::opcodes::OP_FALSE)
+                .push_opcode(bitcoin::opcodes::all::OP_RETURN)
+                .into_script(),
+        ),
+        (
+            "bare OP_TRUE",
+            bitcoin::script::Builder::new()
+                .push_opcode(bitcoin::opcodes::OP_TRUE)
+                .into_script(),
+        ),
+        ("10,001 bytes", ScriptBuf::from_bytes(vec![0x51; 10_001])),
+        ("P2PKH", ScriptBuf::new_p2pkh(&key.pubkey_hash())),
+        (
+            "P2SH",
+            ScriptBuf::new_p2sh(&bitcoin::ScriptHash::from_byte_array([7; 20])),
+        ),
+        (
+            "P2WPKH",
+            ScriptBuf::new_p2wpkh(&key.wpubkey_hash().unwrap()),
+        ),
+        (
+            "spent P2WPKH",
+            fixture.coins[0].previous.output[1].script_pubkey.clone(),
+        ),
+    ];
+    for (name, target) in &refused {
+        assert_eq!(with(target).unwrap_err(), Error::InvalidTarget, "{}", name);
+    }
+    // P2WSH and P2TR, the Cube Vault address types, are accepted.
+    let x_only = master(8).private_key.x_only_public_key(&secp).0;
     for target in [
-        ScriptBuf::new_p2tr(&secp, key, None),
-        fresh_own,
-        other_pkh.clone(),
+        fixture.target.clone(),
+        ScriptBuf::new_p2tr(&secp, x_only, None),
     ] {
         assert!(with(&target).is_ok(), "{}", target);
     }
+}
 
-    // The floor is max(500, Core's relay dust for the target): 546 for P2PKH.
+#[test]
+fn target_must_not_be_the_foreign_wallets_own_script() {
+    for shape in [Shape::WshSortedMulti, Shape::WshMulti] {
+        let fixture = Fixture::new(shape);
+        let source = &fixture.wallet.source;
+        let with = |target: &bitcoin::Script| {
+            create(&inputs(source, &fixture.coins, &fixture.claimed, target))
+        };
+        let script = |branch, index| source.derive(branch, index).unwrap().script_pubkey();
+        // The coins are external 0 and internal 3; step 1 paid external 9.
+        for (branch, index) in [
+            (SplitBranch::External, 0),
+            (SplitBranch::Internal, 3),
+            (SplitBranch::External, 9),
+            (SplitBranch::Internal, 9),
+            (SplitBranch::External, 3 + SOURCE_WINDOW),
+            (SplitBranch::Internal, 3 + SOURCE_WINDOW),
+        ] {
+            assert_eq!(
+                with(&script(branch, index)).unwrap_err(),
+                Error::InvalidTarget,
+                "{:?} {:?} {}",
+                shape,
+                branch,
+                index
+            );
+        }
+        // Beyond the window only the caller's Cube binding refuses (B3b).
+        assert!(with(&script(SplitBranch::External, 4 + SOURCE_WINDOW)).is_ok());
+        assert!(with(&fixture.target).is_ok());
+    }
+}
+
+#[test]
+fn target_value_clears_its_dust_floor() {
+    let fixture = Fixture::new(Shape::Wpkh);
+    let source = &fixture.wallet.source;
+    let secp = secp256k1::Secp256k1::new();
+    let x_only = master(8).private_key.x_only_public_key(&secp).0;
+    // The floor is max(500, Core's relay dust): 500 for P2WSH (330) and P2TR (330).
     let probe = |sats: u64, target: &bitcoin::Script| {
         let coins = vec![coin(source, SplitBranch::External, 0, sats)];
         let claimed = vec![coins[0].outpoint];
@@ -579,14 +638,15 @@ fn target_must_be_usable_and_clear_its_dust_floor() {
             )
         })
     };
-    for (target, floor) in [(fixture.target.clone(), 500), (other_pkh, 546)] {
+    for target in [
+        fixture.target.clone(),
+        ScriptBuf::new_p2tr(&secp, x_only, None),
+    ] {
+        assert_eq!(target.minimal_non_dust().to_sat(), 330);
         let (vbytes, _) = probe(100_000, &target).unwrap();
-        let (_, value) = probe(vbytes + floor, &target).unwrap();
-        assert_eq!(value.to_sat(), floor);
-        assert_eq!(
-            probe(vbytes + floor - 1, &target).unwrap_err(),
-            Error::Economics
-        );
+        let (_, value) = probe(vbytes + 500, &target).unwrap();
+        assert_eq!(value.to_sat(), 500);
+        assert_eq!(probe(vbytes + 499, &target).unwrap_err(), Error::Economics);
     }
 }
 

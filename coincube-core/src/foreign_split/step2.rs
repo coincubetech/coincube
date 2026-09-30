@@ -49,8 +49,10 @@ pub struct SplitStep2Inputs<'a> {
     /// Step 1's claimed prevouts ([`SplitStep1::claimed_prevouts`]). `coins`
     /// must be exactly these.
     pub claimed: &'a [OutPoint],
-    /// The target Cube's address script. Its ownership and freshness are the
-    /// caller's to prove; this module only refuses an unusable script.
+    /// The target Cube's address script: P2WSH or P2TR, the only Vault
+    /// address types. Its ownership and freshness are the caller's to prove;
+    /// this module refuses any other type and the foreign wallet's own
+    /// scripts near its claimed coins.
     pub target: &'a bitcoin::Script,
 }
 
@@ -118,6 +120,45 @@ fn target_output(target: &bitcoin::Script, value: Amount) -> Vec<TxOut> {
     }]
 }
 
+/// How far from each claimed coin's index, on both branches, a target is
+/// compared with the foreign wallet's own scripts: the foreign scanner's
+/// largest history gap.
+const SOURCE_WINDOW: u32 = 100;
+
+/// Whether `target` is one of the foreign wallet's own scripts. Only a `wsh`
+/// source has P2WSH scripts, and no supported source shape has P2TR ones, so
+/// only a P2WSH target of a `wsh` source is compared. A script hash cannot be inverted, so the check derives
+/// both branches within [`SOURCE_WINDOW`] of every claimed coin's index,
+/// which covers the spent scripts and the step-1 destination. Beyond that, only
+/// the caller's binding of the target to the target Cube's own derivation
+/// refuses a foreign script (#568 B3b).
+fn is_source_script(
+    source: &SplitSource,
+    selected: &[Selected],
+    target: &bitcoin::Script,
+) -> Result<bool, Error> {
+    if !target.is_p2wsh() || !matches!(source.external(), Descriptor::Wsh(_)) {
+        return Ok(false);
+    }
+    let mut indices = BTreeSet::new();
+    for input in selected {
+        let last = input.index.saturating_add(SOURCE_WINDOW).min((1 << 31) - 1);
+        indices.extend(input.index.saturating_sub(SOURCE_WINDOW)..=last);
+    }
+    let mut branches = vec![SplitBranch::External];
+    if source.internal().is_some() {
+        branches.push(SplitBranch::Internal);
+    }
+    for branch in branches {
+        for &index in &indices {
+            if source.derive(branch, index)?.script_pubkey().as_script() == target {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
 fn plan(inputs: &SplitStep2Inputs<'_>) -> Result<Plan2, Error> {
     if !inputs.chain.is_blake2b() {
         return Err(Error::NotBitcoinBlake2b(inputs.chain));
@@ -128,12 +169,8 @@ fn plan(inputs: &SplitStep2Inputs<'_>) -> Result<Plan2, Error> {
         return Err(Error::ClaimedMismatch);
     }
     let target = inputs.target;
-    if target.is_empty()
-        || target.is_op_return()
-        || selection
-            .selected
-            .iter()
-            .any(|input| input.output.script_pubkey.as_script() == target)
+    if !(target.is_p2wsh() || target.is_p2tr())
+        || is_source_script(inputs.source, &selection.selected, target)?
     {
         return Err(Error::InvalidTarget);
     }
@@ -317,6 +354,8 @@ pub fn finalize_split_step2<C: secp256k1::Verification>(
         .try_fold(0u64, |sum, output| sum.checked_add(output.value.to_sat()))
         .ok_or(FinalizeError::Economics)?;
     let value = signed.unsigned_tx.output[0].value.to_sat();
+    // Defence in depth mirrored from step 1: the exact-construction check
+    // above already pins the transaction whose economics create checked.
     check_economics(
         total,
         value,

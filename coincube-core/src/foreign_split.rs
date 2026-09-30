@@ -111,7 +111,9 @@ pub enum Error {
     NotBitcoinBlake2b(ChainId),
     /// Step 2's coins are not exactly step 1's claimed prevouts.
     ClaimedMismatch,
-    /// Step 2's target is empty, provably unspendable, or a spent script.
+    /// Step 2's target is not a P2WSH or P2TR script (the only Cube Vault
+    /// address types), or is one of the foreign wallet's own scripts within
+    /// the scanner's gap of a claimed coin's index.
     InvalidTarget,
 }
 
