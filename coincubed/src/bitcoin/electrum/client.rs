@@ -39,6 +39,10 @@ pub enum Error {
     /// is unknown). Returned rather than panicking: on the command path the
     /// caller holds the backend lock (#597).
     IncompleteMempoolGraph(bitcoin::Txid, String),
+    /// The server reported a block height our `i32` heights cannot hold.
+    /// Returned rather than panicking: the poller and the RPC commands both
+    /// read the tip while holding the backend lock (#616).
+    HeightOutOfRange(u64),
 }
 
 impl std::fmt::Display for Error {
@@ -55,6 +59,11 @@ impl std::fmt::Display for Error {
                 f,
                 "Electrum error: cannot compute the mempool fees of '{}': {}.",
                 txid, e
+            ),
+            Error::HeightOutOfRange(height) => write!(
+                f,
+                "Electrum error: the server reported an out-of-range block height {}.",
+                height
             ),
         }
     }
@@ -103,9 +112,13 @@ impl Client {
             .inner
             .block_headers_subscribe()
             .map_err(Error::Server)
-            .map(|notif| BlockChainTip {
-                height: height_i32_from_usize(notif.height),
-                hash: notif.header.block_hash(),
+            .and_then(|notif| {
+                let height = height_i32_from_usize(notif.height)
+                    .ok_or(Error::HeightOutOfRange(notif.height as u64))?;
+                Ok(BlockChainTip {
+                    height,
+                    hash: notif.header.block_hash(),
+                })
             })
     }
 

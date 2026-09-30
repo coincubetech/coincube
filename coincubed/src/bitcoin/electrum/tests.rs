@@ -1,6 +1,6 @@
-//! The Electrum backend's fallible mempool reads against a scripted server
-//! (#597): "the server does not know it" is absence, a dropped connection is an
-//! error.
+//! The Electrum backend's fallible reads against a scripted server: "the server
+//! does not know it" is absence, a dropped connection is an error (#597), and so
+//! is a block height out of our range (#616).
 
 use super::*;
 use crate::bitcoin::BitcoinInterface;
@@ -11,8 +11,8 @@ use std::{
     net::TcpListener,
     str::FromStr,
     sync::{
-        atomic::{AtomicBool, Ordering},
-        mpsc, Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        mpsc, Arc, Mutex,
     },
     thread,
     time::{Duration, Instant},
@@ -118,10 +118,11 @@ fn chain_answer(method: &str) -> Option<Answer> {
 }
 
 /// Run `call` against an Electrum backend (no retries) connected to a server
-/// answering with `answer`.
+/// answering with `answer`. `call` owns the backend, so it can put it behind
+/// the lock the daemon shares it through.
 fn against_server<T>(
     answer: impl Fn(&str, &Json) -> Answer + Send + Sync + 'static,
-    call: impl FnOnce(&Electrum) -> T,
+    call: impl FnOnce(Electrum) -> T,
 ) -> T {
     const DESCRIPTOR: &str = concat!(
         "wsh(andor(pk([aabbccdd]xpub68JJTXc1MWK8KLW4HGLXZBJknja7kDUJuFHnM424LbziEXsfkh1WQCiEjjHw4z",
@@ -153,8 +154,7 @@ fn against_server<T>(
         0.into(),
     );
     let backend = Electrum::new(client, wallet, false).unwrap();
-    let result = call(&backend);
-    drop(backend);
+    let result = call(backend);
     stop.send(()).unwrap();
     server.join().unwrap();
     result
@@ -353,4 +353,117 @@ fn electrum_mempool_entry_with_a_refused_ancestor_parent_is_an_error_not_a_panic
         "{:?}",
         spenders
     );
+}
+
+/// A server whose chain is the genesis block, except that it reports its tip at
+/// `height` (read at each request, so a test can move it). Every block header
+/// it serves is the genesis header. It knows no transaction and no script history.
+fn tip_at(height: Arc<AtomicU64>) -> impl Fn(&str, &Json) -> Answer + Send + Sync + 'static {
+    move |method, _| {
+        let header = serialize_hex(
+            &bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest).header,
+        );
+        match method {
+            "blockchain.headers.subscribe" => Answer::Result(
+                serde_json::json!({"height": height.load(Ordering::SeqCst), "hex": header}),
+            ),
+            "blockchain.scripthash.get_history" => Answer::Result(serde_json::json!([])),
+            "blockchain.transaction.get" => unknown_tx(),
+            other => chain_answer(other)
+                .unwrap_or_else(|| panic!("unexpected Electrum request {}", other)),
+        }
+    }
+}
+
+const OUT_OF_RANGE: &str = "out-of-range block height";
+
+#[test]
+fn electrum_out_of_range_tip_height_is_an_error_for_commands_under_the_lock() {
+    let txid =
+        bitcoin::Txid::from_str("4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b")
+            .unwrap();
+    let outpoint = OutPoint::new(txid, 0);
+    for height in [i32::MAX as u64 + 1, u32::MAX as u64, 1 << 40] {
+        against_server(tip_at(Arc::new(AtomicU64::new(height))), |backend| {
+            // As the daemon shares it: every command read takes this lock, and
+            // a panic while holding it poisons it for the poller and the GUI.
+            let shared: Arc<Mutex<dyn BitcoinInterface>> = Arc::new(Mutex::new(backend));
+
+            let entry = shared.mempool_entry_result(&txid);
+            assert!(
+                matches!(&entry, Err(e) if e.contains(OUT_OF_RANGE)),
+                "height {}: {:?}",
+                height,
+                entry
+            );
+            let spenders = shared.mempool_spenders_result(&[outpoint]);
+            assert!(
+                matches!(&spenders, Err(e) if e.contains(OUT_OF_RANGE)),
+                "height {}: {:?}",
+                height,
+                spenders
+            );
+            // The infallible reads degrade to "unknown" rather than panicking.
+            assert_eq!(shared.tip_time(), None, "height {}", height);
+            assert!(shared.mempool_entry(&txid).is_none(), "height {}", height);
+            assert!(
+                shared.mempool_spenders(&[outpoint]).is_empty(),
+                "height {}",
+                height
+            );
+
+            assert!(!shared.is_poisoned(), "height {}", height);
+        });
+    }
+}
+
+/// Poll `shared` against a server reporting an out-of-range tip: the poll fails,
+/// and nothing of the update was applied, so the poller's next reads of the tip
+/// see `expected_tip` instead of panicking under the lock.
+fn assert_poll_refused(shared: &mut Arc<Mutex<dyn BitcoinInterface>>, expected_tip: i32) {
+    let genesis_hash =
+        bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest).block_hash();
+    let sync = shared.sync_wallet(0.into(), 0.into());
+    assert!(
+        matches!(&sync, Err(e) if e.contains(OUT_OF_RANGE)),
+        "{:?}",
+        sync
+    );
+    let tip = shared.chain_tip();
+    // Every header the scripted server serves is the genesis header.
+    assert_eq!((tip.height, tip.hash), (expected_tip, genesis_hash));
+    assert_eq!(shared.sync_progress().blocks, expected_tip as u64);
+    assert!(!shared.is_poisoned());
+}
+
+#[test]
+fn electrum_out_of_range_tip_height_fails_the_poll_and_leaves_the_wallet_tip_alone() {
+    // BDK reads the server's tip as a `u32`, so these are the heights a sync can
+    // be handed that do not fit into ours. It asks for the last eight blocks up
+    // to the tip and the scripted server returns one, so the update's tip is the
+    // first block of that range: seven below the reported height.
+    for out_of_range in [i32::MAX as u64 + 10, u32::MAX as u64] {
+        let height = Arc::new(AtomicU64::new(out_of_range));
+        against_server(tip_at(height.clone()), |backend| {
+            let mut shared: Arc<Mutex<dyn BitcoinInterface>> = Arc::new(Mutex::new(backend));
+
+            // The wallet's chain is at genesis: the poll is a full scan, and the
+            // next one is still a full scan.
+            assert_poll_refused(&mut shared, 0);
+            assert_eq!(shared.rescan_progress(), Some(0.0));
+            assert_poll_refused(&mut shared, 0);
+
+            // A sane tip, 20: the update's tip is block 13 and the wallet's chain
+            // moves there, so the next poll is an incremental sync.
+            height.store(20, Ordering::SeqCst);
+            let sync = shared.sync_wallet(0.into(), 0.into());
+            assert!(matches!(sync, Ok(None)), "{:?}", sync);
+            assert_eq!(shared.chain_tip().height, 13);
+            assert_eq!(shared.rescan_progress(), None);
+
+            height.store(out_of_range, Ordering::SeqCst);
+            assert_poll_refused(&mut shared, 13);
+            assert_eq!(shared.rescan_progress(), None);
+        });
+    }
 }
