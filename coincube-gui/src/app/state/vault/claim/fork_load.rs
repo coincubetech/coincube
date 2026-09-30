@@ -116,7 +116,7 @@ pub async fn load(
     let plan = controller.plan();
     if plan.bitcoin_chain != ChainId::Bitcoin
         || plan.fork_chain != wallet.chain
-        || controller.signed_txid() != Some(plan.step1.compute_txid())
+        || controller.signed_txid() != Some(plan.step1_txid())
     {
         return Err("The Bitcoin step must be recorded before continuing this Claim.".into());
     }

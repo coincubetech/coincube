@@ -192,6 +192,28 @@ impl SplitSource {
         self.internal.as_ref()
     }
 
+    /// The source identity (owner decision D9): SHA-256 over each
+    /// descriptor's canonical text with its checksum, tagged by branch and
+    /// length-prefixed so the pair cannot be re-split. It names the wallet
+    /// in the Split journal and in the target Cube's `split_from`; it is not
+    /// a secret and not evidence of ownership.
+    pub fn digest(&self) -> bitcoin::hashes::sha256::Hash {
+        use bitcoin::hashes::HashEngine;
+        let mut engine = bitcoin::hashes::sha256::Hash::engine();
+        for (tag, descriptor) in [(0_u8, Some(&self.external)), (1, self.internal.as_ref())] {
+            engine.input(&[tag]);
+            match descriptor {
+                Some(descriptor) => {
+                    let text = descriptor.to_string();
+                    engine.input(&(text.len() as u64).to_be_bytes());
+                    engine.input(text.as_bytes());
+                }
+                None => engine.input(&0_u64.to_be_bytes()),
+            }
+        }
+        bitcoin::hashes::sha256::Hash::from_engine(engine)
+    }
+
     fn derive(
         &self,
         branch: SplitBranch,

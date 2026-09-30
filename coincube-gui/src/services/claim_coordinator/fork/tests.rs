@@ -1579,3 +1579,80 @@ async fn unmarked_completion_tracking_does_not_rewrite_settings_or_require_marke
 }
 
 mod ancestry;
+
+/// Split (#568 B0): completion and loss checks read the tracked (signed)
+/// txid; an inclusion of the unsigned txid is not about this step 1.
+#[test]
+fn completion_checks_use_the_tracked_step1_txid() {
+    use coincube_core::claim::{
+        BitcoinObservation, ClaimPlan, Poison, TransactionLocation, MIN_CONFIRMATIONS,
+    };
+    let prevout = OutPoint::new(Txid::from_byte_array([3; 32]), 0);
+    let mut plan = ClaimPlan {
+        bitcoin_chain: ChainId::Bitcoin,
+        fork_chain: ChainId::BitcoinBlake2b,
+        step1: Transaction {
+            version: transaction::Version::TWO,
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: prevout,
+                ..TxIn::default()
+            }],
+            output: vec![TxOut {
+                value: Amount::ZERO,
+                script_pubkey: coincube_core::miniscript::bitcoin::ScriptBuf::from_bytes(vec![
+                    0x6a;
+                    90
+                ]),
+            }],
+        },
+        claimed_prevouts: vec![prevout],
+        poison: Poison::OpReturn,
+        previous_confirmation: None,
+        tracked_txid: None,
+    };
+    let unsigned = plan.step1.compute_txid();
+    let signed = Txid::from_byte_array([0x5a; 32]);
+    plan.tracked_txid = Some(signed);
+    let block = BlockRef {
+        height: 100,
+        hash: BlockHash::from_byte_array([4; 32]),
+    };
+    let observed = |txid, hash| BitcoinObservation {
+        chain: ChainId::Bitcoin,
+        tip: BlockRef {
+            height: 99 + MIN_CONFIRMATIONS,
+            hash: BlockHash::from_byte_array([1; 32]),
+        },
+        location: TransactionLocation::Confirmed {
+            txid,
+            block,
+            best_chain_hash_at_height: hash,
+        },
+        observed_at: 10_000,
+    };
+    assert!(completion_bitcoin_confirmed(
+        &plan,
+        observed(signed, block.hash)
+    ));
+    assert!(!completion_bitcoin_confirmed(
+        &plan,
+        observed(unsigned, block.hash)
+    ));
+    assert_eq!(
+        completion_bitcoin_loss(&plan, observed(signed, block.hash)),
+        None
+    );
+    assert_eq!(
+        completion_bitcoin_loss(&plan, observed(signed, BlockHash::from_byte_array([9; 32]))),
+        Some(Assessment::Reorged)
+    );
+    // A reorg of some other transaction is not this step 1's loss.
+    assert_eq!(
+        completion_bitcoin_loss(
+            &plan,
+            observed(unsigned, BlockHash::from_byte_array([9; 32]))
+        ),
+        None
+    );
+}

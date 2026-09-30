@@ -4,6 +4,7 @@ pub(crate) use ancestry::RecoveryObservation;
 mod journal;
 mod recovery;
 mod reorg;
+mod split;
 use super::claim_observation::{CollectedAssessment, Failure, ObservationBundle};
 use coincube_core::{
     chain::ChainId,
@@ -17,6 +18,7 @@ use coincube_core::{
 use journal::Journal;
 pub use recovery::BitcoinSubmissionAttempt;
 pub use reorg::Reconfirmation;
+pub use split::{split_identity, RecordedSplit};
 
 /// Upper bound on how long [`Controller::reopen_settling`] waits out `Busy`.
 pub const REOPEN_BUSY_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
@@ -99,6 +101,11 @@ struct Intent {
     bitcoin_transaction: Option<Transaction>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     bitcoin_attempts: Vec<BitcoinSubmissionAttempt>,
+    /// Split (#568) only, and only in a version-8 intent. Every Claim intent
+    /// leaves it absent, so Claim journals serialize exactly as before, and
+    /// binaries without it refuse a Split journal (`deny_unknown_fields`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    split: Option<split::SplitRecord>,
 }
 /// A possible submission, not evidence of acceptance or confirmation. Reading
 /// this journal record never permits a retry, even after an app restart.
@@ -170,6 +177,11 @@ fn context_digest(context: &Context) -> sha256::Hash {
     sha256::Hash::hash(&bytes)
 }
 fn validate(intent: &Intent) -> Result<(), Error> {
+    // A Split intent has its own rules (no Bitcoin Cube, signed scriptSigs,
+    // a tracked signed txid). Every Claim check below stays as it was.
+    if intent.split.is_some() || intent.version == split::VERSION {
+        return split::validate(intent);
+    }
     let p = &intent.plan;
     if !matches!(
         (
@@ -214,6 +226,7 @@ fn validate(intent: &Intent) -> Result<(), Error> {
             .signed_txid
             .is_some_and(|id| id != p.step1.compute_txid())
         || (intent.phase == Phase::Intent) != intent.signed_txid.is_none()
+        || p.tracked_txid.is_some()
     {
         return Err(Error::InvalidPlan);
     }
@@ -283,6 +296,7 @@ impl Controller {
                 claimed_prevouts,
                 poison: Poison::OpReturn,
                 previous_confirmation: None,
+                tracked_txid: None,
             },
             context,
             Some(u32::from(artifact.change_index())),
@@ -297,6 +311,10 @@ impl Controller {
     ) -> Result<(), Error> {
         self.ensure_context(current)?;
         self.clear_check();
+        if self.intent.split.is_some() {
+            self.construction_verified = false;
+            return Err(Error::WrongIdentity);
+        }
         if artifact.chain() != self.intent.plan.bitcoin_chain
             || digest(&artifact.psbt().unsigned_tx) != self.intent.unsigned_digest
             || sha256::Hash::hash(artifact.descriptor().to_string().as_bytes())
@@ -384,6 +402,7 @@ impl Controller {
             inclusion_history: Vec::new(),
             bitcoin_transaction: None,
             bitcoin_attempts: Vec::new(),
+            split: None,
         };
         validate(&intent)?;
         Self::valid_context(&context)?;
@@ -493,6 +512,15 @@ impl Controller {
             }
             other => other,
         }
+    }
+    /// Claim-only operations take Claim artifacts; a Split intent refuses them
+    /// before any check could compare a Claim artifact with a Split record.
+    fn claim_only(&mut self) -> Result<(), Error> {
+        if self.intent.split.is_some() {
+            self.clear_check();
+            return Err(Error::WrongIdentity);
+        }
+        Ok(())
     }
     fn valid_context(context: &Context) -> Result<(), Error> {
         if context.account.is_empty() || context.provider.is_empty() {
@@ -668,6 +696,7 @@ impl Controller {
         now: i64,
     ) -> Result<(), Error> {
         self.ensure_context(current)?;
+        self.claim_only()?;
         let observations = self.fresh.take().ok_or(Error::Unchecked)?;
         self.status = Status::Unchecked;
         if !self.construction_verified || self.intent.phase != Phase::Tracking {
@@ -749,6 +778,7 @@ impl Controller {
         now: i64,
     ) -> Result<(), Error> {
         self.ensure_context(current)?;
+        self.claim_only()?;
         let observations = self.fresh.take().ok_or(Error::Unchecked)?;
         self.status = Status::Unchecked;
         if !self.construction_verified || self.intent.phase != Phase::Tracking {
@@ -801,6 +831,7 @@ impl Controller {
         now: i64,
     ) -> Result<(), Error> {
         self.ensure_context(current)?;
+        self.claim_only()?;
         if !self.construction_verified {
             self.clear_check();
             return Err(Error::Unchecked);

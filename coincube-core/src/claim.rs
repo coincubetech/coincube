@@ -43,6 +43,23 @@ pub struct ClaimPlan {
     pub claimed_prevouts: Vec<OutPoint>,
     pub poison: Poison,
     pub previous_confirmation: Option<BlockRef>,
+    /// The txid step 1 is tracked by on both chains when it differs from the
+    /// unsigned `step1`'s: a Split source spending P2PKH or P2SH-P2WPKH
+    /// inputs puts signatures in scriptSigs, which the txid commits to.
+    /// `None` for Claim (native segwit only, so the two txids are equal); a
+    /// Claim plan therefore serializes exactly as before. Read it only
+    /// through [`ClaimPlan::step1_txid`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracked_txid: Option<Txid>,
+}
+
+impl ClaimPlan {
+    /// The txid every observation of step 1 must use: the recorded signed
+    /// txid when there is one, otherwise the unsigned transaction's.
+    pub fn step1_txid(&self) -> Txid {
+        self.tracked_txid
+            .unwrap_or_else(|| self.step1.compute_txid())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -335,7 +352,7 @@ pub fn assess(
     {
         return Assessment::PoisonMissing;
     }
-    if fork.step1_txid != plan.step1.compute_txid() {
+    if fork.step1_txid != plan.step1_txid() {
         return Assessment::Unknown;
     }
     match fork.step1_presence {
@@ -346,16 +363,13 @@ pub fn assess(
     if let Err(refused) = assess_deployment(&fork, &deployment, policy) {
         return refused;
     }
-    let confirmations = match bitcoin_confirmation(
-        plan.step1.compute_txid(),
-        plan.previous_confirmation,
-        bitcoin,
-    ) {
-        BitcoinConfirmation::Unknown => return Assessment::Unknown,
-        BitcoinConfirmation::Unconfirmed => return Assessment::WaitingForConfirmation,
-        BitcoinConfirmation::Reorged => return Assessment::Reorged,
-        BitcoinConfirmation::Confirmed { confirmations } => confirmations,
-    };
+    let confirmations =
+        match bitcoin_confirmation(plan.step1_txid(), plan.previous_confirmation, bitcoin) {
+            BitcoinConfirmation::Unknown => return Assessment::Unknown,
+            BitcoinConfirmation::Unconfirmed => return Assessment::WaitingForConfirmation,
+            BitcoinConfirmation::Reorged => return Assessment::Reorged,
+            BitcoinConfirmation::Confirmed { confirmations } => confirmations,
+        };
     if confirmations < MIN_CONFIRMATIONS {
         return Assessment::WaitingForDepth { confirmations };
     }
@@ -495,6 +509,7 @@ mod tests {
                     claimed_prevouts: vec![input],
                     poison: Poison::OpReturn,
                     previous_confirmation: Some(block),
+                    tracked_txid: None,
                 },
                 bitcoin,
                 fork,
@@ -797,5 +812,36 @@ mod tests {
             ),
             Assessment::StaleObservation
         );
+    }
+
+    /// A Split step 1 with P2PKH/P2SH-P2WPKH inputs is tracked by its signed
+    /// txid. Observations keyed by the unsigned txid never assess, and a
+    /// Claim plan (no tracked txid) is unchanged, byte for byte.
+    #[test]
+    fn tracked_txid_replaces_the_unsigned_txid_everywhere() {
+        let f = Fixture::new();
+        let unsigned = f.plan.step1.compute_txid();
+        assert_eq!(f.plan.step1_txid(), unsigned);
+        let encoded = serde_json::to_string(&f.plan).unwrap();
+        assert!(!encoded.contains("tracked_txid"));
+        let decoded: ClaimPlan = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.tracked_txid, None);
+
+        let signed = Txid::from_byte_array([0x5a; 32]);
+        let mut f = Fixture::new();
+        f.plan.tracked_txid = Some(signed);
+        assert_eq!(f.plan.step1_txid(), signed);
+        // Observations still keyed by the unsigned txid are not about this
+        // transaction at all.
+        assert_eq!(f.evaluate(), Assessment::Unknown);
+        f.fork.step1_txid = signed;
+        assert_eq!(f.evaluate(), Assessment::Unknown);
+        if let TransactionLocation::Confirmed { txid, .. } = &mut f.bitcoin.location {
+            *txid = signed;
+        }
+        assert_eq!(f.evaluate(), Assessment::ObservationsEligibleForPreflight);
+        let encoded = serde_json::to_string(&f.plan).unwrap();
+        let decoded: ClaimPlan = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.step1_txid(), signed);
     }
 }

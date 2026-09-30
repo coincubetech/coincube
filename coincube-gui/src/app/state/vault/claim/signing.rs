@@ -187,6 +187,7 @@ pub(super) async fn check_inputs(
             claimed_prevouts: transfer.claimed_prevouts().to_vec(),
             poison: claim::Poison::InputAncestry,
             previous_confirmation: None,
+            tracked_txid: None,
         };
         let collected = source
             .collect_ancestry(

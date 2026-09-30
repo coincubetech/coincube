@@ -478,7 +478,7 @@ impl Coordinator {
         let observations = checked.assessment().observations;
         if !completion_bitcoin_confirmed(&plan, observations.bitcoin)
             || observations.fork.chain != plan.fork_chain
-            || observations.fork.step1_txid != plan.step1.compute_txid()
+            || observations.fork.step1_txid != plan.step1_txid()
             || observations.fork.step1_presence
                 != coincube_core::claim::ForkTransactionPresence::NotObserved
         {
@@ -1262,7 +1262,7 @@ fn completion_bitcoin_confirmed(
         return false;
     };
     bitcoin.chain == plan.bitcoin_chain
-        && txid == plan.step1.compute_txid()
+        && txid == plan.step1_txid()
         && block.hash == best_chain_hash_at_height
         && plan
             .previous_confirmation
@@ -1297,7 +1297,7 @@ fn completion_bitcoin_loss(
             block,
             best_chain_hash_at_height,
         } => {
-            if txid != plan.step1.compute_txid() {
+            if txid != plan.step1_txid() {
                 return None;
             }
             if block.hash != best_chain_hash_at_height

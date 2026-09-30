@@ -198,6 +198,7 @@ async fn ancestry_protocol_case(rdts_active: bool, expiry_time: i64) {
         claimed_prevouts: built.claimed_prevouts().to_vec(),
         poison: claim::Poison::InputAncestry,
         previous_confirmation: None,
+        tracked_txid: None,
     };
     let collected = source
         .collect_ancestry(

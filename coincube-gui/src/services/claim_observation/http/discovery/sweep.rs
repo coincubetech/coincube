@@ -31,7 +31,7 @@ impl HttpObservationSource {
     ) -> Result<CollectedAncestrySweep, Failure> {
         super::super::super::validate_plan_shape(plan, policy, budget)?;
         binding::validate_partition(path, plan).map_err(|kind| failure(Stage::Plan, kind))?;
-        if sweep == plan.step1.compute_txid() {
+        if sweep == plan.step1_txid() {
             return Err(failure(Stage::Plan, FailureKind::InvalidPlan));
         }
         let snapshot = self.discovery_snapshot();

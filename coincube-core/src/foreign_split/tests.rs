@@ -1076,3 +1076,28 @@ fn locktime_must_be_a_height_at_or_below_the_tip() {
         );
     }
 }
+
+/// D9 source digest: tagged and length-prefixed over each descriptor's
+/// canonical text, so the receive-only and paired sources differ, every
+/// shape differs, and the value is pinned (`split_from` and the Split
+/// journal store it).
+#[test]
+fn split_source_digest_is_canonical_and_pinned() {
+    let digests: Vec<_> = SHAPES
+        .iter()
+        .map(|shape| wallet(*shape).source.digest())
+        .collect();
+    for (i, a) in digests.iter().enumerate() {
+        for b in &digests[i + 1..] {
+            assert_ne!(a, b);
+        }
+    }
+    let paired = wallet(Shape::Wpkh).source;
+    let receive_only = SplitSource::new(paired.external().clone(), None).unwrap();
+    assert_ne!(paired.digest(), receive_only.digest());
+    assert_eq!(paired.digest(), wallet(Shape::Wpkh).source.digest());
+    assert_eq!(
+        paired.digest().to_string(),
+        "5c33200468e8e8e43abe603ab1fc8b09e9b1a2bba0c1e9790d8511d98234e9eb"
+    );
+}

@@ -109,6 +109,7 @@ fn plan() -> ClaimPlan {
         claimed_prevouts: vec![prev],
         poison: Poison::OpReturn,
         previous_confirmation: None,
+        tracked_txid: None,
     }
 }
 fn controller(temp: &Temp) -> Controller {

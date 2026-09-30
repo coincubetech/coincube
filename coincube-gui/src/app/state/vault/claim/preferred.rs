@@ -202,6 +202,7 @@ pub(super) async fn build_preferred(
             claimed_prevouts: transfer.claimed_prevouts().to_vec(),
             poison: claim::Poison::InputAncestry,
             previous_confirmation: None,
+            tracked_txid: None,
         };
         proof
             .validate_for_plan(
