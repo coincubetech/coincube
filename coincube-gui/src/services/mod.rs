@@ -9,6 +9,14 @@ pub mod foreign_psbt;
 pub mod foreign_scan;
 pub mod foreign_split_inventory;
 pub mod foreign_wallet_source;
+pub mod split_evidence;
+pub mod split_fees;
+pub mod split_psbt_file;
+pub mod split_source;
+#[cfg(test)]
+pub(crate) mod split_test_connect;
+#[cfg(test)]
+pub(crate) mod split_test_wallets;
 
 pub mod http;
 pub mod keys;

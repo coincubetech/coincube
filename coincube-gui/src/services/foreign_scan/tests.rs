@@ -64,6 +64,9 @@ impl Source for Fake {
             [if self.changed && n > 0 { 2 } else { 1 }; 32],
         ))
     }
+    async fn tip_height(&self, _: ChainId, tip: BlockHash) -> Result<u32, ScanError> {
+        Ok(u32::from(tip.to_byte_array()[0]) + 800_000)
+    }
     async fn anchor(&self) -> Result<(BlockHash, Option<u64>), ScanError> {
         Ok((BlockHash::from_byte_array([1; 32]), Some(100)))
     }
@@ -490,6 +493,19 @@ async fn http_complete_bounded_scan_and_inflight_generation_cancel() {
             .header("Cache-Control", "no-store")
             .body("11".repeat(32));
     });
+    let status = server.mock(|when, then| {
+        when.method(GET)
+            .path(format!(
+                "/api/v1/esplora/bitcoin/mainnet/block/{}/status",
+                "11".repeat(32)
+            ))
+            .header("x-coincube-observation", "fresh");
+        then.status(200)
+            .header("X-Coincube-Observation", "fresh")
+            .header("X-Cache", "BYPASS")
+            .header("Cache-Control", "no-store")
+            .body(r#"{"in_best_chain":true,"height":912345,"next_best":null}"#);
+    });
     let mut mocks = Vec::new();
     for index in 0..2 {
         let addr = bitcoin::Address::from_script(
@@ -525,7 +541,9 @@ async fn http_complete_bounded_scan_and_inflight_generation_cancel() {
     p.chain = ChainId::Bitcoin;
     let result = scan(client.clone(), p, 1, rx).await.unwrap();
     assert_eq!(result.addresses_scanned(), 2);
+    assert_eq!(result.tip_height(), 912_345);
     tip.assert_hits(2);
+    status.assert_hits(1);
     for m in mocks {
         m.assert_hits(2);
     }
@@ -629,5 +647,45 @@ async fn confirming_height_and_observed_fork_height_classify_coins() {
         // Without an observed fork height nothing is classifiable.
         let unknown = report.clone().with_fork_height(None);
         assert_eq!(unknown.fork_side(coin), ForkSide::Unknown);
+    }
+}
+
+/// The report's tip height is read for the scan's own tip, and a tip that has
+/// left the best chain, or a status without a height, fails the scan.
+#[tokio::test]
+async fn split_tip_height_is_bound_to_the_scanned_tip() {
+    let report = collect(&Fake::empty(), &plan(4), 7).await.unwrap();
+    assert_eq!(report.tip(), BlockHash::from_byte_array([1; 32]));
+    assert_eq!(report.tip_height(), 800_001);
+
+    use httpmock::prelude::*;
+    for (body, expected) in [
+        (
+            r#"{"in_best_chain":false,"height":5,"next_best":null}"#,
+            Err(ScanError::Changed),
+        ),
+        (r#"{"in_best_chain":true}"#, Err(ScanError::Malformed)),
+        (r#"{"in_best_chain":true,"height":7}"#, Ok(7)),
+    ] {
+        let server = MockServer::start();
+        let tip = BlockHash::from_byte_array([9; 32]);
+        let mock = server.mock(|when, then| {
+            when.method(GET).path(format!(
+                "/api/v1/esplora/bitcoin-blake2b/mainnet/block/{tip}/status"
+            ));
+            then.status(200)
+                .header("X-Coincube-Observation", "fresh")
+                .header("X-Cache", "BYPASS")
+                .header("Cache-Control", "no-store")
+                .body(body);
+        });
+        let mut client = CoincubeClient::for_test(server.base_url());
+        client.set_token("synthetic");
+        let source = http::HttpSource::new(client).unwrap();
+        assert_eq!(
+            source.tip_height(ChainId::BitcoinBlake2b, tip).await,
+            expected
+        );
+        mock.assert();
     }
 }

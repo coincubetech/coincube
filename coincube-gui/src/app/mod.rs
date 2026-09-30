@@ -943,11 +943,13 @@ enum SplitHandoff {
     },
 }
 
-/// The fee source for a BTCB2 Split review. Tenshu has no BTCB2-chain-scoped
-/// estimator yet, so this is always unavailable; the Bitcoin mainnet
-/// `FeeEstimator` must never price a BTCB2 sweep.
-fn split_fee_source() -> std::sync::Arc<dyn crate::services::foreign_psbt::SweepFeeSource> {
-    std::sync::Arc::new(crate::services::foreign_psbt::UnavailableBtcb2Fees)
+/// The fee source for a BTCB2 Split review: Connect's BTCB2 Esplora estimate
+/// for the bound account session (#568 D4), unavailable without one. It fails
+/// closed; the Bitcoin mainnet `FeeEstimator` must never price a BTCB2 sweep.
+fn split_fee_source(
+    client: Option<crate::services::coincube::CoincubeClient>,
+) -> std::sync::Arc<dyn crate::services::foreign_psbt::SweepFeeSource> {
+    crate::services::split_fees::btcb2_fee_source(client)
 }
 
 /// How long a Split reservation waits for the daemon's first successful poll
@@ -3739,9 +3741,9 @@ impl App {
         self.split_handoff_generation = self.split_handoff_generation.wrapping_add(1);
         let generation = self.split_handoff_generation;
         self.split_handoff = Some(SplitHandoff::Reserving(intent));
+        let fees = split_fee_source(self.fork_connect_client.clone());
         Task::perform(
             async move {
-                let fees = split_fee_source();
                 let (reservation, feerate) = tokio::join!(
                     reserve_split_target(daemon, SPLIT_TARGET_POLL_BOUND),
                     crate::services::foreign_psbt::btcb2_sweep_feerate(&*fees)
@@ -8649,16 +8651,24 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    /// #568 A1: the Split review is priced only by a BTCB2-scoped source, and
-    /// none exists yet, so fees are unavailable instead of Bitcoin mainnet's.
+    /// #568 A1/D4: the Split review is priced only by a BTCB2-scoped source,
+    /// Connect's BTCB2 estimate, and is unavailable without an account session
+    /// or when Connect cannot answer, never Bitcoin mainnet's.
     #[tokio::test]
-    async fn split_review_fee_source_is_btcb2_scoped_and_unavailable() {
-        let source = split_fee_source();
-        assert_eq!(source.chain(), crate::chain::ChainId::BitcoinBlake2b);
-        assert_eq!(
-            crate::services::foreign_psbt::btcb2_sweep_feerate(&*source).await,
-            None
-        );
+    async fn split_review_fee_source_is_btcb2_scoped_and_fails_closed() {
+        for client in [
+            None,
+            Some(crate::services::coincube::CoincubeClient::for_test(
+                "http://127.0.0.1:1".to_owned(),
+            )),
+        ] {
+            let source = split_fee_source(client);
+            assert_eq!(source.chain(), crate::chain::ChainId::BitcoinBlake2b);
+            assert_eq!(
+                crate::services::foreign_psbt::btcb2_sweep_feerate(&*source).await,
+                None
+            );
+        }
     }
 
     #[test]
