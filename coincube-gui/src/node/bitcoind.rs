@@ -326,6 +326,33 @@ impl NodeFlavor {
         }
     }
 
+    /// Command-line arguments a managed `bitcoind` of this flavour is spawned
+    /// with, after `-chain`/`-datadir`. Decided by the binary actually being
+    /// launched, not the configured flavour: `select_managed_bitcoind_exe` can
+    /// fall back to the other Bitcoin flavour's binary.
+    ///
+    /// Knots launches a `tor` of its own whenever it cannot reach its Tor
+    /// control port (`-torexecute`, default `tor`), and tries again on every
+    /// reconnect backoff. With inbound Tor on, the managed node loses its
+    /// control port whenever the managed Tor stops under it, and a failed exec
+    /// in Knots v29.3's subprocess code closes a descriptor twice (#394,
+    /// #605). COINCUBE owns the Tor the node talks to (`node::tor`), so the
+    /// launch is switched off: `-torexecute=0` clears the command
+    /// (`TorControlThread`, `src/torcontrol.cpp:828-833` at
+    /// `v29.3.knots20260507`; the same code in `v29.4.1.knots20260508`), and
+    /// the option is accepted even by a build without the Tor subprocess
+    /// (registered as a hidden argument, `src/init.cpp:620-624`).
+    ///
+    /// Core has no such option, and an unknown command-line parameter is fatal
+    /// there (`Invalid parameter`, `src/common/args.cpp:234-239` at `v29.0`),
+    /// so Core gets none.
+    pub fn managed_spawn_args(self) -> &'static [&'static str] {
+        match self {
+            NodeFlavor::Core => &[],
+            NodeFlavor::Knots | NodeFlavor::KnotsBlake2b => &["-torexecute=0"],
+        }
+    }
+
     /// Human-readable name for UI copy and logs.
     pub fn display_name(self) -> &'static str {
         match self {
@@ -1915,8 +1942,11 @@ fn ensure_data_carrier_size(coincube_datadir: &CoincubeDirectory) {
 /// Pick the managed `bitcoind` binary to launch for `configured_flavor`,
 /// preferring that flavour's versions (newest first) and falling back to the
 /// other flavour's only if none are installed. Returns the first existing
-/// `bitcoin-<version>/bin/bitcoind[.exe]` under the managed directory, or `None`
-/// when nothing is installed.
+/// `bitcoin-<version>/bin/bitcoind[.exe]` under the managed directory together
+/// with the flavour of that binary (from its version), or `None` when nothing
+/// is installed. The flavour returned is the one the spawn arguments follow
+/// ([`NodeFlavor::managed_spawn_args`]), since it differs from
+/// `configured_flavor` on a fallback.
 ///
 /// Only versions in [`CORE_VERSIONS`] / [`KNOTS_VERSIONS`] are candidates, so a
 /// Knots build we no longer ship — `29.3.knots20260508`, which enforces a stalled
@@ -1924,7 +1954,7 @@ fn ensure_data_carrier_size(coincube_datadir: &CoincubeDirectory) {
 fn select_managed_bitcoind_exe(
     coincube_datadir: &CoincubeDirectory,
     configured_flavor: NodeFlavor,
-) -> Option<PathBuf> {
+) -> Option<(PathBuf, NodeFlavor)> {
     // A Bitcoin flavour may fall back to the other Bitcoin flavour's binary
     // (same chain, same rules); the Bitcoin Blake2b flavour has no fallback and
     // is searched only under its own family root, so no Bitcoin chain ever
@@ -1938,8 +1968,13 @@ fn select_managed_bitcoind_exe(
     primary
         .iter()
         .chain(secondary.iter())
-        .map(|v| internal_bitcoind_exe_path_for(coincube_datadir, family, v))
-        .find(|path| path.exists())
+        .map(|v| {
+            (
+                internal_bitcoind_exe_path_for(coincube_datadir, family, v),
+                NodeFlavor::from_version(v),
+            )
+        })
+        .find(|(path, _)| path.exists())
 }
 
 /// Block until a managed bitcoind we just asked to `stop` is no longer reachable
@@ -2083,9 +2118,10 @@ impl Bitcoind {
         // the step's marker needs (Bitcoin family only).
         ensure_data_carrier_size(coincube_datadir);
         // Launch the binary the user asked for. Nothing in the conf forces our
-        // hand (it carries no Knots-only key), but the choice is still theirs: a
-        // machine with both flavours installed must launch the configured one
-        // rather than whichever is found first.
+        // hand (it carries no Knots-only key; those go on the command line,
+        // per binary — see `NodeFlavor::managed_spawn_args`), but the choice is
+        // still theirs: a machine with both flavours installed must launch the
+        // configured one rather than whichever is found first.
         let selected_exe = select_managed_bitcoind_exe(coincube_datadir, configured_flavor);
 
         // Is a managed node already running on this RPC endpoint? Its flavour
@@ -2159,10 +2195,10 @@ impl Bitcoind {
             running.stop();
             wait_for_internal_bitcoind_shutdown(&config);
         }
-        let bitcoind_exe_path =
+        let (bitcoind_exe_path, exe_flavor) =
             selected_exe.ok_or(StartInternalBitcoindError::ExecutableNotFound)?;
         info!(
-            "Found bitcoind executable at '{}'.",
+            "Found bitcoind executable at '{}' ({exe_flavor:?}).",
             bitcoind_exe_path.to_string_lossy()
         );
         let datadir_path_str = bitcoind_datadir
@@ -2180,10 +2216,19 @@ impl Bitcoind {
         #[cfg(target_os = "windows")]
         let datadir_path_str = datadir_path_str.replace("\\\\?\\", "").replace("\\\\?", "");
 
-        let args = vec![
+        // The flavour-specific arguments follow the binary being launched,
+        // which is not the configured flavour on a fallback: Core refuses an
+        // option it does not know, so a Knots-only one must never reach it.
+        let mut args = vec![
             format!("-chain={}", network.to_core_arg()),
             format!("-datadir={}", datadir_path_str),
         ];
+        args.extend(
+            exe_flavor
+                .managed_spawn_args()
+                .iter()
+                .map(|a| a.to_string()),
+        );
         // Build a fresh bitcoind command each spawn attempt (we may respawn if
         // the datadir lock isn't free yet — see the retry below).
         let spawn_bitcoind = || -> Result<std::process::Child, StartInternalBitcoindError> {
@@ -3457,16 +3502,23 @@ mod tests {
         // Knots conf -> Knots binary, even though Core is also installed.
         assert_eq!(
             select_managed_bitcoind_exe(&datadir, NodeFlavor::Knots),
-            Some(internal_bitcoind_exe_path(&datadir, KNOTS_VERSION))
+            Some((
+                internal_bitcoind_exe_path(&datadir, KNOTS_VERSION),
+                NodeFlavor::Knots
+            ))
         );
         // Core conf -> Core binary.
         assert_eq!(
             select_managed_bitcoind_exe(&datadir, NodeFlavor::Core),
-            Some(internal_bitcoind_exe_path(&datadir, CORE_VERSION))
+            Some((
+                internal_bitcoind_exe_path(&datadir, CORE_VERSION),
+                NodeFlavor::Core
+            ))
         );
 
         // Fallback: with only Knots installed, a Core conf still finds the
-        // Knots binary rather than failing to locate any executable.
+        // Knots binary rather than failing to locate any executable — and
+        // reports it as Knots, which is what its spawn arguments follow.
         let core_install = internal_bitcoind_exe_path(&datadir, CORE_VERSION)
             .parent()
             .unwrap()
@@ -3476,7 +3528,10 @@ mod tests {
         fs::remove_dir_all(&core_install).unwrap();
         assert_eq!(
             select_managed_bitcoind_exe(&datadir, NodeFlavor::Core),
-            Some(internal_bitcoind_exe_path(&datadir, KNOTS_VERSION))
+            Some((
+                internal_bitcoind_exe_path(&datadir, KNOTS_VERSION),
+                NodeFlavor::Knots
+            ))
         );
 
         let _ = fs::remove_dir_all(&base);
@@ -3526,7 +3581,7 @@ mod tests {
         fs::write(&pinned, b"fake bitcoind").unwrap();
         assert_eq!(
             select_managed_bitcoind_exe(&datadir, NodeFlavor::Knots),
-            Some(pinned)
+            Some((pinned, NodeFlavor::Knots))
         );
 
         let _ = fs::remove_dir_all(&base);
@@ -4060,22 +4115,22 @@ mod tests {
         assert_eq!(select_managed_bitcoind_exe(&root, NodeFlavor::Knots), None);
         assert_eq!(
             select_managed_bitcoind_exe(&root, NodeFlavor::KnotsBlake2b),
-            Some(blake2b_exe.clone())
+            Some((blake2b_exe.clone(), NodeFlavor::KnotsBlake2b))
         );
         // A Bitcoin Knots binary: Bitcoin providers resolve it (Core by
         // fallback, as before); the Blake2b provider still does not.
         let knots_exe = install(NodeChainFamily::Bitcoin, KNOTS_VERSION);
         assert_eq!(
             select_managed_bitcoind_exe(&root, NodeFlavor::Knots),
-            Some(knots_exe.clone())
+            Some((knots_exe.clone(), NodeFlavor::Knots))
         );
         assert_eq!(
             select_managed_bitcoind_exe(&root, NodeFlavor::Core),
-            Some(knots_exe)
+            Some((knots_exe, NodeFlavor::Knots))
         );
         assert_eq!(
             select_managed_bitcoind_exe(&root, NodeFlavor::KnotsBlake2b),
-            Some(blake2b_exe.clone())
+            Some((blake2b_exe.clone(), NodeFlavor::KnotsBlake2b))
         );
         // Remove the Blake2b binary: the Blake2b provider has no fallback.
         std::fs::remove_file(&blake2b_exe).unwrap();
@@ -4265,6 +4320,162 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&conf_path).unwrap(), rewritten);
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // #605: a Knots binary is spawned with `-torexecute=0`, so losing its Tor
+    // control port never makes it launch a `tor` of its own; a Core binary is
+    // spawned without it, because Core refuses an unknown command-line option.
+    // The argument follows the binary actually launched, not the configured
+    // flavour, so both fallbacks are covered.
+    //
+    // Goes through `Bitcoind::maybe_start`'s own spawn: the managed binary is a
+    // script that records its argv and then waits. The RPC endpoint is a
+    // listener that answers every request with HTTP 403 — a non-transient
+    // error — once that record exists, so the start kills the child and
+    // returns instead of waiting for a node that will never come up.
+    #[cfg(unix)]
+    #[test]
+    fn the_spawned_binary_gets_torexecute_0_exactly_when_it_is_knots() {
+        use crate::node::revalidate::ManagedNodeState;
+        use std::io::{Read, Write};
+        use std::os::unix::fs::PermissionsExt;
+
+        struct Case {
+            configured: NodeFlavor,
+            installed: &'static str,
+            expect_torexecute: bool,
+        }
+        let cases = [
+            Case {
+                configured: NodeFlavor::Knots,
+                installed: KNOTS_VERSION,
+                expect_torexecute: true,
+            },
+            // Fallback: Knots configured, only Core installed.
+            Case {
+                configured: NodeFlavor::Knots,
+                installed: CORE_VERSION,
+                expect_torexecute: false,
+            },
+            Case {
+                configured: NodeFlavor::Core,
+                installed: CORE_VERSION,
+                expect_torexecute: false,
+            },
+            // Fallback: Core configured, only Knots installed.
+            Case {
+                configured: NodeFlavor::Core,
+                installed: KNOTS_VERSION,
+                expect_torexecute: true,
+            },
+        ];
+
+        for (i, case) in cases.iter().enumerate() {
+            let (base, root) = a_temp_coincube_datadir(&format!("spawn-args-{}", i));
+            std::fs::create_dir_all(internal_bitcoind_datadir(&root)).unwrap();
+            ManagedNodeState {
+                configured_flavor: Some(case.configured),
+                ..Default::default()
+            }
+            .save(&root)
+            .unwrap();
+
+            let exe = internal_bitcoind_exe_path(&root, case.installed);
+            let bin_dir = exe.parent().unwrap().to_path_buf();
+            std::fs::create_dir_all(&bin_dir).unwrap();
+            let argv_path = bin_dir.join("argv");
+            let argv_tmp = bin_dir.join("argv.tmp");
+            std::fs::write(
+                &exe,
+                format!(
+                    "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}' && mv '{}' '{}'\nexec sleep 30\n",
+                    argv_tmp.display(),
+                    argv_tmp.display(),
+                    argv_path.display()
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let server = {
+                let done = done.clone();
+                let argv_path = argv_path.clone();
+                std::thread::spawn(move || {
+                    for (n, stream) in listener.incoming().enumerate() {
+                        if done.load(std::sync::atomic::Ordering::SeqCst) {
+                            break;
+                        }
+                        let Ok(mut stream) = stream else { break };
+                        let _ = stream.set_read_timeout(Some(time::Duration::from_millis(200)));
+                        let _ = stream.read(&mut [0u8; 4096]);
+                        // The first request is the pre-spawn "is a node already
+                        // running?" check: answered at once. Every later one is
+                        // held until the spawned script has recorded its argv,
+                        // so the start cannot kill it first. Bounded, and a
+                        // second pre-spawn request would only cost its own 3 s
+                        // client timeout.
+                        let wait = if n == 0 { 0 } else { 20 };
+                        let deadline = time::Instant::now() + time::Duration::from_secs(wait);
+                        while !argv_path.exists() && time::Instant::now() < deadline {
+                            thread::sleep(time::Duration::from_millis(20));
+                        }
+                        let _ = stream.write_all(
+                            b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        );
+                        let _ = stream.flush();
+                    }
+                })
+            };
+            let config = BitcoindConfig {
+                rpc_auth: coincubed::config::BitcoindRpcAuth::UserPass(
+                    "user".to_string(),
+                    "pass".to_string(),
+                ),
+                addr,
+            };
+
+            match Bitcoind::maybe_start(Network::Bitcoin, config, &root) {
+                Err(StartInternalBitcoindError::BitcoinDError(_)) => {}
+                other => panic!(
+                    "case {i}: expected BitcoinDError from the stand-in endpoint, got {:?}",
+                    other.map(|_| ())
+                ),
+            }
+            done.store(true, std::sync::atomic::Ordering::SeqCst);
+            let _ = std::net::TcpStream::connect(addr);
+            server.join().unwrap();
+
+            let argv: Vec<String> = std::fs::read_to_string(&argv_path)
+                .unwrap_or_else(|e| panic!("case {}: the binary was not spawned: {}", i, e))
+                .lines()
+                .map(str::to_string)
+                .collect();
+            assert!(
+                argv.iter().any(|a| a == "-chain=main"),
+                "case {}: {:?}",
+                i,
+                argv
+            );
+            assert!(
+                argv.iter().any(|a| a.starts_with("-datadir=")),
+                "case {}: {:?}",
+                i,
+                argv
+            );
+            let torexecute: Vec<&String> = argv
+                .iter()
+                .filter(|a| a.starts_with("-torexecute"))
+                .collect();
+            if case.expect_torexecute {
+                assert_eq!(torexecute, ["-torexecute=0"], "case {}: {:?}", i, argv);
+            } else {
+                assert!(torexecute.is_empty(), "case {}: {:?}", i, argv);
+            }
+            let _ = std::fs::remove_dir_all(&base);
+        }
     }
 
     /// A stand-in for a managed node that is already up on the endpoint:
