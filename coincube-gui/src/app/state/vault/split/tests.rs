@@ -618,6 +618,26 @@ async fn split_preflight_refusal_keeps_the_signed_transaction_for_export() {
         std::fs::read_to_string(&path).unwrap(),
         serialize_hex(&signed)
     );
+
+    // The destination is proven unused again at every review: a used one
+    // refuses before the coordinator is asked, and the signed step 1 stays.
+    let reviews = connect.calls.reviews.load(Ordering::SeqCst);
+    connect
+        .used
+        .lock()
+        .unwrap()
+        .insert(ChainId::Bitcoin, Ok(true));
+    let task = panel.update(SplitMessage::Review);
+    drive(&mut panel, task).await;
+    assert_eq!(connect.calls.reviews.load(Ordering::SeqCst), reviews);
+    assert_eq!(panel.stage(), &Stage::Ready);
+    assert_eq!(panel.notice(), Some(step1::DESTINATION_USED));
+    assert_eq!(panel.signed(), Some(&signed));
+    let destination = step1::construction_destination(panel.construction().unwrap()).unwrap();
+    assert_eq!(
+        connect.calls.address_reads.lock().unwrap().last(),
+        Some(&(ChainId::Bitcoin, destination))
+    );
 }
 
 /// Every precondition refuses before anything is built or recorded.

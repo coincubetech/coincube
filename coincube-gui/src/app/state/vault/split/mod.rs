@@ -563,15 +563,28 @@ impl SplitPanel {
             ),
             SplitMessage::Review if matches!(self.stage, Stage::Ready | Stage::Review) => {
                 self.review = None;
+                let Some(destination) = self
+                    .construction
+                    .as_deref()
+                    .and_then(step1::construction_destination)
+                else {
+                    return Task::none();
+                };
                 let Some((mut driver, connect)) = self.take_driver(Work::Reviewing) else {
                     return Task::none();
                 };
                 self.spawn(
                     async move {
-                        let result = driver
-                            .review(&connect.context())
-                            .await
-                            .map_err(step1::describe);
+                        // The destination must still be unused on both
+                        // chains when the review is shown.
+                        let result = match step1::destination_unused(&*connect, &destination).await
+                        {
+                            Ok(()) => driver
+                                .review(&connect.context())
+                                .await
+                                .map_err(step1::describe),
+                            Err(refusal) => Err(refusal.reason),
+                        };
                         (Driver(driver), result)
                     },
                     |seq, (driver, result)| SplitEvent::Reviewed(seq, driver, result),

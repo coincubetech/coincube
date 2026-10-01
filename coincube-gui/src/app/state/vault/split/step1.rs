@@ -505,18 +505,7 @@ pub async fn preconditions(
         Refusal::retry("Connect has no Bitcoin fee estimate right now, so step 1 can't be priced. Try again shortly.")
     })?;
     let address = destination_address(&source, destination)?.to_string();
-    for chain in [ChainId::Bitcoin, ChainId::BitcoinBlake2b] {
-        match connect.address_used(chain, &address).await {
-            Ok(false) => {}
-            Ok(true) => return Err(Refusal::final_(DESTINATION_USED)),
-            Err(kind) => {
-                return Err(Refusal::retry(format!(
-                    "Connect couldn't prove the fresh address unused on {} ({kind:?}). Nothing was built.",
-                    chain_name(chain)
-                )))
-            }
-        }
-    }
+    destination_unused(connect, &address).await?;
     Ok(Prepared {
         source,
         coins,
@@ -526,6 +515,31 @@ pub async fn preconditions(
         feerate_vb,
         bitcoin_tip_height: inventory.bitcoin_tip_height(),
     })
+}
+
+/// Fresh Connect proof that `address` has no history on either chain.
+pub async fn destination_unused(connect: &dyn SplitConnect, address: &str) -> Result<(), Refusal> {
+    for chain in [ChainId::Bitcoin, ChainId::BitcoinBlake2b] {
+        match connect.address_used(chain, address).await {
+            Ok(false) => {}
+            Ok(true) => return Err(Refusal::final_(DESTINATION_USED)),
+            Err(kind) => {
+                return Err(Refusal::retry(format!(
+                    "Connect couldn't prove the fresh address unused on {} ({kind:?}). Nothing was built or sent.",
+                    chain_name(chain)
+                )))
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The address step 1 pays (its output 1), for the review-time proof.
+pub fn construction_destination(construction: &SplitStep1) -> Option<String> {
+    let output = construction.psbt().unsigned_tx.output.get(1)?;
+    Address::from_script(&output.script_pubkey, Network::Bitcoin)
+        .ok()
+        .map(|address| address.to_string())
 }
 
 fn chain_name(chain: ChainId) -> &'static str {
