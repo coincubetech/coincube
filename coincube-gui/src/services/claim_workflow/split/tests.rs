@@ -546,9 +546,11 @@ fn split_create_and_revalidation_refusals() {
         Controller::create_split(&temp.0, String::new(), &step1, &signed, FORK, context()),
         Err(Error::InvalidPlan)
     ));
+    // Not the construction's fork height (no construction can have 0: no
+    // coin precedes it). Validation refuses a zero fork height as well.
     assert!(matches!(
         Controller::create_split(&temp.0, TARGET.into(), &step1, &signed, 0, context()),
-        Err(Error::InvalidPlan)
+        Err(Error::WrongIdentity)
     ));
     let mut no_account = context();
     no_account.account.clear();
@@ -734,6 +736,77 @@ fn split_resigning_before_submission_moves_the_tracked_txid() {
     assert_eq!(c.signed_txid(), Some(tracked));
     drop(c);
     assert_eq!(reopen(&temp, &step1).unwrap().plan().step1_txid(), tracked);
+}
+
+/// A Pkh construction built at `fork_height`. The fork height only bounds
+/// which coins are pre-fork, so every height above the coins' block builds
+/// the identical transaction.
+fn built_at(wallet: &Wallet, fork_height: u64) -> SplitStep1 {
+    let coins = [
+        coin(&wallet.source, SplitBranch::External, 0, 150_000),
+        coin(&wallet.source, SplitBranch::Internal, 1, 70_000),
+    ];
+    create_split_step1(
+        &SplitInputs {
+            chain: ChainId::Bitcoin,
+            source: &wallet.source,
+            coins: &coins,
+            fork_height,
+            destination: 5,
+        },
+        2,
+        LockTime::from_height(TIP).unwrap(),
+        TIP,
+        hash(7),
+    )
+    .unwrap()
+}
+
+/// CodeRabbit on #622: `create_split` must journal the fork height the
+/// construction was built with, not whatever the caller passes.
+#[test]
+fn split_create_refuses_a_fork_height_other_than_the_constructions() {
+    let wallet = make_wallet(Shape::Pkh, 1);
+    let (step1, other) = (built_at(&wallet, FORK), built_at(&wallet, FORK + 50));
+    assert_eq!(step1.psbt().unsigned_tx, other.psbt().unsigned_tx);
+    let signed = sign(&step1, &wallet.signers);
+    let temp = Temp::new();
+    assert!(matches!(
+        Controller::create_split(&temp.0, TARGET.into(), &step1, &signed, FORK + 1, context()),
+        Err(Error::WrongIdentity)
+    ));
+    assert!(matches!(
+        Controller::create_split(&temp.0, TARGET.into(), &other, &signed, FORK, context()),
+        Err(Error::WrongIdentity)
+    ));
+    assert!(!temp.0.join("intent.json").exists());
+    drop(create(&temp, &step1, &signed));
+    let recorded = reopen(&temp, &step1)
+        .unwrap()
+        .recorded_split()
+        .unwrap()
+        .unwrap();
+    assert_eq!(recorded.fork_height, FORK);
+}
+
+/// CodeRabbit on #622: revalidation must refuse a construction built at
+/// another fork height even when the caller passes the recorded one.
+#[test]
+fn split_revalidation_refuses_a_construction_built_at_another_fork_height() {
+    let wallet = make_wallet(Shape::Pkh, 1);
+    let (step1, other) = (built_at(&wallet, FORK), built_at(&wallet, FORK + 50));
+    assert_eq!(step1.psbt().unsigned_tx, other.psbt().unsigned_tx);
+    let signed = sign(&step1, &wallet.signers);
+    let temp = Temp::new();
+    drop(create(&temp, &step1, &signed));
+    let mut c = reopen(&temp, &step1).unwrap();
+    assert!(matches!(
+        c.revalidate_split_construction(&context(), &other, FORK),
+        Err(Error::WrongIdentity)
+    ));
+    assert!(!c.construction_verified);
+    c.revalidate_split_construction(&context(), &step1, FORK)
+        .unwrap();
 }
 
 /// Review F1 (#622): an observed inclusion of the recorded step 1 keeps
