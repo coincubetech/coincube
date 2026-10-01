@@ -691,9 +691,10 @@ mod tests {
     }
 
     /// D4: the assertion latch is scoped to a server cube row, so logging out
-    /// must re-open it. Signing in as a different account re-registers the same
-    /// local Cube UUID under a new user — a new cube and vault row, whose
-    /// fingerprint is blank — and `CubeRegistered` only ever *sets* the latch.
+    /// must re-open it. Signing in as a different account means the next
+    /// registration names a different cube row (or is refused outright when
+    /// another account owns the UUID) — and `CubeRegistered` only ever *sets*
+    /// the latch.
     /// A stale `true` would therefore suppress the PATCH for the whole session,
     /// leaving the new account's Vault with no id in Keychain.
     #[test]

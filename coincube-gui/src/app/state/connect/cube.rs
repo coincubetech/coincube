@@ -118,6 +118,34 @@ use super::{cube_members, AvatarFlowStep, ConnectCubeMembersState};
 /// Per-Cube Connect panel handling Lightning Address and Avatar.
 /// The Lightning Address claim flow is fulfilled by the Cube's
 /// Spark wallet via Breez-hosted LNURL.
+/// Why `POST /connect/cubes` failed, as carried by
+/// [`ConnectCubeMessage::CubeRegistered`].
+#[derive(Debug, Clone)]
+pub struct CubeRegistrationError {
+    /// User-safe description (the error's `Display`).
+    pub message: String,
+    /// The server refused because another Connect account owns this Cube.
+    pub owned_by_other_account: bool,
+}
+
+impl From<&crate::services::coincube::CoincubeError> for CubeRegistrationError {
+    fn from(e: &crate::services::coincube::CoincubeError) -> Self {
+        Self {
+            message: e.to_string(),
+            owned_by_other_account: e.is_cube_owned_by_another_account(),
+        }
+    }
+}
+
+impl From<String> for CubeRegistrationError {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            owned_by_other_account: false,
+        }
+    }
+}
+
 pub struct ConnectCubePanel {
     /// The Cube's client-side UUID (from CubeSettings.id)
     pub cube_uuid: String,
@@ -176,6 +204,11 @@ pub struct ConnectCubePanel {
     pub server_cube_id: Option<u64>,
     /// Set when the last cube registration attempt failed.
     pub registration_error: Option<String>,
+    /// Set when the last registration was refused because this Cube is
+    /// registered under a different Connect account
+    /// (`CUBE_OWNED_BY_ANOTHER_ACCOUNT`). Mirrored to
+    /// `Cache::cube_owned_by_other_account` for the Vault signing picker.
+    pub owned_by_other_account: bool,
     /// True while a `register_cube` round-trip is in flight.
     ///
     /// The re-entry guard for [`ConnectCubePanel::register_cube`]. Without it,
@@ -281,6 +314,7 @@ impl ConnectCubePanel {
             vault_members_reconciled: false,
             server_cube_id: None,
             registration_error: None,
+            owned_by_other_account: false,
             registering: false,
             session_generation: 0,
             lightning_address: None,
@@ -351,10 +385,10 @@ impl ConnectCubePanel {
         self.client = None;
         self.server_cube_id = None;
         // The latch means "already sent to *this* server cube row", so it dies
-        // with the row id above. Signing in as a different account re-registers
-        // the same local Cube UUID under a new user, producing a new cube (and
-        // vault) row whose fingerprint is blank — and `CubeRegistered` only ever
-        // *sets* this flag, never clears it. Left stale, the assertion would
+        // with the row id above. After signing in as a different account the
+        // next registration names a different row, or none at all (the server
+        // refuses a UUID another account owns with CUBE_OWNED_BY_ANOTHER_ACCOUNT)
+        // — and `CubeRegistered` only ever *sets* this flag, never clears it. Left stale, the assertion would
         // early-return and strand the new account's Vault with no id in Keychain
         // until relaunch. Re-opening it costs at most one redundant PATCH, which
         // the server no-ops.
@@ -363,6 +397,7 @@ impl ConnectCubePanel {
         // reconciled against *this* server cube row", which dies with the id.
         self.vault_members_reconciled = false;
         self.registration_error = None;
+        self.owned_by_other_account = false;
         // Retire any attempt issued under the session that just ended: its
         // reply, when it lands, must not be mistaken for this one's. Clearing
         // the latch here (rather than waiting for that reply) is what lets the
@@ -584,7 +619,7 @@ impl ConnectCubePanel {
             Message::View(view::Message::ConnectCube(
                 ConnectCubeMessage::CubeRegistered {
                     generation,
-                    result: res.map_err(|e| e.to_string()),
+                    result: res.map_err(|e| CubeRegistrationError::from(&e)),
                 },
             ))
         })
@@ -853,6 +888,7 @@ impl ConnectCubePanel {
                         );
                         self.server_cube_id = Some(cube_resp.id);
                         self.registration_error = None;
+                        self.owned_by_other_account = false;
                         // Store the lightning address from the backend (or clear if None)
                         if cube_resp.lightning_address.is_some() {
                             self.lightning_address = Some(LightningAddress {
@@ -915,8 +951,9 @@ impl ConnectCubePanel {
                         return iced::Task::batch(tasks);
                     }
                     Err(e) => {
-                        log::error!("[CONNECT-CUBE] Failed to register cube: {}", e);
-                        self.registration_error = Some(e);
+                        log::error!("[CONNECT-CUBE] Failed to register cube: {}", e.message);
+                        self.owned_by_other_account = e.owned_by_other_account;
+                        self.registration_error = Some(e.message);
                     }
                 }
             }
@@ -2185,7 +2222,7 @@ mod tests {
         // registering: the reason may well be transient (a slot frees up).
         let _ = panel.update_message(ConnectCubeMessage::CubeRegistered {
             generation: panel.session_generation(),
-            result: Err("Cube limit reached for this network".to_string()),
+            result: Err("Cube limit reached for this network".to_string().into()),
         });
         assert!(!panel.registering);
         assert!(
@@ -2278,7 +2315,7 @@ mod tests {
         // The reply releases the guard through the normal path, on either arm.
         let _ = panel.update_message(ConnectCubeMessage::CubeRegistered {
             generation,
-            result: Err("register failed".to_string()),
+            result: Err("register failed".to_string().into()),
         });
         assert!(panel.begin_external_registration().is_some());
     }
@@ -2381,7 +2418,7 @@ mod tests {
 
         let _ = panel.update_message(ConnectCubeMessage::CubeRegistered {
             generation: panel.session_generation(),
-            result: Err("register failed".to_string()),
+            result: Err("register failed".to_string().into()),
         });
         assert_eq!(panel.registration_error.as_deref(), Some("register failed"));
 

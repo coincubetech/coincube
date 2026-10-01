@@ -1720,9 +1720,10 @@ impl Home {
                     );
                     self.cube_sync_errors.remove(&cube_id);
                     let network_dir = self.datadir_path.network_directory(network);
+                    let owner = self.connect_owner();
                     Task::perform(
                         async move {
-                            settings::mark_cube_synced(&network_dir, &cube_id)
+                            settings::mark_cube_synced(&network_dir, &cube_id, owner)
                                 .await
                                 .ok();
                         },
@@ -1926,9 +1927,10 @@ impl Home {
                 Ok(_) => {
                     log::info!("[LAUNCHER] Cube {} updated remotely", cube_id);
                     let network_dir = self.datadir_path.network_directory(network);
+                    let owner = self.connect_owner();
                     Task::perform(
                         async move {
-                            settings::mark_cube_synced(&network_dir, &cube_id)
+                            settings::mark_cube_synced(&network_dir, &cube_id, owner)
                                 .await
                                 .ok();
                         },
@@ -3136,6 +3138,7 @@ impl Home {
                     // updates (already exists but name may have changed).
                     if let Some(client) = self.connect_account.authenticated_client() {
                         let datadir = self.datadir_path.clone();
+                        let owner = self.connect_owner();
                         let mut unsynced: Vec<CubeSettings> = Vec::new();
                         for net in &NETWORKS {
                             let nd = datadir.network_directory(*net);
@@ -3248,8 +3251,12 @@ impl Home {
                                         match outcome {
                                             Ok(()) => {
                                                 let nd = datadir.network_directory(cube.network);
-                                                let _ =
-                                                    settings::mark_cube_synced(&nd, &cube.id).await;
+                                                let _ = settings::mark_cube_synced(
+                                                    &nd,
+                                                    &cube.id,
+                                                    owner.clone(),
+                                                )
+                                                .await;
                                                 outcomes.push((cube.id.clone(), None));
                                             }
                                             Err(e) => {
@@ -3470,6 +3477,15 @@ impl Home {
     /// heap allocations of the `String`s inside it — the words themselves.
     /// Clearing each one first is what actually removes the phrase from
     /// memory, matching the treatment of `recovery_words`.
+    /// The signed-in Connect account, as the owner to record on a Cube this
+    /// session registers. `None` while the account's profile hasn't loaded.
+    fn connect_owner(&self) -> Option<settings::ConnectOwner> {
+        self.connect_account
+            .user
+            .as_ref()
+            .map(settings::ConnectOwner::from_user)
+    }
+
     fn scrub_creation_seed(&mut self) {
         if let Some(words) = &mut self.creation_backup_words {
             for word in words.iter_mut() {
@@ -3869,6 +3885,7 @@ impl Home {
         let cube_name = self.create_cube_name.value.trim().to_string();
         let datadir_path = self.datadir_path.clone();
         let cube_id = *self.pending_cube_id.get_or_insert_with(uuid::Uuid::new_v4);
+        let owner = self.connect_owner();
 
         Task::perform(
             async move {
@@ -3896,6 +3913,7 @@ impl Home {
                 // stops `CubeCreated` registering it a second time.
                 if recovery_kit.is_some() {
                     cube.remote_synced = true;
+                    cube.connect_owner = owner;
                 }
                 cube.creation_recovery_kit = recovery_kit;
                 // Armed, like every Cube created under the gate. Without this a
@@ -3998,6 +4016,7 @@ impl Home {
         let pin = self.create_cube_pin.value();
         let datadir_path = self.datadir_path.clone();
         let cube_id = *self.pending_cube_id.get_or_insert_with(uuid::Uuid::new_v4);
+        let owner = self.connect_owner();
 
         Task::perform(
             async move {
@@ -4130,6 +4149,7 @@ impl Home {
                 // `finalize_passkey_cube_creation`, which does the same.
                 if recovery_kit.is_some() {
                     cube.remote_synced = true;
+                    cube.connect_owner = owner;
                 }
                 cube.creation_recovery_kit = recovery_kit;
                 // Arm the gate. Reaching this line means one of the two

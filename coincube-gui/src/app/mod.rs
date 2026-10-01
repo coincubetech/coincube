@@ -3071,6 +3071,8 @@ impl App {
                 display_mode
             },
             cube_name: cube_settings.name.clone(),
+            cube_connect_owner: cube_settings.connect_owner.clone(),
+            cube_owned_by_other_account: false,
             current_cube_backed_up: cube_settings.backed_up,
             cube_id: cube_settings.id.clone(),
             recovery_kit_last_backed_up_descriptor_fingerprint: cube_settings
@@ -5015,6 +5017,7 @@ impl App {
         // mirror. `None` until `CubeRegistered(Ok)` populates the
         // panel's id.
         self.cache.current_cube_server_id = self.panels.connect.cube.server_cube_id;
+        self.cache.cube_owned_by_other_account = self.panels.connect.cube.owned_by_other_account;
 
         // Keep the Connect auth mirror fresh every tick (not just on
         // ConnectAccount/ConnectCube messages) so surfaces that read it —
@@ -5488,7 +5491,11 @@ impl App {
                                     spark_stable_balance: cube_spark_stable_balance,
                                 }) // upgrade-only Option<bool>
                                 .await
-                                .map_err(|e| e.to_string())
+                                .map_err(|e| {
+                                    crate::app::state::connect::cube::CubeRegistrationError::from(
+                                        &e,
+                                    )
+                                })
                         },
                         move |r| {
                             Message::View(view::Message::ConnectCube(

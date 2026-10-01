@@ -2207,6 +2207,13 @@ impl Tab {
                             init_task
                         }
                     }
+                    app::Message::View(app::view::Message::OpenConnectSwitchAccount) => {
+                        // Unlike OpenConnectSignIn there is no session to
+                        // restore: the user is already authenticated, just as
+                        // the wrong account. Always hand off to Home so they
+                        // can log out and sign back in.
+                        Task::done(Message::OpenConnectSignIn)
+                    }
                     app::Message::View(app::view::Message::OpenPlanBilling) => {
                         // Pure navigation: bubble to the pane so it focuses the
                         // Home tab on Connect → Plan & Billing (the "View plans"
@@ -3998,6 +4005,8 @@ pub fn create_app_with_remote_backend(
             has_connect_session: true,
             has_vault: true,
             cube_name: cube_settings.name.clone(),
+            cube_connect_owner: cube_settings.connect_owner.clone(),
+            cube_owned_by_other_account: false,
             current_cube_backed_up: cube_settings.backed_up,
             backup_warning_dismissed: false,
             spark_notice: None,

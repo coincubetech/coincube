@@ -2299,6 +2299,11 @@ mod recovery_recipients_tests {
 /// can match on it when routing 409s.
 pub const ERR_KEY_ALREADY_USED_IN_VAULT: &str = "KEY_ALREADY_USED_IN_VAULT";
 
+/// Error code returned by `POST /connect/cubes` (409) when the Cube's UUID is
+/// already registered under a different Connect account. Carries no owner
+/// identity.
+pub const ERR_CUBE_OWNED_BY_ANOTHER_ACCOUNT: &str = "CUBE_OWNED_BY_ANOTHER_ACCOUNT";
+
 /// Error code returned by the backend's I2 guard: 409 from
 /// `POST /connect/cubes/{cubeId}/vault/members` when the key is registered as a
 /// recovery recipient and therefore may never be a Vault signer. Mirrors the
@@ -2354,6 +2359,16 @@ pub(crate) fn vault_keyholder_locked_vault_id(
 }
 
 impl CoincubeError {
+    /// Returns `true` if this error is the 409 from `POST /connect/cubes` for a
+    /// Cube registered under a different Connect account — the signed-in user
+    /// is on the wrong account for this Cube.
+    pub fn is_cube_owned_by_another_account(&self) -> bool {
+        let CoincubeError::Unsuccessful(info) = self else {
+            return false;
+        };
+        info.status_code == 409 && info.code().as_deref() == Some(ERR_CUBE_OWNED_BY_ANOTHER_ACCOUNT)
+    }
+
     /// Returns `true` if this error is a W9 "key already used in another
     /// vault" conflict from `POST /connect/cubes/{id}/vault/members`.
     /// Drives the Vault Builder's key-conflict dialog.
