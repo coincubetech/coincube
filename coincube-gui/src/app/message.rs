@@ -70,6 +70,9 @@ pub enum Message {
     Claim(super::state::vault::claim::ClaimEvent),
     ForkClaim(Box<super::state::vault::claim::fork_panel::Event>),
     ForkClaimOpened(Box<super::state::vault::claim::fork_load::Opened>),
+    /// Results of the Split step-1 panel's own tasks (#568 B1b). Carries the
+    /// panel's coordinator back and forth, so no other handler sees it.
+    Split(Box<super::state::vault::split::SplitEvent>),
     /// Completion of the read-only Split destination reservation (with the
     /// daemon's post-reservation sync state and coin history, to prove the
     /// address fresh) and bounded BTCB2 fee-rate lookup (`None` =

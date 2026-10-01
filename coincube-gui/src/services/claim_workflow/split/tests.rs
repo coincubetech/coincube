@@ -1189,8 +1189,12 @@ fn v8_split_journal_is_refused_by_the_v7_reader() {
 /// `Coordinator::create_split` / `resume_split`) and the daemonless
 /// transport (`submit_verified_split_step1_to_connect`, `for_split_step1`)
 /// are reached only from the Split coordinator and its tests, plus the one
-/// gate constructor in the coordinator's step-1 dispatch. Identifiers, not
-/// paths, so an alias or glob still has to name the item somewhere.
+/// gate constructor in the coordinator's step-1 dispatch. B1b adds the Split
+/// step-1 panel (`app/state/vault/split/`) for the create, resume, read and
+/// abandon calls only; the panel is constructed in production only to resume
+/// an existing journal (`split_panel_has_no_gui_entry_point`), so nothing in
+/// the GUI reaches these before B5. Identifiers, not paths, so an alias or
+/// glob still has to name the item somewhere.
 #[test]
 fn split_b0_journal_api_has_no_gui_callers() {
     const ITEMS: [&str; 13] = [
@@ -1252,10 +1256,27 @@ fn split_b0_journal_api_has_no_gui_callers() {
                         && ["split_identity", "RecordedSplit"].contains(&ident);
                     let dispatch = file == "src/services/claim_coordinator/step1.rs"
                         && ident == "for_split_step1";
+                    // B1b: the Split step-1 panel and its tests. Its only
+                    // production constructor resumes an existing journal
+                    // (`split_panel_has_no_gui_entry_point`), so no GUI action
+                    // reaches these before B5.
+                    let panel = file.starts_with("src/app/state/vault/split/")
+                        && [
+                            "create_split",
+                            "resume_split",
+                            "SplitProduction",
+                            "split_identity",
+                            "recorded_split",
+                            "abandon_split",
+                            "revalidate_split_construction",
+                            "bind_recovered_split_transaction",
+                        ]
+                        .contains(&ident);
                     if ITEMS.contains(&ident)
                         && !OWN.contains(&file.as_str())
                         && !reexport
                         && !dispatch
+                        && !panel
                     {
                         unexpected.push((file.clone(), ident.to_owned()));
                     }

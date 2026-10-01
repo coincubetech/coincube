@@ -818,6 +818,10 @@ pub struct App {
     /// Invalidates an in-flight address/feerate completion on session, feature,
     /// account, or Cube changes.
     split_handoff_generation: u64,
+    /// #568 B1b: the Split step-1 panel, only when this BTCB2 Cube's Vault
+    /// already has a Split journal (see [`discover_split_panel`]). Shown as an
+    /// overlay; nothing in the GUI starts a new split before B5 (D1).
+    split_panel: Option<Box<state::vault::split::SplitPanel>>,
     /// Boxed so that `App` — and therefore `gui::tab::State`, whose size is
     /// set by this variant — stays small. `Panels` holds every panel's state
     /// inline (~30 KiB); carried by value it made each `self.state = ...`
@@ -950,6 +954,33 @@ fn split_fee_source(
     client: Option<crate::services::coincube::CoincubeClient>,
 ) -> std::sync::Arc<dyn crate::services::foreign_psbt::SweepFeeSource> {
     crate::services::split_fees::btcb2_fee_source(client)
+}
+
+/// #568 B1b: the only production construction of the Split panel. A Bitcoin
+/// Blake2b (mainnet) Cube whose Vault already holds a Split journal under
+/// `<btcb2>/data/<wallet>/split/<digest>/` resumes it; with none there is no
+/// panel and nothing Split-related is reachable. No one can have a journal
+/// before B5 adds "Start split" (D1). Discovery reads directory names only;
+/// the panel authenticates the journal when it opens it under a session.
+fn discover_split_panel(
+    data_dir: &CoincubeDirectory,
+    cube_settings: &settings::CubeSettings,
+    wallet: &Wallet,
+) -> Option<Box<state::vault::split::SplitPanel>> {
+    use state::vault::split::{step1, SplitPanel};
+    if cube_settings.network != crate::chain::ChainId::BitcoinBlake2b
+        || wallet.chain != cube_settings.network
+    {
+        return None;
+    }
+    let root = step1::journal_root(data_dir, &wallet.id());
+    let (digest, directory) = step1::discover(&root).into_iter().next()?;
+    Some(Box::new(SplitPanel::resume(
+        cube_settings.id.clone(),
+        root,
+        digest,
+        directory,
+    )))
 }
 
 /// How long a Split reservation waits for the daemon's first successful poll
@@ -2784,7 +2815,8 @@ impl App {
         app.cache.has_connect_session = true;
         app.fork_connect_client = Some(client);
         let split = app.start_pending_split();
-        Ok((app, Task::batch([task, split])))
+        let resume = app.refresh_split_session();
+        Ok((app, Task::batch([task, split, resume])))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2833,6 +2865,7 @@ impl App {
         };
         cache.btcb2_claim_resume = fork_claim_handoff.is_some();
         let split_intent = split_intent::take_for_open(&cube_settings.id, cube_settings.network);
+        let split_panel = discover_split_panel(&data_dir, &cube_settings, &wallet);
         // Connect blinding (PR D3): derive the Cube's encryption key once from
         // the master signer the unlock already loaded, so every surface that
         // opens a Connect-served key can do so without re-prompting for a PIN.
@@ -2962,6 +2995,7 @@ impl App {
             loading_fork_claim: None,
             split_handoff: split_intent.map(SplitHandoff::Waiting),
             split_handoff_generation: 0,
+            split_panel,
             panels: Box::new(panels),
             cache: cache_with_vault,
             daemon: Some(daemon),
@@ -3138,6 +3172,7 @@ impl App {
                 loading_fork_claim: None,
                 split_handoff: None,
                 split_handoff_generation: 0,
+                split_panel: None,
                 panels: Box::new(panels),
                 cache,
                 daemon: None,
@@ -3706,6 +3741,36 @@ impl App {
                 .is_some_and(|client| intent.matches_client(client))
     }
 
+    /// Hand the Split panel the bound Connect session (the admitted fork
+    /// client, still this tab's authenticated one) and let it continue its
+    /// journal. No session, or a different one, revokes its coordinator.
+    fn refresh_split_session(&mut self) -> Task<Message> {
+        let session = self.fork_connect_client.clone().and_then(|bound| {
+            let current = self.panels.connect.account.authenticated_client()?;
+            if current.base_url != bound.base_url || current.token() != bound.token() {
+                return None;
+            }
+            let account = self.panels.connect.account.user.as_ref()?.id.to_string();
+            Some(state::vault::claim::ConnectSession {
+                client: bound,
+                account,
+            })
+        });
+        let generation = self.panels.claim_generation.subscribe();
+        let Some(panel) = self.split_panel.as_mut() else {
+            return Task::none();
+        };
+        let connect = session.and_then(|session| {
+            state::vault::split::step1::ProductionConnect::new(session, generation)
+                .ok()
+                .map(|connect| {
+                    Arc::new(connect) as Arc<dyn state::vault::split::step1::SplitConnect>
+                })
+        });
+        panel.set_connect(connect);
+        panel.begin()
+    }
+
     fn revoke_split_handoff(&mut self) {
         self.split_handoff_generation = self.split_handoff_generation.wrapping_add(1);
         self.split_handoff = None;
@@ -4057,6 +4122,9 @@ impl App {
     /// coordinator call also checks. The journaled claim itself survives:
     /// the panel re-binds it under the next context.
     pub fn revoke_claim(&mut self) {
+        if let Some(panel) = &mut self.split_panel {
+            panel.revoke();
+        }
         self.cache.unswept_notice = None;
         self.unswept_in_flight = None;
         self.unswept_session = None;
@@ -5142,6 +5210,18 @@ impl App {
             Message::View(view::Message::DismissSplitReview) => {
                 self.revoke_split_handoff();
                 return Task::none();
+            }
+            Message::Split(event) => {
+                return self
+                    .split_panel
+                    .as_mut()
+                    .map_or_else(Task::none, |panel| panel.apply(*event));
+            }
+            Message::View(view::Message::Split(message)) => {
+                return self
+                    .split_panel
+                    .as_mut()
+                    .map_or_else(Task::none, |panel| panel.update(message));
             }
             Message::View(view::Message::DismissToast(id)) => {
                 self.errors.retain(|(i, ..)| *i != id);
@@ -6630,7 +6710,8 @@ impl App {
                 {
                     self.revoke_split_handoff();
                 }
-                let pending_split = self.start_pending_split();
+                let pending_split =
+                    Task::batch([self.start_pending_split(), self.refresh_split_session()]);
                 if self.cache.chain().is_blake2b() {
                     self.cache.marketplace_flags = Default::default();
                 }
@@ -7659,6 +7740,10 @@ impl App {
     pub fn invalidate_fork_session(&mut self) {
         if self.cache.chain().is_blake2b() {
             self.revoke_split_handoff();
+            if let Some(panel) = &mut self.split_panel {
+                panel.set_connect(None);
+                panel.revoke();
+            }
             if let Some(daemon) = &self.daemon {
                 daemon.invalidate_connect_session();
             }
@@ -7887,6 +7972,15 @@ impl App {
                 .into()
         } else {
             content
+        };
+        let content = match self.split_panel.as_deref() {
+            Some(panel) if !panel.is_hidden() => iced::widget::Stack::new()
+                .push(content)
+                .push(iced::widget::opaque(
+                    view::vault::split::split_panel(panel).map(Message::View),
+                ))
+                .into(),
+            _ => content,
         };
 
         // One-time recovery-alerts consent prompt overlays everything (PR 3).
@@ -8655,6 +8749,56 @@ mod tests {
         );
         assert!(result.is_err());
         assert!(split_intent::take_for_open(&settings.id, chain).is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// #568 B1b (D1): the Split panel exists only for a Bitcoin Blake2b
+    /// mainnet Cube whose Vault already holds a Split journal, and then only
+    /// to resume it. No journal, a Claim journal, or another chain: no panel.
+    #[test]
+    fn the_split_panel_exists_only_to_resume_an_existing_journal() {
+        use coincube_core::miniscript::bitcoin::hashes::{sha256, Hash};
+        use std::str::FromStr;
+        let desc = coincube_core::descriptors::CoincubeDescriptor::from_str(
+            "wsh(or_d(pk([f5acc2fd]tpubD6NzVbkrYhZ4YgUx2ZLNt2rLYAMTdYysCRzKoLu2BeSHKvzqPaBDvf17GeBPnExUVPkuBpx4kniP964e2MxyzzazcXLptxLXModSVCVEV1T/<0;1>/*),and_v(v:pkh([8a64f2a9]tpubD6NzVbkrYhZ4WmzFjvQrp7sDa4ECUxTi9oby8K4FZkd3XCBtEdKwUiQyYJaxiJo5y42gyDWEczrFpozEjeLxMPxjf2WtkfcbpUdfvNnozWF/<0;1>/*),older(10))))#d72le4dr"
+        ).unwrap();
+        let root =
+            std::env::temp_dir().join(format!("coincube-split-panel-{}", uuid::Uuid::new_v4()));
+        let datadir = CoincubeDirectory::new(root.clone());
+        let chain = crate::chain::ChainId::BitcoinBlake2b;
+        let wallet = Wallet::new(desc.clone()).with_chain(chain);
+        let settings = settings::CubeSettings::new("Fork".into(), chain);
+        assert!(discover_split_panel(&datadir, &settings, &wallet).is_none());
+
+        // A Claim journal in the Bitcoin network's claim directory is not one.
+        let claim = datadir
+            .network_directory(crate::chain::ChainId::Bitcoin)
+            .coincubed_data_directory(&wallet.id())
+            .path()
+            .join("claim");
+        std::fs::create_dir_all(&claim).unwrap();
+        std::fs::write(claim.join("intent.json"), b"{}").unwrap();
+        assert!(discover_split_panel(&datadir, &settings, &wallet).is_none());
+
+        let split_root = state::vault::split::step1::journal_root(&datadir, &wallet.id());
+        let digest = sha256::Hash::hash(b"source");
+        let directory = state::vault::split::step1::journal_directory(&split_root, digest);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("intent.json"), b"{}").unwrap();
+        let panel = discover_split_panel(&datadir, &settings, &wallet).unwrap();
+        assert_eq!(panel.journal_directory(), Some(&directory));
+        assert_eq!(panel.stage(), &state::vault::split::Stage::NeedsSession);
+        assert!(!panel.is_bound());
+
+        // Never for a Bitcoin Cube or BTCB2 testnet4, even with a journal there.
+        for other in [
+            crate::chain::ChainId::Bitcoin,
+            crate::chain::ChainId::BitcoinBlake2bTestnet4,
+        ] {
+            let wallet = Wallet::new(desc.clone()).with_chain(other);
+            let settings = settings::CubeSettings::new("Other".into(), other);
+            assert!(discover_split_panel(&datadir, &settings, &wallet).is_none());
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 

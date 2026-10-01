@@ -849,6 +849,11 @@ fn split_b1a_services_have_no_new_gui_callers() {
             || (file == "src/services/foreign_psbt.rs"
                 && ["ConnectBtcb2Fees", "split_fees"].contains(&ident))
             || (file == "src/app/mod.rs" && ["split_fees", "btcb2_fee_source"].contains(&ident))
+            // B1b: the Split step-1 panel, whose only production constructor
+            // is the resume of an existing journal
+            // (`app::state::vault::split::tests::split_panel_has_no_gui_entry_point`).
+            || file.starts_with("src/app/state/vault/split/")
+            || (file == "src/app/view/vault/split.rs" && ident == "split_psbt_file")
     };
     let mut unexpected = Vec::new();
     for (file, text) in &files {

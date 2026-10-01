@@ -11,6 +11,7 @@ pub mod replay;
 pub mod settings;
 pub mod signers;
 pub mod spend;
+pub mod split;
 #[cfg(test)]
 pub mod test_support;
 pub mod transactions;
