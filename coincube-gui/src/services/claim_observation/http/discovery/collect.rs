@@ -26,7 +26,7 @@ impl CollectedAncestry {
         plan: &ClaimPlan,
         context: AncestryContext<'_>,
     ) -> Result<coincube_core::claim::BitcoinConfirmation, FailureKind> {
-        if plan.step1.compute_txid() != self.assessment.observations.fork.step1_txid {
+        if plan.step1_txid() != self.assessment.observations.fork.step1_txid {
             return Err(FailureKind::Changed);
         }
         if !super::super::super::fresh(
@@ -38,7 +38,7 @@ impl CollectedAncestry {
         }
         self.ancestry.validate_for_plan(path, plan, context)?;
         Ok(coincube_core::claim::bitcoin_confirmation(
-            plan.step1.compute_txid(),
+            plan.step1_txid(),
             plan.previous_confirmation,
             self.assessment.observations.bitcoin,
         ))

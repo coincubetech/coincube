@@ -1,7 +1,7 @@
 //! Durable public transaction bytes and attempt history, never retry authority.
 use super::*;
 
-const MAX_BITCOIN_ATTEMPTS: usize = 128;
+pub(super) const MAX_BITCOIN_ATTEMPTS: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -70,6 +70,7 @@ impl Controller {
         verified: &coincube_core::claim_finalize::VerifiedPoisonTransfer,
     ) -> Result<(), Error> {
         self.ensure_context(current)?;
+        self.claim_only()?;
         if !self.construction_verified {
             return Err(Error::Unchecked);
         }

@@ -248,6 +248,23 @@ impl Journal {
         self.snapshot = Some(bytes);
         Ok(())
     }
+    /// Delete the intent file, still holding the lock. Refuses a file some
+    /// other writer changed. Afterwards this owner holds no intent and cannot
+    /// store one; a later open finds none. The lock file stays, as always.
+    pub(super) fn remove(&mut self) -> Result<(), Error> {
+        self.ensure_current()?;
+        let result = (|| -> Result<(), Error> {
+            fs::remove_file(self.directory.join("intent.json"))?;
+            #[cfg(not(windows))]
+            File::open(&self.directory)?.sync_all()?;
+            Ok(())
+        })();
+        // Whatever the outcome, this owner's snapshot no longer describes the
+        // disk with certainty; it must not write again.
+        self.poisoned = true;
+        self.snapshot = None;
+        result
+    }
 }
 
 // Only the explicitly selected subprocess fixture can pause here. Production

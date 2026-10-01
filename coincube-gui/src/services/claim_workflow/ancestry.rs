@@ -212,6 +212,7 @@ impl Controller {
                 claimed_prevouts: artifact.claimed_prevouts().to_vec(),
                 poison: Poison::InputAncestry,
                 previous_confirmation: None,
+                tracked_txid: None,
             },
             context,
             Some(u32::from(artifact.change_index())),

@@ -172,5 +172,6 @@ pub(super) fn plan(path: &RetainedPath) -> ClaimPlan {
         claimed_prevouts: vec![shared],
         poison: Poison::InputAncestry,
         previous_confirmation: None,
+        tracked_txid: None,
     }
 }

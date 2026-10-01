@@ -162,6 +162,10 @@ impl fmt::Display for Error {
 }
 impl std::error::Error for Error {}
 
+/// Domain separation for [`SplitSource::digest`]: no other hashed identity
+/// can share its preimage.
+pub const SPLIT_SOURCE_DIGEST_TAG: &[u8] = b"coincube/split-source/v1";
+
 /// The foreign wallet's public descriptors, checked against the Split matrix.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SplitSource {
@@ -190,6 +194,30 @@ impl SplitSource {
 
     pub fn internal(&self) -> Option<&Descriptor<DescriptorPublicKey>> {
         self.internal.as_ref()
+    }
+
+    /// The source identity (owner decision D9): SHA-256 over the domain tag
+    /// [`SPLIT_SOURCE_DIGEST_TAG`], then each descriptor's canonical text
+    /// with its checksum, tagged by branch and length-prefixed so the pair
+    /// cannot be re-split. It names the wallet
+    /// in the Split journal and in the target Cube's `split_from`; it is not
+    /// a secret and not evidence of ownership.
+    pub fn digest(&self) -> bitcoin::hashes::sha256::Hash {
+        use bitcoin::hashes::HashEngine;
+        let mut engine = bitcoin::hashes::sha256::Hash::engine();
+        engine.input(SPLIT_SOURCE_DIGEST_TAG);
+        for (tag, descriptor) in [(0_u8, Some(&self.external)), (1, self.internal.as_ref())] {
+            engine.input(&[tag]);
+            match descriptor {
+                Some(descriptor) => {
+                    let text = descriptor.to_string();
+                    engine.input(&(text.len() as u64).to_be_bytes());
+                    engine.input(text.as_bytes());
+                }
+                None => engine.input(&0_u64.to_be_bytes()),
+            }
+        }
+        bitcoin::hashes::sha256::Hash::from_engine(engine)
     }
 
     fn derive(
@@ -369,6 +397,8 @@ pub struct SplitStep1 {
     /// Branch and index of each transaction input, in input order.
     inputs: Vec<(SplitBranch, u32)>,
     destination: u32,
+    /// `SplitInputs::fork_height` the coins were checked against.
+    fork_height: u64,
     fork_marker: BlockHash,
     maximum_signed_vbytes: u64,
     /// Sum of the authenticated spent outputs.
@@ -388,6 +418,12 @@ impl SplitStep1 {
     /// Receive index of the destination.
     pub fn destination(&self) -> u32 {
         self.destination
+    }
+    /// The fork height every spent coin was checked to precede
+    /// (`SplitInputs::fork_height`). Not in the transaction, so a journal
+    /// must bind it separately.
+    pub fn fork_height(&self) -> u64 {
+        self.fork_height
     }
     /// The caller-supplied fork label in the poison payload. Not chain evidence.
     pub fn fork_marker(&self) -> BlockHash {
@@ -702,6 +738,7 @@ fn build(
             .map(|input| (input.branch, input.index))
             .collect(),
         destination: inputs.destination,
+        fork_height: inputs.fork_height,
         fork_marker,
         maximum_signed_vbytes: plan.maximum_signed_vbytes,
         total: plan.total,

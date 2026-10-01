@@ -389,7 +389,7 @@ pub async fn collect_sweep(
     mut context: CollectionContext,
 ) -> Result<SweepObservation, Failure> {
     validate_plan(plan, policy, budget)?;
-    if sweep == plan.step1.compute_txid() {
+    if sweep == plan.step1_txid() {
         return Err(failure(Stage::Plan, FailureKind::InvalidPlan));
     }
     let expected = context.expected_generation;
@@ -534,7 +534,7 @@ async fn collect_inner_with_anchor(
 ) -> Result<(CollectedAssessment, NetworkAnchor), Failure> {
     let btc = plan.bitcoin_chain;
     let fork = plan.fork_chain;
-    let txid = plan.step1.compute_txid();
+    let txid = plan.step1_txid();
     let (tip, mut btc_stamp) = read(
         source
             .tip(btc)

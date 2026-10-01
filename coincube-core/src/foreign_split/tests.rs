@@ -1076,3 +1076,53 @@ fn locktime_must_be_a_height_at_or_below_the_tip() {
         );
     }
 }
+
+/// D9 source digest: domain-tagged (`coincube/split-source/v1`), then
+/// branch-tagged and length-prefixed over each descriptor's
+/// canonical text, so the receive-only and paired sources differ, every
+/// shape differs, and the value is pinned (`split_from` and the Split
+/// journal store it).
+#[test]
+fn split_source_digest_is_canonical_and_pinned() {
+    let digests: Vec<_> = SHAPES
+        .iter()
+        .map(|shape| wallet(*shape).source.digest())
+        .collect();
+    for (i, a) in digests.iter().enumerate() {
+        for b in &digests[i + 1..] {
+            assert_ne!(a, b);
+        }
+    }
+    let paired = wallet(Shape::Wpkh).source;
+    let receive_only = SplitSource::new(paired.external().clone(), None).unwrap();
+    assert_ne!(paired.digest(), receive_only.digest());
+    assert_eq!(paired.digest(), wallet(Shape::Wpkh).source.digest());
+    assert_eq!(
+        paired.digest().to_string(),
+        "be64de72f4745a148474c2b1c06112619c8ba5d05950c9321bd568aa5ff399d9"
+    );
+}
+
+/// The construction keeps the fork height its coins were checked against,
+/// from creation and from reconstruction alike; it is not in the
+/// transaction, which is the same for any fork height above the coins.
+#[test]
+fn split_step1_keeps_its_inputs_fork_height() {
+    let wallet = wallet(Shape::Pkh);
+    let coins = coins(&wallet.source);
+    let at = |fork_height| SplitInputs {
+        fork_height,
+        ..inputs(&wallet.source, &coins)
+    };
+    let step = create(&at(FORK)).unwrap();
+    assert_eq!(step.fork_height(), FORK);
+    let higher = create(&at(FORK + 50)).unwrap();
+    assert_eq!(higher.fork_height(), FORK + 50);
+    assert_eq!(higher.psbt(), step.psbt());
+    let recorded = step.psbt().unsigned_tx.clone();
+    for fork_height in [FORK, FORK + 50] {
+        let rebuilt = reconstruct_split_step1(&at(fork_height), &recorded, TIP).unwrap();
+        assert_eq!(rebuilt.fork_height(), fork_height);
+        assert_eq!(rebuilt.psbt(), step.psbt());
+    }
+}

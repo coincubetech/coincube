@@ -109,6 +109,7 @@ fn plan() -> ClaimPlan {
         claimed_prevouts: vec![prev],
         poison: Poison::OpReturn,
         previous_confirmation: None,
+        tracked_txid: None,
     }
 }
 fn controller(temp: &Temp) -> Controller {
@@ -1499,3 +1500,87 @@ fn windows_replacement_failure_poisons_owner_without_changing_saved_intent() {
 }
 
 mod ancestry;
+
+/// Split (#568, #622 review F2): each Claim-only operation refuses a Split
+/// intent at its own guard. Every case is set up so that, without the guard,
+/// the call would get further and return something else: Ok for the bind at
+/// phase Intent, Unchecked for the two fork operations (no fresh
+/// observation), and Ok for a revalidation whose compared fields match.
+#[test]
+fn claim_only_operations_refuse_a_split_intent_at_their_guard() {
+    let (source, verified) = real_artifact(ChainId::Bitcoin, true, 10);
+    struct Getter(Transaction);
+    impl TxGetter for Getter {
+        fn get_tx(&mut self, id: &Txid) -> Option<Transaction> {
+            (self.0.compute_txid() == *id).then(|| self.0.clone())
+        }
+    }
+    let previous = source.psbt().inputs[0].non_witness_utxo.clone().unwrap();
+    let coin = CandidateCoin {
+        outpoint: source.psbt().unsigned_tx.input[0].previous_output,
+        amount: previous.output[0].value,
+        deriv_index: 0.into(),
+        is_change: false,
+        must_select: false,
+        sequence: None,
+        ancestor_info: None,
+    };
+    let sweep = create_claim_fork_sweep(
+        &source,
+        ChainId::BitcoinBlake2b,
+        &secp256k1::Secp256k1::verification_only(),
+        &mut Getter(previous),
+        &[coin],
+        20.into(),
+        3,
+        absolute::LockTime::ZERO,
+    )
+    .unwrap();
+    let secp = secp256k1::Secp256k1::new();
+    let mut psbt = sweep.psbt().clone();
+    for b in 40..42 {
+        let signer = MasterSigner::from_mnemonic(
+            Network::Bitcoin,
+            Mnemonic::from_entropy(&[b; 16]).unwrap(),
+        )
+        .unwrap();
+        psbt = signer.sign_psbt(psbt, &secp).unwrap();
+    }
+    let signed_sweep = coincube_core::claim_finalize::finalize_claim_fork_sweep(
+        &sweep,
+        &coincube_core::psbt_unified::UnifiedPsbt::from_psbt(psbt).unwrap(),
+        &secp,
+    )
+    .unwrap();
+
+    let temp = Temp::new();
+    let mut c = super::split::tests::created_split(&temp.0);
+    assert!(c.construction_verified && c.fresh.is_none());
+    assert_eq!(c.phase(), Phase::Intent);
+    let before = fs::read(temp.0.join("intent.json")).unwrap();
+    assert!(matches!(
+        c.bind_recovered_bitcoin_transaction(&context(), &verified),
+        Err(Error::WrongIdentity)
+    ));
+    assert!(matches!(
+        c.prepare_fork_sweep(&context(), &sweep, policy(), 10000),
+        Err(Error::WrongIdentity)
+    ));
+    assert!(matches!(
+        c.record_fork_broadcast_intent(&context(), &signed_sweep, policy(), 10000),
+        Err(Error::WrongIdentity)
+    ));
+    // Make every field revalidate_construction compares match the Claim
+    // artifact, in memory only: only the guard can refuse.
+    c.intent.plan.bitcoin_chain = source.chain();
+    c.intent.unsigned_digest = digest(&source.psbt().unsigned_tx);
+    c.intent.identity.descriptor_digest =
+        sha256::Hash::hash(source.descriptor().to_string().as_bytes());
+    c.intent.bitcoin_change_index = Some(u32::from(source.change_index()));
+    assert!(matches!(
+        c.revalidate_construction(&context(), &source),
+        Err(Error::WrongIdentity)
+    ));
+    assert!(!c.construction_verified);
+    assert_eq!(fs::read(temp.0.join("intent.json")).unwrap(), before);
+}

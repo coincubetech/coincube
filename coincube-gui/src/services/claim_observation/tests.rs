@@ -48,6 +48,7 @@ fn plan() -> ClaimPlan {
         claimed_prevouts: vec![prevout],
         poison: Poison::OpReturn,
         previous_confirmation: None,
+        tracked_txid: None,
     }
 }
 fn headers() -> HeaderMap {
@@ -742,4 +743,52 @@ async fn recovery_preserves_absent_and_mempool_states_and_refuses_transitions() 
             failure(Stage::Preflight, FailureKind::Changed)
         );
     }
+}
+
+/// Split (#568 B0): a plan with a tracked (signed) txid is observed by that
+/// txid on both chains, never by its unsigned step 1's. The fixture answers
+/// for whichever txid it is asked, so a read of the unsigned txid would come
+/// back keyed by it and assess as Unknown.
+#[tokio::test]
+async fn collection_reads_the_tracked_step1_txid() {
+    let mut p = plan();
+    let signed = txid(0x5a);
+    assert_ne!(signed, p.step1.compute_txid());
+    p.tracked_txid = Some(signed);
+    let f = Fixture::new(Fault::None);
+    let result = f.run(&p).await.unwrap();
+    assert_eq!(
+        result.assessment,
+        Assessment::ObservationsEligibleForPreflight
+    );
+    assert_eq!(result.observations.fork.step1_txid, signed);
+    assert!(matches!(
+        result.observations.bitcoin.location,
+        TransactionLocation::Confirmed { txid, .. } if txid == signed
+    ));
+    assert_eq!(
+        result.observations.bitcoin_transaction,
+        TransactionObservation::Confirmed {
+            txid: signed,
+            block: BlockRef {
+                height: 100,
+                hash: hash(5),
+            },
+        }
+    );
+    // A sweep can never be the tracked step 1 itself.
+    let f = Fixture::new(Fault::None);
+    assert_eq!(
+        collect_sweep(
+            &f,
+            &p,
+            signed,
+            policy(),
+            Duration::from_secs(1),
+            f.context()
+        )
+        .await
+        .unwrap_err(),
+        failure(Stage::Plan, FailureKind::InvalidPlan)
+    );
 }
