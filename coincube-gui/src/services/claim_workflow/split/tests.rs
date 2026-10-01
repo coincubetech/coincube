@@ -1184,11 +1184,16 @@ fn v8_split_journal_is_refused_by_the_v7_reader() {
 }
 
 /// D1: no GUI caller. The Split journal API is reached only from its own
-/// module and tests (and re-exported by `claim_workflow`). Identifiers, not
+/// module and tests (and re-exported by `claim_workflow`), and from the Split
+/// coordinator (B0b). The coordinator's Split API (`SplitProduction`,
+/// `Coordinator::create_split` / `resume_split`) and the daemonless
+/// transport (`submit_verified_split_step1_to_connect`, `for_split_step1`)
+/// are reached only from the Split coordinator and its tests, plus the one
+/// gate constructor in the coordinator's step-1 dispatch. Identifiers, not
 /// paths, so an alias or glob still has to name the item somewhere.
 #[test]
 fn split_b0_journal_api_has_no_gui_callers() {
-    const ITEMS: [&str; 9] = [
+    const ITEMS: [&str; 13] = [
         "create_split",
         "revalidate_split_construction",
         "bind_recovered_split_transaction",
@@ -1198,10 +1203,17 @@ fn split_b0_journal_api_has_no_gui_callers() {
         "recorded_split",
         "split_identity",
         "RecordedSplit",
+        // B0b: coordinator and transport.
+        "SplitProduction",
+        "resume_split",
+        "submit_verified_split_step1_to_connect",
+        "for_split_step1",
     ];
-    const OWN: [&str; 2] = [
+    const OWN: [&str; 4] = [
         "src/services/claim_workflow/split.rs",
         "src/services/claim_workflow/split/tests.rs",
+        "src/services/claim_coordinator/split.rs",
+        "src/services/claim_coordinator/split/tests.rs",
     ];
     fn walk(dir: &std::path::Path, files: &mut Vec<(String, String)>) {
         for entry in fs::read_dir(dir).unwrap() {
@@ -1238,7 +1250,13 @@ fn split_b0_journal_api_has_no_gui_callers() {
                     let ident = &text[from..index];
                     let reexport = file == "src/services/claim_workflow/mod.rs"
                         && ["split_identity", "RecordedSplit"].contains(&ident);
-                    if ITEMS.contains(&ident) && !OWN.contains(&file.as_str()) && !reexport {
+                    let dispatch = file == "src/services/claim_coordinator/step1.rs"
+                        && ident == "for_split_step1";
+                    if ITEMS.contains(&ident)
+                        && !OWN.contains(&file.as_str())
+                        && !reexport
+                        && !dispatch
+                    {
                         unexpected.push((file.clone(), ident.to_owned()));
                     }
                     start = None;

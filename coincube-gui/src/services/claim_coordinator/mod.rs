@@ -10,6 +10,7 @@ use step1::VerifiedStep1;
 pub mod fork;
 mod recovery;
 mod reorg;
+pub mod split;
 use super::{
     claim_observation::{
         self, http::HttpObservationSource, CollectionContext, ObservationBundle, ObservationSource,
@@ -414,6 +415,8 @@ impl Services for Production {
                         )
                         .await
                 }
+                // A Split has no daemon route; only the Split production sends it.
+                VerifiedStep1::Split(_) => Err(DaemonError::ClientNotSupported),
             };
         }
         let node = self
@@ -439,6 +442,7 @@ impl Services for Production {
                     .submit_verified_ancestry_to_node(tx, binding, gate)
                     .await
             }
+            VerifiedStep1::Split(_) => Err(DaemonError::ClientNotSupported),
         }
     }
     async fn submit(
@@ -456,6 +460,7 @@ impl Services for Production {
         match tx {
             VerifiedStep1::OpReturn(tx) => self.daemon.submit_verified_poison(tx, gate).await,
             VerifiedStep1::Ancestry(tx) => self.daemon.submit_verified_ancestry(tx, gate).await,
+            VerifiedStep1::Split(_) => Err(DaemonError::ClientNotSupported),
         }
     }
 }
@@ -866,12 +871,18 @@ impl Coordinator {
         if Instant::now() >= refreshed.not_after {
             return Err(Error::ExpiredEvidence);
         }
-        self.controller.record_broadcast_intent(
-            context,
-            self.verified.transaction(),
-            self.policy.observations,
-            self.services.source().now(),
-        )?;
+        if let VerifiedStep1::Split(verified) = &self.verified {
+            // The Claim journal method refuses a Split intent (#568).
+            let verified = verified.clone();
+            self.record_split_intent(context, &verified)?;
+        } else {
+            self.controller.record_broadcast_intent(
+                context,
+                self.verified.transaction(),
+                self.policy.observations,
+                self.services.source().now(),
+            )?;
+        }
         self.submit_recorded(context, refreshed).await
     }
     // Both initial submission and an explicitly reviewed resend arrive here only
