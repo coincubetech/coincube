@@ -242,7 +242,8 @@ impl Controller {
     /// Record a Split step 1 before any submission. `construction` is the
     /// opaque core builder output and `signed` its verified finalization;
     /// neither can come from a journal. `fork_height` is the authenticated
-    /// anchor's fork height the construction was built with. Creates a
+    /// anchor's fork height, and must be the one the construction was built
+    /// with ([`SplitStep1::fork_height`]). Creates a
     /// version-8 intent with the public descriptors (P2) and refuses an
     /// existing intent in `directory`. The result is not submission
     /// authority: the coordinator still needs fresh observations.
@@ -258,7 +259,8 @@ impl Controller {
         let fork_chain = fork_chain(bitcoin_chain).ok_or(Error::InvalidPlan)?;
         let step1 = construction.psbt().unsigned_tx.clone();
         let unsigned_digest = digest(&step1);
-        if signed.chain() != bitcoin_chain
+        if fork_height != construction.fork_height()
+            || signed.chain() != bitcoin_chain
             || signed.construction_txid() != construction.txid()
             || !signs(signed.transaction(), unsigned_digest)
         {
@@ -349,7 +351,7 @@ impl Controller {
     /// from freshly authenticated coins (`reconstruct_split_step1`) and this
     /// checks it is exactly the recorded one: same chain, unsigned bytes,
     /// source digest (and stored descriptors while kept), destination and
-    /// fork height. Anything else refuses and leaves the intent unverified.
+    /// fork height, both as supplied and as the construction was built. Anything else refuses and leaves the intent unverified.
     pub fn revalidate_split_construction(
         &mut self,
         current: &Context,
@@ -365,6 +367,7 @@ impl Controller {
             || construction.source().digest() != record.source_digest
             || construction.destination() != record.destination
             || fork_height != record.fork_height
+            || construction.fork_height() != record.fork_height
             || construction.claimed_prevouts() != self.intent.plan.claimed_prevouts
         {
             return Err(Error::WrongIdentity);

@@ -397,6 +397,8 @@ pub struct SplitStep1 {
     /// Branch and index of each transaction input, in input order.
     inputs: Vec<(SplitBranch, u32)>,
     destination: u32,
+    /// `SplitInputs::fork_height` the coins were checked against.
+    fork_height: u64,
     fork_marker: BlockHash,
     maximum_signed_vbytes: u64,
     /// Sum of the authenticated spent outputs.
@@ -416,6 +418,12 @@ impl SplitStep1 {
     /// Receive index of the destination.
     pub fn destination(&self) -> u32 {
         self.destination
+    }
+    /// The fork height every spent coin was checked to precede
+    /// (`SplitInputs::fork_height`). Not in the transaction, so a journal
+    /// must bind it separately.
+    pub fn fork_height(&self) -> u64 {
+        self.fork_height
     }
     /// The caller-supplied fork label in the poison payload. Not chain evidence.
     pub fn fork_marker(&self) -> BlockHash {
@@ -730,6 +738,7 @@ fn build(
             .map(|input| (input.branch, input.index))
             .collect(),
         destination: inputs.destination,
+        fork_height: inputs.fork_height,
         fork_marker,
         maximum_signed_vbytes: plan.maximum_signed_vbytes,
         total: plan.total,
