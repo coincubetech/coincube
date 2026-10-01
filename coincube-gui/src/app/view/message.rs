@@ -240,6 +240,11 @@ pub enum Message {
     /// prompt. The Pane intercepts it and focuses the Home tab on its
     /// Connect section.
     OpenConnectSignIn,
+    /// Like [`OpenConnectSignIn`], but for a user who is already signed in to
+    /// Connect under an account that can't act on this Cube. Always hands off
+    /// to the Home tab's Connect overview (where they can log out and sign
+    /// back in) instead of short-circuiting because a session already exists.
+    OpenConnectSwitchAccount,
     /// Bubbles up from a paid-feature locked card outside the Connect page
     /// (e.g. Settings → Vault Recovery Alerts) when the user clicks "View
     /// plans". The Pane intercepts it and focuses the Home tab on its
@@ -2051,7 +2056,10 @@ pub enum ConnectCubeMessage {
     /// applied to the next account (see `ConnectCubePanel::session_generation`).
     CubeRegistered {
         generation: u64,
-        result: Result<crate::services::coincube::CubeResponse, String>,
+        result: Result<
+            crate::services::coincube::CubeResponse,
+            crate::app::state::connect::cube::CubeRegistrationError,
+        >,
     },
     /// Retry a previously failed cube registration.
     RetryRegistration,

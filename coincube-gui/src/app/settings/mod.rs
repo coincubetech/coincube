@@ -453,12 +453,21 @@ pub struct PasskeyMetadata {
 }
 
 /// Mark a cube as synced with the remote Connect API.
+///
+/// `owner` is the account the sync ran under. It is recorded as the Cube's
+/// [`CubeSettings::connect_owner`] only on the *first* sync of a Cube that has
+/// no owner yet — a later sync (or a Cube already marked synced before owners
+/// were tracked) must not attribute it to whoever happens to be signed in.
 pub async fn mark_cube_synced(
     network_dir: &NetworkDirectory,
     cube_id: &str,
+    owner: Option<ConnectOwner>,
 ) -> Result<(), SettingsError> {
     update_settings_file(network_dir, |mut settings| {
         if let Some(cube) = settings.cubes.iter_mut().find(|c| c.id == cube_id) {
+            if !cube.remote_synced && cube.connect_owner.is_none() {
+                cube.connect_owner = owner;
+            }
             cube.remote_synced = true;
         }
         Some(settings)
@@ -919,6 +928,44 @@ pub struct CubeSettings {
     /// has yet to be backfilled by migration.
     #[serde(default, alias = "duress_marker_file")]
     pub duress_slot_file: Option<String>,
+    /// The Connect account this Cube was first registered under — the
+    /// account that owns its server-side record, and so its Vault and the
+    /// Keychain signers attached to it.
+    ///
+    /// Written once, on the Cube's first successful registration (see
+    /// [`mark_cube_synced`] and the creation Recovery Kit path), and never
+    /// overwritten: signing in as another account re-registers the same local
+    /// Cube UUID as a *new* server row, which must not claim ownership. `None`
+    /// on Cubes registered before this field existed, and on Cubes never
+    /// registered at all — callers treat that as "unknown", not "mismatch".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connect_owner: Option<ConnectOwner>,
+}
+
+/// Identity of the Connect account that owns a Cube. See
+/// [`CubeSettings::connect_owner`].
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ConnectOwner {
+    /// Connect user id — stable across email changes.
+    pub user_id: u32,
+    /// Email at registration time, for display ("sign in as …").
+    pub email: String,
+}
+
+impl ConnectOwner {
+    pub fn from_user(user: &crate::services::coincube::User) -> Self {
+        Self {
+            user_id: user.id,
+            email: user.email.clone(),
+        }
+    }
+
+    /// Whether `email` names this owner. Case-insensitive: Connect emails
+    /// are not case-sensitive, and the two copies come from different
+    /// responses.
+    pub fn is_email(&self, email: &str) -> bool {
+        self.email.trim().eq_ignore_ascii_case(email.trim())
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -973,6 +1020,7 @@ impl CubeSettings {
             // reconstruct Cubes in restore paths, which must not be gated.
             creation_backup_required: false,
             duress_slot_file: None,
+            connect_owner: None,
         }
     }
 
@@ -3090,6 +3138,61 @@ mod chain_identity_tests {
                 bad
             );
         }
+    }
+
+    /// The owner is the account of the Cube's *first* sync, and only that: a
+    /// later sync under another account (which re-registers the same UUID as
+    /// a new server row) must not take ownership, and a Cube already synced
+    /// before owners were tracked must not be attributed to whoever syncs it
+    /// next.
+    #[tokio::test]
+    async fn mark_cube_synced_records_the_owner_once_on_first_sync() {
+        let root = temp_root("connect-owner");
+        let dir = root.network_directory(ChainId::Bitcoin);
+        let owner = |id: u32, email: &str| ConnectOwner {
+            user_id: id,
+            email: email.to_string(),
+        };
+
+        let fresh = CubeSettings::new("fresh".to_string(), ChainId::Bitcoin);
+        let mut legacy = CubeSettings::new("legacy".to_string(), ChainId::Bitcoin);
+        legacy.remote_synced = true;
+        let (fresh_id, legacy_id) = (fresh.id.clone(), legacy.id.clone());
+        update_settings_file(&dir, move |mut s| {
+            s.cubes.push(fresh);
+            s.cubes.push(legacy);
+            Some(s)
+        })
+        .await
+        .unwrap();
+
+        mark_cube_synced(&dir, &fresh_id, Some(owner(1, "a@example.com")))
+            .await
+            .unwrap();
+        mark_cube_synced(&dir, &fresh_id, Some(owner(2, "b@example.com")))
+            .await
+            .unwrap();
+        mark_cube_synced(&dir, &legacy_id, Some(owner(2, "b@example.com")))
+            .await
+            .unwrap();
+
+        let saved = Settings::from_file(&dir).unwrap();
+        let find = |id: &str| saved.cubes.iter().find(|c| c.id == id).unwrap();
+        assert_eq!(
+            find(&fresh_id).connect_owner,
+            Some(owner(1, "a@example.com"))
+        );
+        assert_eq!(find(&legacy_id).connect_owner, None);
+    }
+
+    #[test]
+    fn connect_owner_matches_email_case_insensitively() {
+        let owner = ConnectOwner {
+            user_id: 1,
+            email: "CoinCubeAcc2@gmail.com".to_string(),
+        };
+        assert!(owner.is_email("coincubeacc2@gmail.com "));
+        assert!(!owner.is_email("someone.else@gmail.com"));
     }
 
     #[tokio::test]
