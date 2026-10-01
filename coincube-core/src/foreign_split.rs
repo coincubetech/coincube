@@ -895,6 +895,71 @@ pub fn finalize_split_step1<C: secp256k1::Verification>(
     })
 }
 
+/// Verify a recorded signed step 1 (a journal's bytes) against the exact
+/// construction rebuilt from freshly authenticated coins, for a restart that
+/// must resume with the recorded bytes rather than ask for new signatures.
+///
+/// Stored bytes and a matching txid are not signature evidence. Each input's
+/// previous output is authenticated by its txid and checked against the
+/// construction's own derivation; the transaction with every scriptSig and
+/// witness removed must be the construction; and Miniscript's interpreter
+/// replays every retained scriptSig and witness, which may use only
+/// `SIGHASH_ALL` signatures by keys the input commits to. Economics are checked
+/// again. The result certifies exactly what [`finalize_split_step1`]'s does.
+pub fn verify_split_step1_transaction<C: secp256k1::Verification>(
+    construction: &SplitStep1,
+    transaction: &Transaction,
+    secp: &secp256k1::Secp256k1<C>,
+) -> Result<VerifiedSplitStep1, FinalizeError> {
+    let original = &construction.psbt;
+    if construction.inputs.len() != original.inputs.len()
+        || original.unsigned_tx.input.len() != original.inputs.len()
+    {
+        return Err(FinalizeError::ConstructionChanged);
+    }
+    let mut prevouts = Vec::with_capacity(original.inputs.len());
+    for (index, input) in original.inputs.iter().enumerate() {
+        let output = spend::authenticate_previous_output(
+            &original.unsigned_tx.input[index].previous_output,
+            input.non_witness_utxo.as_ref(),
+            input.witness_utxo.as_ref(),
+        )
+        .map_err(|_| FinalizeError::InputAuthentication)?;
+        let (branch, derivation) = construction.inputs[index];
+        let definite = construction
+            .source
+            .derive(branch, derivation)
+            .map_err(|_| FinalizeError::InputAuthentication)?;
+        if definite.script_pubkey() != output.script_pubkey {
+            return Err(FinalizeError::InputAuthentication);
+        }
+        prevouts.push(output);
+    }
+    // Checks the unsigned form first, so the outputs below are the
+    // construction's own.
+    let signatures_per_input = verify_retained_witness(transaction, original, &prevouts, secp)?;
+    let total = prevouts
+        .iter()
+        .try_fold(0u64, |sum, output| sum.checked_add(output.value.to_sat()))
+        .ok_or(FinalizeError::Economics)?;
+    let destination = &original.unsigned_tx.output[1];
+    let value = destination.value.to_sat();
+    check_economics(
+        total,
+        value,
+        &destination.script_pubkey,
+        construction.maximum_signed_vbytes,
+    )
+    .map_err(|_| FinalizeError::Economics)?;
+    Ok(VerifiedSplitStep1 {
+        construction_txid: original.unsigned_tx.compute_txid(),
+        transaction: transaction.clone(),
+        chain: construction.chain,
+        fee: Amount::from_sat(total - value),
+        signatures_per_input,
+    })
+}
+
 /// The signed PSBT must be the exact construction plus `partial_sigs`, with
 /// every input request absent or `SIGHASH_ALL` and every signature byte
 /// `SIGHASH_ALL`. Shared by both steps.

@@ -1126,3 +1126,84 @@ fn split_step1_keeps_its_inputs_fork_height() {
         assert_eq!(rebuilt.psbt(), step.psbt());
     }
 }
+
+/// #568 B1b restart: a recorded signed step 1 verifies against the exact
+/// rebuilt construction, for every shape, and gives what finalization gave.
+/// Any change to its bytes, a missing quorum, a non-`ALL` signature or another
+/// construction refuses.
+#[test]
+fn a_recorded_signed_step1_verifies_only_against_its_exact_construction() {
+    let secp = secp256k1::Secp256k1::verification_only();
+    for shape in SHAPES {
+        let wallet = wallet(shape);
+        let coins = coins(&wallet.source);
+        let step = create(&inputs(&wallet.source, &coins)).unwrap();
+        let finalized = finalize(&step, &sign(step.psbt(), &wallet.signers)).unwrap();
+        let recorded = finalized.transaction().clone();
+
+        // Rebuilt from the coins and the recorded unsigned bytes.
+        let rebuilt =
+            reconstruct_split_step1(&inputs(&wallet.source, &coins), &unsigned(&recorded), TIP)
+                .unwrap();
+        let verified = verify_split_step1_transaction(&rebuilt, &recorded, &secp).unwrap();
+        assert_eq!(verified.transaction(), &recorded, "{:?}", shape);
+        assert_eq!(verified.construction_txid(), finalized.construction_txid());
+        assert_eq!(verified.fee(), finalized.fee());
+        assert_eq!(verified.chain(), ChainId::Bitcoin);
+        assert_eq!(
+            verified.signatures_per_input(),
+            finalized.signatures_per_input(),
+            "{:?}",
+            shape
+        );
+
+        // A flipped signature byte, in a scriptSig or a witness.
+        let mut tampered = recorded.clone();
+        if tampered.input[0].witness.is_empty() {
+            let mut bytes = tampered.input[0].script_sig.to_bytes();
+            bytes[5] ^= 1;
+            tampered.input[0].script_sig = ScriptBuf::from_bytes(bytes);
+        } else {
+            let mut items: Vec<Vec<u8>> = tampered.input[0].witness.to_vec();
+            let signature = items.iter_mut().find(|item| item.len() > 60).unwrap();
+            signature[5] ^= 1;
+            tampered.input[0].witness = bitcoin::Witness::from_slice(&items);
+        }
+        assert!(
+            verify_split_step1_transaction(&rebuilt, &tampered, &secp).is_err(),
+            "{:?}",
+            shape
+        );
+
+        // An unsigned input.
+        let mut stripped = recorded.clone();
+        stripped.input[1].script_sig = ScriptBuf::new();
+        stripped.input[1].witness.clear();
+        assert!(verify_split_step1_transaction(&rebuilt, &stripped, &secp).is_err());
+
+        // Another construction: a different destination.
+        let other = create(&SplitInputs {
+            destination: 10,
+            ..inputs(&wallet.source, &coins)
+        })
+        .unwrap();
+        assert_eq!(
+            verify_split_step1_transaction(&other, &recorded, &secp).unwrap_err(),
+            FinalizeError::ConstructionChanged
+        );
+    }
+
+    // A multisig quorum short by one key refuses.
+    let wallet = wallet(Shape::WshSortedMulti);
+    let coins = coins(&wallet.source);
+    let step = create(&inputs(&wallet.source, &coins)).unwrap();
+    let full = finalize(&step, &sign(step.psbt(), &wallet.signers)).unwrap();
+    let mut short = full.transaction().clone();
+    for input in &mut short.input {
+        let mut items: Vec<Vec<u8>> = input.witness.to_vec();
+        // [empty, sig, sig, script]: drop one signature.
+        items.remove(1);
+        input.witness = bitcoin::Witness::from_slice(&items);
+    }
+    assert!(verify_split_step1_transaction(&step, &short, &secp).is_err());
+}
