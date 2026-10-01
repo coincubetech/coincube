@@ -1326,33 +1326,29 @@ pub enum ConnectAccountStatus {
     SignedOut,
     /// Signed in as the account that owns this Cube.
     Owner,
-    /// Signed in as a different account than the owner. `owner_email` is the
-    /// locally recorded owner, when known — the server never discloses it.
-    OtherAccount { owner_email: Option<String> },
+    /// Signed in as a different account than the owner. Deliberately carries
+    /// no owner identity: the picker must not reveal whose Cube this is.
+    OtherAccount,
     /// Signed in, but the Cube's owner was never recorded.
     SignedInUnknownOwner,
 }
 
 impl ConnectAccountStatus {
     fn from_cache(cache: &Cache) -> Self {
-        if !connect_session_available(cache) {
+        // No account email means no usable session, whatever the other
+        // session flags say — they can outlive a sign-out. Treat it as signed
+        // out so the row offers "Sign in to Connect".
+        if !connect_session_available(cache) || cache.connect_email.is_none() {
             return Self::SignedOut;
         }
         // The server refused to register this Cube for the signed-in account:
         // authoritative, and the only signal for Cubes with no recorded owner.
         if cache.cube_owned_by_other_account {
-            return Self::OtherAccount {
-                owner_email: cache.cube_connect_owner.as_ref().map(|o| o.email.clone()),
-            };
+            return Self::OtherAccount;
         }
         match (&cache.cube_connect_owner, cache.connect_email.as_deref()) {
             (Some(owner), Some(email)) if owner.is_email(email) => Self::Owner,
-            (Some(owner), Some(_)) => Self::OtherAccount {
-                owner_email: Some(owner.email.clone()),
-            },
-            // Session without a known email can't be compared: don't accuse
-            // the user of being on the wrong account.
-            (Some(_), None) => Self::Owner,
+            (Some(_), _) => Self::OtherAccount,
             (None, _) => Self::SignedInUnknownOwner,
         }
     }
@@ -2203,24 +2199,25 @@ impl SignModal {
         // rows can be resolved.
         if self.keychain_enabled && self.keychain.is_none() {
             match &self.connect_account {
-                ConnectAccountStatus::SignedOut => {
+                // Signed out, or signed in as the owner while Keychain is
+                // still coming up: "Sign in to Connect" either routes to Home
+                // to sign in or refreshes the session in place (the tab-level
+                // `OpenConnectSignIn` handler decides which).
+                ConnectAccountStatus::SignedOut | ConnectAccountStatus::Owner => {
                     return (
                         Kind::Unknown,
                         St::NeedsSignIn("Connect a device to sign with this key.".to_string()),
                     );
                 }
-                ConnectAccountStatus::OtherAccount { owner_email } => {
-                    let reason = match owner_email {
-                        Some(email) => format!(
-                            "This Cube belongs to {}. Switch to that account to sign with \
-                             this key.",
-                            email
+                ConnectAccountStatus::OtherAccount => {
+                    return (
+                        Kind::Unknown,
+                        St::NeedsAccountSwitch(
+                            "This Cube belongs to a different Connect account. Switch \
+                             accounts to sign with this key."
+                                .to_string(),
                         ),
-                        None => "This Cube belongs to a different Connect account. Switch \
-                                 accounts to sign with this key."
-                            .to_string(),
-                    };
-                    return (Kind::Unknown, St::NeedsAccountSwitch(reason));
+                    );
                 }
                 // Owner unrecorded (a Cube registered before owners were
                 // tracked): signed in, yet Keychain never came up — most
@@ -2235,9 +2232,6 @@ impl SignModal {
                         ),
                     );
                 }
-                // Right account; Keychain just isn't up (yet). Fall through
-                // to the plain device hint — neither button would help.
-                ConnectAccountStatus::Owner => {}
             }
         }
         (
@@ -3447,18 +3441,12 @@ mod tests {
             .collect::<Vec<_>>()
         };
 
-        let other = primary_states(ConnectAccountStatus::OtherAccount {
-            owner_email: Some("owner@example.com".to_string()),
-        });
+        // Never names the owner — only that it's a different account.
+        let other = primary_states(ConnectAccountStatus::OtherAccount);
         assert!(other.iter().all(|s| matches!(
             s,
-            SigningKeyState::NeedsAccountSwitch(reason) if reason.contains("owner@example.com")
-        )));
-
-        let anonymous = primary_states(ConnectAccountStatus::OtherAccount { owner_email: None });
-        assert!(anonymous.iter().all(|s| matches!(
-            s,
-            SigningKeyState::NeedsAccountSwitch(reason) if reason.contains("different Connect account")
+            SigningKeyState::NeedsAccountSwitch(reason)
+                if reason.contains("different Connect account") && !reason.contains('@')
         )));
 
         let unknown = primary_states(ConnectAccountStatus::SignedInUnknownOwner);
@@ -3466,11 +3454,13 @@ mod tests {
             .iter()
             .all(|s| matches!(s, SigningKeyState::NeedsAccountSwitch(_))));
 
-        // The owner is signed in: no button would help, so neither is offered.
-        let owner = primary_states(ConnectAccountStatus::Owner);
-        assert!(owner
-            .iter()
-            .all(|s| matches!(s, SigningKeyState::Disabled(_))));
+        // Signed out, or the owner while Keychain is still coming up: keep the
+        // "Sign in to Connect" affordance rather than a dead-end hint.
+        for status in [ConnectAccountStatus::SignedOut, ConnectAccountStatus::Owner] {
+            assert!(primary_states(status)
+                .iter()
+                .all(|s| matches!(s, SigningKeyState::NeedsSignIn(_))));
+        }
     }
 
     #[test]
@@ -3499,14 +3489,26 @@ mod tests {
             ConnectAccountStatus::Owner
         );
         assert_eq!(
-            ConnectAccountStatus::from_cache(&cache(Some(owner), Some("other@example.com"))),
-            ConnectAccountStatus::OtherAccount {
-                owner_email: Some("owner@example.com".to_string())
-            }
+            ConnectAccountStatus::from_cache(&cache(
+                Some(owner.clone()),
+                Some("other@example.com")
+            )),
+            ConnectAccountStatus::OtherAccount
         );
         assert_eq!(
             ConnectAccountStatus::from_cache(&cache(None, Some("other@example.com"))),
             ConnectAccountStatus::SignedInUnknownOwner
+        );
+
+        // Session flags that outlived a sign-out, with no account email: this
+        // is signed out, not the owner (it used to drop the sign-in button).
+        let stale = Cache {
+            has_connect_session: true,
+            ..cache(Some(owner), None)
+        };
+        assert_eq!(
+            ConnectAccountStatus::from_cache(&stale),
+            ConnectAccountStatus::SignedOut
         );
 
         // The server's refusal wins, even with no recorded owner.
@@ -3516,7 +3518,7 @@ mod tests {
         };
         assert_eq!(
             ConnectAccountStatus::from_cache(&refused),
-            ConnectAccountStatus::OtherAccount { owner_email: None }
+            ConnectAccountStatus::OtherAccount
         );
     }
 
