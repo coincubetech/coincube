@@ -76,6 +76,10 @@ pub enum Error {
     TipMetadata(&'static str),
     /// Height-zero JSON metadata is absent, ambiguous, or out of range.
     GenesisMetadata(&'static str),
+    /// The server reported a block height our `i32` heights cannot hold.
+    /// Returned rather than panicking or wrapping: the poller reads the wallet
+    /// tip while holding the backend lock (#616, #621).
+    HeightOutOfRange(u64),
 }
 
 impl Error {
@@ -125,6 +129,11 @@ impl std::fmt::Display for Error {
             Error::GenesisMetadata(what) => {
                 write!(f, "Esplora genesis metadata is unusable: {}.", what)
             }
+            Error::HeightOutOfRange(height) => write!(
+                f,
+                "Esplora error: the server reported an out-of-range block height {}.",
+                height
+            ),
         }
     }
 }
@@ -604,10 +613,9 @@ impl Client {
                 message: format!("tip block {} is not in best chain", hash),
             }))
         })?;
-        Ok(BlockChainTip {
-            hash,
-            height: height as i32,
-        })
+        // Checked, not `as i32`: a height above `i32::MAX` would wrap negative.
+        let height = i32::try_from(height).map_err(|_| Error::HeightOutOfRange(height.into()))?;
+        Ok(BlockChainTip { hash, height })
     }
 
     /// Get the timestamp of the genesis block (block 0).

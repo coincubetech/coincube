@@ -1,7 +1,7 @@
 use std::convert::{TryFrom, TryInto};
 
 use bdk_electrum::bdk_chain::{
-    bitcoin, local_chain::CheckPoint, BlockId, ConfirmationTimeHeightAnchor,
+    bitcoin, local_chain::CheckPoint, BlockId, ConfirmationTimeHeightAnchor, TxGraph,
 };
 
 use crate::bitcoin::{BlockChainTip, BlockInfo};
@@ -42,6 +42,36 @@ pub fn check_chain_update_height(backend: &str, chain_update: &CheckPoint) -> Re
         height
     );
     Err(height.into())
+}
+
+/// Refuse a graph update with a confirmation anchored at a height that does not
+/// fit into our `i32` heights, before any of it is applied (#621). Esplora takes
+/// a transaction's confirmation height from the server as a `u32`, independently
+/// of the chain tip; applied, reading that transaction would panic under the
+/// backend lock. Logged at warn for the same reason as
+/// [`check_chain_update_height`].
+pub fn check_graph_update_heights(
+    backend: &str,
+    graph_update: &TxGraph<ConfirmationTimeHeightAnchor>,
+) -> Result<(), u64> {
+    let out_of_range = graph_update
+        .all_anchors()
+        .iter()
+        .flat_map(|(anchor, _)| [anchor.confirmation_height, anchor.anchor_block.height])
+        .find(|height| i32::try_from(*height).is_err());
+    match out_of_range {
+        None => Ok(()),
+        Some(height) => {
+            log::warn!(
+                "Refused the {} graph update: the server reported a confirmation at block \
+                 height {}, which is out of range. The wallet stays as it was and the next \
+                 poll retries.",
+                backend,
+                height
+            );
+            Err(height.into())
+        }
+    }
 }
 
 pub fn height_usize_from_i32(height: i32) -> usize {
