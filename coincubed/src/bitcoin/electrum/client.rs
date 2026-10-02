@@ -29,6 +29,11 @@ const RPC_SOCKET_TIMEOUT: u8 = 180;
 // A retry happens with exponential back-off (base 2) so this makes us give up after (1+2+4+8+16+32=) 63 seconds.
 const RETRY_LIMIT: u8 = 6;
 
+// How many times a mempool walk starts over because the chain tip moved under it,
+// before giving up with `Error::TipKeptChanging`. A tip that moves on every call
+// (a hostile or broken server) used to recurse without bound (#621).
+const MAX_TIP_CHANGE_RESTARTS: u32 = 3;
+
 /// An error in the Electrum client.
 #[derive(Debug)]
 pub enum Error {
@@ -43,6 +48,9 @@ pub enum Error {
     /// Returned rather than panicking: the poller and the RPC commands both
     /// read the tip while holding the backend lock (#616).
     HeightOutOfRange(u64),
+    /// The chain tip moved during a mempool walk on every attempt, and the walk
+    /// gave up after this many restarts rather than retrying without bound.
+    TipKeptChanging(u32),
 }
 
 impl std::fmt::Display for Error {
@@ -64,6 +72,12 @@ impl std::fmt::Display for Error {
                 f,
                 "Electrum error: the server reported an out-of-range block height {}.",
                 height
+            ),
+            Error::TipKeptChanging(restarts) => write!(
+                f,
+                "Electrum error: the chain tip kept changing while reading the mempool; \
+                 gave up after {} restarts.",
+                restarts
             ),
         }
     }
@@ -205,6 +219,22 @@ impl Client {
         expected_tip: Option<CheckPoint>,
     ) -> Result<Vec<MempoolEntry>, Error> {
         log::debug!("Getting mempool entries for txids '{:?}'.", txids);
+        for _ in 0..=MAX_TIP_CHANGE_RESTARTS {
+            if let Some(entries) = self.mempool_entries_attempt(&txids, expected_tip.clone())? {
+                return Ok(entries);
+            }
+            log::debug!("Chain tip changed while getting mempool entry. Restarting.");
+        }
+        Err(Error::TipKeptChanging(MAX_TIP_CHANGE_RESTARTS))
+    }
+
+    /// One walk of [`Self::mempool_entries`]: `Ok(None)` if the chain tip changed
+    /// during it (with no `expected_tip`), so the caller should start over.
+    fn mempool_entries_attempt(
+        &self,
+        txids: &HashSet<bitcoin::Txid>,
+        expected_tip: Option<CheckPoint>,
+    ) -> Result<Option<Vec<MempoolEntry>>, Error> {
         let mut graph = TxGraph::default();
         let mut local_chain = LocalChain::from_genesis_hash(self.genesis_block()?.hash).0;
         let tip_block = if let Some(ref expected_tip) = expected_tip {
@@ -234,7 +264,7 @@ impl Client {
         }
         let mut desc_ops = Vec::new();
         let mut txs = Vec::new();
-        for txid in &txids {
+        for txid in txids {
             if let Some(ChainPosition::Unconfirmed(_)) = sync_result
                 .graph_update
                 .get_chain_position(&local_chain, local_chain.tip().block_id(), *txid)
@@ -268,8 +298,7 @@ impl Client {
                 }
             }
             if local_chain.tip() != local_tip {
-                log::debug!("Chain tip changed while getting mempool entry. Restarting.");
-                return self.mempool_entries(txids, expected_tip.clone());
+                return Ok(None);
             }
             let _ = graph.apply_update(sync_result.graph_update);
             // Get any txids spending the outpoints we've just synced against.
@@ -318,8 +347,7 @@ impl Client {
                 }
             }
             if local_chain.tip() != local_tip {
-                log::debug!("Chain tip changed while getting mempool entry. Restarting.");
-                return self.mempool_entries(txids, expected_tip);
+                return Ok(None);
             }
             let _ = graph.apply_update(sync_result.graph_update);
 
@@ -417,7 +445,7 @@ impl Client {
 
         // It's possible that the chain tip has now changed, but it hadn't done as of the last sync,
         // so go ahead and return the results.
-        Ok(entries)
+        Ok(Some(entries))
     }
 
     /// Get mempool entry for a single `txid`.
@@ -433,12 +461,33 @@ impl Client {
 
     /// Get mempool spenders of the given outpoints.
     ///
-    /// Will restart if chain tip changes before completion.
+    /// Will restart if chain tip changes before completion, at most
+    /// [`MAX_TIP_CHANGE_RESTARTS`] times.
     pub fn mempool_spenders(
         &self,
         outpoints: &[bitcoin::OutPoint],
     ) -> Result<Vec<MempoolEntry>, Error> {
         log::debug!("Getting mempool spenders for outpoints: {:?}.", outpoints);
+        for _ in 0..=MAX_TIP_CHANGE_RESTARTS {
+            match self.mempool_spenders_attempt(outpoints) {
+                Err(Error::TipChanged(expected, actual)) => log::debug!(
+                    "Chain tip changed from {:?} to {:?} while \
+                    getting mempool spenders. Restarting.",
+                    expected,
+                    actual
+                ),
+                result => return result,
+            }
+        }
+        Err(Error::TipKeptChanging(MAX_TIP_CHANGE_RESTARTS))
+    }
+
+    /// One walk of [`Self::mempool_spenders`]: `Error::TipChanged` if the chain
+    /// tip moved during it, so the caller should start over.
+    fn mempool_spenders_attempt(
+        &self,
+        outpoints: &[bitcoin::OutPoint],
+    ) -> Result<Vec<MempoolEntry>, Error> {
         let mut local_chain = LocalChain::from_genesis_hash(self.genesis_block()?.hash).0;
         let chain_tip = self.chain_tip()?;
         if chain_tip.height > 0 {
@@ -459,21 +508,6 @@ impl Client {
             .flat_map(|op| graph.outspends(*op))
             .copied()
             .collect();
-        let entries = match self.mempool_entries(txids, Some(local_tip)) {
-            Ok(entries) => entries,
-            Err(Error::TipChanged(expected, actual)) => {
-                log::debug!(
-                    "Chain tip changed from {:?} to {:?} while \
-                    getting mempool spenders. Restarting.",
-                    expected,
-                    actual
-                );
-                return self.mempool_spenders(outpoints);
-            }
-            Err(e) => {
-                return Err(e);
-            }
-        };
-        Ok(entries)
+        self.mempool_entries(txids, Some(local_tip))
     }
 }

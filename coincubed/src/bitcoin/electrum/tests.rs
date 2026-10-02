@@ -513,3 +513,130 @@ fn electrum_refused_poll_during_a_rescan_keeps_the_rescan_and_warns() {
         assert!(!shared.is_poisoned());
     });
 }
+
+/// A server like [`tip_at`] whose tip moves up ten blocks at every tip request,
+/// for the first `moving` requests, then stays put. `subscribes` counts them.
+fn moving_tip(
+    subscribes: Arc<AtomicU64>,
+    moving: u64,
+    rest: impl Fn(&str, &Json) -> Answer + Send + Sync + 'static,
+) -> impl Fn(&str, &Json) -> Answer + Send + Sync + 'static {
+    move |method, params| {
+        if method == "blockchain.headers.subscribe" {
+            let calls = subscribes.fetch_add(1, Ordering::SeqCst) + 1;
+            let header = serialize_hex(
+                &bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest).header,
+            );
+            let height = 100 + 10 * calls.min(moving);
+            return Answer::Result(serde_json::json!({"height": height, "hex": header}));
+        }
+        rest(method, params)
+    }
+}
+
+#[test]
+fn electrum_mempool_walks_give_up_when_the_tip_keeps_changing() {
+    // T spends Q's output, unconfirmed, paying to a script whose only history is T.
+    let q = bitcoin::Transaction {
+        version: Version::TWO,
+        lock_time: absolute::LockTime::ZERO,
+        input: vec![bitcoin::TxIn {
+            previous_output: OutPoint::null(),
+            script_sig: bitcoin::ScriptBuf::from_bytes(vec![0x51]),
+            sequence: bitcoin::Sequence::MAX,
+            witness: bitcoin::Witness::default(),
+        }],
+        output: vec![bitcoin::TxOut {
+            value: bitcoin::Amount::from_sat(100_000),
+            script_pubkey: bitcoin::ScriptBuf::from_bytes(vec![0x52]),
+        }],
+    };
+    let q_id = q.compute_txid();
+    let t = bitcoin::Transaction {
+        version: Version::TWO,
+        lock_time: absolute::LockTime::ZERO,
+        input: vec![bitcoin::TxIn {
+            previous_output: OutPoint::new(q_id, 0),
+            script_sig: bitcoin::ScriptBuf::new(),
+            sequence: bitcoin::Sequence::ENABLE_RBF_NO_LOCKTIME,
+            witness: bitcoin::Witness::default(),
+        }],
+        output: vec![bitcoin::TxOut {
+            value: bitcoin::Amount::from_sat(80_000),
+            script_pubkey: bitcoin::ScriptBuf::from_bytes(vec![0x51]),
+        }],
+    };
+    let t_id = t.compute_txid();
+    let rest = Arc::new(move |method: &str, params: &Json| {
+        chain_answer(method).unwrap_or_else(|| match method {
+            "blockchain.transaction.get" => match params[0].as_str() {
+                Some(id) if id == t_id.to_string() => {
+                    Answer::Result(Json::String(serialize_hex(&t)))
+                }
+                Some(id) if id == q_id.to_string() => {
+                    Answer::Result(Json::String(serialize_hex(&q)))
+                }
+                _ => unknown_tx(),
+            },
+            "blockchain.scripthash.get_history" => Answer::Result(serde_json::json!([
+                {"tx_hash": t_id.to_string(), "height": 0},
+            ])),
+            other => panic!("unexpected Electrum request {}", other),
+        })
+    });
+    // Moving for far longer than the walks may retry, but not for ever: before
+    // the bound, they recursed until the tip stopped moving.
+    const MOVING: u64 = 200;
+    const KEPT_CHANGING: &str = "the chain tip kept changing";
+
+    // Each attempt reads the tip a handful of times: once itself and once per BDK
+    // sync, five with this server. Four attempts (one and three restarts) read it
+    // at most 4 * 5 times; an unbounded walk reads it until it stops moving.
+    const MAX_READS: u64 = 4 * 5;
+
+    // The entry walk restarts when the tip moves under one of its syncs.
+    let subscribes = Arc::new(AtomicU64::new(0));
+    let entry = {
+        let rest = rest.clone();
+        against_server(
+            moving_tip(subscribes.clone(), MOVING, move |m, p| rest(m, p)),
+            |backend| {
+                let shared: Arc<Mutex<dyn BitcoinInterface>> = Arc::new(Mutex::new(backend));
+                let entry = shared.mempool_entry_result(&t_id);
+                assert!(!shared.is_poisoned());
+                entry
+            },
+        )
+    };
+    assert!(
+        matches!(&entry, Err(e) if e.contains(KEPT_CHANGING)),
+        "{:?}",
+        entry
+    );
+    let calls = subscribes.load(Ordering::SeqCst);
+    assert!(calls <= MAX_READS, "{} tip reads", calls);
+
+    // The spenders walk restarts when the tip moves between its own sync and the
+    // entry walk's. It runs twice here: fallible, then infallible.
+    let subscribes = Arc::new(AtomicU64::new(0));
+    let spenders = against_server(
+        moving_tip(subscribes.clone(), MOVING, move |m, p| rest(m, p)),
+        |backend| {
+            let shared: Arc<Mutex<dyn BitcoinInterface>> = Arc::new(Mutex::new(backend));
+            let spenders = shared.mempool_spenders_result(&[OutPoint::new(t_id, 0)]);
+            // The infallible read degrades to "no spender" rather than spinning.
+            assert!(shared
+                .mempool_spenders(&[OutPoint::new(t_id, 0)])
+                .is_empty());
+            assert!(!shared.is_poisoned());
+            spenders
+        },
+    );
+    assert!(
+        matches!(&spenders, Err(e) if e.contains(KEPT_CHANGING)),
+        "{:?}",
+        spenders
+    );
+    let calls = subscribes.load(Ordering::SeqCst);
+    assert!(calls <= 2 * MAX_READS, "{} tip reads", calls);
+}
