@@ -962,10 +962,15 @@ fn split_step2_gate_has_no_gui_caller() {
     }
     assert!(unexpected.is_empty(), "{:?}", unexpected);
     // `PreparedForeignSweep::new` (the token's one redeemer) has no caller.
+    // Its own unit tests (foreign_psbt's `mod tests`) are not callers.
     for (file, text) in &files {
         let own = file.starts_with("src/services/claim_coordinator/fork/split");
+        let production = match (file.as_str(), text.find("\nmod tests {")) {
+            ("src/services/foreign_psbt.rs", Some(tests)) => &text[..tests],
+            _ => text.as_str(),
+        };
         assert!(
-            own || !text.contains("PreparedForeignSweep::new("),
+            own || !production.contains("PreparedForeignSweep::new("),
             "{}",
             file
         );
