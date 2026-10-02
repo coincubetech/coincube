@@ -1,0 +1,510 @@
+//! Split (#568 B2): the six-confirmation gate before step 2 and the one
+//! value that authorizes it, [`ForeignStep2Authorization`].
+//!
+//! [`SplitPreparation`] mirrors Claim's [`Preparation`]: it owns the Split
+//! journal after step 1 was submitted, and every [`SplitPreparation::check_signing`]
+//! collects both chains twice with the same view. Between the two
+//! collections it reads, fresh from Connect's BTCB2 Esplora, the unspent
+//! outputs of every claimed prevout's address: a coin already spent on BTCB2
+//! (by anyone) cannot be swept by step 2, so it refuses. A token is minted
+//! only when, at the second collection's tips:
+//! - the tracked (signed) step-1 txid has at least
+//!   [`MIN_CONFIRMATIONS`](coincube_core::claim::MIN_CONFIRMATIONS) on
+//!   Bitcoin, in the block recorded for it (a re-mined step 1 needs the
+//!   reconfirmation review of the step-1 coordinator first);
+//! - step 1 is absent from the fork chain;
+//! - RDTS is active with more than the policy margin (36 h, D3) left;
+//! - both tips equal the ones the first collection saw.
+//!
+//! The token is bound to the check (preparation id and revision), a short
+//! monotonic deadline, the session generation and revoker, the digest of the
+//! claimed prevouts and the tracked txid. It has no Clone, no serialization
+//! and no public constructor, and redeeming it consumes it. A later check,
+//! a generation change, a revocation (logout) or dropping the preparation
+//! kills every earlier token. Nothing here signs or builds step 2 (B3b).
+//!
+//! Step 1's reorg handling stays with the step-1 coordinator
+//! (`claim_coordinator::Coordinator`):
+//! `reconcile` reports `Reorged`, `prepare_reconfirmation` reviews a step 1
+//! re-mined in another block, and `prepare_resubmission` offers the exact
+//! recorded bytes after a fresh preflight when it was reorged out. This gate
+//! refuses in every one of those states.
+use super::*;
+use crate::services::{
+    claim_observation::{FailureKind, FreshRead},
+    split_evidence::ConnectEsplora,
+};
+use coincube_core::{
+    foreign_split::{SplitStep1, VerifiedSplitStep1},
+    miniscript::bitcoin::{consensus, Address, Network, OutPoint},
+};
+use std::{collections::BTreeSet, convert::TryFrom, sync::Weak};
+
+/// The daemonless Connect production for the step-2 check: the Split step-1
+/// observation source (same origin checks) and Connect's fresh BTCB2
+/// unspent-output reads.
+pub struct SplitForkProduction {
+    source: HttpObservationSource,
+    esplora: ConnectEsplora,
+    context: Context,
+    generation: watch::Receiver<u64>,
+}
+impl SplitForkProduction {
+    pub fn new(
+        client: CoincubeClient,
+        account: String,
+        expected_generation: u64,
+        generation: watch::Receiver<u64>,
+    ) -> Result<Self, Error> {
+        let esplora = ConnectEsplora::new(
+            &client,
+            CollectionContext {
+                expected_generation,
+                generation: generation.clone(),
+            },
+        )
+        .map_err(|_| Error::InvalidBinding)?;
+        let (source, context, generation) = super::super::split::SplitProduction::new(
+            client,
+            account,
+            expected_generation,
+            generation,
+            ChainId::Bitcoin,
+        )?
+        .into_observation();
+        Ok(Self {
+            source,
+            esplora,
+            context,
+            generation,
+        })
+    }
+    pub fn context(&self) -> &Context {
+        &self.context
+    }
+}
+
+#[async_trait]
+trait SplitForkServices: Send + Sync {
+    fn source(&self) -> &dyn ObservationSource;
+    /// A fresh read of the BTCB2 unspent outputs paying `address`.
+    async fn btcb2_unspent(&self, address: &str) -> Result<FreshRead<Vec<OutPoint>>, FailureKind>;
+}
+#[async_trait]
+impl SplitForkServices for SplitForkProduction {
+    fn source(&self) -> &dyn ObservationSource {
+        &self.source
+    }
+    async fn btcb2_unspent(&self, address: &str) -> Result<FreshRead<Vec<OutPoint>>, FailureKind> {
+        self.esplora
+            .unspent_outputs(ChainId::BitcoinBlake2b, address)
+            .await
+    }
+}
+
+/// Why a step-2 check refused.
+#[derive(Debug)]
+pub enum SplitCheckError {
+    /// The same refusals as Claim's preparation: not deep enough
+    /// (`NotReady(WaitingForDepth { .. })`), reorged, RDTS margin, changed
+    /// view, revoked session, stale evidence.
+    Coordinator(Error),
+    /// The claimed coin is not among its address's BTCB2 unspent outputs: it
+    /// was spent on BTCB2 (by a third party or anyone), so step 2 cannot
+    /// sweep it.
+    ClaimedCoinSpent(OutPoint),
+    /// Connect could not serve a fresh BTCB2 unspent read. Not a sign that a
+    /// coin was spent (the indexer refuses addresses with very long
+    /// histories, #615 N1).
+    Unavailable(OutPoint, FailureKind),
+}
+impl From<Error> for SplitCheckError {
+    fn from(error: Error) -> Self {
+        Self::Coordinator(error)
+    }
+}
+impl From<claim_workflow::Error> for SplitCheckError {
+    fn from(error: claim_workflow::Error) -> Self {
+        Self::Coordinator(Error::Journal(error))
+    }
+}
+
+/// Order-independent digest of a set of outpoints. Refuses duplicates.
+pub(crate) fn prevouts_digest(prevouts: &[OutPoint]) -> Option<sha256::Hash> {
+    let set: BTreeSet<_> = prevouts.iter().copied().collect();
+    if set.len() != prevouts.len() || set.is_empty() {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(set.len() * 36);
+    for outpoint in set {
+        bytes.extend_from_slice(&consensus::serialize(&outpoint));
+    }
+    Some(sha256::Hash::hash(&bytes))
+}
+
+/// Step-two authority for one Split: fresh, short-lived evidence that the
+/// tracked step 1 has six Bitcoin confirmations at the tip, RDTS still has
+/// its margin, step 1 is absent on the fork and every claimed coin is still
+/// unspent there. Only [`SplitPreparation::check_signing`] constructs it.
+/// No Clone, no serialization; [`Self::redeem`] consumes it.
+pub struct ForeignStep2Authorization {
+    check: (u64, u64),
+    /// The preparation's latest check revision; gone when it is dropped.
+    latest: Weak<AtomicU64>,
+    revoker: Revoker,
+    generation: watch::Receiver<u64>,
+    expected_generation: u64,
+    not_after: Instant,
+    fork_chain: ChainId,
+    prevouts: sha256::Hash,
+    tracked_txid: Txid,
+}
+impl std::fmt::Debug for ForeignStep2Authorization {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ForeignStep2Authorization")
+            .finish_non_exhaustive()
+    }
+}
+/// Why a step-2 authorization was not redeemed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RedeemError {
+    /// Expired, superseded by a later check, revoked, or the session or
+    /// preparation is gone.
+    Stale,
+    /// Another chain, generation or set of prevouts than the one checked.
+    Mismatch,
+}
+impl ForeignStep2Authorization {
+    pub fn is_live(&self) -> bool {
+        self.latest
+            .upgrade()
+            .is_some_and(|latest| latest.load(Ordering::Acquire) == self.check.1)
+            && !self.revoker.is_revoked()
+            && *self.generation.borrow() == self.expected_generation
+            && self.generation.has_changed().is_ok()
+            && Instant::now() < self.not_after
+    }
+    /// The step-1 txid this authorization was checked for.
+    pub fn tracked_txid(&self) -> Txid {
+        self.tracked_txid
+    }
+    /// Spend the authorization on exactly the checked prevouts of the fork
+    /// chain, under the checked generation. One use: the value is consumed
+    /// whether or not it redeems.
+    pub(crate) fn redeem(
+        self,
+        chain: ChainId,
+        generation: u64,
+        prevouts: &[OutPoint],
+    ) -> Result<(), RedeemError> {
+        if !self.is_live() {
+            return Err(RedeemError::Stale);
+        }
+        if chain != self.fork_chain
+            || generation != self.expected_generation
+            || prevouts_digest(prevouts) != Some(self.prevouts)
+        {
+            return Err(RedeemError::Mismatch);
+        }
+        Ok(())
+    }
+}
+
+/// Owns the Split journal after step 1 was submitted. Every new step-2
+/// authorization needs another fresh check; see the module documentation.
+pub struct SplitPreparation {
+    id: u64,
+    revision: u64,
+    latest: Arc<AtomicU64>,
+    context: Context,
+    generation: watch::Receiver<u64>,
+    controller: Controller,
+    /// Each claimed prevout and the address its output pays.
+    claimed: Vec<(OutPoint, String)>,
+    prevouts: sha256::Hash,
+    tracked_txid: Txid,
+    services: Box<dyn SplitForkServices>,
+    policy: CheckPolicy,
+    revoker: Revoker,
+}
+impl SplitPreparation {
+    /// Reopen the Split journal in `directory`. `construction` and
+    /// `verified` are the step 1 rebuilt from freshly authenticated coins
+    /// and the recorded signed bytes verified against it (the panel's
+    /// restore); both must match the journal exactly. Refused unless a
+    /// submission of step 1 is recorded. Reopening restores no authority.
+    #[allow(clippy::too_many_arguments)]
+    pub fn resume(
+        directory: &Path,
+        target_cube: String,
+        construction: &SplitStep1,
+        verified: VerifiedSplitStep1,
+        fork_height: u64,
+        production: SplitForkProduction,
+        policy: CheckPolicy,
+    ) -> Result<Self, Error> {
+        let context = production.context.clone();
+        let generation = production.generation.clone();
+        Self::open(
+            directory,
+            target_cube,
+            construction,
+            verified,
+            fork_height,
+            context,
+            generation,
+            Box::new(production),
+            policy,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn open(
+        directory: &Path,
+        target_cube: String,
+        construction: &SplitStep1,
+        verified: VerifiedSplitStep1,
+        fork_height: u64,
+        context: Context,
+        generation: watch::Receiver<u64>,
+        services: Box<dyn SplitForkServices>,
+        policy: CheckPolicy,
+    ) -> Result<Self, Error> {
+        if !policy.valid() || construction.chain() != ChainId::Bitcoin {
+            return Err(Error::Unsupported);
+        }
+        let mut unsigned = verified.transaction().clone();
+        for input in &mut unsigned.input {
+            input.script_sig = Default::default();
+            input.witness.clear();
+        }
+        if verified.chain() != construction.chain()
+            || verified.construction_txid() != construction.txid()
+            || unsigned != construction.psbt().unsigned_tx
+            || *generation.borrow() != context.generation
+            || generation.has_changed().is_err()
+        {
+            return Err(Error::InvalidBinding);
+        }
+        let claimed = claimed_addresses(construction).ok_or(Error::InvalidBinding)?;
+        let identity = claim_workflow::split_identity(target_cube, construction.source().digest());
+        let mut controller =
+            Controller::reopen_settling_blocking(directory, &identity, context.clone())?;
+        controller.revalidate_split_construction(&context, construction, fork_height)?;
+        controller.bind_recovered_split_transaction(&context, &verified)?;
+        let tracked_txid = verified.transaction().compute_txid();
+        let plan = controller.plan();
+        if controller.recorded_split()?.is_none()
+            || controller.phase() == Phase::Intent
+            || controller.signed_txid() != Some(tracked_txid)
+            || plan.step1_txid() != tracked_txid
+            || claimed.iter().map(|(o, _)| *o).collect::<BTreeSet<_>>()
+                != plan.claimed_prevouts.iter().copied().collect()
+        {
+            return Err(Error::InvalidBinding);
+        }
+        if controller.recorded_fork_submission().is_some() {
+            return Err(Error::SubmissionAlreadyRecorded);
+        }
+        let prevouts = prevouts_digest(&plan.claimed_prevouts).ok_or(Error::InvalidBinding)?;
+        Ok(Self {
+            id: NEXT
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
+                .map_err(|_| Error::Revoked)?,
+            revision: 0,
+            latest: Arc::new(AtomicU64::new(0)),
+            context,
+            generation,
+            controller,
+            claimed,
+            prevouts,
+            tracked_txid,
+            services,
+            policy,
+            revoker: Revoker::new(),
+        })
+    }
+    pub fn context(&self) -> &Context {
+        &self.context
+    }
+    pub fn revoker(&self) -> Revoker {
+        self.revoker.clone()
+    }
+    pub fn tracked_txid(&self) -> Txid {
+        self.tracked_txid
+    }
+    fn current(&mut self, context: &Context) -> Result<(), Error> {
+        if self.revoker.is_revoked()
+            || context != &self.context
+            || *self.generation.borrow() != context.generation
+            || self.generation.has_changed().is_err()
+        {
+            self.revoker.revoke();
+            self.controller.invalidate();
+            return Err(Error::Revoked);
+        }
+        Ok(())
+    }
+    async fn collect(&self) -> Result<Collected, Error> {
+        claim_observation::collect(
+            self.services.source(),
+            &self.controller.plan(),
+            self.policy.observations,
+            self.policy.collection_budget,
+            CollectionContext {
+                expected_generation: self.context.generation,
+                generation: self.generation.clone(),
+            },
+        )
+        .await
+        .map(Collected::ordinary)
+        .map_err(Error::Observation)
+    }
+    /// Every claimed coin among its address's fresh BTCB2 unspent outputs.
+    /// Returns the oldest read's stamp.
+    async fn claimed_unspent_on_fork(&self) -> Result<i64, SplitCheckError> {
+        let mut oldest = i64::MAX;
+        for (outpoint, address) in &self.claimed {
+            let read = self
+                .services
+                .btcb2_unspent(address)
+                .await
+                .map_err(|kind| SplitCheckError::Unavailable(*outpoint, kind))?;
+            let now = self.services.source().now();
+            if read.observed_at() < 0
+                || !now.checked_sub(read.observed_at()).is_some_and(|age| {
+                    (0..=self.policy.observations.max_observation_age_seconds).contains(&age)
+                })
+            {
+                return Err(SplitCheckError::Unavailable(*outpoint, FailureKind::Stale));
+            }
+            if !read.value().contains(outpoint) {
+                return Err(SplitCheckError::ClaimedCoinSpent(*outpoint));
+            }
+            oldest = oldest.min(read.observed_at());
+        }
+        Ok(oldest)
+    }
+    /// Fresh step-2 authorization; see the module documentation. Each call
+    /// supersedes every earlier authorization of this preparation, whether or
+    /// not it succeeds.
+    pub async fn check_signing(
+        &mut self,
+        context: &Context,
+    ) -> Result<ForeignStep2Authorization, SplitCheckError> {
+        self.current(context)?;
+        self.revision = self.revision.checked_add(1).ok_or(Error::Revoked)?;
+        self.latest.store(self.revision, Ordering::Release);
+        let ticket = self.controller.begin_check(context)?;
+        let first = self.collect().await?;
+        if first.assessment != Assessment::ObservationsEligibleForPreflight {
+            return Err(Error::NotReady(first.assessment).into());
+        }
+        let unspent_at = self.claimed_unspent_on_fork().await?;
+        // The recheck: a second collection at the tips, which must be the
+        // same view. A reorg or a new block in between refuses.
+        let last = self.collect().await?;
+        self.current(context)?;
+        if !same_view(first.observations, last.observations) {
+            return Err(Error::ChangedReview.into());
+        }
+        let plan = self.controller.plan();
+        let observations = last.observations;
+        if last.assessment != Assessment::ObservationsEligibleForPreflight
+            || !completion_bitcoin_confirmed(&plan, observations.bitcoin)
+            || observations.fork.chain != plan.fork_chain
+            || observations.fork.step1_txid != self.tracked_txid
+            || observations.fork.step1_presence
+                != coincube_core::claim::ForkTransactionPresence::NotObserved
+        {
+            return Err(Error::NotReady(last.assessment).into());
+        }
+        let origin = Instant::now();
+        let now = self.services.source().now();
+        let mut remaining = self.policy.collection_budget.min(Duration::from_secs(30));
+        for stamp in [
+            observations.bitcoin.observed_at,
+            observations.fork.observed_at,
+            observations.deployment.observed_at,
+            unspent_at,
+        ] {
+            let age = now
+                .checked_sub(stamp)
+                .filter(|age| *age >= 0 && stamp >= 0)
+                .ok_or(Error::ExpiredEvidence)?;
+            let seconds = self
+                .policy
+                .observations
+                .max_observation_age_seconds
+                .checked_sub(age)
+                .and_then(|s| s.checked_sub(1))
+                .filter(|s| *s > 0)
+                .ok_or(Error::ExpiredEvidence)?;
+            remaining = remaining.min(Duration::from_secs(seconds as u64));
+        }
+        let not_after = origin
+            .checked_add(remaining)
+            .ok_or(Error::ExpiredEvidence)?;
+        let assessment = last.assessment;
+        let status = last.apply(
+            &mut self.controller,
+            ticket,
+            context,
+            self.policy.observations,
+            now,
+        )?;
+        if status != Status::Observation(Assessment::ObservationsEligibleForPreflight) {
+            return Err(Error::NotReady(assessment).into());
+        }
+        self.current(context)?;
+        Ok(ForeignStep2Authorization {
+            check: (self.id, self.revision),
+            latest: Arc::downgrade(&self.latest),
+            revoker: self.revoker.clone(),
+            generation: self.generation.clone(),
+            expected_generation: self.context.generation,
+            not_after,
+            fork_chain: plan.fork_chain,
+            prevouts: self.prevouts,
+            tracked_txid: self.tracked_txid,
+        })
+    }
+}
+impl Drop for SplitPreparation {
+    fn drop(&mut self) {
+        self.revoker.revoke();
+    }
+}
+
+/// Each claimed prevout of `construction` and the address its output pays,
+/// from the construction's own txid-bound previous transactions. `None` if
+/// any input has no previous output or no address.
+fn claimed_addresses(construction: &SplitStep1) -> Option<Vec<(OutPoint, String)>> {
+    let psbt = construction.psbt();
+    psbt.unsigned_tx
+        .input
+        .iter()
+        .zip(&psbt.inputs)
+        .map(|(txin, input)| {
+            let outpoint = txin.previous_output;
+            let script = match (&input.non_witness_utxo, &input.witness_utxo) {
+                (Some(previous), _) => {
+                    if previous.compute_txid() != outpoint.txid {
+                        return None;
+                    }
+                    previous
+                        .output
+                        .get(usize::try_from(outpoint.vout).ok()?)?
+                        .script_pubkey
+                        .clone()
+                }
+                (None, Some(output)) => output.script_pubkey.clone(),
+                (None, None) => return None,
+            };
+            let address = Address::from_script(&script, Network::Bitcoin).ok()?;
+            Some((outpoint, address.to_string()))
+        })
+        .collect()
+}
+
+#[cfg(all(test, unix))]
+mod tests;

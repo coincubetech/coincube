@@ -1,6 +1,7 @@
 //! Fork-side confirmation and submission. No signing keys or automatic retry.
 use super::*;
 mod source;
+pub mod split;
 use coincube_core::claim_spend::AncestrySelfTransfer;
 use coincube_core::{claim_finalize::VerifiedClaimForkSweep, claim_spend::ClaimForkSweep};
 use source::Source;

@@ -72,6 +72,12 @@ impl SplitProduction {
     pub fn context(&self) -> &Context {
         &self.context
     }
+    /// The admitted observation source, context and generation, for the
+    /// Split step-2 confirmation check (`fork::split`, #568 B2), which
+    /// observes through exactly the same Connect origin checks.
+    pub(super) fn into_observation(self) -> (HttpObservationSource, Context, watch::Receiver<u64>) {
+        (self.source, self.context, self.generation)
+    }
 }
 #[async_trait]
 impl Services for SplitProduction {
@@ -210,7 +216,7 @@ impl Coordinator {
         )
     }
     #[allow(clippy::too_many_arguments)]
-    fn open_split(
+    pub(super) fn open_split(
         directory: &Path,
         target_cube: String,
         construction: &SplitStep1,
