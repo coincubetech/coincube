@@ -80,6 +80,9 @@ pub enum Error {
     /// Returned rather than panicking or wrapping: the poller reads the wallet
     /// tip while holding the backend lock (#616, #621).
     HeightOutOfRange(u64),
+    /// The server reported a block time our `u32` times cannot hold. Refused
+    /// for the same reason as [`Error::HeightOutOfRange`] (#621).
+    TimeOutOfRange(u64),
 }
 
 impl Error {
@@ -133,6 +136,11 @@ impl std::fmt::Display for Error {
                 f,
                 "Esplora error: the server reported an out-of-range block height {}.",
                 height
+            ),
+            Error::TimeOutOfRange(time) => write!(
+                f,
+                "Esplora error: the server reported an out-of-range block time {}.",
+                time
             ),
         }
     }

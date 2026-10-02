@@ -54,17 +54,23 @@ impl std::fmt::Display for EsploraError {
     }
 }
 
-/// Refuse an update with a height out of our range before any of it is applied:
-/// its chain tip ([`utils::check_chain_update_height`]) or a confirmation height
-/// in its graph, which Esplora reports per transaction
-/// ([`utils::check_graph_update_heights`]).
+/// Refuse an update that does not fit our types before any of it is applied:
+/// its chain tip height ([`utils::check_chain_update_height`]), or a
+/// confirmation height or block time in its graph, which Esplora reports per
+/// transaction ([`utils::check_graph_update_anchors`]).
 fn check_update_height(
     chain_update: &CheckPoint,
     graph_update: &TxGraph<ConfirmationTimeHeightAnchor>,
 ) -> Result<(), EsploraError> {
     utils::check_chain_update_height("Esplora", chain_update)
-        .and_then(|()| utils::check_graph_update_heights("Esplora", graph_update))
-        .map_err(|height| EsploraError::Client(client::Error::HeightOutOfRange(height)))
+        .map_err(client::Error::HeightOutOfRange)
+        .and_then(|()| {
+            utils::check_graph_update_anchors("Esplora", graph_update).map_err(|e| match e {
+                utils::AnchorOutOfRange::Height(height) => client::Error::HeightOutOfRange(height),
+                utils::AnchorOutOfRange::Time(time) => client::Error::TimeOutOfRange(time),
+            })
+        })
+        .map_err(EsploraError::Client)
 }
 
 /// How often we force a full per-SPK rescan even when the chain tip

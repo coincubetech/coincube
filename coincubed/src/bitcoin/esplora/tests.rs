@@ -200,12 +200,17 @@ fn assert_poll_refused(
     shared: &mut Arc<Mutex<dyn BitcoinInterface>>,
     expected_tip: u64,
 ) -> Vec<String> {
+    assert_poll_refused_with(shared, expected_tip, OUT_OF_RANGE)
+}
+
+/// [`assert_poll_refused`], for a refusal whose error contains `error`.
+fn assert_poll_refused_with(
+    shared: &mut Arc<Mutex<dyn BitcoinInterface>>,
+    expected_tip: u64,
+    error: &str,
+) -> Vec<String> {
     let (sync, logs) = crate::testutils::capture_logs(|| shared.sync_wallet(0.into(), 0.into()));
-    assert!(
-        matches!(&sync, Err(e) if e.contains(OUT_OF_RANGE)),
-        "{:?}",
-        sync
-    );
+    assert!(matches!(&sync, Err(e) if e.contains(error)), "{:?}", sync);
     let tip = shared.chain_tip();
     assert_eq!(
         (tip.height as u64, tip.hash),
@@ -278,10 +283,11 @@ fn esplora_out_of_range_tip_height_fails_the_poll_and_leaves_the_wallet_tip_alon
     }
 }
 
-#[test]
-fn esplora_out_of_range_confirmation_height_fails_the_poll_and_is_never_read() {
-    // A transaction paying to the wallet, which the server says confirmed at a
-    // height out of our range, far above its sane tip.
+/// A transaction paying to the wallet, which the server says confirmed at
+/// `height` with block time `time`, one of them out of our range: the poll that
+/// returns it is refused with `error` and warns `warning`, and nothing of it is
+/// applied, so reading the transaction neither panics nor poisons the lock.
+fn assert_confirmation_refused(height: u64, time: u64, error: &str, warning: &str) {
     let tip = Arc::new(AtomicU64::new(20));
     let spk: Arc<Mutex<Option<bitcoin::ScriptBuf>>> = Arc::new(Mutex::new(None));
     let tx_of = |spk: bitcoin::ScriptBuf| bitcoin::Transaction {
@@ -313,13 +319,14 @@ fn esplora_out_of_range_confirmation_height_fails_the_poll_and_is_never_read() {
             }
             let tx = tx_of(spk.clone());
             Some(format!(
-                r#"[{{"txid":"{}","version":2,"locktime":0,"vin":[{{"txid":"{}","vout":0,"prevout":null,"scriptsig":"","witness":[],"sequence":{},"is_coinbase":false}}],"vout":[{{"value":100000,"scriptpubkey":"{}"}}],"status":{{"confirmed":true,"block_height":{},"block_hash":"{}","block_time":1700000000}},"fee":1000}}]"#,
+                r#"[{{"txid":"{}","version":2,"locktime":0,"vin":[{{"txid":"{}","vout":0,"prevout":null,"scriptsig":"","witness":[],"sequence":{},"is_coinbase":false}}],"vout":[{{"value":100000,"scriptpubkey":"{}"}}],"status":{{"confirmed":true,"block_height":{},"block_hash":"{}","block_time":{}}},"fee":1000}}]"#,
                 tx.compute_txid(),
                 tx.input[0].previous_output.txid,
                 tx.input[0].sequence.0,
                 spk.to_hex_string(),
-                u32::MAX,
-                hash_at(u32::MAX as u64),
+                height,
+                hash_at(height),
+                time,
             ))
         }
     };
@@ -338,15 +345,34 @@ fn esplora_out_of_range_confirmation_height_fails_the_poll_and_is_never_read() {
         *spk.lock().unwrap() = Some(wallet_spk);
         let mut shared: Arc<Mutex<dyn BitcoinInterface>> = Arc::new(Mutex::new(backend));
 
-        let warnings = assert_poll_refused(&mut shared, 0);
-        assert!(
-            warnings[0].contains("Refused the Esplora graph update"),
-            "{:?}",
-            warnings
-        );
+        let warnings = assert_poll_refused_with(&mut shared, 0, error);
+        assert!(warnings[0].contains(warning), "{:?}", warnings);
         assert_eq!(shared.rescan_progress(), Some(0.0));
         // Nothing of it was applied: the transaction is unknown, not a panic.
         assert!(shared.wallet_transaction(&txid).is_none());
         assert!(!shared.is_poisoned());
     });
+}
+
+#[test]
+fn esplora_out_of_range_confirmation_height_fails_the_poll_and_is_never_read() {
+    // Far above the sane tip.
+    assert_confirmation_refused(
+        u32::MAX as u64,
+        1_700_000_000,
+        OUT_OF_RANGE,
+        "graph update: the server reported a confirmation at block height",
+    );
+}
+
+#[test]
+fn esplora_out_of_range_confirmation_time_fails_the_poll_and_is_never_read() {
+    // At a sane height with its real hash: only the block time is out of range,
+    // and BDK copies it into the anchor unchecked.
+    assert_confirmation_refused(
+        5,
+        1 << 40,
+        "out-of-range block time",
+        "graph update: the server reported a confirmation with block time",
+    );
 }
