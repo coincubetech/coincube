@@ -265,12 +265,14 @@ pub trait Daemon: Debug {
 
     /// Split (#568 B3b) step 2, embedded only: exact verified bytes through
     /// the BTCB2 Vault daemon's own backend, once. The daemon refuses unless
-    /// the one output is its Vault receive address at `target_index`. The
-    /// coordinator owns the fresh checks, preflight, approval and intent.
+    /// the one output is its Vault receive address at `target_index`, and
+    /// unless its backend is still the reviewed `binding`. The coordinator
+    /// owns the fresh checks, preflight, approval and intent.
     async fn submit_verified_split_step2(
         &self,
         _verified: std::sync::Arc<coincube_core::foreign_split::VerifiedSplitStep2>,
         _target_index: coincube_core::miniscript::bitcoin::bip32::ChildNumber,
+        _binding: coincubed::poison_broadcast::ClaimBackendBinding,
         _gate: std::sync::Arc<coincubed::poison_broadcast::SubmissionGate>,
     ) -> Result<coincubed::poison_broadcast::SubmissionOutcome, DaemonError> {
         Err(DaemonError::ClientNotSupported)

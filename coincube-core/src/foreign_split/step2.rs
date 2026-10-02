@@ -378,5 +378,67 @@ pub fn finalize_split_step2<C: secp256k1::Verification>(
     })
 }
 
+/// Verify a recorded signed step 2 (a journal's bytes) against the exact
+/// construction rebuilt from authenticated coins, the step-2 twin of
+/// [`verify_split_step1_transaction`]: each input's previous output is
+/// authenticated by its txid and the construction's own derivation, the
+/// transaction with every scriptSig and witness removed must be the
+/// construction, every retained scriptSig and witness is replayed by
+/// Miniscript's interpreter (`SIGHASH_ALL` only, keys the input commits to),
+/// and economics are checked again. Certifies what [`finalize_split_step2`]
+/// does, nothing about the chain.
+pub fn verify_split_step2_transaction<C: secp256k1::Verification>(
+    construction: &SplitStep2,
+    transaction: &Transaction,
+    secp: &secp256k1::Secp256k1<C>,
+) -> Result<VerifiedSplitStep2, FinalizeError> {
+    let original = &construction.psbt;
+    if construction.inputs.len() != original.inputs.len()
+        || original.unsigned_tx.input.len() != original.inputs.len()
+        || original.unsigned_tx.output.len() != 1
+    {
+        return Err(FinalizeError::ConstructionChanged);
+    }
+    let mut prevouts = Vec::with_capacity(original.inputs.len());
+    for (index, input) in original.inputs.iter().enumerate() {
+        let output = spend::authenticate_previous_output(
+            &original.unsigned_tx.input[index].previous_output,
+            input.non_witness_utxo.as_ref(),
+            input.witness_utxo.as_ref(),
+        )
+        .map_err(|_| FinalizeError::InputAuthentication)?;
+        let (branch, derivation) = construction.inputs[index];
+        let definite = construction
+            .source
+            .derive(branch, derivation)
+            .map_err(|_| FinalizeError::InputAuthentication)?;
+        if definite.script_pubkey() != output.script_pubkey {
+            return Err(FinalizeError::InputAuthentication);
+        }
+        prevouts.push(output);
+    }
+    let signatures_per_input = verify_retained_witness(transaction, original, &prevouts, secp)?;
+    let total = prevouts
+        .iter()
+        .try_fold(0u64, |sum, output| sum.checked_add(output.value.to_sat()))
+        .ok_or(FinalizeError::Economics)?;
+    let target = &original.unsigned_tx.output[0];
+    let value = target.value.to_sat();
+    check_economics(
+        total,
+        value,
+        &target.script_pubkey,
+        construction.maximum_signed_vbytes,
+    )
+    .map_err(|_| FinalizeError::Economics)?;
+    Ok(VerifiedSplitStep2 {
+        construction_txid: original.unsigned_tx.compute_txid(),
+        transaction: transaction.clone(),
+        chain: construction.chain,
+        fee: Amount::from_sat(total - value),
+        signatures_per_input,
+    })
+}
+
 #[cfg(test)]
 mod tests;

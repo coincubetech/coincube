@@ -615,17 +615,21 @@ impl Daemon for EmbeddedDaemon {
         &self,
         verified: std::sync::Arc<coincube_core::foreign_split::VerifiedSplitStep2>,
         target_index: coincube_core::miniscript::bitcoin::bip32::ChildNumber,
+        binding: coincubed::poison_broadcast::ClaimBackendBinding,
         gate: std::sync::Arc<coincubed::poison_broadcast::SubmissionGate>,
     ) -> Result<coincubed::poison_broadcast::SubmissionOutcome, DaemonError> {
-        let control = match self.handle.lock().await.as_ref() {
+        // The blocking worker owns the lifecycle guard until the one send
+        // returns, so a stop or reload cannot replace the handle mid-send.
+        let handle = self.handle.clone().lock_owned().await;
+        let control = match handle.as_ref() {
             Some(DaemonHandle::Controller { control, .. }) => control.clone(),
             Some(_) => return Err(DaemonError::ClientNotSupported),
             None => return Err(DaemonError::DaemonStopped),
         };
         let txid = verified.transaction().compute_txid();
         let wtxid = verified.transaction().compute_wtxid();
-        blocking_claim_submission(txid, wtxid, move || {
-            control.submit_verified_split_step2(&verified, target_index, &gate)
+        blocking_bound_claim_submission(handle, txid, wtxid, move || {
+            control.submit_verified_split_step2(&verified, target_index, &binding, &gate)
         })
         .await
     }

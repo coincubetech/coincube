@@ -216,6 +216,8 @@ struct View {
     address_stale: Option<ChainId>,
     /// Seconds added to the services' clock (`ObservationSource::now`).
     clock_offset: i64,
+    /// Transactions seen on BTCB2 (step 2), by txid.
+    on_btcb2: Vec<(Txid, TransactionObservation)>,
 }
 impl View {
     /// Step 1 confirmed in `block` (hash 6) at height 100 with `depth`
@@ -239,6 +241,7 @@ impl View {
             address_fails: false,
             address_stale: None,
             clock_offset: 0,
+            on_btcb2: Vec::new(),
         };
         view.set_depth(depth);
         view
@@ -314,6 +317,11 @@ impl ObservationSource for Chains {
         txid: Txid,
     ) -> Result<FreshRead<TransactionObservation>, FailureKind> {
         let view = self.view.lock().unwrap();
+        if chain != ChainId::Bitcoin {
+            if let Some((_, seen)) = view.on_btcb2.iter().find(|(id, _)| *id == txid) {
+                return Self::read(chain, *seen);
+            }
+        }
         let observation = match (chain, view.step1_block) {
             (ChainId::Bitcoin, Some(block)) => TransactionObservation::Confirmed { txid, block },
             (ChainId::Bitcoin, None) => TransactionObservation::Absent,
@@ -1037,6 +1045,11 @@ fn split_step2_gate_has_no_gui_caller() {
             "construct_step2",
             "submit_verified_split_step2",
             "for_split_step2",
+            // B3b-2: routes, restart and reconcile.
+            "Step2Routes",
+            "Step2Daemon",
+            "SplitStep2Reconciler",
+            "verify_split_step2_transaction",
         ] {
             // The Daemon trait declares the step-2 transport and the
             // embedded daemon forwards it; neither is a caller.
