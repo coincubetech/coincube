@@ -485,22 +485,203 @@ pub(super) trait Step2Transport: Send + Sync {
 
 enum Step2Route {
     Connect,
-    /// P4: the daemon's bound Bitcoind (managed Knots) node.
+    /// P4: the daemon's bound Bitcoind node (any `Bitcoind` backend on the
+    /// BTCB2 Vault, owner decision recorded on #568).
     Node(route::BoundNode),
 }
 
-/// The target BTCB2 Vault daemon as a step-2 route; see the module
-/// documentation for admission.
-pub struct SplitStep2Production {
-    daemon: Arc<dyn Daemon + Send + Sync>,
+/// What a step-2 route needs from the target Vault daemon. Production is the
+/// GUI daemon handle; tests substitute a binding they can switch.
+#[async_trait]
+pub(super) trait Step2Daemon: Send + Sync + 'static {
+    /// Identity of the daemon's backend instance and configuration.
+    type Binding: Clone + PartialEq + Send + Sync + 'static;
+    async fn binding(&self) -> Result<Self::Binding, DaemonError>;
+    /// The daemon's current Bitcoind node, if its backend is one.
+    fn node(&self) -> Option<coincubed::config::BitcoindConfig>;
+    async fn submit_connect(
+        &self,
+        verified: Arc<VerifiedSplitStep2>,
+        target: ChildNumber,
+        binding: Self::Binding,
+        gate: Arc<SubmissionGate>,
+    ) -> Result<SubmissionOutcome, DaemonError>;
+    async fn submit_node(
+        &self,
+        verified: Arc<VerifiedSplitStep2>,
+        target: ChildNumber,
+        binding: Self::Binding,
+        gate: Arc<SubmissionGate>,
+    ) -> Result<SubmissionOutcome, DaemonError>;
+}
+#[async_trait]
+impl Step2Daemon for Arc<dyn Daemon + Send + Sync> {
+    type Binding = coincubed::poison_broadcast::ClaimBackendBinding;
+    async fn binding(&self) -> Result<Self::Binding, DaemonError> {
+        self.claim_backend_binding().await
+    }
+    fn node(&self) -> Option<coincubed::config::BitcoindConfig> {
+        match self.config()?.bitcoin_backend.as_ref()? {
+            coincubed::config::BitcoinBackend::Bitcoind(node) => Some(node.clone()),
+            _ => None,
+        }
+    }
+    async fn submit_connect(
+        &self,
+        verified: Arc<VerifiedSplitStep2>,
+        target: ChildNumber,
+        binding: Self::Binding,
+        gate: Arc<SubmissionGate>,
+    ) -> Result<SubmissionOutcome, DaemonError> {
+        self.submit_verified_split_step2(verified, target, binding, gate)
+            .await
+    }
+    async fn submit_node(
+        &self,
+        verified: Arc<VerifiedSplitStep2>,
+        target: ChildNumber,
+        binding: Self::Binding,
+        gate: Arc<SubmissionGate>,
+    ) -> Result<SubmissionOutcome, DaemonError> {
+        self.submit_verified_split_step2_to_node(verified, target, binding, gate)
+            .await
+    }
+}
+
+/// Both step-2 routes over a target Vault daemon. The daemon's backend
+/// binding is captured at the first review on either route; every later
+/// review must see the same binding (a backend switch, daemon restart or
+/// node change refuses as `BackendChanged`, #630 F3), and submission passes
+/// the captured binding to the daemon, which refuses a switched backend
+/// before and after taking its backend lock (#568 B3b-2).
+pub(super) struct Step2Routes<D: Step2Daemon> {
+    daemon: D,
     preflight: PreflightClient,
     origin: String,
     descriptor: CoincubeDescriptor,
     route: Step2Route,
-    binding: std::sync::OnceLock<coincubed::poison_broadcast::ClaimBackendBinding>,
+    binding: std::sync::OnceLock<D::Binding>,
     expected_generation: u64,
     generation: watch::Receiver<u64>,
 }
+impl<D: Step2Daemon> Step2Routes<D> {
+    /// Test-only: the routes over a substitute daemon, admission skipped.
+    #[cfg(test)]
+    pub(super) fn for_test(
+        daemon: D,
+        preflight: PreflightClient,
+        origin: String,
+        descriptor: CoincubeDescriptor,
+        node: Option<coincubed::config::BitcoindConfig>,
+        expected_generation: u64,
+        generation: watch::Receiver<u64>,
+    ) -> Self {
+        Self {
+            daemon,
+            preflight,
+            origin,
+            descriptor,
+            route: match node {
+                Some(node) => Step2Route::Node(route::BoundNode::new(node)),
+                None => Step2Route::Connect,
+            },
+            binding: std::sync::OnceLock::new(),
+            expected_generation,
+            generation,
+        }
+    }
+    /// The route this transport reviews and submits on, for the review
+    /// screen's label (`SubmissionRoute::label`).
+    pub fn route(&self) -> SubmissionRoute {
+        match &self.route {
+            Step2Route::Connect => SubmissionRoute::Connect,
+            Step2Route::Node(bound) => bound.route(),
+        }
+    }
+}
+#[async_trait]
+impl<D: Step2Daemon> Step2Transport for Step2Routes<D> {
+    fn origin(&self) -> &str {
+        &self.origin
+    }
+    fn descriptor(&self) -> &CoincubeDescriptor {
+        &self.descriptor
+    }
+    async fn preflight(
+        &self,
+        tx: &Transaction,
+        tip: BlockHash,
+        policy: FreshnessPolicy,
+    ) -> Result<RoutedEvidence, claim_preflight::Error> {
+        let current = self
+            .daemon
+            .binding()
+            .await
+            .map_err(|_| claim_preflight::Error::BackendChanged)?;
+        if self.binding.get_or_init(|| current.clone()) != &current {
+            return Err(claim_preflight::Error::BackendChanged);
+        }
+        match &self.route {
+            Step2Route::Connect => {
+                if self.daemon.node().is_some() {
+                    return Err(claim_preflight::Error::BackendChanged);
+                }
+                self.preflight
+                    .observe(ChainId::BitcoinBlake2b, tx, tip, policy)
+                    .await
+                    .map(RoutedEvidence::Connect)
+            }
+            Step2Route::Node(bound) => {
+                if !self.daemon.node().is_some_and(|node| bound.matches(&node)) {
+                    return Err(claim_preflight::Error::BackendChanged);
+                }
+                route::node_preflight(
+                    bound,
+                    tx,
+                    tip,
+                    policy,
+                    CollectionContext {
+                        expected_generation: self.expected_generation,
+                        generation: self.generation.clone(),
+                    },
+                )
+                .await
+            }
+        }
+    }
+    async fn submit(
+        &self,
+        route: SubmissionRoute,
+        verified: Arc<VerifiedSplitStep2>,
+        target: ChildNumber,
+        gate: Arc<SubmissionGate>,
+    ) -> Result<SubmissionOutcome, DaemonError> {
+        let binding = self
+            .binding
+            .get()
+            .ok_or(DaemonError::ClientNotSupported)?
+            .clone();
+        match (&self.route, route) {
+            (Step2Route::Connect, SubmissionRoute::Connect) => {
+                self.daemon
+                    .submit_connect(verified, target, binding, gate)
+                    .await
+            }
+            (Step2Route::Node(bound), SubmissionRoute::BitcoinNode { .. })
+                if bound.route() == route =>
+            {
+                self.daemon
+                    .submit_node(verified, target, binding, gate)
+                    .await
+            }
+            _ => Err(DaemonError::ClientNotSupported),
+        }
+    }
+}
+
+/// The target BTCB2 Vault daemon as a step-2 route; see the module
+/// documentation for admission.
+pub struct SplitStep2Production(Step2Routes<Arc<dyn Daemon + Send + Sync>>);
 impl SplitStep2Production {
     /// Refused before anything is reviewed: a non-embedded daemon, any chain
     /// but BTCB2 mainnet, a Connect origin that is not exactly
@@ -560,7 +741,7 @@ impl SplitStep2Production {
             },
         )
         .map_err(Error::Preflight)?;
-        Ok(Self {
+        Ok(Self(Step2Routes {
             descriptor: config.main_descriptor.clone(),
             daemon,
             preflight,
@@ -569,16 +750,22 @@ impl SplitStep2Production {
             binding: std::sync::OnceLock::new(),
             expected_generation,
             generation,
-        })
+        }))
+    }
+    /// The route this transport uses; see [`SubmissionRoute::label`]. The
+    /// node route sends the transaction to the Vault's own node, which learns
+    /// it (and this machine's address) before it relays (B3b-2b privacy note).
+    pub fn route(&self) -> SubmissionRoute {
+        self.0.route()
     }
 }
 #[async_trait]
 impl Step2Transport for SplitStep2Production {
     fn origin(&self) -> &str {
-        &self.origin
+        self.0.origin()
     }
     fn descriptor(&self) -> &CoincubeDescriptor {
-        &self.descriptor
+        self.0.descriptor()
     }
     async fn preflight(
         &self,
@@ -586,45 +773,7 @@ impl Step2Transport for SplitStep2Production {
         tip: BlockHash,
         policy: FreshnessPolicy,
     ) -> Result<RoutedEvidence, claim_preflight::Error> {
-        match &self.route {
-            Step2Route::Connect => self
-                .preflight
-                .observe(ChainId::BitcoinBlake2b, tx, tip, policy)
-                .await
-                .map(RoutedEvidence::Connect),
-            Step2Route::Node(bound) => {
-                // The binding is captured at the first review and must still
-                // hold for every later one and at submission.
-                let current = self
-                    .daemon
-                    .claim_backend_binding()
-                    .await
-                    .map_err(|_| claim_preflight::Error::BackendChanged)?;
-                if self.binding.get_or_init(|| current.clone()) != &current {
-                    return Err(claim_preflight::Error::BackendChanged);
-                }
-                match self
-                    .daemon
-                    .config()
-                    .and_then(|c| c.bitcoin_backend.as_ref())
-                {
-                    Some(coincubed::config::BitcoinBackend::Bitcoind(node))
-                        if bound.matches(node) => {}
-                    _ => return Err(claim_preflight::Error::BackendChanged),
-                }
-                route::node_preflight(
-                    bound,
-                    tx,
-                    tip,
-                    policy,
-                    CollectionContext {
-                        expected_generation: self.expected_generation,
-                        generation: self.generation.clone(),
-                    },
-                )
-                .await
-            }
-        }
+        self.0.preflight(tx, tip, policy).await
     }
     async fn submit(
         &self,
@@ -633,26 +782,7 @@ impl Step2Transport for SplitStep2Production {
         target: ChildNumber,
         gate: Arc<SubmissionGate>,
     ) -> Result<SubmissionOutcome, DaemonError> {
-        match (&self.route, route) {
-            (Step2Route::Connect, SubmissionRoute::Connect) => {
-                self.daemon
-                    .submit_verified_split_step2(verified, target, gate)
-                    .await
-            }
-            (Step2Route::Node(bound), SubmissionRoute::BitcoinNode { .. })
-                if bound.route() == route =>
-            {
-                let binding = self
-                    .binding
-                    .get()
-                    .ok_or(DaemonError::ClientNotSupported)?
-                    .clone();
-                self.daemon
-                    .submit_verified_split_step2_to_node(verified, target, binding, gate)
-                    .await
-            }
-            _ => Err(DaemonError::ClientNotSupported),
-        }
+        self.0.submit(route, verified, target, gate).await
     }
 }
 
@@ -891,5 +1021,179 @@ impl SplitStep2Coordinator {
 impl Drop for SplitStep2Coordinator {
     fn drop(&mut self) {
         self.revoker.revoke();
+    }
+}
+
+/// Check the recorded step 2's chain inclusion together with step 1's on
+/// Bitcoin, keyed by the recorded *signed* step-2 txid. A recorded submission
+/// only identifies what to look up; this never resends or authorizes one.
+async fn reconcile_recorded(
+    controller: &mut Controller,
+    services: &dyn SplitForkServices,
+    policy: CheckPolicy,
+    context: &Context,
+    generation: &watch::Receiver<u64>,
+) -> Result<(Status, claim_observation::TransactionObservation), Error> {
+    let submission = controller
+        .recorded_fork_submission()
+        .ok_or(Error::InvalidBinding)?;
+    if controller
+        .recorded_split_step2()
+        .is_none_or(|signed| signed.compute_txid() != submission.txid())
+    {
+        return Err(Error::InvalidBinding);
+    }
+    let ticket = controller.begin_check(context)?;
+    let collected = claim_observation::collect_sweep(
+        services.source(),
+        &controller.plan(),
+        submission.txid(),
+        policy.observations,
+        policy.collection_budget,
+        CollectionContext {
+            expected_generation: context.generation,
+            generation: generation.clone(),
+        },
+    )
+    .await
+    .map_err(Error::Observation)?;
+    if *generation.borrow() != context.generation || generation.has_changed().is_err() {
+        controller.invalidate();
+        return Err(Error::Revoked);
+    }
+    let status = controller.apply_observation(
+        ticket,
+        context,
+        Ok(collected.assessment()),
+        policy.observations,
+        services.source().now(),
+    )?;
+    Ok((status, collected.transaction()))
+}
+
+impl SplitStep2Coordinator {
+    /// After a submission: the recorded step 2's inclusion on BTCB2 and step
+    /// 1's on Bitcoin. Never resends.
+    pub async fn reconcile_sweep(
+        &mut self,
+        context: &Context,
+    ) -> Result<(Status, claim_observation::TransactionObservation), Error> {
+        self.current(context)?;
+        reconcile_recorded(
+            &mut self.controller,
+            self.services.as_ref(),
+            self.policy,
+            context,
+            &self.generation,
+        )
+        .await
+    }
+}
+
+/// Restart after a recorded step-2 submission (#568 B3b-2): owns the Split
+/// journal and can only reconcile. It needs no construction, coins or
+/// signatures (the claimed coins may already be spent on BTCB2 by step 2),
+/// holds no transport, and so cannot send anything again.
+pub struct SplitStep2Reconciler {
+    context: Context,
+    generation: watch::Receiver<u64>,
+    controller: Controller,
+    services: Box<dyn SplitForkServices>,
+    policy: CheckPolicy,
+    revoker: Revoker,
+}
+impl SplitStep2Reconciler {
+    /// Reopen the Split journal of `source_digest` under `target_cube`.
+    /// Refused unless step 2's signed bytes and submission are recorded.
+    pub fn resume(
+        directory: &Path,
+        target_cube: String,
+        source_digest: sha256::Hash,
+        production: SplitForkProduction,
+        policy: CheckPolicy,
+    ) -> Result<Self, Error> {
+        let context = production.context.clone();
+        let generation = production.generation.clone();
+        Self::open(
+            directory,
+            target_cube,
+            source_digest,
+            context,
+            generation,
+            Box::new(production),
+            policy,
+        )
+    }
+    pub(super) fn open(
+        directory: &Path,
+        target_cube: String,
+        source_digest: sha256::Hash,
+        context: Context,
+        generation: watch::Receiver<u64>,
+        services: Box<dyn SplitForkServices>,
+        policy: CheckPolicy,
+    ) -> Result<Self, Error> {
+        if !policy.valid()
+            || *generation.borrow() != context.generation
+            || generation.has_changed().is_err()
+        {
+            return Err(Error::InvalidBinding);
+        }
+        let identity = claim_workflow::split_identity(target_cube, source_digest);
+        let controller =
+            Controller::reopen_settling_blocking(directory, &identity, context.clone())?;
+        let submission = controller
+            .recorded_fork_submission()
+            .ok_or(Error::InvalidBinding)?;
+        if controller.recorded_split()?.is_none()
+            || controller.plan().bitcoin_chain != ChainId::Bitcoin
+            || controller
+                .recorded_split_step2()
+                .is_none_or(|signed| signed.compute_txid() != submission.txid())
+        {
+            return Err(Error::InvalidBinding);
+        }
+        Ok(Self {
+            context,
+            generation,
+            controller,
+            services,
+            policy,
+            revoker: Revoker::new(),
+        })
+    }
+    pub fn revoker(&self) -> Revoker {
+        self.revoker.clone()
+    }
+    /// The recorded possible submission: what to reconcile, never resend.
+    pub fn recorded_outcome(&self) -> Option<Outcome> {
+        self.controller
+            .recorded_fork_submission()
+            .map(|s| Outcome::Uncertain {
+                txid: s.txid(),
+                wtxid: s.wtxid(),
+            })
+    }
+    pub async fn reconcile_sweep(
+        &mut self,
+        context: &Context,
+    ) -> Result<(Status, claim_observation::TransactionObservation), Error> {
+        if self.revoker.is_revoked()
+            || context != &self.context
+            || *self.generation.borrow() != context.generation
+            || self.generation.has_changed().is_err()
+        {
+            self.revoker.revoke();
+            self.controller.invalidate();
+            return Err(Error::Revoked);
+        }
+        reconcile_recorded(
+            &mut self.controller,
+            self.services.as_ref(),
+            self.policy,
+            context,
+            &self.generation,
+        )
+        .await
     }
 }

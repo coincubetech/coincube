@@ -1156,8 +1156,8 @@ fn verify_retained_witness<C: secp256k1::Verification>(
 
 mod step2;
 pub use step2::{
-    create_split_step2, finalize_split_step2, reconstruct_split_step2, SplitStep2,
-    SplitStep2Inputs, VerifiedSplitStep2,
+    create_split_step2, finalize_split_step2, reconstruct_split_step2,
+    verify_split_step2_transaction, SplitStep2, SplitStep2Inputs, VerifiedSplitStep2,
 };
 
 #[cfg(test)]

@@ -182,14 +182,24 @@ fn split_step2_transport_sends_exact_bytes_once_to_the_reserved_vault_address() 
     let daemon = control(ChainId::BitcoinBlake2b, descriptor, backend.clone());
     let (gate, _) = fresh_gate(&verified);
     assert_eq!(
-        daemon.submit_verified_split_step2(&verified, index(TARGET_INDEX), &gate),
+        daemon.submit_verified_split_step2(
+            &verified,
+            index(TARGET_INDEX),
+            &daemon.claim_backend_binding(),
+            &gate
+        ),
         Ok(SubmissionOutcome::UpstreamAccepted {
             txid: verified.transaction().compute_txid(),
             wtxid: verified.transaction().compute_wtxid(),
         })
     );
     assert_eq!(
-        daemon.submit_verified_split_step2(&verified, index(TARGET_INDEX), &gate),
+        daemon.submit_verified_split_step2(
+            &verified,
+            index(TARGET_INDEX),
+            &daemon.claim_backend_binding(),
+            &gate
+        ),
         Err(SubmissionError::AlreadyStarted)
     );
     let sent = sent(&backend);
@@ -219,10 +229,12 @@ fn split_step2_transport_refuses_wrong_chain_output_and_gate_before_sending() {
         ChainId::BitcoinBlake2bTestnet4,
     ] {
         let (gate, _) = fresh_gate(&verified);
+        let other = control(chain, descriptor.clone(), backend.clone());
         assert_eq!(
-            control(chain, descriptor.clone(), backend.clone()).submit_verified_split_step2(
+            other.submit_verified_split_step2(
                 &verified,
                 index(TARGET_INDEX),
+                &other.claim_backend_binding(),
                 &gate
             ),
             Err(SubmissionError::UnsupportedChain),
@@ -233,9 +245,14 @@ fn split_step2_transport_refuses_wrong_chain_output_and_gate_before_sending() {
     // Wrong artifact chain: a BTCB2 Testnet4 construction.
     let testnet = split_step2(ChainId::BitcoinBlake2bTestnet4, 1, &target);
     let (gate, _) = fresh_gate(&testnet);
+    let other = control(ChainId::BitcoinBlake2b, descriptor.clone(), backend.clone());
     assert_eq!(
-        control(ChainId::BitcoinBlake2b, descriptor.clone(), backend.clone())
-            .submit_verified_split_step2(&testnet, index(TARGET_INDEX), &gate),
+        other.submit_verified_split_step2(
+            &testnet,
+            index(TARGET_INDEX),
+            &other.claim_backend_binding(),
+            &gate
+        ),
         Err(SubmissionError::UnsupportedChain)
     );
 
@@ -248,7 +265,12 @@ fn split_step2_transport_refuses_wrong_chain_output_and_gate_before_sending() {
     ] {
         let (gate, _) = fresh_gate(&verified);
         assert_eq!(
-            daemon.submit_verified_split_step2(&verified, wrong, &gate),
+            daemon.submit_verified_split_step2(
+                &verified,
+                wrong,
+                &daemon.claim_backend_binding(),
+                &gate
+            ),
             Err(SubmissionError::OutputMismatch),
             "{wrong}"
         );
@@ -271,7 +293,12 @@ fn split_step2_transport_refuses_wrong_chain_output_and_gate_before_sending() {
         let elsewhere = split_step2(ChainId::BitcoinBlake2b, 1, &script);
         let (gate, _) = fresh_gate(&elsewhere);
         assert_eq!(
-            daemon.submit_verified_split_step2(&elsewhere, index(TARGET_INDEX), &gate),
+            daemon.submit_verified_split_step2(
+                &elsewhere,
+                index(TARGET_INDEX),
+                &daemon.claim_backend_binding(),
+                &gate
+            ),
             Err(SubmissionError::OutputMismatch)
         );
         assert_eq!(gate.state(), SubmissionState::Pending);
@@ -284,7 +311,12 @@ fn split_step2_transport_refuses_wrong_chain_output_and_gate_before_sending() {
     );
     let (gate, _) = fresh_gate(&other_step2);
     assert_eq!(
-        daemon.submit_verified_split_step2(&verified, index(TARGET_INDEX), &gate),
+        daemon.submit_verified_split_step2(
+            &verified,
+            index(TARGET_INDEX),
+            &daemon.claim_backend_binding(),
+            &gate
+        ),
         Err(SubmissionError::GateMismatch)
     );
     assert_eq!(gate.state(), SubmissionState::Pending);
@@ -297,7 +329,12 @@ fn split_step2_transport_refuses_wrong_chain_output_and_gate_before_sending() {
         Instant::now() + Duration::from_secs(60),
     );
     assert_eq!(
-        daemon.submit_verified_split_step2(&verified, index(TARGET_INDEX), &wrong_chain_gate),
+        daemon.submit_verified_split_step2(
+            &verified,
+            index(TARGET_INDEX),
+            &daemon.claim_backend_binding(),
+            &wrong_chain_gate
+        ),
         Err(SubmissionError::GateMismatch)
     );
     assert!(sent(&backend).is_empty());
@@ -318,19 +355,34 @@ fn split_step2_transport_revocation_expiry_and_uncertain_response() {
     let (revoked, revoker) = fresh_gate(&verified);
     assert_eq!(revoker.revoke(), SubmissionState::Revoked);
     assert_eq!(
-        daemon.submit_verified_split_step2(&verified, index(TARGET_INDEX), &revoked),
+        daemon.submit_verified_split_step2(
+            &verified,
+            index(TARGET_INDEX),
+            &daemon.claim_backend_binding(),
+            &revoked
+        ),
         Err(SubmissionError::Revoked)
     );
     let (expired, _) = SubmissionGate::for_split_step2(&verified, Instant::now());
     assert_eq!(
-        daemon.submit_verified_split_step2(&verified, index(TARGET_INDEX), &expired),
+        daemon.submit_verified_split_step2(
+            &verified,
+            index(TARGET_INDEX),
+            &daemon.claim_backend_binding(),
+            &expired
+        ),
         Err(SubmissionError::Expired)
     );
     assert!(sent(&backend).is_empty());
     backend.lock().unwrap().broadcast_error = Some("response lost".into());
     let (gate, _) = fresh_gate(&verified);
     assert_eq!(
-        daemon.submit_verified_split_step2(&verified, index(TARGET_INDEX), &gate),
+        daemon.submit_verified_split_step2(
+            &verified,
+            index(TARGET_INDEX),
+            &daemon.claim_backend_binding(),
+            &gate
+        ),
         Err(SubmissionError::Uncertain {
             txid: verified.transaction().compute_txid(),
             wtxid: verified.transaction().compute_wtxid(),
@@ -338,6 +390,47 @@ fn split_step2_transport_revocation_expiry_and_uncertain_response() {
     );
     assert_eq!(gate.state(), SubmissionState::Started);
     assert_eq!(sent(&backend).len(), 1);
+}
+
+/// #568 B3b-2: the Connect route refuses a backend switched since review.
+/// A binding captured from another daemon instance (a restart or a backend
+/// switch replaces the controller) refuses before the backend is called and
+/// leaves the gate Pending; the current binding then sends.
+#[test]
+fn split_step2_connect_route_refuses_a_switched_backend() {
+    let descriptor = vault();
+    let verified = split_step2(
+        ChainId::BitcoinBlake2b,
+        1,
+        &receive_script(&descriptor, TARGET_INDEX),
+    );
+    let backend = Arc::new(Mutex::new(DummyBitcoind::new()));
+    let reviewed = control(ChainId::BitcoinBlake2b, descriptor.clone(), backend.clone())
+        .claim_backend_binding();
+    let daemon = control(
+        ChainId::BitcoinBlake2b,
+        descriptor,
+        Arc::new(Mutex::new(DummyBitcoind::new())),
+    );
+    let (gate, _) = fresh_gate(&verified);
+    assert_eq!(
+        daemon.submit_verified_split_step2(&verified, index(TARGET_INDEX), &reviewed, &gate),
+        Err(SubmissionError::BackendUnavailable)
+    );
+    assert_eq!(gate.state(), SubmissionState::Pending);
+    assert_eq!(
+        daemon.submit_verified_split_step2(
+            &verified,
+            index(TARGET_INDEX),
+            &daemon.claim_backend_binding(),
+            &gate
+        ),
+        Ok(SubmissionOutcome::UpstreamAccepted {
+            txid: verified.transaction().compute_txid(),
+            wtxid: verified.transaction().compute_wtxid(),
+        })
+    );
+    assert!(sent(&backend).is_empty());
 }
 
 /// P4: the managed-node route refuses an Esplora-backed daemon (no bound
@@ -401,4 +494,115 @@ fn split_step2_transport_is_not_exposed_over_rpc() {
             assert!(!text.contains(ident), "{} names {}", file, ident);
         }
     }
+}
+
+/// One `sendrawtransaction` received by a local fake Knots node: returns the
+/// request body; answers with `reply_txid`.
+fn fake_node(
+    reply_txid: Txid,
+) -> (
+    std::net::SocketAddr,
+    std::thread::JoinHandle<serde_json::Value>,
+) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let worker = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut headers = Vec::new();
+        let mut byte = [0];
+        while !headers.ends_with(b"\r\n\r\n") {
+            stream.read_exact(&mut byte).unwrap();
+            headers.push(byte[0]);
+        }
+        let headers = String::from_utf8(headers).unwrap();
+        let length: usize = headers
+            .lines()
+            .find_map(|line| {
+                let (key, value) = line.split_once(':')?;
+                key.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse().unwrap())
+            })
+            .unwrap();
+        let mut body = vec![0; length];
+        stream.read_exact(&mut body).unwrap();
+        let reply = serde_json::json!({"id":1,"result":reply_txid,"error":null}).to_string();
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            reply.len(),
+            reply
+        )
+        .unwrap();
+        serde_json::from_slice(&body).unwrap()
+    });
+    (address, worker)
+}
+
+fn node_control(descriptor: CoincubeDescriptor, address: std::net::SocketAddr) -> DaemonControl {
+    use crate::config::{BitcoinBackend, BitcoindConfig, BitcoindRpcAuth};
+    let config = Config::new(
+        BitcoinConfig::new(ChainId::BitcoinBlake2b, Duration::from_secs(2)),
+        Some(BitcoinBackend::Bitcoind(BitcoindConfig {
+            addr: address,
+            rpc_auth: BitcoindRpcAuth::UserPass("synthetic".into(), "fixture".into()),
+        })),
+        log::LevelFilter::Off,
+        descriptor,
+        DataDirectory::new(std::path::PathBuf::from("/synthetic-unused-split-step2")),
+    );
+    let (sender, _receiver) = mpsc::sync_channel(1);
+    DaemonControl::new(
+        config,
+        Arc::new(Mutex::new(DummyBitcoind::new())),
+        sender,
+        Arc::new(Mutex::new(DummyDatabase::new())),
+        bitcoin::secp256k1::Secp256k1::verification_only(),
+        Default::default(),
+        Default::default(),
+    )
+}
+
+/// #568 B3b-2, P4 end to end at the transport: the bound Knots node receives
+/// exactly one `sendrawtransaction` of the verified witness bytes, through the
+/// binding captured at review. A binding from another daemon instance (a
+/// node switched since review) refuses before any connection.
+#[test]
+fn split_step2_node_route_sends_exact_bytes_once_to_the_bound_node() {
+    let descriptor = vault();
+    let verified = split_step2(
+        ChainId::BitcoinBlake2b,
+        1,
+        &receive_script(&descriptor, TARGET_INDEX),
+    );
+    let tx = verified.transaction().clone();
+    let (address, worker) = fake_node(tx.compute_txid());
+    let daemon = node_control(descriptor.clone(), address);
+    // A switched node: the binding of another controller at the same address.
+    let stale = node_control(descriptor, address).claim_backend_binding();
+    let (gate, _) = fresh_gate(&verified);
+    assert_eq!(
+        daemon.submit_verified_split_step2_to_node(&verified, index(TARGET_INDEX), &stale, &gate),
+        Err(SubmissionError::BackendUnavailable)
+    );
+    assert_eq!(gate.state(), SubmissionState::Pending);
+    let binding = daemon.claim_backend_binding();
+    assert_eq!(
+        daemon.submit_verified_split_step2_to_node(&verified, index(TARGET_INDEX), &binding, &gate),
+        Ok(SubmissionOutcome::UpstreamAccepted {
+            txid: tx.compute_txid(),
+            wtxid: tx.compute_wtxid(),
+        })
+    );
+    assert_eq!(
+        worker.join().unwrap(),
+        serde_json::json!({"jsonrpc":"2.0","id":1,"method":"sendrawtransaction","params":[bitcoin::consensus::encode::serialize_hex(&tx)]})
+    );
+    assert_eq!(
+        daemon.submit_verified_split_step2_to_node(&verified, index(TARGET_INDEX), &binding, &gate),
+        Err(SubmissionError::AlreadyStarted)
+    );
 }

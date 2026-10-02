@@ -407,17 +407,24 @@ impl DaemonControl {
     /// recorded foreign source. What this route does check is where the coins
     /// go: exactly one output, paying this daemon's own Vault receive address
     /// at `target_index` (the index recorded in the Split journal), on BTCB2
-    /// mainnet only. The caller must first join the fresh step-2 checks, the
-    /// BTCB2 preflight of this witness, approval and the durable intent.
+    /// mainnet only. `binding` is the backend the coordinator reviewed this
+    /// witness against; a backend switched since (another daemon instance,
+    /// endpoint or configuration) refuses before and after taking the backend
+    /// lock (#568 B3b-2). The caller must first join the fresh step-2 checks,
+    /// the BTCB2 preflight of this witness, approval and the durable intent.
     pub fn submit_verified_split_step2(
         &self,
         verified: &VerifiedSplitStep2,
         target_index: ChildNumber,
+        binding: &ClaimBackendBinding,
         gate: &SubmissionGate,
     ) -> Result<SubmissionOutcome, SubmissionError> {
         let transaction = self.check_split_step2(verified, target_index, gate)?;
         let txid = transaction.compute_txid();
         let wtxid = transaction.compute_wtxid();
+        if !binding.matches(self) {
+            return Err(SubmissionError::BackendUnavailable);
+        }
         #[cfg(test)]
         if let Some(barrier) = &gate.before_lock {
             barrier.wait();
@@ -426,6 +433,9 @@ impl DaemonControl {
             .bitcoin
             .lock()
             .map_err(|_| SubmissionError::BackendUnavailable)?;
+        if !binding.matches(self) {
+            return Err(SubmissionError::BackendUnavailable);
+        }
         gate.enter()?;
         backend
             .broadcast_tx(transaction)
