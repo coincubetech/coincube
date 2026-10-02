@@ -1,0 +1,1185 @@
+//! Split step-1 panel (#568 B1b) state tests against a mocked Connect.
+//!
+//! [`FakeConnect`] stands in for Connect: the anchor window, the Bitcoin fee,
+//! fresh address-history reads and the per-outpoint chain evidence are
+//! synthetic. The journal is real: the fake opens it with the same
+//! `claim_workflow::Controller` Split API the coordinator uses, in a private
+//! temporary directory, so file permissions, contents and restart are the
+//! production ones. The coordinator's own review, preflight and submission
+//! are B0b's (`claim_coordinator::split::tests`); [`FakeDriver`] records what
+//! the panel asks of it. Signatures come from rust-bitcoin's PSBT signer and
+//! travel through real PSBT files.
+
+use super::*;
+use crate::services::{
+    claim_coordinator,
+    claim_observation::{FailureKind, FreshRead, TransactionObservation},
+    claim_preflight::NodePolicy,
+    claim_workflow::{Context, Controller},
+    coincube::CoincubeClient,
+    foreign_scan::ScanReport,
+    foreign_split_inventory::{SplitInventory, TwoChainScan},
+    split_evidence::SplitEvidenceSource,
+    split_test_wallets::{self as fixture, Shape},
+};
+use async_trait::async_trait;
+use coincube_core::{
+    chain::ChainId,
+    claim::{Assessment, BlockRef},
+    miniscript::bitcoin::{
+        absolute::LockTime, hashes::Hash, secp256k1::Secp256k1, Address, BlockHash, Network,
+        OutPoint,
+    },
+};
+use iced::futures::StreamExt;
+use reqwest::header::{HeaderMap, CACHE_CONTROL};
+use std::{
+    collections::{BTreeSet, HashMap},
+    os::unix::fs::PermissionsExt,
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Mutex,
+    },
+};
+use step1::{ReviewView, SplitConnect};
+
+const TARGET: &str = "btcb2-target-cube";
+
+fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+}
+
+fn fresh<T>(chain: ChainId, value: T) -> FreshRead<T> {
+    let mut headers = HeaderMap::new();
+    headers.insert("x-cache", "BYPASS".parse().unwrap());
+    headers.insert(CACHE_CONTROL, "no-store".parse().unwrap());
+    FreshRead::from_response(chain, value, now(), &headers).unwrap()
+}
+
+struct Temp(PathBuf);
+impl Temp {
+    fn new() -> Self {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "split-panel-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        Self(path)
+    }
+    /// `<datadir>/…/split` stand-in.
+    fn root(&self) -> PathBuf {
+        self.0.join("split")
+    }
+}
+impl Drop for Temp {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Both chains as Connect would show them: every fixture coin confirmed in
+/// the same pre-fork block on both, unspent on both.
+struct Chains {
+    previous: HashMap<Txid, Transaction>,
+    status: Mutex<HashMap<(ChainId, Txid), TransactionObservation>>,
+    canonical: HashMap<(ChainId, u64), BlockHash>,
+    utxos: Mutex<HashMap<(ChainId, String), BTreeSet<OutPoint>>>,
+}
+
+impl Chains {
+    fn of(coins: &[crate::services::foreign_scan::DiscoveredCoin]) -> Self {
+        let mut chains = Self {
+            previous: HashMap::new(),
+            status: Mutex::new(HashMap::new()),
+            canonical: HashMap::new(),
+            utxos: Mutex::new(HashMap::new()),
+        };
+        for coin in coins {
+            let block = BlockRef {
+                height: u64::from(coin.block_height.unwrap()),
+                hash: coin.block_hash.unwrap(),
+            };
+            chains
+                .previous
+                .insert(coin.outpoint.txid, coin.previous.clone());
+            let address = Address::from_script(&coin.output.script_pubkey, Network::Bitcoin)
+                .unwrap()
+                .to_string();
+            for chain in [ChainId::Bitcoin, ChainId::BitcoinBlake2b] {
+                chains.status.lock().unwrap().insert(
+                    (chain, coin.outpoint.txid),
+                    TransactionObservation::Confirmed {
+                        txid: coin.outpoint.txid,
+                        block,
+                    },
+                );
+                chains.canonical.insert((chain, block.height), block.hash);
+                chains
+                    .utxos
+                    .lock()
+                    .unwrap()
+                    .entry((chain, address.clone()))
+                    .or_default()
+                    .insert(coin.outpoint);
+            }
+        }
+        chains
+    }
+    fn spend_on(&self, chain: ChainId, outpoint: OutPoint) {
+        for (key, set) in self.utxos.lock().unwrap().iter_mut() {
+            if key.0 == chain {
+                set.remove(&outpoint);
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl SplitEvidenceSource for Chains {
+    fn now(&self) -> i64 {
+        now()
+    }
+    async fn tip(&self, chain: ChainId) -> Result<FreshRead<BlockRef>, FailureKind> {
+        let height = match chain {
+            ChainId::Bitcoin => fixture::BITCOIN_TIP_HEIGHT,
+            _ => fixture::BTCB2_TIP_HEIGHT,
+        };
+        Ok(fresh(
+            chain,
+            BlockRef {
+                height: u64::from(height),
+                hash: fixture::block_hash(u64::from(height)),
+            },
+        ))
+    }
+    async fn transaction(
+        &self,
+        chain: ChainId,
+        txid: Txid,
+    ) -> Result<FreshRead<TransactionObservation>, FailureKind> {
+        let value = self
+            .status
+            .lock()
+            .unwrap()
+            .get(&(chain, txid))
+            .copied()
+            .unwrap_or(TransactionObservation::Absent);
+        Ok(fresh(chain, value))
+    }
+    async fn hash_at_height(
+        &self,
+        chain: ChainId,
+        height: u64,
+    ) -> Result<FreshRead<BlockHash>, FailureKind> {
+        self.canonical
+            .get(&(chain, height))
+            .map(|hash| fresh(chain, *hash))
+            .ok_or(FailureKind::Http(404))
+    }
+    async fn previous_transaction(
+        &self,
+        _chain: ChainId,
+        txid: Txid,
+    ) -> Result<Transaction, FailureKind> {
+        self.previous
+            .get(&txid)
+            .cloned()
+            .ok_or(FailureKind::Http(404))
+    }
+    async fn unspent_outputs(
+        &self,
+        chain: ChainId,
+        address: &str,
+    ) -> Result<FreshRead<Vec<OutPoint>>, FailureKind> {
+        let set = self
+            .utxos
+            .lock()
+            .unwrap()
+            .get(&(chain, address.to_owned()))
+            .cloned()
+            .unwrap_or_default();
+        Ok(fresh(chain, set.into_iter().collect()))
+    }
+}
+
+/// What the panel asked of the coordinator.
+#[derive(Default)]
+struct Calls {
+    opened: Mutex<Vec<bool>>,
+    reviews: AtomicUsize,
+    submits: AtomicUsize,
+    reconciles: AtomicUsize,
+    revoked: AtomicBool,
+    address_reads: Mutex<Vec<(ChainId, String)>>,
+}
+
+#[derive(Clone)]
+enum SubmitPlan {
+    Accept,
+    Refuse(String),
+}
+
+struct FakeConnect {
+    context: Context,
+    window: Mutex<Result<ForkWindow, String>>,
+    feerate: Option<u64>,
+    used: Mutex<HashMap<ChainId, Result<bool, FailureKind>>>,
+    chains: Chains,
+    calls: Arc<Calls>,
+    submit: Mutex<SubmitPlan>,
+}
+
+use crate::app::state::vault::claim::ForkWindow;
+
+fn window() -> ForkWindow {
+    let mtp = now();
+    ForkWindow {
+        fork_height: fixture::FORK,
+        fork_hash: fixture::block_hash(fixture::FORK),
+        tip_height: u64::from(fixture::BTCB2_TIP_HEIGHT),
+        median_time_past: mtp,
+        expires_at: mtp + 30 * 24 * 3600,
+        rdts: Ok(()),
+    }
+}
+
+impl FakeConnect {
+    fn new(coins: &[crate::services::foreign_scan::DiscoveredCoin]) -> Arc<Self> {
+        Arc::new(Self {
+            context: Context {
+                generation: 0,
+                account: "synthetic-account".into(),
+                provider: "synthetic-provider".into(),
+            },
+            window: Mutex::new(Ok(window())),
+            feerate: Some(3),
+            used: Mutex::new(HashMap::new()),
+            chains: Chains::of(coins),
+            calls: Arc::default(),
+            submit: Mutex::new(SubmitPlan::Accept),
+        })
+    }
+}
+
+#[async_trait]
+impl SplitConnect for FakeConnect {
+    fn context(&self) -> Context {
+        self.context.clone()
+    }
+    fn evidence(&self) -> &dyn SplitEvidenceSource {
+        &self.chains
+    }
+    async fn window(&self) -> Result<ForkWindow, String> {
+        self.window.lock().unwrap().clone()
+    }
+    async fn bitcoin_feerate(&self) -> Option<u64> {
+        self.feerate
+    }
+    async fn address_used(&self, chain: ChainId, address: &str) -> Result<bool, FailureKind> {
+        self.calls
+            .address_reads
+            .lock()
+            .unwrap()
+            .push((chain, address.to_owned()));
+        self.used
+            .lock()
+            .unwrap()
+            .get(&chain)
+            .copied()
+            .unwrap_or(Ok(false))
+    }
+    fn open(&self, request: OpenRequest) -> Result<Box<dyn Step1Driver>, claim_coordinator::Error> {
+        self.calls.opened.lock().unwrap().push(request.resume);
+        let context = self.context.clone();
+        let mut controller = if request.resume {
+            let identity = crate::services::claim_workflow::split_identity(
+                request.target_cube.clone(),
+                request.construction.source().digest(),
+            );
+            Controller::reopen(&request.directory, &identity, context.clone())?
+        } else {
+            crate::services::claim_workflow::prepare_directory(&request.directory)?;
+            Controller::create_split(
+                &request.directory,
+                request.target_cube.clone(),
+                &request.construction,
+                &request.verified,
+                request.fork_height,
+                context.clone(),
+            )?
+        };
+        controller.revalidate_split_construction(
+            &context,
+            &request.construction,
+            request.fork_height,
+        )?;
+        controller.bind_recovered_split_transaction(&context, &request.verified)?;
+        Ok(Box::new(FakeDriver {
+            phase: controller.phase(),
+            _controller: controller,
+            calls: self.calls.clone(),
+            plan: self.submit.lock().unwrap().clone(),
+            reviewed: false,
+            txid: request.verified.transaction().compute_txid(),
+        }))
+    }
+}
+
+struct FakeDriver {
+    /// Holds the journal lock like the coordinator does.
+    _controller: Controller,
+    phase: Phase,
+    calls: Arc<Calls>,
+    plan: SubmitPlan,
+    reviewed: bool,
+    txid: Txid,
+}
+
+#[async_trait]
+impl Step1Driver for FakeDriver {
+    fn phase(&self) -> Phase {
+        self.phase
+    }
+    fn revoke_handle(&self) -> RevokeHandle {
+        let calls = self.calls.clone();
+        Arc::new(move || calls.revoked.store(true, Ordering::SeqCst))
+    }
+    async fn review(&mut self, _: &Context) -> Result<ReviewView, claim_coordinator::Error> {
+        self.calls.reviews.fetch_add(1, Ordering::SeqCst);
+        self.reviewed = true;
+        Ok(ReviewView {
+            txid: self.txid,
+            fee_sats: 1_000,
+            vsize: 300,
+            route: claim_coordinator::SubmissionRoute::Connect,
+            bitcoin_tip: u64::from(fixture::BITCOIN_TIP_HEIGHT),
+            fork_tip: u64::from(fixture::BTCB2_TIP_HEIGHT),
+            rdts_left: Some(30 * 24 * 3600),
+        })
+    }
+    async fn submit(&mut self, _: &Context) -> Result<Outcome, claim_coordinator::Error> {
+        self.calls.submits.fetch_add(1, Ordering::SeqCst);
+        if !std::mem::take(&mut self.reviewed) {
+            return Err(claim_coordinator::Error::InvalidReview);
+        }
+        match &self.plan {
+            SubmitPlan::Accept => {
+                self.phase = Phase::BroadcastUncertain;
+                Ok(Outcome::Uncertain {
+                    txid: self.txid,
+                    wtxid: coincube_core::miniscript::bitcoin::Wtxid::all_zeros(),
+                })
+            }
+            SubmitPlan::Refuse(reason) => Err(claim_coordinator::Error::PolicyRejected(
+                NodePolicy::Rejected {
+                    reason: reason.clone(),
+                },
+            )),
+        }
+    }
+    async fn reconcile(&mut self, _: &Context) -> Result<Status, claim_coordinator::Error> {
+        self.calls.reconciles.fetch_add(1, Ordering::SeqCst);
+        Ok(Status::Unchecked)
+    }
+}
+
+/// A scanned foreign wallet handed over from Home.
+struct Scan {
+    wallet: fixture::Wallet,
+    coins: Vec<crate::services::foreign_scan::DiscoveredCoin>,
+}
+
+impl Scan {
+    fn new(shape: Shape) -> Self {
+        let wallet = fixture::wallet(shape);
+        let coins = fixture::shared_coins(&wallet);
+        Self { wallet, coins }
+    }
+    fn intent_with(&self, edit: impl Fn(ScanReport) -> ScanReport) -> SplitIntent {
+        let btcb2 = edit(fixture::report(ChainId::BitcoinBlake2b, self.coins.clone()));
+        let bitcoin = edit(fixture::report(ChainId::Bitcoin, self.coins.clone()));
+        let inventory = SplitInventory::join(&btcb2, &bitcoin, fixture::GENERATION, true).unwrap();
+        let mut client = CoincubeClient::new();
+        client.set_token("synthetic-test-token");
+        SplitIntent::new(
+            TARGET.into(),
+            ChainId::BitcoinBlake2b,
+            0,
+            &client,
+            TwoChainScan {
+                btcb2,
+                bitcoin,
+                inventory,
+            },
+            self.wallet.external.clone(),
+            Some(self.wallet.internal.clone()),
+        )
+        .unwrap()
+    }
+    fn intent(&self) -> SplitIntent {
+        self.intent_with(|report| report)
+    }
+}
+
+/// Run a task the panel returned; collect the Split events it produced.
+async fn events(task: Task<Message>) -> Vec<SplitEvent> {
+    let mut out = Vec::new();
+    let Some(mut stream) = iced_runtime::task::into_stream(task) else {
+        return out;
+    };
+    while let Some(action) = stream.next().await {
+        if let iced_runtime::Action::Output(Message::Split(event)) = action {
+            out.push(*event);
+        }
+    }
+    out
+}
+
+/// Apply every event and the tasks they start until the panel settles.
+async fn drive(panel: &mut SplitPanel, task: Task<Message>) {
+    let mut pending = vec![task];
+    while let Some(task) = pending.pop() {
+        for event in events(task).await {
+            pending.push(panel.apply(event));
+        }
+    }
+}
+
+fn sign_to_file(
+    panel: &SplitPanel,
+    signers: &[coincube_core::miniscript::bitcoin::bip32::Xpriv],
+    dir: &Path,
+    name: &str,
+) -> PathBuf {
+    let secp = Secp256k1::new();
+    let mut psbt = panel.construction().unwrap().psbt().clone();
+    for signer in signers {
+        psbt.sign(signer, &secp).unwrap();
+    }
+    let path = dir.join(name);
+    std::fs::write(&path, split_psbt_file::encode(&psbt, Encoding::Base64)).unwrap();
+    path
+}
+
+use std::path::Path;
+
+/// Fresh flow up to a recorded, unsubmitted step 1.
+async fn recorded(scan: &Scan, connect: &Arc<FakeConnect>, temp: &Temp) -> SplitPanel {
+    let mut panel = SplitPanel::start(TARGET.into(), temp.root(), scan.intent());
+    panel.set_connect(Some(connect.clone() as Arc<dyn SplitConnect>));
+    let task = panel.begin();
+    drive(&mut panel, task).await;
+    assert_eq!(panel.stage(), &Stage::Sign, "{:?}", panel.stage());
+
+    // Export the unsigned PSBT file; it is exactly the construction.
+    let exported = temp.0.join("unsigned.psbt");
+    let task = panel.export_to(exported.clone(), Encoding::Binary);
+    drive(&mut panel, task).await;
+    assert_eq!(panel.exported(), Some(&exported));
+    assert_eq!(
+        split_psbt_file::load(&exported).unwrap(),
+        *panel.construction().unwrap().psbt()
+    );
+
+    // Each cosigner returns a file; import and combine until satisfied.
+    let files: Vec<PathBuf> = scan
+        .wallet
+        .signers
+        .iter()
+        .enumerate()
+        .map(|(i, signer)| sign_to_file(&panel, &[*signer], &temp.0, &format!("signed-{i}.txt")))
+        .collect();
+    let (first, rest) = files.split_first().unwrap();
+    let task = panel.import_from(vec![first.clone()]);
+    drive(&mut panel, task).await;
+    if rest.is_empty() {
+        assert_eq!(panel.stage(), &Stage::Ready);
+    } else {
+        assert_eq!(panel.stage(), &Stage::Sign);
+        assert!(panel.notice().unwrap().contains("More are needed"));
+        assert!(panel.signed().is_none());
+        let task = panel.import_from(rest.to_vec());
+        drive(&mut panel, task).await;
+    }
+    assert_eq!(panel.stage(), &Stage::Ready, "{:?}", panel.notice());
+    assert_eq!(panel.phase(), Some(Phase::Intent));
+    assert!(panel.is_bound());
+    panel
+}
+
+/// build → export → import → finalize → record → review → submit, for a
+/// single-key wallet whose signed txid differs (pkh) and a 2-of-3 multisig
+/// signed by two separate files.
+#[tokio::test(flavor = "multi_thread")]
+async fn split_panel_flow_builds_exports_imports_records_reviews_and_submits() {
+    for shape in [Shape::Pkh, Shape::WshSortedMulti] {
+        let scan = Scan::new(shape);
+        let connect = FakeConnect::new(&scan.coins);
+        let temp = Temp::new();
+        let mut panel = recorded(&scan, &connect, &temp).await;
+
+        // Preconditions: the destination is the proven fresh index, read
+        // afresh on both chains.
+        let prepared = panel.prepared().unwrap();
+        let intent = scan.intent();
+        assert_eq!(
+            crate::services::foreign_split_inventory::FreshIndex::Proven(prepared.destination),
+            intent.inventory.fresh_receive()
+        );
+        let reads = connect.calls.address_reads.lock().unwrap().clone();
+        assert_eq!(
+            reads,
+            vec![
+                (ChainId::Bitcoin, prepared.address.clone()),
+                (ChainId::BitcoinBlake2b, prepared.address.clone())
+            ]
+        );
+        // Built against the anchor's fork height and marker, with locktime =
+        // the Bitcoin tip height.
+        let construction = panel.construction().unwrap();
+        assert_eq!(construction.fork_height(), fixture::FORK);
+        assert_eq!(
+            construction.fork_marker(),
+            fixture::block_hash(fixture::FORK)
+        );
+        assert_eq!(
+            construction.psbt().unsigned_tx.lock_time,
+            LockTime::from_height(fixture::BITCOIN_TIP_HEIGHT).unwrap()
+        );
+        assert_eq!(construction.destination(), prepared.destination);
+
+        // The tracked txid is the signed one.
+        let signed = panel.signed().unwrap().clone();
+        assert_eq!(panel.tracked_txid(), Some(signed.compute_txid()));
+        assert_eq!(
+            signed.compute_txid() == construction.txid(),
+            shape == Shape::WshSortedMulti
+        );
+        // The journal is in the Split directory under the source digest.
+        let digest = construction.source().digest();
+        assert_eq!(
+            panel.journal_directory(),
+            Some(&temp.root().join(digest.to_string()))
+        );
+        assert_eq!(*connect.calls.opened.lock().unwrap(), vec![false]);
+
+        // Review only on request, then submit exactly it.
+        assert_eq!(connect.calls.reviews.load(Ordering::SeqCst), 0);
+        let task = panel.update(SplitMessage::Review);
+        drive(&mut panel, task).await;
+        assert_eq!(panel.stage(), &Stage::Review);
+        assert_eq!(panel.review().unwrap().txid, signed.compute_txid());
+        let task = panel.update(SplitMessage::Confirm);
+        drive(&mut panel, task).await;
+        assert_eq!(connect.calls.submits.load(Ordering::SeqCst), 1);
+        assert_eq!(panel.stage(), &Stage::Tracking);
+        assert!(matches!(panel.outcome(), Some(Outcome::Uncertain { .. })));
+        // Tracking never re-submits.
+        let task = panel.update(SplitMessage::Confirm);
+        drive(&mut panel, task).await;
+        let task = panel.update(SplitMessage::Review);
+        drive(&mut panel, task).await;
+        assert_eq!(connect.calls.submits.load(Ordering::SeqCst), 1);
+        assert_eq!(connect.calls.reviews.load(Ordering::SeqCst), 1);
+        let task = panel.update(SplitMessage::Reconcile);
+        drive(&mut panel, task).await;
+        assert_eq!(connect.calls.reconciles.load(Ordering::SeqCst), 1);
+        assert_eq!(panel.stage(), &Stage::Tracking);
+    }
+}
+
+/// A refused submission (preflight) keeps the signed step 1, shows the
+/// reason and can save it.
+#[tokio::test(flavor = "multi_thread")]
+async fn split_preflight_refusal_keeps_the_signed_transaction_for_export() {
+    let scan = Scan::new(Shape::Wpkh);
+    let connect = FakeConnect::new(&scan.coins);
+    *connect.submit.lock().unwrap() = SubmitPlan::Refuse("min relay fee not met".into());
+    let temp = Temp::new();
+    let mut panel = recorded(&scan, &connect, &temp).await;
+    let signed = panel.signed().unwrap().clone();
+    let task = panel.update(SplitMessage::Review);
+    drive(&mut panel, task).await;
+    let task = panel.update(SplitMessage::Confirm);
+    drive(&mut panel, task).await;
+    assert_eq!(panel.stage(), &Stage::Ready);
+    assert!(panel.notice().unwrap().contains("min relay fee not met"));
+    assert_eq!(panel.signed(), Some(&signed));
+    let path = temp.0.join("signed.txt");
+    let task = panel.export_signed_to(path.clone());
+    drive(&mut panel, task).await;
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        serialize_hex(&signed)
+    );
+
+    // The destination is proven unused again at every review: a used one
+    // refuses before the coordinator is asked, and the signed step 1 stays.
+    let reviews = connect.calls.reviews.load(Ordering::SeqCst);
+    connect
+        .used
+        .lock()
+        .unwrap()
+        .insert(ChainId::Bitcoin, Ok(true));
+    let task = panel.update(SplitMessage::Review);
+    drive(&mut panel, task).await;
+    assert_eq!(connect.calls.reviews.load(Ordering::SeqCst), reviews);
+    assert_eq!(panel.stage(), &Stage::Ready);
+    assert_eq!(panel.notice(), Some(step1::DESTINATION_USED));
+    assert_eq!(panel.signed(), Some(&signed));
+    let destination = step1::construction_destination(panel.construction().unwrap()).unwrap();
+    assert_eq!(
+        connect.calls.address_reads.lock().unwrap().last(),
+        Some(&(ChainId::Bitcoin, destination))
+    );
+}
+
+/// Every precondition refuses before anything is built or recorded.
+#[tokio::test(flavor = "multi_thread")]
+async fn split_preconditions_refuse_before_building() {
+    let scan = Scan::new(Shape::ShWpkh);
+    type Case<'a> = (
+        &'a str,
+        Box<dyn Fn(&FakeConnect)>,
+        Option<SplitIntent>,
+        &'a str,
+    );
+    let cases: Vec<Case> = vec![
+        (
+            "rdts inside the 36 h margin",
+            Box::new(|c: &FakeConnect| {
+                let mut w = window();
+                w.expires_at = w.median_time_past + 35 * 3600;
+                w.rdts = Err(Assessment::ExpiryMargin);
+                *c.window.lock().unwrap() = Ok(w);
+            }),
+            None,
+            "expires too soon",
+        ),
+        (
+            "stale anchor",
+            Box::new(|c: &FakeConnect| {
+                let mut w = window();
+                w.fork_height += 1;
+                *c.window.lock().unwrap() = Ok(w);
+            }),
+            None,
+            step1::STALE_ANCHOR,
+        ),
+        (
+            "destination used on BTCB2",
+            Box::new(|c: &FakeConnect| {
+                c.used
+                    .lock()
+                    .unwrap()
+                    .insert(ChainId::BitcoinBlake2b, Ok(true));
+            }),
+            None,
+            step1::DESTINATION_USED,
+        ),
+        (
+            "destination freshness unreadable",
+            Box::new(|c: &FakeConnect| {
+                c.used
+                    .lock()
+                    .unwrap()
+                    .insert(ChainId::Bitcoin, Err(FailureKind::Http(500)));
+            }),
+            None,
+            "couldn't prove the fresh address unused",
+        ),
+        (
+            "unproven fresh index (P7/D8)",
+            Box::new(|_: &FakeConnect| {}),
+            Some(scan.intent_with(|report| report.with_coverage(fixture::walk(4, Some(3))))),
+            step1::WATCH_ONLY_DEFERRED,
+        ),
+    ];
+    for (name, edit, intent, copy) in cases {
+        let connect = FakeConnect::new(&scan.coins);
+        edit(&connect);
+        let temp = Temp::new();
+        let mut panel = SplitPanel::start(
+            TARGET.into(),
+            temp.root(),
+            intent.unwrap_or_else(|| scan.intent()),
+        );
+        panel.set_connect(Some(connect.clone() as Arc<dyn SplitConnect>));
+        let task = panel.begin();
+        drive(&mut panel, task).await;
+        match panel.stage() {
+            Stage::Refused(refusal) => {
+                assert!(refusal.reason.contains(copy), "{}: {:?}", name, refusal)
+            }
+            other => panic!("{}: {:?}", name, other),
+        }
+        assert!(panel.construction().is_none(), "{}", name);
+        assert!(connect.calls.opened.lock().unwrap().is_empty(), "{}", name);
+        assert!(!temp.root().exists(), "{}", name);
+    }
+}
+
+/// Sign-out or cancel revokes the coordinator synchronously and drops any
+/// in-flight result; the recorded split stays on disk.
+#[tokio::test(flavor = "multi_thread")]
+async fn split_session_end_revokes_and_drops_in_flight_results() {
+    let scan = Scan::new(Shape::Wpkh);
+    let connect = FakeConnect::new(&scan.coins);
+    let temp = Temp::new();
+    let mut panel = recorded(&scan, &connect, &temp).await;
+    let review = panel.update(SplitMessage::Review);
+    panel.revoke();
+    assert!(connect.calls.revoked.load(Ordering::SeqCst));
+    assert!(!panel.is_bound());
+    assert_eq!(panel.stage(), &Stage::NeedsSession);
+    // The review started before the revocation lands and is dropped.
+    drive(&mut panel, review).await;
+    assert!(panel.review().is_none());
+    assert!(!panel.is_bound());
+    assert_eq!(panel.stage(), &Stage::NeedsSession);
+    // Clearing the session keeps it that way; the journal is untouched.
+    panel.set_connect(None);
+    assert_eq!(step1::discover(&temp.root()).len(), 1);
+    let task = panel.update(SplitMessage::Confirm);
+    drive(&mut panel, task).await;
+    assert_eq!(connect.calls.submits.load(Ordering::SeqCst), 0);
+
+    // Cancel (Close) on a bound panel revokes and hides; a new session does
+    // not wake a hidden panel.
+    let connect = FakeConnect::new(&scan.coins);
+    drop(panel);
+    let mut panel = resumed(&connect, &temp).await;
+    assert!(panel.is_bound());
+    let task = panel.update(SplitMessage::Close);
+    drive(&mut panel, task).await;
+    assert!(connect.calls.revoked.load(Ordering::SeqCst));
+    assert!(panel.is_hidden() && !panel.is_bound());
+    let task = panel.begin();
+    drive(&mut panel, task).await;
+    assert!(!panel.is_bound());
+    assert_eq!(step1::discover(&temp.root()).len(), 1);
+}
+
+fn rewrite_journal(directory: &Path, edit: impl FnOnce(&mut serde_json::Value)) {
+    let path = directory.join("intent.json");
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    edit(&mut value);
+    std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+}
+
+async fn resumed(connect: &Arc<FakeConnect>, temp: &Temp) -> SplitPanel {
+    let found = step1::discover(&temp.root());
+    assert_eq!(found.len(), 1);
+    let (digest, directory) = found.into_iter().next().unwrap();
+    let mut panel = SplitPanel::resume(TARGET.into(), temp.root(), digest, directory);
+    panel.set_connect(Some(connect.clone() as Arc<dyn SplitConnect>));
+    let task = panel.begin();
+    drive(&mut panel, task).await;
+    panel
+}
+
+/// Restart at Intent and at BroadcastUncertain: the recorded step 1 is
+/// rebuilt from freshly authenticated coins and resumed with exactly the
+/// recorded signed bytes. Nothing is reviewed, re-signed or submitted
+/// automatically; a recorded submission is only reconciled.
+#[tokio::test(flavor = "multi_thread")]
+async fn split_restart_rebuilds_the_exact_recorded_bytes_without_retrying() {
+    for shape in [Shape::Pkh, Shape::WshMulti] {
+        let scan = Scan::new(shape);
+        let connect = FakeConnect::new(&scan.coins);
+        let temp = Temp::new();
+        let first = recorded(&scan, &connect, &temp).await;
+        let signed = first.signed().unwrap().clone();
+        let unsigned = first.construction().unwrap().psbt().clone();
+        drop(first);
+
+        // At Intent.
+        let panel = resumed(&connect, &temp).await;
+        assert_eq!(panel.stage(), &Stage::Ready, "{:?}", panel.stage());
+        assert_eq!(panel.signed(), Some(&signed));
+        assert_eq!(panel.construction().unwrap().psbt(), &unsigned);
+        assert_eq!(panel.phase(), Some(Phase::Intent));
+        assert_eq!(*connect.calls.opened.lock().unwrap(), vec![false, true]);
+        assert_eq!(connect.calls.reviews.load(Ordering::SeqCst), 0);
+        assert_eq!(connect.calls.submits.load(Ordering::SeqCst), 0);
+        // Abandon is offered, but confirmed only after a chain check.
+        assert!(panel.can_check_abandon() && !panel.can_confirm_abandon());
+        drop(panel);
+
+        // At BroadcastUncertain.
+        let directory = step1::discover(&temp.root()).remove(0).1;
+        rewrite_journal(&directory, |intent| {
+            intent["phase"] = "BroadcastUncertain".into();
+            intent["signed_txid"] = signed.compute_txid().to_string().into();
+            intent["bitcoin_attempts"] =
+                serde_json::json!([{ "wtxid": signed.compute_wtxid().to_string() }]);
+        });
+        let mut panel = resumed(&connect, &temp).await;
+        assert_eq!(panel.stage(), &Stage::Tracking, "{:?}", panel.stage());
+        assert_eq!(panel.signed(), Some(&signed));
+        assert_eq!(panel.phase(), Some(Phase::BroadcastUncertain));
+        assert!(!panel.can_check_abandon());
+        for message in [
+            SplitMessage::Review,
+            SplitMessage::Confirm,
+            SplitMessage::CheckAbandon,
+        ] {
+            let task = panel.update(message);
+            drive(&mut panel, task).await;
+        }
+        assert_eq!(connect.calls.reviews.load(Ordering::SeqCst), 0);
+        assert_eq!(connect.calls.submits.load(Ordering::SeqCst), 0);
+        assert_eq!(panel.stage(), &Stage::Tracking);
+        assert_eq!(step1::discover(&temp.root()).len(), 1);
+    }
+}
+
+/// Restart refuses, keeping the journal, when the recorded step 1 can't be
+/// rebuilt: a coin spent on BTCB2, a moved anchor, or an indexer read error
+/// (worded as a Connect limit, never as "spent").
+#[tokio::test(flavor = "multi_thread")]
+async fn split_restart_refuses_without_fresh_evidence() {
+    let scan = Scan::new(Shape::Wpkh);
+    let temp = Temp::new();
+    {
+        let connect = FakeConnect::new(&scan.coins);
+        recorded(&scan, &connect, &temp).await;
+    }
+    let connect = FakeConnect::new(&scan.coins);
+    connect
+        .chains
+        .spend_on(ChainId::BitcoinBlake2b, scan.coins[0].outpoint);
+    let panel = resumed(&connect, &temp).await;
+    assert!(
+        matches!(panel.stage(), Stage::Refused(r) if r.reason.contains("no longer unspent on Bitcoin Blake2b"))
+    );
+    assert!(!panel.is_bound());
+
+    let connect = FakeConnect::new(&scan.coins);
+    let mut moved = window();
+    moved.fork_height -= 1;
+    *connect.window.lock().unwrap() = Ok(moved);
+    let panel = resumed(&connect, &temp).await;
+    assert!(matches!(panel.stage(), Stage::Refused(r) if r.reason == step1::STALE_ANCHOR));
+
+    let refusal = step1::evidence_refusal(crate::services::split_evidence::EvidenceError {
+        outpoint: None,
+        failure: crate::services::split_evidence::EvidenceFailure::Read(
+            ChainId::BitcoinBlake2b,
+            FailureKind::Http(400),
+        ),
+    });
+    assert!(refusal.retry);
+    assert!(refusal.reason.contains("not a sign that a coin was spent"));
+    assert!(refusal.reason.contains("500"));
+    assert_eq!(step1::discover(&temp.root()).len(), 1);
+}
+
+/// Abandon needs a passing chain check first; a spent coin (for example an
+/// out-of-band broadcast) or a seen step 1 refuses it, and the journal stays.
+#[tokio::test(flavor = "multi_thread")]
+async fn split_abandon_only_after_a_chain_check() {
+    let scan = Scan::new(Shape::Wpkh);
+    let temp = Temp::new();
+    let connect = FakeConnect::new(&scan.coins);
+    let mut panel = recorded(&scan, &connect, &temp).await;
+    assert!(panel.can_check_abandon() && !panel.can_confirm_abandon());
+    panel.revoke();
+    drop(panel);
+
+    let mut panel = resumed(&connect, &temp).await;
+    // Confirming without a check is ignored.
+    let task = panel.update(SplitMessage::ConfirmAbandon);
+    drive(&mut panel, task).await;
+    assert_eq!(step1::discover(&temp.root()).len(), 1);
+
+    // A coin spent on Bitcoin refuses.
+    connect
+        .chains
+        .spend_on(ChainId::Bitcoin, scan.coins[1].outpoint);
+    let task = panel.update(SplitMessage::CheckAbandon);
+    drive(&mut panel, task).await;
+    assert!(!panel.can_confirm_abandon());
+    assert!(panel.notice().unwrap().contains("spent on Bitcoin"));
+    assert_eq!(panel.stage(), &Stage::Ready);
+
+    // The step 1 itself seen on Bitcoin refuses.
+    let connect = FakeConnect::new(&scan.coins);
+    let tracked = panel.tracked_txid().unwrap();
+    connect.chains.status.lock().unwrap().insert(
+        (ChainId::Bitcoin, tracked),
+        TransactionObservation::Unconfirmed { txid: tracked },
+    );
+    drop(panel);
+    let mut panel = resumed(&connect, &temp).await;
+    let task = panel.update(SplitMessage::CheckAbandon);
+    drive(&mut panel, task).await;
+    assert!(!panel.can_confirm_abandon());
+    assert!(panel.notice().unwrap().contains("on Bitcoin"));
+
+    // A clean chain: check, then abandon deletes the journal.
+    let connect = FakeConnect::new(&scan.coins);
+    drop(panel);
+    let mut panel = resumed(&connect, &temp).await;
+    let task = panel.update(SplitMessage::CheckAbandon);
+    drive(&mut panel, task).await;
+    assert!(panel.can_confirm_abandon(), "{:?}", panel.notice());
+    let task = panel.update(SplitMessage::ConfirmAbandon);
+    drive(&mut panel, task).await;
+    assert_eq!(panel.stage(), &Stage::Abandoned, "{:?}", panel.stage());
+    assert!(connect.calls.revoked.load(Ordering::SeqCst));
+    assert!(step1::discover(&temp.root()).is_empty());
+}
+
+/// The datadir holds public data only: no seed, xpriv or private key, and the
+/// journal is owner-only (file 0600, directory 0700).
+#[tokio::test(flavor = "multi_thread")]
+async fn split_journal_is_private_and_holds_no_secrets() {
+    let scan = Scan::new(Shape::WshSortedMulti);
+    let connect = FakeConnect::new(&scan.coins);
+    let temp = Temp::new();
+    let panel = recorded(&scan, &connect, &temp).await;
+    let directory = panel.journal_directory().unwrap().clone();
+    let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&directory.join("intent.json")), 0o600);
+    assert_eq!(mode(&directory), 0o700);
+    assert_eq!(mode(&temp.root()), 0o700);
+
+    let secp = Secp256k1::new();
+    let mut secrets: Vec<String> = Vec::new();
+    for signer in &scan.wallet.signers {
+        secrets.push(signer.to_string());
+        secrets.push(hex::encode(signer.private_key.secret_bytes()));
+        secrets.push(signer.private_key.display_secret().to_string());
+        let _ = &secp;
+    }
+    for seed in [1u8, 2, 3] {
+        secrets.push(hex::encode([seed; 32]));
+    }
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else {
+                out.push(path);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(&temp.root(), &mut files);
+    assert!(files.iter().any(|f| f.ends_with("intent.json")));
+    for file in files {
+        let text = String::from_utf8_lossy(&std::fs::read(&file).unwrap()).to_string();
+        for marker in ["xprv", "tprv"] {
+            assert!(!text.contains(marker), "{}", file.display());
+        }
+        for secret in &secrets {
+            assert!(!text.contains(secret.as_str()), "{}", file.display());
+        }
+    }
+}
+
+/// Journal discovery: only a real digest-named directory holding a regular
+/// intent.json; nothing else (including a Claim pairing's `claim/` layout or
+/// a symlink) is a Split journal.
+#[test]
+fn split_journal_discovery_finds_only_split_journals() {
+    let temp = Temp::new();
+    let root = temp.root();
+    assert!(step1::discover(&root).is_empty());
+    std::fs::create_dir_all(&root).unwrap();
+    let digest = sha256::Hash::hash(b"source");
+    let real = step1::journal_directory(&root, digest);
+    std::fs::create_dir(&real).unwrap();
+    assert!(step1::discover(&root).is_empty());
+    std::fs::write(real.join("intent.json"), b"{}").unwrap();
+    // Not a digest, a symlinked digest directory, an uppercase digest name.
+    let claim = root.join("claim");
+    std::fs::create_dir(&claim).unwrap();
+    std::fs::write(claim.join("intent.json"), b"{}").unwrap();
+    let other = sha256::Hash::hash(b"other");
+    std::os::unix::fs::symlink(&real, step1::journal_directory(&root, other)).unwrap();
+    let upper = root.join(sha256::Hash::hash(b"upper").to_string().to_uppercase());
+    std::fs::create_dir(&upper).unwrap();
+    std::fs::write(upper.join("intent.json"), b"{}").unwrap();
+    assert_eq!(step1::discover(&root), vec![(digest, real)]);
+}
+
+/// D1: nothing in the GUI starts a split. `SplitPanel::start` is reached only
+/// from this module's tests; production constructs the panel only through
+/// `SplitPanel::resume` in `app/mod.rs`'s journal discovery; the panel's
+/// intents have no start; and the Home scan's review overlay still offers
+/// only its close action.
+#[test]
+fn split_panel_has_no_gui_entry_point() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    fn walk(dir: &Path, files: &mut Vec<(String, String)>, root: &Path) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                walk(&path, files, root);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                files.push((
+                    path.strip_prefix(root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .replace('\\', "/"),
+                    std::fs::read_to_string(&path).unwrap(),
+                ));
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(&root, &mut files, &root);
+    for (file, text) in &files {
+        let starts = text.matches("SplitPanel::start").count();
+        if !file.starts_with("app/state/vault/split/") {
+            assert_eq!(starts, 0, "{} starts a split", file);
+        }
+        let resumes =
+            text.matches("SplitPanel::resume").count() + text.matches("SplitPanel::{").count();
+        if !file.starts_with("app/state/vault/split/") {
+            match file.as_str() {
+                "app/mod.rs" => assert_eq!(resumes, 1, "{}", file),
+                _ => assert_eq!(resumes, 0, "{} constructs the Split panel", file),
+            }
+        }
+    }
+    let app = &files.iter().find(|(f, _)| f == "app/mod.rs").unwrap().1;
+    // The one construction is the journal discovery's resume.
+    let discovery = &app[app.find("fn discover_split_panel(").unwrap()..];
+    let discovery = &discovery[..discovery.find("\n}\n").unwrap()];
+    assert!(discovery.contains("step1::discover(&root)"));
+    assert!(discovery.contains("SplitPanel::resume("));
+    assert!(!app.contains("SplitPanel::start"));
+    // The review overlay's only action is its close.
+    let overlay = &app[app.find("fn split_review_overlay<").unwrap()..];
+    let overlay = &overlay[..overlay.find("\n}\n").unwrap()];
+    let presses: Vec<_> = overlay.match_indices(".on_press(").collect();
+    assert_eq!(presses.len(), 1);
+    assert!(overlay.contains(".on_press(view::Message::DismissSplitReview)"));
+    // No panel intent starts a split.
+    let state = &files
+        .iter()
+        .find(|(f, _)| f == "app/state/vault/split/mod.rs")
+        .unwrap()
+        .1;
+    let intents = &state[state.find("pub enum SplitMessage {").unwrap()..];
+    let intents = &intents[..intents.find("\n}\n").unwrap()];
+    assert!(!intents.to_lowercase().contains("start"));
+}
+
+/// The production Connect side: address freshness is a fresh, anonymous
+/// read on Connect's allowlisted path of each chain, and `open` records and
+/// resumes through the real Split coordinator (`Coordinator::create_split` /
+/// `resume_split`) without any network call.
+#[tokio::test(flavor = "multi_thread")]
+async fn split_production_connect_reads_freshness_and_opens_the_real_coordinator() {
+    use crate::services::split_test_connect::{serve_fresh, strict};
+    use httpmock::MockServer;
+    let server = MockServer::start();
+    let refused = strict(&server);
+    let mut client = CoincubeClient::new();
+    client.base_url = format!("{}/", server.base_url());
+    client.set_token("synthetic-test-token");
+    let (_sender, generation) = tokio::sync::watch::channel(0u64);
+    let connect = step1::ProductionConnect::new(
+        crate::app::state::vault::claim::ConnectSession {
+            client,
+            account: "synthetic-account".into(),
+        },
+        generation,
+    )
+    .unwrap();
+
+    let scan = Scan::new(Shape::Wpkh);
+    let intent = scan.intent();
+    let source =
+        crate::services::split_source::split_source(&intent.external, intent.internal.as_ref())
+            .unwrap();
+    let crate::services::foreign_split_inventory::FreshIndex::Proven(index) =
+        intent.inventory.fresh_receive()
+    else {
+        panic!("fixture has a fresh index");
+    };
+    let script = source
+        .external()
+        .at_derivation_index(index)
+        .unwrap()
+        .script_pubkey();
+    let address = Address::from_script(&script, Network::Bitcoin)
+        .unwrap()
+        .to_string();
+    let unused = r#"{"chain_stats":{"tx_count":0},"mempool_stats":{"tx_count":0}}"#;
+    let used = r#"{"chain_stats":{"tx_count":0},"mempool_stats":{"tx_count":1}}"#;
+    let path = format!("/address/{address}");
+    let bitcoin = serve_fresh(&server, "bitcoin", &path, unused);
+    let btcb2 = serve_fresh(&server, "bitcoin-blake2b", &path, used);
+    assert_eq!(
+        connect.address_used(ChainId::Bitcoin, &address).await,
+        Ok(false)
+    );
+    assert_eq!(
+        connect
+            .address_used(ChainId::BitcoinBlake2b, &address)
+            .await,
+        Ok(true)
+    );
+    bitcoin.assert_hits(1);
+    btcb2.assert_hits(1);
+    refused.assert_hits(0);
+
+    // Record, release, resume: the real coordinator over a real journal.
+    let construction = step1::build(&step1::Prepared {
+        source,
+        coins: intent.inventory.splittable_coins(),
+        destination: index,
+        address,
+        window: window(),
+        feerate_vb: 3,
+        bitcoin_tip_height: fixture::BITCOIN_TIP_HEIGHT,
+    })
+    .unwrap();
+    let verify = || {
+        let secp = Secp256k1::new();
+        let mut psbt = construction.psbt().clone();
+        for signer in &scan.wallet.signers {
+            psbt.sign(signer, &secp).unwrap();
+        }
+        match step1::import(&construction, &[psbt]).unwrap() {
+            step1::Imported::Complete(verified, _) => *verified,
+            step1::Imported::Partial => panic!("fully signed"),
+        }
+    };
+    let temp = Temp::new();
+    let directory = step1::journal_directory(&temp.root(), construction.source().digest());
+    let request = |resume| OpenRequest {
+        directory: directory.clone(),
+        target_cube: TARGET.into(),
+        construction: construction.clone(),
+        verified: verify(),
+        fork_height: fixture::FORK,
+        resume,
+    };
+    let driver = tokio::task::block_in_place(|| connect.open(request(false))).unwrap();
+    assert_eq!(driver.phase(), Phase::Intent);
+    let mode = std::fs::metadata(directory.join("intent.json"))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600);
+    // A second record of the same source refuses while one exists.
+    drop(driver);
+    assert!(tokio::task::block_in_place(|| connect.open(request(false))).is_err());
+    let driver = tokio::task::block_in_place(|| connect.open(request(true))).unwrap();
+    assert_eq!(driver.phase(), Phase::Intent);
+    refused.assert_hits(0);
+}
