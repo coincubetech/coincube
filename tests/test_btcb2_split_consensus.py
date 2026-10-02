@@ -380,7 +380,24 @@ def sign_and_finalize_step2(tool, wallet, request, built):
     native = wallet.shape in ("wpkh", "wsh_multi", "wsh_sortedmulti")
     assert (implicit["step2_txid"] == built["unsigned_txid"]) == native
     assert implicit["vsize"] <= built["maximum_signed_vbytes"], implicit
+    check_step2_recorded(tool, request, implicit["step2_raw"], implicit)
     return implicit
+
+
+def check_step2_recorded(tool, request, raw, finalized):
+    """Recorded signed bytes verify against the rebuilt construction
+    (`verify_split_step2_transaction`, the restart path); the same bytes with
+    a changed locktime do not."""
+    request = copy.deepcopy(request)
+    request["step2"].pop("signed", None)
+    request["step2"]["recorded_signed"] = raw
+    verified = run_bridge(tool, request)
+    assert verified["verified_txid"] == finalized["step2_txid"], verified
+    assert verified["verified_signatures_per_input"] == finalized["signatures_per_input"]
+    tampered = bytes.fromhex(raw)
+    locktime = struct.unpack("<I", tampered[-4:])[0]
+    request["step2"]["recorded_signed"] = (tampered[:-4] + struct.pack("<I", locktime - 1)).hex()
+    bridge_refuses(tool, request, "ConstructionChanged")
 
 
 @pytest.mark.parametrize("shape", SHAPES)
@@ -743,6 +760,8 @@ def test_split_step2_consensus(split_chains, shape, record_property):
     mined = b.rpc.getrawtransaction(step2_id, True, b.rpc.getbestblockhash())
     assert mined["confirmations"] == 1, mined
     assert [o["scriptPubKey"]["hex"] for o in mined["vout"]] == [target.hex()]
+    # The bytes BTCB2 mined verify as a recorded step 2 (restart path).
+    check_step2_recorded(tool, request, mined["hex"], finalized)
     for txid, vout in prevouts:
         assert b.rpc.gettxout(txid, vout, False) is None
     assert b.rpc.gettxout(step2_id, 0, False)["scriptPubKey"]["hex"] == target.hex()

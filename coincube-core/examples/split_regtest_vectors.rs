@@ -12,8 +12,8 @@ use coincube_core::{
     claim::BlockRef,
     foreign_split::{
         create_split_step1, create_split_step2, finalize_split_step1, finalize_split_step2,
-        reconstruct_split_step1, reconstruct_split_step2, SplitBranch, SplitCoin, SplitInputs,
-        SplitSource, SplitStep2Inputs,
+        reconstruct_split_step1, reconstruct_split_step2, verify_split_step2_transaction,
+        SplitBranch, SplitCoin, SplitInputs, SplitSource, SplitStep2Inputs,
     },
     miniscript::{
         bitcoin::{
@@ -84,6 +84,9 @@ struct Step2Request {
     signed: Option<String>,
     /// An unsigned step 2 to rebuild from the same observations.
     recorded: Option<String>,
+    /// A recorded signed step 2 (journal bytes) to verify against the rebuilt
+    /// construction, as a restart would.
+    recorded_signed: Option<String>,
 }
 
 fn required<T>(value: Option<T>, name: &str) -> Result<T, Box<dyn Error>> {
@@ -205,6 +208,12 @@ fn step2(
         result["construction_txid"] = json!(verified.construction_txid());
         result["vsize"] = json!(verified.vsize());
         result["signatures_per_input"] = json!(verified.signatures_per_input());
+    }
+    if let Some(recorded) = &step2.recorded_signed {
+        let recorded: Transaction = deserialize_hex(recorded)?;
+        let verified = verify_split_step2_transaction(&built, &recorded, &secp)?;
+        result["verified_txid"] = json!(verified.transaction().compute_txid());
+        result["verified_signatures_per_input"] = json!(verified.signatures_per_input());
     }
     Ok(result)
 }

@@ -126,7 +126,9 @@ the claimed outpoints to a fresh P2WSH target (P2TR for `wpkh`): accepted by the
 BTCB2 mempool within the construction's vsize estimate and mined there, and
 refused by Bitcoin's mempool (`missing-inputs`) and in a candidate block. The
 bridge refuses an unclaimed or missing coin, a foreign-wallet or non-Vault target,
-a future locktime, step 1's signatures and any hash type but `SIGHASH_ALL`. Its
+a future locktime, step 1's signatures and any hash type but `SIGHASH_ALL`; the
+signed bytes (and the bytes BTCB2 mined) verify as a recorded step 2, and a
+tampered copy does not. Its
 offline cases need only the bridge. The unified `ALL|UNIFIED` fallback (#568 B4b)
 is not built yet and is not covered.
 
