@@ -29,6 +29,7 @@
 //! split survives on disk and continues under the next session.
 
 pub mod step1;
+pub mod step2;
 
 use std::{fmt, path::PathBuf, sync::Arc};
 
@@ -1095,6 +1096,7 @@ async fn resume(
         fork_height,
         phase,
         claimed,
+        ..
     } = restored;
     let resumed = Box::new(Resumed {
         construction: construction.clone(),

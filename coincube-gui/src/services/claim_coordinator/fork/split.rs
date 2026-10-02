@@ -216,6 +216,12 @@ impl ForeignStep2Authorization {
     pub fn tracked_txid(&self) -> Txid {
         self.tracked_txid
     }
+    /// When this authorization's evidence lapses: the deadline of the check
+    /// that minted it. Display only (the replay label); [`Self::is_live`]
+    /// also needs the check, session and generation current.
+    pub fn not_after(&self) -> Instant {
+        self.not_after
+    }
     /// Spend the authorization on exactly the checked prevouts of the fork
     /// chain, under the checked generation, for the checked step-1 txid
     /// (#626: the tracked txid is bound at redemption). One use: the value is

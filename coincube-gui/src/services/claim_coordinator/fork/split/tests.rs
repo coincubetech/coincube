@@ -1056,7 +1056,27 @@ fn split_step2_gate_has_no_gui_caller() {
             let transport = ["src/daemon/mod.rs", "src/daemon/embedded.rs"]
                 .contains(&file.as_str())
                 && ident.starts_with("submit_verified_split_step2");
-            if text.contains(ident) && !transport {
+            // B3b-2b: the panel's step-2 layer wraps these and is itself
+            // uncalled (`app::state::vault::split::step2::tests::
+            // step2_panel_layer_has_no_caller_yet`).
+            let panel = file.starts_with("src/app/state/vault/split/step2")
+                && [
+                    "SplitPreparation",
+                    "SplitForkProduction",
+                    "ForeignStep2Authorization",
+                    "SplitCheckError",
+                    "SplitStep2Production",
+                    "SplitStep2Coordinator",
+                    "SplitStep2Reconciler",
+                    "TargetError",
+                    "Step2Error",
+                    "RESERVATION_BOUND",
+                    "reserve_target",
+                    "prove_target",
+                    "construct_step2",
+                ]
+                .contains(&ident);
+            if text.contains(ident) && !transport && !panel {
                 unexpected.push((file.clone(), ident));
             }
         }

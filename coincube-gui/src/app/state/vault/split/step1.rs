@@ -678,6 +678,9 @@ pub struct Restored {
     /// Each claimed prevout and the Bitcoin address it pays, for the
     /// pre-abandon chain check.
     pub claimed: Vec<(OutPoint, String)>,
+    /// The claimed coins as authenticated for this restore: step 2 is built
+    /// from them (#568 B3b-2b).
+    pub coins: Vec<SplitCoin>,
 }
 
 fn journal_refusal(error: claim_workflow::Error) -> Refusal {
@@ -847,6 +850,7 @@ pub async fn restore(
     )
     .await
     .map_err(evidence_refusal)?;
+    let coins = authenticated.coins.clone();
     let tip = u32::try_from(authenticated.bitcoin_tip.height)
         .map_err(|_| Refusal::final_("The Bitcoin tip height is out of range."))?;
     let fork_height = record.fork_height;
@@ -884,6 +888,7 @@ pub async fn restore(
         fork_height,
         phase,
         claimed: addresses,
+        coins,
     })
 }
 
