@@ -984,3 +984,36 @@ fn every_key_must_change_the_same_branch_step() {
         Err(Error::UnrelatedInternal)
     );
 }
+
+/// #614 G2: the window is pinned at 100 (the foreign scanner's per-branch
+/// range end) and reaches *below* each claimed coin's index. A coin at a high
+/// index with a target derived under it refuses at exactly `index - 100` and
+/// is admitted one index further down, so dropping the lower side of the
+/// window or narrowing it to 99 fails here.
+#[test]
+fn source_window_is_pinned_and_reaches_below_a_high_index_coin() {
+    assert_eq!(SOURCE_WINDOW, 100);
+    for shape in [Shape::WshSortedMulti, Shape::WshMulti] {
+        let wallet = wallet(shape);
+        let source = &wallet.source;
+        let coins = vec![coin(source, SplitBranch::External, 150, 100_000)];
+        let claimed = step1(source, &coins).claimed_prevouts();
+        let script = |branch, index| source.derive(branch, index).unwrap().script_pubkey();
+        let with = |target: &bitcoin::Script| create(&inputs(source, &coins, &claimed, target));
+        for branch in [SplitBranch::External, SplitBranch::Internal] {
+            for index in [150 - SOURCE_WINDOW, 149, 150, 150 + SOURCE_WINDOW] {
+                assert_eq!(
+                    with(&script(branch, index)).unwrap_err(),
+                    Error::InvalidTarget,
+                    "{:?} {:?} {}",
+                    shape,
+                    branch,
+                    index
+                );
+            }
+            // Just outside the window on both sides.
+            assert!(with(&script(branch, 150 - SOURCE_WINDOW - 1)).is_ok());
+            assert!(with(&script(branch, 150 + SOURCE_WINDOW + 1)).is_ok());
+        }
+    }
+}

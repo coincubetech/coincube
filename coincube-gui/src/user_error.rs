@@ -324,6 +324,7 @@ impl From<&Error> for UserError {
                         // Each guard returns before broadcast_tx:
                         SubmissionError::UnsupportedChain // Bitcoin-mainnet boundary.
                         | SubmissionError::DescriptorMismatch // Construction identity check.
+                        | SubmissionError::OutputMismatch // Split step-2 target check.
                         | SubmissionError::BackendUnavailable // Backend acquisition.
                         | SubmissionError::GateMismatch // Transaction-bound gate check.
                         | SubmissionError::Revoked // Revocation at gate entry.

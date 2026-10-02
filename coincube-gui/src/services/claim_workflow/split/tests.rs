@@ -1197,7 +1197,7 @@ fn v8_split_journal_is_refused_by_the_v7_reader() {
 /// glob still has to name the item somewhere.
 #[test]
 fn split_b0_journal_api_has_no_gui_callers() {
-    const ITEMS: [&str; 13] = [
+    const ITEMS: [&str; 18] = [
         "create_split",
         "revalidate_split_construction",
         "bind_recovered_split_transaction",
@@ -1212,6 +1212,12 @@ fn split_b0_journal_api_has_no_gui_callers() {
         "resume_split",
         "submit_verified_split_step1_to_connect",
         "for_split_step1",
+        // B3b: step-2 reservation and records.
+        "record_split_target",
+        "replace_used_split_target",
+        "prepare_split_step2",
+        "record_split_step2_broadcast_intent",
+        "recorded_split_step2",
     ];
     const OWN: [&str; 4] = [
         "src/services/claim_workflow/split.rs",
@@ -1272,19 +1278,28 @@ fn split_b0_journal_api_has_no_gui_callers() {
                             "bind_recovered_split_transaction",
                         ]
                         .contains(&ident);
-                    // B2: the dormant step-2 gate and its tests reopen a
-                    // submitted Split journal; no GUI caller reaches it
+                    // B2/B3b: the dormant step-2 gate and construction and
+                    // their tests reopen a submitted Split journal; no GUI
+                    // caller reaches them
                     // (`fork::split::tests::split_step2_gate_has_no_gui_caller`).
+                    // Only the tests create a journal (#626 guard nit).
+                    let gate_tests =
+                        file.starts_with("src/services/claim_coordinator/fork/split/tests");
                     let gate = file.starts_with("src/services/claim_coordinator/fork/split")
-                        && [
-                            "create_split",
+                        && ([
                             "SplitProduction",
                             "split_identity",
                             "recorded_split",
                             "revalidate_split_construction",
                             "bind_recovered_split_transaction",
+                            "record_split_target",
+                            "replace_used_split_target",
+                            "prepare_split_step2",
+                            "record_split_step2_broadcast_intent",
+                            "recorded_split_step2",
                         ]
-                        .contains(&ident);
+                        .contains(&ident)
+                            || (gate_tests && ident == "create_split"));
                     if ITEMS.contains(&ident)
                         && !OWN.contains(&file.as_str())
                         && !reexport
@@ -1301,4 +1316,257 @@ fn split_b0_journal_api_has_no_gui_callers() {
         }
     }
     assert!(unexpected.is_empty(), "{:?}", unexpected);
+}
+
+/// A P2WSH script of an unrelated wallet: a stand-in for the target Vault's
+/// receive address at `index`.
+fn target_script(index: u32) -> coincube_core::miniscript::bitcoin::ScriptBuf {
+    make_wallet(Shape::WshMulti, 20)
+        .source
+        .external()
+        .at_derivation_index(index)
+        .unwrap()
+        .script_pubkey()
+}
+/// The core step 2 of `wallet`'s claimed coins into `target`.
+fn step2(
+    wallet: &Wallet,
+    step1: &SplitStep1,
+    target: &coincube_core::miniscript::bitcoin::Script,
+    feerate: u64,
+) -> SplitStep2 {
+    let coins = [
+        coin(&wallet.source, SplitBranch::External, 0, 150_000),
+        coin(&wallet.source, SplitBranch::Internal, 1, 70_000),
+    ];
+    coincube_core::foreign_split::create_split_step2(
+        &coincube_core::foreign_split::SplitStep2Inputs {
+            chain: ChainId::BitcoinBlake2b,
+            source: &wallet.source,
+            coins: &coins,
+            fork_height: FORK,
+            claimed: &step1.claimed_prevouts(),
+            target,
+        },
+        feerate,
+        LockTime::from_height(100).unwrap(),
+        100,
+    )
+    .unwrap()
+}
+fn sign_step2(wallet: &Wallet, construction: &SplitStep2) -> VerifiedSplitStep2 {
+    let secp = Secp256k1::new();
+    let mut psbt = construction.psbt().clone();
+    for signer in wallet.signers.iter().take(2) {
+        psbt.sign(signer, &secp).unwrap();
+    }
+    let coins = [
+        coin(&wallet.source, SplitBranch::External, 0, 150_000),
+        coin(&wallet.source, SplitBranch::Internal, 1, 70_000),
+    ];
+    coincube_core::foreign_split::finalize_split_step2(
+        construction,
+        &coins,
+        &wallet.source,
+        &psbt,
+        &secp,
+    )
+    .unwrap()
+}
+
+/// B3b: the step-2 target is reserved only once step 1 is tracked, kept
+/// (same reservation again is a no-op, any other a conflict) and replaced
+/// only by a strictly higher index; the unsigned step 2 must spend exactly
+/// the claimed prevouts into it; the submission records the signed bytes
+/// and names *their* txid (P2SH-P2WPKH scriptSigs change it). Once a step 2
+/// is recorded, the target is fixed.
+#[test]
+fn split_step2_target_and_submission_records() {
+    let (wallet, step1, signed) = setup(Shape::ShWpkh);
+    let temp = Temp::new();
+    let mut c = create(&temp, &step1, &signed);
+    // Not before step 1 is tracked.
+    assert!(matches!(
+        c.record_split_target(&context(), 3, target_script(3)),
+        Err(Error::InvalidPlan)
+    ));
+    record(&mut c, &signed);
+    assert!(matches!(
+        c.record_split_target(&context(), 3, target_script(3)),
+        Err(Error::InvalidPlan)
+    ));
+    let tracked = signed.transaction().compute_txid();
+    assert_eq!(
+        refresh(
+            &mut c,
+            observation(tracked, Bitcoin::Confirmed { depth: 6 })
+        ),
+        Status::Observation(Assessment::ObservationsEligibleForPreflight)
+    );
+    c.record_split_target(&context(), 3, target_script(3))
+        .unwrap();
+    c.record_split_target(&context(), 3, target_script(3))
+        .unwrap();
+    for (index, script) in [(3, target_script(4)), (4, target_script(4))] {
+        assert!(matches!(
+            c.record_split_target(&context(), index, script),
+            Err(Error::Conflict)
+        ));
+    }
+    // Not a P2WSH/P2TR script.
+    assert!(c
+        .replace_used_split_target(
+            &context(),
+            3,
+            4,
+            signed.transaction().output[0].script_pubkey.clone()
+        )
+        .is_err());
+    for (used, index) in [(2, 5), (3, 3), (3, 2)] {
+        assert!(matches!(
+            c.replace_used_split_target(&context(), used, index, target_script(index)),
+            Err(Error::Conflict)
+        ));
+    }
+    c.replace_used_split_target(&context(), 3, 5, target_script(5))
+        .unwrap();
+    let recorded = c.recorded_split().unwrap().unwrap();
+    assert_eq!(recorded.target_index, Some(5));
+    assert_eq!(recorded.target_script, Some(target_script(5)));
+
+    // The unsigned step 2 needs a fresh assessment and the reserved target.
+    let elsewhere = step2(&wallet, &step1, &target_script(6), 2);
+    let construction = step2(&wallet, &step1, &target_script(5), 2);
+    refresh(
+        &mut c,
+        observation(tracked, Bitcoin::Confirmed { depth: 6 }),
+    );
+    assert!(matches!(
+        c.prepare_split_step2(&context(), &elsewhere, policy(), 10_000),
+        Err(Error::WrongIdentity)
+    ));
+    // That attempt consumed the fresh assessment.
+    assert!(matches!(
+        c.prepare_split_step2(&context(), &construction, policy(), 10_000),
+        Err(Error::Unchecked)
+    ));
+    refresh(
+        &mut c,
+        observation(tracked, Bitcoin::Confirmed { depth: 6 }),
+    );
+    c.prepare_split_step2(&context(), &construction, policy(), 10_000)
+        .unwrap();
+    assert_eq!(
+        c.recorded_fork_sweep(),
+        Some(&construction.psbt().unsigned_tx)
+    );
+    // Another construction (another fee) is refused; the same is a no-op.
+    refresh(
+        &mut c,
+        observation(tracked, Bitcoin::Confirmed { depth: 6 }),
+    );
+    assert!(matches!(
+        c.prepare_split_step2(
+            &context(),
+            &step2(&wallet, &step1, &target_script(5), 3),
+            policy(),
+            10_000
+        ),
+        Err(Error::Conflict)
+    ));
+    refresh(
+        &mut c,
+        observation(tracked, Bitcoin::Confirmed { depth: 6 }),
+    );
+    c.prepare_split_step2(&context(), &construction, policy(), 10_000)
+        .unwrap();
+    // The target is now fixed.
+    assert!(matches!(
+        c.replace_used_split_target(&context(), 5, 7, target_script(7)),
+        Err(Error::Conflict)
+    ));
+
+    // The submission intent names the signed bytes' own txid.
+    let verified = sign_step2(&wallet, &construction);
+    let signed2 = verified.transaction().clone();
+    assert_ne!(signed2.compute_txid(), construction.txid(), "sh(wpkh)");
+    assert!(matches!(
+        c.record_split_step2_broadcast_intent(&context(), &verified, policy(), 10_000),
+        Err(Error::Unchecked)
+    ));
+    refresh(
+        &mut c,
+        observation(tracked, Bitcoin::Confirmed { depth: 6 }),
+    );
+    c.record_split_step2_broadcast_intent(&context(), &verified, policy(), 10_000)
+        .unwrap();
+    let submission = c.recorded_fork_submission().unwrap();
+    assert_eq!(submission.txid(), signed2.compute_txid());
+    assert_eq!(submission.wtxid(), signed2.compute_wtxid());
+    assert_eq!(c.recorded_split_step2(), Some(&signed2));
+    // Never recorded twice.
+    refresh(
+        &mut c,
+        observation(tracked, Bitcoin::Confirmed { depth: 6 }),
+    );
+    assert!(matches!(
+        c.record_split_step2_broadcast_intent(&context(), &verified, policy(), 10_000),
+        Err(Error::Conflict)
+    ));
+    let base = c.intent.clone();
+    drop(c);
+    let c = reopen(&temp, &step1).unwrap();
+    assert_eq!(c.recorded_split_step2(), Some(&signed2));
+
+    // Validation of what a tampered journal could claim.
+    full_validate(&base).unwrap();
+    let check = |change: &dyn Fn(&mut Intent)| {
+        let mut next = base.clone();
+        change(&mut next);
+        full_validate(&next).err()
+    };
+    let unsigned_txid = construction.txid();
+    for (name, change) in [
+        (
+            "submission naming the unsigned txid",
+            Box::new(move |i: &mut Intent| {
+                i.fork_submission = Some(RecordedForkSubmission {
+                    txid: unsigned_txid,
+                    wtxid: i.fork_submission.unwrap().wtxid,
+                })
+            }) as Box<dyn Fn(&mut Intent)>,
+        ),
+        (
+            "signed step 2 without a submission",
+            Box::new(|i: &mut Intent| i.fork_submission = None),
+        ),
+        (
+            "submission without the signed step 2",
+            Box::new(|i: &mut Intent| i.split.as_mut().unwrap().step2_transaction = None),
+        ),
+        (
+            "signed step 2 of another sweep",
+            Box::new(|i: &mut Intent| {
+                let sweep = i.fork_sweep.as_mut().unwrap();
+                sweep.output[0].value = Amount::from_sat(sweep.output[0].value.to_sat() - 1);
+            }),
+        ),
+        (
+            "an unsigned step 2 recorded as signed",
+            Box::new(|i: &mut Intent| {
+                let record = i.split.as_mut().unwrap();
+                let tx = record.step2_transaction.as_mut().unwrap();
+                tx.input[0].script_sig = Default::default();
+                tx.input[0].witness.clear();
+            }),
+        ),
+        (
+            "a sweep to another target",
+            Box::new(|i: &mut Intent| {
+                i.split.as_mut().unwrap().target_script = Some(target_script(9))
+            }),
+        ),
+    ] {
+        assert!(check(&*change).is_some(), "{}", name);
+    }
 }

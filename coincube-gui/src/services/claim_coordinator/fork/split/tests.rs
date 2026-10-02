@@ -208,6 +208,14 @@ struct View {
     /// Applied once, at the first BTCB2 unspent read: between the gate's
     /// two collections.
     between: Option<Between>,
+    /// Addresses with history, per chain (step-2 target freshness).
+    used: Vec<(ChainId, String)>,
+    /// An address-history read fails.
+    address_fails: bool,
+    /// Address-history reads on this chain come back an hour old.
+    address_stale: Option<ChainId>,
+    /// Seconds added to the services' clock (`ObservationSource::now`).
+    clock_offset: i64,
 }
 impl View {
     /// Step 1 confirmed in `block` (hash 6) at height 100 with `depth`
@@ -227,6 +235,10 @@ impl View {
             unspent,
             unspent_fails: false,
             between: None,
+            used: Vec::new(),
+            address_fails: false,
+            address_stale: None,
+            clock_offset: 0,
         };
         view.set_depth(depth);
         view
@@ -245,7 +257,10 @@ struct Chains {
     view: Arc<Mutex<View>>,
     preflight: Arc<PreflightClient>,
     unspent_reads: Arc<AtomicUsize>,
+    address_reads: Arc<AtomicUsize>,
 }
+/// The Connect origin the synthetic services were admitted at.
+const ORIGIN: &str = "https://connect.example/";
 impl Chains {
     fn read<T>(chain: ChainId, value: T) -> Result<FreshRead<T>, FailureKind> {
         let mut headers = HeaderMap::new();
@@ -260,7 +275,7 @@ impl Chains {
 #[async_trait]
 impl ObservationSource for Chains {
     fn now(&self) -> i64 {
-        now()
+        now() + self.view.lock().unwrap().clock_offset
     }
     async fn anchor(&self, chain: ChainId) -> Result<NetworkAnchorStatus, FailureKind> {
         let expiry = self.view.lock().unwrap().rdts_expiry;
@@ -325,6 +340,28 @@ impl ObservationSource for Chains {
 impl SplitForkServices for Chains {
     fn source(&self) -> &dyn ObservationSource {
         self
+    }
+    fn origin(&self) -> &str {
+        ORIGIN
+    }
+    async fn address_used(
+        &self,
+        chain: ChainId,
+        address: &str,
+    ) -> Result<FreshRead<bool>, FailureKind> {
+        self.address_reads.fetch_add(1, Ordering::SeqCst);
+        let view = self.view.lock().unwrap();
+        if view.address_fails {
+            return Err(FailureKind::Http(503));
+        }
+        let used = view.used.contains(&(chain, address.to_owned()));
+        if view.address_stale == Some(chain) {
+            let mut headers = HeaderMap::new();
+            headers.insert("x-cache", "BYPASS".parse().unwrap());
+            headers.insert("cache-control", "no-store".parse().unwrap());
+            return FreshRead::from_response(chain, used, now() - 3_600, &headers);
+        }
+        Self::read(chain, used)
     }
     async fn btcb2_unspent(&self, _address: &str) -> Result<FreshRead<Vec<OutPoint>>, FailureKind> {
         self.unspent_reads.fetch_add(1, Ordering::SeqCst);
@@ -415,6 +452,7 @@ impl Harness {
                 .unwrap(),
             ),
             unspent_reads: Arc::new(AtomicUsize::new(0)),
+            address_reads: Arc::new(AtomicUsize::new(0)),
         };
         Self {
             temp,
@@ -503,7 +541,12 @@ async fn split_step2_needs_six_confirmations_of_the_tracked_txid() {
     // Nothing about step 2 is journaled by the check.
     assert!(journal.get("fork_sweep").is_none());
     assert!(token
-        .redeem(ChainId::BitcoinBlake2b, 7, &h.prevouts())
+        .redeem(
+            ChainId::BitcoinBlake2b,
+            7,
+            &h.prevouts(),
+            h.signed.compute_txid()
+        )
         .is_ok());
 }
 
@@ -715,42 +758,55 @@ async fn split_step2_token_expires_is_one_use_and_revoked() {
     let h = Harness::new(6).await;
     let mut preparation = h.prepare().unwrap();
     let prevouts = h.prevouts();
+    let tracked = h.signed.compute_txid();
+
+    // Bound to the checked tracked step-1 txid (#626): the unsigned step-1
+    // txid, or any other, does not redeem.
+    let token = preparation.check_signing(&context()).await.unwrap();
+    assert_ne!(h.step1.txid(), tracked);
+    assert_eq!(
+        token.redeem(ChainId::BitcoinBlake2b, 7, &prevouts, h.step1.txid()),
+        Err(RedeemError::Mismatch)
+    );
 
     // Bound to the checked prevouts, chain and generation. Each redeem
     // consumes the token, so every case takes a fresh one.
     let token = preparation.check_signing(&context()).await.unwrap();
     assert_eq!(
-        token.redeem(ChainId::BitcoinBlake2b, 7, &prevouts[..1]),
+        token.redeem(ChainId::BitcoinBlake2b, 7, &prevouts[..1], tracked),
         Err(RedeemError::Mismatch)
     );
     let token = preparation.check_signing(&context()).await.unwrap();
     let mut extra = prevouts.clone();
     extra.push(OutPoint::new(Txid::from_byte_array([9; 32]), 0));
     assert_eq!(
-        token.redeem(ChainId::BitcoinBlake2b, 7, &extra),
+        token.redeem(ChainId::BitcoinBlake2b, 7, &extra, tracked),
         Err(RedeemError::Mismatch)
     );
     let token = preparation.check_signing(&context()).await.unwrap();
     assert_eq!(
-        token.redeem(ChainId::Bitcoin, 7, &prevouts),
+        token.redeem(ChainId::Bitcoin, 7, &prevouts, tracked),
         Err(RedeemError::Mismatch)
     );
     let token = preparation.check_signing(&context()).await.unwrap();
     assert_eq!(
-        token.redeem(ChainId::BitcoinBlake2b, 8, &prevouts),
+        token.redeem(ChainId::BitcoinBlake2b, 8, &prevouts, tracked),
         Err(RedeemError::Mismatch)
     );
     // Order does not matter; the exact set redeems.
     let token = preparation.check_signing(&context()).await.unwrap();
     let reversed: Vec<_> = prevouts.iter().rev().copied().collect();
-    assert_eq!(token.redeem(ChainId::BitcoinBlake2b, 7, &reversed), Ok(()));
+    assert_eq!(
+        token.redeem(ChainId::BitcoinBlake2b, 7, &reversed, tracked),
+        Ok(())
+    );
 
     // Superseded by a later check, whatever its result.
     let first = preparation.check_signing(&context()).await.unwrap();
     let second = preparation.check_signing(&context()).await.unwrap();
     assert!(!first.is_live() && second.is_live());
     assert_eq!(
-        first.redeem(ChainId::BitcoinBlake2b, 7, &prevouts),
+        first.redeem(ChainId::BitcoinBlake2b, 7, &prevouts, tracked),
         Err(RedeemError::Stale)
     );
 
@@ -762,7 +818,7 @@ async fn split_step2_token_expires_is_one_use_and_revoked() {
     tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
     assert!(!token.is_live());
     assert_eq!(
-        token.redeem(ChainId::BitcoinBlake2b, 7, &prevouts),
+        token.redeem(ChainId::BitcoinBlake2b, 7, &prevouts, tracked),
         Err(RedeemError::Stale)
     );
 
@@ -782,7 +838,7 @@ async fn split_step2_token_expires_is_one_use_and_revoked() {
     h.sender.send(8).unwrap();
     assert!(!token.is_live());
     assert_eq!(
-        token.redeem(ChainId::BitcoinBlake2b, 7, &prevouts),
+        token.redeem(ChainId::BitcoinBlake2b, 7, &prevouts, tracked),
         Err(RedeemError::Stale)
     );
     drop(preparation);
@@ -914,10 +970,28 @@ fn split_fork_production_admits_only_a_connect_origin() {
     .is_err());
 }
 
-/// D1: the step-2 gate is dormant. `SplitPreparation`, `SplitForkProduction`
-/// and the token are named only in `fork::split` itself and in
-/// `foreign_psbt.rs` (the re-export and `PreparedForeignSweep::new`, which
-/// has no caller); B3b wires step 2.
+/// The production text of a source file: everything before its inline
+/// `#[cfg(test)]\nmod tests {` module, which must then be the file's last
+/// item (#626 re-review N1: a caller placed after the module is production
+/// code too). rustfmt indents every line inside a module, so any other
+/// column-0 line after the module's opening line is a later item.
+pub(super) fn production_text<'a>(file: &str, text: &'a str) -> &'a str {
+    let Some(cut) = text.find("#[cfg(test)]\nmod tests {") else {
+        return text;
+    };
+    let after: Vec<&str> = text[cut..]
+        .lines()
+        .skip(2)
+        .filter(|line| !line.is_empty() && !line.starts_with(char::is_whitespace))
+        .collect();
+    assert_eq!(after, ["}"], "{file}: `mod tests` is not the last item");
+    &text[..cut]
+}
+
+/// D1: step 2 is dormant. The gate, the step-2 construction, its handoff,
+/// coordinator and transport (`fork::split` and `fork::split::step2`) are
+/// named only in `fork::split` itself; nothing else in the crate reaches
+/// them (B3b-2 adds the panel, reachable only by resuming a journal).
 #[test]
 fn split_step2_gate_has_no_gui_caller() {
     fn walk(dir: &std::path::Path, files: &mut Vec<(String, String)>) {
@@ -951,28 +1025,63 @@ fn split_step2_gate_has_no_gui_caller() {
             "SplitForkProduction",
             "ForeignStep2Authorization",
             "SplitCheckError",
+            // B3b: step-2 target, construction, handoff and submission.
+            "SplitStep2Production",
+            "SplitStep2Coordinator",
+            "Step2Transport",
+            "TargetError",
+            "Step2Error",
+            "RESERVATION_BOUND",
+            "reserve_target",
+            "prove_target",
+            "construct_step2",
+            "submit_verified_split_step2",
+            "for_split_step2",
         ] {
-            // foreign_psbt re-exports the token and names its minter in docs.
-            let allowed = file == "src/services/foreign_psbt.rs"
-                && ["ForeignStep2Authorization", "SplitPreparation"].contains(&ident);
-            if text.contains(ident) && !allowed {
+            // The Daemon trait declares the step-2 transport and the
+            // embedded daemon forwards it; neither is a caller.
+            let transport = ["src/daemon/mod.rs", "src/daemon/embedded.rs"]
+                .contains(&file.as_str())
+                && ident.starts_with("submit_verified_split_step2");
+            if text.contains(ident) && !transport {
                 unexpected.push((file.clone(), ident));
             }
         }
     }
     assert!(unexpected.is_empty(), "{:?}", unexpected);
-    // `PreparedForeignSweep::new` (the token's one redeemer) has no caller.
-    // Its own unit tests (foreign_psbt's `mod tests`) are not callers.
-    for (file, text) in &files {
-        let own = file.starts_with("src/services/claim_coordinator/fork/split");
-        let production = match (file.as_str(), text.find("\nmod tests {")) {
-            ("src/services/foreign_psbt.rs", Some(tests)) => &text[..tests],
-            _ => text.as_str(),
-        };
+    // The token's one redeemer is the step-2 construction. `foreign_psbt.rs`
+    // (its previous, scan-wide redeemer) no longer names the token in
+    // production code, including anything placed after its tests module.
+    let foreign_psbt = &files
+        .iter()
+        .find(|(file, _)| file == "src/services/foreign_psbt.rs")
+        .unwrap()
+        .1;
+    let production = production_text("foreign_psbt.rs", foreign_psbt);
+    assert!(
+        production.len() < foreign_psbt.len(),
+        "foreign_psbt has a tests module"
+    );
+    for ident in ["ForeignStep2Authorization", "redeem(", "SplitPreparation"] {
         assert!(
-            own || !production.contains("PreparedForeignSweep::new("),
-            "{}",
-            file
+            !production.contains(ident),
+            "foreign_psbt.rs names {}",
+            ident
         );
     }
+    let step2 = production_text("fork/split/step2.rs", include_str!("step2.rs"));
+    assert_eq!(step2.matches(".redeem(").count(), 1);
 }
+
+/// The cut refuses a production item after the tests module, and accepts a
+/// file whose tests module is last.
+#[test]
+fn production_text_refuses_an_item_after_the_tests_module() {
+    let last = "fn a() {}\n#[cfg(test)]\nmod tests {\n    fn b() {}\n}\n";
+    assert_eq!(production_text("last", last), "fn a() {}\n");
+    let after = "fn a() {}\n#[cfg(test)]\nmod tests {\n    fn b() {}\n}\nfn caller() {}\n";
+    assert!(std::panic::catch_unwind(|| production_text("after", after)).is_err());
+    assert_eq!(production_text("none", "fn a() {}\n"), "fn a() {}\n");
+}
+
+mod step2;
