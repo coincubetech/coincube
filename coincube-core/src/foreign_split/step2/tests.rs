@@ -1104,4 +1104,128 @@ fn a_recorded_signed_step2_verifies_only_against_its_exact_construction() {
     assert!(verify_split_step2_transaction(&step, &short_tx, &secp).is_err());
     // Control: the full quorum verifies against the same construction.
     assert!(verify_split_step2_transaction(&step, &full, &secp).is_ok());
+
+    // Genuine signatures of another sighash type, swapped in by key where
+    // the ALL ones were (#635 P3-1, step 1's #625 F1 cases): on a restart
+    // there is no PSBT-level sighash check, so the in-replay `SIGHASH_ALL`
+    // condition is the only defence. An explicit 0x01 request gives exactly
+    // the default signatures, so the swap is byte-identical and verifies.
+    for shape in SHAPES {
+        let fixture = Fixture::new(shape);
+        let step = fixture.step();
+        let signers = &fixture.wallet.signers[..fixture.wallet.threshold];
+        let all = sign(step.psbt(), signers);
+        let recorded = fixture.finalize(&step, &all).unwrap().transaction().clone();
+        for (sighash, accepted) in [
+            (EcdsaSighashType::All, true),
+            (EcdsaSighashType::None, false),
+            (EcdsaSighashType::Single, false),
+            (EcdsaSighashType::AllPlusAnyoneCanPay, false),
+        ] {
+            let mut request = step.psbt().clone();
+            for input in &mut request.inputs {
+                input.sighash_type = Some(PsbtSighashType::from(sighash));
+            }
+            let other = sign(&request, signers);
+            let swapped = with_signatures_of(&recorded, &all, &other);
+            assert_eq!(swapped == recorded, accepted, "{:?} {:?}", shape, sighash);
+            assert_eq!(
+                verify_split_step2_transaction(&step, &swapped, &secp).is_ok(),
+                accepted,
+                "{:?} {:?}",
+                shape,
+                sighash
+            );
+        }
+    }
+
+    // Structurally changed satisfactions refuse.
+    let refused = |shape: Shape, change: &dyn Fn(&mut Transaction)| {
+        let fixture = Fixture::new(shape);
+        let step = fixture.step();
+        let signers = &fixture.wallet.signers[..fixture.wallet.threshold];
+        let mut tx = fixture
+            .finalize(&step, &sign(step.psbt(), signers))
+            .unwrap()
+            .transaction()
+            .clone();
+        assert!(verify_split_step2_transaction(&step, &tx, &secp).is_ok());
+        change(&mut tx);
+        assert!(
+            verify_split_step2_transaction(&step, &tx, &secp).is_err(),
+            "{:?}",
+            shape
+        );
+    };
+    let push_witness = |tx: &mut Transaction, item: Vec<u8>, front: bool| {
+        let mut items: Vec<Vec<u8>> = tx.input[0].witness.to_vec();
+        if front {
+            items.insert(0, item);
+        } else {
+            items.push(item);
+        }
+        tx.input[0].witness = bitcoin::Witness::from_slice(&items);
+    };
+    // An extra witness item.
+    refused(Shape::Wpkh, &|tx| push_witness(tx, vec![1], false));
+    refused(Shape::Wpkh, &|tx| push_witness(tx, vec![1], true));
+    // A scriptSig on a native segwit input.
+    refused(Shape::Wpkh, &|tx| {
+        tx.input[0].script_sig = bitcoin::script::Builder::new().push_int(1).into_script()
+    });
+    // An extra scriptSig item, and a witness on a pkh input.
+    refused(Shape::Pkh, &|tx| {
+        let mut bytes = vec![0x51]; // OP_1 before the pushes
+        bytes.extend_from_slice(tx.input[0].script_sig.as_bytes());
+        tx.input[0].script_sig = ScriptBuf::from_bytes(bytes);
+    });
+    refused(Shape::Pkh, &|tx| push_witness(tx, vec![1], false));
+    for shape in [Shape::WshSortedMulti, Shape::WshMulti] {
+        // A non-empty CHECKMULTISIG dummy, and an extra leading item.
+        refused(shape, &|tx| {
+            let mut items: Vec<Vec<u8>> = tx.input[0].witness.to_vec();
+            assert!(items[0].is_empty());
+            items[0] = vec![1];
+            tx.input[0].witness = bitcoin::Witness::from_slice(&items);
+        });
+        refused(shape, &|tx| push_witness(tx, Vec::new(), true));
+    }
+}
+
+/// `recorded` with every signature of `from` replaced by the same key's
+/// signature in `to`, in witnesses and scriptSig pushes alike (a copy of
+/// step 1's test helper).
+fn with_signatures_of(recorded: &Transaction, from: &Psbt, to: &Psbt) -> Transaction {
+    let mut tx = recorded.clone();
+    for (index, input) in tx.input.iter_mut().enumerate() {
+        let swap = |item: &[u8]| -> Option<Vec<u8>> {
+            from.inputs[index]
+                .partial_sigs
+                .iter()
+                .find(|(_, sig)| sig.to_vec() == item)
+                .map(|(key, _)| to.inputs[index].partial_sigs[key].to_vec())
+        };
+        let items: Vec<Vec<u8>> = input
+            .witness
+            .iter()
+            .map(|item| swap(item).unwrap_or_else(|| item.to_vec()))
+            .collect();
+        input.witness = bitcoin::Witness::from_slice(&items);
+        if !input.script_sig.is_empty() {
+            let mut builder = bitcoin::script::Builder::new();
+            for instruction in input.script_sig.instructions() {
+                match instruction.unwrap() {
+                    bitcoin::script::Instruction::PushBytes(bytes) => {
+                        let data =
+                            swap(bytes.as_bytes()).unwrap_or_else(|| bytes.as_bytes().to_vec());
+                        builder = builder
+                            .push_slice(bitcoin::script::PushBytesBuf::try_from(data).unwrap());
+                    }
+                    bitcoin::script::Instruction::Op(op) => builder = builder.push_opcode(op),
+                }
+            }
+            input.script_sig = builder.into_script();
+        }
+    }
+    tx
 }
