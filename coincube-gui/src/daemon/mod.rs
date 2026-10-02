@@ -263,6 +263,31 @@ pub trait Daemon: Debug {
         Err(DaemonError::ClientNotSupported)
     }
 
+    /// Split (#568 B3b) step 2, embedded only: exact verified bytes through
+    /// the BTCB2 Vault daemon's own backend, once. The daemon refuses unless
+    /// the one output is its Vault receive address at `target_index`. The
+    /// coordinator owns the fresh checks, preflight, approval and intent.
+    async fn submit_verified_split_step2(
+        &self,
+        _verified: std::sync::Arc<coincube_core::foreign_split::VerifiedSplitStep2>,
+        _target_index: coincube_core::miniscript::bitcoin::bip32::ChildNumber,
+        _gate: std::sync::Arc<coincubed::poison_broadcast::SubmissionGate>,
+    ) -> Result<coincubed::poison_broadcast::SubmissionOutcome, DaemonError> {
+        Err(DaemonError::ClientNotSupported)
+    }
+
+    /// Split step 2 to the bound node of a BTCB2 Vault on a managed Knots
+    /// node (#568 P4): the same checks plus the reviewed backend binding.
+    async fn submit_verified_split_step2_to_node(
+        &self,
+        _verified: std::sync::Arc<coincube_core::foreign_split::VerifiedSplitStep2>,
+        _target_index: coincube_core::miniscript::bitcoin::bip32::ChildNumber,
+        _binding: coincubed::poison_broadcast::ClaimBackendBinding,
+        _gate: std::sync::Arc<coincubed::poison_broadcast::SubmissionGate>,
+    ) -> Result<coincubed::poison_broadcast::SubmissionOutcome, DaemonError> {
+        Err(DaemonError::ClientNotSupported)
+    }
+
     async fn start_rescan(&self, t: u32) -> Result<(), DaemonError>;
     async fn list_confirmed_txs(
         &self,

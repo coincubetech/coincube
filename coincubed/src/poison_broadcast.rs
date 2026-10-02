@@ -10,9 +10,9 @@ use coincube_core::{
     chain::ChainId,
     claim_finalize::{VerifiedAncestryTransfer, VerifiedClaimForkSweep, VerifiedPoisonTransfer},
     descriptors::CoincubeDescriptor,
-    foreign_split::VerifiedSplitStep1,
+    foreign_split::{VerifiedSplitStep1, VerifiedSplitStep2},
 };
-use miniscript::bitcoin::{Transaction, Txid, Wtxid};
+use miniscript::bitcoin::{bip32::ChildNumber, Transaction, Txid, Wtxid};
 use std::sync::{
     atomic::{AtomicU8, Ordering},
     Arc,
@@ -27,6 +27,9 @@ pub enum SubmissionError {
     Revoked,
     Expired,
     AlreadyStarted,
+    /// Split (#568) step 2: the transaction does not pay exactly one output,
+    /// the receive address of this daemon's own Vault at the recorded index.
+    OutputMismatch,
     /// The backend may have accepted the transaction before returning an error.
     /// Reconcile this exact txid/wtxid; never silently retry or replace it.
     Uncertain {
@@ -49,6 +52,9 @@ impl std::fmt::Display for SubmissionError {
             Self::AlreadyStarted => f.write_str("Submission gate was already consumed"),
             Self::DescriptorMismatch => {
                 f.write_str("Claim construction belongs to another descriptor")
+            }
+            Self::OutputMismatch => {
+                f.write_str("Split step 2 does not pay this Vault's reserved address")
             }
             Self::Uncertain { .. } => f.write_str(
                 "Claim submission may have been accepted; reconcile the exact transaction",
@@ -125,6 +131,15 @@ impl SubmissionGate {
     /// coordinator's responsibility; verified signatures are not permission.
     pub fn for_split_step1(
         verified: &VerifiedSplitStep1,
+        not_after: std::time::Instant,
+    ) -> (Self, SubmissionRevoker) {
+        Self::for_transaction(verified.chain(), verified.transaction(), not_after)
+    }
+    /// Split (#568) step-2 transport gate only. The coordinator owns the
+    /// fresh six-confirmation check, the BTCB2 preflight of this witness,
+    /// explicit approval and the durable step-2 submission intent.
+    pub fn for_split_step2(
+        verified: &VerifiedSplitStep2,
         not_after: std::time::Instant,
     ) -> (Self, SubmissionRevoker) {
         Self::for_transaction(verified.chain(), verified.transaction(), not_after)
@@ -383,6 +398,120 @@ impl DaemonControl {
         )
     }
 
+    /// Split (#568 B3b) step 2 through this daemon's own backend: the BTCB2
+    /// Vault daemon admitted by the coordinator (the exact Connect BTCB2
+    /// Esplora route). Not exposed over RPC; one attempt, no retry.
+    ///
+    /// The inputs are a foreign wallet's, so there is no descriptor check on
+    /// them: `finalize_split_step2` verified every signature against the
+    /// recorded foreign source. What this route does check is where the coins
+    /// go: exactly one output, paying this daemon's own Vault receive address
+    /// at `target_index` (the index recorded in the Split journal), on BTCB2
+    /// mainnet only. The caller must first join the fresh step-2 checks, the
+    /// BTCB2 preflight of this witness, approval and the durable intent.
+    pub fn submit_verified_split_step2(
+        &self,
+        verified: &VerifiedSplitStep2,
+        target_index: ChildNumber,
+        gate: &SubmissionGate,
+    ) -> Result<SubmissionOutcome, SubmissionError> {
+        let transaction = self.check_split_step2(verified, target_index, gate)?;
+        let txid = transaction.compute_txid();
+        let wtxid = transaction.compute_wtxid();
+        #[cfg(test)]
+        if let Some(barrier) = &gate.before_lock {
+            barrier.wait();
+        }
+        let backend = self
+            .bitcoin
+            .lock()
+            .map_err(|_| SubmissionError::BackendUnavailable)?;
+        gate.enter()?;
+        backend
+            .broadcast_tx(transaction)
+            .map_err(|_| SubmissionError::Uncertain { txid, wtxid })?;
+        Ok(SubmissionOutcome::UpstreamAccepted { txid, wtxid })
+    }
+
+    /// Split (#568 B3b, owner decision P4) step 2 to the bound node of a
+    /// BTCB2 Vault daemon on a managed Knots node: the same checks as
+    /// [`Self::submit_verified_split_step2`], plus the binding the
+    /// coordinator captured when it preflighted this witness through that
+    /// node. One `sendrawtransaction`, no redirect, retry or fallback.
+    pub fn submit_verified_split_step2_to_node(
+        &self,
+        verified: &VerifiedSplitStep2,
+        target_index: ChildNumber,
+        binding: &ClaimBackendBinding,
+        gate: &SubmissionGate,
+    ) -> Result<SubmissionOutcome, SubmissionError> {
+        let transaction = self.check_split_step2(verified, target_index, gate)?;
+        let txid = transaction.compute_txid();
+        let wtxid = transaction.compute_wtxid();
+        if !binding.matches(self) {
+            return Err(SubmissionError::BackendUnavailable);
+        }
+        let Some(crate::config::BitcoinBackend::Bitcoind(node)) = &self.config.bitcoin_backend
+        else {
+            return Err(SubmissionError::BackendUnavailable);
+        };
+        let request = node_transport::PreparedNode::new(node, transaction)
+            .map_err(|_| SubmissionError::BackendUnavailable)?;
+        #[cfg(test)]
+        if let Some(barrier) = &gate.before_lock {
+            barrier.wait();
+        }
+        let _backend = self
+            .bitcoin
+            .lock()
+            .map_err(|_| SubmissionError::BackendUnavailable)?;
+        if !binding.matches(self) {
+            return Err(SubmissionError::BackendUnavailable);
+        }
+        gate.enter()?;
+        request
+            .send()
+            .map_err(|_| SubmissionError::Uncertain { txid, wtxid })?;
+        Ok(SubmissionOutcome::UpstreamAccepted { txid, wtxid })
+    }
+
+    /// Step 2's checks before any lock: BTCB2 mainnet on both sides, one
+    /// output equal to this Vault's receive derivation at `target_index`,
+    /// and a gate for exactly this witness.
+    fn check_split_step2<'a>(
+        &self,
+        verified: &'a VerifiedSplitStep2,
+        target_index: ChildNumber,
+        gate: &SubmissionGate,
+    ) -> Result<&'a Transaction, SubmissionError> {
+        if self.config.bitcoin_config.chain != ChainId::BitcoinBlake2b
+            || verified.chain() != ChainId::BitcoinBlake2b
+            || self.config.bitcoin_config.network != miniscript::bitcoin::Network::Bitcoin
+        {
+            return Err(SubmissionError::UnsupportedChain);
+        }
+        let transaction = verified.transaction();
+        if target_index.is_hardened()
+            || transaction.output.len() != 1
+            || transaction.output[0].script_pubkey
+                != self
+                    .config
+                    .main_descriptor
+                    .receive_descriptor()
+                    .derive(target_index, &self.secp)
+                    .script_pubkey()
+        {
+            return Err(SubmissionError::OutputMismatch);
+        }
+        if gate.chain != ChainId::BitcoinBlake2b
+            || gate.txid != transaction.compute_txid()
+            || gate.wtxid != transaction.compute_wtxid()
+        {
+            return Err(SubmissionError::GateMismatch);
+        }
+        Ok(transaction)
+    }
+
     fn submit_exact_bound_claim(
         &self,
         chain: ChainId,
@@ -480,6 +609,8 @@ impl DaemonControl {
     }
 }
 
+#[cfg(test)]
+mod split_step2_tests;
 #[cfg(test)]
 mod split_tests;
 #[cfg(test)]
