@@ -38,15 +38,21 @@ fn refusal(refusal: Step2Refusal) -> Refusal {
 }
 
 impl SplitPanel {
-    /// Install (or clear) the target Vault's step-2 port. A different port
-    /// (another daemon) revokes any step-2 handle first.
+    /// Install (or clear) the target Vault's step-2 port. The App builds a
+    /// new port on every Connect refresh: an equivalent one (same session
+    /// context and daemon instance) is ignored, so a flow in progress keeps
+    /// its handles; any other (another daemon, account, provider or
+    /// generation, or none) revokes every step-2 handle first (#637 F1).
     pub fn set_step2_port(&mut self, port: Option<Arc<dyn Step2Port>>) {
         let same = match (&self.step2_port, &port) {
-            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (Some(a), Some(b)) => a.identity() == b.identity(),
             (None, None) => true,
             _ => false,
         };
-        if !same && (self.prep.is_some() || self.coord.is_some() || self.recon.is_some()) {
+        if same {
+            return;
+        }
+        if self.prep.is_some() || self.coord.is_some() || self.recon.is_some() {
             self.revoke();
         }
         self.step2_port = port;

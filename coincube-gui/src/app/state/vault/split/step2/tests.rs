@@ -436,6 +436,12 @@ impl Step2Port for Port {
     fn context(&self) -> Context {
         context()
     }
+    fn identity(&self) -> PortIdentity {
+        PortIdentity {
+            context: context(),
+            daemon: 0,
+        }
+    }
     fn open_preparation(&self, _: Step2Open) -> Result<Box<dyn Step2Prep>, Step2Refusal> {
         self.preparations.fetch_add(1, Ordering::SeqCst);
         Ok(Box::new(HeldPrep {
@@ -596,6 +602,12 @@ async fn restart_reconciles_only_after_a_recorded_step2_submission() {
     impl Step2Port for OtherPort {
         fn context(&self) -> Context {
             self.1.clone()
+        }
+        fn identity(&self) -> PortIdentity {
+            PortIdentity {
+                context: self.1.clone(),
+                daemon: 0,
+            }
         }
         fn open_preparation(&self, open: Step2Open) -> Result<Box<dyn Step2Prep>, Step2Refusal> {
             self.0.open_preparation(open)
@@ -769,6 +781,7 @@ fn step2_panel_layer_is_reached_only_through_the_split_panel() {
             "RESERVING",
             "FinishRefusal",
             "set_step2_port",
+            "PortIdentity",
         ] {
             let named = text
                 .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))

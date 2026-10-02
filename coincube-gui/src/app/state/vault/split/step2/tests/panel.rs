@@ -250,10 +250,31 @@ impl Step2Recon for PanelRecon {
 struct PanelPort {
     shared: Shared,
     psbt: Psbt,
+    /// The daemon instance this port stands for.
+    daemon: usize,
+    account: &'static str,
+}
+impl PanelPort {
+    fn new(shared: &Shared, journal: &Journal, daemon: usize) -> Self {
+        Self {
+            shared: shared.clone(),
+            psbt: step2(&journal.wallet, &journal.step1).psbt().clone(),
+            daemon,
+            account: "synthetic-account",
+        }
+    }
 }
 impl Step2Port for PanelPort {
     fn context(&self) -> Context {
-        context()
+        let mut context = context();
+        context.account = self.account.into();
+        context
+    }
+    fn identity(&self) -> PortIdentity {
+        PortIdentity {
+            context: self.context(),
+            daemon: self.daemon,
+        }
     }
     fn open_preparation(&self, open: Step2Open) -> Result<Box<dyn Step2Prep>, Step2Refusal> {
         // The step-1 driver was released before this open (#626).
@@ -279,7 +300,6 @@ impl Step2Port for PanelPort {
 /// A resumed panel tracking step 1 at six confirmations, with a step-2 port.
 fn tracked_panel(journal: &Journal) -> (SplitPanel, Shared) {
     let shared: Shared = Arc::default();
-    let construction = step2(&journal.wallet, &journal.step1);
     let mut panel = SplitPanel::resume(
         TARGET.into(),
         journal.temp.0.parent().unwrap().to_path_buf(),
@@ -287,10 +307,7 @@ fn tracked_panel(journal: &Journal) -> (SplitPanel, Shared) {
         journal.temp.0.clone(),
     );
     panel.connect = Some(Arc::new(PanelConnect(shared.clone())));
-    panel.step2_port = Some(Arc::new(PanelPort {
-        shared: shared.clone(),
-        psbt: construction.psbt().clone(),
-    }));
+    panel.step2_port = Some(Arc::new(PanelPort::new(&shared, journal, 1)));
     panel.stage = Stage::Tracking;
     panel.phase = Some(Phase::Tracking);
     panel.status = Some(Status::Observation(
@@ -333,17 +350,22 @@ async fn panel_runs_step2_from_a_tracked_step1() {
     assert_eq!(shared.lock().unwrap().step1_dropped, 1);
     assert!(panel.driver.is_none());
 
-    // Build is gated on a live label and a reserved target.
+    // Build is gated on a reserved target and a live label: neither, then a
+    // target without a label, builds nothing (#637 F3).
     let task = panel.update(SplitMessage::Step2Build);
     drive(&mut panel, task).await;
     assert!(panel.step2_psbt().is_none());
-    let task = panel.update(SplitMessage::Step2Check);
-    drive(&mut panel, task).await;
-    assert_eq!(panel.replay_label(), Some(CANNOT_REPLAY));
     let task = panel.update(SplitMessage::Step2Reserve);
     assert_eq!(panel.stage, Stage::Working(Work::Reserving), "N4");
     drive(&mut panel, task).await;
     assert_eq!(panel.target_index(), Some(3));
+    let task = panel.update(SplitMessage::Step2Build);
+    drive(&mut panel, task).await;
+    assert!(panel.step2_psbt().is_none(), "no live label");
+    assert_eq!(panel.stage, Stage::Step2(Step2Stage::Ready));
+    let task = panel.update(SplitMessage::Step2Check);
+    drive(&mut panel, task).await;
+    assert_eq!(panel.replay_label(), Some(CANNOT_REPLAY));
     // A second check supersedes the first label.
     let earlier = panel.replay.clone().unwrap();
     let task = panel.update(SplitMessage::Step2Check);
@@ -438,19 +460,29 @@ async fn panel_leaves_step2_and_revokes_on_a_port_change() {
     assert_eq!(shared.lock().unwrap().step1_opened, 1);
     assert_eq!(panel.replay_label(), None);
 
-    // Back in, then the Vault's daemon changes: a new port revokes.
+    // Back in. The App builds a new port on every Connect refresh: an
+    // equivalent one (same session, same daemon) keeps the flow (#637 F1).
     shared.lock().unwrap().step1_dropped = 0;
     let task = panel.update(SplitMessage::EnterStep2);
     drive(&mut panel, task).await;
-    assert!(panel.prep.is_some());
+    let task = panel.update(SplitMessage::Step2Check);
+    drive(&mut panel, task).await;
     let revoked = shared.lock().unwrap().revoked;
-    let other = Arc::new(PanelPort {
-        shared: shared.clone(),
-        psbt: step2(&journal.wallet, &journal.step1).psbt().clone(),
-    });
-    panel.set_step2_port(Some(other));
+    for _ in 0..3 {
+        panel.set_step2_port(Some(Arc::new(PanelPort::new(&shared, &journal, 1))));
+    }
+    assert_eq!(shared.lock().unwrap().revoked, revoked);
+    assert!(panel.prep.is_some());
+    assert_eq!(panel.replay_label(), Some(CANNOT_REPLAY));
+    assert_eq!(panel.stage, Stage::Step2(Step2Stage::Ready));
+
+    // Another account's session revokes every step-2 handle.
+    let mut other_account = PanelPort::new(&shared, &journal, 1);
+    other_account.account = "other-account";
+    panel.set_step2_port(Some(Arc::new(other_account)));
     assert_eq!(shared.lock().unwrap().revoked, revoked + 1);
     assert!(panel.prep.is_none());
+    assert_eq!(panel.replay_label(), None);
     assert_eq!(panel.stage, Stage::NeedsSession);
 }
 
@@ -468,10 +500,7 @@ async fn panel_restart_after_a_recorded_step2_only_reconciles() {
         journal.temp.0.clone(),
     );
     panel.set_connect(Some(Arc::new(PanelConnect(shared.clone()))));
-    panel.set_step2_port(Some(Arc::new(PanelPort {
-        shared: shared.clone(),
-        psbt: step2(&journal.wallet, &journal.step1).psbt().clone(),
-    })));
+    panel.set_step2_port(Some(Arc::new(PanelPort::new(&shared, &journal, 1))));
     let task = panel.begin();
     assert_eq!(panel.stage, Stage::Working(Work::Restarting));
     drive(&mut panel, task).await;
@@ -497,4 +526,28 @@ async fn panel_restart_after_a_recorded_step2_only_reconciles() {
         Some(TransactionObservation::Unconfirmed { .. })
     ));
     assert_eq!(shared.lock().unwrap().reconciles, 1);
+}
+
+/// #637 F1: the Vault's daemon restarting or switching (a new daemon
+/// instance behind an otherwise equal session) revokes every step-2 handle.
+#[tokio::test(flavor = "multi_thread")]
+async fn panel_revokes_step2_when_the_vault_daemon_changes() {
+    let journal = Journal::new(false);
+    let (mut panel, shared) = tracked_panel(&journal);
+    let task = panel.update(SplitMessage::EnterStep2);
+    drive(&mut panel, task).await;
+    assert!(panel.prep.is_some());
+    let revoked = shared.lock().unwrap().revoked;
+    panel.set_step2_port(Some(Arc::new(PanelPort::new(&shared, &journal, 2))));
+    assert_eq!(shared.lock().unwrap().revoked, revoked + 1);
+    assert!(panel.prep.is_none());
+    assert_eq!(panel.stage, Stage::NeedsSession);
+    // No port at all (the daemon unloaded) revokes the same way.
+    let (mut panel, shared) = tracked_panel(&journal);
+    let task = panel.update(SplitMessage::EnterStep2);
+    drive(&mut panel, task).await;
+    let revoked = shared.lock().unwrap().revoked;
+    panel.set_step2_port(None);
+    assert_eq!(shared.lock().unwrap().revoked, revoked + 1);
+    assert!(panel.prep.is_none());
 }

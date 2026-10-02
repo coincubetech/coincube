@@ -305,6 +305,11 @@ pub struct Step2Open {
 /// Opens the step-2 side of a Split journal for one session.
 pub trait Step2Port: Send + Sync {
     fn context(&self) -> Context;
+    /// What makes two ports the same: the session context (account,
+    /// provider, generation) and the Vault daemon instance. The panel keeps
+    /// its step-2 handles across an equivalent port and revokes them on any
+    /// other (#637 F1).
+    fn identity(&self) -> PortIdentity;
     /// Blocking: callers use `spawn_blocking`, after dropping any step-1
     /// driver on the same journal.
     fn open_preparation(&self, open: Step2Open) -> Result<Box<dyn Step2Prep>, Step2Refusal>;
@@ -315,6 +320,15 @@ pub trait Step2Port: Send + Sync {
         target_cube: String,
         digest: sha256::Hash,
     ) -> Result<Box<dyn Step2Recon>, Step2Refusal>;
+}
+
+/// See [`Step2Port::identity`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortIdentity {
+    pub context: Context,
+    /// The daemon handle's address: a restarted or switched daemon is a new
+    /// instance.
+    pub daemon: usize,
 }
 
 /// #626 ordering: release the step-1 driver (and its journal lock), *then*
@@ -436,6 +450,12 @@ impl ProductionStep2 {
 impl Step2Port for ProductionStep2 {
     fn context(&self) -> Context {
         self.context.clone()
+    }
+    fn identity(&self) -> PortIdentity {
+        PortIdentity {
+            context: self.context.clone(),
+            daemon: Arc::as_ptr(&self.daemon) as *const () as usize,
+        }
     }
     fn open_preparation(&self, open: Step2Open) -> Result<Box<dyn Step2Prep>, Step2Refusal> {
         let preparation = SplitPreparation::resume(
