@@ -836,23 +836,28 @@ impl BitcoinD {
         valid_node_instance(&instance).then_some(instance)
     }
 
-    fn get_bitcoind_version(&self) -> u64 {
-        self.make_node_request("getnetworkinfo", None)
+    /// The node's numeric `version` and its self-reported build string
+    /// (`subversion`), from a single `getnetworkinfo` request.
+    ///
+    /// The subversion, e.g. `/Satoshi:29.0.0/` for Bitcoin Core or
+    /// `/Satoshi:29.3.0/Knots:20260508/` for Bitcoin Knots, is informational
+    /// only — we gate compatibility on the numeric `version`, not this string,
+    /// so Knots (a Core superset) is accepted like any other build. It is read
+    /// from the same response so that logging it costs no extra RPC: a request
+    /// made inside a `log::info!` argument would only be sent when `Info` is
+    /// enabled, so the log level would change what the node is asked (#628).
+    fn get_bitcoind_version(&self) -> (u64, String) {
+        let network_info = self.make_node_request("getnetworkinfo", None);
+        let version = network_info
             .get("version")
             .and_then(Json::as_u64)
-            .expect("Missing or invalid 'version' in 'getnetworkinfo' result?")
-    }
-
-    /// The node's self-reported build string, e.g. `/Satoshi:29.0.0/` for
-    /// Bitcoin Core or `/Satoshi:29.3.0/Knots:20260508/` for Bitcoin Knots.
-    /// Informational only — we gate compatibility on the numeric `version`, not
-    /// this string, so Knots (a Core superset) is accepted like any other build.
-    fn get_bitcoind_subversion(&self) -> String {
-        self.make_node_request("getnetworkinfo", None)
+            .expect("Missing or invalid 'version' in 'getnetworkinfo' result?");
+        let subversion = network_info
             .get("subversion")
             .and_then(Json::as_str)
             .unwrap_or("unknown")
-            .to_string()
+            .to_string();
+        (version, subversion)
     }
 
     fn get_network_bip70(&self) -> String {
@@ -1145,10 +1150,10 @@ impl BitcoinD {
         // `version` (Knots' 29.x base reports 290000, clearing both thresholds),
         // and log the subversion so the detected build — Core or Knots — is
         // visible without affecting compatibility.
-        let version = self.get_bitcoind_version();
+        let (version, subversion) = self.get_bitcoind_version();
         log::info!(
             "Connected to bitcoind: subversion '{}', version {}.",
-            self.get_bitcoind_subversion(),
+            subversion,
             version
         );
         if !is_supported_bitcoind_version(version, is_taproot) {
@@ -2022,8 +2027,8 @@ impl BitcoinD {
     /// `/Satoshi:29.3.0/Knots:20260508/`), or `None` if the request fails.
     /// Fallible (never panics) because the desktop calls it to decide whether a
     /// reachable managed node is Core or Knots, possibly while it is shutting
-    /// down. Distinct from the internal [`Self::get_bitcoind_subversion`], which
-    /// is informational and may panic on a failed request.
+    /// down. Distinct from the internal [`Self::get_bitcoind_version`], whose
+    /// subversion is informational and which may panic on a failed request.
     ///
     /// Probes with `retry = false`: this is a fail-fast liveness/flavour check,
     /// so a transient error (or a node mid-shutdown) must return `None` at once
