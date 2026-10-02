@@ -854,6 +854,10 @@ fn split_b1a_services_have_no_new_gui_callers() {
             // (`app::state::vault::split::tests::split_panel_has_no_gui_entry_point`).
             || file.starts_with("src/app/state/vault/split/")
             || (file == "src/app/view/vault/split.rs" && ident == "split_psbt_file")
+            // B2: the dormant step-2 gate reads BTCB2 unspent outputs; it has
+            // no GUI caller (`fork::split::tests::split_step2_gate_has_no_gui_caller`).
+            || (file == "src/services/claim_coordinator/fork/split.rs"
+                && ["split_evidence", "ConnectEsplora"].contains(&ident))
     };
     let mut unexpected = Vec::new();
     for (file, text) in &files {

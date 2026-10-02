@@ -216,12 +216,14 @@ impl VerifiedForeignPsbt {
     }
 }
 
-/// Step-two authority for a foreign sweep. It is deliberately uninhabited:
-/// scan evidence, economics, a reserved address or a saved phase cannot
-/// create one. A later slice mints it from confirmed poison-split evidence
-/// (six Bitcoin confirmations rechecked at the tip, #568). Until then no
-/// production path can build a sweep PSBT.
-pub(crate) enum ForeignStep2Authorization {}
+/// Step-two authority for a foreign sweep (#568 B2). Scan evidence,
+/// economics, a reserved address or a saved phase cannot create one: only
+/// `claim_coordinator::fork::split::SplitPreparation::check_signing` mints
+/// it, from fresh evidence that step 1 has six Bitcoin confirmations at the
+/// tip, RDTS its margin, and every claimed coin is still unspent on BTCB2. It
+/// is one-use, short-lived and bound to the check, generation, claimed
+/// prevouts and tracked step-1 txid.
+pub(crate) use super::claim_coordinator::fork::split::ForeignStep2Authorization;
 
 pub struct PreparedForeignSweep {
     original: Psbt,
@@ -495,11 +497,12 @@ pub async fn btcb2_sweep_feerate(source: &dyn SweepFeeSource) -> Option<u64> {
 }
 
 impl PreparedForeignSweep {
-    /// Construct the exact unsigned step-two sweep. Requires step-two
-    /// authority, which no production code can create yet.
-    // Dormant: the token is uninhabited until a later #568 slice mints it
-    // from confirmation evidence, so this body is unreachable by design.
-    #[allow(dead_code, unreachable_code, unused_variables)]
+    /// Construct the exact unsigned step-two sweep. Redeems (consumes)
+    /// step-two authority, which must cover exactly the selected coins: the
+    /// step-1 claimed prevouts, under this session's chain and generation.
+    /// No change output: step 2 sweeps the claimed coins whole (#568).
+    // Dormant: no production caller until B3b wires step 2 behind the token.
+    #[allow(dead_code)]
     pub(crate) fn new(
         report: &ScanReport,
         session: ForeignSession<'_>,
@@ -508,8 +511,25 @@ impl PreparedForeignSweep {
         change: Option<ForeignChange>,
         authorization: ForeignStep2Authorization,
     ) -> Result<Self, ForeignPsbtError> {
-        match authorization {}
-        Self::construct(report, session, destination_amount, fee, change)
+        if change.is_some() {
+            return Err(ForeignPsbtError::Economics);
+        }
+        let prevouts: Vec<OutPoint> = select_pre_fork(report, &session)?
+            .inputs
+            .iter()
+            .map(|input| input.coin.outpoint)
+            .collect();
+        authorization
+            .redeem(session.chain, session.generation, &prevouts)
+            .map_err(|error| match error {
+                super::claim_coordinator::fork::split::RedeemError::Stale => {
+                    ForeignPsbtError::StaleSession
+                }
+                super::claim_coordinator::fork::split::RedeemError::Mismatch => {
+                    ForeignPsbtError::ConstructionChanged
+                }
+            })?;
+        Self::construct(report, session, destination_amount, fee, None)
     }
 
     /// Consume every authenticated pre-fork coin in the report and construct
@@ -1706,5 +1726,168 @@ mod tests {
         drop(source);
         assert_eq!(fs::read_dir(&datadir).unwrap().count(), 0);
         fs::remove_dir(datadir).unwrap();
+    }
+
+    /// A one-coin pre-fork BTCB2 report, its descriptors and a target.
+    fn step2_inputs() -> (ScanReport, AccountDescriptors, TargetAddressEvidence) {
+        let source = SessionSeedSource::new(
+            Zeroizing::new(WORDS.to_owned()),
+            Zeroizing::new("session passphrase".to_owned()),
+        )
+        .unwrap();
+        let descriptors = source.descriptors(StandardSinglesig::Bip84, 0).unwrap();
+        let previous = Transaction {
+            version: transaction::Version::TWO,
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![TxIn::default()],
+            output: vec![TxOut {
+                value: Amount::from_sat(100_000),
+                script_pubkey: descriptors.external.script(7).unwrap(),
+            }],
+        };
+        let coin = DiscoveredCoin {
+            branch: Branch::External,
+            index: 7,
+            outpoint: OutPoint::new(previous.compute_txid(), 0),
+            output: previous.output[0].clone(),
+            previous,
+            confirmed: true,
+            block_height: Some(FORK_HEIGHT as u32 - 1),
+            block_hash: Some(BlockHash::from_byte_array([3; 32])),
+        };
+        let report = ScanReport::for_test(
+            ChainId::BitcoinBlake2b,
+            9,
+            BlockHash::from_byte_array([2; 32]),
+            vec![coin],
+        )
+        .with_fork_height(Some(FORK_HEIGHT));
+        (report, descriptors, target_evidence("vault-a", 11, 9))
+    }
+
+    /// #568 B2: the token's one redeemer sweeps exactly the authorized
+    /// prevouts with no change. A change output refuses; another prevout set
+    /// is `ConstructionChanged`; a superseded or out-of-session token is
+    /// `StaleSession`; only the exact set under a live token constructs.
+    #[test]
+    fn step2_sweep_redeems_the_token_for_exactly_its_prevouts_without_change() {
+        let (report, descriptors, target) = step2_inputs();
+        let session = || ForeignSession {
+            chain: ChainId::BitcoinBlake2b,
+            generation: 9,
+            target: &target,
+            external: &descriptors.external,
+            internal: Some(&descriptors.internal),
+        };
+        let selected: Vec<OutPoint> = report.coins().iter().map(|c| c.outpoint).collect();
+        assert_eq!(selected.len(), 1);
+        let (sender, _) = tokio::sync::watch::channel(9u64);
+        let token = || ForeignStep2Authorization::for_test(&selected, sender.subscribe());
+
+        // A change output refuses, even with balanced economics.
+        let (authorization, _live) = token();
+        assert!(matches!(
+            PreparedForeignSweep::new(
+                &report,
+                session(),
+                Amount::from_sat(90_000),
+                Amount::from_sat(1_000),
+                Some(ForeignChange {
+                    index: 4,
+                    amount: Amount::from_sat(9_000),
+                }),
+                authorization,
+            ),
+            Err(ForeignPsbtError::Economics)
+        ));
+
+        // A token for another prevout set.
+        let other = [OutPoint::new(
+            coincube_core::miniscript::bitcoin::Txid::from_byte_array([5; 32]),
+            0,
+        )];
+        let (authorization, _live) =
+            ForeignStep2Authorization::for_test(&other, sender.subscribe());
+        assert!(matches!(
+            PreparedForeignSweep::new(
+                &report,
+                session(),
+                Amount::from_sat(99_000),
+                Amount::from_sat(1_000),
+                None,
+                authorization,
+            ),
+            Err(ForeignPsbtError::ConstructionChanged)
+        ));
+        let mut superset = selected.clone();
+        superset.extend(other);
+        let (authorization, _live) =
+            ForeignStep2Authorization::for_test(&superset, sender.subscribe());
+        assert!(matches!(
+            PreparedForeignSweep::new(
+                &report,
+                session(),
+                Amount::from_sat(99_000),
+                Amount::from_sat(1_000),
+                None,
+                authorization,
+            ),
+            Err(ForeignPsbtError::ConstructionChanged)
+        ));
+
+        // Superseded by a later check.
+        let (authorization, live) = token();
+        live.store(2, std::sync::atomic::Ordering::Release);
+        assert!(matches!(
+            PreparedForeignSweep::new(
+                &report,
+                session(),
+                Amount::from_sat(99_000),
+                Amount::from_sat(1_000),
+                None,
+                authorization,
+            ),
+            Err(ForeignPsbtError::StaleSession)
+        ));
+        // Its preparation gone.
+        let (authorization, live) = token();
+        drop(live);
+        assert!(matches!(
+            PreparedForeignSweep::new(
+                &report,
+                session(),
+                Amount::from_sat(99_000),
+                Amount::from_sat(1_000),
+                None,
+                authorization,
+            ),
+            Err(ForeignPsbtError::StaleSession)
+        ));
+
+        // The exact set, no change, a live token.
+        let (authorization, _live) = token();
+        let prepared = PreparedForeignSweep::new(
+            &report,
+            session(),
+            Amount::from_sat(99_000),
+            Amount::from_sat(1_000),
+            None,
+            authorization,
+        )
+        .unwrap();
+        let psbt = Psbt::from_str(&prepared.export_text()).unwrap();
+        assert_eq!(
+            psbt.unsigned_tx
+                .input
+                .iter()
+                .map(|i| i.previous_output)
+                .collect::<Vec<_>>(),
+            selected
+        );
+        assert_eq!(psbt.unsigned_tx.output.len(), 1);
+        assert_eq!(
+            psbt.unsigned_tx.output[0].script_pubkey,
+            target.script_pubkey
+        );
     }
 }

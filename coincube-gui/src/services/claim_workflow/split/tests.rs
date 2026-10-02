@@ -1272,11 +1272,25 @@ fn split_b0_journal_api_has_no_gui_callers() {
                             "bind_recovered_split_transaction",
                         ]
                         .contains(&ident);
+                    // B2: the dormant step-2 gate and its tests reopen a
+                    // submitted Split journal; no GUI caller reaches it
+                    // (`fork::split::tests::split_step2_gate_has_no_gui_caller`).
+                    let gate = file.starts_with("src/services/claim_coordinator/fork/split")
+                        && [
+                            "create_split",
+                            "SplitProduction",
+                            "split_identity",
+                            "recorded_split",
+                            "revalidate_split_construction",
+                            "bind_recovered_split_transaction",
+                        ]
+                        .contains(&ident);
                     if ITEMS.contains(&ident)
                         && !OWN.contains(&file.as_str())
                         && !reexport
                         && !dispatch
                         && !panel
+                        && !gate
                     {
                         unexpected.push((file.clone(), ident.to_owned()));
                     }
