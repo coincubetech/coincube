@@ -121,8 +121,12 @@ fn target_output(target: &bitcoin::Script, value: Amount) -> Vec<TxOut> {
 }
 
 /// How far from each claimed coin's index, on both branches, a target is
-/// compared with the foreign wallet's own scripts: the foreign scanner's
-/// largest history gap.
+/// compared with the foreign wallet's own scripts: 100, the foreign
+/// scanner's per-branch range end (`DEFAULT_RANGE_END`), not its gap
+/// (`DEFAULT_GAP`, 20). Pinned by
+/// `source_window_is_pinned_and_reaches_below_a_high_index_coin` (#614 G2,
+/// G3). The cost grows with the union of the windows (about 0.3 ms per
+/// derivation), so callers run construction off the UI thread (G1).
 const SOURCE_WINDOW: u32 = 100;
 
 /// Whether `target` is one of the foreign wallet's own scripts. Only a `wsh`
