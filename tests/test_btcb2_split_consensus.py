@@ -1,14 +1,16 @@
-"""Split step 1 (#568 B6a) construction/finalization against both pinned nodes.
+"""Split steps 1 and 2 (#568 B6a, B6b) against both pinned nodes.
 
 Five foreign (non-Cube) wallets, one per supported source shape, are funded
 before the fork, so every coin is shared history on both chains. For each, the
-production `foreign_split` code builds and finalizes step 1 through the
-`split_regtest_vectors` bridge; this module supplies the chain observations
-and signs with disposable regtest keys. It checks node consensus only: no GUI,
-journal, fee source, freshness proof, preflight or step 2 (B6b).
+production `foreign_split` code builds and finalizes step 1 and step 2
+through the `split_regtest_vectors` bridge; this module supplies the chain
+observations, the step-2 target and signs with disposable regtest keys. It
+checks node consensus only: no GUI, journal, fee source, freshness proof,
+preflight, target reservation or unified (`ALL|UNIFIED`) fallback (B4b, not
+built yet).
 
-The first test needs no node. It fabricates the previous transactions and
-runs the same bridge and signer, so the signing and finalization paths for all
+The offline tests need no node. They fabricate the previous transactions and
+run the same bridge and signer, so the signing and finalization paths for all
 five shapes are exercised wherever the bridge is built.
 """
 import copy
@@ -51,6 +53,14 @@ DESTINATION_INDEX = 5
 FEERATE_VB = 2
 FUND_AMOUNTS = (Decimal("0.01"), Decimal("0.02"))
 SIGHASH_ALL = 1
+# The poison payload (`coincube-core/src/split_poison.rs`), parsed here
+# independently of the Rust decoder: tag, version, chain byte (0 = Bitcoin
+# mainnet), fork marker, outpoint commitment, zero padding.
+POISON_TAG = b"COINCUBE-SPLIT"
+POISON_VERSION = 1
+POISON_CHAIN_BITCOIN = 0
+# Step-2 target kind per shape: one P2TR, the rest P2WSH (the Vault types).
+TARGET_KIND = {"wpkh": "p2tr"}
 
 
 def split_tool():
@@ -167,6 +177,53 @@ def unsigned_tx_hex(psbt_b64):
     return PSBT.from_base64(psbt_b64).g.map[0].hex()
 
 
+def txid_of(raw_hex):
+    """Txid of a transaction serialized without witness."""
+    return hash256(bytes.fromhex(raw_hex))[::-1].hex()
+
+
+def outpoint_str(txid, vout):
+    return f"{txid}:{vout}"
+
+
+def check_poison(script, fork_marker, prevouts, built):
+    """The poison's content, parsed here: chain byte, fork marker and the
+    commitment to exactly `prevouts` (`(txid hex, vout)`), not only its length
+    and opcode (#612 review, finding 2). The bridge's production decoder and
+    rebuild must agree with the same bytes."""
+    assert len(script) == 90, script.hex()
+    assert script[:3] == bytes([0x6A, 0x4C, 87]), script.hex()
+    payload = script[3:]
+    assert payload[:14] == POISON_TAG
+    assert payload[14] == POISON_VERSION
+    assert payload[15] == POISON_CHAIN_BITCOIN
+    # RPC hex is the reversed (display) byte order of the internal hash.
+    assert payload[16:48] == bytes.fromhex(fork_marker)[::-1]
+    # Sorted as the Rust set sorts outpoints: internal txid bytes, then vout.
+    ordered = sorted((bytes.fromhex(txid)[::-1], vout) for txid, vout in prevouts)
+    serialized = b"".join(txid + struct.pack("<I", vout) for txid, vout in ordered)
+    assert payload[48:80] == sha256(serialized)
+    assert payload[80:] == bytes(7)
+    assert built["poison_script"] == script.hex()
+    assert built["poison_fork_marker"] == fork_marker
+    assert built["poison_rebuilds"] is True
+
+
+def target_script(kind):
+    """A step-2 target outside the foreign wallet: a fresh 1-key P2WSH, or a
+    P2TR output key. Nothing here spends it."""
+    key = coincurve.PrivateKey().public_key.format()
+    if kind == "p2tr":
+        return bytes([0x51, 0x20]) + key[1:]
+    return bytes([0x00, 0x20]) + sha256(bytes([0x21]) + key + bytes([0xAC]))
+
+
+def bridge_refuses(tool, request, reason):
+    rejected = subprocess.run([tool], input=json.dumps(request), text=True,
+                              capture_output=True, timeout=30)
+    assert rejected.returncode != 0 and reason in rejected.stderr, rejected.stderr
+
+
 def sign_and_finalize(tool, wallet, request, built):
     """Finalize with implicit and explicit SIGHASH_ALL; both must be identical."""
     request = dict(request, signed_step1=wallet.sign(built["step1_psbt"]))
@@ -193,11 +250,7 @@ def fake_previous(script, amount_sat):
     return tx.serialize_without_witness().hex()
 
 
-@pytest.mark.parametrize("shape", SHAPES)
-def test_split_step1_bridge_offline(shape):
-    """No node: fabricated prevouts, the real bridge and the real signer."""
-    tool = split_tool()
-    wallet = ForeignWallet(shape)
+def offline_request(wallet):
     block = {"height": 100, "hash": os.urandom(32).hex()}
     coins = [
         {"previous": fake_previous(wallet.script_pubkey(branch, 0), 1_000_000 * (branch + 1)),
@@ -205,7 +258,7 @@ def test_split_step1_bridge_offline(shape):
          "bitcoin_block": block, "btcb2_block": block}
         for branch in (0, 1)
     ]
-    request = {
+    return {
         "external": wallet.descriptor(0),
         "internal": wallet.descriptor(1),
         "coins": coins,
@@ -216,10 +269,21 @@ def test_split_step1_bridge_offline(shape):
         "locktime": 150,
         "bitcoin_tip_height": 150,
     }
+
+
+@pytest.mark.parametrize("shape", SHAPES)
+def test_split_step1_bridge_offline(shape):
+    """No node: fabricated prevouts, the real bridge and the real signer."""
+    tool = split_tool()
+    wallet = ForeignWallet(shape)
+    request = offline_request(wallet)
+    block = request["coins"][0]["bitcoin_block"]
+    prevouts = [(txid_of(c["previous"]), c["vout"]) for c in request["coins"]]
     built = run_bridge(tool, request)
     unsigned = from_binary(CTransaction, bytes.fromhex(unsigned_tx_hex(built["step1_psbt"])))
     assert unsigned.vout[1].scriptPubKey == wallet.script_pubkey(0, DESTINATION_INDEX)
-    assert len(unsigned.vout[0].scriptPubKey) == 90 and unsigned.vout[0].scriptPubKey[0] == 0x6A
+    check_poison(unsigned.vout[0].scriptPubKey, request["fork_marker"], prevouts, built)
+    assert sorted(built["claimed_prevouts"]) == sorted(outpoint_str(*p) for p in prevouts)
     assert built["fee"] == built["maximum_signed_vbytes"] * FEERATE_VB
     request["recorded_step1"] = unsigned_tx_hex(built["step1_psbt"])
     assert run_bridge(tool, request)["reconstructed_txid"] == built["unsigned_txid"]
@@ -230,9 +294,143 @@ def test_split_step1_bridge_offline(shape):
     late = copy.deepcopy(request)
     late["coins"][0]["bitcoin_block"] = late["coins"][0]["btcb2_block"] = {
         "height": 200, "hash": block["hash"]}
-    rejected = subprocess.run([tool], input=json.dumps(late), text=True,
-                              capture_output=True, timeout=30)
-    assert rejected.returncode != 0 and "PostFork" in rejected.stderr, rejected.stderr
+    bridge_refuses(tool, late, "PostFork")
+
+
+def step2_request(request, claimed, target, tip):
+    """A step-2 request over the step-1 request's coins, source and fork."""
+    return {
+        "external": request["external"],
+        "internal": request["internal"],
+        "coins": request["coins"],
+        "fork_height": request["fork_height"],
+        "step2": {
+            "claimed": list(claimed),
+            "target": target.hex(),
+            "feerate_vb": FEERATE_VB,
+            "locktime": tip,
+            "btcb2_tip_height": tip,
+        },
+    }
+
+
+def check_step2_construction(tool, request, built, target):
+    """One output, the target, no change; exactly the claimed inputs; fee at
+    the worst-case size; deterministic reconstruction."""
+    unsigned = from_binary(CTransaction, bytes.fromhex(unsigned_tx_hex(built["step2_psbt"])))
+    assert [o.scriptPubKey for o in unsigned.vout] == [target]
+    assert built["target"] == target.hex()
+    spent = sorted(f"{i.prevout.hash:064x}:{i.prevout.n}" for i in unsigned.vin)
+    assert spent == sorted(request["step2"]["claimed"]), (spent, request["step2"]["claimed"])
+    assert sorted(built["claimed_prevouts"]) == spent
+    assert built["fee"] == built["maximum_signed_vbytes"] * FEERATE_VB
+    total = sum(
+        from_binary(CTransaction, bytes.fromhex(c["previous"])).vout[c["vout"]].nValue
+        for c in request["coins"]
+    )
+    assert unsigned.vout[0].nValue == total - built["fee"]
+    assert unsigned.nLockTime == request["step2"]["locktime"]
+    recorded = copy.deepcopy(request)
+    recorded["step2"]["recorded"] = unsigned_tx_hex(built["step2_psbt"])
+    assert run_bridge(tool, recorded)["reconstructed_txid"] == built["unsigned_txid"]
+
+
+def check_step2_refusals(tool, wallet, request):
+    """Refused by the bridge (the production construction) before anything
+    could be signed or broadcast."""
+    claimed = request["step2"]["claimed"]
+    # A coin step 1 did not claim, spent alongside the claimed one.
+    extra = copy.deepcopy(request)
+    extra["step2"]["claimed"] = claimed[:1]
+    bridge_refuses(tool, extra, "ClaimedMismatch")
+    # A claimed coin left out.
+    short = copy.deepcopy(request)
+    short["coins"] = [
+        c for c in short["coins"]
+        if outpoint_str(txid_of(c["previous"]), c["vout"]) == claimed[0]
+    ]
+    assert len(short["coins"]) == 1
+    bridge_refuses(tool, short, "ClaimedMismatch")
+    # Back into the foreign wallet: step 1's own destination script.
+    home = copy.deepcopy(request)
+    home["step2"]["target"] = wallet.script_pubkey(0, DESTINATION_INDEX).hex()
+    bridge_refuses(tool, home, "InvalidTarget")
+    # Not a Vault address type.
+    wpkh = copy.deepcopy(request)
+    wpkh["step2"]["target"] = (bytes([0x00, 0x14]) + os.urandom(20)).hex()
+    bridge_refuses(tool, wpkh, "InvalidTarget")
+    # A locktime above the observed BTCB2 tip.
+    late = copy.deepcopy(request)
+    late["step2"]["locktime"] = late["step2"]["btcb2_tip_height"] + 1
+    bridge_refuses(tool, late, "Locktime")
+
+
+def sign_and_finalize_step2(tool, wallet, request, built):
+    """Finalize step 2 with implicit and explicit SIGHASH_ALL; both identical."""
+    request = copy.deepcopy(request)
+    request["step2"]["signed"] = wallet.sign(built["step2_psbt"])
+    implicit = run_bridge(tool, request)
+    request["step2"]["signed"] = wallet.sign(built["step2_psbt"], explicit_all=True)
+    explicit = run_bridge(tool, request)
+    assert explicit["step2_raw"] == implicit["step2_raw"], (explicit, implicit)
+    assert explicit["step2_txid"] == implicit["step2_txid"]
+    expected = 2 if wallet.shape.startswith("wsh_") else 1
+    assert implicit["signatures_per_input"] == [expected] * len(request["coins"])
+    assert implicit["construction_txid"] == built["unsigned_txid"]
+    native = wallet.shape in ("wpkh", "wsh_multi", "wsh_sortedmulti")
+    assert (implicit["step2_txid"] == built["unsigned_txid"]) == native
+    assert implicit["vsize"] <= built["maximum_signed_vbytes"], implicit
+    return implicit
+
+
+@pytest.mark.parametrize("shape", SHAPES)
+def test_split_step2_bridge_offline(shape):
+    """No node: step 2 over fabricated prevouts, claimed by a real step 1."""
+    tool = split_tool()
+    wallet = ForeignWallet(shape)
+    request = offline_request(wallet)
+    claimed = run_bridge(tool, request)["claimed_prevouts"]
+    target = target_script(TARGET_KIND.get(shape, "p2wsh"))
+    request2 = step2_request(request, claimed, target, 150)
+    built = run_bridge(tool, request2)
+    check_step2_construction(tool, request2, built, target)
+    check_step2_refusals(tool, wallet, request2)
+    sign_and_finalize_step2(tool, wallet, request2, built)
+    check_step2_signature_refusals(tool, wallet, request, request2, built)
+
+
+def check_step2_signature_refusals(tool, wallet, request1, request2, built):
+    """The step-2 finalizer refuses step 1's signatures over the same coins
+    and any hash type but ALL, including BTCB2 `ALL|UNIFIED` (0x21, #585 F1)."""
+    signed1 = PSBT.from_base64(wallet.sign(run_bridge(tool, request1)["step1_psbt"]))
+    by_prevout = {
+        (i.prevout.hash, i.prevout.n): signed1.i[n].map[PSBT_IN_PARTIAL_SIG]
+        for n, i in enumerate(signed1.tx.vin)
+    }
+    transplanted = PSBT.from_base64(built["step2_psbt"])
+    for n, txin in enumerate(transplanted.tx.vin):
+        transplanted.i[n].map[PSBT_IN_PARTIAL_SIG] = dict(
+            by_prevout[(txin.prevout.hash, txin.prevout.n)])
+    crossed = copy.deepcopy(request2)
+    crossed["step2"]["signed"] = transplanted.to_base64()
+    bridge_refuses(tool, crossed, "InvalidSignature")
+
+    # A BTCB2 unified request, `ALL|UNIFIED`, over otherwise valid signatures.
+    unified = PSBT.from_base64(wallet.sign(built["step2_psbt"]))
+    for psbt_in in unified.i:
+        psbt_in.map[PSBT_IN_SIGHASH_TYPE] = struct.pack("<I", 0x21)
+    refused = copy.deepcopy(request2)
+    refused["step2"]["signed"] = unified.to_base64()
+    bridge_refuses(tool, refused, "UnsupportedSighash")
+    # A signature whose own hash-type byte is not ALL (ALL|ANYONECANPAY).
+    anyone = PSBT.from_base64(wallet.sign(built["step2_psbt"]))
+    for psbt_in in anyone.i:
+        psbt_in.map[PSBT_IN_PARTIAL_SIG] = {
+            key: sig[:-1] + bytes([0x81])
+            for key, sig in psbt_in.map[PSBT_IN_PARTIAL_SIG].items()
+        }
+    refused["step2"]["signed"] = anyone.to_base64()
+    bridge_refuses(tool, refused, "UnsupportedSighash")
 
 
 # ── two-chain consensus ───────────────────────────────────────────────────
@@ -251,6 +449,8 @@ def split_two_chain_class():
             super().__init__(directory)
             self.wallets = {shape: ForeignWallet(shape) for shape in SHAPES}
             self.funded = {}  # shape -> [(txid, vout, branch, index, block hash)]
+            # shape -> the confirmed step 1 (txid, block, claimed prevouts).
+            self.step1 = {}
 
         def setup(self):
             os.makedirs(self.home_dir, exist_ok=True)
@@ -339,11 +539,9 @@ def observe(node, txid, block_hash):
     return {"height": header["height"], "hash": block_hash}
 
 
-@pytest.mark.parametrize("shape", SHAPES)
-def test_split_step1_consensus(split_chains, shape, record_property):
-    tool = split_tool()
+def observed_coins(split_chains, shape):
+    """Each funded coin with its confirming block as each node reports it."""
     a, b = split_chains.legacy, split_chains.blake2b
-    wallet = split_chains.wallets[shape]
     coins = []
     for txid, vout, branch, index, block in split_chains.funded[shape]:
         coins.append({
@@ -354,11 +552,16 @@ def test_split_step1_consensus(split_chains, shape, record_property):
             "bitcoin_block": observe(a, txid, block),
             "btcb2_block": observe(b, txid, block),
         })
-    tip = a.rpc.getblockcount()
-    request = {
+    return coins
+
+
+def step1_request(split_chains, shape):
+    wallet = split_chains.wallets[shape]
+    tip = split_chains.legacy.rpc.getblockcount()
+    return {
         "external": wallet.descriptor(0),
         "internal": wallet.descriptor(1),
-        "coins": coins,
+        "coins": observed_coins(split_chains, shape),
         "fork_height": split_chains.activation_height,
         "fork_marker": split_chains.fork_parent_hash,
         "destination": DESTINATION_INDEX,
@@ -366,12 +569,55 @@ def test_split_step1_consensus(split_chains, shape, record_property):
         "locktime": tip,
         "bitcoin_tip_height": tip,
     }
+
+
+def level(node, height):
+    """Mine `node` up to at least `height`, so a transaction with a height
+    locktime of `height` is final in its next block on that chain."""
+    count = node.rpc.getblockcount()
+    if count < height:
+        node.generate_block(height - count)
+    assert node.rpc.getblockcount() >= height
+
+
+def confirmed_step1(split_chains, shape):
+    """Step 1 confirmed on Bitcoin for `shape`: the one the step-1 test
+    recorded, or, when that test did not run first, built, signed and mined
+    to six confirmations here."""
+    if shape not in split_chains.step1:
+        tool = split_tool()
+        a = split_chains.legacy
+        wallet = split_chains.wallets[shape]
+        request = step1_request(split_chains, shape)
+        built = run_bridge(tool, request)
+        finalized = sign_and_finalize(tool, wallet, request, built)
+        step1_id = finalized["step1_txid"]
+        height = a.rpc.getblockcount() + 1
+        assert a.rpc.sendrawtransaction(finalized["step1_raw"]) == step1_id
+        a.generate_block(6, wait_for_mempool=step1_id)
+        block = a.rpc.getblockhash(height)
+        assert a.rpc.getrawtransaction(step1_id, True, block)["confirmations"] == 6
+        split_chains.step1[shape] = (step1_id, block, built["claimed_prevouts"])
+    return split_chains.step1[shape]
+
+
+@pytest.mark.parametrize("shape", SHAPES)
+def test_split_step1_consensus(split_chains, shape, record_property):
+    tool = split_tool()
+    a, b = split_chains.legacy, split_chains.blake2b
+    wallet = split_chains.wallets[shape]
+    request = step1_request(split_chains, shape)
+    tip = request["bitcoin_tip_height"]
     built = run_bridge(tool, request)
     request["recorded_step1"] = unsigned_tx_hex(built["step1_psbt"])
     assert run_bridge(tool, request)["reconstructed_txid"] == built["unsigned_txid"]
     del request["recorded_step1"]
     finalized = sign_and_finalize(tool, wallet, request, built)
     step1, step1_id = finalized["step1_raw"], finalized["step1_txid"]
+    # The poison's content in the exact bytes the BTCB2 block refuses below.
+    prevouts = [(c[0], c[1]) for c in split_chains.funded[shape]]
+    signed = from_binary(CTransaction, bytes.fromhex(step1))
+    check_poison(signed.vout[0].scriptPubKey, split_chains.fork_parent_hash, prevouts, built)
 
     # Accepted by the Bitcoin node at no more than the construction's estimate.
     verdict_a = a.rpc.testmempoolaccept([step1])[0]
@@ -386,9 +632,7 @@ def test_split_step1_consensus(split_chains, shape, record_property):
     # The locktime is Bitcoin's tip, and earlier shapes mined Bitcoin only.
     # Bring BTCB2 level first so the candidate block is final there and the
     # poison, not the locktime, is what consensus refuses.
-    if b.rpc.getblockcount() < tip:
-        b.generate_block(tip - b.rpc.getblockcount())
-    assert b.rpc.getblockcount() >= tip
+    level(b, tip)
     verdict_b = b.rpc.testmempoolaccept([step1])[0]
     assert not verdict_b["allowed"], verdict_b
     assert verdict_b["reject-reason"] == "scriptpubkey", verdict_b
@@ -405,7 +649,6 @@ def test_split_step1_consensus(split_chains, shape, record_property):
     assert b.rpc.getbestblockhash() == fork_tip
 
     # Confirmed on Bitcoin; the same outpoints stay unspent on BTCB2.
-    prevouts = [(c[0], c[1]) for c in split_chains.funded[shape]]
     assert a.rpc.sendrawtransaction(step1) == step1_id
     a.generate_block(6, wait_for_mempool=step1_id)
     status = a.rpc.getrawtransaction(step1_id, True, a.rpc.getblockhash(tip + 1))
@@ -430,3 +673,78 @@ def test_split_step1_consensus(split_chains, shape, record_property):
     a.rpc.reconsiderblock(step1_block)
     assert a.rpc.getbestblockhash() == best
     assert a.rpc.getrawtransaction(step1_id, True, step1_block)["confirmations"] == 6
+    split_chains.step1[shape] = (step1_id, step1_block, built["claimed_prevouts"])
+
+
+@pytest.mark.parametrize("shape", SHAPES)
+def test_split_step2_consensus(split_chains, shape, record_property):
+    """Step 2 spends exactly step 1's claimed prevouts to the target: accepted
+    on BTCB2 (mempool and a mined block) and refused on Bitcoin, where step 1
+    already spent them."""
+    tool = split_tool()
+    a, b = split_chains.legacy, split_chains.blake2b
+    wallet = split_chains.wallets[shape]
+    step1_id, step1_block, claimed = confirmed_step1(split_chains, shape)
+    prevouts = [(c[0], c[1]) for c in split_chains.funded[shape]]
+    assert sorted(claimed) == sorted(outpoint_str(*p) for p in prevouts)
+
+    # Step 1 has at least six confirmations on Bitcoin, and the claimed
+    # outpoints are spent there and unspent on BTCB2.
+    status = a.rpc.getrawtransaction(step1_id, True, step1_block)
+    assert status["in_active_chain"] and status["confirmations"] >= 6, status
+    for txid, vout in prevouts:
+        assert a.rpc.gettxout(txid, vout, False) is None
+        assert b.rpc.gettxout(txid, vout, False) is not None
+    record_property(f"{shape}_step1_confirmations", status["confirmations"])
+
+    # The locktime is BTCB2's tip; bring BTCB2 level with Bitcoin first so
+    # both chains' next block is past it (B6a's alignment, for both chains).
+    level(b, a.rpc.getblockcount())
+    tip = b.rpc.getblockcount()
+    target = target_script(TARGET_KIND.get(shape, "p2wsh"))
+    request = step2_request(step1_request(split_chains, shape), claimed, target, tip)
+    built = run_bridge(tool, request)
+    check_step2_construction(tool, request, built, target)
+    check_step2_refusals(tool, wallet, request)
+    finalized = sign_and_finalize_step2(tool, wallet, request, built)
+    step2, step2_id = finalized["step2_raw"], finalized["step2_txid"]
+    record_property(f"{shape}_step2_target", TARGET_KIND.get(shape, "p2wsh"))
+
+    # Accepted by the BTCB2 node at no more than the construction's estimate.
+    verdict_b = b.rpc.testmempoolaccept([step2])[0]
+    assert verdict_b["allowed"], verdict_b
+    assert verdict_b["txid"] == step2_id
+    assert verdict_b["vsize"] == finalized["vsize"], (verdict_b, finalized)
+    assert verdict_b["vsize"] <= built["maximum_signed_vbytes"], (verdict_b, built)
+    record_property(f"{shape}_step2_vsize", verdict_b["vsize"])
+    record_property(f"{shape}_step2_maximum_signed_vbytes", built["maximum_signed_vbytes"])
+
+    # Refused by the Bitcoin node: its inputs are spent by step 1. Bitcoin is
+    # first brought past the locktime, so missing inputs, not finality, is
+    # what each check refuses.
+    level(a, tip)
+    verdict_a = a.rpc.testmempoolaccept([step2])[0]
+    assert not verdict_a["allowed"], verdict_a
+    assert verdict_a["reject-reason"] == "missing-inputs", verdict_a
+    bitcoin_tip = a.rpc.getbestblockhash()
+    with pytest.raises(JSONRPCException) as rejected_block:
+        a.rpc.generateblock(a.rpc.getnewaddress(), [step2])
+    block_error = rejected_block.value.error
+    assert block_error["code"] == -25, block_error
+    assert block_error["message"].startswith(
+        "TestBlockValidity failed: bad-txns-inputs-missingorspent,"
+    ), block_error
+    record_property(f"{shape}_bitcoin_block_reject", block_error["message"])
+    assert a.rpc.getbestblockhash() == bitcoin_tip
+
+    # Mined on BTCB2: the claimed outpoints are spent there, into the target.
+    assert b.rpc.sendrawtransaction(step2) == step2_id
+    b.generate_block(1, wait_for_mempool=step2_id)
+    mined = b.rpc.getrawtransaction(step2_id, True, b.rpc.getbestblockhash())
+    assert mined["confirmations"] == 1, mined
+    assert [o["scriptPubKey"]["hex"] for o in mined["vout"]] == [target.hex()]
+    for txid, vout in prevouts:
+        assert b.rpc.gettxout(txid, vout, False) is None
+    assert b.rpc.gettxout(step2_id, 0, False)["scriptPubKey"]["hex"] == target.hex()
+    # Step 1 is unaffected on Bitcoin.
+    assert a.rpc.getrawtransaction(step1_id, True, step1_block)["in_active_chain"]
