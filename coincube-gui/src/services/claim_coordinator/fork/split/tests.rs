@@ -191,6 +191,8 @@ fn sign(step1: &SplitStep1, wallet: &Wallet) -> VerifiedSplitStep1 {
     finalize_split_step1(step1, &psbt, &secp).unwrap()
 }
 
+type Between = Box<dyn FnOnce(&mut View) + Send>;
+
 /// The synthetic two-chain view.
 struct View {
     bitcoin_tip: BlockRef,
@@ -205,7 +207,7 @@ struct View {
     unspent_fails: bool,
     /// Applied once, at the first BTCB2 unspent read: between the gate's
     /// two collections.
-    between: Option<Box<dyn FnOnce(&mut View) + Send>>,
+    between: Option<Between>,
 }
 impl View {
     /// Step 1 confirmed in `block` (hash 6) at height 100 with `depth`
@@ -910,4 +912,62 @@ fn split_fork_production_admits_only_a_connect_origin() {
         sender.subscribe()
     )
     .is_err());
+}
+
+/// D1: the step-2 gate is dormant. `SplitPreparation`, `SplitForkProduction`
+/// and the token are named only in `fork::split` itself and in
+/// `foreign_psbt.rs` (the re-export and `PreparedForeignSweep::new`, which
+/// has no caller); B3b wires step 2.
+#[test]
+fn split_step2_gate_has_no_gui_caller() {
+    fn walk(dir: &std::path::Path, files: &mut Vec<(String, String)>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                walk(&path, files);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                files.push((
+                    path.strip_prefix(env!("CARGO_MANIFEST_DIR"))
+                        .unwrap()
+                        .to_string_lossy()
+                        .replace('\\', "/"),
+                    std::fs::read_to_string(&path).unwrap(),
+                ));
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut files,
+    );
+    let mut unexpected = Vec::new();
+    for (file, text) in &files {
+        if file.starts_with("src/services/claim_coordinator/fork/split") {
+            continue;
+        }
+        for ident in [
+            "SplitPreparation",
+            "SplitForkProduction",
+            "ForeignStep2Authorization",
+            "SplitCheckError",
+        ] {
+            // foreign_psbt re-exports the token and names its minter in docs.
+            let allowed = file == "src/services/foreign_psbt.rs"
+                && ["ForeignStep2Authorization", "SplitPreparation"].contains(&ident);
+            if text.contains(ident) && !allowed {
+                unexpected.push((file.clone(), ident));
+            }
+        }
+    }
+    assert!(unexpected.is_empty(), "{:?}", unexpected);
+    // `PreparedForeignSweep::new` (the token's one redeemer) has no caller.
+    for (file, text) in &files {
+        let own = file.starts_with("src/services/claim_coordinator/fork/split");
+        assert!(
+            own || !text.contains("PreparedForeignSweep::new("),
+            "{}",
+            file
+        );
+    }
 }
