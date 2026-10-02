@@ -1795,6 +1795,116 @@ mod tests {
         }
     }
 
+    /// A scripted bitcoind that answers `echo`, `getnetworkinfo` and
+    /// `getblockchaininfo` by method name, in any order and any number of
+    /// times, until `stop` is set. Returns the methods it was asked, in order.
+    fn serve_node_by_method(
+        server: net::TcpListener,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> thread::JoinHandle<Vec<String>> {
+        thread::spawn(move || {
+            server.set_nonblocking(true).unwrap();
+            let mut methods = Vec::new();
+            while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                let mut stream = match server.accept() {
+                    Ok((stream, _)) => stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(time::Duration::from_millis(5));
+                        continue;
+                    }
+                    Err(error) => panic!("accepting scripted RPC: {}", error),
+                };
+                stream.set_nonblocking(false).unwrap();
+                stream
+                    .set_read_timeout(Some(time::Duration::from_secs(5)))
+                    .unwrap();
+                let mut reader = BufReader::new(&mut stream);
+                let mut line = String::new();
+                while line != "\r\n" && line != "\n" {
+                    line.clear();
+                    assert_ne!(reader.read_line(&mut line).unwrap(), 0, "no JSON body");
+                }
+                let request: serde_json::Value = serde_json::Deserializer::from_reader(reader)
+                    .into_iter()
+                    .next()
+                    .unwrap()
+                    .unwrap();
+                let method = request["method"].as_str().unwrap().to_string();
+                let result = match method.as_str() {
+                    "echo" => serde_json::json!([]),
+                    "getnetworkinfo" => {
+                        serde_json::json!({"version": 290000, "subversion": "/Satoshi:29.0.0/"})
+                    }
+                    "getblockchaininfo" => serde_json::json!({"chain": "main"}),
+                    other => panic!("unscripted RPC '{}'", other),
+                };
+                let body =
+                    serde_json::json!({"jsonrpc": "2.0", "id": request["id"], "result": result})
+                        .to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+                methods.push(method);
+            }
+            methods
+        })
+    }
+
+    /// The node's version and subversion are logged at `Info` from the one
+    /// `getnetworkinfo` request the version check makes. A request inside the
+    /// log line's arguments would be sent only when `Info` is enabled, so the
+    /// log level would change what the node is asked (#628).
+    #[test]
+    fn node_sanity_checks_log_the_subversion_without_another_rpc() {
+        let server = net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = server.local_addr().unwrap();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let node = serve_node_by_method(server, stop.clone());
+        let backend = BitcoinD::new(
+            &config::BitcoindConfig {
+                addr,
+                rpc_auth: config::BitcoindRpcAuth::UserPass("synthetic".into(), "synthetic".into()),
+            },
+            "synthetic-wallet".into(),
+        )
+        .unwrap();
+
+        let (checks, logs) = capture_logs_at(log::Level::Info, || {
+            backend.node_sanity_checks(bitcoin::Network::Bitcoin, false)
+        });
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        let methods = node.join().unwrap();
+
+        assert!(checks.is_ok(), "{:?}", checks);
+        assert_eq!(
+            methods,
+            ["echo", "echo", "getnetworkinfo", "getblockchaininfo"],
+            "the version check must ask the node exactly once, whatever the log level"
+        );
+        assert!(
+            logs.contains(&(
+                log::Level::Info,
+                "Connected to bitcoind: subversion '/Satoshi:29.0.0/', version 290000.".into()
+            )),
+            "{:?}",
+            logs
+        );
+    }
+
+    /// [`daemon_startup`] with `Info` logging enabled process-wide: the scripted
+    /// bitcoind answers exactly the RPCs startup makes, so a log call that sends
+    /// one more would derail it (#628).
+    #[test]
+    fn daemon_startup_at_info_log_level() {
+        let ((), _) = capture_logs_at(log::Level::Info, || {
+            assert!(log::max_level() >= log::LevelFilter::Info);
+            daemon_startup();
+        });
+    }
+
     #[test]
     fn daemon_startup() {
         // This exercises a startup path with a known thread race: the poller can
@@ -2578,6 +2688,16 @@ mod tests {
             worker
                 .join()
                 .expect("startup with an existing v8 database panicked");
+        }
+
+        /// [`an_existing_v8_bitcoin_database_starts_and_is_migrated`] with `Info`
+        /// logging enabled process-wide (#628).
+        #[test]
+        fn an_existing_v8_bitcoin_database_starts_and_is_migrated_at_info_log_level() {
+            let ((), _) = capture_logs_at(log::Level::Info, || {
+                assert!(log::max_level() >= log::LevelFilter::Info);
+                an_existing_v8_bitcoin_database_starts_and_is_migrated();
+            });
         }
 
         fn v8_bitcoin_database_starts_inner() {

@@ -935,13 +935,30 @@ impl DummyCoincube {
 ///
 /// The logger is process-wide and installed once; it keeps only the records of
 /// threads inside a `capture_logs` call, so tests running in parallel do not see
-/// each other's records. Only warnings and errors are captured. Returns `f`'s
-/// result and the `(level, message)` pairs.
+/// each other's records. Only warnings and errors are captured; see
+/// [`capture_logs_at`] for a lower level. Returns `f`'s result and the
+/// `(level, message)` pairs.
 pub fn capture_logs<T>(f: impl FnOnce() -> T) -> (T, Vec<(log::Level, String)>) {
+    capture_logs_at(log::Level::Warn, f)
+}
+
+/// [`capture_logs`], keeping the records at `level` and above.
+///
+/// The `log` crate's maximum level is process-wide, so this raises it to
+/// `level` for every thread, for the rest of the test binary: it is never
+/// lowered again, since a concurrent capture may still need it. Every test
+/// running at the same time — and after — therefore evaluates the arguments of
+/// log calls down to `level`, which is what makes it a check that a log call
+/// has no side effect (#628).
+pub fn capture_logs_at<T>(
+    level: log::Level,
+    f: impl FnOnce() -> T,
+) -> (T, Vec<(log::Level, String)>) {
     use std::cell::RefCell;
 
     thread_local! {
-        static CAPTURED: RefCell<Option<Vec<(log::Level, String)>>> = const { RefCell::new(None) };
+        static CAPTURED: RefCell<Option<(log::Level, Vec<(log::Level, String)>)>> =
+            const { RefCell::new(None) };
     }
     struct Capture;
     impl log::Log for Capture {
@@ -952,24 +969,44 @@ pub fn capture_logs<T>(f: impl FnOnce() -> T) -> (T, Vec<(log::Level, String)>) 
             // Format only on a capturing thread: every other test's records
             // pass through here too, and must not be slowed down.
             CAPTURED.with(|captured| {
-                if let Some(records) = captured.borrow_mut().as_mut() {
-                    records.push((record.level(), record.args().to_string()));
+                if let Some((level, records)) = captured.borrow_mut().as_mut() {
+                    // The global level may be lower than this capture's, if
+                    // another test raised it.
+                    if record.level() <= *level {
+                        records.push((record.level(), record.args().to_string()));
+                    }
                 }
             });
         }
         fn flush(&self) {}
     }
     static LOGGER: Capture = Capture;
-    static INSTALL: sync::Once = sync::Once::new();
-    INSTALL.call_once(|| {
-        log::set_logger(&LOGGER).expect("no other logger in the coincubed unit tests");
-        // Warn and above only: the records the tests assert on. A lower level
-        // would make every `debug!`/`trace!` in the parallel tests reach here.
-        log::set_max_level(log::LevelFilter::Warn);
-    });
+    // Held while installing or raising the level, so two captures racing to
+    // raise it cannot leave it at the lower of the two.
+    static MAX_LEVEL: sync::Mutex<()> = sync::Mutex::new(());
+    {
+        let _guard = MAX_LEVEL.lock().unwrap_or_else(|e| e.into_inner());
+        static INSTALL: sync::Once = sync::Once::new();
+        INSTALL.call_once(|| {
+            log::set_logger(&LOGGER).expect("no other logger in the coincubed unit tests");
+            // Warn and above by default: the records most tests assert on. A
+            // lower level makes every `info!`/`debug!` in the parallel tests
+            // reach here, so it is only set by a capture that asks for it.
+            log::set_max_level(log::LevelFilter::Warn);
+        });
+        if log::max_level() < level.to_level_filter() {
+            log::set_max_level(level.to_level_filter());
+        }
+    }
 
-    CAPTURED.with(|captured| *captured.borrow_mut() = Some(Vec::new()));
+    CAPTURED.with(|captured| *captured.borrow_mut() = Some((level, Vec::new())));
     let result = f();
-    let records = CAPTURED.with(|captured| captured.borrow_mut().take().unwrap_or_default());
+    let records = CAPTURED.with(|captured| {
+        captured
+            .borrow_mut()
+            .take()
+            .map(|(_, records)| records)
+            .unwrap_or_default()
+    });
     (result, records)
 }
