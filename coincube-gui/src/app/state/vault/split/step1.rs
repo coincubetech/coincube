@@ -42,7 +42,7 @@ use tokio::sync::watch;
 
 use coincube_core::{
     chain::ChainId,
-    claim::{Assessment, DeploymentState},
+    claim::{Assessment, BlockRef, DeploymentState},
     foreign_split::{
         create_split_step1, finalize_split_step1, reconstruct_split_step1,
         verify_split_step1_transaction, FinalizeError, SplitBranch, SplitCoin, SplitInputs,
@@ -65,7 +65,8 @@ use crate::{
     dir::CoincubeDirectory,
     services::{
         claim_coordinator::{
-            self, split::SplitProduction, Coordinator, Outcome, Review, SubmissionRoute,
+            self, split::SplitProduction, Coordinator, Outcome, ReconfirmationReview,
+            ResubmissionReview, Review, SubmissionRoute,
         },
         claim_observation::{
             http::HttpObservationSource, CollectionContext, FailureKind, ObservationSource,
@@ -97,6 +98,11 @@ pub const STALE_ANCHOR: &str = "The Bitcoin Blake2b fork height Connect reports 
 pub const DESTINATION_USED: &str = "The fresh address Split chose has been used since the scan, so it is no longer fresh. Nothing was built; scan the wallet again.";
 pub const COMPLETED: &str = "This split's recorded wallet details were already removed after completion. There is nothing left to resume.";
 pub const OTHER_ACCOUNT: &str = "This split was recorded under a different Connect account. Sign in with that account to continue it.";
+/// Step 1 left the block it was confirmed in: step 2 is blocked (#568 B2).
+pub const REORGED: &str = "Step 1 is no longer in the Bitcoin block it was confirmed in, so step 2 is blocked. Check what happened: step 1 may have been mined again in another block, or dropped from the chain.";
+/// Step 1's coins were spent on Bitcoin by another transaction after a
+/// reorg: this step 1 can never confirm, so a new one is needed.
+pub const NEW_POISON_NEEDED: &str = "Step 1 was dropped from Bitcoin and its coins were since spent there by another transaction, so this step 1 can never confirm and step 2 stays blocked. A new step 1 is needed: scan the wallet again for a fresh inventory.";
 
 /// Why the flow stops, and whether trying again could change it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -187,6 +193,29 @@ pub trait Step1Driver: Send {
     /// refuses.
     async fn submit(&mut self, context: &Context) -> Result<Outcome, claim_coordinator::Error>;
     async fn reconcile(&mut self, context: &Context) -> Result<Status, claim_coordinator::Error>;
+    /// After a check found step 1 `Reorged` (#568 B2): a fresh review of
+    /// what happened. Re-mined in another block: the reconfirmation to
+    /// acknowledge. Dropped from the chain: the exact recorded step 1, after a
+    /// fresh preflight, to send again. The review stays with the driver.
+    async fn recover(&mut self, context: &Context) -> Result<Recovery, claim_coordinator::Error>;
+    /// Acknowledge exactly the reconfirmation the last `recover` showed.
+    async fn acknowledge(&mut self, context: &Context) -> Result<(), claim_coordinator::Error>;
+    /// Send exactly the step 1 the last `recover` reviewed again. Without a
+    /// live resend review it refuses.
+    async fn resend(&mut self, context: &Context) -> Result<Outcome, claim_coordinator::Error>;
+}
+
+/// What a reorg review found. A display copy only: the one-use review token
+/// stays with the driver.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Recovery {
+    /// Mined again in `confirmed` instead of `previous`.
+    Reconfirmed {
+        previous: BlockRef,
+        confirmed: BlockRef,
+    },
+    /// Dropped from the chain; the exact recorded bytes may be sent again.
+    Resend(ReviewView),
 }
 
 /// Everything `Coordinator::create_split` / `resume_split` takes.
@@ -344,6 +373,8 @@ impl SplitConnect for ProductionConnect {
         Ok(Box::new(CoordinatorDriver {
             coordinator,
             review: None,
+            reconfirmation: None,
+            resubmission: None,
         }))
     }
 }
@@ -385,6 +416,16 @@ async fn address_used(
 struct CoordinatorDriver {
     coordinator: Coordinator,
     review: Option<Review>,
+    reconfirmation: Option<ReconfirmationReview>,
+    resubmission: Option<ResubmissionReview>,
+}
+
+impl CoordinatorDriver {
+    fn clear_reviews(&mut self) {
+        self.review = None;
+        self.reconfirmation = None;
+        self.resubmission = None;
+    }
 }
 
 #[async_trait]
@@ -397,7 +438,7 @@ impl Step1Driver for CoordinatorDriver {
         Arc::new(move || revoker.revoke())
     }
     async fn review(&mut self, context: &Context) -> Result<ReviewView, claim_coordinator::Error> {
-        self.review = None;
+        self.clear_reviews();
         let review = self.coordinator.prepare_review(context).await?;
         let view = review_view(review.snapshot());
         self.review = Some(review);
@@ -411,8 +452,46 @@ impl Step1Driver for CoordinatorDriver {
         self.coordinator.confirm_and_submit(review, context).await
     }
     async fn reconcile(&mut self, context: &Context) -> Result<Status, claim_coordinator::Error> {
-        self.review = None;
+        self.clear_reviews();
         self.coordinator.reconcile(context).await
+    }
+    async fn recover(&mut self, context: &Context) -> Result<Recovery, claim_coordinator::Error> {
+        self.clear_reviews();
+        match self.coordinator.prepare_reconfirmation(context).await {
+            Ok(review) => {
+                let inclusion = review.inclusion();
+                self.reconfirmation = Some(review);
+                return Ok(Recovery::Reconfirmed {
+                    previous: inclusion.previous,
+                    confirmed: inclusion.confirmed,
+                });
+            }
+            // Not mined again elsewhere: maybe dropped from the chain.
+            Err(claim_coordinator::Error::NotReady(_)) => {}
+            Err(error) => return Err(error),
+        }
+        let review = self.coordinator.prepare_resubmission(context).await?;
+        let view = review_view(review.snapshot());
+        self.resubmission = Some(review);
+        Ok(Recovery::Resend(view))
+    }
+    async fn acknowledge(&mut self, context: &Context) -> Result<(), claim_coordinator::Error> {
+        let review = self
+            .reconfirmation
+            .take()
+            .ok_or(claim_coordinator::Error::InvalidReview)?;
+        self.clear_reviews();
+        self.coordinator
+            .confirm_reconfirmation(review, context)
+            .await
+    }
+    async fn resend(&mut self, context: &Context) -> Result<Outcome, claim_coordinator::Error> {
+        let review = self
+            .resubmission
+            .take()
+            .ok_or(claim_coordinator::Error::InvalidReview)?;
+        self.clear_reviews();
+        self.coordinator.confirm_resubmission(review, context).await
     }
 }
 
@@ -877,6 +956,54 @@ pub async fn check_abandon(
     Ok(())
 }
 
+/// After a reorg dropped step 1 and no resend could be reviewed: whether a
+/// claimed coin was spent on Bitcoin by another transaction. Step 1 must be
+/// fresh-read absent from Bitcoin (its own spend in the mempool is not a
+/// double spend); then a claimed coin missing from its address's fresh
+/// Bitcoin unspent outputs was spent by something else, and this step 1 can
+/// never confirm. A read failure is never reported as spent.
+pub async fn step1_double_spent(
+    connect: &dyn SplitConnect,
+    tracked: Txid,
+    claimed: &[(OutPoint, String)],
+) -> Result<bool, Refusal> {
+    let evidence = connect.evidence();
+    let fresh = |observed_at: i64| {
+        evidence
+            .now()
+            .checked_sub(observed_at)
+            .is_some_and(|age| (0..=MAX_EVIDENCE_AGE_SECONDS).contains(&age))
+    };
+    let unavailable = |kind: FailureKind| {
+        Refusal::retry(format!(
+            "Connect couldn't check Bitcoin after the reorg ({kind:?}). This is not a sign that a coin was spent. Try again later."
+        ))
+    };
+    let status = evidence
+        .transaction(ChainId::Bitcoin, tracked)
+        .await
+        .map_err(unavailable)?;
+    if !fresh(status.observed_at()) {
+        return Err(unavailable(FailureKind::Stale));
+    }
+    if *status.value() != TransactionObservation::Absent {
+        return Ok(false);
+    }
+    for (outpoint, address) in claimed {
+        let unspent = evidence
+            .unspent_outputs(ChainId::Bitcoin, address)
+            .await
+            .map_err(unavailable)?;
+        if !fresh(unspent.observed_at()) {
+            return Err(unavailable(FailureKind::Stale));
+        }
+        if !unspent.value().contains(outpoint) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Delete an unsubmitted Split journal, descriptors included (P2). The
 /// journal refuses once a submission was recorded or an inclusion seen.
 /// Blocking: off the UI thread, with every coordinator on it dropped first.
@@ -905,6 +1032,7 @@ pub fn describe(error: claim_coordinator::Error) -> String {
         E::Unsupported | E::InvalidBinding => {
             "This split's Connect session or chain binding is not usable. Sign in again and reopen the Cube.".to_string()
         }
+        E::NotReady(Assessment::Reorged) => REORGED.to_string(),
         E::NotReady(Assessment::ExpiryMargin) => format!(
             "Bitcoin Blake2b's replay protection expires within {}. Nothing was sent.",
             describe_duration(EXPIRY_MARGIN_SECONDS)

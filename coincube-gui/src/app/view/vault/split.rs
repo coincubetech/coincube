@@ -2,6 +2,7 @@
 //! [`SplitPanel`]; every action is a [`SplitMessage`]. There is no "start"
 //! action: a fresh split is not reachable before B5 (D1).
 
+use coincube_core::claim::MIN_CONFIRMATIONS;
 use coincube_ui::{
     component::{button, card, text::*},
     theme,
@@ -14,7 +15,10 @@ use iced::{
 
 use crate::{
     app::{
-        state::vault::split::{step1::describe_route, SplitMessage, SplitPanel, Stage, Work},
+        state::vault::split::{
+            step1::{self, describe_route},
+            SplitMessage, SplitPanel, Stage, Work,
+        },
         view::Message,
     },
     services::{claim_coordinator::Outcome, claim_workflow::Phase, split_psbt_file::Encoding},
@@ -43,6 +47,9 @@ fn working(work: Work) -> &'static str {
         Work::Reviewing => "Preparing a fresh review…",
         Work::Submitting => "Submitting through Connect…",
         Work::Reconciling => "Checking the chains…",
+        Work::Recovering => "Checking what happened to step 1…",
+        Work::Acknowledging => "Checking the new block again…",
+        Work::Resending => "Sending step 1 again through Connect…",
         Work::CheckingAbandon => "Checking Bitcoin before abandoning…",
         Work::Abandoning => "Abandoning…",
     }
@@ -148,10 +155,63 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
                 (Some(Phase::Tracking), _) => "Step 1 was seen on chain.".to_string(),
                 _ => "A submission of step 1 is recorded but not confirmed. It is never sent again automatically; check its status.".to_string(),
             }));
-            if let Some(status) = panel.status() {
+            if panel.reorged() {
+                body = body.push(p1_regular(step1::REORGED).style(theme::text::warning));
+                actions = actions.push(primary("Check the reorg", SplitMessage::CheckReorg));
+            } else if let Some(confirmations) = panel.confirmations() {
+                body = body.push(p1_bold(format!(
+                    "Bitcoin confirmations: {confirmations} of {MIN_CONFIRMATIONS}"
+                )));
+                body = body.push(p1_regular(if confirmations >= MIN_CONFIRMATIONS {
+                    "Step 1 has the confirmations step 2 needs. Step 2 isn't available in this version yet; the split stays recorded on this device.".to_string()
+                } else {
+                    format!(
+                        "Step 2 waits for {MIN_CONFIRMATIONS} confirmations of step 1, rechecked at the tip of both chains. Check again later."
+                    )
+                }));
+            } else if let Some(status) = panel.status() {
                 body = body.push(caption(format!("Last check: {status:?}")));
             }
-            actions = actions.push(primary("Check status", SplitMessage::Reconcile));
+            actions = actions.push(action("Refresh", SplitMessage::Reconcile));
+        }
+        Stage::Reconfirm {
+            previous,
+            confirmed,
+        } => {
+            body = body
+                .push(p1_bold("Step 1 was mined again in another block"))
+                .push(p1_regular(format!(
+                    "It was confirmed at height {} (block {}) and is now at height {} (block {}). Step 2 stays blocked until you acknowledge the new block; its confirmations then count from it.",
+                    previous.height, previous.hash, confirmed.height, confirmed.hash
+                )));
+            actions = actions
+                .push(primary(
+                    "Acknowledge new block",
+                    SplitMessage::AcknowledgeReconfirmation,
+                ))
+                .push(action("Refresh", SplitMessage::Reconcile));
+        }
+        Stage::Resend => {
+            body = body.push(p1_bold(
+                "Step 1 was dropped from Bitcoin by a reorg. Step 2 is blocked.",
+            ));
+            if let Some(review) = panel.review() {
+                body = body
+                    .push(p1_regular(format!(
+                        "Send exactly the same signed step 1 again ({}): fee {} sats · {} vB · route {}. A fresh preflight accepted it.",
+                        review.txid,
+                        review.fee_sats,
+                        review.vsize,
+                        describe_route(&review.route)
+                    )))
+                    .push(caption(format!(
+                        "Bitcoin tip {} · Bitcoin Blake2b tip {}",
+                        review.bitcoin_tip, review.fork_tip
+                    )));
+            }
+            actions = actions
+                .push(primary("Send again", SplitMessage::ConfirmResend))
+                .push(action("Refresh", SplitMessage::Reconcile));
         }
         Stage::Refused(refusal) => {
             body = body.push(p1_regular(refusal.reason.clone()).style(theme::text::warning));

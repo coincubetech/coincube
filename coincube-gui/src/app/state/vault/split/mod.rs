@@ -14,6 +14,14 @@
 //!   one is reviewed again only on an explicit request, and may be abandoned
 //!   after a chain check.
 //!
+//! Once step 1 is submitted the panel tracks it (#568 B2): each check shows
+//! its Bitcoin confirmations as N of 6, the depth step 2 needs. A step 1 that
+//! left its block blocks step 2 and is reviewed explicitly: re-mined in
+//! another block, the user acknowledges the new block; dropped from the
+//! chain, the exact recorded bytes may be sent again after a fresh preflight;
+//! dropped and its coins spent elsewhere, a new step 1 is needed. Step 2
+//! itself (B3b) is not reachable from here.
+//!
 //! The panel owns no keys and never signs: signatures come back in PSBT
 //! files (D6). Every Connect read, build, file operation and journal call
 //! runs in a task, off the UI thread. A session end (sign-out, account
@@ -27,6 +35,7 @@ use std::{fmt, path::PathBuf, sync::Arc};
 use iced::Task;
 
 use coincube_core::{
+    claim::{Assessment, BlockRef, MIN_CONFIRMATIONS},
     foreign_split::SplitStep1,
     miniscript::bitcoin::{
         consensus::encode::serialize_hex, hashes::sha256, psbt::Psbt, OutPoint, Transaction, Txid,
@@ -43,7 +52,8 @@ use crate::{
 };
 
 use step1::{
-    Imported, OpenRequest, Prepared, Refusal, ReviewView, RevokeHandle, SplitConnect, Step1Driver,
+    Imported, OpenRequest, Prepared, Recovery, Refusal, ReviewView, RevokeHandle, SplitConnect,
+    Step1Driver,
 };
 
 /// What the panel is doing or waiting for.
@@ -61,6 +71,14 @@ pub enum Stage {
     Review,
     /// A submission may exist: reconcile only.
     Tracking,
+    /// Step 1 was mined again in another block: acknowledge it.
+    Reconfirm {
+        previous: BlockRef,
+        confirmed: BlockRef,
+    },
+    /// Step 1 was dropped from the chain: a review of exactly the recorded
+    /// bytes is on screen; confirming sends them again.
+    Resend,
     Refused(Refusal),
     /// The unsubmitted journal was deleted.
     Abandoned,
@@ -77,6 +95,9 @@ pub enum Work {
     Reviewing,
     Submitting,
     Reconciling,
+    Recovering,
+    Acknowledging,
+    Resending,
     CheckingAbandon,
     Abandoning,
 }
@@ -116,6 +137,9 @@ pub enum SplitEvent {
     Reviewed(u64, Driver, Result<ReviewView, String>),
     Submitted(u64, Driver, Result<Outcome, String>),
     Reconciled(u64, Driver, Result<Status, String>),
+    Recovered(u64, Driver, Recovered),
+    Acknowledged(u64, Driver, Result<(), String>),
+    Resent(u64, Driver, Result<Outcome, String>),
     AbandonChecked(u64, Result<(), Refusal>),
     Abandoned(u64, Result<(), String>),
     SignedExported(u64, Result<Option<PathBuf>, String>),
@@ -123,6 +147,15 @@ pub enum SplitEvent {
     ExportChosen(u64, Option<PathBuf>, Encoding),
     ImportChosen(u64, Option<Vec<PathBuf>>),
     SignedExportChosen(u64, Option<PathBuf>),
+}
+
+/// What a reorg check concluded.
+#[derive(Debug)]
+pub enum Recovered {
+    Review(Recovery),
+    /// Dropped, and a claimed coin spent on Bitcoin by another transaction.
+    NewStep1Needed,
+    Refused(String),
 }
 
 /// User intents. There is deliberately no "start" message: a fresh split is
@@ -135,6 +168,12 @@ pub enum SplitMessage {
     Review,
     Confirm,
     Reconcile,
+    /// After a check found step 1 reorged: review what happened.
+    CheckReorg,
+    /// Acknowledge the block step 1 was mined again in.
+    AcknowledgeReconfirmation,
+    /// Send exactly the recorded step 1 again, as reviewed.
+    ConfirmResend,
     CheckAbandon,
     ConfirmAbandon,
     ExportSigned,
@@ -265,6 +304,25 @@ impl SplitPanel {
     }
     pub fn status(&self) -> Option<Status> {
         self.status
+    }
+    /// Step 1's Bitcoin confirmations at the last check, when it saw a
+    /// depth: 0 unconfirmed, then N of [`MIN_CONFIRMATIONS`] (capped).
+    pub fn confirmations(&self) -> Option<u64> {
+        match self.status? {
+            Status::Observation(Assessment::WaitingForConfirmation) => Some(0),
+            Status::Observation(Assessment::WaitingForDepth { confirmations }) => {
+                Some(confirmations.min(MIN_CONFIRMATIONS))
+            }
+            Status::Observation(Assessment::ObservationsEligibleForPreflight) => {
+                Some(MIN_CONFIRMATIONS)
+            }
+            _ => None,
+        }
+    }
+    /// The last check found step 1 out of the block it was confirmed in:
+    /// step 2 is blocked until the reorg is reviewed.
+    pub fn reorged(&self) -> bool {
+        self.status == Some(Status::Observation(Assessment::Reorged))
     }
     pub fn notice(&self) -> Option<&str> {
         self.notice.as_deref()
@@ -606,7 +664,12 @@ impl SplitPanel {
                     |seq, (driver, result)| SplitEvent::Submitted(seq, driver, result),
                 )
             }
-            SplitMessage::Reconcile if matches!(self.stage, Stage::Tracking | Stage::Ready) => {
+            SplitMessage::Reconcile
+                if matches!(
+                    self.stage,
+                    Stage::Tracking | Stage::Ready | Stage::Reconfirm { .. } | Stage::Resend
+                ) =>
+            {
                 self.review = None;
                 let Some((mut driver, connect)) = self.take_driver(Work::Reconciling) else {
                     return Task::none();
@@ -620,6 +683,65 @@ impl SplitPanel {
                         (Driver(driver), result)
                     },
                     |seq, (driver, result)| SplitEvent::Reconciled(seq, driver, result),
+                )
+            }
+            SplitMessage::CheckReorg if self.stage == Stage::Tracking && self.reorged() => {
+                let (Some(tracked), claimed) = (self.tracked_txid(), self.claimed.clone()) else {
+                    return Task::none();
+                };
+                let Some((mut driver, connect)) = self.take_driver(Work::Recovering) else {
+                    return Task::none();
+                };
+                self.spawn(
+                    async move {
+                        let recovered = match driver.recover(&connect.context()).await {
+                            Ok(recovery) => Recovered::Review(recovery),
+                            Err(error) => {
+                                let reason = step1::describe(error);
+                                match step1::step1_double_spent(&*connect, tracked, &claimed).await
+                                {
+                                    Ok(true) => Recovered::NewStep1Needed,
+                                    Ok(false) => Recovered::Refused(reason),
+                                    Err(refusal) => Recovered::Refused(refusal.reason),
+                                }
+                            }
+                        };
+                        (Driver(driver), recovered)
+                    },
+                    |seq, (driver, recovered)| SplitEvent::Recovered(seq, driver, recovered),
+                )
+            }
+            SplitMessage::AcknowledgeReconfirmation
+                if matches!(self.stage, Stage::Reconfirm { .. }) =>
+            {
+                let Some((mut driver, connect)) = self.take_driver(Work::Acknowledging) else {
+                    return Task::none();
+                };
+                self.spawn(
+                    async move {
+                        let result = driver
+                            .acknowledge(&connect.context())
+                            .await
+                            .map_err(step1::describe);
+                        (Driver(driver), result)
+                    },
+                    |seq, (driver, result)| SplitEvent::Acknowledged(seq, driver, result),
+                )
+            }
+            SplitMessage::ConfirmResend if self.stage == Stage::Resend => {
+                self.review = None;
+                let Some((mut driver, connect)) = self.take_driver(Work::Resending) else {
+                    return Task::none();
+                };
+                self.spawn(
+                    async move {
+                        let result = driver
+                            .resend(&connect.context())
+                            .await
+                            .map_err(step1::describe);
+                        (Driver(driver), result)
+                    },
+                    |seq, (driver, result)| SplitEvent::Resent(seq, driver, result),
                 )
             }
             SplitMessage::CheckAbandon if self.can_check_abandon() => {
@@ -836,6 +958,63 @@ impl SplitPanel {
                 self.settle();
                 Task::none()
             }
+            SplitEvent::Recovered(_, Driver(driver), recovered) => {
+                self.bind(driver);
+                match recovered {
+                    Recovered::Review(Recovery::Reconfirmed {
+                        previous,
+                        confirmed,
+                    }) => {
+                        self.notice = None;
+                        self.stage = Stage::Reconfirm {
+                            previous,
+                            confirmed,
+                        };
+                    }
+                    Recovered::Review(Recovery::Resend(review)) => {
+                        self.notice = None;
+                        self.review = Some(review);
+                        self.stage = Stage::Resend;
+                    }
+                    Recovered::NewStep1Needed => {
+                        self.stage = Stage::Refused(Refusal::final_(step1::NEW_POISON_NEEDED));
+                    }
+                    Recovered::Refused(reason) => {
+                        self.notice = Some(reason);
+                        self.settle();
+                    }
+                }
+                Task::none()
+            }
+            SplitEvent::Acknowledged(_, Driver(driver), result) => {
+                self.bind(driver);
+                match result {
+                    Ok(()) => {
+                        // Depth now counts from the new block: check again.
+                        self.status = None;
+                        self.notice = Some(
+                            "The new block is recorded. Check status again to count its confirmations."
+                                .to_string(),
+                        );
+                    }
+                    Err(reason) => self.notice = Some(reason),
+                }
+                self.settle();
+                Task::none()
+            }
+            SplitEvent::Resent(_, Driver(driver), result) => {
+                self.bind(driver);
+                match result {
+                    Ok(outcome) => {
+                        self.notice = None;
+                        self.status = None;
+                        self.outcome = Some(outcome);
+                    }
+                    Err(reason) => self.notice = Some(reason),
+                }
+                self.settle();
+                Task::none()
+            }
             SplitEvent::AbandonChecked(_, result) => {
                 match result {
                     Ok(()) => self.abandon_checked = true,
@@ -887,6 +1066,9 @@ impl SplitEvent {
             | Self::Reviewed(seq, ..)
             | Self::Submitted(seq, ..)
             | Self::Reconciled(seq, ..)
+            | Self::Recovered(seq, ..)
+            | Self::Acknowledged(seq, ..)
+            | Self::Resent(seq, ..)
             | Self::AbandonChecked(seq, _)
             | Self::Abandoned(seq, _)
             | Self::SignedExported(seq, _)

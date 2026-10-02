@@ -41,7 +41,7 @@ use std::{
         Mutex,
     },
 };
-use step1::{ReviewView, SplitConnect};
+use step1::{Recovery, ReviewView, SplitConnect};
 
 const TARGET: &str = "btcb2-target-cube";
 
@@ -217,6 +217,13 @@ struct Calls {
     reconciles: AtomicUsize,
     revoked: AtomicBool,
     address_reads: Mutex<Vec<(ChainId, String)>>,
+    /// What the next reconcile reports (default Unchecked).
+    status: Mutex<Option<Status>>,
+    /// What the next reorg review finds (default: nothing to review).
+    recovery: Mutex<Option<Recovery>>,
+    recovers: AtomicUsize,
+    acknowledges: AtomicUsize,
+    resends: AtomicUsize,
 }
 
 #[derive(Clone)]
@@ -326,6 +333,7 @@ impl SplitConnect for FakeConnect {
             calls: self.calls.clone(),
             plan: self.submit.lock().unwrap().clone(),
             reviewed: false,
+            recovered: None,
             txid: request.verified.transaction().compute_txid(),
         }))
     }
@@ -338,6 +346,7 @@ struct FakeDriver {
     calls: Arc<Calls>,
     plan: SubmitPlan,
     reviewed: bool,
+    recovered: Option<Recovery>,
     txid: Txid,
 }
 
@@ -385,7 +394,37 @@ impl Step1Driver for FakeDriver {
     }
     async fn reconcile(&mut self, _: &Context) -> Result<Status, claim_coordinator::Error> {
         self.calls.reconciles.fetch_add(1, Ordering::SeqCst);
-        Ok(Status::Unchecked)
+        self.recovered = None;
+        Ok(self
+            .calls
+            .status
+            .lock()
+            .unwrap()
+            .unwrap_or(Status::Unchecked))
+    }
+    async fn recover(&mut self, _: &Context) -> Result<Recovery, claim_coordinator::Error> {
+        self.calls.recovers.fetch_add(1, Ordering::SeqCst);
+        self.recovered = self.calls.recovery.lock().unwrap().clone();
+        self.recovered
+            .clone()
+            .ok_or(claim_coordinator::Error::NotReady(Assessment::Reorged))
+    }
+    async fn acknowledge(&mut self, _: &Context) -> Result<(), claim_coordinator::Error> {
+        self.calls.acknowledges.fetch_add(1, Ordering::SeqCst);
+        match self.recovered.take() {
+            Some(Recovery::Reconfirmed { .. }) => Ok(()),
+            _ => Err(claim_coordinator::Error::InvalidReview),
+        }
+    }
+    async fn resend(&mut self, _: &Context) -> Result<Outcome, claim_coordinator::Error> {
+        self.calls.resends.fetch_add(1, Ordering::SeqCst);
+        match self.recovered.take() {
+            Some(Recovery::Resend(_)) => Ok(Outcome::Uncertain {
+                txid: self.txid,
+                wtxid: coincube_core::miniscript::bitcoin::Wtxid::all_zeros(),
+            }),
+            _ => Err(claim_coordinator::Error::InvalidReview),
+        }
     }
 }
 
@@ -1182,4 +1221,246 @@ async fn split_production_connect_reads_freshness_and_opens_the_real_coordinator
     let driver = tokio::task::block_in_place(|| connect.open(request(true))).unwrap();
     assert_eq!(driver.phase(), Phase::Intent);
     refused.assert_hits(0);
+}
+
+/// A recorded and submitted step 1, resumed for tracking.
+async fn tracking(scan: &Scan, connect: &Arc<FakeConnect>, temp: &Temp) -> SplitPanel {
+    let first = recorded(scan, connect, temp).await;
+    let signed = first.signed().unwrap().clone();
+    drop(first);
+    let directory = step1::discover(&temp.root()).remove(0).1;
+    rewrite_journal(&directory, |intent| {
+        intent["phase"] = "BroadcastUncertain".into();
+        intent["signed_txid"] = signed.compute_txid().to_string().into();
+        intent["bitcoin_attempts"] =
+            serde_json::json!([{ "wtxid": signed.compute_wtxid().to_string() }]);
+    });
+    let panel = resumed(connect, temp).await;
+    assert_eq!(panel.stage(), &Stage::Tracking, "{:?}", panel.stage());
+    panel
+}
+
+async fn refresh(panel: &mut SplitPanel, connect: &Arc<FakeConnect>, status: Status) {
+    *connect.calls.status.lock().unwrap() = Some(status);
+    let task = panel.update(SplitMessage::Reconcile);
+    drive(panel, task).await;
+    assert_eq!(panel.stage(), &Stage::Tracking, "{:?}", panel.stage());
+}
+
+/// (#568 B2) Tracking shows step 1's Bitcoin depth as N of 6 at each
+/// refresh; a reorg is shown as blocking step 2 and offers its review only
+/// then. Nothing here reaches step 2.
+#[tokio::test(flavor = "multi_thread")]
+async fn split_tracking_counts_confirmations_to_six_and_flags_a_reorg() {
+    let scan = Scan::new(Shape::Wpkh);
+    let connect = FakeConnect::new(&scan.coins);
+    let temp = Temp::new();
+    let mut panel = tracking(&scan, &connect, &temp).await;
+    assert_eq!(panel.confirmations(), None);
+
+    // A reorg review is not offered without a reorg.
+    let task = panel.update(SplitMessage::CheckReorg);
+    drive(&mut panel, task).await;
+    assert_eq!(connect.calls.recovers.load(Ordering::SeqCst), 0);
+
+    refresh(
+        &mut panel,
+        &connect,
+        Status::Observation(Assessment::WaitingForConfirmation),
+    )
+    .await;
+    assert_eq!(panel.confirmations(), Some(0));
+    for depth in 1..=5 {
+        refresh(
+            &mut panel,
+            &connect,
+            Status::Observation(Assessment::WaitingForDepth {
+                confirmations: depth,
+            }),
+        )
+        .await;
+        assert_eq!(panel.confirmations(), Some(depth));
+        assert!(!panel.reorged());
+    }
+    refresh(
+        &mut panel,
+        &connect,
+        Status::Observation(Assessment::ObservationsEligibleForPreflight),
+    )
+    .await;
+    assert_eq!(panel.confirmations(), Some(6));
+
+    refresh(
+        &mut panel,
+        &connect,
+        Status::Observation(Assessment::Reorged),
+    )
+    .await;
+    assert!(panel.reorged());
+    assert_eq!(panel.confirmations(), None);
+    assert_eq!(connect.calls.reconciles.load(Ordering::SeqCst), 8);
+    // Never a new review or submission of step 1 from tracking.
+    assert_eq!(connect.calls.reviews.load(Ordering::SeqCst), 0);
+    assert_eq!(connect.calls.submits.load(Ordering::SeqCst), 0);
+}
+
+/// Re-mined in another block: the new block is shown and must be
+/// acknowledged; depth then counts from it at the next refresh.
+#[tokio::test(flavor = "multi_thread")]
+async fn split_reorg_remined_step1_needs_an_acknowledgement() {
+    let scan = Scan::new(Shape::Pkh);
+    let connect = FakeConnect::new(&scan.coins);
+    let temp = Temp::new();
+    let mut panel = tracking(&scan, &connect, &temp).await;
+    refresh(
+        &mut panel,
+        &connect,
+        Status::Observation(Assessment::Reorged),
+    )
+    .await;
+    let previous = BlockRef {
+        height: 100,
+        hash: BlockHash::from_byte_array([6; 32]),
+    };
+    let confirmed = BlockRef {
+        height: 101,
+        hash: BlockHash::from_byte_array([9; 32]),
+    };
+    *connect.calls.recovery.lock().unwrap() = Some(Recovery::Reconfirmed {
+        previous,
+        confirmed,
+    });
+    // Sending again is not offered for a re-mined step 1.
+    let task = panel.update(SplitMessage::ConfirmResend);
+    drive(&mut panel, task).await;
+    assert_eq!(connect.calls.resends.load(Ordering::SeqCst), 0);
+
+    let task = panel.update(SplitMessage::CheckReorg);
+    drive(&mut panel, task).await;
+    assert_eq!(
+        panel.stage(),
+        &Stage::Reconfirm {
+            previous,
+            confirmed
+        }
+    );
+    let task = panel.update(SplitMessage::ConfirmResend);
+    drive(&mut panel, task).await;
+    assert_eq!(connect.calls.resends.load(Ordering::SeqCst), 0);
+
+    let task = panel.update(SplitMessage::AcknowledgeReconfirmation);
+    drive(&mut panel, task).await;
+    assert_eq!(connect.calls.acknowledges.load(Ordering::SeqCst), 1);
+    assert_eq!(panel.stage(), &Stage::Tracking);
+    assert_eq!(panel.status(), None);
+    assert!(panel.notice().unwrap().contains("Check status again"));
+    refresh(
+        &mut panel,
+        &connect,
+        Status::Observation(Assessment::WaitingForDepth { confirmations: 2 }),
+    )
+    .await;
+    assert_eq!(panel.confirmations(), Some(2));
+}
+
+/// Dropped from the chain: exactly the recorded step 1 is offered again
+/// after its fresh review, sent only on confirmation, once.
+#[tokio::test(flavor = "multi_thread")]
+async fn split_reorg_dropped_step1_offers_the_exact_bytes_again() {
+    let scan = Scan::new(Shape::Wpkh);
+    let connect = FakeConnect::new(&scan.coins);
+    let temp = Temp::new();
+    let mut panel = tracking(&scan, &connect, &temp).await;
+    let tracked = panel.tracked_txid().unwrap();
+    refresh(
+        &mut panel,
+        &connect,
+        Status::Observation(Assessment::Reorged),
+    )
+    .await;
+    let review = ReviewView {
+        txid: tracked,
+        fee_sats: 1_000,
+        vsize: 300,
+        route: claim_coordinator::SubmissionRoute::Connect,
+        bitcoin_tip: 106,
+        fork_tip: u64::from(fixture::BTCB2_TIP_HEIGHT),
+        rdts_left: Some(30 * 24 * 3600),
+    };
+    *connect.calls.recovery.lock().unwrap() = Some(Recovery::Resend(review.clone()));
+    // Acknowledging is not offered for a dropped step 1.
+    let task = panel.update(SplitMessage::AcknowledgeReconfirmation);
+    drive(&mut panel, task).await;
+    assert_eq!(connect.calls.acknowledges.load(Ordering::SeqCst), 0);
+
+    let task = panel.update(SplitMessage::CheckReorg);
+    drive(&mut panel, task).await;
+    assert_eq!(panel.stage(), &Stage::Resend);
+    assert_eq!(panel.review(), Some(&review));
+    let task = panel.update(SplitMessage::ConfirmResend);
+    drive(&mut panel, task).await;
+    assert_eq!(connect.calls.resends.load(Ordering::SeqCst), 1);
+    assert_eq!(panel.stage(), &Stage::Tracking);
+    assert!(matches!(panel.outcome(), Some(Outcome::Uncertain { txid, .. }) if txid == tracked));
+    // A second confirm without a new review does nothing.
+    let task = panel.update(SplitMessage::ConfirmResend);
+    drive(&mut panel, task).await;
+    assert_eq!(connect.calls.resends.load(Ordering::SeqCst), 1);
+    assert_eq!(connect.calls.submits.load(Ordering::SeqCst), 0);
+}
+
+/// Dropped and nothing to send again: if a claimed coin was spent on
+/// Bitcoin by another transaction, a new step 1 is needed (final); if not,
+/// the reason is shown and tracking continues. A failed read is never
+/// reported as a spend.
+#[tokio::test(flavor = "multi_thread")]
+async fn split_reorg_with_coins_spent_elsewhere_needs_a_new_step1() {
+    let scan = Scan::new(Shape::Wpkh);
+    let connect = FakeConnect::new(&scan.coins);
+    let temp = Temp::new();
+    let mut panel = tracking(&scan, &connect, &temp).await;
+    refresh(
+        &mut panel,
+        &connect,
+        Status::Observation(Assessment::Reorged),
+    )
+    .await;
+
+    // Nothing spent: the refusal is shown and the panel keeps tracking.
+    let task = panel.update(SplitMessage::CheckReorg);
+    drive(&mut panel, task).await;
+    assert_eq!(panel.stage(), &Stage::Tracking);
+    assert_eq!(panel.notice(), Some(step1::REORGED));
+    assert!(panel.is_bound());
+
+    // Step 1 itself back in the mempool is not a double spend.
+    let tracked = panel.tracked_txid().unwrap();
+    connect
+        .chains
+        .spend_on(ChainId::Bitcoin, scan.coins[0].outpoint);
+    connect.chains.status.lock().unwrap().insert(
+        (ChainId::Bitcoin, tracked),
+        TransactionObservation::Unconfirmed { txid: tracked },
+    );
+    let task = panel.update(SplitMessage::CheckReorg);
+    drive(&mut panel, task).await;
+    assert_eq!(panel.stage(), &Stage::Tracking);
+
+    // Absent, and a claimed coin spent on Bitcoin by something else.
+    connect
+        .chains
+        .status
+        .lock()
+        .unwrap()
+        .remove(&(ChainId::Bitcoin, tracked));
+    let task = panel.update(SplitMessage::CheckReorg);
+    drive(&mut panel, task).await;
+    assert!(
+        matches!(panel.stage(), Stage::Refused(r) if r.reason == step1::NEW_POISON_NEEDED && !r.retry),
+        "{:?}",
+        panel.stage()
+    );
+    assert_eq!(connect.calls.recovers.load(Ordering::SeqCst), 3);
+    assert_eq!(connect.calls.resends.load(Ordering::SeqCst), 0);
+    assert_eq!(step1::discover(&temp.root()).len(), 1);
 }
