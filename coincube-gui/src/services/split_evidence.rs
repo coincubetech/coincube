@@ -447,6 +447,45 @@ impl ConnectEsplora {
         )
     }
 
+    /// Whether an address has any history on `chain`: a funded output or a
+    /// transaction, confirmed or in the mempool (`address/{addr}` stats).
+    /// `false` is fresh proof the address was never used there (#568 B3b,
+    /// #592 I10/I11): it reads the chain through Connect, not a daemon's
+    /// last poll (N1).
+    pub async fn address_used(
+        &self,
+        chain: ChainId,
+        address: &str,
+    ) -> Result<FreshRead<bool>, FailureKind> {
+        #[derive(Deserialize)]
+        struct Stats {
+            funded_txo_count: u64,
+            spent_txo_count: u64,
+            tx_count: u64,
+        }
+        #[derive(Deserialize)]
+        struct AddressStats {
+            address: String,
+            chain_stats: Stats,
+            mempool_stats: Stats,
+        }
+        if address.is_empty() || !address.bytes().all(|b| b.is_ascii_alphanumeric()) {
+            return Err(FailureKind::Malformed);
+        }
+        let read = self
+            .fresh(chain, &format!("address/{address}"), JSON_LIMIT)
+            .await?;
+        let stats: AddressStats =
+            serde_json::from_slice(read.value()).map_err(|_| FailureKind::Malformed)?;
+        if stats.address != address {
+            return Err(FailureKind::Malformed);
+        }
+        let used = [stats.chain_stats, stats.mempool_stats]
+            .iter()
+            .any(|s| s.funded_txo_count > 0 || s.spent_txo_count > 0 || s.tx_count > 0);
+        FreshRead::from_response(chain, used, read.observed_at(), &fresh_headers())
+    }
+
     /// Six-block fee estimate, rounded up, in sat/vB.
     pub async fn fee_rate(&self, chain: ChainId) -> Result<u64, FailureKind> {
         let read = self.fresh(chain, "fee-estimates", JSON_LIMIT).await?;

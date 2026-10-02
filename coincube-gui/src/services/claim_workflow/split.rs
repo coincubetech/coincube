@@ -11,7 +11,13 @@
 //! - Signatures (scriptSig or witness) appear only in that recorded signed
 //!   transaction. The plan's step 1 and any fork sweep stay unsigned.
 //! - A fork sweep's single output must be the recorded target script, native
-//!   P2WSH or P2TR (reserved for step 2, B3b).
+//!   P2WSH or P2TR: the target Vault receive address reserved for step 2
+//!   (B3b). The reservation is recorded once and reused until it is proven
+//!   used (#592 I12); only then may a strictly higher index replace it, and
+//!   never once a step 2 is recorded.
+//! - Step 2's signed bytes are recorded with its submission intent, and the
+//!   submission names their own txid: like step 1, a P2PKH or P2SH-P2WPKH
+//!   input's scriptSig changes it.
 //! - The foreign public descriptors are kept until completion (owner decision
 //!   P2), in the same owner-only (0600) journal, and then deleted.
 //!
@@ -20,7 +26,7 @@
 //! submission can only be reconciled.
 use super::*;
 use coincube_core::{
-    foreign_split::{SplitSource, SplitStep1, VerifiedSplitStep1},
+    foreign_split::{SplitSource, SplitStep1, SplitStep2, VerifiedSplitStep1, VerifiedSplitStep2},
     miniscript::{bitcoin::ScriptBuf, Descriptor, DescriptorPublicKey},
 };
 use std::str::FromStr;
@@ -46,11 +52,15 @@ pub(super) struct SplitRecord {
     destination: u32,
     target_cube: String,
     /// Reserved for step 2 (B3b): the target Vault's receive index and
-    /// script. Both or neither. Nothing in this slice writes them.
+    /// script. Both or neither; see [`Controller::record_split_target`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     target_index: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     target_script: Option<ScriptBuf>,
+    /// The signed step 2, recorded with its submission intent (B3b). Its own
+    /// txid is the recorded fork submission's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    step2_transaction: Option<Transaction>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -226,14 +236,31 @@ pub(super) fn validate(intent: &Intent) -> Result<(), Error> {
             return Err(Error::InvalidPlan);
         }
     }
-    if let Some(submission) = intent.fork_submission {
-        if intent
-            .fork_sweep
-            .as_ref()
-            .is_none_or(|sweep| sweep.compute_txid() != submission.txid)
-        {
-            return Err(Error::InvalidPlan);
+    // A reservation is only made once step 1 is tracked.
+    if record.target_index.is_some()
+        && (intent.phase != Phase::Tracking || intent.signed_txid.is_none())
+    {
+        return Err(Error::InvalidPlan);
+    }
+    // The signed step 2 and its submission are recorded together; the
+    // submission names the signed bytes' own txid and wtxid, and those bytes
+    // are the recorded sweep with a signature on every input.
+    match (&intent.fork_submission, &record.step2_transaction) {
+        (None, None) => {}
+        (Some(submission), Some(signed)) => {
+            let sweep = intent.fork_sweep.as_ref().ok_or(Error::InvalidPlan)?;
+            if unsigned(signed) != *sweep
+                || signed
+                    .input
+                    .iter()
+                    .any(|input| input.script_sig.is_empty() && input.witness.is_empty())
+                || submission.txid != signed.compute_txid()
+                || submission.wtxid != signed.compute_wtxid()
+            {
+                return Err(Error::InvalidPlan);
+            }
         }
+        _ => return Err(Error::InvalidPlan),
     }
     reorg::validate_history(intent)
 }
@@ -300,6 +327,7 @@ impl Controller {
                 target_cube,
                 target_index: None,
                 target_script: None,
+                step2_transaction: None,
             }),
         };
         validate(&intent)?;
@@ -490,6 +518,179 @@ impl Controller {
         self.journal.store(&next)?;
         self.intent = next;
         Ok(())
+    }
+
+    /// Record the step-2 target: the target Vault's receive `index` and its
+    /// `script`. A tracked step 1 only, before any step 2 is recorded. The
+    /// reservation is kept and reused (#592 I12): recording the same one
+    /// again is a no-op and any other is a [`Error::Conflict`]; replacing it
+    /// needs [`Self::replace_used_split_target`]. The caller derives the
+    /// script from the target Vault's own descriptor and proves it unused;
+    /// this checks only its shape.
+    pub fn record_split_target(
+        &mut self,
+        current: &Context,
+        index: u32,
+        script: ScriptBuf,
+    ) -> Result<(), Error> {
+        self.ensure_context(current)?;
+        let record = self.split_record()?;
+        if record.target_index == Some(index) && record.target_script.as_ref() == Some(&script) {
+            return Ok(());
+        }
+        if record.target_index.is_some() {
+            return Err(Error::Conflict);
+        }
+        self.store_split_target(index, script)
+    }
+
+    /// Replace a reservation the caller proved used (an address with history
+    /// cannot be step 2's fresh target). `used` must be the recorded index
+    /// and `index` strictly higher, so a used index is never reserved again;
+    /// refused once a step 2 is recorded.
+    pub fn replace_used_split_target(
+        &mut self,
+        current: &Context,
+        used: u32,
+        index: u32,
+        script: ScriptBuf,
+    ) -> Result<(), Error> {
+        self.ensure_context(current)?;
+        let record = self.split_record()?;
+        if record.target_index != Some(used) || index <= used {
+            return Err(Error::Conflict);
+        }
+        self.store_split_target(index, script)
+    }
+
+    fn store_split_target(&mut self, index: u32, script: ScriptBuf) -> Result<(), Error> {
+        if self.intent.fork_sweep.is_some() || self.intent.fork_submission.is_some() {
+            return Err(Error::Conflict);
+        }
+        let mut next = self.intent.clone();
+        if let Some(record) = next.split.as_mut() {
+            record.target_index = Some(index);
+            record.target_script = Some(script);
+        }
+        validate(&next)?;
+        self.journal.store(&next)?;
+        self.intent = next;
+        Ok(())
+    }
+
+    /// Record the unsigned step 2 (the fork sweep) after a fresh assessment:
+    /// the restart record, not signing or broadcast permission. It must spend
+    /// exactly step 1's claimed prevouts into the reserved target, from the
+    /// recorded source. An identical record is a no-op; any other refuses.
+    pub fn prepare_split_step2(
+        &mut self,
+        current: &Context,
+        construction: &SplitStep2,
+        policy: Policy,
+        now: i64,
+    ) -> Result<(), Error> {
+        self.ensure_context(current)?;
+        if self.intent.split.is_none() {
+            self.clear_check();
+            return Err(Error::WrongIdentity);
+        }
+        let observations = self.fresh.take().ok_or(Error::Unchecked)?;
+        self.status = Status::Unchecked;
+        if !self.construction_verified || self.intent.phase != Phase::Tracking {
+            return Err(Error::Unchecked);
+        }
+        let record = self.split_record()?;
+        let claimed: std::collections::BTreeSet<_> =
+            self.intent.plan.claimed_prevouts.iter().copied().collect();
+        let spent: std::collections::BTreeSet<_> =
+            construction.claimed_prevouts().into_iter().collect();
+        if construction.chain() != self.intent.plan.fork_chain
+            || construction.source().digest() != record.source_digest
+            || spent != claimed
+            || record.target_script.as_deref() != Some(construction.target())
+        {
+            return Err(Error::WrongIdentity);
+        }
+        if self.assess_fresh(&observations, policy, now)?
+            != Assessment::ObservationsEligibleForPreflight
+        {
+            return Err(Error::Unchecked);
+        }
+        if self.intent.fork_submission.is_some() {
+            return Err(Error::Conflict);
+        }
+        let transaction = &construction.psbt().unsigned_tx;
+        if let Some(recorded) = &self.intent.fork_sweep {
+            return if recorded == transaction {
+                Ok(())
+            } else {
+                Err(Error::Conflict)
+            };
+        }
+        let mut next = self.intent.clone();
+        next.fork_sweep = Some(transaction.clone());
+        validate(&next)?;
+        self.journal.store(&next)?;
+        self.intent = next;
+        Ok(())
+    }
+
+    /// Durably record a possible submission of exactly this verified signed
+    /// step 2 before it is attempted, after another fresh assessment. Like
+    /// [`Self::record_fork_broadcast_intent`], a saved intent never permits a
+    /// retry; it can only be reconciled.
+    pub fn record_split_step2_broadcast_intent(
+        &mut self,
+        current: &Context,
+        signed: &VerifiedSplitStep2,
+        policy: Policy,
+        now: i64,
+    ) -> Result<(), Error> {
+        self.ensure_context(current)?;
+        if self.intent.split.is_none() {
+            self.clear_check();
+            return Err(Error::WrongIdentity);
+        }
+        let observations = self.fresh.take().ok_or(Error::Unchecked)?;
+        self.status = Status::Unchecked;
+        if !self.construction_verified || self.intent.phase != Phase::Tracking {
+            return Err(Error::Unchecked);
+        }
+        if self.intent.fork_submission.is_some() {
+            return Err(Error::Conflict);
+        }
+        let tx = signed.transaction();
+        if signed.chain() != self.intent.plan.fork_chain
+            || self.intent.fork_sweep.as_ref() != Some(&unsigned(tx))
+        {
+            return Err(Error::InvalidPlan);
+        }
+        if self.assess_fresh(&observations, policy, now)?
+            != Assessment::ObservationsEligibleForPreflight
+        {
+            return Err(Error::Unchecked);
+        }
+        let mut next = self.intent.clone();
+        next.fork_submission = Some(RecordedForkSubmission {
+            txid: tx.compute_txid(),
+            wtxid: tx.compute_wtxid(),
+        });
+        if let Some(record) = next.split.as_mut() {
+            record.step2_transaction = Some(tx.clone());
+        }
+        validate(&next)?;
+        self.journal.store(&next)?;
+        self.intent = next;
+        Ok(())
+    }
+
+    /// The recorded signed step 2, once its submission intent was recorded.
+    /// Untrusted restart data: it identifies what to reconcile, nothing more.
+    pub fn recorded_split_step2(&self) -> Option<&Transaction> {
+        self.intent
+            .split
+            .as_ref()
+            .and_then(|record| record.step2_transaction.as_ref())
     }
 
     /// Abandon a Split that was never submitted: delete the whole intent,

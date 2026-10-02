@@ -21,7 +21,8 @@
 //! claimed prevouts and the tracked txid. It has no Clone, no serialization
 //! and no public constructor, and redeeming it consumes it. A later check,
 //! a generation change, a revocation (logout) or dropping the preparation
-//! kills every earlier token. Nothing here signs or builds step 2 (B3b).
+//! kills every earlier token. Redeeming it builds step 2 (B3b, [`step2`]):
+//! the token must name this preparation's tracked step-1 txid too.
 //!
 //! Step 1's reorg handling stays with the step-1 coordinator
 //! (`claim_coordinator::Coordinator`):
@@ -46,6 +47,9 @@ use std::{collections::BTreeSet, convert::TryFrom, sync::Weak};
 pub struct SplitForkProduction {
     source: HttpObservationSource,
     esplora: ConnectEsplora,
+    /// The admitted Connect origin, `scheme://host[:port]/`. Step 2's
+    /// transport must be bound to this same origin.
+    origin: String,
     context: Context,
     generation: watch::Receiver<u64>,
 }
@@ -64,6 +68,10 @@ impl SplitForkProduction {
             },
         )
         .map_err(|_| Error::InvalidBinding)?;
+        let origin = reqwest::Url::parse(&client.base_url)
+            .map_err(|_| Error::InvalidBinding)?
+            .as_str()
+            .to_owned();
         let (source, context, generation) = super::super::split::SplitProduction::new(
             client,
             account,
@@ -75,6 +83,7 @@ impl SplitForkProduction {
         Ok(Self {
             source,
             esplora,
+            origin,
             context,
             generation,
         })
@@ -87,18 +96,36 @@ impl SplitForkProduction {
 #[async_trait]
 trait SplitForkServices: Send + Sync {
     fn source(&self) -> &dyn ObservationSource;
+    /// The admitted Connect origin (`scheme://host[:port]/`).
+    fn origin(&self) -> &str;
     /// A fresh read of the BTCB2 unspent outputs paying `address`.
     async fn btcb2_unspent(&self, address: &str) -> Result<FreshRead<Vec<OutPoint>>, FailureKind>;
+    /// A fresh read of whether `address` has any history on `chain`.
+    async fn address_used(
+        &self,
+        chain: ChainId,
+        address: &str,
+    ) -> Result<FreshRead<bool>, FailureKind>;
 }
 #[async_trait]
 impl SplitForkServices for SplitForkProduction {
     fn source(&self) -> &dyn ObservationSource {
         &self.source
     }
+    fn origin(&self) -> &str {
+        &self.origin
+    }
     async fn btcb2_unspent(&self, address: &str) -> Result<FreshRead<Vec<OutPoint>>, FailureKind> {
         self.esplora
             .unspent_outputs(ChainId::BitcoinBlake2b, address)
             .await
+    }
+    async fn address_used(
+        &self,
+        chain: ChainId,
+        address: &str,
+    ) -> Result<FreshRead<bool>, FailureKind> {
+        self.esplora.address_used(chain, address).await
     }
 }
 
@@ -171,7 +198,8 @@ pub enum RedeemError {
     /// Expired, superseded by a later check, revoked, or the session or
     /// preparation is gone.
     Stale,
-    /// Another chain, generation or set of prevouts than the one checked.
+    /// Another chain, generation, set of prevouts or tracked step-1 txid
+    /// than the one checked.
     Mismatch,
 }
 impl ForeignStep2Authorization {
@@ -189,13 +217,15 @@ impl ForeignStep2Authorization {
         self.tracked_txid
     }
     /// Spend the authorization on exactly the checked prevouts of the fork
-    /// chain, under the checked generation. One use: the value is consumed
-    /// whether or not it redeems.
+    /// chain, under the checked generation, for the checked step-1 txid
+    /// (#626: the tracked txid is bound at redemption). One use: the value is
+    /// consumed whether or not it redeems.
     pub(crate) fn redeem(
         self,
         chain: ChainId,
         generation: u64,
         prevouts: &[OutPoint],
+        tracked_txid: Txid,
     ) -> Result<(), RedeemError> {
         if !self.is_live() {
             return Err(RedeemError::Stale);
@@ -203,6 +233,7 @@ impl ForeignStep2Authorization {
         if chain != self.fork_chain
             || generation != self.expected_generation
             || prevouts_digest(prevouts) != Some(self.prevouts)
+            || tracked_txid != self.tracked_txid
         {
             return Err(RedeemError::Mismatch);
         }
@@ -213,11 +244,11 @@ impl ForeignStep2Authorization {
 #[cfg(test)]
 impl ForeignStep2Authorization {
     /// Test-only: a token shaped as `check_signing` mints it, for the
-    /// redeemer's own tests (`PreparedForeignSweep::new`). It stays live
-    /// while the returned counter holds 1; storing anything else supersedes
-    /// it, as a later check would.
+    /// redeemer's own tests. It stays live while the returned counter holds
+    /// 1; storing anything else supersedes it, as a later check would.
     pub(crate) fn for_test(
         prevouts: &[OutPoint],
+        tracked_txid: Txid,
         generation: watch::Receiver<u64>,
     ) -> (Self, Arc<AtomicU64>) {
         let latest = Arc::new(AtomicU64::new(1));
@@ -231,7 +262,7 @@ impl ForeignStep2Authorization {
             not_after: Instant::now() + Duration::from_secs(60),
             fork_chain: ChainId::BitcoinBlake2b,
             prevouts: prevouts_digest(prevouts).expect("distinct prevouts"),
-            tracked_txid: Txid::all_zeros(),
+            tracked_txid,
         };
         (token, latest)
     }
@@ -253,6 +284,12 @@ pub struct SplitPreparation {
     services: Box<dyn SplitForkServices>,
     policy: CheckPolicy,
     revoker: Revoker,
+    /// Step 2 (B3b): the BTCB2 tip of the latest check that minted a token.
+    fork_tip: Option<coincube_core::claim::BlockRef>,
+    /// The reserved target as last proven; see [`step2`].
+    target: step2::TargetState,
+    /// The unsigned step 2 built under a redeemed token.
+    step2: Option<Arc<coincube_core::foreign_split::SplitStep2>>,
 }
 impl SplitPreparation {
     /// Reopen the Split journal in `directory`. `construction` and
@@ -348,6 +385,9 @@ impl SplitPreparation {
             services,
             policy,
             revoker: Revoker::new(),
+            fork_tip: None,
+            target: step2::TargetState::default(),
+            step2: None,
         })
     }
     pub fn context(&self) -> &Context {
@@ -421,6 +461,7 @@ impl SplitPreparation {
         self.current(context)?;
         self.revision = self.revision.checked_add(1).ok_or(Error::Revoked)?;
         self.latest.store(self.revision, Ordering::Release);
+        self.fork_tip = None;
         let ticket = self.controller.begin_check(context)?;
         let first = self.collect().await?;
         if first.assessment != Assessment::ObservationsEligibleForPreflight {
@@ -483,6 +524,7 @@ impl SplitPreparation {
             return Err(Error::NotReady(assessment).into());
         }
         self.current(context)?;
+        self.fork_tip = Some(observations.fork.tip);
         Ok(ForeignStep2Authorization {
             check: (self.id, self.revision),
             latest: Arc::downgrade(&self.latest),
@@ -496,11 +538,9 @@ impl SplitPreparation {
         })
     }
 }
-impl Drop for SplitPreparation {
-    fn drop(&mut self) {
-        self.revoker.revoke();
-    }
-}
+// No Drop: a dropped preparation takes its check counter with it, so every
+// token it minted stops being live (`ForeignStep2Authorization::is_live`).
+// `finish` revokes explicitly before handing the journal on.
 
 /// Each claimed prevout of `construction` and the address its output pays,
 /// from the construction's own txid-bound previous transactions. `None` if
@@ -532,6 +572,8 @@ fn claimed_addresses(construction: &SplitStep1) -> Option<Vec<(OutPoint, String)
         })
         .collect()
 }
+
+pub mod step2;
 
 #[cfg(all(test, unix))]
 mod tests;

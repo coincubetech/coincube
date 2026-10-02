@@ -146,6 +146,22 @@ pub(super) async fn preflight(
     Ok(RoutedEvidence::Connect(evidence))
 }
 
+/// Local-node policy only, with no operator fallback: Split step 2 on a
+/// BTCB2 Vault's managed Knots node (#568 P4). The node's best block must
+/// equal `tip`, the independently observed BTCB2 tip, so a node on any other
+/// chain refuses as `Stale`. A rejection is returned as evidence; the caller
+/// refuses it.
+pub(super) async fn node_preflight(
+    bound: &BoundNode,
+    tx: &Transaction,
+    tip: BlockHash,
+    policy: FreshnessPolicy,
+    context: CollectionContext,
+) -> Result<RoutedEvidence, claim_preflight::Error> {
+    let evidence = direct::observe(bound.config.clone(), tx.clone(), tip, context, policy).await?;
+    Ok(RoutedEvidence::BitcoinNode(evidence, bound.identity))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
