@@ -7,6 +7,13 @@ use std::net::SocketAddr;
 /// Process-local binding; contains no credential digest or persisted identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NodeIdentity(u64);
+#[cfg(test)]
+impl NodeIdentity {
+    /// Test-only: an identity for a synthetic route value.
+    pub(crate) fn for_test(n: u64) -> Self {
+        Self(n)
+    }
+}
 #[derive(Clone)]
 pub(super) struct BoundNode {
     identity: NodeIdentity,
