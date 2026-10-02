@@ -1,6 +1,7 @@
-//! Split step-1 panel view (#568 B1b). Pure rendering of
+//! Split panel view (#568 B1b, step 2 in B3b-2b-2). Pure rendering of
 //! [`SplitPanel`]; every action is a [`SplitMessage`]. There is no "start"
-//! action: a fresh split is not reachable before B5 (D1).
+//! action: a fresh split is not reachable before B5 (D1), and step 2 is
+//! reachable only from a resumed journal whose step 1 has six confirmations.
 
 use coincube_core::claim::MIN_CONFIRMATIONS;
 use coincube_ui::{
@@ -17,7 +18,7 @@ use crate::{
     app::{
         state::vault::split::{
             step1::{self, describe_route},
-            SplitMessage, SplitPanel, Stage, Work,
+            step2, SplitMessage, SplitPanel, Stage, Step2Stage, Work,
         },
         view::Message,
     },
@@ -52,7 +53,123 @@ fn working(work: Work) -> &'static str {
         Work::Resending => "Sending step 1 again through Connect…",
         Work::CheckingAbandon => "Checking Bitcoin before abandoning…",
         Work::Abandoning => "Abandoning…",
+        Work::Restarting => "Reading the split recorded on this device…",
+        Work::Entering => "Opening step 2…",
+        Work::Leaving => "Returning to step 1…",
+        Work::Step2Checking => "Checking step 1's confirmations on both chains…",
+        Work::Reserving => step2::RESERVING,
+        Work::Step2Building => "Building step 2…",
+        Work::Step2Exporting => "Saving the step-2 PSBT file…",
+        Work::Step2Importing => "Checking the signed step-2 files…",
+        Work::Finishing => "Verifying the signed step 2…",
+        Work::Step2Reviewing => "Preparing a fresh step-2 review…",
+        Work::Step2Submitting => "Submitting step 2…",
+        Work::Step2Reconciling => "Checking Bitcoin Blake2b for step 2…",
     }
+}
+
+/// The step-2 stages.
+fn step2_body<'a>(
+    panel: &'a SplitPanel,
+    stage: Step2Stage,
+    mut body: coincube_ui::widget::Column<'a, Message>,
+    mut actions: coincube_ui::widget::Row<'a, Message>,
+) -> (
+    coincube_ui::widget::Column<'a, Message>,
+    coincube_ui::widget::Row<'a, Message>,
+) {
+    if let Some(label) = panel.replay_label() {
+        body = body.push(p1_bold(label).style(theme::text::success));
+    }
+    match stage {
+        Step2Stage::Ready => {
+            body = body.push(p1_regular(
+                "Step 2 moves the same coins on Bitcoin Blake2b to a fresh address of this Vault. Check step 1's confirmations, reserve the address, then build.",
+            ));
+            if let Some(index) = panel.target_index() {
+                body = body.push(caption(format!(
+                    "Fresh Vault address reserved (receive index {index}); Connect shows no use on either chain."
+                )));
+            }
+            actions = actions
+                .push(action("Check confirmations", SplitMessage::Step2Check))
+                .push(action("Reserve address", SplitMessage::Step2Reserve));
+            if panel.target_index().is_some() && panel.replay_label().is_some() {
+                actions = actions.push(primary("Build step 2", SplitMessage::Step2Build));
+            }
+            actions = actions.push(action("Back to step 1", SplitMessage::LeaveStep2));
+        }
+        Step2Stage::Sign => {
+            if let Some(psbt) = panel.step2_psbt() {
+                body = body.push(caption(format!(
+                    "Unsigned step-2 txid {}",
+                    psbt.unsigned_tx.compute_txid()
+                )));
+            }
+            body = body.push(p1_regular(match panel.step2_exported() {
+                Some(path) => format!(
+                    "Saved to {}. Sign it in the wallet that holds the keys (SIGHASH_ALL, without finalizing), then import the signed file(s).",
+                    path.display()
+                ),
+                None => "Save the unsigned step-2 PSBT, sign it in the wallet that holds the keys, then import the signed file(s).".to_string(),
+            }));
+            if panel.step2_files() > 0 {
+                body = body.push(caption(format!(
+                    "{} signed file(s) loaded",
+                    panel.step2_files()
+                )));
+            }
+            actions = actions
+                .push(action(
+                    "Save PSBT",
+                    SplitMessage::Step2Export(Encoding::Binary),
+                ))
+                .push(action(
+                    "Save as text",
+                    SplitMessage::Step2Export(Encoding::Base64),
+                ))
+                .push(primary("Import signed", SplitMessage::Step2Import))
+                .push(action("Back to step 1", SplitMessage::LeaveStep2));
+        }
+        Step2Stage::Signed => {
+            body = body.push(p1_regular(
+                "Step 2 is signed. Nothing has been sent. Review it to submit.",
+            ));
+            actions = actions.push(primary("Review step 2", SplitMessage::Step2Review));
+        }
+        Step2Stage::Review => {
+            if let Some(review) = panel.step2_review() {
+                body = body
+                    .push(p1_bold(format!("Step-2 txid {}", review.txid)))
+                    .push(p1_regular(format!(
+                        "Fee {} sats · {} vB · route {}",
+                        review.fee_sats, review.vsize, review.route_label
+                    )));
+                if let Some(note) = review.privacy_note {
+                    body = body.push(p1_regular(note).style(theme::text::warning));
+                }
+            }
+            actions = actions
+                .push(primary("Submit step 2", SplitMessage::Step2Confirm))
+                .push(action("Review again", SplitMessage::Step2Review));
+        }
+        Step2Stage::Submitted | Step2Stage::Reconcile => {
+            body = body.push(p1_regular(match panel.step2_outcome() {
+                Some(Outcome::UpstreamAccepted { txid, .. }) => {
+                    format!("Step 2 {txid} was accepted for relay. Waiting for confirmation.")
+                }
+                Some(Outcome::Uncertain { txid, .. }) | Some(Outcome::Recorded { txid }) => format!(
+                    "A submission of step 2 ({txid}) is recorded. It is never sent again automatically; check its status."
+                ),
+                None => "A submission of step 2 is recorded. Check its status.".to_string(),
+            }));
+            if let Some(seen) = panel.step2_seen() {
+                body = body.push(caption(format!("Bitcoin Blake2b: {seen:?}")));
+            }
+            actions = actions.push(action("Refresh", SplitMessage::Step2Reconcile));
+        }
+    }
+    (body, actions)
 }
 
 pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
@@ -163,7 +280,11 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
                     "Bitcoin confirmations: {confirmations} of {MIN_CONFIRMATIONS}"
                 )));
                 body = body.push(p1_regular(if confirmations >= MIN_CONFIRMATIONS {
-                    "Step 1 has the confirmations step 2 needs. Step 2 isn't available in this version yet; the split stays recorded on this device.".to_string()
+                    if panel.can_enter_step2() {
+                        "Step 1 has the confirmations step 2 needs. Continue to step 2 on Bitcoin Blake2b.".to_string()
+                    } else {
+                        "Step 1 has the confirmations step 2 needs. Step 2 needs this Vault's wallet engine running; the split stays recorded on this device.".to_string()
+                    }
                 } else {
                     format!(
                         "Step 2 waits for {MIN_CONFIRMATIONS} confirmations of step 1, rechecked at the tip of both chains. Check again later."
@@ -172,7 +293,13 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
             } else if let Some(status) = panel.status() {
                 body = body.push(caption(format!("Last check: {status:?}")));
             }
+            if panel.can_enter_step2() {
+                actions = actions.push(primary("Continue to step 2", SplitMessage::EnterStep2));
+            }
             actions = actions.push(action("Refresh", SplitMessage::Reconcile));
+        }
+        Stage::Step2(stage) => {
+            (body, actions) = step2_body(panel, *stage, body, actions);
         }
         Stage::Reconfirm {
             previous,

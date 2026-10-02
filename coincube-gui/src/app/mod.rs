@@ -3757,6 +3757,19 @@ impl App {
             })
         });
         let generation = self.panels.claim_generation.subscribe();
+        // Step 2 (#568 B3b-2b-2) through this Cube's Vault daemon, when one
+        // is loaded. A daemon or backend switch revokes the panel first
+        // (`revoke_claim`), and a new daemon gives a new port.
+        let step2 = session.clone().and_then(|session| {
+            let daemon = self.daemon.clone()?;
+            state::vault::split::step2::ProductionStep2::new(
+                session,
+                self.panels.claim_generation.subscribe(),
+                daemon,
+            )
+            .ok()
+            .map(|port| Arc::new(port) as Arc<dyn state::vault::split::step2::Step2Port>)
+        });
         let Some(panel) = self.split_panel.as_mut() else {
             return Task::none();
         };
@@ -3768,6 +3781,7 @@ impl App {
                 })
         });
         panel.set_connect(connect);
+        panel.set_step2_port(step2);
         panel.begin()
     }
 

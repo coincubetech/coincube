@@ -383,6 +383,9 @@ impl Step2Prep for HeldPrep {
     async fn build(&mut self, _: &Context, _: Vec<SplitCoin>) -> Result<Psbt, Step2Refusal> {
         unreachable!()
     }
+    fn verify_signed(&self, _: &Psbt, _: &[SplitCoin]) -> Result<bool, Step2Refusal> {
+        unreachable!()
+    }
     fn finish(
         self: Box<Self>,
         _: &Context,
@@ -667,30 +670,56 @@ fn step2_copy_names_the_cause_and_the_node_route_privacy() {
     assert!(NODE_PRIVACY.contains("network address"));
 }
 
-/// "Split — cannot replay" only from live evidence: a token from a
-/// successful check produces it, it names that check's tracked txid, and it
-/// lapses with the check's evidence.
+/// "Split — cannot replay" only from live evidence (#636 P3-2): a token from
+/// a successful check produces it and it names that check's tracked txid.
+/// It disappears with the evidence, not only by time: when a later check
+/// supersedes it, on revocation (logout, Cube close), on a generation change
+/// and when the preparation is gone.
 #[test]
 fn cannot_replay_label_comes_only_from_live_check_evidence() {
     let prevouts = [OutPoint::new(Txid::from_byte_array([1; 32]), 0)];
     let tracked = Txid::from_byte_array([2; 32]);
-    let (token, _live) =
-        ForeignStep2Authorization::for_test(&prevouts, tracked, watch::channel(7).1);
+    let (sender, generation) = watch::channel(7);
+    // Superseded by a later check.
+    let (token, latest) =
+        ForeignStep2Authorization::for_test(&prevouts, tracked, generation.clone());
     let label = evidence_of(&token);
     assert_eq!(label.label(), Some(CANNOT_REPLAY));
     assert_eq!(label.tracked_txid(), tracked);
-    let lapsed = CannotReplay {
-        tracked,
-        until: Instant::now(),
-    };
-    assert_eq!(lapsed.label(), None);
+    latest.store(2, Ordering::Release);
+    assert_eq!(label.label(), None);
+    // The preparation (its check counter) dropped.
+    let (token, latest) =
+        ForeignStep2Authorization::for_test(&prevouts, tracked, generation.clone());
+    let label = evidence_of(&token);
+    drop(latest);
+    assert_eq!(label.label(), None);
+    // A generation change (session or account change).
+    let (token, _latest) =
+        ForeignStep2Authorization::for_test(&prevouts, tracked, generation.clone());
+    let label = evidence_of(&token);
+    assert_eq!(label.label(), Some(CANNOT_REPLAY));
+    sender.send(8).unwrap();
+    assert_eq!(label.label(), None);
+    // A closed session (the generation's sender gone) is not live either.
+    let (token, _latest) =
+        ForeignStep2Authorization::for_test(&prevouts, tracked, watch::channel(7).1);
+    assert_eq!(evidence_of(&token).label(), None);
+    // Revocation (logout, Cube close, backend switch).
+    let (token, _latest) =
+        ForeignStep2Authorization::for_test(&prevouts, tracked, generation.clone());
+    let label = evidence_of(&token);
+    assert_eq!(label.label(), Some(CANNOT_REPLAY));
+    token.revoke_for_test();
+    assert_eq!(label.label(), None);
 }
 
-/// D1: the step-2 panel layer has no caller yet. Its items are named only
-/// in this module and its tests (B3b-2b-2 wires the panel, still reachable
-/// only by resuming a journal).
+/// D1: the step-2 panel layer is reached only through the Split panel
+/// (itself constructed in production only to resume an existing journal,
+/// `split_panel_has_no_gui_entry_point`), and the App only hands the panel
+/// its port. Whole identifiers.
 #[test]
-fn step2_panel_layer_has_no_caller_yet() {
+fn step2_panel_layer_is_reached_only_through_the_split_panel() {
     fn walk(dir: &Path, files: &mut Vec<(String, String)>) {
         for entry in std::fs::read_dir(dir).unwrap() {
             let path = entry.unwrap().path();
@@ -714,7 +743,7 @@ fn step2_panel_layer_has_no_caller_yet() {
     );
     let mut unexpected = Vec::new();
     for (file, text) in &files {
-        if file.starts_with("src/app/state/vault/split/step2") {
+        if file.starts_with("src/app/state/vault/split/") {
             continue;
         }
         for ident in [
@@ -723,24 +752,43 @@ fn step2_panel_layer_has_no_caller_yet() {
             "Step2Prep",
             "Step2Coord",
             "Step2Recon",
+            "Step2Open",
+            "Restart",
+            "restart",
             "enter_step2",
             "leave_for_step1",
             "CannotReplay",
             "Step2Refusal",
+            "Step2ReviewView",
             "describe_target",
             "describe_step2",
+            "describe_split_check",
             "route_copy",
             "NODE_PRIVACY",
+            "CANNOT_REPLAY",
+            "RESERVING",
             "FinishRefusal",
+            "set_step2_port",
         ] {
-            // Whole identifiers: `SplitStep2Coordinator` is not `Step2Coord`.
             let named = text
                 .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
                 .any(|word| word == ident);
-            if named {
+            // The App hands the panel the port of its Vault daemon; the view
+            // shows the N4 waiting text.
+            let allowed = (file == "src/app/mod.rs"
+                && ["ProductionStep2", "Step2Port", "set_step2_port"].contains(&ident))
+                || (file == "src/app/view/vault/split.rs" && ident == "RESERVING");
+            // `restart`/`Restart` are common words elsewhere: only a path
+            // into the step-2 module counts for them.
+            let generic = ["restart", "Restart"].contains(&ident)
+                && !text.contains(&format!("step2::{ident}"));
+            if named && !allowed && !generic {
                 unexpected.push((file.clone(), ident));
             }
         }
     }
     assert!(unexpected.is_empty(), "{:?}", unexpected);
 }
+
+mod driver;
+mod panel;

@@ -202,15 +202,50 @@ pub enum RedeemError {
     /// than the one checked.
     Mismatch,
 }
-impl ForeignStep2Authorization {
+/// Whether one check's evidence is still current, without its authority:
+/// the same test as [`ForeignStep2Authorization::is_live`] (the check is the
+/// preparation's latest, not revoked, same generation, before its
+/// deadline), for display such as the "cannot replay" label (#636 P3-2).
+/// It redeems nothing.
+#[derive(Clone)]
+pub struct Step2Liveness {
+    check: u64,
+    latest: Weak<AtomicU64>,
+    revoker: Revoker,
+    generation: watch::Receiver<u64>,
+    expected_generation: u64,
+    not_after: Instant,
+}
+impl std::fmt::Debug for Step2Liveness {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Step2Liveness").finish_non_exhaustive()
+    }
+}
+impl Step2Liveness {
     pub fn is_live(&self) -> bool {
         self.latest
             .upgrade()
-            .is_some_and(|latest| latest.load(Ordering::Acquire) == self.check.1)
+            .is_some_and(|latest| latest.load(Ordering::Acquire) == self.check)
             && !self.revoker.is_revoked()
             && *self.generation.borrow() == self.expected_generation
             && self.generation.has_changed().is_ok()
             && Instant::now() < self.not_after
+    }
+}
+impl ForeignStep2Authorization {
+    pub fn is_live(&self) -> bool {
+        self.liveness().is_live()
+    }
+    /// The display-only liveness of this authorization's check.
+    pub fn liveness(&self) -> Step2Liveness {
+        Step2Liveness {
+            check: self.check.1,
+            latest: self.latest.clone(),
+            revoker: self.revoker.clone(),
+            generation: self.generation.clone(),
+            expected_generation: self.expected_generation,
+            not_after: self.not_after,
+        }
     }
     /// The step-1 txid this authorization was checked for.
     pub fn tracked_txid(&self) -> Txid {
@@ -271,6 +306,10 @@ impl ForeignStep2Authorization {
             tracked_txid,
         };
         (token, latest)
+    }
+    /// Test-only: revoke the token's session, as a logout would.
+    pub(crate) fn revoke_for_test(&self) {
+        self.revoker.revoke();
     }
 }
 
