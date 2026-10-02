@@ -212,6 +212,10 @@ struct View {
     used: Vec<(ChainId, String)>,
     /// An address-history read fails.
     address_fails: bool,
+    /// Address-history reads on this chain come back an hour old.
+    address_stale: Option<ChainId>,
+    /// Seconds added to the services' clock (`ObservationSource::now`).
+    clock_offset: i64,
 }
 impl View {
     /// Step 1 confirmed in `block` (hash 6) at height 100 with `depth`
@@ -233,6 +237,8 @@ impl View {
             between: None,
             used: Vec::new(),
             address_fails: false,
+            address_stale: None,
+            clock_offset: 0,
         };
         view.set_depth(depth);
         view
@@ -269,7 +275,7 @@ impl Chains {
 #[async_trait]
 impl ObservationSource for Chains {
     fn now(&self) -> i64 {
-        now()
+        now() + self.view.lock().unwrap().clock_offset
     }
     async fn anchor(&self, chain: ChainId) -> Result<NetworkAnchorStatus, FailureKind> {
         let expiry = self.view.lock().unwrap().rdts_expiry;
@@ -348,7 +354,14 @@ impl SplitForkServices for Chains {
         if view.address_fails {
             return Err(FailureKind::Http(503));
         }
-        Self::read(chain, view.used.contains(&(chain, address.to_owned())))
+        let used = view.used.contains(&(chain, address.to_owned()));
+        if view.address_stale == Some(chain) {
+            let mut headers = HeaderMap::new();
+            headers.insert("x-cache", "BYPASS".parse().unwrap());
+            headers.insert("cache-control", "no-store".parse().unwrap());
+            return FreshRead::from_response(chain, used, now() - 3_600, &headers);
+        }
+        Self::read(chain, used)
     }
     async fn btcb2_unspent(&self, _address: &str) -> Result<FreshRead<Vec<OutPoint>>, FailureKind> {
         self.unspent_reads.fetch_add(1, Ordering::SeqCst);

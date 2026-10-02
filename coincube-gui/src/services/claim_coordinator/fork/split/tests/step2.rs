@@ -1066,3 +1066,91 @@ impl Daemon for AdmissionDaemon {
         unreachable!("_get_labels_bip329: admission makes no daemon call")
     }
 }
+
+/// #630 F1 (I10, N1): every address-history read must itself be fresh. A
+/// read an hour old on BTCB2, or on Bitcoin, refuses as unavailable and
+/// proves nothing (no index is marked used); the control with fresh reads
+/// on both chains proves the target.
+#[tokio::test(flavor = "multi_thread")]
+async fn split_step2_target_proof_needs_fresh_reads_on_both_chains() {
+    let h = Harness::new(6).await;
+    let mut preparation = tracked(&h).await;
+    let polls = Arc::new(AtomicUsize::new(0));
+    preparation
+        .reserve_target(
+            &context(),
+            &vault(),
+            reserved(&vault(), INDEX, &polls),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+    for chain in [ChainId::BitcoinBlake2b, ChainId::Bitcoin] {
+        h.chains.edit(|view| view.address_stale = Some(chain));
+        assert!(
+            matches!(
+                preparation.prove_target(&context(), &vault()).await,
+                Err(TargetError::Unavailable(c, FailureKind::Stale)) if c == chain
+            ),
+            "{:?}",
+            chain
+        );
+        assert!(!preparation.needs_reservation().unwrap());
+        // Not proven: no construction.
+        let token = preparation.check_signing(&context()).await.unwrap();
+        assert!(matches!(
+            preparation
+                .construct_step2(&context(), token, coins(&h.wallet), &Fees(Some(2)))
+                .await,
+            Err(Step2Error::TargetNotProven)
+        ));
+    }
+    // Control: fresh on both chains.
+    h.chains.edit(|view| view.address_stale = None);
+    preparation
+        .prove_target(&context(), &vault())
+        .await
+        .unwrap();
+}
+
+/// #630 F2 (I10): construction needs a target proof no older than the
+/// observation age (60 s here). With the services' clock past that age the
+/// proof refuses as `TargetNotProven` and nothing is journaled; the control,
+/// at the proof's own time, builds.
+#[tokio::test(flavor = "multi_thread")]
+async fn split_step2_construction_refuses_a_target_proof_past_the_observation_age() {
+    let h = Harness::new(6).await;
+    let mut preparation = tracked(&h).await;
+    let polls = Arc::new(AtomicUsize::new(0));
+    preparation
+        .reserve_target(
+            &context(),
+            &vault(),
+            reserved(&vault(), INDEX, &polls),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+    preparation
+        .prove_target(&context(), &vault())
+        .await
+        .unwrap();
+    let token = preparation.check_signing(&context()).await.unwrap();
+    // The clock moves past the proof's age between the check and the build.
+    h.chains.edit(|view| view.clock_offset = 61);
+    assert!(matches!(
+        preparation
+            .construct_step2(&context(), token, coins(&h.wallet), &Fees(Some(2)))
+            .await,
+        Err(Step2Error::TargetNotProven)
+    ));
+    assert!(h.temp.journal().get("fork_sweep").is_none());
+    // Control: the same preparation, the clock back, a fresh token.
+    h.chains.edit(|view| view.clock_offset = 0);
+    let token = preparation.check_signing(&context()).await.unwrap();
+    preparation
+        .construct_step2(&context(), token, coins(&h.wallet), &Fees(Some(2)))
+        .await
+        .unwrap();
+    assert!(h.temp.journal().get("fork_sweep").is_some());
+}
