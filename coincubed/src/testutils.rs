@@ -956,9 +956,10 @@ pub fn capture_logs_at<T>(
 ) -> (T, Vec<(log::Level, String)>) {
     use std::cell::RefCell;
 
+    /// The capturing thread's level and the records kept so far.
+    type Capturing = Option<(log::Level, Vec<(log::Level, String)>)>;
     thread_local! {
-        static CAPTURED: RefCell<Option<(log::Level, Vec<(log::Level, String)>)>> =
-            const { RefCell::new(None) };
+        static CAPTURED: RefCell<Capturing> = const { RefCell::new(None) };
     }
     struct Capture;
     impl log::Log for Capture {
