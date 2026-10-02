@@ -1727,4 +1727,167 @@ mod tests {
         assert_eq!(fs::read_dir(&datadir).unwrap().count(), 0);
         fs::remove_dir(datadir).unwrap();
     }
+
+    /// A one-coin pre-fork BTCB2 report, its descriptors and a target.
+    fn step2_inputs() -> (ScanReport, AccountDescriptors, TargetAddressEvidence) {
+        let source = SessionSeedSource::new(
+            Zeroizing::new(WORDS.to_owned()),
+            Zeroizing::new("session passphrase".to_owned()),
+        )
+        .unwrap();
+        let descriptors = source.descriptors(StandardSinglesig::Bip84, 0).unwrap();
+        let previous = Transaction {
+            version: transaction::Version::TWO,
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![TxIn::default()],
+            output: vec![TxOut {
+                value: Amount::from_sat(100_000),
+                script_pubkey: descriptors.external.script(7).unwrap(),
+            }],
+        };
+        let coin = DiscoveredCoin {
+            branch: Branch::External,
+            index: 7,
+            outpoint: OutPoint::new(previous.compute_txid(), 0),
+            output: previous.output[0].clone(),
+            previous,
+            confirmed: true,
+            block_height: Some(FORK_HEIGHT as u32 - 1),
+            block_hash: Some(BlockHash::from_byte_array([3; 32])),
+        };
+        let report = ScanReport::for_test(
+            ChainId::BitcoinBlake2b,
+            9,
+            BlockHash::from_byte_array([2; 32]),
+            vec![coin],
+        )
+        .with_fork_height(Some(FORK_HEIGHT));
+        (report, descriptors, target_evidence("vault-a", 11, 9))
+    }
+
+    /// #568 B2: the token's one redeemer sweeps exactly the authorized
+    /// prevouts with no change. A change output refuses; another prevout set
+    /// is `ConstructionChanged`; a superseded or out-of-session token is
+    /// `StaleSession`; only the exact set under a live token constructs.
+    #[test]
+    fn step2_sweep_redeems_the_token_for_exactly_its_prevouts_without_change() {
+        let (report, descriptors, target) = step2_inputs();
+        let session = || ForeignSession {
+            chain: ChainId::BitcoinBlake2b,
+            generation: 9,
+            target: &target,
+            external: &descriptors.external,
+            internal: Some(&descriptors.internal),
+        };
+        let selected: Vec<OutPoint> = report.coins().iter().map(|c| c.outpoint).collect();
+        assert_eq!(selected.len(), 1);
+        let (sender, _) = tokio::sync::watch::channel(9u64);
+        let token = || ForeignStep2Authorization::for_test(&selected, sender.subscribe());
+
+        // A change output refuses, even with balanced economics.
+        let (authorization, _live) = token();
+        assert!(matches!(
+            PreparedForeignSweep::new(
+                &report,
+                session(),
+                Amount::from_sat(90_000),
+                Amount::from_sat(1_000),
+                Some(ForeignChange {
+                    index: 4,
+                    amount: Amount::from_sat(9_000),
+                }),
+                authorization,
+            ),
+            Err(ForeignPsbtError::Economics)
+        ));
+
+        // A token for another prevout set.
+        let other = [OutPoint::new(
+            coincube_core::miniscript::bitcoin::Txid::from_byte_array([5; 32]),
+            0,
+        )];
+        let (authorization, _live) =
+            ForeignStep2Authorization::for_test(&other, sender.subscribe());
+        assert!(matches!(
+            PreparedForeignSweep::new(
+                &report,
+                session(),
+                Amount::from_sat(99_000),
+                Amount::from_sat(1_000),
+                None,
+                authorization,
+            ),
+            Err(ForeignPsbtError::ConstructionChanged)
+        ));
+        let mut superset = selected.clone();
+        superset.extend(other);
+        let (authorization, _live) =
+            ForeignStep2Authorization::for_test(&superset, sender.subscribe());
+        assert!(matches!(
+            PreparedForeignSweep::new(
+                &report,
+                session(),
+                Amount::from_sat(99_000),
+                Amount::from_sat(1_000),
+                None,
+                authorization,
+            ),
+            Err(ForeignPsbtError::ConstructionChanged)
+        ));
+
+        // Superseded by a later check.
+        let (authorization, live) = token();
+        live.store(2, std::sync::atomic::Ordering::Release);
+        assert!(matches!(
+            PreparedForeignSweep::new(
+                &report,
+                session(),
+                Amount::from_sat(99_000),
+                Amount::from_sat(1_000),
+                None,
+                authorization,
+            ),
+            Err(ForeignPsbtError::StaleSession)
+        ));
+        // Its preparation gone.
+        let (authorization, live) = token();
+        drop(live);
+        assert!(matches!(
+            PreparedForeignSweep::new(
+                &report,
+                session(),
+                Amount::from_sat(99_000),
+                Amount::from_sat(1_000),
+                None,
+                authorization,
+            ),
+            Err(ForeignPsbtError::StaleSession)
+        ));
+
+        // The exact set, no change, a live token.
+        let (authorization, _live) = token();
+        let prepared = PreparedForeignSweep::new(
+            &report,
+            session(),
+            Amount::from_sat(99_000),
+            Amount::from_sat(1_000),
+            None,
+            authorization,
+        )
+        .unwrap();
+        let psbt = Psbt::from_str(&prepared.export_text()).unwrap();
+        assert_eq!(
+            psbt.unsigned_tx
+                .input
+                .iter()
+                .map(|i| i.previous_output)
+                .collect::<Vec<_>>(),
+            selected
+        );
+        assert_eq!(psbt.unsigned_tx.output.len(), 1);
+        assert_eq!(
+            psbt.unsigned_tx.output[0].script_pubkey,
+            target.script_pubkey
+        );
+    }
 }

@@ -53,10 +53,30 @@ fn now() -> i64 {
 }
 
 fn fresh<T>(chain: ChainId, value: T) -> FreshRead<T> {
+    read_at(chain, value, now())
+}
+
+fn read_at<T>(chain: ChainId, value: T, observed_at: i64) -> FreshRead<T> {
     let mut headers = HeaderMap::new();
     headers.insert("x-cache", "BYPASS".parse().unwrap());
     headers.insert(CACHE_CONTROL, "no-store".parse().unwrap());
-    FreshRead::from_response(chain, value, now(), &headers).unwrap()
+    FreshRead::from_response(chain, value, observed_at, &headers).unwrap()
+}
+
+/// An injected Bitcoin read fault (#626 F1): the read fails, or answers with
+/// a stamp older than any freshness bound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Fault {
+    Error,
+    Stale,
+}
+
+fn faulted<T>(fault: Option<Fault>, chain: ChainId, value: T) -> Result<FreshRead<T>, FailureKind> {
+    match fault {
+        None => Ok(fresh(chain, value)),
+        Some(Fault::Error) => Err(FailureKind::Http(503)),
+        Some(Fault::Stale) => Ok(read_at(chain, value, now() - 3_600)),
+    }
 }
 
 struct Temp(PathBuf);
@@ -90,6 +110,9 @@ struct Chains {
     status: Mutex<HashMap<(ChainId, Txid), TransactionObservation>>,
     canonical: HashMap<(ChainId, u64), BlockHash>,
     utxos: Mutex<HashMap<(ChainId, String), BTreeSet<OutPoint>>>,
+    /// Faults on Bitcoin transaction-status and unspent-output reads.
+    status_fault: Mutex<Option<Fault>>,
+    utxo_fault: Mutex<Option<Fault>>,
 }
 
 impl Chains {
@@ -99,6 +122,8 @@ impl Chains {
             status: Mutex::new(HashMap::new()),
             canonical: HashMap::new(),
             utxos: Mutex::new(HashMap::new()),
+            status_fault: Mutex::new(None),
+            utxo_fault: Mutex::new(None),
         };
         for coin in coins {
             let block = BlockRef {
@@ -170,7 +195,10 @@ impl SplitEvidenceSource for Chains {
             .get(&(chain, txid))
             .copied()
             .unwrap_or(TransactionObservation::Absent);
-        Ok(fresh(chain, value))
+        let fault = (chain == ChainId::Bitcoin)
+            .then(|| *self.status_fault.lock().unwrap())
+            .flatten();
+        faulted(fault, chain, value)
     }
     async fn hash_at_height(
         &self,
@@ -204,7 +232,10 @@ impl SplitEvidenceSource for Chains {
             .get(&(chain, address.to_owned()))
             .cloned()
             .unwrap_or_default();
-        Ok(fresh(chain, set.into_iter().collect()))
+        let fault = (chain == ChainId::Bitcoin)
+            .then(|| *self.utxo_fault.lock().unwrap())
+            .flatten();
+        faulted(fault, chain, set.into_iter().collect())
     }
 }
 
@@ -1463,4 +1494,93 @@ async fn split_reorg_with_coins_spent_elsewhere_needs_a_new_step1() {
     assert_eq!(connect.calls.recovers.load(Ordering::SeqCst), 3);
     assert_eq!(connect.calls.resends.load(Ordering::SeqCst), 0);
     assert_eq!(step1::discover(&temp.root()).len(), 1);
+}
+
+/// (#626 F1) After a reorg, a failed or stale Bitcoin read is never taken
+/// as a spend: neither step 1's own status read nor a claimed coin's
+/// unspent-output read. Each gives a retry refusal, and the panel keeps
+/// tracking instead of asking for a new step 1. The status cases run with a
+/// claimed coin really absent from the unspent outputs (as when step 1
+/// itself is back in the mempool), so a status failure read as "absent"
+/// would wrongly conclude a double spend.
+#[tokio::test(flavor = "multi_thread")]
+async fn split_reorg_read_failures_are_never_reported_as_a_spend() {
+    let scan = Scan::new(Shape::Wpkh);
+    let connect = FakeConnect::new(&scan.coins);
+    let temp = Temp::new();
+    let mut panel = tracking(&scan, &connect, &temp).await;
+    let tracked = panel.tracked_txid().unwrap();
+    let claimed = panel.claimed.clone();
+    refresh(
+        &mut panel,
+        &connect,
+        Status::Observation(Assessment::Reorged),
+    )
+    .await;
+    // The coordinator stays the one opened through `first`; each case swaps
+    // in a Connect (same account) whose Bitcoin reads are faulted.
+    let first = connect;
+
+    let cases = [
+        ("unspent read error", None, Some(Fault::Error), false),
+        ("stale unspent read", None, Some(Fault::Stale), false),
+        ("step 1 status read error", Some(Fault::Error), None, true),
+        ("stale step 1 status read", Some(Fault::Stale), None, true),
+    ];
+    for (case, status_fault, utxo_fault, coin_gone) in cases {
+        let connect = FakeConnect::new(&scan.coins);
+        if coin_gone {
+            connect
+                .chains
+                .spend_on(ChainId::Bitcoin, scan.coins[0].outpoint);
+        }
+        *connect.chains.status_fault.lock().unwrap() = status_fault;
+        *connect.chains.utxo_fault.lock().unwrap() = utxo_fault;
+
+        let refusal = step1::step1_double_spent(&*connect, tracked, &claimed)
+            .await
+            .expect_err(case);
+        assert!(refusal.retry, "{}", case);
+        assert!(
+            refusal.reason.contains("not a sign that a coin was spent"),
+            "{case}: {}",
+            refusal.reason
+        );
+
+        panel.set_connect(Some(connect.clone() as Arc<dyn SplitConnect>));
+        assert!(panel.is_bound() && panel.reorged(), "{}", case);
+        let before = first.calls.recovers.load(Ordering::SeqCst);
+        let task = panel.update(SplitMessage::CheckReorg);
+        drive(&mut panel, task).await;
+        assert_eq!(
+            panel.stage(),
+            &Stage::Tracking,
+            "{case}: {:?}",
+            panel.stage()
+        );
+        let notice = panel.notice().unwrap_or_default();
+        assert!(
+            notice.contains("not a sign that a coin was spent"),
+            "{}: {}",
+            case,
+            notice
+        );
+        assert_ne!(notice, step1::NEW_POISON_NEEDED, "{}", case);
+        assert_eq!(
+            first.calls.recovers.load(Ordering::SeqCst),
+            before + 1,
+            "{case}"
+        );
+
+        // Control: the same chain state without the fault.
+        *connect.chains.status_fault.lock().unwrap() = None;
+        *connect.chains.utxo_fault.lock().unwrap() = None;
+        assert_eq!(
+            step1::step1_double_spent(&*connect, tracked, &claimed)
+                .await
+                .unwrap(),
+            coin_gone,
+            "{case}"
+        );
+    }
 }

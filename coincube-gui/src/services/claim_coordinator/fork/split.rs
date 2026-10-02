@@ -210,6 +210,33 @@ impl ForeignStep2Authorization {
     }
 }
 
+#[cfg(test)]
+impl ForeignStep2Authorization {
+    /// Test-only: a token shaped as `check_signing` mints it, for the
+    /// redeemer's own tests (`PreparedForeignSweep::new`). It stays live
+    /// while the returned counter holds 1; storing anything else supersedes
+    /// it, as a later check would.
+    pub(crate) fn for_test(
+        prevouts: &[OutPoint],
+        generation: watch::Receiver<u64>,
+    ) -> (Self, Arc<AtomicU64>) {
+        let latest = Arc::new(AtomicU64::new(1));
+        let expected_generation = *generation.borrow();
+        let token = Self {
+            check: (0, 1),
+            latest: Arc::downgrade(&latest),
+            revoker: Revoker::new(),
+            generation,
+            expected_generation,
+            not_after: Instant::now() + Duration::from_secs(60),
+            fork_chain: ChainId::BitcoinBlake2b,
+            prevouts: prevouts_digest(prevouts).expect("distinct prevouts"),
+            tracked_txid: Txid::all_zeros(),
+        };
+        (token, latest)
+    }
+}
+
 /// Owns the Split journal after step 1 was submitted. Every new step-2
 /// authorization needs another fresh check; see the module documentation.
 pub struct SplitPreparation {
