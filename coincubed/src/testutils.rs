@@ -930,3 +930,46 @@ impl DummyCoincube {
         fs::remove_dir_all(self.tmp_dir).unwrap();
     }
 }
+
+/// Capture the log records emitted on the current thread while running `f`.
+///
+/// The logger is process-wide and installed once; it keeps only the records of
+/// threads inside a `capture_logs` call, so tests running in parallel do not see
+/// each other's records. Only warnings and errors are captured. Returns `f`'s
+/// result and the `(level, message)` pairs.
+pub fn capture_logs<T>(f: impl FnOnce() -> T) -> (T, Vec<(log::Level, String)>) {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static CAPTURED: RefCell<Option<Vec<(log::Level, String)>>> = const { RefCell::new(None) };
+    }
+    struct Capture;
+    impl log::Log for Capture {
+        fn enabled(&self, _: &log::Metadata) -> bool {
+            true
+        }
+        fn log(&self, record: &log::Record) {
+            // Format only on a capturing thread: every other test's records
+            // pass through here too, and must not be slowed down.
+            CAPTURED.with(|captured| {
+                if let Some(records) = captured.borrow_mut().as_mut() {
+                    records.push((record.level(), record.args().to_string()));
+                }
+            });
+        }
+        fn flush(&self) {}
+    }
+    static LOGGER: Capture = Capture;
+    static INSTALL: sync::Once = sync::Once::new();
+    INSTALL.call_once(|| {
+        log::set_logger(&LOGGER).expect("no other logger in the coincubed unit tests");
+        // Warn and above only: the records the tests assert on. A lower level
+        // would make every `debug!`/`trace!` in the parallel tests reach here.
+        log::set_max_level(log::LevelFilter::Warn);
+    });
+
+    CAPTURED.with(|captured| *captured.borrow_mut() = Some(Vec::new()));
+    let result = f();
+    let records = CAPTURED.with(|captured| captured.borrow_mut().take().unwrap_or_default());
+    (result, records)
+}

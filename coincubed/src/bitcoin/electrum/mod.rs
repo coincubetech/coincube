@@ -51,18 +51,10 @@ impl std::fmt::Display for ElectrumError {
     }
 }
 
-/// Refuse a chain update whose tip height does not fit into our `i32` heights,
-/// before any of it is applied (#616). BDK takes the tip height from the server
-/// as a `u32`; applied, it would make every later read of the wallet tip panic
-/// under the backend lock. The rest of the update is at or below its tip.
+/// See [`utils::check_chain_update_height`].
 fn check_update_height(chain_update: &CheckPoint) -> Result<(), ElectrumError> {
-    let height = chain_update.height();
-    if utils::height_i32_from_usize(height as usize).is_none() {
-        return Err(ElectrumError::Client(client::Error::HeightOutOfRange(
-            height.into(),
-        )));
-    }
-    Ok(())
+    utils::check_chain_update_height("Electrum", chain_update)
+        .map_err(|height| ElectrumError::Client(client::Error::HeightOutOfRange(height)))
 }
 
 /// Interface for Electrum backend.

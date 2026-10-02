@@ -2,12 +2,14 @@ use std::collections::HashMap;
 
 use bdk_electrum::bdk_chain::{
     bitcoin::{self, bip32::ChildNumber, BlockHash, OutPoint},
-    local_chain::{CannotConnectError, LocalChain},
+    local_chain::{CannotConnectError, CheckPoint, LocalChain},
     spk_client::{FullScanRequest, SyncRequest},
-    ChainPosition,
+    ChainPosition, ConfirmationTimeHeightAnchor, TxGraph,
 };
 
 pub mod client;
+#[cfg(test)]
+mod tests;
 
 use crate::bitcoin::electrum::{
     utils,
@@ -50,6 +52,25 @@ impl std::fmt::Display for EsploraError {
             ),
         }
     }
+}
+
+/// Refuse an update that does not fit our types before any of it is applied:
+/// its chain tip height ([`utils::check_chain_update_height`]), or a
+/// confirmation height or block time in its graph, which Esplora reports per
+/// transaction ([`utils::check_graph_update_anchors`]).
+fn check_update_height(
+    chain_update: &CheckPoint,
+    graph_update: &TxGraph<ConfirmationTimeHeightAnchor>,
+) -> Result<(), EsploraError> {
+    utils::check_chain_update_height("Esplora", chain_update)
+        .map_err(client::Error::HeightOutOfRange)
+        .and_then(|()| {
+            utils::check_graph_update_anchors("Esplora", graph_update).map_err(|e| match e {
+                utils::AnchorOutOfRange::Height(height) => client::Error::HeightOutOfRange(height),
+                utils::AnchorOutOfRange::Time(time) => client::Error::TimeOutOfRange(time),
+            })
+        })
+        .map_err(EsploraError::Client)
 }
 
 /// How often we force a full per-SPK rescan even when the chain tip
@@ -227,7 +248,17 @@ impl Esplora {
         // poll has no baseline.
         if !self.is_rescanning() && !eager {
             if let Some(last_tip) = self.last_synced_tip {
-                let current_tip = self.client.chain_tip().map_err(EsploraError::Client)?;
+                let current_tip = self.client.chain_tip().map_err(|e| {
+                    if let client::Error::HeightOutOfRange(height) = e {
+                        log::warn!(
+                            "Refused the Esplora chain tip: the server reported block height {}, \
+                             which is out of range. The wallet stays at its last tip and the \
+                             next poll retries.",
+                            height
+                        );
+                    }
+                    EsploraError::Client(e)
+                })?;
                 if current_tip == last_tip {
                     // Counting the *prospective* skip first so the
                     // boundary fires exactly on the
@@ -307,6 +338,7 @@ impl Esplora {
                     PARALLEL_REQUESTS,
                 )
                 .map_err(EsploraError::Client)?;
+            check_update_height(&sync_result.chain_update, &sync_result.graph_update)?;
             log::debug!("Sync complete.");
             (sync_result.chain_update, sync_result.graph_update, None)
         } else {
@@ -327,6 +359,9 @@ impl Esplora {
                     PARALLEL_REQUESTS,
                 )
                 .map_err(EsploraError::Client)?;
+            // Checked before clearing `full_scan`, so a refused update is retried
+            // as the same full scan.
+            check_update_height(&scan_result.chain_update, &scan_result.graph_update)?;
             self.full_scan = false;
             log::info!("Full scan complete.");
             (
