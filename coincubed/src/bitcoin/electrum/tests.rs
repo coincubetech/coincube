@@ -117,6 +117,13 @@ fn chain_answer(method: &str) -> Option<Answer> {
     }))
 }
 
+pub(crate) const DESCRIPTOR: &str = concat!(
+    "wsh(andor(pk([aabbccdd]xpub68JJTXc1MWK8KLW4HGLXZBJknja7kDUJuFHnM424LbziEXsfkh1WQCiEjjHw4z",
+    "LqSUm4rvhgyGkkuRowE9tCJSgt3TQB5J3SKAbZ2SdcKST/<0;1>/*),older(10000),pk([aabbccdd]xpub68JJT",
+    "Xc1MWK8PEQozKsRatrUHXKFNkD1Cb1BuQU9Xr5moCv87anqGyXLyUd4KpnDyZgo3gz4aN1r3NiaoweFW8Uut",
+    "BsBbgKHzaD5HkTkifK/<0;1>/*)))#3xh8xmhn"
+);
+
 /// Run `call` against an Electrum backend (no retries) connected to a server
 /// answering with `answer`. `call` owns the backend, so it can put it behind
 /// the lock the daemon shares it through.
@@ -124,12 +131,6 @@ fn against_server<T>(
     answer: impl Fn(&str, &Json) -> Answer + Send + Sync + 'static,
     call: impl FnOnce(Electrum) -> T,
 ) -> T {
-    const DESCRIPTOR: &str = concat!(
-        "wsh(andor(pk([aabbccdd]xpub68JJTXc1MWK8KLW4HGLXZBJknja7kDUJuFHnM424LbziEXsfkh1WQCiEjjHw4z",
-        "LqSUm4rvhgyGkkuRowE9tCJSgt3TQB5J3SKAbZ2SdcKST/<0;1>/*),older(10000),pk([aabbccdd]xpub68JJT",
-        "Xc1MWK8PEQozKsRatrUHXKFNkD1Cb1BuQU9Xr5moCv87anqGyXLyUd4KpnDyZgo3gz4aN1r3NiaoweFW8Uut",
-        "BsBbgKHzaD5HkTkifK/<0;1>/*)))#3xh8xmhn"
-    );
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = format!("tcp://{}", listener.local_addr().unwrap());
     let (stop, stopped) = mpsc::channel();
@@ -466,4 +467,49 @@ fn electrum_out_of_range_tip_height_fails_the_poll_and_leaves_the_wallet_tip_alo
             assert_eq!(shared.rescan_progress(), None);
         });
     }
+}
+
+#[test]
+fn electrum_refused_poll_during_a_rescan_keeps_the_rescan_and_warns() {
+    let height = Arc::new(AtomicU64::new(20));
+    against_server(tip_at(height.clone()), |backend| {
+        let mut shared: Arc<Mutex<dyn BitcoinInterface>> = Arc::new(Mutex::new(backend));
+        // A sane first poll: the wallet's chain moves to block 13 (see above), so
+        // only an explicit rescan makes the next poll a full scan.
+        let sync = shared.sync_wallet(0.into(), 0.into());
+        assert!(matches!(sync, Ok(None)), "{:?}", sync);
+        assert_eq!(shared.chain_tip().height, 13);
+        assert_eq!(shared.rescan_progress(), None);
+
+        // The user asks for a rescan, and its first poll is refused.
+        let desc = DESCRIPTOR.parse().unwrap();
+        shared.start_rescan(&desc, 0).unwrap();
+        assert_eq!(shared.rescan_progress(), Some(0.0));
+        height.store(u32::MAX as u64, Ordering::SeqCst);
+        let ((), logs) = crate::testutils::capture_logs(|| assert_poll_refused(&mut shared, 13));
+        // Still a rescan: had the refusal cleared it, the poller would take the
+        // rescan for complete and the wallet would never be rescanned.
+        assert_eq!(shared.rescan_progress(), Some(0.0));
+        // Visible at the default log level, with the reason and no server address.
+        let warnings: Vec<_> = logs
+            .iter()
+            .filter(|(level, _)| *level == log::Level::Warn)
+            .map(|(_, message)| message)
+            .collect();
+        assert_eq!(warnings.len(), 1, "{:?}", logs);
+        assert!(
+            warnings[0].contains("Refused the Electrum chain update")
+                && warnings[0].contains("out of range")
+                && !warnings[0].contains("127.0.0.1"),
+            "{:?}",
+            warnings
+        );
+
+        // The next sane poll is the full scan, and it completes the rescan.
+        height.store(20, Ordering::SeqCst);
+        let sync = shared.sync_wallet(0.into(), 0.into());
+        assert!(sync.is_ok(), "{:?}", sync);
+        assert_eq!(shared.rescan_progress(), None);
+        assert!(!shared.is_poisoned());
+    });
 }
