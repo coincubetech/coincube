@@ -346,6 +346,8 @@ pub struct SplitPanel {
     step2_review: Option<step2::Step2ReviewView>,
     step2_outcome: Option<Outcome>,
     step2_seen: Option<TransactionObservation>,
+    /// The step-1 evidence of the last step-2 reconcile (#637 r4172242637).
+    step2_status: Option<Status>,
     /// The authenticated claimed coins from the restore.
     coins: Vec<SplitCoin>,
 }
@@ -400,6 +402,7 @@ impl SplitPanel {
             step2_review: None,
             step2_outcome: None,
             step2_seen: None,
+            step2_status: None,
             coins: Vec::new(),
         }
     }

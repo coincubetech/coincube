@@ -979,6 +979,8 @@ fn step2_panel_layer_is_reached_only_through_the_split_panel() {
             "ReconPort",
             "set_recon_port",
             "RECONCILE_UNAVAILABLE",
+            "STEP1_REORGED_AFTER_STEP2",
+            "reconcile_warning",
         ] {
             let named = text
                 .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))

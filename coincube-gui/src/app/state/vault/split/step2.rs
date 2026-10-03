@@ -76,6 +76,43 @@ pub const NODE_PRIVACY: &str = "Step 2 will be sent through this Vault's own Bit
 /// A restart found a recorded step-2 submission but has no reconciler for
 /// this session (#637 R1): nothing else is opened.
 pub const RECONCILE_UNAVAILABLE: &str = "Step 2 of this split was already sent or may have been. Its status can't be checked with Connect right now, so nothing was rebuilt or sent. Try again.";
+/// A reconcile after the step-2 submission found step 1 reorged out of its
+/// Bitcoin block (#637 r4172242637). No recovery is offered: none exists
+/// yet for this case.
+pub const STEP1_REORGED_AFTER_STEP2: &str = "Bitcoin reorganized after step 2 was sent: step 1 is no longer in the Bitcoin block it was confirmed in, so Bitcoin replay protection for step 2 is no longer established. This version has no recovery for this, and nothing was rebuilt or sent again. Check status again later.";
+
+/// What the step-1 evidence of a reconcile after the step-2 submission
+/// means (#637 r4172242637): nothing while step 1 is still eligible (six
+/// deep on Bitcoin, absent from BTCB2, inside the RDTS margin); otherwise a
+/// warning that Bitcoin replay protection for step 2 is not established. A
+/// reorg is named only for `Reorged`. No warning offers a recovery.
+pub fn reconcile_warning(status: Status) -> Option<String> {
+    use coincube_core::claim::{Assessment as A, MIN_CONFIRMATIONS};
+    let unconfirmed = |seen: String| {
+        format!(
+            "{seen} Until it has all {MIN_CONFIRMATIONS} again, Bitcoin replay protection for step 2 is not established. Check status again later."
+        )
+    };
+    match status {
+        Status::Observation(A::ObservationsEligibleForPreflight) => None,
+        Status::Observation(A::Reorged) => Some(STEP1_REORGED_AFTER_STEP2.to_string()),
+        Status::Observation(A::WaitingForConfirmation) => Some(unconfirmed(
+            "At the last check step 1 was not confirmed on Bitcoin.".to_string(),
+        )),
+        Status::Observation(A::WaitingForDepth { confirmations }) => Some(unconfirmed(format!(
+            "At the last check step 1 had {} of {MIN_CONFIRMATIONS} Bitcoin confirmations.",
+            confirmations.min(MIN_CONFIRMATIONS)
+        ))),
+        Status::Unchecked
+        | Status::Unavailable
+        | Status::Observation(A::Unknown | A::StaleObservation | A::NeedsPreflightRecheck) => Some(
+            "The last check couldn't confirm step 1 on Bitcoin with fresh evidence. That is not a sign of a reorg, but Bitcoin replay protection for step 2 isn't confirmed until a check sees step 1 at full depth again. Check status again later.".to_string(),
+        ),
+        Status::Observation(_) => Some(
+            "The last check didn't find step 1 eligible on Bitcoin, so Bitcoin replay protection for step 2 isn't confirmed. Check status again later.".to_string(),
+        ),
+    }
+}
 
 /// What a refused step-2 operation means for the user.
 #[derive(Debug, Clone, PartialEq, Eq)]

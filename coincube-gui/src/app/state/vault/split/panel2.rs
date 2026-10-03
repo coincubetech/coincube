@@ -22,8 +22,8 @@ use coincube_core::{
 use super::{
     step1::{OpenRequest, Refusal, SplitConnect},
     step2::{self, ReconPort, Step2Open, Step2Port, Step2Refusal},
-    Coord, Driver, Prep, Recon, Restarted, SplitEvent, SplitMessage, SplitPanel, Stage, Step2Stage,
-    Work,
+    Coord, Driver, Prep, Recon, Restarted, Seen, SplitEvent, SplitMessage, SplitPanel, Stage,
+    Step2Stage, Work,
 };
 use crate::{
     app::message::Message,
@@ -119,6 +119,10 @@ impl SplitPanel {
     }
     pub fn step2_seen(&self) -> Option<crate::services::claim_observation::TransactionObservation> {
         self.step2_seen
+    }
+    /// The step-1 evidence of the last step-2 reconcile.
+    pub fn step2_status(&self) -> Option<crate::services::claim_workflow::Status> {
+        self.step2_status
     }
     /// Step 2 may be entered: step 1 tracked at six confirmations, the
     /// step-1 driver bound, a step-2 port and a Connect session.
@@ -535,6 +539,32 @@ impl SplitPanel {
         )
     }
 
+    /// A reconcile after the step-2 submission, from the live coordinator or
+    /// the reopened reconciler alike (#637 r4172242637). The BTCB2
+    /// observation and the step-1 evidence are both kept. Evidence that no
+    /// longer shows step 1 eligible on Bitcoin warns, naming a reorg only for
+    /// `Reorged`, and drops any "cannot replay" label. A failed check keeps
+    /// the last evidence and its warning. Nothing new is offered: the only
+    /// action after a step-2 submission is still to reconcile.
+    fn reconciled(&mut self, result: Seen) {
+        let error = match result {
+            Ok((status, seen)) => {
+                self.step2_status = Some(status);
+                self.step2_seen = Some(seen);
+                None
+            }
+            Err(reason) => Some(reason.reason),
+        };
+        let warning = self.step2_status.and_then(step2::reconcile_warning);
+        if warning.is_some() || error.is_some() {
+            self.replay = None;
+        }
+        self.notice = match (warning, error) {
+            (Some(warning), Some(error)) => Some(format!("{} {}", warning, error)),
+            (warning, error) => warning.or(error),
+        };
+    }
+
     pub(super) fn apply_step2(&mut self, event: SplitEvent) -> Task<Message> {
         match event {
             SplitEvent::Restarted(_, Ok(Restarted::Step1)) => match self.connect.clone() {
@@ -722,25 +752,13 @@ impl SplitPanel {
             }
             SplitEvent::Step2Reconciled(_, Coord(coord), result) => {
                 self.bind_coord(coord);
-                match result {
-                    Ok((_, seen)) => {
-                        self.notice = None;
-                        self.step2_seen = Some(seen);
-                    }
-                    Err(reason) => self.notice = Some(reason.reason),
-                }
+                self.reconciled(result);
                 self.stage = Stage::Step2(Step2Stage::Submitted);
                 Task::none()
             }
             SplitEvent::ReconReconciled(_, Recon(recon), result) => {
                 self.bind_recon(recon);
-                match result {
-                    Ok((_, seen)) => {
-                        self.notice = None;
-                        self.step2_seen = Some(seen);
-                    }
-                    Err(reason) => self.notice = Some(reason.reason),
-                }
+                self.reconciled(result);
                 self.stage = Stage::Step2(Step2Stage::Reconcile);
                 Task::none()
             }

@@ -23,6 +23,24 @@ struct Counts {
     coord_dropped: usize,
     submits: usize,
     reconciles: usize,
+    /// The step-1 evidence the next step-2 reconciles return, in order
+    /// (`None`: the check fails). Empty: `Status::Unchecked`.
+    statuses: std::collections::VecDeque<Option<Status>>,
+}
+fn next_reconcile(
+    shared: &Shared,
+    seen: TransactionObservation,
+) -> Result<(Status, TransactionObservation), Step2Refusal> {
+    let mut counts = shared.lock().unwrap();
+    counts.reconciles += 1;
+    match counts.statuses.pop_front() {
+        None => Ok((Status::Unchecked, seen)),
+        Some(Some(status)) => Ok((status, seen)),
+        Some(None) => Err(Step2Refusal {
+            reason: "Connect couldn't be reached.".to_string(),
+            retry: true,
+        }),
+    }
 }
 type Shared = Arc<Mutex<Counts>>;
 
@@ -217,8 +235,7 @@ impl Step2Coord for PanelCoord {
         &mut self,
         _: &Context,
     ) -> Result<(Status, TransactionObservation), Step2Refusal> {
-        self.shared.lock().unwrap().reconciles += 1;
-        Ok((Status::Unchecked, TransactionObservation::Absent))
+        next_reconcile(&self.shared, TransactionObservation::Absent)
     }
 }
 
@@ -239,13 +256,12 @@ impl Step2Recon for PanelRecon {
         &mut self,
         _: &Context,
     ) -> Result<(Status, TransactionObservation), Step2Refusal> {
-        self.0.lock().unwrap().reconciles += 1;
-        Ok((
-            Status::Unchecked,
+        next_reconcile(
+            &self.0,
             TransactionObservation::Unconfirmed {
                 txid: Txid::from_byte_array([5; 32]),
             },
-        ))
+        )
     }
 }
 
@@ -848,6 +864,189 @@ async fn panel_forgets_an_earlier_export_on_a_new_build() {
     shared.lock().unwrap().step1_dropped = 0;
     build(&mut panel).await;
     assert_eq!(panel.step2_exported(), None);
+}
+
+/// Every message other than reconcile, none of which may act after a
+/// step-2 submission: no step-1 signing, rebuild, reset or resend.
+const AFTER_SUBMISSION: [SplitMessage; 12] = [
+    SplitMessage::Step2Confirm,
+    SplitMessage::Step2Review,
+    SplitMessage::Step2Check,
+    SplitMessage::Step2Reserve,
+    SplitMessage::Step2Build,
+    SplitMessage::EnterStep2,
+    SplitMessage::LeaveStep2,
+    SplitMessage::Retry,
+    SplitMessage::Reconcile,
+    SplitMessage::CheckReorg,
+    SplitMessage::ConfirmResend,
+    SplitMessage::ConfirmAbandon,
+];
+
+/// #637 r4172242637, live coordinator: each reconcile after the step-2
+/// submission keeps its step-1 evidence beside the BTCB2 observation. A
+/// reorg of step 1 warns that Bitcoin replay protection is no longer
+/// established and drops a stale "cannot replay" label. Fewer confirmations
+/// or an unreadable check warn without calling it a reorg. A failed check
+/// keeps the last evidence and its warning. A later eligible check clears
+/// the warning. Nothing but reconcile acts.
+#[tokio::test(flavor = "multi_thread")]
+async fn panel_warns_when_step1_loses_bitcoin_confirmation_after_step2() {
+    use crate::app::state::vault::split::step2::STEP1_REORGED_AFTER_STEP2;
+    let journal = Journal::new(false);
+    let (mut panel, shared) = tracked_panel(&journal);
+    let outcome = Outcome::UpstreamAccepted {
+        txid: Txid::from_byte_array([5; 32]),
+        wtxid: coincube_core::miniscript::bitcoin::Wtxid::from_byte_array([6; 32]),
+    };
+    panel.driver = None;
+    panel.coord = Some(Box::new(PanelCoord {
+        shared: shared.clone(),
+        reviewed: false,
+        submitted: Some(outcome),
+    }));
+    panel.step2_outcome = Some(outcome);
+    panel.stage = Stage::Step2(Step2Stage::Submitted);
+    // A label left from a check before the submission.
+    let (_sender, generation) = watch::channel(7);
+    let (token, _latest) = ForeignStep2Authorization::for_test(
+        &[OutPoint::new(Txid::from_byte_array([1; 32]), 0)],
+        Txid::from_byte_array([2; 32]),
+        generation,
+    );
+    panel.replay = Some(evidence_of(&token));
+    assert!(panel.replay_label().is_some());
+    shared.lock().unwrap().statuses.extend([
+        Some(Status::Observation(Assessment::Reorged)),
+        None,
+        Some(Status::Observation(Assessment::WaitingForDepth {
+            confirmations: 3,
+        })),
+        Some(Status::Unavailable),
+        Some(Status::Observation(
+            Assessment::ObservationsEligibleForPreflight,
+        )),
+    ]);
+    let reconcile = |panel: &mut SplitPanel| panel.update(SplitMessage::Step2Reconcile);
+
+    let task = reconcile(&mut panel);
+    drive(&mut panel, task).await;
+    assert_eq!(panel.stage, Stage::Step2(Step2Stage::Submitted));
+    assert_eq!(
+        panel.step2_status(),
+        Some(Status::Observation(Assessment::Reorged))
+    );
+    assert_eq!(panel.notice(), Some(STEP1_REORGED_AFTER_STEP2));
+    assert_eq!(panel.step2_seen(), Some(TransactionObservation::Absent));
+    assert_eq!(panel.replay_label(), None);
+    for message in AFTER_SUBMISSION {
+        let task = panel.update(message);
+        drive(&mut panel, task).await;
+        assert_eq!(panel.stage, Stage::Step2(Step2Stage::Submitted));
+    }
+    {
+        let counts = shared.lock().unwrap();
+        assert_eq!((counts.submits, counts.step1_opened), (0, 0));
+        assert_eq!(counts.reconciles, 1);
+    }
+    assert!(panel.prep.is_none() && panel.driver.is_none() && panel.coord.is_some());
+
+    // A failed check keeps the evidence and its warning.
+    let task = reconcile(&mut panel);
+    drive(&mut panel, task).await;
+    assert_eq!(
+        panel.step2_status(),
+        Some(Status::Observation(Assessment::Reorged))
+    );
+    let notice = panel.notice().unwrap();
+    assert!(notice.starts_with(STEP1_REORGED_AFTER_STEP2), "{}", notice);
+    assert!(
+        notice.ends_with("Connect couldn't be reached."),
+        "{}",
+        notice
+    );
+
+    // Fewer confirmations, or no fresh evidence: warned, not a reorg.
+    let task = reconcile(&mut panel);
+    drive(&mut panel, task).await;
+    let notice = panel.notice().unwrap();
+    assert!(
+        notice.contains("3 of 6 Bitcoin confirmations"),
+        "{}",
+        notice
+    );
+    assert!(notice.contains("replay protection"), "{}", notice);
+    assert!(!notice.contains("reorganized"), "{}", notice);
+    let task = reconcile(&mut panel);
+    drive(&mut panel, task).await;
+    let notice = panel.notice().unwrap();
+    assert!(notice.contains("not a sign of a reorg"), "{}", notice);
+    assert_eq!(panel.step2_status(), Some(Status::Unavailable));
+
+    // Eligible again: no warning; the observation is still shown.
+    let task = reconcile(&mut panel);
+    drive(&mut panel, task).await;
+    assert_eq!(panel.notice(), None);
+    assert_eq!(
+        panel.step2_status(),
+        Some(Status::Observation(
+            Assessment::ObservationsEligibleForPreflight
+        ))
+    );
+    assert_eq!(panel.step2_seen(), Some(TransactionObservation::Absent));
+    assert_eq!(panel.stage, Stage::Step2(Step2Stage::Submitted));
+}
+
+/// #637 r4172242637, reopened reconciler: the same after a restart with a
+/// recorded step 2. The reorg warning comes with the BTCB2 observation,
+/// only reconcile acts, and a later eligible check clears the warning.
+#[tokio::test(flavor = "multi_thread")]
+async fn panel_reconciler_warns_when_step1_loses_bitcoin_confirmation() {
+    use crate::app::state::vault::split::step2::STEP1_REORGED_AFTER_STEP2;
+    let journal = Journal::new(true);
+    let shared: Shared = Arc::default();
+    let mut panel = SplitPanel::resume(
+        TARGET.into(),
+        journal.temp.0.parent().unwrap().to_path_buf(),
+        journal.digest(),
+        journal.temp.0.clone(),
+    );
+    panel.set_connect(Some(Arc::new(PanelConnect(shared.clone()))));
+    panel.set_recon_port(Some(Arc::new(PanelReconPort(shared.clone()))));
+    let task = panel.begin();
+    drive(&mut panel, task).await;
+    assert_eq!(panel.stage, Stage::Step2(Step2Stage::Reconcile));
+    shared.lock().unwrap().statuses.extend([
+        Some(Status::Observation(Assessment::Reorged)),
+        Some(Status::Observation(
+            Assessment::ObservationsEligibleForPreflight,
+        )),
+    ]);
+
+    let task = panel.update(SplitMessage::Step2Reconcile);
+    drive(&mut panel, task).await;
+    assert_eq!(panel.stage, Stage::Step2(Step2Stage::Reconcile));
+    assert_eq!(
+        panel.step2_status(),
+        Some(Status::Observation(Assessment::Reorged))
+    );
+    assert_eq!(panel.notice(), Some(STEP1_REORGED_AFTER_STEP2));
+    assert!(matches!(
+        panel.step2_seen(),
+        Some(TransactionObservation::Unconfirmed { .. })
+    ));
+    for message in AFTER_SUBMISSION {
+        let task = panel.update(message);
+        drive(&mut panel, task).await;
+        assert_eq!(panel.stage, Stage::Step2(Step2Stage::Reconcile));
+    }
+    assert_eq!(shared.lock().unwrap().step1_opened, 0);
+    assert!(panel.recon.is_some() && panel.prep.is_none() && panel.driver.is_none());
+
+    let task = panel.update(SplitMessage::Step2Reconcile);
+    drive(&mut panel, task).await;
+    assert_eq!(panel.notice(), None);
+    assert_eq!(shared.lock().unwrap().reconciles, 2);
 }
 
 /// #637 F1: the Vault's daemon restarting or switching (a new daemon
