@@ -197,9 +197,19 @@ pub type FinishResult = Result<Coord, (step2::Step2Refusal, Option<Prep>)>;
 /// A step-2 reconcile's result.
 pub type Seen = Result<(Status, TransactionObservation), step2::Step2Refusal>;
 
-/// A resumed journal and its coordinator, or why not (with what was rebuilt
-/// before the coordinator refused, if anything).
-pub type ResumeResult = Result<(Box<Resumed>, Driver), (Refusal, Option<Box<Resumed>>)>;
+/// Why a restart did not resume, with what it still has.
+#[derive(Debug)]
+pub struct Unresumed {
+    pub refusal: Refusal,
+    /// What was rebuilt before the coordinator refused, if anything.
+    pub resumed: Option<Box<Resumed>>,
+    /// The rebuild itself was refused finally (#625 F2): the journal read
+    /// again for abandonment only, or why that is not possible either.
+    pub abandon: Option<Result<step1::AbandonOnly, Refusal>>,
+}
+
+/// A resumed journal and its coordinator, or why not.
+pub type ResumeResult = Result<(Box<Resumed>, Driver), Box<Unresumed>>;
 
 /// Results of the panel's tasks. Each carries the sequence number of the
 /// request that started it; a stale result is dropped (and any coordinator
@@ -324,6 +334,9 @@ pub struct SplitPanel {
     /// Claimed prevouts and their Bitcoin addresses, for the abandon check.
     claimed: Vec<(OutPoint, String)>,
     abandon_checked: bool,
+    /// An unsubmitted journal that can't be rebuilt, read for abandonment
+    /// only (#625 F2). Never alongside a construction or a driver.
+    abandon_only: Option<step1::AbandonOnly>,
     /// The last refusal while the flow keeps its state. Never the step-1
     /// evidence's warning after the step-2 submission: that is derived from
     /// `step2_status` ([`Self::step2_warning`]) so no notice replaces it.
@@ -388,6 +401,7 @@ impl SplitPanel {
             status: None,
             claimed: Vec::new(),
             abandon_checked: false,
+            abandon_only: None,
             notice: None,
             resume_stage: None,
             step2_port: None,
@@ -498,11 +512,23 @@ impl SplitPanel {
     pub fn is_bound(&self) -> bool {
         self.driver.is_some()
     }
+    /// An unsubmitted journal that can't be rebuilt, offered for abandonment
+    /// only (#625 F2).
+    pub fn abandon_only(&self) -> Option<&step1::AbandonOnly> {
+        self.abandon_only.as_ref()
+    }
+    /// The step 1 an abandon check looks for on Bitcoin: the signed one, or
+    /// for a journal that can't be rebuilt the recorded txid.
+    fn abandon_tracked(&self) -> Option<Txid> {
+        self.tracked_txid()
+            .or_else(|| self.abandon_only.as_ref().map(|only| only.tracked))
+    }
     /// Abandon is offered only for an unsubmitted journal, and confirmed only
     /// after a chain check passed.
     pub fn can_check_abandon(&self) -> bool {
         self.phase == Some(Phase::Intent)
             && !self.claimed.is_empty()
+            && self.abandon_tracked().is_some()
             && matches!(self.stage, Stage::Ready | Stage::Review | Stage::Refused(_))
     }
     pub fn can_confirm_abandon(&self) -> bool {
@@ -535,6 +561,8 @@ impl SplitPanel {
         self.driver = None;
         self.review = None;
         self.abandon_checked = false;
+        // Read under this session: the next one reads the journal again.
+        self.abandon_only = None;
         self.seq = self.seq.wrapping_add(1);
         if self.journal.is_some() && self.stage != Stage::Abandoned {
             self.stage = Stage::NeedsSession;
@@ -927,7 +955,7 @@ impl SplitPanel {
                 )
             }
             SplitMessage::CheckAbandon if self.can_check_abandon() => {
-                let (Some(connect), Some(tracked)) = (self.connect.clone(), self.tracked_txid())
+                let (Some(connect), Some(tracked)) = (self.connect.clone(), self.abandon_tracked())
                 else {
                     return Task::none();
                 };
@@ -944,7 +972,7 @@ impl SplitPanel {
             SplitMessage::ConfirmAbandon if self.can_confirm_abandon() => {
                 let (Some(connect), Some(tracked), Some((digest, directory))) = (
                     self.connect.clone(),
-                    self.tracked_txid(),
+                    self.abandon_tracked(),
                     self.journal.clone(),
                 ) else {
                     return Task::none();
@@ -1093,9 +1121,33 @@ impl SplitPanel {
                 self.settle();
                 Task::none()
             }
-            SplitEvent::Resumed(_, Err((refusal, resumed))) => {
+            SplitEvent::Resumed(_, Err(unresumed)) => {
+                let Unresumed {
+                    mut refusal,
+                    resumed,
+                    abandon,
+                } = *unresumed;
                 if let Some(resumed) = resumed {
                     self.install(*resumed);
+                }
+                match abandon {
+                    // #625 F2: nothing to rebuild, review or send; only the
+                    // check-then-confirm abandon.
+                    Some(Ok(only)) => {
+                        self.phase = Some(Phase::Intent);
+                        self.claimed = only.claimed.clone();
+                        self.abandon_only = Some(only);
+                        self.notice = Some(step1::UNREBUILDABLE.to_string());
+                    }
+                    // The journal is kept; say why it can't be abandoned,
+                    // unless that is the refusal already shown.
+                    Some(Err(why)) => {
+                        refusal.retry |= why.retry;
+                        if why.reason != refusal.reason {
+                            self.notice = Some(why.reason);
+                        }
+                    }
+                    None => {}
                 }
                 self.stage = Stage::Refused(refusal);
                 Task::none()
@@ -1209,6 +1261,7 @@ impl SplitPanel {
                 self.journal = None;
                 self.phase = None;
                 self.claimed.clear();
+                self.abandon_only = None;
                 self.notice = None;
                 self.stage = Stage::Abandoned;
                 Task::none()
@@ -1279,15 +1332,29 @@ impl SplitEvent {
 }
 
 /// Restore the journal and resume its coordinator with the recorded bytes.
+/// A rebuild refused finally reads the journal again for abandonment only
+/// (#625 F2); a refusal that may pass on retry does not.
 async fn resume(
     connect: Arc<dyn SplitConnect>,
     directory: PathBuf,
     target_cube: String,
     digest: sha256::Hash,
 ) -> ResumeResult {
-    let restored = step1::restore(&*connect, &directory, &target_cube, digest)
-        .await
-        .map_err(|refusal| (refusal, None))?;
+    let unresumed = |refusal, resumed, abandon| {
+        Box::new(Unresumed {
+            refusal,
+            resumed,
+            abandon,
+        })
+    };
+    let restored = match step1::restore(&*connect, &directory, &target_cube, digest).await {
+        Ok(restored) => restored,
+        Err(refusal) if refusal.retry => return Err(unresumed(refusal, None, None)),
+        Err(refusal) => {
+            let abandon = step1::abandon_only(&*connect, &directory, &target_cube, digest).await;
+            return Err(unresumed(refusal, None, Some(abandon)));
+        }
+    };
     let step1::Restored {
         construction,
         verified,
@@ -1316,10 +1383,15 @@ async fn resume(
     .await;
     match opened {
         Ok(Ok(driver)) => Ok((resumed, Driver(driver))),
-        Ok(Err(error)) => Err((Refusal::retry(step1::describe(error)), Some(resumed))),
-        Err(_) => Err((
+        Ok(Err(error)) => Err(unresumed(
+            Refusal::retry(step1::describe(error)),
+            Some(resumed),
+            None,
+        )),
+        Err(_) => Err(unresumed(
             Refusal::retry("Resuming the split was interrupted. Try again."),
             Some(resumed),
+            None,
         )),
     }
 }
