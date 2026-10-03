@@ -116,23 +116,33 @@ pub fn reconcile_warning(status: Status) -> Option<String> {
     }
 }
 
+/// Additional state invalidation required by a refusal, independent of copy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Step2Recovery {
+    None,
+    RefreshTarget,
+}
+
 /// What a refused step-2 operation means for the user.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Step2Refusal {
     pub reason: String,
     pub retry: bool,
+    pub recovery: Step2Recovery,
 }
 impl Step2Refusal {
     fn final_(reason: impl Into<String>) -> Self {
         Self {
             reason: reason.into(),
             retry: false,
+            recovery: Step2Recovery::None,
         }
     }
-    fn retry(reason: impl Into<String>) -> Self {
+    pub(super) fn retry(reason: impl Into<String>) -> Self {
         Self {
             reason: reason.into(),
             retry: true,
+            recovery: Step2Recovery::None,
         }
     }
 }
@@ -181,9 +191,11 @@ pub fn describe_step2(error: Step2Error) -> Step2Refusal {
         Step2Error::FeeUnavailable => Step2Refusal::retry(
             "Connect has no Bitcoin Blake2b fee estimate right now, so step 2 can't be priced. Nothing was built; try again shortly.",
         ),
-        Step2Error::TargetNotProven => Step2Refusal::retry(
-            "The reserved address must be checked again before step 2 is built. Try again.",
-        ),
+        Step2Error::TargetNotProven => Step2Refusal {
+            reason: "The address proof expired or is unavailable. Select Reserve address, then Check confirmations, then Build step 2. An unused reserved address will be reused.".to_string(),
+            retry: true,
+            recovery: Step2Recovery::RefreshTarget,
+        },
         Step2Error::NotChecked | Step2Error::Redeem(_) => Step2Refusal::retry(
             "The step-2 check expired before step 2 was built. Nothing was built; try again.",
         ),
@@ -225,7 +237,11 @@ fn describe_check(error: claim_coordinator::Error) -> Step2Refusal {
         }
         other => step1::describe(other),
     };
-    Step2Refusal { reason, retry }
+    Step2Refusal {
+        reason,
+        retry,
+        recovery: Step2Recovery::None,
+    }
 }
 
 /// The review screen's route label, and a privacy note for the node route.

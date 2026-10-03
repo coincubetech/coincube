@@ -142,6 +142,9 @@ fn step2_body<'a>(
                 ))
                 .push(primary("Import signed", SplitMessage::Step2Import))
                 .push(action("Back to step 1", SplitMessage::LeaveStep2));
+            if panel.can_retry_step2_handoff() {
+                actions = actions.push(primary("Retry handoff", SplitMessage::Step2RetryHandoff));
+            }
         }
         Step2Stage::Signed => {
             body = body.push(p1_regular(
@@ -356,6 +359,10 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
             body = body.push(p1_regular(refusal.reason.clone()).style(theme::text::warning));
             if refusal.retry {
                 actions = actions.push(action("Try again", SplitMessage::Retry));
+            } else {
+                body = body.push(p1_regular(
+                    "This split cannot continue in the current session. Close and reopen the Cube to reload its recorded split. If this refusal persists, the connection or wallet identity must be corrected before continuing.",
+                ));
             }
         }
         Stage::Abandoned => {

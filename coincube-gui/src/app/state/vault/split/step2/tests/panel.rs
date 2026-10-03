@@ -24,6 +24,11 @@ struct Counts {
     coord_dropped: usize,
     submits: usize,
     reconciles: usize,
+    finish_failures: usize,
+    finishes: usize,
+    stale_target: bool,
+    proofs: usize,
+    builds: usize,
     /// The step-1 evidence the next step-2 reconciles return, in order
     /// (`None`: the check fails). Empty: `Status::Unchecked`.
     statuses: std::collections::VecDeque<Option<Status>>,
@@ -40,6 +45,7 @@ fn next_reconcile(
         Some(None) => Err(Step2Refusal {
             reason: "Connect couldn't be reached.".to_string(),
             retry: true,
+            recovery: Step2Recovery::None,
         }),
     }
 }
@@ -155,10 +161,18 @@ impl Step2Prep for PanelPrep {
         Ok(evidence_of(&token))
     }
     async fn ensure_target(&mut self, _: &Context) -> Result<u32, Step2Refusal> {
+        let mut counts = self.shared.lock().unwrap();
+        counts.stale_target = false;
+        counts.proofs += 1;
         Ok(3)
     }
     async fn build(&mut self, _: &Context, coins: Vec<SplitCoin>) -> Result<Psbt, Step2Refusal> {
         assert_eq!(coins.len(), 2, "the restored claimed coins");
+        let mut counts = self.shared.lock().unwrap();
+        counts.builds += 1;
+        if counts.stale_target {
+            return Err(describe_step2(Step2Error::TargetNotProven));
+        }
         Ok(self.psbt.clone())
     }
     fn verify_signed(&self, signed: &Psbt, _: &[SplitCoin]) -> Result<bool, Step2Refusal> {
@@ -177,6 +191,22 @@ impl Step2Prep for PanelPrep {
             .inputs
             .iter()
             .all(|input| !input.partial_sigs.is_empty()));
+        let refuse = {
+            let mut counts = self.shared.lock().unwrap();
+            counts.finishes += 1;
+            if counts.finish_failures > 0 {
+                counts.finish_failures -= 1;
+                true
+            } else {
+                false
+            }
+        };
+        if refuse {
+            return Err((
+                Step2Refusal::retry("Handoff unavailable. Try again."),
+                Some(self),
+            ));
+        }
         Ok(Box::new(PanelCoord {
             shared: self.shared.clone(),
             reviewed: false,
@@ -419,7 +449,7 @@ async fn panel_runs_step2_from_a_tracked_step1() {
     drive(&mut panel, task).await;
     assert_eq!(panel.stage, Stage::Step2(Step2Stage::Sign));
     assert!(panel.prep.is_some());
-    assert!(panel.notice().unwrap().contains("More are needed"));
+    assert!(panel.notice().unwrap().contains("No new signatures"));
     let mut signed = panel.step2_psbt().unwrap().clone();
     signed
         .sign(&journal.wallet.signer, &Secp256k1::new())
@@ -917,36 +947,41 @@ async fn panel_caps_step2_imports_before_reading_any_file() {
     refused(&mut panel, missing(MAX_COMBINED_FILES + 1)).await;
     assert_eq!(panel.step2_files(), 0);
 
-    // One less than the cap loaded (the unsigned file chosen repeatedly),
-    // then two more: neither is over the cap alone, together they are.
-    let unsigned = dir.join("unsigned.txt");
+    // A retained list from the old importer may include duplicates.
+    // Keep the pre-read cap counting every retained file even in that case.
+    let mut signed = panel.step2_psbt().unwrap().clone();
+    signed
+        .sign(&journal.wallet.signer, &Secp256k1::new())
+        .unwrap();
+    let mut partial = signed.clone();
+    partial.inputs[1].partial_sigs.clear();
+    panel.step2_files = vec![partial; MAX_COMBINED_FILES - 1];
+    refused(&mut panel, missing(2)).await;
+    let path = dir.join("signed.txt");
     std::fs::write(
-        &unsigned,
-        split_psbt_file::encode(
-            panel.step2_psbt().unwrap(),
-            split_psbt_file::Encoding::Base64,
-        ),
+        &path,
+        split_psbt_file::encode(&signed, split_psbt_file::Encoding::Base64),
     )
     .unwrap();
-    let task = panel.step2_import_from(vec![unsigned.clone(); MAX_COMBINED_FILES - 1]);
-    drive(&mut panel, task).await;
-    assert_eq!(panel.step2_files(), MAX_COMBINED_FILES - 1);
-    refused(&mut panel, missing(2)).await;
-
-    // Exactly the cap imports, still under the same preparation.
-    let task = panel.step2_import_from(vec![unsigned]);
+    _shared.lock().unwrap().finish_failures = 1;
+    let task = panel.step2_import_from(vec![path]);
     drive(&mut panel, task).await;
     assert_eq!(panel.step2_files(), MAX_COMBINED_FILES);
-    assert!(panel.notice().unwrap().contains("More are needed"));
-    assert!(panel.prep.is_some());
-    assert_eq!(panel.stage, Stage::Step2(Step2Stage::Sign));
-    // Full: one more is refused.
+    assert!(panel.can_retry_step2_handoff());
     refused(&mut panel, missing(1)).await;
+    // Retry is independent of the file cap and does not submit anything.
+    let task = panel.update(SplitMessage::Step2RetryHandoff);
+    drive(&mut panel, task).await;
+    assert_eq!(panel.stage, Stage::Step2(Step2Stage::Signed));
+    assert_eq!(panel.step2_files(), MAX_COMBINED_FILES);
+    assert_eq!(_shared.lock().unwrap().submits, 0);
+    assert_eq!(_shared.lock().unwrap().finishes, 2);
 }
 
 /// Every message other than reconcile, none of which may act after a
 /// step-2 submission: no step-1 signing, rebuild, reset or resend.
-const AFTER_SUBMISSION: [SplitMessage; 12] = [
+const AFTER_SUBMISSION: [SplitMessage; 13] = [
+    SplitMessage::Step2RetryHandoff,
     SplitMessage::Step2Confirm,
     SplitMessage::Step2Review,
     SplitMessage::Step2Check,
@@ -1200,11 +1235,13 @@ async fn panel_keeps_the_step1_warning_beside_every_notice() {
     async fn save(panel: &mut SplitPanel, path: PathBuf) -> Vec<String> {
         let task = panel.export_signed_to(path);
         drive(panel, task).await;
+        assert_rendered_feedback(panel).await;
         warning_lines(panel)
     }
 
     let task = panel.update(SplitMessage::Step2Reconcile);
     drive(&mut panel, task).await;
+    assert_rendered_feedback(&panel).await;
     assert_eq!(warning_lines(&panel), [STEP1_REORGED_AFTER_STEP2]);
     assert!(panel.signed().is_some());
 
@@ -1233,12 +1270,14 @@ async fn panel_keeps_the_step1_warning_beside_every_notice() {
     let seq = panel.seq;
     let task = panel.apply(SplitEvent::SignedExportChosen(seq, None));
     drive(&mut panel, task).await;
+    assert_rendered_feedback(&panel).await;
     assert_eq!(warning_lines(&panel), lines);
     assert_eq!(panel.stage, Stage::Step2(Step2Stage::Submitted));
 
     // Revoked: the session's notice and the warning, each on its line.
     panel.revoke();
     assert_eq!(panel.stage, Stage::NeedsSession);
+    assert_rendered_feedback(&panel).await;
     let lines = warning_lines(&panel);
     assert_eq!(lines.len(), 2, "{:?}", lines);
     assert_eq!(lines[0], STEP1_REORGED_AFTER_STEP2);
@@ -1254,6 +1293,7 @@ async fn panel_keeps_the_step1_warning_beside_every_notice() {
     drive(&mut panel, task).await;
     assert_eq!(panel.stage, Stage::Step2(Step2Stage::Reconcile));
     assert!(panel.recon.is_some() && panel.coord.is_none());
+    assert_rendered_feedback(&panel).await;
     assert_eq!(warning_lines(&panel), [STEP1_REORGED_AFTER_STEP2]);
     let saved = root.join("signed-2.txt");
     let lines = save(&mut panel, saved.clone()).await;
@@ -1271,6 +1311,7 @@ async fn panel_keeps_the_step1_warning_beside_every_notice() {
     // its own result.
     let task = panel.update(SplitMessage::Step2Reconcile);
     drive(&mut panel, task).await;
+    assert_rendered_feedback(&panel).await;
     assert!(warning_lines(&panel).is_empty());
     let lines = save(&mut panel, root.join("signed-3.txt")).await;
     assert_eq!(lines.len(), 1, "{:?}", lines);
@@ -1306,4 +1347,211 @@ async fn panel_revokes_step2_when_the_vault_daemon_changes() {
     panel.set_step2_port(None);
     assert_eq!(shared.lock().unwrap().revoked, revoked + 1);
     assert!(panel.prep.is_none());
+}
+
+/// Traverse the actual laid-out view, including the production warning loop.
+async fn rendered_labels(panel: &SplitPanel) -> Vec<String> {
+    use iced::advanced::{
+        layout,
+        renderer::Headless,
+        widget::{Id, Operation, Tree},
+        Layout,
+    };
+    #[derive(Default)]
+    struct Labels(Vec<String>);
+    impl Operation for Labels {
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+            operate(self);
+        }
+        fn text(&mut self, _: Option<&Id>, bounds: iced::Rectangle, text: &str) {
+            assert!(bounds.width > 0.0 && bounds.height > 0.0);
+            self.0.push(text.to_owned());
+        }
+    }
+    let renderer = <iced::Renderer as Headless>::new(
+        iced::Font::DEFAULT,
+        iced::Pixels(16.0),
+        Some("tiny-skia"),
+    )
+    .await
+    .expect("software renderer for Split view regression");
+    let mut element = crate::app::view::vault::split::split_panel(panel);
+    let mut tree = Tree::new(element.as_widget());
+    let node = element.as_widget_mut().layout(
+        &mut tree,
+        &renderer,
+        &layout::Limits::new(iced::Size::ZERO, iced::Size::new(1200.0, 1600.0)),
+    );
+    let mut labels = Labels::default();
+    element
+        .as_widget_mut()
+        .operate(&mut tree, Layout::new(&node), &renderer, &mut labels);
+    labels.0
+}
+async fn assert_rendered_feedback(panel: &SplitPanel) {
+    let labels = rendered_labels(panel).await;
+    for expected in warning_lines(panel) {
+        assert_eq!(
+            labels.iter().filter(|text| **text == expected).count(),
+            1,
+            "warning/notice missing or duplicated in actual view: {expected}"
+        );
+    }
+    if panel.step2_warning().is_none() {
+        assert!(!labels.iter().any(|text| text == STEP1_REORGED_AFTER_STEP2));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn panel_recovers_from_expired_target_proof_without_replacing_address() {
+    let journal = Journal::new(false);
+    let (mut panel, shared) = tracked_panel(&journal);
+    for message in [
+        SplitMessage::EnterStep2,
+        SplitMessage::Step2Reserve,
+        SplitMessage::Step2Check,
+    ] {
+        let task = panel.update(message);
+        drive(&mut panel, task).await;
+    }
+    shared.lock().unwrap().stale_target = true;
+    let task = panel.update(SplitMessage::Step2Build);
+    drive(&mut panel, task).await;
+    assert_eq!(panel.target_index(), None);
+    assert_eq!(panel.replay_label(), None);
+    assert!(panel
+        .notice()
+        .unwrap()
+        .contains("Reserve address, then Check confirmations, then Build step 2"));
+    let labels = rendered_labels(&panel).await;
+    assert!(!labels
+        .iter()
+        .any(|text| text.contains("Fresh Vault address reserved")));
+    assert!(!labels.iter().any(|text| text == "Build step 2"));
+    let task = panel.update(SplitMessage::Step2Check);
+    drive(&mut panel, task).await;
+    let task = panel.update(SplitMessage::Step2Build);
+    drive(&mut panel, task).await;
+    assert_eq!(
+        shared.lock().unwrap().builds,
+        1,
+        "a new check cannot restore target proof"
+    );
+    let task = panel.update(SplitMessage::Step2Reserve);
+    drive(&mut panel, task).await;
+    assert_eq!(panel.target_index(), Some(3));
+    let task = panel.update(SplitMessage::Step2Build);
+    drive(&mut panel, task).await;
+    assert_eq!(panel.stage, Stage::Step2(Step2Stage::Sign));
+    assert_eq!(shared.lock().unwrap().proofs, 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn panel_ignores_noop_files_and_retries_complete_handoff_without_import() {
+    let journal = Journal::new(false);
+    let (mut panel, shared) = tracked_panel(&journal);
+    for message in [
+        SplitMessage::EnterStep2,
+        SplitMessage::Step2Reserve,
+        SplitMessage::Step2Check,
+        SplitMessage::Step2Build,
+    ] {
+        let task = panel.update(message);
+        drive(&mut panel, task).await;
+    }
+    assert!(!panel.can_retry_step2_handoff());
+    let mut signed = panel.step2_psbt().unwrap().clone();
+    signed
+        .sign(&journal.wallet.signer, &Secp256k1::new())
+        .unwrap();
+    let mut first = signed.clone();
+    first.inputs[1].partial_sigs.clear();
+    let mut second = signed.clone();
+    second.inputs[0].partial_sigs.clear();
+    let dir = journal.temp.0.parent().unwrap();
+    let save = |name: &str, psbt: &Psbt| {
+        let path = dir.join(name);
+        std::fs::write(
+            &path,
+            split_psbt_file::encode(psbt, split_psbt_file::Encoding::Base64),
+        )
+        .unwrap();
+        path
+    };
+    let unsigned = save("unsigned.txt", panel.step2_psbt().unwrap());
+    let first = save("first.txt", &first);
+    let second = save("second.txt", &second);
+    let task = panel.step2_import_from(vec![unsigned.clone(), first.clone(), first.clone()]);
+    drive(&mut panel, task).await;
+    assert_eq!(panel.step2_files(), 1);
+    assert!(!panel.can_retry_step2_handoff());
+    for _ in 0..20 {
+        let task = panel.step2_import_from(vec![first.clone(), unsigned.clone()]);
+        drive(&mut panel, task).await;
+        assert_eq!(panel.step2_files(), 1);
+    }
+    // A bad file rejects the entire selection, even after a useful one.
+    let mut wrong = signed.clone();
+    wrong.unsigned_tx.output[0].value = Amount::from_sat(1);
+    let wrong = save("wrong.txt", &wrong);
+    let retained = panel.step2_files.clone();
+    let task = panel.step2_import_from(vec![second.clone(), wrong]);
+    drive(&mut panel, task).await;
+    assert_eq!(panel.step2_files, retained);
+    assert!(!panel.can_retry_step2_handoff());
+    let task = panel.update(SplitMessage::Step2RetryHandoff);
+    drive(&mut panel, task).await;
+    assert_eq!(shared.lock().unwrap().finishes, 0);
+    shared.lock().unwrap().finish_failures = 1;
+    let task = panel.step2_import_from(vec![second]);
+    drive(&mut panel, task).await;
+    assert_eq!(panel.step2_files(), 2);
+    assert!(panel.can_retry_step2_handoff());
+    assert!(rendered_labels(&panel)
+        .await
+        .iter()
+        .any(|s| s == "Retry handoff"));
+    let task = panel.update(SplitMessage::Step2RetryHandoff);
+    drive(&mut panel, task).await;
+    assert_eq!(panel.stage, Stage::Step2(Step2Stage::Signed));
+    assert_eq!(shared.lock().unwrap().finishes, 2);
+    assert_eq!(shared.lock().unwrap().submits, 0);
+    let task = panel.update(SplitMessage::Step2Confirm);
+    drive(&mut panel, task).await;
+    assert_eq!(shared.lock().unwrap().submits, 0, "review remains required");
+    panel.revoke();
+    assert!(!panel.can_retry_step2_handoff());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn panel_explains_final_entry_refusals_without_enabling_retry() {
+    for error in [
+        CoordinatorError::Unsupported,
+        CoordinatorError::InvalidBinding,
+        CoordinatorError::Journal(claim_workflow::Error::WrongIdentity),
+    ] {
+        let journal = Journal::new(false);
+        let (mut panel, shared) = tracked_panel(&journal);
+        let entering = panel.update(SplitMessage::EnterStep2);
+        let events = events(entering).await;
+        drop(events); // release the preparation just as a refused open does
+        let reason = describe_check(error);
+        assert!(!reason.retry);
+        let task = panel.apply(SplitEvent::Step2Entered(panel.seq, Err(reason)));
+        drive(&mut panel, task).await;
+        let labels = rendered_labels(&panel).await;
+        assert!(labels
+            .iter()
+            .any(|s| s.contains("Close and reopen the Cube")));
+        assert!(!labels.iter().any(|s| s == "Try again"));
+        let task = panel.update(SplitMessage::Retry);
+        drive(&mut panel, task).await;
+        assert!(matches!(panel.stage, Stage::Refused(_)));
+        assert!(panel.prep.is_none() && panel.driver.is_none());
+        assert_eq!(shared.lock().unwrap().submits, 0);
+        let task = panel.update(SplitMessage::Close);
+        drive(&mut panel, task).await;
+        assert!(panel.is_hidden());
+        assert!(journal.temp.0.exists());
+    }
 }
