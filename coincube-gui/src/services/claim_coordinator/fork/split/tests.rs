@@ -192,6 +192,7 @@ fn sign(step1: &SplitStep1, wallet: &Wallet) -> VerifiedSplitStep1 {
 }
 
 type Between = Box<dyn FnOnce(&mut View) + Send>;
+type ReadHook = Box<dyn FnOnce() + Send>;
 
 /// The synthetic two-chain view.
 struct View {
@@ -222,6 +223,8 @@ struct View {
     fork_tip: u64,
     /// Seconds subtracted from the stamp of every transaction read.
     read_age: i64,
+    /// Run once, at the first BTCB2 read that finds a listed transaction.
+    on_btcb2_sighting: Option<ReadHook>,
 }
 impl View {
     /// Step 1 confirmed in `block` (hash 6) at height 100 with `depth`
@@ -248,6 +251,7 @@ impl View {
             on_btcb2: Vec::new(),
             fork_tip: FORK_TIP,
             read_age: 0,
+            on_btcb2_sighting: None,
         };
         view.set_depth(depth);
         view
@@ -329,10 +333,16 @@ impl ObservationSource for Chains {
         chain: ChainId,
         txid: Txid,
     ) -> Result<FreshRead<TransactionObservation>, FailureKind> {
-        let view = self.view.lock().unwrap();
+        let mut view = self.view.lock().unwrap();
         if chain != ChainId::Bitcoin {
             if let Some((_, seen)) = view.on_btcb2.iter().find(|(id, _)| *id == txid) {
-                return Self::read_aged(chain, *seen, view.read_age);
+                let seen = *seen;
+                if seen != TransactionObservation::Absent {
+                    if let Some(hook) = view.on_btcb2_sighting.take() {
+                        hook();
+                    }
+                }
+                return Self::read_aged(chain, seen, view.read_age);
             }
         }
         let observation = match (chain, view.step1_block) {

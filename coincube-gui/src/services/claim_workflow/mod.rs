@@ -18,6 +18,7 @@ use coincube_core::{
 use journal::Journal;
 pub use recovery::BitcoinSubmissionAttempt;
 pub use reorg::Reconfirmation;
+pub(crate) use split::Step2ReturnHold;
 pub use split::{split_identity, RecordedSplit, MAX_SPLIT_STEP2_RESUBMISSIONS};
 
 /// Upper bound on how long [`Controller::reopen_settling`] waits out `Busy`.

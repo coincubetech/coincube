@@ -25,9 +25,13 @@
 //!   latest attempt's return without the route's acceptance was recorded,
 //!   after control came back from a completed send. An accepted attempt, or
 //!   one whose return is not on disk (cancelled, timed out, interrupted, or
-//!   a failed write), is never resent. Each resend is recorded before it is
-//!   attempted, and a step 2 ever seen on BTCB2 is recorded as observed: it
-//!   left, so no resend is offered again. These fields are absent until
+//!   a failed write), is never resent. Every fresh BTCB2 read of the
+//!   recorded step 2 runs with that record durably withdrawn
+//!   ([`Step2ReturnHold`]), restored only after a read without a sighting,
+//!   so a sighting the journal then fails to record still ends the resend.
+//!   Each resend is recorded before it is attempted, and a step 2 ever seen
+//!   on BTCB2 is recorded as observed: it left, so no resend is offered
+//!   again. These fields are absent until
 //!   used, so a journal without them serializes exactly as before. A binary
 //!   that predates them refuses one that has them (`deny_unknown_fields`),
 //!   and an ordinary send that comes back refused, or a reconcile that sees
@@ -94,6 +98,19 @@ pub(super) struct SplitRecord {
     /// recording a resend clears it before that resend is sent.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     step2_returned: bool,
+}
+
+/// The step-2 resend permission (`step2_returned`), durably withdrawn for the
+/// span of one fresh BTCB2 read of the recorded step 2 (P3-3). Only a read
+/// that found no sighting gives it back
+/// ([`Controller::release_split_step2_return`]), or a resend consumes it
+/// ([`Controller::record_split_step2_resubmission`]). Dropped otherwise (a
+/// sighting, a failed write, an interruption, a revoked session), it stays
+/// withdrawn. No Clone; it names the controller and the resends recorded
+/// when it was taken.
+pub(crate) struct Step2ReturnHold {
+    controller: u64,
+    resubmissions: usize,
 }
 
 /// One explicitly reviewed resend of the recorded signed step 2 (P3-3).
@@ -804,6 +821,61 @@ impl Controller {
         Ok(())
     }
 
+    /// Before a fresh BTCB2 read of the recorded step 2: durably withdraw the
+    /// resend permission, so the read cannot leave it standing if it finds
+    /// the step 2 and that sighting then fails to record. `None` when there
+    /// is no permission to withdraw. Leaves the current check alone.
+    pub(crate) fn hold_split_step2_return(
+        &mut self,
+        current: &Context,
+    ) -> Result<Option<Step2ReturnHold>, Error> {
+        self.ensure_context(current)?;
+        let record = self.split_record()?;
+        if !record.step2_returned {
+            return Ok(None);
+        }
+        let hold = Step2ReturnHold {
+            controller: self.id,
+            resubmissions: record.step2_resubmissions.len(),
+        };
+        let mut next = self.intent.clone();
+        if let Some(record) = next.split.as_mut() {
+            record.step2_returned = false;
+        }
+        validate(&next)?;
+        self.journal.store(&next)?;
+        self.intent = next;
+        Ok(Some(hold))
+    }
+
+    /// After that read found no sighting: give the withdrawn permission
+    /// back. Refused for another controller's hold, or once anything was
+    /// recorded since (a sighting or a resend).
+    pub(crate) fn release_split_step2_return(
+        &mut self,
+        current: &Context,
+        hold: Step2ReturnHold,
+    ) -> Result<(), Error> {
+        self.ensure_context(current)?;
+        let record = self.split_record()?;
+        if hold.controller != self.id
+            || self.intent.fork_submission.is_none()
+            || record.step2_returned
+            || record.step2_observed
+            || record.step2_resubmissions.len() != hold.resubmissions
+        {
+            return Err(Error::Conflict);
+        }
+        let mut next = self.intent.clone();
+        if let Some(record) = next.split.as_mut() {
+            record.step2_returned = true;
+        }
+        validate(&next)?;
+        self.journal.store(&next)?;
+        self.intent = next;
+        Ok(())
+    }
+
     /// Record that a fresh read keyed by the recorded signed step 2's own
     /// txid saw it on BTCB2 (`seen`, mempool or block). Monotonic, and an
     /// absence is a no-op. It only takes the resend away and grants nothing,
@@ -842,16 +914,18 @@ impl Controller {
     /// assessment (the coordinator's resend review, applied with a ticket)
     /// and `step2`, that same collection's read of the recorded step 2 on
     /// BTCB2, which must be absent. Refused for any other bytes, once the
-    /// step 2 was ever seen there, at the attempt limit, and unless the
-    /// latest attempt's return without acceptance is recorded; the record
-    /// clears that, so this resend's own return must be recorded before
-    /// another. Like the submission intent, a recorded resend never permits
-    /// another; each one needs its own review. Performs no network I/O.
-    pub fn record_split_step2_resubmission(
+    /// step 2 was ever seen there, and at the attempt limit. `hold` is the
+    /// resend permission (the latest attempt's recorded return) withdrawn
+    /// for that read: this consumes it whatever the result, so this resend's
+    /// own return must be recorded before another. Like the submission
+    /// intent, a recorded resend never permits another; each one needs its
+    /// own review. Performs no network I/O.
+    pub(crate) fn record_split_step2_resubmission(
         &mut self,
         current: &Context,
         signed: &VerifiedSplitStep2,
         step2: TransactionObservation,
+        hold: Step2ReturnHold,
         policy: Policy,
         now: i64,
     ) -> Result<(), Error> {
@@ -877,7 +951,9 @@ impl Controller {
             return Err(Error::InvalidPlan);
         }
         if record.step2_observed
-            || !record.step2_returned
+            || record.step2_returned
+            || hold.controller != self.id
+            || hold.resubmissions != record.step2_resubmissions.len()
             || record.step2_resubmissions.len() >= MAX_SPLIT_STEP2_RESUBMISSIONS
         {
             return Err(Error::Conflict);
@@ -889,10 +965,11 @@ impl Controller {
         }
         let mut next = self.intent.clone();
         if let Some(record) = next.split.as_mut() {
+            // The permission stays withdrawn (`hold`): this resend's own
+            // return must be recorded before another.
             record.step2_resubmissions.push(Step2Resubmission {
                 wtxid: tx.compute_wtxid(),
             });
-            record.step2_returned = false;
         }
         validate(&next)?;
         self.journal.store(&next)?;

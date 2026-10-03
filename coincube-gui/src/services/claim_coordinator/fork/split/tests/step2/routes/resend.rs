@@ -335,6 +335,8 @@ async fn split_step2_reconcile_records_a_sighting_that_ends_the_resend() {
         .edit(|view| view.on_btcb2 = vec![(txid, TransactionObservation::Unconfirmed { txid })]);
     coordinator.reconcile_sweep(&context()).await.unwrap();
     assert_eq!(h.temp.journal()["split"]["step2_observed"], true);
+    // The withdrawn resend permission is not given back after a sighting.
+    assert!(h.temp.journal()["split"].get("step2_returned").is_none());
     h.chains.edit(|view| view.on_btcb2.clear());
     assert!(matches!(
         coordinator.prepare_step2_resubmission(&context()).await,
@@ -386,6 +388,8 @@ async fn split_step2_reconcile_records_a_sighting_that_ends_the_resend() {
     });
     reconciler.reconcile_sweep(&context()).await.unwrap();
     assert_eq!(h.temp.journal()["split"]["step2_observed"], true);
+    // The withdrawn resend permission is not given back after a sighting.
+    assert!(h.temp.journal()["split"].get("step2_returned").is_none());
     drop(reconciler);
     h.chains.edit(|view| view.on_btcb2.clear());
     let transport = routes_over(
@@ -723,6 +727,8 @@ async fn split_step2_resend_needs_fresh_absence_unspent_coins_and_depth() {
         Err(ResendError::Observed)
     ));
     assert_eq!(h.temp.journal()["split"]["step2_observed"], true);
+    // The withdrawn resend permission is not given back after a sighting.
+    assert!(h.temp.journal()["split"].get("step2_returned").is_none());
     h.chains.edit(|view| view.on_btcb2.clear());
     assert!(matches!(
         coordinator.prepare_step2_resubmission(&context()).await,
@@ -1314,4 +1320,90 @@ async fn split_step2_resend_past_the_send_bound_is_never_resent() {
         Err(ResendError::Unsettled)
     ));
     assert_eq!(daemon.calls(), 2);
+}
+
+/// #639 r4172255662: a sighting the journal fails to record must still end
+/// the resend for good. The reconcile sees the recorded step 2 on BTCB2
+/// while the journal cannot be written. Storage then recovers and the
+/// transaction leaves the read. Reopened, it is never offered a resend.
+#[tokio::test(flavor = "multi_thread")]
+async fn split_step2_a_sighting_the_journal_fails_to_record_still_ends_the_resend() {
+    let connect = MockServer::start_async().await;
+    let daemon = Refusing::new(None, 1);
+    let Uncertain {
+        h,
+        mut coordinator,
+        signed,
+        ..
+    } = uncertain(&daemon, None, &connect).await;
+    let txid = signed.compute_txid();
+    let directory = h.temp.0.clone();
+    h.chains.edit(|view| {
+        view.on_btcb2 = vec![(txid, TransactionObservation::Unconfirmed { txid })];
+        view.on_btcb2_sighting = Some(Box::new(move || set_mode(&directory, 0o500)));
+    });
+    let result = coordinator.reconcile_sweep(&context()).await;
+    set_mode(&h.temp.0, 0o700);
+    assert!(result.is_err(), "the sighting could not be written");
+    drop(coordinator);
+    h.chains.edit(|view| view.on_btcb2.clear());
+    let transport = routes_over(
+        daemon.clone(),
+        None,
+        &connect,
+        ORIGIN,
+        vault_descriptor(),
+        &h,
+    );
+    let mut reopened = reopen(&h, coins(&h.wallet), transport).await.unwrap();
+    assert!(matches!(
+        reopened.prepare_step2_resubmission(&context()).await,
+        Err(ResendError::Unsettled)
+    ));
+    assert!(daemon.sends().is_empty());
+    drop(reopened);
+
+    // The same through the resend review's own read.
+    let other_connect = MockServer::start_async().await;
+    let other_daemon = Refusing::new(None, 1);
+    let Uncertain {
+        h,
+        mut coordinator,
+        signed,
+        ..
+    } = uncertain(&other_daemon, None, &other_connect).await;
+    let txid = signed.compute_txid();
+    let directory = h.temp.0.clone();
+    h.chains.edit(|view| {
+        view.on_btcb2 = vec![(txid, TransactionObservation::Unconfirmed { txid })];
+        view.on_btcb2_sighting = Some(Box::new(move || set_mode(&directory, 0o500)));
+    });
+    let result = coordinator.prepare_step2_resubmission(&context()).await;
+    set_mode(&h.temp.0, 0o700);
+    assert!(
+        matches!(
+            result,
+            Err(ResendError::Coordinator(Error::Journal(
+                claim_workflow::Error::Io(_)
+            )))
+        ),
+        "{:?}",
+        result.err()
+    );
+    drop(coordinator);
+    h.chains.edit(|view| view.on_btcb2.clear());
+    let transport = routes_over(
+        other_daemon.clone(),
+        None,
+        &other_connect,
+        ORIGIN,
+        vault_descriptor(),
+        &h,
+    );
+    let mut reopened = reopen(&h, coins(&h.wallet), transport).await.unwrap();
+    assert!(matches!(
+        reopened.prepare_step2_resubmission(&context()).await,
+        Err(ResendError::Unsettled)
+    ));
+    assert!(other_daemon.sends().is_empty());
 }

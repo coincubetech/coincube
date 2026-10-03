@@ -1066,7 +1066,9 @@ impl Drop for SplitStep2Coordinator {
 /// Bitcoin, keyed by the recorded *signed* step-2 txid. A recorded submission
 /// only identifies what to look up; this never resends or authorizes one. A
 /// step 2 seen on BTCB2 is recorded as observed, which ends any resend
-/// (P3-3).
+/// (P3-3). The read runs with the resend permission durably withdrawn and
+/// gives it back only when it found no sighting in the still-current
+/// session, so a sighting that fails to record still ends the resend.
 async fn reconcile_recorded(
     controller: &mut Controller,
     services: &dyn SplitForkServices,
@@ -1083,6 +1085,7 @@ async fn reconcile_recorded(
     {
         return Err(Error::InvalidBinding);
     }
+    let hold = controller.hold_split_step2_return(context)?;
     let ticket = controller.begin_check(context)?;
     let collected = claim_observation::collect_sweep(
         services.source(),
@@ -1095,9 +1098,16 @@ async fn reconcile_recorded(
             generation: generation.clone(),
         },
     )
-    .await
-    .map_err(Error::Observation)?;
-    if *generation.borrow() != context.generation || generation.has_changed().is_err() {
+    .await;
+    let current = *generation.borrow() == context.generation && generation.has_changed().is_ok();
+    let sighted = collected
+        .as_ref()
+        .is_ok_and(|c| c.transaction() != claim_observation::TransactionObservation::Absent);
+    if let (true, false, Some(hold)) = (current, sighted, hold) {
+        controller.release_split_step2_return(context, hold)?;
+    }
+    let collected = collected.map_err(Error::Observation)?;
+    if !current {
         controller.invalidate();
         return Err(Error::Revoked);
     }

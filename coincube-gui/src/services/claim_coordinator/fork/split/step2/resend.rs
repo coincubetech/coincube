@@ -16,7 +16,10 @@
 //!   back from a completed send without the route's acceptance, written
 //!   only after control returned. So an accepted attempt, or one cancelled,
 //!   timed out or interrupted, or whose record failed to write, is never
-//!   resent, before or after a restart. A step 2 ever seen on BTCB2 (by
+//!   resent, before or after a restart. The review's reads of the recorded
+//!   step 2 run with that record durably withdrawn and give it back only
+//!   when they found no sighting, so a sighting the journal fails to record
+//!   still ends the resend. A step 2 ever seen on BTCB2 (by
 //!   this review or by any reconcile, recorded in the journal) never gets
 //!   one either: it left.
 //! - **Fresh evidence**, collected around the route's preflight of the exact
@@ -42,6 +45,7 @@
 //! transport to the target Vault and the Split's Connect origin. It never
 //! signs, reserves an address, or builds anything new.
 use super::*;
+use crate::services::claim_workflow::Step2ReturnHold;
 use coincube_core::foreign_split::{
     verify_split_step2_transaction, SplitStep1, VerifiedSplitStep1,
 };
@@ -349,9 +353,13 @@ impl SplitStep2Coordinator {
         &mut self,
         context: &Context,
         collected: &claim_observation::SweepObservation,
+        sighted: &mut bool,
     ) -> Result<(), ResendError> {
         let seen = collected.transaction();
         if seen != claim_observation::TransactionObservation::Absent {
+            // Set before the write: the withdrawn resend permission is not
+            // given back whether or not the sighting records.
+            *sighted = true;
             self.controller.record_split_step2_observed(context, seen)?;
             return Err(ResendError::Observed);
         }
@@ -370,13 +378,53 @@ impl SplitStep2Coordinator {
     async fn resend_snapshot(
         &mut self,
         context: &Context,
-    ) -> Result<(ReviewSnapshot, claim_observation::TransactionObservation), ResendError> {
+    ) -> Result<
+        (
+            ReviewSnapshot,
+            claim_observation::TransactionObservation,
+            Step2ReturnHold,
+        ),
+        ResendError,
+    > {
         self.current(context)?;
         self.resendable()?;
+        let hold = self
+            .controller
+            .hold_split_step2_return(context)?
+            .ok_or(ResendError::Unsettled)?;
+        let mut sighted = false;
+        match self.held_evidence(context, &mut sighted).await {
+            Ok((snapshot, step2)) => Ok((snapshot, step2, hold)),
+            Err(error) => {
+                if !sighted {
+                    self.restore(context, hold);
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Give back a resend permission withdrawn for reads that found no
+    /// sighting, if the session is still current. A failed write leaves it
+    /// withdrawn, which only refuses later resends; the journal is then
+    /// poisoned and every later step refuses anyway.
+    fn restore(&mut self, context: &Context, hold: Step2ReturnHold) {
+        if self.current(context).is_ok() {
+            let _withdrawn_on_failure = self.controller.release_split_step2_return(context, hold);
+        }
+    }
+
+    /// The evidence itself, under a withdrawn resend permission; `sighted`
+    /// is set by any read that saw the recorded step 2 on BTCB2.
+    async fn held_evidence(
+        &mut self,
+        context: &Context,
+        sighted: &mut bool,
+    ) -> Result<(ReviewSnapshot, claim_observation::TransactionObservation), ResendError> {
         let ticket = self.controller.begin_check(context)?;
         let first = self.collect_step2().await?;
         self.current(context)?;
-        self.absent(context, &first)?;
+        self.absent(context, &first, sighted)?;
         let unspent_at =
             claimed_unspent_on_fork(self.services.as_ref(), &self.claimed, self.policy).await?;
         let tx = self.verified.transaction().clone();
@@ -395,7 +443,7 @@ impl SplitStep2Coordinator {
         if !same_view(first.assessment().observations, observations) {
             return Err(Error::ChangedReview.into());
         }
-        self.absent(context, &last)?;
+        self.absent(context, &last, sighted)?;
         let chain_ok = match &evidence {
             RoutedEvidence::Connect(evidence) => evidence.chain() == ChainId::BitcoinBlake2b,
             // The node's best block was the BTCB2 tip observed via Connect.
@@ -464,7 +512,8 @@ impl SplitStep2Coordinator {
     ) -> Result<Step2ResubmissionReview, ResendError> {
         self.current(context)?;
         self.revision = self.revision.checked_add(1).ok_or(Error::Revoked)?;
-        let (snapshot, _) = self.resend_snapshot(context).await?;
+        let (snapshot, _, hold) = self.resend_snapshot(context).await?;
+        self.controller.release_split_step2_return(context, hold)?;
         Ok(Step2ResubmissionReview {
             coordinator: self.id,
             revision: self.revision,
@@ -490,7 +539,7 @@ impl SplitStep2Coordinator {
         if Instant::now() >= review.snapshot.not_after {
             return Err(Error::ExpiredEvidence.into());
         }
-        let (mut refreshed, step2) = self.resend_snapshot(context).await?;
+        let (mut refreshed, step2, hold) = self.resend_snapshot(context).await?;
         if review.snapshot.transaction != refreshed.transaction
             || review.snapshot.wallet != refreshed.wallet
             || review.snapshot.txid != refreshed.txid
@@ -499,17 +548,20 @@ impl SplitStep2Coordinator {
             || review.previous_attempts != self.controller.split_step2_resubmissions()
             || !same_view(review.snapshot.observations, refreshed.observations)
         {
+            self.restore(context, hold);
             return Err(Error::ChangedReview.into());
         }
         refreshed.not_after = refreshed.not_after.min(review.snapshot.not_after);
         self.current(context)?;
         if Instant::now() >= refreshed.not_after {
+            self.restore(context, hold);
             return Err(Error::ExpiredEvidence.into());
         }
         self.controller.record_split_step2_resubmission(
             context,
             &self.verified,
             step2,
+            hold,
             self.policy.observations,
             self.services.source().now(),
         )?;

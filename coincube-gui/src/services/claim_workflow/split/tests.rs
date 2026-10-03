@@ -1197,7 +1197,7 @@ fn v8_split_journal_is_refused_by_the_v7_reader() {
 /// glob still has to name the item somewhere.
 #[test]
 fn split_b0_journal_api_has_no_gui_callers() {
-    const ITEMS: [&str; 24] = [
+    const ITEMS: [&str; 27] = [
         "create_split",
         "revalidate_split_construction",
         "bind_recovered_split_transaction",
@@ -1225,6 +1225,9 @@ fn split_b0_journal_api_has_no_gui_callers() {
         "split_step2_observed",
         "record_split_step2_returned",
         "split_step2_returned",
+        "hold_split_step2_return",
+        "release_split_step2_return",
+        "Step2ReturnHold",
     ];
     const OWN: [&str; 4] = [
         "src/services/claim_workflow/split.rs",
@@ -1266,7 +1269,7 @@ fn split_b0_journal_api_has_no_gui_callers() {
                 (false, Some(from)) => {
                     let ident = &text[from..index];
                     let reexport = file == "src/services/claim_workflow/mod.rs"
-                        && ["split_identity", "RecordedSplit"].contains(&ident);
+                        && ["split_identity", "RecordedSplit", "Step2ReturnHold"].contains(&ident);
                     let dispatch = file == "src/services/claim_coordinator/step1.rs"
                         && ident == "for_split_step1";
                     // B1b: the Split step-1 panel and its tests. Its only
@@ -1310,6 +1313,9 @@ fn split_b0_journal_api_has_no_gui_callers() {
                             "split_step2_observed",
                             "record_split_step2_returned",
                             "split_step2_returned",
+                            "hold_split_step2_return",
+                            "release_split_step2_return",
+                            "Step2ReturnHold",
                         ]
                         .contains(&ident)
                             || (gate_tests && ident == "create_split"));
@@ -1657,24 +1663,38 @@ fn split_step2_resends_and_the_observation_that_ends_them() {
     let fresh = |c: &mut Controller| {
         refresh(c, observation(tracked, Bitcoin::Confirmed { depth: 6 }));
     };
-    let resend = |c: &mut Controller, signed: &VerifiedSplitStep2, step2| {
-        c.record_split_step2_resubmission(&context(), signed, step2, policy(), 10_000)
+    // A resend takes the permission withdrawn for its read: the latest
+    // attempt's recorded return, given back to it if a refusal consumed it.
+    let held = |c: &mut Controller| {
+        if !c.split_step2_returned() {
+            c.record_split_step2_returned(&context()).unwrap();
+        }
+        c.hold_split_step2_return(&context()).unwrap().unwrap()
     };
-    // Not before the submission's return without acceptance is recorded.
-    fresh(&mut c);
-    assert!(matches!(
-        resend(&mut c, &verified, TransactionObservation::Absent),
-        Err(Error::Conflict)
-    ));
+    let resend = |c: &mut Controller, signed: &VerifiedSplitStep2, step2| {
+        let hold = held(c);
+        c.record_split_step2_resubmission(&context(), signed, step2, hold, policy(), 10_000)
+    };
+    // Nothing to withdraw before the submission's return is recorded, so no
+    // resend can be recorded.
+    assert!(c.hold_split_step2_return(&context()).unwrap().is_none());
     c.record_split_step2_returned(&context()).unwrap();
     c.record_split_step2_returned(&context()).unwrap();
     assert!(c.split_step2_returned());
     let text = journal_text(&temp);
-    // A fresh assessment, an absent step 2 and the recorded bytes.
+    // Withdrawn for a read, then given back: the journal is as it was.
+    let hold = c.hold_split_step2_return(&context()).unwrap().unwrap();
+    assert!(!c.split_step2_returned());
+    assert!(c.hold_split_step2_return(&context()).unwrap().is_none());
+    c.release_split_step2_return(&context(), hold).unwrap();
+    assert_eq!(journal_text(&temp), text);
+    // A fresh assessment, an absent step 2 and the recorded bytes. Every
+    // refusal consumes the withdrawn permission: it stays withdrawn.
     assert!(matches!(
         resend(&mut c, &verified, TransactionObservation::Absent),
         Err(Error::Unchecked)
     ));
+    assert!(!c.split_step2_returned());
     fresh(&mut c);
     assert!(matches!(
         resend(
@@ -1699,22 +1719,14 @@ fn split_step2_resends_and_the_observation_that_ends_them() {
         resend(&mut c, &verified, TransactionObservation::Absent),
         Err(Error::Unchecked)
     ));
-    assert_eq!(journal_text(&temp), text, "refusals write nothing");
+    assert!(!c.split_step2_returned());
     fresh(&mut c);
     resend(&mut c, &verified, TransactionObservation::Absent).unwrap();
     assert_eq!(c.split_step2_resubmissions(), 1);
-    // It consumed the assessment, and its own return is not recorded yet.
+    // It consumed the assessment and the permission; its own return is not
+    // recorded yet.
     assert!(!c.split_step2_returned());
-    assert!(matches!(
-        resend(&mut c, &verified, TransactionObservation::Absent),
-        Err(Error::Unchecked)
-    ));
-    fresh(&mut c);
-    assert!(matches!(
-        resend(&mut c, &verified, TransactionObservation::Absent),
-        Err(Error::Conflict)
-    ));
-    c.record_split_step2_returned(&context()).unwrap();
+    assert!(c.hold_split_step2_return(&context()).unwrap().is_none());
     fresh(&mut c);
     resend(&mut c, &verified, TransactionObservation::Absent).unwrap();
     let journal: serde_json::Value = serde_json::from_str(&journal_text(&temp)).unwrap();
@@ -1726,6 +1738,22 @@ fn split_step2_resends_and_the_observation_that_ends_them() {
     // Nothing recorded earlier changes.
     assert_eq!(c.recorded_split_step2(), Some(verified.transaction()));
     assert_eq!(c.recorded_fork_submission().unwrap().txid(), txid);
+    // A permission withdrawn for a read that then records a sighting is not
+    // given back.
+    c.record_split_step2_returned(&context()).unwrap();
+    let hold = c.hold_split_step2_return(&context()).unwrap().unwrap();
+    let before_sighting = c.intent.clone();
+    c.record_split_step2_observed(&context(), TransactionObservation::Unconfirmed { txid })
+        .unwrap();
+    assert!(matches!(
+        c.release_split_step2_return(&context(), hold),
+        Err(Error::Conflict)
+    ));
+    assert!(!c.split_step2_returned());
+    // Undo the sighting in memory only, to check the remaining rules on
+    // their own.
+    c.intent = before_sighting;
+    c.journal.store(&c.intent.clone()).unwrap();
 
     // A sighting: only of the recorded txid; an absence changes nothing.
     c.record_split_step2_observed(&context(), TransactionObservation::Absent)
@@ -1765,6 +1793,7 @@ fn split_step2_resends_and_the_observation_that_ends_them() {
     at_bound.step2_resubmissions = vec![attempt; MAX_SPLIT_STEP2_RESUBMISSIONS];
     at_bound.step2_returned = true;
     full_validate(&c.intent).unwrap();
+    c.journal.store(&c.intent.clone()).unwrap();
     fresh(&mut c);
     assert!(matches!(
         resend(&mut c, &verified, TransactionObservation::Absent),
