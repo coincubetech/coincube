@@ -21,6 +21,7 @@ pub mod protocol;
 mod signatures;
 pub mod tls;
 pub mod transport;
+pub mod unpair_sync;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -171,6 +172,12 @@ impl PhoneSigner {
     pub fn is_alive(&self) -> bool {
         self.correlator.is_alive()
     }
+
+    /// `true` once the phone has said it removed this pairing. `hw.rs` then
+    /// drops the pairing from the store instead of redialling.
+    pub fn peer_unpaired(&self) -> bool {
+        self.correlator.peer_unpaired()
+    }
 }
 
 #[async_trait]
@@ -217,6 +224,9 @@ impl HWI for PhoneSigner {
         use crate::services::connect::grpc::connect_v1 as cv1;
         if !lan_signing_allowed(self.chain) {
             return Err(HwiError::Device(BTCB2_LAN_UNAVAILABLE.to_string()));
+        }
+        if self.peer_unpaired() {
+            return Err(HwiError::Device(protocol::phone_unpaired_text()));
         }
 
         let binding = self

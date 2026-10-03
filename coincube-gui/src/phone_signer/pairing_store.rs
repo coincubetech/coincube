@@ -178,6 +178,41 @@ impl PairedPhone {
 pub struct PairingStoreFile {
     #[serde(default)]
     pub phones: Vec<PairedPhone>,
+    /// Phones the user removed here that haven't been told yet. Removal
+    /// takes effect locally at once; the phone learns it from an
+    /// `Unpaired` frame the next time it is reachable, so it stops listing
+    /// this desktop too. Grants nothing: these entries are never dialled
+    /// for signing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_unpairs: Vec<PendingUnpair>,
+}
+
+/// A removal still to be delivered to the phone it concerns. Carries only
+/// what reaching that phone again needs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingUnpair {
+    pub cert_pin: [u8; 32],
+    pub name: String,
+    pub fallback_addr: Option<String>,
+    pub removed_at_unix: u64,
+}
+
+/// How long a removal keeps waiting for its phone. A phone that stays away
+/// longer still holds a pairing this desktop no longer dials, which the user
+/// can remove on the phone.
+pub const PENDING_UNPAIR_TTL_SECS: u64 = 14 * 24 * 60 * 60;
+
+impl PendingUnpair {
+    pub fn is_expired(&self, now_unix: u64) -> bool {
+        now_unix.saturating_sub(self.removed_at_unix) > PENDING_UNPAIR_TTL_SECS
+    }
+}
+
+pub(crate) fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// JSON file name under [`CoincubeDirectory`]. Top-level (not under
@@ -232,6 +267,9 @@ pub fn upsert(dir: &CoincubeDirectory, phone: PairedPhone) -> std::io::Result<Pa
     let _guard = super::pairing_transaction::WRITER.lock().unwrap();
     super::pairing_transaction::revoke(dir, &phone.cert_pin)?;
     let mut file = load_visible(dir)?;
+    // Pairing again supersedes an undelivered removal of the same phone.
+    file.pending_unpairs
+        .retain(|p| p.cert_pin != phone.cert_pin);
     if let Some(existing) = file
         .phones
         .iter_mut()
@@ -312,6 +350,76 @@ pub fn remove(dir: &CoincubeDirectory, cert_pin: &[u8; 32]) -> std::io::Result<P
     file.phones.retain(|p| &p.cert_pin != cert_pin);
     save(dir, &file)?;
     Ok(file)
+}
+
+/// The user removed this phone here: drop its row at once and queue an
+/// `Unpaired` notice for the phone, delivered by
+/// [`super::unpair_sync`] whenever the phone is next reachable. No-op if the
+/// phone isn't paired.
+pub fn unpair(dir: &CoincubeDirectory, cert_pin: &[u8; 32]) -> std::io::Result<PairingStoreFile> {
+    let _guard = super::pairing_transaction::WRITER.lock().unwrap();
+    super::pairing_transaction::revoke(dir, cert_pin)?;
+    // After `revoke` this phone's raw row is its visible row. Editing the raw
+    // file leaves any other phone's in-progress pairing untouched.
+    let mut file = load_raw(dir)?;
+    let Some(index) = file.phones.iter().position(|p| &p.cert_pin == cert_pin) else {
+        return load_visible(dir);
+    };
+    let removed = file.phones.remove(index);
+    file.pending_unpairs.retain(|p| &p.cert_pin != cert_pin);
+    file.pending_unpairs.push(PendingUnpair {
+        cert_pin: removed.cert_pin,
+        name: removed.name,
+        fallback_addr: removed.fallback_addr,
+        removed_at_unix: now_unix(),
+    });
+    save(dir, &file)?;
+    load_visible(dir)
+}
+
+/// The phone said it removed this desktop. That carries the same authority as
+/// the user removing the phone here, so like [`unpair`] it supersedes any
+/// pairing journal for the phone, including one stuck after a lost final
+/// acknowledgement, which would otherwise keep the row dialled forever. Only
+/// the row that connection was made for is removed (`paired_at_unix` tells a
+/// later re-pairing of the same phone apart); for any other row nothing is
+/// touched. Returns whether a row was removed.
+pub fn remove_unpaired_by_peer(
+    dir: &CoincubeDirectory,
+    cert_pin: &[u8; 32],
+    paired_at_unix: u64,
+) -> std::io::Result<bool> {
+    let _guard = super::pairing_transaction::WRITER.lock().unwrap();
+    let dialled = |p: &PairedPhone| &p.cert_pin == cert_pin && p.paired_at_unix == paired_at_unix;
+    if !load_visible(dir)?.phones.iter().any(dialled) {
+        return Ok(false);
+    }
+    super::pairing_transaction::revoke(dir, cert_pin)?;
+    // After `revoke` this phone's raw row is its visible row. Editing the raw
+    // file leaves any other phone's in-progress pairing untouched.
+    let mut file = load_raw(dir)?;
+    file.phones.retain(|p| !dialled(p));
+    // The phone already knows; nothing left to tell it.
+    file.pending_unpairs.retain(|p| &p.cert_pin != cert_pin);
+    save(dir, &file)?;
+    Ok(true)
+}
+
+/// Forget queued removal notices: delivered ones and ones past
+/// [`PENDING_UNPAIR_TTL_SECS`]. A notice is matched on its removal time too,
+/// so one queued again while the first was being delivered stays queued.
+pub fn clear_pending_unpairs(
+    dir: &CoincubeDirectory,
+    done: &[([u8; 32], u64)],
+) -> std::io::Result<()> {
+    if done.is_empty() {
+        return Ok(());
+    }
+    let _guard = super::pairing_transaction::WRITER.lock().unwrap();
+    let mut file = load_raw(dir)?;
+    file.pending_unpairs
+        .retain(|p| !done.contains(&(p.cert_pin, p.removed_at_unix)));
+    save(dir, &file)
 }
 
 #[cfg(test)]
@@ -453,6 +561,103 @@ mod tests {
             serde_json::to_value(&prior).unwrap()
         );
     }
+    #[test]
+    fn unpair_queues_one_notice_and_pairing_again_drops_it() {
+        let dir = fresh_dir();
+        let phone = sample_phone(2);
+        upsert(&dir, phone.clone()).unwrap();
+        upsert(&dir, sample_phone(3)).unwrap();
+        unpair(&dir, &phone.cert_pin).unwrap();
+        unpair(&dir, &phone.cert_pin).unwrap(); // already gone: no second notice
+        let file = load(&dir).unwrap();
+        assert_eq!(file.phones.len(), 1);
+        assert_eq!(file.pending_unpairs.len(), 1);
+        assert_eq!(file.pending_unpairs[0].cert_pin, phone.cert_pin);
+        assert_eq!(file.pending_unpairs[0].fallback_addr, phone.fallback_addr);
+
+        upsert(&dir, phone.clone()).unwrap();
+        assert!(load(&dir).unwrap().pending_unpairs.is_empty());
+
+        // A pairing started again supersedes the notice before it completes:
+        // delivering it mid-handshake would undo the new pairing.
+        unpair(&dir, &phone.cert_pin).unwrap();
+        let _staged = super::super::pairing_transaction::PairingTransaction::prepare(
+            &dir,
+            "again".into(),
+            phone.clone(),
+        )
+        .unwrap();
+        assert!(load(&dir).unwrap().pending_unpairs.is_empty());
+    }
+
+    #[test]
+    fn peer_unpair_removes_only_the_row_it_was_made_for() {
+        let dir = fresh_dir();
+        let phone = sample_phone(4);
+        upsert(&dir, phone.clone()).unwrap();
+        // A connection from an earlier pairing of the same phone.
+        assert!(!remove_unpaired_by_peer(&dir, &phone.cert_pin, phone.paired_at_unix - 1).unwrap());
+        assert_eq!(load(&dir).unwrap().phones.len(), 1);
+
+        assert!(remove_unpaired_by_peer(&dir, &phone.cert_pin, phone.paired_at_unix).unwrap());
+        assert!(load(&dir).unwrap().phones.is_empty());
+    }
+
+    /// A re-pair whose FINISHED was lost leaves a decided journal for good,
+    /// with the earlier pairing still visible and dialled. The phone's removal
+    /// must still apply, or that row is redialled every refresh tick forever.
+    #[test]
+    fn peer_unpair_supersedes_a_pairing_stuck_after_finish() {
+        use super::super::pairing_transaction::PairingTransaction;
+        let dir = fresh_dir();
+        let phone = sample_phone(4);
+        upsert(&dir, phone.clone()).unwrap();
+        let repaired = PairedPhone {
+            paired_at_unix: phone.paired_at_unix + 100,
+            ..phone.clone()
+        };
+        let stuck = PairingTransaction::prepare(&dir, "lost-finished".into(), repaired).unwrap();
+        stuck.write_candidate().unwrap();
+        stuck.decide().unwrap();
+        drop(stuck); // Decided: drop leaves it hidden, it never rolls back.
+        assert_eq!(
+            load(&dir).unwrap().phones[0].paired_at_unix,
+            phone.paired_at_unix,
+            "the earlier pairing is what stays visible and dialled",
+        );
+
+        assert!(remove_unpaired_by_peer(&dir, &phone.cert_pin, phone.paired_at_unix).unwrap());
+        assert!(load(&dir).unwrap().phones.is_empty());
+        assert!(
+            load_raw(&dir).unwrap().phones.is_empty(),
+            "the hidden candidate goes too"
+        );
+    }
+
+    #[test]
+    fn stores_without_queued_removals_keep_their_shape() {
+        let dir = fresh_dir();
+        // A store written before `pending_unpairs` existed still loads.
+        std::fs::write(store_path(&dir), br#"{"phones":[]}"#).unwrap();
+        assert!(load(&dir).unwrap().pending_unpairs.is_empty());
+        // And an empty queue isn't written, so older builds read it as before.
+        upsert(&dir, sample_phone(5)).unwrap();
+        let raw = std::fs::read_to_string(store_path(&dir)).unwrap();
+        assert!(!raw.contains("pending_unpairs"), "{}", raw);
+    }
+
+    #[test]
+    fn queued_removal_expires() {
+        let pending = PendingUnpair {
+            cert_pin: [1; 32],
+            name: "x".into(),
+            fallback_addr: None,
+            removed_at_unix: 1_000,
+        };
+        assert!(!pending.is_expired(1_000 + PENDING_UNPAIR_TTL_SECS));
+        assert!(pending.is_expired(1_001 + PENDING_UNPAIR_TTL_SECS));
+    }
+
     #[test]
     fn unpair_and_rename_revoke_pending_writers() {
         use super::super::pairing_transaction::PairingTransaction;
@@ -727,6 +932,7 @@ mod tests {
             &dir,
             &PairingStoreFile {
                 phones: vec![prior],
+                ..Default::default()
             },
         )
         .expect("seed store");

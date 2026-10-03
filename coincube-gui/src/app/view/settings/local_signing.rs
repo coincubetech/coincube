@@ -507,11 +507,16 @@ fn paired_phones_card<'a>(state: &'a LocalSigningState) -> Element<'a, Message> 
         rows.into()
     };
 
+    let notice = state.unpaired_notice.as_ref().map(|notice| {
+        Container::new(text(notice.as_str()).style(theme::text::secondary)).padding([0, 10])
+    });
+
     card::simple(
         Column::new()
             .push(header)
             .push(separation().width(Length::Fill))
             .push(Space::new().height(Length::Fixed(10.0)))
+            .push(notice)
             .push(body),
     )
     .into()
