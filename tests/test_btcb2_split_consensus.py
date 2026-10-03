@@ -380,22 +380,40 @@ def sign_and_finalize_step2(tool, wallet, request, built):
     native = wallet.shape in ("wpkh", "wsh_multi", "wsh_sortedmulti")
     assert (implicit["step2_txid"] == built["unsigned_txid"]) == native
     assert implicit["vsize"] <= built["maximum_signed_vbytes"], implicit
-    check_step2_recorded(tool, request, implicit["step2_raw"], implicit)
+    # A restart later than the construction: ten blocks on, as one would be.
+    check_step2_recorded(
+        tool, request, built, implicit["step2_raw"], implicit, request["step2"]["locktime"] + 10
+    )
     return implicit
 
 
-def check_step2_recorded(tool, request, raw, finalized):
-    """Recorded signed bytes verify against the rebuilt construction
-    (`verify_split_step2_transaction`, the restart path); the same bytes with
-    a changed locktime do not."""
+def check_step2_recorded(tool, request, built, raw, finalized, tip):
+    """A restart at BTCB2 tip `tip`, as the service layer does it (#638 F2):
+    the recorded signed bytes verify against the recorded unsigned sweep
+    rebuilt at that tip (`reconstruct_split_step2`, then
+    `verify_split_step2_transaction`), not against a fresh construction at
+    the original tip. A tip below the recorded locktime is refused, and the
+    same bytes with a changed locktime do not verify."""
     request = copy.deepcopy(request)
     request["step2"].pop("signed", None)
+    locktime = request["step2"]["locktime"]
+    assert tip >= locktime, (tip, locktime)
+    # A restart knows the current tip and the journal's two records; a fresh
+    # construction there would carry the current tip as its locktime.
+    request["step2"]["locktime"] = request["step2"]["btcb2_tip_height"] = tip
+    request["step2"]["recorded"] = unsigned_tx_hex(built["step2_psbt"])
     request["step2"]["recorded_signed"] = raw
     verified = run_bridge(tool, request)
+    assert verified["reconstructed_txid"] == finalized["construction_txid"], verified
     assert verified["verified_txid"] == finalized["step2_txid"], verified
     assert verified["verified_signatures_per_input"] == finalized["signatures_per_input"]
+    # Below the recorded locktime the record is not final there: refused
+    # before any signature is looked at.
+    early = copy.deepcopy(request)
+    early["step2"]["locktime"] = early["step2"]["btcb2_tip_height"] = locktime - 1
+    bridge_refuses(tool, early, "Locktime")
     tampered = bytes.fromhex(raw)
-    locktime = struct.unpack("<I", tampered[-4:])[0]
+    assert struct.unpack("<I", tampered[-4:])[0] == locktime, raw
     request["step2"]["recorded_signed"] = (tampered[:-4] + struct.pack("<I", locktime - 1)).hex()
     bridge_refuses(tool, request, "ConstructionChanged")
 
@@ -760,8 +778,9 @@ def test_split_step2_consensus(split_chains, shape, record_property):
     mined = b.rpc.getrawtransaction(step2_id, True, b.rpc.getbestblockhash())
     assert mined["confirmations"] == 1, mined
     assert [o["scriptPubKey"]["hex"] for o in mined["vout"]] == [target.hex()]
-    # The bytes BTCB2 mined verify as a recorded step 2 (restart path).
-    check_step2_recorded(tool, request, mined["hex"], finalized)
+    # The bytes BTCB2 mined verify as a recorded step 2 at the tip after
+    # mining, where a restart would rebuild it (#638 F2).
+    check_step2_recorded(tool, request, built, mined["hex"], finalized, b.rpc.getblockcount())
     for txid, vout in prevouts:
         assert b.rpc.gettxout(txid, vout, False) is None
     assert b.rpc.gettxout(step2_id, 0, False)["scriptPubKey"]["hex"] == target.hex()
