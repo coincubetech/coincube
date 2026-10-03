@@ -359,7 +359,7 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
             body = body.push(p1_regular(refusal.reason.clone()).style(theme::text::warning));
             if refusal.retry {
                 actions = actions.push(action("Try again", SplitMessage::Retry));
-            } else {
+            } else if refusal.recovery == step1::RefusalRecovery::ReopenCube {
                 body = body.push(p1_regular(
                     "This split cannot continue in the current session. Close and reopen the Cube to reload its recorded split. If this refusal persists, the connection or wallet identity must be corrected before continuing.",
                 ));

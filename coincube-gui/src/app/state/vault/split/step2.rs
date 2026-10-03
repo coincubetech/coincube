@@ -116,11 +116,12 @@ pub fn reconcile_warning(status: Status) -> Option<String> {
     }
 }
 
-/// Additional state invalidation required by a refusal, independent of copy.
+/// Recovery guidance or state invalidation required by a refusal, independent of copy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Step2Recovery {
     None,
     RefreshTarget,
+    ReopenCube,
 }
 
 /// What a refused step-2 operation means for the user.
@@ -221,10 +222,13 @@ pub fn describe_split_check(error: SplitCheckError) -> Step2Refusal {
 
 fn describe_check(error: claim_coordinator::Error) -> Step2Refusal {
     use claim_coordinator::Error as E;
-    let retry = !matches!(
-        error,
-        E::Unsupported | E::InvalidBinding | E::Journal(claim_workflow::Error::WrongIdentity)
-    );
+    let recovery = match error {
+        E::Unsupported | E::InvalidBinding | E::Journal(claim_workflow::Error::WrongIdentity) => {
+            Step2Recovery::ReopenCube
+        }
+        _ => Step2Recovery::None,
+    };
+    let retry = recovery != Step2Recovery::ReopenCube;
     let reason = match error {
         E::NotReady(coincube_core::claim::Assessment::WaitingForDepth { confirmations }) => {
             format!(
@@ -240,7 +244,7 @@ fn describe_check(error: claim_coordinator::Error) -> Step2Refusal {
     Step2Refusal {
         reason,
         retry,
-        recovery: Step2Recovery::None,
+        recovery,
     }
 }
 

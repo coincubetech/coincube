@@ -20,7 +20,7 @@ use coincube_core::{
 };
 
 use super::{
-    step1::{OpenRequest, Refusal, SplitConnect},
+    step1::{OpenRequest, Refusal, RefusalRecovery, SplitConnect},
     step2::{self, ReconPort, Step2Open, Step2Port, Step2Refusal},
     Coord, Driver, Prep, Recon, Restarted, Seen, SplitEvent, SplitMessage, SplitPanel, Stage,
     Step2Stage, Work,
@@ -34,6 +34,10 @@ fn refusal(refusal: Step2Refusal) -> Refusal {
     Refusal {
         reason: refusal.reason,
         retry: refusal.retry,
+        recovery: match refusal.recovery {
+            step2::Step2Recovery::ReopenCube => RefusalRecovery::ReopenCube,
+            _ => RefusalRecovery::None,
+        },
     }
 }
 
@@ -524,10 +528,13 @@ impl SplitPanel {
                             for path in &paths {
                                 let file = split_psbt_file::load(path)
                                     .map_err(|error| Step2Refusal::retry(error.to_string()))?;
+                                // Combining can supply missing fields or resolve conflicts.
+                                // Check the exact input first, including no-op files, so
+                                // retained metadata/signatures cannot mask malformed input.
+                                prep.verify_signed(&file, &coins)?;
                                 let candidate = combine(&combined, std::slice::from_ref(&file))?;
-                                // Verify even a no-op file before ignoring it. Only a
-                                // validated new signature consumes a retained slot.
                                 prep.verify_signed(&candidate, &coins)?;
+                                // Only a validated new signature consumes a retained slot.
                                 let adds_signature =
                                     candidate.inputs.iter().zip(&combined.inputs).any(
                                         |(new, old)| {

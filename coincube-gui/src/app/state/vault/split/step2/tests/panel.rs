@@ -133,7 +133,7 @@ impl SplitConnect for PanelConnect {
 
 struct PanelPrep {
     shared: Shared,
-    psbt: Psbt,
+    construction: Arc<SplitStep2>,
     live: Vec<Arc<std::sync::atomic::AtomicU64>>,
     /// The session's generation, alive while the preparation is.
     generation: watch::Sender<u64>,
@@ -173,13 +173,24 @@ impl Step2Prep for PanelPrep {
         if counts.stale_target {
             return Err(describe_step2(Step2Error::TargetNotProven));
         }
-        Ok(self.psbt.clone())
+        Ok(self.construction.psbt().clone())
     }
-    fn verify_signed(&self, signed: &Psbt, _: &[SplitCoin]) -> Result<bool, Step2Refusal> {
-        Ok(signed
-            .inputs
-            .iter()
-            .all(|input| !input.partial_sigs.is_empty()))
+    fn verify_signed(&self, signed: &Psbt, coins: &[SplitCoin]) -> Result<bool, Step2Refusal> {
+        // Use production cryptography and exact-construction checks, including
+        // partial and surplus signatures; a nonempty map is not evidence.
+        match finalize_split_step2(
+            &self.construction,
+            coins,
+            self.construction.source(),
+            signed,
+            &Secp256k1::verification_only(),
+        ) {
+            Ok(_) => Ok(true),
+            Err(coincube_core::foreign_split::FinalizeError::Unsatisfied) => Ok(false),
+            Err(error) => Err(Step2Refusal::final_(format!(
+                "Invalid signed file: {error}"
+            ))),
+        }
     }
     fn finish(
         self: Box<Self>,
@@ -298,7 +309,7 @@ impl Step2Recon for PanelRecon {
 
 struct PanelPort {
     shared: Shared,
-    psbt: Psbt,
+    construction: Arc<SplitStep2>,
     /// The daemon instance this port stands for.
     daemon: usize,
     account: &'static str,
@@ -307,7 +318,7 @@ impl PanelPort {
     fn new(shared: &Shared, journal: &Journal, daemon: usize) -> Self {
         Self {
             shared: shared.clone(),
-            psbt: step2(&journal.wallet, &journal.step1).psbt().clone(),
+            construction: Arc::new(step2(&journal.wallet, &journal.step1)),
             daemon,
             account: "synthetic-account",
         }
@@ -331,7 +342,7 @@ impl Step2Port for PanelPort {
         assert_eq!(open.target_cube, TARGET);
         Ok(Box::new(PanelPrep {
             shared: self.shared.clone(),
-            psbt: self.psbt.clone(),
+            construction: self.construction.clone(),
             live: Vec::new(),
             generation: watch::channel(7).0,
         }))
@@ -1554,4 +1565,139 @@ async fn panel_explains_final_entry_refusals_without_enabling_retry() {
         assert!(panel.is_hidden());
         assert!(journal.temp.0.exists());
     }
+}
+
+/// Copilot r4174940015: the exact file must be checked before merge can
+/// supply or replace metadata. A bad later file rolls back useful earlier
+/// files in the same selection. Cryptographic checks use the real core.
+#[tokio::test(flavor = "multi_thread")]
+async fn panel_rejects_raw_invalid_files_before_combining() {
+    use coincube_core::miniscript::bitcoin::secp256k1::{Message as SecpMessage, SecretKey};
+    for case in 0..3 {
+        let journal = Journal::new(false);
+        let (mut panel, shared) = tracked_panel(&journal);
+        for message in [
+            SplitMessage::EnterStep2,
+            SplitMessage::Step2Reserve,
+            SplitMessage::Step2Check,
+            SplitMessage::Step2Build,
+        ] {
+            let task = panel.update(message);
+            drive(&mut panel, task).await;
+        }
+        let mut signed = panel.step2_psbt().unwrap().clone();
+        signed
+            .sign(&journal.wallet.signer, &Secp256k1::new())
+            .unwrap();
+        let mut first = signed.clone();
+        first.inputs[1].partial_sigs.clear();
+        let mut second = signed.clone();
+        second.inputs[0].partial_sigs.clear();
+        let save = |name: &str, psbt: &Psbt| {
+            let path = journal.temp.0.parent().unwrap().join(name);
+            std::fs::write(
+                &path,
+                split_psbt_file::encode(psbt, split_psbt_file::Encoding::Base64),
+            )
+            .unwrap();
+            path
+        };
+        let task = panel.step2_import_from(vec![save("first.txt", &first)]);
+        drive(&mut panel, task).await;
+        assert_eq!(panel.step2_files(), 1);
+        let retained = panel.step2_files.clone();
+        let mut invalid = first.clone();
+        match case {
+            // Same public-key slot as an already retained valid signature.
+            0 => {
+                invalid.inputs[0]
+                    .partial_sigs
+                    .values_mut()
+                    .next()
+                    .unwrap()
+                    .signature = Secp256k1::new().sign_ecdsa(
+                    &SecpMessage::from_digest([42; 32]),
+                    &SecretKey::from_slice(&[42; 32]).unwrap(),
+                )
+            }
+            1 => {
+                assert!(invalid.inputs[0].non_witness_utxo.take().is_some());
+            }
+            2 => invalid.inputs[0].bip32_derivation.clear(),
+            _ => unreachable!(),
+        }
+        assert!(panel
+            .prep
+            .as_ref()
+            .unwrap()
+            .verify_signed(&invalid, &panel.coins)
+            .is_err());
+        let invalid_path = save("invalid.txt", &invalid);
+        let second_path = save("second.txt", &second);
+        // Includes a valid duplicate control and a useful complementary file.
+        let task = panel.step2_import_from(vec![
+            save("duplicate.txt", &first),
+            second_path.clone(),
+            invalid_path.clone(),
+        ]);
+        drive(&mut panel, task).await;
+        assert_eq!(panel.stage, Stage::Step2(Step2Stage::Sign), "case {case}");
+        assert_eq!(
+            panel.step2_files, retained,
+            "case {case}: partial batch retained"
+        );
+        assert!(panel.prep.is_some());
+        assert!(!panel.can_retry_step2_handoff());
+        assert_eq!(shared.lock().unwrap().finishes, 0);
+        assert_eq!(shared.lock().unwrap().submits, 0);
+        // Reversing order also refuses; then valid complementary signatures work.
+        let task = panel.step2_import_from(vec![invalid_path, second_path.clone()]);
+        drive(&mut panel, task).await;
+        assert_eq!(panel.step2_files, retained);
+        let task = panel.step2_import_from(vec![second_path]);
+        drive(&mut panel, task).await;
+        assert_eq!(panel.stage, Stage::Step2(Step2Stage::Signed));
+        assert_eq!(shared.lock().unwrap().submits, 0);
+    }
+}
+
+/// Copilot r4174940044: terminal domain refusals keep their own recovery
+/// instructions; they must not acquire session/identity/reopen advice.
+#[tokio::test(flavor = "multi_thread")]
+async fn panel_rejects_reopen_advice_for_terminal_domain_refusals() {
+    use crate::app::state::vault::split::step1::Refusal;
+    let journal = Journal::new(false);
+    let (mut panel, _) = tracked_panel(&journal);
+    let spent = describe_split_check(SplitCheckError::ClaimedCoinSpent(OutPoint::null())).reason;
+    for reason in [
+        step1::NO_PRE_FORK_COINS,
+        step1::DESTINATION_USED,
+        step1::STALE_ANCHOR,
+        step1::NEW_POISON_NEEDED,
+        step1::COMPLETED,
+        spent.as_str(),
+    ] {
+        panel.stage = Stage::Refused(Refusal::final_(reason));
+        let labels = rendered_labels(&panel).await;
+        assert!(labels.iter().any(|label| label == reason));
+        assert!(
+            !labels
+                .iter()
+                .any(|label| label.contains("Close and reopen the Cube")),
+            "{}",
+            reason
+        );
+        assert!(!labels.iter().any(|label| label == "Try again"));
+    }
+    // A step-2-specific terminal domain error travels through the entry arm.
+    let task = panel.apply(SplitEvent::Step2Entered(
+        panel.seq,
+        Err(describe_step2(Step2Error::DescriptorsForgotten)),
+    ));
+    drive(&mut panel, task).await;
+    let labels = rendered_labels(&panel).await;
+    assert!(labels.iter().any(|label| label == step1::COMPLETED));
+    assert!(!labels
+        .iter()
+        .any(|label| label.contains("Close and reopen the Cube")));
 }
