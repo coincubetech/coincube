@@ -223,6 +223,8 @@ struct View {
     fork_tip: u64,
     /// Seconds subtracted from the stamp of every transaction read.
     read_age: i64,
+    /// Seconds subtracted from the stamp of every BTCB2 unspent read.
+    unspent_age: i64,
     /// Run once, at the first BTCB2 read that finds a listed transaction.
     on_btcb2_sighting: Option<ReadHook>,
     /// Answered once, by the next BTCB2 read of that transaction.
@@ -253,6 +255,7 @@ impl View {
             on_btcb2: Vec::new(),
             fork_tip: FORK_TIP,
             read_age: 0,
+            unspent_age: 0,
             on_btcb2_sighting: None,
             on_btcb2_once: None,
         };
@@ -410,9 +413,10 @@ impl SplitForkServices for Chains {
         if view.unspent_fails {
             return Err(FailureKind::Http(400));
         }
-        Self::read(
+        Self::read_aged(
             ChainId::BitcoinBlake2b,
             view.unspent.iter().copied().collect(),
+            view.unspent_age,
         )
     }
 }
@@ -1092,9 +1096,11 @@ fn split_step2_gate_has_no_gui_caller() {
             let transport = ["src/daemon/mod.rs", "src/daemon/embedded.rs"]
                 .contains(&file.as_str())
                 && ident.starts_with("submit_verified_split_step2");
-            // B3b-2b: the panel's step-2 layer wraps these and is itself
-            // uncalled (`app::state::vault::split::step2::tests::
-            // step2_panel_layer_has_no_caller_yet`).
+            // B3b-2b: the panel's step-2 layer wraps these and is reached
+            // only through the Split panel (`app::state::vault::split::
+            // step2::tests::step2_panel_layer_is_reached_only_through_the_
+            // split_panel`), itself only resuming a journal. P3-3 adds the
+            // resend review and its restart there.
             let panel = file.starts_with("src/app/state/vault/split/step2")
                 && [
                     "SplitPreparation",
@@ -1110,6 +1116,11 @@ fn split_step2_gate_has_no_gui_caller() {
                     "reserve_target",
                     "prove_target",
                     "construct_step2",
+                    "Step2ResubmissionReview",
+                    "ResendError",
+                    "prepare_step2_resubmission",
+                    "confirm_step2_resubmission",
+                    "resume_uncertain",
                 ]
                 .contains(&ident);
             if text.contains(ident) && !transport && !panel {
