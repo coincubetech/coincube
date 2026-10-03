@@ -685,6 +685,19 @@ pub struct CubeSettings {
     /// Which Claim sweep the historical completion marker describes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub split_completion_txid: Option<coincube_core::miniscript::bitcoin::Txid>,
+    /// Splits (#568 B5) completed into this Cube's Vault, one record per
+    /// completed step 2: the digest of the foreign source's descriptors
+    /// (owner decision D9), the BTCB2 height of step 2's confirmation and
+    /// step 2's txid. Never a descriptor, a key, spending or replay
+    /// authority: history for the Split panel and the one predicate the
+    /// "Start split" refusal reads. Written only on the target BTCB2 Cube,
+    /// by `SplitCompletionEvidence::persist`, and cleared by its
+    /// reconciliation when the chains take the completion back (D17); the
+    /// deleted descriptors are not restored. An older build that rewrites
+    /// `settings.json` drops the field (no `deny_unknown_fields`, like every
+    /// field here); the Split journal keeps the completed step 2 regardless.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub split_from: Vec<SplitFromRecord>,
     pub id: String,
     pub name: String,
     /// The chain this Cube lives on — its *identity*, which decides the
@@ -942,6 +955,20 @@ pub struct CubeSettings {
     pub connect_owner: Option<ConnectOwner>,
 }
 
+/// One Split completed into a Cube's Vault; see [`CubeSettings::split_from`].
+/// Digest-only by construction: no field can hold a descriptor or a key.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct SplitFromRecord {
+    /// SHA-256 of the foreign source's canonical descriptors (D9), the
+    /// Split journal's identity.
+    pub descriptor_digest: coincube_core::miniscript::bitcoin::hashes::sha256::Hash,
+    /// BTCB2 height of the block that confirmed step 2 when the completion
+    /// was recorded.
+    pub completed_height: u64,
+    /// The signed step 2's own txid.
+    pub step2_txid: coincube_core::miniscript::bitcoin::Txid,
+}
+
 /// Identity of the Connect account that owns a Cube. See
 /// [`CubeSettings::connect_owner`].
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -986,6 +1013,7 @@ impl CubeSettings {
         Self {
             split_completed_at_height: None,
             split_completion_txid: None,
+            split_from: Vec::new(),
             id,
             name,
             network: network.into(),
@@ -2599,6 +2627,91 @@ mod test {
             cube.vault_fingerprint, None,
             "an absent field reads as `not asserted yet`, not as an error"
         );
+    }
+
+    fn split_from_record(byte: u8) -> super::SplitFromRecord {
+        use coincube_core::miniscript::bitcoin::{
+            hashes::{sha256, Hash},
+            Txid,
+        };
+        super::SplitFromRecord {
+            descriptor_digest: sha256::Hash::hash(&[byte]),
+            completed_height: 900_000 + u64::from(byte),
+            step2_txid: Txid::from_byte_array([byte; 32]),
+        }
+    }
+
+    /// B5 (#568): a completed Split's record survives a settings round-trip
+    /// verbatim, through the same JSON the settings file is written with.
+    #[test]
+    fn split_from_round_trips_through_settings() {
+        use super::CubeSettings;
+        use crate::chain::ChainId;
+
+        let mut cube = CubeSettings::new_with_raw_id(
+            "target-cube".to_string(),
+            "Target".to_string(),
+            ChainId::BitcoinBlake2b,
+        );
+        cube.split_from = vec![split_from_record(1), split_from_record(2)];
+        let json = serde_json::to_string(&cube).expect("CubeSettings must serialize");
+        let restored: CubeSettings =
+            serde_json::from_str(&json).expect("CubeSettings must deserialize");
+        assert_eq!(
+            restored.split_from,
+            vec![split_from_record(1), split_from_record(2)],
+            "every completed Split must come back exactly as written"
+        );
+    }
+
+    /// B5 back-compat: a `settings.json` written before `split_from` existed
+    /// deserializes with no completed Splits, not as an error.
+    #[test]
+    fn pre_field_settings_deserialize_without_split_from() {
+        use super::CubeSettings;
+
+        let json = r#"{
+            "id": "cube-1",
+            "name": "Legacy",
+            "network": "bitcoin-blake2b",
+            "created_at": 0,
+            "vault_wallet_id": {
+                "timestamp": 1700000000,
+                "descriptor_checksum": "njhdtwde"
+            }
+        }"#;
+        let cube: CubeSettings =
+            serde_json::from_str(json).expect("pre-field settings must still deserialize");
+        assert!(cube.vault_wallet_id.is_some());
+        assert!(
+            cube.split_from.is_empty(),
+            "an absent field reads as `no completed Split`, not as an error"
+        );
+    }
+
+    /// B5: a Cube with no completed Split serializes exactly as before the
+    /// field existed (no `split_from` key), so the files of every Cube that
+    /// never split stay byte-identical; a completed Split does write it.
+    #[test]
+    fn split_from_is_omitted_when_empty() {
+        use super::CubeSettings;
+        use crate::chain::ChainId;
+
+        let mut cube = CubeSettings::new_with_raw_id(
+            "target-cube".to_string(),
+            "Target".to_string(),
+            ChainId::BitcoinBlake2b,
+        );
+        let json = serde_json::to_string(&cube).expect("CubeSettings must serialize");
+        assert!(
+            !json.contains("split_from"),
+            "an empty split_from must not be written: {}",
+            json
+        );
+        cube.split_from.push(split_from_record(3));
+        let json = serde_json::to_string(&cube).expect("CubeSettings must serialize");
+        assert!(json.contains("\"split_from\""), "{}", json);
+        assert!(json.contains("\"completed_height\":900003"), "{}", json);
     }
 
     /// D4: the backfill writes once and is a no-op on a Cube that already
