@@ -3790,6 +3790,9 @@ impl App {
                 account,
             })
         });
+        if self.split_panel.is_none() {
+            return Task::none();
+        }
         // Step 2 goes through this Cube's Vault daemon, when one is loaded on
         // an admitted route. A daemon or backend switch revokes the panel
         // first (`revoke_claim`), and a new daemon gives a new port.

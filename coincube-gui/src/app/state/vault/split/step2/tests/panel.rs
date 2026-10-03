@@ -705,6 +705,62 @@ async fn panel_restart_reconciles_through_the_production_ports_without_a_daemon(
     assert!(reopen().is_ok());
 }
 
+/// #637 R1: the App installs the session's reconcile-only port on every
+/// Connect refresh. An equivalent one (same session context) keeps a bound
+/// reconciler; another session's, or none, revokes it.
+#[tokio::test(flavor = "multi_thread")]
+async fn panel_keeps_its_reconciler_across_an_equivalent_recon_port() {
+    struct OtherAccount;
+    impl ReconPort for OtherAccount {
+        fn context(&self) -> Context {
+            let mut context = context();
+            context.account = "other-account".into();
+            context
+        }
+        fn open_reconciler(
+            &self,
+            _: PathBuf,
+            _: String,
+            _: sha256::Hash,
+        ) -> Result<Box<dyn Step2Recon>, Step2Refusal> {
+            unreachable!("never opened in this test")
+        }
+    }
+    let journal = Journal::new(true);
+    let shared: Shared = Arc::default();
+    let mut panel = SplitPanel::resume(
+        TARGET.into(),
+        journal.temp.0.parent().unwrap().to_path_buf(),
+        journal.digest(),
+        journal.temp.0.clone(),
+    );
+    panel.set_connect(Some(Arc::new(PanelConnect(shared.clone()))));
+    panel.set_recon_port(Some(Arc::new(PanelReconPort(shared.clone()))));
+    let task = panel.begin();
+    drive(&mut panel, task).await;
+    assert_eq!(panel.stage, Stage::Step2(Step2Stage::Reconcile));
+    for _ in 0..3 {
+        panel.set_recon_port(Some(Arc::new(PanelReconPort(shared.clone()))));
+    }
+    assert!(panel.recon.is_some());
+    assert_eq!(shared.lock().unwrap().revoked, 0);
+    assert_eq!(panel.stage, Stage::Step2(Step2Stage::Reconcile));
+
+    panel.set_recon_port(Some(Arc::new(OtherAccount)));
+    assert_eq!(shared.lock().unwrap().revoked, 1);
+    assert!(panel.recon.is_none());
+    assert_eq!(panel.stage, Stage::NeedsSession);
+
+    panel.set_recon_port(Some(Arc::new(PanelReconPort(shared.clone()))));
+    let task = panel.begin();
+    drive(&mut panel, task).await;
+    assert_eq!(panel.stage, Stage::Step2(Step2Stage::Reconcile));
+    panel.set_recon_port(None);
+    assert_eq!(shared.lock().unwrap().revoked, 2);
+    assert!(panel.recon.is_none());
+    assert_eq!(panel.stage, Stage::NeedsSession);
+}
+
 /// #637 F1: the Vault's daemon restarting or switching (a new daemon
 /// instance behind an otherwise equal session) revokes every step-2 handle.
 #[tokio::test(flavor = "multi_thread")]
