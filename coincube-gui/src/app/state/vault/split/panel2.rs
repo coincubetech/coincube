@@ -476,7 +476,16 @@ impl SplitPanel {
 
     /// Load the signed files at `paths`, combine them with those loaded and
     /// check them against the built step 2 without giving up the journal.
+    /// At most [`split_psbt_file::MAX_COMBINED_FILES`] files in all, as for
+    /// step 1: more is refused before any file is read, anything is cloned
+    /// or the preparation is taken, keeping the loaded files
+    /// (#637 r4174164844).
     pub fn step2_import_from(&mut self, paths: Vec<PathBuf>) -> Task<Message> {
+        if self.step2_files.len().saturating_add(paths.len()) > split_psbt_file::MAX_COMBINED_FILES
+        {
+            self.notice = Some(split_psbt_file::FileError::TooManyFiles.to_string());
+            return Task::none();
+        }
         let (Some(base), Some(prep)) = (self.step2_psbt.clone(), self.prep.take()) else {
             return Task::none();
         };

@@ -867,6 +867,83 @@ async fn panel_forgets_an_earlier_export_on_a_new_build() {
     assert_eq!(panel.step2_exported(), None);
 }
 
+/// #637 r4174164844: a step-2 import holds at most `MAX_COMBINED_FILES`
+/// files in all, as step 1's does. More, in one selection or added to the
+/// files already loaded, is refused before any file is read, anything is
+/// cloned or the preparation is taken: the loaded files, the preparation and
+/// the Sign stage stay usable, and exactly the cap still imports.
+#[tokio::test(flavor = "multi_thread")]
+async fn panel_caps_step2_imports_before_reading_any_file() {
+    use split_psbt_file::MAX_COMBINED_FILES;
+    /// Refused by the cap: nothing ran and nothing changed but the notice.
+    async fn refused(panel: &mut SplitPanel, paths: Vec<PathBuf>) {
+        let (seq, loaded) = (panel.seq, panel.step2_files());
+        let task = panel.step2_import_from(paths);
+        assert!(events(task).await.is_empty(), "a file was read");
+        assert_eq!(panel.seq, seq);
+        assert_eq!(
+            panel.notice(),
+            Some(
+                split_psbt_file::FileError::TooManyFiles
+                    .to_string()
+                    .as_str()
+            )
+        );
+        assert_eq!(panel.step2_files(), loaded);
+        assert!(panel.prep.is_some());
+        assert_eq!(panel.stage, Stage::Step2(Step2Stage::Sign));
+    }
+    let journal = Journal::new(false);
+    let (mut panel, _shared) = tracked_panel(&journal);
+    for message in [
+        SplitMessage::EnterStep2,
+        SplitMessage::Step2Reserve,
+        SplitMessage::Step2Check,
+        SplitMessage::Step2Build,
+    ] {
+        let task = panel.update(message);
+        drive(&mut panel, task).await;
+    }
+    assert_eq!(panel.stage, Stage::Step2(Step2Stage::Sign));
+    let dir = journal.temp.0.parent().unwrap().to_path_buf();
+    // Files that don't exist: reading any would refuse with a read error.
+    let missing = |n: usize| {
+        (0..n)
+            .map(|i| dir.join(format!("missing-{}.txt", i)))
+            .collect::<Vec<_>>()
+    };
+
+    // One selection over the cap.
+    refused(&mut panel, missing(MAX_COMBINED_FILES + 1)).await;
+    assert_eq!(panel.step2_files(), 0);
+
+    // One less than the cap loaded (the unsigned file chosen repeatedly),
+    // then two more: neither is over the cap alone, together they are.
+    let unsigned = dir.join("unsigned.txt");
+    std::fs::write(
+        &unsigned,
+        split_psbt_file::encode(
+            panel.step2_psbt().unwrap(),
+            split_psbt_file::Encoding::Base64,
+        ),
+    )
+    .unwrap();
+    let task = panel.step2_import_from(vec![unsigned.clone(); MAX_COMBINED_FILES - 1]);
+    drive(&mut panel, task).await;
+    assert_eq!(panel.step2_files(), MAX_COMBINED_FILES - 1);
+    refused(&mut panel, missing(2)).await;
+
+    // Exactly the cap imports, still under the same preparation.
+    let task = panel.step2_import_from(vec![unsigned]);
+    drive(&mut panel, task).await;
+    assert_eq!(panel.step2_files(), MAX_COMBINED_FILES);
+    assert!(panel.notice().unwrap().contains("More are needed"));
+    assert!(panel.prep.is_some());
+    assert_eq!(panel.stage, Stage::Step2(Step2Stage::Sign));
+    // Full: one more is refused.
+    refused(&mut panel, missing(1)).await;
+}
+
 /// Every message other than reconcile, none of which may act after a
 /// step-2 submission: no step-1 signing, rebuild, reset or resend.
 const AFTER_SUBMISSION: [SplitMessage; 12] = [

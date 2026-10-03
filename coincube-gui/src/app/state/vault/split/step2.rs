@@ -78,8 +78,10 @@ pub const NODE_PRIVACY: &str = "Step 2 will be sent through this Vault's own Bit
 pub const RECONCILE_UNAVAILABLE: &str = "Step 2 of this split was already sent or may have been. Its status can't be checked with Connect right now, so nothing was rebuilt or sent. Try again.";
 /// A reconcile after the step-2 submission found step 1 reorged out of its
 /// Bitcoin block (#637 r4172242637). No recovery is offered: none exists
-/// yet for this case.
-pub const STEP1_REORGED_AFTER_STEP2: &str = "Bitcoin reorganized after step 2 was sent: step 1 is no longer in the Bitcoin block it was confirmed in, so Bitcoin replay protection for step 2 is no longer established. This version has no recovery for this, and nothing was rebuilt or sent again. Check status again later.";
+/// yet for this case. A recorded submission may not have reached the
+/// transport (`Outcome::Uncertain`), so the copy doesn't say step 2 was
+/// sent (#637 Copilot review 5401909718).
+pub const STEP1_REORGED_AFTER_STEP2: &str = "Bitcoin reorganized after a submission of step 2 was recorded; it was sent or may have been sent. Step 1 is no longer in the Bitcoin block it was confirmed in, so Bitcoin replay protection for step 2 is no longer established. This version has no recovery for this. Nothing was rebuilt, and step 2 is not sent automatically. Check status again later.";
 
 /// What the step-1 evidence of a reconcile after the step-2 submission
 /// means (#637 r4172242637): nothing while step 1 is still eligible (six

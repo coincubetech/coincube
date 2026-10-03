@@ -865,6 +865,22 @@ fn step2_copy_names_the_cause_and_the_node_route_privacy() {
     ));
     assert!(switched.retry && switched.reason.contains("nothing was sent"));
     assert!(RESERVING.contains("fresh receive address"));
+    // A recorded submission may never have reached the transport
+    // (`Outcome::Uncertain`): the reorg warning doesn't claim step 2 was
+    // sent, and keeps the replay-protection and no-recovery guidance
+    // (#637 Copilot review 5401909718).
+    let reorged = reconcile_warning(Status::Observation(Assessment::Reorged)).unwrap();
+    assert_eq!(reorged, STEP1_REORGED_AFTER_STEP2);
+    for wanted in [
+        "a submission of step 2 was recorded; it was sent or may have been sent",
+        "replay protection for step 2 is no longer established",
+        "no recovery",
+        "not sent automatically",
+    ] {
+        assert!(reorged.contains(wanted), "{}", wanted);
+    }
+    assert!(!reorged.contains("step 2 was sent:"), "{}", reorged);
+    assert!(!reorged.contains("sent again"), "{}", reorged);
 
     assert_eq!(route_copy(SubmissionRoute::Connect), ("Connect", None));
     let node = SubmissionRoute::BitcoinNode {
