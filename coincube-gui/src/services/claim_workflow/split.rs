@@ -20,11 +20,21 @@
 //!   input's scriptSig changes it.
 //! - The foreign public descriptors are kept until completion (owner decision
 //!   P2), in the same owner-only (0600) journal, and then deleted.
+//! - After an uncertain step-2 submission (P3-3), each explicitly reviewed
+//!   resend of exactly the recorded signed step 2 is recorded before it is
+//!   attempted, and a step 2 ever seen on BTCB2 or accepted by its route is
+//!   recorded as observed: it left, so no resend is offered again. Both
+//!   fields are absent until used, so a journal without them serializes
+//!   exactly as before. A binary that predates them refuses one that has
+//!   them (`deny_unknown_fields`), and an ordinary submission or reconcile
+//!   that sees step 2 leave writes the observation, so a downgrade after
+//!   that point refuses the journal.
 //!
 //! Nothing here signs, broadcasts, or grants step-2 authority. A reopened
 //! Split intent is Unchecked like a Claim one, and a recorded uncertain
-//! submission can only be reconciled.
+//! submission can only be reconciled, or resent after a fresh review.
 use super::*;
+use crate::services::claim_observation::TransactionObservation;
 use coincube_core::{
     foreign_split::{SplitSource, SplitStep1, SplitStep2, VerifiedSplitStep1, VerifiedSplitStep2},
     miniscript::{bitcoin::ScriptBuf, Descriptor, DescriptorPublicKey},
@@ -38,6 +48,9 @@ pub(super) const VERSION: u32 = 8;
 /// Far above any supported descriptor (a 3-key `wsh(sortedmulti)` is under
 /// 400 bytes); a bound on untrusted journal text, not a policy.
 const MAX_DESCRIPTOR_BYTES: usize = 4096;
+/// Explicit step-2 resends a journal may record (P3-3). With the submission
+/// intent, step 2 has at most step 1's attempt bound.
+pub const MAX_SPLIT_STEP2_RESUBMISSIONS: usize = recovery::MAX_BITCOIN_ATTEMPTS - 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -61,6 +74,24 @@ pub(super) struct SplitRecord {
     /// txid is the recorded fork submission's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     step2_transaction: Option<Transaction>,
+    /// Explicitly reviewed resends of that signed step 2 (P3-3), each
+    /// recorded before it was attempted. The submission intent is the first
+    /// attempt and is not listed here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    step2_resubmissions: Vec<Step2Resubmission>,
+    /// A fresh read saw the recorded step 2 on BTCB2, in a mempool or a
+    /// block, or its route accepted exactly those bytes (P3-3). It left: no
+    /// resend is offered again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    step2_observed: bool,
+}
+
+/// One explicitly reviewed resend of the recorded signed step 2 (P3-3).
+/// Every resend is of exactly the recorded bytes, so this names their wtxid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Step2Resubmission {
+    wtxid: Wtxid,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -244,9 +275,15 @@ pub(super) fn validate(intent: &Intent) -> Result<(), Error> {
     }
     // The signed step 2 and its submission are recorded together; the
     // submission names the signed bytes' own txid and wtxid, and those bytes
-    // are the recorded sweep with a signature on every input.
+    // are the recorded sweep with a signature on every input. Resends and an
+    // observation exist only for a recorded step 2, and every resend is of
+    // exactly its bytes.
     match (&intent.fork_submission, &record.step2_transaction) {
-        (None, None) => {}
+        (None, None) => {
+            if !record.step2_resubmissions.is_empty() || record.step2_observed {
+                return Err(Error::InvalidPlan);
+            }
+        }
         (Some(submission), Some(signed)) => {
             let sweep = intent.fork_sweep.as_ref().ok_or(Error::InvalidPlan)?;
             if unsigned(signed) != *sweep
@@ -256,6 +293,11 @@ pub(super) fn validate(intent: &Intent) -> Result<(), Error> {
                     .any(|input| input.script_sig.is_empty() && input.witness.is_empty())
                 || submission.txid != signed.compute_txid()
                 || submission.wtxid != signed.compute_wtxid()
+                || record.step2_resubmissions.len() > MAX_SPLIT_STEP2_RESUBMISSIONS
+                || record
+                    .step2_resubmissions
+                    .iter()
+                    .any(|attempt| attempt.wtxid != submission.wtxid)
             {
                 return Err(Error::InvalidPlan);
             }
@@ -328,6 +370,8 @@ impl Controller {
                 target_index: None,
                 target_script: None,
                 step2_transaction: None,
+                step2_resubmissions: Vec::new(),
+                step2_observed: false,
             }),
         };
         validate(&intent)?;
@@ -691,6 +735,118 @@ impl Controller {
             .split
             .as_ref()
             .and_then(|record| record.step2_transaction.as_ref())
+    }
+
+    /// The explicit step-2 resends recorded so far (P3-3); the submission
+    /// intent is not counted. At [`MAX_SPLIT_STEP2_RESUBMISSIONS`] no more
+    /// are recorded.
+    pub fn split_step2_resubmissions(&self) -> usize {
+        self.intent
+            .split
+            .as_ref()
+            .map_or(0, |record| record.step2_resubmissions.len())
+    }
+
+    /// Whether the recorded step 2 was ever seen on BTCB2 or accepted by its
+    /// route (P3-3).
+    pub fn split_step2_observed(&self) -> bool {
+        self.intent
+            .split
+            .as_ref()
+            .is_some_and(|record| record.step2_observed)
+    }
+
+    /// Record that a fresh read keyed by the recorded signed step 2's own
+    /// txid saw it on BTCB2 (`seen`, mempool or block), or that its route
+    /// accepted exactly those bytes (`Unconfirmed`). Monotonic, and an
+    /// absence is a no-op. It only takes the resend away and grants nothing,
+    /// so it leaves the current check alone: the caller still applies the
+    /// collection the read came from.
+    pub fn record_split_step2_observed(
+        &mut self,
+        current: &Context,
+        seen: TransactionObservation,
+    ) -> Result<(), Error> {
+        self.ensure_context(current)?;
+        let record = self.split_record()?;
+        let txid = match seen {
+            TransactionObservation::Absent => return Ok(()),
+            TransactionObservation::Unconfirmed { txid }
+            | TransactionObservation::Confirmed { txid, .. } => txid,
+        };
+        if self.intent.fork_submission.map(|s| s.txid) != Some(txid) {
+            return Err(Error::InvalidPlan);
+        }
+        if record.step2_observed {
+            return Ok(());
+        }
+        let mut next = self.intent.clone();
+        if let Some(record) = next.split.as_mut() {
+            record.step2_observed = true;
+        }
+        validate(&next)?;
+        self.journal.store(&next)?;
+        self.intent = next;
+        Ok(())
+    }
+
+    /// P3-3: durably record one explicitly reviewed resend of exactly the
+    /// recorded signed step 2 before it is attempted. Needs another fresh
+    /// assessment (the coordinator's resend review, applied with a ticket)
+    /// and `step2`, that same collection's read of the recorded step 2 on
+    /// BTCB2, which must be absent. Refused for any other bytes, once the
+    /// step 2 was ever seen there, and at the attempt limit. Like the
+    /// submission intent, a recorded resend never permits another; each one
+    /// needs its own review. Performs no network I/O.
+    pub fn record_split_step2_resubmission(
+        &mut self,
+        current: &Context,
+        signed: &VerifiedSplitStep2,
+        step2: TransactionObservation,
+        policy: Policy,
+        now: i64,
+    ) -> Result<(), Error> {
+        self.ensure_context(current)?;
+        if self.intent.split.is_none() {
+            self.clear_check();
+            return Err(Error::WrongIdentity);
+        }
+        let observations = self.fresh.take().ok_or(Error::Unchecked)?;
+        self.status = Status::Unchecked;
+        if !self.construction_verified
+            || self.intent.phase != Phase::Tracking
+            || self.intent.fork_submission.is_none()
+            || step2 != TransactionObservation::Absent
+        {
+            return Err(Error::Unchecked);
+        }
+        let record = self.split_record()?;
+        let tx = signed.transaction();
+        if signed.chain() != self.intent.plan.fork_chain
+            || record.step2_transaction.as_ref() != Some(tx)
+        {
+            return Err(Error::InvalidPlan);
+        }
+        if record.step2_observed
+            || record.step2_resubmissions.len() >= MAX_SPLIT_STEP2_RESUBMISSIONS
+        {
+            return Err(Error::Conflict);
+        }
+        if self.assess_fresh(&observations, policy, now)?
+            != Assessment::ObservationsEligibleForPreflight
+        {
+            return Err(Error::Unchecked);
+        }
+        let mut next = self.intent.clone();
+        if let Some(record) = next.split.as_mut() {
+            record.step2_resubmissions.push(Step2Resubmission {
+                wtxid: tx.compute_wtxid(),
+            });
+        }
+        validate(&next)?;
+        self.journal.store(&next)?;
+        self.intent = next;
+        Ok(())
     }
 
     /// Abandon a Split that was never submitted: delete the whole intent,

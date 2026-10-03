@@ -1197,7 +1197,7 @@ fn v8_split_journal_is_refused_by_the_v7_reader() {
 /// glob still has to name the item somewhere.
 #[test]
 fn split_b0_journal_api_has_no_gui_callers() {
-    const ITEMS: [&str; 18] = [
+    const ITEMS: [&str; 22] = [
         "create_split",
         "revalidate_split_construction",
         "bind_recovered_split_transaction",
@@ -1218,6 +1218,11 @@ fn split_b0_journal_api_has_no_gui_callers() {
         "prepare_split_step2",
         "record_split_step2_broadcast_intent",
         "recorded_split_step2",
+        // P3-3: step-2 resends and the observation that ends them.
+        "record_split_step2_resubmission",
+        "record_split_step2_observed",
+        "split_step2_resubmissions",
+        "split_step2_observed",
     ];
     const OWN: [&str; 4] = [
         "src/services/claim_workflow/split.rs",
@@ -1297,6 +1302,10 @@ fn split_b0_journal_api_has_no_gui_callers() {
                             "prepare_split_step2",
                             "record_split_step2_broadcast_intent",
                             "recorded_split_step2",
+                            "record_split_step2_resubmission",
+                            "record_split_step2_observed",
+                            "split_step2_resubmissions",
+                            "split_step2_observed",
                         ]
                         .contains(&ident)
                             || (gate_tests && ident == "create_split"));
@@ -1583,4 +1592,215 @@ fn split_step2_target_and_submission_records() {
     ] {
         assert!(check(&*change).is_some(), "{}", name);
     }
+}
+
+/// A Split journal through a recorded step-2 submission of `wallet`'s
+/// claimed coins into `target_script(5)`.
+fn submitted() -> (
+    Temp,
+    Controller,
+    Wallet,
+    SplitStep1,
+    VerifiedSplitStep2,
+    Txid,
+) {
+    let (wallet, step1, signed) = setup(Shape::ShWpkh);
+    let temp = Temp::new();
+    let mut c = create(&temp, &step1, &signed);
+    record(&mut c, &signed);
+    let tracked = signed.transaction().compute_txid();
+    refresh(
+        &mut c,
+        observation(tracked, Bitcoin::Confirmed { depth: 6 }),
+    );
+    c.record_split_target(&context(), 5, target_script(5))
+        .unwrap();
+    let construction = step2(&wallet, &step1, &target_script(5), 2);
+    refresh(
+        &mut c,
+        observation(tracked, Bitcoin::Confirmed { depth: 6 }),
+    );
+    c.prepare_split_step2(&context(), &construction, policy(), 10_000)
+        .unwrap();
+    let verified = sign_step2(&wallet, &construction);
+    refresh(
+        &mut c,
+        observation(tracked, Bitcoin::Confirmed { depth: 6 }),
+    );
+    c.record_split_step2_broadcast_intent(&context(), &verified, policy(), 10_000)
+        .unwrap();
+    (temp, c, wallet, step1, verified, tracked)
+}
+
+/// P3-3: a resend of the recorded signed step 2 is recorded only after a
+/// fresh assessment whose read of it on BTCB2 was absent, for exactly its
+/// bytes, never once it was seen there, and within the attempt bound. A
+/// sighting is recorded once, from a read of its own txid. Neither field
+/// exists until used, so an earlier journal serializes as before, and each
+/// needs a recorded step 2.
+#[test]
+fn split_step2_resends_and_the_observation_that_ends_them() {
+    let (temp, mut c, wallet, step1, verified, tracked) = submitted();
+    let txid = verified.transaction().compute_txid();
+    let text = journal_text(&temp);
+    assert!(!text.contains("step2_resubmissions") && !text.contains("step2_observed"));
+    assert_eq!(c.split_step2_resubmissions(), 0);
+    assert!(!c.split_step2_observed());
+    let fresh = |c: &mut Controller| {
+        refresh(c, observation(tracked, Bitcoin::Confirmed { depth: 6 }));
+    };
+    let resend = |c: &mut Controller, signed: &VerifiedSplitStep2, step2| {
+        c.record_split_step2_resubmission(&context(), signed, step2, policy(), 10_000)
+    };
+    // A fresh assessment, an absent step 2 and the recorded bytes.
+    assert!(matches!(
+        resend(&mut c, &verified, TransactionObservation::Absent),
+        Err(Error::Unchecked)
+    ));
+    fresh(&mut c);
+    assert!(matches!(
+        resend(
+            &mut c,
+            &verified,
+            TransactionObservation::Unconfirmed { txid }
+        ),
+        Err(Error::Unchecked)
+    ));
+    let other = sign_step2(&wallet, &step2(&wallet, &step1, &target_script(5), 3));
+    fresh(&mut c);
+    assert!(matches!(
+        resend(&mut c, &other, TransactionObservation::Absent),
+        Err(Error::InvalidPlan)
+    ));
+    // Not eligible (step 1 five deep).
+    refresh(
+        &mut c,
+        observation(tracked, Bitcoin::Confirmed { depth: 5 }),
+    );
+    assert!(matches!(
+        resend(&mut c, &verified, TransactionObservation::Absent),
+        Err(Error::Unchecked)
+    ));
+    assert_eq!(journal_text(&temp), text, "refusals write nothing");
+    fresh(&mut c);
+    resend(&mut c, &verified, TransactionObservation::Absent).unwrap();
+    assert_eq!(c.split_step2_resubmissions(), 1);
+    // It consumed the assessment.
+    assert!(matches!(
+        resend(&mut c, &verified, TransactionObservation::Absent),
+        Err(Error::Unchecked)
+    ));
+    fresh(&mut c);
+    resend(&mut c, &verified, TransactionObservation::Absent).unwrap();
+    let journal: serde_json::Value = serde_json::from_str(&journal_text(&temp)).unwrap();
+    let wtxid = verified.transaction().compute_wtxid().to_string();
+    assert_eq!(
+        journal["split"]["step2_resubmissions"],
+        serde_json::json!([{ "wtxid": wtxid }, { "wtxid": wtxid }])
+    );
+    // Nothing recorded earlier changes.
+    assert_eq!(c.recorded_split_step2(), Some(verified.transaction()));
+    assert_eq!(c.recorded_fork_submission().unwrap().txid(), txid);
+
+    // A sighting: only of the recorded txid; an absence changes nothing.
+    c.record_split_step2_observed(&context(), TransactionObservation::Absent)
+        .unwrap();
+    assert!(!c.split_step2_observed());
+    let elsewhere = Txid::from_byte_array([9; 32]);
+    assert!(matches!(
+        c.record_split_step2_observed(
+            &context(),
+            TransactionObservation::Unconfirmed { txid: elsewhere }
+        ),
+        Err(Error::InvalidPlan)
+    ));
+    c.record_split_step2_observed(&context(), TransactionObservation::Unconfirmed { txid })
+        .unwrap();
+    c.record_split_step2_observed(&context(), TransactionObservation::Unconfirmed { txid })
+        .unwrap();
+    assert!(c.split_step2_observed());
+    fresh(&mut c);
+    assert!(matches!(
+        resend(&mut c, &verified, TransactionObservation::Absent),
+        Err(Error::Conflict)
+    ));
+    let base = c.intent.clone();
+    drop(c);
+    let c = reopen(&temp, &step1).unwrap();
+    assert_eq!(c.split_step2_resubmissions(), 2);
+    assert!(c.split_step2_observed());
+    drop(c);
+
+    // At the bound, refused.
+    let (_temp, mut c, _, _, verified, _) = submitted();
+    let attempt = Step2Resubmission {
+        wtxid: verified.transaction().compute_wtxid(),
+    };
+    c.intent.split.as_mut().unwrap().step2_resubmissions =
+        vec![attempt; MAX_SPLIT_STEP2_RESUBMISSIONS];
+    full_validate(&c.intent).unwrap();
+    fresh(&mut c);
+    assert!(matches!(
+        resend(&mut c, &verified, TransactionObservation::Absent),
+        Err(Error::Conflict)
+    ));
+
+    // What a tampered journal could claim.
+    full_validate(&base).unwrap();
+    let check = |change: &dyn Fn(&mut Intent)| {
+        let mut next = base.clone();
+        change(&mut next);
+        full_validate(&next).err()
+    };
+    for (name, change) in [
+        (
+            "a resend of other bytes",
+            Box::new(|i: &mut Intent| {
+                i.split.as_mut().unwrap().step2_resubmissions[0].wtxid =
+                    coincube_core::miniscript::bitcoin::Wtxid::from_byte_array([7; 32])
+            }) as Box<dyn Fn(&mut Intent)>,
+        ),
+        (
+            "past the bound",
+            Box::new(move |i: &mut Intent| {
+                i.split.as_mut().unwrap().step2_resubmissions =
+                    vec![attempt; MAX_SPLIT_STEP2_RESUBMISSIONS + 1]
+            }),
+        ),
+        (
+            "resends without a recorded step 2",
+            Box::new(|i: &mut Intent| {
+                i.fork_submission = None;
+                let record = i.split.as_mut().unwrap();
+                record.step2_transaction = None;
+                record.step2_observed = false;
+            }),
+        ),
+        (
+            "an observation without a recorded step 2",
+            Box::new(|i: &mut Intent| {
+                i.fork_submission = None;
+                let record = i.split.as_mut().unwrap();
+                record.step2_transaction = None;
+                record.step2_resubmissions.clear();
+            }),
+        ),
+    ] {
+        assert!(check(&*change).is_some(), "{}", name);
+    }
+    // Without a recorded step 2, a sighting has nothing to name.
+    let (_wallet, step1, signed) = setup(Shape::ShWpkh);
+    let temp = Temp::new();
+    let mut c = create(&temp, &step1, &signed);
+    record(&mut c, &signed);
+    assert!(matches!(
+        c.record_split_step2_observed(
+            &context(),
+            TransactionObservation::Unconfirmed {
+                txid: signed.transaction().compute_txid()
+            }
+        ),
+        Err(Error::InvalidPlan)
+    ));
+    assert_eq!(c.split_step2_resubmissions(), 0);
 }

@@ -218,6 +218,8 @@ struct View {
     clock_offset: i64,
     /// Transactions seen on BTCB2 (step 2), by txid.
     on_btcb2: Vec<(Txid, TransactionObservation)>,
+    /// The BTCB2 anchor's tip height.
+    fork_tip: u64,
 }
 impl View {
     /// Step 1 confirmed in `block` (hash 6) at height 100 with `depth`
@@ -242,6 +244,7 @@ impl View {
             address_stale: None,
             clock_offset: 0,
             on_btcb2: Vec::new(),
+            fork_tip: FORK_TIP,
         };
         view.set_depth(depth);
         view
@@ -281,17 +284,20 @@ impl ObservationSource for Chains {
         now() + self.view.lock().unwrap().clock_offset
     }
     async fn anchor(&self, chain: ChainId) -> Result<NetworkAnchorStatus, FailureKind> {
-        let expiry = self.view.lock().unwrap().rdts_expiry;
+        let (expiry, tip) = {
+            let view = self.view.lock().unwrap();
+            (view.rdts_expiry, view.fork_tip)
+        };
         Ok(NetworkAnchorStatus {
             network: chain,
             state: AnchorState::Available,
             anchor: Some(NetworkAnchor {
                 tip_hash: hash(2),
-                tip_height: FORK_TIP,
+                tip_height: tip,
                 tip_median_time_past: MTP,
                 observed_at: now(),
                 observation: NetworkObservation {
-                    tip_height: FORK_TIP,
+                    tip_height: tip,
                     fork: Some(ForkActivation {
                         height: 90,
                         active: true,
@@ -1050,6 +1056,12 @@ fn split_step2_gate_has_no_gui_caller() {
             "Step2Daemon",
             "SplitStep2Reconciler",
             "verify_split_step2_transaction",
+            // P3-3: the reviewed resend and its restart.
+            "Step2ResubmissionReview",
+            "ResendError",
+            "prepare_step2_resubmission",
+            "confirm_step2_resubmission",
+            "resume_uncertain",
         ] {
             // The Daemon trait declares the step-2 transport and the
             // embedded daemon forwards it; neither is a caller.

@@ -18,7 +18,7 @@ use coincube_core::{
 use journal::Journal;
 pub use recovery::BitcoinSubmissionAttempt;
 pub use reorg::Reconfirmation;
-pub use split::{split_identity, RecordedSplit};
+pub use split::{split_identity, RecordedSplit, MAX_SPLIT_STEP2_RESUBMISSIONS};
 
 /// Upper bound on how long [`Controller::reopen_settling`] waits out `Busy`.
 pub const REOPEN_BUSY_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
