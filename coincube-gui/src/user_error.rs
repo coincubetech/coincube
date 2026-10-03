@@ -108,6 +108,8 @@ pub const CC_XFER_BROADCAST: &str = "CC-XFER-BROADCAST";
 // ── Wallet / signing / misc ─────────────────────────────────────────────────
 pub const CC_WALLET: &str = "CC-WALLET";
 pub const CC_HW: &str = "CC-HW";
+pub const CC_HW_LAN: &str = "CC-HW-LAN";
+pub const CC_HW_LAN_REPAIR: &str = "CC-HW-LAN-REPAIR";
 pub const CC_DESC: &str = "CC-DESC";
 pub const CC_SPEND: &str = "CC-SPEND";
 pub const CC_BACKUP: &str = "CC-BACKUP";
@@ -228,6 +230,52 @@ pub fn report(error: &Error) -> String {
     let user: UserError = error.into();
     log::error!("[{}] {}", user.reference, error);
     user.toast()
+}
+
+/// [`report`] for a signing request that failed over the local network to a
+/// Keychain phone.
+///
+/// The phone travels the hardware-wallet path, so its failures arrive as
+/// `Error::HardwareWallet` — whose copy ("the Bitcoin app is open…") is for a
+/// USB device and sends a phone user looking for a cable. `connect_available`
+/// is whether the picker can send the same request through Connect instead,
+/// which is the one action that works whatever went wrong on the LAN.
+pub fn report_lan_keychain(error: &Error, connect_available: bool) -> String {
+    let user = lan_keychain_error(error, connect_available);
+    log::error!("[{}] {}", user.reference, error);
+    user.toast()
+}
+
+fn lan_keychain_error(error: &Error, connect_available: bool) -> UserError {
+    let needs_repair = matches!(
+        error,
+        Error::HardwareWallet(e) if crate::phone_signer::needs_repair(e)
+    );
+    if needs_repair {
+        UserError::new(
+            "This Keychain needs to be paired again",
+            if connect_available {
+                "Send the request through COINCUBE | Connect instead, or pair the phone again \
+                 in Settings > Pair with Keychain."
+            } else {
+                "Pair the phone again in Settings > Pair with Keychain."
+            },
+            CC_HW_LAN_REPAIR,
+            false,
+        )
+    } else {
+        UserError::new(
+            "Couldn't sign with your Keychain over Wi-Fi",
+            if connect_available {
+                "Send the request through COINCUBE | Connect instead, or check that the phone \
+                 is on the same Wi-Fi with Keychain open, then try again."
+            } else {
+                "Check that the phone is on the same Wi-Fi with Keychain open, then try again."
+            },
+            CC_HW_LAN,
+            true,
+        )
+    }
 }
 
 /// Maps a Vault/daemon [`Error`] onto copy a person can act on.
@@ -778,6 +826,52 @@ mod tests {
 
         let settled = UserError::new("t", "g", CC_API_NOTFOUND, false);
         assert_eq!(settled.retry_action(42), None);
+    }
+
+    /// A phone on the LAN never gets USB-device advice, a stale pairing is
+    /// told to re-pair (and not to retry the same road), and Connect is only
+    /// suggested when the picker can actually use it.
+    #[test]
+    fn lan_keychain_errors_speak_about_the_phone_not_a_usb_device() {
+        let stale = Error::HardwareWallet(async_hwi::Error::Device(
+            "pair_again: This LAN pairing has no current exact signer identity.".into(),
+        ));
+        let offline = Error::HardwareWallet(async_hwi::Error::DeviceDisconnected);
+
+        let u = lan_keychain_error(&stale, true);
+        assert_eq!(u.reference, CC_HW_LAN_REPAIR);
+        assert!(!u.retryable);
+        assert!(u
+            .guidance
+            .starts_with("Send the request through COINCUBE | Connect"));
+        assert!(u.guidance.contains("Pair with Keychain"), "{}", u.guidance);
+
+        let u = lan_keychain_error(&stale, false);
+        assert!(
+            u.guidance.starts_with("Pair the phone again"),
+            "{}",
+            u.guidance
+        );
+        assert!(!u.guidance.contains("Connect"), "{}", u.guidance);
+
+        let u = lan_keychain_error(&offline, true);
+        assert_eq!(u.reference, CC_HW_LAN);
+        assert!(u.retryable);
+        assert!(u.guidance.contains("same Wi-Fi"), "{}", u.guidance);
+
+        let u = lan_keychain_error(&offline, false);
+        assert!(
+            u.guidance.starts_with("Check that the phone"),
+            "{}",
+            u.guidance
+        );
+
+        for u in [
+            lan_keychain_error(&stale, true),
+            lan_keychain_error(&offline, true),
+        ] {
+            assert!(!u.guidance.contains("Bitcoin app"), "{}", u.guidance);
+        }
     }
 
     /// Every arm must name a next step. The dead ends this replaced —

@@ -101,6 +101,13 @@ impl HardwareWallet {
         }
     }
 
+    /// True for a Keychain phone paired over the local network. It joins this
+    /// list so it signs through the same path as a USB device, but it is not a
+    /// hardware wallet and must not be presented as one.
+    pub fn is_lan_phone(&self) -> bool {
+        self.id().starts_with(LAN_PHONE_ID_PREFIX)
+    }
+
     pub fn kind(&self) -> &DeviceKind {
         match self {
             Self::Locked { kind, .. } => kind,
@@ -836,7 +843,7 @@ fn refresh(mut state: State) -> impl Stream<Item = HardwareWalletMessage> {
                             continue;
                         }
                         let fp8 = crate::phone_signer::identity::pin_hex8(&paired.cert_pin);
-                        let id = format!("phone-{}", fp8);
+                        let id = format!("{}{}", LAN_PHONE_ID_PREFIX, fp8);
                         // Resolve a target address: prefer the
                         // mDNS-discovered one; fall back to the
                         // user-entered `fallback_addr` when mDNS is
@@ -1259,6 +1266,11 @@ pub fn is_compatible_with_tapminiscript(
                 }
         })
 }
+
+/// Device-list id prefix of a LAN-paired Keychain phone (`phone-{fp8}`).
+/// USB devices use their vendor name (`ledger-…`, `jade-…`), so the prefix is
+/// what [`HardwareWallet::is_lan_phone`] keys off.
+pub(crate) const LAN_PHONE_ID_PREFIX: &str = "phone-";
 
 /// Initial delay between consecutive failed dials of the same phone.
 /// The window doubles on each subsequent failure, up to

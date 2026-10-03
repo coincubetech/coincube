@@ -1753,6 +1753,13 @@ pub struct SignModal {
     /// `ToggleSpendPath`: `None` = primary, `Some(seq)` = a recovery path.
     /// Inactive cards default to collapsed.
     expanded_paths: HashSet<Option<u16>>,
+    /// Keys whose last signing attempt to a Keychain phone over the local
+    /// network failed, mapped to whether the phone asked to be paired again.
+    /// Their rows offer Connect instead; cleared by the next local attempt.
+    lan_failures: HashMap<Fingerprint, bool>,
+    /// Keys with a signing request out to a Keychain phone over the local
+    /// network, so its result is handled as a Wi-Fi one.
+    lan_signing: HashSet<Fingerprint>,
 }
 
 impl SignModal {
@@ -1782,6 +1789,8 @@ impl SignModal {
             keychain_enabled,
             connect_account: ConnectAccountStatus::SignedOut,
             expanded_paths: HashSet::new(),
+            lan_failures: HashMap::new(),
+            lan_signing: HashSet::new(),
         }
     }
 
@@ -2060,19 +2069,8 @@ impl SignModal {
         };
 
         let master_fp = self.wallet.signer.as_ref().map(|s| s.fingerprint());
-        // Keychain session for this key, only once the flow has resolved.
-        let kc = self
-            .keychain
-            .as_ref()
-            .filter(|k| k.is_resolved())
-            .and_then(|k| {
-                k.pending()
-                    .iter()
-                    .enumerate()
-                    .find(|(_, p)| p.fingerprint == fp)
-                    .map(|(i, p)| (i, p.status))
-            });
-        let kind = self.signing_key_kind(fp, master_fp, kc.is_some());
+        let kc = self.keychain_session(fp);
+        let kind = self.signing_key_kind(fp, master_fp, kc.map(|(_, status)| status));
 
         // A resolved Keychain session in a give-up state (rejected / expired /
         // failed — including a *persist* failure) must fall through to the Retry
@@ -2116,7 +2114,7 @@ impl SignModal {
             .hws
             .list
             .iter()
-            .position(|hw| hw.fingerprint() == Some(fp))
+            .position(|hw| hw.fingerprint() == Some(fp) && !hw.is_lan_phone())
         {
             match &self.hws.list[i] {
                 HardwareWallet::Supported {
@@ -2138,6 +2136,30 @@ impl SignModal {
                     );
                 }
                 _ => {}
+            }
+        }
+        // A Keychain phone reachable over the local network. That road is the
+        // default, unless a Connect session for this key is already under way
+        // or finished — then the Connect branch below owns the row, so the
+        // user sees that session's progress and no second request goes out
+        // over Wi-Fi.
+        let connect_idle = kc.is_some_and(|(_, status)| status.is_idle());
+        if kc.is_none() || connect_idle {
+            if let Some(i) = self.lan_phone_index(fp) {
+                let state = match self.lan_failures.get(&fp) {
+                    None => St::Available(Act::Hardware(i)),
+                    Some(true) => St::LanFailed {
+                        reason: "This Keychain needs to be paired again.".to_string(),
+                        retry: None,
+                        connect: connect_idle,
+                    },
+                    Some(false) => St::LanFailed {
+                        reason: "Couldn't sign over Wi-Fi.".to_string(),
+                        retry: Some(i),
+                        connect: connect_idle,
+                    },
+                };
+                return (Kind::LanKeychain, state);
             }
         }
         // A Connect-resolved Keychain signer.
@@ -2241,25 +2263,66 @@ impl SignModal {
     }
 
     /// Icon kind for a descriptor key: master / border / connected-hardware /
-    /// resolved-keychain, else unknown.
+    /// Keychain over the local network / resolved-keychain, else unknown.
+    ///
+    /// `keychain` is the key's Connect session status, once resolved. A phone
+    /// on the local network reads as [`Kind::LanKeychain`] only while that is
+    /// the road in use — i.e. no Connect session has left `Idle` — matching
+    /// [`Self::classify_signing_key`].
     fn signing_key_kind(
         &self,
         fp: Fingerprint,
         master_fp: Option<Fingerprint>,
-        is_keychain: bool,
+        keychain: Option<super::keychain_sign::PendingSessionStatus>,
     ) -> view::vault::psbt::SigningKeyKind {
         use view::vault::psbt::SigningKeyKind as Kind;
         if master_fp == Some(fp) {
             Kind::Master
         } else if self.wallet.border_wallet_fingerprints.contains(&fp) {
             Kind::BorderWallet
-        } else if self.hws.list.iter().any(|hw| hw.fingerprint() == Some(fp)) {
+        } else if self
+            .hws
+            .list
+            .iter()
+            .any(|hw| hw.fingerprint() == Some(fp) && !hw.is_lan_phone())
+        {
             Kind::Hardware
-        } else if is_keychain {
+        } else if keychain.is_none_or(|status| status.is_idle())
+            && self.lan_phone_index(fp).is_some()
+        {
+            Kind::LanKeychain
+        } else if keychain.is_some() {
             Kind::Keychain
         } else {
             Kind::Unknown
         }
+    }
+
+    /// The Connect Keychain session for `fp` (its `pending` index and
+    /// status), only once the nested flow has resolved.
+    fn keychain_session(
+        &self,
+        fp: Fingerprint,
+    ) -> Option<(usize, super::keychain_sign::PendingSessionStatus)> {
+        self.keychain
+            .as_ref()
+            .filter(|k| k.is_resolved())
+            .and_then(|k| {
+                k.pending()
+                    .iter()
+                    .enumerate()
+                    .find(|(_, p)| p.fingerprint == fp)
+                    .map(|(i, p)| (i, p.status))
+            })
+    }
+
+    /// Device-list index of a Keychain phone holding `fp` that is reachable
+    /// over the local network right now.
+    fn lan_phone_index(&self, fp: Fingerprint) -> Option<usize> {
+        self.hws
+            .list
+            .iter()
+            .position(|hw| hw.is_lan_phone() && hw.fingerprint() == Some(fp))
     }
 
     /// Display label for a descriptor key: user alias, else the resolved
@@ -2334,12 +2397,23 @@ impl Modal for SignModal {
                 if let Some(refused) = self.refuse_before_dispatch(&tx.psbt) {
                     return refused;
                 }
-                if let Some(HardwareWallet::Supported {
-                    fingerprint,
-                    device,
-                    ..
-                }) = self.hws.list.get(i)
+                if let Some(
+                    hw @ HardwareWallet::Supported {
+                        fingerprint,
+                        device,
+                        ..
+                    },
+                ) = self.hws.list.get(i)
                 {
+                    // A fresh attempt over the local network supersedes the
+                    // last failure; the row goes back to "Signing…". Recorded
+                    // here rather than looked up when the result lands: a
+                    // phone whose connection died has usually left the device
+                    // list by then, and its failure is still a Wi-Fi one.
+                    if hw.is_lan_phone() {
+                        self.lan_failures.remove(fingerprint);
+                        self.lan_signing.insert(*fingerprint);
+                    }
                     // Keep the modal open (as the master-signer path below
                     // does) so the selected device shows its "Processing… /
                     // Please check your device" state while we wait for the
@@ -2429,10 +2503,30 @@ impl Modal for SignModal {
             }
             Message::Signed(fingerprint, res) => {
                 self.signing.remove(&fingerprint);
+                let over_lan = self.lan_signing.remove(&fingerprint);
                 match res {
                     Err(e) => {
                         self.display_modal = true;
                         if !matches!(e, Error::HardwareWallet(async_hwi::Error::UserRefused)) {
+                            // A Keychain phone over the local network: remember
+                            // the failure so its row offers Connect instead, and
+                            // word the toast for a phone, not a USB device.
+                            if over_lan {
+                                let needs_repair = matches!(
+                                    &e,
+                                    Error::HardwareWallet(hw) if crate::phone_signer::needs_repair(hw)
+                                );
+                                self.lan_failures.insert(fingerprint, needs_repair);
+                                let connect_available = self
+                                    .keychain_session(fingerprint)
+                                    .is_some_and(|(_, status)| status.is_idle());
+                                let err_msg =
+                                    crate::user_error::report_lan_keychain(&e, connect_available);
+                                self.error = Some(e);
+                                return Task::done(Message::View(view::Message::ShowError(
+                                    err_msg,
+                                )));
+                            }
                             let err_msg = crate::user_error::report(&e);
                             self.error = Some(e);
                             return Task::done(Message::View(view::Message::ShowError(err_msg)));
@@ -3520,6 +3614,345 @@ mod tests {
             ConnectAccountStatus::from_cache(&refused),
             ConnectAccountStatus::OtherAccount
         );
+    }
+
+    /// Answers with a fixed fingerprint; the picker tests never let it sign.
+    #[derive(Debug)]
+    struct StubDevice(Fingerprint);
+
+    #[async_trait::async_trait]
+    impl async_hwi::HWI for StubDevice {
+        fn device_kind(&self) -> async_hwi::DeviceKind {
+            async_hwi::DeviceKind::Specter
+        }
+        async fn get_version(&self) -> Result<async_hwi::Version, async_hwi::Error> {
+            Err(async_hwi::Error::UnimplementedMethod)
+        }
+        async fn get_master_fingerprint(&self) -> Result<Fingerprint, async_hwi::Error> {
+            Ok(self.0)
+        }
+        async fn get_extended_pubkey(
+            &self,
+            _path: &coincube_core::miniscript::bitcoin::bip32::DerivationPath,
+        ) -> Result<coincube_core::miniscript::bitcoin::bip32::Xpub, async_hwi::Error> {
+            Err(async_hwi::Error::UnimplementedMethod)
+        }
+        async fn register_wallet(
+            &self,
+            _name: &str,
+            _policy: &str,
+        ) -> Result<Option<[u8; 32]>, async_hwi::Error> {
+            Ok(None)
+        }
+        async fn is_wallet_registered(
+            &self,
+            _name: &str,
+            _policy: &str,
+        ) -> Result<bool, async_hwi::Error> {
+            Ok(true)
+        }
+        async fn display_address(
+            &self,
+            _script: &async_hwi::AddressScript,
+        ) -> Result<(), async_hwi::Error> {
+            Err(async_hwi::Error::UnimplementedMethod)
+        }
+        async fn sign_tx(&self, _psbt: &mut Psbt) -> Result<(), async_hwi::Error> {
+            Err(async_hwi::Error::UnimplementedMethod)
+        }
+    }
+
+    /// A device-list entry for `fp` under `id` — `phone-…` for a Keychain
+    /// phone on the local network, a vendor prefix for a USB wallet.
+    fn device(id: &str, fp: Fingerprint) -> HardwareWallet {
+        HardwareWallet::Supported {
+            id: id.to_string(),
+            device: Arc::new(StubDevice(fp)),
+            kind: async_hwi::DeviceKind::Specter,
+            fingerprint: fp,
+            version: None,
+            registered: Some(true),
+            alias: None,
+        }
+    }
+
+    const PHONE_FP: &str = "f714c228";
+    const USB_FP: &str = "2522f23c";
+
+    /// The DESC primary path with a Keychain phone on the LAN holding
+    /// `PHONE_FP` (device index 0) and a USB wallet holding `USB_FP` (index 1).
+    /// `connect` is the Connect session for the phone's key, if Connect
+    /// resolved it.
+    fn picker_with_phone(
+        connect: Option<super::super::keychain_sign::PendingSessionStatus>,
+    ) -> SignModal {
+        let wallet = Arc::new(wallet());
+        let keychain = connect.map(|status| {
+            super::super::keychain_sign::KeychainSignModal::resolved_for_test(
+                wallet.clone(),
+                &[(fingerprint(PHONE_FP), status)],
+            )
+        });
+        let mut modal = SignModal::new(
+            HashSet::new(),
+            wallet,
+            CoincubeDirectory::new(PathBuf::new()),
+            Network::Signet,
+            false,
+            None,
+            keychain,
+            true,
+        );
+        modal.hws.list = vec![
+            device(
+                &format!("{}0a0b0c0d", crate::hw::LAN_PHONE_ID_PREFIX),
+                fingerprint(PHONE_FP),
+            ),
+            device("ledger-usb-1", fingerprint(USB_FP)),
+        ];
+        modal
+    }
+
+    fn primary_row(
+        modal: &SignModal,
+        fp: &str,
+    ) -> (
+        view::vault::psbt::SigningKeyKind,
+        view::vault::psbt::SigningKeyState,
+    ) {
+        let row = modal
+            .signing_paths()
+            .into_iter()
+            .find(|p| p.is_primary)
+            .unwrap()
+            .keys
+            .into_iter()
+            .find(|row| row.fingerprint == fingerprint(fp))
+            .unwrap();
+        (row.kind, row.state)
+    }
+
+    /// What `SignModal::update` needs besides the message. Neither is touched
+    /// on the paths these tests drive (a failure, or a device dispatch).
+    fn update_args() -> (Arc<dyn crate::daemon::Daemon + Sync + Send>, SpendTx) {
+        let f = crate::app::state::vault::test_support::unified::fixture();
+        let tx = SpendTx::new(
+            None,
+            f.psbt.clone(),
+            Vec::new(),
+            &f.descriptor,
+            &coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::new(),
+            Network::Signet,
+        );
+        (Arc::new(Coincubed::new(Daemon::new(vec![]).run())), tx)
+    }
+
+    /// Dispatch the device holding `fp` (its index in the device list), then
+    /// deliver `error` as that attempt's result — the order the picker sees.
+    fn fail_signing(modal: &mut SignModal, fp: &str, error: async_hwi::Error) {
+        let i = modal
+            .hws
+            .list
+            .iter()
+            .position(|hw| hw.fingerprint() == Some(fingerprint(fp)))
+            .expect("a device holds this key");
+        let (daemon, mut tx) = update_args();
+        let _ = modal.update(
+            daemon.clone(),
+            Message::View(view::Message::SelectHardwareWallet(i)),
+            &mut tx,
+        );
+        let _ = modal.update(
+            daemon,
+            Message::Signed(fingerprint(fp), Err(Error::HardwareWallet(error))),
+            &mut tx,
+        );
+    }
+
+    /// A phone whose connection died has usually left the device list by the
+    /// time its failure lands. That is still a Wi-Fi failure: while the phone
+    /// is gone its row is Connect's, and when it reappears the row offers
+    /// Connect instead of silently retrying the same road.
+    #[test]
+    fn a_phone_that_drops_off_the_list_still_counts_as_a_wifi_failure() {
+        use super::super::keychain_sign::PendingSessionStatus;
+        use view::vault::psbt::{
+            SigningKeyAction as Act, SigningKeyKind as Kind, SigningKeyState as St,
+        };
+
+        let mut modal = picker_with_phone(Some(PendingSessionStatus::Idle));
+        let (daemon, mut tx) = update_args();
+        let _ = modal.update(
+            daemon.clone(),
+            Message::View(view::Message::SelectHardwareWallet(0)),
+            &mut tx,
+        );
+        let phone = modal.hws.list.remove(0);
+        let _ = modal.update(
+            daemon,
+            Message::Signed(
+                fingerprint(PHONE_FP),
+                Err(Error::HardwareWallet(async_hwi::Error::DeviceDisconnected)),
+            ),
+            &mut tx,
+        );
+        assert_eq!(modal.lan_failures.get(&fingerprint(PHONE_FP)), Some(&false));
+        let (kind, state) = primary_row(&modal, PHONE_FP);
+        assert!(matches!(kind, Kind::Keychain));
+        assert!(matches!(state, St::Available(Act::Keychain)));
+
+        modal.hws.list.insert(0, phone);
+        assert!(matches!(
+            primary_row(&modal, PHONE_FP).1,
+            St::LanFailed {
+                retry: Some(0),
+                connect: true,
+                ..
+            }
+        ));
+    }
+
+    /// The phone is a Keychain key reached over Wi-Fi — never labelled a
+    /// hardware wallet — and signs through its device-list entry. A USB
+    /// wallet beside it keeps its hardware label.
+    #[test]
+    fn a_lan_phone_reads_as_keychain_and_signs_over_the_local_network() {
+        use super::super::keychain_sign::PendingSessionStatus;
+        use view::vault::psbt::{
+            SigningKeyAction as Act, SigningKeyKind as Kind, SigningKeyState as St,
+        };
+
+        for connect in [None, Some(PendingSessionStatus::Idle)] {
+            let modal = picker_with_phone(connect);
+            let (kind, state) = primary_row(&modal, PHONE_FP);
+            assert!(matches!(kind, Kind::LanKeychain), "{:?}", connect);
+            assert!(
+                matches!(state, St::Available(Act::Hardware(0))),
+                "{:?}",
+                connect
+            );
+
+            let (kind, state) = primary_row(&modal, USB_FP);
+            assert!(matches!(kind, Kind::Hardware));
+            assert!(matches!(state, St::Available(Act::Hardware(1))));
+        }
+    }
+
+    /// Once a Connect session for the key is under way, Connect owns the row:
+    /// the user sees its progress and nothing is also offered over Wi-Fi.
+    #[test]
+    fn a_connect_session_under_way_owns_the_phone_row() {
+        use super::super::keychain_sign::PendingSessionStatus;
+        use view::vault::psbt::{SigningKeyKind as Kind, SigningKeyState as St};
+
+        let modal = picker_with_phone(Some(PendingSessionStatus::Pending));
+        let (kind, state) = primary_row(&modal, PHONE_FP);
+        assert!(matches!(kind, Kind::Keychain));
+        assert!(matches!(state, St::InProgress(_)));
+
+        let modal = picker_with_phone(Some(PendingSessionStatus::Rejected));
+        let (kind, state) = primary_row(&modal, PHONE_FP);
+        assert!(matches!(kind, Kind::Keychain));
+        assert!(matches!(state, St::Retry(0)));
+    }
+
+    /// A failed Wi-Fi attempt offers Connect (when it resolved the key) and
+    /// another Wi-Fi attempt — except when the phone asked to be paired
+    /// again, where retrying the same road can't work. Trying Wi-Fi again
+    /// clears the failure.
+    #[test]
+    fn a_failed_wifi_attempt_offers_connect_instead() {
+        use super::super::keychain_sign::PendingSessionStatus;
+        use view::vault::psbt::{SigningKeyKind as Kind, SigningKeyState as St};
+
+        let mut modal = picker_with_phone(Some(PendingSessionStatus::Idle));
+        fail_signing(
+            &mut modal,
+            PHONE_FP,
+            async_hwi::Error::Device("sign_tx timeout".into()),
+        );
+        let (kind, state) = primary_row(&modal, PHONE_FP);
+        assert!(matches!(kind, Kind::LanKeychain));
+        assert!(matches!(
+            state,
+            St::LanFailed {
+                retry: Some(0),
+                connect: true,
+                ..
+            }
+        ));
+
+        fail_signing(
+            &mut modal,
+            PHONE_FP,
+            async_hwi::Error::Device(
+                "pair_again: This LAN pairing has no current exact signer identity.".into(),
+            ),
+        );
+        let (_, state) = primary_row(&modal, PHONE_FP);
+        assert!(matches!(
+            state,
+            St::LanFailed { retry: None, connect: true, ref reason } if reason.contains("paired again")
+        ));
+
+        let (daemon, mut tx) = update_args();
+        let _ = modal.update(
+            daemon,
+            Message::View(view::Message::SelectHardwareWallet(0)),
+            &mut tx,
+        );
+        let (kind, state) = primary_row(&modal, PHONE_FP);
+        assert!(matches!(kind, Kind::LanKeychain));
+        assert!(
+            matches!(state, St::InProgress(_)),
+            "retry clears the failure"
+        );
+    }
+
+    /// Without Connect there is nothing to fall back to: the row offers only
+    /// another Wi-Fi attempt, or just the reason when the phone needs pairing.
+    #[test]
+    fn without_connect_a_failed_wifi_attempt_offers_no_fallback() {
+        use view::vault::psbt::SigningKeyState as St;
+
+        let mut modal = picker_with_phone(None);
+        fail_signing(&mut modal, PHONE_FP, async_hwi::Error::DeviceDisconnected);
+        assert!(matches!(
+            primary_row(&modal, PHONE_FP).1,
+            St::LanFailed {
+                retry: Some(0),
+                connect: false,
+                ..
+            }
+        ));
+
+        fail_signing(
+            &mut modal,
+            PHONE_FP,
+            async_hwi::Error::Device("pair_again: stale".into()),
+        );
+        assert!(matches!(
+            primary_row(&modal, PHONE_FP).1,
+            St::LanFailed {
+                retry: None,
+                connect: false,
+                ..
+            }
+        ));
+    }
+
+    /// A USB wallet's failure is not a Wi-Fi failure: its row is unchanged.
+    #[test]
+    fn a_usb_failure_does_not_offer_the_connect_fallback() {
+        use view::vault::psbt::{SigningKeyAction as Act, SigningKeyState as St};
+
+        let mut modal = picker_with_phone(None);
+        fail_signing(&mut modal, USB_FP, async_hwi::Error::DeviceDisconnected);
+        assert!(modal.lan_failures.is_empty());
+        assert!(matches!(
+            primary_row(&modal, USB_FP).1,
+            St::Available(Act::Hardware(1))
+        ));
     }
 
     #[tokio::test]

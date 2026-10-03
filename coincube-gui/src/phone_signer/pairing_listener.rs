@@ -493,7 +493,7 @@ async fn try_pair_once(
             .send(&LocalEnvelope {
                 payload: Some(local_v1::local_envelope::Payload::Error(
                     local_v1::ErrorEnvelope {
-                        code: "pair_again".into(),
+                        code: super::PAIR_AGAIN_CODE.into(),
                         message: format!("Pairing incomplete: {}. Pair again.", error),
                         session_id: String::new(),
                     },
