@@ -7,7 +7,9 @@
 use super::*;
 use crate::app::{
     message::Message,
-    state::vault::split::{SplitEvent, SplitMessage, SplitPanel, Stage, Step2Stage, Work},
+    state::vault::split::{
+        Restarted, SplitEvent, SplitMessage, SplitPanel, Stage, Step2Stage, Work,
+    },
 };
 use crate::services::split_psbt_file;
 use iced::{futures::StreamExt, Task};
@@ -287,13 +289,21 @@ impl Step2Port for PanelPort {
             generation: watch::channel(7).0,
         }))
     }
+}
+
+/// The session's reconcile-only port: no daemon behind it.
+struct PanelReconPort(Shared);
+impl ReconPort for PanelReconPort {
+    fn context(&self) -> Context {
+        context()
+    }
     fn open_reconciler(
         &self,
         _: PathBuf,
         _: String,
         _: sha256::Hash,
     ) -> Result<Box<dyn Step2Recon>, Step2Refusal> {
-        Ok(Box::new(PanelRecon(self.shared.clone())))
+        Ok(Box::new(PanelRecon(self.0.clone())))
     }
 }
 
@@ -488,9 +498,72 @@ async fn panel_leaves_step2_and_revokes_on_a_port_change() {
 
 /// A restart after a recorded step-2 submission opens only the reconciler:
 /// the recorded outcome is shown as recorded, and the only action is to
-/// reconcile.
+/// reconcile. #637 R1: that holds with no step-2 port at all (the Vault's
+/// daemon unloaded, restarting, external or on a route step 2 can't be sent
+/// through) as with one; the restart never rebuilds step 1.
 #[tokio::test(flavor = "multi_thread")]
 async fn panel_restart_after_a_recorded_step2_only_reconciles() {
+    let journal = Journal::new(true);
+    for daemon in [false, true] {
+        let shared: Shared = Arc::default();
+        let mut panel = SplitPanel::resume(
+            TARGET.into(),
+            journal.temp.0.parent().unwrap().to_path_buf(),
+            journal.digest(),
+            journal.temp.0.clone(),
+        );
+        panel.set_connect(Some(Arc::new(PanelConnect(shared.clone()))));
+        if daemon {
+            panel.set_step2_port(Some(Arc::new(PanelPort::new(&shared, &journal, 1))));
+        }
+        panel.set_recon_port(Some(Arc::new(PanelReconPort(shared.clone()))));
+        let task = panel.begin();
+        assert_eq!(panel.stage, Stage::Working(Work::Restarting), "{}", daemon);
+        drive(&mut panel, task).await;
+        assert_eq!(
+            panel.stage,
+            Stage::Step2(Step2Stage::Reconcile),
+            "{}",
+            daemon
+        );
+        assert!(matches!(
+            panel.step2_outcome(),
+            Some(Outcome::Uncertain { .. })
+        ));
+        assert_eq!(shared.lock().unwrap().step1_opened, 0, "{}", daemon);
+        for message in [
+            SplitMessage::Step2Confirm,
+            SplitMessage::Step2Review,
+            SplitMessage::EnterStep2,
+            SplitMessage::Retry,
+        ] {
+            let task = panel.update(message);
+            drive(&mut panel, task).await;
+            assert_eq!(
+                panel.stage,
+                Stage::Step2(Step2Stage::Reconcile),
+                "{}",
+                daemon
+            );
+        }
+        let task = panel.update(SplitMessage::Step2Reconcile);
+        drive(&mut panel, task).await;
+        assert!(matches!(
+            panel.step2_seen(),
+            Some(TransactionObservation::Unconfirmed { .. })
+        ));
+        let counts = shared.lock().unwrap();
+        assert_eq!(counts.reconciles, 1, "{}", daemon);
+        assert_eq!((counts.step1_opened, counts.submits), (0, 0), "{}", daemon);
+    }
+}
+
+/// #637 R1: a recorded step 2 with a session but no reconciler for it fails
+/// closed, retryably: nothing reopens step 1 or opens a preparation, and a
+/// retry stays refused until the session's reconcile-only port arrives,
+/// which then reconciles. Without a session it waits for one.
+#[tokio::test(flavor = "multi_thread")]
+async fn panel_restart_without_a_reconciler_refuses_instead_of_step1() {
     let journal = Journal::new(true);
     let shared: Shared = Arc::default();
     let mut panel = SplitPanel::resume(
@@ -499,33 +572,137 @@ async fn panel_restart_after_a_recorded_step2_only_reconciles() {
         journal.digest(),
         journal.temp.0.clone(),
     );
-    panel.set_connect(Some(Arc::new(PanelConnect(shared.clone()))));
     panel.set_step2_port(Some(Arc::new(PanelPort::new(&shared, &journal, 1))));
+    panel.set_recon_port(Some(Arc::new(PanelReconPort(shared.clone()))));
+    let task = panel.begin();
+    assert_eq!(panel.stage, Stage::NeedsSession);
+    drive(&mut panel, task).await;
+    assert_eq!(
+        panel.stage,
+        Stage::NeedsSession,
+        "no session, nothing opened"
+    );
+
+    panel.set_recon_port(None);
+    panel.set_connect(Some(Arc::new(PanelConnect(shared.clone()))));
+    for _ in 0..2 {
+        let task = match panel.stage {
+            Stage::NeedsSession => panel.begin(),
+            _ => panel.update(SplitMessage::Retry),
+        };
+        drive(&mut panel, task).await;
+        match &panel.stage {
+            Stage::Refused(refusal) => {
+                assert!(refusal.retry);
+                assert_eq!(refusal.reason, RECONCILE_UNAVAILABLE);
+            }
+            other => panic!("{:?}", other),
+        }
+        assert_eq!(shared.lock().unwrap().step1_opened, 0);
+        assert!(panel.driver.is_none() && panel.prep.is_none() && panel.recon.is_none());
+    }
+
+    // The session's port arrives (the App's next refresh): reconcile only.
+    panel.set_recon_port(Some(Arc::new(PanelReconPort(shared.clone()))));
+    let task = panel.update(SplitMessage::Retry);
+    drive(&mut panel, task).await;
+    assert_eq!(panel.stage, Stage::Step2(Step2Stage::Reconcile));
+    assert_eq!(shared.lock().unwrap().step1_opened, 0);
+}
+
+/// #637 R1 (step 1 unchanged): a journal with no recorded step 2 restarts
+/// into its step-1 resume whether or not there is a step-2 or a
+/// reconcile-only port.
+#[tokio::test(flavor = "multi_thread")]
+async fn panel_restart_of_a_step1_journal_resumes_step1_without_a_daemon() {
+    let journal = Journal::new(false);
+    for (step2_port, recon_port) in [(false, false), (false, true), (true, true)] {
+        let shared: Shared = Arc::default();
+        let mut panel = SplitPanel::resume(
+            TARGET.into(),
+            journal.temp.0.parent().unwrap().to_path_buf(),
+            journal.digest(),
+            journal.temp.0.clone(),
+        );
+        panel.set_connect(Some(Arc::new(PanelConnect(shared.clone()))));
+        if step2_port {
+            panel.set_step2_port(Some(Arc::new(PanelPort::new(&shared, &journal, 1))));
+        }
+        if recon_port {
+            panel.set_recon_port(Some(Arc::new(PanelReconPort(shared.clone()))));
+        }
+        let task = panel.begin();
+        assert_eq!(panel.stage, Stage::Working(Work::Restarting));
+        let mut out = events(task).await;
+        assert_eq!(out.len(), 1);
+        let restarted = out.remove(0);
+        assert!(
+            matches!(restarted, SplitEvent::Restarted(_, Ok(Restarted::Step1))),
+            "{:?}",
+            restarted
+        );
+        // The step-1 resume (rebuilt from fresh chain evidence, which this
+        // fake has none of) is what runs next.
+        let _resume = panel.apply(restarted);
+        assert_eq!(
+            panel.stage,
+            Stage::Working(Work::Restoring),
+            "{} {}",
+            step2_port,
+            recon_port
+        );
+        assert!(panel.recon.is_none());
+        assert_eq!(shared.lock().unwrap().reconciles, 0);
+    }
+}
+
+/// #637 R1 through the production ports: a panel resumed on a real journal
+/// whose step 2 is recorded, under the session's production Connect and
+/// reconcile-only ports and with no Vault daemon at all, opens the
+/// production reconciler over that journal (which then holds its lock) and
+/// never step 1. Revoking it releases the journal.
+#[tokio::test(flavor = "multi_thread")]
+async fn panel_restart_reconciles_through_the_production_ports_without_a_daemon() {
+    let (_sender, generation) = watch::channel(7);
+    let recon = ProductionRecon::new(session(ORIGIN), generation.clone()).unwrap();
+    let connect = step1::ProductionConnect::new(session(ORIGIN), generation.clone()).unwrap();
+    assert_eq!(ReconPort::context(&recon), SplitConnect::context(&connect));
+    let journal = Journal::under(true, &ReconPort::context(&recon));
+    let mut panel = SplitPanel::resume(
+        TARGET.into(),
+        journal.temp.0.parent().unwrap().to_path_buf(),
+        journal.digest(),
+        journal.temp.0.clone(),
+    );
+    panel.set_connect(Some(Arc::new(connect)));
+    panel.set_recon_port(Some(Arc::new(recon)));
+    assert!(!panel.step2_available());
     let task = panel.begin();
     assert_eq!(panel.stage, Stage::Working(Work::Restarting));
     drive(&mut panel, task).await;
-    assert_eq!(panel.stage, Stage::Step2(Step2Stage::Reconcile));
+    assert_eq!(
+        panel.stage,
+        Stage::Step2(Step2Stage::Reconcile),
+        "{:?}",
+        panel.notice()
+    );
+    assert!(panel.recon.is_some() && panel.driver.is_none() && panel.prep.is_none());
+    assert!(panel.construction().is_none(), "step 1 was not rebuilt");
     assert!(matches!(
         panel.step2_outcome(),
         Some(Outcome::Uncertain { .. })
     ));
-    assert_eq!(shared.lock().unwrap().step1_opened, 0);
-    for message in [
-        SplitMessage::Step2Confirm,
-        SplitMessage::Step2Review,
-        SplitMessage::EnterStep2,
-    ] {
-        let task = panel.update(message);
-        drive(&mut panel, task).await;
-        assert_eq!(panel.stage, Stage::Step2(Step2Stage::Reconcile));
-    }
-    let task = panel.update(SplitMessage::Step2Reconcile);
-    drive(&mut panel, task).await;
-    assert!(matches!(
-        panel.step2_seen(),
-        Some(TransactionObservation::Unconfirmed { .. })
-    ));
-    assert_eq!(shared.lock().unwrap().reconciles, 1);
+    let reopen = || {
+        Controller::reopen(
+            &journal.temp.0,
+            &claim_workflow::split_identity(TARGET.into(), journal.digest()),
+            ReconPort::context(&ProductionRecon::new(session(ORIGIN), generation.clone()).unwrap()),
+        )
+    };
+    assert!(matches!(reopen(), Err(claim_workflow::Error::Busy)));
+    panel.revoke();
+    assert!(panel.recon.is_none());
+    assert!(reopen().is_ok());
 }
 
 /// #637 F1: the Vault's daemon restarting or switching (a new daemon

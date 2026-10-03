@@ -28,8 +28,9 @@
 //! under a fresh check, signed through PSBT files, handed to the submission
 //! coordinator, reviewed (route label, node-route privacy note), submitted
 //! once and reconciled. A restart after a recorded step-2 submission opens
-//! only the reconciler. It is still reachable only by resuming a journal
-//! (D1).
+//! only the reconciler, under the Connect session alone: the Vault's daemon
+//! is needed only to enter step 2, and only on a route step 2 can be sent
+//! through. It is still reachable only by resuming a journal (D1).
 //!
 //! The panel owns no keys and never signs: signatures come back in PSBT
 //! files (D6). Every Connect read, build, file operation and journal call
@@ -327,8 +328,11 @@ pub struct SplitPanel {
     notice: Option<String>,
     /// The stage to return to after a check.
     resume_stage: Option<Stage>,
-    /// Step 2 (B3b-2b): the target Vault's port, when its daemon is loaded.
+    /// Step 2 (B3b-2b): the target Vault's port, when its daemon is loaded
+    /// on a route step 2 can be sent through.
     step2_port: Option<Arc<dyn step2::Step2Port>>,
+    /// The session's reconcile-only port, whatever the daemon (#637 R1).
+    recon_port: Option<Arc<dyn step2::ReconPort>>,
     prep: Option<Box<dyn step2::Step2Prep>>,
     coord: Option<Box<dyn step2::Step2Coord>>,
     recon: Option<Box<dyn step2::Step2Recon>>,
@@ -383,6 +387,7 @@ impl SplitPanel {
             notice: None,
             resume_stage: None,
             step2_port: None,
+            recon_port: None,
             prep: None,
             coord: None,
             recon: None,
@@ -550,15 +555,17 @@ impl SplitPanel {
             return Task::none();
         }
         self.notice = None;
-        if let (Some((digest, directory)), Some(port)) =
-            (self.journal.clone(), self.step2_port.clone())
-        {
-            // A recorded step-2 submission reopens only the reconciler.
+        if let Some((digest, directory)) = self.journal.clone() {
+            // A recorded step-2 submission reopens only the reconciler. The
+            // decision needs only the session, never the Vault daemon, so a
+            // daemon that is unloaded or on an unsupported route can't send
+            // a recorded step 2 back to step 1 (#637 R1).
             self.stage = Stage::Working(Work::Restarting);
             let target = self.target_cube.clone();
+            let (context, recon) = (connect.context(), self.recon_port.clone());
             return self.spawn(
                 async move {
-                    step2::restart(port, directory, target, digest)
+                    step2::restart(context, recon, directory, target, digest)
                         .await
                         .map(|restart| match restart {
                             step2::Restart::Step1 => Restarted::Step1,

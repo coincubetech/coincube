@@ -21,7 +21,7 @@ use coincube_core::{
 
 use super::{
     step1::{OpenRequest, Refusal, SplitConnect},
-    step2::{self, Step2Open, Step2Port, Step2Refusal},
+    step2::{self, ReconPort, Step2Open, Step2Port, Step2Refusal},
     Coord, Driver, Prep, Recon, Restarted, SplitEvent, SplitMessage, SplitPanel, Stage, Step2Stage,
     Work,
 };
@@ -56,6 +56,25 @@ impl SplitPanel {
             self.revoke();
         }
         self.step2_port = port;
+    }
+
+    /// Install (or clear) the session's reconcile-only port (#637 R1). The
+    /// App builds one on every Connect refresh, whether or not the Vault's
+    /// daemon gives a step-2 port: an equivalent one (same session context)
+    /// is ignored; any other revokes a reconciler opened under the old one.
+    pub fn set_recon_port(&mut self, port: Option<Arc<dyn ReconPort>>) {
+        let same = match (&self.recon_port, &port) {
+            (Some(a), Some(b)) => a.context() == b.context(),
+            (None, None) => true,
+            _ => false,
+        };
+        if same {
+            return;
+        }
+        if self.recon.is_some() {
+            self.revoke();
+        }
+        self.recon_port = port;
     }
 
     /// Revoke and drop every step-2 handle (releasing the journal) and the

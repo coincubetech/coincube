@@ -2,12 +2,15 @@
 //! iced state. The panel stages, view and App hooks that drive it are
 //! B3b-2b-2; nothing in the GUI calls this module yet (D1).
 //!
-//! - **Ports.** [`Step2Port`] opens the step-2 coordinator side of a Split
-//!   journal: a [`Step2Prep`] (target reservation and proof, construction
-//!   under the step-2 token, the signed-PSBT handoff) and, after a recorded
-//!   step-2 submission, a [`Step2Recon`] that can only reconcile. The
-//!   production implementation, [`ProductionStep2`], wraps
-//!   `claim_coordinator::fork::split` for the target Vault's daemon.
+//! - **Ports.** [`Step2Port`] opens the step-2 submission side of a Split
+//!   journal through the target Vault's daemon: a [`Step2Prep`] (target
+//!   reservation and proof, construction under the step-2 token, the
+//!   signed-PSBT handoff). Its production implementation, [`ProductionStep2`],
+//!   wraps `claim_coordinator::fork::split` and exists only for a daemon on a
+//!   route step 2 can be sent through (#637 R2). [`ReconPort`] opens, after a
+//!   recorded step-2 submission, a [`Step2Recon`] that can only reconcile; its
+//!   production implementation, [`ProductionRecon`], needs only the Connect
+//!   session, never the daemon (#637 R1).
 //! - **Journal-lock ordering** (#626). The step-1 driver and the step-2
 //!   preparation each hold the journal lock. [`enter_step2`] drops the step-1
 //!   driver *before* opening the preparation, off the UI thread;
@@ -16,7 +19,8 @@
 //!   the submission coordinator. [`restart`] opens a [`Step2Recon`] instead of
 //!   the step-1 driver when the journal already records a step-2 submission,
 //!   because the claimed coins may be spent on BTCB2 by then and step 1 can
-//!   no longer be rebuilt from them.
+//!   no longer be rebuilt from them. That decision needs only the Connect
+//!   session, so it holds whatever state the Vault daemon is in.
 //! - **Copy.** Every target and construction refusal ([`describe_target`],
 //!   [`describe_step2`]), the waiting state while the Vault reserves its
 //!   address ([`RESERVING`], #592 N4), the route label with a privacy note on
@@ -67,6 +71,9 @@ pub const RESERVING: &str = "Reserving a fresh receive address in this Vault and
 pub const CANNOT_REPLAY: &str = "Split — cannot replay";
 /// The privacy note shown with the node route.
 pub const NODE_PRIVACY: &str = "Step 2 will be sent through this Vault's own Bitcoin node. That node, which may be a remote one you configured, learns the transaction and this computer's network address before it relays it.";
+/// A restart found a recorded step-2 submission but has no reconciler for
+/// this session (#637 R1): nothing else is opened.
+pub const RECONCILE_UNAVAILABLE: &str = "Step 2 of this split was already sent or may have been. Its status can't be checked with Connect right now, so nothing was rebuilt or sent. Try again.";
 
 /// What a refused step-2 operation means for the user.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -302,7 +309,8 @@ pub struct Step2Open {
     pub fork_height: u64,
 }
 
-/// Opens the step-2 side of a Split journal for one session.
+/// Opens the step-2 submission side of a Split journal for one session,
+/// through the target Vault's daemon.
 pub trait Step2Port: Send + Sync {
     fn context(&self) -> Context;
     /// What makes two ports the same: the session context (account,
@@ -313,7 +321,15 @@ pub trait Step2Port: Send + Sync {
     /// Blocking: callers use `spawn_blocking`, after dropping any step-1
     /// driver on the same journal.
     fn open_preparation(&self, open: Step2Open) -> Result<Box<dyn Step2Prep>, Step2Refusal>;
-    /// Blocking, like [`Self::open_preparation`].
+}
+
+/// Opens the reconcile-only side of a Split journal for one Connect session
+/// (#637 R1). It needs no Vault daemon: a recorded step 2 is reconciled
+/// whether the daemon is loaded, restarting, external or on a route step 2
+/// can't be sent through.
+pub trait ReconPort: Send + Sync {
+    fn context(&self) -> Context;
+    /// Blocking: callers use `spawn_blocking`.
     fn open_reconciler(
         &self,
         directory: PathBuf,
@@ -369,18 +385,21 @@ pub enum Restart {
     Reconcile(Box<dyn Step2Recon>),
 }
 
-/// Restart decision: read the journal (lock released at once) and, when it
-/// records a step-2 submission, open the reconciler instead of rebuilding
-/// step 1 (whose claimed coins may already be spent on BTCB2 by step 2).
+/// Restart decision: read the journal under the Connect session's `context`
+/// (lock released at once) and, when it records a step-2 submission, open
+/// the reconciler instead of rebuilding step 1 (whose claimed coins may
+/// already be spent on BTCB2 by step 2). No reconciler for the session
+/// refuses; it never falls back to step 1 (#637 R1).
 pub async fn restart(
-    port: Arc<dyn Step2Port>,
+    context: Context,
+    recon: Option<Arc<dyn ReconPort>>,
     directory: PathBuf,
     target_cube: String,
     digest: sha256::Hash,
 ) -> Result<Restart, Step2Refusal> {
     let identity = claim_workflow::split_identity(target_cube.clone(), digest);
     let recorded = {
-        let controller = Controller::reopen_settling(&directory, &identity, port.context())
+        let controller = Controller::reopen_settling(&directory, &identity, context)
             .await
             .map_err(|error| {
                 Step2Refusal::retry(step1::describe(claim_coordinator::Error::Journal(error)))
@@ -391,10 +410,26 @@ pub async fn restart(
     if !recorded {
         return Ok(Restart::Step1);
     }
+    let port = recon.ok_or_else(|| Step2Refusal::retry(RECONCILE_UNAVAILABLE))?;
     tokio::task::spawn_blocking(move || port.open_reconciler(directory, target_cube, digest))
         .await
         .map_err(|_| Step2Refusal::retry("Reopening the split was interrupted. Try again."))?
         .map(Restart::Reconcile)
+}
+
+/// The session's Split fork production, built fresh for each open.
+fn fork_production(
+    session: &ConnectSession,
+    expected: u64,
+    generation: &watch::Receiver<u64>,
+) -> Result<SplitForkProduction, Step2Refusal> {
+    SplitForkProduction::new(
+        session.client.clone(),
+        session.account.clone(),
+        expected,
+        generation.clone(),
+    )
+    .map_err(|error| Step2Refusal::retry(step1::describe(error)))
 }
 
 /// The production step-2 port for the target Vault's daemon and one Connect
@@ -408,14 +443,25 @@ pub struct ProductionStep2 {
     vault: CoincubeDescriptor,
 }
 impl ProductionStep2 {
-    /// Refused without an account, an embedded BTCB2 daemon, its Vault
-    /// descriptor, or after the generation moved.
+    /// Refused without an account, after the generation moved, and for any
+    /// route the submission transport does not admit (#637 R2): a daemon
+    /// that is not embedded or not on BTCB2 mainnet, or a backend other than
+    /// exactly Connect's BTCB2 Esplora at this session's origin or a bound
+    /// Bitcoind node. So nothing is reserved, built or signed for a step 2
+    /// that could not be sent. `finish` admits the route again at the
+    /// handoff, and the review binds it.
     pub fn new(
         session: ConnectSession,
         generation: watch::Receiver<u64>,
         daemon: Arc<dyn Daemon + Send + Sync>,
     ) -> Result<Self, claim_coordinator::Error> {
         let expected = *generation.borrow();
+        SplitStep2Production::new(
+            &session.client,
+            daemon.clone(),
+            expected,
+            generation.clone(),
+        )?;
         let vault = daemon
             .config()
             .map(|config| config.main_descriptor.clone())
@@ -438,13 +484,7 @@ impl ProductionStep2 {
         })
     }
     fn production(&self) -> Result<SplitForkProduction, Step2Refusal> {
-        SplitForkProduction::new(
-            self.session.client.clone(),
-            self.session.account.clone(),
-            self.expected,
-            self.generation.clone(),
-        )
-        .map_err(|error| Step2Refusal::retry(step1::describe(error)))
+        fork_production(&self.session, self.expected, &self.generation)
     }
 }
 impl Step2Port for ProductionStep2 {
@@ -483,6 +523,44 @@ impl Step2Port for ProductionStep2 {
             }),
         }))
     }
+}
+
+/// The production reconcile-only port: one Connect session and no Vault
+/// daemon (#637 R1).
+pub struct ProductionRecon {
+    session: ConnectSession,
+    generation: watch::Receiver<u64>,
+    expected: u64,
+    context: Context,
+}
+impl ProductionRecon {
+    /// Refused without an account, for an unusable origin, or after the
+    /// generation moved.
+    pub fn new(
+        session: ConnectSession,
+        generation: watch::Receiver<u64>,
+    ) -> Result<Self, claim_coordinator::Error> {
+        let expected = *generation.borrow();
+        let context = SplitForkProduction::new(
+            session.client.clone(),
+            session.account.clone(),
+            expected,
+            generation.clone(),
+        )?
+        .context()
+        .clone();
+        Ok(Self {
+            session,
+            generation,
+            expected,
+            context,
+        })
+    }
+}
+impl ReconPort for ProductionRecon {
+    fn context(&self) -> Context {
+        self.context.clone()
+    }
     fn open_reconciler(
         &self,
         directory: PathBuf,
@@ -493,7 +571,7 @@ impl Step2Port for ProductionStep2 {
             &directory,
             target_cube,
             digest,
-            self.production()?,
+            fork_production(&self.session, self.expected, &self.generation)?,
             CHECK_POLICY,
         )
         .map_err(describe_check)?;

@@ -983,6 +983,40 @@ fn discover_split_panel(
     )))
 }
 
+/// The Split panel's ports for one Connect session (#568 B3b-2b-2): the
+/// step-1 Connect side, the step-2 submission side and the reconcile-only
+/// step-2 side. Only submission needs the Vault daemon, and only on a route
+/// step 2 can be sent through (#637 R2). Reconciliation and the restart
+/// decision need the session alone (#637 R1).
+type SplitPorts = (
+    Option<Arc<dyn state::vault::split::step1::SplitConnect>>,
+    Option<Arc<dyn state::vault::split::step2::Step2Port>>,
+    Option<Arc<dyn state::vault::split::step2::ReconPort>>,
+);
+fn split_ports(
+    session: Option<state::vault::claim::ConnectSession>,
+    generation: &tokio::sync::watch::Sender<u64>,
+    daemon: Option<Arc<dyn Daemon + Sync + Send>>,
+) -> SplitPorts {
+    use state::vault::split::{step1, step2};
+    let step2 = session.clone().and_then(|session| {
+        step2::ProductionStep2::new(session, generation.subscribe(), daemon?)
+            .ok()
+            .map(|port| Arc::new(port) as Arc<dyn step2::Step2Port>)
+    });
+    let recon = session.clone().and_then(|session| {
+        step2::ProductionRecon::new(session, generation.subscribe())
+            .ok()
+            .map(|port| Arc::new(port) as Arc<dyn step2::ReconPort>)
+    });
+    let connect = session.and_then(|session| {
+        step1::ProductionConnect::new(session, generation.subscribe())
+            .ok()
+            .map(|connect| Arc::new(connect) as Arc<dyn step1::SplitConnect>)
+    });
+    (connect, step2, recon)
+}
+
 /// How long a Split reservation waits for the daemon's first successful poll
 /// after the reservation before the review is refused as unprovable.
 const SPLIT_TARGET_POLL_BOUND: Duration = Duration::from_secs(30);
@@ -3756,32 +3790,17 @@ impl App {
                 account,
             })
         });
-        let generation = self.panels.claim_generation.subscribe();
-        // Step 2 (#568 B3b-2b-2) through this Cube's Vault daemon, when one
-        // is loaded. A daemon or backend switch revokes the panel first
-        // (`revoke_claim`), and a new daemon gives a new port.
-        let step2 = session.clone().and_then(|session| {
-            let daemon = self.daemon.clone()?;
-            state::vault::split::step2::ProductionStep2::new(
-                session,
-                self.panels.claim_generation.subscribe(),
-                daemon,
-            )
-            .ok()
-            .map(|port| Arc::new(port) as Arc<dyn state::vault::split::step2::Step2Port>)
-        });
+        // Step 2 goes through this Cube's Vault daemon, when one is loaded on
+        // an admitted route. A daemon or backend switch revokes the panel
+        // first (`revoke_claim`), and a new daemon gives a new port.
+        let (connect, step2, recon) =
+            split_ports(session, &self.panels.claim_generation, self.daemon.clone());
         let Some(panel) = self.split_panel.as_mut() else {
             return Task::none();
         };
-        let connect = session.and_then(|session| {
-            state::vault::split::step1::ProductionConnect::new(session, generation)
-                .ok()
-                .map(|connect| {
-                    Arc::new(connect) as Arc<dyn state::vault::split::step1::SplitConnect>
-                })
-        });
         panel.set_connect(connect);
         panel.set_step2_port(step2);
+        panel.set_recon_port(recon);
         panel.begin()
     }
 
@@ -8814,6 +8833,78 @@ mod tests {
             assert!(discover_split_panel(&datadir, &settings, &wallet).is_none());
         }
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// #637 R1/R2 at the App's handoff: each Connect refresh gives the Split
+    /// panel the session's reconcile-only port whatever the Vault daemon is
+    /// (none, or one on a route step 2 can't be sent through), and a step-2
+    /// port only for a daemon on an admitted route. No session, no port.
+    #[test]
+    fn split_ports_reconcile_without_a_daemon_and_submit_only_on_an_admitted_route() {
+        use coincubed::config::{BitcoinBackend, BitcoinConfig, ElectrumConfig, EsploraConfig};
+        use std::str::FromStr;
+        let desc = coincube_core::descriptors::CoincubeDescriptor::from_str(
+            "wsh(or_d(pk([f5acc2fd]tpubD6NzVbkrYhZ4YgUx2ZLNt2rLYAMTdYysCRzKoLu2BeSHKvzqPaBDvf17GeBPnExUVPkuBpx4kniP964e2MxyzzazcXLptxLXModSVCVEV1T/<0;1>/*),and_v(v:pkh([8a64f2a9]tpubD6NzVbkrYhZ4WmzFjvQrp7sDa4ECUxTi9oby8K4FZkd3XCBtEdKwUiQyYJaxiJo5y42gyDWEczrFpozEjeLxMPxjf2WtkfcbpUdfvNnozWF/<0;1>/*),older(10))))#d72le4dr"
+        ).unwrap();
+        let daemon = |backend: BitcoinBackend| -> Arc<dyn Daemon + Sync + Send> {
+            Arc::new(EmbeddedDaemon::unstarted_for_test(
+                coincubed::config::Config::new(
+                    BitcoinConfig::new(
+                        crate::chain::ChainId::BitcoinBlake2b,
+                        Duration::from_secs(30),
+                    ),
+                    Some(backend),
+                    log::LevelFilter::Off,
+                    desc.clone(),
+                    coincubed::datadir::DataDirectory::new(std::path::PathBuf::from(
+                        "/synthetic-unused-split-ports",
+                    )),
+                ),
+                None,
+            ))
+        };
+        let connect = daemon(BitcoinBackend::Esplora(EsploraConfig {
+            addr: "https://connect.example/api/v1/esplora/bitcoin-blake2b/mainnet".into(),
+            token: None,
+            fallback_addr: None,
+            fallback_token: None,
+            secondary_fallback_addr: None,
+            secondary_fallback_token: None,
+        }));
+        let electrum = daemon(BitcoinBackend::Electrum(ElectrumConfig {
+            addr: "ssl://electrum.example:50002".into(),
+            validate_domain: true,
+        }));
+        let session = || {
+            let mut client =
+                crate::services::coincube::CoincubeClient::for_test("https://connect.example/");
+            client.set_token("synthetic-test-token");
+            Some(state::vault::claim::ConnectSession {
+                client,
+                account: "synthetic-account".into(),
+            })
+        };
+        let generation = tokio::sync::watch::channel(1).0;
+        let shape = |(connect, step2, recon): SplitPorts| {
+            (connect.is_some(), step2.is_some(), recon.is_some())
+        };
+        // (Connect, step 2, reconcile-only)
+        assert_eq!(
+            shape(split_ports(session(), &generation, None)),
+            (true, false, true)
+        );
+        assert_eq!(
+            shape(split_ports(session(), &generation, Some(electrum))),
+            (true, false, true)
+        );
+        assert_eq!(
+            shape(split_ports(session(), &generation, Some(connect.clone()))),
+            (true, true, true)
+        );
+        assert_eq!(
+            shape(split_ports(None, &generation, Some(connect))),
+            (false, false, false)
+        );
     }
 
     /// #568 A1/D4: the Split review is priced only by a BTCB2-scoped source,
