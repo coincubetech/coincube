@@ -1343,7 +1343,19 @@ fn split_journal_discovery_finds_only_split_journals() {
     let upper = root.join(sha256::Hash::hash(b"upper").to_string().to_uppercase());
     std::fs::create_dir(&upper).unwrap();
     std::fs::write(upper.join("intent.json"), b"{}").unwrap();
-    assert_eq!(step1::discover(&root), vec![(digest, real)]);
+    assert_eq!(step1::discover(&root), vec![(digest, real.clone())]);
+    // #625 F2: a tombstone that is not a regular file doesn't close it; a
+    // regular one does, and discovery skips the journal.
+    std::fs::create_dir(real.join(step1::CLOSED)).unwrap();
+    assert!(!step1::is_closed(&real));
+    std::fs::remove_dir(real.join(step1::CLOSED)).unwrap();
+    std::os::unix::fs::symlink(real.join("intent.json"), real.join(step1::CLOSED)).unwrap();
+    assert!(!step1::is_closed(&real));
+    assert_eq!(step1::discover(&root), vec![(digest, real.clone())]);
+    std::fs::remove_file(real.join(step1::CLOSED)).unwrap();
+    std::fs::write(real.join(step1::CLOSED), b"{}").unwrap();
+    assert!(step1::is_closed(&real));
+    assert!(step1::discover(&root).is_empty());
 }
 
 /// D1: nothing in the GUI starts a split. `SplitPanel::start` is reached only
