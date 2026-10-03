@@ -128,6 +128,13 @@ impl SplitPanel {
     pub fn step2_status(&self) -> Option<crate::services::claim_workflow::Status> {
         self.step2_status
     }
+    /// What that evidence warns about (#637 r4172242637), derived from it
+    /// rather than kept in the notice: an operation's notice (a saved file, a
+    /// failed export or check, an ended session) never replaces it, and only
+    /// new evidence changes it (#637 review 5971166062 F1).
+    pub fn step2_warning(&self) -> Option<String> {
+        self.step2_status.and_then(step2::reconcile_warning)
+    }
     /// Step 2 may be entered: step 1 tracked at six confirmations, the
     /// step-1 driver bound, a step-2 port and a Connect session.
     pub fn can_enter_step2(&self) -> bool {
@@ -546,27 +553,24 @@ impl SplitPanel {
     /// A reconcile after the step-2 submission, from the live coordinator or
     /// the reopened reconciler alike (#637 r4172242637). The BTCB2
     /// observation and the step-1 evidence are both kept. Evidence that no
-    /// longer shows step 1 eligible on Bitcoin warns, naming a reorg only for
-    /// `Reorged`, and drops any "cannot replay" label. A failed check keeps
-    /// the last evidence and its warning. Nothing new is offered: the only
-    /// action after a step-2 submission is still to reconcile.
+    /// longer shows step 1 eligible on Bitcoin warns through
+    /// [`Self::step2_warning`], naming a reorg only for `Reorged`, and drops
+    /// any "cannot replay" label. A failed check keeps the last evidence and
+    /// its warning; the notice carries only the failure. Nothing new is
+    /// offered: the only action after a step-2 submission is still to
+    /// reconcile.
     fn reconciled(&mut self, result: Seen) {
-        let error = match result {
+        match result {
             Ok((status, seen)) => {
                 self.step2_status = Some(status);
                 self.step2_seen = Some(seen);
-                None
+                self.notice = None;
             }
-            Err(reason) => Some(reason.reason),
-        };
-        let warning = self.step2_status.and_then(step2::reconcile_warning);
-        if warning.is_some() || error.is_some() {
+            Err(reason) => self.notice = Some(reason.reason),
+        }
+        if self.step2_warning().is_some() || self.notice.is_some() {
             self.replay = None;
         }
-        self.notice = match (warning, error) {
-            (Some(warning), Some(error)) => Some(format!("{} {}", warning, error)),
-            (warning, error) => warning.or(error),
-        };
     }
 
     pub(super) fn apply_step2(&mut self, event: SplitEvent) -> Task<Message> {
@@ -582,11 +586,10 @@ impl SplitPanel {
                 self.outcome = None;
                 self.step2_outcome = recon.recorded_outcome();
                 self.bind_recon(recon);
-                // The last reconcile's step-1 evidence, kept through the
-                // revocation along with its BTCB2 observation, still decides
-                // the warning until a new reconcile replaces it
+                // The last reconcile's step-1 evidence is kept through the
+                // revocation along with its BTCB2 observation, so its
+                // warning stays until a new reconcile replaces it
                 // (#637 r4172729359).
-                self.notice = self.step2_status.and_then(step2::reconcile_warning);
                 self.stage = Stage::Step2(Step2Stage::Reconcile);
                 Task::none()
             }

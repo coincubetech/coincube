@@ -10,6 +10,7 @@ use crate::app::{
     state::vault::split::{
         Restarted, SplitEvent, SplitMessage, SplitPanel, Stage, Step2Stage, Work,
     },
+    view::vault::split::warning_lines,
 };
 use crate::services::split_psbt_file;
 use iced::{futures::StreamExt, Task};
@@ -936,7 +937,12 @@ async fn panel_warns_when_step1_loses_bitcoin_confirmation_after_step2() {
         panel.step2_status(),
         Some(Status::Observation(Assessment::Reorged))
     );
-    assert_eq!(panel.notice(), Some(STEP1_REORGED_AFTER_STEP2));
+    assert_eq!(
+        panel.step2_warning().as_deref(),
+        Some(STEP1_REORGED_AFTER_STEP2)
+    );
+    assert_eq!(panel.notice(), None);
+    assert_eq!(warning_lines(&panel), [STEP1_REORGED_AFTER_STEP2]);
     assert_eq!(panel.step2_seen(), Some(TransactionObservation::Absent));
     assert_eq!(panel.replay_label(), None);
     for message in AFTER_SUBMISSION {
@@ -951,42 +957,42 @@ async fn panel_warns_when_step1_loses_bitcoin_confirmation_after_step2() {
     }
     assert!(panel.prep.is_none() && panel.driver.is_none() && panel.coord.is_some());
 
-    // A failed check keeps the evidence and its warning.
+    // A failed check keeps the evidence and its warning; the failure has
+    // its own line.
     let task = reconcile(&mut panel);
     drive(&mut panel, task).await;
     assert_eq!(
         panel.step2_status(),
         Some(Status::Observation(Assessment::Reorged))
     );
-    let notice = panel.notice().unwrap();
-    assert!(notice.starts_with(STEP1_REORGED_AFTER_STEP2), "{}", notice);
-    assert!(
-        notice.ends_with("Connect couldn't be reached."),
-        "{}",
-        notice
+    assert_eq!(
+        warning_lines(&panel),
+        [STEP1_REORGED_AFTER_STEP2, "Connect couldn't be reached."]
     );
 
     // Fewer confirmations, or no fresh evidence: warned, not a reorg.
     let task = reconcile(&mut panel);
     drive(&mut panel, task).await;
-    let notice = panel.notice().unwrap();
+    assert_eq!(panel.notice(), None);
+    let warning = panel.step2_warning().unwrap();
     assert!(
-        notice.contains("3 of 6 Bitcoin confirmations"),
+        warning.contains("3 of 6 Bitcoin confirmations"),
         "{}",
-        notice
+        warning
     );
-    assert!(notice.contains("replay protection"), "{}", notice);
-    assert!(!notice.contains("reorganized"), "{}", notice);
+    assert!(warning.contains("replay protection"), "{}", warning);
+    assert!(!warning.contains("reorganized"), "{}", warning);
     let task = reconcile(&mut panel);
     drive(&mut panel, task).await;
-    let notice = panel.notice().unwrap();
-    assert!(notice.contains("not a sign of a reorg"), "{}", notice);
+    let warning = panel.step2_warning().unwrap();
+    assert!(warning.contains("not a sign of a reorg"), "{}", warning);
     assert_eq!(panel.step2_status(), Some(Status::Unavailable));
 
     // Eligible again: no warning; the observation is still shown.
     let task = reconcile(&mut panel);
     drive(&mut panel, task).await;
-    assert_eq!(panel.notice(), None);
+    assert_eq!(panel.step2_warning(), None);
+    assert!(warning_lines(&panel).is_empty());
     assert_eq!(
         panel.step2_status(),
         Some(Status::Observation(
@@ -1030,7 +1036,7 @@ async fn panel_reconciler_warns_when_step1_loses_bitcoin_confirmation() {
         panel.step2_status(),
         Some(Status::Observation(Assessment::Reorged))
     );
-    assert_eq!(panel.notice(), Some(STEP1_REORGED_AFTER_STEP2));
+    assert_eq!(warning_lines(&panel), [STEP1_REORGED_AFTER_STEP2]);
     assert!(matches!(
         panel.step2_seen(),
         Some(TransactionObservation::Unconfirmed { .. })
@@ -1047,8 +1053,18 @@ async fn panel_reconciler_warns_when_step1_loses_bitcoin_confirmation() {
     // keep the last evidence, and its warning comes back with the
     // reconciler instead of leaving the observation unexplained
     // (#637 r4172729359).
+    // While the session is gone, its notice doesn't hide the warning
+    // (#637 review 5971166062 F1).
     panel.revoke();
     assert_eq!(panel.stage, Stage::NeedsSession);
+    let lines = warning_lines(&panel);
+    assert_eq!(lines.len(), 2, "{:?}", lines);
+    assert_eq!(lines[0], STEP1_REORGED_AFTER_STEP2);
+    assert!(
+        lines[1].starts_with("The split session ended."),
+        "{}",
+        lines[1]
+    );
     let task = panel.begin();
     drive(&mut panel, task).await;
     assert_eq!(panel.stage, Stage::Step2(Step2Stage::Reconcile));
@@ -1057,19 +1073,138 @@ async fn panel_reconciler_warns_when_step1_loses_bitcoin_confirmation() {
         Some(Status::Observation(Assessment::Reorged))
     );
     assert!(panel.step2_seen().is_some());
-    assert_eq!(panel.notice(), Some(STEP1_REORGED_AFTER_STEP2));
+    assert_eq!(warning_lines(&panel), [STEP1_REORGED_AFTER_STEP2]);
     assert_eq!(shared.lock().unwrap().step1_opened, 0);
 
     let task = panel.update(SplitMessage::Step2Reconcile);
     drive(&mut panel, task).await;
-    assert_eq!(panel.notice(), None);
+    assert!(warning_lines(&panel).is_empty());
     assert_eq!(shared.lock().unwrap().reconciles, 2);
     // Eligible evidence reopens without a warning.
     panel.revoke();
     let task = panel.begin();
     drive(&mut panel, task).await;
     assert_eq!(panel.stage, Stage::Step2(Step2Stage::Reconcile));
-    assert_eq!(panel.notice(), None);
+    assert!(warning_lines(&panel).is_empty());
+}
+
+/// #637 review 5971166062 F1: after a step-1 reorg is found, saving the
+/// signed step 1 (it succeeds, fails or is cancelled) reports on its own
+/// line, and the warning stays. So it does through a revocation and a
+/// reopen, which keep the signed step 1 offered for saving, until new
+/// evidence clears it.
+#[tokio::test(flavor = "multi_thread")]
+async fn panel_keeps_the_step1_warning_beside_every_notice() {
+    use crate::app::state::vault::split::step2::STEP1_REORGED_AFTER_STEP2;
+    // The journal records step 2, so a reopen only reconciles.
+    let journal = Journal::new(true);
+    let (mut panel, shared) = tracked_panel(&journal);
+    let outcome = Outcome::UpstreamAccepted {
+        txid: Txid::from_byte_array([5; 32]),
+        wtxid: coincube_core::miniscript::bitcoin::Wtxid::from_byte_array([6; 32]),
+    };
+    panel.driver = None;
+    panel.coord = Some(Box::new(PanelCoord {
+        shared: shared.clone(),
+        reviewed: false,
+        submitted: Some(outcome),
+    }));
+    panel.step2_outcome = Some(outcome);
+    panel.stage = Stage::Step2(Step2Stage::Submitted);
+    panel.set_recon_port(Some(Arc::new(PanelReconPort(shared.clone()))));
+    shared.lock().unwrap().statuses.extend([
+        Some(Status::Observation(Assessment::Reorged)),
+        Some(Status::Observation(
+            Assessment::ObservationsEligibleForPreflight,
+        )),
+    ]);
+    let root = journal.temp.0.parent().unwrap().to_path_buf();
+    // Save the signed step 1 to `path`; the warning lines afterwards.
+    async fn save(panel: &mut SplitPanel, path: PathBuf) -> Vec<String> {
+        let task = panel.export_signed_to(path);
+        drive(panel, task).await;
+        warning_lines(panel)
+    }
+
+    let task = panel.update(SplitMessage::Step2Reconcile);
+    drive(&mut panel, task).await;
+    assert_eq!(warning_lines(&panel), [STEP1_REORGED_AFTER_STEP2]);
+    assert!(panel.signed().is_some());
+
+    let saved = root.join("signed-1.txt");
+    let lines = save(&mut panel, saved.clone()).await;
+    assert!(saved.exists());
+    assert_eq!(lines.len(), 2, "{:?}", lines);
+    assert_eq!(lines[0], STEP1_REORGED_AFTER_STEP2);
+    assert!(
+        lines[1].starts_with("Signed step 1 saved to"),
+        "{}",
+        lines[1]
+    );
+
+    let lines = save(&mut panel, root.join("missing").join("signed.txt")).await;
+    assert_eq!(lines.len(), 2, "{:?}", lines);
+    assert_eq!(lines[0], STEP1_REORGED_AFTER_STEP2);
+    assert!(
+        !lines[1].starts_with("Signed step 1 saved to"),
+        "{}",
+        lines[1]
+    );
+    assert_eq!(panel.notice(), Some(lines[1].as_str()));
+
+    // A cancelled dialog changes nothing.
+    let seq = panel.seq;
+    let task = panel.apply(SplitEvent::SignedExportChosen(seq, None));
+    drive(&mut panel, task).await;
+    assert_eq!(warning_lines(&panel), lines);
+    assert_eq!(panel.stage, Stage::Step2(Step2Stage::Submitted));
+
+    // Revoked: the session's notice and the warning, each on its line.
+    panel.revoke();
+    assert_eq!(panel.stage, Stage::NeedsSession);
+    let lines = warning_lines(&panel);
+    assert_eq!(lines.len(), 2, "{:?}", lines);
+    assert_eq!(lines[0], STEP1_REORGED_AFTER_STEP2);
+    assert!(
+        lines[1].starts_with("The split session ended."),
+        "{}",
+        lines[1]
+    );
+
+    // Reopened: only the reconciler, with the warning; saving still keeps
+    // it.
+    let task = panel.begin();
+    drive(&mut panel, task).await;
+    assert_eq!(panel.stage, Stage::Step2(Step2Stage::Reconcile));
+    assert!(panel.recon.is_some() && panel.coord.is_none());
+    assert_eq!(warning_lines(&panel), [STEP1_REORGED_AFTER_STEP2]);
+    let saved = root.join("signed-2.txt");
+    let lines = save(&mut panel, saved.clone()).await;
+    assert!(saved.exists());
+    assert_eq!(lines.len(), 2, "{:?}", lines);
+    assert_eq!(lines[0], STEP1_REORGED_AFTER_STEP2);
+    assert!(
+        lines[1].starts_with("Signed step 1 saved to"),
+        "{}",
+        lines[1]
+    );
+    assert_eq!(panel.stage, Stage::Step2(Step2Stage::Reconcile));
+
+    // New eligible evidence clears the warning; a later save shows only
+    // its own result.
+    let task = panel.update(SplitMessage::Step2Reconcile);
+    drive(&mut panel, task).await;
+    assert!(warning_lines(&panel).is_empty());
+    let lines = save(&mut panel, root.join("signed-3.txt")).await;
+    assert_eq!(lines.len(), 1, "{:?}", lines);
+    assert!(
+        lines[0].starts_with("Signed step 1 saved to"),
+        "{}",
+        lines[0]
+    );
+    let counts = shared.lock().unwrap();
+    assert_eq!((counts.submits, counts.step1_opened), (0, 0));
+    assert_eq!(counts.reconciles, 2);
 }
 
 /// #637 F1: the Vault's daemon restarting or switching (a new daemon

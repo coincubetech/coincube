@@ -324,7 +324,9 @@ pub struct SplitPanel {
     /// Claimed prevouts and their Bitcoin addresses, for the abandon check.
     claimed: Vec<(OutPoint, String)>,
     abandon_checked: bool,
-    /// The last refusal while the flow keeps its state.
+    /// The last refusal while the flow keeps its state. Never the step-1
+    /// evidence's warning after the step-2 submission: that is derived from
+    /// `step2_status` ([`Self::step2_warning`]) so no notice replaces it.
     notice: Option<String>,
     /// The stage to return to after a check.
     resume_stage: Option<Stage>,

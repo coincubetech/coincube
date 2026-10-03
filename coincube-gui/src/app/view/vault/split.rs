@@ -68,6 +68,18 @@ fn working(work: Work) -> &'static str {
     }
 }
 
+/// The warning lines under every stage: the step-1 evidence's warning after
+/// the step-2 submission, then the last operation's notice. Each has its own
+/// line, so a saved file, a failed export or check, or an ended session never
+/// hides the warning (#637 review 5971166062 F1).
+pub(crate) fn warning_lines(panel: &SplitPanel) -> Vec<String> {
+    panel
+        .step2_warning()
+        .into_iter()
+        .chain(panel.notice().map(str::to_string))
+        .collect()
+}
+
 /// The step-2 stages.
 fn step2_body<'a>(
     panel: &'a SplitPanel,
@@ -355,8 +367,8 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
     if let Some(txid) = panel.tracked_txid() {
         body = body.push(caption(format!("Tracked step-1 txid {txid}")));
     }
-    if let Some(notice) = panel.notice() {
-        body = body.push(p1_regular(notice.to_string()).style(theme::text::warning));
+    for line in warning_lines(panel) {
+        body = body.push(p1_regular(line).style(theme::text::warning));
     }
     if panel.signed().is_some() && !matches!(panel.stage(), Stage::Working(_)) {
         actions = actions.push(action(
