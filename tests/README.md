@@ -106,7 +106,7 @@ and a fork sweep excluding that input. It tests construction and consensus;
 it does not admit regtest as mainnet historical proof or exercise automatic
 input preference and coordinator authorization.
 
-Split step 1 (#568) has its own test-only bridge:
+Split steps 1 and 2 (#568) have their own test-only bridge:
 
 ```sh
 cargo build --release --package coincube-core --example split_regtest_vectors
@@ -119,8 +119,18 @@ It funds one foreign wallet per supported shape (`pkh`, `sh(wpkh)`, `wpkh`,
 nodes, and checks: acceptance on Bitcoin with a signed vsize within the
 construction's estimate, mempool and block rejection on BTCB2, implicit and
 explicit `SIGHASH_ALL` giving identical transactions, and an `invalidateblock`
-reorg that returns the spent outpoints to Bitcoin's UTXO set. Its offline cases
-need only the bridge. Step 2 is not covered yet.
+reorg that returns the spent outpoints to Bitcoin's UTXO set. The step-1 poison's
+chain byte, fork marker and outpoint commitment are parsed independently of the
+Rust decoder. After step 1 has six confirmations on Bitcoin, step 2 spends exactly
+the claimed outpoints to a fresh P2WSH target (P2TR for `wpkh`): accepted by the
+BTCB2 mempool within the construction's vsize estimate and mined there, and
+refused by Bitcoin's mempool (`missing-inputs`) and in a candidate block. The
+bridge refuses an unclaimed or missing coin, a foreign-wallet or non-Vault target,
+a future locktime, step 1's signatures and any hash type but `SIGHASH_ALL`; the
+signed bytes (and the bytes BTCB2 mined) verify as a recorded step 2, and a
+tampered copy does not. Its
+offline cases need only the bridge. The unified `ALL|UNIFIED` fallback (#568 B4b)
+is not built yet and is not covered.
 
 A separate headless GUI test drives the production Claim panel's build, signer
 picker, software signing, review, explicit confirmation and confirmation tracking.

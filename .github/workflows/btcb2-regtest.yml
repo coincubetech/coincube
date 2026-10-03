@@ -216,7 +216,7 @@ jobs:
           "$KNOTS_LEGACY_PATH" --version | head -1
           # B4.1 proves the harness; B4.2 runs the QA matrices on it; the three
           # test_btcb2_claim_* modules run Claim end to end on both chains;
-          # test_btcb2_split_consensus.py runs Split step 1 on both (#568);
+          # test_btcb2_split_consensus.py runs Split steps 1 and 2 on both (#568);
           # test_btcb2_blockfile.py drives concurrent getblock batches at one
           # node to reproduce the block-file fault in #394. The modules are
           # named explicitly: a bare `pytest tests/` here would also pull in
