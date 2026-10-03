@@ -1197,7 +1197,7 @@ fn v8_split_journal_is_refused_by_the_v7_reader() {
 /// glob still has to name the item somewhere.
 #[test]
 fn split_b0_journal_api_has_no_gui_callers() {
-    const ITEMS: [&str; 22] = [
+    const ITEMS: [&str; 24] = [
         "create_split",
         "revalidate_split_construction",
         "bind_recovered_split_transaction",
@@ -1223,6 +1223,8 @@ fn split_b0_journal_api_has_no_gui_callers() {
         "record_split_step2_observed",
         "split_step2_resubmissions",
         "split_step2_observed",
+        "record_split_step2_returned",
+        "split_step2_returned",
     ];
     const OWN: [&str; 4] = [
         "src/services/claim_workflow/split.rs",
@@ -1306,6 +1308,8 @@ fn split_b0_journal_api_has_no_gui_callers() {
                             "record_split_step2_observed",
                             "split_step2_resubmissions",
                             "split_step2_observed",
+                            "record_split_step2_returned",
+                            "split_step2_returned",
                         ]
                         .contains(&ident)
                             || (gate_tests && ident == "create_split"));
@@ -1632,9 +1636,11 @@ fn submitted() -> (
     (temp, c, wallet, step1, verified, tracked)
 }
 
-/// P3-3: a resend of the recorded signed step 2 is recorded only after a
-/// fresh assessment whose read of it on BTCB2 was absent, for exactly its
-/// bytes, never once it was seen there, and within the attempt bound. A
+/// P3-3: a resend of the recorded signed step 2 is recorded only after its
+/// latest attempt's return without acceptance was recorded (which the
+/// resend clears), after a fresh assessment whose read of it on BTCB2 was
+/// absent, for exactly its bytes, never once it was seen there, and within
+/// the attempt bound. A
 /// sighting is recorded once, from a read of its own txid. Neither field
 /// exists until used, so an earlier journal serializes as before, and each
 /// needs a recorded step 2.
@@ -1643,15 +1649,27 @@ fn split_step2_resends_and_the_observation_that_ends_them() {
     let (temp, mut c, wallet, step1, verified, tracked) = submitted();
     let txid = verified.transaction().compute_txid();
     let text = journal_text(&temp);
-    assert!(!text.contains("step2_resubmissions") && !text.contains("step2_observed"));
+    assert!(!["step2_resubmissions", "step2_observed", "step2_returned"]
+        .iter()
+        .any(|field| text.contains(field)));
     assert_eq!(c.split_step2_resubmissions(), 0);
-    assert!(!c.split_step2_observed());
+    assert!(!c.split_step2_observed() && !c.split_step2_returned());
     let fresh = |c: &mut Controller| {
         refresh(c, observation(tracked, Bitcoin::Confirmed { depth: 6 }));
     };
     let resend = |c: &mut Controller, signed: &VerifiedSplitStep2, step2| {
         c.record_split_step2_resubmission(&context(), signed, step2, policy(), 10_000)
     };
+    // Not before the submission's return without acceptance is recorded.
+    fresh(&mut c);
+    assert!(matches!(
+        resend(&mut c, &verified, TransactionObservation::Absent),
+        Err(Error::Conflict)
+    ));
+    c.record_split_step2_returned(&context()).unwrap();
+    c.record_split_step2_returned(&context()).unwrap();
+    assert!(c.split_step2_returned());
+    let text = journal_text(&temp);
     // A fresh assessment, an absent step 2 and the recorded bytes.
     assert!(matches!(
         resend(&mut c, &verified, TransactionObservation::Absent),
@@ -1685,11 +1703,18 @@ fn split_step2_resends_and_the_observation_that_ends_them() {
     fresh(&mut c);
     resend(&mut c, &verified, TransactionObservation::Absent).unwrap();
     assert_eq!(c.split_step2_resubmissions(), 1);
-    // It consumed the assessment.
+    // It consumed the assessment, and its own return is not recorded yet.
+    assert!(!c.split_step2_returned());
     assert!(matches!(
         resend(&mut c, &verified, TransactionObservation::Absent),
         Err(Error::Unchecked)
     ));
+    fresh(&mut c);
+    assert!(matches!(
+        resend(&mut c, &verified, TransactionObservation::Absent),
+        Err(Error::Conflict)
+    ));
+    c.record_split_step2_returned(&context()).unwrap();
     fresh(&mut c);
     resend(&mut c, &verified, TransactionObservation::Absent).unwrap();
     let journal: serde_json::Value = serde_json::from_str(&journal_text(&temp)).unwrap();
@@ -1736,8 +1761,9 @@ fn split_step2_resends_and_the_observation_that_ends_them() {
     let attempt = Step2Resubmission {
         wtxid: verified.transaction().compute_wtxid(),
     };
-    c.intent.split.as_mut().unwrap().step2_resubmissions =
-        vec![attempt; MAX_SPLIT_STEP2_RESUBMISSIONS];
+    let at_bound = c.intent.split.as_mut().unwrap();
+    at_bound.step2_resubmissions = vec![attempt; MAX_SPLIT_STEP2_RESUBMISSIONS];
+    at_bound.step2_returned = true;
     full_validate(&c.intent).unwrap();
     fresh(&mut c);
     assert!(matches!(
@@ -1785,6 +1811,17 @@ fn split_step2_resends_and_the_observation_that_ends_them() {
                 record.step2_resubmissions.clear();
             }),
         ),
+        (
+            "a return without a recorded step 2",
+            Box::new(|i: &mut Intent| {
+                i.fork_submission = None;
+                let record = i.split.as_mut().unwrap();
+                record.step2_transaction = None;
+                record.step2_resubmissions.clear();
+                record.step2_observed = false;
+                record.step2_returned = true;
+            }),
+        ),
     ] {
         assert!(check(&*change).is_some(), "{}", name);
     }
@@ -1800,6 +1837,10 @@ fn split_step2_resends_and_the_observation_that_ends_them() {
                 txid: signed.transaction().compute_txid()
             }
         ),
+        Err(Error::InvalidPlan)
+    ));
+    assert!(matches!(
+        c.record_split_step2_returned(&context()),
         Err(Error::InvalidPlan)
     ));
     assert_eq!(c.split_step2_resubmissions(), 0);

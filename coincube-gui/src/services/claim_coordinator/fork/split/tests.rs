@@ -220,6 +220,8 @@ struct View {
     on_btcb2: Vec<(Txid, TransactionObservation)>,
     /// The BTCB2 anchor's tip height.
     fork_tip: u64,
+    /// Seconds subtracted from the stamp of every transaction read.
+    read_age: i64,
 }
 impl View {
     /// Step 1 confirmed in `block` (hash 6) at height 100 with `depth`
@@ -245,6 +247,7 @@ impl View {
             clock_offset: 0,
             on_btcb2: Vec::new(),
             fork_tip: FORK_TIP,
+            read_age: 0,
         };
         view.set_depth(depth);
         view
@@ -269,10 +272,14 @@ struct Chains {
 const ORIGIN: &str = "https://connect.example/";
 impl Chains {
     fn read<T>(chain: ChainId, value: T) -> Result<FreshRead<T>, FailureKind> {
+        Self::read_aged(chain, value, 0)
+    }
+    /// A read stamped `age` seconds ago.
+    fn read_aged<T>(chain: ChainId, value: T, age: i64) -> Result<FreshRead<T>, FailureKind> {
         let mut headers = HeaderMap::new();
         headers.insert("x-cache", "BYPASS".parse().unwrap());
         headers.insert("cache-control", "no-store".parse().unwrap());
-        FreshRead::from_response(chain, value, now(), &headers)
+        FreshRead::from_response(chain, value, now() - age, &headers)
     }
     fn edit(&self, edit: impl FnOnce(&mut View)) {
         edit(&mut self.view.lock().unwrap());
@@ -325,7 +332,7 @@ impl ObservationSource for Chains {
         let view = self.view.lock().unwrap();
         if chain != ChainId::Bitcoin {
             if let Some((_, seen)) = view.on_btcb2.iter().find(|(id, _)| *id == txid) {
-                return Self::read(chain, *seen);
+                return Self::read_aged(chain, *seen, view.read_age);
             }
         }
         let observation = match (chain, view.step1_block) {
@@ -334,7 +341,7 @@ impl ObservationSource for Chains {
             _ if view.on_fork => TransactionObservation::Unconfirmed { txid },
             _ => TransactionObservation::Absent,
         };
-        Self::read(chain, observation)
+        Self::read_aged(chain, observation, view.read_age)
     }
     async fn hash_at_height(
         &self,

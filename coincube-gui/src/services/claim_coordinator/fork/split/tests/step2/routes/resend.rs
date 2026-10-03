@@ -8,6 +8,9 @@ use crate::services::claim_coordinator::fork::split::step2::{
     ResendError, SplitStep2Coordinator, Step2ResubmissionReview,
 };
 
+/// Run by a daemon when a send is asked for.
+type Hook = Box<dyn FnOnce() + Send>;
+
 /// A target Vault daemon that refuses sends before any byte leaves: the
 /// next `refusals` sends, and, when `switch` is set, the next send after its
 /// backend binding moves to that value (the #635 dead end: a backend switch
@@ -19,6 +22,8 @@ struct Refusing {
     switch: Arc<Mutex<Option<usize>>>,
     /// Sends never answer (a lost response).
     hang: Arc<std::sync::atomic::AtomicBool>,
+    /// Run once when the next send is asked for.
+    on_send: Arc<Mutex<Option<Hook>>>,
     /// Every send the coordinator asked for, refused or not.
     calls: Arc<AtomicUsize>,
 }
@@ -29,6 +34,7 @@ impl Refusing {
             refusals: Arc::new(AtomicUsize::new(refusals)),
             switch: Arc::new(Mutex::new(None)),
             hang: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            on_send: Arc::new(Mutex::new(None)),
             calls: Arc::new(AtomicUsize::new(0)),
         }
     }
@@ -41,6 +47,9 @@ impl Refusing {
     /// Whether this send is refused before any byte leaves.
     fn refuse(&self) -> bool {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        if let Some(hook) = self.on_send.lock().unwrap().take() {
+            hook();
+        }
         if let Some(binding) = self.switch.lock().unwrap().take() {
             self.vault.binding.store(binding, Ordering::SeqCst);
         }
@@ -221,8 +230,8 @@ fn attempts(signed: &Transaction, n: usize) -> serde_json::Value {
 /// The live dead end and its recovery. Ordinary review and reconcile never
 /// resend; a distinct review, which records nothing, then a confirmation
 /// that records the attempt before the one send of exactly the recorded
-/// bytes. The route's exact acceptance is recorded as a sighting: it left,
-/// and no resend is offered again.
+/// bytes. After the route's exact acceptance no resend is offered again:
+/// its return without acceptance is never recorded.
 #[tokio::test(flavor = "multi_thread")]
 async fn split_step2_dead_end_is_resent_live_after_an_explicit_review() {
     let connect = MockServer::start_async().await;
@@ -295,12 +304,12 @@ async fn split_step2_dead_end_is_resent_live_after_an_explicit_review() {
         Some(Outcome::Uncertain { txid, wtxid })
     );
 
-    // Accepted: it left. Recorded, and the resend is gone, although
-    // Connect's read does not show it yet.
-    assert_eq!(journal["split"]["step2_observed"], true);
+    // Accepted: it left. The resend is gone, although Connect's read does
+    // not show it yet.
+    assert!(journal["split"].get("step2_returned").is_none());
     assert!(matches!(
         coordinator.prepare_step2_resubmission(&context()).await,
-        Err(ResendError::Observed)
+        Err(ResendError::Unsettled)
     ));
     assert_eq!(daemon.sends().len(), 1);
 }
@@ -500,7 +509,7 @@ async fn split_step2_dead_end_is_resent_after_a_restart_from_the_recorded_bytes(
         )]
     );
     let after = h.temp.journal();
-    assert_eq!(after["split"]["step2_observed"], true, "it left");
+    assert!(after["split"].get("step2_returned").is_none(), "accepted");
     assert_eq!(resends(&h), attempts(&signed, 1));
     assert_eq!(
         after["split"]["target_index"],
@@ -1017,12 +1026,9 @@ async fn split_step2_resend_records_each_attempt_before_its_one_send() {
     // not a valid journal.
     let max = claim_workflow::MAX_SPLIT_STEP2_RESUBMISSIONS;
     h.temp.rewrite(|intent| {
-        // The accepted resend above recorded a sighting; drop it to reach
-        // the bound alone.
-        intent["split"]
-            .as_object_mut()
-            .unwrap()
-            .remove("step2_observed");
+        // The resend above was accepted, so its return is not recorded;
+        // record one to reach the bound alone.
+        intent["split"]["step2_returned"] = true.into();
         intent["split"]["step2_resubmissions"] = attempts(&signed, max)
     });
     let mut coordinator = reopen(&h, coins(&h.wallet), transport()).await.unwrap();
@@ -1127,6 +1133,8 @@ async fn split_step2_resend_cancelled_mid_send_stays_uncertain() {
         }
     );
     assert_eq!(resends(&h), attempts(&signed, 1));
+    // It may still be under way: its return is never recorded.
+    assert!(h.temp.journal()["split"].get("step2_returned").is_none());
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(daemon.calls(), 2, "no retry");
     assert!(daemon.sends().is_empty());
@@ -1134,4 +1142,171 @@ async fn split_step2_resend_cancelled_mid_send_stays_uncertain() {
         coordinator.prepare_step2_resubmission(&context()).await,
         Err(ResendError::Coordinator(Error::Revoked))
     ));
+}
+
+fn set_mode(directory: &std::path::Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(directory, std::fs::Permissions::from_mode(mode)).unwrap();
+}
+
+/// #639 r4172137529: an attempt the route accepted, with the journal
+/// unwritable from the send on, is never resent: reopened, with a fresh
+/// absent read and an accepting preflight, it is still unsettled. A refused
+/// attempt whose return cannot be written is never resent either.
+#[tokio::test(flavor = "multi_thread")]
+async fn split_step2_an_accepted_send_is_never_resent_after_a_failed_write() {
+    let connect = MockServer::start_async().await;
+    let daemon = Refusing::new(None, 1);
+    let Uncertain {
+        h,
+        mut coordinator,
+        signed,
+        ..
+    } = uncertain(&daemon, None, &connect).await;
+    let (txid, wtxid) = (signed.compute_txid(), signed.compute_wtxid());
+    let review = coordinator
+        .prepare_step2_resubmission(&context())
+        .await
+        .unwrap();
+    let directory = h.temp.0.clone();
+    *daemon.on_send.lock().unwrap() = Some(Box::new(move || set_mode(&directory, 0o500)));
+    let outcome = coordinator
+        .confirm_step2_resubmission(review, &context())
+        .await;
+    set_mode(&h.temp.0, 0o700);
+    assert_eq!(outcome.unwrap(), Outcome::UpstreamAccepted { txid, wtxid });
+    assert_eq!(daemon.sends().len(), 1);
+    drop(coordinator);
+    let transport = routes_over(
+        daemon.clone(),
+        None,
+        &connect,
+        ORIGIN,
+        vault_descriptor(),
+        &h,
+    );
+    let mut reopened = reopen(&h, coins(&h.wallet), transport).await.unwrap();
+    assert!(matches!(
+        reopened.prepare_step2_resubmission(&context()).await,
+        Err(ResendError::Unsettled)
+    ));
+    assert_eq!(daemon.sends().len(), 1);
+    drop(reopened);
+
+    // Refused while the journal cannot be written: the return is not
+    // recorded, so this attempt is never resent either.
+    let other_connect = MockServer::start_async().await;
+    let refusing = Refusing::new(None, 2);
+    let Uncertain {
+        h,
+        mut coordinator,
+        signed,
+        ..
+    } = uncertain(&refusing, None, &other_connect).await;
+    let (txid, wtxid) = (signed.compute_txid(), signed.compute_wtxid());
+    let review = coordinator
+        .prepare_step2_resubmission(&context())
+        .await
+        .unwrap();
+    let directory = h.temp.0.clone();
+    *refusing.on_send.lock().unwrap() = Some(Box::new(move || set_mode(&directory, 0o500)));
+    let outcome = coordinator
+        .confirm_step2_resubmission(review, &context())
+        .await;
+    set_mode(&h.temp.0, 0o700);
+    assert_eq!(outcome.unwrap(), Outcome::Uncertain { txid, wtxid });
+    assert_eq!(refusing.calls(), 2);
+    drop(coordinator);
+    assert!(h.temp.journal()["split"].get("step2_returned").is_none());
+    let transport = routes_over(
+        refusing.clone(),
+        None,
+        &other_connect,
+        ORIGIN,
+        vault_descriptor(),
+        &h,
+    );
+    let mut reopened = reopen(&h, coins(&h.wallet), transport).await.unwrap();
+    assert!(matches!(
+        reopened.prepare_step2_resubmission(&context()).await,
+        Err(ResendError::Unsettled)
+    ));
+    assert_eq!(refusing.calls(), 2);
+}
+
+/// #639 r4172137542: the first step-2 collection, before the preflight, is
+/// review evidence too. A first read at the edge of the observation age
+/// leaves no time for the review, although the later reads are fresh.
+#[tokio::test(flavor = "multi_thread")]
+async fn split_step2_resend_deadline_covers_the_first_collection() {
+    let connect = MockServer::start_async().await;
+    let daemon = Refusing::new(None, 1);
+    let Uncertain {
+        h, mut coordinator, ..
+    } = uncertain(&daemon, None, &connect).await;
+    h.chains.edit(|view| {
+        view.read_age = policy().observations.max_observation_age_seconds - 1;
+        view.between = Some(Box::new(|v: &mut View| v.read_age = 0));
+    });
+    assert!(matches!(
+        coordinator.prepare_step2_resubmission(&context()).await,
+        Err(ResendError::Coordinator(Error::ExpiredEvidence))
+    ));
+    // With every read fresh, the review is granted.
+    coordinator
+        .prepare_step2_resubmission(&context())
+        .await
+        .unwrap();
+}
+
+/// A resend whose send outlives the 30 s bound is `Uncertain`, and since the
+/// send may still be under way it is never recorded as returned: no further
+/// resend, then or after a restart.
+#[tokio::test(flavor = "multi_thread")]
+async fn split_step2_resend_past_the_send_bound_is_never_resent() {
+    let connect = MockServer::start_async().await;
+    let daemon = Refusing::new(None, 1);
+    let Uncertain {
+        h,
+        mut coordinator,
+        signed,
+        ..
+    } = uncertain(&daemon, None, &connect).await;
+    let review = coordinator
+        .prepare_step2_resubmission(&context())
+        .await
+        .unwrap();
+    daemon.hang.store(true, Ordering::SeqCst);
+    assert_eq!(
+        coordinator
+            .confirm_step2_resubmission(review, &context())
+            .await
+            .unwrap(),
+        Outcome::Uncertain {
+            txid: signed.compute_txid(),
+            wtxid: signed.compute_wtxid(),
+        }
+    );
+    assert_eq!(resends(&h), attempts(&signed, 1));
+    assert!(h.temp.journal()["split"].get("step2_returned").is_none());
+    assert!(matches!(
+        coordinator.prepare_step2_resubmission(&context()).await,
+        Err(ResendError::Unsettled)
+    ));
+    drop(coordinator);
+    daemon.hang.store(false, Ordering::SeqCst);
+    let transport = routes_over(
+        daemon.clone(),
+        None,
+        &connect,
+        ORIGIN,
+        vault_descriptor(),
+        &h,
+    );
+    let mut reopened = reopen(&h, coins(&h.wallet), transport).await.unwrap();
+    assert!(matches!(
+        reopened.prepare_step2_resubmission(&context()).await,
+        Err(ResendError::Unsettled)
+    ));
+    assert_eq!(daemon.calls(), 2);
 }

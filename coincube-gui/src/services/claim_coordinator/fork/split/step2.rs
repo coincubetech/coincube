@@ -998,7 +998,8 @@ impl SplitStep2Coordinator {
     /// The one send of an attempt the journal has just recorded (the
     /// submission intent or a resend), on the reviewed route under its
     /// deadline. Anything but the route's exact acceptance is `Uncertain`;
-    /// nothing here retries. An exact acceptance is recorded as a sighting.
+    /// nothing here retries. Only a send that completed without that
+    /// acceptance is recorded as returned, which a resend review needs.
     async fn send_recorded(&mut self, context: &Context, refreshed: ReviewSnapshot) -> Outcome {
         let uncertain = Outcome::Uncertain {
             txid: refreshed.txid,
@@ -1037,17 +1038,21 @@ impl SplitStep2Coordinator {
             Some(Ok(SubmissionOutcome::UpstreamAccepted { txid, wtxid }))
                 if txid == refreshed.txid && wtxid == refreshed.wtxid =>
             {
-                // The route took exactly these bytes: they left. Record that
-                // as a sighting so no resend is offered (P3-3). The outcome
-                // stands either way; a failed write poisons the journal, and
-                // every later step then refuses.
-                let _ = self.controller.record_split_step2_observed(
-                    context,
-                    claim_observation::TransactionObservation::Unconfirmed { txid },
-                );
                 Outcome::UpstreamAccepted { txid, wtxid }
             }
-            _ => uncertain,
+            Some(_) => {
+                // The send completed without the route's acceptance (a
+                // refusal, a lost upstream answer, another txid): record that
+                // it returned, the one record that lets a resend be reviewed
+                // (P3-3). If this write fails, the journal still holds the
+                // attempt as unreturned, which never resends, so the outcome
+                // stands either way.
+                let _unreturned_refuses = self.controller.record_split_step2_returned(context);
+                uncertain
+            }
+            // Cancelled or past the bound: the send may still be under way
+            // and may yet be accepted. It stays unreturned: never resent.
+            None => uncertain,
         }
     }
 }

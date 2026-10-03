@@ -12,9 +12,13 @@
 //! - **One distinct, one-use review.** Only
 //!   [`SplitStep2Coordinator::prepare_step2_resubmission`] creates a
 //!   [`Step2ResubmissionReview`]; review, refresh, reconcile and restart
-//!   never do. A step 2 ever seen on BTCB2 (by this review or by any
-//!   reconcile) or accepted by its route never gets one: it left. The
-//!   journal records that.
+//!   never do. It needs the journal's record that the latest attempt came
+//!   back from a completed send without the route's acceptance, written
+//!   only after control returned. So an accepted attempt, or one cancelled,
+//!   timed out or interrupted, or whose record failed to write, is never
+//!   resent, before or after a restart. A step 2 ever seen on BTCB2 (by
+//!   this review or by any reconcile, recorded in the journal) never gets
+//!   one either: it left.
 //! - **Fresh evidence**, collected around the route's preflight of the exact
 //!   bytes and again at confirmation: the recorded signed step 2 absent from
 //!   BTCB2 (stable reads keyed by its own txid), every claimed coin still
@@ -77,6 +81,10 @@ pub enum ResendError {
     /// The recorded step 2 was seen on BTCB2, now or by an earlier read
     /// (recorded in the journal): it left. Reconcile only.
     Observed,
+    /// The latest attempt's return without the route's acceptance is not
+    /// recorded: it was accepted, or cancelled, timed out or interrupted
+    /// while it may have left. Reconcile only.
+    Unsettled,
     /// The journal records the most resends it allows.
     AttemptsExhausted,
     /// A claimed coin is not among its address's fresh BTCB2 unspent
@@ -290,7 +298,8 @@ impl SplitStep2Coordinator {
     }
 
     /// The journal's side of a resend: a recorded submission of exactly this
-    /// coordinator's verified step 2, never seen on BTCB2, under the limit.
+    /// coordinator's verified step 2, never seen on BTCB2, whose latest
+    /// attempt is recorded as returned without acceptance, under the limit.
     fn resendable(&self) -> Result<(), ResendError> {
         let Some(submission) = self.controller.recorded_fork_submission() else {
             return Err(ResendError::NotRecorded);
@@ -304,6 +313,9 @@ impl SplitStep2Coordinator {
         }
         if self.controller.split_step2_observed() {
             return Err(ResendError::Observed);
+        }
+        if !self.controller.split_step2_returned() {
+            return Err(ResendError::Unsettled);
         }
         if self.controller.split_step2_resubmissions()
             >= claim_workflow::MAX_SPLIT_STEP2_RESUBMISSIONS
@@ -411,7 +423,7 @@ impl SplitStep2Coordinator {
         )?
         .min(observation_deadline(
             self.policy,
-            last.observed_at().min(unspent_at),
+            first.observed_at().min(last.observed_at()).min(unspent_at),
             now,
             origin,
         )?);
@@ -444,6 +456,7 @@ impl SplitStep2Coordinator {
     /// A fresh resend review of the recorded signed step 2, after a recorded
     /// submission whose outcome is uncertain. Records nothing; refused while
     /// no submission is recorded, once the step 2 was ever seen on BTCB2,
+    /// until the latest attempt is recorded as returned without acceptance,
     /// at the attempt limit, and on any stale or failing evidence.
     pub async fn prepare_step2_resubmission(
         &mut self,

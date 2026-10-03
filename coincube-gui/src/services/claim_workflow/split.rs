@@ -20,15 +20,20 @@
 //!   input's scriptSig changes it.
 //! - The foreign public descriptors are kept until completion (owner decision
 //!   P2), in the same owner-only (0600) journal, and then deleted.
-//! - After an uncertain step-2 submission (P3-3), each explicitly reviewed
-//!   resend of exactly the recorded signed step 2 is recorded before it is
-//!   attempted, and a step 2 ever seen on BTCB2 or accepted by its route is
-//!   recorded as observed: it left, so no resend is offered again. Both
-//!   fields are absent until used, so a journal without them serializes
-//!   exactly as before. A binary that predates them refuses one that has
-//!   them (`deny_unknown_fields`), and an ordinary submission or reconcile
-//!   that sees step 2 leave writes the observation, so a downgrade after
-//!   that point refuses the journal.
+//! - After an uncertain step-2 submission (P3-3), an explicitly reviewed
+//!   resend of exactly the recorded signed step 2 is possible only once the
+//!   latest attempt's return without the route's acceptance was recorded,
+//!   after control came back from a completed send. An accepted attempt, or
+//!   one whose return is not on disk (cancelled, timed out, interrupted, or
+//!   a failed write), is never resent. Each resend is recorded before it is
+//!   attempted, and a step 2 ever seen on BTCB2 is recorded as observed: it
+//!   left, so no resend is offered again. These fields are absent until
+//!   used, so a journal without them serializes exactly as before. A binary
+//!   that predates them refuses one that has them (`deny_unknown_fields`),
+//!   and an ordinary send that comes back refused, or a reconcile that sees
+//!   step 2, writes one, so a downgrade after either refuses the journal. A
+//!   submission recorded before these fields existed has no recorded return
+//!   and is never resent.
 //!
 //! Nothing here signs, broadcasts, or grants step-2 authority. A reopened
 //! Split intent is Unchecked like a Claim one, and a recorded uncertain
@@ -80,10 +85,15 @@ pub(super) struct SplitRecord {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     step2_resubmissions: Vec<Step2Resubmission>,
     /// A fresh read saw the recorded step 2 on BTCB2, in a mempool or a
-    /// block, or its route accepted exactly those bytes (P3-3). It left: no
-    /// resend is offered again.
+    /// block (P3-3). It left: no resend is offered again.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     step2_observed: bool,
+    /// The latest attempt (the submission intent or the last resend) came
+    /// back from a completed send without the route's acceptance, recorded
+    /// after it returned (P3-3). Only then may a resend be reviewed;
+    /// recording a resend clears it before that resend is sent.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    step2_returned: bool,
 }
 
 /// One explicitly reviewed resend of the recorded signed step 2 (P3-3).
@@ -280,7 +290,10 @@ pub(super) fn validate(intent: &Intent) -> Result<(), Error> {
     // exactly its bytes.
     match (&intent.fork_submission, &record.step2_transaction) {
         (None, None) => {
-            if !record.step2_resubmissions.is_empty() || record.step2_observed {
+            if !record.step2_resubmissions.is_empty()
+                || record.step2_observed
+                || record.step2_returned
+            {
                 return Err(Error::InvalidPlan);
             }
         }
@@ -372,6 +385,7 @@ impl Controller {
                 step2_transaction: None,
                 step2_resubmissions: Vec::new(),
                 step2_observed: false,
+                step2_returned: false,
             }),
         };
         validate(&intent)?;
@@ -747,8 +761,7 @@ impl Controller {
             .map_or(0, |record| record.step2_resubmissions.len())
     }
 
-    /// Whether the recorded step 2 was ever seen on BTCB2 or accepted by its
-    /// route (P3-3).
+    /// Whether a fresh read ever saw the recorded step 2 on BTCB2 (P3-3).
     pub fn split_step2_observed(&self) -> bool {
         self.intent
             .split
@@ -756,9 +769,43 @@ impl Controller {
             .is_some_and(|record| record.step2_observed)
     }
 
+    /// Whether the latest step-2 attempt is recorded as having come back
+    /// without the route's acceptance (P3-3); only then may a resend be
+    /// reviewed.
+    pub fn split_step2_returned(&self) -> bool {
+        self.intent
+            .split
+            .as_ref()
+            .is_some_and(|record| record.step2_returned)
+    }
+
+    /// Record that the latest step-2 attempt came back from a completed send
+    /// without the route's acceptance (P3-3). The coordinator's send is the
+    /// only caller, after control returns: never after an acceptance, a
+    /// cancellation or an expired bound, so an attempt that may have been
+    /// accepted is never marked. It grants nothing by itself; a resend still
+    /// needs its own review and fresh evidence.
+    pub(crate) fn record_split_step2_returned(&mut self, current: &Context) -> Result<(), Error> {
+        self.ensure_context(current)?;
+        let record = self.split_record()?;
+        if self.intent.fork_submission.is_none() {
+            return Err(Error::InvalidPlan);
+        }
+        if record.step2_returned {
+            return Ok(());
+        }
+        let mut next = self.intent.clone();
+        if let Some(record) = next.split.as_mut() {
+            record.step2_returned = true;
+        }
+        validate(&next)?;
+        self.journal.store(&next)?;
+        self.intent = next;
+        Ok(())
+    }
+
     /// Record that a fresh read keyed by the recorded signed step 2's own
-    /// txid saw it on BTCB2 (`seen`, mempool or block), or that its route
-    /// accepted exactly those bytes (`Unconfirmed`). Monotonic, and an
+    /// txid saw it on BTCB2 (`seen`, mempool or block). Monotonic, and an
     /// absence is a no-op. It only takes the resend away and grants nothing,
     /// so it leaves the current check alone: the caller still applies the
     /// collection the read came from.
@@ -795,9 +842,11 @@ impl Controller {
     /// assessment (the coordinator's resend review, applied with a ticket)
     /// and `step2`, that same collection's read of the recorded step 2 on
     /// BTCB2, which must be absent. Refused for any other bytes, once the
-    /// step 2 was ever seen there, and at the attempt limit. Like the
-    /// submission intent, a recorded resend never permits another; each one
-    /// needs its own review. Performs no network I/O.
+    /// step 2 was ever seen there, at the attempt limit, and unless the
+    /// latest attempt's return without acceptance is recorded; the record
+    /// clears that, so this resend's own return must be recorded before
+    /// another. Like the submission intent, a recorded resend never permits
+    /// another; each one needs its own review. Performs no network I/O.
     pub fn record_split_step2_resubmission(
         &mut self,
         current: &Context,
@@ -828,6 +877,7 @@ impl Controller {
             return Err(Error::InvalidPlan);
         }
         if record.step2_observed
+            || !record.step2_returned
             || record.step2_resubmissions.len() >= MAX_SPLIT_STEP2_RESUBMISSIONS
         {
             return Err(Error::Conflict);
@@ -842,6 +892,7 @@ impl Controller {
             record.step2_resubmissions.push(Step2Resubmission {
                 wtxid: tx.compute_wtxid(),
             });
+            record.step2_returned = false;
         }
         validate(&next)?;
         self.journal.store(&next)?;
