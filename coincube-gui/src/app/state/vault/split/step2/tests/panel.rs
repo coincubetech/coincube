@@ -761,6 +761,95 @@ async fn panel_keeps_its_reconciler_across_an_equivalent_recon_port() {
     assert_eq!(panel.stage, Stage::NeedsSession);
 }
 
+/// Rebind a tracked step 1 at six confirmations, as resuming the journal
+/// under the next session does (the panel's own resume needs chain evidence
+/// this fake has none of). The next entry drops this driver.
+fn rebind_step1(panel: &mut SplitPanel, shared: &Shared) {
+    panel.stage = Stage::Tracking;
+    panel.status = Some(Status::Observation(
+        Assessment::ObservationsEligibleForPreflight,
+    ));
+    panel.driver = Some(Box::new(Step1(shared.clone())));
+    shared.lock().unwrap().step1_dropped = 0;
+}
+
+/// #637 r4172150937: a target proof belongs to the preparation that made it.
+/// A revocation drops it with the preparation, and a new preparation starts
+/// with none (also after one a refused handoff released without a
+/// revocation), so Build comes back only once the target is reserved and
+/// proven again, never after a check alone.
+#[tokio::test(flavor = "multi_thread")]
+async fn panel_needs_a_new_target_proof_for_each_preparation() {
+    let journal = Journal::new(false);
+    let (mut panel, shared) = tracked_panel(&journal);
+    let task = panel.update(SplitMessage::EnterStep2);
+    drive(&mut panel, task).await;
+    let task = panel.update(SplitMessage::Step2Reserve);
+    drive(&mut panel, task).await;
+    assert_eq!(panel.target_index(), Some(3));
+
+    // Logout, Cube close or a backend switch.
+    panel.revoke();
+    assert_eq!(panel.target_index(), None);
+
+    // A new preparation under the next session. An index left from any
+    // earlier preparation does not carry over into it.
+    rebind_step1(&mut panel, &shared);
+    panel.target_index = Some(9);
+    let task = panel.update(SplitMessage::EnterStep2);
+    drive(&mut panel, task).await;
+    assert_eq!(panel.stage, Stage::Step2(Step2Stage::Ready));
+    assert_eq!(panel.target_index(), None);
+    let task = panel.update(SplitMessage::Step2Check);
+    drive(&mut panel, task).await;
+    assert!(panel.replay_label().is_some());
+    let task = panel.update(SplitMessage::Step2Build);
+    drive(&mut panel, task).await;
+    assert!(panel.step2_psbt().is_none(), "built on an unproven target");
+    assert_eq!(panel.stage, Stage::Step2(Step2Stage::Ready));
+
+    // Reserved and proven in this preparation: it builds.
+    let task = panel.update(SplitMessage::Step2Reserve);
+    drive(&mut panel, task).await;
+    assert_eq!(panel.target_index(), Some(3));
+    let task = panel.update(SplitMessage::Step2Build);
+    drive(&mut panel, task).await;
+    assert_eq!(panel.stage, Stage::Step2(Step2Stage::Sign));
+}
+
+/// #637 r4172150954: a new build forgets the earlier export, so the Sign
+/// stage never names a file that holds an earlier PSBT.
+#[tokio::test(flavor = "multi_thread")]
+async fn panel_forgets_an_earlier_export_on_a_new_build() {
+    async fn build(panel: &mut SplitPanel) {
+        for message in [
+            SplitMessage::EnterStep2,
+            SplitMessage::Step2Reserve,
+            SplitMessage::Step2Check,
+            SplitMessage::Step2Build,
+        ] {
+            let task = panel.update(message);
+            drive(panel, task).await;
+        }
+        assert_eq!(panel.stage, Stage::Step2(Step2Stage::Sign));
+    }
+    let journal = Journal::new(false);
+    let (mut panel, shared) = tracked_panel(&journal);
+    build(&mut panel).await;
+    let exported = journal.temp.0.parent().unwrap().join("first.txt");
+    let task = panel.step2_export_to(exported.clone(), split_psbt_file::Encoding::Base64);
+    drive(&mut panel, task).await;
+    assert_eq!(panel.step2_exported(), Some(&exported));
+
+    // Back to step 1 (a reorg review), then a new preparation and build.
+    let task = panel.update(SplitMessage::LeaveStep2);
+    drive(&mut panel, task).await;
+    assert_eq!(panel.stage, Stage::Tracking);
+    shared.lock().unwrap().step1_dropped = 0;
+    build(&mut panel).await;
+    assert_eq!(panel.step2_exported(), None);
+}
+
 /// #637 F1: the Vault's daemon restarting or switching (a new daemon
 /// instance behind an otherwise equal session) revokes every step-2 handle.
 #[tokio::test(flavor = "multi_thread")]

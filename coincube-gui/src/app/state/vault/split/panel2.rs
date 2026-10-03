@@ -78,7 +78,8 @@ impl SplitPanel {
     }
 
     /// Revoke and drop every step-2 handle (releasing the journal) and the
-    /// label; called from [`SplitPanel::revoke`].
+    /// label; called from [`SplitPanel::revoke`]. The target proof dies with
+    /// the preparation that made it (#637 r4172150937).
     pub(super) fn revoke_step2(&mut self) {
         if let Some(revoke) = self.step2_revoke.take() {
             revoke();
@@ -88,6 +89,7 @@ impl SplitPanel {
         self.recon = None;
         self.replay = None;
         self.step2_review = None;
+        self.target_index = None;
     }
 
     pub fn step2_available(&self) -> bool {
@@ -555,6 +557,9 @@ impl SplitPanel {
             }
             SplitEvent::Step2Entered(_, Ok(Prep(prep))) => {
                 self.notice = None;
+                // A new preparation has proven no target yet, whatever an
+                // earlier one did (#637 r4172150937): reserve, then build.
+                self.target_index = None;
                 self.bind_prep(prep);
                 self.stage = Stage::Step2(Step2Stage::Ready);
                 Task::none()
@@ -613,6 +618,9 @@ impl SplitPanel {
                         self.notice = None;
                         self.step2_psbt = Some(psbt);
                         self.step2_files.clear();
+                        // An earlier export holds an earlier PSBT
+                        // (#637 r4172150954).
+                        self.step2_exported = None;
                         self.stage = Stage::Step2(Step2Stage::Sign);
                     }
                     Err(reason) => {
