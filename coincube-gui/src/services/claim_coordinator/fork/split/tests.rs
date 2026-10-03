@@ -192,6 +192,7 @@ fn sign(step1: &SplitStep1, wallet: &Wallet) -> VerifiedSplitStep1 {
 }
 
 type Between = Box<dyn FnOnce(&mut View) + Send>;
+type ReadHook = Box<dyn FnOnce() + Send>;
 
 /// The synthetic two-chain view.
 struct View {
@@ -218,6 +219,14 @@ struct View {
     clock_offset: i64,
     /// Transactions seen on BTCB2 (step 2), by txid.
     on_btcb2: Vec<(Txid, TransactionObservation)>,
+    /// The BTCB2 anchor's tip height.
+    fork_tip: u64,
+    /// Seconds subtracted from the stamp of every transaction read.
+    read_age: i64,
+    /// Run once, at the first BTCB2 read that finds a listed transaction.
+    on_btcb2_sighting: Option<ReadHook>,
+    /// Answered once, by the next BTCB2 read of that transaction.
+    on_btcb2_once: Option<(Txid, TransactionObservation)>,
 }
 impl View {
     /// Step 1 confirmed in `block` (hash 6) at height 100 with `depth`
@@ -242,6 +251,10 @@ impl View {
             address_stale: None,
             clock_offset: 0,
             on_btcb2: Vec::new(),
+            fork_tip: FORK_TIP,
+            read_age: 0,
+            on_btcb2_sighting: None,
+            on_btcb2_once: None,
         };
         view.set_depth(depth);
         view
@@ -266,10 +279,14 @@ struct Chains {
 const ORIGIN: &str = "https://connect.example/";
 impl Chains {
     fn read<T>(chain: ChainId, value: T) -> Result<FreshRead<T>, FailureKind> {
+        Self::read_aged(chain, value, 0)
+    }
+    /// A read stamped `age` seconds ago.
+    fn read_aged<T>(chain: ChainId, value: T, age: i64) -> Result<FreshRead<T>, FailureKind> {
         let mut headers = HeaderMap::new();
         headers.insert("x-cache", "BYPASS".parse().unwrap());
         headers.insert("cache-control", "no-store".parse().unwrap());
-        FreshRead::from_response(chain, value, now(), &headers)
+        FreshRead::from_response(chain, value, now() - age, &headers)
     }
     fn edit(&self, edit: impl FnOnce(&mut View)) {
         edit(&mut self.view.lock().unwrap());
@@ -281,17 +298,20 @@ impl ObservationSource for Chains {
         now() + self.view.lock().unwrap().clock_offset
     }
     async fn anchor(&self, chain: ChainId) -> Result<NetworkAnchorStatus, FailureKind> {
-        let expiry = self.view.lock().unwrap().rdts_expiry;
+        let (expiry, tip) = {
+            let view = self.view.lock().unwrap();
+            (view.rdts_expiry, view.fork_tip)
+        };
         Ok(NetworkAnchorStatus {
             network: chain,
             state: AnchorState::Available,
             anchor: Some(NetworkAnchor {
                 tip_hash: hash(2),
-                tip_height: FORK_TIP,
+                tip_height: tip,
                 tip_median_time_past: MTP,
                 observed_at: now(),
                 observation: NetworkObservation {
-                    tip_height: FORK_TIP,
+                    tip_height: tip,
                     fork: Some(ForkActivation {
                         height: 90,
                         active: true,
@@ -316,10 +336,20 @@ impl ObservationSource for Chains {
         chain: ChainId,
         txid: Txid,
     ) -> Result<FreshRead<TransactionObservation>, FailureKind> {
-        let view = self.view.lock().unwrap();
+        let mut view = self.view.lock().unwrap();
         if chain != ChainId::Bitcoin {
+            if view.on_btcb2_once.is_some_and(|(id, _)| id == txid) {
+                let (_, once) = view.on_btcb2_once.take().unwrap();
+                return Self::read_aged(chain, once, view.read_age);
+            }
             if let Some((_, seen)) = view.on_btcb2.iter().find(|(id, _)| *id == txid) {
-                return Self::read(chain, *seen);
+                let seen = *seen;
+                if seen != TransactionObservation::Absent {
+                    if let Some(hook) = view.on_btcb2_sighting.take() {
+                        hook();
+                    }
+                }
+                return Self::read_aged(chain, seen, view.read_age);
             }
         }
         let observation = match (chain, view.step1_block) {
@@ -328,7 +358,7 @@ impl ObservationSource for Chains {
             _ if view.on_fork => TransactionObservation::Unconfirmed { txid },
             _ => TransactionObservation::Absent,
         };
-        Self::read(chain, observation)
+        Self::read_aged(chain, observation, view.read_age)
     }
     async fn hash_at_height(
         &self,
@@ -1050,6 +1080,12 @@ fn split_step2_gate_has_no_gui_caller() {
             "Step2Daemon",
             "SplitStep2Reconciler",
             "verify_split_step2_transaction",
+            // P3-3: the reviewed resend and its restart.
+            "Step2ResubmissionReview",
+            "ResendError",
+            "prepare_step2_resubmission",
+            "confirm_step2_resubmission",
+            "resume_uncertain",
         ] {
             // The Daemon trait declares the step-2 transport and the
             // embedded daemon forwards it; neither is a caller.

@@ -432,30 +432,8 @@ impl SplitPreparation {
         .map(Collected::ordinary)
         .map_err(Error::Observation)
     }
-    /// Every claimed coin among its address's fresh BTCB2 unspent outputs.
-    /// Returns the oldest read's stamp.
     async fn claimed_unspent_on_fork(&self) -> Result<i64, SplitCheckError> {
-        let mut oldest = i64::MAX;
-        for (outpoint, address) in &self.claimed {
-            let read = self
-                .services
-                .btcb2_unspent(address)
-                .await
-                .map_err(|kind| SplitCheckError::Unavailable(*outpoint, kind))?;
-            let now = self.services.source().now();
-            if read.observed_at() < 0
-                || !now.checked_sub(read.observed_at()).is_some_and(|age| {
-                    (0..=self.policy.observations.max_observation_age_seconds).contains(&age)
-                })
-            {
-                return Err(SplitCheckError::Unavailable(*outpoint, FailureKind::Stale));
-            }
-            if !read.value().contains(outpoint) {
-                return Err(SplitCheckError::ClaimedCoinSpent(*outpoint));
-            }
-            oldest = oldest.min(read.observed_at());
-        }
-        Ok(oldest)
+        claimed_unspent_on_fork(self.services.as_ref(), &self.claimed, self.policy).await
     }
     /// Fresh step-2 authorization; see the module documentation. Each call
     /// supersedes every earlier authorization of this preparation, whether or
@@ -547,6 +525,35 @@ impl SplitPreparation {
 // No Drop: a dropped preparation takes its check counter with it, so every
 // token it minted stops being live (`ForeignStep2Authorization::is_live`).
 // `finish` revokes explicitly before handing the journal on.
+
+/// Every claimed coin among its address's fresh BTCB2 unspent outputs: the
+/// step-2 check, and a step-2 resend (P3-3). Returns the oldest read's stamp.
+async fn claimed_unspent_on_fork(
+    services: &dyn SplitForkServices,
+    claimed: &[(OutPoint, String)],
+    policy: CheckPolicy,
+) -> Result<i64, SplitCheckError> {
+    let mut oldest = i64::MAX;
+    for (outpoint, address) in claimed {
+        let read = services
+            .btcb2_unspent(address)
+            .await
+            .map_err(|kind| SplitCheckError::Unavailable(*outpoint, kind))?;
+        let now = services.source().now();
+        if read.observed_at() < 0
+            || !now.checked_sub(read.observed_at()).is_some_and(|age| {
+                (0..=policy.observations.max_observation_age_seconds).contains(&age)
+            })
+        {
+            return Err(SplitCheckError::Unavailable(*outpoint, FailureKind::Stale));
+        }
+        if !read.value().contains(outpoint) {
+            return Err(SplitCheckError::ClaimedCoinSpent(*outpoint));
+        }
+        oldest = oldest.min(read.observed_at());
+    }
+    Ok(oldest)
+}
 
 /// Each claimed prevout of `construction` and the address its output pays,
 /// from the construction's own txid-bound previous transactions. `None` if

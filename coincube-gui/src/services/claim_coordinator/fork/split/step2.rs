@@ -34,6 +34,13 @@
 //!    confirmations again, records the submission intent and submits once.
 //!    A refused preflight records nothing and keeps the verified signed step
 //!    2 for another review.
+//! 5. **Resend (P3-3, `resend`).** Any non-exact result after the intent
+//!    is `Uncertain`, including a refusal before any byte left. The ordinary
+//!    review then refuses and reconcile only observes, so only a distinct,
+//!    explicitly reviewed resend of exactly the recorded bytes, after fresh
+//!    evidence that they are absent from BTCB2 and their coins unspent, can
+//!    send them again; live, or after a restart that rebuilds and verifies
+//!    them ([`SplitStep2Coordinator::resume_uncertain`]).
 //!
 //! Routes ([`SplitStep2Production`]): the target Vault daemon on exactly the
 //! Connect BTCB2 Esplora at the Split's own Connect origin, preflighted by
@@ -61,6 +68,9 @@ use coincube_core::{
         absolute::LockTime, bip32::ChildNumber, psbt::Psbt, secp256k1, ScriptBuf,
     },
 };
+
+mod resend;
+pub use resend::{ResendError, Step2ResubmissionReview};
 
 /// The wall-clock bound on a target reservation (#592 N2). The daemon call
 /// runs on its own task, so a reservation stuck behind the daemon's locks
@@ -441,6 +451,7 @@ impl SplitPreparation {
             context,
             generation,
             controller,
+            claimed,
             services,
             policy,
             ..
@@ -453,6 +464,7 @@ impl SplitPreparation {
             controller,
             verified: Arc::new(verified),
             target_index,
+            claimed,
             services,
             transport,
             policy,
@@ -787,7 +799,9 @@ impl Step2Transport for SplitStep2Production {
 }
 
 /// Owns the Split journal while the verified step 2 is reviewed and
-/// submitted. Reopening never restores review authority.
+/// submitted. Reopening never restores review authority: a reopened
+/// uncertain step 2 ([`Self::resume_uncertain`]) can only be reconciled or,
+/// after a fresh resend review, resent.
 pub struct SplitStep2Coordinator {
     id: u64,
     revision: u64,
@@ -796,6 +810,9 @@ pub struct SplitStep2Coordinator {
     controller: Controller,
     verified: Arc<VerifiedSplitStep2>,
     target_index: ChildNumber,
+    /// Each claimed prevout and the address its output pays, for the fresh
+    /// BTCB2 unspent reads of a resend review.
+    claimed: Vec<(OutPoint, String)>,
     services: Box<dyn SplitForkServices>,
     transport: Box<dyn Step2Transport>,
     policy: CheckPolicy,
@@ -975,6 +992,15 @@ impl SplitStep2Coordinator {
             self.policy.observations,
             self.services.source().now(),
         )?;
+        Ok(self.send_recorded(context, refreshed).await)
+    }
+
+    /// The one send of an attempt the journal has just recorded (the
+    /// submission intent or a resend), on the reviewed route under its
+    /// deadline. Anything but the route's exact acceptance is `Uncertain`;
+    /// nothing here retries. Only a send that completed without that
+    /// acceptance is recorded as returned, which a resend review needs.
+    async fn send_recorded(&mut self, context: &Context, refreshed: ReviewSnapshot) -> Outcome {
         let uncertain = Outcome::Uncertain {
             txid: refreshed.txid,
             wtxid: refreshed.wtxid,
@@ -982,7 +1008,7 @@ impl SplitStep2Coordinator {
         let (gate, revoker) = SubmissionGate::for_split_step2(&self.verified, refreshed.not_after);
         let _pending = PendingGate(revoker.clone());
         if self.revoker.register(revoker).is_err() || self.current(context).is_err() {
-            return Ok(uncertain);
+            return uncertain;
         }
         let mut generation = self.generation.clone();
         let expected = self.context.generation;
@@ -1006,15 +1032,27 @@ impl SplitStep2Coordinator {
             result = tokio::time::timeout(Duration::from_secs(30), submit) => result.ok(),
         };
         if self.current(context).is_err() {
-            return Ok(uncertain);
+            return uncertain;
         }
         match result {
             Some(Ok(SubmissionOutcome::UpstreamAccepted { txid, wtxid }))
                 if txid == refreshed.txid && wtxid == refreshed.wtxid =>
             {
-                Ok(Outcome::UpstreamAccepted { txid, wtxid })
+                Outcome::UpstreamAccepted { txid, wtxid }
             }
-            _ => Ok(uncertain),
+            Some(_) => {
+                // The send completed without the route's acceptance (a
+                // refusal, a lost upstream answer, another txid): record that
+                // it returned, the one record that lets a resend be reviewed
+                // (P3-3). If this write fails, the journal still holds the
+                // attempt as unreturned, which never resends, so the outcome
+                // stands either way.
+                let _unreturned_refuses = self.controller.record_split_step2_returned(context);
+                uncertain
+            }
+            // Cancelled or past the bound: the send may still be under way
+            // and may yet be accepted. It stays unreturned: never resent.
+            None => uncertain,
         }
     }
 }
@@ -1024,9 +1062,80 @@ impl Drop for SplitStep2Coordinator {
     }
 }
 
+/// An observation source that notes any read of one transaction on one
+/// chain that answered it present (mempool or block), whatever becomes of the
+/// collection the read belongs to: a collection can fail after one of its
+/// reads saw the recorded step 2 (P3-3). Every other read passes through.
+pub(super) struct SightingProbe<'a> {
+    inner: &'a dyn ObservationSource,
+    chain: ChainId,
+    txid: Txid,
+    sighted: std::sync::atomic::AtomicBool,
+}
+impl<'a> SightingProbe<'a> {
+    pub(super) fn new(inner: &'a dyn ObservationSource, chain: ChainId, txid: Txid) -> Self {
+        Self {
+            inner,
+            chain,
+            txid,
+            sighted: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+    /// Whether any read answered the transaction present.
+    pub(super) fn sighted(&self) -> bool {
+        self.sighted.load(Ordering::SeqCst)
+    }
+}
+#[async_trait]
+impl ObservationSource for SightingProbe<'_> {
+    fn now(&self) -> i64 {
+        self.inner.now()
+    }
+    async fn anchor(
+        &self,
+        chain: ChainId,
+    ) -> Result<crate::services::coincube::network_anchor::NetworkAnchorStatus, FailureKind> {
+        self.inner.anchor(chain).await
+    }
+    async fn tip(
+        &self,
+        chain: ChainId,
+    ) -> Result<FreshRead<coincube_core::claim::BlockRef>, FailureKind> {
+        self.inner.tip(chain).await
+    }
+    async fn transaction(
+        &self,
+        chain: ChainId,
+        txid: Txid,
+    ) -> Result<FreshRead<claim_observation::TransactionObservation>, FailureKind> {
+        let read = self.inner.transaction(chain, txid).await;
+        if chain == self.chain
+            && txid == self.txid
+            && read.as_ref().is_ok_and(|read| {
+                *read.value() != claim_observation::TransactionObservation::Absent
+            })
+        {
+            self.sighted.store(true, Ordering::SeqCst);
+        }
+        read
+    }
+    async fn hash_at_height(
+        &self,
+        chain: ChainId,
+        height: u64,
+    ) -> Result<FreshRead<BlockHash>, FailureKind> {
+        self.inner.hash_at_height(chain, height).await
+    }
+}
+
 /// Check the recorded step 2's chain inclusion together with step 1's on
 /// Bitcoin, keyed by the recorded *signed* step-2 txid. A recorded submission
-/// only identifies what to look up; this never resends or authorizes one.
+/// only identifies what to look up; this never resends or authorizes one. A
+/// step 2 seen on BTCB2 is recorded as observed, which ends any resend
+/// (P3-3). The read runs with the resend permission durably withdrawn and
+/// gives it back only when no read of the collection saw the step 2 (even
+/// one the collection then failed past) in the still-current session, so a
+/// sighting that fails to record still ends the resend.
 async fn reconcile_recorded(
     controller: &mut Controller,
     services: &dyn SplitForkServices,
@@ -1043,10 +1152,13 @@ async fn reconcile_recorded(
     {
         return Err(Error::InvalidBinding);
     }
+    let hold = controller.hold_split_step2_return(context)?;
     let ticket = controller.begin_check(context)?;
+    let plan = controller.plan();
+    let probe = SightingProbe::new(services.source(), plan.fork_chain, submission.txid());
     let collected = claim_observation::collect_sweep(
-        services.source(),
-        &controller.plan(),
+        &probe,
+        &plan,
         submission.txid(),
         policy.observations,
         policy.collection_budget,
@@ -1055,9 +1167,17 @@ async fn reconcile_recorded(
             generation: generation.clone(),
         },
     )
-    .await
-    .map_err(Error::Observation)?;
-    if *generation.borrow() != context.generation || generation.has_changed().is_err() {
+    .await;
+    let current = *generation.borrow() == context.generation && generation.has_changed().is_ok();
+    let sighted = probe.sighted()
+        || collected
+            .as_ref()
+            .is_ok_and(|c| c.transaction() != claim_observation::TransactionObservation::Absent);
+    if let (true, false, Some(hold)) = (current, sighted, hold) {
+        controller.release_split_step2_return(context, hold)?;
+    }
+    let collected = collected.map_err(Error::Observation)?;
+    if !current {
         controller.invalidate();
         return Err(Error::Revoked);
     }
@@ -1068,6 +1188,7 @@ async fn reconcile_recorded(
         policy.observations,
         services.source().now(),
     )?;
+    controller.record_split_step2_observed(context, collected.transaction())?;
     Ok((status, collected.transaction()))
 }
 
