@@ -582,6 +582,11 @@ impl SplitPanel {
                 self.outcome = None;
                 self.step2_outcome = recon.recorded_outcome();
                 self.bind_recon(recon);
+                // The last reconcile's step-1 evidence, kept through the
+                // revocation along with its BTCB2 observation, still decides
+                // the warning until a new reconcile replaces it
+                // (#637 r4172729359).
+                self.notice = self.step2_status.and_then(step2::reconcile_warning);
                 self.stage = Stage::Step2(Step2Stage::Reconcile);
                 Task::none()
             }

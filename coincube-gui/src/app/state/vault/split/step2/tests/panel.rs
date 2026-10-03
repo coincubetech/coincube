@@ -1043,10 +1043,33 @@ async fn panel_reconciler_warns_when_step1_loses_bitcoin_confirmation() {
     assert_eq!(shared.lock().unwrap().step1_opened, 0);
     assert!(panel.recon.is_some() && panel.prep.is_none() && panel.driver.is_none());
 
+    // A revocation (logout, Cube close, a backend switch) and a reopen
+    // keep the last evidence, and its warning comes back with the
+    // reconciler instead of leaving the observation unexplained
+    // (#637 r4172729359).
+    panel.revoke();
+    assert_eq!(panel.stage, Stage::NeedsSession);
+    let task = panel.begin();
+    drive(&mut panel, task).await;
+    assert_eq!(panel.stage, Stage::Step2(Step2Stage::Reconcile));
+    assert_eq!(
+        panel.step2_status(),
+        Some(Status::Observation(Assessment::Reorged))
+    );
+    assert!(panel.step2_seen().is_some());
+    assert_eq!(panel.notice(), Some(STEP1_REORGED_AFTER_STEP2));
+    assert_eq!(shared.lock().unwrap().step1_opened, 0);
+
     let task = panel.update(SplitMessage::Step2Reconcile);
     drive(&mut panel, task).await;
     assert_eq!(panel.notice(), None);
     assert_eq!(shared.lock().unwrap().reconciles, 2);
+    // Eligible evidence reopens without a warning.
+    panel.revoke();
+    let task = panel.begin();
+    drive(&mut panel, task).await;
+    assert_eq!(panel.stage, Stage::Step2(Step2Stage::Reconcile));
+    assert_eq!(panel.notice(), None);
 }
 
 /// #637 F1: the Vault's daemon restarting or switching (a new daemon
