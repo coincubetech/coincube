@@ -771,7 +771,7 @@ fn refresh(mut state: State) -> impl Stream<Item = HardwareWalletMessage> {
             Ok(Default::default())
         };
         match phone_store {
-            Ok(store) if !store.phones.is_empty() => {
+            Ok(store) if !store.phones.is_empty() || !store.pending_unpairs.is_empty() => {
                 let discovered = crate::phone_signer::mdns::browse();
                 let identity =
                     match crate::phone_signer::identity::load_or_create(&state.datadir_path) {
@@ -844,6 +844,34 @@ fn refresh(mut state: State) -> impl Stream<Item = HardwareWalletMessage> {
                         }
                         let fp8 = crate::phone_signer::identity::pin_hex8(&paired.cert_pin);
                         let id = format!("{}{}", LAN_PHONE_ID_PREFIX, fp8);
+                        // The phone said it removed this desktop. Drop the
+                        // pairing it was dialled for (not a newer re-pair
+                        // of the same phone) instead of redialling a phone
+                        // that would only say so again.
+                        if let Some(signer) = state
+                            .phone_signers
+                            .get(&id)
+                            .filter(|s| s.peer_unpaired())
+                            .cloned()
+                        {
+                            state.phone_signers.remove(&id);
+                            state.phone_cooldowns.remove(&fp8);
+                            if state.persist_pairing {
+                                if let Err(e) =
+                                    crate::phone_signer::pairing_store::remove_unpaired_by_peer(
+                                        &state.datadir_path,
+                                        &signer.paired_phone.cert_pin,
+                                        signer.paired_phone.paired_at_unix,
+                                    )
+                                {
+                                    warn!(
+                                        "could not remove {} after it unpaired: {}",
+                                        paired.name, e
+                                    );
+                                }
+                            }
+                            continue;
+                        }
                         // Resolve a target address: prefer the
                         // mDNS-discovered one; fall back to the
                         // user-entered `fallback_addr` when mDNS is
@@ -975,6 +1003,16 @@ fn refresh(mut state: State) -> impl Stream<Item = HardwareWalletMessage> {
                                 });
                             }
                         }
+                    }
+                    // Tell phones the user removed here, once reachable.
+                    if state.persist_pairing {
+                        crate::phone_signer::unpair_sync::deliver_pending(
+                            &state.datadir_path,
+                            &identity,
+                            &store,
+                            &discovered,
+                        )
+                        .await;
                     }
                 }
             }
@@ -1339,15 +1377,11 @@ pub(crate) fn resolve_phone_target(
     paired: &crate::phone_signer::pairing_store::PairedPhone,
     discovered: &[crate::phone_signer::mdns::DiscoveredPhone],
 ) -> Option<std::net::SocketAddr> {
-    let mdns_addr = discovered
-        .iter()
-        .find(|d| d.cert_fp8 == fp8)
-        .map(|d| d.addr);
-    let fallback_addr = paired
-        .fallback_addr
-        .as_deref()
-        .and_then(|s| s.parse::<std::net::SocketAddr>().ok());
-    mdns_addr.or(fallback_addr)
+    crate::phone_signer::unpair_sync::resolve_target(
+        fp8,
+        paired.fallback_addr.as_deref(),
+        discovered,
+    )
 }
 
 #[cfg(test)]

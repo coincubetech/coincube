@@ -1193,6 +1193,7 @@ async fn cancellation_at_tls_identity_acceptance_and_pre_persistence_leaves_no_r
                         payload: Some(Payload::PairingStep(local_v1::PairingStep {
                             transaction_id: step.transaction_id.clone(),
                             phase: reply as i32,
+                            desktop_name: String::new(),
                         })),
                     }
                     .encode_to_vec();
@@ -1224,6 +1225,7 @@ async fn cancellation_at_tls_identity_acceptance_and_pre_persistence_leaves_no_r
                     payload: Some(Payload::PairingStep(local_v1::PairingStep {
                         transaction_id: step.transaction_id,
                         phase: Phase::Finished as i32,
+                        desktop_name: String::new(),
                     })),
                 }
                 .encode_to_vec();
@@ -1240,6 +1242,7 @@ async fn cancellation_at_tls_identity_acceptance_and_pre_persistence_leaves_no_r
                         local_v1::PairingStep {
                             transaction_id: step.transaction_id,
                             phase: local_v1::pairing_step::Phase::Prepared as i32,
+                            desktop_name: String::new(),
                         },
                     )),
                 }
