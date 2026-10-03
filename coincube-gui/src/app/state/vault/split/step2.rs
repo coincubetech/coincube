@@ -1,13 +1,18 @@
 //! Split step 2 (#568 B3b-2b): what the panel does for step 2 that is not
-//! iced state. The panel stages, view and App hooks that drive it are
-//! B3b-2b-2; nothing in the GUI calls this module yet (D1).
+//! iced state. The panel's step-2 stages (`panel2`), its view and the App's
+//! port handoff drive it, and like the panel it is reached only by resuming
+//! an existing Split journal: nothing in the GUI starts a split before B5
+//! (D1).
 //!
-//! - **Ports.** [`Step2Port`] opens the step-2 coordinator side of a Split
-//!   journal: a [`Step2Prep`] (target reservation and proof, construction
-//!   under the step-2 token, the signed-PSBT handoff) and, after a recorded
-//!   step-2 submission, a [`Step2Recon`] that can only reconcile. The
-//!   production implementation, [`ProductionStep2`], wraps
-//!   `claim_coordinator::fork::split` for the target Vault's daemon.
+//! - **Ports.** [`Step2Port`] opens the step-2 submission side of a Split
+//!   journal through the target Vault's daemon: a [`Step2Prep`] (target
+//!   reservation and proof, construction under the step-2 token, the
+//!   signed-PSBT handoff). Its production implementation, [`ProductionStep2`],
+//!   wraps `claim_coordinator::fork::split` and exists only for a daemon on a
+//!   route step 2 can be sent through (#637 R2). [`ReconPort`] opens, after a
+//!   recorded step-2 submission, a [`Step2Recon`] that can only reconcile; its
+//!   production implementation, [`ProductionRecon`], needs only the Connect
+//!   session, never the daemon (#637 R1).
 //! - **Journal-lock ordering** (#626). The step-1 driver and the step-2
 //!   preparation each hold the journal lock. [`enter_step2`] drops the step-1
 //!   driver *before* opening the preparation, off the UI thread;
@@ -16,7 +21,8 @@
 //!   the submission coordinator. [`restart`] opens a [`Step2Recon`] instead of
 //!   the step-1 driver when the journal already records a step-2 submission,
 //!   because the claimed coins may be spent on BTCB2 by then and step 1 can
-//!   no longer be rebuilt from them.
+//!   no longer be rebuilt from them. That decision needs only the Connect
+//!   session, so it holds whatever state the Vault daemon is in.
 //! - **Copy.** Every target and construction refusal ([`describe_target`],
 //!   [`describe_step2`]), the waiting state while the Vault reserves its
 //!   address ([`RESERVING`], #592 N4), the route label with a privacy note on
@@ -25,7 +31,7 @@
 //!
 //! Every blocking call here runs off the UI thread.
 
-use std::{path::PathBuf, sync::Arc, time::Instant};
+use std::{path::PathBuf, sync::Arc};
 
 use async_trait::async_trait;
 use tokio::sync::watch;
@@ -49,6 +55,7 @@ use crate::{
                     TargetError, RESERVATION_BOUND,
                 },
                 ForeignStep2Authorization, SplitCheckError, SplitForkProduction, SplitPreparation,
+                Step2Liveness,
             },
             Outcome, Review, SubmissionRoute,
         },
@@ -66,6 +73,48 @@ pub const RESERVING: &str = "Reserving a fresh receive address in this Vault and
 pub const CANNOT_REPLAY: &str = "Split — cannot replay";
 /// The privacy note shown with the node route.
 pub const NODE_PRIVACY: &str = "Step 2 will be sent through this Vault's own Bitcoin node. That node, which may be a remote one you configured, learns the transaction and this computer's network address before it relays it.";
+/// A restart found a recorded step-2 submission but has no reconciler for
+/// this session (#637 R1): nothing else is opened.
+pub const RECONCILE_UNAVAILABLE: &str = "Step 2 of this split was already sent or may have been. Its status can't be checked with Connect right now, so nothing was rebuilt or sent. Try again.";
+/// A reconcile after the step-2 submission found step 1 reorged out of its
+/// Bitcoin block (#637 r4172242637). No recovery is offered: none exists
+/// yet for this case. A recorded submission may not have reached the
+/// transport (`Outcome::Uncertain`), so the copy doesn't say step 2 was
+/// sent (#637 Copilot review 5401909718).
+pub const STEP1_REORGED_AFTER_STEP2: &str = "Bitcoin reorganized after a submission of step 2 was recorded; it was sent or may have been sent. Step 1 is no longer in the Bitcoin block it was confirmed in, so Bitcoin replay protection for step 2 is no longer established. This version has no recovery for this. Nothing was rebuilt, and step 2 is not sent automatically. Check status again later.";
+
+/// What the step-1 evidence of a reconcile after the step-2 submission
+/// means (#637 r4172242637): nothing while step 1 is still eligible (six
+/// deep on Bitcoin, absent from BTCB2, inside the RDTS margin); otherwise a
+/// warning that Bitcoin replay protection for step 2 is not established. A
+/// reorg is named only for `Reorged`. No warning offers a recovery.
+pub fn reconcile_warning(status: Status) -> Option<String> {
+    use coincube_core::claim::{Assessment as A, MIN_CONFIRMATIONS};
+    let unconfirmed = |seen: String| {
+        format!(
+            "{seen} Until it has all {MIN_CONFIRMATIONS} again, Bitcoin replay protection for step 2 is not established. Check status again later."
+        )
+    };
+    match status {
+        Status::Observation(A::ObservationsEligibleForPreflight) => None,
+        Status::Observation(A::Reorged) => Some(STEP1_REORGED_AFTER_STEP2.to_string()),
+        Status::Observation(A::WaitingForConfirmation) => Some(unconfirmed(
+            "At the last check step 1 was not confirmed on Bitcoin.".to_string(),
+        )),
+        Status::Observation(A::WaitingForDepth { confirmations }) => Some(unconfirmed(format!(
+            "At the last check step 1 had {} of {MIN_CONFIRMATIONS} Bitcoin confirmations.",
+            confirmations.min(MIN_CONFIRMATIONS)
+        ))),
+        Status::Unchecked
+        | Status::Unavailable
+        | Status::Observation(A::Unknown | A::StaleObservation | A::NeedsPreflightRecheck) => Some(
+            "The last check couldn't confirm step 1 on Bitcoin with fresh evidence. That is not a sign of a reorg, but Bitcoin replay protection for step 2 isn't confirmed until a check sees step 1 at full depth again. Check status again later.".to_string(),
+        ),
+        Status::Observation(_) => Some(
+            "The last check didn't find step 1 eligible on Bitcoin, so Bitcoin replay protection for step 2 isn't confirmed. Check status again later.".to_string(),
+        ),
+    }
+}
 
 /// What a refused step-2 operation means for the user.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -189,30 +238,33 @@ pub fn route_copy(route: SubmissionRoute) -> (&'static str, Option<&'static str>
 
 /// "Split — cannot replay", only from live evidence: a successful
 /// six-confirmation check (step 1 six deep on Bitcoin at the tip, absent
-/// from BTCB2, RDTS margin, every claimed coin unspent on BTCB2) minted it,
-/// and it lapses with that check's evidence. No saved phase, journal record
-/// or earlier check can produce it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// from BTCB2, RDTS margin, every claimed coin unspent on BTCB2) minted it.
+/// It carries that check's liveness (#636 P3-2), so the label disappears as
+/// soon as the evidence does: a later check starts (whatever its result),
+/// the session is revoked (logout, Cube close, backend switch), the
+/// generation changes, the preparation is dropped, or the deadline passes.
+/// No saved phase, journal record or earlier check can produce it.
+#[derive(Debug, Clone)]
 pub struct CannotReplay {
     tracked: Txid,
-    until: Instant,
+    live: Step2Liveness,
 }
 impl CannotReplay {
     /// The label while the check's evidence is live; afterwards `None`.
     pub fn label(&self) -> Option<&'static str> {
-        (Instant::now() < self.until).then_some(CANNOT_REPLAY)
+        self.live.is_live().then_some(CANNOT_REPLAY)
     }
     pub fn tracked_txid(&self) -> Txid {
         self.tracked
     }
 }
 
-/// The token from one successful check, kept by the driver, with the live
-/// label it supports. The token itself never leaves the driver.
+/// The label a token's check supports. The token itself never leaves the
+/// driver.
 fn evidence_of(token: &ForeignStep2Authorization) -> CannotReplay {
     CannotReplay {
         tracked: token.tracked_txid(),
-        until: token.not_after(),
+        live: token.liveness(),
     }
 }
 
@@ -239,6 +291,10 @@ pub trait Step2Prep: Send {
         context: &Context,
         coins: Vec<SplitCoin>,
     ) -> Result<Psbt, Step2Refusal>;
+    /// Whether a (possibly partially) signed PSBT would finish, without
+    /// giving up the journal: `Ok(false)` while more signatures are needed.
+    /// CPU-bound: callers use `spawn_blocking`.
+    fn verify_signed(&self, signed: &Psbt, coins: &[SplitCoin]) -> Result<bool, Step2Refusal>;
     /// Verify the signed PSBT and hand the journal to the coordinator.
     /// CPU-bound and blocking: callers use `spawn_blocking`.
     fn finish(
@@ -294,19 +350,42 @@ pub struct Step2Open {
     pub fork_height: u64,
 }
 
-/// Opens the step-2 side of a Split journal for one session.
+/// Opens the step-2 submission side of a Split journal for one session,
+/// through the target Vault's daemon.
 pub trait Step2Port: Send + Sync {
     fn context(&self) -> Context;
+    /// What makes two ports the same: the session context (account,
+    /// provider, generation) and the Vault daemon instance. The panel keeps
+    /// its step-2 handles across an equivalent port and revokes them on any
+    /// other (#637 F1).
+    fn identity(&self) -> PortIdentity;
     /// Blocking: callers use `spawn_blocking`, after dropping any step-1
     /// driver on the same journal.
     fn open_preparation(&self, open: Step2Open) -> Result<Box<dyn Step2Prep>, Step2Refusal>;
-    /// Blocking, like [`Self::open_preparation`].
+}
+
+/// Opens the reconcile-only side of a Split journal for one Connect session
+/// (#637 R1). It needs no Vault daemon: a recorded step 2 is reconciled
+/// whether the daemon is loaded, restarting, external or on a route step 2
+/// can't be sent through.
+pub trait ReconPort: Send + Sync {
+    fn context(&self) -> Context;
+    /// Blocking: callers use `spawn_blocking`.
     fn open_reconciler(
         &self,
         directory: PathBuf,
         target_cube: String,
         digest: sha256::Hash,
     ) -> Result<Box<dyn Step2Recon>, Step2Refusal>;
+}
+
+/// See [`Step2Port::identity`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortIdentity {
+    pub context: Context,
+    /// The daemon handle's address: a restarted or switched daemon is a new
+    /// instance.
+    pub daemon: usize,
 }
 
 /// #626 ordering: release the step-1 driver (and its journal lock), *then*
@@ -347,18 +426,21 @@ pub enum Restart {
     Reconcile(Box<dyn Step2Recon>),
 }
 
-/// Restart decision: read the journal (lock released at once) and, when it
-/// records a step-2 submission, open the reconciler instead of rebuilding
-/// step 1 (whose claimed coins may already be spent on BTCB2 by step 2).
+/// Restart decision: read the journal under the Connect session's `context`
+/// (lock released at once) and, when it records a step-2 submission, open
+/// the reconciler instead of rebuilding step 1 (whose claimed coins may
+/// already be spent on BTCB2 by step 2). No reconciler for the session
+/// refuses; it never falls back to step 1 (#637 R1).
 pub async fn restart(
-    port: Arc<dyn Step2Port>,
+    context: Context,
+    recon: Option<Arc<dyn ReconPort>>,
     directory: PathBuf,
     target_cube: String,
     digest: sha256::Hash,
 ) -> Result<Restart, Step2Refusal> {
     let identity = claim_workflow::split_identity(target_cube.clone(), digest);
     let recorded = {
-        let controller = Controller::reopen_settling(&directory, &identity, port.context())
+        let controller = Controller::reopen_settling(&directory, &identity, context)
             .await
             .map_err(|error| {
                 Step2Refusal::retry(step1::describe(claim_coordinator::Error::Journal(error)))
@@ -369,10 +451,26 @@ pub async fn restart(
     if !recorded {
         return Ok(Restart::Step1);
     }
+    let port = recon.ok_or_else(|| Step2Refusal::retry(RECONCILE_UNAVAILABLE))?;
     tokio::task::spawn_blocking(move || port.open_reconciler(directory, target_cube, digest))
         .await
         .map_err(|_| Step2Refusal::retry("Reopening the split was interrupted. Try again."))?
         .map(Restart::Reconcile)
+}
+
+/// The session's Split fork production, built fresh for each open.
+fn fork_production(
+    session: &ConnectSession,
+    expected: u64,
+    generation: &watch::Receiver<u64>,
+) -> Result<SplitForkProduction, Step2Refusal> {
+    SplitForkProduction::new(
+        session.client.clone(),
+        session.account.clone(),
+        expected,
+        generation.clone(),
+    )
+    .map_err(|error| Step2Refusal::retry(step1::describe(error)))
 }
 
 /// The production step-2 port for the target Vault's daemon and one Connect
@@ -386,14 +484,25 @@ pub struct ProductionStep2 {
     vault: CoincubeDescriptor,
 }
 impl ProductionStep2 {
-    /// Refused without an account, an embedded BTCB2 daemon, its Vault
-    /// descriptor, or after the generation moved.
+    /// Refused without an account, after the generation moved, and for any
+    /// route the submission transport does not admit (#637 R2): a daemon
+    /// that is not embedded or not on BTCB2 mainnet, or a backend other than
+    /// exactly Connect's BTCB2 Esplora at this session's origin or a bound
+    /// Bitcoind node. So nothing is reserved, built or signed for a step 2
+    /// that could not be sent. `finish` admits the route again at the
+    /// handoff, and the review binds it.
     pub fn new(
         session: ConnectSession,
         generation: watch::Receiver<u64>,
         daemon: Arc<dyn Daemon + Send + Sync>,
     ) -> Result<Self, claim_coordinator::Error> {
         let expected = *generation.borrow();
+        SplitStep2Production::new(
+            &session.client,
+            daemon.clone(),
+            expected,
+            generation.clone(),
+        )?;
         let vault = daemon
             .config()
             .map(|config| config.main_descriptor.clone())
@@ -416,18 +525,18 @@ impl ProductionStep2 {
         })
     }
     fn production(&self) -> Result<SplitForkProduction, Step2Refusal> {
-        SplitForkProduction::new(
-            self.session.client.clone(),
-            self.session.account.clone(),
-            self.expected,
-            self.generation.clone(),
-        )
-        .map_err(|error| Step2Refusal::retry(step1::describe(error)))
+        fork_production(&self.session, self.expected, &self.generation)
     }
 }
 impl Step2Port for ProductionStep2 {
     fn context(&self) -> Context {
         self.context.clone()
+    }
+    fn identity(&self) -> PortIdentity {
+        PortIdentity {
+            context: self.context.clone(),
+            daemon: Arc::as_ptr(&self.daemon) as *const () as usize,
+        }
     }
     fn open_preparation(&self, open: Step2Open) -> Result<Box<dyn Step2Prep>, Step2Refusal> {
         let preparation = SplitPreparation::resume(
@@ -441,15 +550,57 @@ impl Step2Port for ProductionStep2 {
         )
         .map_err(describe_check)?;
         Ok(Box::new(PreparationDriver {
-            preparation,
+            core: LivePrep {
+                preparation,
+                daemon: self.daemon.clone(),
+                vault: self.vault.clone(),
+                fees: split_fees::btcb2_fee_source(Some(self.session.client.clone())),
+            },
             token: None,
-            daemon: self.daemon.clone(),
-            vault: self.vault.clone(),
-            fees: split_fees::btcb2_fee_source(Some(self.session.client.clone())),
-            client: self.session.client.clone(),
-            expected: self.expected,
-            generation: self.generation.clone(),
+            finish: Some(FinishDeps {
+                client: self.session.client.clone(),
+                expected: self.expected,
+                generation: self.generation.clone(),
+            }),
         }))
+    }
+}
+
+/// The production reconcile-only port: one Connect session and no Vault
+/// daemon (#637 R1).
+pub struct ProductionRecon {
+    session: ConnectSession,
+    generation: watch::Receiver<u64>,
+    expected: u64,
+    context: Context,
+}
+impl ProductionRecon {
+    /// Refused without an account, for an unusable origin, or after the
+    /// generation moved.
+    pub fn new(
+        session: ConnectSession,
+        generation: watch::Receiver<u64>,
+    ) -> Result<Self, claim_coordinator::Error> {
+        let expected = *generation.borrow();
+        let context = SplitForkProduction::new(
+            session.client.clone(),
+            session.account.clone(),
+            expected,
+            generation.clone(),
+        )?
+        .context()
+        .clone();
+        Ok(Self {
+            session,
+            generation,
+            expected,
+            context,
+        })
+    }
+}
+impl ReconPort for ProductionRecon {
+    fn context(&self) -> Context {
+        self.context.clone()
     }
     fn open_reconciler(
         &self,
@@ -461,7 +612,7 @@ impl Step2Port for ProductionStep2 {
             &directory,
             target_cube,
             digest,
-            self.production()?,
+            fork_production(&self.session, self.expected, &self.generation)?,
             CHECK_POLICY,
         )
         .map_err(describe_check)?;
@@ -469,17 +620,58 @@ impl Step2Port for ProductionStep2 {
     }
 }
 
-struct PreparationDriver {
+/// What the driver needs from a step-2 preparation: the production one is
+/// [`LivePrep`] over `SplitPreparation`; tests substitute a fake to pin the
+/// driver's own logic (#636 P3-1).
+#[async_trait]
+trait PrepCore: Send {
+    fn revoke_handle(&self) -> RevokeHandle;
+    fn needs_reservation(&self) -> Result<bool, claim_coordinator::Error>;
+    fn recorded_target(&self) -> Result<Option<u32>, claim_coordinator::Error>;
+    async fn check_signing(
+        &mut self,
+        context: &Context,
+    ) -> Result<ForeignStep2Authorization, SplitCheckError>;
+    async fn reserve(&mut self, context: &Context) -> Result<u32, TargetError>;
+    async fn prove(&mut self, context: &Context) -> Result<(), TargetError>;
+    async fn construct(
+        &mut self,
+        context: &Context,
+        token: ForeignStep2Authorization,
+        coins: Vec<SplitCoin>,
+    ) -> Result<Psbt, Step2Error>;
+    fn check_signed(
+        &self,
+        signed: &Psbt,
+        coins: &[SplitCoin],
+    ) -> Result<(), coincube_core::foreign_split::FinalizeError>;
+}
+
+/// The production preparation and what it reserves and prices with.
+struct LivePrep {
     preparation: SplitPreparation,
-    token: Option<ForeignStep2Authorization>,
     daemon: Arc<dyn Daemon + Send + Sync>,
     vault: CoincubeDescriptor,
     fees: Arc<dyn SweepFeeSource>,
-    client: crate::services::coincube::CoincubeClient,
-    expected: u64,
-    generation: watch::Receiver<u64>,
 }
-impl PreparationDriver {
+#[async_trait]
+impl PrepCore for LivePrep {
+    fn revoke_handle(&self) -> RevokeHandle {
+        let revoker = self.preparation.revoker();
+        Arc::new(move || revoker.revoke())
+    }
+    fn needs_reservation(&self) -> Result<bool, claim_coordinator::Error> {
+        self.preparation.needs_reservation()
+    }
+    fn recorded_target(&self) -> Result<Option<u32>, claim_coordinator::Error> {
+        self.preparation.recorded_target()
+    }
+    async fn check_signing(
+        &mut self,
+        context: &Context,
+    ) -> Result<ForeignStep2Authorization, SplitCheckError> {
+        self.preparation.check_signing(context).await
+    }
     async fn reserve(&mut self, context: &Context) -> Result<u32, TargetError> {
         let daemon = self.daemon.clone();
         self.preparation
@@ -491,20 +683,47 @@ impl PreparationDriver {
             )
             .await
     }
+    async fn prove(&mut self, context: &Context) -> Result<(), TargetError> {
+        self.preparation.prove_target(context, &self.vault).await
+    }
+    async fn construct(
+        &mut self,
+        context: &Context,
+        token: ForeignStep2Authorization,
+        coins: Vec<SplitCoin>,
+    ) -> Result<Psbt, Step2Error> {
+        self.preparation
+            .construct_step2(context, token, coins, &*self.fees)
+            .await
+    }
+    fn check_signed(
+        &self,
+        signed: &Psbt,
+        coins: &[SplitCoin],
+    ) -> Result<(), coincube_core::foreign_split::FinalizeError> {
+        self.preparation.check_signed(signed, coins)
+    }
 }
-#[async_trait]
-impl Step2Prep for PreparationDriver {
-    fn revoke_handle(&self) -> RevokeHandle {
-        let revoker = self.preparation.revoker();
-        Arc::new(move || revoker.revoke())
-    }
-    fn needs_reservation(&self) -> bool {
-        self.preparation.needs_reservation().unwrap_or(false)
-    }
-    async fn check(&mut self, context: &Context) -> Result<CannotReplay, Step2Refusal> {
+
+/// What `finish` needs to admit the transport.
+struct FinishDeps {
+    client: crate::services::coincube::CoincubeClient,
+    expected: u64,
+    generation: watch::Receiver<u64>,
+}
+
+struct PreparationDriver<P> {
+    core: P,
+    token: Option<ForeignStep2Authorization>,
+    finish: Option<FinishDeps>,
+}
+impl<P: PrepCore> PreparationDriver<P> {
+    /// A new check supersedes and clears any earlier token first, whatever
+    /// its own result (#636 P3-1).
+    async fn check_inner(&mut self, context: &Context) -> Result<CannotReplay, Step2Refusal> {
         self.token = None;
         let token = self
-            .preparation
+            .core
             .check_signing(context)
             .await
             .map_err(describe_split_check)?;
@@ -512,32 +731,30 @@ impl Step2Prep for PreparationDriver {
         self.token = Some(token);
         Ok(label)
     }
-    async fn ensure_target(&mut self, context: &Context) -> Result<u32, Step2Refusal> {
-        if self
-            .preparation
-            .needs_reservation()
-            .map_err(describe_check)?
-        {
-            self.reserve(context).await.map_err(describe_target)?;
+    /// Reserve when the journal needs one (a journal error refuses; it is
+    /// never read as "no reservation needed"), prove, and replace a target
+    /// proven used exactly once. A second used target refuses with no third
+    /// reservation; an unavailable or stale proof never replaces anything.
+    async fn ensure_target_inner(&mut self, context: &Context) -> Result<u32, Step2Refusal> {
+        if self.core.needs_reservation().map_err(describe_check)? {
+            self.core.reserve(context).await.map_err(describe_target)?;
         }
-        match self.preparation.prove_target(context, &self.vault).await {
+        match self.core.prove(context).await {
             Ok(()) => {}
-            // Proven used: replace it once with a strictly higher index.
             Err(TargetError::Used(_)) => {
-                self.reserve(context).await.map_err(describe_target)?;
-                self.preparation
-                    .prove_target(context, &self.vault)
-                    .await
-                    .map_err(describe_target)?;
+                self.core.reserve(context).await.map_err(describe_target)?;
+                self.core.prove(context).await.map_err(describe_target)?;
             }
             Err(error) => return Err(describe_target(error)),
         }
-        self.preparation
+        self.core
             .recorded_target()
             .map_err(describe_check)?
             .ok_or_else(|| describe_target(TargetError::NoReservation))
     }
-    async fn build(
+    /// One build per check: the token is taken before construction, so a
+    /// failed construction also needs a new check.
+    async fn build_inner(
         &mut self,
         context: &Context,
         coins: Vec<SplitCoin>,
@@ -545,10 +762,47 @@ impl Step2Prep for PreparationDriver {
         let token = self.token.take().ok_or_else(|| {
             Step2Refusal::retry("Check step 1's confirmations again before building step 2.")
         })?;
-        self.preparation
-            .construct_step2(context, token, coins, &*self.fees)
+        self.core
+            .construct(context, token, coins)
             .await
             .map_err(describe_step2)
+    }
+    fn verify_inner(&self, signed: &Psbt, coins: &[SplitCoin]) -> Result<bool, Step2Refusal> {
+        use coincube_core::foreign_split::FinalizeError;
+        match self.core.check_signed(signed, coins) {
+            Ok(()) => Ok(true),
+            Err(FinalizeError::Unsatisfied) => Ok(false),
+            Err(error) => Err(Step2Refusal::final_(format!(
+                "The signed step 2 does not match what was built ({error}). Nothing was sent."
+            ))),
+        }
+    }
+}
+#[async_trait]
+impl Step2Prep for PreparationDriver<LivePrep> {
+    fn revoke_handle(&self) -> RevokeHandle {
+        self.core.revoke_handle()
+    }
+    /// Display and restart data only: a journal error reads as `false` here
+    /// and decides nothing (`ensure_target` asks the journal itself).
+    fn needs_reservation(&self) -> bool {
+        self.core.needs_reservation().unwrap_or(false)
+    }
+    async fn check(&mut self, context: &Context) -> Result<CannotReplay, Step2Refusal> {
+        self.check_inner(context).await
+    }
+    async fn ensure_target(&mut self, context: &Context) -> Result<u32, Step2Refusal> {
+        self.ensure_target_inner(context).await
+    }
+    async fn build(
+        &mut self,
+        context: &Context,
+        coins: Vec<SplitCoin>,
+    ) -> Result<Psbt, Step2Refusal> {
+        self.build_inner(context, coins).await
+    }
+    fn verify_signed(&self, signed: &Psbt, coins: &[SplitCoin]) -> Result<bool, Step2Refusal> {
+        self.verify_inner(signed, coins)
     }
     fn finish(
         self: Box<Self>,
@@ -556,11 +810,17 @@ impl Step2Prep for PreparationDriver {
         signed: &Psbt,
         coins: &[SplitCoin],
     ) -> Result<Box<dyn Step2Coord>, FinishRefusal> {
+        let Some(deps) = self.finish.as_ref() else {
+            return Err((
+                Step2Refusal::final_("This preparation cannot hand over."),
+                Some(self),
+            ));
+        };
         let transport = match SplitStep2Production::new(
-            &self.client,
-            self.daemon.clone(),
-            self.expected,
-            self.generation.clone(),
+            &deps.client,
+            self.core.daemon.clone(),
+            deps.expected,
+            deps.generation.clone(),
         ) {
             Ok(transport) => transport,
             Err(error) => return Err((describe_check(error), Some(self))),
@@ -568,7 +828,8 @@ impl Step2Prep for PreparationDriver {
         let route = transport.route();
         // `finish` consumes the preparation: a refused handoff releases the
         // journal, and the panel reopens it to try again.
-        self.preparation
+        self.core
+            .preparation
             .finish(context, signed, coins, transport)
             .map(|coordinator| {
                 Box::new(CoordinatorDriver {

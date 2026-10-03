@@ -392,6 +392,37 @@ impl SplitPreparation {
         Ok(psbt)
     }
 
+    /// Whether `signed` would finish: the same verification as
+    /// [`Self::finish`] against the construction built under the token,
+    /// without consuming the preparation (a partially signed import keeps
+    /// the journal open). `Unsatisfied` means more signatures are needed.
+    pub fn check_signed(
+        &self,
+        signed: &Psbt,
+        coins: &[SplitCoin],
+    ) -> Result<(), coincube_core::foreign_split::FinalizeError> {
+        use coincube_core::foreign_split::FinalizeError;
+        let construction = self
+            .step2
+            .as_ref()
+            .ok_or(FinalizeError::ConstructionChanged)?;
+        let source = self
+            .controller
+            .recorded_split()
+            .ok()
+            .flatten()
+            .and_then(|record| record.source)
+            .ok_or(FinalizeError::ConstructionChanged)?;
+        finalize_split_step2(
+            construction,
+            coins,
+            &source,
+            signed,
+            &secp256k1::Secp256k1::verification_only(),
+        )
+        .map(|_| ())
+    }
+
     /// Verify the signed step 2 against the construction built under the
     /// token, then move the journal lock into the submission coordinator
     /// (Claim's `Preparation::finish` handoff). `coins` are the current

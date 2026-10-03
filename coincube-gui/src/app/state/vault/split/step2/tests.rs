@@ -245,15 +245,15 @@ fn six_deep(txid: Txid) -> CollectedAssessment {
         },
     }
 }
-fn observe(controller: &mut Controller, txid: Txid, absent: bool) {
+fn observe_under(controller: &mut Controller, context: &Context, txid: Txid, absent: bool) {
     let mut bundle = six_deep(txid);
     if absent {
         bundle.observations.bitcoin_transaction = TransactionObservation::Absent;
         bundle.observations.bitcoin.location = TransactionLocation::Unconfirmed;
     }
-    let ticket = controller.begin_check(&context()).unwrap();
+    let ticket = controller.begin_check(context).unwrap();
     controller
-        .apply_observation(ticket, &context(), Ok(bundle), policy(), 10_000)
+        .apply_observation(ticket, context, Ok(bundle), policy(), 10_000)
         .unwrap();
 }
 
@@ -266,25 +266,34 @@ struct Journal {
 }
 impl Journal {
     fn new(with_step2: bool) -> Self {
+        Self::under(with_step2, &context())
+    }
+    /// [`Self::new`] journaled under `context` (a production session's).
+    fn under(with_step2: bool, context: &Context) -> Self {
         let temp = Temp::new();
         let wallet = wallet();
         let step1 = step1(&wallet);
         let signed = sign1(&step1, &wallet);
         let tracked = signed.transaction().compute_txid();
-        let mut c =
-            Controller::create_split(&temp.0, TARGET.into(), &step1, &signed, FORK, context())
-                .unwrap();
-        observe(&mut c, tracked, true);
-        c.record_split_broadcast_intent(&context(), &signed, policy(), 10_000)
+        let mut c = Controller::create_split(
+            &temp.0,
+            TARGET.into(),
+            &step1,
+            &signed,
+            FORK,
+            context.clone(),
+        )
+        .unwrap();
+        observe_under(&mut c, context, tracked, true);
+        c.record_split_broadcast_intent(context, &signed, policy(), 10_000)
             .unwrap();
-        observe(&mut c, tracked, false);
+        observe_under(&mut c, context, tracked, false);
         assert_eq!(c.phase(), Phase::Tracking);
         if with_step2 {
-            c.record_split_target(&context(), 3, target_script())
-                .unwrap();
+            c.record_split_target(context, 3, target_script()).unwrap();
             let construction = step2(&wallet, &step1);
-            observe(&mut c, tracked, false);
-            c.prepare_split_step2(&context(), &construction, policy(), 10_000)
+            observe_under(&mut c, context, tracked, false);
+            c.prepare_split_step2(context, &construction, policy(), 10_000)
                 .unwrap();
             let secp = Secp256k1::new();
             let mut psbt = construction.psbt().clone();
@@ -292,8 +301,8 @@ impl Journal {
             let verified =
                 finalize_split_step2(&construction, &coins(&wallet), &wallet.source, &psbt, &secp)
                     .unwrap();
-            observe(&mut c, tracked, false);
-            c.record_split_step2_broadcast_intent(&context(), &verified, policy(), 10_000)
+            observe_under(&mut c, context, tracked, false);
+            c.record_split_step2_broadcast_intent(context, &verified, policy(), 10_000)
                 .unwrap();
         }
         Self {
@@ -383,6 +392,9 @@ impl Step2Prep for HeldPrep {
     async fn build(&mut self, _: &Context, _: Vec<SplitCoin>) -> Result<Psbt, Step2Refusal> {
         unreachable!()
     }
+    fn verify_signed(&self, _: &Psbt, _: &[SplitCoin]) -> Result<bool, Step2Refusal> {
+        unreachable!()
+    }
     fn finish(
         self: Box<Self>,
         _: &Context,
@@ -433,11 +445,22 @@ impl Step2Port for Port {
     fn context(&self) -> Context {
         context()
     }
+    fn identity(&self) -> PortIdentity {
+        PortIdentity {
+            context: context(),
+            daemon: 0,
+        }
+    }
     fn open_preparation(&self, _: Step2Open) -> Result<Box<dyn Step2Prep>, Step2Refusal> {
         self.preparations.fetch_add(1, Ordering::SeqCst);
         Ok(Box::new(HeldPrep {
             _controller: self.lock()?,
         }))
+    }
+}
+impl ReconPort for Port {
+    fn context(&self) -> Context {
+        context()
     }
     fn open_reconciler(
         &self,
@@ -553,21 +576,27 @@ async fn step2_entry_and_exit_release_the_journal_lock_first() {
 /// Restart: a journal with no recorded step-2 submission resumes step 1 (the
 /// reconciler is not opened); one with a recorded step-2 submission opens
 /// only the reconciler, without rebuilding step 1, and the decision's own
-/// journal read has released the lock by then.
+/// journal read has released the lock by then. The decision reads the
+/// journal under the session's context and needs no step-2 port: without a
+/// reconciler a recorded step 2 refuses rather than fall back to step 1, and
+/// a step-1 journal still resumes (#637 R1).
 #[tokio::test(flavor = "multi_thread")]
 async fn restart_reconciles_only_after_a_recorded_step2_submission() {
     let plain = Journal::new(false);
     let port_plain = port(&plain);
-    assert!(matches!(
-        restart(
-            port_plain.clone(),
-            plain.temp.0.clone(),
-            TARGET.into(),
-            plain.digest()
-        )
-        .await,
-        Ok(Restart::Step1)
-    ));
+    for recon in [Some(port_plain.clone() as Arc<dyn ReconPort>), None] {
+        assert!(matches!(
+            restart(
+                context(),
+                recon,
+                plain.temp.0.clone(),
+                TARGET.into(),
+                plain.digest()
+            )
+            .await,
+            Ok(Restart::Step1)
+        ));
+    }
     assert_eq!(port_plain.reconcilers.load(Ordering::SeqCst), 0);
 
     let submitted = Journal::new(true);
@@ -575,7 +604,8 @@ async fn restart_reconciles_only_after_a_recorded_step2_submission() {
     let started = std::time::Instant::now();
     assert!(matches!(
         restart(
-            port_submitted.clone(),
+            context(),
+            Some(port_submitted.clone()),
             submitted.temp.0.clone(),
             TARGET.into(),
             submitted.digest()
@@ -586,28 +616,32 @@ async fn restart_reconciles_only_after_a_recorded_step2_submission() {
     assert!(started.elapsed() < Duration::from_millis(1_500));
     assert_eq!(port_submitted.reconcilers.load(Ordering::SeqCst), 1);
     assert_eq!(port_submitted.preparations.load(Ordering::SeqCst), 0);
+    // No reconciler for the session: refused, retryable, and nothing else
+    // is opened; the journal is not left locked.
+    match restart(
+        context(),
+        None,
+        submitted.temp.0.clone(),
+        TARGET.into(),
+        submitted.digest(),
+    )
+    .await
+    {
+        Err(refusal) => {
+            assert!(refusal.retry);
+            assert_eq!(refusal.reason, RECONCILE_UNAVAILABLE);
+        }
+        Ok(_) => panic!("a recorded step 2 restarted without a reconciler"),
+    }
+    assert_eq!(port_submitted.reconcilers.load(Ordering::SeqCst), 1);
+    assert_eq!(port_submitted.preparations.load(Ordering::SeqCst), 0);
+    drop(submitted.lock());
     // Another account's journal is not read as either.
     let mut other = context();
     other.account = "other".into();
-    struct OtherPort(Arc<Port>, Context);
-    impl Step2Port for OtherPort {
-        fn context(&self) -> Context {
-            self.1.clone()
-        }
-        fn open_preparation(&self, open: Step2Open) -> Result<Box<dyn Step2Prep>, Step2Refusal> {
-            self.0.open_preparation(open)
-        }
-        fn open_reconciler(
-            &self,
-            d: PathBuf,
-            t: String,
-            g: sha256::Hash,
-        ) -> Result<Box<dyn Step2Recon>, Step2Refusal> {
-            self.0.open_reconciler(d, t, g)
-        }
-    }
     assert!(restart(
-        Arc::new(OtherPort(port_submitted.clone(), other)),
+        other,
+        Some(port_submitted.clone()),
         submitted.temp.0.clone(),
         TARGET.into(),
         submitted.digest()
@@ -615,6 +649,180 @@ async fn restart_reconciles_only_after_a_recorded_step2_submission() {
     .await
     .is_err());
     assert_eq!(port_submitted.reconcilers.load(Ordering::SeqCst), 1);
+}
+
+/// An authenticated Connect session at a synthetic origin. Nothing here
+/// sends a request.
+fn session(origin: &str) -> ConnectSession {
+    let mut client = crate::services::coincube::CoincubeClient::for_test(origin);
+    client.set_token("synthetic-test-token");
+    ConnectSession {
+        client,
+        account: "synthetic-account".into(),
+    }
+}
+const ORIGIN: &str = "https://connect.example/";
+
+/// A target Vault daemon's configuration on `chain` with `backend`.
+fn vault_config(
+    chain: ChainId,
+    backend: Option<coincubed::config::BitcoinBackend>,
+) -> coincubed::config::Config {
+    coincubed::config::Config::new(
+        coincubed::config::BitcoinConfig::new(chain, Duration::from_secs(30)),
+        backend,
+        log::LevelFilter::Off,
+        CoincubeDescriptor::from_str(
+            "wsh(or_d(pk([f5acc2fd]tpubD6NzVbkrYhZ4YgUx2ZLNt2rLYAMTdYysCRzKoLu2BeSHKvzqPaBDvf17GeBPnExUVPkuBpx4kniP964e2MxyzzazcXLptxLXModSVCVEV1T/<0;1>/*),and_v(v:pkh([8a64f2a9]tpubD6NzVbkrYhZ4WmzFjvQrp7sDa4ECUxTi9oby8K4FZkd3XCBtEdKwUiQyYJaxiJo5y42gyDWEczrFpozEjeLxMPxjf2WtkfcbpUdfvNnozWF/<0;1>/*),older(10))))#d72le4dr",
+        )
+        .unwrap(),
+        coincubed::datadir::DataDirectory::new(PathBuf::from("/synthetic-unused-split-panel")),
+    )
+}
+fn embedded(config: coincubed::config::Config) -> Arc<dyn Daemon + Send + Sync> {
+    Arc::new(crate::daemon::embedded::EmbeddedDaemon::unstarted_for_test(
+        config, None,
+    ))
+}
+
+/// An external daemon's RPC, which admission must never call.
+#[derive(Debug)]
+struct NoRpc;
+impl crate::daemon::client::Client for NoRpc {
+    type Error = crate::daemon::DaemonError;
+    fn request<
+        S: serde::Serialize + std::fmt::Debug,
+        D: serde::de::DeserializeOwned + std::fmt::Debug,
+    >(
+        &self,
+        method: &str,
+        _: Option<S>,
+    ) -> Result<D, Self::Error> {
+        unreachable!("admission called the daemon: {}", method)
+    }
+}
+
+/// #637 R2: the step-2 port exists only for a Vault daemon on a route step 2
+/// can be sent through, by the same admission `finish` applies again at the
+/// handoff: embedded, on BTCB2 mainnet, and on exactly Connect's BTCB2
+/// Esplora at the session's origin (no token, no fallback) or a bound
+/// Bitcoind node (P4). Anything else is refused before anything is
+/// reserved, built or signed. The session's reconcile-only port takes no
+/// daemon at all (#637 R1).
+#[test]
+fn step2_port_admits_only_a_route_step2_can_be_sent_through() {
+    use coincubed::config::{
+        BitcoinBackend, BitcoindConfig, BitcoindRpcAuth, ElectrumConfig, EsploraConfig,
+    };
+    let endpoint = "https://connect.example/api/v1/esplora/bitcoin-blake2b/mainnet";
+    let esplora = |addr: &str| EsploraConfig {
+        addr: addr.to_owned(),
+        token: None,
+        fallback_addr: None,
+        fallback_token: None,
+        secondary_fallback_addr: None,
+        secondary_fallback_token: None,
+    };
+    let connect = || Some(BitcoinBackend::Esplora(esplora(endpoint)));
+    let node = || {
+        Some(BitcoinBackend::Bitcoind(BitcoindConfig {
+            addr: "127.0.0.1:8332".parse().unwrap(),
+            rpc_auth: BitcoindRpcAuth::CookieFile("/synthetic/.cookie".into()),
+        }))
+    };
+    let (_sender, generation) = watch::channel(7);
+    let port =
+        |origin: &str, daemon| ProductionStep2::new(session(origin), generation.clone(), daemon);
+
+    for (route, backend) in [("connect", connect()), ("node", node())] {
+        let daemon = embedded(vault_config(ChainId::BitcoinBlake2b, backend));
+        let admitted =
+            port(ORIGIN, daemon.clone()).unwrap_or_else(|e| panic!("{}: {:?}", route, e));
+        assert_eq!(
+            admitted.identity().daemon,
+            Arc::as_ptr(&daemon) as *const () as usize
+        );
+    }
+
+    let with = |edit: fn(&mut EsploraConfig)| {
+        let mut config = esplora(endpoint);
+        edit(&mut config);
+        Some(BitcoinBackend::Esplora(config))
+    };
+    let mut fallback = vault_config(ChainId::BitcoinBlake2b, connect());
+    fallback.fallback_esplora = Some(esplora("https://mempool.example/api"));
+    let refused: Vec<(&str, Arc<dyn Daemon + Send + Sync>)> = vec![
+        (
+            "electrum",
+            embedded(vault_config(
+                ChainId::BitcoinBlake2b,
+                Some(BitcoinBackend::Electrum(ElectrumConfig {
+                    addr: "ssl://electrum.example:50002".into(),
+                    validate_domain: true,
+                })),
+            )),
+        ),
+        (
+            "another esplora",
+            embedded(vault_config(
+                ChainId::BitcoinBlake2b,
+                Some(BitcoinBackend::Esplora(esplora(
+                    "https://mempool.example/api",
+                ))),
+            )),
+        ),
+        (
+            "connect's bitcoin esplora",
+            embedded(vault_config(
+                ChainId::BitcoinBlake2b,
+                Some(BitcoinBackend::Esplora(esplora(
+                    "https://connect.example/api/v1/esplora/bitcoin/mainnet",
+                ))),
+            )),
+        ),
+        (
+            "token",
+            embedded(vault_config(
+                ChainId::BitcoinBlake2b,
+                with(|c| c.token = Some("synthetic".into())),
+            )),
+        ),
+        (
+            "esplora fallback",
+            embedded(vault_config(
+                ChainId::BitcoinBlake2b,
+                with(|c| c.fallback_addr = Some("https://other.example/api".into())),
+            )),
+        ),
+        ("vault fallback", embedded(fallback)),
+        (
+            "no backend",
+            embedded(vault_config(ChainId::BitcoinBlake2b, None)),
+        ),
+        (
+            "bitcoin",
+            embedded(vault_config(ChainId::Bitcoin, connect())),
+        ),
+        (
+            "btcb2 testnet4",
+            embedded(vault_config(ChainId::BitcoinBlake2bTestnet4, connect())),
+        ),
+        (
+            "external daemon",
+            Arc::new(crate::daemon::client::Coincubed::new(NoRpc)),
+        ),
+    ];
+    for (case, daemon) in refused {
+        assert!(port(ORIGIN, daemon).is_err(), "{}", case);
+    }
+    // Connect's Esplora at another origin than the session's.
+    let daemon = embedded(vault_config(ChainId::BitcoinBlake2b, connect()));
+    assert!(port("https://other.example/", daemon).is_err());
+
+    // The reconcile-only port: the session alone.
+    let recon = ProductionRecon::new(session(ORIGIN), generation.clone()).unwrap();
+    assert_eq!(recon.context().account, "synthetic-account");
+    assert_eq!(recon.context().generation, 7);
 }
 
 /// The user copy: every target and construction refusal has text; a used
@@ -657,6 +865,22 @@ fn step2_copy_names_the_cause_and_the_node_route_privacy() {
     ));
     assert!(switched.retry && switched.reason.contains("nothing was sent"));
     assert!(RESERVING.contains("fresh receive address"));
+    // A recorded submission may never have reached the transport
+    // (`Outcome::Uncertain`): the reorg warning doesn't claim step 2 was
+    // sent, and keeps the replay-protection and no-recovery guidance
+    // (#637 Copilot review 5401909718).
+    let reorged = reconcile_warning(Status::Observation(Assessment::Reorged)).unwrap();
+    assert_eq!(reorged, STEP1_REORGED_AFTER_STEP2);
+    for wanted in [
+        "a submission of step 2 was recorded; it was sent or may have been sent",
+        "replay protection for step 2 is no longer established",
+        "no recovery",
+        "not sent automatically",
+    ] {
+        assert!(reorged.contains(wanted), "{}", wanted);
+    }
+    assert!(!reorged.contains("step 2 was sent:"), "{}", reorged);
+    assert!(!reorged.contains("sent again"), "{}", reorged);
 
     assert_eq!(route_copy(SubmissionRoute::Connect), ("Connect", None));
     let node = SubmissionRoute::BitcoinNode {
@@ -667,30 +891,56 @@ fn step2_copy_names_the_cause_and_the_node_route_privacy() {
     assert!(NODE_PRIVACY.contains("network address"));
 }
 
-/// "Split — cannot replay" only from live evidence: a token from a
-/// successful check produces it, it names that check's tracked txid, and it
-/// lapses with the check's evidence.
+/// "Split — cannot replay" only from live evidence (#636 P3-2): a token from
+/// a successful check produces it and it names that check's tracked txid.
+/// It disappears with the evidence, not only by time: when a later check
+/// supersedes it, on revocation (logout, Cube close), on a generation change
+/// and when the preparation is gone.
 #[test]
 fn cannot_replay_label_comes_only_from_live_check_evidence() {
     let prevouts = [OutPoint::new(Txid::from_byte_array([1; 32]), 0)];
     let tracked = Txid::from_byte_array([2; 32]);
-    let (token, _live) =
-        ForeignStep2Authorization::for_test(&prevouts, tracked, watch::channel(7).1);
+    let (sender, generation) = watch::channel(7);
+    // Superseded by a later check.
+    let (token, latest) =
+        ForeignStep2Authorization::for_test(&prevouts, tracked, generation.clone());
     let label = evidence_of(&token);
     assert_eq!(label.label(), Some(CANNOT_REPLAY));
     assert_eq!(label.tracked_txid(), tracked);
-    let lapsed = CannotReplay {
-        tracked,
-        until: Instant::now(),
-    };
-    assert_eq!(lapsed.label(), None);
+    latest.store(2, Ordering::Release);
+    assert_eq!(label.label(), None);
+    // The preparation (its check counter) dropped.
+    let (token, latest) =
+        ForeignStep2Authorization::for_test(&prevouts, tracked, generation.clone());
+    let label = evidence_of(&token);
+    drop(latest);
+    assert_eq!(label.label(), None);
+    // A generation change (session or account change).
+    let (token, _latest) =
+        ForeignStep2Authorization::for_test(&prevouts, tracked, generation.clone());
+    let label = evidence_of(&token);
+    assert_eq!(label.label(), Some(CANNOT_REPLAY));
+    sender.send(8).unwrap();
+    assert_eq!(label.label(), None);
+    // A closed session (the generation's sender gone) is not live either.
+    let (token, _latest) =
+        ForeignStep2Authorization::for_test(&prevouts, tracked, watch::channel(7).1);
+    assert_eq!(evidence_of(&token).label(), None);
+    // Revocation (logout, Cube close, backend switch).
+    let (token, _latest) =
+        ForeignStep2Authorization::for_test(&prevouts, tracked, generation.clone());
+    let label = evidence_of(&token);
+    assert_eq!(label.label(), Some(CANNOT_REPLAY));
+    token.revoke_for_test();
+    assert_eq!(label.label(), None);
 }
 
-/// D1: the step-2 panel layer has no caller yet. Its items are named only
-/// in this module and its tests (B3b-2b-2 wires the panel, still reachable
-/// only by resuming a journal).
+/// D1: the step-2 panel layer is reached only through the Split panel
+/// (itself constructed in production only to resume an existing journal,
+/// `split_panel_has_no_gui_entry_point`), and the App only hands the panel
+/// its port. Whole identifiers.
 #[test]
-fn step2_panel_layer_has_no_caller_yet() {
+fn step2_panel_layer_is_reached_only_through_the_split_panel() {
     fn walk(dir: &Path, files: &mut Vec<(String, String)>) {
         for entry in std::fs::read_dir(dir).unwrap() {
             let path = entry.unwrap().path();
@@ -714,7 +964,7 @@ fn step2_panel_layer_has_no_caller_yet() {
     );
     let mut unexpected = Vec::new();
     for (file, text) in &files {
-        if file.starts_with("src/app/state/vault/split/step2") {
+        if file.starts_with("src/app/state/vault/split/") {
             continue;
         }
         for ident in [
@@ -723,24 +973,59 @@ fn step2_panel_layer_has_no_caller_yet() {
             "Step2Prep",
             "Step2Coord",
             "Step2Recon",
+            "Step2Open",
+            "Restart",
+            "restart",
             "enter_step2",
             "leave_for_step1",
             "CannotReplay",
             "Step2Refusal",
+            "Step2ReviewView",
             "describe_target",
             "describe_step2",
+            "describe_split_check",
             "route_copy",
             "NODE_PRIVACY",
+            "CANNOT_REPLAY",
+            "RESERVING",
             "FinishRefusal",
+            "set_step2_port",
+            "PortIdentity",
+            "ProductionRecon",
+            "ReconPort",
+            "set_recon_port",
+            "RECONCILE_UNAVAILABLE",
+            "STEP1_REORGED_AFTER_STEP2",
+            "reconcile_warning",
         ] {
-            // Whole identifiers: `SplitStep2Coordinator` is not `Step2Coord`.
             let named = text
                 .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
                 .any(|word| word == ident);
-            if named {
+            // The App hands the panel the port of its Vault daemon and the
+            // session's reconcile-only port; the view shows the N4 waiting
+            // text.
+            let allowed = (file == "src/app/mod.rs"
+                && [
+                    "ProductionStep2",
+                    "Step2Port",
+                    "set_step2_port",
+                    "ProductionRecon",
+                    "ReconPort",
+                    "set_recon_port",
+                ]
+                .contains(&ident))
+                || (file == "src/app/view/vault/split.rs" && ident == "RESERVING");
+            // `restart`/`Restart` are common words elsewhere: only a path
+            // into the step-2 module counts for them.
+            let generic = ["restart", "Restart"].contains(&ident)
+                && !text.contains(&format!("step2::{ident}"));
+            if named && !allowed && !generic {
                 unexpected.push((file.clone(), ident));
             }
         }
     }
     assert!(unexpected.is_empty(), "{:?}", unexpected);
 }
+
+mod driver;
+mod panel;

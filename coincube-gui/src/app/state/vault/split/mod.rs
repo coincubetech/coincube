@@ -19,8 +19,18 @@
 //! left its block blocks step 2 and is reviewed explicitly: re-mined in
 //! another block, the user acknowledges the new block; dropped from the
 //! chain, the exact recorded bytes may be sent again after a fresh preflight;
-//! dropped and its coins spent elsewhere, a new step 1 is needed. Step 2
-//! itself (B3b) is not reachable from here.
+//! dropped and its coins spent elsewhere, a new step 1 is needed.
+//!
+//! Step 2 (#568 B3b-2b-2, [`panel2`]) continues the same resumed journal once
+//! step 1 has six confirmations: the step-1 driver is released before the
+//! step-2 preparation opens (and the preparation before a step-1 reorg
+//! review), the target Vault reserves and proves its address, step 2 is built
+//! under a fresh check, signed through PSBT files, handed to the submission
+//! coordinator, reviewed (route label, node-route privacy note), submitted
+//! once and reconciled. A restart after a recorded step-2 submission opens
+//! only the reconciler, under the Connect session alone: the Vault's daemon
+//! is needed only to enter step 2, and only on a route step 2 can be sent
+//! through. It is still reachable only by resuming a journal (D1).
 //!
 //! The panel owns no keys and never signs: signatures come back in PSBT
 //! files (D6). Every Connect read, build, file operation and journal call
@@ -28,6 +38,7 @@
 //! change, Cube close) revokes the coordinator synchronously; a recorded
 //! split survives on disk and continues under the next session.
 
+mod panel2;
 pub mod step1;
 pub mod step2;
 
@@ -37,7 +48,7 @@ use iced::Task;
 
 use coincube_core::{
     claim::{Assessment, BlockRef, MIN_CONFIRMATIONS},
-    foreign_split::SplitStep1,
+    foreign_split::{SplitCoin, SplitStep1},
     miniscript::bitcoin::{
         consensus::encode::serialize_hex, hashes::sha256, psbt::Psbt, OutPoint, Transaction, Txid,
     },
@@ -47,6 +58,7 @@ use crate::{
     app::{message::Message, split_intent::SplitIntent},
     services::{
         claim_coordinator::Outcome,
+        claim_observation::TransactionObservation,
         claim_workflow::{Phase, Status},
         split_psbt_file::{self, Encoding},
     },
@@ -83,6 +95,25 @@ pub enum Stage {
     Refused(Refusal),
     /// The unsubmitted journal was deleted.
     Abandoned,
+    /// Step 2 (B3b-2b): a step-2 handle holds the journal.
+    Step2(Step2Stage),
+}
+
+/// Where step 2 is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Step2Stage {
+    /// The preparation is open: check, reserve the target, build.
+    Ready,
+    /// Built: export the unsigned PSBT, then import the signed file(s).
+    Sign,
+    /// Signed and handed to the coordinator: review on request.
+    Signed,
+    /// A step-2 review is on screen; confirming submits exactly it.
+    Review,
+    /// A step-2 submission may exist: reconcile only.
+    Submitted,
+    /// Restarted after a recorded step-2 submission: reconcile only.
+    Reconcile,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,6 +132,20 @@ pub enum Work {
     Resending,
     CheckingAbandon,
     Abandoning,
+    /// Step 2.
+    Restarting,
+    Entering,
+    Leaving,
+    Step2Checking,
+    /// N4: the Vault reserves and Connect proves a fresh address.
+    Reserving,
+    Step2Building,
+    Step2Exporting,
+    Step2Importing,
+    Finishing,
+    Step2Reviewing,
+    Step2Submitting,
+    Step2Reconciling,
 }
 
 /// The coordinator in transit between the panel and a task.
@@ -118,7 +163,39 @@ pub struct Resumed {
     pub signed: Transaction,
     pub phase: Phase,
     pub claimed: Vec<(OutPoint, String)>,
+    /// The claimed coins as authenticated: step 2 is built from them.
+    pub coins: Vec<SplitCoin>,
 }
+
+/// Step-2 handles in transit between the panel and a task.
+pub struct Prep(pub Box<dyn step2::Step2Prep>);
+pub struct Coord(pub Box<dyn step2::Step2Coord>);
+pub struct Recon(pub Box<dyn step2::Step2Recon>);
+impl fmt::Debug for Prep {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Prep")
+    }
+}
+impl fmt::Debug for Coord {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Coord")
+    }
+}
+impl fmt::Debug for Recon {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Recon")
+    }
+}
+/// What a restart opened.
+#[derive(Debug)]
+pub enum Restarted {
+    Step1,
+    Reconcile(Recon),
+}
+/// A step-2 handoff refused, with the preparation when still usable.
+pub type FinishResult = Result<Coord, (step2::Step2Refusal, Option<Prep>)>;
+/// A step-2 reconcile's result.
+pub type Seen = Result<(Status, TransactionObservation), step2::Step2Refusal>;
 
 /// A resumed journal and its coordinator, or why not (with what was rebuilt
 /// before the coordinator refused, if anything).
@@ -148,6 +225,31 @@ pub enum SplitEvent {
     ExportChosen(u64, Option<PathBuf>, Encoding),
     ImportChosen(u64, Option<Vec<PathBuf>>),
     SignedExportChosen(u64, Option<PathBuf>),
+    /// Step 2.
+    Restarted(u64, Result<Restarted, step2::Step2Refusal>),
+    Step2Entered(u64, Result<Prep, step2::Step2Refusal>),
+    Step2Left(u64, Result<Driver, Refusal>),
+    Step2Checked(u64, Prep, Result<step2::CannotReplay, step2::Step2Refusal>),
+    Step2Reserved(u64, Prep, Result<u32, step2::Step2Refusal>),
+    Step2Built(u64, Prep, Result<Psbt, step2::Step2Refusal>),
+    Step2ExportChosen(u64, Option<PathBuf>, Encoding),
+    Step2Exported(u64, Result<Option<PathBuf>, String>),
+    Step2ImportChosen(u64, Option<Vec<PathBuf>>),
+    /// The loaded files, their combination, and whether it is complete.
+    Step2Imported(
+        u64,
+        Option<Prep>,
+        Result<(Vec<Psbt>, Psbt, bool), step2::Step2Refusal>,
+    ),
+    Step2Finished(u64, FinishResult),
+    Step2Reviewed(
+        u64,
+        Coord,
+        Result<step2::Step2ReviewView, step2::Step2Refusal>,
+    ),
+    Step2Submitted(u64, Coord, Result<Outcome, step2::Step2Refusal>),
+    Step2Reconciled(u64, Coord, Seen),
+    ReconReconciled(u64, Recon, Seen),
 }
 
 /// What a reorg check concluded.
@@ -181,6 +283,19 @@ pub enum SplitMessage {
     /// Cancel: revoke the coordinator and hide the panel until the Cube is
     /// opened again. Nothing recorded is deleted.
     Close,
+    /// Step 2: release the step-1 driver and open the step-2 preparation.
+    EnterStep2,
+    /// Step 2: back to the step-1 driver (for a reorg review).
+    LeaveStep2,
+    Step2Check,
+    /// N4: reserve and prove the Vault's fresh address.
+    Step2Reserve,
+    Step2Build,
+    Step2Export(Encoding),
+    Step2Import,
+    Step2Review,
+    Step2Confirm,
+    Step2Reconcile,
 }
 
 pub struct SplitPanel {
@@ -209,10 +324,34 @@ pub struct SplitPanel {
     /// Claimed prevouts and their Bitcoin addresses, for the abandon check.
     claimed: Vec<(OutPoint, String)>,
     abandon_checked: bool,
-    /// The last refusal while the flow keeps its state.
+    /// The last refusal while the flow keeps its state. Never the step-1
+    /// evidence's warning after the step-2 submission: that is derived from
+    /// `step2_status` ([`Self::step2_warning`]) so no notice replaces it.
     notice: Option<String>,
     /// The stage to return to after a check.
     resume_stage: Option<Stage>,
+    /// Step 2 (B3b-2b): the target Vault's port, when its daemon is loaded
+    /// on a route step 2 can be sent through.
+    step2_port: Option<Arc<dyn step2::Step2Port>>,
+    /// The session's reconcile-only port, whatever the daemon (#637 R1).
+    recon_port: Option<Arc<dyn step2::ReconPort>>,
+    prep: Option<Box<dyn step2::Step2Prep>>,
+    coord: Option<Box<dyn step2::Step2Coord>>,
+    recon: Option<Box<dyn step2::Step2Recon>>,
+    step2_revoke: Option<RevokeHandle>,
+    /// The live "cannot replay" label from the last successful check.
+    replay: Option<step2::CannotReplay>,
+    target_index: Option<u32>,
+    step2_psbt: Option<Psbt>,
+    step2_files: Vec<Psbt>,
+    step2_exported: Option<PathBuf>,
+    step2_review: Option<step2::Step2ReviewView>,
+    step2_outcome: Option<Outcome>,
+    step2_seen: Option<TransactionObservation>,
+    /// The step-1 evidence of the last step-2 reconcile (#637 r4172242637).
+    step2_status: Option<Status>,
+    /// The authenticated claimed coins from the restore.
+    coins: Vec<SplitCoin>,
 }
 
 impl fmt::Debug for SplitPanel {
@@ -251,6 +390,22 @@ impl SplitPanel {
             abandon_checked: false,
             notice: None,
             resume_stage: None,
+            step2_port: None,
+            recon_port: None,
+            prep: None,
+            coord: None,
+            recon: None,
+            step2_revoke: None,
+            replay: None,
+            target_index: None,
+            step2_psbt: None,
+            step2_files: Vec::new(),
+            step2_exported: None,
+            step2_review: None,
+            step2_outcome: None,
+            step2_seen: None,
+            step2_status: None,
+            coins: Vec::new(),
         }
     }
 
@@ -376,6 +531,7 @@ impl SplitPanel {
         if let Some(revoke) = self.revoke.take() {
             revoke();
         }
+        self.revoke_step2();
         self.driver = None;
         self.review = None;
         self.abandon_checked = false;
@@ -404,6 +560,31 @@ impl SplitPanel {
             return Task::none();
         }
         self.notice = None;
+        if let Some((digest, directory)) = self.journal.clone() {
+            // A recorded step-2 submission reopens only the reconciler. The
+            // decision needs only the session, never the Vault daemon, so a
+            // daemon that is unloaded or on an unsupported route can't send
+            // a recorded step 2 back to step 1 (#637 R1).
+            self.stage = Stage::Working(Work::Restarting);
+            let target = self.target_cube.clone();
+            let (context, recon) = (connect.context(), self.recon_port.clone());
+            return self.spawn(
+                async move {
+                    step2::restart(context, recon, directory, target, digest)
+                        .await
+                        .map(|restart| match restart {
+                            step2::Restart::Step1 => Restarted::Step1,
+                            step2::Restart::Reconcile(recon) => Restarted::Reconcile(Recon(recon)),
+                        })
+                },
+                SplitEvent::Restarted,
+            );
+        }
+        self.resume_journal(connect)
+    }
+
+    /// Resume the journal's step 1 (the step-1 driver).
+    fn resume_journal(&mut self, connect: Arc<dyn SplitConnect>) -> Task<Message> {
         if let Some((digest, directory)) = self.journal.clone() {
             self.stage = Stage::Working(Work::Restoring);
             let target = self.target_cube.clone();
@@ -801,7 +982,7 @@ impl SplitPanel {
                 self.hidden = true;
                 Task::none()
             }
-            _ => Task::none(),
+            other => self.update_step2(other),
         }
     }
 
@@ -1044,6 +1225,7 @@ impl SplitPanel {
                 });
                 Task::none()
             }
+            other => self.apply_step2(other),
         }
     }
 
@@ -1052,6 +1234,7 @@ impl SplitPanel {
         self.signed = Some(resumed.signed);
         self.phase = Some(resumed.phase);
         self.claimed = resumed.claimed;
+        self.coins = resumed.coins;
     }
 }
 
@@ -1075,7 +1258,22 @@ impl SplitEvent {
             | Self::SignedExported(seq, _)
             | Self::ExportChosen(seq, ..)
             | Self::ImportChosen(seq, _)
-            | Self::SignedExportChosen(seq, _) => *seq,
+            | Self::SignedExportChosen(seq, _)
+            | Self::Restarted(seq, _)
+            | Self::Step2Entered(seq, _)
+            | Self::Step2Left(seq, _)
+            | Self::Step2Checked(seq, ..)
+            | Self::Step2Reserved(seq, ..)
+            | Self::Step2Built(seq, ..)
+            | Self::Step2ExportChosen(seq, ..)
+            | Self::Step2Exported(seq, _)
+            | Self::Step2ImportChosen(seq, _)
+            | Self::Step2Imported(seq, ..)
+            | Self::Step2Finished(seq, _)
+            | Self::Step2Reviewed(seq, ..)
+            | Self::Step2Submitted(seq, ..)
+            | Self::Step2Reconciled(seq, ..)
+            | Self::ReconReconciled(seq, ..) => *seq,
         }
     }
 }
@@ -1096,13 +1294,14 @@ async fn resume(
         fork_height,
         phase,
         claimed,
-        ..
+        coins,
     } = restored;
     let resumed = Box::new(Resumed {
         construction: construction.clone(),
         signed: verified.transaction().clone(),
         phase,
         claimed,
+        coins,
     });
     let opened = tokio::task::spawn_blocking(move || {
         connect.open(OpenRequest {

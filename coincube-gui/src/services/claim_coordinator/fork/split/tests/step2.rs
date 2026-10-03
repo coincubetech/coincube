@@ -1155,4 +1155,41 @@ async fn split_step2_construction_refuses_a_target_proof_past_the_observation_ag
     assert!(h.temp.journal().get("fork_sweep").is_some());
 }
 
+/// #637 F2: `check_signed` verifies a signed step 2 against the construction
+/// built under the token without consuming the preparation: the full
+/// signature set is Ok, the unsigned (partial) PSBT is `Unsatisfied`, a
+/// file of another transaction is refused, and before any construction
+/// there is nothing to check against.
+#[tokio::test(flavor = "multi_thread")]
+async fn split_step2_check_signed_tells_complete_partial_and_wrong_apart() {
+    use coincube_core::foreign_split::FinalizeError;
+    let s = Step2::new().await;
+    let coins = coins(&s.h.wallet);
+    assert_eq!(s.preparation.check_signed(&s.signed(), &coins), Ok(()));
+    assert_eq!(
+        s.preparation.check_signed(&s.psbt, &coins),
+        Err(FinalizeError::Unsatisfied)
+    );
+    let mut other = s.signed();
+    other.unsigned_tx.output[0].value =
+        Amount::from_sat(other.unsigned_tx.output[0].value.to_sat() - 1);
+    assert!(s.preparation.check_signed(&other, &coins).is_err());
+    assert!(s
+        .preparation
+        .check_signed(&s.signed(), &coins[..1])
+        .is_err());
+    // It consumed nothing: the preparation still hands over.
+    let signed_tx = s.signed_tx();
+    let (transport, _server, _, _) = transport(&s.h, &signed_tx, true).await;
+    let (_h, coordinator) = finish(s, transport);
+    assert_eq!(coordinator.transaction(), &signed_tx);
+    // No construction yet: refused.
+    let h = Harness::new(6).await;
+    let preparation = tracked(&h).await;
+    assert_eq!(
+        preparation.check_signed(&h.step1.psbt().clone(), &coins),
+        Err(FinalizeError::ConstructionChanged)
+    );
+}
+
 mod routes;
