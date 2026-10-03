@@ -796,6 +796,22 @@ impl Controller {
             .is_some_and(|record| record.step2_returned)
     }
 
+    /// A recorded step-2 submission that no resend can follow and that no
+    /// read ever saw on BTCB2 (#625 F2, #639 N1): the resend permission is
+    /// withdrawn (an accepted, cancelled, timed-out or interrupted send, or a
+    /// read that didn't give it back), or the resend limit is reached. Only
+    /// such a journal may be closed after a fresh chain check. Read-only; it
+    /// grants nothing.
+    pub fn split_step2_dead_end(&self) -> bool {
+        self.intent.split.as_ref().is_some_and(|record| {
+            self.intent.fork_submission.is_some()
+                && record.step2_transaction.is_some()
+                && !record.step2_observed
+                && (!record.step2_returned
+                    || record.step2_resubmissions.len() >= MAX_SPLIT_STEP2_RESUBMISSIONS)
+        })
+    }
+
     /// Record that the latest step-2 attempt came back from a completed send
     /// without the route's acceptance (P3-3). The coordinator's send is the
     /// only caller, after control returns: never after an acceptance, a

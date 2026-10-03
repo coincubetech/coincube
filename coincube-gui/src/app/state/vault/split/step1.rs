@@ -146,10 +146,24 @@ pub fn journal_directory(root: &Path, digest: sha256::Hash) -> PathBuf {
     root.join(digest.to_string())
 }
 
+/// #625 F2 (A1 = A): the tombstone a split closed in its step-2 dead end
+/// leaves in its journal directory (`step2::close`). The journal stays, with
+/// the recorded signed step 2, so a new split of the same source is still
+/// refused; discovery skips it. Removing this file (or the whole directory)
+/// is the owner's explicit reset.
+pub const CLOSED: &str = "closed.json";
+
+/// Whether the journal in `directory` was closed: its tombstone is a
+/// regular file (metadata only).
+pub fn is_closed(directory: &Path) -> bool {
+    std::fs::symlink_metadata(directory.join(CLOSED)).is_ok_and(|metadata| metadata.is_file())
+}
+
 /// Existing Split journals under `root`, by source digest, sorted. Only a
 /// real directory named by a digest and holding a regular `intent.json`
-/// counts; symlinks and anything else are ignored. Discovery reads nothing
-/// inside the journal: opening it authenticates it.
+/// counts, unless it was closed ([`CLOSED`]); symlinks and anything else
+/// are ignored. Discovery reads nothing inside the journal (file metadata
+/// only): opening it authenticates it.
 pub fn discover(root: &Path) -> Vec<(sha256::Hash, PathBuf)> {
     let Ok(entries) = std::fs::read_dir(root) else {
         return Vec::new();
@@ -165,7 +179,7 @@ pub fn discover(root: &Path) -> Vec<(sha256::Hash, PathBuf)> {
             let path = entry.path();
             let is_dir = std::fs::symlink_metadata(&path).ok()?.is_dir();
             let journal = std::fs::symlink_metadata(path.join("intent.json")).ok()?;
-            (is_dir && journal.is_file()).then_some((digest, path))
+            (is_dir && journal.is_file() && !is_closed(&path)).then_some((digest, path))
         })
         .collect();
     found.sort();

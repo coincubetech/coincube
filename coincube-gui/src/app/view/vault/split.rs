@@ -53,6 +53,8 @@ fn working(work: Work) -> &'static str {
         Work::Resending => "Sending step 1 again through Connect…",
         Work::CheckingAbandon => "Checking Bitcoin before abandoning…",
         Work::Abandoning => "Abandoning…",
+        Work::CheckingClose => "Checking both chains before abandoning…",
+        Work::Closing => "Abandoning and closing the split…",
         Work::Restarting => "Reading the split recorded on this device…",
         Work::Entering => "Opening step 2…",
         Work::Leaving => "Returning to step 1…",
@@ -177,6 +179,11 @@ fn step2_body<'a>(
             }));
             if let Some(seen) = panel.step2_seen() {
                 body = body.push(caption(format!("Bitcoin Blake2b: {seen:?}")));
+            }
+            if panel.dead_end().is_some() {
+                body = body.push(p1_regular(
+                    "This version can't send this step 2 again: its last attempt was accepted or may have left, or no resend is left. If Bitcoin Blake2b never shows it, you can abandon this split after a check.",
+                ));
             }
             actions = actions.push(action("Refresh", SplitMessage::Step2Reconcile));
         }
@@ -363,6 +370,11 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
                 "The unsubmitted split was abandoned and its record deleted from this device.",
             ));
         }
+        Stage::Closed => {
+            body = body.push(p1_regular(
+                "This split was abandoned and closed on this device. Its record, with the signed step 2, is kept, and a new split of this wallet is refused until that record is reset.",
+            ));
+        }
     }
     if let Some(txid) = panel.tracked_txid() {
         body = body.push(caption(format!("Tracked step-1 txid {txid}")));
@@ -382,6 +394,16 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
         ));
         actions = actions.push(action("Abandon split", SplitMessage::ConfirmAbandon));
     } else if panel.can_check_abandon() {
+        actions = actions.push(action(
+            "Check before abandoning",
+            SplitMessage::CheckAbandon,
+        ));
+    } else if panel.can_confirm_close() {
+        body = body.push(caption(
+            "Bitcoin Blake2b shows neither this step 2 nor any spend of its coins, and step 1 is six deep on Bitcoin. Abandoning closes this split on this device: its record and the signed step 2 are kept, and a new split of this wallet stays refused until that record is reset.",
+        ));
+        actions = actions.push(action("Abandon split", SplitMessage::ConfirmAbandon));
+    } else if panel.can_check_close() {
         actions = actions.push(action(
             "Check before abandoning",
             SplitMessage::CheckAbandon,

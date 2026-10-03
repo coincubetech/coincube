@@ -27,7 +27,10 @@ use super::{
 };
 use crate::{
     app::message::Message,
-    services::split_psbt_file::{self, Encoding},
+    services::{
+        claim_observation::TransactionObservation,
+        split_psbt_file::{self, Encoding},
+    },
 };
 
 fn refusal(refusal: Step2Refusal) -> Refusal {
@@ -450,6 +453,51 @@ impl SplitPanel {
                     |seq, (recon, result)| SplitEvent::ReconReconciled(seq, recon, result),
                 )
             }
+            SplitMessage::CheckAbandon if self.can_check_close() => {
+                let (Some(connect), Some(dead_end)) = (self.connect.clone(), self.dead_end.clone())
+                else {
+                    return Task::none();
+                };
+                self.abandon_checked = false;
+                let back = std::mem::replace(&mut self.stage, Stage::Working(Work::CheckingClose));
+                self.resume_stage = Some(back);
+                self.spawn(
+                    async move { step2::check_close(&*connect, &dead_end).await },
+                    SplitEvent::AbandonChecked,
+                )
+            }
+            SplitMessage::ConfirmAbandon if self.can_confirm_close() => {
+                let (Some(connect), Some(dead_end), Some((digest, directory))) = (
+                    self.connect.clone(),
+                    self.dead_end.clone(),
+                    self.journal.clone(),
+                ) else {
+                    return Task::none();
+                };
+                // Release the reconciler and its journal lock first.
+                if let Some(revoke) = self.step2_revoke.take() {
+                    revoke();
+                }
+                self.recon = None;
+                self.abandon_checked = false;
+                let target = self.target_cube.clone();
+                self.stage = Stage::Working(Work::Closing);
+                self.spawn(
+                    async move {
+                        step2::check_close(&*connect, &dead_end)
+                            .await
+                            .map_err(|refusal| refusal.reason)?;
+                        let context = connect.context();
+                        let closed_at = connect.evidence().now();
+                        tokio::task::spawn_blocking(move || {
+                            step2::close(&directory, &target, digest, context, &dead_end, closed_at)
+                        })
+                        .await
+                        .map_err(|_| "Abandoning was interrupted.".to_string())?
+                    },
+                    SplitEvent::Closed,
+                )
+            }
             _ => Task::none(),
         }
     }
@@ -574,6 +622,10 @@ impl SplitPanel {
                 self.step2_status = Some(status);
                 self.step2_seen = Some(seen);
                 self.notice = None;
+                // Seen on BTCB2: it left, so it is no dead end (#625 F2).
+                if seen != TransactionObservation::Absent {
+                    self.dead_end = None;
+                }
             }
             Err(reason) => self.notice = Some(reason.reason),
         }
@@ -591,10 +643,11 @@ impl SplitPanel {
                     Task::none()
                 }
             },
-            SplitEvent::Restarted(_, Ok(Restarted::Reconcile(Recon(recon)))) => {
+            SplitEvent::Restarted(_, Ok(Restarted::Reconcile(Recon(recon), dead_end))) => {
                 self.outcome = None;
                 self.step2_outcome = recon.recorded_outcome();
                 self.bind_recon(recon);
+                self.dead_end = dead_end;
                 // The last reconcile's step-1 evidence is kept through the
                 // revocation along with its BTCB2 observation, so its
                 // warning stays until a new reconcile replaces it
@@ -602,8 +655,24 @@ impl SplitPanel {
                 self.stage = Stage::Step2(Step2Stage::Reconcile);
                 Task::none()
             }
+            SplitEvent::Restarted(_, Ok(Restarted::Closed)) => {
+                self.notice = None;
+                self.stage = Stage::Closed;
+                Task::none()
+            }
             SplitEvent::Restarted(_, Err(reason)) => {
                 self.stage = Stage::Refused(refusal(reason));
+                Task::none()
+            }
+            SplitEvent::Closed(_, Ok(())) => {
+                self.dead_end = None;
+                self.notice = None;
+                self.stage = Stage::Closed;
+                Task::none()
+            }
+            SplitEvent::Closed(_, Err(reason)) => {
+                // The reconciler was released for the close: reopen it.
+                self.stage = Stage::Refused(Refusal::retry(reason));
                 Task::none()
             }
             SplitEvent::Step2Entered(_, Ok(Prep(prep))) => {

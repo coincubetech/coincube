@@ -611,7 +611,8 @@ async fn restart_reconciles_only_after_a_recorded_step2_submission() {
             submitted.digest()
         )
         .await,
-        Ok(Restart::Reconcile(_))
+        // Nothing recorded its return: the dead end comes with it (#625 F2).
+        Ok(Restart::Reconcile(_, Some(_)))
     ));
     assert!(started.elapsed() < Duration::from_millis(1_500));
     assert_eq!(port_submitted.reconcilers.load(Ordering::SeqCst), 1);
@@ -997,6 +998,9 @@ fn step2_panel_layer_is_reached_only_through_the_split_panel() {
             "RECONCILE_UNAVAILABLE",
             "STEP1_REORGED_AFTER_STEP2",
             "reconcile_warning",
+            // #625 F2: closing a step-2 dead end.
+            "DeadEnd",
+            "check_close",
         ] {
             let named = text
                 .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
@@ -1027,5 +1031,6 @@ fn step2_panel_layer_is_reached_only_through_the_split_panel() {
     assert!(unexpected.is_empty(), "{:?}", unexpected);
 }
 
+mod close;
 mod driver;
 mod panel;

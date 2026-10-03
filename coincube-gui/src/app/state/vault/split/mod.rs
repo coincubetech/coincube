@@ -95,6 +95,9 @@ pub enum Stage {
     Refused(Refusal),
     /// The unsubmitted journal was deleted.
     Abandoned,
+    /// #625 F2 (A1 = A): closed in its step-2 dead end. The journal is kept
+    /// with its tombstone; nothing more happens here.
+    Closed,
     /// Step 2 (B3b-2b): a step-2 handle holds the journal.
     Step2(Step2Stage),
 }
@@ -132,6 +135,9 @@ pub enum Work {
     Resending,
     CheckingAbandon,
     Abandoning,
+    /// #625 F2: a step-2 dead end checked on both chains, then closed.
+    CheckingClose,
+    Closing,
     /// Step 2.
     Restarting,
     Entering,
@@ -190,7 +196,10 @@ impl fmt::Debug for Recon {
 #[derive(Debug)]
 pub enum Restarted {
     Step1,
-    Reconcile(Recon),
+    /// The reconciler, with the journal's step-2 dead end if it is in one.
+    Reconcile(Recon, Option<step2::DeadEnd>),
+    /// #625 F2: closed in its step-2 dead end.
+    Closed,
 }
 /// A step-2 handoff refused, with the preparation when still usable.
 pub type FinishResult = Result<Coord, (step2::Step2Refusal, Option<Prep>)>;
@@ -230,6 +239,8 @@ pub enum SplitEvent {
     Resent(u64, Driver, Result<Outcome, String>),
     AbandonChecked(u64, Result<(), Refusal>),
     Abandoned(u64, Result<(), String>),
+    /// #625 F2: a step-2 dead end closed, or why not.
+    Closed(u64, Result<(), String>),
     SignedExported(u64, Result<Option<PathBuf>, String>),
     /// A file dialog answered (`None`: cancelled).
     ExportChosen(u64, Option<PathBuf>, Encoding),
@@ -337,6 +348,9 @@ pub struct SplitPanel {
     /// An unsubmitted journal that can't be rebuilt, read for abandonment
     /// only (#625 F2). Never alongside a construction or a driver.
     abandon_only: Option<step1::AbandonOnly>,
+    /// The reopened journal's step-2 dead end, which may be closed after a
+    /// check (#625 F2).
+    dead_end: Option<step2::DeadEnd>,
     /// The last refusal while the flow keeps its state. Never the step-1
     /// evidence's warning after the step-2 submission: that is derived from
     /// `step2_status` ([`Self::step2_warning`]) so no notice replaces it.
@@ -402,6 +416,7 @@ impl SplitPanel {
             claimed: Vec::new(),
             abandon_checked: false,
             abandon_only: None,
+            dead_end: None,
             notice: None,
             resume_stage: None,
             step2_port: None,
@@ -534,6 +549,20 @@ impl SplitPanel {
     pub fn can_confirm_abandon(&self) -> bool {
         self.can_check_abandon() && self.abandon_checked
     }
+    /// The reopened journal's step-2 dead end (#625 F2).
+    pub fn dead_end(&self) -> Option<&step2::DeadEnd> {
+        self.dead_end.as_ref()
+    }
+    /// #625 F2: a step-2 dead end may be closed from the reconcile-only
+    /// stage, and only after a check on both chains passed.
+    pub fn can_check_close(&self) -> bool {
+        self.dead_end.is_some()
+            && self.connect.is_some()
+            && self.stage == Stage::Step2(Step2Stage::Reconcile)
+    }
+    pub fn can_confirm_close(&self) -> bool {
+        self.can_check_close() && self.abandon_checked
+    }
 
     /// Install (or clear) the Connect session. A different session revokes
     /// the coordinator first; the journal stays and continues under the next
@@ -563,8 +592,9 @@ impl SplitPanel {
         self.abandon_checked = false;
         // Read under this session: the next one reads the journal again.
         self.abandon_only = None;
+        self.dead_end = None;
         self.seq = self.seq.wrapping_add(1);
-        if self.journal.is_some() && self.stage != Stage::Abandoned {
+        if self.journal.is_some() && !matches!(self.stage, Stage::Abandoned | Stage::Closed) {
             self.stage = Stage::NeedsSession;
             self.notice = Some(
                 "The split session ended. It is recorded on this device and continues after you sign in again.".to_string(),
@@ -602,7 +632,10 @@ impl SplitPanel {
                         .await
                         .map(|restart| match restart {
                             step2::Restart::Step1 => Restarted::Step1,
-                            step2::Restart::Reconcile(recon) => Restarted::Reconcile(Recon(recon)),
+                            step2::Restart::Reconcile(recon, dead_end) => {
+                                Restarted::Reconcile(Recon(recon), dead_end)
+                            }
+                            step2::Restart::Closed => Restarted::Closed,
                         })
                 },
                 SplitEvent::Restarted,
@@ -1308,6 +1341,7 @@ impl SplitEvent {
             | Self::Resent(seq, ..)
             | Self::AbandonChecked(seq, _)
             | Self::Abandoned(seq, _)
+            | Self::Closed(seq, _)
             | Self::SignedExported(seq, _)
             | Self::ExportChosen(seq, ..)
             | Self::ImportChosen(seq, _)
