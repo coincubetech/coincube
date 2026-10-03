@@ -1399,6 +1399,10 @@ pub enum SigningKeyKind {
     Hardware,
     BorderWallet,
     Keychain,
+    /// A Keychain phone paired over the local network. It signs through the
+    /// device list like a USB wallet, but it is the same Keychain key as
+    /// [`Self::Keychain`] reached without Connect.
+    LanKeychain,
     /// Not identifiable from local data — an external key whose device isn't
     /// connected and which Connect hasn't resolved. Shown disabled rather than
     /// guessed as hardware or keychain.
@@ -1433,6 +1437,17 @@ pub enum SigningKeyState {
     /// account than the one that created it. Carries the explanation and a
     /// "Switch account" affordance that leads to the Connect overview.
     NeedsAccountSwitch(String),
+    /// A Keychain phone's last attempt over the local network failed. Offers
+    /// Connect instead when it has resolved this key, and another local
+    /// attempt unless the phone asked to be paired again.
+    LanFailed {
+        reason: String,
+        /// Device-list index for another local attempt; `None` when retrying
+        /// the local network can't succeed.
+        retry: Option<usize>,
+        /// Whether Connect can deliver the same request instead.
+        connect: bool,
+    },
 }
 
 pub struct SigningKeyRow {
@@ -1498,6 +1513,7 @@ fn signing_key_kind_caption(kind: &SigningKeyKind) -> Option<&'static str> {
         SigningKeyKind::Hardware => Some("Hardware wallet"),
         SigningKeyKind::BorderWallet => Some("Border Wallet"),
         SigningKeyKind::Keychain => Some("Keychain"),
+        SigningKeyKind::LanKeychain => Some("Keychain · local network"),
         SigningKeyKind::Unknown => None,
     }
 }
@@ -1560,6 +1576,30 @@ fn signing_key_row(row: &SigningKeyRow, color: iced::Color) -> Element<'static, 
         SigningKeyState::Retry(idx) => button::secondary(Some(icon::reload_icon()), "Retry")
             .on_press(Message::Spend(SpendTxMessage::RetryKeychainSigner(*idx)))
             .into(),
+        // Stacked like `NeedsSignIn`, for the same reason: beside the `Fill`
+        // info column the buttons' labels would wrap.
+        SigningKeyState::LanFailed {
+            reason,
+            retry,
+            connect,
+        } => {
+            let mut col = Column::new()
+                .spacing(6)
+                .align_x(Alignment::End)
+                .push(p1_regular(reason.clone()).style(theme::text::secondary));
+            if *connect {
+                col = col.push(button::primary(None, "Send through Connect").on_press(
+                    Message::Spend(SpendTxMessage::SelectKeychainSigner(row.fingerprint)),
+                ));
+            }
+            if let Some(i) = retry {
+                col = col.push(
+                    button::secondary(Some(icon::reload_icon()), "Try Wi-Fi again")
+                        .on_press(Message::SelectHardwareWallet(*i)),
+                );
+            }
+            col.into()
+        }
         SigningKeyState::Available(action) => {
             let (msg, label) = match action {
                 SigningKeyAction::Master => {
@@ -2304,6 +2344,10 @@ mod tests {
             Some("This computer")
         );
         assert_eq!(signing_key_kind_caption(&SigningKeyKind::Unknown), None);
+        assert_eq!(
+            signing_key_kind_caption(&SigningKeyKind::LanKeychain),
+            Some("Keychain · local network")
+        );
 
         let active = SigningPath {
             title: "Primary path".to_string(),
@@ -2369,6 +2413,32 @@ mod tests {
                     "Keychain signer",
                     SigningKeyKind::Keychain,
                     SigningKeyState::Available(SigningKeyAction::Keychain),
+                ),
+                signing_row(
+                    fg1,
+                    "Keychain over Wi-Fi",
+                    SigningKeyKind::LanKeychain,
+                    SigningKeyState::Available(SigningKeyAction::Hardware(1)),
+                ),
+                signing_row(
+                    fg2,
+                    "Wi-Fi failed, both roads",
+                    SigningKeyKind::LanKeychain,
+                    SigningKeyState::LanFailed {
+                        reason: "Couldn't sign over Wi-Fi".to_string(),
+                        retry: Some(1),
+                        connect: true,
+                    },
+                ),
+                signing_row(
+                    fg3,
+                    "Wi-Fi failed, nothing to offer",
+                    SigningKeyKind::LanKeychain,
+                    SigningKeyState::LanFailed {
+                        reason: "Pair this Keychain again".to_string(),
+                        retry: None,
+                        connect: false,
+                    },
                 ),
             ],
         };

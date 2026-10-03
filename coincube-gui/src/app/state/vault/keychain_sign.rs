@@ -2446,6 +2446,53 @@ fn event_type_from_i32(v: i32) -> crate::services::connect::grpc::connect_v1::Ev
 }
 
 #[cfg(test)]
+impl KeychainSignModal {
+    /// A flow already resolved to one Connect signer per `(fingerprint,
+    /// status)` — the state the unified picker reads its rows from. For the
+    /// picker's tests in `psbt.rs`, which can't reach this module's fixtures.
+    pub(super) fn resolved_for_test(
+        wallet: Arc<Wallet>,
+        signers: &[(Fingerprint, PendingSessionStatus)],
+    ) -> Self {
+        use crate::app::state::vault::test_support::{empty_psbt, tokens};
+        let mut modal = Self::new(
+            wallet,
+            CoincubeClient::new(),
+            tokens(),
+            "https://grpc.example.test".to_string(),
+            "desktop-device".to_string(),
+            42,
+            "cube-local".to_string(),
+            empty_psbt(),
+            None,
+        );
+        modal.pending = signers
+            .iter()
+            .enumerate()
+            .map(|(i, (fingerprint, status))| PendingSession {
+                session_id: format!("session-{i}"),
+                key_id: i as u64 + 1,
+                fingerprint: *fingerprint,
+                device_id: format!("device-{i}"),
+                transport_pubkey: Vec::new(),
+                capabilities: Vec::new(),
+                request_id: format!("req-{i}"),
+                label: format!("Signer {i}"),
+                status: *status,
+                error: None,
+                cancel_requested: false,
+                signed_psbt_persisted: false,
+                signed_psbt_fetching: false,
+                signed_psbt_merged: false,
+                signed_psbt_persisting: false,
+            })
+            .collect();
+        modal.phase = Phase::Sessions;
+        modal
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::app::state::vault::test_support::{empty_psbt, tokens};

@@ -414,6 +414,22 @@ impl HWI for PhoneSigner {
     }
 }
 
+/// Error code a peer sends when its stored pairing no longer matches: the
+/// phone's key, account or transport key changed since the QR was scanned.
+/// Retrying over the local network cannot succeed until the user pairs again.
+pub(crate) const PAIR_AGAIN_CODE: &str = "pair_again";
+
+/// True when a failed [`PhoneSigner::sign_tx`] was the phone refusing a stale
+/// pairing rather than a transport problem. The correlator renders a phone
+/// `ErrorEnvelope` as `"{code}: {message}"`, so the code is the prefix.
+pub(crate) fn needs_repair(error: &HwiError) -> bool {
+    matches!(
+        error,
+        HwiError::Device(msg)
+            if msg.strip_prefix(PAIR_AGAIN_CODE).is_some_and(|rest| rest.starts_with(':'))
+    )
+}
+
 /// Translate a phone-reported error string into a friendlier
 /// [`HwiError`]. Today the only specific case is `replay_refused:`,
 /// emitted by the phone's persistent replay guard when the desktop
@@ -459,6 +475,23 @@ mod tests {
             other => panic!("expected Device, got {:?}", other),
         };
         assert_eq!(msg, "USER_DECLINED: tap reject");
+    }
+
+    #[test]
+    fn needs_repair_matches_only_the_pair_again_code() {
+        // Exactly what the correlator produces for the phone's stale-binding
+        // refusal (`local_signer_host.dart`).
+        assert!(needs_repair(&HwiError::Device(
+            "pair_again: This LAN pairing has no current exact signer identity.".into()
+        )));
+        for other in [
+            HwiError::Device("sign_tx timeout".into()),
+            HwiError::Device("pair_again_later: not the same code".into()),
+            HwiError::Device("replay_refused: pair_again".into()),
+            HwiError::DeviceDisconnected,
+        ] {
+            assert!(!needs_repair(&other), "{:?}", other);
+        }
     }
 }
 
