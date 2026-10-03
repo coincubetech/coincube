@@ -1119,10 +1119,15 @@ async fn split_step2_resend_cancelled_mid_send_stays_uncertain() {
     let (outcome, _) = tokio::join!(
         coordinator.confirm_step2_resubmission(review, &session),
         async {
-            while daemon.calls() < 2 {
+            // Bounded: a confirmation that ends before its send is reported
+            // by the outcome assertion below instead of hanging here.
+            for _ in 0..1_000 {
+                if daemon.calls() >= 2 {
+                    break;
+                }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            h.sender.send(8).unwrap();
+            let _ = h.sender.send(8);
         }
     );
     assert_eq!(
