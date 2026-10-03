@@ -822,6 +822,11 @@ pub struct App {
     /// already has a Split journal (see [`discover_split_panel`]). Shown as an
     /// overlay; nothing in the GUI starts a new split before B5 (D1).
     split_panel: Option<Box<state::vault::split::SplitPanel>>,
+    /// Whether the Split panel may build step 2 on `daemon` (#637 batch 4):
+    /// `Ready` unless a backend switch is in flight, failed with nothing
+    /// recovered, or panicked with a possibly stopped daemon retained. Only
+    /// a switch that settles on a known-good backend sets it back.
+    split_backend: state::vault::claim::BackendState,
     /// Boxed so that `App` — and therefore `gui::tab::State`, whose size is
     /// set by this variant — stays small. `Panels` holds every panel's state
     /// inline (~30 KiB); carried by value it made each `self.state = ...`
@@ -3030,6 +3035,7 @@ impl App {
             split_handoff: split_intent.map(SplitHandoff::Waiting),
             split_handoff_generation: 0,
             split_panel,
+            split_backend: state::vault::claim::BackendState::Ready,
             panels: Box::new(panels),
             cache: cache_with_vault,
             daemon: Some(daemon),
@@ -3207,6 +3213,7 @@ impl App {
                 split_handoff: None,
                 split_handoff_generation: 0,
                 split_panel: None,
+                split_backend: state::vault::claim::BackendState::Ready,
                 panels: Box::new(panels),
                 cache,
                 daemon: None,
@@ -3797,7 +3804,7 @@ impl App {
         // an admitted route. A daemon or backend switch revokes the panel
         // first (`revoke_claim`), and a new daemon gives a new port.
         let (connect, step2, recon) =
-            split_ports(session, &self.panels.claim_generation, self.daemon.clone());
+            split_ports(session, &self.panels.claim_generation, self.split_daemon());
         let Some(panel) = self.split_panel.as_mut() else {
             return Task::none();
         };
@@ -3805,6 +3812,20 @@ impl App {
         panel.set_step2_port(step2);
         panel.set_recon_port(recon);
         panel.begin()
+    }
+
+    /// The daemon a Split step-2 port may be built on (#637 batch 4): the
+    /// App's daemon while Split's backend is `Ready`. During a switch, after
+    /// one that failed with nothing recovered, and after one that panicked
+    /// (its retained daemon may be stopped) Split gets none, on every later
+    /// refresh too, until a switch settles on a known-good backend.
+    /// Reconciliation needs no daemon (#637 R1).
+    fn split_daemon(&self) -> Option<Arc<dyn Daemon + Sync + Send>> {
+        if self.split_backend == state::vault::claim::BackendState::Ready {
+            self.daemon.clone()
+        } else {
+            None
+        }
     }
 
     fn revoke_split_handoff(&mut self) {
@@ -6429,6 +6450,13 @@ impl App {
                     }
                     None => Task::none(),
                 };
+                // And the Split panel, on every outcome (#637 batch 4): new
+                // ports under the current generation, with a step-2 port only
+                // on a known-good daemon whose route is admitted. The state
+                // outlasts this refresh, so no later one restores a step-2
+                // port on a daemon this switch left unknown.
+                self.split_backend = claim_backend;
+                let split_task = self.refresh_split_session();
                 // A successful switch clears the pending local-node sync card.
                 if result.is_ok() {
                     self.cache.node_bitcoind_sync_progress = None;
@@ -6442,6 +6470,7 @@ impl App {
                     extra,
                     Task::done(Message::CacheUpdated),
                     claim_task,
+                    split_task,
                 ]);
             }
             Message::WalletUpdated(Ok(wallet)) => {
@@ -7815,6 +7844,7 @@ impl App {
         if let Some(panel) = &mut self.panels.claim {
             panel.set_backend(state::vault::claim::BackendState::Switching);
         }
+        self.split_backend = state::vault::claim::BackendState::Switching;
         self.revoke_claim();
         // Mark a switch in flight so subsequent sync probes / triggers don't
         // re-fire it before it completes (the config only changes on success).
@@ -8908,6 +8938,241 @@ mod tests {
             shape(split_ports(None, &generation, Some(connect))),
             (false, false, false)
         );
+    }
+
+    /// The Vault descriptor of the Split rebind tests.
+    const SPLIT_DESC: &str = "wsh(or_d(pk([f5acc2fd]tpubD6NzVbkrYhZ4YgUx2ZLNt2rLYAMTdYysCRzKoLu2BeSHKvzqPaBDvf17GeBPnExUVPkuBpx4kniP964e2MxyzzazcXLptxLXModSVCVEV1T/<0;1>/*),and_v(v:pkh([8a64f2a9]tpubD6NzVbkrYhZ4WmzFjvQrp7sDa4ECUxTi9oby8K4FZkd3XCBtEdKwUiQyYJaxiJo5y42gyDWEczrFpozEjeLxMPxjf2WtkfcbpUdfvNnozWF/<0;1>/*),older(10))))#d72le4dr";
+
+    /// Daemon backends for the Split rebind tests: Connect's BTCB2 Esplora
+    /// at `https://connect.example/` (step 2's admitted route), or Electrum
+    /// (not admitted).
+    fn split_backend_daemon(
+        root: &std::path::Path,
+        admitted: bool,
+    ) -> Arc<dyn Daemon + Sync + Send> {
+        use coincubed::config::{BitcoinBackend, BitcoinConfig, ElectrumConfig, EsploraConfig};
+        use std::str::FromStr;
+        let backend = if admitted {
+            BitcoinBackend::Esplora(EsploraConfig {
+                addr: "https://connect.example/api/v1/esplora/bitcoin-blake2b/mainnet".into(),
+                token: None,
+                fallback_addr: None,
+                fallback_token: None,
+                secondary_fallback_addr: None,
+                secondary_fallback_token: None,
+            })
+        } else {
+            BitcoinBackend::Electrum(ElectrumConfig {
+                addr: "ssl://electrum.example:50002".into(),
+                validate_domain: true,
+            })
+        };
+        Arc::new(EmbeddedDaemon::unstarted_for_test(
+            coincubed::config::Config::new(
+                BitcoinConfig::new(
+                    crate::chain::ChainId::BitcoinBlake2b,
+                    Duration::from_secs(30),
+                ),
+                Some(backend),
+                log::LevelFilter::Off,
+                coincube_core::descriptors::CoincubeDescriptor::from_str(SPLIT_DESC).unwrap(),
+                coincubed::datadir::DataDirectory::new(root.to_path_buf()),
+            ),
+            None,
+        ))
+    }
+
+    /// A Bitcoin Blake2b Cube App on an admitted daemon. With `journal`, its
+    /// Vault holds a Split journal, so discovery gives it the Split panel;
+    /// with `session`, it has an admitted Connect session.
+    fn split_app(root: &std::path::Path, journal: bool, session: bool) -> App {
+        use coincube_core::miniscript::bitcoin::hashes::{sha256, Hash};
+        use std::str::FromStr;
+        let chain = crate::chain::ChainId::BitcoinBlake2b;
+        let descriptor =
+            coincube_core::descriptors::CoincubeDescriptor::from_str(SPLIT_DESC).unwrap();
+        let wallet = Arc::new(Wallet::new(descriptor).with_chain(chain));
+        let datadir = CoincubeDirectory::new(root.to_path_buf());
+        if journal {
+            let split_root = state::vault::split::step1::journal_root(&datadir, &wallet.id());
+            let directory = state::vault::split::step1::journal_directory(
+                &split_root,
+                sha256::Hash::hash(b"source"),
+            );
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::write(directory.join("intent.json"), b"{}").unwrap();
+        }
+        let (mut app, startup) = App::new_inner(
+            Cache {
+                fiat_chain: chain,
+                network: chain.bitcoin_network(),
+                ..Cache::default()
+            },
+            wallet,
+            None,
+            None,
+            Config::new(false),
+            split_backend_daemon(root, true),
+            datadir,
+            None,
+            settings::CubeSettings::new("Fork".into(), chain),
+            None,
+        );
+        drop(startup);
+        assert_eq!(app.split_panel.is_some(), journal);
+        if session {
+            let mut client =
+                crate::services::coincube::CoincubeClient::for_test("https://connect.example/");
+            client.set_token("synthetic-test-token");
+            app.panels.connect.install_admitted_client(client.clone());
+            app.panels.connect.account.user = Some(crate::services::coincube::User {
+                id: 7,
+                email: "synthetic@example.invalid".into(),
+                email_verified: Some(true),
+            });
+            app.fork_connect_client = Some(client);
+        }
+        drop(app.refresh_split_session());
+        app
+    }
+
+    /// (step-2 port, reconcile-only port) the Split panel holds.
+    fn split_ports_held(app: &App) -> (bool, bool) {
+        let panel = app.split_panel.as_ref().unwrap();
+        (panel.step2_available(), panel.reconcile_available())
+    }
+
+    /// #637 batch 4 (Copilot 5399744661): every `DaemonRestarted` outcome
+    /// rebinds the Split panel. A switch that settles on a known-good
+    /// daemon (started, started but not persisted, failed but recovered)
+    /// gives a step-2 port when its route is admitted. One that failed with
+    /// nothing recovered, or panicked with a possibly stopped daemon
+    /// retained, leaves only the reconcile-only port, on every later Connect
+    /// refresh too, until a later switch settles on a known-good backend.
+    /// Each rebind is under the current generation.
+    #[test]
+    fn split_rebinds_after_every_daemon_restart_outcome() {
+        let _guard = crate::app::session::test_guard();
+        let root = std::env::temp_dir().join(format!("split-rebind-{}", uuid::Uuid::new_v4()));
+        let mut app = split_app(&root, true, true);
+        assert_eq!(split_ports_held(&app), (true, true));
+        let restart = |app: &mut App, outcome: DaemonRestart| {
+            drop(app.update(Message::DaemonRestarted(outcome)));
+        };
+        let failure = || Error::Config("synthetic switch failure".into());
+        use state::vault::claim::BackendState;
+
+        // Started on a backend step 2 can't be sent through: reconcile only.
+        restart(
+            &mut app,
+            DaemonRestart::Started(split_backend_daemon(&root, false)),
+        );
+        assert_eq!(app.split_backend, BackendState::Ready);
+        assert_eq!(split_ports_held(&app), (false, true));
+        // Started, but not persisted, on an admitted one: step 2 again.
+        restart(
+            &mut app,
+            DaemonRestart::StartedNotPersisted(split_backend_daemon(&root, true)),
+        );
+        assert_eq!(split_ports_held(&app), (true, true));
+        // Failed with nothing recovered: no daemon, reconcile only, also
+        // after a later Connect refresh.
+        restart(
+            &mut app,
+            DaemonRestart::Failed {
+                error: failure(),
+                recovered: None,
+            },
+        );
+        assert_eq!(app.split_backend, BackendState::Unavailable);
+        assert_eq!(split_ports_held(&app), (false, true));
+        drop(app.refresh_split_session());
+        assert_eq!(split_ports_held(&app), (false, true));
+        // Failed but recovered on an admitted daemon: step 2 again.
+        restart(
+            &mut app,
+            DaemonRestart::Failed {
+                error: failure(),
+                recovered: Some(split_backend_daemon(&root, true)),
+            },
+        );
+        assert_eq!(app.split_backend, BackendState::Ready);
+        assert_eq!(split_ports_held(&app), (true, true));
+
+        // Panicked: the App keeps its (admitted) daemon, possibly stopped.
+        // Split never gets a step-2 port on it, at the restart or on any
+        // later Connect refresh.
+        let generation = *app.panels.claim_generation.borrow();
+        restart(&mut app, DaemonRestart::Panicked(failure()));
+        assert!(app.daemon.is_some(), "the retained daemon");
+        assert_eq!(app.split_backend, BackendState::Unknown);
+        assert_eq!(split_ports_held(&app), (false, true));
+        for _ in 0..2 {
+            drop(app.refresh_split_session());
+            assert_eq!(split_ports_held(&app), (false, true), "later refresh");
+        }
+        assert_eq!(*app.panels.claim_generation.borrow(), generation);
+        // A later switch that settles on a known-good daemon restores it.
+        restart(
+            &mut app,
+            DaemonRestart::Started(split_backend_daemon(&root, true)),
+        );
+        assert_eq!(split_ports_held(&app), (true, true));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// #637 batch 4: without a Connect session a restart gives the Split
+    /// panel no port at all, and without a Split panel it rebinds nothing
+    /// (the backend state is still kept for a later panel's refresh).
+    #[test]
+    fn split_rebind_needs_a_session_and_a_panel() {
+        let _guard = crate::app::session::test_guard();
+        let root = std::env::temp_dir().join(format!("split-rebind-{}", uuid::Uuid::new_v4()));
+        let mut app = split_app(&root, true, false);
+        assert_eq!(split_ports_held(&app), (false, false));
+        drop(app.update(Message::DaemonRestarted(DaemonRestart::Started(
+            split_backend_daemon(&root, true),
+        ))));
+        assert_eq!(split_ports_held(&app), (false, false));
+        let _ = std::fs::remove_dir_all(&root);
+
+        let root = std::env::temp_dir().join(format!("split-rebind-{}", uuid::Uuid::new_v4()));
+        let mut app = split_app(&root, false, true);
+        drop(app.update(Message::DaemonRestarted(DaemonRestart::Panicked(
+            Error::Config("synthetic switch failure".into()),
+        ))));
+        assert!(app.split_panel.is_none());
+        assert_eq!(
+            app.split_backend,
+            state::vault::claim::BackendState::Unknown
+        );
+        assert!(app.split_daemon().is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// #637 batch 4: while a backend switch is in flight the App still holds
+    /// the daemon being replaced, and Split gets no step-2 daemon from it.
+    #[test]
+    fn split_gets_no_daemon_while_a_switch_is_in_flight() {
+        let _guard = crate::app::session::test_guard();
+        let root = std::env::temp_dir().join(format!("split-switch-{}", uuid::Uuid::new_v4()));
+        let (mut app, _) = super::claim_step1_tests::bitcoin_app(&root);
+        assert!(app.split_daemon().is_some());
+        let mut cfg = app.daemon.as_ref().unwrap().config().unwrap().clone();
+        if let Some(coincubed::config::BitcoinBackend::Esplora(selection)) =
+            cfg.bitcoin_backend.as_mut()
+        {
+            selection.addr =
+                "https://replacement.example.invalid/api/v1/esplora/bitcoin/mainnet".into();
+        }
+        drop(app.spawn_daemon_switch(cfg));
+        assert!(app.daemon_switch_in_progress && app.daemon.is_some());
+        assert_eq!(
+            app.split_backend,
+            state::vault::claim::BackendState::Switching
+        );
+        assert!(app.split_daemon().is_none());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// #568 A1/D4: the Split review is priced only by a BTCB2-scoped source,

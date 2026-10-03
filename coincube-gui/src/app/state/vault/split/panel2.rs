@@ -95,6 +95,10 @@ impl SplitPanel {
     pub fn step2_available(&self) -> bool {
         self.step2_port.is_some()
     }
+    /// A recorded step 2 can be reconciled under the current session.
+    pub fn reconcile_available(&self) -> bool {
+        self.recon_port.is_some()
+    }
     /// The live "Split — cannot replay" label, if a check's evidence is.
     pub fn replay_label(&self) -> Option<&'static str> {
         self.replay.as_ref().and_then(step2::CannotReplay::label)
