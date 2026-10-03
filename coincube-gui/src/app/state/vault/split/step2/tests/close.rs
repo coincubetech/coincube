@@ -63,6 +63,8 @@ struct Chains {
     /// A fault on every BTCB2 read, and on every Bitcoin read.
     btcb2_fault: Mutex<Option<Fault>>,
     bitcoin_fault: Mutex<Option<Fault>>,
+    /// A fault on the BTCB2 reads of the recorded step 2 only.
+    step2_fault: Mutex<Option<Fault>>,
 }
 impl Chains {
     fn new(journal: &Journal) -> Self {
@@ -94,6 +96,7 @@ impl Chains {
             btcb2_utxos: Mutex::new(utxos),
             btcb2_fault: Mutex::default(),
             bitcoin_fault: Mutex::default(),
+            step2_fault: Mutex::default(),
         }
     }
     fn spend_on_btcb2(&self, outpoint: OutPoint) {
@@ -130,19 +133,21 @@ impl SplitEvidenceSource for Chains {
         chain: ChainId,
         txid: Txid,
     ) -> Result<FreshRead<TransactionObservation>, FailureKind> {
-        let value = match chain {
+        let (value, fault) = match chain {
             ChainId::Bitcoin => {
                 assert_eq!(txid, self.step1);
-                *self.step1_status.lock().unwrap()
+                (*self.step1_status.lock().unwrap(), self.fault(chain))
             }
-            _ => self
-                .step2_reads
-                .lock()
-                .unwrap()
-                .pop_front()
-                .unwrap_or(TransactionObservation::Absent),
+            _ => (
+                self.step2_reads
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .unwrap_or(TransactionObservation::Absent),
+                self.step2_fault.lock().unwrap().or(self.fault(chain)),
+            ),
         };
-        read(chain, value, self.fault(chain))
+        read(chain, value, fault)
     }
     async fn hash_at_height(
         &self,
@@ -433,6 +438,7 @@ async fn panel_keeps_a_step2_dead_end_open_without_clean_fresh_evidence() {
         *chains.btcb2_utxos.lock().unwrap() = fresh.btcb2_utxos.lock().unwrap().clone();
         *chains.btcb2_fault.lock().unwrap() = None;
         *chains.bitcoin_fault.lock().unwrap() = None;
+        *chains.step2_fault.lock().unwrap() = None;
     };
 
     // Seen in the first read, then only in the last one.
@@ -468,9 +474,13 @@ async fn panel_keeps_a_step2_dead_end_open_without_clean_fresh_evidence() {
     check(&mut panel).await;
     refused(&panel, STEP1_NOT_DEEP);
 
-    // A failed or stale read on either chain.
+    // A failed or stale read on either chain, or of the step 2 alone.
     for fault in [Fault::Error, Fault::Stale] {
-        for chain_fault in [&chains.btcb2_fault, &chains.bitcoin_fault] {
+        for chain_fault in [
+            &chains.btcb2_fault,
+            &chains.bitcoin_fault,
+            &chains.step2_fault,
+        ] {
             reset();
             *chain_fault.lock().unwrap() = Some(fault);
             check(&mut panel).await;
