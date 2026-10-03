@@ -359,14 +359,15 @@ async fn split_step2_reconcile_records_a_sighting_that_ends_the_resend() {
     drop(reopened);
 
     // The reconcile-only restart records it too.
-    let other_connect = MockServer::start_async().await;
+    drop(h);
+    let other_connect = &connect;
     let other_daemon = Refusing::new(None, 1);
     let Uncertain {
         h,
         coordinator,
         signed,
         ..
-    } = uncertain(&other_daemon, None, &other_connect).await;
+    } = uncertain(&other_daemon, None, other_connect).await;
     drop(coordinator);
     let txid = signed.compute_txid();
     let mut reconciler = SplitStep2Reconciler::open(
@@ -395,7 +396,7 @@ async fn split_step2_reconcile_records_a_sighting_that_ends_the_resend() {
     let transport = routes_over(
         other_daemon.clone(),
         None,
-        &other_connect,
+        other_connect,
         ORIGIN,
         vault_descriptor(),
         &h,
@@ -566,6 +567,7 @@ async fn split_step2_restart_refuses_recorded_bytes_that_do_not_verify() {
         Err(Error::InvalidBinding)
     ));
 
+    drop(h);
     let unsubmitted = Step2::new().await;
     let Step2 {
         h: unsubmitted,
@@ -783,18 +785,18 @@ async fn split_step2_resend_review_is_one_use_and_bound() {
         Err(ResendError::NotRecorded)
     ));
     drop(unsubmitted);
+    drop(s.h);
 
     let daemon = Refusing::new(None, 1);
     let Uncertain {
         h, mut coordinator, ..
     } = uncertain(&daemon, None, &connect).await;
-    let other_connect = MockServer::start_async().await;
     let other_daemon = Refusing::new(None, 1);
     let Uncertain {
-        h: _other_h,
+        h: other_h,
         coordinator: mut other,
         ..
-    } = uncertain(&other_daemon, None, &other_connect).await;
+    } = uncertain(&other_daemon, None, &connect).await;
     let journal = h.temp.journal();
     let refused = |result: Result<Outcome, ResendError>| result.err();
 
@@ -923,13 +925,15 @@ async fn split_step2_resend_review_is_one_use_and_bound() {
         Some(ResendError::Coordinator(Error::Revoked))
     ));
     drop(other);
+    drop(other_h);
+    drop(coordinator);
+    drop(h);
     let daemon3 = Refusing::new(None, 1);
-    let third_connect = MockServer::start_async().await;
     let Uncertain {
         h: h3,
         coordinator: mut third,
         ..
-    } = uncertain(&daemon3, None, &third_connect).await;
+    } = uncertain(&daemon3, None, &connect).await;
     let review = third.prepare_step2_resubmission(&context()).await.unwrap();
     h3.sender.send(8).unwrap();
     assert!(matches!(
@@ -1206,14 +1210,15 @@ async fn split_step2_an_accepted_send_is_never_resent_after_a_failed_write() {
 
     // Refused while the journal cannot be written: the return is not
     // recorded, so this attempt is never resent either.
-    let other_connect = MockServer::start_async().await;
+    drop(h);
+    let other_connect = &connect;
     let refusing = Refusing::new(None, 2);
     let Uncertain {
         h,
         mut coordinator,
         signed,
         ..
-    } = uncertain(&refusing, None, &other_connect).await;
+    } = uncertain(&refusing, None, other_connect).await;
     let (txid, wtxid) = (signed.compute_txid(), signed.compute_wtxid());
     let review = coordinator
         .prepare_step2_resubmission(&context())
@@ -1232,7 +1237,7 @@ async fn split_step2_an_accepted_send_is_never_resent_after_a_failed_write() {
     let transport = routes_over(
         refusing.clone(),
         None,
-        &other_connect,
+        other_connect,
         ORIGIN,
         vault_descriptor(),
         &h,
@@ -1364,14 +1369,15 @@ async fn split_step2_a_sighting_the_journal_fails_to_record_still_ends_the_resen
     drop(reopened);
 
     // The same through the resend review's own read.
-    let other_connect = MockServer::start_async().await;
+    drop(h);
+    let other_connect = &connect;
     let other_daemon = Refusing::new(None, 1);
     let Uncertain {
         h,
         mut coordinator,
         signed,
         ..
-    } = uncertain(&other_daemon, None, &other_connect).await;
+    } = uncertain(&other_daemon, None, other_connect).await;
     let txid = signed.compute_txid();
     let directory = h.temp.0.clone();
     h.chains.edit(|view| {
@@ -1395,7 +1401,7 @@ async fn split_step2_a_sighting_the_journal_fails_to_record_still_ends_the_resen
     let transport = routes_over(
         other_daemon.clone(),
         None,
-        &other_connect,
+        other_connect,
         ORIGIN,
         vault_descriptor(),
         &h,
@@ -1406,4 +1412,145 @@ async fn split_step2_a_sighting_the_journal_fails_to_record_still_ends_the_resen
         Err(ResendError::Unsettled)
     ));
     assert!(other_daemon.sends().is_empty());
+}
+
+/// #639 r4172421143 and r4172421171: a collection that fails after one of
+/// its reads saw the recorded step 2 (here the second read no longer
+/// agrees) is a sighting too. The withdrawn resend permission is not given
+/// back, through reconcile or through the resend review, live or after a
+/// restart. A failed collection that saw nothing gives it back.
+#[tokio::test(flavor = "multi_thread")]
+async fn split_step2_a_partial_sighting_still_ends_the_resend() {
+    let connect = MockServer::start_async().await;
+    for path in ["reconcile", "review"] {
+        let daemon = Refusing::new(None, 1);
+        let Uncertain {
+            h,
+            mut coordinator,
+            signed,
+            ..
+        } = uncertain(&daemon, None, &connect).await;
+        let txid = signed.compute_txid();
+        h.chains.edit(|view| {
+            view.on_btcb2_once = Some((txid, TransactionObservation::Unconfirmed { txid }))
+        });
+        let failed = match path {
+            "reconcile" => coordinator.reconcile_sweep(&context()).await.is_err(),
+            _ => coordinator
+                .prepare_step2_resubmission(&context())
+                .await
+                .is_err(),
+        };
+        assert!(failed, "{}: the collection changed", path);
+        assert!(
+            h.temp.journal()["split"].get("step2_returned").is_none(),
+            "{}: the permission was given back after a partial sighting",
+            path
+        );
+        assert!(matches!(
+            coordinator.prepare_step2_resubmission(&context()).await,
+            Err(ResendError::Unsettled)
+        ));
+        drop(coordinator);
+        let transport = routes_over(
+            daemon.clone(),
+            None,
+            &connect,
+            ORIGIN,
+            vault_descriptor(),
+            &h,
+        );
+        let mut reopened = reopen(&h, coins(&h.wallet), transport).await.unwrap();
+        assert!(matches!(
+            reopened.prepare_step2_resubmission(&context()).await,
+            Err(ResendError::Unsettled)
+        ));
+        assert!(daemon.sends().is_empty());
+    }
+}
+
+/// The Connect preflight of `tx` rejecting it for `reason`.
+async fn mock_rejection(server: &MockServer, tx: &Transaction, reason: &str) -> usize {
+    let stamp = now();
+    let (txid, wtxid) = (tx.compute_txid(), tx.compute_wtxid());
+    server.mock_async(|when, then| {
+        when.method(POST).path("/api/v1/esplora/bitcoin-blake2b/mainnet/tx/preflight");
+        then.status(200).header("cache-control", "no-store").json_body(json!({"success":true,"data":{"network":"bitcoin-blake2b","state":"available","result":{"txid":txid,"wtxid":wtxid,"tip_hash":hash(2),"observed_at":stamp,"allowed":false,"reject_reason":reason}}}));
+    }).await.id
+}
+
+/// The route's node reporting the recorded step 2 already held (in its
+/// mempool, with this or another witness, or with its outputs in its UTXO
+/// set) is a sighting even while every BTCB2 read finds it absent: the
+/// review refuses and the withdrawn resend permission is not given back,
+/// live or after a restart. Any other rejection gives it back.
+#[tokio::test(flavor = "multi_thread")]
+async fn split_step2_a_node_already_holding_the_step2_ends_the_resend() {
+    let connect = MockServer::start_async().await;
+    for (reason, held) in [
+        ("txn-already-in-mempool", true),
+        ("txn-same-nonwitness-data-in-mempool", true),
+        ("txn-already-known", true),
+        ("mempool-min-fee-not-met", false),
+    ] {
+        let daemon = Refusing::new(None, 1);
+        let Uncertain {
+            h,
+            mut coordinator,
+            signed,
+            preflight,
+            ..
+        } = uncertain(&daemon, None, &connect).await;
+        httpmock::Mock::new(preflight, &connect)
+            .delete_async()
+            .await;
+        let rejecting = mock_rejection(&connect, &signed, reason).await;
+        assert!(
+            matches!(
+                coordinator.prepare_step2_resubmission(&context()).await,
+                Err(ResendError::Coordinator(Error::PolicyRejected(_)))
+            ),
+            "{}",
+            reason
+        );
+        assert_eq!(
+            h.temp.journal()["split"].get("step2_returned").is_none(),
+            held,
+            "{}: the permission",
+            reason
+        );
+        httpmock::Mock::new(rejecting, &connect)
+            .delete_async()
+            .await;
+        let accepting = mock_preflight(&connect, &signed, true).await;
+        let review = coordinator.prepare_step2_resubmission(&context()).await;
+        if held {
+            assert!(
+                matches!(review, Err(ResendError::Unsettled)),
+                "{}: {:?}",
+                reason,
+                review.err()
+            );
+            drop(coordinator);
+            let transport = routes_over(
+                daemon.clone(),
+                None,
+                &connect,
+                ORIGIN,
+                vault_descriptor(),
+                &h,
+            );
+            let mut reopened = reopen(&h, coins(&h.wallet), transport).await.unwrap();
+            assert!(matches!(
+                reopened.prepare_step2_resubmission(&context()).await,
+                Err(ResendError::Unsettled)
+            ));
+        } else {
+            assert!(review.is_ok(), "{}: {:?}", reason, review.err());
+        }
+        assert!(daemon.sends().is_empty(), "{}", reason);
+        httpmock::Mock::new(accepting, &connect)
+            .delete_async()
+            .await;
+    }
 }

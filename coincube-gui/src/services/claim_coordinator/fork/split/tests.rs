@@ -225,6 +225,8 @@ struct View {
     read_age: i64,
     /// Run once, at the first BTCB2 read that finds a listed transaction.
     on_btcb2_sighting: Option<ReadHook>,
+    /// Answered once, by the next BTCB2 read of that transaction.
+    on_btcb2_once: Option<(Txid, TransactionObservation)>,
 }
 impl View {
     /// Step 1 confirmed in `block` (hash 6) at height 100 with `depth`
@@ -252,6 +254,7 @@ impl View {
             fork_tip: FORK_TIP,
             read_age: 0,
             on_btcb2_sighting: None,
+            on_btcb2_once: None,
         };
         view.set_depth(depth);
         view
@@ -335,6 +338,10 @@ impl ObservationSource for Chains {
     ) -> Result<FreshRead<TransactionObservation>, FailureKind> {
         let mut view = self.view.lock().unwrap();
         if chain != ChainId::Bitcoin {
+            if view.on_btcb2_once.is_some_and(|(id, _)| id == txid) {
+                let (_, once) = view.on_btcb2_once.take().unwrap();
+                return Self::read_aged(chain, once, view.read_age);
+            }
             if let Some((_, seen)) = view.on_btcb2.iter().find(|(id, _)| *id == txid) {
                 let seen = *seen;
                 if seen != TransactionObservation::Absent {

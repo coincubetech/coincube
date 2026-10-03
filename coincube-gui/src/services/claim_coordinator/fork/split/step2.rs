@@ -1062,13 +1062,80 @@ impl Drop for SplitStep2Coordinator {
     }
 }
 
+/// An observation source that notes any read of one transaction on one
+/// chain that answered it present (mempool or block), whatever becomes of the
+/// collection the read belongs to: a collection can fail after one of its
+/// reads saw the recorded step 2 (P3-3). Every other read passes through.
+pub(super) struct SightingProbe<'a> {
+    inner: &'a dyn ObservationSource,
+    chain: ChainId,
+    txid: Txid,
+    sighted: std::sync::atomic::AtomicBool,
+}
+impl<'a> SightingProbe<'a> {
+    pub(super) fn new(inner: &'a dyn ObservationSource, chain: ChainId, txid: Txid) -> Self {
+        Self {
+            inner,
+            chain,
+            txid,
+            sighted: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+    /// Whether any read answered the transaction present.
+    pub(super) fn sighted(&self) -> bool {
+        self.sighted.load(Ordering::SeqCst)
+    }
+}
+#[async_trait]
+impl ObservationSource for SightingProbe<'_> {
+    fn now(&self) -> i64 {
+        self.inner.now()
+    }
+    async fn anchor(
+        &self,
+        chain: ChainId,
+    ) -> Result<crate::services::coincube::network_anchor::NetworkAnchorStatus, FailureKind> {
+        self.inner.anchor(chain).await
+    }
+    async fn tip(
+        &self,
+        chain: ChainId,
+    ) -> Result<FreshRead<coincube_core::claim::BlockRef>, FailureKind> {
+        self.inner.tip(chain).await
+    }
+    async fn transaction(
+        &self,
+        chain: ChainId,
+        txid: Txid,
+    ) -> Result<FreshRead<claim_observation::TransactionObservation>, FailureKind> {
+        let read = self.inner.transaction(chain, txid).await;
+        if chain == self.chain
+            && txid == self.txid
+            && read.as_ref().is_ok_and(|read| {
+                *read.value() != claim_observation::TransactionObservation::Absent
+            })
+        {
+            self.sighted.store(true, Ordering::SeqCst);
+        }
+        read
+    }
+    async fn hash_at_height(
+        &self,
+        chain: ChainId,
+        height: u64,
+    ) -> Result<FreshRead<BlockHash>, FailureKind> {
+        self.inner.hash_at_height(chain, height).await
+    }
+}
+
 /// Check the recorded step 2's chain inclusion together with step 1's on
 /// Bitcoin, keyed by the recorded *signed* step-2 txid. A recorded submission
 /// only identifies what to look up; this never resends or authorizes one. A
 /// step 2 seen on BTCB2 is recorded as observed, which ends any resend
 /// (P3-3). The read runs with the resend permission durably withdrawn and
-/// gives it back only when it found no sighting in the still-current
-/// session, so a sighting that fails to record still ends the resend.
+/// gives it back only when no read of the collection saw the step 2 (even
+/// one the collection then failed past) in the still-current session, so a
+/// sighting that fails to record still ends the resend.
 async fn reconcile_recorded(
     controller: &mut Controller,
     services: &dyn SplitForkServices,
@@ -1087,9 +1154,11 @@ async fn reconcile_recorded(
     }
     let hold = controller.hold_split_step2_return(context)?;
     let ticket = controller.begin_check(context)?;
+    let plan = controller.plan();
+    let probe = SightingProbe::new(services.source(), plan.fork_chain, submission.txid());
     let collected = claim_observation::collect_sweep(
-        services.source(),
-        &controller.plan(),
+        &probe,
+        &plan,
         submission.txid(),
         policy.observations,
         policy.collection_budget,
@@ -1100,9 +1169,10 @@ async fn reconcile_recorded(
     )
     .await;
     let current = *generation.borrow() == context.generation && generation.has_changed().is_ok();
-    let sighted = collected
-        .as_ref()
-        .is_ok_and(|c| c.transaction() != claim_observation::TransactionObservation::Absent);
+    let sighted = probe.sighted()
+        || collected
+            .as_ref()
+            .is_ok_and(|c| c.transaction() != claim_observation::TransactionObservation::Absent);
     if let (true, false, Some(hold)) = (current, sighted, hold) {
         controller.release_split_step2_return(context, hold)?;
     }

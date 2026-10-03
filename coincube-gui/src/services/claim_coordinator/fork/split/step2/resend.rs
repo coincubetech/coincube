@@ -18,10 +18,11 @@
 //!   timed out or interrupted, or whose record failed to write, is never
 //!   resent, before or after a restart. The review's reads of the recorded
 //!   step 2 run with that record durably withdrawn and give it back only
-//!   when they found no sighting, so a sighting the journal fails to record
-//!   still ends the resend. A step 2 ever seen on BTCB2 (by
-//!   this review or by any reconcile, recorded in the journal) never gets
-//!   one either: it left.
+//!   when none of them saw it (even one in a collection that then failed)
+//!   and the route's node did not report already holding it, so a sighting
+//!   the journal fails to record still ends the resend. A step 2 ever seen
+//!   on BTCB2 (by this review or by any reconcile, recorded in the journal)
+//!   never gets one either: it left.
 //! - **Fresh evidence**, collected around the route's preflight of the exact
 //!   bytes and again at confirmation: the recorded signed step 2 absent from
 //!   BTCB2 (stable reads keyed by its own txid), every claimed coin still
@@ -330,11 +331,19 @@ impl SplitStep2Coordinator {
     }
 
     /// Both chains, with the recorded step 2 read by its own txid on BTCB2.
-    async fn collect_step2(&self) -> Result<claim_observation::SweepObservation, Error> {
-        claim_observation::collect_sweep(
-            self.services.source(),
-            &self.controller.plan(),
-            self.verified.transaction().compute_txid(),
+    /// `sighted` is set by any read that answered it present, even when the
+    /// collection then fails.
+    async fn collect_step2(
+        &self,
+        sighted: &mut bool,
+    ) -> Result<claim_observation::SweepObservation, Error> {
+        let plan = self.controller.plan();
+        let txid = self.verified.transaction().compute_txid();
+        let probe = SightingProbe::new(self.services.source(), plan.fork_chain, txid);
+        let collected = claim_observation::collect_sweep(
+            &probe,
+            &plan,
+            txid,
             self.policy.observations,
             self.policy.collection_budget,
             CollectionContext {
@@ -342,8 +351,9 @@ impl SplitStep2Coordinator {
                 generation: self.generation.clone(),
             },
         )
-        .await
-        .map_err(Error::Observation)
+        .await;
+        *sighted |= probe.sighted();
+        collected.map_err(Error::Observation)
     }
 
     /// The recorded step 2 absent from BTCB2, and step 1 eligible: six deep
@@ -415,14 +425,15 @@ impl SplitStep2Coordinator {
     }
 
     /// The evidence itself, under a withdrawn resend permission; `sighted`
-    /// is set by any read that saw the recorded step 2 on BTCB2.
+    /// is set by any read that saw the recorded step 2 on BTCB2, including
+    /// one in a collection that then failed.
     async fn held_evidence(
         &mut self,
         context: &Context,
         sighted: &mut bool,
     ) -> Result<(ReviewSnapshot, claim_observation::TransactionObservation), ResendError> {
         let ticket = self.controller.begin_check(context)?;
-        let first = self.collect_step2().await?;
+        let first = self.collect_step2(sighted).await?;
         self.current(context)?;
         self.absent(context, &first, sighted)?;
         let unspent_at =
@@ -437,7 +448,10 @@ impl SplitStep2Coordinator {
             )
             .await
             .map_err(Error::Preflight)?;
-        let last = self.collect_step2().await?;
+        if let NodePolicy::Rejected { reason } = evidence.node_policy() {
+            *sighted |= holds_already(reason);
+        }
+        let last = self.collect_step2(sighted).await?;
         self.current(context)?;
         let observations = last.assessment().observations;
         if !same_view(first.assessment().observations, observations) {
@@ -567,4 +581,15 @@ impl SplitStep2Coordinator {
         )?;
         Ok(self.send_recorded(context, refreshed).await)
     }
+}
+
+/// A preflight rejection by which the route's node reports already holding
+/// the transaction by txid: Bitcoin Core's `testmempoolaccept` reasons for
+/// one in its mempool (with this or another witness) or with outputs in its
+/// UTXO set. A sighting of the recorded step 2; any other rejection is not.
+fn holds_already(reason: &str) -> bool {
+    matches!(
+        reason,
+        "txn-already-in-mempool" | "txn-same-nonwitness-data-in-mempool" | "txn-already-known"
+    )
 }
