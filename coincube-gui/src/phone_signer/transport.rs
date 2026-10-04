@@ -285,6 +285,15 @@ impl PairedWriter {
             .map_err(|e| HwiError::Device(format!("flush: {}", e)))?;
         Ok(())
     }
+
+    /// Send TLS `close_notify` and close the write side, so the peer reads
+    /// everything sent so far before it sees the connection end.
+    pub async fn shutdown(&mut self) -> Result<(), HwiError> {
+        self.write
+            .shutdown()
+            .await
+            .map_err(|e| HwiError::Device(format!("shutdown: {}", e)))
+    }
 }
 
 impl std::fmt::Debug for PairedTransport {

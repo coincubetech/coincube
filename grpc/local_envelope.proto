@@ -32,7 +32,19 @@ message LocalEnvelope {
     PartialSignature    partial       = 7;  // signed PSBT bytes
     ErrorEnvelope       error         = 8;
     PairingStep pairing_step = 9; // explicit durable-pairing state transitions
+    Unpaired    unpaired     = 10; // either peer: "I removed our pairing"
   }
+}
+
+// Either peer → the other, over the pinned mutual-TLS channel: the sender has
+// removed its pairing with the receiver. The receiver removes its own record
+// for the sender's certificate and closes the connection. It grants nothing:
+// either side can already end the pairing on its own, so a receiver acts on it
+// without asking the user. A phone answers a removed desktop's next connection
+// with this frame alone, so the desktop learns about a removal made while it
+// was offline.
+message Unpaired {
+  string reason = 1; // diagnostic only, never shown to the user
 }
 
 // Sent by the phone immediately after the pairing TLS handshake succeeds.
@@ -123,6 +135,8 @@ message SignerBinding {
 // FINISH follows the durable coordinator completion decision, serialized with
 // cancellation. FINISHED acknowledges phone completion. Errors before FINISH
 // abort. Loss after FINISH is uncertain; require explicit recovery/re-pair.
+// ACCEPT also carries the desktop's display name, which the phone lists the
+// pairing under; the QR's `svc` names the phone itself, not the desktop.
 message PairingStep {
   string transaction_id = 1;
   enum Phase {
@@ -135,4 +149,6 @@ message PairingStep {
     FINISHED = 6;
   }
   Phase phase = 2;
+  // Set on ACCEPT only (desktop → phone). Empty from older desktops.
+  string desktop_name = 3;
 }
