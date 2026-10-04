@@ -1565,14 +1565,24 @@ fn split_ui_paths_do_no_blocking_work() {
     ];
     for (name, text) in ui {
         for token in BLOCKING {
-            // Outside a blocking task: everything before the first one.
-            let outside = text.split("spawn_blocking(").next().unwrap();
-            assert!(
-                !outside.contains(token),
-                "{} calls {} on the UI thread",
-                name,
-                token
-            );
+            // Every occurrence must sit inside a `spawn_blocking(...)`
+            // argument: after one, with its parentheses still open.
+            for (at, _) in text.match_indices(token) {
+                let inside = text[..at].rfind("spawn_blocking(").is_some_and(|open| {
+                    let start = open + "spawn_blocking(".len();
+                    // Closed once its depth reaches zero, for good.
+                    let mut depth = 1i32;
+                    text[start..at].chars().all(|c| {
+                        match c {
+                            '(' => depth += 1,
+                            ')' => depth -= 1,
+                            _ => {}
+                        }
+                        depth > 0
+                    })
+                });
+                assert!(inside, "{} calls {} on the UI thread", name, token);
+            }
         }
     }
     // The UI paths call the blocking helpers only through a task.
