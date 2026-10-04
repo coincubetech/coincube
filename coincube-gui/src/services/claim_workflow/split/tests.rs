@@ -1321,7 +1321,10 @@ fn split_b0_journal_api_has_no_gui_callers() {
                             || (gate_tests && ident == "create_split"));
                     // B3b-2b: the panel's (uncalled) step-2 layer reads the
                     // recorded step 2 at restart; its tests write journals.
-                    let panel_step2 = file.starts_with("src/app/state/vault/split/step2")
+                    // P3-3: the restart also reads whether a resend is
+                    // allowed, to choose which handle to open (it records
+                    // nothing); its tests record a return or a sighting.
+                    let panel_step2 = (file.starts_with("src/app/state/vault/split/step2")
                         && [
                             "split_identity",
                             "recorded_split_step2",
@@ -1330,8 +1333,14 @@ fn split_b0_journal_api_has_no_gui_callers() {
                             "record_split_target",
                             "prepare_split_step2",
                             "record_split_step2_broadcast_intent",
+                            "split_step2_returned",
+                            "split_step2_observed",
+                            "split_step2_resubmissions",
                         ]
-                        .contains(&ident);
+                        .contains(&ident))
+                        || (file.starts_with("src/app/state/vault/split/step2/tests")
+                            && ["record_split_step2_returned", "record_split_step2_observed"]
+                                .contains(&ident));
                     if ITEMS.contains(&ident)
                         && !OWN.contains(&file.as_str())
                         && !reexport

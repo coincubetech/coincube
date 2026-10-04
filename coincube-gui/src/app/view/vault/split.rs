@@ -65,6 +65,10 @@ fn working(work: Work) -> &'static str {
         Work::Step2Reviewing => "Preparing a fresh step-2 review…",
         Work::Step2Submitting => "Submitting step 2…",
         Work::Step2Reconciling => "Checking Bitcoin Blake2b for step 2…",
+        Work::Step2ResendReviewing => {
+            "Checking both chains and the claimed coins before a resend of step 2…"
+        }
+        Work::Step2Resending => "Sending step 2 again…",
     }
 }
 
@@ -180,6 +184,28 @@ fn step2_body<'a>(
             }));
             if let Some(seen) = panel.step2_seen() {
                 body = body.push(caption(format!("Bitcoin Blake2b: {seen:?}")));
+            }
+            // P3-3: a resend of exactly the recorded step 2, only from a
+            // live review.
+            if let Some(resend) = panel.step2_resend_review() {
+                body = body
+                    .push(p1_bold(format!("Send step 2 ({}) again", resend.txid)))
+                    .push(p1_regular(format!(
+                        "Exactly the recorded signed step 2 · resend {} of at most {} · route {}",
+                        resend.attempt, resend.max_attempts, resend.route_label
+                    )))
+                    .push(caption(format!(
+                        "Fresh checks found it absent from Bitcoin Blake2b and every claimed coin unspent there. This review expires at {}; after that, review it again.",
+                        resend.expires_at.format("%H:%M:%S")
+                    )));
+                if let Some(note) = resend.privacy_note {
+                    body = body.push(p1_regular(note).style(theme::text::warning));
+                }
+                actions = actions
+                    .push(primary("Send again", SplitMessage::Step2ConfirmResend))
+                    .push(action("Review again", SplitMessage::Step2ReviewResend));
+            } else if panel.can_review_resend() {
+                actions = actions.push(action("Review resend", SplitMessage::Step2ReviewResend));
             }
             actions = actions.push(action("Refresh", SplitMessage::Step2Reconcile));
         }
