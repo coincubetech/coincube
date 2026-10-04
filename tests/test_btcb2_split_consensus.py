@@ -801,11 +801,14 @@ def check_unified_signature_refusals(tool, wallet, request, built):
     refused = copy.deepcopy(request)
     refused["unified"]["signed"] = legacy.to_base64()
     bridge_refuses(tool, refused, "LegacySignature")
-    # Unified records under a 0x01 request.
+    # Unified records under a 0x01 request: refused by the finalizer, whose
+    # error is anchored exactly. The bare name would also match the PSBT
+    # adapter's `UnsupportedSighashRequest`, which refuses requests the
+    # chain never serves (0x02, say) before the finalizer is reached.
     refused["unified"]["signed"] = wallet.sign_unified(
         built["unified_psbt"], request=SIGHASH_ALL
     )
-    bridge_refuses(tool, refused, "UnsupportedSighash")
+    bridge_refuses(tool, refused, "UnsupportedSighash { input")
     # Unified records plus a legacy partial signature by the same key: the
     # PSBT adapter refuses the ambiguity before the finalizer is reached.
     mixed = PSBT.from_base64(wallet.sign_unified(built["unified_psbt"]))
