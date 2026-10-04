@@ -2029,8 +2029,8 @@ async fn panel_resends_step2_only_from_an_explicit_review_after_a_restart() {
 /// the reconciler and says why there is no resend; when the App's next
 /// refresh brings the port, the reconciler is revoked and the restart
 /// reopens the coordinator. A step 2 seen on BTCB2 opens the reconciler even
-/// with the port. (The live coordinator after a submission offers none:
-/// `AFTER_SUBMISSION`.)
+/// with the port. The live coordinator after an uncertain submission (the
+/// Submitted stage) offers none either.
 #[tokio::test(flavor = "multi_thread")]
 async fn panel_offers_a_resend_only_where_a_restart_reopened_the_coordinator() {
     let journal = Journal::returned(false);
@@ -2061,6 +2061,27 @@ async fn panel_offers_a_resend_only_where_a_restart_reopened_the_coordinator() {
     assert_eq!(panel.notice(), None);
     assert!(!panel.can_review_resend());
     assert_eq!(shared.lock().unwrap().reopened, 0);
+
+    // The live coordinator after an uncertain submission: only the Reconcile
+    // stage offers a resend, so neither message acts here.
+    let live = Journal::new(false);
+    let (mut panel, shared) = tracked_panel(&live);
+    panel.driver = None;
+    panel.coord = Some(Box::new(PanelCoord::new(&shared, Some(uncertain()))));
+    panel.step2_outcome = Some(uncertain());
+    panel.stage = Stage::Step2(Step2Stage::Submitted);
+    assert!(!panel.can_review_resend());
+    for message in [
+        SplitMessage::Step2ReviewResend,
+        SplitMessage::Step2ConfirmResend,
+    ] {
+        let task = panel.update(message);
+        drive(&mut panel, task).await;
+        assert_eq!(panel.stage, Stage::Step2(Step2Stage::Submitted));
+    }
+    assert!(panel.step2_resend_review().is_none());
+    let counts = shared.lock().unwrap();
+    assert_eq!((counts.resend_reviews, counts.resends), (0, 0));
 }
 
 /// Consuming the preparation does not make a transient failure terminal.
