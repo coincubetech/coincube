@@ -667,3 +667,32 @@ fn close_refuses_a_journal_that_changed_since_the_check() {
     assert!(!step1::is_closed(&journal.temp.0));
     assert!(journal.temp.0.join("intent.json").exists());
 }
+
+/// #644 G2: a restart that waits for the journal's lock while a close holds
+/// it opens nothing once the close wrote its tombstone: it reads the
+/// tombstone again under the lock. Adapted from Gimli's #644 review probe.
+#[tokio::test(flavor = "multi_thread")]
+async fn restart_waiting_on_a_close_opens_nothing() {
+    let fixture = Fixture::new();
+    let directory = fixture.journal.temp.0.clone();
+    // The close's critical section: the journal lock held.
+    let held = fixture.journal.lock();
+    let port: Arc<dyn ReconPort> = fixture.port.clone();
+    let restarting = tokio::spawn(restart(
+        context(),
+        Some(port),
+        None,
+        directory.clone(),
+        TARGET.into(),
+        fixture.journal.digest(),
+    ));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!restarting.is_finished());
+    // The close writes its tombstone under the lock, then releases it.
+    std::fs::write(directory.join(step1::CLOSED), b"{}").unwrap();
+    drop(held);
+    assert!(matches!(restarting.await.unwrap(), Ok(Restart::Closed)));
+    assert_eq!(fixture.port.opened.load(Ordering::SeqCst), 0);
+    // The journal is not left locked.
+    drop(fixture.journal.lock());
+}

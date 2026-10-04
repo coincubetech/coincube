@@ -645,7 +645,8 @@ fn resend_allowed(controller: &Controller) -> bool {
 /// the reconciler instead of rebuilding step 1 (whose claimed coins may
 /// already be spent on BTCB2 by step 2). No reconciler for the session
 /// refuses; it never falls back to step 1 (#637 R1). A closed split opens
-/// nothing (#625 F2).
+/// nothing (#625 F2), including one closed while this restart waited for
+/// the journal's lock (#644 G2).
 ///
 /// P3-3: when the journal also allows a resend and `resend` gives the
 /// target Vault's step-2 port for the same session, the coordinator is
@@ -669,6 +670,12 @@ pub async fn restart(
             .map_err(|error| {
                 Step2Refusal::retry(step1::describe(claim_coordinator::Error::Journal(error)))
             })?;
+        // #644 G2: a close that held the journal's lock while this restart
+        // waited for it has written its tombstone by now. The check above
+        // stays: it keeps a closed split from waiting for the lock at all.
+        if step1::is_closed(&directory) {
+            return Ok(Restart::Closed);
+        }
         (
             controller.recorded_split_step2().is_some(),
             resend_allowed(&controller),
