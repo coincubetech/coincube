@@ -613,6 +613,23 @@ pub(crate) mod tests {
                 .await,
             Err(Error::Device(message)) if message == LISTED_FOR_ANOTHER_WALLET
         ));
+        // The listing's own name with another wallet's descriptor (review F2).
+        let other_descriptor = split_descriptor(construction(Shape::WshMulti).source())
+            .unwrap()
+            .to_string();
+        assert_ne!(other_descriptor, descriptor);
+        assert!(matches!(
+            binder
+                .bind(request(
+                    DeviceKind::Coldcard,
+                    1,
+                    policy.name(),
+                    &other_descriptor,
+                    None
+                ))
+                .await,
+            Err(Error::Device(message)) if message == LISTED_FOR_ANOTHER_WALLET
+        ));
 
         // A listing opened without the policy cannot bind these devices: the
         // session refuses at open, before any registration prompt (B4a F1).

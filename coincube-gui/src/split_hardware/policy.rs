@@ -279,7 +279,7 @@ mod tests {
         );
         // One multisig key without its origin.
         let (o1, x1) = account(1, "m/48'/0'/0'/2'");
-        let (_, x2) = account(2, "m/48'/0'/0'/2'");
+        let (o2, x2) = account(2, "m/48'/0'/0'/2'");
         let (o3, x3) = account(3, "m/48'/0'/0'/2'");
         assert_eq!(
             refuse(
@@ -302,6 +302,19 @@ mod tests {
         );
         assert_eq!(
             refuse(&format!("wpkh({origin}{xpub}/0/0/*)"), None),
+            PolicyError::Branch
+        );
+        // A fixed child key (no wildcard) is one address, not the ranged
+        // branch a device policy would describe (P7; review F1).
+        assert_eq!(
+            refuse(&format!("wpkh({origin}{xpub}/0)"), None),
+            PolicyError::Branch
+        );
+        assert_eq!(
+            refuse(
+                &format!("wsh(sortedmulti(2,{o1}{x1}/0/*,{o2}{x2}/0,{o3}{x3}/0/*))"),
+                None
+            ),
             PolicyError::Branch
         );
         assert_eq!(
