@@ -3,6 +3,7 @@
 //! transport.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use tokio::sync::{oneshot, Mutex};
@@ -50,6 +51,27 @@ pub fn cancel_envelope(session_id: impl Into<String>, reason: impl Into<String>)
     }
 }
 
+/// Build a [`LocalEnvelope`] telling the peer this side removed the pairing.
+pub fn unpaired_envelope(reason: impl Into<String>) -> LocalEnvelope {
+    LocalEnvelope {
+        payload: Some(local_v1::local_envelope::Payload::Unpaired(
+            local_v1::Unpaired {
+                reason: reason.into(),
+            },
+        )),
+    }
+}
+
+/// What a waiting `sign_tx` call is told when the phone removes the pairing
+/// mid-session. Prefixed with [`super::PAIR_AGAIN_CODE`] so the PSBT panel
+/// offers to pair again, exactly as for a phone that refuses a stale pairing.
+pub fn phone_unpaired_text() -> String {
+    format!(
+        "{}: This Keychain removed its pairing with this computer. Pair it again to sign over the local network.",
+        super::PAIR_AGAIN_CODE
+    )
+}
+
 /// What a reader-task envelope should do, independent of how the
 /// transport pulled it off the wire. Split out so unit tests can
 /// exercise the classification logic without spinning up a TLS pipe.
@@ -71,6 +93,10 @@ pub enum DispatchAction {
     /// (e.g. v1.0 phones or transport-level errors that don't
     /// pertain to a specific session).
     BroadcastError(String),
+    /// The phone removed this pairing. Fail every waiter with
+    /// [`phone_unpaired_text`], mark the connection unpaired and stop reading:
+    /// nothing the phone sends afterwards is acted on.
+    Unpaired,
     /// Envelope was a `SessionStatusUpdate` / `Pong` / malformed —
     /// reader continues without dispatching.
     Ignore,
@@ -98,6 +124,7 @@ pub fn classify_envelope(envelope: LocalEnvelope) -> DispatchAction {
                 }
             }
         }
+        Some(local_v1::local_envelope::Payload::Unpaired(_)) => DispatchAction::Unpaired,
         Some(local_v1::local_envelope::Payload::StatusUpdate(_)) => DispatchAction::Ignore,
         Some(local_v1::local_envelope::Payload::Pong(_)) => DispatchAction::Ignore,
         _ => DispatchAction::Ignore,
@@ -120,6 +147,9 @@ pub struct Correlator {
     /// instead of keeping a paired phone listed as Supported while
     /// signing silently fails.
     reader: JoinHandle<()>,
+    /// Set once the phone sends `Unpaired`. The hw refresh tick reads it to
+    /// remove the pairing from the store; the reader has already stopped.
+    unpaired: Arc<AtomicBool>,
 }
 
 /// What the reader hands back to a waiting `sign_tx` call.
@@ -139,6 +169,8 @@ impl Correlator {
         let in_flight: Arc<Mutex<HashMap<String, oneshot::Sender<SignResponse>>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let in_flight_for_reader = in_flight.clone();
+        let unpaired = Arc::new(AtomicBool::new(false));
+        let unpaired_for_reader = unpaired.clone();
         let reader = tokio::spawn(async move {
             let mut reader = reader;
             loop {
@@ -182,11 +214,23 @@ impl Correlator {
                             let _ = tx.send(SignResponse::Error(text.clone()));
                         }
                     }
+                    DispatchAction::Unpaired => {
+                        unpaired_for_reader.store(true, Ordering::SeqCst);
+                        let mut waiters = in_flight_for_reader.lock().await;
+                        for (_, tx) in waiters.drain() {
+                            let _ = tx.send(SignResponse::Error(phone_unpaired_text()));
+                        }
+                        return;
+                    }
                     DispatchAction::Ignore => {}
                 }
             }
         });
-        Self { in_flight, reader }
+        Self {
+            in_flight,
+            reader,
+            unpaired,
+        }
     }
 
     /// Register a oneshot for the given `session_id`. The matching
@@ -209,6 +253,11 @@ impl Correlator {
     /// short-circuit a re-dial.
     pub fn is_alive(&self) -> bool {
         !self.reader.is_finished()
+    }
+
+    /// `true` once the phone has said it removed this pairing.
+    pub fn peer_unpaired(&self) -> bool {
+        self.unpaired.load(Ordering::SeqCst)
     }
 }
 
@@ -338,6 +387,19 @@ mod tests {
     fn classify_pong_is_ignored() {
         let env = pong_envelope();
         assert!(matches!(classify_envelope(env), DispatchAction::Ignore));
+    }
+
+    #[test]
+    fn classify_unpaired_stops_the_reader() {
+        let env = unpaired_envelope("removed on phone");
+        assert!(matches!(classify_envelope(env), DispatchAction::Unpaired));
+    }
+
+    #[test]
+    fn phone_unpaired_text_asks_to_pair_again() {
+        assert!(super::super::needs_repair(&async_hwi::Error::Device(
+            phone_unpaired_text()
+        )));
     }
 
     #[test]

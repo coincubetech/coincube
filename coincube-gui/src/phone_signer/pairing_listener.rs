@@ -459,14 +459,14 @@ async fn try_pair_once(
     })?;
     let result = async {
         use local_v1::pairing_step::Phase;
-        send_step(&mut writer, &transaction_id, Phase::Accept, run).await?;
+        send_step(&mut writer, accept_step(&transaction_id), run).await?;
         recv_step(&mut reader, &transaction_id, Phase::Prepared, run).await?;
         run.authorized(|| {
             transaction
                 .write_candidate()
                 .map_err(|e| PairingError::InternalError(format!("persist pairing: {}", e)))
         })?;
-        send_step(&mut writer, &transaction_id, Phase::Commit, run).await?;
+        send_step(&mut writer, step(&transaction_id, Phase::Commit), run).await?;
         recv_step(&mut reader, &transaction_id, Phase::Committed, run).await?;
         // Both candidates are durable, but neither peer has been authorized
         // to expose the new binding. Cancel can still win this final lock.
@@ -475,7 +475,7 @@ async fn try_pair_once(
                 .decide()
                 .map_err(|e| PairingError::InternalError(format!("complete pairing: {}", e)))
         })?;
-        send_step(&mut writer, &transaction_id, Phase::Finish, run).await?;
+        send_step(&mut writer, step(&transaction_id, Phase::Finish), run).await?;
         recv_step(&mut reader, &transaction_id, Phase::Finished, run).await?;
         run.check()?;
         transaction.finish().map_err(|e| {
@@ -515,20 +515,51 @@ fn _force_prost_import(env: &LocalEnvelope) -> usize {
     env.encoded_len()
 }
 
+/// Longest desktop name sent to the phone, in characters.
+const MAX_DESKTOP_NAME_CHARS: usize = 64;
+
+/// What the phone lists this pairing under: this computer's name, as the
+/// Connect device list shows it. The QR's `svc` names the phone itself, so
+/// the phone can't take the desktop's name from there.
+pub(crate) fn desktop_display_name() -> String {
+    clean_desktop_name(&crate::utils::device::device_label())
+}
+
+fn clean_desktop_name(label: &str) -> String {
+    // macOS host names end in the mDNS `.local` suffix, noise on the phone.
+    let name: String = label
+        .replacen(".local (", " (", 1)
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(MAX_DESKTOP_NAME_CHARS)
+        .collect();
+    name.trim().to_string()
+}
+
+fn step(id: &str, phase: local_v1::pairing_step::Phase) -> local_v1::PairingStep {
+    local_v1::PairingStep {
+        transaction_id: id.into(),
+        phase: phase as i32,
+        desktop_name: String::new(),
+    }
+}
+
+/// ACCEPT also names this desktop; see [`desktop_display_name`].
+fn accept_step(id: &str) -> local_v1::PairingStep {
+    local_v1::PairingStep {
+        desktop_name: desktop_display_name(),
+        ..step(id, local_v1::pairing_step::Phase::Accept)
+    }
+}
+
 async fn send_step(
     writer: &mut super::transport::PairedWriter,
-    id: &str,
-    phase: local_v1::pairing_step::Phase,
+    step: local_v1::PairingStep,
     run: &PairingRun,
 ) -> Result<(), PairingError> {
     run.check()?;
     let envelope = LocalEnvelope {
-        payload: Some(local_v1::local_envelope::Payload::PairingStep(
-            local_v1::PairingStep {
-                transaction_id: id.into(),
-                phase: phase as i32,
-            },
-        )),
+        payload: Some(local_v1::local_envelope::Payload::PairingStep(step)),
     };
     run.wait(async {
         tokio::time::timeout(Duration::from_secs(10), writer.send(&envelope))
@@ -617,5 +648,33 @@ mod tests {
         let other = discovered("deadbeef", "192.168.1.42:50000");
         let picked = pick_current_target("c5bf643c", &[other], &snapshot);
         assert_eq!(picked.addr, snapshot.addr);
+    }
+
+    /// Only ACCEPT names the desktop; every other step leaves it empty.
+    #[test]
+    fn accept_step_names_this_desktop() {
+        use local_v1::pairing_step::Phase;
+        let accept = accept_step("tx");
+        assert_eq!(accept.phase, Phase::Accept as i32);
+        assert_eq!(accept.transaction_id, "tx");
+        assert_eq!(accept.desktop_name, desktop_display_name());
+        assert!(!accept.desktop_name.is_empty());
+        for phase in [Phase::Commit, Phase::Finish] {
+            assert!(step("tx", phase).desktop_name.is_empty());
+        }
+    }
+
+    #[test]
+    fn desktop_name_drops_the_mdns_suffix_and_stays_short() {
+        assert_eq!(
+            clean_desktop_name("Studio-Mac.local (macOS)"),
+            "Studio-Mac (macOS)"
+        );
+        assert_eq!(clean_desktop_name("build-box (Linux)"), "build-box (Linux)");
+        assert_eq!(clean_desktop_name("a\u{7}b\n (Linux)"), "ab (Linux)");
+        assert_eq!(
+            clean_desktop_name(&"x".repeat(200)).chars().count(),
+            MAX_DESKTOP_NAME_CHARS
+        );
     }
 }

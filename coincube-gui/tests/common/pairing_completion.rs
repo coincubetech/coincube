@@ -37,6 +37,11 @@ pub async fn complete_with_fault<T: AsyncRead + AsyncWrite + Unpin>(
         {
             return Err("unexpected phase".into());
         }
+        // ACCEPT names the desktop so the phone can list the pairing under
+        // it; no other step carries a name.
+        if (expected == Phase::Accept) == step.desktop_name.trim().is_empty() {
+            return Err("only ACCEPT names the desktop".into());
+        }
         if let Some((stop, kind)) = fault {
             if boundary == stop {
                 if kind == "timeout" {
@@ -47,6 +52,7 @@ pub async fn complete_with_fault<T: AsyncRead + AsyncWrite + Unpin>(
                         payload: Some(Payload::PairingStep(local_v1::PairingStep {
                             transaction_id: "wrong-id".into(),
                             phase: reply as i32,
+                            desktop_name: String::new(),
                         })),
                     }
                     .encode_to_vec();
@@ -62,6 +68,7 @@ pub async fn complete_with_fault<T: AsyncRead + AsyncWrite + Unpin>(
             payload: Some(Payload::PairingStep(local_v1::PairingStep {
                 transaction_id: step.transaction_id,
                 phase: reply as i32,
+                desktop_name: String::new(),
             })),
         }
         .encode_to_vec();
