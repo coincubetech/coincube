@@ -82,10 +82,12 @@ struct Step2Request {
     locktime: u32,
     btcb2_tip_height: u32,
     signed: Option<String>,
-    /// An unsigned step 2 to rebuild from the same observations.
+    /// The journal's unsigned step 2, rebuilt at `btcb2_tip_height` as a
+    /// restart rebuilds it.
     recorded: Option<String>,
-    /// A recorded signed step 2 (journal bytes) to verify against the rebuilt
-    /// construction, as a restart would.
+    /// The journal's signed step 2, verified against that rebuilt `recorded`
+    /// (never against a fresh construction here), as a restart would. Needs
+    /// `recorded`.
     recorded_signed: Option<String>,
 }
 
@@ -195,10 +197,12 @@ fn step2(
             .collect::<Vec<_>>(),
         "target": built.target().to_hex_string(),
     });
+    let mut reconstructed = None;
     if let Some(recorded) = &step2.recorded {
         let recorded: Transaction = deserialize_hex(recorded)?;
         let rebuilt = reconstruct_split_step2(&inputs, &recorded, step2.btcb2_tip_height)?;
         result["reconstructed_txid"] = json!(rebuilt.txid());
+        reconstructed = Some(rebuilt);
     }
     if let Some(signed) = &step2.signed {
         let verified =
@@ -210,8 +214,16 @@ fn step2(
         result["signatures_per_input"] = json!(verified.signatures_per_input());
     }
     if let Some(recorded) = &step2.recorded_signed {
+        // A restart (`claim_coordinator/fork/split/step2/resend.rs`) verifies
+        // the journal's signed bytes against the journal's unsigned sweep
+        // rebuilt at the current BTCB2 tip, never against a fresh
+        // construction at the original tip (#638 F2): `built` carries this
+        // request's locktime, which a later restart does not know.
+        let construction = reconstructed
+            .as_ref()
+            .ok_or("`recorded_signed` needs `recorded`, the unsigned sweep a restart rebuilds")?;
         let recorded: Transaction = deserialize_hex(recorded)?;
-        let verified = verify_split_step2_transaction(&built, &recorded, &secp)?;
+        let verified = verify_split_step2_transaction(construction, &recorded, &secp)?;
         result["verified_txid"] = json!(verified.transaction().compute_txid());
         result["verified_signatures_per_input"] = json!(verified.signatures_per_input());
     }

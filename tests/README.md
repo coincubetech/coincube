@@ -127,8 +127,12 @@ BTCB2 mempool within the construction's vsize estimate and mined there, and
 refused by Bitcoin's mempool (`missing-inputs`) and in a candidate block. The
 bridge refuses an unclaimed or missing coin, a foreign-wallet or non-Vault target,
 a future locktime, step 1's signatures and any hash type but `SIGHASH_ALL`; the
-signed bytes (and the bytes BTCB2 mined) verify as a recorded step 2, and a
-tampered copy does not. Its
+signed bytes (and the bytes BTCB2 mined, compared whole, witness included)
+verify as a recorded step 2 rebuilt at a later BTCB2 tip, as a restart rebuilds
+it, and a tampered copy does not. A replay test pins, at node level, the
+exposure the post-submission reorg design must close: once step 1's Bitcoin
+block is invalidated, step 2 is refused by Bitcoin's mempool only as step 1's
+conflict and a block carrying it is accepted, until the chain is restored. Its
 offline cases need only the bridge. The unified `ALL|UNIFIED` fallback (#568 B4b)
 is not built yet and is not covered.
 

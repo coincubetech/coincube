@@ -104,11 +104,20 @@ pub const REORGED: &str = "Step 1 is no longer in the Bitcoin block it was confi
 /// reorg: this step 1 can never confirm, so a new one is needed.
 pub const NEW_POISON_NEEDED: &str = "Step 1 was dropped from Bitcoin and its coins were since spent there by another transaction, so this step 1 can never confirm and step 2 stays blocked. A new step 1 is needed: scan the wallet again for a fresh inventory.";
 
+/// Additional navigation advice for a refused operation. Terminal domain
+/// errors retain only their own instructions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefusalRecovery {
+    None,
+    ReopenCube,
+}
+
 /// Why the flow stops, and whether trying again could change it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Refusal {
     pub reason: String,
     pub retry: bool,
+    pub recovery: RefusalRecovery,
 }
 
 impl Refusal {
@@ -116,12 +125,14 @@ impl Refusal {
         Self {
             reason: reason.into(),
             retry: false,
+            recovery: RefusalRecovery::None,
         }
     }
     pub fn retry(reason: impl Into<String>) -> Self {
         Self {
             reason: reason.into(),
             retry: true,
+            recovery: RefusalRecovery::None,
         }
     }
 }
