@@ -41,6 +41,14 @@
 //!    evidence that they are absent from BTCB2 and their coins unspent, can
 //!    send them again; live, or after a restart that rebuilds and verifies
 //!    them ([`SplitStep2Coordinator::resume_uncertain`]).
+//! 6. **Completion (B5a, `completion`).** On the reconciler, a reconcile
+//!    that finds step 2 six deep on BTCB2 with step 1 still six deep on
+//!    Bitcoin and absent from BTCB2, rechecked by a second collection,
+//!    mints short-lived [`SplitCompletionEvidence`]; it records a
+//!    digest-only `split_from` entry on the target Cube and only then
+//!    permits deleting the foreign descriptors from the journal (P2,
+//!    D18). A later reconcile clears the entry when the chains take the
+//!    completion back (D17).
 //!
 //! Routes ([`SplitStep2Production`]): the target Vault daemon on exactly the
 //! Connect BTCB2 Esplora at the Split's own Connect origin, preflighted by
@@ -71,6 +79,8 @@ use coincube_core::{
 
 mod resend;
 pub use resend::{ResendError, Step2ResubmissionReview};
+mod completion;
+pub use completion::{CompletionTarget, SplitCompletionEvidence, SplitCompletionReconciliation};
 
 /// The wall-clock bound on a target reservation (#592 N2). The daemon call
 /// runs on its own task, so a reservation stuck behind the daemon's locks
@@ -1253,6 +1263,12 @@ pub struct SplitStep2Reconciler {
     services: Box<dyn SplitForkServices>,
     policy: CheckPolicy,
     revoker: Revoker,
+    /// Completion evidence (`completion`) outlives nothing of this: a
+    /// dropped reconciler kills every evidence it minted.
+    lifetime: Arc<()>,
+    /// Revoked at every check, so an earlier check's completion evidence
+    /// never survives a later one (Claim's `completion_revoker`).
+    completion_revoker: Revoker,
 }
 impl SplitStep2Reconciler {
     /// Reopen the Split journal of `source_digest` under `target_cube`.
@@ -1312,6 +1328,8 @@ impl SplitStep2Reconciler {
             services,
             policy,
             revoker: Revoker::new(),
+            lifetime: Arc::new(()),
+            completion_revoker: Revoker::new(),
         })
     }
     pub fn revoker(&self) -> Revoker {
@@ -1330,6 +1348,7 @@ impl SplitStep2Reconciler {
         &mut self,
         context: &Context,
     ) -> Result<(Status, claim_observation::TransactionObservation), Error> {
+        self.completion_revoker.revoke();
         if self.revoker.is_revoked()
             || context != &self.context
             || *self.generation.borrow() != context.generation
