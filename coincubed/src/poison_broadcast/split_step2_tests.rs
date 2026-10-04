@@ -11,11 +11,15 @@ use crate::{
     testutils::{DummyBitcoind, DummyDatabase},
 };
 use coincube_core::{
+    bip39::Mnemonic,
     claim::BlockRef,
     foreign_split::{
-        create_split_step1, create_split_step2, finalize_split_step2, SplitBranch, SplitCoin,
-        SplitInputs, SplitSource, SplitStep2Inputs,
+        create_split_step1, create_split_step2, create_unified_sweep, finalize_split_step2,
+        finalize_unified_sweep, SplitBranch, SplitCoin, SplitInputs, SplitSource, SplitStep2Inputs,
+        UnifiedInputs, UnifiedReplayStatus,
     },
+    psbt_unified::UnifiedPsbt,
+    signer::SessionSigner,
 };
 use miniscript::{
     bitcoin::{
@@ -605,4 +609,258 @@ fn split_step2_node_route_sends_exact_bytes_once_to_the_bound_node() {
         daemon.submit_verified_split_step2_to_node(&verified, index(TARGET_INDEX), &binding, &gate),
         Err(SubmissionError::AlreadyStarted)
     );
+}
+
+/// A verified unified sweep (#568 B4b) of a single-key `wpkh` foreign
+/// wallet (`seed` varies it) paying `target`, on `chain`, signed
+/// `ALL|UNIFIED` by the session signer and finalized Protected.
+fn unified_sweep(chain: ChainId, seed: u8, target: &bitcoin::Script) -> VerifiedUnifiedSweep {
+    let secp = Secp256k1::new();
+    let signer = SessionSigner::from_mnemonic(
+        Network::Bitcoin,
+        Mnemonic::from_entropy(&[seed; 16]).unwrap(),
+        "",
+    )
+    .unwrap();
+    let path = DerivationPath::from_str("m/84'/0'/0'").unwrap();
+    let key = format!(
+        "[{}/84'/0'/0']{}",
+        signer.fingerprint(&secp),
+        signer.xpub_at(&path, &secp)
+    );
+    let branch = |b: u32| Descriptor::from_str(&format!("wpkh({}/{}/*)", key, b)).unwrap();
+    let source = SplitSource::new(branch(0), Some(branch(1))).unwrap();
+    let previous = Transaction {
+        version: transaction::Version::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint::new(Txid::from_byte_array([seed; 32]), 1),
+            ..TxIn::default()
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(150_000),
+            script_pubkey: source
+                .external()
+                .at_derivation_index(0)
+                .unwrap()
+                .script_pubkey(),
+        }],
+    };
+    let block = BlockRef {
+        height: FORK - 10,
+        hash: BlockHash::from_byte_array([0x33; 32]),
+    };
+    let coins = [SplitCoin {
+        outpoint: OutPoint::new(previous.compute_txid(), 0),
+        branch: SplitBranch::External,
+        index: 0,
+        previous,
+        bitcoin_block: Some(block),
+        btcb2_block: Some(block),
+    }];
+    let sweep = create_unified_sweep(
+        &UnifiedInputs {
+            chain,
+            source: &source,
+            coins: &coins,
+            fork_height: FORK,
+            target,
+        },
+        2,
+        LockTime::from_height(TIP).unwrap(),
+        TIP,
+    )
+    .unwrap();
+    let signed = signer
+        .sign_unified(
+            &UnifiedPsbt::from_psbt(sweep.psbt().clone()).unwrap(),
+            chain,
+            &secp,
+        )
+        .unwrap();
+    finalize_unified_sweep(&sweep, &signed, &secp).unwrap()
+}
+
+fn unified_gate(verified: &VerifiedUnifiedSweep) -> (SubmissionGate, SubmissionRevoker) {
+    SubmissionGate::for_unified_sweep(verified, Instant::now() + Duration::from_secs(60))
+}
+
+/// #568 B4b: the unified sweep takes step 2's transport and refusals, on
+/// both routes. Every refusal returns before any backend or node is touched
+/// and leaves the gate Pending: a wrong chain (daemon or artifact), an
+/// output that is not this Vault's receive address at the recorded index
+/// (another index, a hardened one, the change branch, another Vault), and a
+/// gate for another transaction, another chain or a step-2 artifact. Then
+/// the exact bytes go once through the backend route and once through the
+/// bound node route, and neither method is reachable over RPC.
+#[test]
+fn unified_transport_refuses_wrong_chain_output_and_gate() {
+    let descriptor = vault();
+    let target = receive_script(&descriptor, TARGET_INDEX);
+    let verified = unified_sweep(ChainId::BitcoinBlake2b, 1, &target);
+    assert_eq!(verified.replay_status(), UnifiedReplayStatus::Protected);
+    let backend = Arc::new(Mutex::new(DummyBitcoind::new()));
+    let both = |daemon: &DaemonControl,
+                verified: &VerifiedUnifiedSweep,
+                target_index: ChildNumber,
+                gate: &SubmissionGate| {
+        let binding = daemon.claim_backend_binding();
+        let backend = daemon.submit_verified_unified_sweep(verified, target_index, &binding, gate);
+        let node =
+            daemon.submit_verified_unified_sweep_to_node(verified, target_index, &binding, gate);
+        assert_eq!(backend, node);
+        assert_eq!(gate.state(), SubmissionState::Pending);
+        backend
+    };
+
+    // Wrong daemon chain.
+    for chain in [
+        ChainId::Bitcoin,
+        ChainId::Testnet4,
+        ChainId::BitcoinBlake2bTestnet4,
+    ] {
+        let (gate, _) = unified_gate(&verified);
+        let other = control(chain, descriptor.clone(), backend.clone());
+        assert_eq!(
+            both(&other, &verified, index(TARGET_INDEX), &gate),
+            Err(SubmissionError::UnsupportedChain),
+            "{chain:?}"
+        );
+    }
+    // Wrong artifact chain: a BTCB2 Testnet4 construction.
+    let testnet = unified_sweep(ChainId::BitcoinBlake2bTestnet4, 1, &target);
+    let (gate, _) = unified_gate(&testnet);
+    let daemon = control(ChainId::BitcoinBlake2b, descriptor.clone(), backend.clone());
+    assert_eq!(
+        both(&daemon, &testnet, index(TARGET_INDEX), &gate),
+        Err(SubmissionError::UnsupportedChain)
+    );
+    // Another recorded index, and a hardened one.
+    for wrong in [
+        index(TARGET_INDEX + 1),
+        index(TARGET_INDEX - 1),
+        ChildNumber::from_hardened_idx(TARGET_INDEX).unwrap(),
+    ] {
+        let (gate, _) = unified_gate(&verified);
+        assert_eq!(
+            both(&daemon, &verified, wrong, &gate),
+            Err(SubmissionError::OutputMismatch),
+            "{wrong}"
+        );
+    }
+    // The change branch at the same index, and another Vault's address.
+    let change = descriptor
+        .change_descriptor()
+        .derive(index(TARGET_INDEX), &Secp256k1::verification_only())
+        .script_pubkey();
+    let other_vault = CoincubeDescriptor::from_str(
+        &VAULT
+            .split('#')
+            .next()
+            .unwrap()
+            .replace("older(3)", "older(4)"),
+    )
+    .unwrap();
+    for script in [change, receive_script(&other_vault, TARGET_INDEX)] {
+        let elsewhere = unified_sweep(ChainId::BitcoinBlake2b, 1, &script);
+        let (gate, _) = unified_gate(&elsewhere);
+        assert_eq!(
+            both(&daemon, &elsewhere, index(TARGET_INDEX), &gate),
+            Err(SubmissionError::OutputMismatch)
+        );
+    }
+    // A gate for another sweep (another foreign wallet, same target), a gate
+    // on the Bitcoin chain, and a step-2 gate (another artifact).
+    let other_sweep = unified_sweep(ChainId::BitcoinBlake2b, 2, &target);
+    assert_ne!(
+        other_sweep.transaction().compute_txid(),
+        verified.transaction().compute_txid()
+    );
+    let (gate, _) = unified_gate(&other_sweep);
+    assert_eq!(
+        both(&daemon, &verified, index(TARGET_INDEX), &gate),
+        Err(SubmissionError::GateMismatch)
+    );
+    let (wrong_chain_gate, _) = SubmissionGate::for_transaction(
+        ChainId::Bitcoin,
+        verified.transaction(),
+        Instant::now() + Duration::from_secs(60),
+    );
+    assert_eq!(
+        both(&daemon, &verified, index(TARGET_INDEX), &wrong_chain_gate),
+        Err(SubmissionError::GateMismatch)
+    );
+    let (step2_gate, _) = fresh_gate(&split_step2(ChainId::BitcoinBlake2b, 1, &target));
+    assert_eq!(
+        both(&daemon, &verified, index(TARGET_INDEX), &step2_gate),
+        Err(SubmissionError::GateMismatch)
+    );
+    assert!(sent(&backend).is_empty());
+
+    // The exact bytes, once, through the backend route.
+    let (gate, _) = unified_gate(&verified);
+    let binding = daemon.claim_backend_binding();
+    assert_eq!(
+        daemon.submit_verified_unified_sweep(&verified, index(TARGET_INDEX), &binding, &gate),
+        Ok(SubmissionOutcome::UpstreamAccepted {
+            txid: verified.transaction().compute_txid(),
+            wtxid: verified.transaction().compute_wtxid(),
+        })
+    );
+    assert_eq!(
+        daemon.submit_verified_unified_sweep(&verified, index(TARGET_INDEX), &binding, &gate),
+        Err(SubmissionError::AlreadyStarted)
+    );
+    let sent = sent(&backend);
+    assert_eq!(sent.len(), 1);
+    assert_eq!(
+        bitcoin::consensus::serialize(&sent[0]),
+        bitcoin::consensus::serialize(verified.transaction())
+    );
+
+    // The exact bytes, once, through the bound node route; a binding from
+    // another daemon instance refuses before any connection.
+    let tx = verified.transaction().clone();
+    let (address, worker) = fake_node(tx.compute_txid());
+    let node = node_control(descriptor.clone(), address);
+    let stale = node_control(descriptor, address).claim_backend_binding();
+    let (gate, _) = unified_gate(&verified);
+    assert_eq!(
+        node.submit_verified_unified_sweep_to_node(&verified, index(TARGET_INDEX), &stale, &gate),
+        Err(SubmissionError::BackendUnavailable)
+    );
+    assert_eq!(gate.state(), SubmissionState::Pending);
+    let binding = node.claim_backend_binding();
+    assert_eq!(
+        node.submit_verified_unified_sweep_to_node(&verified, index(TARGET_INDEX), &binding, &gate),
+        Ok(SubmissionOutcome::UpstreamAccepted {
+            txid: tx.compute_txid(),
+            wtxid: tx.compute_wtxid(),
+        })
+    );
+    assert_eq!(
+        worker.join().unwrap(),
+        serde_json::json!({"jsonrpc":"2.0","id":1,"method":"sendrawtransaction","params":[bitcoin::consensus::encode::serialize_hex(&tx)]})
+    );
+    assert_eq!(
+        node.submit_verified_unified_sweep_to_node(&verified, index(TARGET_INDEX), &binding, &gate),
+        Err(SubmissionError::AlreadyStarted)
+    );
+
+    // Not exposed over RPC.
+    for (file, text) in [
+        ("jsonrpc/api.rs", include_str!("../jsonrpc/api.rs")),
+        ("jsonrpc/mod.rs", include_str!("../jsonrpc/mod.rs")),
+        ("jsonrpc/rpc.rs", include_str!("../jsonrpc/rpc.rs")),
+        ("commands/mod.rs", include_str!("../commands/mod.rs")),
+        ("lib.rs", include_str!("../lib.rs")),
+    ] {
+        for ident in [
+            "submit_verified_unified_sweep",
+            "for_unified_sweep",
+            "VerifiedUnifiedSweep",
+        ] {
+            assert!(!text.contains(ident), "{} names {}", file, ident);
+        }
+    }
 }

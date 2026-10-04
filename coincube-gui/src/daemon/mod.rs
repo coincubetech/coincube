@@ -290,6 +290,33 @@ pub trait Daemon: Debug {
         Err(DaemonError::ClientNotSupported)
     }
 
+    /// Split (#568 B4b) unified sweep, embedded only: the exact verified
+    /// `ALL|UNIFIED` bytes through the BTCB2 Vault daemon's own backend,
+    /// once, with step 2's checks (one output at this Vault's receive index,
+    /// the reviewed backend binding). The coordinator owns the fresh checks,
+    /// preflight, approval and intent; a Protected witness is not permission.
+    async fn submit_verified_unified_sweep(
+        &self,
+        _verified: std::sync::Arc<coincube_core::foreign_split::VerifiedUnifiedSweep>,
+        _target_index: coincube_core::miniscript::bitcoin::bip32::ChildNumber,
+        _binding: coincubed::poison_broadcast::ClaimBackendBinding,
+        _gate: std::sync::Arc<coincubed::poison_broadcast::SubmissionGate>,
+    ) -> Result<coincubed::poison_broadcast::SubmissionOutcome, DaemonError> {
+        Err(DaemonError::ClientNotSupported)
+    }
+
+    /// The unified sweep to the bound node of a BTCB2 Vault on a managed
+    /// Knots node (#568 P4): the same checks plus the reviewed binding.
+    async fn submit_verified_unified_sweep_to_node(
+        &self,
+        _verified: std::sync::Arc<coincube_core::foreign_split::VerifiedUnifiedSweep>,
+        _target_index: coincube_core::miniscript::bitcoin::bip32::ChildNumber,
+        _binding: coincubed::poison_broadcast::ClaimBackendBinding,
+        _gate: std::sync::Arc<coincubed::poison_broadcast::SubmissionGate>,
+    ) -> Result<coincubed::poison_broadcast::SubmissionOutcome, DaemonError> {
+        Err(DaemonError::ClientNotSupported)
+    }
+
     async fn start_rescan(&self, t: u32) -> Result<(), DaemonError>;
     async fn list_confirmed_txs(
         &self,
