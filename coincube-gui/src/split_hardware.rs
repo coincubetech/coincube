@@ -13,6 +13,7 @@
 //! [`sign`] holds the separate hardware signing session (slice B4a). It has
 //! no GUI caller yet, and the account source above still never signs.
 
+pub mod bind;
 pub mod policy;
 pub mod sign;
 

@@ -93,7 +93,7 @@ impl HardwareWallet {
         })
     }
 
-    fn id(&self) -> &String {
+    pub(crate) fn id(&self) -> &String {
         match self {
             Self::Locked { id, .. } => id,
             Self::Unsupported { id, .. } => id,
@@ -165,6 +165,44 @@ pub struct ConnectedList {
     still: Vec<String>,
 }
 
+/// A Split device policy bound into the device listing (#568 B4b-2). A
+/// named (multisig) policy goes into each Coldcard handle as its wallet name
+/// and into each BitBox02 handle as its policy when the device is opened, so
+/// the listed handle is the one that signs it. An unnamed (singlesig) policy
+/// binds nothing: those devices sign singlesig on a plain handle, and a
+/// forced singlesig policy is not what BitBox02 expects. Ledger is bound by
+/// the Split binder instead (`split_hardware::bind`). Nothing is persisted.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct SplitPolicyBinding {
+    name: String,
+    descriptor: String,
+}
+
+impl SplitPolicyBinding {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn descriptor(&self) -> &str {
+        &self.descriptor
+    }
+
+    /// The name and descriptor bound into Coldcard and BitBox02 handles:
+    /// `None` for an unnamed (singlesig) policy.
+    pub fn bound(&self) -> Option<(&str, &str)> {
+        (!self.name.is_empty()).then_some((self.name.as_str(), self.descriptor.as_str()))
+    }
+}
+
+/// No descriptor (xpubs) in logs or message traces.
+impl std::fmt::Debug for SplitPolicyBinding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SplitPolicyBinding")
+            .field("name", &self.name)
+            .finish_non_exhaustive()
+    }
+}
+
 pub struct HardwareWallets {
     network: Network,
     pub list: Vec<HardwareWallet>,
@@ -174,6 +212,9 @@ pub struct HardwareWallets {
     /// False for session-only consumers (the Split tool): BitBox02 pairing
     /// then stays in memory and nothing is written under `datadir_path`.
     persist_pairing: bool,
+    /// The Split policy bound into Coldcard and BitBox02 handles at listing
+    /// (#568 B4b-2); used only when no wallet is loaded.
+    split_policy: Option<SplitPolicyBinding>,
 }
 
 impl std::fmt::Debug for HardwareWallets {
@@ -191,6 +232,7 @@ impl HardwareWallets {
             wallet: None,
             datadir_path,
             persist_pairing: true,
+            split_policy: None,
         }
     }
 
@@ -200,6 +242,21 @@ impl HardwareWallets {
     pub fn ephemeral(mut self) -> Self {
         self.persist_pairing = false;
         self
+    }
+
+    /// Session-only listing for signing a Split policy (#568 B4b-2): Coldcard
+    /// and BitBox02 handles are bound to a named (multisig) policy when the
+    /// device is opened, and no BitBox02 pairing is written, since a Split
+    /// listing is always ephemeral. With a loaded wallet, the wallet's own
+    /// binding wins.
+    pub fn with_split_policy(mut self, name: String, descriptor: String) -> Self {
+        self.persist_pairing = false;
+        self.split_policy = Some(SplitPolicyBinding { name, descriptor });
+        self
+    }
+
+    pub fn split_policy_binding(&self) -> Option<&SplitPolicyBinding> {
+        self.split_policy.as_ref()
     }
 
     #[cfg(test)]
@@ -269,11 +326,19 @@ impl HardwareWallets {
                                     let id = id.to_string();
                                     let network = self.network;
                                     let wallet = self.wallet.clone();
+                                    let split_policy = self.split_policy.clone();
                                     cmds.push(Task::perform(
                                         async move {
                                             (
                                                 id.clone(),
-                                                unlock_bitbox(id, network, bb, wallet).await,
+                                                unlock_bitbox(
+                                                    id,
+                                                    network,
+                                                    bb,
+                                                    wallet,
+                                                    split_policy,
+                                                )
+                                                .await,
                                             )
                                         },
                                         |(id, res)| HardwareWalletMessage::Unlocked(id, res),
@@ -351,6 +416,7 @@ impl HardwareWallets {
             wallet: self.wallet.clone(),
             datadir_path: self.datadir_path.clone(),
             persist_pairing: self.persist_pairing,
+            split_policy: self.split_policy.clone(),
         };
         iced::Subscription::run_with(state, make_refresh_stream)
     }
@@ -361,6 +427,7 @@ async fn unlock_bitbox(
     network: Network,
     bb: Box<PairingBitbox02<runtime::TokioRuntime>>,
     wallet: Option<Arc<Wallet>>,
+    split_policy: Option<SplitPolicyBinding>,
 ) -> Result<HardwareWallet, async_hwi::Error> {
     let paired_bb = bb.wait_confirm().await?;
     let mut bitbox2 = BitBox02::from(paired_bb).with_network(network);
@@ -390,6 +457,12 @@ async fn unlock_bitbox(
             })
         }
     } else {
+        // Split (#568 B4b-2): a named policy is bound into the handle so the
+        // listed handle signs it; whether it is registered is the signing
+        // session's question.
+        if let Some((_, policy)) = split_policy.as_ref().and_then(SplitPolicyBinding::bound) {
+            bitbox2 = bitbox2.with_policy(policy)?;
+        }
         Ok(HardwareWallet::Supported {
             id: id.clone(),
             kind: DeviceKind::BitBox02,
@@ -410,6 +483,7 @@ struct RefreshState {
     wallet: Option<Arc<Wallet>>,
     datadir_path: CoincubeDirectory,
     persist_pairing: bool,
+    split_policy: Option<SplitPolicyBinding>,
 }
 
 impl std::hash::Hash for RefreshState {
@@ -421,6 +495,7 @@ impl std::hash::Hash for RefreshState {
             .hash(state);
         self.datadir_path.path().hash(state);
         self.persist_pairing.hash(state);
+        self.split_policy.hash(state);
     }
 }
 
@@ -432,6 +507,7 @@ struct State {
     api: Option<ledger::HidApi>,
     datadir_path: CoincubeDirectory,
     persist_pairing: bool,
+    split_policy: Option<SplitPolicyBinding>,
     /// Per-phone retry cooldowns keyed by `fp8`. Set on a failed
     /// dial so the next refresh tick skips the phone (and pays no
     /// `CONNECT_TIMEOUT`) until the window has elapsed. Cleared on
@@ -459,6 +535,7 @@ fn make_refresh_stream(rs: &RefreshState) -> impl Stream<Item = HardwareWalletMe
         api: None,
         datadir_path: rs.datadir_path.clone(),
         persist_pairing: rs.persist_pairing,
+        split_policy: rs.split_policy.clone(),
         phone_cooldowns: HashMap::new(),
         phone_signers: HashMap::new(),
     };
@@ -673,6 +750,15 @@ fn refresh(mut state: State) -> impl Stream<Item = HardwareWalletMessage> {
                         {
                             coldcard::Coldcard::from(cc)
                                 .with_wallet_name(wallet.name.clone())
+                                .into()
+                        } else if let Some((name, _)) = state
+                            .split_policy
+                            .as_ref()
+                            .and_then(SplitPolicyBinding::bound)
+                        {
+                            // Split (#568 B4b-2): the named policy's handle.
+                            coldcard::Coldcard::from(cc)
+                                .with_wallet_name(name.to_string())
                                 .into()
                         } else {
                             coldcard::Coldcard::from(cc).into()
@@ -1394,6 +1480,14 @@ mod tests {
     const DESC: &str = "wsh(or_d(multi(2,[ffd63c8d/48'/1'/0'/2']tpubDExA3EC3iAsPxPhFn4j6gMiVup6V2eH3qKyk69RcTc9TTNRfFYVPad8bJD5FCHVQxyBT4izKsvr7Btd2R4xmQ1hZkvsqGBaeE82J71uTK4N/<0;1>/*,[de6eb005/48'/1'/0'/2']tpubDFGuYfS2JwiUSEXiQuNGdT3R7WTDhbaE6jbUhgYSSdhmfQcSx7ZntMPPv7nrkvAqjpj3jX9wbhSGMeKVao4qAzhbNyBi7iQmv5xxQk6H6jz/<0;1>/*),and_v(v:pkh([ffd63c8d/48'/1'/0'/2']tpubDExA3EC3iAsPxPhFn4j6gMiVup6V2eH3qKyk69RcTc9TTNRfFYVPad8bJD5FCHVQxyBT4izKsvr7Btd2R4xmQ1hZkvsqGBaeE82J71uTK4N/<2;3>/*),older(3))))#p9ax3xxp";
 
     fn refresh_hash(wallet: Option<Arc<Wallet>>, root: &str) -> u64 {
+        refresh_hash_with(wallet, root, None)
+    }
+
+    fn refresh_hash_with(
+        wallet: Option<Arc<Wallet>>,
+        root: &str,
+        split_policy: Option<SplitPolicyBinding>,
+    ) -> u64 {
         use std::hash::{Hash, Hasher};
         let state = RefreshState {
             network: Network::Testnet4,
@@ -1401,10 +1495,53 @@ mod tests {
             wallet,
             datadir_path: CoincubeDirectory::new(root.into()),
             persist_pairing: true,
+            split_policy,
         };
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         state.hash(&mut hasher);
         hasher.finish()
+    }
+
+    /// #568 B4b-2: the Split policy binding is part of the subscription
+    /// identity, so a listing opened for another policy, or none, restarts
+    /// its stream; a Split listing never persists pairing; an unnamed
+    /// policy binds nothing into the handles; Debug carries no descriptor.
+    #[test]
+    fn refresh_subscription_restarts_for_split_policy_changes() {
+        let split = |name: &str| {
+            HardwareWallets::new(
+                CoincubeDirectory::new("/synthetic/one".into()),
+                Network::Testnet4,
+            )
+            .with_split_policy(name.to_string(), DESC.to_string())
+        };
+        let bare = refresh_hash_with(None, "/synthetic/one", None);
+        let listing = split("Split0000abcd");
+        assert!(!listing.persists_pairing());
+        let binding = listing.split_policy_binding().cloned().unwrap();
+        assert_eq!(binding.bound(), Some(("Split0000abcd", DESC)));
+        let bound = refresh_hash_with(None, "/synthetic/one", Some(binding.clone()));
+        assert_ne!(bare, bound);
+        assert_eq!(
+            bound,
+            refresh_hash_with(None, "/synthetic/one", Some(binding.clone()))
+        );
+        let other = split("Split0000abce")
+            .split_policy_binding()
+            .cloned()
+            .unwrap();
+        assert_ne!(
+            bound,
+            refresh_hash_with(None, "/synthetic/one", Some(other))
+        );
+        assert!(!format!("{binding:?}").contains("tpub"));
+
+        let unnamed = split("");
+        assert!(!unnamed.persists_pairing());
+        let binding = unnamed.split_policy_binding().unwrap();
+        assert_eq!(binding.bound(), None);
+        assert_eq!(binding.descriptor(), DESC);
+        assert!(!format!("{binding:?}").contains("tpub"));
     }
 
     #[test]
