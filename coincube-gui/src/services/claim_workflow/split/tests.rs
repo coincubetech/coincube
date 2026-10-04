@@ -1304,6 +1304,8 @@ fn split_b0_journal_api_has_no_gui_callers() {
                             "recorded_split",
                             "revalidate_split_construction",
                             "bind_recovered_split_transaction",
+                            // B5a: the completion evidence deletes them.
+                            "forget_split_descriptors",
                             "record_split_target",
                             "replace_used_split_target",
                             "prepare_split_step2",
