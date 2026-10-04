@@ -57,6 +57,11 @@ pub(super) const VERSION: u32 = 8;
 /// Far above any supported descriptor (a 3-key `wsh(sortedmulti)` is under
 /// 400 bytes); a bound on untrusted journal text, not a policy.
 const MAX_DESCRIPTOR_BYTES: usize = 4096;
+/// #625 F2 (A1 = A): the tombstone a split closed in its step-2 dead end
+/// leaves in its journal directory. The journal stays; a new split is never
+/// created in a directory that holds one (anything by that name), so a
+/// partly reset directory can't hide a new journal behind an old tombstone.
+pub const SPLIT_TOMBSTONE: &str = "closed.json";
 /// Explicit step-2 resends a journal may record (P3-3). With the submission
 /// intent, step 2 has at most step 1's attempt bound.
 pub const MAX_SPLIT_STEP2_RESUBMISSIONS: usize = recovery::MAX_BITCOIN_ATTEMPTS - 1;
@@ -408,7 +413,10 @@ impl Controller {
         validate(&intent)?;
         Self::valid_context(&context)?;
         let mut journal = journal::Journal::open(directory)?;
-        if journal.load()?.is_some() {
+        // Checked under the journal's lock, which the close holds to write it.
+        if journal.load()?.is_some()
+            || std::fs::symlink_metadata(directory.join(SPLIT_TOMBSTONE)).is_ok()
+        {
             return Err(Error::Conflict);
         }
         journal.store(&intent)?;
@@ -794,6 +802,22 @@ impl Controller {
             .split
             .as_ref()
             .is_some_and(|record| record.step2_returned)
+    }
+
+    /// A recorded step-2 submission that no resend can follow and that no
+    /// read ever saw on BTCB2 (#625 F2, #639 N1): the resend permission is
+    /// withdrawn (an accepted, cancelled, timed-out or interrupted send, or a
+    /// read that didn't give it back), or the resend limit is reached. Only
+    /// such a journal may be closed after a fresh chain check. Read-only; it
+    /// grants nothing.
+    pub fn split_step2_dead_end(&self) -> bool {
+        self.intent.split.as_ref().is_some_and(|record| {
+            self.intent.fork_submission.is_some()
+                && record.step2_transaction.is_some()
+                && !record.step2_observed
+                && (!record.step2_returned
+                    || record.step2_resubmissions.len() >= MAX_SPLIT_STEP2_RESUBMISSIONS)
+        })
     }
 
     /// Record that the latest step-2 attempt came back from a completed send

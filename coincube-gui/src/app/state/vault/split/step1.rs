@@ -103,6 +103,15 @@ pub const REORGED: &str = "Step 1 is no longer in the Bitcoin block it was confi
 /// Step 1's coins were spent on Bitcoin by another transaction after a
 /// reorg: this step 1 can never confirm, so a new one is needed.
 pub const NEW_POISON_NEEDED: &str = "Step 1 was dropped from Bitcoin and its coins were since spent there by another transaction, so this step 1 can never confirm and step 2 stays blocked. A new step 1 is needed: scan the wallet again for a fresh inventory.";
+/// #625 F2: a recorded step 1 that can't be rebuilt, never sent.
+pub const UNREBUILDABLE: &str = "This split's step 1 was never sent and can't be rebuilt, so it can't be sent now. You can abandon it after a check that Bitcoin shows neither it nor any spend of its coins.";
+/// #625 F2: a step 1 whose submission is recorded is never abandoned here.
+pub const SUBMISSION_RECORDED: &str = "A submission of this split's step 1 is recorded, so it can't be abandoned here. The record is kept.";
+/// A session that ended after an abandon or close was confirmed: nothing
+/// was deleted or closed (#644 r4176212750).
+pub const ENDED_BEFORE_ABANDON: &str = "The split session ended before the split was abandoned, so nothing was deleted or closed. It is recorded on this device and continues after you sign in again.";
+/// #625 F2: the journal's identity or recorded inputs can't be established.
+pub const UNIDENTIFIED: &str = "The coins this split recorded can't be identified on Bitcoin, so it can't be abandoned here. The record is kept.";
 
 /// Additional navigation advice for a refused operation. Terminal domain
 /// errors retain only their own instructions.
@@ -151,10 +160,24 @@ pub fn journal_directory(root: &Path, digest: sha256::Hash) -> PathBuf {
     root.join(digest.to_string())
 }
 
+/// #625 F2 (A1 = A): the tombstone a split closed in its step-2 dead end
+/// leaves in its journal directory (`step2::close`). The journal stays, with
+/// the recorded signed step 2, so a new split of the same source is still
+/// refused; discovery skips it. Removing this file (or the whole directory)
+/// is the owner's explicit reset.
+pub const CLOSED: &str = claim_workflow::SPLIT_TOMBSTONE;
+
+/// Whether the journal in `directory` was closed: its tombstone is a
+/// regular file (metadata only).
+pub fn is_closed(directory: &Path) -> bool {
+    std::fs::symlink_metadata(directory.join(CLOSED)).is_ok_and(|metadata| metadata.is_file())
+}
+
 /// Existing Split journals under `root`, by source digest, sorted. Only a
 /// real directory named by a digest and holding a regular `intent.json`
-/// counts; symlinks and anything else are ignored. Discovery reads nothing
-/// inside the journal: opening it authenticates it.
+/// counts, unless it was closed ([`CLOSED`]); symlinks and anything else
+/// are ignored. Discovery reads nothing inside the journal (file metadata
+/// only): opening it authenticates it.
 pub fn discover(root: &Path) -> Vec<(sha256::Hash, PathBuf)> {
     let Ok(entries) = std::fs::read_dir(root) else {
         return Vec::new();
@@ -170,7 +193,7 @@ pub fn discover(root: &Path) -> Vec<(sha256::Hash, PathBuf)> {
             let path = entry.path();
             let is_dir = std::fs::symlink_metadata(&path).ok()?.is_dir();
             let journal = std::fs::symlink_metadata(path.join("intent.json")).ok()?;
-            (is_dir && journal.is_file()).then_some((digest, path))
+            (is_dir && journal.is_file() && !is_closed(&path)).then_some((digest, path))
         })
         .collect();
     found.sort();
@@ -903,6 +926,84 @@ pub async fn restore(
     })
 }
 
+/// What an unsubmitted journal that [`restore`] finally refused still allows
+/// (#625 F2): abandoning it after [`check_abandon`], nothing else. It holds
+/// no construction, no signed bytes and no coordinator, so nothing can be
+/// reviewed, exported or sent from it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AbandonOnly {
+    /// The recorded signed step 1's own txid.
+    pub tracked: Txid,
+    /// Each recorded input and the Bitcoin address it pays.
+    pub claimed: Vec<(OutPoint, String)>,
+}
+
+/// After [`restore`] refused an unsubmitted journal finally (it can't be
+/// rebuilt or its signed bytes don't verify): read it again for abandonment
+/// only. The journal must be this directory's Split, under this session,
+/// with no submission recorded. Each recorded input's address comes from its
+/// previous transaction, fetched from Bitcoin and checked against its txid,
+/// not from the recorded wallet: the wallet may be what can't be rebuilt.
+/// Anything that can't be established refuses, and the journal is kept.
+pub async fn abandon_only(
+    connect: &dyn SplitConnect,
+    directory: &Path,
+    target_cube: &str,
+    digest: sha256::Hash,
+) -> Result<AbandonOnly, Refusal> {
+    let identity = claim_workflow::split_identity(target_cube.to_owned(), digest);
+    let (tracked, claimed) = {
+        let controller = Controller::reopen_settling(directory, &identity, connect.context())
+            .await
+            .map_err(journal_refusal)?;
+        let record = controller
+            .recorded_split()
+            .map_err(journal_refusal)?
+            .ok_or_else(|| Refusal::final_("The journal here is not a split."))?;
+        if record.source_digest != digest {
+            return Err(Refusal::final_(
+                "The split journal is in the wrong directory.",
+            ));
+        }
+        if controller.phase() != Phase::Intent {
+            return Err(Refusal::final_(SUBMISSION_RECORDED));
+        }
+        let plan = controller.plan();
+        let tracked = plan.step1_txid();
+        let signed = controller
+            .recorded_bitcoin_transaction()
+            .map(|signed| signed.compute_txid());
+        if signed != Some(tracked) || plan.claimed_prevouts.is_empty() {
+            return Err(Refusal::final_(UNIDENTIFIED));
+        }
+        (tracked, plan.claimed_prevouts)
+        // The controller, and the journal lock, end here.
+    };
+    let evidence = connect.evidence();
+    let mut addresses = Vec::with_capacity(claimed.len());
+    for outpoint in claimed {
+        let previous = evidence
+            .previous_transaction(ChainId::Bitcoin, outpoint.txid)
+            .await
+            .map_err(|kind| {
+                Refusal::retry(format!(
+                    "Connect couldn't read the coins this split recorded ({kind:?}), so it can't be abandoned yet. This is not a sign that a coin was spent. Try again later."
+                ))
+            })?;
+        let address = (previous.compute_txid() == outpoint.txid)
+            .then(|| usize::try_from(outpoint.vout).ok())
+            .flatten()
+            .and_then(|vout| previous.output.get(vout))
+            .and_then(|output| Address::from_script(&output.script_pubkey, Network::Bitcoin).ok())
+            .ok_or_else(|| Refusal::final_(UNIDENTIFIED))?;
+        addresses.push((outpoint, address.to_string()));
+    }
+    Ok(AbandonOnly {
+        tracked,
+        claimed: addresses,
+    })
+}
+
 /// Each claimed prevout of `construction` and the Bitcoin address it pays,
 /// from the construction's own txid-authenticated previous transactions.
 pub fn claimed_addresses(construction: &SplitStep1) -> Vec<(OutPoint, String)> {
@@ -1022,16 +1123,23 @@ pub async fn step1_double_spent(
 
 /// Delete an unsubmitted Split journal, descriptors included (P2). The
 /// journal refuses once a submission was recorded or an inclusion seen.
-/// Blocking: off the UI thread, with every coordinator on it dropped first.
+/// `ended` is the panel's session flag: set by a revocation after this was
+/// confirmed, it refuses (`Revoked`) under the journal's lock, right before
+/// the delete (#644 r4176212750). Blocking: off the UI thread, with every
+/// coordinator on it dropped first.
 pub fn abandon(
     directory: &Path,
     target_cube: &str,
     digest: sha256::Hash,
     context: Context,
+    ended: &std::sync::atomic::AtomicBool,
 ) -> Result<(), claim_workflow::Error> {
     let identity = claim_workflow::split_identity(target_cube.to_owned(), digest);
-    Controller::reopen_settling_blocking(directory, &identity, context.clone())?
-        .abandon_split(&context)
+    let controller = Controller::reopen_settling_blocking(directory, &identity, context.clone())?;
+    if ended.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err(claim_workflow::Error::Revoked);
+    }
+    controller.abandon_split(&context)
 }
 
 /// User-facing copy for a coordinator refusal. Never a retry instruction for
