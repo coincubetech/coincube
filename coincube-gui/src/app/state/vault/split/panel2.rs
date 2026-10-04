@@ -481,6 +481,8 @@ impl SplitPanel {
                 self.recon = None;
                 self.abandon_checked = false;
                 let target = self.target_cube.clone();
+                let ended = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                self.ending = Some(ended.clone());
                 self.stage = Stage::Working(Work::Closing);
                 self.spawn(
                     async move {
@@ -490,7 +492,9 @@ impl SplitPanel {
                         let context = connect.context();
                         let closed_at = connect.evidence().now();
                         tokio::task::spawn_blocking(move || {
-                            step2::close(&directory, &target, digest, context, &dead_end, closed_at)
+                            step2::close(
+                                &directory, &target, digest, context, &dead_end, closed_at, &ended,
+                            )
                         })
                         .await
                         .map_err(|_| "Abandoning was interrupted.".to_string())?
@@ -665,12 +669,14 @@ impl SplitPanel {
                 Task::none()
             }
             SplitEvent::Closed(_, Ok(())) => {
+                self.ending = None;
                 self.dead_end = None;
                 self.notice = None;
                 self.stage = Stage::Closed;
                 Task::none()
             }
             SplitEvent::Closed(_, Err(reason)) => {
+                self.ending = None;
                 // The reconciler was released for the close: reopen it.
                 self.stage = Stage::Refused(Refusal::retry(reason));
                 Task::none()

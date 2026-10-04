@@ -107,6 +107,9 @@ pub const NEW_POISON_NEEDED: &str = "Step 1 was dropped from Bitcoin and its coi
 pub const UNREBUILDABLE: &str = "This split's step 1 was never sent and can't be rebuilt, so it can't be sent now. You can abandon it after a check that Bitcoin shows neither it nor any spend of its coins.";
 /// #625 F2: a step 1 whose submission is recorded is never abandoned here.
 pub const SUBMISSION_RECORDED: &str = "A submission of this split's step 1 is recorded, so it can't be abandoned here. The record is kept.";
+/// A session that ended after an abandon or close was confirmed: nothing
+/// was deleted or closed (#644 r4176212750).
+pub const ENDED_BEFORE_ABANDON: &str = "The split session ended before the split was abandoned, so nothing was deleted or closed. It is recorded on this device and continues after you sign in again.";
 /// #625 F2: the journal's identity or recorded inputs can't be established.
 pub const UNIDENTIFIED: &str = "The coins this split recorded can't be identified on Bitcoin, so it can't be abandoned here. The record is kept.";
 
@@ -151,7 +154,7 @@ pub fn journal_directory(root: &Path, digest: sha256::Hash) -> PathBuf {
 /// the recorded signed step 2, so a new split of the same source is still
 /// refused; discovery skips it. Removing this file (or the whole directory)
 /// is the owner's explicit reset.
-pub const CLOSED: &str = "closed.json";
+pub const CLOSED: &str = claim_workflow::SPLIT_TOMBSTONE;
 
 /// Whether the journal in `directory` was closed: its tombstone is a
 /// regular file (metadata only).
@@ -1109,16 +1112,23 @@ pub async fn step1_double_spent(
 
 /// Delete an unsubmitted Split journal, descriptors included (P2). The
 /// journal refuses once a submission was recorded or an inclusion seen.
-/// Blocking: off the UI thread, with every coordinator on it dropped first.
+/// `ended` is the panel's session flag: set by a revocation after this was
+/// confirmed, it refuses (`Revoked`) under the journal's lock, right before
+/// the delete (#644 r4176212750). Blocking: off the UI thread, with every
+/// coordinator on it dropped first.
 pub fn abandon(
     directory: &Path,
     target_cube: &str,
     digest: sha256::Hash,
     context: Context,
+    ended: &std::sync::atomic::AtomicBool,
 ) -> Result<(), claim_workflow::Error> {
     let identity = claim_workflow::split_identity(target_cube.to_owned(), digest);
-    Controller::reopen_settling_blocking(directory, &identity, context.clone())?
-        .abandon_split(&context)
+    let controller = Controller::reopen_settling_blocking(directory, &identity, context.clone())?;
+    if ended.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err(claim_workflow::Error::Revoked);
+    }
+    controller.abandon_split(&context)
 }
 
 /// User-facing copy for a coordinator refusal. Never a retry instruction for

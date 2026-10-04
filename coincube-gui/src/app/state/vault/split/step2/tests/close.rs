@@ -296,8 +296,9 @@ impl Fixture {
             port,
         }
     }
-    /// A panel restarted on the journal: reconcile only.
-    async fn panel(&self) -> SplitPanel {
+    /// A panel restarted on the journal (reconcile only) without a
+    /// reconcile yet.
+    async fn restarted(&self) -> SplitPanel {
         let mut panel = SplitPanel::resume(
             TARGET.into(),
             self.journal.temp.0.parent().unwrap().to_path_buf(),
@@ -308,6 +309,15 @@ impl Fixture {
         panel.set_recon_port(Some(self.port.clone()));
         let task = panel.begin();
         drive(&mut panel, task).await;
+        panel
+    }
+    /// [`Self::restarted`], then one reconcile.
+    async fn panel(&self) -> SplitPanel {
+        let mut panel = self.restarted().await;
+        if panel.stage() == &Stage::Step2(Step2Stage::Reconcile) {
+            let task = panel.update(SplitMessage::Step2Reconcile);
+            drive(&mut panel, task).await;
+        }
         panel
     }
     fn tombstone(&self) -> PathBuf {
@@ -331,7 +341,13 @@ async fn check(panel: &mut SplitPanel) {
 #[tokio::test(flavor = "multi_thread")]
 async fn panel_closes_a_step2_dead_end_after_a_check_on_both_chains() {
     let fixture = Fixture::new();
-    let mut panel = fixture.panel().await;
+    // Not before a reconcile saw step 2 absent: an accepted send may still
+    // be in a mempool.
+    let mut panel = fixture.restarted().await;
+    assert_eq!(panel.stage(), &Stage::Step2(Step2Stage::Reconcile));
+    assert!(panel.dead_end().is_some() && !panel.can_check_close());
+    let task = panel.update(SplitMessage::Step2Reconcile);
+    drive(&mut panel, task).await;
     assert_eq!(panel.stage(), &Stage::Step2(Step2Stage::Reconcile));
     let dead_end = panel.dead_end().cloned().unwrap();
     assert_eq!(dead_end.step1, fixture.chains.step1);
@@ -513,6 +529,19 @@ async fn panel_keeps_a_step2_dead_end_open_when_anything_changes_before_closing(
     assert!(!fixture.tombstone().exists());
     drop(panel);
 
+    // The session ends after the close was confirmed, before its task
+    // writes (#644 r4176212750): nothing is closed.
+    let mut panel = fixture.panel().await;
+    check(&mut panel).await;
+    assert!(panel.can_confirm_close());
+    let task = panel.update(SplitMessage::ConfirmAbandon);
+    panel.revoke();
+    drive(&mut panel, task).await;
+    assert!(!fixture.tombstone().exists());
+    assert!(!step1::is_closed(&fixture.journal.temp.0));
+    assert_eq!(panel.stage(), &Stage::NeedsSession);
+    drop(panel);
+
     // A coin spent between the check and the confirmation: the close checks
     // again and refuses; a retry reopens the reconciler.
     let mut panel = fixture.panel().await;
@@ -600,7 +629,8 @@ fn close_refuses_a_journal_that_changed_since_the_check() {
         let controller = journal.lock();
         dead_end(&controller).unwrap()
     };
-    let close_now = |dead_end: &DeadEnd| {
+    let ended = std::sync::atomic::AtomicBool::new(false);
+    let close_now = |dead_end: &DeadEnd, ended: &std::sync::atomic::AtomicBool| {
         close(
             &journal.temp.0,
             TARGET,
@@ -608,18 +638,32 @@ fn close_refuses_a_journal_that_changed_since_the_check() {
             context(),
             dead_end,
             now(),
+            ended,
         )
     };
+    // The session ended after the close was confirmed (#644 r4176212750):
+    // refused under the lock, nothing written.
+    assert_eq!(
+        close_now(&dead_end, &std::sync::atomic::AtomicBool::new(true)),
+        Err(step1::ENDED_BEFORE_ABANDON.to_string())
+    );
+    assert!(!step1::is_closed(&journal.temp.0));
     // Another step 2 than the one checked.
     let mut other = dead_end.clone();
     other.step2 = Txid::from_byte_array([9; 32]);
-    assert_eq!(close_now(&other), Err(CHANGED_SINCE_CHECK.to_string()));
+    assert_eq!(
+        close_now(&other, &ended),
+        Err(CHANGED_SINCE_CHECK.to_string())
+    );
     // A resend became reviewable.
     journal
         .lock()
         .record_split_step2_returned(&context())
         .unwrap();
-    assert_eq!(close_now(&dead_end), Err(CHANGED_SINCE_CHECK.to_string()));
+    assert_eq!(
+        close_now(&dead_end, &ended),
+        Err(CHANGED_SINCE_CHECK.to_string())
+    );
     assert!(!step1::is_closed(&journal.temp.0));
     assert!(journal.temp.0.join("intent.json").exists());
 }

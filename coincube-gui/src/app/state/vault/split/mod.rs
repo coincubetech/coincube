@@ -42,7 +42,14 @@ mod panel2;
 pub mod step1;
 pub mod step2;
 
-use std::{fmt, path::PathBuf, sync::Arc};
+use std::{
+    fmt,
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+};
 
 use iced::Task;
 
@@ -351,6 +358,10 @@ pub struct SplitPanel {
     /// The reopened journal's step-2 dead end, which may be closed after a
     /// check (#625 F2).
     dead_end: Option<step2::DeadEnd>,
+    /// The session flag of a confirmed abandon or close in flight: a
+    /// revocation sets it, and the task refuses under the journal's lock
+    /// before deleting or closing anything (#644 r4176212750).
+    ending: Option<Arc<AtomicBool>>,
     /// The last refusal while the flow keeps its state. Never the step-1
     /// evidence's warning after the step-2 submission: that is derived from
     /// `step2_status` ([`Self::step2_warning`]) so no notice replaces it.
@@ -417,6 +428,7 @@ impl SplitPanel {
             abandon_checked: false,
             abandon_only: None,
             dead_end: None,
+            ending: None,
             notice: None,
             resume_stage: None,
             step2_port: None,
@@ -554,10 +566,13 @@ impl SplitPanel {
         self.dead_end.as_ref()
     }
     /// #625 F2: a step-2 dead end may be closed from the reconcile-only
-    /// stage, and only after a check on both chains passed.
+    /// stage, once a reconcile saw step 2 absent from BTCB2 (an accepted
+    /// send may still be in a mempool), and only after a check on both
+    /// chains passed.
     pub fn can_check_close(&self) -> bool {
         self.dead_end.is_some()
             && self.connect.is_some()
+            && self.step2_seen == Some(TransactionObservation::Absent)
             && self.stage == Stage::Step2(Step2Stage::Reconcile)
     }
     pub fn can_confirm_close(&self) -> bool {
@@ -593,6 +608,9 @@ impl SplitPanel {
         // Read under this session: the next one reads the journal again.
         self.abandon_only = None;
         self.dead_end = None;
+        if let Some(ending) = self.ending.take() {
+            ending.store(true, Ordering::SeqCst);
+        }
         self.seq = self.seq.wrapping_add(1);
         if self.journal.is_some() && !matches!(self.stage, Stage::Abandoned | Stage::Closed) {
             self.stage = Stage::NeedsSession;
@@ -1018,6 +1036,8 @@ impl SplitPanel {
                 self.abandon_checked = false;
                 let claimed = self.claimed.clone();
                 let target = self.target_cube.clone();
+                let ended = Arc::new(AtomicBool::new(false));
+                self.ending = Some(ended.clone());
                 self.stage = Stage::Working(Work::Abandoning);
                 self.spawn(
                     async move {
@@ -1026,9 +1046,16 @@ impl SplitPanel {
                             .map_err(|refusal| refusal.reason)?;
                         let context = connect.context();
                         tokio::task::spawn_blocking(move || {
-                            step1::abandon(&directory, &target, digest, context).map_err(|error| {
-                                format!("The split could not be abandoned ({error:?}).")
-                            })
+                            step1::abandon(&directory, &target, digest, context, &ended).map_err(
+                                |error| match error {
+                                    crate::services::claim_workflow::Error::Revoked => {
+                                        step1::ENDED_BEFORE_ABANDON.to_string()
+                                    }
+                                    error => {
+                                        format!("The split could not be abandoned ({error:?}).")
+                                    }
+                                },
+                            )
                         })
                         .await
                         .map_err(|_| "Abandoning was interrupted.".to_string())?
@@ -1291,6 +1318,7 @@ impl SplitPanel {
                 Task::none()
             }
             SplitEvent::Abandoned(_, Ok(())) => {
+                self.ending = None;
                 self.journal = None;
                 self.phase = None;
                 self.claimed.clear();
@@ -1300,6 +1328,7 @@ impl SplitPanel {
                 Task::none()
             }
             SplitEvent::Abandoned(_, Err(reason)) => {
+                self.ending = None;
                 self.stage = Stage::Refused(Refusal::retry(reason));
                 Task::none()
             }

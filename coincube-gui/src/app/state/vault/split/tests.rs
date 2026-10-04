@@ -1158,6 +1158,19 @@ async fn split_unrebuildable_journal_is_abandoned_only_after_a_chain_check() {
     let task = panel.update(SplitMessage::ConfirmAbandon);
     drive(&mut panel, task).await;
     kept(&temp);
+    // The session ends after the abandon was confirmed, before its task
+    // deletes the journal (#644 r4176212750): it is kept.
+    let connect = FakeConnect::new(&scan.coins);
+    let mut confirmed = resumed(&connect, &temp).await;
+    let task = check(&mut confirmed);
+    drive(&mut confirmed, task).await;
+    assert!(confirmed.can_confirm_abandon());
+    let task = confirmed.update(SplitMessage::ConfirmAbandon);
+    confirmed.revoke();
+    drive(&mut confirmed, task).await;
+    kept(&temp);
+    assert_eq!(confirmed.stage(), &Stage::NeedsSession);
+    drop(confirmed);
     // The next session can't read Bitcoin Blake2b: the rebuild may pass on
     // retry, so nothing is offered for abandonment from the last session.
     let unread = FakeConnect::new(&scan.coins);

@@ -616,8 +616,10 @@ pub async fn check_close(connect: &dyn SplitConnect, dead_end: &DeadEnd) -> Resu
 /// written atomically next to the journal, naming the source, the target
 /// Cube, both recorded txids and the claimed inputs. The journal itself,
 /// with the recorded signed step 2, is not changed or deleted. A failed
-/// write closes nothing. Blocking: off the UI thread, with every handle on
-/// the journal dropped first.
+/// write closes nothing. `ended` is the panel's session flag: set by a
+/// revocation after the close was confirmed, it refuses under the journal's
+/// lock, right before the write (#644 r4176212750). Blocking: off the UI
+/// thread, with every handle on the journal dropped first.
 pub fn close(
     directory: &Path,
     target_cube: &str,
@@ -625,12 +627,16 @@ pub fn close(
     context: Context,
     dead_end: &DeadEnd,
     closed_at: i64,
+    ended: &std::sync::atomic::AtomicBool,
 ) -> Result<(), String> {
     let identity = claim_workflow::split_identity(target_cube.to_owned(), digest);
     let controller = Controller::reopen_settling_blocking(directory, &identity, context)
         .map_err(|error| step1::describe(claim_coordinator::Error::Journal(error)))?;
     if self::dead_end(&controller).as_ref() != Some(dead_end) {
         return Err(CHANGED_SINCE_CHECK.to_string());
+    }
+    if ended.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err(step1::ENDED_BEFORE_ABANDON.to_string());
     }
     let tombstone = serde_json::json!({
         "version": 1,
@@ -655,7 +661,12 @@ pub fn close(
 /// file, synced, renamed over the final name, then the directory synced.
 fn write_tombstone(directory: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
-    let temporary = directory.join(format!(".closed-{}.tmp", std::process::id()));
+    // Unique per write: a temporary file a crashed run left behind is never
+    // reused.
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_nanos());
+    let temporary = directory.join(format!(".closed-{}-{}.tmp", std::process::id(), nonce));
     let result = (|| {
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);

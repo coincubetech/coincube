@@ -57,6 +57,11 @@ pub(super) const VERSION: u32 = 8;
 /// Far above any supported descriptor (a 3-key `wsh(sortedmulti)` is under
 /// 400 bytes); a bound on untrusted journal text, not a policy.
 const MAX_DESCRIPTOR_BYTES: usize = 4096;
+/// #625 F2 (A1 = A): the tombstone a split closed in its step-2 dead end
+/// leaves in its journal directory. The journal stays; a new split is never
+/// created in a directory that holds one (anything by that name), so a
+/// partly reset directory can't hide a new journal behind an old tombstone.
+pub const SPLIT_TOMBSTONE: &str = "closed.json";
 /// Explicit step-2 resends a journal may record (P3-3). With the submission
 /// intent, step 2 has at most step 1's attempt bound.
 pub const MAX_SPLIT_STEP2_RESUBMISSIONS: usize = recovery::MAX_BITCOIN_ATTEMPTS - 1;
@@ -408,7 +413,10 @@ impl Controller {
         validate(&intent)?;
         Self::valid_context(&context)?;
         let mut journal = journal::Journal::open(directory)?;
-        if journal.load()?.is_some() {
+        // Checked under the journal's lock, which the close holds to write it.
+        if journal.load()?.is_some()
+            || std::fs::symlink_metadata(directory.join(SPLIT_TOMBSTONE)).is_ok()
+        {
             return Err(Error::Conflict);
         }
         journal.store(&intent)?;

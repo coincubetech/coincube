@@ -1885,6 +1885,27 @@ fn split_step2_resends_and_the_observation_that_ends_them() {
     assert_eq!(c.split_step2_resubmissions(), 0);
 }
 
+/// #625 F2: a new split is never created in a directory holding a closed
+/// split's tombstone, whatever it is (a partly reset directory must not hide
+/// a new journal behind an old tombstone); without it, creation proceeds.
+#[test]
+fn split_create_refuses_a_directory_with_a_tombstone() {
+    let (_wallet, step1, signed) = setup(Shape::ShWpkh);
+    let create_split = |temp: &Temp| {
+        Controller::create_split(&temp.0, TARGET.into(), &step1, &signed, FORK, context())
+    };
+    let temp = Temp::new();
+    fs::write(temp.0.join(SPLIT_TOMBSTONE), b"{}").unwrap();
+    assert!(matches!(create_split(&temp), Err(Error::Conflict)));
+    assert!(!temp.0.join("intent.json").exists());
+    let temp = Temp::new();
+    fs::create_dir(temp.0.join(SPLIT_TOMBSTONE)).unwrap();
+    assert!(matches!(create_split(&temp), Err(Error::Conflict)));
+    assert!(!temp.0.join("intent.json").exists());
+    let temp = Temp::new();
+    create_split(&temp).unwrap();
+}
+
 /// #625 F2: a step-2 dead end is a recorded submission that no resend can
 /// follow (its permission withdrawn, or the resend limit reached) and no
 /// read ever saw on BTCB2. Before any submission, with a resend reviewable,

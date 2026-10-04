@@ -180,7 +180,7 @@ fn step2_body<'a>(
             if let Some(seen) = panel.step2_seen() {
                 body = body.push(caption(format!("Bitcoin Blake2b: {seen:?}")));
             }
-            if panel.dead_end().is_some() {
+            if panel.can_check_close() {
                 body = body.push(p1_regular(
                     "This version can't send this step 2 again: its last attempt was accepted or may have left, or no resend is left. If Bitcoin Blake2b never shows it, you can abandon this split after a check.",
                 ));
