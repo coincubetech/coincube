@@ -285,7 +285,6 @@ pub(super) async fn prepare_reconfirmation(
     generation: &watch::Receiver<u64>,
     owner: (u64, u64),
 ) -> Result<Step1ReconfirmationReview, Error> {
-    two_step_only(controller)?;
     let txid = recorded_submission(controller)?;
     let collected =
         collect_for_reconfirmation(controller, services, policy, context, generation, txid).await?;
@@ -323,7 +322,6 @@ pub(super) async fn confirm_reconfirmation(
     if Instant::now() >= review.not_after {
         return Err(Error::ExpiredEvidence);
     }
-    two_step_only(controller)?;
     let txid = recorded_submission(controller)?;
     let ticket = controller.begin_check(context)?;
     let collected =
@@ -364,6 +362,7 @@ impl SplitStep2Reconciler {
     ) -> Result<Step1ReconfirmationReview, Error> {
         self.completion_revoker.revoke();
         self.current(context)?;
+        two_step_only(&self.controller)?;
         self.revision = self.revision.checked_add(1).ok_or(Error::Revoked)?;
         prepare_reconfirmation(
             &mut self.controller,
@@ -387,6 +386,7 @@ impl SplitStep2Reconciler {
     ) -> Result<(), Error> {
         self.completion_revoker.revoke();
         self.current(context)?;
+        two_step_only(&self.controller)?;
         if review.owner != self.id || review.revision != self.revision {
             return Err(Error::InvalidReview);
         }
@@ -412,6 +412,7 @@ impl SplitStep2Coordinator {
         context: &Context,
     ) -> Result<Step1ReconfirmationReview, Error> {
         self.current(context)?;
+        two_step_only(&self.controller)?;
         self.revision = self.revision.checked_add(1).ok_or(Error::Revoked)?;
         prepare_reconfirmation(
             &mut self.controller,
@@ -430,6 +431,7 @@ impl SplitStep2Coordinator {
         context: &Context,
     ) -> Result<(), Error> {
         self.current(context)?;
+        two_step_only(&self.controller)?;
         if review.owner != self.id || review.revision != self.revision {
             return Err(Error::InvalidReview);
         }
