@@ -326,6 +326,33 @@ impl Journal {
         drop(c);
         journal
     }
+    /// [`Self::returned`] with its resends already at the limit (P3-3): a
+    /// journal only a long run of resends could produce, written directly.
+    fn at_resend_limit() -> Self {
+        let journal = Self::returned(false);
+        let wtxid = journal
+            .lock()
+            .recorded_split_step2()
+            .unwrap()
+            .compute_wtxid()
+            .to_string();
+        let path = journal.temp.0.join("intent.json");
+        let mut intent: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        intent["split"]["step2_resubmissions"] = serde_json::Value::Array(vec![
+            serde_json::json!({ "wtxid": wtxid });
+            claim_workflow::MAX_SPLIT_STEP2_RESUBMISSIONS
+        ]);
+        std::fs::write(&path, serde_json::to_vec(&intent).unwrap()).unwrap();
+        let c = journal.lock();
+        assert_eq!(
+            c.split_step2_resubmissions(),
+            claim_workflow::MAX_SPLIT_STEP2_RESUBMISSIONS
+        );
+        assert!(c.split_step2_returned() && !c.split_step2_observed());
+        drop(c);
+        journal
+    }
     fn digest(&self) -> sha256::Hash {
         self.step1.source().digest()
     }
@@ -479,8 +506,8 @@ struct Port {
     reconcilers: AtomicUsize,
     /// P3-3: coordinators reopened for a resend.
     uncertain: AtomicUsize,
-    /// Reopening for a resend refuses.
-    refuse_uncertain: std::sync::atomic::AtomicBool,
+    /// Reopening for a resend refuses with this.
+    refuse_uncertain: std::sync::Mutex<Option<Step2Refusal>>,
     /// The session account the port was built for.
     account: &'static str,
 }
@@ -524,10 +551,8 @@ impl Step2Port for Port {
             (directory, target_cube, digest),
             (self.directory.clone(), TARGET.to_string(), self.digest)
         );
-        if self.refuse_uncertain.load(Ordering::SeqCst) {
-            return Err(Step2Refusal::retry(
-                "Connect couldn't read Bitcoin Blake2b's status.",
-            ));
+        if let Some(refusal) = self.refuse_uncertain.lock().unwrap().clone() {
+            return Err(refusal);
         }
         self.uncertain.fetch_add(1, Ordering::SeqCst);
         let lock = self.lock()?;
@@ -561,7 +586,7 @@ fn port_as(journal: &Journal, account: &'static str) -> Arc<Port> {
         preparations: AtomicUsize::new(0),
         reconcilers: AtomicUsize::new(0),
         uncertain: AtomicUsize::new(0),
-        refuse_uncertain: std::sync::atomic::AtomicBool::new(false),
+        refuse_uncertain: std::sync::Mutex::new(None),
         account,
     })
 }
@@ -814,7 +839,9 @@ async fn restart_reopens_the_coordinator_only_for_a_resend_the_journal_allows() 
     assert_eq!(other.uncertain.load(Ordering::SeqCst), 0);
     // The reopen refuses (Connect, a rebuild that does not verify, a route
     // no longer admitted): the reconciler, with that reason.
-    ports.refuse_uncertain.store(true, Ordering::SeqCst);
+    *ports.refuse_uncertain.lock().unwrap() = Some(Step2Refusal::retry(
+        "Connect couldn't read Bitcoin Blake2b's status.",
+    ));
     match run(&returned, &ports, true).await {
         Ok(Restart::Reconcile(_, Some(note))) => {
             assert!(note.contains("can't be sent again right now"), "{}", note);
@@ -825,6 +852,43 @@ async fn restart_reopens_the_coordinator_only_for_a_resend_the_journal_allows() 
     assert_eq!(ports.uncertain.load(Ordering::SeqCst), 1);
     assert_eq!(ports.reconcilers.load(Ordering::SeqCst), 2);
     drop(ports.lock().unwrap());
+    // Restoring step 1 finds a claimed coin spent on BTCB2: final, and this
+    // step 2 may itself be the spender, so the note doesn't blame anything
+    // else (#648 R1). Another final refusal isn't "right now" either.
+    let spent = step1::evidence_refusal(crate::services::split_evidence::EvidenceError {
+        outpoint: Some(OutPoint::new(Txid::from_byte_array([1; 32]), 0)),
+        failure: crate::services::split_evidence::EvidenceFailure::Btcb2Spent,
+    });
+    assert!(!spent.retry);
+    *ports.refuse_uncertain.lock().unwrap() = Some(Step2Refusal::final_(spent.reason));
+    match run(&returned, &ports, true).await {
+        Ok(Restart::Reconcile(_, Some(note))) => assert_eq!(note, RESEND_COIN_SPENT),
+        _ => panic!("a spent claimed coin"),
+    }
+    *ports.refuse_uncertain.lock().unwrap() =
+        Some(Step2Refusal::final_("This split can't be resumed here."));
+    match run(&returned, &ports, true).await {
+        Ok(Restart::Reconcile(_, Some(note))) => {
+            assert!(note.starts_with("Step 2 can't be sent again: "), "{}", note);
+            assert!(note.contains("can't be resumed here"), "{}", note);
+        }
+        _ => panic!("a final refusal"),
+    }
+    assert_eq!(ports.uncertain.load(Ordering::SeqCst), 1);
+    assert_eq!(ports.reconcilers.load(Ordering::SeqCst), 4);
+    drop(ports.lock().unwrap());
+    *ports.refuse_uncertain.lock().unwrap() = None;
+
+    // At the resend limit the restart opens only the reconciler, and no
+    // resend is mentioned (#648 R3a).
+    let exhausted = Journal::at_resend_limit();
+    let ports = port(&exhausted);
+    assert!(matches!(
+        run(&exhausted, &ports, true).await,
+        Ok(Restart::Reconcile(_, None))
+    ));
+    assert_eq!(ports.uncertain.load(Ordering::SeqCst), 0);
+    assert_eq!(ports.reconcilers.load(Ordering::SeqCst), 1);
 
     // A step 2 ever seen on BTCB2 is never resent: the reconciler, and no
     // resend is mentioned.

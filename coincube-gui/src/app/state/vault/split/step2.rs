@@ -97,6 +97,11 @@ pub const STEP1_REORGED_AFTER_STEP2: &str = "Bitcoin reorganized after a submiss
 /// A restart found a resend the journal allows, but no step-2 port to send
 /// it through (P3-3): only the reconciler was opened.
 pub const RESEND_NEEDS_VAULT: &str = "Sending step 2 again needs this Vault's wallet engine running on a route step 2 can be sent through. Its status can still be checked.";
+/// A restart's resend reopen found a claimed coin no longer unspent on
+/// BTCB2 (#648 R1). Step 2 is recorded as having come back unaccepted, so it
+/// may itself be the spender (relayed anyway, or sent from another copy of
+/// this Cube); either way it is never sent again.
+pub const RESEND_COIN_SPENT: &str = "Step 2 can't be sent again: a coin this split claims is no longer unspent on Bitcoin Blake2b, and this step 2 may itself have spent it. Nothing was sent; check its status.";
 /// `ResendError::Unsettled`: the journal does not record that the latest
 /// attempt came back unaccepted, so it may have left (P3-3). Only the #625
 /// F2 abandon or reset path gets out of this.
@@ -568,9 +573,28 @@ pub enum Restart {
     Resend(Box<dyn Step2Coord>),
 }
 
-/// Why a resend the journal allows was not reopened (P3-3).
-fn resend_unavailable(reason: &str) -> String {
-    format!("Step 2 can't be sent again right now: {reason} Its status can still be checked.")
+/// Why a resend the journal allows was not reopened (P3-3). Restoring step 1
+/// for it can find a claimed coin spent on BTCB2, which step 1's copy blames
+/// on something other than step 2 (#648 R1); and a final refusal is not
+/// "right now".
+fn resend_unavailable(refusal: &Step2Refusal) -> String {
+    let spent = step1::evidence_refusal(crate::services::split_evidence::EvidenceError {
+        outpoint: None,
+        failure: crate::services::split_evidence::EvidenceFailure::Btcb2Spent,
+    });
+    if refusal.reason == spent.reason {
+        RESEND_COIN_SPENT.to_string()
+    } else if refusal.retry {
+        format!(
+            "Step 2 can't be sent again right now: {} Its status can still be checked.",
+            refusal.reason
+        )
+    } else {
+        format!(
+            "Step 2 can't be sent again: {} Its status can still be checked.",
+            refusal.reason
+        )
+    }
 }
 
 /// Whether the journal allows a reviewed resend of its recorded step 2
@@ -625,7 +649,7 @@ pub async fn restart(
             Some((port, connect)) if port.context() == context && connect.context() == context => {
                 port.reopen_for_resend(connect, directory.clone(), target_cube.clone(), digest)
                     .await
-                    .map_err(|refusal| resend_unavailable(&refusal.reason))
+                    .map_err(|refusal| resend_unavailable(&refusal))
             }
             _ => Err(RESEND_NEEDS_VAULT.to_string()),
         };

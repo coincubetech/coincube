@@ -46,6 +46,8 @@ struct Counts {
     /// The shown resend review's evidence lapsed (its deadline, or the
     /// generation moved).
     resend_expired: bool,
+    /// What the coordinator's reconciles see on BTCB2. `None`: absent.
+    coord_seen: Option<TransactionObservation>,
 }
 fn next_reconcile(
     shared: &Shared,
@@ -315,7 +317,8 @@ impl Step2Coord for PanelCoord {
     ) -> Result<(Status, TransactionObservation), Step2Refusal> {
         // A reconcile drops any resend review, as the driver does.
         self.resend_reviewed = false;
-        next_reconcile(&self.shared, TransactionObservation::Absent)
+        let seen = self.shared.lock().unwrap().coord_seen;
+        next_reconcile(&self.shared, seen.unwrap_or(TransactionObservation::Absent))
     }
     async fn review_resend(&mut self, _: &Context) -> Result<Step2ResendView, Step2Refusal> {
         self.resend_reviewed = false;
@@ -1972,7 +1975,11 @@ async fn panel_resends_step2_only_from_an_explicit_review_after_a_restart() {
     assert!(panel.step2_resend_review().is_none());
 
     // A refused send: its reason, back to Reconcile, the review used up.
+    // The review granted first takes the refusal above off the screen
+    // (#648 R3b).
     review(&mut panel).await;
+    assert!(panel.step2_resend_review().is_some());
+    assert_eq!(panel.notice(), None);
     let spent = OutPoint::new(Txid::from_byte_array([1; 32]), 0);
     shared
         .lock()
@@ -2028,9 +2035,10 @@ async fn panel_resends_step2_only_from_an_explicit_review_after_a_restart() {
 /// Without the Vault's step-2 port the restart of a resendable journal opens
 /// the reconciler and says why there is no resend; when the App's next
 /// refresh brings the port, the reconciler is revoked and the restart
-/// reopens the coordinator. A step 2 seen on BTCB2 opens the reconciler even
-/// with the port. The live coordinator after an uncertain submission (the
-/// Submitted stage) offers none either.
+/// reopens the coordinator, until a reconcile sees step 2 on BTCB2. A step 2
+/// seen there before the restart opens the reconciler even with the port.
+/// The live coordinator after an uncertain submission (the Submitted stage)
+/// offers none either.
 #[tokio::test(flavor = "multi_thread")]
 async fn panel_offers_a_resend_only_where_a_restart_reopened_the_coordinator() {
     let journal = Journal::returned(false);
@@ -2054,6 +2062,24 @@ async fn panel_offers_a_resend_only_where_a_restart_reopened_the_coordinator() {
     assert_eq!(panel.notice(), None);
     assert!(panel.can_review_resend());
     assert_eq!(shared.lock().unwrap().reopened, 1);
+    // A reconcile on it that sees step 2 on BTCB2: no resend is offered any
+    // more, since its review could only refuse (#648 R2).
+    shared.lock().unwrap().coord_seen = Some(TransactionObservation::Unconfirmed {
+        txid: Txid::from_byte_array([5; 32]),
+    });
+    let task = panel.update(SplitMessage::Step2Reconcile);
+    drive(&mut panel, task).await;
+    assert_eq!(panel.stage, Stage::Step2(Step2Stage::Reconcile));
+    assert!(matches!(
+        panel.step2_seen(),
+        Some(TransactionObservation::Unconfirmed { .. })
+    ));
+    assert!(panel.coord.is_some());
+    assert!(!panel.can_review_resend());
+    let task = panel.update(SplitMessage::Step2ReviewResend);
+    drive(&mut panel, task).await;
+    assert_eq!(panel.stage, Stage::Step2(Step2Stage::Reconcile));
+    assert_eq!(shared.lock().unwrap().resend_reviews, 0);
 
     let observed = Journal::returned(true);
     let (panel, shared) = restarted(&observed, true).await;
@@ -2082,6 +2108,52 @@ async fn panel_offers_a_resend_only_where_a_restart_reopened_the_coordinator() {
     assert!(panel.step2_resend_review().is_none());
     let counts = shared.lock().unwrap();
     assert_eq!((counts.resend_reviews, counts.resends), (0, 0));
+}
+
+/// P3-3: a resend review or send still running when the session is revoked
+/// (logout, Cube close, a backend switch) lands on nothing. Its coordinator
+/// is not bound again, no review or outcome is taken from it, and the panel
+/// stays without a session (#648 R3c).
+#[tokio::test(flavor = "multi_thread")]
+async fn panel_drops_a_resend_result_that_lands_after_a_revocation() {
+    let journal = Journal::returned(false);
+    let (mut panel, shared) = restarted(&journal, true).await;
+    let task = panel.update(SplitMessage::Step2ReviewResend);
+    assert_eq!(panel.stage, Stage::Working(Work::Step2ResendReviewing));
+    panel.revoke();
+    drive(&mut panel, task).await;
+    assert_eq!(shared.lock().unwrap().resend_reviews, 1);
+    assert_eq!(panel.stage, Stage::NeedsSession);
+    assert!(panel.coord.is_none() && panel.step2_resend_review().is_none());
+
+    // Under the next session: a review, then a send revoked while it runs.
+    let task = panel.begin();
+    drive(&mut panel, task).await;
+    assert_eq!(panel.stage, Stage::Step2(Step2Stage::Reconcile));
+    let task = panel.update(SplitMessage::Step2ReviewResend);
+    drive(&mut panel, task).await;
+    assert!(panel.step2_resend_review().is_some());
+    let accepted = Outcome::UpstreamAccepted {
+        txid: Txid::from_byte_array([5; 32]),
+        wtxid: coincube_core::miniscript::bitcoin::Wtxid::from_byte_array([6; 32]),
+    };
+    shared
+        .lock()
+        .unwrap()
+        .resend_results
+        .push_back(Ok(accepted));
+    let task = panel.update(SplitMessage::Step2ConfirmResend);
+    assert_eq!(panel.stage, Stage::Working(Work::Step2Resending));
+    panel.revoke();
+    drive(&mut panel, task).await;
+    assert_eq!(shared.lock().unwrap().resends, 1);
+    assert_eq!(panel.stage, Stage::NeedsSession);
+    assert!(panel.coord.is_none() && panel.step2_resend_review().is_none());
+    assert!(matches!(
+        panel.step2_outcome(),
+        Some(Outcome::Uncertain { .. })
+    ));
+    assert_eq!(shared.lock().unwrap().reopened, 2);
 }
 
 /// Consuming the preparation does not make a transient failure terminal.
