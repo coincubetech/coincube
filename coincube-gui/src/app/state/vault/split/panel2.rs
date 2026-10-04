@@ -783,10 +783,18 @@ impl SplitPanel {
                 Task::none()
             }
             SplitEvent::Step2Finished(_, Err((reason, Some(Prep(prep))))) => {
-                self.step2_handoff_ready = reason.retry;
                 self.bind_prep(prep);
-                self.notice = Some(reason.reason);
-                self.stage = Stage::Step2(Step2Stage::Sign);
+                if reason.retry {
+                    self.step2_handoff_ready = true;
+                    self.notice = Some(reason.reason);
+                    self.stage = Stage::Step2(Step2Stage::Sign);
+                } else {
+                    // Import also initiates handoff once retained signatures are
+                    // complete. A terminal refusal must disable that path too.
+                    self.revoke_step2();
+                    self.notice = None;
+                    self.stage = Stage::Refused(refusal(reason));
+                }
                 Task::none()
             }
             SplitEvent::Step2Finished(_, Err((reason, None))) => {
