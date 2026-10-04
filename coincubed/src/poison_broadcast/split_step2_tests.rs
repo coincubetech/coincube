@@ -795,6 +795,27 @@ fn unified_transport_refuses_wrong_chain_output_and_gate() {
         both(&daemon, &verified, index(TARGET_INDEX), &step2_gate),
         Err(SubmissionError::GateMismatch)
     );
+    // A gate for the same txid but another witness (one extra item): the
+    // gate binds the wtxid too (#647 O1).
+    let mut other_witness = verified.transaction().clone();
+    other_witness.input[0].witness.push([0u8]);
+    assert_eq!(
+        other_witness.compute_txid(),
+        verified.transaction().compute_txid()
+    );
+    assert_ne!(
+        other_witness.compute_wtxid(),
+        verified.transaction().compute_wtxid()
+    );
+    let (wtxid_gate, _) = SubmissionGate::for_transaction(
+        ChainId::BitcoinBlake2b,
+        &other_witness,
+        Instant::now() + Duration::from_secs(60),
+    );
+    assert_eq!(
+        both(&daemon, &verified, index(TARGET_INDEX), &wtxid_gate),
+        Err(SubmissionError::GateMismatch)
+    );
     assert!(sent(&backend).is_empty());
 
     // The exact bytes, once, through the backend route.

@@ -502,16 +502,35 @@ mod tests {
             SeedSet::new(&source(&format!("wpkh({bare}/{{b}}/*)"))).err(),
             Some(SeedSetError::UnsupportedPolicy)
         );
+        // One origin-less key among three is refused too, not silently
+        // reduced to a two-key policy (#647 O2).
+        let with_origin = [
+            account(1, "", "m/48'/0'/0'/2'"),
+            account(2, "second passphrase", "m/48'/0'/0'/2'"),
+        ];
+        let third = account(3, "", "m/48'/0'/0'/2'");
+        let third = &third[third.find(']').unwrap() + 1..];
+        let mixed = format!(
+            "wsh(sortedmulti(2,{}/{{b}}/*,{}/{{b}}/*,{}/{{b}}/*))",
+            with_origin[0], with_origin[1], third
+        );
+        assert_eq!(
+            SeedSet::new(&source(&mixed)).err(),
+            Some(SeedSetError::UnsupportedPolicy)
+        );
 
         // Nothing was written anywhere.
         assert_eq!(fs::read_dir(&datadir).unwrap().count(), 0);
         fs::remove_dir(datadir).unwrap();
 
         // The production part of this module names no persistence API.
+        // Normalized to LF: Git for Windows checks the file out with CRLF
+        // (`core.autocrlf`), which would hide the marker (#647 F1).
         let text = fs::read_to_string(
             Path::new(env!("CARGO_MANIFEST_DIR")).join("src/services/split_seed.rs"),
         )
-        .unwrap();
+        .unwrap()
+        .replace("\r\n", "\n");
         let marker = "#[cfg(test)]\nmod tests {";
         assert_eq!(text.matches(marker).count(), 1);
         let production = &text[..text.find(marker).unwrap()];
