@@ -311,6 +311,48 @@ impl Journal {
             step1,
         }
     }
+    /// [`Self::new`] with a recorded step 2 whose latest attempt is recorded
+    /// as having come back unaccepted (P3-3), and, with `observed`, a step 2
+    /// since seen on BTCB2.
+    fn returned(observed: bool) -> Self {
+        let journal = Self::new(true);
+        let mut c = journal.lock();
+        c.record_split_step2_returned(&context()).unwrap();
+        if observed {
+            let txid = c.recorded_split_step2().unwrap().compute_txid();
+            c.record_split_step2_observed(&context(), TransactionObservation::Unconfirmed { txid })
+                .unwrap();
+        }
+        drop(c);
+        journal
+    }
+    /// [`Self::returned`] with its resends already at the limit (P3-3): a
+    /// journal only a long run of resends could produce, written directly.
+    fn at_resend_limit() -> Self {
+        let journal = Self::returned(false);
+        let wtxid = journal
+            .lock()
+            .recorded_split_step2()
+            .unwrap()
+            .compute_wtxid()
+            .to_string();
+        let path = journal.temp.0.join("intent.json");
+        let mut intent: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        intent["split"]["step2_resubmissions"] = serde_json::Value::Array(vec![
+            serde_json::json!({ "wtxid": wtxid });
+            claim_workflow::MAX_SPLIT_STEP2_RESUBMISSIONS
+        ]);
+        std::fs::write(&path, serde_json::to_vec(&intent).unwrap()).unwrap();
+        let c = journal.lock();
+        assert_eq!(
+            c.split_step2_resubmissions(),
+            claim_workflow::MAX_SPLIT_STEP2_RESUBMISSIONS
+        );
+        assert!(c.split_step2_returned() && !c.split_step2_observed());
+        drop(c);
+        journal
+    }
     fn digest(&self) -> sha256::Hash {
         self.step1.source().digest()
     }
@@ -423,6 +465,38 @@ impl Step2Recon for HeldRecon {
     }
 }
 
+/// A reopened coordinator holding the real journal lock (P3-3).
+struct HeldCoord {
+    _controller: Controller,
+}
+#[async_trait]
+impl Step2Coord for HeldCoord {
+    fn revoke_handle(&self) -> RevokeHandle {
+        Arc::new(|| {})
+    }
+    fn recorded_outcome(&self) -> Option<Outcome> {
+        None
+    }
+    async fn review(&mut self, _: &Context) -> Result<Step2ReviewView, Step2Refusal> {
+        unreachable!()
+    }
+    async fn submit(&mut self, _: &Context) -> Result<Outcome, Step2Refusal> {
+        unreachable!()
+    }
+    async fn reconcile(
+        &mut self,
+        _: &Context,
+    ) -> Result<(Status, TransactionObservation), Step2Refusal> {
+        unreachable!()
+    }
+    async fn review_resend(&mut self, _: &Context) -> Result<Step2ResendView, Step2Refusal> {
+        unreachable!()
+    }
+    async fn confirm_resend(&mut self, _: &Context) -> Result<Outcome, Step2Refusal> {
+        unreachable!()
+    }
+}
+
 /// A port that opens the real journal (and so needs its lock) and counts
 /// what it was asked to open.
 struct Port {
@@ -430,6 +504,12 @@ struct Port {
     digest: sha256::Hash,
     preparations: AtomicUsize,
     reconcilers: AtomicUsize,
+    /// P3-3: coordinators reopened for a resend.
+    uncertain: AtomicUsize,
+    /// Reopening for a resend refuses with this.
+    refuse_uncertain: std::sync::Mutex<Option<Step2Refusal>>,
+    /// The session account the port was built for.
+    account: &'static str,
 }
 impl Port {
     fn lock(&self) -> Result<Controller, Step2Refusal> {
@@ -441,13 +521,16 @@ impl Port {
         .map_err(|error| Step2Refusal::retry(format!("{error:?}")))
     }
 }
+#[async_trait]
 impl Step2Port for Port {
     fn context(&self) -> Context {
-        context()
+        let mut context = context();
+        context.account = self.account.into();
+        context
     }
     fn identity(&self) -> PortIdentity {
         PortIdentity {
-            context: context(),
+            context: Step2Port::context(self),
             daemon: 0,
         }
     }
@@ -456,6 +539,24 @@ impl Step2Port for Port {
         Ok(Box::new(HeldPrep {
             _controller: self.lock()?,
         }))
+    }
+    async fn reopen_for_resend(
+        &self,
+        _: Arc<dyn SplitConnect>,
+        directory: PathBuf,
+        target_cube: String,
+        digest: sha256::Hash,
+    ) -> Result<Box<dyn Step2Coord>, Step2Refusal> {
+        assert_eq!(
+            (directory, target_cube, digest),
+            (self.directory.clone(), TARGET.to_string(), self.digest)
+        );
+        if let Some(refusal) = self.refuse_uncertain.lock().unwrap().clone() {
+            return Err(refusal);
+        }
+        self.uncertain.fetch_add(1, Ordering::SeqCst);
+        let lock = self.lock()?;
+        Ok(Box::new(HeldCoord { _controller: lock }))
     }
 }
 impl ReconPort for Port {
@@ -475,11 +576,18 @@ impl ReconPort for Port {
     }
 }
 fn port(journal: &Journal) -> Arc<Port> {
+    port_as(journal, "synthetic-account")
+}
+/// [`port`] for the session of `account`.
+fn port_as(journal: &Journal, account: &'static str) -> Arc<Port> {
     Arc::new(Port {
         directory: journal.temp.0.clone(),
         digest: journal.digest(),
         preparations: AtomicUsize::new(0),
         reconcilers: AtomicUsize::new(0),
+        uncertain: AtomicUsize::new(0),
+        refuse_uncertain: std::sync::Mutex::new(None),
+        account,
     })
 }
 
@@ -579,7 +687,8 @@ async fn step2_entry_and_exit_release_the_journal_lock_first() {
 /// journal read has released the lock by then. The decision reads the
 /// journal under the session's context and needs no step-2 port: without a
 /// reconciler a recorded step 2 refuses rather than fall back to step 1, and
-/// a step-1 journal still resumes (#637 R1).
+/// a step-1 journal still resumes (#637 R1). A step-2 port does not change
+/// that while the journal allows no resend (P3-3).
 #[tokio::test(flavor = "multi_thread")]
 async fn restart_reconciles_only_after_a_recorded_step2_submission() {
     let plain = Journal::new(false);
@@ -589,6 +698,7 @@ async fn restart_reconciles_only_after_a_recorded_step2_submission() {
             restart(
                 context(),
                 recon,
+                Some(resend_ports(&plain, &port_plain)),
                 plain.temp.0.clone(),
                 TARGET.into(),
                 plain.digest()
@@ -598,6 +708,7 @@ async fn restart_reconciles_only_after_a_recorded_step2_submission() {
         ));
     }
     assert_eq!(port_plain.reconcilers.load(Ordering::SeqCst), 0);
+    assert_eq!(port_plain.uncertain.load(Ordering::SeqCst), 0);
 
     let submitted = Journal::new(true);
     let port_submitted = port(&submitted);
@@ -606,21 +717,25 @@ async fn restart_reconciles_only_after_a_recorded_step2_submission() {
         restart(
             context(),
             Some(port_submitted.clone()),
+            Some(resend_ports(&submitted, &port_submitted)),
             submitted.temp.0.clone(),
             TARGET.into(),
             submitted.digest()
         )
         .await,
-        // Nothing recorded its return: the dead end comes with it (#625 F2).
-        Ok(Restart::Reconcile(_, Some(_)))
+        // Nothing recorded its return: the dead end comes with it (#625 F2),
+        // and no resend is mentioned.
+        Ok(Restart::Reconcile(_, Some(_), None))
     ));
     assert!(started.elapsed() < Duration::from_millis(1_500));
     assert_eq!(port_submitted.reconcilers.load(Ordering::SeqCst), 1);
     assert_eq!(port_submitted.preparations.load(Ordering::SeqCst), 0);
+    assert_eq!(port_submitted.uncertain.load(Ordering::SeqCst), 0);
     // No reconciler for the session: refused, retryable, and nothing else
     // is opened; the journal is not left locked.
     match restart(
         context(),
+        None,
         None,
         submitted.temp.0.clone(),
         TARGET.into(),
@@ -643,6 +758,7 @@ async fn restart_reconciles_only_after_a_recorded_step2_submission() {
     assert!(restart(
         other,
         Some(port_submitted.clone()),
+        None,
         submitted.temp.0.clone(),
         TARGET.into(),
         submitted.digest()
@@ -650,6 +766,142 @@ async fn restart_reconciles_only_after_a_recorded_step2_submission() {
     .await
     .is_err());
     assert_eq!(port_submitted.reconcilers.load(Ordering::SeqCst), 1);
+}
+
+/// The step-2 port and step-1 session a restart may reopen a resend with.
+fn resend_ports(
+    journal: &Journal,
+    port: &Arc<Port>,
+) -> (Arc<dyn Step2Port>, Arc<dyn SplitConnect>) {
+    (
+        port.clone(),
+        Arc::new(Connect {
+            directory: journal.temp.0.clone(),
+            digest: journal.digest(),
+            dropped: Arc::new(AtomicUsize::new(0)),
+        }),
+    )
+}
+
+/// P3-3: a restart reopens the submission coordinator only for a resend the
+/// journal allows (the latest attempt recorded as returned unaccepted, the
+/// step 2 never seen on BTCB2) and only through the same session's step-2
+/// port, after its own journal read released the lock. Otherwise, or when
+/// that reopen refuses, the reconciler is opened as before, with the reason
+/// a resend is unavailable; nothing is left holding the journal.
+#[tokio::test(flavor = "multi_thread")]
+async fn restart_reopens_the_coordinator_only_for_a_resend_the_journal_allows() {
+    async fn run(
+        journal: &Journal,
+        port: &Arc<Port>,
+        resend: bool,
+    ) -> Result<Restart, Step2Refusal> {
+        restart(
+            context(),
+            Some(port.clone()),
+            resend.then(|| resend_ports(journal, port)),
+            journal.temp.0.clone(),
+            TARGET.into(),
+            journal.digest(),
+        )
+        .await
+    }
+
+    let returned = Journal::returned(false);
+    let ports = port(&returned);
+    let started = std::time::Instant::now();
+    let reopened = run(&returned, &ports, true).await;
+    assert!(started.elapsed() < Duration::from_millis(1_500));
+    assert!(matches!(reopened, Ok(Restart::Resend(_))));
+    assert_eq!(ports.uncertain.load(Ordering::SeqCst), 1);
+    assert_eq!(ports.reconcilers.load(Ordering::SeqCst), 0);
+    // The reopened coordinator holds the journal; dropping it releases it.
+    assert!(tokio::task::spawn_blocking({
+        let ports = ports.clone();
+        move || ports.lock().map(|_| ())
+    })
+    .await
+    .unwrap()
+    .is_err());
+    drop(reopened);
+    drop(ports.lock().unwrap());
+
+    // No step-2 port (the Vault daemon unloaded or on a route step 2 can't
+    // be sent through): the reconciler, saying why.
+    match run(&returned, &ports, false).await {
+        Ok(Restart::Reconcile(_, None, Some(note))) => assert_eq!(note, RESEND_NEEDS_VAULT),
+        _ => panic!("no step-2 port"),
+    }
+    // A step-2 port of another session is not used.
+    let other = port_as(&returned, "other-account");
+    match run(&returned, &other, true).await {
+        Ok(Restart::Reconcile(_, None, Some(note))) => assert_eq!(note, RESEND_NEEDS_VAULT),
+        _ => panic!("another session's port"),
+    }
+    assert_eq!(other.uncertain.load(Ordering::SeqCst), 0);
+    // The reopen refuses (Connect, a rebuild that does not verify, a route
+    // no longer admitted): the reconciler, with that reason.
+    *ports.refuse_uncertain.lock().unwrap() = Some(Step2Refusal::retry(
+        "Connect couldn't read Bitcoin Blake2b's status.",
+    ));
+    match run(&returned, &ports, true).await {
+        Ok(Restart::Reconcile(_, None, Some(note))) => {
+            assert!(note.contains("can't be sent again right now"), "{}", note);
+            assert!(note.contains("Connect couldn't read"), "{}", note);
+        }
+        _ => panic!("a refused reopen"),
+    }
+    assert_eq!(ports.uncertain.load(Ordering::SeqCst), 1);
+    assert_eq!(ports.reconcilers.load(Ordering::SeqCst), 2);
+    drop(ports.lock().unwrap());
+    // Restoring step 1 finds a claimed coin spent on BTCB2: final, and this
+    // step 2 may itself be the spender, so the note doesn't blame anything
+    // else (#648 R1). Another final refusal isn't "right now" either.
+    let spent = step1::evidence_refusal(crate::services::split_evidence::EvidenceError {
+        outpoint: Some(OutPoint::new(Txid::from_byte_array([1; 32]), 0)),
+        failure: crate::services::split_evidence::EvidenceFailure::Btcb2Spent,
+    });
+    assert!(!spent.retry);
+    *ports.refuse_uncertain.lock().unwrap() = Some(Step2Refusal::final_(spent.reason));
+    match run(&returned, &ports, true).await {
+        Ok(Restart::Reconcile(_, None, Some(note))) => assert_eq!(note, RESEND_COIN_SPENT),
+        _ => panic!("a spent claimed coin"),
+    }
+    *ports.refuse_uncertain.lock().unwrap() =
+        Some(Step2Refusal::final_("This split can't be resumed here."));
+    match run(&returned, &ports, true).await {
+        Ok(Restart::Reconcile(_, None, Some(note))) => {
+            assert!(note.starts_with("Step 2 can't be sent again: "), "{}", note);
+            assert!(note.contains("can't be resumed here"), "{}", note);
+        }
+        _ => panic!("a final refusal"),
+    }
+    assert_eq!(ports.uncertain.load(Ordering::SeqCst), 1);
+    assert_eq!(ports.reconcilers.load(Ordering::SeqCst), 4);
+    drop(ports.lock().unwrap());
+    *ports.refuse_uncertain.lock().unwrap() = None;
+
+    // At the resend limit the restart opens only the reconciler, in its dead
+    // end, and no resend is mentioned (#648 R3a).
+    let exhausted = Journal::at_resend_limit();
+    let ports = port(&exhausted);
+    assert!(matches!(
+        run(&exhausted, &ports, true).await,
+        Ok(Restart::Reconcile(_, Some(_), None))
+    ));
+    assert_eq!(ports.uncertain.load(Ordering::SeqCst), 0);
+    assert_eq!(ports.reconcilers.load(Ordering::SeqCst), 1);
+
+    // A step 2 ever seen on BTCB2 is never resent: the reconciler, and no
+    // resend is mentioned.
+    let observed = Journal::returned(true);
+    let ports = port(&observed);
+    assert!(matches!(
+        run(&observed, &ports, true).await,
+        Ok(Restart::Reconcile(_, None, None))
+    ));
+    assert_eq!(ports.uncertain.load(Ordering::SeqCst), 0);
+    assert_eq!(ports.reconcilers.load(Ordering::SeqCst), 1);
 }
 
 /// An authenticated Connect session at a synthetic origin. Nothing here
@@ -892,6 +1144,91 @@ fn step2_copy_names_the_cause_and_the_node_route_privacy() {
     assert!(NODE_PRIVACY.contains("network address"));
 }
 
+/// P3-3 copy. Every resend refusal says nothing was sent. `Unsettled` says
+/// this version can't resend and names abandon or reset as the way out, as
+/// does the attempt limit; a sighting is final; a spent claimed coin names
+/// it; an unavailable read is retryable and not called a spend; the
+/// coordinator's own refusals read as for step 2.
+#[test]
+fn step2_resend_copy_names_the_way_out() {
+    let spent = OutPoint::new(Txid::from_byte_array([1; 32]), 3);
+    let refusals = [
+        describe_resend(ResendError::NotRecorded),
+        describe_resend(ResendError::Observed),
+        describe_resend(ResendError::Unsettled),
+        describe_resend(ResendError::AttemptsExhausted),
+        describe_resend(ResendError::ClaimedCoinSpent(spent)),
+        describe_resend(ResendError::Unavailable(spent, FailureKind::Http(503))),
+    ];
+    for refusal in &refusals {
+        assert!(
+            refusal.reason.contains("Nothing was sent"),
+            "{}",
+            refusal.reason
+        );
+    }
+    let [not_recorded, observed, unsettled, exhausted, coin_spent, unavailable] = refusals;
+    assert!(!not_recorded.retry && not_recorded.reason.contains("nothing to send again"));
+    assert!(!observed.retry && observed.reason.contains("never sent again"));
+    assert_eq!(unsettled.reason, RESEND_UNSETTLED);
+    assert!(!unsettled.retry);
+    for wanted in ["can't send step 2 again", "abandon or reset this split"] {
+        assert!(unsettled.reason.contains(wanted), "{}", wanted);
+    }
+    assert!(!exhausted.retry);
+    assert!(exhausted.reason.contains(&format!(
+        "{} times",
+        claim_workflow::MAX_SPLIT_STEP2_RESUBMISSIONS
+    )));
+    assert!(exhausted.reason.contains("abandon or reset this split"));
+    assert!(!coin_spent.retry && coin_spent.reason.contains(&spent.to_string()));
+    assert!(unavailable.retry && unavailable.reason.contains("not a sign a coin was spent"));
+    let expired = describe_resend(ResendError::Coordinator(CoordinatorError::ExpiredEvidence));
+    assert_eq!(
+        expired,
+        describe_step2(Step2Error::Coordinator(CoordinatorError::ExpiredEvidence))
+    );
+    assert!(expired.retry);
+    assert!(!describe_resend(ResendError::Coordinator(CoordinatorError::Unsupported)).retry);
+    assert!(RESEND_NEEDS_VAULT.contains("status can still be checked"));
+}
+
+/// P3-3: a resend review on screen lapses with its deadline, the
+/// coordinator's revocation, a generation change or the generation's sender
+/// going away, whichever comes first.
+#[test]
+fn resend_review_lapses_with_its_deadline_revocation_and_generation() {
+    let far = Instant::now() + Duration::from_secs(60);
+    let (sender, generation) = watch::channel(7);
+    let revoked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let live = {
+        let revoked = revoked.clone();
+        resend_liveness(
+            move || revoked.load(Ordering::SeqCst),
+            generation.clone(),
+            7,
+            far,
+        )
+    };
+    assert!(live());
+    revoked.store(true, Ordering::SeqCst);
+    assert!(!live());
+    revoked.store(false, Ordering::SeqCst);
+    assert!(live());
+    sender.send(8).unwrap();
+    assert!(!live());
+    sender.send(7).unwrap();
+    assert!(live());
+    drop(sender);
+    assert!(!live());
+
+    let (_sender, generation) = watch::channel(7);
+    let past = resend_liveness(|| false, generation.clone(), 7, Instant::now());
+    assert!(!past());
+    let other = resend_liveness(|| false, generation, 6, far);
+    assert!(!other());
+}
+
 /// "Split — cannot replay" only from live evidence (#636 P3-2): a token from
 /// a successful check produces it and it names that check's tracked txid.
 /// It disappears with the evidence, not only by time: when a later check
@@ -998,6 +1335,17 @@ fn step2_panel_layer_is_reached_only_through_the_split_panel() {
             "RECONCILE_UNAVAILABLE",
             "STEP1_REORGED_AFTER_STEP2",
             "reconcile_warning",
+            // #642 (#637 review E1 and E3).
+            "Step2Recovery",
+            // P3-3.
+            "reopen_for_resend",
+            "review_resend",
+            "confirm_resend",
+            "Step2ResendView",
+            "ResendLiveness",
+            "describe_resend",
+            "RESEND_NEEDS_VAULT",
+            "RESEND_UNSETTLED",
             // #625 F2: closing a step-2 dead end.
             "DeadEnd",
             "check_close",

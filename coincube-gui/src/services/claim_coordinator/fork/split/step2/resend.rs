@@ -68,6 +68,12 @@ impl Step2ResubmissionReview {
     pub fn snapshot(&self) -> &ReviewSnapshot {
         &self.snapshot
     }
+    /// When this review's evidence lapses. Display only (the panel's resend
+    /// review); a confirmation checks the deadline again with everything
+    /// else.
+    pub fn not_after(&self) -> Instant {
+        self.snapshot.not_after
+    }
     /// Resends already recorded; the submission intent is not counted.
     pub fn previous_attempts(&self) -> usize {
         self.previous_attempts

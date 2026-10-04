@@ -23,11 +23,23 @@
 //!   because the claimed coins may be spent on BTCB2 by then and step 1 can
 //!   no longer be rebuilt from them. That decision needs only the Connect
 //!   session, so it holds whatever state the Vault daemon is in.
-//! - **Copy.** Every target and construction refusal ([`describe_target`],
-//!   [`describe_step2`]), the waiting state while the Vault reserves its
-//!   address ([`RESERVING`], #592 N4), the route label with a privacy note on
-//!   the node route ([`route_copy`]) and the "Split — cannot replay" label,
-//!   which only a live six-confirmation check can produce ([`CannotReplay`]).
+//! - **Resend** (P3-3). When the journal also allows a reviewed resend (its
+//!   latest attempt came back without the route's acceptance, the step 2
+//!   was never seen on BTCB2, under the limit) and the Vault daemon gives a
+//!   step-2 port, [`restart`] opens the submission coordinator again through
+//!   [`Step2Port::reopen_for_resend`] (step 1 rebuilt from freshly
+//!   authenticated coins, then `resume_uncertain`) instead of the
+//!   reconciler; otherwise, or if that open refuses, the reconciler as
+//!   before. The coordinator reconciles, and resends only after an explicit
+//!   one-use review ([`Step2Coord::review_resend`],
+//!   [`Step2Coord::confirm_resend`]), which a reconcile, its deadline, the
+//!   session's revocation or a generation change drops.
+//! - **Copy.** Every target, construction and resend refusal
+//!   ([`describe_target`], [`describe_step2`], [`describe_resend`]), the
+//!   waiting state while the Vault reserves its address ([`RESERVING`], #592
+//!   N4), the route label with a privacy note on the node route
+//!   ([`route_copy`]) and the "Split — cannot replay" label, which only a
+//!   live six-confirmation check can produce ([`CannotReplay`]).
 //!
 //! - **Closing a dead end** (#625 F2, A1 = A). A recorded step 2 that no
 //!   resend can follow and no read ever saw ([`DeadEnd`]) may be closed after
@@ -41,6 +53,7 @@ use std::{
     convert::TryFrom,
     path::{Path, PathBuf},
     sync::Arc,
+    time::Instant,
 };
 
 use async_trait::async_trait;
@@ -63,8 +76,8 @@ use crate::{
             self,
             fork::split::{
                 step2::{
-                    SplitStep2Coordinator, SplitStep2Production, SplitStep2Reconciler, Step2Error,
-                    TargetError, RESERVATION_BOUND,
+                    ResendError, SplitStep2Coordinator, SplitStep2Production, SplitStep2Reconciler,
+                    Step2Error, Step2ResubmissionReview, TargetError, RESERVATION_BOUND,
                 },
                 ForeignStep2Authorization, SplitCheckError, SplitForkProduction, SplitPreparation,
                 Step2Liveness,
@@ -95,6 +108,18 @@ pub const RECONCILE_UNAVAILABLE: &str = "Step 2 of this split was already sent o
 /// transport (`Outcome::Uncertain`), so the copy doesn't say step 2 was
 /// sent (#637 Copilot review 5401909718).
 pub const STEP1_REORGED_AFTER_STEP2: &str = "Bitcoin reorganized after a submission of step 2 was recorded; it was sent or may have been sent. Step 1 is no longer in the Bitcoin block it was confirmed in, so Bitcoin replay protection for step 2 is no longer established. This version has no recovery for this. Nothing was rebuilt, and step 2 is not sent automatically. Check status again later.";
+/// A restart found a resend the journal allows, but no step-2 port to send
+/// it through (P3-3): only the reconciler was opened.
+pub const RESEND_NEEDS_VAULT: &str = "Sending step 2 again needs this Vault's wallet engine running on a route step 2 can be sent through. Its status can still be checked.";
+/// A restart's resend reopen found a claimed coin no longer unspent on
+/// BTCB2 (#648 R1). Step 2 is recorded as having come back unaccepted, so it
+/// may itself be the spender (relayed anyway, or sent from another copy of
+/// this Cube); either way it is never sent again.
+pub const RESEND_COIN_SPENT: &str = "Step 2 can't be sent again: a coin this split claims is no longer unspent on Bitcoin Blake2b, and this step 2 may itself have spent it. Nothing was sent; check its status.";
+/// `ResendError::Unsettled`: the journal does not record that the latest
+/// attempt came back unaccepted, so it may have left (P3-3). Only the #625
+/// F2 abandon or reset path gets out of this.
+pub const RESEND_UNSETTLED: &str = "This version can't send step 2 again. Its last send, or a check of it, ended without a clear answer (it may have been accepted, or it was cancelled, timed out or interrupted), so step 2 may have reached the network. Nothing was sent; check its status. If step 2 never appears on Bitcoin Blake2b, the way out is to abandon or reset this split.";
 
 /// What the step-1 evidence of a reconcile after the step-2 submission
 /// means (#637 r4172242637): nothing while step 1 is still eligible (six
@@ -135,6 +160,11 @@ pub enum Step2Recovery {
     None,
     RefreshTarget,
     ReopenCube,
+    /// No resend can follow in this coordinator (an unsettled last attempt,
+    /// or the attempt limit): the panel reads the journal again through
+    /// [`restart`], so a dead end comes with its reconciler and its close
+    /// (#648 X1).
+    Restart,
 }
 
 /// What a refused step-2 operation means for the user.
@@ -229,6 +259,37 @@ pub fn describe_split_check(error: SplitCheckError) -> Step2Refusal {
         ),
         SplitCheckError::Unavailable(_, kind) => Step2Refusal::retry(format!(
             "Connect couldn't read Bitcoin Blake2b for this split ({kind:?}). This is a Connect or indexer limit, not a sign a coin was spent. Try again later."
+        )),
+    }
+}
+
+/// Copy for a refused resend review or confirmation (P3-3). None of these
+/// sent anything; the coordinator's own refusals read as for step 2.
+pub fn describe_resend(error: ResendError) -> Step2Refusal {
+    match error {
+        ResendError::Coordinator(error) => describe_step2(Step2Error::Coordinator(error)),
+        ResendError::NotRecorded => Step2Refusal::final_(
+            "No submission of step 2 is recorded, so there is nothing to send again. Nothing was sent.",
+        ),
+        ResendError::Observed => Step2Refusal::final_(
+            "Step 2 was seen on Bitcoin Blake2b, so it left this device and is never sent again. Nothing was sent; check its status.",
+        ),
+        ResendError::Unsettled => Step2Refusal {
+            recovery: Step2Recovery::Restart,
+            ..Step2Refusal::final_(RESEND_UNSETTLED)
+        },
+        ResendError::AttemptsExhausted => Step2Refusal {
+            recovery: Step2Recovery::Restart,
+            ..Step2Refusal::final_(format!(
+                "Step 2 was already sent again {} times, the most this version allows. Nothing was sent; check its status. If step 2 never appears on Bitcoin Blake2b, the way out is to abandon or reset this split.",
+                claim_workflow::MAX_SPLIT_STEP2_RESUBMISSIONS
+            ))
+        },
+        ResendError::ClaimedCoinSpent(outpoint) => Step2Refusal::final_(format!(
+            "A coin this split claims ({outpoint}) is already spent on Bitcoin Blake2b, so the recorded step 2 can never confirm. Nothing was sent."
+        )),
+        ResendError::Unavailable(_, kind) => Step2Refusal::retry(format!(
+            "Connect couldn't read Bitcoin Blake2b's unspent coins for this split ({kind:?}). This is a Connect or indexer limit, not a sign a coin was spent. Nothing was sent; try again later."
         )),
     }
 }
@@ -349,6 +410,58 @@ pub struct Step2ReviewView {
     pub privacy_note: Option<&'static str>,
 }
 
+/// Whether a resend review's evidence and session are still current.
+pub type ResendLiveness = Arc<dyn Fn() -> bool + Send + Sync>;
+
+/// A resend review is live until `not_after`, while `revoked` says no and
+/// the session's generation is still `expected` (and its sender alive).
+fn resend_liveness(
+    revoked: impl Fn() -> bool + Send + Sync + 'static,
+    generation: watch::Receiver<u64>,
+    expected: u64,
+    not_after: Instant,
+) -> ResendLiveness {
+    Arc::new(move || {
+        !revoked()
+            && *generation.borrow() == expected
+            && generation.has_changed().is_ok()
+            && Instant::now() < not_after
+    })
+}
+
+/// A resend review shown for step 2 (P3-3): exactly the recorded signed
+/// step 2, on the route the review bound.
+#[derive(Clone)]
+pub struct Step2ResendView {
+    pub txid: Txid,
+    pub route: SubmissionRoute,
+    pub route_label: &'static str,
+    pub privacy_note: Option<&'static str>,
+    /// This resend's number (the resends already recorded, plus one) and
+    /// the most the journal records.
+    pub attempt: usize,
+    pub max_attempts: usize,
+    /// When the review's evidence lapses, for display.
+    pub expires_at: chrono::DateTime<chrono::Local>,
+    live: ResendLiveness,
+}
+impl std::fmt::Debug for Step2ResendView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Step2ResendView")
+            .field("txid", &self.txid)
+            .field("attempt", &self.attempt)
+            .finish_non_exhaustive()
+    }
+}
+impl Step2ResendView {
+    /// Until its deadline, while the coordinator that made it is not revoked
+    /// and the session's generation has not moved. Afterwards the panel
+    /// drops the review; a confirmation would refuse anyway.
+    pub fn is_live(&self) -> bool {
+        (self.live)()
+    }
+}
+
 /// The step-2 submission coordinator over one Split journal.
 #[async_trait]
 pub trait Step2Coord: Send {
@@ -357,10 +470,18 @@ pub trait Step2Coord: Send {
     async fn review(&mut self, context: &Context) -> Result<Step2ReviewView, Step2Refusal>;
     /// Submit exactly what the last review showed.
     async fn submit(&mut self, context: &Context) -> Result<Outcome, Step2Refusal>;
+    /// Drops any resend review.
     async fn reconcile(
         &mut self,
         context: &Context,
     ) -> Result<(Status, TransactionObservation), Step2Refusal>;
+    /// P3-3: a fresh resend review of exactly the recorded signed step 2,
+    /// replacing any earlier one. Records nothing and sends nothing.
+    async fn review_resend(&mut self, context: &Context) -> Result<Step2ResendView, Step2Refusal>;
+    /// Send the recorded step 2 again, once, as the last resend review
+    /// showed. That review is used up whatever the result; another resend
+    /// needs another review.
+    async fn confirm_resend(&mut self, context: &Context) -> Result<Outcome, Step2Refusal>;
 }
 
 /// After a recorded step-2 submission: reconcile only.
@@ -385,6 +506,7 @@ pub struct Step2Open {
 
 /// Opens the step-2 submission side of a Split journal for one session,
 /// through the target Vault's daemon.
+#[async_trait]
 pub trait Step2Port: Send + Sync {
     fn context(&self) -> Context;
     /// What makes two ports the same: the session context (account,
@@ -395,6 +517,19 @@ pub trait Step2Port: Send + Sync {
     /// Blocking: callers use `spawn_blocking`, after dropping any step-1
     /// driver on the same journal.
     fn open_preparation(&self, open: Step2Open) -> Result<Box<dyn Step2Prep>, Step2Refusal>;
+    /// P3-3, at restart only: the submission coordinator of the journal's
+    /// recorded step 2, rebuilt from it (step 1 restored through `connect`
+    /// from freshly authenticated coins, then the recorded signed step 2
+    /// verified against its own rebuild). It never signs, reserves or
+    /// builds anything new; it reconciles, and resends only after an
+    /// explicit review. Called only when no other handle holds the journal.
+    async fn reopen_for_resend(
+        &self,
+        connect: Arc<dyn SplitConnect>,
+        directory: PathBuf,
+        target_cube: String,
+        digest: sha256::Hash,
+    ) -> Result<Box<dyn Step2Coord>, Step2Refusal>;
 }
 
 /// Opens the reconcile-only side of a Split journal for one Connect session
@@ -456,8 +591,13 @@ pub enum Restart {
     /// (`SplitPanel::resume`).
     Step1,
     /// A step-2 submission is recorded: reconcile only, with its dead end
-    /// when it is in one (#625 F2).
-    Reconcile(Box<dyn Step2Recon>, Option<DeadEnd>),
+    /// when it is in one (#625 F2), or else why a resend the journal allows
+    /// could not be opened (P3-3). At most one is set: a journal in a dead
+    /// end allows no resend.
+    Reconcile(Box<dyn Step2Recon>, Option<DeadEnd>, Option<String>),
+    /// A step-2 submission is recorded and the journal allows a reviewed
+    /// resend (P3-3): its coordinator, reopened from the recorded bytes.
+    Resend(Box<dyn Step2Coord>),
     /// #625 F2: the split was closed in its step-2 dead end. Nothing opens.
     Closed,
 }
@@ -475,15 +615,58 @@ pub struct DeadEnd {
     pub claimed: Vec<OutPoint>,
 }
 
+/// Why a resend the journal allows was not reopened (P3-3). Restoring step 1
+/// for it can find a claimed coin spent on BTCB2, which step 1's copy blames
+/// on something other than step 2 (#648 R1); and a final refusal is not
+/// "right now".
+fn resend_unavailable(refusal: &Step2Refusal) -> String {
+    let spent = step1::evidence_refusal(crate::services::split_evidence::EvidenceError {
+        outpoint: None,
+        failure: crate::services::split_evidence::EvidenceFailure::Btcb2Spent,
+    });
+    if refusal.reason == spent.reason {
+        RESEND_COIN_SPENT.to_string()
+    } else if refusal.retry {
+        format!(
+            "Step 2 can't be sent again right now: {} Its status can still be checked.",
+            refusal.reason
+        )
+    } else {
+        format!(
+            "Step 2 can't be sent again: {} Its status can still be checked.",
+            refusal.reason
+        )
+    }
+}
+
+/// Whether the journal allows a reviewed resend of its recorded step 2
+/// (P3-3): the latest attempt is recorded as having come back without the
+/// route's acceptance, the step 2 was never seen on BTCB2, and the resends
+/// recorded are under the limit. This only chooses which handle a restart
+/// opens; the coordinator checks it again, with fresh evidence, before any
+/// resend.
+fn resend_allowed(controller: &Controller) -> bool {
+    controller.split_step2_returned()
+        && !controller.split_step2_observed()
+        && controller.split_step2_resubmissions() < claim_workflow::MAX_SPLIT_STEP2_RESUBMISSIONS
+}
+
 /// Restart decision: read the journal under the Connect session's `context`
 /// (lock released at once) and, when it records a step-2 submission, open
 /// the reconciler instead of rebuilding step 1 (whose claimed coins may
 /// already be spent on BTCB2 by step 2). No reconciler for the session
 /// refuses; it never falls back to step 1 (#637 R1). A closed split opens
-/// nothing (#625 F2).
+/// nothing (#625 F2), including one closed while this restart waited for
+/// the journal's lock (#644 G2).
+///
+/// P3-3: when the journal also allows a resend and `resend` gives the
+/// target Vault's step-2 port for the same session, the coordinator is
+/// reopened through it instead; if that refuses (or there is no such port)
+/// the reconciler is opened as before, with the reason kept for the panel.
 pub async fn restart(
     context: Context,
     recon: Option<Arc<dyn ReconPort>>,
+    resend: Option<(Arc<dyn Step2Port>, Arc<dyn SplitConnect>)>,
     directory: PathBuf,
     target_cube: String,
     digest: sha256::Hash,
@@ -492,14 +675,21 @@ pub async fn restart(
         return Ok(Restart::Closed);
     }
     let identity = claim_workflow::split_identity(target_cube.clone(), digest);
-    let (recorded, dead_end) = {
-        let controller = Controller::reopen_settling(&directory, &identity, context)
+    let (recorded, resendable, dead_end) = {
+        let controller = Controller::reopen_settling(&directory, &identity, context.clone())
             .await
             .map_err(|error| {
                 Step2Refusal::retry(step1::describe(claim_coordinator::Error::Journal(error)))
             })?;
+        // #644 G2: a close that held the journal's lock while this restart
+        // waited for it has written its tombstone by now. The check above
+        // stays: it keeps a closed split from waiting for the lock at all.
+        if step1::is_closed(&directory) {
+            return Ok(Restart::Closed);
+        }
         (
             controller.recorded_split_step2().is_some(),
+            resend_allowed(&controller),
             dead_end(&controller),
         )
         // The controller, and the journal lock, end here.
@@ -507,11 +697,26 @@ pub async fn restart(
     if !recorded {
         return Ok(Restart::Step1);
     }
+    let mut unavailable = None;
+    if resendable {
+        let reopened = match resend {
+            Some((port, connect)) if port.context() == context && connect.context() == context => {
+                port.reopen_for_resend(connect, directory.clone(), target_cube.clone(), digest)
+                    .await
+                    .map_err(|refusal| resend_unavailable(&refusal))
+            }
+            _ => Err(RESEND_NEEDS_VAULT.to_string()),
+        };
+        match reopened {
+            Ok(coord) => return Ok(Restart::Resend(coord)),
+            Err(reason) => unavailable = Some(reason),
+        }
+    }
     let port = recon.ok_or_else(|| Step2Refusal::retry(RECONCILE_UNAVAILABLE))?;
     tokio::task::spawn_blocking(move || port.open_reconciler(directory, target_cube, digest))
         .await
         .map_err(|_| Step2Refusal::retry("Reopening the split was interrupted. Try again."))?
-        .map(|recon| Restart::Reconcile(recon, dead_end))
+        .map(|recon| Restart::Reconcile(recon, dead_end, unavailable))
 }
 
 /// The journal's step-2 dead end, if it is in one.
@@ -780,6 +985,7 @@ impl ProductionStep2 {
         fork_production(&self.session, self.expected, &self.generation)
     }
 }
+#[async_trait]
 impl Step2Port for ProductionStep2 {
     fn context(&self) -> Context {
         self.context.clone()
@@ -815,6 +1021,52 @@ impl Step2Port for ProductionStep2 {
                 generation: self.generation.clone(),
             }),
         }))
+    }
+    async fn reopen_for_resend(
+        &self,
+        connect: Arc<dyn SplitConnect>,
+        directory: PathBuf,
+        target_cube: String,
+        digest: sha256::Hash,
+    ) -> Result<Box<dyn Step2Coord>, Step2Refusal> {
+        // The route is admitted again, as at the handoff (#637 R2).
+        let transport = SplitStep2Production::new(
+            &self.session.client,
+            self.daemon.clone(),
+            self.expected,
+            self.generation.clone(),
+        )
+        .map_err(describe_check)?;
+        let route = transport.route();
+        let restored = step1::restore(&*connect, &directory, &target_cube, digest)
+            .await
+            .map_err(|refusal| Step2Refusal {
+                reason: refusal.reason,
+                retry: refusal.retry,
+                recovery: match refusal.recovery {
+                    step1::RefusalRecovery::ReopenCube => Step2Recovery::ReopenCube,
+                    step1::RefusalRecovery::None => Step2Recovery::None,
+                },
+            })?;
+        let coordinator = SplitStep2Coordinator::resume_uncertain(
+            &directory,
+            target_cube,
+            &restored.construction,
+            restored.verified,
+            restored.fork_height,
+            restored.coins,
+            self.production()?,
+            transport,
+            CHECK_POLICY,
+        )
+        .await
+        .map_err(describe_check)?;
+        Ok(Box::new(CoordinatorDriver::new(
+            coordinator,
+            route,
+            self.generation.clone(),
+            self.expected,
+        )))
     }
 }
 
@@ -1078,17 +1330,19 @@ impl Step2Prep for PreparationDriver<LivePrep> {
             Err(error) => return Err((describe_check(error), Some(self))),
         };
         let route = transport.route();
+        let (generation, expected) = (deps.generation.clone(), deps.expected);
         // `finish` consumes the preparation: a refused handoff releases the
         // journal, and the panel reopens it to try again.
         self.core
             .preparation
             .finish(context, signed, coins, transport)
             .map(|coordinator| {
-                Box::new(CoordinatorDriver {
+                Box::new(CoordinatorDriver::new(
                     coordinator,
-                    review: None,
                     route,
-                }) as Box<dyn Step2Coord>
+                    generation,
+                    expected,
+                )) as Box<dyn Step2Coord>
             })
             .map_err(|error| (describe_check(error), None))
     }
@@ -1097,7 +1351,30 @@ impl Step2Prep for PreparationDriver<LivePrep> {
 struct CoordinatorDriver {
     coordinator: SplitStep2Coordinator,
     review: Option<Review>,
+    /// P3-3: the last resend review, used up by its confirmation.
+    resend: Option<Step2ResubmissionReview>,
     route: SubmissionRoute,
+    /// The session generation the coordinator works under, for the resend
+    /// review's liveness.
+    generation: watch::Receiver<u64>,
+    expected: u64,
+}
+impl CoordinatorDriver {
+    fn new(
+        coordinator: SplitStep2Coordinator,
+        route: SubmissionRoute,
+        generation: watch::Receiver<u64>,
+        expected: u64,
+    ) -> Self {
+        Self {
+            coordinator,
+            review: None,
+            resend: None,
+            route,
+            generation,
+            expected,
+        }
+    }
 }
 #[async_trait]
 impl Step2Coord for CoordinatorDriver {
@@ -1144,10 +1421,55 @@ impl Step2Coord for CoordinatorDriver {
         context: &Context,
     ) -> Result<(Status, TransactionObservation), Step2Refusal> {
         self.review = None;
+        self.resend = None;
         self.coordinator
             .reconcile_sweep(context)
             .await
             .map_err(describe_check)
+    }
+    async fn review_resend(&mut self, context: &Context) -> Result<Step2ResendView, Step2Refusal> {
+        self.review = None;
+        self.resend = None;
+        let review = self
+            .coordinator
+            .prepare_step2_resubmission(context)
+            .await
+            .map_err(describe_resend)?;
+        let snapshot = review.snapshot();
+        debug_assert_eq!(snapshot.route, self.route);
+        let (route_label, privacy_note) = route_copy(snapshot.route);
+        let not_after = review.not_after();
+        let left = not_after.saturating_duration_since(Instant::now());
+        let revoker = self.coordinator.revoker();
+        let view = Step2ResendView {
+            txid: snapshot.txid,
+            route: snapshot.route,
+            route_label,
+            privacy_note,
+            attempt: review.previous_attempts().saturating_add(1),
+            max_attempts: claim_workflow::MAX_SPLIT_STEP2_RESUBMISSIONS,
+            expires_at: chrono::Local::now()
+                + chrono::Duration::from_std(left).unwrap_or_else(|_| chrono::Duration::zero()),
+            live: resend_liveness(
+                move || revoker.is_revoked(),
+                self.generation.clone(),
+                self.expected,
+                not_after,
+            ),
+        };
+        self.resend = Some(review);
+        Ok(view)
+    }
+    async fn confirm_resend(&mut self, context: &Context) -> Result<Outcome, Step2Refusal> {
+        self.review = None;
+        let review = self
+            .resend
+            .take()
+            .ok_or_else(|| Step2Refusal::retry("Review the resend again before sending."))?;
+        self.coordinator
+            .confirm_step2_resubmission(review, context)
+            .await
+            .map_err(describe_resend)
     }
 }
 

@@ -1193,8 +1193,10 @@ async fn reconcile_recorded(
     {
         return Err(Error::InvalidBinding);
     }
-    let hold = controller.hold_split_step2_return(context)?;
+    // The hold is taken once the check has started, so a check that cannot
+    // start withdraws nothing (CodeRabbit r4174926591).
     let ticket = controller.begin_check(context)?;
+    let hold = controller.hold_split_step2_return(context)?;
     let plan = controller.plan();
     let probe = SightingProbe::new(services.source(), plan.fork_chain, submission.txid());
     let collected = claim_observation::collect_sweep(

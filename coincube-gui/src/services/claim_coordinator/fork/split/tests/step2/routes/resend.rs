@@ -1275,6 +1275,33 @@ async fn split_step2_resend_deadline_covers_the_first_collection() {
         .unwrap();
 }
 
+/// #639 F1 (Gimli's G5 probe): the claimed coins' BTCB2 unspent reads are
+/// review evidence too. An unspent read at the edge of the observation age
+/// leaves no time for the review, although every other read is fresh.
+#[tokio::test(flavor = "multi_thread")]
+async fn split_step2_resend_deadline_covers_the_unspent_reads() {
+    let connect = MockServer::start_async().await;
+    let daemon = Refusing::new(None, 1);
+    let Uncertain {
+        h, mut coordinator, ..
+    } = uncertain(&daemon, None, &connect).await;
+    h.chains.edit(|view| {
+        view.unspent_age = policy().observations.max_observation_age_seconds - 1;
+    });
+    let aged = coordinator.prepare_step2_resubmission(&context()).await;
+    assert!(
+        matches!(aged, Err(ResendError::Coordinator(Error::ExpiredEvidence))),
+        "an unspent read at the edge of the observation age: {:?}",
+        aged.map(|review| review.previous_attempts())
+    );
+    // With every read fresh, the review is granted.
+    h.chains.edit(|view| view.unspent_age = 0);
+    coordinator
+        .prepare_step2_resubmission(&context())
+        .await
+        .unwrap();
+}
+
 /// A resend whose send outlives the 30 s bound is `Uncertain`, and since the
 /// send may still be under way it is never recorded as returned: no further
 /// resend, then or after a restart.

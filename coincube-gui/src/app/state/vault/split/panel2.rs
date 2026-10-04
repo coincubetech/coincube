@@ -96,6 +96,7 @@ impl SplitPanel {
         self.recon = None;
         self.replay = None;
         self.step2_review = None;
+        self.step2_resend = None;
         self.target_index = None;
         self.step2_handoff_ready = false;
     }
@@ -131,6 +132,30 @@ impl SplitPanel {
     }
     pub fn step2_review(&self) -> Option<&step2::Step2ReviewView> {
         self.step2_review.as_ref()
+    }
+    /// The resend review on screen while it is live (P3-3): its deadline,
+    /// the session's revocation or a generation change drops it.
+    pub fn step2_resend_review(&self) -> Option<&step2::Step2ResendView> {
+        self.step2_resend.as_ref().filter(|view| view.is_live())
+    }
+    /// A resend may be reviewed (P3-3): only from the Reconcile stage, only
+    /// when the restart reopened the coordinator for a resend the journal
+    /// allows (the reconciler can't send), not once a resend was accepted,
+    /// and not once a reconcile under this session saw step 2 on BTCB2,
+    /// which the review could only refuse (#648 R2). The coordinator checks
+    /// everything again with fresh evidence.
+    pub fn can_review_resend(&self) -> bool {
+        self.stage == Stage::Step2(Step2Stage::Reconcile)
+            && self.coord.is_some()
+            && self.connect.is_some()
+            && !matches!(
+                self.step2_outcome,
+                Some(crate::services::claim_coordinator::Outcome::UpstreamAccepted { .. })
+            )
+            && matches!(
+                self.step2_seen_here,
+                None | Some(crate::services::claim_observation::TransactionObservation::Absent)
+            )
     }
     pub fn step2_outcome(&self) -> Option<crate::services::claim_coordinator::Outcome> {
         self.step2_outcome
@@ -451,7 +476,18 @@ impl SplitPanel {
                     |seq, (coord, result)| SplitEvent::Step2Submitted(seq, coord, result),
                 )
             }
-            SplitMessage::Step2Reconcile if self.stage == Stage::Step2(Step2Stage::Submitted) => {
+            // The live coordinator after a submission, or the one a restart
+            // reopened for a resend (P3-3). A reconcile drops any resend
+            // review.
+            SplitMessage::Step2Reconcile
+                if self.stage == Stage::Step2(Step2Stage::Submitted)
+                    || (self.stage == Stage::Step2(Step2Stage::Reconcile)
+                        && self.coord.is_some()) =>
+            {
+                let Stage::Step2(back) = self.stage else {
+                    return Task::none();
+                };
+                self.step2_resend = None;
                 let Some((mut coord, connect)) = self.take_coord(Work::Step2Reconciling) else {
                     return Task::none();
                 };
@@ -460,7 +496,39 @@ impl SplitPanel {
                         let result = coord.reconcile(&connect.context()).await;
                         (Coord(coord), result)
                     },
-                    |seq, (coord, result)| SplitEvent::Step2Reconciled(seq, coord, result),
+                    move |seq, (coord, result)| {
+                        SplitEvent::Step2Reconciled(seq, coord, result, back)
+                    },
+                )
+            }
+            SplitMessage::Step2ReviewResend if self.can_review_resend() => {
+                self.step2_resend = None;
+                let Some((mut coord, connect)) = self.take_coord(Work::Step2ResendReviewing) else {
+                    return Task::none();
+                };
+                self.spawn(
+                    async move {
+                        let result = coord.review_resend(&connect.context()).await;
+                        (Coord(coord), result)
+                    },
+                    |seq, (coord, result)| SplitEvent::Step2ResendReviewed(seq, coord, result),
+                )
+            }
+            // Exactly the live review on screen, once: it is used up here
+            // whatever the result.
+            SplitMessage::Step2ConfirmResend
+                if self.can_review_resend() && self.step2_resend_review().is_some() =>
+            {
+                self.step2_resend = None;
+                let Some((mut coord, connect)) = self.take_coord(Work::Step2Resending) else {
+                    return Task::none();
+                };
+                self.spawn(
+                    async move {
+                        let result = coord.confirm_resend(&connect.context()).await;
+                        (Coord(coord), result)
+                    },
+                    |seq, (coord, result)| SplitEvent::Step2Resent(seq, coord, result),
                 )
             }
             SplitMessage::Step2Reconcile if self.stage == Stage::Step2(Step2Stage::Reconcile) => {
@@ -670,6 +738,7 @@ impl SplitPanel {
             Ok((status, seen)) => {
                 self.step2_status = Some(status);
                 self.step2_seen = Some(seen);
+                self.step2_seen_here = Some(seen);
                 self.notice = None;
                 // Seen on BTCB2: it left, so it is no dead end (#625 F2).
                 if seen != TransactionObservation::Absent {
@@ -692,15 +761,35 @@ impl SplitPanel {
                     Task::none()
                 }
             },
-            SplitEvent::Restarted(_, Ok(Restarted::Reconcile(Recon(recon), dead_end))) => {
+            SplitEvent::Restarted(
+                _,
+                Ok(Restarted::Reconcile(Recon(recon), dead_end, unavailable)),
+            ) => {
                 self.outcome = None;
                 self.step2_outcome = recon.recorded_outcome();
                 self.bind_recon(recon);
                 self.dead_end = dead_end;
+                // Why a resend the journal allows was not opened (P3-3).
+                // Otherwise the notice stays: `begin` cleared it, unless the
+                // coordinator's refusal asked for this restart (#648 X1).
+                if unavailable.is_some() {
+                    self.notice = unavailable;
+                }
                 // The last reconcile's step-1 evidence is kept through the
                 // revocation along with its BTCB2 observation, so its
                 // warning stays until a new reconcile replaces it
                 // (#637 r4172729359).
+                self.stage = Stage::Step2(Step2Stage::Reconcile);
+                Task::none()
+            }
+            SplitEvent::Restarted(_, Ok(Restarted::Resend(Coord(coord)))) => {
+                // P3-3: the coordinator, for a resend the journal allows. It
+                // reconciles like the reconciler; a resend needs a review.
+                // A journal that allows a resend is in no dead end.
+                self.outcome = None;
+                self.step2_outcome = coord.recorded_outcome();
+                self.bind_coord(coord);
+                self.dead_end = None;
                 self.stage = Stage::Step2(Step2Stage::Reconcile);
                 Task::none()
             }
@@ -736,7 +825,11 @@ impl SplitPanel {
                 Task::none()
             }
             SplitEvent::Step2Entered(_, Err(reason)) => {
-                // The step-1 driver was released: reopen from the journal.
+                // The step-1 driver was released, so the panel holds no
+                // handle; the journal is kept. A retryable refusal offers
+                // Try again, which reopens it; a final one (`Unsupported`,
+                // `InvalidBinding`, `WrongIdentity`) says to close and reopen
+                // the Cube, whose next open resumes it (#637 review E3).
                 self.stage = Stage::Refused(refusal(reason));
                 Task::none()
             }
@@ -916,15 +1009,52 @@ impl SplitPanel {
                 };
                 Task::none()
             }
-            SplitEvent::Step2Reconciled(_, Coord(coord), result) => {
+            SplitEvent::Step2Reconciled(_, Coord(coord), result, back) => {
                 self.bind_coord(coord);
                 self.reconciled(result);
-                self.stage = Stage::Step2(Step2Stage::Submitted);
+                self.stage = Stage::Step2(back);
                 Task::none()
             }
             SplitEvent::ReconReconciled(_, Recon(recon), result) => {
                 self.bind_recon(recon);
                 self.reconciled(result);
+                self.stage = Stage::Step2(Step2Stage::Reconcile);
+                Task::none()
+            }
+            SplitEvent::Step2ResendReviewed(_, Coord(coord), result) => {
+                self.bind_coord(coord);
+                match result {
+                    Ok(view) => {
+                        self.notice = None;
+                        self.step2_resend = Some(view);
+                    }
+                    Err(reason) => {
+                        self.step2_resend = None;
+                        if reason.recovery == step2::Step2Recovery::Restart {
+                            return self.restart_step2(reason.reason);
+                        }
+                        self.notice = Some(reason.reason);
+                    }
+                }
+                self.stage = Stage::Step2(Step2Stage::Reconcile);
+                Task::none()
+            }
+            SplitEvent::Step2Resent(_, Coord(coord), result) => {
+                // Whatever happened, the review was used up; anything but
+                // the route's exact acceptance is uncertain again and only
+                // reconciles, or is reviewed again.
+                self.bind_coord(coord);
+                self.step2_resend = None;
+                match result {
+                    Ok(outcome) => {
+                        self.notice = None;
+                        self.step2_outcome = Some(outcome);
+                    }
+                    Err(reason) if reason.recovery == step2::Step2Recovery::Restart => {
+                        return self.restart_step2(reason.reason);
+                    }
+                    Err(reason) => self.notice = Some(reason.reason),
+                }
                 self.stage = Stage::Step2(Step2Stage::Reconcile);
                 Task::none()
             }

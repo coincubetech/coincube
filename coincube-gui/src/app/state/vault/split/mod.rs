@@ -30,7 +30,11 @@
 //! once and reconciled. A restart after a recorded step-2 submission opens
 //! only the reconciler, under the Connect session alone: the Vault's daemon
 //! is needed only to enter step 2, and only on a route step 2 can be sent
-//! through. It is still reachable only by resuming a journal (D1).
+//! through. When the journal allows a resend of that submission (P3-3) and
+//! the daemon is on such a route, the restart reopens the submission
+//! coordinator instead: still reconcile first, and exactly the recorded
+//! step 2 sent again only from an explicit one-use resend review. It is
+//! still reachable only by resuming a journal (D1).
 //!
 //! The panel owns no keys and never signs: signatures come back in PSBT
 //! files (D6). Every Connect read, build, file operation and journal call
@@ -122,7 +126,8 @@ pub enum Step2Stage {
     Review,
     /// A step-2 submission may exist: reconcile only.
     Submitted,
-    /// Restarted after a recorded step-2 submission: reconcile only.
+    /// Restarted after a recorded step-2 submission: reconcile, and, when
+    /// the restart reopened the coordinator (P3-3), review a resend.
     Reconcile,
 }
 
@@ -159,6 +164,9 @@ pub enum Work {
     Step2Reviewing,
     Step2Submitting,
     Step2Reconciling,
+    /// P3-3: fresh evidence for a resend review.
+    Step2ResendReviewing,
+    Step2Resending,
 }
 
 /// The coordinator in transit between the panel and a task.
@@ -203,8 +211,11 @@ impl fmt::Debug for Recon {
 #[derive(Debug)]
 pub enum Restarted {
     Step1,
-    /// The reconciler, with the journal's step-2 dead end if it is in one.
-    Reconcile(Recon, Option<step2::DeadEnd>),
+    /// The reconciler, with the journal's step-2 dead end if it is in one,
+    /// or else why a resend the journal allows could not be opened.
+    Reconcile(Recon, Option<step2::DeadEnd>, Option<String>),
+    /// P3-3: the coordinator, for a resend the journal allows.
+    Resend(Coord),
     /// #625 F2: closed in its step-2 dead end.
     Closed,
 }
@@ -276,8 +287,16 @@ pub enum SplitEvent {
         Result<step2::Step2ReviewView, step2::Step2Refusal>,
     ),
     Step2Submitted(u64, Coord, Result<Outcome, step2::Step2Refusal>),
-    Step2Reconciled(u64, Coord, Seen),
+    /// With the reconcile-only stage it returns to.
+    Step2Reconciled(u64, Coord, Seen, Step2Stage),
     ReconReconciled(u64, Recon, Seen),
+    /// P3-3.
+    Step2ResendReviewed(
+        u64,
+        Coord,
+        Result<step2::Step2ResendView, step2::Step2Refusal>,
+    ),
+    Step2Resent(u64, Coord, Result<Outcome, step2::Step2Refusal>),
 }
 
 /// What a reorg check concluded.
@@ -326,6 +345,10 @@ pub enum SplitMessage {
     Step2Review,
     Step2Confirm,
     Step2Reconcile,
+    /// P3-3: a fresh one-use review of a resend of the recorded step 2.
+    Step2ReviewResend,
+    /// P3-3: send the recorded step 2 again, as that review showed.
+    Step2ConfirmResend,
 }
 
 pub struct SplitPanel {
@@ -387,8 +410,14 @@ pub struct SplitPanel {
     step2_handoff_ready: bool,
     step2_exported: Option<PathBuf>,
     step2_review: Option<step2::Step2ReviewView>,
+    /// P3-3: the resend review on screen.
+    step2_resend: Option<step2::Step2ResendView>,
     step2_outcome: Option<Outcome>,
     step2_seen: Option<TransactionObservation>,
+    /// What this session's last reconcile saw of step 2 on BTCB2. A
+    /// revocation forgets it, while `step2_seen` stays for its warning; the
+    /// close and the resend review are offered from it (#644 G1, #648 R2).
+    step2_seen_here: Option<TransactionObservation>,
     /// The step-1 evidence of the last step-2 reconcile (#637 r4172242637).
     step2_status: Option<Status>,
     /// The authenticated claimed coins from the restore.
@@ -447,8 +476,10 @@ impl SplitPanel {
             step2_handoff_ready: false,
             step2_exported: None,
             step2_review: None,
+            step2_resend: None,
             step2_outcome: None,
             step2_seen: None,
+            step2_seen_here: None,
             step2_status: None,
             coins: Vec::new(),
         }
@@ -570,13 +601,13 @@ impl SplitPanel {
         self.dead_end.as_ref()
     }
     /// #625 F2: a step-2 dead end may be closed from the reconcile-only
-    /// stage, once a reconcile saw step 2 absent from BTCB2 (an accepted
-    /// send may still be in a mempool), and only after a check on both
-    /// chains passed.
+    /// stage, once a reconcile under this session saw step 2 absent from
+    /// BTCB2 (an accepted send may still be in a mempool; #644 G1), and only
+    /// after a check on both chains passed.
     pub fn can_check_close(&self) -> bool {
         self.dead_end.is_some()
             && self.connect.is_some()
-            && self.step2_seen == Some(TransactionObservation::Absent)
+            && self.step2_seen_here == Some(TransactionObservation::Absent)
             && self.stage == Stage::Step2(Step2Stage::Reconcile)
     }
     pub fn can_confirm_close(&self) -> bool {
@@ -612,6 +643,7 @@ impl SplitPanel {
         // Read under this session: the next one reads the journal again.
         self.abandon_only = None;
         self.dead_end = None;
+        self.step2_seen_here = None;
         if let Some(ending) = self.ending.take() {
             ending.store(true, Ordering::SeqCst);
         }
@@ -644,19 +676,23 @@ impl SplitPanel {
             // A recorded step-2 submission reopens only the reconciler. The
             // decision needs only the session, never the Vault daemon, so a
             // daemon that is unloaded or on an unsupported route can't send
-            // a recorded step 2 back to step 1 (#637 R1).
+            // a recorded step 2 back to step 1 (#637 R1). A resend the
+            // journal allows reopens the coordinator through the Vault's
+            // step-2 port when there is one (P3-3).
             self.stage = Stage::Working(Work::Restarting);
             let target = self.target_cube.clone();
             let (context, recon) = (connect.context(), self.recon_port.clone());
+            let resend = self.step2_port.clone().map(|port| (port, connect));
             return self.spawn(
                 async move {
-                    step2::restart(context, recon, directory, target, digest)
+                    step2::restart(context, recon, resend, directory, target, digest)
                         .await
                         .map(|restart| match restart {
                             step2::Restart::Step1 => Restarted::Step1,
-                            step2::Restart::Reconcile(recon, dead_end) => {
-                                Restarted::Reconcile(Recon(recon), dead_end)
+                            step2::Restart::Reconcile(recon, dead_end, note) => {
+                                Restarted::Reconcile(Recon(recon), dead_end, note)
                             }
+                            step2::Restart::Resend(coord) => Restarted::Resend(Coord(coord)),
                             step2::Restart::Closed => Restarted::Closed,
                         })
                 },
@@ -664,6 +700,20 @@ impl SplitPanel {
             );
         }
         self.resume_journal(connect)
+    }
+
+    /// #648 X1: the coordinator found that no resend can follow (its last
+    /// attempt unsettled, or the attempt limit reached). Release it and read
+    /// the journal again through the restart decision, keeping `notice`, so
+    /// a dead end comes with its reconciler and its close. A reconcile from
+    /// before no longer counts for the close: it waits for a new one.
+    fn restart_step2(&mut self, notice: String) -> Task<Message> {
+        self.revoke_step2();
+        self.step2_seen_here = None;
+        self.stage = Stage::NeedsSession;
+        let task = self.begin();
+        self.notice = Some(notice);
+        task
     }
 
     /// Resume the journal's step 1 (the step-1 driver).
@@ -1393,7 +1443,9 @@ impl SplitEvent {
             | Self::Step2Reviewed(seq, ..)
             | Self::Step2Submitted(seq, ..)
             | Self::Step2Reconciled(seq, ..)
-            | Self::ReconReconciled(seq, ..) => *seq,
+            | Self::ReconReconciled(seq, ..)
+            | Self::Step2ResendReviewed(seq, ..)
+            | Self::Step2Resent(seq, ..) => *seq,
         }
     }
 }
