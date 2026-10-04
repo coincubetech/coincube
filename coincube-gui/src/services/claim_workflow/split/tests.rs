@@ -1307,7 +1307,8 @@ fn split_b0_journal_api_has_no_gui_callers() {
                     // their tests reopen a submitted Split journal; no GUI
                     // caller reaches them
                     // (`fork::split::tests::split_step2_gate_has_no_gui_caller`).
-                    // Only the tests create a journal (#626 guard nit).
+                    // Only the tests create a journal (#626 guard nit); B4b-1b's
+                    // reconciler tests create and submit a fork-only one.
                     let gate_tests =
                         file.starts_with("src/services/claim_coordinator/fork/split/tests");
                     let gate = file.starts_with("src/services/claim_coordinator/fork/split")
@@ -1335,7 +1336,14 @@ fn split_b0_journal_api_has_no_gui_callers() {
                             "Step2ReturnHold",
                         ]
                         .contains(&ident)
-                            || (gate_tests && ident == "create_split"));
+                            || (gate_tests
+                                && [
+                                    "create_split",
+                                    "create_unified_split",
+                                    "record_unified_broadcast_intent",
+                                    "UnifiedConstruction",
+                                ]
+                                .contains(&ident)));
                     // B3b-2b: the panel's (uncalled) step-2 layer reads the
                     // recorded step 2 at restart; its tests write journals.
                     let panel_step2 = file.starts_with("src/app/state/vault/split/step2")
