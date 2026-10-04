@@ -720,3 +720,118 @@ async fn panel_offers_the_close_only_from_this_sessions_reconcile() {
     drive(&mut panel, task).await;
     assert!(panel.can_check_close());
 }
+
+/// Only the BTCB2 unspent reads are stale; every other read is fresh.
+struct StaleUnspent(Arc<Chains>);
+#[async_trait]
+impl SplitEvidenceSource for StaleUnspent {
+    fn now(&self) -> i64 {
+        self.0.now()
+    }
+    async fn tip(&self, chain: ChainId) -> Result<FreshRead<BlockRef>, FailureKind> {
+        self.0.tip(chain).await
+    }
+    async fn transaction(
+        &self,
+        chain: ChainId,
+        txid: Txid,
+    ) -> Result<FreshRead<TransactionObservation>, FailureKind> {
+        self.0.transaction(chain, txid).await
+    }
+    async fn hash_at_height(
+        &self,
+        chain: ChainId,
+        height: u64,
+    ) -> Result<FreshRead<BlockHash>, FailureKind> {
+        self.0.hash_at_height(chain, height).await
+    }
+    async fn previous_transaction(
+        &self,
+        chain: ChainId,
+        txid: Txid,
+    ) -> Result<Transaction, FailureKind> {
+        self.0.previous_transaction(chain, txid).await
+    }
+    async fn unspent_outputs(
+        &self,
+        chain: ChainId,
+        address: &str,
+    ) -> Result<FreshRead<Vec<OutPoint>>, FailureKind> {
+        let value = self
+            .0
+            .unspent_outputs(chain, address)
+            .await?
+            .value()
+            .clone();
+        read(chain, value, Some(Fault::Stale))
+    }
+}
+struct StaleUnspentConnect(StaleUnspent);
+#[async_trait]
+impl SplitConnect for StaleUnspentConnect {
+    fn context(&self) -> Context {
+        context()
+    }
+    fn evidence(&self) -> &dyn SplitEvidenceSource {
+        &self.0
+    }
+    async fn window(&self) -> Result<ForkWindow, String> {
+        unreachable!()
+    }
+    async fn bitcoin_feerate(&self) -> Option<u64> {
+        unreachable!()
+    }
+    async fn address_used(&self, _: ChainId, _: &str) -> Result<bool, FailureKind> {
+        unreachable!()
+    }
+    fn open(&self, _: OpenRequest) -> Result<Box<dyn Step1Driver>, CoordinatorError> {
+        unreachable!()
+    }
+}
+
+/// #644 G3: the two `check_close` retain branches no other case isolates.
+/// A stale BTCB2 unspent read alone refuses as unavailable (the stale case
+/// above also makes the first step-2 read stale, which refuses first), and
+/// a previous transaction that is not the one its outpoint names refuses as
+/// unidentified. Adapted from Gimli's #644 review probes.
+#[tokio::test(flavor = "multi_thread")]
+async fn check_close_refuses_a_stale_unspent_read_and_an_unauthenticated_previous_tx() {
+    let fixture = Fixture::new();
+    let panel = fixture.panel().await;
+    let dead_end = panel.dead_end().cloned().unwrap();
+    drop(panel);
+    // Clean and fresh: passes.
+    assert!(check_close(&Evidence(fixture.chains.clone()), &dead_end)
+        .await
+        .is_ok());
+
+    // Only the unspent reads stale: refused as unavailable.
+    let refused = check_close(
+        &StaleUnspentConnect(StaleUnspent(fixture.chains.clone())),
+        &dead_end,
+    )
+    .await
+    .expect_err("a stale BTCB2 unspent read was accepted");
+    assert!(refused.retry, "{:?}", refused);
+    assert!(
+        refused.reason.contains("not a sign that step 2 left"),
+        "{:?}",
+        refused
+    );
+
+    // A claimed input's previous transaction swapped for another one.
+    let mut chains = Chains::new(&fixture.journal);
+    let (first, second) = (dead_end.claimed[0], dead_end.claimed[1]);
+    assert_ne!(first.txid, second.txid);
+    let other = chains.previous[&second.txid].clone();
+    chains.previous.insert(first.txid, other);
+    let refused = check_close(&Evidence(Arc::new(chains)), &dead_end)
+        .await
+        .expect_err("an unauthenticated previous transaction was accepted");
+    assert!(!refused.retry, "{:?}", refused);
+    assert!(
+        refused.reason.contains(step1::UNIDENTIFIED),
+        "{:?}",
+        refused
+    );
+}
