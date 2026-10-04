@@ -26,6 +26,7 @@ struct Counts {
     reconciles: usize,
     finish_failures: usize,
     terminal_finish: Option<Step2Refusal>,
+    consume_finish: bool,
     finishes: usize,
     stale_target: bool,
     proofs: usize,
@@ -206,6 +207,9 @@ impl Step2Prep for PanelPrep {
         let terminal = self.shared.lock().unwrap().terminal_finish.take();
         if let Some(reason) = terminal {
             self.shared.lock().unwrap().finishes += 1;
+            if self.shared.lock().unwrap().consume_finish {
+                return Err((reason, None));
+            }
             return Err((reason, Some(self)));
         }
         let refuse = {
@@ -1711,69 +1715,108 @@ async fn panel_rejects_reopen_advice_for_terminal_domain_refusals() {
 /// A duplicate or unsigned import must not bypass a terminal handoff refusal.
 #[tokio::test(flavor = "multi_thread")]
 async fn panel_terminal_handoff_blocks_import_and_retry() {
-    for error in [
-        CoordinatorError::Unsupported,
-        CoordinatorError::InvalidBinding,
-    ] {
-        let journal = Journal::new(false);
-        let (mut panel, shared) = tracked_panel(&journal);
-        for message in [
-            SplitMessage::EnterStep2,
-            SplitMessage::Step2Reserve,
-            SplitMessage::Step2Check,
-            SplitMessage::Step2Build,
+    for consumed in [false, true] {
+        for error in [
+            CoordinatorError::Unsupported,
+            CoordinatorError::InvalidBinding,
         ] {
-            let task = panel.update(message);
+            let journal = Journal::new(false);
+            let (mut panel, shared) = tracked_panel(&journal);
+            for message in [
+                SplitMessage::EnterStep2,
+                SplitMessage::Step2Reserve,
+                SplitMessage::Step2Check,
+                SplitMessage::Step2Build,
+            ] {
+                let task = panel.update(message);
+                drive(&mut panel, task).await;
+            }
+            let unsigned = panel.step2_psbt().unwrap().clone();
+            let mut signed = unsigned.clone();
+            signed
+                .sign(&journal.wallet.signer, &Secp256k1::new())
+                .unwrap();
+            let dir = journal.temp.0.parent().unwrap();
+            let save = |name: &str, psbt: &Psbt| {
+                let path = dir.join(name);
+                std::fs::write(
+                    &path,
+                    split_psbt_file::encode(psbt, split_psbt_file::Encoding::Base64),
+                )
+                .unwrap();
+                path
+            };
+            let signed_path = save("terminal-signed.txt", &signed);
+            let unsigned_path = save("terminal-unsigned.txt", &unsigned);
+            shared.lock().unwrap().terminal_finish = Some(describe_check(error));
+            shared.lock().unwrap().consume_finish = consumed;
+            let task = panel.step2_import_from(vec![signed_path.clone()]);
             drive(&mut panel, task).await;
+            assert_eq!(shared.lock().unwrap().finishes, 1);
+            assert!(!panel.can_retry_step2_handoff());
+            assert!(
+                matches!(&panel.stage, Stage::Refused(reason) if !reason.retry),
+                "terminal classification lost (consumed={})",
+                consumed
+            );
+            // Exercise the reported bypass before inspecting presentation state.
+            for path in [signed_path, unsigned_path] {
+                let task = panel.step2_import_from(vec![path]);
+                drive(&mut panel, task).await;
+                let finishes = shared.lock().unwrap().finishes;
+                assert_eq!(finishes, 1, "terminal refusal retried through import");
+            }
+            for message in [SplitMessage::Step2RetryHandoff, SplitMessage::Retry] {
+                let task = panel.update(message);
+                drive(&mut panel, task).await;
+            }
+            assert!(matches!(panel.stage, Stage::Refused(_)));
+            assert!(panel.prep.is_none());
+            if !consumed {
+                assert!(shared.lock().unwrap().revoked > 0);
+            }
+            assert!(panel.target_index().is_none());
+            assert!(panel.replay_label().is_none());
+            assert!(!panel.can_retry_step2_handoff());
+            assert_eq!(shared.lock().unwrap().finishes, 1);
+            assert_eq!(shared.lock().unwrap().submits, 0);
+            let labels = rendered_labels(&panel).await;
+            assert!(labels
+                .iter()
+                .any(|s| s.contains("Close and reopen the Cube")));
+            assert!(!labels
+                .iter()
+                .any(|s| s == "Retry handoff" || s == "Try again"));
+            assert!(journal.temp.0.exists());
         }
-        let unsigned = panel.step2_psbt().unwrap().clone();
-        let mut signed = unsigned.clone();
-        signed
-            .sign(&journal.wallet.signer, &Secp256k1::new())
-            .unwrap();
-        let dir = journal.temp.0.parent().unwrap();
-        let save = |name: &str, psbt: &Psbt| {
-            let path = dir.join(name);
-            std::fs::write(
-                &path,
-                split_psbt_file::encode(psbt, split_psbt_file::Encoding::Base64),
-            )
-            .unwrap();
-            path
-        };
-        let signed_path = save("terminal-signed.txt", &signed);
-        let unsigned_path = save("terminal-unsigned.txt", &unsigned);
-        shared.lock().unwrap().terminal_finish = Some(describe_check(error));
-        let task = panel.step2_import_from(vec![signed_path.clone()]);
-        drive(&mut panel, task).await;
-        assert_eq!(shared.lock().unwrap().finishes, 1);
-        assert!(!panel.can_retry_step2_handoff());
-        // Exercise the reported bypass before inspecting presentation state.
-        for path in [signed_path, unsigned_path] {
-            let task = panel.step2_import_from(vec![path]);
-            drive(&mut panel, task).await;
-            let finishes = shared.lock().unwrap().finishes;
-            assert_eq!(finishes, 1, "terminal refusal retried through import");
-        }
-        for message in [SplitMessage::Step2RetryHandoff, SplitMessage::Retry] {
-            let task = panel.update(message);
-            drive(&mut panel, task).await;
-        }
-        assert!(matches!(panel.stage, Stage::Refused(_)));
-        assert!(panel.prep.is_none());
-        assert!(shared.lock().unwrap().revoked > 0);
-        assert!(panel.target_index().is_none());
-        assert!(panel.replay_label().is_none());
-        assert!(!panel.can_retry_step2_handoff());
-        assert_eq!(shared.lock().unwrap().finishes, 1);
-        assert_eq!(shared.lock().unwrap().submits, 0);
-        let labels = rendered_labels(&panel).await;
-        assert!(labels
-            .iter()
-            .any(|s| s.contains("Close and reopen the Cube")));
-        assert!(!labels
-            .iter()
-            .any(|s| s == "Retry handoff" || s == "Try again"));
-        assert!(journal.temp.0.exists());
     }
+}
+
+/// Consuming the preparation does not make a transient failure terminal.
+#[tokio::test(flavor = "multi_thread")]
+async fn panel_consumed_retryable_handoff_preserves_retry() {
+    let journal = Journal::new(false);
+    let (mut panel, _) = tracked_panel(&journal);
+    for message in [
+        SplitMessage::EnterStep2,
+        SplitMessage::Step2Reserve,
+        SplitMessage::Step2Check,
+        SplitMessage::Step2Build,
+    ] {
+        let task = panel.update(message);
+        drive(&mut panel, task).await;
+    }
+    drop(panel.prep.take());
+    panel.step2_revoke = None;
+    let task = panel.apply(SplitEvent::Step2Finished(
+        panel.seq,
+        Err((Step2Refusal::retry("Handoff interrupted; retry."), None)),
+    ));
+    drive(&mut panel, task).await;
+    assert!(matches!(&panel.stage, Stage::Refused(reason) if reason.retry));
+    let labels = rendered_labels(&panel).await;
+    assert!(labels.iter().any(|s| s == "Try again"));
+    assert!(!labels
+        .iter()
+        .any(|s| s.contains("Close and reopen the Cube")));
 }

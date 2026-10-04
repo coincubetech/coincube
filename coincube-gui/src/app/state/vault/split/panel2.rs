@@ -798,8 +798,13 @@ impl SplitPanel {
                 Task::none()
             }
             SplitEvent::Step2Finished(_, Err((reason, None))) => {
-                // The preparation released the journal: reopen it.
-                self.stage = Stage::Refused(Refusal::retry(reason.reason));
+                // Consumption releases the journal, but does not change whether
+                // the failure is recoverable by retrying under this session.
+                if !reason.retry {
+                    self.revoke_step2();
+                    self.notice = None;
+                }
+                self.stage = Stage::Refused(refusal(reason));
                 Task::none()
             }
             SplitEvent::Step2Reviewed(_, Coord(coord), result) => {
