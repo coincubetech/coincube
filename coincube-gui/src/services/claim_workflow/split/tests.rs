@@ -1378,8 +1378,13 @@ fn split_b0_journal_api_has_no_gui_callers() {
                         ]
                         .contains(&ident))
                         || (file.starts_with("src/app/state/vault/split/step2/tests")
-                            && ["record_split_step2_returned", "record_split_step2_observed"]
-                                .contains(&ident));
+                            && [
+                                "record_split_step2_returned",
+                                "record_split_step2_observed",
+                                // #568 S4: the warning test builds an O4 outcome.
+                                "Step1Conflict",
+                            ]
+                            .contains(&ident));
                     // #625 F2: the close tests make a journal whose resend is
                     // reviewable, which is no dead end. Tests only.
                     let panel_step2_tests = file
