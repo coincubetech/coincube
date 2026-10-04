@@ -2297,6 +2297,79 @@ async fn panel_reads_the_journal_again_after_an_uncertain_resend() {
     assert_eq!(panel.notice(), None);
 }
 
+/// S3-D1 (PortIdentity hardening): a step-2 handle moved into a task is not
+/// held by the panel, yet a port change while the task runs still revokes
+/// it, and the task's result lands on nothing. Covered: a check with the
+/// preparation taken (its revoke handle still bound), an entry still opening
+/// the preparation (nothing bound yet) and a restart still deciding.
+#[tokio::test(flavor = "multi_thread")]
+async fn port_change_during_an_in_flight_step2_task_revokes_it() {
+    // A check in flight.
+    let journal = Journal::new(false);
+    let (mut panel, shared) = tracked_panel(&journal);
+    let task = panel.update(SplitMessage::EnterStep2);
+    drive(&mut panel, task).await;
+    assert_eq!(panel.stage, Stage::Step2(Step2Stage::Ready));
+    let task = panel.update(SplitMessage::Step2Check);
+    assert_eq!(panel.stage, Stage::Working(Work::Step2Checking));
+    assert!(panel.prep.is_none() && panel.coord.is_none() && panel.recon.is_none());
+    let revoked = shared.lock().unwrap().revoked;
+    panel.set_step2_port(Some(Arc::new(PanelPort::new(&shared, &journal, 2))));
+    assert_eq!(shared.lock().unwrap().revoked, revoked + 1);
+    assert_eq!(panel.stage, Stage::NeedsSession);
+    drive(&mut panel, task).await;
+    assert!(panel.prep.is_none() && panel.replay_label().is_none());
+    assert_eq!(panel.stage, Stage::NeedsSession);
+
+    // An entry still opening the preparation.
+    let journal = Journal::new(false);
+    let (mut panel, shared) = tracked_panel(&journal);
+    let task = panel.update(SplitMessage::EnterStep2);
+    assert_eq!(panel.stage, Stage::Working(Work::Entering));
+    assert!(panel.step2_revoke.is_none());
+    panel.set_step2_port(Some(Arc::new(PanelPort::new(&shared, &journal, 2))));
+    assert_eq!(panel.stage, Stage::NeedsSession);
+    drive(&mut panel, task).await;
+    assert!(panel.prep.is_none() && panel.step2_revoke.is_none());
+    assert_eq!(panel.stage, Stage::NeedsSession);
+
+    // A restart still deciding, when the Vault's port goes away.
+    let journal = Journal::returned(false);
+    let shared: Shared = Arc::default();
+    let mut panel = SplitPanel::resume(
+        TARGET.into(),
+        journal.temp.0.parent().unwrap().to_path_buf(),
+        journal.digest(),
+        journal.temp.0.clone(),
+    );
+    panel.set_connect(Some(Arc::new(PanelConnect(shared.clone()))));
+    panel.set_step2_port(Some(Arc::new(PanelPort::new(&shared, &journal, 1))));
+    panel.set_recon_port(Some(Arc::new(PanelReconPort(shared.clone()))));
+    let task = panel.begin();
+    assert_eq!(panel.stage, Stage::Working(Work::Restarting));
+    panel.set_step2_port(None);
+    assert_eq!(panel.stage, Stage::NeedsSession);
+    drive(&mut panel, task).await;
+    assert!(panel.coord.is_none() && panel.recon.is_none());
+    assert_eq!(panel.stage, Stage::NeedsSession);
+    // The restart under the remaining ports opens only the reconciler.
+    let task = panel.begin();
+    drive(&mut panel, task).await;
+    assert_eq!(panel.stage, Stage::Step2(Step2Stage::Reconcile));
+    assert!(panel.recon.is_some() && panel.coord.is_none());
+
+    // A reconcile in flight on the reconciler, when the session's
+    // reconcile-only port goes away.
+    let task = panel.update(SplitMessage::Step2Reconcile);
+    assert_eq!(panel.stage, Stage::Working(Work::Step2Reconciling));
+    assert!(panel.recon.is_none());
+    panel.set_recon_port(None);
+    assert_eq!(panel.stage, Stage::NeedsSession);
+    drive(&mut panel, task).await;
+    assert!(panel.recon.is_none() && panel.step2_revoke.is_none());
+    assert_eq!(panel.stage, Stage::NeedsSession);
+}
+
 /// Consuming the preparation does not make a transient failure terminal.
 #[tokio::test(flavor = "multi_thread")]
 async fn panel_consumed_retryable_handoff_preserves_retry() {

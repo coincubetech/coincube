@@ -50,7 +50,8 @@ impl SplitPanel {
     /// new port on every Connect refresh: an equivalent one (same session
     /// context and daemon instance) is ignored, so a flow in progress keeps
     /// its handles; any other (another daemon, account, provider or
-    /// generation, or none) revokes every step-2 handle first (#637 F1).
+    /// generation, or none) revokes every step-2 handle first (#637 F1),
+    /// including one a task holds ([`Self::step2_engaged`]).
     pub fn set_step2_port(&mut self, port: Option<Arc<dyn Step2Port>>) {
         let same = match (&self.step2_port, &port) {
             (Some(a), Some(b)) => a.identity() == b.identity(),
@@ -60,16 +61,42 @@ impl SplitPanel {
         if same {
             return;
         }
-        if self.prep.is_some() || self.coord.is_some() || self.recon.is_some() {
+        if self.step2_engaged() {
             self.revoke();
         }
         self.step2_port = port;
     }
 
+    /// A step-2 handle is held, or may be in a task (S3-D1): one moved into
+    /// a task is not held (`take_prep`, `take_coord`, a restart or entry
+    /// still opening it), but its revoke handle stays bound or the stage
+    /// shows the task. A port or session change then revokes it, and the
+    /// sequence bump drops the task's result, as for a held one.
+    fn step2_engaged(&self) -> bool {
+        self.prep.is_some()
+            || self.coord.is_some()
+            || self.recon.is_some()
+            || self.step2_revoke.is_some()
+            || matches!(self.stage, Stage::Working(_))
+    }
+
+    /// The reconciler is held, or may be in a task (S3-D1): a restart still
+    /// deciding (it opens the reconciler from the old port) or a step-2
+    /// reconcile running (from the reconciler, or the coordinator, which is
+    /// revoked with it: a reconcile is never more than a read).
+    fn recon_engaged(&self) -> bool {
+        self.recon.is_some()
+            || matches!(
+                self.stage,
+                Stage::Working(Work::Restarting | Work::Step2Reconciling)
+            )
+    }
+
     /// Install (or clear) the session's reconcile-only port (#637 R1). The
     /// App builds one on every Connect refresh, whether or not the Vault's
     /// daemon gives a step-2 port: an equivalent one (same session context)
-    /// is ignored; any other revokes a reconciler opened under the old one.
+    /// is ignored; any other revokes a reconciler opened under the old one,
+    /// held or in a task ([`Self::recon_engaged`]).
     pub fn set_recon_port(&mut self, port: Option<Arc<dyn ReconPort>>) {
         let same = match (&self.recon_port, &port) {
             (Some(a), Some(b)) => a.context() == b.context(),
@@ -79,7 +106,7 @@ impl SplitPanel {
         if same {
             return;
         }
-        if self.recon.is_some() {
+        if self.recon_engaged() {
             self.revoke();
         }
         self.recon_port = port;
