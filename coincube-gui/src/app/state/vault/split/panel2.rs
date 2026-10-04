@@ -20,7 +20,7 @@ use coincube_core::{
 };
 
 use super::{
-    step1::{OpenRequest, Refusal, SplitConnect},
+    step1::{OpenRequest, Refusal, RefusalRecovery, SplitConnect},
     step2::{self, ReconPort, Step2Open, Step2Port, Step2Refusal},
     Coord, Driver, Prep, Recon, Restarted, Seen, SplitEvent, SplitMessage, SplitPanel, Stage,
     Step2Stage, Work,
@@ -34,6 +34,10 @@ fn refusal(refusal: Step2Refusal) -> Refusal {
     Refusal {
         reason: refusal.reason,
         retry: refusal.retry,
+        recovery: match refusal.recovery {
+            step2::Step2Recovery::ReopenCube => RefusalRecovery::ReopenCube,
+            _ => RefusalRecovery::None,
+        },
     }
 }
 
@@ -90,6 +94,7 @@ impl SplitPanel {
         self.replay = None;
         self.step2_review = None;
         self.target_index = None;
+        self.step2_handoff_ready = false;
     }
 
     pub fn step2_available(&self) -> bool {
@@ -108,6 +113,12 @@ impl SplitPanel {
     }
     pub fn step2_psbt(&self) -> Option<&Psbt> {
         self.step2_psbt.as_ref()
+    }
+    pub fn can_retry_step2_handoff(&self) -> bool {
+        self.stage == Stage::Step2(Step2Stage::Sign)
+            && self.prep.is_some()
+            && self.step2_handoff_ready
+            && self.step2_outcome.is_none()
     }
     pub fn step2_files(&self) -> usize {
         self.step2_files.len()
@@ -243,6 +254,7 @@ impl SplitPanel {
                                 return Err(Step2Refusal {
                                     reason,
                                     retry: true,
+                                    recovery: step2::Step2Recovery::None,
                                 });
                             }
                         };
@@ -393,6 +405,18 @@ impl SplitPanel {
                     },
                 )
             }
+            SplitMessage::Step2RetryHandoff if self.can_retry_step2_handoff() => {
+                let Some(base) = self.step2_psbt.as_ref() else {
+                    return Task::none();
+                };
+                match combine(base, &self.step2_files) {
+                    Ok(signed) => self.finish(signed),
+                    Err(reason) => {
+                        self.notice = Some(reason.reason);
+                        Task::none()
+                    }
+                }
+            }
             SplitMessage::Step2Review
                 if matches!(
                     self.stage,
@@ -481,6 +505,9 @@ impl SplitPanel {
     /// or the preparation is taken, keeping the loaded files
     /// (#637 r4174164844).
     pub fn step2_import_from(&mut self, paths: Vec<PathBuf>) -> Task<Message> {
+        if self.stage != Stage::Step2(Step2Stage::Sign) {
+            return Task::none();
+        }
         if self.step2_files.len().saturating_add(paths.len()) > split_psbt_file::MAX_COMBINED_FILES
         {
             self.notice = Some(split_psbt_file::FileError::TooManyFiles.to_string());
@@ -495,19 +522,35 @@ impl SplitPanel {
         self.spawn(
             async move {
                 tokio::task::spawn_blocking(move || {
-                    let result = (|| {
-                        for path in &paths {
-                            files.push(split_psbt_file::load(path).map_err(|error| {
-                                Step2Refusal {
-                                    reason: error.to_string(),
-                                    retry: true,
+                    let result =
+                        (|| {
+                            let mut combined = combine(&base, &files)?;
+                            for path in &paths {
+                                let file = split_psbt_file::load(path)
+                                    .map_err(|error| Step2Refusal::retry(error.to_string()))?;
+                                // Combining can supply missing fields or resolve conflicts.
+                                // Check the exact input first, including no-op files, so
+                                // retained metadata/signatures cannot mask malformed input.
+                                prep.verify_signed(&file, &coins)?;
+                                let candidate = combine(&combined, std::slice::from_ref(&file))?;
+                                prep.verify_signed(&candidate, &coins)?;
+                                // Only a validated new signature consumes a retained slot.
+                                let adds_signature =
+                                    candidate.inputs.iter().zip(&combined.inputs).any(
+                                        |(new, old)| {
+                                            new.partial_sigs
+                                                .keys()
+                                                .any(|key| !old.partial_sigs.contains_key(key))
+                                        },
+                                    );
+                                if adds_signature {
+                                    files.push(file);
+                                    combined = candidate;
                                 }
-                            })?);
-                        }
-                        let combined = combine(&base, &files)?;
-                        let complete = prep.verify_signed(&combined, &coins)?;
-                        Ok((files, combined, complete))
-                    })();
+                            }
+                            let complete = prep.verify_signed(&combined, &coins)?;
+                            Ok((files, combined, complete))
+                        })();
                     (Some(Prep(prep)), result)
                 })
                 .await
@@ -519,6 +562,7 @@ impl SplitPanel {
                         Err(Step2Refusal {
                             reason: "The import was interrupted. Open the split again.".to_string(),
                             retry: true,
+                            recovery: step2::Step2Recovery::None,
                         }),
                     )
                 })
@@ -550,6 +594,7 @@ impl SplitPanel {
                             reason: "Handing step 2 over was interrupted. Open the split again."
                                 .to_string(),
                             retry: true,
+                            recovery: step2::Step2Recovery::None,
                         },
                         None,
                     )),
@@ -625,6 +670,7 @@ impl SplitPanel {
                 self.target_index = None;
                 self.step2_psbt = None;
                 self.step2_files.clear();
+                self.step2_handoff_ready = false;
                 self.settle();
                 Task::none()
             }
@@ -669,12 +715,16 @@ impl SplitPanel {
                         self.notice = None;
                         self.step2_psbt = Some(psbt);
                         self.step2_files.clear();
+                        self.step2_handoff_ready = false;
                         // An earlier export holds an earlier PSBT
                         // (#637 r4172150954).
                         self.step2_exported = None;
                         self.stage = Stage::Step2(Step2Stage::Sign);
                     }
                     Err(reason) => {
+                        if reason.recovery == step2::Step2Recovery::RefreshTarget {
+                            self.target_index = None;
+                        }
                         self.notice = Some(reason.reason);
                         self.stage = Stage::Step2(Step2Stage::Ready);
                     }
@@ -706,14 +756,19 @@ impl SplitPanel {
                 self.stage = Stage::Step2(Step2Stage::Sign);
                 match result {
                     Ok((files, combined, complete)) => {
+                        let added = files.len() > self.step2_files.len();
                         self.step2_files = files;
+                        self.step2_handoff_ready = complete;
                         if complete {
                             self.notice = None;
                             return self.finish(combined);
                         }
                         self.notice = Some(
-                            "Signatures loaded. More are needed: import the other signers' files."
-                                .to_string(),
+                            if added {
+                                "Signatures loaded. More are needed: import the other signers' files."
+                            } else {
+                                "No new signatures found. Import the other signers' files."
+                            }.to_string(),
                         );
                     }
                     Err(reason) => self.notice = Some(reason.reason),
@@ -723,18 +778,33 @@ impl SplitPanel {
             SplitEvent::Step2Finished(_, Ok(Coord(coord))) => {
                 self.notice = None;
                 self.bind_coord(coord);
+                self.step2_handoff_ready = false;
                 self.stage = Stage::Step2(Step2Stage::Signed);
                 Task::none()
             }
             SplitEvent::Step2Finished(_, Err((reason, Some(Prep(prep))))) => {
                 self.bind_prep(prep);
-                self.notice = Some(reason.reason);
-                self.stage = Stage::Step2(Step2Stage::Sign);
+                if reason.retry {
+                    self.step2_handoff_ready = true;
+                    self.notice = Some(reason.reason);
+                    self.stage = Stage::Step2(Step2Stage::Sign);
+                } else {
+                    // Import also initiates handoff once retained signatures are
+                    // complete. A terminal refusal must disable that path too.
+                    self.revoke_step2();
+                    self.notice = None;
+                    self.stage = Stage::Refused(refusal(reason));
+                }
                 Task::none()
             }
             SplitEvent::Step2Finished(_, Err((reason, None))) => {
-                // The preparation released the journal: reopen it.
-                self.stage = Stage::Refused(Refusal::retry(reason.reason));
+                // Consumption releases the journal, but does not change whether
+                // the failure is recoverable by retrying under this session.
+                if !reason.retry {
+                    self.revoke_step2();
+                    self.notice = None;
+                }
+                self.stage = Stage::Refused(refusal(reason));
                 Task::none()
             }
             SplitEvent::Step2Reviewed(_, Coord(coord), result) => {
@@ -797,11 +867,13 @@ fn combine(base: &Psbt, files: &[Psbt]) -> Result<Psbt, Step2Refusal> {
             return Err(Step2Refusal {
                 reason: "A loaded file is not this split's step 2.".to_string(),
                 retry: true,
+                recovery: step2::Step2Recovery::None,
             });
         }
         combined.combine(file.clone()).map_err(|_| Step2Refusal {
             reason: "A loaded file could not be combined with the others.".to_string(),
             retry: true,
+            recovery: step2::Step2Recovery::None,
         })?;
     }
     Ok(combined)
