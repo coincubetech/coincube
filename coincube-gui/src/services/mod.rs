@@ -12,6 +12,7 @@ pub mod foreign_wallet_source;
 pub mod split_evidence;
 pub mod split_fees;
 pub mod split_psbt_file;
+pub mod split_seed;
 pub mod split_source;
 #[cfg(test)]
 pub(crate) mod split_test_connect;
