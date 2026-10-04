@@ -219,7 +219,7 @@ mod tests {
                 merged.for_each_key(|key| {
                     counted += 1;
                     let DescriptorPublicKey::MultiXPub(key) = key else {
-                        panic!("{shape:?}: {key}");
+                        panic!("{:?}: {}", shape, key);
                     };
                     assert!(key.origin.is_some());
                     assert_eq!(
