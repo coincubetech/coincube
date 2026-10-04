@@ -12,6 +12,10 @@ built yet).
 The offline tests need no node. They fabricate the previous transactions and
 run the same bridge and signer, so the signing and finalization paths for all
 five shapes are exercised wherever the bridge is built.
+
+The replay test pins, at node level, the window the post-submission reorg
+design (#568, Section 2) must close: once step 1 leaves Bitcoin's active
+chain, the step 2 BTCB2 mined is a valid Bitcoin transaction.
 """
 import copy
 import json
@@ -380,22 +384,40 @@ def sign_and_finalize_step2(tool, wallet, request, built):
     native = wallet.shape in ("wpkh", "wsh_multi", "wsh_sortedmulti")
     assert (implicit["step2_txid"] == built["unsigned_txid"]) == native
     assert implicit["vsize"] <= built["maximum_signed_vbytes"], implicit
-    check_step2_recorded(tool, request, implicit["step2_raw"], implicit)
+    # A restart later than the construction: ten blocks on, as one would be.
+    check_step2_recorded(
+        tool, request, built, implicit["step2_raw"], implicit, request["step2"]["locktime"] + 10
+    )
     return implicit
 
 
-def check_step2_recorded(tool, request, raw, finalized):
-    """Recorded signed bytes verify against the rebuilt construction
-    (`verify_split_step2_transaction`, the restart path); the same bytes with
-    a changed locktime do not."""
+def check_step2_recorded(tool, request, built, raw, finalized, tip):
+    """A restart at BTCB2 tip `tip`, as the service layer does it (#638 F2):
+    the recorded signed bytes verify against the recorded unsigned sweep
+    rebuilt at that tip (`reconstruct_split_step2`, then
+    `verify_split_step2_transaction`), not against a fresh construction at
+    the original tip. A tip below the recorded locktime is refused, and the
+    same bytes with a changed locktime do not verify."""
     request = copy.deepcopy(request)
     request["step2"].pop("signed", None)
+    locktime = request["step2"]["locktime"]
+    assert tip >= locktime, (tip, locktime)
+    # A restart knows the current tip and the journal's two records; a fresh
+    # construction there would carry the current tip as its locktime.
+    request["step2"]["locktime"] = request["step2"]["btcb2_tip_height"] = tip
+    request["step2"]["recorded"] = unsigned_tx_hex(built["step2_psbt"])
     request["step2"]["recorded_signed"] = raw
     verified = run_bridge(tool, request)
+    assert verified["reconstructed_txid"] == finalized["construction_txid"], verified
     assert verified["verified_txid"] == finalized["step2_txid"], verified
     assert verified["verified_signatures_per_input"] == finalized["signatures_per_input"]
+    # Below the recorded locktime the record is not final there: refused
+    # before any signature is looked at.
+    early = copy.deepcopy(request)
+    early["step2"]["locktime"] = early["step2"]["btcb2_tip_height"] = locktime - 1
+    bridge_refuses(tool, early, "Locktime")
     tampered = bytes.fromhex(raw)
-    locktime = struct.unpack("<I", tampered[-4:])[0]
+    assert struct.unpack("<I", tampered[-4:])[0] == locktime, raw
     request["step2"]["recorded_signed"] = (tampered[:-4] + struct.pack("<I", locktime - 1)).hex()
     bridge_refuses(tool, request, "ConstructionChanged")
 
@@ -466,8 +488,10 @@ def split_two_chain_class():
             super().__init__(directory)
             self.wallets = {shape: ForeignWallet(shape) for shape in SHAPES}
             self.funded = {}  # shape -> [(txid, vout, branch, index, block hash)]
-            # shape -> the confirmed step 1 (txid, block, claimed prevouts).
+            # shape -> the confirmed step 1 (txid, block, claimed prevouts, raw).
             self.step1 = {}
+            # shape -> the step 2 mined on BTCB2 (raw, txid, block).
+            self.step2 = {}
 
         def setup(self):
             os.makedirs(self.home_dir, exist_ok=True)
@@ -614,7 +638,9 @@ def confirmed_step1(split_chains, shape):
         a.generate_block(6, wait_for_mempool=step1_id)
         block = a.rpc.getblockhash(height)
         assert a.rpc.getrawtransaction(step1_id, True, block)["confirmations"] == 6
-        split_chains.step1[shape] = (step1_id, block, built["claimed_prevouts"])
+        split_chains.step1[shape] = (
+            step1_id, block, built["claimed_prevouts"], finalized["step1_raw"]
+        )
     return split_chains.step1[shape]
 
 
@@ -690,7 +716,7 @@ def test_split_step1_consensus(split_chains, shape, record_property):
     a.rpc.reconsiderblock(step1_block)
     assert a.rpc.getbestblockhash() == best
     assert a.rpc.getrawtransaction(step1_id, True, step1_block)["confirmations"] == 6
-    split_chains.step1[shape] = (step1_id, step1_block, built["claimed_prevouts"])
+    split_chains.step1[shape] = (step1_id, step1_block, built["claimed_prevouts"], step1)
 
 
 @pytest.mark.parametrize("shape", SHAPES)
@@ -701,7 +727,7 @@ def test_split_step2_consensus(split_chains, shape, record_property):
     tool = split_tool()
     a, b = split_chains.legacy, split_chains.blake2b
     wallet = split_chains.wallets[shape]
-    step1_id, step1_block, claimed = confirmed_step1(split_chains, shape)
+    step1_id, step1_block, claimed, _ = confirmed_step1(split_chains, shape)
     prevouts = [(c[0], c[1]) for c in split_chains.funded[shape]]
     assert sorted(claimed) == sorted(outpoint_str(*p) for p in prevouts)
 
@@ -759,11 +785,124 @@ def test_split_step2_consensus(split_chains, shape, record_property):
     b.generate_block(1, wait_for_mempool=step2_id)
     mined = b.rpc.getrawtransaction(step2_id, True, b.rpc.getbestblockhash())
     assert mined["confirmations"] == 1, mined
+    # Byte identity, witness included: what BTCB2 mined is what was sent,
+    # and its wtxid is the hash of those bytes (#638 F3). Only pkh carries
+    # no witness, so only there the wtxid is the txid.
+    assert mined["hex"] == step2, (mined["hex"], step2)
+    assert mined["hash"] == hash256(bytes.fromhex(step2))[::-1].hex(), mined
+    assert (mined["hash"] == step2_id) == (shape == "pkh"), mined
     assert [o["scriptPubKey"]["hex"] for o in mined["vout"]] == [target.hex()]
-    # The bytes BTCB2 mined verify as a recorded step 2 (restart path).
-    check_step2_recorded(tool, request, mined["hex"], finalized)
+    # The bytes BTCB2 mined verify as a recorded step 2 at the tip after
+    # mining, where a restart would rebuild it (#638 F2).
+    check_step2_recorded(tool, request, built, mined["hex"], finalized, b.rpc.getblockcount())
     for txid, vout in prevouts:
         assert b.rpc.gettxout(txid, vout, False) is None
     assert b.rpc.gettxout(step2_id, 0, False)["scriptPubKey"]["hex"] == target.hex()
     # Step 1 is unaffected on Bitcoin.
     assert a.rpc.getrawtransaction(step1_id, True, step1_block)["in_active_chain"]
+    split_chains.step2[shape] = (step2, step2_id, mined["blockhash"])
+
+
+def confirmed_step2(split_chains, shape):
+    """Step 2 mined on BTCB2 for `shape`: the one the step-2 test recorded,
+    or, when that test did not run first, built, signed and mined here, with
+    Bitcoin brought past its locktime as that test does."""
+    if shape not in split_chains.step2:
+        tool = split_tool()
+        a, b = split_chains.legacy, split_chains.blake2b
+        wallet = split_chains.wallets[shape]
+        _, _, claimed, _ = confirmed_step1(split_chains, shape)
+        level(b, a.rpc.getblockcount())
+        tip = b.rpc.getblockcount()
+        target = target_script(TARGET_KIND.get(shape, "p2wsh"))
+        request = step2_request(step1_request(split_chains, shape), claimed, target, tip)
+        built = run_bridge(tool, request)
+        finalized = sign_and_finalize_step2(tool, wallet, request, built)
+        step2_id = finalized["step2_txid"]
+        assert b.rpc.sendrawtransaction(finalized["step2_raw"]) == step2_id
+        b.generate_block(1, wait_for_mempool=step2_id)
+        block = b.rpc.getbestblockhash()
+        assert b.rpc.getrawtransaction(step2_id, True, block)["confirmations"] == 1
+        level(a, tip)
+        split_chains.step2[shape] = (finalized["step2_raw"], step2_id, block)
+    return split_chains.step2[shape]
+
+
+@pytest.mark.parametrize("shape", SHAPES)
+def test_split_step2_replay_after_step1_reorg(split_chains, shape, record_property):
+    """The window the post-submission reorg design must close (#568, B6c-1),
+    pinned at node level. Bitcoin refuses the step 2 BTCB2 mined only while
+    step 1 is in its active chain (the counterfactual, first) or in its
+    mempool. Once step 1's block is invalidated, the same bytes are a valid
+    Bitcoin transaction over the claimed prevouts: the mempool refuses them
+    only as step 1's conflict, and a block carrying them is accepted. The
+    chain is restored afterwards. Nothing here observes through Split."""
+    a, b = split_chains.legacy, split_chains.blake2b
+    step1_id, step1_block, claimed, step1 = confirmed_step1(split_chains, shape)
+    step2, step2_id, step2_block = confirmed_step2(split_chains, shape)
+    prevouts = [(c[0], c[1]) for c in split_chains.funded[shape]]
+    locktime = struct.unpack("<I", bytes.fromhex(step2)[-4:])[0]
+    # Bitcoin is past step 2's locktime, so finality never refuses it below.
+    level(a, locktime)
+    best = a.rpc.getbestblockhash()
+    assert a.rpc.getrawtransaction(step1_id, True, step1_block)["in_active_chain"]
+
+    # Counterfactual: with step 1 in the active chain, consensus refuses the
+    # replay (the step-2 test shows the mempool does too).
+    with pytest.raises(JSONRPCException) as refused:
+        a.rpc.generateblock(a.rpc.getnewaddress(), [step2])
+    assert refused.value.error["code"] == -25, refused.value.error
+    assert refused.value.error["message"].startswith(
+        "TestBlockValidity failed: bad-txns-inputs-missingorspent,"
+    ), refused.value.error
+    assert a.rpc.getbestblockhash() == best
+
+    # Step 1 leaves the active chain. Core returns a disconnected block's
+    # transactions to its mempool only for a reorg ten blocks deep or less;
+    # deeper, a peer still relaying step 1 puts it back, as here.
+    a.rpc.invalidateblock(step1_block)
+    for txid, vout in prevouts:
+        assert a.rpc.gettxout(txid, vout, False) is not None
+    returned = step1_id in a.rpc.getrawmempool()
+    record_property(f"{shape}_step1_returned_to_mempool", returned)
+    if not returned:
+        assert a.rpc.sendrawtransaction(step1) == step1_id
+    assert step1_id in a.rpc.getrawmempool()
+    # Step 2's locktime is BTCB2's tip at its construction, past step 1's
+    # block: mine empty blocks on the new branch until step 2 is final
+    # there, leaving step 1 in the mempool.
+    branch_root = a.rpc.getblockcount() + 1
+    a.generate_empty_blocks(max(0, locktime - a.rpc.getblockcount()))
+    assert a.rpc.getblockcount() >= locktime
+    assert step1_id in a.rpc.getrawmempool()
+    # The mempool refuses step 2 only because step 1 conflicts with it: both
+    # signal replaceability and step 2 pays less than step 1.
+    verdict = a.rpc.testmempoolaccept([step2])[0]
+    assert not verdict["allowed"], verdict
+    assert verdict["reject-reason"] in ("insufficient fee", "txn-mempool-conflict"), verdict
+    record_property(f"{shape}_replay_mempool_reject", verdict["reject-reason"])
+    # The replay: a block carrying step 2 is valid on Bitcoin. Step 1 is
+    # evicted as its conflict and the claimed coins move to the target.
+    replay_block = a.rpc.generateblock(a.rpc.getnewaddress(), [step2])["hash"]
+    record_property(f"{shape}_replay_block", replay_block)
+    replayed = a.rpc.getrawtransaction(step2_id, True, replay_block)
+    assert replayed["in_active_chain"] and replayed["hex"] == step2, replayed
+    assert step1_id not in a.rpc.getrawmempool()
+    assert a.rpc.gettxout(step2_id, 0, False) is not None
+    for txid, vout in prevouts:
+        assert a.rpc.gettxout(txid, vout, False) is None
+
+    # Restore: drop the whole branch, then reconsider step 1's block. Step 2
+    # is neither in Bitcoin's active chain nor relayable there again.
+    a.rpc.invalidateblock(a.rpc.getblockhash(branch_root))
+    a.rpc.reconsiderblock(step1_block)
+    assert a.rpc.getbestblockhash() == best
+    assert a.rpc.getrawtransaction(step1_id, True, step1_block)["in_active_chain"]
+    assert not a.rpc.getrawtransaction(step2_id, True, replay_block)["in_active_chain"]
+    assert step2_id not in a.rpc.getrawmempool()
+    verdict = a.rpc.testmempoolaccept([step2])[0]
+    assert not verdict["allowed"] and verdict["reject-reason"] == "missing-inputs", verdict
+    for txid, vout in prevouts:
+        assert a.rpc.gettxout(txid, vout, False) is None
+    # BTCB2 saw none of it.
+    assert b.rpc.getrawtransaction(step2_id, True, step2_block)["in_active_chain"]
