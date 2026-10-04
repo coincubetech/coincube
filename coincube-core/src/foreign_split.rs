@@ -1160,6 +1160,13 @@ pub use step2::{
     verify_split_step2_transaction, SplitStep2, SplitStep2Inputs, VerifiedSplitStep2,
 };
 
+mod unified;
+pub use unified::{
+    create_unified_sweep, finalize_unified_sweep, reconstruct_unified_sweep,
+    verify_unified_sweep_transaction, UnifiedInputs, UnifiedReplayStatus, UnifiedSweep,
+    UnifiedSweepFinalizeError, VerifiedUnifiedSweep,
+};
+
 #[cfg(test)]
 #[path = "foreign_split/tests.rs"]
 mod tests;
