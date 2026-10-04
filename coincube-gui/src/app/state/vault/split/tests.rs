@@ -1008,6 +1008,282 @@ async fn split_abandon_only_after_a_chain_check() {
     assert!(step1::discover(&temp.root()).is_empty());
 }
 
+/// Flip one byte of the recorded step 1's first witness signature (#625
+/// review F2's probe). The journal still validates, since it only checks that
+/// a signature is present, but the signed bytes no longer verify. The txid
+/// is unchanged: a witness is not part of it.
+fn tamper_witness(directory: &Path) -> Transaction {
+    let mut tampered = None;
+    rewrite_journal(directory, |intent| {
+        let mut signed: Transaction =
+            serde_json::from_value(intent["bitcoin_transaction"].clone()).unwrap();
+        let mut items: Vec<Vec<u8>> = signed.input[0].witness.iter().map(<[u8]>::to_vec).collect();
+        items[0][10] ^= 1;
+        signed.input[0].witness = coincube_core::miniscript::bitcoin::Witness::from_slice(&items);
+        intent["bitcoin_transaction"] = serde_json::to_value(&signed).unwrap();
+        tampered = Some(signed);
+    });
+    tampered.unwrap()
+}
+
+/// #625 F2, step 1: an unsubmitted journal whose recorded step 1 doesn't
+/// verify is offered for abandonment only. It holds no construction, signed
+/// bytes or coordinator, so nothing can be reviewed, exported or sent, and
+/// the abandon still needs a passing chain check, repeated at confirmation.
+/// The journal is kept when the step 1 is seen, a coin is spent, evidence
+/// fails or is stale, the session changes, or a submission is recorded.
+#[tokio::test(flavor = "multi_thread")]
+async fn split_unrebuildable_journal_is_abandoned_only_after_a_chain_check() {
+    let scan = Scan::new(Shape::Wpkh);
+    let temp = Temp::new();
+    let (tracked, claimed) = {
+        let connect = FakeConnect::new(&scan.coins);
+        let panel = recorded(&scan, &connect, &temp).await;
+        (
+            panel.tracked_txid().unwrap(),
+            step1::claimed_addresses(panel.construction().unwrap()),
+        )
+    };
+    let directory = step1::discover(&temp.root()).remove(0).1;
+    let tampered = tamper_witness(&directory);
+    assert_eq!(tampered.compute_txid(), tracked);
+    let kept = |temp: &Temp| assert_eq!(step1::discover(&temp.root()).len(), 1);
+
+    let connect = FakeConnect::new(&scan.coins);
+    let mut panel = resumed(&connect, &temp).await;
+    assert!(
+        matches!(panel.stage(), Stage::Refused(r) if r.reason.contains("does not verify") && !r.retry),
+        "{:?}",
+        panel.stage()
+    );
+    assert_eq!(
+        panel.abandon_only(),
+        Some(&step1::AbandonOnly {
+            tracked,
+            claimed: claimed.clone(),
+        })
+    );
+    assert_eq!(panel.notice(), Some(step1::UNREBUILDABLE));
+    assert_eq!(panel.phase(), Some(Phase::Intent));
+    assert!(panel.can_check_abandon() && !panel.can_confirm_abandon());
+    // Nothing to review, export or send: no driver, construction or bytes.
+    assert!(!panel.is_bound());
+    assert!(panel.construction().is_none() && panel.signed().is_none());
+    for message in [
+        SplitMessage::Review,
+        SplitMessage::Confirm,
+        SplitMessage::Reconcile,
+        SplitMessage::ExportSigned,
+        SplitMessage::EnterStep2,
+        SplitMessage::Retry,
+        // Confirming without a check is ignored.
+        SplitMessage::ConfirmAbandon,
+    ] {
+        let task = panel.update(message);
+        drive(&mut panel, task).await;
+    }
+    assert!(matches!(panel.stage(), Stage::Refused(_)));
+    assert_eq!(*connect.calls.opened.lock().unwrap(), Vec::<bool>::new());
+    assert_eq!(connect.calls.reviews.load(Ordering::SeqCst), 0);
+    assert_eq!(connect.calls.submits.load(Ordering::SeqCst), 0);
+    kept(&temp);
+
+    // The check refuses, and the journal stays, when: a coin is spent on
+    // Bitcoin; the step 1 is seen there; a read fails; a read is stale.
+    let check = |panel: &mut SplitPanel| panel.update(SplitMessage::CheckAbandon);
+    connect
+        .chains
+        .spend_on(ChainId::Bitcoin, scan.coins[0].outpoint);
+    let task = check(&mut panel);
+    drive(&mut panel, task).await;
+    assert!(!panel.can_confirm_abandon());
+    assert!(panel.notice().unwrap().contains("spent on Bitcoin"));
+    assert!(matches!(panel.stage(), Stage::Refused(_)));
+    let connect = FakeConnect::new(&scan.coins);
+    connect.chains.status.lock().unwrap().insert(
+        (ChainId::Bitcoin, tracked),
+        TransactionObservation::Unconfirmed { txid: tracked },
+    );
+    let mut panel = resumed(&connect, &temp).await;
+    let task = check(&mut panel);
+    drive(&mut panel, task).await;
+    assert!(!panel.can_confirm_abandon());
+    assert!(panel.notice().unwrap().contains("on Bitcoin"));
+    for fault in [Fault::Error, Fault::Stale] {
+        let connect = FakeConnect::new(&scan.coins);
+        *connect.chains.utxo_fault.lock().unwrap() = Some(fault);
+        let mut panel = resumed(&connect, &temp).await;
+        let task = check(&mut panel);
+        drive(&mut panel, task).await;
+        assert!(!panel.can_confirm_abandon(), "{:?}", fault);
+        assert!(
+            panel
+                .notice()
+                .unwrap()
+                .contains("not a sign that a coin was spent"),
+            "{:?}",
+            panel.notice()
+        );
+    }
+    kept(&temp);
+
+    // A passing check, then a coin spent before confirmation: the check is
+    // repeated at confirmation, and refuses.
+    let connect = FakeConnect::new(&scan.coins);
+    let mut panel = resumed(&connect, &temp).await;
+    let task = check(&mut panel);
+    drive(&mut panel, task).await;
+    assert!(panel.can_confirm_abandon(), "{:?}", panel.notice());
+    connect
+        .chains
+        .spend_on(ChainId::Bitcoin, scan.coins[0].outpoint);
+    let task = panel.update(SplitMessage::ConfirmAbandon);
+    drive(&mut panel, task).await;
+    assert!(
+        matches!(panel.stage(), Stage::Refused(r) if r.reason.contains("spent on Bitcoin")),
+        "{:?}",
+        panel.stage()
+    );
+    kept(&temp);
+
+    // A passing check, then the session changes: no confirmation without a
+    // new check under the next session, which reads the journal again.
+    let connect = FakeConnect::new(&scan.coins);
+    let mut panel = resumed(&connect, &temp).await;
+    let task = check(&mut panel);
+    drive(&mut panel, task).await;
+    assert!(panel.can_confirm_abandon());
+    panel.revoke();
+    assert!(!panel.can_check_abandon() && panel.abandon_only().is_none());
+    let task = panel.update(SplitMessage::ConfirmAbandon);
+    drive(&mut panel, task).await;
+    kept(&temp);
+    // The session ends after the abandon was confirmed, before its task
+    // deletes the journal (#644 r4176212750): it is kept.
+    let connect = FakeConnect::new(&scan.coins);
+    let mut confirmed = resumed(&connect, &temp).await;
+    let task = check(&mut confirmed);
+    drive(&mut confirmed, task).await;
+    assert!(confirmed.can_confirm_abandon());
+    let task = confirmed.update(SplitMessage::ConfirmAbandon);
+    confirmed.revoke();
+    drive(&mut confirmed, task).await;
+    kept(&temp);
+    assert_eq!(confirmed.stage(), &Stage::NeedsSession);
+    drop(confirmed);
+    // The next session can't read Bitcoin Blake2b: the rebuild may pass on
+    // retry, so nothing is offered for abandonment from the last session.
+    let unread = FakeConnect::new(&scan.coins);
+    *unread.window.lock().unwrap() = Err("unreachable".into());
+    panel.set_connect(Some(unread.clone() as Arc<dyn SplitConnect>));
+    let task = panel.begin();
+    drive(&mut panel, task).await;
+    assert!(matches!(panel.stage(), Stage::Refused(r) if r.retry));
+    assert!(!panel.can_check_abandon() && panel.abandon_only().is_none());
+
+    // A passing check, then a submission recorded elsewhere before
+    // confirmation: the journal refuses to be abandoned.
+    let connect = FakeConnect::new(&scan.coins);
+    let mut panel = resumed(&connect, &temp).await;
+    let task = check(&mut panel);
+    drive(&mut panel, task).await;
+    assert!(panel.can_confirm_abandon());
+    let submitted = |directory: &Path| {
+        rewrite_journal(directory, |intent| {
+            intent["phase"] = "BroadcastUncertain".into();
+            intent["signed_txid"] = tracked.to_string().into();
+            intent["bitcoin_attempts"] =
+                serde_json::json!([{ "wtxid": tampered.compute_wtxid().to_string() }]);
+        })
+    };
+    let pristine = std::fs::read(directory.join("intent.json")).unwrap();
+    submitted(&directory);
+    let task = panel.update(SplitMessage::ConfirmAbandon);
+    drive(&mut panel, task).await;
+    assert!(
+        matches!(panel.stage(), Stage::Refused(r) if r.reason.contains("could not be abandoned")),
+        "{:?}",
+        panel.stage()
+    );
+    kept(&temp);
+    // A recorded submission is never offered for abandonment here.
+    drop(panel);
+    let mut panel = resumed(&connect, &temp).await;
+    assert_eq!(panel.notice(), Some(step1::SUBMISSION_RECORDED));
+    assert!(!panel.can_check_abandon() && panel.abandon_only().is_none());
+    let task = panel.update(SplitMessage::CheckAbandon);
+    drive(&mut panel, task).await;
+    kept(&temp);
+    std::fs::write(directory.join("intent.json"), &pristine).unwrap();
+
+    // Clean chains: check, then confirm deletes the journal.
+    drop(panel);
+    let connect = FakeConnect::new(&scan.coins);
+    let mut panel = resumed(&connect, &temp).await;
+    let task = check(&mut panel);
+    drive(&mut panel, task).await;
+    assert!(panel.can_confirm_abandon(), "{:?}", panel.notice());
+    let task = panel.update(SplitMessage::ConfirmAbandon);
+    drive(&mut panel, task).await;
+    assert_eq!(panel.stage(), &Stage::Abandoned, "{:?}", panel.stage());
+    assert!(panel.abandon_only().is_none());
+    assert!(step1::discover(&temp.root()).is_empty());
+}
+
+/// #625 F2: when the recorded inputs can't be established on Bitcoin, the
+/// journal is kept with an explicit refusal; a read failure may pass on
+/// retry, an input whose previous transaction doesn't match its txid not.
+#[tokio::test(flavor = "multi_thread")]
+async fn split_unrebuildable_journal_with_unestablished_inputs_is_kept() {
+    let scan = Scan::new(Shape::Wpkh);
+    let temp = Temp::new();
+    {
+        let connect = FakeConnect::new(&scan.coins);
+        recorded(&scan, &connect, &temp).await;
+    }
+    let directory = step1::discover(&temp.root()).remove(0).1;
+    tamper_witness(&directory);
+    let first = scan.coins[0].outpoint.txid;
+
+    // A previous transaction that isn't the one its txid names.
+    let mut connect = FakeConnect::new(&scan.coins);
+    let other = scan.coins[1].previous.clone();
+    assert_ne!(other.compute_txid(), first);
+    Arc::get_mut(&mut connect)
+        .unwrap()
+        .chains
+        .previous
+        .insert(first, other);
+    let panel = resumed(&connect, &temp).await;
+    assert!(matches!(panel.stage(), Stage::Refused(r) if !r.retry));
+    assert!(!panel.can_check_abandon() && panel.abandon_only().is_none());
+    assert_eq!(step1::discover(&temp.root()).len(), 1);
+
+    // A previous transaction that can't be read, with the rebuild refused
+    // first by a moved anchor: kept, and the refusal may be retried.
+    let mut connect = FakeConnect::new(&scan.coins);
+    Arc::get_mut(&mut connect)
+        .unwrap()
+        .chains
+        .previous
+        .remove(&first);
+    let mut moved = window();
+    moved.fork_height -= 1;
+    *connect.window.lock().unwrap() = Ok(moved);
+    let panel = resumed(&connect, &temp).await;
+    assert!(
+        matches!(panel.stage(), Stage::Refused(r) if r.reason == step1::STALE_ANCHOR && r.retry),
+        "{:?}",
+        panel.stage()
+    );
+    assert!(panel
+        .notice()
+        .unwrap()
+        .contains("not a sign that a coin was spent"));
+    assert!(!panel.can_check_abandon() && panel.abandon_only().is_none());
+    assert_eq!(step1::discover(&temp.root()).len(), 1);
+}
+
 /// The datadir holds public data only: no seed, xpriv or private key, and the
 /// journal is owner-only (file 0600, directory 0700).
 #[tokio::test(flavor = "multi_thread")]
@@ -1080,7 +1356,19 @@ fn split_journal_discovery_finds_only_split_journals() {
     let upper = root.join(sha256::Hash::hash(b"upper").to_string().to_uppercase());
     std::fs::create_dir(&upper).unwrap();
     std::fs::write(upper.join("intent.json"), b"{}").unwrap();
-    assert_eq!(step1::discover(&root), vec![(digest, real)]);
+    assert_eq!(step1::discover(&root), vec![(digest, real.clone())]);
+    // #625 F2: a tombstone that is not a regular file doesn't close it; a
+    // regular one does, and discovery skips the journal.
+    std::fs::create_dir(real.join(step1::CLOSED)).unwrap();
+    assert!(!step1::is_closed(&real));
+    std::fs::remove_dir(real.join(step1::CLOSED)).unwrap();
+    std::os::unix::fs::symlink(real.join("intent.json"), real.join(step1::CLOSED)).unwrap();
+    assert!(!step1::is_closed(&real));
+    assert_eq!(step1::discover(&root), vec![(digest, real.clone())]);
+    std::fs::remove_file(real.join(step1::CLOSED)).unwrap();
+    std::fs::write(real.join(step1::CLOSED), b"{}").unwrap();
+    assert!(step1::is_closed(&real));
+    assert!(step1::discover(&root).is_empty());
 }
 
 /// D1: nothing in the GUI starts a split. `SplitPanel::start` is reached only

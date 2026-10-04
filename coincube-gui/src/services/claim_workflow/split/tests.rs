@@ -1197,7 +1197,7 @@ fn v8_split_journal_is_refused_by_the_v7_reader() {
 /// glob still has to name the item somewhere.
 #[test]
 fn split_b0_journal_api_has_no_gui_callers() {
-    const ITEMS: [&str; 27] = [
+    const ITEMS: [&str; 28] = [
         "create_split",
         "revalidate_split_construction",
         "bind_recovered_split_transaction",
@@ -1228,6 +1228,8 @@ fn split_b0_journal_api_has_no_gui_callers() {
         "hold_split_step2_return",
         "release_split_step2_return",
         "Step2ReturnHold",
+        // #625 F2: the step-2 dead end a split may be closed in.
+        "split_step2_dead_end",
     ];
     const OWN: [&str; 4] = [
         "src/services/claim_workflow/split.rs",
@@ -1332,14 +1334,22 @@ fn split_b0_journal_api_has_no_gui_callers() {
                             "record_split_target",
                             "prepare_split_step2",
                             "record_split_step2_broadcast_intent",
+                            // #625 F2: the restart reads the dead end.
+                            "split_step2_dead_end",
                         ]
                         .contains(&ident);
+                    // #625 F2: the close tests make a journal whose resend is
+                    // reviewable, which is no dead end. Tests only.
+                    let panel_step2_tests = file
+                        .starts_with("src/app/state/vault/split/step2/tests")
+                        && ident == "record_split_step2_returned";
                     if ITEMS.contains(&ident)
                         && !OWN.contains(&file.as_str())
                         && !reexport
                         && !dispatch
                         && !panel
                         && !panel_step2
+                        && !panel_step2_tests
                         && !gate
                     {
                         unexpected.push((file.clone(), ident.to_owned()));
@@ -1875,4 +1885,77 @@ fn split_step2_resends_and_the_observation_that_ends_them() {
         Err(Error::InvalidPlan)
     ));
     assert_eq!(c.split_step2_resubmissions(), 0);
+}
+
+/// #625 F2: a new split is never created in a directory holding a closed
+/// split's tombstone, whatever it is (a partly reset directory must not hide
+/// a new journal behind an old tombstone); without it, creation proceeds.
+#[test]
+fn split_create_refuses_a_directory_with_a_tombstone() {
+    let (_wallet, step1, signed) = setup(Shape::ShWpkh);
+    let create_split = |temp: &Temp| {
+        Controller::create_split(&temp.0, TARGET.into(), &step1, &signed, FORK, context())
+    };
+    let temp = Temp::new();
+    fs::write(temp.0.join(SPLIT_TOMBSTONE), b"{}").unwrap();
+    assert!(matches!(create_split(&temp), Err(Error::Conflict)));
+    assert!(!temp.0.join("intent.json").exists());
+    let temp = Temp::new();
+    fs::create_dir(temp.0.join(SPLIT_TOMBSTONE)).unwrap();
+    assert!(matches!(create_split(&temp), Err(Error::Conflict)));
+    assert!(!temp.0.join("intent.json").exists());
+    let temp = Temp::new();
+    create_split(&temp).unwrap();
+}
+
+/// #625 F2: a step-2 dead end is a recorded submission that no resend can
+/// follow (its permission withdrawn, or the resend limit reached) and no
+/// read ever saw on BTCB2. Before any submission, with a resend reviewable,
+/// or once step 2 was seen, it is not one.
+#[test]
+fn split_step2_dead_end_is_a_submission_no_resend_or_sighting_can_follow() {
+    let (_wallet, step1, signed) = setup(Shape::ShWpkh);
+    let temp = Temp::new();
+    let mut c = create(&temp, &step1, &signed);
+    assert!(!c.split_step2_dead_end());
+    record(&mut c, &signed);
+    assert!(!c.split_step2_dead_end());
+
+    let (_temp, mut c, _wallet, _step1, verified, tracked) = submitted();
+    // Accepted, cancelled, timed out or interrupted: no return recorded.
+    assert!(c.split_step2_dead_end());
+    // A completed send that came back unaccepted: a resend is reviewable.
+    c.record_split_step2_returned(&context()).unwrap();
+    assert!(!c.split_step2_dead_end());
+    // Withdrawn for a read that never gave it back: a dead end again.
+    let _hold = c.hold_split_step2_return(&context()).unwrap().unwrap();
+    assert!(c.split_step2_dead_end());
+    // Every resend the journal allows, the last one's return recorded: the
+    // permission stands, but no resend can follow.
+    for _ in 0..MAX_SPLIT_STEP2_RESUBMISSIONS {
+        c.record_split_step2_returned(&context()).unwrap();
+        let hold = c.hold_split_step2_return(&context()).unwrap().unwrap();
+        refresh(
+            &mut c,
+            observation(tracked, Bitcoin::Confirmed { depth: 6 }),
+        );
+        c.record_split_step2_resubmission(
+            &context(),
+            &verified,
+            TransactionObservation::Absent,
+            hold,
+            policy(),
+            10_000,
+        )
+        .unwrap();
+    }
+    c.record_split_step2_returned(&context()).unwrap();
+    assert!(c.split_step2_returned());
+    assert_eq!(c.split_step2_resubmissions(), MAX_SPLIT_STEP2_RESUBMISSIONS);
+    assert!(c.split_step2_dead_end());
+    // Seen on BTCB2: it left, so it is not a dead end.
+    let txid = verified.transaction().compute_txid();
+    c.record_split_step2_observed(&context(), TransactionObservation::Unconfirmed { txid })
+        .unwrap();
+    assert!(!c.split_step2_dead_end());
 }
