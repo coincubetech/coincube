@@ -34,7 +34,7 @@ fn reopen(h: &Harness, services: Box<dyn SplitForkServices>) -> SplitStep2Reconc
     .unwrap()
 }
 /// The step-1 coordinator's own open on `h`'s journal, as a restart's
-/// `resume_split` reaches it.
+/// resume reaches it.
 fn resume_step1(h: &Harness) -> Result<Step1Coordinator, Error> {
     Step1Coordinator::open_split(
         &h.temp.0,

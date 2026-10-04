@@ -49,15 +49,31 @@ struct Counts {
     /// What the coordinator's reconciles see on BTCB2. `None`: absent.
     coord_seen: Option<TransactionObservation>,
 }
+/// What the fakes report of step 1 after the step-2 submission, from the
+/// status a test queued (#568 S4): the service classifies it from the
+/// collection itself; these tests drive the panel only.
+fn after_of(status: Status) -> Step1AfterStep2 {
+    match status {
+        Status::Observation(Assessment::ObservationsEligibleForPreflight) => {
+            Step1AfterStep2::Eligible
+        }
+        Status::Observation(Assessment::Reorged) => Step1AfterStep2::Missing,
+        Status::Observation(Assessment::WaitingForDepth { confirmations }) => {
+            Step1AfterStep2::Shallow { confirmations }
+        }
+        Status::Observation(Assessment::WaitingForConfirmation) => Step1AfterStep2::InMempool,
+        _ => Step1AfterStep2::Unknown,
+    }
+}
 fn next_reconcile(
     shared: &Shared,
     seen: TransactionObservation,
-) -> Result<(Status, TransactionObservation), Step2Refusal> {
+) -> Result<(Status, TransactionObservation, Step1AfterStep2), Step2Refusal> {
     let mut counts = shared.lock().unwrap();
     counts.reconciles += 1;
     match counts.statuses.pop_front() {
-        None => Ok((Status::Unchecked, seen)),
-        Some(Some(status)) => Ok((status, seen)),
+        None => Ok((Status::Unchecked, seen, after_of(Status::Unchecked))),
+        Some(Some(status)) => Ok((status, seen, after_of(status))),
         Some(None) => Err(Step2Refusal {
             reason: "Connect couldn't be reached.".to_string(),
             retry: true,
@@ -314,7 +330,7 @@ impl Step2Coord for PanelCoord {
     async fn reconcile(
         &mut self,
         _: &Context,
-    ) -> Result<(Status, TransactionObservation), Step2Refusal> {
+    ) -> Result<(Status, TransactionObservation, Step1AfterStep2), Step2Refusal> {
         // A reconcile drops any resend review, as the driver does.
         self.resend_reviewed = false;
         let seen = self.shared.lock().unwrap().coord_seen;
@@ -372,7 +388,7 @@ impl Step2Recon for PanelRecon {
     async fn reconcile(
         &mut self,
         _: &Context,
-    ) -> Result<(Status, TransactionObservation), Step2Refusal> {
+    ) -> Result<(Status, TransactionObservation, Step1AfterStep2), Step2Refusal> {
         next_reconcile(
             &self.0,
             TransactionObservation::Unconfirmed {

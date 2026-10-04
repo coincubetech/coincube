@@ -33,7 +33,9 @@
 use super::*;
 use crate::services::{
     claim_observation::{FailureKind, FreshRead},
-    split_evidence::ConnectEsplora,
+    split_evidence::{
+        ConnectEsplora, ConnectSplitEvidence, SplitEvidenceSource, MAX_EVIDENCE_AGE_SECONDS,
+    },
 };
 use coincube_core::{
     foreign_split::{SplitStep1, VerifiedSplitStep1},
@@ -42,11 +44,13 @@ use coincube_core::{
 use std::{collections::BTreeSet, convert::TryFrom, sync::Weak};
 
 /// The daemonless Connect production for the step-2 check: the Split step-1
-/// observation source (same origin checks) and Connect's fresh BTCB2
-/// unspent-output reads.
+/// observation source (same origin checks), Connect's fresh unspent-output
+/// reads, and (#568 S4) the txid-checked previous transactions a step-1
+/// conflict check after step 2 reads.
 pub struct SplitForkProduction {
     source: HttpObservationSource,
     esplora: ConnectEsplora,
+    evidence: ConnectSplitEvidence,
     /// The admitted Connect origin, `scheme://host[:port]/`. Step 2's
     /// transport must be bound to this same origin.
     origin: String,
@@ -68,6 +72,9 @@ impl SplitForkProduction {
             },
         )
         .map_err(|_| Error::InvalidBinding)?;
+        let evidence =
+            ConnectSplitEvidence::new(client.clone(), expected_generation, generation.clone())
+                .map_err(|_| Error::InvalidBinding)?;
         let origin = reqwest::Url::parse(&client.base_url)
             .map_err(|_| Error::InvalidBinding)?
             .as_str()
@@ -83,6 +90,7 @@ impl SplitForkProduction {
         Ok(Self {
             source,
             esplora,
+            evidence,
             origin,
             context,
             generation,
@@ -106,6 +114,21 @@ trait SplitForkServices: Send + Sync {
         chain: ChainId,
         address: &str,
     ) -> Result<FreshRead<bool>, FailureKind>;
+    /// #568 S4, O4: a fresh read of the Bitcoin unspent outputs paying
+    /// `address`. Unavailable unless a source serves it, so a source without
+    /// it never reports a step-1 conflict.
+    async fn bitcoin_unspent(
+        &self,
+        _address: &str,
+    ) -> Result<FreshRead<Vec<OutPoint>>, FailureKind> {
+        Err(FailureKind::Unavailable)
+    }
+    /// #568 S4, O4: the Bitcoin transaction `txid`, from which a claimed
+    /// prevout's address is read. Not a fresh read: the caller checks its
+    /// txid, which binds its content. Unavailable unless a source serves it.
+    async fn previous_transaction(&self, _txid: Txid) -> Result<Transaction, FailureKind> {
+        Err(FailureKind::Unavailable)
+    }
 }
 #[async_trait]
 impl SplitForkServices for SplitForkProduction {
@@ -126,6 +149,19 @@ impl SplitForkServices for SplitForkProduction {
         address: &str,
     ) -> Result<FreshRead<bool>, FailureKind> {
         self.esplora.address_used(chain, address).await
+    }
+    async fn bitcoin_unspent(
+        &self,
+        address: &str,
+    ) -> Result<FreshRead<Vec<OutPoint>>, FailureKind> {
+        self.esplora
+            .unspent_outputs(ChainId::Bitcoin, address)
+            .await
+    }
+    async fn previous_transaction(&self, txid: Txid) -> Result<Transaction, FailureKind> {
+        self.evidence
+            .previous_transaction(ChainId::Bitcoin, txid)
+            .await
     }
 }
 

@@ -62,7 +62,7 @@ use crate::services::claim_observation::TransactionObservation;
 use coincube_core::{
     foreign_split::{SplitSource, SplitStep1, SplitStep2, VerifiedSplitStep1, VerifiedSplitStep2},
     miniscript::{
-        bitcoin::{Script, ScriptBuf},
+        bitcoin::{OutPoint, Script, ScriptBuf},
         Descriptor, DescriptorPublicKey,
     },
 };
@@ -161,6 +161,42 @@ pub(super) struct SplitRecord {
     /// recording a resend clears it before that resend is sent.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     step2_returned: bool,
+    /// #568 S4, O4: after step 2 was submitted, fresh reads found step 1
+    /// absent from Bitcoin and a claimed coin spent there by another
+    /// transaction, so step 1 can never confirm and the split can't
+    /// complete. Terminal (S4-D2): never cleared or replaced. Absent until
+    /// recorded, so a journal without it serializes exactly as before and
+    /// stays at version 8; a binary without the field refuses one that has
+    /// it (`deny_unknown_fields`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    step1_conflict: Option<Step1Conflict>,
+}
+
+/// #568 S4, O4: the claimed coin a fresh Bitcoin read found spent by
+/// another transaction while step 1 was absent, and the Bitcoin tip of the
+/// reconcile that found it. The spender is not named (S4-D1: Connect does
+/// not serve `/tx/{txid}/outspend`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Step1Conflict {
+    outpoint: OutPoint,
+    bitcoin_tip: BlockRef,
+}
+impl Step1Conflict {
+    pub(crate) fn new(outpoint: OutPoint, bitcoin_tip: BlockRef) -> Self {
+        Self {
+            outpoint,
+            bitcoin_tip,
+        }
+    }
+    /// The claimed coin spent on Bitcoin by another transaction.
+    pub fn outpoint(&self) -> OutPoint {
+        self.outpoint
+    }
+    /// The Bitcoin tip of the reconcile that found it.
+    pub fn bitcoin_tip(&self) -> BlockRef {
+        self.bitcoin_tip
+    }
 }
 
 /// The step-2 resend permission (`step2_returned`), durably withdrawn for the
@@ -472,6 +508,15 @@ pub(super) fn validate(intent: &Intent) -> Result<(), Error> {
         }
         _ => return Err(Error::InvalidPlan),
     }
+    // O4 (#568 S4): a two-step record's claimed coin, only after step 2 was
+    // submitted.
+    if record.step1_conflict.is_some_and(|conflict| {
+        record.kind != SplitKind::Split
+            || intent.fork_submission.is_none()
+            || !p.claimed_prevouts.contains(&conflict.outpoint)
+    }) {
+        return Err(Error::InvalidPlan);
+    }
     reorg::validate_history(intent)
 }
 
@@ -542,6 +587,7 @@ impl Controller {
                 step2_resubmissions: Vec::new(),
                 step2_observed: false,
                 step2_returned: false,
+                step1_conflict: None,
             }),
         };
         Self::admit_split(directory, intent, context)
@@ -618,6 +664,7 @@ impl Controller {
                 step2_resubmissions: Vec::new(),
                 step2_observed: false,
                 step2_returned: false,
+                step1_conflict: None,
             }),
         };
         Self::admit_split(directory, intent, context)
@@ -814,11 +861,16 @@ impl Controller {
     /// can be completed; the completion evidence itself (B5) is checked by
     /// the caller, which is the only intended one. Dropping the descriptors
     /// removes restart data and grants nothing. A fork-only record refuses
-    /// it: its completion is B4b-3's decision.
+    /// it: its completion is B4b-3's decision. A recorded step-1 conflict
+    /// (O4, #568 S4) refuses it too: that split never completes.
     pub fn forget_split_descriptors(&mut self, current: &Context) -> Result<(), Error> {
         self.ensure_context(current)?;
         self.clear_check();
-        self.record_of(SplitKind::Split)?;
+        // O4 (#568 S4): a split whose step 1 can never confirm never
+        // completes, so its descriptors are never forgotten.
+        if self.record_of(SplitKind::Split)?.step1_conflict.is_some() {
+            return Err(Error::Conflict);
+        }
         if self.intent.phase != Phase::Tracking || self.intent.signed_txid.is_none() {
             return Err(Error::Unchecked);
         }
@@ -1053,6 +1105,45 @@ impl Controller {
                 && (!record.step2_returned
                     || record.step2_resubmissions.len() >= MAX_SPLIT_STEP2_RESUBMISSIONS)
         })
+    }
+
+    /// #568 S4, O4: the recorded step-1 conflict, if any. Terminal: once
+    /// recorded it is never cleared, and the split can't complete.
+    pub fn split_step1_conflict(&self) -> Option<Step1Conflict> {
+        self.intent
+            .split
+            .as_ref()
+            .and_then(|record| record.step1_conflict)
+    }
+
+    /// #568 S4, O4: record that fresh Bitcoin reads after the step-2
+    /// submission found step 1 absent and `conflict`'s coin spent by another
+    /// transaction. The step-2 reconciler's fresh reads are the only caller;
+    /// a read failure never comes here. A two-step record with a recorded
+    /// step-2 submission only. Terminal (S4-D2): a recorded conflict is kept
+    /// and never replaced, so recording again is a no-op. Grants nothing
+    /// and leaves the current check alone.
+    pub(crate) fn record_split_step1_conflict(
+        &mut self,
+        current: &Context,
+        conflict: Step1Conflict,
+    ) -> Result<(), Error> {
+        self.ensure_context(current)?;
+        let record = self.record_of(SplitKind::Split)?;
+        if self.intent.fork_submission.is_none() {
+            return Err(Error::InvalidPlan);
+        }
+        if record.step1_conflict.is_some() {
+            return Ok(());
+        }
+        let mut next = self.intent.clone();
+        if let Some(record) = next.split.as_mut() {
+            record.step1_conflict = Some(conflict);
+        }
+        validate(&next)?;
+        self.journal.store(&next)?;
+        self.intent = next;
+        Ok(())
     }
 
     /// Record that the latest step-2 attempt came back from a completed send

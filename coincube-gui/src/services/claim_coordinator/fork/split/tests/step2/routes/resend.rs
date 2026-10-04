@@ -251,7 +251,7 @@ async fn split_step2_dead_end_is_resent_live_after_an_explicit_review() {
         coordinator.prepare_review(&context()).await,
         Err(Error::SubmissionAlreadyRecorded)
     ));
-    let (_, seen) = coordinator.reconcile_sweep(&context()).await.unwrap();
+    let seen = coordinator.reconcile_sweep(&context()).await.unwrap().step2;
     assert_eq!(seen, TransactionObservation::Absent);
     assert_eq!(daemon.calls(), 1);
     assert!(h.temp.journal()["split"].get("step2_observed").is_none());

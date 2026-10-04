@@ -167,12 +167,19 @@ impl SplitPanel {
     pub fn step2_status(&self) -> Option<crate::services::claim_workflow::Status> {
         self.step2_status
     }
+    /// What the last step-2 reconcile found of step 1 after the step-2
+    /// submission (#568 S4).
+    pub fn step2_after(
+        &self,
+    ) -> Option<crate::services::claim_coordinator::fork::split::step2::Step1AfterStep2> {
+        self.step2_after
+    }
     /// What that evidence warns about (#637 r4172242637), derived from it
     /// rather than kept in the notice: an operation's notice (a saved file, a
     /// failed export or check, an ended session) never replaces it, and only
     /// new evidence changes it (#637 review 5971166062 F1).
     pub fn step2_warning(&self) -> Option<String> {
-        self.step2_status.and_then(step2::reconcile_warning)
+        self.step2_after.and_then(step2::reconcile_warning)
     }
     /// Step 2 may be entered: step 1 tracked at six confirmations, the
     /// step-1 driver bound, a step-2 port and a Connect session.
@@ -728,15 +735,16 @@ impl SplitPanel {
     /// the reopened reconciler alike (#637 r4172242637). The BTCB2
     /// observation and the step-1 evidence are both kept. Evidence that no
     /// longer shows step 1 eligible on Bitcoin warns through
-    /// [`Self::step2_warning`], naming a reorg only for `Reorged`, and drops
+    /// [`Self::step2_warning`], one case per outcome (#568 S4), and drops
     /// any "cannot replay" label. A failed check keeps the last evidence and
     /// its warning; the notice carries only the failure. Nothing new is
     /// offered: the only action after a step-2 submission is still to
     /// reconcile.
     fn reconciled(&mut self, result: Seen) {
         match result {
-            Ok((status, seen)) => {
+            Ok((status, seen, after)) => {
                 self.step2_status = Some(status);
+                self.step2_after = Some(after);
                 self.step2_seen = Some(seen);
                 self.step2_seen_here = Some(seen);
                 self.notice = None;

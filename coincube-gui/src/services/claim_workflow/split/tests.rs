@@ -1197,7 +1197,7 @@ fn v8_split_journal_is_refused_by_the_v7_reader() {
 /// glob still has to name the item somewhere.
 #[test]
 fn split_b0_journal_api_has_no_gui_callers() {
-    const ITEMS: [&str; 33] = [
+    const ITEMS: [&str; 36] = [
         "create_split",
         // B4b-1b: the fork-only (`kind: Unified`) record.
         "create_unified_split",
@@ -1236,6 +1236,10 @@ fn split_b0_journal_api_has_no_gui_callers() {
         "Step2ReturnHold",
         // #625 F2: the step-2 dead end a split may be closed in.
         "split_step2_dead_end",
+        // #568 S4: the step-1 conflict (O4) after the step-2 submission.
+        "Step1Conflict",
+        "split_step1_conflict",
+        "record_split_step1_conflict",
     ];
     const OWN: [&str; 4] = [
         "src/services/claim_workflow/split.rs",
@@ -1283,6 +1287,7 @@ fn split_b0_journal_api_has_no_gui_callers() {
                             "Step2ReturnHold",
                             "SplitKind",
                             "UnifiedConstruction",
+                            "Step1Conflict",
                         ]
                         .contains(&ident);
                     let dispatch = file == "src/services/claim_coordinator/step1.rs"
@@ -1334,6 +1339,13 @@ fn split_b0_journal_api_has_no_gui_callers() {
                             "hold_split_step2_return",
                             "release_split_step2_return",
                             "Step2ReturnHold",
+                            // #568 S4: the step-2 reconciler's step-1 reorg
+                            // outcomes refuse a fork-only record and record
+                            // a step-1 conflict (O4).
+                            "SplitKind",
+                            "Step1Conflict",
+                            "split_step1_conflict",
+                            "record_split_step1_conflict",
                         ]
                         .contains(&ident)
                             || (gate_tests

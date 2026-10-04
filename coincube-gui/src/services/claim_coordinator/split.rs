@@ -252,7 +252,8 @@ impl Coordinator {
             // After step 2 was submitted, step 1 is never reviewed, resent or
             // reconfirmed here again (#568 S4): the claimed coins may already
             // be spent on BTCB2, and its reorg recovery is the step-2
-            // reconciler's. `SplitPreparation::open` refuses the same way.
+            // reconciler's. The step-2 preparation's open refuses the same
+            // way.
             if controller.recorded_fork_submission().is_some() {
                 return Err(Error::SubmissionAlreadyRecorded);
             }

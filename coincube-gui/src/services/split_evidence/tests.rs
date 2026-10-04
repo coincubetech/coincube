@@ -856,8 +856,11 @@ fn split_b1a_services_have_no_new_gui_callers() {
             || (file == "src/app/view/vault/split.rs" && ident == "split_psbt_file")
             // B2: the dormant step-2 gate reads BTCB2 unspent outputs; it has
             // no GUI caller (`fork::split::tests::split_step2_gate_has_no_gui_caller`).
+            // #568 S4: and, for a step-1 conflict after the step-2
+            // submission, Bitcoin unspent outputs and the txid-checked
+            // previous transactions (same guard).
             || (file == "src/services/claim_coordinator/fork/split.rs"
-                && ["split_evidence", "ConnectEsplora"].contains(&ident))
+                && ["split_evidence", "ConnectEsplora", "ConnectSplitEvidence"].contains(&ident))
             // B4b-2: the dormant device-signing service's tests build their
             // step-1 constructions from the fixtures; the modules themselves
             // have no GUI caller

@@ -1099,6 +1099,12 @@ fn split_step2_gate_has_no_gui_caller() {
             "SplitCompletionReconciliation",
             "check_completion",
             "reconcile_split_completion",
+            // #568 S4: step 1 reorged after the step-2 submission.
+            "Step1AfterStep2",
+            "SweepReconcile",
+            "Step1ReconfirmationReview",
+            "prepare_step1_reconfirmation",
+            "confirm_step1_reconfirmation",
         ] {
             // The Daemon trait declares the step-2 transport and the
             // embedded daemon forwards it; neither is a caller.
@@ -1141,11 +1147,16 @@ fn split_step2_gate_has_no_gui_caller() {
             // Claim's own completion check (`fork.rs`), its tests and its
             // panel caller name `check_completion` too; Split's is a method
             // of the reconciler, which is guarded by its own name.
+            // #568 S4: the panel's reconcile warning reads what became of
+            // step 1 after the step-2 submission. Its O1 acknowledgement is
+            // S4b's: no panel file names the reconfirmation.
+            let warning = file.starts_with("src/app/state/vault/split/")
+                && ["Step1AfterStep2", "SweepReconcile"].contains(&ident);
             let claim = ident == "check_completion"
                 && (file == "src/services/claim_coordinator/fork.rs"
                     || file.starts_with("src/services/claim_coordinator/fork/tests")
                     || file.starts_with("src/app/state/vault/claim/"));
-            if text.contains(ident) && !transport && !panel && !claim {
+            if text.contains(ident) && !transport && !panel && !warning && !claim {
                 unexpected.push((file.clone(), ident));
             }
         }
