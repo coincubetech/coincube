@@ -113,11 +113,20 @@ pub const ENDED_BEFORE_ABANDON: &str = "The split session ended before the split
 /// #625 F2: the journal's identity or recorded inputs can't be established.
 pub const UNIDENTIFIED: &str = "The coins this split recorded can't be identified on Bitcoin, so it can't be abandoned here. The record is kept.";
 
+/// Additional navigation advice for a refused operation. Terminal domain
+/// errors retain only their own instructions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefusalRecovery {
+    None,
+    ReopenCube,
+}
+
 /// Why the flow stops, and whether trying again could change it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Refusal {
     pub reason: String,
     pub retry: bool,
+    pub recovery: RefusalRecovery,
 }
 
 impl Refusal {
@@ -125,12 +134,14 @@ impl Refusal {
         Self {
             reason: reason.into(),
             retry: false,
+            recovery: RefusalRecovery::None,
         }
     }
     pub fn retry(reason: impl Into<String>) -> Self {
         Self {
             reason: reason.into(),
             retry: true,
+            recovery: RefusalRecovery::None,
         }
     }
 }

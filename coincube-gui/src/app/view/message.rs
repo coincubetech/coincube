@@ -581,6 +581,12 @@ pub enum LocalSigningMessage {
     /// User asked to remove a paired phone (8-hex fingerprint of the
     /// phone's cert pin).
     RemovePhone(String),
+    /// Periodic tick while no pairing is in progress: tell phones about
+    /// removals made here, and ask paired phones whether they removed this
+    /// desktop.
+    SyncTick,
+    /// Result of the pass started by [`Self::SyncTick`].
+    PairingsSynced(Result<crate::phone_signer::unpair_sync::SyncReport, String>),
     /// Inline rename draft on a paired-phone row. `(fp8, new_text)`.
     /// Doesn't persist; commit happens on `SaveRow`.
     DraftName(String, String),

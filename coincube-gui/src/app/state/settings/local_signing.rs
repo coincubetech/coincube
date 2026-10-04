@@ -24,6 +24,9 @@ use crate::phone_signer::errors::PairingError;
 use crate::phone_signer::pairing::{GeneratedOffer, PairingOffer};
 use crate::phone_signer::pairing_store::{PairedPhone, PairingStoreFile};
 
+/// How often the panel syncs pairing removals with its phones while open.
+const SYNC_INTERVAL: Duration = Duration::from_secs(3);
+
 /// What the pairing wizard is currently doing.
 pub enum PairingFlow {
     /// No pairing in flight; render the paired-phones table.
@@ -148,6 +151,12 @@ pub struct LocalSigningState {
     /// where `cache` is available.
     initialised: bool,
     wallet_chain: Option<crate::chain::ChainId>,
+    /// A [`LocalSigningMessage::SyncTick`] pass is running; ticks are
+    /// skipped until it reports back.
+    sync_in_flight: bool,
+    /// Says which phones removed this desktop since the panel opened, so a
+    /// row that vanishes on its own is explained.
+    pub unpaired_notice: Option<String>,
 }
 
 impl Default for LocalSigningState {
@@ -171,6 +180,8 @@ impl Default for LocalSigningState {
             tombstones: Arc::new(Mutex::new(HashSet::new())),
             initialised: false,
             wallet_chain: None,
+            sync_in_flight: false,
+            unpaired_notice: None,
         }
     }
 }
@@ -565,10 +576,58 @@ impl LocalSigningState {
             if let Ok(mut g) = self.tombstones.lock() {
                 g.insert(pk);
             }
-            let _ = crate::phone_signer::pairing_store::remove(dir, &pk);
+            // Gone here at once; the phone is told by the next sync pass
+            // that can reach it.
+            let _ = crate::phone_signer::pairing_store::unpair(dir, &pk);
             self.row_drafts.remove(fp8);
+            self.unpaired_notice = None;
             self.refresh_phones_from(dir);
         }
+    }
+
+    /// Start a sync pass unless one is running or a pairing is in progress
+    /// (a pass must not dial a phone mid-handshake). Also re-reads the store,
+    /// so a pairing another screen removed disappears here too.
+    pub(crate) fn start_sync(&mut self, dir: &crate::dir::CoincubeDirectory) -> Task<Message> {
+        if !matches!(self.flow, PairingFlow::Idle | PairingFlow::Error(_)) {
+            return Task::none();
+        }
+        self.refresh_phones_from(dir);
+        if self.sync_in_flight
+            || self
+                .wallet_chain
+                .is_some_and(|chain| !crate::phone_signer::lan_signing_allowed(chain))
+        {
+            return Task::none();
+        }
+        self.sync_in_flight = true;
+        Task::perform(
+            crate::phone_signer::unpair_sync::sync(dir.clone(), self.wallet_fingerprint),
+            |res| {
+                Message::View(view::Message::Settings(
+                    view::SettingsMessage::LocalSigning(LocalSigningMessage::PairingsSynced(res)),
+                ))
+            },
+        )
+    }
+
+    pub(crate) fn apply_pairings_synced(
+        &mut self,
+        dir: &crate::dir::CoincubeDirectory,
+        res: Result<crate::phone_signer::unpair_sync::SyncReport, String>,
+    ) {
+        self.sync_in_flight = false;
+        match res {
+            Ok(report) if !report.removed_by_phone.is_empty() => {
+                self.unpaired_notice = Some(format!(
+                    "{} removed this pairing on the phone.",
+                    report.removed_by_phone.join(", ")
+                ));
+            }
+            Ok(_) => {}
+            Err(e) => tracing::debug!("paired-phone sync: {}", e),
+        }
+        self.refresh_phones_from(dir);
     }
 }
 
@@ -654,6 +713,7 @@ impl State for LocalSigningState {
                 Task::none()
             }
             LocalSigningMessage::StartPairing => {
+                self.unpaired_notice = None;
                 // We need a wallet fingerprint before we can build
                 // an offer. Bail with a typed error if there's no
                 // wallet loaded yet.
@@ -814,6 +874,12 @@ impl State for LocalSigningState {
             }
             LocalSigningMessage::RemovePhone(fp8) => {
                 self.apply_remove_phone(&cache.datadir_path, &fp8);
+                // Tell the phone now if it's reachable.
+                self.start_sync(&cache.datadir_path)
+            }
+            LocalSigningMessage::SyncTick => self.start_sync(&cache.datadir_path),
+            LocalSigningMessage::PairingsSynced(res) => {
+                self.apply_pairings_synced(&cache.datadir_path, res);
                 Task::none()
             }
             LocalSigningMessage::DraftName(fp8, text) => {
@@ -834,7 +900,8 @@ impl State for LocalSigningState {
     fn subscription(&self) -> iced::Subscription<Message> {
         // Drive the countdown while a pairing offer is on-screen,
         // and refresh the phone-picker list every second while the
-        // picker is open.
+        // picker is open. Otherwise keep the paired list in step with
+        // the phones: removals made on either side show up within a tick.
         match self.flow {
             PairingFlow::Waiting { .. } | PairingFlow::PhonePicker { .. } => {
                 iced::time::every(Duration::from_secs(1)).map(|_| {
@@ -843,7 +910,13 @@ impl State for LocalSigningState {
                     ))
                 })
             }
-            _ => iced::Subscription::none(),
+            PairingFlow::Idle | PairingFlow::Error(_) => {
+                iced::time::every(SYNC_INTERVAL).map(|_| {
+                    Message::View(view::Message::Settings(
+                        view::SettingsMessage::LocalSigning(LocalSigningMessage::SyncTick),
+                    ))
+                })
+            }
         }
     }
 
@@ -935,7 +1008,10 @@ mod tests {
     }
 
     fn seed_store(dir: &CoincubeDirectory, phones: Vec<PairedPhone>) {
-        let file = pairing_store::PairingStoreFile { phones };
+        let file = pairing_store::PairingStoreFile {
+            phones,
+            ..Default::default()
+        };
         pairing_store::save(dir, &file).expect("seed store");
     }
 
@@ -1119,6 +1195,69 @@ mod tests {
         assert_eq!(on_disk.phones.len(), 1);
         assert_eq!(on_disk.phones[0].cert_pin, [7u8; 32]);
         assert!(!state.row_drafts.contains_key(&fp2));
+    }
+
+    /// Removing a phone here queues a notice so the phone drops this
+    /// desktop too, and a later sync explains rows a phone removed.
+    #[test]
+    fn apply_remove_phone_queues_a_notice_for_the_phone() {
+        let dir = fresh_dir();
+        let p = paired(9, "iPhone", Some("10.0.0.9:8443"));
+        seed_store(&dir, vec![p.clone()]);
+        let mut state = LocalSigningState::default();
+        state.refresh_phones_from(&dir);
+        state.apply_remove_phone(&dir, &fp8_of(&p));
+
+        let on_disk = pairing_store::load(&dir).unwrap();
+        assert!(on_disk.phones.is_empty());
+        assert_eq!(on_disk.pending_unpairs.len(), 1);
+        let pending = &on_disk.pending_unpairs[0];
+        assert_eq!(pending.cert_pin, p.cert_pin);
+        assert_eq!(pending.fallback_addr.as_deref(), Some("10.0.0.9:8443"));
+    }
+
+    #[test]
+    fn sync_waits_for_pairing_and_for_the_previous_pass() {
+        let dir = fresh_dir();
+        seed_store(&dir, vec![paired(1, "iPhone", None)]);
+        let mut state = LocalSigningState::default();
+        state.flow = PairingFlow::PhonePicker {
+            discovered: Vec::new(),
+        };
+        let _ = state.start_sync(&dir);
+        assert!(!state.sync_in_flight, "no pass mid-pairing");
+        assert!(state.phones.phones.is_empty(), "nor a store re-read");
+
+        state.flow = PairingFlow::Idle;
+        let _ = state.start_sync(&dir);
+        assert!(state.sync_in_flight);
+        assert_eq!(state.phones.phones.len(), 1, "idle ticks re-read the store");
+        // A tick arriving before the pass reports back starts nothing new.
+        let _ = state.start_sync(&dir);
+        assert!(state.sync_in_flight);
+
+        state.apply_pairings_synced(&dir, Ok(Default::default()));
+        assert!(!state.sync_in_flight);
+        assert!(state.unpaired_notice.is_none());
+    }
+
+    #[test]
+    fn sync_names_phones_that_removed_this_desktop() {
+        let dir = fresh_dir();
+        seed_store(&dir, vec![paired(1, "Kept", None)]);
+        let mut state = LocalSigningState::default();
+        let _ = state.start_sync(&dir);
+        state.apply_pairings_synced(
+            &dir,
+            Ok(crate::phone_signer::unpair_sync::SyncReport {
+                removed_by_phone: vec!["iPhone".into()],
+            }),
+        );
+        assert_eq!(
+            state.unpaired_notice.as_deref(),
+            Some("iPhone removed this pairing on the phone.")
+        );
+        assert_eq!(state.phones.phones.len(), 1);
     }
 
     #[test]

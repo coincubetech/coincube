@@ -676,6 +676,8 @@ async fn split_step2_needs_a_fee_a_live_token_and_a_check() {
 #[tokio::test(flavor = "multi_thread")]
 async fn split_step2_restart_rebuilds_the_recorded_step2_exactly() {
     let s = Step2::new().await;
+    // Keep the external signer's original file across the restart.
+    let signed_before_restart = s.signed();
     let recorded = s.psbt.unsigned_tx.clone();
     let Step2 { h, preparation, .. } = s;
     drop(preparation);
@@ -691,6 +693,11 @@ async fn split_step2_restart_rebuilds_the_recorded_step2_exactly() {
         .await
         .unwrap();
     assert_eq!(psbt.unsigned_tx, recorded);
+    assert_eq!(
+        preparation.check_signed(&signed_before_restart, &coins(&h.wallet)),
+        Ok(()),
+        "the original signer file remains valid without re-signing"
+    );
     // A recorded step 2 fixes its target: ownership is checked, freshness
     // no longer (a later payment to the address cannot strand step 2).
     let used = address(&vault(), INDEX).to_string();
