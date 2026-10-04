@@ -48,6 +48,9 @@ struct Counts {
     resend_expired: bool,
     /// What the coordinator's reconciles see on BTCB2. `None`: absent.
     coord_seen: Option<TransactionObservation>,
+    /// How long the next resend reviews stay live, by the runtime's clock.
+    /// `None`: 60 s.
+    resend_lifetime: Option<std::time::Duration>,
 }
 fn next_reconcile(
     shared: &Shared,
@@ -329,6 +332,9 @@ impl Step2Coord for PanelCoord {
             return Err(refusal);
         }
         let attempt = counts.resends + 1;
+        let lifetime = counts
+            .resend_lifetime
+            .unwrap_or(std::time::Duration::from_secs(60));
         drop(counts);
         self.resend_reviewed = true;
         let (route_label, privacy_note) = route_copy(node_route());
@@ -341,6 +347,7 @@ impl Step2Coord for PanelCoord {
             attempt,
             max_attempts: claim_workflow::MAX_SPLIT_STEP2_RESUBMISSIONS,
             expires_at: chrono::Local::now(),
+            not_after: tokio::time::Instant::now().into_std() + lifetime,
             live: Arc::new(move || !shared.lock().unwrap().resend_expired),
         })
     }
@@ -2368,6 +2375,106 @@ async fn port_change_during_an_in_flight_step2_task_revokes_it() {
     drive(&mut panel, task).await;
     assert!(panel.recon.is_none() && panel.step2_revoke.is_none());
     assert_eq!(panel.stage, Stage::NeedsSession);
+}
+
+/// S3 item 5: the "cannot replay" label lapses at its deadline on screen
+/// with no input: the armed timer fires, the panel drops it, and Build is
+/// gated off. No real waiting: the runtime's clock is paused and jumps to
+/// the timer.
+#[tokio::test(start_paused = true)]
+async fn replay_label_and_build_lapse_at_the_deadline_without_input() {
+    let journal = Journal::new(false);
+    let (mut panel, shared) = tracked_panel(&journal);
+    for message in [
+        SplitMessage::EnterStep2,
+        SplitMessage::Step2Reserve,
+        SplitMessage::Step2Check,
+    ] {
+        let task = panel.update(message);
+        drive(&mut panel, task).await;
+    }
+    assert_eq!(panel.replay_label(), Some(CANNOT_REPLAY));
+    let timer = panel.arm_deadline();
+    // Armed once: the same deadline arms nothing more.
+    assert!(iced_runtime::task::into_stream(panel.arm_deadline()).is_none());
+    let start = tokio::time::Instant::now();
+    drive(&mut panel, timer).await;
+    assert!(tokio::time::Instant::now() - start >= std::time::Duration::from_secs(59));
+    assert!(panel.replay.is_none());
+    assert_eq!(panel.replay_label(), None);
+    assert_eq!(panel.stage, Stage::Step2(Step2Stage::Ready));
+    let task = panel.update(SplitMessage::Step2Build);
+    drive(&mut panel, task).await;
+    assert_eq!(shared.lock().unwrap().builds, 0);
+    assert!(iced_runtime::task::into_stream(panel.arm_deadline()).is_none());
+}
+
+/// S3 item 5: a timer whose deadline was replaced (a new review) or
+/// revoked with the session lands on nothing: what is on screen stays, and
+/// no second timer is armed for it.
+#[tokio::test(start_paused = true)]
+async fn deadline_timer_is_dropped_by_replacement_and_revocation() {
+    let lifetime = |shared: &Shared, secs: u64| {
+        shared.lock().unwrap().resend_lifetime = Some(std::time::Duration::from_secs(secs));
+    };
+    let journal = Journal::returned(false);
+    let (mut panel, shared) = restarted(&journal, true).await;
+
+    // Replaced: a 60 s review, then a 120 s one.
+    lifetime(&shared, 60);
+    let task = panel.update(SplitMessage::Step2ReviewResend);
+    drive(&mut panel, task).await;
+    let first = panel.arm_deadline();
+    lifetime(&shared, 120);
+    let task = panel.update(SplitMessage::Step2ReviewResend);
+    drive(&mut panel, task).await;
+    let second = panel.arm_deadline();
+    drive(&mut panel, first).await;
+    assert!(panel.step2_resend.is_some());
+    assert!(
+        iced_runtime::task::into_stream(panel.arm_deadline()).is_none(),
+        "a replaced timer re-armed the review's"
+    );
+
+    // Revoked: the session ends, and the next one's review outlives the
+    // old timer.
+    panel.revoke();
+    assert!(panel.step2_resend.is_none());
+    assert!(iced_runtime::task::into_stream(panel.arm_deadline()).is_none());
+    let task = panel.begin();
+    drive(&mut panel, task).await;
+    lifetime(&shared, 600);
+    let task = panel.update(SplitMessage::Step2ReviewResend);
+    drive(&mut panel, task).await;
+    let third = panel.arm_deadline();
+    drive(&mut panel, second).await;
+    assert!(panel.step2_resend_review().is_some());
+    assert!(
+        iced_runtime::task::into_stream(panel.arm_deadline()).is_none(),
+        "a revoked timer re-armed the next review's"
+    );
+    // Its own timer still drops it.
+    drive(&mut panel, third).await;
+    assert!(panel.step2_resend.is_none());
+}
+
+/// S3 item 5: the resend review lapses at its deadline on screen with no
+/// input; Send again then does nothing, and a new review may be asked for.
+#[tokio::test(start_paused = true)]
+async fn resend_review_lapses_at_its_deadline() {
+    let journal = Journal::returned(false);
+    let (mut panel, shared) = restarted(&journal, true).await;
+    let task = panel.update(SplitMessage::Step2ReviewResend);
+    drive(&mut panel, task).await;
+    assert!(panel.step2_resend_review().is_some());
+    let timer = panel.arm_deadline();
+    drive(&mut panel, timer).await;
+    assert!(panel.step2_resend.is_none());
+    assert!(panel.can_review_resend());
+    let task = panel.update(SplitMessage::Step2ConfirmResend);
+    drive(&mut panel, task).await;
+    assert_eq!(shared.lock().unwrap().resends, 0);
+    assert_eq!(panel.stage, Stage::Step2(Step2Stage::Reconcile));
 }
 
 /// Consuming the preparation does not make a transient failure terminal.

@@ -351,6 +351,11 @@ impl CannotReplay {
     pub fn tracked_txid(&self) -> Txid {
         self.tracked
     }
+    /// When the label lapses at the latest (S3 item 5): the panel redraws
+    /// then, without waiting for input.
+    pub fn not_after(&self) -> Instant {
+        self.live.not_after()
+    }
 }
 
 /// The label a token's check supports. The token itself never leaves the
@@ -443,6 +448,9 @@ pub struct Step2ResendView {
     pub max_attempts: usize,
     /// When the review's evidence lapses, for display.
     pub expires_at: chrono::DateTime<chrono::Local>,
+    /// The same deadline on the monotonic clock: the panel drops the review
+    /// then, without waiting for input (S3 item 5).
+    not_after: Instant,
     live: ResendLiveness,
 }
 impl std::fmt::Debug for Step2ResendView {
@@ -459,6 +467,10 @@ impl Step2ResendView {
     /// drops the review; a confirmation would refuse anyway.
     pub fn is_live(&self) -> bool {
         (self.live)()
+    }
+    /// When the review lapses at the latest.
+    pub fn not_after(&self) -> Instant {
+        self.not_after
     }
 }
 
@@ -1450,6 +1462,7 @@ impl Step2Coord for CoordinatorDriver {
             max_attempts: claim_workflow::MAX_SPLIT_STEP2_RESUBMISSIONS,
             expires_at: chrono::Local::now()
                 + chrono::Duration::from_std(left).unwrap_or_else(|_| chrono::Duration::zero()),
+            not_after,
             live: resend_liveness(
                 move || revoker.is_revoked(),
                 self.generation.clone(),

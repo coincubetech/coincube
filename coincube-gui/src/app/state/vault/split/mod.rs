@@ -53,6 +53,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
+    time::Instant,
 };
 
 use iced::Task;
@@ -297,6 +298,9 @@ pub enum SplitEvent {
         Result<step2::Step2ResendView, step2::Step2Refusal>,
     ),
     Step2Resent(u64, Coord, Result<Outcome, step2::Step2Refusal>),
+    /// S3 item 5: the deadline armed under this epoch (not a request
+    /// sequence number) passed. See [`SplitPanel::arm_deadline`].
+    DeadlinePassed(u64),
 }
 
 /// What a reorg check concluded.
@@ -422,6 +426,12 @@ pub struct SplitPanel {
     step2_status: Option<Status>,
     /// The authenticated claimed coins from the restore.
     coins: Vec<SplitCoin>,
+    /// S3 item 5: the deadline a timer is armed for, and its epoch. The
+    /// epoch moves whenever the armed deadline changes (the label or the
+    /// resend review set, replaced or cleared) and on every revocation, so a
+    /// superseded timer lands on nothing.
+    armed: Option<Instant>,
+    deadline_epoch: u64,
 }
 
 impl fmt::Debug for SplitPanel {
@@ -482,6 +492,8 @@ impl SplitPanel {
             step2_seen_here: None,
             step2_status: None,
             coins: Vec::new(),
+            armed: None,
+            deadline_epoch: 0,
         }
     }
 
@@ -648,6 +660,7 @@ impl SplitPanel {
             ending.store(true, Ordering::SeqCst);
         }
         self.seq = self.seq.wrapping_add(1);
+        self.disarm_deadline();
         if self.journal.is_some() && !matches!(self.stage, Stage::Abandoned | Stage::Closed) {
             self.stage = Stage::NeedsSession;
             self.notice = Some(
@@ -1134,6 +1147,10 @@ impl SplitPanel {
     /// Apply a task's result. A result from an older request is dropped; a
     /// coordinator it carries is released (it was revoked with that request).
     pub fn apply(&mut self, event: SplitEvent) -> Task<Message> {
+        if let SplitEvent::DeadlinePassed(epoch) = event {
+            self.deadline_passed(epoch);
+            return Task::none();
+        }
         if event.seq() != self.seq {
             return Task::none();
         }
@@ -1401,6 +1418,68 @@ impl SplitPanel {
         }
     }
 
+    /// The earliest deadline of what is on screen: the "cannot replay"
+    /// label's and the resend review's.
+    fn deadline(&self) -> Option<Instant> {
+        let replay = self.replay.as_ref().map(step2::CannotReplay::not_after);
+        let resend = self
+            .step2_resend
+            .as_ref()
+            .map(step2::Step2ResendView::not_after);
+        replay.into_iter().chain(resend).min()
+    }
+
+    fn disarm_deadline(&mut self) {
+        self.armed = None;
+        self.deadline_epoch = self.deadline_epoch.wrapping_add(1);
+    }
+
+    /// S3 item 5: a timer for the earliest deadline on screen, so the label
+    /// and the resend review lapse at their deadline without input. The App
+    /// calls it after every [`Self::update`] and [`Self::apply`]. Nothing
+    /// new when that deadline is the armed one; a changed one moves the
+    /// epoch first, so the old timer lands on nothing. Liveness at action
+    /// time is checked as before: the timer only redraws.
+    pub fn arm_deadline(&mut self) -> Task<Message> {
+        let deadline = self.deadline();
+        if deadline == self.armed {
+            return Task::none();
+        }
+        self.disarm_deadline();
+        self.armed = deadline;
+        let Some(at) = deadline else {
+            return Task::none();
+        };
+        let epoch = self.deadline_epoch;
+        // The timer is made when the task first runs, on the runtime: it
+        // can't be made on the UI thread.
+        Task::perform(
+            async move { tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await },
+            move |()| Message::Split(Box::new(SplitEvent::DeadlinePassed(epoch))),
+        )
+    }
+
+    /// The armed deadline passed: drop what has lapsed (by the runtime's
+    /// clock, which the timer used). A stale epoch changes nothing. The
+    /// next [`Self::arm_deadline`] arms what is left.
+    fn deadline_passed(&mut self, epoch: u64) {
+        if epoch != self.deadline_epoch {
+            return;
+        }
+        let now = tokio::time::Instant::now().into_std();
+        if self.replay.as_ref().is_some_and(|r| r.not_after() <= now) {
+            self.replay = None;
+        }
+        if self
+            .step2_resend
+            .as_ref()
+            .is_some_and(|r| r.not_after() <= now)
+        {
+            self.step2_resend = None;
+        }
+        self.armed = None;
+    }
+
     fn install(&mut self, resumed: Resumed) {
         self.construction = Some(Box::new(resumed.construction));
         self.signed = Some(resumed.signed);
@@ -1448,7 +1527,8 @@ impl SplitEvent {
             | Self::Step2Reconciled(seq, ..)
             | Self::ReconReconciled(seq, ..)
             | Self::Step2ResendReviewed(seq, ..)
-            | Self::Step2Resent(seq, ..) => *seq,
+            | Self::Step2Resent(seq, ..)
+            | Self::DeadlinePassed(seq) => *seq,
         }
     }
 }

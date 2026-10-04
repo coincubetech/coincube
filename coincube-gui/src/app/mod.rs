@@ -5268,17 +5268,18 @@ impl App {
                 self.revoke_split_handoff();
                 return Task::none();
             }
+            // Each is followed by the panel's deadline timer (S3 item 5).
             Message::Split(event) => {
-                return self
-                    .split_panel
-                    .as_mut()
-                    .map_or_else(Task::none, |panel| panel.apply(*event));
+                return self.split_panel.as_mut().map_or_else(Task::none, |panel| {
+                    let task = panel.apply(*event);
+                    Task::batch([task, panel.arm_deadline()])
+                });
             }
             Message::View(view::Message::Split(message)) => {
-                return self
-                    .split_panel
-                    .as_mut()
-                    .map_or_else(Task::none, |panel| panel.update(message));
+                return self.split_panel.as_mut().map_or_else(Task::none, |panel| {
+                    let task = panel.update(message);
+                    Task::batch([task, panel.arm_deadline()])
+                });
             }
             Message::View(view::Message::DismissToast(id)) => {
                 self.errors.retain(|(i, ..)| *i != id);
