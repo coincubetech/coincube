@@ -1028,7 +1028,8 @@ pub(super) fn production_text<'a>(file: &str, text: &'a str) -> &'a str {
     let Some(cut) = cut else {
         assert!(
             !text.contains("mod tests"),
-            "{file}: `mod tests` is not an inline `#[cfg(test)]` module"
+            "{}: `mod tests` is not an inline `#[cfg(test)]` module",
+            file
         );
         return text;
     };
@@ -1213,7 +1214,8 @@ fn production_text_handles_crlf_and_refuses_a_missing_marker() {
     ] {
         assert!(
             std::panic::catch_unwind(|| production_text("missed", missed)).is_err(),
-            "{missed:?}"
+            "{:?}",
+            missed
         );
     }
 }

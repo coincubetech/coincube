@@ -745,7 +745,7 @@ fn unified_construction_refuses_foreign_proprietary_records() {
         let fixture = Fixture::new(shape);
         let sweep = fixture.sweep();
         let signed = sign_unified(sweep.psbt(), &fixture.signers());
-        assert!(finalize(&sweep, &signed).is_ok(), "{shape:?}");
+        assert!(finalize(&sweep, &signed).is_ok(), "{:?}", shape);
         assert!(signed.psbt().inputs[0]
             .proprietary
             .keys()
