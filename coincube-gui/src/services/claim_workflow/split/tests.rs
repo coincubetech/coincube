@@ -1197,8 +1197,14 @@ fn v8_split_journal_is_refused_by_the_v7_reader() {
 /// glob still has to name the item somewhere.
 #[test]
 fn split_b0_journal_api_has_no_gui_callers() {
-    const ITEMS: [&str; 28] = [
+    const ITEMS: [&str; 33] = [
         "create_split",
+        // B4b-1b: the fork-only (`kind: Unified`) record.
+        "create_unified_split",
+        "revalidate_unified_construction",
+        "record_unified_broadcast_intent",
+        "UnifiedConstruction",
+        "SplitKind",
         "revalidate_split_construction",
         "bind_recovered_split_transaction",
         "record_split_broadcast_intent",
@@ -1271,7 +1277,14 @@ fn split_b0_journal_api_has_no_gui_callers() {
                 (false, Some(from)) => {
                     let ident = &text[from..index];
                     let reexport = file == "src/services/claim_workflow/mod.rs"
-                        && ["split_identity", "RecordedSplit", "Step2ReturnHold"].contains(&ident);
+                        && [
+                            "split_identity",
+                            "RecordedSplit",
+                            "Step2ReturnHold",
+                            "SplitKind",
+                            "UnifiedConstruction",
+                        ]
+                        .contains(&ident);
                     let dispatch = file == "src/services/claim_coordinator/step1.rs"
                         && ident == "for_split_step1";
                     // B1b: the Split step-1 panel and its tests. Its only
@@ -1294,7 +1307,8 @@ fn split_b0_journal_api_has_no_gui_callers() {
                     // their tests reopen a submitted Split journal; no GUI
                     // caller reaches them
                     // (`fork::split::tests::split_step2_gate_has_no_gui_caller`).
-                    // Only the tests create a journal (#626 guard nit).
+                    // Only the tests create a journal (#626 guard nit); B4b-1b's
+                    // reconciler tests create and submit a fork-only one.
                     let gate_tests =
                         file.starts_with("src/services/claim_coordinator/fork/split/tests");
                     let gate = file.starts_with("src/services/claim_coordinator/fork/split")
@@ -1322,7 +1336,14 @@ fn split_b0_journal_api_has_no_gui_callers() {
                             "Step2ReturnHold",
                         ]
                         .contains(&ident)
-                            || (gate_tests && ident == "create_split"));
+                            || (gate_tests
+                                && [
+                                    "create_split",
+                                    "create_unified_split",
+                                    "record_unified_broadcast_intent",
+                                    "UnifiedConstruction",
+                                ]
+                                .contains(&ident)));
                     // B3b-2b: the panel's (uncalled) step-2 layer reads the
                     // recorded step 2 at restart; its tests write journals.
                     // P3-3: the restart also reads whether a resend is
@@ -1967,4 +1988,962 @@ fn split_step2_dead_end_is_a_submission_no_resend_or_sighting_can_follow() {
     c.record_split_step2_observed(&context(), TransactionObservation::Unconfirmed { txid })
         .unwrap();
     assert!(!c.split_step2_dead_end());
+}
+
+// ---------------------------------------------------------------------------
+// B4b-1b: the fork-only (`kind: Unified`) record.
+
+/// The unified sweep of `wallet`'s two splittable coins into `target`
+/// (B4b-1a's unified-sweep shape: one output, no change), built
+/// with core's step-2 construction over the same coins, which has exactly
+/// that shape. It is signed `ALL` here (`sign_step2`): the journal records
+/// bytes, and the `ALL|UNIFIED` request is core's finalizer's (B4b-1a).
+fn unified_sweep(wallet: &Wallet, target: &Script, feerate: u64) -> SplitStep2 {
+    let coins = [
+        coin(&wallet.source, SplitBranch::External, 0, 150_000),
+        coin(&wallet.source, SplitBranch::Internal, 1, 70_000),
+    ];
+    let claimed: Vec<OutPoint> = coins.iter().map(|c| c.outpoint).collect();
+    coincube_core::foreign_split::create_split_step2(
+        &coincube_core::foreign_split::SplitStep2Inputs {
+            chain: ChainId::BitcoinBlake2b,
+            source: &wallet.source,
+            coins: &coins,
+            fork_height: FORK,
+            claimed: &claimed,
+            target,
+        },
+        feerate,
+        LockTime::from_height(100).unwrap(),
+        100,
+    )
+    .unwrap()
+}
+fn unified_construction<'a>(
+    wallet: &'a Wallet,
+    sweep: &'a SplitStep2,
+    index: u32,
+    target: &'a Script,
+) -> UnifiedConstruction<'a> {
+    UnifiedConstruction {
+        chain: ChainId::BitcoinBlake2b,
+        source: &wallet.source,
+        fork_height: FORK,
+        target_index: index,
+        target_script: target,
+        unsigned: &sweep.psbt().unsigned_tx,
+    }
+}
+fn create_unified(
+    temp: &Temp,
+    wallet: &Wallet,
+    sweep: &SplitStep2,
+    target: &Script,
+    context: Context,
+) -> Controller {
+    Controller::create_unified_split(
+        &temp.0,
+        TARGET.into(),
+        unified_construction(wallet, sweep, 5, target),
+        context,
+    )
+    .unwrap()
+}
+fn unified_identity(wallet: &Wallet) -> WalletIdentity {
+    split_identity(TARGET.into(), wallet.source.digest())
+}
+fn reopen_unified(temp: &Temp, wallet: &Wallet, context: Context) -> Result<Controller, Error> {
+    Controller::reopen_settling_blocking(&temp.0, &unified_identity(wallet), context)
+}
+
+/// B4b-1b: a fork-only record is a version-9, owner-only journal with
+/// `kind: Unified`, no step 1 (the canonical empty transaction, nothing
+/// tracked, signed or attempted on Bitcoin, no `bitcoin_transaction`),
+/// Tracking from creation, its target and unsigned sweep recorded from
+/// creation, and the signed sweep recorded with its submission, which names
+/// the signed bytes' own txid. It round-trips through reopen under the Split
+/// identity. A two-step record, written and rewritten by this binary, still
+/// serializes as the version-8 shape without a `kind` field, which the
+/// version-8 reader (mirrored here) reads; that reader refuses the fork-only
+/// record on its unknown `kind` field and, had it known the field, on its
+/// version.
+#[test]
+fn fork_only_journal_round_trips_and_old_readers_refuse() {
+    let wallet = make_wallet(Shape::ShWpkh, 1);
+    let target = target_script(5);
+    let sweep = unified_sweep(&wallet, &target, 2);
+    let unsigned = sweep.psbt().unsigned_tx.clone();
+    let temp = Temp::new();
+    let mut c = create_unified(&temp, &wallet, &sweep, &target, context());
+    #[cfg(unix)]
+    assert_eq!(mode(&temp), 0o600);
+    let json: serde_json::Value = serde_json::from_str(&journal_text(&temp)).unwrap();
+    assert_eq!(json["version"], 9);
+    assert_eq!(json["split"]["kind"], "Unified");
+    assert_eq!(json["identity"]["bitcoin_cube"], "");
+    assert_eq!(json["identity"]["fork_cube"], TARGET);
+    assert_eq!(json["split"]["target_cube"], TARGET);
+    assert_eq!(json["split"]["fork_height"], FORK);
+    assert_eq!(json["split"]["destination"], 0);
+    assert_eq!(json["split"]["target_index"], 5);
+    assert!(json["split"].get("target_script").is_some());
+    assert!(json["split"].get("step2_transaction").is_none());
+    assert_eq!(
+        json["split"]["descriptors"]["external"],
+        wallet.source.external().to_string()
+    );
+    assert_eq!(json["phase"], "Tracking");
+    assert!(json["signed_txid"].is_null());
+    assert!(json.get("bitcoin_transaction").is_none());
+    assert!(json.get("bitcoin_attempts").is_none());
+    assert!(json.get("fork_submission").is_none());
+    assert!(json["plan"].get("tracked_txid").is_none());
+    assert!(json["plan"].get("previous_confirmation").is_some());
+    assert!(json["plan"]["previous_confirmation"].is_null());
+    assert!(json["plan"]["step1"]["input"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert!(json["plan"]["step1"]["output"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert!(json.get("fork_sweep").is_some());
+    assert_eq!(c.phase(), Phase::Tracking);
+    assert_eq!(c.signed_txid(), None);
+    assert_eq!(c.recorded_bitcoin_transaction(), None);
+    assert_eq!(c.last_inclusion(), None);
+    assert_eq!(c.recorded_fork_sweep(), Some(&unsigned));
+    assert_eq!(c.recorded_fork_submission(), None);
+    assert_eq!(c.recorded_split_step2(), None);
+    assert_eq!(c.status(), Status::Unchecked);
+    assert_eq!(
+        c.plan().claimed_prevouts,
+        unsigned
+            .input
+            .iter()
+            .map(|i| i.previous_output)
+            .collect::<Vec<_>>()
+    );
+    let recorded = c.recorded_split().unwrap().unwrap();
+    assert_eq!(recorded.kind, SplitKind::Unified);
+    assert_eq!(recorded.source.as_ref(), Some(&wallet.source));
+    assert_eq!(recorded.source_digest, wallet.source.digest());
+    assert_eq!((recorded.fork_height, recorded.destination), (FORK, 0));
+    assert_eq!(recorded.target_index, Some(5));
+    assert_eq!(recorded.target_script.as_deref(), Some(target.as_script()));
+    assert_eq!(c.identity(), &unified_identity(&wallet));
+    // The open controller holds the journal's lock.
+    assert!(matches!(
+        Controller::create_unified_split(
+            &temp.0,
+            TARGET.into(),
+            unified_construction(&wallet, &sweep, 5, &target),
+            context()
+        ),
+        Err(Error::Busy)
+    ));
+    let (_, step1, signed1) = setup(Shape::Pkh);
+
+    // The submission records the signed sweep and names its own txid
+    // (sh(wpkh) scriptSigs change it).
+    let verified = sign_step2(&wallet, &sweep);
+    let signed = verified.transaction().clone();
+    assert_ne!(signed.compute_txid(), unsigned.compute_txid());
+    c.record_unified_broadcast_intent(&context(), ChainId::BitcoinBlake2b, &signed)
+        .unwrap();
+    let submission = c.recorded_fork_submission().unwrap();
+    assert_eq!(submission.txid(), signed.compute_txid());
+    assert_eq!(submission.wtxid(), signed.compute_wtxid());
+    assert_eq!(c.recorded_split_step2(), Some(&signed));
+    assert_eq!(c.phase(), Phase::Tracking);
+    drop(c);
+    let c = reopen_unified(&temp, &wallet, context()).unwrap();
+    assert_eq!(
+        c.recorded_split().unwrap().unwrap().kind,
+        SplitKind::Unified
+    );
+    assert_eq!(c.recorded_split_step2(), Some(&signed));
+    assert_eq!(c.recorded_fork_sweep(), Some(&unsigned));
+    assert_eq!(c.recorded_fork_submission(), Some(submission));
+    assert_eq!(c.status(), Status::Unchecked);
+    let json: serde_json::Value = serde_json::from_str(&journal_text(&temp)).unwrap();
+    assert_eq!(json["version"], 9);
+    assert_eq!(json["split"]["kind"], "Unified");
+    assert!(json["split"].get("step2_transaction").is_some());
+    drop(c);
+    // One intent per directory, whatever the kind.
+    assert!(matches!(
+        Controller::create_unified_split(
+            &temp.0,
+            TARGET.into(),
+            unified_construction(&wallet, &sweep, 5, &target),
+            context()
+        ),
+        Err(Error::Conflict)
+    ));
+    assert!(matches!(
+        Controller::create_split(&temp.0, TARGET.into(), &step1, &signed1, FORK, context()),
+        Err(Error::Conflict)
+    ));
+    // A Claim identity, or another target, never opens it.
+    let mut wrong = unified_identity(&wallet);
+    wrong.bitcoin_cube = "btc-cube".into();
+    assert!(matches!(
+        Controller::reopen_settling_blocking(&temp.0, &wrong, context()),
+        Err(Error::WrongIdentity)
+    ));
+    let mut wrong = unified_identity(&wallet);
+    wrong.fork_cube = "another-target".into();
+    assert!(matches!(
+        Controller::reopen_settling_blocking(&temp.0, &wrong, context()),
+        Err(Error::WrongIdentity)
+    ));
+    let text = journal_text(&temp);
+
+    // The version-8 reader: the Split record's fields as of version 8, with
+    // no `kind`. It reads a two-step journal, which still carries no `kind`
+    // and is version 8, and refuses the fork-only one on that field; its
+    // validator also refused every version but 8.
+    #[allow(dead_code)]
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct V8Split {
+        source_digest: serde_json::Value,
+        #[serde(default)]
+        descriptors: Option<serde_json::Value>,
+        fork_height: u64,
+        destination: u32,
+        target_cube: String,
+        #[serde(default)]
+        target_index: Option<u32>,
+        #[serde(default)]
+        target_script: Option<serde_json::Value>,
+        #[serde(default)]
+        step2_transaction: Option<serde_json::Value>,
+        #[serde(default)]
+        step2_resubmissions: Option<serde_json::Value>,
+        #[serde(default)]
+        step2_observed: Option<bool>,
+        #[serde(default)]
+        step2_returned: Option<bool>,
+    }
+    #[allow(dead_code)]
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct V8Intent {
+        version: u32,
+        #[serde(default)]
+        ancestry: Option<serde_json::Value>,
+        identity: serde_json::Value,
+        plan: serde_json::Value,
+        unsigned_digest: serde_json::Value,
+        context_digest: serde_json::Value,
+        signed_txid: serde_json::Value,
+        phase: serde_json::Value,
+        #[serde(default)]
+        fork_sweep: Option<serde_json::Value>,
+        #[serde(default)]
+        fork_change_index: Option<serde_json::Value>,
+        #[serde(default)]
+        bitcoin_change_index: Option<serde_json::Value>,
+        #[serde(default)]
+        fork_submission: Option<serde_json::Value>,
+        #[serde(default)]
+        inclusion_history: Option<serde_json::Value>,
+        #[serde(default)]
+        bitcoin_transaction: Option<serde_json::Value>,
+        #[serde(default)]
+        bitcoin_attempts: Option<serde_json::Value>,
+        #[serde(default)]
+        split: Option<V8Split>,
+    }
+    let error = serde_json::from_str::<V8Intent>(&text).err().unwrap();
+    assert!(
+        error.to_string().contains("unknown field `kind`"),
+        "{}",
+        error
+    );
+    assert_ne!(
+        json["version"], 8,
+        "the version-8 validator refuses any other version"
+    );
+
+    // A two-step journal, written and rewritten by this binary, is still the
+    // version-8 shape that reader reads: no `kind` anywhere, version 8.
+    let two_step = Temp::new();
+    let mut c = create(&two_step, &step1, &signed1);
+    record(&mut c, &signed1);
+    refresh(
+        &mut c,
+        observation(
+            signed1.transaction().compute_txid(),
+            Bitcoin::Confirmed { depth: 6 },
+        ),
+    );
+    c.record_split_target(&context(), 3, target_script(3))
+        .unwrap();
+    drop(c);
+    let text = journal_text(&two_step);
+    assert_eq!(serde_json::from_str::<V8Intent>(&text).unwrap().version, 8);
+    assert!(!text.contains("kind"), "{}", text);
+    let c = reopen(&two_step, &step1).unwrap();
+    assert_eq!(c.recorded_split().unwrap().unwrap().kind, SplitKind::Split);
+}
+
+/// B4b-1b: `validate` refuses a fork-only record with any of the two-step
+/// shape (a `bitcoin_transaction`, a step 1, a signed or tracked txid, a
+/// Bitcoin confirmation or attempt, a destination, phase Intent), one
+/// without its target or sweep, one at version 8 or claiming to be two-step;
+/// and a two-step record in the fork-only shape, at version 9, or claiming
+/// to be fork-only.
+#[test]
+fn unified_record_validate_refuses_split_shape_and_vice_versa() {
+    let wallet = make_wallet(Shape::Wpkh, 1);
+    let target = target_script(5);
+    let sweep = unified_sweep(&wallet, &target, 2);
+    let temp = Temp::new();
+    let base = create_unified(&temp, &wallet, &sweep, &target, context())
+        .intent
+        .clone();
+    full_validate(&base).unwrap();
+    let (_, step1, signed1) = setup(Shape::Wpkh);
+    let two_step = Temp::new();
+    let split_base = create(&two_step, &step1, &signed1).intent.clone();
+    full_validate(&split_base).unwrap();
+    let check = |base: &Intent, change: &dyn Fn(&mut Intent)| {
+        let mut next = base.clone();
+        change(&mut next);
+        full_validate(&next).err()
+    };
+    type Change = Box<dyn Fn(&mut Intent)>;
+    let signed_step1 = signed1.transaction().clone();
+    let step1_tx = step1.psbt().unsigned_tx.clone();
+    let txid = signed_step1.compute_txid();
+    let fork_only: Vec<(&str, Change)> = vec![
+        (
+            "with a bitcoin_transaction",
+            Box::new(move |i| i.bitcoin_transaction = Some(signed_step1.clone())),
+        ),
+        (
+            "with a step 1",
+            Box::new(move |i| {
+                i.plan.step1 = step1_tx.clone();
+                i.unsigned_digest = digest(&i.plan.step1);
+            }),
+        ),
+        (
+            "with a step 1 that is empty but not the canonical empty transaction",
+            Box::new(|i| {
+                i.plan.step1.lock_time = LockTime::from_height(1).unwrap();
+                i.unsigned_digest = digest(&i.plan.step1);
+            }),
+        ),
+        (
+            "without a target",
+            Box::new(|i| {
+                let record = i.split.as_mut().unwrap();
+                record.target_index = None;
+                record.target_script = None;
+            }),
+        ),
+        ("at version 8", Box::new(|i| i.version = 8)),
+        ("in phase Intent", Box::new(|i| i.phase = Phase::Intent)),
+        (
+            "in phase BroadcastUncertain",
+            Box::new(|i| i.phase = Phase::BroadcastUncertain),
+        ),
+        (
+            "with a signed txid",
+            Box::new(move |i| i.signed_txid = Some(txid)),
+        ),
+        (
+            "with a tracked txid",
+            Box::new(move |i| i.plan.tracked_txid = Some(txid)),
+        ),
+        (
+            "with a Bitcoin confirmation",
+            Box::new(|i| {
+                i.plan.previous_confirmation = Some(BlockRef {
+                    height: 100,
+                    hash: hash(4),
+                })
+            }),
+        ),
+        (
+            "with a Bitcoin attempt",
+            Box::new(|i| {
+                i.bitcoin_attempts
+                    .push(BitcoinSubmissionAttempt { wtxid: None })
+            }),
+        ),
+        (
+            "with a destination",
+            Box::new(|i| i.split.as_mut().unwrap().destination = 5),
+        ),
+        ("without its sweep", Box::new(|i| i.fork_sweep = None)),
+        (
+            "whose sweep does not spend exactly the claimed prevouts",
+            Box::new(|i| {
+                i.plan.claimed_prevouts.pop();
+            }),
+        ),
+        (
+            "with no claimed prevouts",
+            Box::new(|i| i.plan.claimed_prevouts.clear()),
+        ),
+        (
+            "with a Bitcoin cube",
+            Box::new(|i| i.identity.bitcoin_cube = "btc".into()),
+        ),
+        (
+            "claiming to be two-step",
+            Box::new(|i| i.split.as_mut().unwrap().kind = SplitKind::Split),
+        ),
+        (
+            "claiming to be two-step at version 8",
+            Box::new(|i| {
+                i.version = 8;
+                i.split.as_mut().unwrap().kind = SplitKind::Split;
+            }),
+        ),
+    ];
+    for (name, change) in &fork_only {
+        assert!(
+            check(&base, &**change).is_some(),
+            "a fork-only record {}",
+            name
+        );
+    }
+    let two_step: Vec<(&str, Change)> = vec![
+        (
+            "in the fork-only shape",
+            Box::new(|i| {
+                i.plan.step1 = empty_step1();
+                i.unsigned_digest = digest(&i.plan.step1);
+                i.plan.tracked_txid = None;
+                i.bitcoin_transaction = None;
+                i.signed_txid = None;
+                i.phase = Phase::Tracking;
+            }),
+        ),
+        ("at version 9", Box::new(|i| i.version = 9)),
+        (
+            "claiming to be fork-only",
+            Box::new(|i| i.split.as_mut().unwrap().kind = SplitKind::Unified),
+        ),
+        (
+            "claiming to be fork-only at version 9",
+            Box::new(|i| {
+                i.version = 9;
+                i.split.as_mut().unwrap().kind = SplitKind::Unified;
+            }),
+        ),
+    ];
+    for (name, change) in &two_step {
+        assert!(
+            check(&split_base, &**change).is_some(),
+            "a two-step record {}",
+            name
+        );
+    }
+}
+
+/// B4b-1b: a fork-only record whose submission is recorded reconciles
+/// through the step-2 path. The step-2 reconciler's reopen reads exactly
+/// these: the identity, a journal that validates, a recorded fork
+/// submission, a Split record, the Bitcoin chain, and a recorded signed
+/// step 2 whose txid is the submission's. (Its own `open` is named only in
+/// `fork::split`, by that module's D1 guard, so the test that calls it on
+/// this record lives there: `fork::split::tests::step2::unified_journal`.)
+/// The journal then takes
+/// the reconcile's writes in their order: no return hold (no attempt
+/// returned), a check whose step-1-centric assessment is inert (there is no
+/// step 1 to assess), then the sighting of the recorded txid, which
+/// survives reopen. It is never a step-2 dead end, even in the state that
+/// is one for a two-step record: that close checks a step 1 the record does
+/// not have, and its close is B4b-3's decision.
+#[test]
+fn unified_record_reconciles_through_the_step2_path() {
+    let ctx = context();
+    let wallet = make_wallet(Shape::WshMulti, 1);
+    let target = target_script(5);
+    let sweep = unified_sweep(&wallet, &target, 2);
+    let temp = Temp::new();
+    drop(create_unified(&temp, &wallet, &sweep, &target, ctx.clone()));
+    let mut c = reopen_unified(&temp, &wallet, ctx.clone()).unwrap();
+    // Nothing to reconcile before a submission is recorded.
+    assert_eq!(c.recorded_fork_submission(), None);
+    assert_eq!(c.recorded_split_step2(), None);
+    c.revalidate_unified_construction(&ctx, unified_construction(&wallet, &sweep, 5, &target))
+        .unwrap();
+    let verified = sign_step2(&wallet, &sweep);
+    let signed = verified.transaction().clone();
+    c.record_unified_broadcast_intent(&ctx, ChainId::BitcoinBlake2b, &signed)
+        .unwrap();
+    assert!(!c.split_step2_dead_end());
+    drop(c);
+    // What the reconciler's reopen reads.
+    let c = Controller::reopen_settling_blocking(
+        &temp.0,
+        &split_identity(TARGET.into(), wallet.source.digest()),
+        ctx.clone(),
+    )
+    .unwrap();
+    let submission = c.recorded_fork_submission().unwrap();
+    assert!(c.recorded_split().unwrap().is_some());
+    assert_eq!(c.plan().bitcoin_chain, ChainId::Bitcoin);
+    assert_eq!(
+        c.recorded_split_step2().map(|tx| tx.compute_txid()),
+        Some(submission.txid())
+    );
+    assert_eq!(submission.wtxid(), signed.compute_wtxid());
+    drop(c);
+
+    // The journal side of the reconcile, on the reopened record.
+    let mut c = reopen_unified(&temp, &wallet, ctx.clone()).unwrap();
+    assert!(c.hold_split_step2_return(&ctx).unwrap().is_none());
+    let ticket = c.begin_check(&ctx).unwrap();
+    let status = c
+        .apply_observation(
+            ticket,
+            &ctx,
+            Ok(observation(signed.compute_txid(), Bitcoin::Absent)),
+            policy(),
+            10_000,
+        )
+        .unwrap();
+    assert_eq!(status, Status::Observation(Assessment::InvalidPlan));
+    assert_eq!(c.phase(), Phase::Tracking);
+    // The sighting must be of the recorded txid.
+    assert!(matches!(
+        c.record_split_step2_observed(
+            &ctx,
+            TransactionObservation::Unconfirmed {
+                txid: Txid::from_byte_array([9; 32])
+            }
+        ),
+        Err(Error::InvalidPlan)
+    ));
+    assert!(!c.split_step2_observed());
+    c.record_split_step2_observed(
+        &ctx,
+        TransactionObservation::Unconfirmed {
+            txid: signed.compute_txid(),
+        },
+    )
+    .unwrap();
+    assert!(c.split_step2_observed());
+    assert!(!c.split_step2_dead_end());
+    drop(c);
+    let c = reopen_unified(&temp, &wallet, ctx).unwrap();
+    assert!(c.split_step2_observed());
+    assert_eq!(c.recorded_split_step2(), Some(&signed));
+    // The same journal state of a two-step record is a dead end.
+    let (_temp, two_step, ..) = submitted();
+    assert!(two_step.split_step2_dead_end());
+}
+
+/// B4b-1b limitation, pinned: the step-2 observation path (`collect_sweep`,
+/// which the step-2 reconciler's `reconcile_sweep` runs) refuses a fork-only
+/// plan before any read, since it is step-1-centric (the claimed prevouts
+/// must be the step 1's inputs and the step 1 must carry the poison). So the
+/// reconciler reopens a fork-only record but cannot yet reconcile it; the
+/// fork-only reconcile is B4b-3's. Lifting this is a deliberate change.
+#[tokio::test]
+async fn step2_observation_path_refuses_a_fork_only_plan() {
+    use crate::services::claim_observation::{
+        collect_sweep, CollectionContext, FailureKind, FreshRead, ObservationSource, Stage,
+    };
+    use crate::services::coincube::network_anchor::NetworkAnchorStatus;
+    struct Unreachable;
+    #[async_trait::async_trait]
+    impl ObservationSource for Unreachable {
+        fn now(&self) -> i64 {
+            unreachable!("no read is made")
+        }
+        async fn anchor(&self, _: ChainId) -> Result<NetworkAnchorStatus, FailureKind> {
+            unreachable!("no read is made")
+        }
+        async fn tip(&self, _: ChainId) -> Result<FreshRead<BlockRef>, FailureKind> {
+            unreachable!("no read is made")
+        }
+        async fn transaction(
+            &self,
+            _: ChainId,
+            _: Txid,
+        ) -> Result<FreshRead<TransactionObservation>, FailureKind> {
+            unreachable!("no read is made")
+        }
+        async fn hash_at_height(
+            &self,
+            _: ChainId,
+            _: u64,
+        ) -> Result<FreshRead<BlockHash>, FailureKind> {
+            unreachable!("no read is made")
+        }
+    }
+    let wallet = make_wallet(Shape::Wpkh, 1);
+    let target = target_script(5);
+    let sweep = unified_sweep(&wallet, &target, 2);
+    let temp = Temp::new();
+    let mut c = create_unified(&temp, &wallet, &sweep, &target, context());
+    let signed = sign_step2(&wallet, &sweep).transaction().clone();
+    c.record_unified_broadcast_intent(&context(), ChainId::BitcoinBlake2b, &signed)
+        .unwrap();
+    let (_sender, generation) = tokio::sync::watch::channel(1u64);
+    let failure = collect_sweep(
+        &Unreachable,
+        &c.plan(),
+        signed.compute_txid(),
+        policy(),
+        std::time::Duration::from_secs(5),
+        CollectionContext {
+            expected_generation: 1,
+            generation,
+        },
+    )
+    .await
+    .err()
+    .unwrap();
+    assert!(
+        matches!(
+            (failure.stage, failure.kind),
+            (Stage::Plan, FailureKind::InvalidPlan)
+        ),
+        "{:?}",
+        failure
+    );
+}
+
+/// B4b-1b: a fork-only record's abandonment is B4b-3's decision. The
+/// journal refuses it before and after a submission, and keeps the record;
+/// nor is the record ever a step-2 dead end to close.
+#[test]
+fn unified_record_abandon_is_refused() {
+    let wallet = make_wallet(Shape::Pkh, 1);
+    let target = target_script(5);
+    let sweep = unified_sweep(&wallet, &target, 2);
+    let temp = Temp::new();
+    let c = create_unified(&temp, &wallet, &sweep, &target, context());
+    // Fresh, nothing sent: still refused, and kept.
+    assert!(matches!(c.abandon_split(&context()), Err(Error::Conflict)));
+    assert!(temp.0.join("intent.json").exists());
+    let c = reopen_unified(&temp, &wallet, context()).unwrap();
+    assert!(matches!(c.abandon_split(&context()), Err(Error::Conflict)));
+    let mut c = reopen_unified(&temp, &wallet, context()).unwrap();
+    c.revalidate_unified_construction(
+        &context(),
+        unified_construction(&wallet, &sweep, 5, &target),
+    )
+    .unwrap();
+    let verified = sign_step2(&wallet, &sweep);
+    c.record_unified_broadcast_intent(&context(), ChainId::BitcoinBlake2b, verified.transaction())
+        .unwrap();
+    assert!(!c.split_step2_dead_end());
+    assert!(matches!(c.abandon_split(&context()), Err(Error::Conflict)));
+    let c = reopen_unified(&temp, &wallet, context()).unwrap();
+    assert_eq!(c.recorded_split_step2(), Some(verified.transaction()));
+    assert!(!c.split_step2_dead_end());
+    // A revoked session refuses too, as for a two-step record.
+    let mut other = context();
+    other.generation = 2;
+    assert!(matches!(c.abandon_split(&other), Err(Error::Revoked)));
+    assert!(temp.0.join("intent.json").exists());
+}
+
+/// B4b-1b: a fork-only record refuses every two-step writer (the step-1
+/// revalidation, binding and submission, the descriptor deletion, the
+/// reservation it already holds and its replacement, the step-2 record,
+/// submission and resend), and a two-step record refuses the fork-only
+/// writers at every phase. Neither refusal disturbs the record.
+#[test]
+fn unified_and_two_step_writers_refuse_each_others_record() {
+    let wallet = make_wallet(Shape::ShWpkh, 1);
+    let target = target_script(5);
+    let sweep = unified_sweep(&wallet, &target, 2);
+    let temp = Temp::new();
+    let mut c = create_unified(&temp, &wallet, &sweep, &target, context());
+    let (other_wallet, step1, signed1) = setup(Shape::ShWpkh);
+    assert!(matches!(
+        c.revalidate_split_construction(&context(), &step1, FORK),
+        Err(Error::WrongIdentity)
+    ));
+    assert!(matches!(
+        c.bind_recovered_split_transaction(&context(), &signed1),
+        Err(Error::WrongIdentity)
+    ));
+    assert!(matches!(
+        c.record_split_broadcast_intent(&context(), &signed1, policy(), 10_000),
+        Err(Error::WrongIdentity)
+    ));
+    assert!(matches!(
+        c.forget_split_descriptors(&context()),
+        Err(Error::WrongIdentity)
+    ));
+    // Even the reservation it already holds: the target is fixed at creation.
+    assert!(matches!(
+        c.record_split_target(&context(), 5, target.clone()),
+        Err(Error::WrongIdentity)
+    ));
+    assert!(matches!(
+        c.replace_used_split_target(&context(), 5, 6, target_script(6)),
+        Err(Error::WrongIdentity)
+    ));
+    let step2_construction = step2(&other_wallet, &step1, &target, 2);
+    assert!(matches!(
+        c.prepare_split_step2(&context(), &step2_construction, policy(), 10_000),
+        Err(Error::WrongIdentity)
+    ));
+    let verified2 = sign_step2(&other_wallet, &step2_construction);
+    assert!(matches!(
+        c.record_split_step2_broadcast_intent(&context(), &verified2, policy(), 10_000),
+        Err(Error::WrongIdentity)
+    ));
+    assert!(matches!(
+        c.record_split_step2_resubmission(
+            &context(),
+            &verified2,
+            TransactionObservation::Absent,
+            Step2ReturnHold {
+                controller: 0,
+                resubmissions: 0,
+            },
+            policy(),
+            10_000
+        ),
+        Err(Error::WrongIdentity)
+    ));
+    // Undisturbed: still verified from creation, target and descriptors kept.
+    let recorded = c.recorded_split().unwrap().unwrap();
+    assert_eq!(recorded.target_index, Some(5));
+    assert_eq!(recorded.source.as_ref(), Some(&wallet.source));
+    c.record_unified_broadcast_intent(
+        &context(),
+        ChainId::BitcoinBlake2b,
+        sign_step2(&wallet, &sweep).transaction(),
+    )
+    .unwrap();
+
+    // The reverse, at every phase of a two-step record.
+    let two_step = Temp::new();
+    let mut c = create(&two_step, &step1, &signed1);
+    let other_sweep = unified_sweep(&other_wallet, &target, 2);
+    let other_signed = sign_step2(&other_wallet, &other_sweep)
+        .transaction()
+        .clone();
+    let tracked = signed1.transaction().compute_txid();
+    for phase in [Phase::Intent, Phase::BroadcastUncertain, Phase::Tracking] {
+        assert_eq!(c.phase(), phase);
+        assert!(matches!(
+            c.revalidate_unified_construction(
+                &context(),
+                unified_construction(&other_wallet, &other_sweep, 5, &target)
+            ),
+            Err(Error::WrongIdentity)
+        ));
+        assert!(matches!(
+            c.record_unified_broadcast_intent(&context(), ChainId::BitcoinBlake2b, &other_signed),
+            Err(Error::WrongIdentity)
+        ));
+        match phase {
+            Phase::Intent => record(&mut c, &signed1),
+            Phase::BroadcastUncertain => {
+                refresh(
+                    &mut c,
+                    observation(tracked, Bitcoin::Confirmed { depth: 6 }),
+                );
+            }
+            Phase::Tracking => {}
+        }
+    }
+    // Undisturbed: the two-step flow continues (verified from creation).
+    assert_eq!(c.recorded_fork_submission(), None);
+    c.record_split_target(&context(), 5, target.clone())
+        .unwrap();
+}
+
+/// B4b-1b: creation refuses a sweep that is not the shape it records (a
+/// second output, another target, the Bitcoin chain, no fork height) and
+/// writes nothing. After a restart the construction is unverified until the
+/// exact rebuild is checked; a different sweep, chain, source, fork height
+/// or target refuses and leaves it unverified. The submission takes exactly
+/// the recorded sweep, signed on every input, on the record's fork chain,
+/// once, in the same session.
+#[test]
+fn unified_submission_needs_a_revalidated_exact_construction() {
+    let wallet = make_wallet(Shape::WshMulti, 1);
+    let target = target_script(5);
+    let sweep = unified_sweep(&wallet, &target, 2);
+    let temp = Temp::new();
+    let good = unified_construction(&wallet, &sweep, 5, &target);
+    let mut two_outputs = sweep.psbt().unsigned_tx.clone();
+    two_outputs.output.push(two_outputs.output[0].clone());
+    let elsewhere = target_script(6);
+    let create = |construction: UnifiedConstruction<'_>| {
+        Controller::create_unified_split(&temp.0, TARGET.into(), construction, context()).err()
+    };
+    for (name, wrong) in [
+        (
+            "a second output",
+            UnifiedConstruction {
+                unsigned: &two_outputs,
+                ..good
+            },
+        ),
+        (
+            "another target than the sweep pays",
+            UnifiedConstruction {
+                target_script: &elsewhere,
+                ..good
+            },
+        ),
+        (
+            "the Bitcoin chain",
+            UnifiedConstruction {
+                chain: ChainId::Bitcoin,
+                ..good
+            },
+        ),
+        (
+            "no fork height",
+            UnifiedConstruction {
+                fork_height: 0,
+                ..good
+            },
+        ),
+        (
+            "a target that is not P2WSH or P2TR",
+            UnifiedConstruction {
+                target_script: sweep.psbt().inputs[0]
+                    .witness_utxo
+                    .as_ref()
+                    .map(|o| o.script_pubkey.as_script())
+                    .unwrap(),
+                ..good
+            },
+        ),
+    ] {
+        assert!(
+            matches!(create(wrong), Some(Error::InvalidPlan)),
+            "{}",
+            name
+        );
+        assert!(!temp.0.join("intent.json").exists(), "{}", name);
+    }
+    drop(create_unified(&temp, &wallet, &sweep, &target, context()));
+
+    let mut c = reopen_unified(&temp, &wallet, context()).unwrap();
+    let verified = sign_step2(&wallet, &sweep);
+    let signed = verified.transaction().clone();
+    assert!(matches!(
+        c.record_unified_broadcast_intent(&context(), ChainId::BitcoinBlake2b, &signed),
+        Err(Error::Unchecked)
+    ));
+    let other_sweep = unified_sweep(&wallet, &target, 3);
+    let other_wallet = make_wallet(Shape::WshMulti, 7);
+    for (name, wrong) in [
+        (
+            "another sweep",
+            UnifiedConstruction {
+                unsigned: &other_sweep.psbt().unsigned_tx,
+                ..good
+            },
+        ),
+        (
+            "another chain",
+            UnifiedConstruction {
+                chain: ChainId::BitcoinBlake2bTestnet4,
+                ..good
+            },
+        ),
+        (
+            "another source",
+            UnifiedConstruction {
+                source: &other_wallet.source,
+                ..good
+            },
+        ),
+        (
+            "another fork height",
+            UnifiedConstruction {
+                fork_height: FORK + 1,
+                ..good
+            },
+        ),
+        (
+            "another target index",
+            UnifiedConstruction {
+                target_index: 6,
+                ..good
+            },
+        ),
+        (
+            "another target script",
+            UnifiedConstruction {
+                target_script: &elsewhere,
+                ..good
+            },
+        ),
+    ] {
+        assert!(
+            matches!(
+                c.revalidate_unified_construction(&context(), wrong),
+                Err(Error::WrongIdentity)
+            ),
+            "{}",
+            name
+        );
+        assert!(
+            matches!(
+                c.record_unified_broadcast_intent(&context(), ChainId::BitcoinBlake2b, &signed),
+                Err(Error::Unchecked)
+            ),
+            "{}",
+            name
+        );
+    }
+    c.revalidate_unified_construction(&context(), good).unwrap();
+    // Exactly the recorded sweep, signed on every input, on the fork chain.
+    let other_signed = sign_step2(&wallet, &other_sweep).transaction().clone();
+    let mut half = signed.clone();
+    half.input[1].witness.clear();
+    for (name, chain, tx) in [
+        ("another sweep", ChainId::BitcoinBlake2b, &other_signed),
+        ("an input left unsigned", ChainId::BitcoinBlake2b, &half),
+        ("the Bitcoin chain", ChainId::Bitcoin, &signed),
+        (
+            "the unsigned sweep",
+            ChainId::BitcoinBlake2b,
+            &sweep.psbt().unsigned_tx,
+        ),
+    ] {
+        assert!(
+            matches!(
+                c.record_unified_broadcast_intent(&context(), chain, tx),
+                Err(Error::InvalidPlan)
+            ),
+            "{}",
+            name
+        );
+        assert_eq!(c.recorded_fork_submission(), None, "{}", name);
+    }
+    // A revoked session refuses.
+    let mut other = context();
+    other.generation = 2;
+    assert!(matches!(
+        c.record_unified_broadcast_intent(&other, ChainId::BitcoinBlake2b, &signed),
+        Err(Error::Revoked)
+    ));
+    drop(c);
+    let mut c = reopen_unified(&temp, &wallet, context()).unwrap();
+    c.revalidate_unified_construction(&context(), good).unwrap();
+    c.record_unified_broadcast_intent(&context(), ChainId::BitcoinBlake2b, &signed)
+        .unwrap();
+    // Never twice.
+    assert!(matches!(
+        c.record_unified_broadcast_intent(&context(), ChainId::BitcoinBlake2b, &signed),
+        Err(Error::Conflict)
+    ));
+    assert_eq!(c.recorded_split_step2(), Some(&signed));
 }
