@@ -330,8 +330,11 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
                 body = body.push(p1_regular(if confirmations >= MIN_CONFIRMATIONS {
                     if panel.can_enter_step2() {
                         "Step 1 has the confirmations step 2 needs. Continue to step 2 on Bitcoin Blake2b.".to_string()
+                    } else if let Some(copy) = panel.step2_unavailable_copy() {
+                        // S3-D4: why there is no step-2 port.
+                        copy.to_string()
                     } else {
-                        "Step 1 has the confirmations step 2 needs. Step 2 needs this Vault's wallet engine running; the split stays recorded on this device.".to_string()
+                        "Step 1 has the confirmations step 2 needs; the split stays recorded on this device.".to_string()
                     }
                 } else {
                     format!(

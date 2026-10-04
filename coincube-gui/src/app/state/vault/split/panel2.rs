@@ -132,6 +132,21 @@ impl SplitPanel {
     pub fn step2_available(&self) -> bool {
         self.step2_port.is_some()
     }
+    /// Record why the App's port build gave no step-2 port (S3-D4).
+    pub fn note_step2_unavailable(&mut self, reason: Option<step2::Step2Unavailable>) {
+        self.step2_missing = reason;
+    }
+    /// Why step 2 can't be entered for want of a step-2 port, in words; with
+    /// no reason recorded, the Vault daemon is missing.
+    pub fn step2_unavailable_copy(&self) -> Option<&'static str> {
+        if self.step2_port.is_some() {
+            return None;
+        }
+        Some(step2::unavailable_copy(
+            self.step2_missing
+                .unwrap_or(step2::Step2Unavailable::NoDaemon),
+        ))
+    }
     /// A recorded step 2 can be reconciled under the current session.
     pub fn reconcile_available(&self) -> bool {
         self.recon_port.is_some()

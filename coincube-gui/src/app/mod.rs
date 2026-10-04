@@ -822,6 +822,14 @@ pub struct App {
     /// already has a Split journal (see [`discover_split_panel`]). Shown as an
     /// overlay; nothing in the GUI starts a new split before B5 (D1).
     split_panel: Option<Box<state::vault::split::SplitPanel>>,
+    /// #625 F3c: the Split ports are built in a task. Each refresh, and each
+    /// revocation, moves this; a build that lands under an older value is
+    /// dropped.
+    split_port_seq: u64,
+    /// The session (origin, token, account) the last port build was for: a
+    /// refresh under another one revokes the panel at once, before its ports
+    /// are built.
+    split_port_session: Option<(String, Option<String>, String)>,
     /// Whether the Split panel may build step 2 on `daemon` (#637 batch 4):
     /// `Ready` unless a backend switch is in flight, failed with nothing
     /// recovered, or panicked with a possibly stopped daemon retained. Only
@@ -992,34 +1000,61 @@ fn discover_split_panel(
 /// step-1 Connect side, the step-2 submission side and the reconcile-only
 /// step-2 side. Only submission needs the Vault daemon, and only on a route
 /// step 2 can be sent through (#637 R2). Reconciliation and the restart
-/// decision need the session alone (#637 R1).
-type SplitPorts = (
-    Option<Arc<dyn state::vault::split::step1::SplitConnect>>,
-    Option<Arc<dyn state::vault::split::step2::Step2Port>>,
-    Option<Arc<dyn state::vault::split::step2::ReconPort>>,
-);
+/// decision need the session alone (#637 R1). With a session but no step-2
+/// port, why not (S3-D4).
+pub struct SplitPorts {
+    connect: Option<Arc<dyn state::vault::split::step1::SplitConnect>>,
+    step2: Option<Arc<dyn state::vault::split::step2::Step2Port>>,
+    recon: Option<Arc<dyn state::vault::split::step2::ReconPort>>,
+    step2_missing: Option<state::vault::split::step2::Step2Unavailable>,
+}
+impl std::fmt::Debug for SplitPorts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SplitPorts")
+            .field("connect", &self.connect.is_some())
+            .field("step2", &self.step2.is_some())
+            .field("recon", &self.recon.is_some())
+            .field("step2_missing", &self.step2_missing)
+            .finish()
+    }
+}
+/// Blocking (#625 F3c): each port builds clients (`reqwest` among them), so
+/// the App calls it only inside `spawn_blocking`.
 fn split_ports(
     session: Option<state::vault::claim::ConnectSession>,
-    generation: &tokio::sync::watch::Sender<u64>,
+    generation: tokio::sync::watch::Receiver<u64>,
     daemon: Option<Arc<dyn Daemon + Sync + Send>>,
 ) -> SplitPorts {
     use state::vault::split::{step1, step2};
-    let step2 = session.clone().and_then(|session| {
-        step2::ProductionStep2::new(session, generation.subscribe(), daemon?)
-            .ok()
-            .map(|port| Arc::new(port) as Arc<dyn step2::Step2Port>)
-    });
+    let (step2, step2_missing) = match (session.clone(), daemon) {
+        (None, _) => (None, None),
+        (Some(_), None) => (None, Some(step2::Step2Unavailable::NoDaemon)),
+        (Some(session), Some(daemon)) => {
+            match step2::ProductionStep2::new(session, generation.clone(), daemon) {
+                Ok(port) => (Some(Arc::new(port) as Arc<dyn step2::Step2Port>), None),
+                Err(crate::services::claim_coordinator::Error::Unsupported) => {
+                    (None, Some(step2::Step2Unavailable::UnsupportedRoute))
+                }
+                Err(_) => (None, Some(step2::Step2Unavailable::Refused)),
+            }
+        }
+    };
     let recon = session.clone().and_then(|session| {
-        step2::ProductionRecon::new(session, generation.subscribe())
+        step2::ProductionRecon::new(session, generation.clone())
             .ok()
             .map(|port| Arc::new(port) as Arc<dyn step2::ReconPort>)
     });
     let connect = session.and_then(|session| {
-        step1::ProductionConnect::new(session, generation.subscribe())
+        step1::ProductionConnect::new(session, generation)
             .ok()
             .map(|connect| Arc::new(connect) as Arc<dyn step1::SplitConnect>)
     });
-    (connect, step2, recon)
+    SplitPorts {
+        connect,
+        step2,
+        recon,
+        step2_missing,
+    }
 }
 
 /// How long a Split reservation waits for the daemon's first successful poll
@@ -2904,7 +2939,6 @@ impl App {
         };
         cache.btcb2_claim_resume = fork_claim_handoff.is_some();
         let split_intent = split_intent::take_for_open(&cube_settings.id, cube_settings.network);
-        let split_panel = discover_split_panel(&data_dir, &cube_settings, &wallet);
         // Connect blinding (PR D3): derive the Cube's encryption key once from
         // the master signer the unlock already loaded, so every surface that
         // opens a Connect-served key can do so without re-prompting for a PIN.
@@ -3034,7 +3068,11 @@ impl App {
             loading_fork_claim: None,
             split_handoff: split_intent.map(SplitHandoff::Waiting),
             split_handoff_generation: 0,
-            split_panel,
+            // Discovered off the UI thread (#625 F3a): see
+            // `split_discovery_task`.
+            split_panel: None,
+            split_port_seq: 0,
+            split_port_session: None,
             split_backend: state::vault::claim::BackendState::Ready,
             panels: Box::new(panels),
             cache: cache_with_vault,
@@ -3087,7 +3125,36 @@ impl App {
         // valid claim source now that its Vault and the account grant are
         // known. A card press is a request, not a permission.
         let claim = app.start_pending_claim();
-        (app, Task::batch([cmd, backfill, claim]))
+        let split = app.split_discovery_task();
+        (app, Task::batch([cmd, backfill, claim, split]))
+    }
+
+    /// #625 F3a: look for a Split journal off the UI thread (a directory
+    /// read and two `symlink_metadata` calls per entry). The result is
+    /// installed by [`Message::SplitDiscovered`] for this Cube and Vault
+    /// only, and only while no panel is present.
+    fn split_discovery_task(&self) -> Task<Message> {
+        let Some(wallet) = self.wallet.clone() else {
+            return Task::none();
+        };
+        let (datadir, settings) = (self.datadir.clone(), self.cube_settings.clone());
+        Task::perform(
+            async move {
+                let (cube, id) = (settings.id.clone(), wallet.id());
+                let panel = tokio::task::spawn_blocking(move || {
+                    discover_split_panel(&datadir, &settings, &wallet)
+                })
+                .await
+                .ok()
+                .flatten();
+                (cube, id, panel)
+            },
+            |(cube, wallet, panel)| Message::SplitDiscovered {
+                cube,
+                wallet,
+                panel,
+            },
+        )
     }
 
     pub fn new_without_wallet(
@@ -3213,6 +3280,8 @@ impl App {
                 split_handoff: None,
                 split_handoff_generation: 0,
                 split_panel: None,
+                split_port_seq: 0,
+                split_port_session: None,
                 split_backend: state::vault::claim::BackendState::Ready,
                 panels: Box::new(panels),
                 cache,
@@ -3784,7 +3853,10 @@ impl App {
 
     /// Hand the Split panel the bound Connect session (the admitted fork
     /// client, still this tab's authenticated one) and let it continue its
-    /// journal. No session, or a different one, revokes its coordinator.
+    /// journal. No session, or a different one, revokes its coordinator at
+    /// once; the new session's ports are built in a task (#625 F3c) and
+    /// installed by [`Message::SplitPortsBuilt`], unless a later refresh or
+    /// a revocation came first.
     fn refresh_split_session(&mut self) -> Task<Message> {
         let session = self.fork_connect_client.clone().and_then(|bound| {
             let current = self.panels.connect.account.authenticated_client()?;
@@ -3797,21 +3869,78 @@ impl App {
                 account,
             })
         });
-        if self.split_panel.is_none() {
-            return Task::none();
-        }
-        // Step 2 goes through this Cube's Vault daemon, when one is loaded on
-        // an admitted route. A daemon or backend switch revokes the panel
-        // first (`revoke_claim`), and a new daemon gives a new port.
-        let (connect, step2, recon) =
-            split_ports(session, &self.panels.claim_generation, self.split_daemon());
         let Some(panel) = self.split_panel.as_mut() else {
             return Task::none();
         };
+        self.split_port_seq = self.split_port_seq.wrapping_add(1);
+        let key = session.as_ref().map(|session| {
+            (
+                session.client.base_url.clone(),
+                session.client.token().map(str::to_owned),
+                session.account.clone(),
+            )
+        });
+        if key.is_none() || key != self.split_port_session {
+            // Lost or changed: revoke now, not when the new ports land.
+            panel.set_connect(None);
+            panel.set_step2_port(None);
+            panel.set_recon_port(None);
+            panel.note_step2_unavailable(None);
+        }
+        self.split_port_session = key;
+        let Some(session) = session else {
+            return panel.begin();
+        };
+        // Step 2 goes through this Cube's Vault daemon, when one is loaded on
+        // an admitted route. A daemon or backend switch revokes the panel
+        // first (`revoke_claim`), and a new daemon gives a new port.
+        let (seq, generation, daemon) = (
+            self.split_port_seq,
+            self.panels.claim_generation.subscribe(),
+            self.split_daemon(),
+        );
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || split_ports(Some(session), generation, daemon))
+                    .await
+                    .ok()
+            },
+            move |ports| Message::SplitPortsBuilt(seq, ports.map(Box::new)),
+        )
+    }
+
+    /// #625 F3c: install the ports a refresh built, if no later refresh or
+    /// revocation came first, and let the panel continue.
+    fn install_split_ports(&mut self, seq: u64, ports: Option<Box<SplitPorts>>) -> Task<Message> {
+        if seq != self.split_port_seq {
+            return Task::none();
+        }
+        let Some(panel) = self.split_panel.as_mut() else {
+            return Task::none();
+        };
+        // A build that did not finish installs nothing: the next refresh
+        // builds again.
+        let Some(ports) = ports else {
+            return Task::none();
+        };
+        let SplitPorts {
+            connect,
+            step2,
+            recon,
+            step2_missing,
+        } = *ports;
         panel.set_connect(connect);
         panel.set_step2_port(step2);
         panel.set_recon_port(recon);
+        panel.note_step2_unavailable(step2_missing);
         panel.begin()
+    }
+
+    /// Drop any Split port build in flight (#625 F3c): its result would be
+    /// for a revoked context.
+    fn drop_split_port_builds(&mut self) {
+        self.split_port_seq = self.split_port_seq.wrapping_add(1);
+        self.split_port_session = None;
     }
 
     /// The daemon a Split step-2 port may be built on (#637 batch 4): the
@@ -4179,6 +4308,7 @@ impl App {
     /// coordinator call also checks. The journaled claim itself survives:
     /// the panel re-binds it under the next context.
     pub fn revoke_claim(&mut self) {
+        self.drop_split_port_builds();
         if let Some(panel) = &mut self.split_panel {
             panel.revoke();
         }
@@ -5267,6 +5397,26 @@ impl App {
             Message::View(view::Message::DismissSplitReview) => {
                 self.revoke_split_handoff();
                 return Task::none();
+            }
+            Message::SplitDiscovered {
+                cube,
+                wallet,
+                panel,
+            } => {
+                // #625 F3a: only this Cube's Vault, and only once.
+                let ours = cube == self.cube_settings.id
+                    && self.wallet.as_ref().is_some_and(|w| w.id() == wallet);
+                if !ours || self.split_panel.is_some() {
+                    return Task::none();
+                }
+                let Some(panel) = panel else {
+                    return Task::none();
+                };
+                self.split_panel = Some(panel);
+                return self.refresh_split_session();
+            }
+            Message::SplitPortsBuilt(seq, ports) => {
+                return self.install_split_ports(seq, ports);
             }
             // Each is followed by the panel's deadline timer (S3 item 5).
             Message::Split(event) => {
@@ -7806,6 +7956,7 @@ impl App {
     pub fn invalidate_fork_session(&mut self) {
         if self.cache.chain().is_blake2b() {
             self.revoke_split_handoff();
+            self.drop_split_port_builds();
             if let Some(panel) = &mut self.split_panel {
                 panel.set_connect(None);
                 panel.revoke();
@@ -8919,25 +9070,39 @@ mod tests {
             })
         };
         let generation = tokio::sync::watch::channel(1).0;
-        let shape = |(connect, step2, recon): SplitPorts| {
-            (connect.is_some(), step2.is_some(), recon.is_some())
+        let shape = |ports: SplitPorts| {
+            (
+                ports.connect.is_some(),
+                ports.step2.is_some(),
+                ports.recon.is_some(),
+                ports.step2_missing,
+            )
         };
-        // (Connect, step 2, reconcile-only)
+        use state::vault::split::step2::Step2Unavailable;
+        // (Connect, step 2, reconcile-only, why no step 2: S3-D4)
         assert_eq!(
-            shape(split_ports(session(), &generation, None)),
-            (true, false, true)
+            shape(split_ports(session(), generation.subscribe(), None)),
+            (true, false, true, Some(Step2Unavailable::NoDaemon))
         );
         assert_eq!(
-            shape(split_ports(session(), &generation, Some(electrum))),
-            (true, false, true)
+            shape(split_ports(
+                session(),
+                generation.subscribe(),
+                Some(electrum)
+            )),
+            (true, false, true, Some(Step2Unavailable::UnsupportedRoute))
         );
         assert_eq!(
-            shape(split_ports(session(), &generation, Some(connect.clone()))),
-            (true, true, true)
+            shape(split_ports(
+                session(),
+                generation.subscribe(),
+                Some(connect.clone())
+            )),
+            (true, true, true, None)
         );
         assert_eq!(
-            shape(split_ports(None, &generation, Some(connect))),
-            (false, false, false)
+            shape(split_ports(None, generation.subscribe(), Some(connect))),
+            (false, false, false, None)
         );
     }
 
@@ -9020,6 +9185,12 @@ mod tests {
             None,
         );
         drop(startup);
+        // Discovery runs in a task (#625 F3a): nothing on construction.
+        assert!(app.split_panel.is_none());
+        for message in task_messages(app.split_discovery_task()) {
+            assert!(matches!(message, Message::SplitDiscovered { .. }));
+            drop(app.update(message));
+        }
         assert_eq!(app.split_panel.is_some(), journal);
         if session {
             let mut client =
@@ -9033,8 +9204,41 @@ mod tests {
             });
             app.fork_connect_client = Some(client);
         }
-        drop(app.refresh_split_session());
+        settle_split_ports(&mut app);
         app
+    }
+
+    /// Every output of `task`, run to completion on a fresh runtime. Only
+    /// for tasks that make no network call.
+    fn task_messages(task: Task<Message>) -> Vec<Message> {
+        use iced::futures::StreamExt;
+        let Some(stream) = iced_runtime::task::into_stream(task) else {
+            return Vec::new();
+        };
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(
+                stream
+                    .filter_map(|action| async move {
+                        match action {
+                            iced_runtime::Action::Output(message) => Some(message),
+                            _ => None,
+                        }
+                    })
+                    .collect(),
+            )
+    }
+
+    /// A Connect refresh with its port build run (#625 F3c), as the App
+    /// would see it land. The panel's own task after the install (its
+    /// restart over Connect) is dropped, as before the build moved.
+    fn settle_split_ports(app: &mut App) {
+        for message in task_messages(app.refresh_split_session()) {
+            assert!(matches!(message, Message::SplitPortsBuilt(..)));
+            drop(app.update(message));
+        }
     }
 
     /// (step-2 port, reconcile-only port) the Split panel holds.
@@ -9057,8 +9261,13 @@ mod tests {
         let root = std::env::temp_dir().join(format!("split-rebind-{}", uuid::Uuid::new_v4()));
         let mut app = split_app(&root, true, true);
         assert_eq!(split_ports_held(&app), (true, true));
+        // Each outcome refreshes the Split ports (the build sequence moves);
+        // the build is then run as a refresh lands it (#625 F3c).
         let restart = |app: &mut App, outcome: DaemonRestart| {
+            let seq = app.split_port_seq;
             drop(app.update(Message::DaemonRestarted(outcome)));
+            assert_ne!(app.split_port_seq, seq, "the restart refreshed Split");
+            settle_split_ports(app);
         };
         let failure = || Error::Config("synthetic switch failure".into());
         use state::vault::claim::BackendState;
@@ -9087,7 +9296,7 @@ mod tests {
         );
         assert_eq!(app.split_backend, BackendState::Unavailable);
         assert_eq!(split_ports_held(&app), (false, true));
-        drop(app.refresh_split_session());
+        settle_split_ports(&mut app);
         assert_eq!(split_ports_held(&app), (false, true));
         // Failed but recovered on an admitted daemon: step 2 again.
         restart(
@@ -9109,7 +9318,7 @@ mod tests {
         assert_eq!(app.split_backend, BackendState::Unknown);
         assert_eq!(split_ports_held(&app), (false, true));
         for _ in 0..2 {
-            drop(app.refresh_split_session());
+            settle_split_ports(&mut app);
             assert_eq!(split_ports_held(&app), (false, true), "later refresh");
         }
         assert_eq!(*app.panels.claim_generation.borrow(), generation);
@@ -9119,6 +9328,129 @@ mod tests {
             DaemonRestart::Started(split_backend_daemon(&root, true)),
         );
         assert_eq!(split_ports_held(&app), (true, true));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// #625 F3a: Split journal discovery runs in a task, not in
+    /// construction, and its result is installed only for this Cube and
+    /// Vault and only while no panel is present.
+    #[test]
+    fn split_discovery_runs_off_the_ui_thread_and_installs_once() {
+        let _guard = crate::app::session::test_guard();
+        let root = std::env::temp_dir().join(format!("split-discover-{}", uuid::Uuid::new_v4()));
+        // `split_app` asserts no panel on construction, then runs discovery.
+        let mut app = split_app(&root, true, false);
+        let first = app
+            .split_panel
+            .as_deref()
+            .map(|panel| panel as *const state::vault::split::SplitPanel);
+        assert!(first.is_some());
+        // A second discovery's result does not replace the panel.
+        let again = task_messages(app.split_discovery_task());
+        assert_eq!(again.len(), 1);
+        for message in again {
+            drop(app.update(message));
+        }
+        assert_eq!(
+            app.split_panel
+                .as_deref()
+                .map(|panel| panel as *const state::vault::split::SplitPanel),
+            first
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+
+        // Another Cube's or another Vault's result is not installed.
+        let root = std::env::temp_dir().join(format!("split-discover-{}", uuid::Uuid::new_v4()));
+        let mut app = split_app(&root, false, false);
+        let found = |app: &App| {
+            discover_split_panel(
+                &app.datadir,
+                &app.cube_settings,
+                app.wallet.as_ref().unwrap(),
+            )
+        };
+        let wallet = app.wallet.as_ref().unwrap().id();
+        let directory = state::vault::split::step1::journal_directory(
+            &state::vault::split::step1::journal_root(&app.datadir, &wallet),
+            coincube_core::miniscript::bitcoin::hashes::Hash::hash(b"source"),
+        );
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("intent.json"), b"{}").unwrap();
+        assert!(found(&app).is_some());
+        let mut other_wallet = wallet.clone();
+        other_wallet.descriptor_checksum = "otherchk".into();
+        for (cube, wallet) in [
+            ("another-cube".to_string(), wallet.clone()),
+            (app.cube_settings.id.clone(), other_wallet),
+        ] {
+            drop(app.update(Message::SplitDiscovered {
+                cube,
+                wallet,
+                panel: found(&app),
+            }));
+            assert!(app.split_panel.is_none());
+        }
+        let cube = app.cube_settings.id.clone();
+        drop(app.update(Message::SplitDiscovered {
+            cube,
+            wallet,
+            panel: found(&app),
+        }));
+        assert!(app.split_panel.is_some());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// #625 F3c: the Split ports are built in a task. A lost session revokes
+    /// the panel at once, before any build; a build that lands after a
+    /// revocation (`revoke_claim`) or after a newer refresh is dropped.
+    #[test]
+    fn split_ports_are_built_in_a_task_and_a_stale_build_is_dropped() {
+        let _guard = crate::app::session::test_guard();
+        let root = std::env::temp_dir().join(format!("split-ports-{}", uuid::Uuid::new_v4()));
+        let mut app = split_app(&root, true, true);
+        assert_eq!(split_ports_held(&app), (true, true));
+        let client = app.fork_connect_client.clone();
+
+        // The session lost: revoked synchronously, and nothing is built.
+        app.fork_connect_client = None;
+        let task = app.refresh_split_session();
+        assert_eq!(split_ports_held(&app), (false, false));
+        let panel = app.split_panel.as_ref().unwrap();
+        assert_eq!(panel.stage(), &state::vault::split::Stage::NeedsSession);
+        assert!(task_messages(task).is_empty());
+
+        // Back, but revoked before its build lands: the build is dropped.
+        app.fork_connect_client = client;
+        let task = app.refresh_split_session();
+        assert_eq!(split_ports_held(&app), (false, false));
+        app.revoke_claim();
+        for message in task_messages(task) {
+            drop(app.update(message));
+        }
+        assert_eq!(split_ports_held(&app), (false, false));
+
+        // Two refreshes: the older build landing last is dropped. The newer
+        // one is made with no daemon (a switch failed), so it gives no
+        // step-2 port, and says why.
+        let older = app.refresh_split_session();
+        app.split_backend = state::vault::claim::BackendState::Unavailable;
+        let newer = app.refresh_split_session();
+        for message in task_messages(newer) {
+            drop(app.update(message));
+        }
+        assert_eq!(split_ports_held(&app), (false, true));
+        for message in task_messages(older) {
+            drop(app.update(message));
+        }
+        assert_eq!(split_ports_held(&app), (false, true));
+        // Why: no daemon (S3-D4).
+        assert!(app
+            .split_panel
+            .as_ref()
+            .unwrap()
+            .step2_unavailable_copy()
+            .is_some_and(|copy| copy.contains("needs this Vault's wallet engine running")));
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -2477,6 +2477,46 @@ async fn resend_review_lapses_at_its_deadline() {
     assert_eq!(panel.stage, Stage::Step2(Step2Stage::Reconcile));
 }
 
+/// S3-D4: with step 1 six deep but no step-2 port, the panel says why: no
+/// Vault daemon, a daemon on a route step 2 can't be sent through (naming
+/// the two that can), or a port refused otherwise. With no reason recorded,
+/// the daemon is missing; with a port, step 2 is offered instead.
+#[tokio::test(flavor = "multi_thread")]
+async fn step2_unavailable_copy_names_the_reason() {
+    let journal = Journal::new(false);
+    let (mut panel, _) = tracked_panel(&journal);
+    assert!(panel.can_enter_step2());
+    assert_eq!(panel.step2_unavailable_copy(), None);
+    let labels = rendered_labels(&panel).await;
+    assert!(labels.iter().any(|s| s.contains("Continue to step 2")));
+
+    panel.step2_port = None;
+    assert!(!panel.can_enter_step2());
+    for (reason, copy) in [
+        (None, STEP2_NEEDS_VAULT),
+        (Some(Step2Unavailable::NoDaemon), STEP2_NEEDS_VAULT),
+        (
+            Some(Step2Unavailable::UnsupportedRoute),
+            STEP2_UNSUPPORTED_ROUTE,
+        ),
+        (Some(Step2Unavailable::Refused), STEP2_REFUSED),
+    ] {
+        panel.note_step2_unavailable(reason);
+        assert_eq!(panel.step2_unavailable_copy(), Some(copy));
+        let labels = rendered_labels(&panel).await;
+        assert_eq!(
+            labels.iter().filter(|s| *s == copy).count(),
+            1,
+            "{:?}: {:?}",
+            reason,
+            labels
+        );
+    }
+    assert!(STEP2_UNSUPPORTED_ROUTE.contains("Connect's Bitcoin Blake2b server"));
+    assert!(STEP2_UNSUPPORTED_ROUTE.contains("this Vault's own Bitcoin Blake2b node"));
+    assert!(!STEP2_UNSUPPORTED_ROUTE.contains("running"));
+}
+
 /// Consuming the preparation does not make a transient failure terminal.
 #[tokio::test(flavor = "multi_thread")]
 async fn panel_consumed_retryable_handoff_preserves_retry() {

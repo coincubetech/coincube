@@ -225,6 +225,10 @@ pub type FinishResult = Result<Coord, (step2::Step2Refusal, Option<Prep>)>;
 /// A step-2 reconcile's result.
 pub type Seen = Result<(Status, TransactionObservation), step2::Step2Refusal>;
 
+/// A refused recording: why, and the journal (source digest, directory)
+/// already on disk for this split, if any.
+pub type Recording = (String, Option<(sha256::Hash, PathBuf)>);
+
 /// Why a restart did not resume, with what it still has.
 #[derive(Debug)]
 pub struct Unresumed {
@@ -248,7 +252,10 @@ pub enum SplitEvent {
     Built(u64, Result<Box<SplitStep1>, String>),
     Exported(u64, Result<Option<PathBuf>, String>),
     Imported(u64, Result<(Vec<Psbt>, Imported), String>),
-    Recorded(u64, Result<Driver, String>),
+    /// A refusal carries the journal found for this split, if the record
+    /// was written before the coordinator refused (#625 F3b: looked for in
+    /// the task, off the UI thread).
+    Recorded(u64, Result<Driver, Recording>),
     Resumed(u64, ResumeResult),
     Reviewed(u64, Driver, Result<ReviewView, String>),
     Submitted(u64, Driver, Result<Outcome, String>),
@@ -402,6 +409,8 @@ pub struct SplitPanel {
     step2_port: Option<Arc<dyn step2::Step2Port>>,
     /// The session's reconcile-only port, whatever the daemon (#637 R1).
     recon_port: Option<Arc<dyn step2::ReconPort>>,
+    /// Why there is no step-2 port, as the App's port build said (S3-D4).
+    step2_missing: Option<step2::Step2Unavailable>,
     prep: Option<Box<dyn step2::Step2Prep>>,
     coord: Option<Box<dyn step2::Step2Coord>>,
     recon: Option<Box<dyn step2::Step2Recon>>,
@@ -475,6 +484,7 @@ impl SplitPanel {
             resume_stage: None,
             step2_port: None,
             recon_port: None,
+            step2_missing: None,
             prep: None,
             coord: None,
             recon: None,
@@ -856,10 +866,12 @@ impl SplitPanel {
         let digest = construction.source().digest();
         let directory = step1::journal_directory(&self.journal_root, digest);
         let target_cube = self.target_cube.clone();
+        let root = self.journal_root.clone();
         self.stage = Stage::Working(Work::Recording);
         self.spawn(
             async move {
-                tokio::task::spawn_blocking(move || {
+                let again = root.clone();
+                let recorded = tokio::task::spawn_blocking(move || {
                     // Re-finalized from the kept files: the verified value is
                     // consumed by the coordinator and has no Clone.
                     let verified = match step1::import(&construction, &files) {
@@ -878,8 +890,19 @@ impl SplitPanel {
                         .map(Driver)
                         .map_err(step1::describe)
                 })
-                .await
-                .map_err(|_| "Recording the split was interrupted.".to_string())?
+                .await;
+                // The journal may have been written before the coordinator
+                // refused: look for it here, off the UI thread (#625 F3b).
+                let reason = match recorded {
+                    Ok(Ok(driver)) => return Ok(driver),
+                    Ok(Err(reason)) => reason,
+                    Err(_) => "Recording the split was interrupted.".to_string(),
+                };
+                let found = tokio::task::spawn_blocking(move || find_journal(&again, digest))
+                    .await
+                    .ok()
+                    .flatten();
+                Err((reason, found))
             },
             SplitEvent::Recorded,
         )
@@ -1234,17 +1257,11 @@ impl SplitPanel {
                 self.settle();
                 Task::none()
             }
-            SplitEvent::Recorded(_, Err(reason)) => {
+            SplitEvent::Recorded(_, Err((reason, found))) => {
                 // The journal may have been written before the coordinator
                 // refused: continue from it, never from a second record.
-                if let Some(construction) = &self.construction {
-                    let digest = construction.source().digest();
-                    if let Some(found) = step1::discover(&self.journal_root)
-                        .into_iter()
-                        .find(|(found, _)| *found == digest)
-                    {
-                        self.journal = Some(found);
-                    }
+                if let Some(found) = found {
+                    self.journal = Some(found);
                 }
                 self.stage = Stage::Refused(Refusal::retry(reason));
                 Task::none()
@@ -1531,6 +1548,13 @@ impl SplitEvent {
             | Self::DeadlinePassed(seq) => *seq,
         }
     }
+}
+
+/// This split's journal under `root`, if one is on disk. Blocking.
+fn find_journal(root: &std::path::Path, digest: sha256::Hash) -> Option<(sha256::Hash, PathBuf)> {
+    step1::discover(root)
+        .into_iter()
+        .find(|(found, _)| *found == digest)
 }
 
 /// Restore the journal and resume its coordinator with the recorded bytes.

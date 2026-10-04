@@ -1350,6 +1350,12 @@ fn step2_panel_layer_is_reached_only_through_the_split_panel() {
             // #625 F2: closing a step-2 dead end.
             "DeadEnd",
             "check_close",
+            // S3-D4: why there is no step-2 port.
+            "Step2Unavailable",
+            "unavailable_copy",
+            "STEP2_NEEDS_VAULT",
+            "STEP2_UNSUPPORTED_ROUTE",
+            "STEP2_REFUSED",
         ] {
             let named = text
                 .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
@@ -1365,6 +1371,8 @@ fn step2_panel_layer_is_reached_only_through_the_split_panel() {
                     "ProductionRecon",
                     "ReconPort",
                     "set_recon_port",
+                    // S3-D4: the port build says why there is no step 2.
+                    "Step2Unavailable",
                 ]
                 .contains(&ident))
                 || (file == "src/app/view/vault/split.rs" && ident == "RESERVING");
