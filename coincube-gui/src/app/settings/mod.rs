@@ -691,9 +691,10 @@ pub struct CubeSettings {
     /// step 2's txid. Never a descriptor, a key, spending or replay
     /// authority: history for the Split panel and the one predicate the
     /// "Start split" refusal reads. Written only on the target BTCB2 Cube,
-    /// by `SplitCompletionEvidence::persist`, and cleared by its
-    /// reconciliation when the chains take the completion back (D17); the
-    /// deleted descriptors are not restored. An older build that rewrites
+    /// by the Split completion evidence
+    /// (`services::claim_coordinator::fork::split::step2::completion`), and
+    /// cleared by its reconciliation when the chains take the completion
+    /// back (D17); the deleted descriptors are not restored. An older build that rewrites
     /// `settings.json` drops the field (no `deny_unknown_fields`, like every
     /// field here); the Split journal keeps the completed step 2 regardless.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

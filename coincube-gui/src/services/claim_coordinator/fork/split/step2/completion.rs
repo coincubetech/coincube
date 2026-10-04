@@ -35,7 +35,7 @@ use super::*;
 use crate::{
     app::settings::{
         update_settings_file_checked, CubeSettings, Settings, SettingsError, SplitFromRecord,
-        WalletId,
+        WalletId, SETTINGS_FILE_NAME,
     },
     dir::CoincubeDirectory,
 };
@@ -93,6 +93,25 @@ impl std::fmt::Debug for SplitCompletionEvidence {
         f.debug_struct("SplitCompletionEvidence")
             .finish_non_exhaustive()
     }
+}
+
+/// What [`SplitStep2Reconciler::reconcile_split_completion`] found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplitCompletionReconciliation {
+    /// Step 2 is still in the block the record names and step 1 still has
+    /// its depth: the record, if any, stands.
+    Standing {
+        status: Status,
+        transaction: claim_observation::TransactionObservation,
+    },
+    /// Step 2 left its block (absent, unconfirmed or re-mined elsewhere) or
+    /// step 1 lost its depth. The matching record was cleared when `cleared`;
+    /// otherwise there was none to clear. The descriptors stay forgotten.
+    Lost {
+        status: Status,
+        transaction: claim_observation::TransactionObservation,
+        cleared: bool,
+    },
 }
 
 impl SplitCompletionEvidence {
@@ -359,4 +378,163 @@ impl SplitStep2Reconciler {
             not_after,
         }))
     }
+
+    /// Reconcile a recorded completion after a fresh loss (D17): step 2 no
+    /// longer in the block the record names, or step 1 below its depth,
+    /// clears the Cube's matching `split_from` record. Inclusion is inspected
+    /// from the recheck's own observations, independently of the journal's
+    /// assessment, since an expired RDTS window would otherwise mask a
+    /// Bitcoin reorg. Transport failures and a changing view leave the record
+    /// alone and return an error; another Split's record is never cleared;
+    /// the forgotten descriptors are never restored.
+    pub async fn reconcile_split_completion(
+        &mut self,
+        context: &Context,
+        root: &CoincubeDirectory,
+        target: &CompletionTarget,
+    ) -> Result<SplitCompletionReconciliation, Error> {
+        let origin = Instant::now();
+        self.completion_revoker.revoke();
+        self.completion_revoker = Revoker::new();
+        self.current(context)?;
+        if target.cube_id != self.controller.identity().fork_cube {
+            return Err(Error::InvalidBinding);
+        }
+        let (status, seen) = reconcile_recorded(
+            &mut self.controller,
+            self.services.as_ref(),
+            self.policy,
+            context,
+            &self.generation,
+        )
+        .await?;
+        let recheck = self.recheck_sweep(context, seen).await?;
+        let plan = self.controller.plan();
+        let observations = recheck.assessment().observations;
+        let status = completion_bitcoin_loss(&plan, observations.bitcoin)
+            .map(Status::Observation)
+            .unwrap_or(status);
+        let digest = self.controller.identity().descriptor_digest;
+        let txid = self.recorded_txid()?;
+        let recorded = recorded_height(root, target, digest, txid)?;
+        let left_block = match seen {
+            claim_observation::TransactionObservation::Confirmed { block, .. } => {
+                recorded.is_some_and(|height| height != block.height)
+            }
+            _ => true,
+        };
+        let lost = left_block
+            || matches!(
+                status,
+                Status::Observation(
+                    Assessment::Reorged
+                        | Assessment::WaitingForConfirmation
+                        | Assessment::WaitingForDepth { .. }
+                )
+            );
+        if !lost {
+            return Ok(SplitCompletionReconciliation::Standing {
+                status,
+                transaction: seen,
+            });
+        }
+        let deadline = evidence_deadline(
+            self.policy,
+            observations,
+            recheck.observed_at(),
+            self.services.source().now(),
+            origin,
+        )?;
+        let cleared = self
+            .clear_split_from(context, root, target, digest, txid, deadline)
+            .await?;
+        Ok(SplitCompletionReconciliation::Lost {
+            status,
+            transaction: seen,
+            cleared,
+        })
+    }
+
+    /// Remove the target Cube's record of this Split (`digest`, `txid`)
+    /// under the BTCB2 writer lock, before `deadline` and while the session
+    /// is current. `false` when no such record is there, with nothing
+    /// written.
+    async fn clear_split_from(
+        &mut self,
+        context: &Context,
+        root: &CoincubeDirectory,
+        target: &CompletionTarget,
+        digest: sha256::Hash,
+        txid: Txid,
+        deadline: Instant,
+    ) -> Result<bool, Error> {
+        let directory = root.network_directory(ChainId::BitcoinBlake2b);
+        let apply = |settings: &mut Settings| -> Result<bool, SettingsError> {
+            if self.revoker.is_revoked()
+                || self.generation.has_changed().is_err()
+                || *self.generation.borrow() != context.generation
+                || Instant::now() >= deadline
+            {
+                return Err(SettingsError::Unexpected(
+                    "Split reorg check expired or changed".into(),
+                ));
+            }
+            let cube = matching_completion_cube(
+                settings,
+                ChainId::BitcoinBlake2b,
+                &target.cube_id,
+                &target.vault_fingerprint,
+                &target.vault_wallet_id.descriptor_checksum,
+            )?;
+            let before = cube.split_from.len();
+            cube.split_from.retain(|record| {
+                !(record.descriptor_digest == digest && record.step2_txid == txid)
+            });
+            Ok(cube.split_from.len() != before)
+        };
+        let marked = recorded_height(root, target, digest, txid)?.is_some();
+        if marked {
+            // Refuse a missing or mismatched Cube before the file is touched;
+            // the same check runs again under the writer lock.
+            let mut snapshot = Settings::from_file(&directory)
+                .map_err(|error| Error::CompletionPersistence(error.to_string()))?;
+            apply(&mut snapshot)
+                .map_err(|error| Error::CompletionPersistence(error.to_string()))?;
+            update_settings_file_checked(&directory, |mut settings| {
+                apply(&mut settings)?;
+                Ok(Some(settings))
+            })
+            .await
+            .map_err(|error| Error::CompletionPersistence(error.to_string()))?;
+        }
+        self.current(context)?;
+        if Instant::now() >= deadline {
+            return Err(Error::ExpiredEvidence);
+        }
+        Ok(marked)
+    }
+}
+
+/// The height the target Cube's settings record for this Split (`digest`,
+/// `txid`), read without a lock; `None` when there is no settings file or no
+/// such record. An unreadable file is an error, never "no record".
+fn recorded_height(
+    root: &CoincubeDirectory,
+    target: &CompletionTarget,
+    digest: sha256::Hash,
+    txid: Txid,
+) -> Result<Option<u64>, Error> {
+    let directory = root.network_directory(ChainId::BitcoinBlake2b);
+    if !directory.path().join(SETTINGS_FILE_NAME).exists() {
+        return Ok(None);
+    }
+    let settings = Settings::from_file(&directory)
+        .map_err(|error| Error::CompletionPersistence(error.to_string()))?;
+    Ok(settings
+        .cubes
+        .iter()
+        .filter(|cube| cube.id == target.cube_id)
+        .flat_map(|cube| cube.split_from.iter())
+        .find(|record| record.descriptor_digest == digest && record.step2_txid == txid)
+        .map(|record| record.completed_height))
 }

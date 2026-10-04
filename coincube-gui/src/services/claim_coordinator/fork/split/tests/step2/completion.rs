@@ -12,7 +12,8 @@ use crate::{
     dir::CoincubeDirectory,
     services::{
         claim_coordinator::fork::split::step2::{
-            CompletionTarget, SplitCompletionEvidence, SplitStep2Reconciler,
+            CompletionTarget, SplitCompletionEvidence, SplitCompletionReconciliation,
+            SplitStep2Reconciler,
         },
         coincube::network_anchor::NetworkAnchorStatus,
     },
@@ -570,4 +571,204 @@ async fn split_completion_persist_is_idempotent_and_refuses_a_mismatched_vault()
     let fresh = minted(&mut reconciler).await;
     assert!(fresh.persist(&empty, &target).await.is_err());
     assert!(!settings_path(&empty).exists());
+}
+
+/// D17: after completion, a reconcile that finds step 2 still in its block
+/// and step 1 deep keeps the record; step 2 absent, unconfirmed or re-mined
+/// into another block, or step 1 below six (also behind an RDTS margin
+/// refusal), clears it while the descriptors stay forgotten and another
+/// Split's record stays. A failing collection, a changing view or a target
+/// that is not the journal's Cube leaves the file alone.
+#[tokio::test(flavor = "multi_thread")]
+async fn split_completion_marker_is_cleared_when_step2_leaves_its_block() {
+    let (h, txid) = submitted().await;
+    let (root, target) = settings_root(&h).await;
+    let other = SplitFromRecord {
+        descriptor_digest: sha256::Hash::hash(b"another source"),
+        completed_height: 7,
+        step2_txid: Txid::from_byte_array([7; 32]),
+    };
+    update_settings_file(&root.network_directory(ChainId::BitcoinBlake2b), |mut s| {
+        s.cubes[0].split_from.push(other.clone());
+        Some(s)
+    })
+    .await
+    .unwrap();
+    h.chains
+        .edit(|view| view.on_btcb2 = vec![(txid, confirmed(txid, STEP2_HEIGHT))]);
+    let mut reconciler = reopen(&h, Box::new(h.chains.clone()));
+    let evidence = minted(&mut reconciler).await;
+    evidence.persist(&root, &target).await.unwrap();
+    evidence.forget(&mut reconciler, &context()).unwrap();
+    let completed = || vec![other.clone(), record(&h, txid, STEP2_HEIGHT)];
+    assert_eq!(split_from(&root), completed());
+    let standing = |result: Result<SplitCompletionReconciliation, Error>| {
+        assert!(
+            matches!(
+                result,
+                Ok(SplitCompletionReconciliation::Standing {
+                    status: Status::Observation(Assessment::ObservationsEligibleForPreflight),
+                    ..
+                })
+            ),
+            "{:?}",
+            result
+        );
+    };
+    let lost = |result: Result<SplitCompletionReconciliation, Error>, cleared: bool| {
+        assert!(
+            matches!(
+                result,
+                Ok(SplitCompletionReconciliation::Lost { cleared: c, .. }) if c == cleared
+            ),
+            "{:?}",
+            result
+        );
+    };
+
+    // Standing.
+    standing(
+        reconciler
+            .reconcile_split_completion(&context(), &root, &target)
+            .await,
+    );
+    assert_eq!(split_from(&root), completed());
+    // A failing collection leaves the record.
+    h.chains.edit(|view| view.read_age = 3_600);
+    assert!(reconciler
+        .reconcile_split_completion(&context(), &root, &target)
+        .await
+        .is_err());
+    h.chains.edit(|view| view.read_age = 0);
+    assert_eq!(split_from(&root), completed());
+    // A target that is not the journal's Cube.
+    let mut wrong = target.clone();
+    wrong.cube_id = "other-cube".into();
+    assert!(matches!(
+        reconciler
+            .reconcile_split_completion(&context(), &root, &wrong)
+            .await,
+        Err(Error::InvalidBinding)
+    ));
+    assert_eq!(split_from(&root), completed());
+
+    // Step 1 below six: cleared; the other record stays; recorded again
+    // from fresh evidence once deep.
+    h.chains.edit(|view| view.set_depth(5));
+    lost(
+        reconciler
+            .reconcile_split_completion(&context(), &root, &target)
+            .await,
+        true,
+    );
+    assert_eq!(split_from(&root), vec![other.clone()]);
+    assert!(h.temp.journal()["split"].get("descriptors").is_none());
+    lost(
+        reconciler
+            .reconcile_split_completion(&context(), &root, &target)
+            .await,
+        false,
+    );
+    h.chains.edit(|view| view.set_depth(6));
+    minted(&mut reconciler)
+        .await
+        .persist(&root, &target)
+        .await
+        .unwrap();
+    assert_eq!(split_from(&root), completed());
+    // Step 1 below six behind an RDTS margin refusal: the loss is read from
+    // the chain observations, not the journal's assessment.
+    h.chains.edit(|view| {
+        view.rdts_expiry = MTP + 600;
+        view.set_depth(5);
+    });
+    lost(
+        reconciler
+            .reconcile_split_completion(&context(), &root, &target)
+            .await,
+        true,
+    );
+    h.chains.edit(|view| {
+        view.rdts_expiry = 20_000;
+        view.set_depth(6);
+    });
+    minted(&mut reconciler)
+        .await
+        .persist(&root, &target)
+        .await
+        .unwrap();
+    assert_eq!(split_from(&root), completed());
+
+    // Step 2 re-mined into another block: cleared, then recorded at the new
+    // height.
+    h.chains
+        .edit(|view| view.on_btcb2 = vec![(txid, confirmed(txid, STEP2_HEIGHT - 1))]);
+    lost(
+        reconciler
+            .reconcile_split_completion(&context(), &root, &target)
+            .await,
+        true,
+    );
+    assert_eq!(split_from(&root), vec![other.clone()]);
+    minted(&mut reconciler)
+        .await
+        .persist(&root, &target)
+        .await
+        .unwrap();
+    assert_eq!(
+        split_from(&root),
+        vec![other.clone(), record(&h, txid, STEP2_HEIGHT - 1)]
+    );
+    standing(
+        reconciler
+            .reconcile_split_completion(&context(), &root, &target)
+            .await,
+    );
+
+    // Step 2 unconfirmed, then absent: cleared.
+    h.chains
+        .edit(|view| view.on_btcb2 = vec![(txid, TransactionObservation::Unconfirmed { txid })]);
+    lost(
+        reconciler
+            .reconcile_split_completion(&context(), &root, &target)
+            .await,
+        true,
+    );
+    assert_eq!(split_from(&root), vec![other.clone()]);
+    h.chains.edit(|view| view.on_btcb2.clear());
+    lost(
+        reconciler
+            .reconcile_split_completion(&context(), &root, &target)
+            .await,
+        false,
+    );
+    // A view that changes between the reconcile and the recheck leaves the
+    // record alone: back at the recorded height, re-mined for the recheck.
+    h.chains
+        .edit(|view| view.on_btcb2 = vec![(txid, confirmed(txid, STEP2_HEIGHT))]);
+    minted(&mut reconciler)
+        .await
+        .persist(&root, &target)
+        .await
+        .unwrap();
+    drop(reconciler);
+    let flipping = Flipping {
+        inner: h.chains.clone(),
+        txid,
+        reads: Arc::new(AtomicUsize::new(0)),
+        flip_after: 2,
+        after: confirmed(txid, STEP2_HEIGHT - 1),
+    };
+    let mut reconciler = reopen(&h, Box::new(flipping));
+    assert!(matches!(
+        reconciler
+            .reconcile_split_completion(&context(), &root, &target)
+            .await,
+        Err(Error::ChangedReview)
+    ));
+    assert_eq!(split_from(&root), completed());
+    // The descriptors were never restored.
+    assert!(h.temp.journal()["split"].get("descriptors").is_none());
+    // The unrelated Cube is untouched throughout.
+    assert!(btcb2_settings(&root).cubes[1].split_from.is_empty());
 }

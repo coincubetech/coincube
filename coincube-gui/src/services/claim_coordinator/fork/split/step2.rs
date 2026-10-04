@@ -80,7 +80,7 @@ use coincube_core::{
 mod resend;
 pub use resend::{ResendError, Step2ResubmissionReview};
 mod completion;
-pub use completion::{CompletionTarget, SplitCompletionEvidence};
+pub use completion::{CompletionTarget, SplitCompletionEvidence, SplitCompletionReconciliation};
 
 /// The wall-clock bound on a target reservation (#592 N2). The daemon call
 /// runs on its own task, so a reservation stuck behind the daemon's locks
