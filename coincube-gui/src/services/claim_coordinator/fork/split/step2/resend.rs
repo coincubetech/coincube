@@ -309,8 +309,9 @@ impl SplitStep2Coordinator {
     }
 
     /// The journal's side of a resend: a recorded submission of exactly this
-    /// coordinator's verified step 2, never seen on BTCB2, whose latest
-    /// attempt is recorded as returned without acceptance, under the limit.
+    /// coordinator's verified step 2, never seen on BTCB2, with no recorded
+    /// step-1 conflict (#568 S4), whose latest attempt is recorded as
+    /// returned without acceptance, under the limit.
     fn resendable(&self) -> Result<(), ResendError> {
         let Some(submission) = self.controller.recorded_fork_submission() else {
             return Err(ResendError::NotRecorded);
@@ -324,6 +325,11 @@ impl SplitStep2Coordinator {
         }
         if self.controller.split_step2_observed() {
             return Err(ResendError::Observed);
+        }
+        // #568 S4, O4: a recorded step-1 conflict is terminal (S4-D2), so no
+        // resend is reviewed or sent even if step 1 shows six deep again.
+        if self.controller.split_step1_conflict().is_some() {
+            return Err(Error::Journal(claim_workflow::Error::Conflict).into());
         }
         if !self.controller.split_step2_returned() {
             return Err(ResendError::Unsettled);

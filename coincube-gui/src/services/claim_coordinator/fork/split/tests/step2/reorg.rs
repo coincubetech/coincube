@@ -4,7 +4,7 @@
 //! synthetic view says where step 1 is on Bitcoin.
 use super::*;
 use crate::services::{
-    claim_coordinator::fork::split::step2::{SplitStep2Reconciler, Step1AfterStep2},
+    claim_coordinator::fork::split::step2::{ResendError, SplitStep2Reconciler, Step1AfterStep2},
     claim_workflow::{Reconfirmation, Step1Conflict},
 };
 
@@ -860,7 +860,8 @@ async fn split_step1_conflict_is_terminal_and_never_recorded_from_a_failed_or_st
 }
 
 /// Withholding in O1 to O4. A resend (after a send that came back refused)
-/// is reviewable while step 1 is eligible and refused in each outcome.
+/// is reviewable while step 1 is eligible and refused in each outcome,
+/// including a recorded conflict with step 1 seen six deep again.
 /// Completion (step 2 six deep on BTCB2) is minted while step 1 is
 /// eligible and refused in each outcome, including a recorded conflict with
 /// step 1 seen six deep again. The descriptors are never forgotten once a
@@ -925,6 +926,10 @@ async fn split_resend_completion_and_forget_are_refused_in_o1_to_o4() {
             eligible(&view);
         }
     }
+    // The conflict is terminal (S4-D2): with step 1 six deep again in its
+    // recorded block, the reconcile still reports it and the resend is
+    // refused from the journal, before any read.
+    eligible(&view);
     assert!(matches!(
         coordinator
             .reconcile_sweep(&context())
@@ -933,6 +938,15 @@ async fn split_resend_completion_and_forget_are_refused_in_o1_to_o4() {
             .after_step2,
         Step1AfterStep2::Conflict(_)
     ));
+    let reads = view.inner.unspent_reads.load(Ordering::SeqCst);
+    assert!(matches!(
+        coordinator.prepare_step2_resubmission(&context()).await,
+        Err(ResendError::Coordinator(Error::Journal(
+            claim_workflow::Error::Conflict
+        )))
+    ));
+    assert_eq!(view.inner.unspent_reads.load(Ordering::SeqCst), reads);
+    assert_eq!(h.temp.journal()["split"]["step2_returned"], true);
     assert!(h.temp.journal()["split"]
         .get("step2_resubmissions")
         .is_none());
