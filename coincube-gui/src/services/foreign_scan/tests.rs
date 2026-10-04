@@ -126,15 +126,26 @@ fn descriptor_capabilities_are_scan_only_and_ambiguous_or_secret_paths_refuse() 
     let key_b = ranged_key(42);
     let key_c = ranged_key(43);
     let origin = format!("[abcd1234/84h/0h/0h]{public}");
-    for (text, psbt_file) in [
-        (text.clone(), true),
-        (format!("pkh({})", public), true),
-        (format!("wpkh({origin})"), true),
-        (format!("sh(wpkh({}))", public), true),
+    // (descriptor, PSBT-file route, in-app routes): the in-app routes need
+    // an origin on every key (U6).
+    for (text, psbt_file, matched) in [
+        (text.clone(), true, false),
+        (format!("pkh({})", public), true, false),
+        (format!("wpkh({origin})"), true, true),
+        (format!("sh(wpkh({}))", public), true, false),
         // `tr` is scan-only: no route, not even a PSBT file.
-        (format!("tr({})", public), false),
-        (format!("wsh(multi(2,{key_a},{key_b},{key_c}))"), true),
-        (format!("wsh(sortedmulti(2,{key_a},{key_b},{key_c}))"), true),
+        (format!("tr({})", public), false, false),
+        (format!("tr([abcd1234/86h/0h/0h]{public})"), false, false),
+        (
+            format!("wsh(multi(2,{key_a},{key_b},{key_c}))"),
+            true,
+            false,
+        ),
+        (
+            format!("wsh(sortedmulti(2,{key_a},{key_b},{key_c}))"),
+            true,
+            false,
+        ),
     ] {
         let d = ScanDescriptor::parse(Branch::External, &text).unwrap();
         assert_eq!(d.end_exclusive(100), 100);
@@ -144,8 +155,8 @@ fn descriptor_capabilities_are_scan_only_and_ambiguous_or_secret_paths_refuse() 
                 scan: true,
                 signing: SigningRoutes {
                     psbt_file,
-                    in_app_hardware: false,
-                    seed_unified: false,
+                    in_app_hardware: matched,
+                    seed_unified: matched,
                 },
                 claim_authorization: false
             },
@@ -219,14 +230,14 @@ fn descriptor_matrix_covers_every_shape_with_and_without_origins() {
             .map(|i| key(50 + i as u8, with_origin.then_some(origins[i]), suffix))
             .collect()
     };
-    let routes = |psbt_file| Capabilities {
+    // The in-app routes (device, unified seed) need an origin on every key
+    // of a non-`tr` shape (U6); without one they fail closed.
+    let routes = |psbt_file, matched| Capabilities {
         scan: true,
         signing: SigningRoutes {
             psbt_file,
-            // Not implemented for any foreign shape: unsupported signing
-            // combinations fail closed.
-            in_app_hardware: false,
-            seed_unified: false,
+            in_app_hardware: matched,
+            seed_unified: matched,
         },
         claim_authorization: false,
     };
@@ -239,8 +250,11 @@ fn descriptor_matrix_covers_every_shape_with_and_without_origins() {
                 .unwrap_or_else(|e| panic!("{} with origin: {:?}", name, e));
         let same_branch_origin =
             ScanDescriptor::parse(Branch::External, &shape(&keys(count, true, "/0/*"))).unwrap();
+        assert_eq!(bare.capabilities(), routes(psbt_file, false), "{}", name);
+        for d in [&with_origin, &same_branch_origin] {
+            assert_eq!(d.capabilities(), routes(psbt_file, psbt_file), "{}", name);
+        }
         for d in [&bare, &with_origin, &same_branch_origin] {
-            assert_eq!(d.capabilities(), routes(psbt_file), "{}", name);
             assert_eq!(d.is_taproot(), name == "tr", "{}", name);
             assert!(d.is_ranged(), "{}", name);
             assert_eq!(d.end_exclusive(100), 100, "{}", name);
@@ -265,6 +279,8 @@ fn descriptor_matrix_covers_every_shape_with_and_without_origins() {
             mixed[1] = key(51, None, "/0/*");
             let d = ScanDescriptor::parse(Branch::External, &shape(&mixed)).unwrap();
             assert_eq!(d.script(5).unwrap(), bare.script(5).unwrap(), "{}", name);
+            // One key without its origin: no in-app route.
+            assert_eq!(d.capabilities(), routes(psbt_file, false), "{}", name);
         }
 
         // Refusals, each with and without origins.
@@ -349,7 +365,8 @@ fn descriptor_matrix_covers_every_shape_with_and_without_origins() {
         let d = ScanDescriptor::parse(Branch::External, &text).unwrap();
         assert!(!d.is_ranged(), "{}", text);
         assert_eq!(d.end_exclusive(100), 1, "{}", text);
-        assert_eq!(d.capabilities(), routes(psbt_file), "{}", text);
+        // A fixed key has no in-app route, with or without an origin (P7).
+        assert_eq!(d.capabilities(), routes(psbt_file, false), "{}", text);
     }
 
     // Unsupported forms fail closed with or without origins.

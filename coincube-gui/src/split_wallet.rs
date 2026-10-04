@@ -1302,8 +1302,13 @@ mod tests {
         assert_eq!(panel.generation, 24);
     }
 
+    /// #568 U6 (replaces the A1 "discovery only" pin): the PSBT-file route
+    /// exists for every non-`tr` shape; the in-app routes (a connected device,
+    /// the unified seed) only when every key carries its origin, so a signer
+    /// can be matched to it. `tr` has no route, and no shape grants Claim
+    /// authority.
     #[test]
-    fn every_supported_source_remains_discovery_only() {
+    fn signing_routes_need_origins() {
         use crate::services::foreign_scan::{Capabilities, SigningRoutes};
 
         let secp = Secp256k1::new();
@@ -1323,28 +1328,49 @@ mod tests {
             )
             .unwrap(),
         );
-        // #568 A1: only the PSBT-file route exists, and `tr` has none. No
-        // shape grants in-app hardware, unified-seed or Claim authority.
-        let expected = |taproot: bool| Capabilities {
+        let expected = |taproot: bool, origins: bool| Capabilities {
             scan: true,
             signing: SigningRoutes {
                 psbt_file: !taproot,
-                ..SigningRoutes::NONE
+                in_app_hardware: !taproot && origins,
+                seed_unified: !taproot && origins,
             },
             claim_authorization: false,
         };
 
-        // Covers the PR 8 discovery shapes with and without origin metadata.
-        // A hardware-exported account xpub is public material here: accepting
-        // it for discovery must never imply that a device was connected,
+        // The PR 8 discovery shapes with and without origin metadata. A
+        // hardware-exported account xpub is public material here: the route
+        // says a device could be matched, never that one was connected,
         // accepted the PSBT, or granted Claim authority.
-        for descriptor in [
-            format!("wpkh({first}/0/*)"),
-            format!("wpkh([d34db33f/84h/0h/0h]{first}/0/*)"),
-            format!("sh(wpkh({first}/0/*))"),
-            format!("pkh({first}/0/*)"),
-            format!("wsh(sortedmulti(2,{first}/0/*,{second}/0/*))"),
-            format!("tr({first}/0/*)"),
+        let a = "[d34db33f/84h/0h/0h]";
+        let m = "[d34db33f/48h/0h/0h/2h]";
+        let n = "[0badc0de/48h/0h/0h/2h]";
+        for (descriptor, origins) in [
+            (format!("wpkh({first}/0/*)"), false),
+            (format!("wpkh({a}{first}/0/*)"), true),
+            (format!("sh(wpkh({first}/0/*))"), false),
+            (format!("sh(wpkh([d34db33f/49h/0h/0h]{first}/0/*))"), true),
+            (format!("pkh({first}/0/*)"), false),
+            (format!("pkh([d34db33f/44h/0h/0h]{first}/1/*)"), true),
+            (
+                format!("wsh(sortedmulti(2,{first}/0/*,{second}/0/*))"),
+                false,
+            ),
+            // One multisig key without its origin is enough to refuse.
+            (
+                format!("wsh(sortedmulti(2,{m}{first}/0/*,{second}/0/*))"),
+                false,
+            ),
+            (
+                format!("wsh(sortedmulti(2,{m}{first}/0/*,{n}{second}/0/*))"),
+                true,
+            ),
+            (
+                format!("wsh(multi(2,{m}{first}/0/*,{n}{second}/0/*))"),
+                true,
+            ),
+            (format!("tr({first}/0/*)"), false),
+            (format!("tr([d34db33f/86h/0h/0h]{first}/0/*)"), true),
         ] {
             let parsed =
                 ScanDescriptor::parse(Branch::External, &descriptor).unwrap_or_else(|_| {
@@ -1352,7 +1378,7 @@ mod tests {
                 });
             assert_eq!(
                 parsed.capabilities(),
-                expected(descriptor.starts_with("tr(")),
+                expected(descriptor.starts_with("tr("), origins),
                 "{}",
                 descriptor
             );

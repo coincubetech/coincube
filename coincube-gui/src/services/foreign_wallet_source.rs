@@ -220,7 +220,9 @@ mod tests {
             assert_eq!(descriptors.fingerprint, fingerprint);
             assert_eq!(descriptors.external.end_exclusive(100), 100);
             assert_eq!(descriptors.internal.end_exclusive(100), 100);
-            assert!(!descriptors.external.capabilities().signing.seed_unified);
+            // The account key carries its origin, so the in-app routes are
+            // offered (#568 U6); Claim authority never is.
+            assert!(descriptors.external.capabilities().signing.seed_unified);
             assert!(!descriptors.internal.capabilities().claim_authorization);
         }
     }
