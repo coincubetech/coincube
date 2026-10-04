@@ -696,3 +696,27 @@ async fn restart_waiting_on_a_close_opens_nothing() {
     // The journal is not left locked.
     drop(fixture.journal.lock());
 }
+
+/// #644 G1: the close is offered only from a reconcile under this session.
+/// A new session resuming the same panel keeps the last BTCB2 observation
+/// for its warning, but offers the close only after its own reconcile saw
+/// step 2 absent. Adapted from Gimli's #644 review probe.
+#[tokio::test(flavor = "multi_thread")]
+async fn panel_offers_the_close_only_from_this_sessions_reconcile() {
+    let fixture = Fixture::new();
+    let mut panel = fixture.panel().await;
+    assert!(panel.can_check_close());
+    // The session ends, then a new one resumes the panel.
+    panel.set_connect(None);
+    assert!(!panel.can_check_close());
+    panel.set_connect(Some(Arc::new(Evidence(fixture.chains.clone()))));
+    let task = panel.begin();
+    drive(&mut panel, task).await;
+    assert_eq!(panel.stage(), &Stage::Step2(Step2Stage::Reconcile));
+    assert!(panel.dead_end().is_some());
+    assert_eq!(panel.step2_seen(), Some(TransactionObservation::Absent));
+    assert!(!panel.can_check_close());
+    let task = panel.update(SplitMessage::Step2Reconcile);
+    drive(&mut panel, task).await;
+    assert!(panel.can_check_close());
+}

@@ -414,6 +414,10 @@ pub struct SplitPanel {
     step2_resend: Option<step2::Step2ResendView>,
     step2_outcome: Option<Outcome>,
     step2_seen: Option<TransactionObservation>,
+    /// What this session's last reconcile saw of step 2 on BTCB2. A
+    /// revocation forgets it, while `step2_seen` stays for its warning; the
+    /// close and the resend review are offered from it (#644 G1, #648 R2).
+    step2_seen_here: Option<TransactionObservation>,
     /// The step-1 evidence of the last step-2 reconcile (#637 r4172242637).
     step2_status: Option<Status>,
     /// The authenticated claimed coins from the restore.
@@ -475,6 +479,7 @@ impl SplitPanel {
             step2_resend: None,
             step2_outcome: None,
             step2_seen: None,
+            step2_seen_here: None,
             step2_status: None,
             coins: Vec::new(),
         }
@@ -596,13 +601,13 @@ impl SplitPanel {
         self.dead_end.as_ref()
     }
     /// #625 F2: a step-2 dead end may be closed from the reconcile-only
-    /// stage, once a reconcile saw step 2 absent from BTCB2 (an accepted
-    /// send may still be in a mempool), and only after a check on both
-    /// chains passed.
+    /// stage, once a reconcile under this session saw step 2 absent from
+    /// BTCB2 (an accepted send may still be in a mempool; #644 G1), and only
+    /// after a check on both chains passed.
     pub fn can_check_close(&self) -> bool {
         self.dead_end.is_some()
             && self.connect.is_some()
-            && self.step2_seen == Some(TransactionObservation::Absent)
+            && self.step2_seen_here == Some(TransactionObservation::Absent)
             && self.stage == Stage::Step2(Step2Stage::Reconcile)
     }
     pub fn can_confirm_close(&self) -> bool {
@@ -638,6 +643,7 @@ impl SplitPanel {
         // Read under this session: the next one reads the journal again.
         self.abandon_only = None;
         self.dead_end = None;
+        self.step2_seen_here = None;
         if let Some(ending) = self.ending.take() {
             ending.store(true, Ordering::SeqCst);
         }
