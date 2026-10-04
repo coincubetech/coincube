@@ -1,4 +1,5 @@
-"""Split steps 1 and 2 (#568 B6a, B6b) against both pinned nodes.
+"""Split steps 1 and 2 (#568 B6a, B6b) and the single-step unified fallback
+(B4b-1a, B6-d) against both pinned nodes.
 
 Five foreign (non-Cube) wallets, one per supported source shape, are funded
 before the fork, so every coin is shared history on both chains. For each, the
@@ -6,8 +7,15 @@ production `foreign_split` code builds and finalizes step 1 and step 2
 through the `split_regtest_vectors` bridge; this module supplies the chain
 observations, the step-2 target and signs with disposable regtest keys. It
 checks node consensus only: no GUI, journal, fee source, freshness proof,
-preflight, target reservation or unified (`ALL|UNIFIED`) fallback (B4b, not
-built yet).
+preflight or target reservation.
+
+A second wallet per shape, never split in two steps, takes the unified
+fallback: one BTCB2 sweep of its shared coins signed `ALL|UNIFIED` (0x21),
+accepted by the BTCB2 node and refused by the Bitcoin node for the
+signature alone. This module signs it too, over Bitcoin Knots' unified
+digest ported here and pinned to the upstream vectors, as the `coincube`
+proprietary records the production finalizer reads. Owner decision P1
+(block): every legacy signature on that route is refused, never classified.
 
 The offline tests need no node. They fabricate the previous transactions and
 run the same bridge and signer, so the signing and finalization paths for all
@@ -37,6 +45,7 @@ from test_framework.serializations import (
     PSBT_IN_BIP32_DERIVATION,
     PSBT_IN_NON_WITNESS_UTXO,
     PSBT_IN_PARTIAL_SIG,
+    PSBT_IN_PROPRIETARY,
     PSBT_IN_SIGHASH_TYPE,
     PSBT_IN_WITNESS_SCRIPT,
     PSBT_IN_WITNESS_UTXO,
@@ -47,6 +56,7 @@ from test_framework.serializations import (
     from_binary,
     hash160,
     hash256,
+    ser_string,
     sha256,
     sighash_all_witness,
 )
@@ -65,6 +75,30 @@ POISON_VERSION = 1
 POISON_CHAIN_BITCOIN = 0
 # Step-2 target kind per shape: one P2TR, the rest P2WSH (the Vault types).
 TARGET_KIND = {"wpkh": "p2tr"}
+# The unified sighash (`coincube-core/src/unified_sighash.rs`, Knots' draft):
+# the opt-in bit, the legacy output and input modes it keeps, the two script
+# types this port covers, and the tag of its tagged hash.
+SIGHASH_UNIFIED = 0x20
+UNIFIED_SIGHASH_ALL = SIGHASH_ALL | SIGHASH_UNIFIED
+SIGHASH_NONE = 2
+SIGHASH_SINGLE = 3
+SIGHASH_ANYONECANPAY = 0x80
+SCRIPT_TYPE_BASE = 0
+SCRIPT_TYPE_WITNESS_V0 = 1
+UNIFIED_SIGHASH_TAG = sha256(b"UnifiedSighash")
+# A unified signature's PSBT record (`coincube-core/src/psbt_unified.rs`):
+# proprietary key data `<prefix "coincube"><subtype 0><public key>`, value
+# the DER signature followed by 0x21.
+UNIFIED_RECORD_PREFIX = ser_string(b"coincube") + bytes([0])
+# Bitcoin Knots' vectors, copied unchanged into the core crate's test data.
+UNIFIED_VECTORS = os.path.join(
+    os.path.dirname(__file__),
+    "..",
+    "coincube-core",
+    "tests",
+    "data",
+    "unified_sighash.json",
+)
 
 
 def split_tool():
@@ -137,26 +171,53 @@ class ForeignWallet:
         """Every key of a single-sig wallet; two of three for multisig."""
         return self.hds[:2]
 
-    def sign(self, psbt_b64, explicit_all=False):
+    def signing_keys(self, psbt_in, signers=None):
+        """`(pubkey, privkey)` for every BIP32 derivation of the input that
+        one of `signers` (by default `signers()`) controls."""
+        if signers is None:
+            signers = self.signers()
+        for pubkey, origin in psbt_in.map[PSBT_IN_BIP32_DERIVATION].items():
+            raw_path = origin[4:]
+            path = [
+                int.from_bytes(raw_path[j : j + 4], "little")
+                for j in range(0, len(raw_path), 4)
+            ]
+            for hd in signers:
+                privkey = coincurve.PrivateKey(hd.get_privkey_from_path(path))
+                if privkey.public_key.format() == pubkey:
+                    yield pubkey, privkey
+
+    def sign(self, psbt_b64, explicit_all=False, signers=None):
         """Add SIGHASH_ALL partial signatures, optionally with an explicit
         PSBT_IN_SIGHASH_TYPE of 0x01 on every input (#585 F1)."""
         psbt = PSBT.from_base64(psbt_b64)
         for i, psbt_in in enumerate(psbt.i):
-            for pubkey, origin in psbt_in.map[PSBT_IN_BIP32_DERIVATION].items():
-                raw_path = origin[4:]
-                path = [
-                    int.from_bytes(raw_path[j : j + 4], "little")
-                    for j in range(0, len(raw_path), 4)
-                ]
-                for hd in self.signers():
-                    privkey = coincurve.PrivateKey(hd.get_privkey_from_path(path))
-                    if privkey.public_key.format() != pubkey:
-                        continue
-                    digest = sighash_all(psbt, i, pubkey)
-                    signature = privkey.sign(digest, hasher=None) + bytes([SIGHASH_ALL])
-                    psbt_in.map.setdefault(PSBT_IN_PARTIAL_SIG, {})[pubkey] = signature
+            for pubkey, privkey in self.signing_keys(psbt_in, signers):
+                digest = sighash_all(psbt, i, pubkey)
+                signature = privkey.sign(digest, hasher=None) + bytes([SIGHASH_ALL])
+                psbt_in.map.setdefault(PSBT_IN_PARTIAL_SIG, {})[pubkey] = signature
             if explicit_all:
                 psbt_in.map[PSBT_IN_SIGHASH_TYPE] = struct.pack("<I", SIGHASH_ALL)
+        return psbt.to_base64()
+
+    def sign_unified(self, psbt_b64, request=UNIFIED_SIGHASH_ALL):
+        """Add `ALL|UNIFIED` (0x21) signatures over the unified digest, as
+        the records the production finalizer reads: no partial signature is
+        written. Every input then requests `request`, 0x21 unless a test asks
+        for the refusal of another value."""
+        psbt = PSBT.from_base64(psbt_b64)
+        spent = [spent_output(psbt, i) for i in range(len(psbt.i))]
+        suffix = bytes([UNIFIED_SIGHASH_ALL])
+        for i, psbt_in in enumerate(psbt.i):
+            for pubkey, privkey in self.signing_keys(psbt_in):
+                code, kind = unified_script_code(psbt_in, pubkey, spent[i])
+                digest = unified_sighash(
+                    psbt.tx, i, UNIFIED_SIGHASH_ALL, kind, spent, code
+                )
+                signature = privkey.sign(digest, hasher=None) + suffix
+                records = psbt_in.map.setdefault(PSBT_IN_PROPRIETARY, {})
+                records[UNIFIED_RECORD_PREFIX + pubkey] = signature
+            psbt_in.map[PSBT_IN_SIGHASH_TYPE] = struct.pack("<I", request)
         return psbt.to_base64()
 
 
@@ -175,6 +236,121 @@ def sighash_all(psbt, i, pubkey):
         txin.scriptSig = b""
     tx.vin[i].scriptSig = previous.vout[tx.vin[i].prevout.n].scriptPubKey
     return hash256(tx.serialize_without_witness() + struct.pack("<I", SIGHASH_ALL))
+
+
+def spent_output(psbt, i):
+    """The output input `i` spends: the witness UTXO, or the previous
+    transaction's output (a P2PKH input carries only the latter)."""
+    psbt_in = psbt.i[i].map
+    if PSBT_IN_WITNESS_UTXO in psbt_in:
+        return from_binary(CTxOut, psbt_in[PSBT_IN_WITNESS_UTXO])
+    previous = from_binary(CTransaction, psbt_in[PSBT_IN_NON_WITNESS_UTXO])
+    return previous.vout[psbt.tx.vin[i].prevout.n]
+
+
+def unified_script_code(psbt_in, pubkey, spent):
+    """The scriptCode and script type the unified signer and finalizer use
+    per shape (`coincube-core/src/unified_foreign.rs`): a P2WSH input signs
+    its witness script as type 1; P2WPKH, native or nested, the implied P2PKH
+    script as type 1; P2PKH its own scriptPubKey as type 0."""
+    if PSBT_IN_WITNESS_SCRIPT in psbt_in.map:
+        return psbt_in.map[PSBT_IN_WITNESS_SCRIPT], SCRIPT_TYPE_WITNESS_V0
+    code = bytes([0x76, 0xA9, 0x14]) + hash160(pubkey) + bytes([0x88, 0xAC])
+    if PSBT_IN_WITNESS_UTXO in psbt_in.map:
+        return code, SCRIPT_TYPE_WITNESS_V0
+    assert spent.scriptPubKey == code, spent
+    return code, SCRIPT_TYPE_BASE
+
+
+def unified_sighash(tx, index, hash_type, script_type, spent_outputs, script_code):
+    """Bitcoin Knots' draft unified signature hash for script types 0 (bare,
+    P2SH) and 1 (SegWit v0), ported here independently of the Rust
+    implementation the bridge verifies against, and pinned to the upstream
+    vectors by `test_unified_sighash_port_offline`. `spent_outputs` is the
+    output every input spends, in input order."""
+    assert hash_type & SIGHASH_UNIFIED, hex(hash_type)
+    assert script_type in (SCRIPT_TYPE_BASE, SCRIPT_TYPE_WITNESS_V0), script_type
+    assert len(spent_outputs) == len(tx.vin), (len(spent_outputs), len(tx.vin))
+    output_type = hash_type & 0x1F
+    anyone_can_pay = bool(hash_type & SIGHASH_ANYONECANPAY)
+    # Epoch, hash type, version, the locktime zero-extended to five bytes.
+    message = bytes([0, hash_type]) + struct.pack("<i", tx.nVersion)
+    message += struct.pack("<I", tx.nLockTime) + b"\x00"
+    if not anyone_can_pay:
+        message += sha256(b"".join(txin.prevout.serialize() for txin in tx.vin))
+        message += sha256(
+            b"".join(struct.pack("<q", out.nValue) for out in spent_outputs)
+        )
+        message += sha256(
+            b"".join(ser_string(out.scriptPubKey) for out in spent_outputs)
+        )
+        message += sha256(
+            b"".join(struct.pack("<I", txin.nSequence) for txin in tx.vin)
+        )
+    if output_type not in (SIGHASH_NONE, SIGHASH_SINGLE):
+        message += sha256(b"".join(out.serialize() for out in tx.vout))
+    message += bytes([script_type])
+    if anyone_can_pay:
+        message += tx.vin[index].prevout.serialize() + spent_outputs[index].serialize()
+        message += struct.pack("<I", tx.vin[index].nSequence)
+    else:
+        message += struct.pack("<I", index)
+    message += ser_string(script_code)
+    if output_type == SIGHASH_SINGLE:
+        message += sha256(tx.vout[index].serialize())
+    return sha256(UNIFIED_SIGHASH_TAG + UNIFIED_SIGHASH_TAG + message)
+
+
+def test_unified_sighash_port_offline():
+    """This module's digest, byte for byte, on every upstream Knots vector of
+    script types 0 and 1; the Taproot rows are out of scope, as in the Rust
+    port's own test."""
+    with open(UNIFIED_VECTORS) as vectors:
+        rows = json.load(vectors)
+    assert rows[0] == [
+        "scriptCode",
+        "rawTx",
+        "inIdx",
+        "hashType",
+        "scriptType",
+        "spentOutputs",
+        "sighash",
+    ]
+    checked = skipped = 0
+    for script_code, raw, index, hash_type, script_type, spent, expected in rows[1:]:
+        if script_type > SCRIPT_TYPE_WITNESS_V0:
+            skipped += 1
+            continue
+        tx = from_binary(CTransaction, bytes.fromhex(raw))
+        outputs = [CTxOut(amount, bytes.fromhex(script)) for amount, script in spent]
+        digest = unified_sighash(
+            tx, index, hash_type, script_type, outputs, bytes.fromhex(script_code)
+        )
+        assert digest.hex() == expected, (checked + skipped + 1, expected)
+        checked += 1
+    assert (checked, skipped) == (142, 24)
+
+
+def script_pushes(script):
+    """The data of a scriptSig made of direct pushes (a signature and a key)."""
+    pushes, position = [], 0
+    while position < len(script):
+        size = script[position]
+        assert 1 <= size <= 75, script.hex()
+        pushes.append(script[position + 1 : position + 1 + size])
+        position += 1 + size
+    return pushes
+
+
+def retained_items(shape, tx, i):
+    """Input `i`'s items that may be signatures, as the retained-witness
+    verifier takes them: the scriptSig pushes of a P2PKH spend, the witness
+    items of a P2WPKH or P2SH-P2WPKH spend, the items before the witness
+    script of a P2WSH spend."""
+    if shape == "pkh":
+        return script_pushes(tx.vin[i].scriptSig)
+    stack = tx.wit.vtxinwit[i].scriptWitness.stack
+    return stack[:-1] if shape.startswith("wsh_") else stack
 
 
 def unsigned_tx_hex(psbt_b64):
@@ -472,6 +648,215 @@ def check_step2_signature_refusals(tool, wallet, request1, request2, built):
     bridge_refuses(tool, refused, "UnsupportedSighash")
 
 
+def unified_request(request, target, tip):
+    """A unified-sweep request over a request's coins, source and fork."""
+    return {
+        "external": request["external"],
+        "internal": request["internal"],
+        "coins": request["coins"],
+        "fork_height": request["fork_height"],
+        "unified": {
+            "target": target.hex(),
+            "feerate_vb": FEERATE_VB,
+            "locktime": tip,
+            "btcb2_tip_height": tip,
+        },
+    }
+
+
+def check_unified_construction(tool, request, built, target):
+    """Step 2's construction without a step 1: one output, the target, no
+    change; exactly the wallet's coins; fee at the worst-case size;
+    deterministic reconstruction."""
+    unsigned = from_binary(
+        CTransaction, bytes.fromhex(unsigned_tx_hex(built["unified_psbt"]))
+    )
+    assert [o.scriptPubKey for o in unsigned.vout] == [target]
+    assert built["target"] == target.hex()
+    spent = sorted(f"{i.prevout.hash:064x}:{i.prevout.n}" for i in unsigned.vin)
+    coins = sorted(
+        outpoint_str(txid_of(c["previous"]), c["vout"]) for c in request["coins"]
+    )
+    assert spent == coins == sorted(built["spent_outpoints"]), (spent, coins, built)
+    assert built["fee"] == built["maximum_signed_vbytes"] * FEERATE_VB
+    total = sum(
+        from_binary(CTransaction, bytes.fromhex(c["previous"])).vout[c["vout"]].nValue
+        for c in request["coins"]
+    )
+    assert unsigned.vout[0].nValue == total - built["fee"]
+    assert unsigned.nLockTime == request["unified"]["locktime"]
+    assert built["fork_height"] == request["fork_height"]
+    recorded = copy.deepcopy(request)
+    recorded["unified"]["recorded"] = unsigned_tx_hex(built["unified_psbt"])
+    assert run_bridge(tool, recorded)["reconstructed_txid"] == built["unsigned_txid"]
+
+
+def check_unified_refusals(tool, wallet, request):
+    """Refused by the bridge (the production construction) before anything
+    could be signed or broadcast."""
+    # Back into the foreign wallet: one of its own scripts.
+    home = copy.deepcopy(request)
+    home["unified"]["target"] = wallet.script_pubkey(0, DESTINATION_INDEX).hex()
+    bridge_refuses(tool, home, "InvalidTarget")
+    # Not a Vault address type.
+    wpkh = copy.deepcopy(request)
+    wpkh["unified"]["target"] = (bytes([0x00, 0x14]) + os.urandom(20)).hex()
+    bridge_refuses(tool, wpkh, "InvalidTarget")
+    # A locktime above the observed BTCB2 tip.
+    late = copy.deepcopy(request)
+    late["unified"]["locktime"] = late["unified"]["btcb2_tip_height"] + 1
+    bridge_refuses(tool, late, "Locktime")
+    # A coin at or after the fork height: not shared history (D10).
+    post_fork = copy.deepcopy(request)
+    block = post_fork["coins"][0]["btcb2_block"]
+    post_fork["coins"][0]["bitcoin_block"] = post_fork["coins"][0]["btcb2_block"] = {
+        "height": request["fork_height"],
+        "hash": block["hash"],
+    }
+    bridge_refuses(tool, post_fork, "PostFork")
+    # No fee.
+    free = copy.deepcopy(request)
+    free["unified"]["feerate_vb"] = 0
+    bridge_refuses(tool, free, "Economics")
+    # One request builds one thing.
+    both = copy.deepcopy(request)
+    both["step2"] = dict(request["unified"], claimed=[])
+    bridge_refuses(tool, both, "one of step 1, step 2 or the unified sweep")
+
+
+def sign_and_finalize_unified(tool, wallet, request, built):
+    """Finalize the unified sweep: every input's witness holds `threshold`
+    verified 0x21 signatures and no legacy one, so it classifies Protected;
+    then the bytes verify as a recorded sweep at a later tip."""
+    request = copy.deepcopy(request)
+    request["unified"]["signed"] = wallet.sign_unified(built["unified_psbt"])
+    finalized = run_bridge(tool, request)
+    count = len(request["coins"])
+    expected = 2 if wallet.shape.startswith("wsh_") else 1
+    assert finalized["inputs"] == [{"unified_used": expected, "legacy_used": 0}] * count
+    assert finalized["replay_status"] == "Protected", finalized
+    assert finalized["construction_txid"] == built["unsigned_txid"]
+    assert finalized["verified_fee"] == built["fee"]
+    native = wallet.shape in ("wpkh", "wsh_multi", "wsh_sortedmulti")
+    assert (finalized["unified_txid"] == built["unsigned_txid"]) == native
+    assert finalized["vsize"] <= built["maximum_signed_vbytes"], finalized
+    # The bytes themselves: every retained signature ends in 0x21, none in 0x01.
+    tx = from_binary(CTransaction, bytes.fromhex(finalized["unified_raw"]))
+    for i in range(count):
+        items = retained_items(wallet.shape, tx, i)
+        signatures = [item for item in items if item[:1] == b"\x30"]
+        assert len(signatures) == expected, items
+        assert all(s[-1] == UNIFIED_SIGHASH_ALL for s in signatures), items
+    check_unified_recorded(
+        tool,
+        request,
+        built,
+        finalized["unified_raw"],
+        finalized,
+        request["unified"]["locktime"] + 10,
+    )
+    return finalized
+
+
+def check_unified_recorded(tool, request, built, raw, finalized, tip):
+    """A restart at BTCB2 tip `tip`, as for step 2 (#638 F2): the recorded
+    signed bytes verify against the recorded unsigned sweep rebuilt at that
+    tip (`reconstruct_unified_sweep`, then
+    `verify_unified_sweep_transaction`), Protected again. A tip below the
+    recorded locktime is refused, and the same bytes with a changed locktime
+    do not verify."""
+    request = copy.deepcopy(request)
+    request["unified"].pop("signed", None)
+    locktime = request["unified"]["locktime"]
+    assert tip >= locktime, (tip, locktime)
+    request["unified"]["locktime"] = request["unified"]["btcb2_tip_height"] = tip
+    request["unified"]["recorded"] = unsigned_tx_hex(built["unified_psbt"])
+    request["unified"]["recorded_signed"] = raw
+    verified = run_bridge(tool, request)
+    assert verified["reconstructed_txid"] == finalized["construction_txid"], verified
+    assert verified["verified_txid"] == finalized["unified_txid"], verified
+    assert verified["verified_inputs"] == finalized["inputs"]
+    assert verified["verified_replay_status"] == "Protected"
+    early = copy.deepcopy(request)
+    early["unified"]["locktime"] = early["unified"]["btcb2_tip_height"] = locktime - 1
+    bridge_refuses(tool, early, "Locktime")
+    tampered = bytes.fromhex(raw)
+    assert struct.unpack("<I", tampered[-4:])[0] == locktime, raw
+    request["unified"]["recorded_signed"] = (
+        tampered[:-4] + struct.pack("<I", locktime - 1)
+    ).hex()
+    bridge_refuses(tool, request, "ConstructionChanged")
+
+
+def check_unified_signature_refusals(tool, wallet, request, built):
+    """Owner decision P1 (block): a legacy signature anywhere on this route is
+    refused, never classified. Returns the legacy twin: the same unsigned
+    transaction finalized by step 2's path with SIGHASH_ALL, what a standard
+    PSBT consumer makes of these keys and what Bitcoin accepts (the
+    consensus test shows it); the retained-witness verifier refuses it."""
+    # SIGHASH_ALL partial signatures under a 0x21 request: the 0x01 twin.
+    legacy = PSBT.from_base64(wallet.sign(built["unified_psbt"]))
+    for psbt_in in legacy.i:
+        psbt_in.map[PSBT_IN_SIGHASH_TYPE] = struct.pack("<I", UNIFIED_SIGHASH_ALL)
+    refused = copy.deepcopy(request)
+    refused["unified"]["signed"] = legacy.to_base64()
+    bridge_refuses(tool, refused, "LegacySignature")
+    # Unified records under a 0x01 request.
+    refused["unified"]["signed"] = wallet.sign_unified(
+        built["unified_psbt"], request=SIGHASH_ALL
+    )
+    bridge_refuses(tool, refused, "UnsupportedSighash")
+    # Unified records plus a legacy partial signature by the same key: the
+    # PSBT adapter refuses the ambiguity before the finalizer is reached.
+    mixed = PSBT.from_base64(wallet.sign_unified(built["unified_psbt"]))
+    mixed.i[0].map[PSBT_IN_PARTIAL_SIG] = dict(legacy.i[0].map[PSBT_IN_PARTIAL_SIG])
+    refused["unified"]["signed"] = mixed.to_base64()
+    bridge_refuses(tool, refused, "AmbiguousSignatureEncoding")
+    if wallet.shape.startswith("wsh_"):
+        # Unified records from two keys plus the third key's legacy
+        # signature: unambiguous, and refused by the finalizer.
+        third = PSBT.from_base64(
+            wallet.sign(built["unified_psbt"], signers=wallet.hds[2:])
+        )
+        mixed = PSBT.from_base64(wallet.sign_unified(built["unified_psbt"]))
+        mixed.i[0].map[PSBT_IN_PARTIAL_SIG] = dict(third.i[0].map[PSBT_IN_PARTIAL_SIG])
+        assert len(mixed.i[0].map[PSBT_IN_PARTIAL_SIG]) == 1
+        refused["unified"]["signed"] = mixed.to_base64()
+        bridge_refuses(tool, refused, "LegacySignature")
+    # The retained-witness twin. The unified construction is step 2's over
+    # the same coins, target, fee and locktime, so step 2's finalizer yields
+    # the same unsigned transaction with 0x01 witnesses.
+    tip = request["unified"]["btcb2_tip_height"]
+    assert request["unified"]["locktime"] == tip
+    twin_request = step2_request(
+        request, built["spent_outpoints"], bytes.fromhex(built["target"]), tip
+    )
+    built2 = run_bridge(tool, twin_request)
+    assert built2["unsigned_txid"] == built["unsigned_txid"], (built2, built)
+    twin_request["step2"]["signed"] = wallet.sign(built2["step2_psbt"])
+    twin = run_bridge(tool, twin_request)["step2_raw"]
+    recorded = copy.deepcopy(request)
+    recorded["unified"]["recorded"] = unsigned_tx_hex(built["unified_psbt"])
+    recorded["unified"]["recorded_signed"] = twin
+    bridge_refuses(tool, recorded, "LegacySignature")
+    return twin
+
+
+@pytest.mark.parametrize("shape", SHAPES)
+def test_split_unified_bridge_offline(shape):
+    """No node: the unified sweep over fabricated prevouts, signed 0x21 here
+    and finalized by the real finalizer; every legacy twin refused."""
+    tool = split_tool()
+    wallet = ForeignWallet(shape)
+    target = target_script(TARGET_KIND.get(shape, "p2wsh"))
+    request = unified_request(offline_request(wallet), target, 150)
+    built = run_bridge(tool, request)
+    check_unified_construction(tool, request, built, target)
+    check_unified_refusals(tool, wallet, request)
+    sign_and_finalize_unified(tool, wallet, request, built)
+    check_unified_signature_refusals(tool, wallet, request, built)
+
+
 # ── two-chain consensus ───────────────────────────────────────────────────
 
 
@@ -488,6 +873,10 @@ def split_two_chain_class():
             super().__init__(directory)
             self.wallets = {shape: ForeignWallet(shape) for shape in SHAPES}
             self.funded = {}  # shape -> [(txid, vout, branch, index, block hash)]
+            # The unified fallback's wallets: never split in two steps, so
+            # their coins stay unspent on both chains until the sweep.
+            self.unified_wallets = {shape: ForeignWallet(shape) for shape in SHAPES}
+            self.unified_funded = {}
             # shape -> the confirmed step 1 (txid, block, claimed prevouts, raw).
             self.step1 = {}
             # shape -> the step 2 mined on BTCB2 (raw, txid, block).
@@ -514,7 +903,16 @@ def split_two_chain_class():
                 self.activation_height = fork
             rpc = self.legacy.rpc
             txids = []
-            for shape, wallet in self.wallets.items():
+            sets = (
+                (self.wallets, self.funded),
+                (self.unified_wallets, self.unified_funded),
+            )
+            funding = [
+                (shape, wallet, funded)
+                for wallets, funded in sets
+                for shape, wallet in wallets.items()
+            ]
+            for shape, wallet, funded in funding:
                 scripts = {}
                 outputs = {}
                 for branch, amount in zip((0, 1), FUND_AMOUNTS):
@@ -526,18 +924,19 @@ def split_two_chain_class():
                     scripts[info["scriptPubKey"]] = branch
                 txid = rpc.sendmany("", outputs)
                 txids.append(txid)
-                self.funded[shape] = (txid, scripts)
+                funded[shape] = (txid, scripts)
             self.legacy.generate_block(1, wait_for_mempool=txids)
             block = rpc.getbestblockhash()
             assert rpc.getblockcount() < fork - 1
-            for shape, (txid, scripts) in list(self.funded.items()):
-                decoded = rpc.getrawtransaction(txid, True, block)
-                self.funded[shape] = [
-                    (txid, out["n"], scripts[out["scriptPubKey"]["hex"]], 0, block)
-                    for out in decoded["vout"]
-                    if out["scriptPubKey"]["hex"] in scripts
-                ]
-                assert len(self.funded[shape]) == 2
+            for _, funded in sets:
+                for shape, (txid, scripts) in list(funded.items()):
+                    decoded = rpc.getrawtransaction(txid, True, block)
+                    funded[shape] = [
+                        (txid, out["n"], scripts[out["scriptPubKey"]["hex"]], 0, block)
+                        for out in decoded["vout"]
+                        if out["scriptPubKey"]["hex"] in scripts
+                    ]
+                    assert len(funded[shape]) == 2
             self.legacy.generate_block(fork - 1 - rpc.getblockcount())
             assert rpc.getblockcount() == fork - 1
             self.fork_parent_hash = rpc.getbestblockhash()
@@ -580,11 +979,13 @@ def observe(node, txid, block_hash):
     return {"height": header["height"], "hash": block_hash}
 
 
-def observed_coins(split_chains, shape):
+def observed_coins(split_chains, shape, funded=None):
     """Each funded coin with its confirming block as each node reports it."""
     a, b = split_chains.legacy, split_chains.blake2b
+    if funded is None:
+        funded = split_chains.funded
     coins = []
-    for txid, vout, branch, index, block in split_chains.funded[shape]:
+    for txid, vout, branch, index, block in funded[shape]:
         coins.append({
             "previous": a.rpc.getrawtransaction(txid, False, block),
             "vout": vout,
@@ -906,3 +1307,119 @@ def test_split_step2_replay_after_step1_reorg(split_chains, shape, record_proper
         assert a.rpc.gettxout(txid, vout, False) is None
     # BTCB2 saw none of it.
     assert b.rpc.getrawtransaction(step2_id, True, step2_block)["in_active_chain"]
+
+
+# ── unified fallback consensus ────────────────────────────────────────────
+
+
+def unified_base_request(split_chains, shape):
+    """The unified wallet's coins, source and fork for `shape`: no step 1
+    exists for these coins, and none is built."""
+    wallet = split_chains.unified_wallets[shape]
+    return {
+        "external": wallet.descriptor(0),
+        "internal": wallet.descriptor(1),
+        "coins": observed_coins(split_chains, shape, split_chains.unified_funded),
+        "fork_height": split_chains.activation_height,
+    }
+
+
+@pytest.mark.parametrize("shape", SHAPES)
+def test_split_unified_fallback_consensus(split_chains, shape, record_property):
+    """The single-step fallback (#568 B4b-1a, B6-d): one BTCB2 sweep of the
+    foreign wallet's shared coins to the target, signed `ALL|UNIFIED` (0x21)
+    with no step 1 and no poison. Accepted and mined by the BTCB2 node;
+    refused by the Bitcoin node, in its mempool and in a block, for the
+    signature alone: the same construction with legacy signatures is a valid
+    Bitcoin transaction (checked, never sent). Nothing moves on Bitcoin."""
+    tool = split_tool()
+    a, b = split_chains.legacy, split_chains.blake2b
+    wallet = split_chains.unified_wallets[shape]
+    prevouts = [(c[0], c[1]) for c in split_chains.unified_funded[shape]]
+    # Shared pre-fork history, unspent on both chains.
+    for txid, vout in prevouts:
+        assert a.rpc.gettxout(txid, vout, False) is not None
+        assert b.rpc.gettxout(txid, vout, False) is not None
+
+    # The locktime is BTCB2's tip; bring BTCB2 level with Bitcoin first.
+    level(b, a.rpc.getblockcount())
+    tip = b.rpc.getblockcount()
+    target = target_script(TARGET_KIND.get(shape, "p2wsh"))
+    request = unified_request(unified_base_request(split_chains, shape), target, tip)
+    built = run_bridge(tool, request)
+    check_unified_construction(tool, request, built, target)
+    check_unified_refusals(tool, wallet, request)
+    finalized = sign_and_finalize_unified(tool, wallet, request, built)
+    twin = check_unified_signature_refusals(tool, wallet, request, built)
+    sweep, sweep_id = finalized["unified_raw"], finalized["unified_txid"]
+    assert finalized["replay_status"] == "Protected"
+    record_property(f"{shape}_unified_target", TARGET_KIND.get(shape, "p2wsh"))
+    record_property(f"{shape}_unified_inputs", json.dumps(finalized["inputs"]))
+
+    # Accepted by the BTCB2 node at no more than the construction's estimate.
+    verdict_b = b.rpc.testmempoolaccept([sweep])[0]
+    assert verdict_b["allowed"], verdict_b
+    assert verdict_b["txid"] == sweep_id
+    assert verdict_b["vsize"] == finalized["vsize"], (verdict_b, finalized)
+    assert verdict_b["vsize"] <= built["maximum_signed_vbytes"], (verdict_b, built)
+    record_property(f"{shape}_unified_vsize", verdict_b["vsize"])
+    record_property(
+        f"{shape}_unified_maximum_signed_vbytes", built["maximum_signed_vbytes"]
+    )
+
+    # Refused by the Bitcoin node for the signature: by relay policy, and by
+    # consensus in a block. Bitcoin is first brought past the locktime, so
+    # the script, not finality, is what each check refuses; the coins are
+    # unspent there, so it is not missing inputs either.
+    level(a, tip)
+    verdict_a = a.rpc.testmempoolaccept([sweep])[0]
+    assert not verdict_a["allowed"], verdict_a
+    assert verdict_a["reject-reason"] == (
+        "mempool-script-verify-flag-failed "
+        "(Signature hash type missing or not understood)"
+    ), verdict_a
+    record_property(
+        f"{shape}_bitcoin_unified_mempool_reject", verdict_a["reject-reason"]
+    )
+    bitcoin_tip = a.rpc.getbestblockhash()
+    with pytest.raises(JSONRPCException) as rejected_block:
+        a.rpc.generateblock(a.rpc.getnewaddress(), [sweep])
+    block_error = rejected_block.value.error
+    assert block_error["code"] == -25, block_error
+    # Consensus has no hash-type policy: the signature simply does not
+    # verify under the legacy digest, and the script ends false.
+    assert block_error["message"].startswith(
+        "TestBlockValidity failed: mandatory-script-verify-flag-failed "
+        "(Script evaluated without error but finished with a false/empty top "
+        "stack element), input "
+    ), block_error
+    record_property(f"{shape}_bitcoin_unified_block_reject", block_error["message"])
+    assert a.rpc.getbestblockhash() == bitcoin_tip
+    # The witness is all that keeps the chains apart: the legacy twin of the
+    # same transaction is a valid, standard Bitcoin transaction. Not sent.
+    verdict_twin = a.rpc.testmempoolaccept([twin])[0]
+    assert verdict_twin["allowed"], verdict_twin
+    assert verdict_twin["txid"] not in a.rpc.getrawmempool()
+    record_property(f"{shape}_bitcoin_legacy_twin_allowed", verdict_twin["allowed"])
+
+    # Mined on BTCB2: the coins are spent there, into the target.
+    assert b.rpc.sendrawtransaction(sweep) == sweep_id
+    b.generate_block(1, wait_for_mempool=sweep_id)
+    mined = b.rpc.getrawtransaction(sweep_id, True, b.rpc.getbestblockhash())
+    assert mined["confirmations"] == 1, mined
+    assert mined["hex"] == sweep, (mined["hex"], sweep)
+    assert mined["hash"] == hash256(bytes.fromhex(sweep))[::-1].hex(), mined
+    assert (mined["hash"] == sweep_id) == (shape == "pkh"), mined
+    assert [o["scriptPubKey"]["hex"] for o in mined["vout"]] == [target.hex()]
+    # The bytes BTCB2 mined verify as a recorded sweep at the tip after
+    # mining, where a restart would rebuild it.
+    check_unified_recorded(
+        tool, request, built, mined["hex"], finalized, b.rpc.getblockcount()
+    )
+    for txid, vout in prevouts:
+        assert b.rpc.gettxout(txid, vout, False) is None
+    assert b.rpc.gettxout(sweep_id, 0, False)["scriptPubKey"]["hex"] == target.hex()
+    # Nothing moved on Bitcoin.
+    for txid, vout in prevouts:
+        assert a.rpc.gettxout(txid, vout, False) is not None
+    assert a.rpc.gettxout(sweep_id, 0, False) is None
