@@ -1120,7 +1120,7 @@ dependencies = [
 [[package]]
 name = "boltz-client"
 version = "0.1.0"
-source = "git+https://github.com/breez/boltz-client?rev=aea35af1628d1fb259ebf85266f96215cfdabcb5#aea35af1628d1fb259ebf85266f96215cfdabcb5"
+source = "git+https://github.com/coincubetech/boltz-client?rev=aea35af1628d1fb259ebf85266f96215cfdabcb5#aea35af1628d1fb259ebf85266f96215cfdabcb5"
 dependencies = [
  "alloy-primitives",
  "alloy-signer",
@@ -1135,8 +1135,8 @@ dependencies = [
  "hex",
  "k256",
  "lightning-invoice 0.34.1",
- "macros 0.1.0 (git+https://github.com/breez/boltz-client?rev=aea35af1628d1fb259ebf85266f96215cfdabcb5)",
- "platform-utils 0.1.0 (git+https://github.com/breez/boltz-client?rev=aea35af1628d1fb259ebf85266f96215cfdabcb5)",
+ "macros 0.1.0 (git+https://github.com/coincubetech/boltz-client?rev=aea35af1628d1fb259ebf85266f96215cfdabcb5)",
+ "platform-utils 0.1.0 (git+https://github.com/coincubetech/boltz-client?rev=aea35af1628d1fb259ebf85266f96215cfdabcb5)",
  "serde",
  "serde_json",
  "sha2",
@@ -3172,7 +3172,7 @@ dependencies = [
 [[package]]
 name = "macros"
 version = "0.1.0"
-source = "git+https://github.com/breez/boltz-client?rev=aea35af1628d1fb259ebf85266f96215cfdabcb5#aea35af1628d1fb259ebf85266f96215cfdabcb5"
+source = "git+https://github.com/coincubetech/boltz-client?rev=aea35af1628d1fb259ebf85266f96215cfdabcb5#aea35af1628d1fb259ebf85266f96215cfdabcb5"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3456,13 +3456,13 @@ dependencies = [
 [[package]]
 name = "platform-utils"
 version = "0.1.0"
-source = "git+https://github.com/breez/boltz-client?rev=aea35af1628d1fb259ebf85266f96215cfdabcb5#aea35af1628d1fb259ebf85266f96215cfdabcb5"
+source = "git+https://github.com/coincubetech/boltz-client?rev=aea35af1628d1fb259ebf85266f96215cfdabcb5#aea35af1628d1fb259ebf85266f96215cfdabcb5"
 dependencies = [
  "async-trait",
  "base64",
  "encoding_rs",
  "futures",
- "macros 0.1.0 (git+https://github.com/breez/boltz-client?rev=aea35af1628d1fb259ebf85266f96215cfdabcb5)",
+ "macros 0.1.0 (git+https://github.com/coincubetech/boltz-client?rev=aea35af1628d1fb259ebf85266f96215cfdabcb5)",
  "mime",
  "reqwest",
  "serde",

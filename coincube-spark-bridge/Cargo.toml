@@ -93,3 +93,9 @@ debug = "line-tables-only"
 
 [profile.dev.package."*"]
 debug = false
+
+# Preserve the exact upstream source after breez/boltz-client became unavailable.
+# The mirror retains the original commit and MIT license; this changes fetch
+# location only, without upgrading Spark or re-enabling the Boltz provider.
+[patch."https://github.com/breez/boltz-client"]
+boltz-client = { git = "https://github.com/coincubetech/boltz-client", rev = "aea35af1628d1fb259ebf85266f96215cfdabcb5" }
