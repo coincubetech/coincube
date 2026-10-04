@@ -38,6 +38,21 @@
 //!   step 2, writes one, so a downgrade after either refuses the journal. A
 //!   submission recorded before these fields existed has no recorded return
 //!   and is never resent.
+//! - A fork-only record (B4b-1b, `kind: Unified`, version 9) is the unified
+//!   fallback: one BTCB2-only sweep of the splittable coins into the target
+//!   Vault, signed `ALL|UNIFIED` (B4b-1a), with no step 1. Its plan's `step1`
+//!   is the canonical empty transaction, it has no `bitcoin_transaction`, it
+//!   is Tracking from creation with its target reserved from creation, and
+//!   the sweep reuses the step-2 fields (`fork_sweep`, `step2_transaction`,
+//!   `fork_submission`), so a recorded submission reopens through the step-2
+//!   reconciler as a step 2 does. Its only writers are
+//!   [`Controller::create_unified_split`] and
+//!   [`Controller::record_unified_broadcast_intent`]; every two-step writer
+//!   refuses it, and the reverse. A two-step record stays version 8 and
+//!   serializes exactly as before; a binary that predates the fork-only
+//!   record refuses one by version (and by its `kind` field). Its
+//!   abandonment, and the close of its dead end, are B4b-3's decisions, so
+//!   both are refused here and the journal is kept.
 //!
 //! Nothing here signs, broadcasts, or grants step-2 authority. A reopened
 //! Split intent is Unchecked like a Claim one, and a recorded uncertain
@@ -46,14 +61,24 @@ use super::*;
 use crate::services::claim_observation::TransactionObservation;
 use coincube_core::{
     foreign_split::{SplitSource, SplitStep1, SplitStep2, VerifiedSplitStep1, VerifiedSplitStep2},
-    miniscript::{bitcoin::ScriptBuf, Descriptor, DescriptorPublicKey},
+    miniscript::{
+        bitcoin::{Script, ScriptBuf},
+        Descriptor, DescriptorPublicKey,
+    },
 };
 use std::str::FromStr;
 
-/// The journal version of a Split intent. Binaries that predate it refuse
-/// the file: `split` is an unknown field to them, and 8 is outside every
-/// version they validate.
-pub(super) const VERSION: u32 = 8;
+/// The newest journal version of a Split intent. A record is written at the
+/// lowest version that represents it ([`SplitKind::version`]): a two-step
+/// record stays at 8, byte-identical to before, so a binary that predates
+/// the fork-only record keeps reading it; a fork-only record is 9, which
+/// that binary refuses by version (and by the `kind` field it does not
+/// know). Binaries that predate Split refuse both: `split` is an unknown
+/// field to them, and 8 and 9 are outside every version they validate.
+pub(super) const VERSION: u32 = 9;
+/// Every version a Split intent may carry; `claim_workflow`'s reader sends
+/// an intent at any of them to [`validate`].
+pub(super) const VERSIONS: std::ops::RangeInclusive<u32> = 8..=VERSION;
 /// Far above any supported descriptor (a 3-key `wsh(sortedmulti)` is under
 /// 400 bytes); a bound on untrusted journal text, not a policy.
 const MAX_DESCRIPTOR_BYTES: usize = 4096;
@@ -66,9 +91,42 @@ pub const SPLIT_TOMBSTONE: &str = "closed.json";
 /// intent, step 2 has at most step 1's attempt bound.
 pub const MAX_SPLIT_STEP2_RESUBMISSIONS: usize = recovery::MAX_BITCOIN_ATTEMPTS - 1;
 
+/// What a Split journal records (B4b-1b).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SplitKind {
+    /// The two-step split: a signed Bitcoin step 1 tracked on both chains,
+    /// then the BTCB2 step 2 into the target. Version 8; the field is
+    /// absent from the journal, which serializes exactly as before.
+    #[default]
+    Split,
+    /// The unified fallback (B4b): one BTCB2-only sweep of the splittable
+    /// coins into the target, signed `ALL|UNIFIED`. There is no step 1, so
+    /// the record's `step1` is the canonical empty transaction, it has no
+    /// `bitcoin_transaction`, it is Tracking from creation and carries its
+    /// target from creation; the sweep reuses the step-2 fields. Version 9.
+    Unified,
+}
+impl SplitKind {
+    fn is_split(&self) -> bool {
+        matches!(self, Self::Split)
+    }
+    /// The journal version a record of this kind is written at: the lowest
+    /// that represents it.
+    fn version(self) -> u32 {
+        match self {
+            Self::Split => 8,
+            Self::Unified => VERSION,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct SplitRecord {
+    /// Absent for [`SplitKind::Split`] (the version-8 shape); written for a
+    /// fork-only record, so a binary without it refuses one.
+    #[serde(default, skip_serializing_if = "SplitKind::is_split")]
+    kind: SplitKind,
     source_digest: sha256::Hash,
     /// Public descriptors only (P2). Absent once deleted at completion.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -165,6 +223,7 @@ impl StoredDescriptors {
 /// [`Controller::revalidate_split_construction`] before relying on any of it.
 #[derive(Debug, Clone)]
 pub struct RecordedSplit {
+    pub kind: SplitKind,
     pub source_digest: sha256::Hash,
     /// `None` once the descriptors were deleted at completion.
     pub source: Option<SplitSource>,
@@ -192,6 +251,45 @@ fn fork_chain(bitcoin: ChainId) -> Option<ChainId> {
         _ => None,
     }
 }
+fn bitcoin_chain(fork: ChainId) -> Option<ChainId> {
+    match fork {
+        ChainId::BitcoinBlake2b => Some(ChainId::Bitcoin),
+        ChainId::BitcoinBlake2bTestnet4 => Some(ChainId::Testnet4),
+        _ => None,
+    }
+}
+
+/// A fork-only record's `step1`: there is none, so its plan carries the
+/// canonical empty transaction (no inputs, no outputs, version 2, lock time
+/// 0) and nothing is ever tracked on Bitcoin.
+fn empty_step1() -> Transaction {
+    Transaction {
+        version: coincube_core::miniscript::bitcoin::transaction::Version::TWO,
+        lock_time: coincube_core::miniscript::bitcoin::absolute::LockTime::ZERO,
+        input: Vec::new(),
+        output: Vec::new(),
+    }
+}
+
+/// The caller's description of the unified sweep it built (B4b-1a's
+/// `UnifiedSweep`), for [`Controller::create_unified_split`] and
+/// [`Controller::revalidate_unified_construction`]. The journal records the
+/// unsigned sweep and checks its shape: every input one of `source`'s
+/// coins, as the caller established from freshly authenticated coins, and
+/// one output paying `target_script`, the target Vault's receive script at
+/// `target_index`.
+#[derive(Clone, Copy)]
+pub struct UnifiedConstruction<'a> {
+    /// The fork chain the sweep spends on (BTCB2, or its testnet).
+    pub chain: ChainId,
+    pub source: &'a SplitSource,
+    /// The authenticated anchor's fork height the sweep was built with.
+    pub fork_height: u64,
+    pub target_index: u32,
+    pub target_script: &'a Script,
+    /// The unsigned sweep.
+    pub unsigned: &'a Transaction,
+}
 
 /// Step 1 with every scriptSig and witness removed.
 fn unsigned(tx: &Transaction) -> Transaction {
@@ -218,7 +316,9 @@ pub(super) fn validate(intent: &Intent) -> Result<(), Error> {
     let p = &intent.plan;
     let inputs: std::collections::BTreeSet<_> =
         p.step1.input.iter().map(|i| i.previous_output).collect();
-    if intent.version != VERSION
+    // What both kinds share: the kind's version, the identity, the chains,
+    // no change hints, and a reservation of the right shape.
+    if intent.version != record.kind.version()
         || intent.ancestry.is_some()
         || p.poison != Poison::OpReturn
         || !intent.identity.bitcoin_cube.is_empty()
@@ -227,10 +327,6 @@ pub(super) fn validate(intent: &Intent) -> Result<(), Error> {
         || intent.identity.fork_cube != record.target_cube
         || intent.identity.descriptor_digest != record.source_digest
         || fork_chain(p.bitcoin_chain) != Some(p.fork_chain)
-        || p.step1.input.is_empty()
-        || p.step1.input.iter().any(|i| {
-            !i.script_sig.is_empty() || !i.witness.is_empty() || i.previous_output.is_null()
-        })
         || inputs.len() != p.step1.input.len()
         || p.claimed_prevouts
             .iter()
@@ -248,44 +344,83 @@ pub(super) fn validate(intent: &Intent) -> Result<(), Error> {
             .target_script
             .as_ref()
             .is_some_and(|script| !script.is_p2wsh() && !script.is_p2tr())
-        || (intent.phase == Phase::Intent) != intent.signed_txid.is_none()
-        || intent
-            .signed_txid
-            .is_some_and(|id| Some(id) != p.tracked_txid)
     {
         return Err(Error::InvalidPlan);
     }
-    // Every input claimed, each exactly once, with the OP_RETURN poison.
-    ancestry::validate_poison(intent)?;
+    match record.kind {
+        SplitKind::Split => {
+            if p.step1.input.is_empty()
+                || p.step1.input.iter().any(|i| {
+                    !i.script_sig.is_empty() || !i.witness.is_empty() || i.previous_output.is_null()
+                })
+                || (intent.phase == Phase::Intent) != intent.signed_txid.is_none()
+                || intent
+                    .signed_txid
+                    .is_some_and(|id| Some(id) != p.tracked_txid)
+            {
+                return Err(Error::InvalidPlan);
+            }
+            // Every input claimed, each exactly once, with the OP_RETURN poison.
+            ancestry::validate_poison(intent)?;
+        }
+        SplitKind::Unified => {
+            // No step 1 at all: the canonical empty transaction, nothing
+            // signed, tracked or attempted on Bitcoin, Tracking from
+            // creation, the target reserved and the sweep recorded from
+            // creation. The claimed prevouts are the sweep's inputs
+            // (checked with the sweep below).
+            if p.step1 != empty_step1()
+                || p.claimed_prevouts.is_empty()
+                || p.claimed_prevouts.iter().any(|o| o.is_null())
+                || p.tracked_txid.is_some()
+                || p.previous_confirmation.is_some()
+                || intent.signed_txid.is_some()
+                || intent.phase != Phase::Tracking
+                || intent.bitcoin_transaction.is_some()
+                || !intent.bitcoin_attempts.is_empty()
+                || !intent.inclusion_history.is_empty()
+                || record.destination != 0
+                || record.target_script.is_none()
+                || intent.fork_sweep.is_none()
+            {
+                return Err(Error::InvalidPlan);
+            }
+        }
+    }
     if let Some(descriptors) = &record.descriptors {
         if descriptors.source()?.digest() != record.source_digest {
             return Err(Error::InvalidJournal);
         }
     }
-    // The signed step 1 is the only place a signature may appear, and its
-    // own txid is the one tracked on both chains.
-    let signed = intent
-        .bitcoin_transaction
-        .as_ref()
-        .ok_or(Error::InvalidJournal)?;
-    let wtxid = signed.compute_wtxid();
-    if !signs(signed, intent.unsigned_digest)
-        || p.tracked_txid != Some(signed.compute_txid())
-        || (intent.phase == Phase::Intent) != intent.bitcoin_attempts.is_empty()
-        || intent.bitcoin_attempts.len() > recovery::MAX_BITCOIN_ATTEMPTS
-        || intent
-            .bitcoin_attempts
-            .iter()
-            .any(|attempt| attempt.wtxid != Some(wtxid))
-    {
-        return Err(Error::InvalidJournal);
+    if record.kind == SplitKind::Split {
+        // The signed step 1 is the only place a signature may appear, and
+        // its own txid is the one tracked on both chains.
+        let signed = intent
+            .bitcoin_transaction
+            .as_ref()
+            .ok_or(Error::InvalidJournal)?;
+        let wtxid = signed.compute_wtxid();
+        if !signs(signed, intent.unsigned_digest)
+            || p.tracked_txid != Some(signed.compute_txid())
+            || (intent.phase == Phase::Intent) != intent.bitcoin_attempts.is_empty()
+            || intent.bitcoin_attempts.len() > recovery::MAX_BITCOIN_ATTEMPTS
+            || intent
+                .bitcoin_attempts
+                .iter()
+                .any(|attempt| attempt.wtxid != Some(wtxid))
+        {
+            return Err(Error::InvalidJournal);
+        }
     }
+    // A two-step record's step 1 must be tracked before the sweep and the
+    // reservation; a fork-only record is Tracking from creation (above).
+    let tracked = intent.phase == Phase::Tracking
+        && (record.kind == SplitKind::Unified || intent.signed_txid.is_some());
     if let Some(sweep) = &intent.fork_sweep {
         let sweep_inputs: std::collections::BTreeSet<_> =
             sweep.input.iter().map(|i| i.previous_output).collect();
         let claimed: std::collections::BTreeSet<_> = p.claimed_prevouts.iter().copied().collect();
-        if intent.phase != Phase::Tracking
-            || intent.signed_txid.is_none()
+        if !tracked
             || sweep_inputs.len() != sweep.input.len()
             || sweep_inputs != claimed
             || sweep
@@ -300,9 +435,7 @@ pub(super) fn validate(intent: &Intent) -> Result<(), Error> {
         }
     }
     // A reservation is only made once step 1 is tracked.
-    if record.target_index.is_some()
-        && (intent.phase != Phase::Tracking || intent.signed_txid.is_none())
-    {
+    if record.target_index.is_some() && !tracked {
         return Err(Error::InvalidPlan);
     }
     // The signed step 2 and its submission are recorded together; the
@@ -348,9 +481,9 @@ impl Controller {
     /// neither can come from a journal. `fork_height` is the authenticated
     /// anchor's fork height, and must be the one the construction was built
     /// with ([`SplitStep1::fork_height`]). Creates a
-    /// version-8 intent with the public descriptors (P2) and refuses an
-    /// existing intent in `directory`. The result is not submission
-    /// authority: the coordinator still needs fresh observations.
+    /// version-8 intent (`kind: Split`) with the public descriptors (P2) and
+    /// refuses an existing intent in `directory`. The result is not
+    /// submission authority: the coordinator still needs fresh observations.
     pub fn create_split(
         directory: &Path,
         target_cube: String,
@@ -373,7 +506,7 @@ impl Controller {
         let source = construction.source();
         let source_digest = source.digest();
         let intent = Intent {
-            version: VERSION,
+            version: SplitKind::Split.version(),
             ancestry: None,
             identity: split_identity(target_cube.clone(), source_digest),
             plan: ClaimPlan {
@@ -397,6 +530,7 @@ impl Controller {
             bitcoin_transaction: Some(signed.transaction().clone()),
             bitcoin_attempts: Vec::new(),
             split: Some(SplitRecord {
+                kind: SplitKind::Split,
                 source_digest,
                 descriptors: Some(StoredDescriptors::new(source)),
                 fork_height,
@@ -410,6 +544,88 @@ impl Controller {
                 step2_returned: false,
             }),
         };
+        Self::admit_split(directory, intent, context)
+    }
+
+    /// Record the unified fallback (B4b, `kind: Unified`): one BTCB2-only
+    /// sweep of the splittable coins into the target Vault, with no step 1.
+    /// `construction` describes the sweep the caller built from freshly
+    /// authenticated coins (B4b-1a's `UnifiedSweep`): the journal records
+    /// its unsigned transaction, checks its shape, and reserves the target
+    /// from creation. Creates a version-9 intent with the public descriptors
+    /// (P2) that is Tracking from creation, since nothing is ever tracked on
+    /// Bitcoin, and refuses an existing intent or a tombstone in
+    /// `directory`. The result is not submission authority: the caller's
+    /// gate (C2) holds the fresh evidence, and the signed bytes are recorded
+    /// only with their submission intent
+    /// ([`Self::record_unified_broadcast_intent`]).
+    pub fn create_unified_split(
+        directory: &Path,
+        target_cube: String,
+        construction: UnifiedConstruction<'_>,
+        context: Context,
+    ) -> Result<Self, Error> {
+        let fork_chain = construction.chain;
+        let bitcoin_chain = bitcoin_chain(fork_chain).ok_or(Error::InvalidPlan)?;
+        let unsigned = construction.unsigned;
+        if unsigned.input.is_empty()
+            || unsigned
+                .input
+                .iter()
+                .any(|i| !i.script_sig.is_empty() || !i.witness.is_empty())
+            || unsigned.output.len() != 1
+            || unsigned.output[0].script_pubkey.as_script() != construction.target_script
+        {
+            return Err(Error::InvalidPlan);
+        }
+        let source_digest = construction.source.digest();
+        let step1 = empty_step1();
+        let unsigned_digest = digest(&step1);
+        let intent = Intent {
+            version: SplitKind::Unified.version(),
+            ancestry: None,
+            identity: split_identity(target_cube.clone(), source_digest),
+            plan: ClaimPlan {
+                bitcoin_chain,
+                fork_chain,
+                claimed_prevouts: unsigned.input.iter().map(|i| i.previous_output).collect(),
+                step1,
+                poison: Poison::OpReturn,
+                previous_confirmation: None,
+                tracked_txid: None,
+            },
+            unsigned_digest,
+            context_digest: context_digest(&context),
+            signed_txid: None,
+            phase: Phase::Tracking,
+            fork_sweep: Some(unsigned.clone()),
+            fork_change_index: None,
+            bitcoin_change_index: None,
+            fork_submission: None,
+            inclusion_history: Vec::new(),
+            bitcoin_transaction: None,
+            bitcoin_attempts: Vec::new(),
+            split: Some(SplitRecord {
+                kind: SplitKind::Unified,
+                source_digest,
+                descriptors: Some(StoredDescriptors::new(construction.source)),
+                fork_height: construction.fork_height,
+                destination: 0,
+                target_cube,
+                target_index: Some(construction.target_index),
+                target_script: Some(construction.target_script.to_owned()),
+                step2_transaction: None,
+                step2_resubmissions: Vec::new(),
+                step2_observed: false,
+                step2_returned: false,
+            }),
+        };
+        Self::admit_split(directory, intent, context)
+    }
+
+    /// Validate a new Split intent of either kind and write it as the only
+    /// journal in `directory`, under the journal's lock.
+    fn admit_split(directory: &Path, intent: Intent, context: Context) -> Result<Self, Error> {
         validate(&intent)?;
         Self::valid_context(&context)?;
         let mut journal = journal::Journal::open(directory)?;
@@ -438,12 +654,23 @@ impl Controller {
         self.intent.split.as_ref().ok_or(Error::WrongIdentity)
     }
 
+    /// The Split record if it is of `kind`. A Claim intent or the other
+    /// kind refuses, so a two-step writer never touches a fork-only record
+    /// and the reverse.
+    fn record_of(&self, kind: SplitKind) -> Result<&SplitRecord, Error> {
+        match &self.intent.split {
+            Some(record) if record.kind == kind => Ok(record),
+            _ => Err(Error::WrongIdentity),
+        }
+    }
+
     /// Untrusted restart record; see [`RecordedSplit`]. `None` for Claim.
     pub fn recorded_split(&self) -> Result<Option<RecordedSplit>, Error> {
         let Some(record) = &self.intent.split else {
             return Ok(None);
         };
         Ok(Some(RecordedSplit {
+            kind: record.kind,
             source_digest: record.source_digest,
             source: record
                 .descriptors
@@ -463,6 +690,8 @@ impl Controller {
     /// checks it is exactly the recorded one: same chain, unsigned bytes,
     /// source digest (and stored descriptors while kept), destination and
     /// fork height, both as supplied and as the construction was built. Anything else refuses and leaves the intent unverified.
+    /// A fork-only record refuses it
+    /// ([`Self::revalidate_unified_construction`] is its check).
     pub fn revalidate_split_construction(
         &mut self,
         current: &Context,
@@ -471,8 +700,9 @@ impl Controller {
     ) -> Result<(), Error> {
         self.ensure_context(current)?;
         self.clear_check();
+        self.record_of(SplitKind::Split)?;
         self.construction_verified = false;
-        let record = self.split_record()?;
+        let record = self.record_of(SplitKind::Split)?;
         if construction.chain() != self.intent.plan.bitcoin_chain
             || digest(&construction.psbt().unsigned_tx) != self.intent.unsigned_digest
             || construction.source().digest() != record.source_digest
@@ -504,7 +734,7 @@ impl Controller {
         signed: &VerifiedSplitStep1,
     ) -> Result<(), Error> {
         self.ensure_context(current)?;
-        self.split_record()?;
+        self.record_of(SplitKind::Split)?;
         if !self.construction_verified {
             return Err(Error::Unchecked);
         }
@@ -547,7 +777,7 @@ impl Controller {
         now: i64,
     ) -> Result<(), Error> {
         self.ensure_context(current)?;
-        if self.intent.split.is_none() {
+        if self.record_of(SplitKind::Split).is_err() {
             self.clear_check();
             return Err(Error::WrongIdentity);
         }
@@ -583,11 +813,12 @@ impl Controller {
     /// txids, signed bytes and inclusion history stay. Only a tracked step 1
     /// can be completed; the completion evidence itself (B5) is checked by
     /// the caller, which is the only intended one. Dropping the descriptors
-    /// removes restart data and grants nothing.
+    /// removes restart data and grants nothing. A fork-only record refuses
+    /// it: its completion is B4b-3's decision.
     pub fn forget_split_descriptors(&mut self, current: &Context) -> Result<(), Error> {
         self.ensure_context(current)?;
         self.clear_check();
-        self.split_record()?;
+        self.record_of(SplitKind::Split)?;
         if self.intent.phase != Phase::Tracking || self.intent.signed_txid.is_none() {
             return Err(Error::Unchecked);
         }
@@ -609,7 +840,8 @@ impl Controller {
     /// again is a no-op and any other is a [`Error::Conflict`]; replacing it
     /// needs [`Self::replace_used_split_target`]. The caller derives the
     /// script from the target Vault's own descriptor and proves it unused;
-    /// this checks only its shape.
+    /// this checks only its shape. A fork-only record refuses it: its
+    /// target is fixed at creation.
     pub fn record_split_target(
         &mut self,
         current: &Context,
@@ -617,7 +849,7 @@ impl Controller {
         script: ScriptBuf,
     ) -> Result<(), Error> {
         self.ensure_context(current)?;
-        let record = self.split_record()?;
+        let record = self.record_of(SplitKind::Split)?;
         if record.target_index == Some(index) && record.target_script.as_ref() == Some(&script) {
             return Ok(());
         }
@@ -639,7 +871,7 @@ impl Controller {
         script: ScriptBuf,
     ) -> Result<(), Error> {
         self.ensure_context(current)?;
-        let record = self.split_record()?;
+        let record = self.record_of(SplitKind::Split)?;
         if record.target_index != Some(used) || index <= used {
             return Err(Error::Conflict);
         }
@@ -673,7 +905,7 @@ impl Controller {
         now: i64,
     ) -> Result<(), Error> {
         self.ensure_context(current)?;
-        if self.intent.split.is_none() {
+        if self.record_of(SplitKind::Split).is_err() {
             self.clear_check();
             return Err(Error::WrongIdentity);
         }
@@ -730,7 +962,7 @@ impl Controller {
         now: i64,
     ) -> Result<(), Error> {
         self.ensure_context(current)?;
-        if self.intent.split.is_none() {
+        if self.record_of(SplitKind::Split).is_err() {
             self.clear_check();
             return Err(Error::WrongIdentity);
         }
@@ -809,10 +1041,13 @@ impl Controller {
     /// withdrawn (an accepted, cancelled, timed-out or interrupted send, or a
     /// read that didn't give it back), or the resend limit is reached. Only
     /// such a journal may be closed after a fresh chain check. Read-only; it
-    /// grants nothing.
+    /// grants nothing. Never for a fork-only record: the close checks step
+    /// 1 on Bitcoin, which it does not have, and its close is B4b-3's
+    /// decision.
     pub fn split_step2_dead_end(&self) -> bool {
         self.intent.split.as_ref().is_some_and(|record| {
-            self.intent.fork_submission.is_some()
+            record.kind == SplitKind::Split
+                && self.intent.fork_submission.is_some()
                 && record.step2_transaction.is_some()
                 && !record.step2_observed
                 && (!record.step2_returned
@@ -954,7 +1189,7 @@ impl Controller {
         now: i64,
     ) -> Result<(), Error> {
         self.ensure_context(current)?;
-        if self.intent.split.is_none() {
+        if self.record_of(SplitKind::Split).is_err() {
             self.clear_check();
             return Err(Error::WrongIdentity);
         }
@@ -1001,15 +1236,108 @@ impl Controller {
         Ok(())
     }
 
+    /// Restart never restores the construction. The caller rebuilds the
+    /// unified sweep from freshly authenticated coins and this checks it is
+    /// exactly the recorded one: same fork chain, unsigned bytes, source
+    /// digest (and stored descriptors while kept), fork height and target.
+    /// Anything else refuses and leaves the intent unverified. A two-step
+    /// record refuses it ([`Self::revalidate_split_construction`] is its
+    /// check).
+    pub fn revalidate_unified_construction(
+        &mut self,
+        current: &Context,
+        construction: UnifiedConstruction<'_>,
+    ) -> Result<(), Error> {
+        self.ensure_context(current)?;
+        self.clear_check();
+        self.record_of(SplitKind::Unified)?;
+        self.construction_verified = false;
+        let record = self.record_of(SplitKind::Unified)?;
+        if construction.chain != self.intent.plan.fork_chain
+            || self.intent.fork_sweep.as_ref() != Some(construction.unsigned)
+            || construction.source.digest() != record.source_digest
+            || construction.fork_height != record.fork_height
+            || record.target_index != Some(construction.target_index)
+            || record.target_script.as_deref() != Some(construction.target_script)
+        {
+            return Err(Error::WrongIdentity);
+        }
+        if let Some(descriptors) = &record.descriptors {
+            if &descriptors.source()? != construction.source {
+                return Err(Error::WrongIdentity);
+            }
+        }
+        self.construction_verified = true;
+        Ok(())
+    }
+
+    /// Durably record a possible submission of exactly the signed unified
+    /// sweep before it is attempted: the recorded unsigned sweep with a
+    /// signature on every input, on the record's fork chain, once the
+    /// construction was verified in this session
+    /// ([`Self::create_unified_split`] or
+    /// [`Self::revalidate_unified_construction`]). `chain` and `signed` come
+    /// from core's verified sweep (B4b-1a's `VerifiedUnifiedSweep`), whose
+    /// finalizer is the only check of the signatures and of their
+    /// `ALL|UNIFIED` type; this checks unsigned identity only, like
+    /// [`Self::record_broadcast_intent`]. As for step 2, the submission
+    /// names the signed bytes' own txid, and a saved intent never permits a
+    /// retry: it can only be reconciled. The journal cannot assess a
+    /// fork-only record (there is no step 1 to observe), so no fresh
+    /// assessment is consumed here: the caller's gate (C2) holds the fresh
+    /// evidence. Returns no broadcast authority and performs no network I/O.
+    pub fn record_unified_broadcast_intent(
+        &mut self,
+        current: &Context,
+        chain: ChainId,
+        signed: &Transaction,
+    ) -> Result<(), Error> {
+        self.ensure_context(current)?;
+        self.clear_check();
+        self.record_of(SplitKind::Unified)?;
+        if !self.construction_verified {
+            return Err(Error::Unchecked);
+        }
+        if self.intent.fork_submission.is_some() {
+            return Err(Error::Conflict);
+        }
+        if chain != self.intent.plan.fork_chain
+            || self.intent.fork_sweep.as_ref() != Some(&unsigned(signed))
+            || signed
+                .input
+                .iter()
+                .any(|input| input.script_sig.is_empty() && input.witness.is_empty())
+        {
+            return Err(Error::InvalidPlan);
+        }
+        let mut next = self.intent.clone();
+        next.fork_submission = Some(RecordedForkSubmission {
+            txid: signed.compute_txid(),
+            wtxid: signed.compute_wtxid(),
+        });
+        if let Some(record) = next.split.as_mut() {
+            record.step2_transaction = Some(signed.clone());
+        }
+        validate(&next)?;
+        self.journal.store(&next)?;
+        self.intent = next;
+        Ok(())
+    }
+
     /// Abandon a Split that was never submitted: delete the whole intent,
     /// descriptors included (P2). Refused once a submission was recorded or
     /// an inclusion observed (the signed bytes may have been sent from
     /// elsewhere), since step 1 may then be on chain and must stay tracked.
     /// Absence of an observed inclusion is not proof it is not on chain; a
-    /// caller offering this checks the chain first.
+    /// caller offering this checks the chain first. A fork-only record is
+    /// always refused, and kept: it is Tracking from creation, and its
+    /// abandonment is B4b-3's decision.
     pub fn abandon_split(mut self, current: &Context) -> Result<(), Error> {
         self.ensure_context(current)?;
         self.split_record()?;
+        if self.record_of(SplitKind::Split).is_err() {
+            return Err(Error::Conflict);
+        }
         if self.intent.phase != Phase::Intent
             || !self.intent.bitcoin_attempts.is_empty()
             || self.intent.plan.previous_confirmation.is_some()
