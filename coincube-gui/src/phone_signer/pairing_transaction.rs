@@ -105,6 +105,10 @@ impl PairingTransaction {
         // Re-pair is explicit recovery: restore an abandoned provisional raw row.
         let mut raw = pairing_store::load_raw(dir)?;
         replace(&mut raw, &candidate.cert_pin, previous.clone());
+        // Pairing this phone again supersedes an undelivered removal of it;
+        // delivering that removal now would undo the new pairing.
+        raw.pending_unpairs
+            .retain(|p| p.cert_pin != candidate.cert_pin);
         pairing_store::save(dir, &raw)?;
         entries.insert(
             key.clone(),
