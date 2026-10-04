@@ -41,17 +41,30 @@
 //!   ([`route_copy`]) and the "Split — cannot replay" label, which only a
 //!   live six-confirmation check can produce ([`CannotReplay`]).
 //!
+//! - **Closing a dead end** (#625 F2, A1 = A). A recorded step 2 that no
+//!   resend can follow and no read ever saw ([`DeadEnd`]) may be closed after
+//!   [`check_close`]: [`close`] leaves the journal, recorded bytes included,
+//!   and writes its tombstone, so discovery skips it and a new split of the
+//!   same source stays refused until the owner removes the tombstone.
+//!
 //! Every blocking call here runs off the UI thread.
 
-use std::{path::PathBuf, sync::Arc, time::Instant};
+use std::{
+    convert::TryFrom,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Instant,
+};
 
 use async_trait::async_trait;
 use tokio::sync::watch;
 
 use coincube_core::{
+    chain::ChainId,
+    claim::MIN_CONFIRMATIONS,
     descriptors::CoincubeDescriptor,
     foreign_split::{SplitCoin, SplitStep1, VerifiedSplitStep1},
-    miniscript::bitcoin::{hashes::sha256, psbt::Psbt, Txid},
+    miniscript::bitcoin::{hashes::sha256, psbt::Psbt, Address, Network, OutPoint, Txid},
 };
 
 use super::step1::{self, OpenRequest, Refusal, RevokeHandle, SplitConnect, Step1Driver};
@@ -71,9 +84,10 @@ use crate::{
             },
             Outcome, Review, SubmissionRoute,
         },
-        claim_observation::TransactionObservation,
+        claim_observation::{FailureKind, TransactionObservation},
         claim_workflow::{self, Context, Controller, Status},
         foreign_psbt::SweepFeeSource,
+        split_evidence::{SplitEvidenceSource, MAX_EVIDENCE_AGE_SECONDS},
         split_fees,
     },
 };
@@ -565,12 +579,29 @@ pub enum Restart {
     /// No step-2 submission recorded: resume step 1 as before
     /// (`SplitPanel::resume`).
     Step1,
-    /// A step-2 submission is recorded: reconcile only. With why a resend
-    /// the journal allows could not be opened, when that is the case.
-    Reconcile(Box<dyn Step2Recon>, Option<String>),
+    /// A step-2 submission is recorded: reconcile only, with its dead end
+    /// when it is in one (#625 F2), or else why a resend the journal allows
+    /// could not be opened (P3-3). At most one is set: a journal in a dead
+    /// end allows no resend.
+    Reconcile(Box<dyn Step2Recon>, Option<DeadEnd>, Option<String>),
     /// A step-2 submission is recorded and the journal allows a reviewed
     /// resend (P3-3): its coordinator, reopened from the recorded bytes.
     Resend(Box<dyn Step2Coord>),
+    /// #625 F2: the split was closed in its step-2 dead end. Nothing opens.
+    Closed,
+}
+
+/// #625 F2: a recorded step 2 that no resend can follow and no read ever
+/// saw on BTCB2 ([`Controller::split_step2_dead_end`]), as the restart read
+/// it. What [`check_close`] looks for on both chains; it grants nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeadEnd {
+    /// The recorded signed step 1's own txid.
+    pub step1: Txid,
+    /// The recorded signed step 2's own txid.
+    pub step2: Txid,
+    /// Step 1's claimed inputs: the coins step 2 spends on BTCB2.
+    pub claimed: Vec<OutPoint>,
 }
 
 /// Why a resend the journal allows was not reopened (P3-3). Restoring step 1
@@ -613,7 +644,8 @@ fn resend_allowed(controller: &Controller) -> bool {
 /// (lock released at once) and, when it records a step-2 submission, open
 /// the reconciler instead of rebuilding step 1 (whose claimed coins may
 /// already be spent on BTCB2 by step 2). No reconciler for the session
-/// refuses; it never falls back to step 1 (#637 R1).
+/// refuses; it never falls back to step 1 (#637 R1). A closed split opens
+/// nothing (#625 F2).
 ///
 /// P3-3: when the journal also allows a resend and `resend` gives the
 /// target Vault's step-2 port for the same session, the coordinator is
@@ -627,8 +659,11 @@ pub async fn restart(
     target_cube: String,
     digest: sha256::Hash,
 ) -> Result<Restart, Step2Refusal> {
+    if step1::is_closed(&directory) {
+        return Ok(Restart::Closed);
+    }
     let identity = claim_workflow::split_identity(target_cube.clone(), digest);
-    let (recorded, resendable) = {
+    let (recorded, resendable, dead_end) = {
         let controller = Controller::reopen_settling(&directory, &identity, context.clone())
             .await
             .map_err(|error| {
@@ -637,6 +672,7 @@ pub async fn restart(
         (
             controller.recorded_split_step2().is_some(),
             resend_allowed(&controller),
+            dead_end(&controller),
         )
         // The controller, and the journal lock, end here.
     };
@@ -662,7 +698,203 @@ pub async fn restart(
     tokio::task::spawn_blocking(move || port.open_reconciler(directory, target_cube, digest))
         .await
         .map_err(|_| Step2Refusal::retry("Reopening the split was interrupted. Try again."))?
-        .map(|recon| Restart::Reconcile(recon, unavailable))
+        .map(|recon| Restart::Reconcile(recon, dead_end, unavailable))
+}
+
+/// The journal's step-2 dead end, if it is in one.
+fn dead_end(controller: &Controller) -> Option<DeadEnd> {
+    if !controller.split_step2_dead_end() {
+        return None;
+    }
+    let plan = controller.plan();
+    Some(DeadEnd {
+        step1: plan.step1_txid(),
+        step2: controller.recorded_split_step2()?.compute_txid(),
+        claimed: plan.claimed_prevouts,
+    })
+}
+
+/// #625 F2: a dead-end split whose step 2 Bitcoin Blake2b shows.
+pub const STEP2_SEEN: &str = "Bitcoin Blake2b shows this step 2, so it left and this split can't be abandoned. It stays tracked here.";
+/// #625 F2: step 1 is not (or no longer) six deep on Bitcoin.
+pub const STEP1_NOT_DEEP: &str = "Step 1 isn't six confirmations deep on Bitcoin right now, so this split can't be abandoned yet. Check again later.";
+/// #625 F2: a claimed coin is no longer unspent on BTCB2.
+pub const COIN_SPENT_ON_BTCB2: &str = "A coin of this split is no longer unspent on Bitcoin Blake2b, possibly spent by this step 2. This split can't be abandoned; it stays tracked here.";
+/// #625 F2: the journal changed between the check and the close.
+pub const CHANGED_SINCE_CHECK: &str =
+    "This split changed since it was checked, so it was not abandoned. Check again.";
+
+fn fresh(evidence: &dyn SplitEvidenceSource, observed_at: i64) -> bool {
+    evidence
+        .now()
+        .checked_sub(observed_at)
+        .is_some_and(|age| (0..=MAX_EVIDENCE_AGE_SECONDS).contains(&age))
+}
+fn unavailable(kind: FailureKind) -> Refusal {
+    Refusal::retry(format!(
+        "Connect couldn't check the chains for this split ({kind:?}), so it can't be abandoned yet. This is not a sign that step 2 left or that a coin was spent. Try again later."
+    ))
+}
+/// One fresh BTCB2 read keyed by the recorded step 2's own txid: absent.
+async fn step2_absent(evidence: &dyn SplitEvidenceSource, step2: Txid) -> Result<(), Refusal> {
+    let seen = evidence
+        .transaction(ChainId::BitcoinBlake2b, step2)
+        .await
+        .map_err(unavailable)?;
+    if !fresh(evidence, seen.observed_at()) {
+        return Err(unavailable(FailureKind::Stale));
+    }
+    if *seen.value() != TransactionObservation::Absent {
+        return Err(Refusal::final_(STEP2_SEEN));
+    }
+    Ok(())
+}
+
+/// #625 F2 (A1 = A): before a split in its step-2 dead end may be closed,
+/// fresh reads must show, in this order: the recorded step 2 absent from
+/// BTCB2 (a read keyed by its own txid); step 1 confirmed on Bitcoin in a
+/// block still canonical at its height, at least [`MIN_CONFIRMATIONS`] deep
+/// against the tip; every claimed input among its address's BTCB2 unspent
+/// outputs (the address from its previous transaction, checked against its
+/// txid); and the recorded step 2 absent again. A sighting, a spend, a
+/// shallow or reorged step 1, or a failed or stale read refuses, and the
+/// journal is kept. A sighting here is not recorded in the journal: the dead
+/// end has no resend for it to end.
+pub async fn check_close(connect: &dyn SplitConnect, dead_end: &DeadEnd) -> Result<(), Refusal> {
+    let evidence = connect.evidence();
+    step2_absent(evidence, dead_end.step2).await?;
+
+    let status = evidence
+        .transaction(ChainId::Bitcoin, dead_end.step1)
+        .await
+        .map_err(unavailable)?;
+    if !fresh(evidence, status.observed_at()) {
+        return Err(unavailable(FailureKind::Stale));
+    }
+    let TransactionObservation::Confirmed { block, .. } = *status.value() else {
+        return Err(Refusal::retry(STEP1_NOT_DEEP));
+    };
+    let tip = evidence.tip(ChainId::Bitcoin).await.map_err(unavailable)?;
+    let canonical = evidence
+        .hash_at_height(ChainId::Bitcoin, block.height)
+        .await
+        .map_err(unavailable)?;
+    if !fresh(evidence, tip.observed_at()) || !fresh(evidence, canonical.observed_at()) {
+        return Err(unavailable(FailureKind::Stale));
+    }
+    let deep = tip
+        .value()
+        .height
+        .checked_sub(block.height)
+        .is_some_and(|below| below.saturating_add(1) >= MIN_CONFIRMATIONS);
+    if *canonical.value() != block.hash || !deep {
+        return Err(Refusal::retry(STEP1_NOT_DEEP));
+    }
+
+    for outpoint in &dead_end.claimed {
+        let previous = evidence
+            .previous_transaction(ChainId::Bitcoin, outpoint.txid)
+            .await
+            .map_err(unavailable)?;
+        let address = (previous.compute_txid() == outpoint.txid)
+            .then(|| usize::try_from(outpoint.vout).ok())
+            .flatten()
+            .and_then(|vout| previous.output.get(vout))
+            .and_then(|output| Address::from_script(&output.script_pubkey, Network::Bitcoin).ok())
+            .ok_or_else(|| Refusal::final_(step1::UNIDENTIFIED))?;
+        let unspent = evidence
+            .unspent_outputs(ChainId::BitcoinBlake2b, &address.to_string())
+            .await
+            .map_err(unavailable)?;
+        if !fresh(evidence, unspent.observed_at()) {
+            return Err(unavailable(FailureKind::Stale));
+        }
+        if !unspent.value().contains(outpoint) {
+            return Err(Refusal::final_(COIN_SPENT_ON_BTCB2));
+        }
+    }
+
+    step2_absent(evidence, dead_end.step2).await
+}
+
+/// #625 F2 (A1 = A): close a split in its step-2 dead end, after
+/// [`check_close`] passed again. Under the journal's lock it must still be
+/// in exactly that dead end; then its tombstone ([`step1::CLOSED`]) is
+/// written atomically next to the journal, naming the source, the target
+/// Cube, both recorded txids and the claimed inputs. The journal itself,
+/// with the recorded signed step 2, is not changed or deleted. A failed
+/// write closes nothing. `ended` is the panel's session flag: set by a
+/// revocation after the close was confirmed, it refuses under the journal's
+/// lock, right before the write (#644 r4176212750). Blocking: off the UI
+/// thread, with every handle on the journal dropped first.
+pub fn close(
+    directory: &Path,
+    target_cube: &str,
+    digest: sha256::Hash,
+    context: Context,
+    dead_end: &DeadEnd,
+    closed_at: i64,
+    ended: &std::sync::atomic::AtomicBool,
+) -> Result<(), String> {
+    let identity = claim_workflow::split_identity(target_cube.to_owned(), digest);
+    let controller = Controller::reopen_settling_blocking(directory, &identity, context)
+        .map_err(|error| step1::describe(claim_coordinator::Error::Journal(error)))?;
+    if self::dead_end(&controller).as_ref() != Some(dead_end) {
+        return Err(CHANGED_SINCE_CHECK.to_string());
+    }
+    if ended.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err(step1::ENDED_BEFORE_ABANDON.to_string());
+    }
+    let tombstone = serde_json::json!({
+        "version": 1,
+        "source_digest": digest.to_string(),
+        "target_cube": target_cube,
+        "step1_txid": dead_end.step1.to_string(),
+        "step2_txid": dead_end.step2.to_string(),
+        "claimed_prevouts": dead_end
+            .claimed
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        "closed_at": closed_at,
+    });
+    let bytes = serde_json::to_vec_pretty(&tombstone).map_err(|error| error.to_string())?;
+    write_tombstone(directory, &bytes)
+        .map_err(|error| format!("The split could not be abandoned ({error})."))
+    // The controller, and the journal lock, end here.
+}
+
+/// Write `bytes` to `directory/closed.json` atomically: a private temporary
+/// file, synced, renamed over the final name, then the directory synced.
+fn write_tombstone(directory: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    // Unique per write: a temporary file a crashed run left behind is never
+    // reused.
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_nanos());
+    let temporary = directory.join(format!(".closed-{}-{}.tmp", std::process::id(), nonce));
+    let result = (|| {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        let mut file = options.open(&temporary)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&temporary, directory.join(step1::CLOSED))?;
+        #[cfg(unix)]
+        std::fs::File::open(directory)?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
 }
 
 /// The session's Split fork production, built fresh for each open.

@@ -19,7 +19,7 @@ use journal::Journal;
 pub use recovery::BitcoinSubmissionAttempt;
 pub use reorg::Reconfirmation;
 pub(crate) use split::Step2ReturnHold;
-pub use split::{split_identity, RecordedSplit, MAX_SPLIT_STEP2_RESUBMISSIONS};
+pub use split::{split_identity, RecordedSplit, MAX_SPLIT_STEP2_RESUBMISSIONS, SPLIT_TOMBSTONE};
 
 /// Upper bound on how long [`Controller::reopen_settling`] waits out `Busy`.
 pub const REOPEN_BUSY_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
