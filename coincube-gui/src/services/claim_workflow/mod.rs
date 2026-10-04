@@ -19,7 +19,10 @@ use journal::Journal;
 pub use recovery::BitcoinSubmissionAttempt;
 pub use reorg::Reconfirmation;
 pub(crate) use split::Step2ReturnHold;
-pub use split::{split_identity, RecordedSplit, MAX_SPLIT_STEP2_RESUBMISSIONS, SPLIT_TOMBSTONE};
+pub use split::{
+    split_identity, RecordedSplit, SplitKind, UnifiedConstruction, MAX_SPLIT_STEP2_RESUBMISSIONS,
+    SPLIT_TOMBSTONE,
+};
 
 /// Upper bound on how long [`Controller::reopen_settling`] waits out `Busy`.
 pub const REOPEN_BUSY_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
@@ -102,9 +105,10 @@ struct Intent {
     bitcoin_transaction: Option<Transaction>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     bitcoin_attempts: Vec<BitcoinSubmissionAttempt>,
-    /// Split (#568) only, and only in a version-8 intent. Every Claim intent
-    /// leaves it absent, so Claim journals serialize exactly as before, and
-    /// binaries without it refuse a Split journal (`deny_unknown_fields`).
+    /// Split (#568) only, and only in a version-8 (two-step) or version-9
+    /// (fork-only) intent. Every Claim intent leaves it absent, so Claim
+    /// journals serialize exactly as before, and binaries without it refuse
+    /// a Split journal (`deny_unknown_fields`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     split: Option<split::SplitRecord>,
 }
@@ -180,7 +184,7 @@ fn context_digest(context: &Context) -> sha256::Hash {
 fn validate(intent: &Intent) -> Result<(), Error> {
     // A Split intent has its own rules (no Bitcoin Cube, signed scriptSigs,
     // a tracked signed txid). Every Claim check below stays as it was.
-    if intent.split.is_some() || intent.version == split::VERSION {
+    if intent.split.is_some() || split::VERSIONS.contains(&intent.version) {
         return split::validate(intent);
     }
     let p = &intent.plan;
