@@ -28,6 +28,7 @@ use super::{
 use crate::{
     app::message::Message,
     services::{
+        claim_coordinator::Outcome,
         claim_observation::TransactionObservation,
         split_psbt_file::{self, Encoding},
     },
@@ -1031,7 +1032,7 @@ impl SplitPanel {
                     Err(reason) => {
                         self.step2_resend = None;
                         if reason.recovery == step2::Step2Recovery::Restart {
-                            return self.restart_step2(reason.reason);
+                            return self.restart_step2(Some(reason.reason));
                         }
                         self.notice = Some(reason.reason);
                     }
@@ -1046,12 +1047,21 @@ impl SplitPanel {
                 self.bind_coord(coord);
                 self.step2_resend = None;
                 match result {
-                    Ok(outcome) => {
+                    Ok(outcome @ Outcome::UpstreamAccepted { .. }) => {
                         self.notice = None;
                         self.step2_outcome = Some(outcome);
                     }
+                    // #648 X1b: an attempt that did not come back accepted
+                    // (timed out or interrupted: no return is recorded, or
+                    // the last one allowed) may leave the journal with no
+                    // resend. Read it again, as a refusal that says so does,
+                    // so a dead end is shown without another review.
+                    Ok(outcome) => {
+                        self.step2_outcome = Some(outcome);
+                        return self.restart_step2(None);
+                    }
                     Err(reason) if reason.recovery == step2::Step2Recovery::Restart => {
-                        return self.restart_step2(reason.reason);
+                        return self.restart_step2(Some(reason.reason));
                     }
                     Err(reason) => self.notice = Some(reason.reason),
                 }

@@ -1945,6 +1945,10 @@ async fn panel_resends_step2_only_from_an_explicit_review_after_a_restart() {
         Some(Outcome::Uncertain { .. })
     ));
     assert_eq!(panel.notice(), None);
+    // The uncertain send read the journal again (#648 X1b): it still allows
+    // a resend, so the coordinator was reopened.
+    assert_eq!(shared.lock().unwrap().reopened, 2);
+    assert!(panel.coord.is_some() && panel.recon.is_none());
     // Another resend needs another review.
     send(&mut panel).await;
     assert_eq!(resends(&shared), 1);
@@ -2033,7 +2037,9 @@ async fn panel_resends_step2_only_from_an_explicit_review_after_a_restart() {
         (counts.step1_opened, counts.submits, counts.builds),
         (0, 0, 0)
     );
-    assert_eq!(counts.reopened, 2);
+    // The first restart, the uncertain send's (#648 X1b) and the next
+    // session's; the accepted send restarts nothing.
+    assert_eq!(counts.reopened, 3);
 }
 
 /// P3-3: a resend is offered only where a restart reopened the coordinator.
@@ -2241,6 +2247,54 @@ async fn panel_reopens_the_dead_end_when_no_resend_can_follow() {
     drive(&mut panel, task).await;
     assert!(panel.coord.is_some() && panel.recon.is_none());
     assert!(panel.can_review_resend());
+}
+
+/// #648 X1b (Legolas's probe, review 5985131761): a resend that comes back
+/// uncertain and leaves the journal with no resend (its return withdrawn, as
+/// a timed-out send leaves it) reads the journal again, as a refusal that
+/// says so does. The dead end follows without another Review resend, and no
+/// notice is added. A journal that still allows a resend reopens the
+/// coordinator through the same restart.
+#[tokio::test(flavor = "multi_thread")]
+async fn panel_reads_the_journal_again_after_an_uncertain_resend() {
+    let journal = Journal::returned(false);
+    let (mut panel, shared) = restarted(&journal, true).await;
+    let task = panel.update(SplitMessage::Step2ReviewResend);
+    drive(&mut panel, task).await;
+    assert!(panel.step2_resend_review().is_some());
+    withdraw_return(&journal);
+    // The fake's default send result: Uncertain.
+    let task = panel.update(SplitMessage::Step2ConfirmResend);
+    drive(&mut panel, task).await;
+    assert!(matches!(
+        panel.step2_outcome(),
+        Some(Outcome::Uncertain { .. })
+    ));
+    assert!(
+        panel.dead_end().is_some() && panel.coord.is_none(),
+        "after an uncertain resend with no resend left: coordinator kept = {}, Review resend offered = {}",
+        panel.coord.is_some(),
+        panel.can_review_resend()
+    );
+    assert!(panel.recon.is_some());
+    assert_eq!(panel.stage, Stage::Step2(Step2Stage::Reconcile));
+    assert!(!panel.can_review_resend());
+    assert_eq!(panel.notice(), None);
+    assert_eq!(shared.lock().unwrap().reopened, 1);
+
+    // The journal still allows a resend: the restart reopens the
+    // coordinator, and a resend needs a new review.
+    let journal = Journal::returned(false);
+    let (mut panel, shared) = restarted(&journal, true).await;
+    let task = panel.update(SplitMessage::Step2ReviewResend);
+    drive(&mut panel, task).await;
+    let task = panel.update(SplitMessage::Step2ConfirmResend);
+    drive(&mut panel, task).await;
+    assert_eq!(shared.lock().unwrap().resends, 1);
+    assert_eq!(shared.lock().unwrap().reopened, 2);
+    assert!(panel.coord.is_some() && panel.dead_end().is_none());
+    assert!(panel.can_review_resend() && panel.step2_resend_review().is_none());
+    assert_eq!(panel.notice(), None);
 }
 
 /// Consuming the preparation does not make a transient failure terminal.

@@ -703,16 +703,19 @@ impl SplitPanel {
     }
 
     /// #648 X1: the coordinator found that no resend can follow (its last
-    /// attempt unsettled, or the attempt limit reached). Release it and read
-    /// the journal again through the restart decision, keeping `notice`, so
-    /// a dead end comes with its reconciler and its close. A reconcile from
+    /// attempt unsettled, or the attempt limit reached), or a resend came
+    /// back anything but accepted (#648 X1b), which may have withdrawn the
+    /// journal's permission for another. Release it and read the journal
+    /// again through the restart decision, showing `notice` (or none), so a
+    /// dead end comes with its reconciler and its close, and a journal that
+    /// still allows a resend reopens the coordinator. A reconcile from
     /// before no longer counts for the close: it waits for a new one.
-    fn restart_step2(&mut self, notice: String) -> Task<Message> {
+    fn restart_step2(&mut self, notice: Option<String>) -> Task<Message> {
         self.revoke_step2();
         self.step2_seen_here = None;
         self.stage = Stage::NeedsSession;
         let task = self.begin();
-        self.notice = Some(notice);
+        self.notice = notice;
         task
     }
 

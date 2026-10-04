@@ -1345,6 +1345,7 @@ fn step2_panel_layer_is_reached_only_through_the_split_panel() {
             "ResendLiveness",
             "describe_resend",
             "RESEND_NEEDS_VAULT",
+            "RESEND_COIN_SPENT",
             "RESEND_UNSETTLED",
             // #625 F2: closing a step-2 dead end.
             "DeadEnd",
