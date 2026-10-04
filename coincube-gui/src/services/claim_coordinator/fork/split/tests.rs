@@ -1031,9 +1031,11 @@ pub(super) fn production_text<'a>(file: &str, text: &'a str) -> &'a str {
 }
 
 /// D1: step 2 is dormant. The gate, the step-2 construction, its handoff,
-/// coordinator and transport (`fork::split` and `fork::split::step2`) are
-/// named only in `fork::split` itself; nothing else in the crate reaches
-/// them (B3b-2 adds the panel, reachable only by resuming a journal).
+/// coordinator and transport (`fork::split` and `fork::split::step2`), and
+/// the completion evidence and `split_from` writer (B5a) are named only in
+/// `fork::split` itself; nothing else in the crate reaches them (B3b-2 adds
+/// the panel, reachable only by resuming a journal; B5b adds its completion
+/// stage).
 #[test]
 fn split_step2_gate_has_no_gui_caller() {
     fn walk(dir: &std::path::Path, files: &mut Vec<(String, String)>) {
@@ -1090,6 +1092,13 @@ fn split_step2_gate_has_no_gui_caller() {
             "prepare_step2_resubmission",
             "confirm_step2_resubmission",
             "resume_uncertain",
+            // B5a: completion evidence, the `split_from` writer and its
+            // reconciliation.
+            "SplitCompletionEvidence",
+            "CompletionTarget",
+            "SplitCompletionReconciliation",
+            "check_completion",
+            "reconcile_split_completion",
         ] {
             // The Daemon trait declares the step-2 transport and the
             // embedded daemon forwards it; neither is a caller.
@@ -1121,9 +1130,22 @@ fn split_step2_gate_has_no_gui_caller() {
                     "prepare_step2_resubmission",
                     "confirm_step2_resubmission",
                     "resume_uncertain",
+                    // B5b: the panel's completion stage.
+                    "SplitCompletionEvidence",
+                    "CompletionTarget",
+                    "SplitCompletionReconciliation",
+                    "check_completion",
+                    "reconcile_split_completion",
                 ]
                 .contains(&ident);
-            if text.contains(ident) && !transport && !panel {
+            // Claim's own completion check (`fork.rs`), its tests and its
+            // panel caller name `check_completion` too; Split's is a method
+            // of the reconciler, which is guarded by its own name.
+            let claim = ident == "check_completion"
+                && (file == "src/services/claim_coordinator/fork.rs"
+                    || file.starts_with("src/services/claim_coordinator/fork/tests")
+                    || file.starts_with("src/app/state/vault/claim/"));
+            if text.contains(ident) && !transport && !panel && !claim {
                 unexpected.push((file.clone(), ident));
             }
         }
