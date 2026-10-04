@@ -14,6 +14,7 @@
 //! no GUI caller yet, and the account source above still never signs.
 
 pub mod bind;
+pub mod flow;
 pub mod policy;
 pub mod sign;
 

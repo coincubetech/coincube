@@ -772,4 +772,22 @@ pub(crate) mod tests {
         assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
         std::fs::remove_dir(root).unwrap();
     }
+
+    /// B4a F5 carried forward: the device flow's output is unverified and
+    /// enters the verified import seams only. `flow.rs` names no finalizer.
+    #[test]
+    fn split_device_flow_never_finalizes_directly() {
+        let flow = include_str!("flow.rs");
+        for forbidden in [
+            "finalize_split_step1",
+            "finalize_split_step2",
+            "VerifiedSplitStep1",
+            "VerifiedSplitStep2",
+            "finalize_mut",
+            "finalize_split",
+        ] {
+            assert!(!flow.contains(forbidden), "flow.rs names {}", forbidden);
+        }
+        assert!(flow.contains("UnverifiedDeviceSignatures"));
+    }
 }
