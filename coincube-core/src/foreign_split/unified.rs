@@ -36,7 +36,7 @@
 
 use super::{step2::is_source_script, *};
 use crate::{
-    psbt_unified::{proprietary_key, UnifiedPsbt},
+    psbt_unified::{is_reserved_key, proprietary_key, UnifiedPsbt},
     unified_finalize::{FinalizedSpend, InputWitnessReport},
     unified_foreign::{finalize_foreign_unified, ForeignUnifiedError},
     unified_sighash::{UnifiedSighashCache, SCRIPT_TYPE_BASE, SCRIPT_TYPE_WITNESS_V0},
@@ -348,8 +348,8 @@ impl VerifiedUnifiedSweep {
 }
 
 /// Accept only an unfinalized PSBT of the exact opaque construction plus
-/// unified records: everything except the proprietary records must be
-/// identical, every input must request `ALL|UNIFIED`, and no input may carry
+/// unified records: everything except the reserved `coincube`/0 records must
+/// be identical (another proprietary record is a change, #647 O4), every input must request `ALL|UNIFIED`, and no input may carry
 /// a `partial_sigs` entry (P1). The unified finalizer then verifies every
 /// record against the authenticated previous outputs and builds the witness
 /// from verified unified signatures only; every input of the result must be
@@ -376,6 +376,10 @@ pub fn finalize_unified_sweep<C: secp256k1::Verification>(
     {
         return Err(UnifiedSweepFinalizeError::NotProtected { input });
     }
+    // Defence in depth (#647 O5): `finalize_foreign_unified` only adds
+    // scriptSigs and witnesses to the checked construction's transaction, so
+    // no test reaches this refusal; it pins that the bytes returned are that
+    // construction and nothing else, whatever the finalizer does later.
     if strip(&finalized.transaction) != original.unsigned_tx {
         return Err(UnifiedSweepFinalizeError::InvalidWitness);
     }
@@ -406,6 +410,9 @@ pub fn verify_unified_sweep_transaction<C: secp256k1::Verification>(
 ) -> Result<VerifiedUnifiedSweep, UnifiedSweepFinalizeError> {
     use UnifiedSweepFinalizeError::{InvalidWitness, LegacySignature};
     let original = &construction.psbt;
+    // The recorded bytes are matched to the construction before anything
+    // else is read from them; the re-finalization below must then return
+    // exactly these bytes (#647 O5).
     if strip(transaction) != original.unsigned_tx {
         return Err(UnifiedSweepFinalizeError::ConstructionChanged);
     }
@@ -470,9 +477,9 @@ pub fn verify_unified_sweep_transaction<C: secp256k1::Verification>(
     Ok(verified)
 }
 
-/// The signed PSBT must be the exact construction plus proprietary records,
-/// with every input requesting `ALL|UNIFIED` and none carrying a legacy
-/// `partial_sigs` entry.
+/// The signed PSBT must be the exact construction plus unified signature
+/// records in the reserved `coincube`/0 namespace, with every input
+/// requesting `ALL|UNIFIED` and none carrying a legacy `partial_sigs` entry.
 fn check_signed_unified_construction(
     original: &Psbt,
     signed: &Psbt,
@@ -491,7 +498,12 @@ fn check_signed_unified_construction(
         if input.sighash_type.map(|s| s.to_u32()) != Some(u32::from(UNIFIED_SIGHASH_ALL)) {
             return Err(UnifiedSweepFinalizeError::UnsupportedSighash { input: index });
         }
-        normalized.inputs[index].proprietary.clear();
+        // Only this crate's own unified records are signing output (#647
+        // O4); any other proprietary record is a change to the construction,
+        // as step 2's check treats everything but `partial_sigs`.
+        normalized.inputs[index]
+            .proprietary
+            .retain(|key, _| !is_reserved_key(key));
         normalized.inputs[index].sighash_type = original.inputs[index].sighash_type;
     }
     if normalized != *original {
