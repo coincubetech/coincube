@@ -657,6 +657,50 @@ impl Daemon for EmbeddedDaemon {
         .await
     }
 
+    async fn submit_verified_unified_sweep(
+        &self,
+        verified: std::sync::Arc<coincube_core::foreign_split::VerifiedUnifiedSweep>,
+        target_index: coincube_core::miniscript::bitcoin::bip32::ChildNumber,
+        binding: coincubed::poison_broadcast::ClaimBackendBinding,
+        gate: std::sync::Arc<coincubed::poison_broadcast::SubmissionGate>,
+    ) -> Result<coincubed::poison_broadcast::SubmissionOutcome, DaemonError> {
+        // As for step 2: the blocking worker owns the lifecycle guard until
+        // the one send returns.
+        let handle = self.handle.clone().lock_owned().await;
+        let control = match handle.as_ref() {
+            Some(DaemonHandle::Controller { control, .. }) => control.clone(),
+            Some(_) => return Err(DaemonError::ClientNotSupported),
+            None => return Err(DaemonError::DaemonStopped),
+        };
+        let txid = verified.transaction().compute_txid();
+        let wtxid = verified.transaction().compute_wtxid();
+        blocking_bound_claim_submission(handle, txid, wtxid, move || {
+            control.submit_verified_unified_sweep(&verified, target_index, &binding, &gate)
+        })
+        .await
+    }
+
+    async fn submit_verified_unified_sweep_to_node(
+        &self,
+        verified: std::sync::Arc<coincube_core::foreign_split::VerifiedUnifiedSweep>,
+        target_index: coincube_core::miniscript::bitcoin::bip32::ChildNumber,
+        binding: coincubed::poison_broadcast::ClaimBackendBinding,
+        gate: std::sync::Arc<coincubed::poison_broadcast::SubmissionGate>,
+    ) -> Result<coincubed::poison_broadcast::SubmissionOutcome, DaemonError> {
+        let handle = self.handle.clone().lock_owned().await;
+        let control = match handle.as_ref() {
+            Some(DaemonHandle::Controller { control, .. }) => control.clone(),
+            Some(_) => return Err(DaemonError::ClientNotSupported),
+            None => return Err(DaemonError::DaemonStopped),
+        };
+        let txid = verified.transaction().compute_txid();
+        let wtxid = verified.transaction().compute_wtxid();
+        blocking_bound_claim_submission(handle, txid, wtxid, move || {
+            control.submit_verified_unified_sweep_to_node(&verified, target_index, &binding, &gate)
+        })
+        .await
+    }
+
     async fn start_rescan(&self, t: u32) -> Result<(), DaemonError> {
         self.command(|daemon| {
             daemon

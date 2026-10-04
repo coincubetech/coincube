@@ -1985,7 +1985,7 @@ fn split_step2_dead_end_is_a_submission_no_resend_or_sighting_can_follow() {
 // B4b-1b: the fork-only (`kind: Unified`) record.
 
 /// The unified sweep of `wallet`'s two splittable coins into `target`
-/// (B4b-1a's `create_unified_sweep` shape: one output, no change), built
+/// (B4b-1a's unified-sweep shape: one output, no change), built
 /// with core's step-2 construction over the same coins, which has exactly
 /// that shape. It is signed `ALL` here (`sign_step2`): the journal records
 /// bytes, and the `ALL|UNIFIED` request is core's finalizer's (B4b-1a).
@@ -2445,8 +2445,9 @@ fn unified_record_validate_refuses_split_shape_and_vice_versa() {
 /// these: the identity, a journal that validates, a recorded fork
 /// submission, a Split record, the Bitcoin chain, and a recorded signed
 /// step 2 whose txid is the submission's. (Its own `open` is named only in
-/// `fork::split`, by that module's D1 guard, so the probe that calls it on
-/// this record runs outside the tree; see the PR.) The journal then takes
+/// `fork::split`, by that module's D1 guard, so the test that calls it on
+/// this record lives there: `fork::split::tests::step2::unified_journal`.)
+/// The journal then takes
 /// the reconcile's writes in their order: no return hold (no attempt
 /// returned), a check whose step-1-centric assessment is inert (there is no
 /// step 1 to assess), then the sighting of the recorded txid, which

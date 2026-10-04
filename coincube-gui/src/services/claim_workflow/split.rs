@@ -272,7 +272,7 @@ fn empty_step1() -> Transaction {
 }
 
 /// The caller's description of the unified sweep it built (B4b-1a's
-/// `UnifiedSweep`), for [`Controller::create_unified_split`] and
+/// unified sweep construction), for [`Controller::create_unified_split`] and
 /// [`Controller::revalidate_unified_construction`]. The journal records the
 /// unsigned sweep and checks its shape: every input one of `source`'s
 /// coins, as the caller established from freshly authenticated coins, and
@@ -550,7 +550,7 @@ impl Controller {
     /// Record the unified fallback (B4b, `kind: Unified`): one BTCB2-only
     /// sweep of the splittable coins into the target Vault, with no step 1.
     /// `construction` describes the sweep the caller built from freshly
-    /// authenticated coins (B4b-1a's `UnifiedSweep`): the journal records
+    /// authenticated coins (B4b-1a's unified sweep construction): the journal records
     /// its unsigned transaction, checks its shape, and reserves the target
     /// from creation. Creates a version-9 intent with the public descriptors
     /// (P2) that is Tracking from creation, since nothing is ever tracked on
@@ -1277,7 +1277,7 @@ impl Controller {
     /// construction was verified in this session
     /// ([`Self::create_unified_split`] or
     /// [`Self::revalidate_unified_construction`]). `chain` and `signed` come
-    /// from core's verified sweep (B4b-1a's `VerifiedUnifiedSweep`), whose
+    /// from core's verified unified sweep (B4b-1a), whose
     /// finalizer is the only check of the signatures and of their
     /// `ALL|UNIFIED` type; this checks unsigned identity only, like
     /// [`Self::record_broadcast_intent`]. As for step 2, the submission

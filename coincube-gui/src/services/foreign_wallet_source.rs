@@ -10,12 +10,15 @@ use std::str::FromStr;
 
 use coincube_core::{
     bip39::{Language, Mnemonic},
+    chain::ChainId,
     miniscript::bitcoin::{
         bip32::{ChildNumber, DerivationPath, Fingerprint, Xpub},
-        secp256k1::Secp256k1,
+        secp256k1::{self, Secp256k1},
         Network, NetworkKind,
     },
+    psbt_unified::UnifiedPsbt,
     signer::SessionSigner,
+    unified_foreign::ForeignUnifiedError,
 };
 use zeroize::Zeroizing;
 
@@ -157,6 +160,26 @@ impl SessionSeedSource {
         let fingerprint = self.signer.fingerprint(&secp);
         let account_xpub = self.signer.xpub_at(&path, &secp);
         AccountXpubSource::new(standard, account, fingerprint, account_xpub)?.descriptors()
+    }
+
+    /// The seed's master fingerprint: public, and what the Split unified
+    /// fallback's seed set binds a seed to a policy key origin by.
+    pub fn fingerprint(&self) -> Fingerprint {
+        self.signer.fingerprint(&Secp256k1::signing_only())
+    }
+
+    /// Sign every foreign input key this seed controls with `ALL|UNIFIED`
+    /// for the Split unified fallback (#568 B4b), a passthrough to
+    /// [`SessionSigner::sign_unified`]: Bitcoin Blake2b only, no Taproot,
+    /// no legacy signature and no sighash request but `0x21`. The input
+    /// PSBT is not changed and nothing is persisted.
+    pub fn sign_unified(
+        &self,
+        psbt: &UnifiedPsbt,
+        chain: ChainId,
+        secp: &Secp256k1<secp256k1::All>,
+    ) -> Result<UnifiedPsbt, ForeignUnifiedError> {
+        self.signer.sign_unified(psbt, chain, secp)
     }
 }
 
