@@ -135,8 +135,8 @@ const SOURCE_WINDOW: u32 = 100;
 /// both branches within [`SOURCE_WINDOW`] of every claimed coin's index,
 /// which covers the spent scripts and the step-1 destination. Beyond that, only
 /// the caller's binding of the target to the target Cube's own derivation
-/// refuses a foreign script (#568 B3b).
-fn is_source_script(
+/// refuses a foreign script (#568 B3b). Shared with the unified sweep.
+pub(super) fn is_source_script(
     source: &SplitSource,
     selected: &[Selected],
     target: &bitcoin::Script,
