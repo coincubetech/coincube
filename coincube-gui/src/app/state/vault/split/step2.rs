@@ -160,6 +160,11 @@ pub enum Step2Recovery {
     None,
     RefreshTarget,
     ReopenCube,
+    /// No resend can follow in this coordinator (an unsettled last attempt,
+    /// or the attempt limit): the panel reads the journal again through
+    /// [`restart`], so a dead end comes with its reconciler and its close
+    /// (#648 X1).
+    Restart,
 }
 
 /// What a refused step-2 operation means for the user.
@@ -269,11 +274,17 @@ pub fn describe_resend(error: ResendError) -> Step2Refusal {
         ResendError::Observed => Step2Refusal::final_(
             "Step 2 was seen on Bitcoin Blake2b, so it left this device and is never sent again. Nothing was sent; check its status.",
         ),
-        ResendError::Unsettled => Step2Refusal::final_(RESEND_UNSETTLED),
-        ResendError::AttemptsExhausted => Step2Refusal::final_(format!(
-            "Step 2 was already sent again {} times, the most this version allows. Nothing was sent; check its status. If step 2 never appears on Bitcoin Blake2b, the way out is to abandon or reset this split.",
-            claim_workflow::MAX_SPLIT_STEP2_RESUBMISSIONS
-        )),
+        ResendError::Unsettled => Step2Refusal {
+            recovery: Step2Recovery::Restart,
+            ..Step2Refusal::final_(RESEND_UNSETTLED)
+        },
+        ResendError::AttemptsExhausted => Step2Refusal {
+            recovery: Step2Recovery::Restart,
+            ..Step2Refusal::final_(format!(
+                "Step 2 was already sent again {} times, the most this version allows. Nothing was sent; check its status. If step 2 never appears on Bitcoin Blake2b, the way out is to abandon or reset this split.",
+                claim_workflow::MAX_SPLIT_STEP2_RESUBMISSIONS
+            ))
+        },
         ResendError::ClaimedCoinSpent(outpoint) => Step2Refusal::final_(format!(
             "A coin this split claims ({outpoint}) is already spent on Bitcoin Blake2b, so the recorded step 2 can never confirm. Nothing was sent."
         )),

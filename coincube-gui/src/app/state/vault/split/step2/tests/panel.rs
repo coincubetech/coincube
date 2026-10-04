@@ -1968,11 +1968,16 @@ async fn panel_resends_step2_only_from_an_explicit_review_after_a_restart() {
     send(&mut panel).await;
     assert_eq!(resends(&shared), 1);
 
-    // A refused review: its reason, and no review.
-    shared.lock().unwrap().refuse_resend_review = Some(describe_resend(ResendError::Unsettled));
+    // A refused review: its reason, and no review. (A refusal that leaves
+    // no resend reads the journal again: #648 X1, in its own test.)
+    shared.lock().unwrap().refuse_resend_review = Some(describe_resend(ResendError::Unavailable(
+        OutPoint::new(Txid::from_byte_array([1; 32]), 0),
+        FailureKind::Http(503),
+    )));
     review(&mut panel).await;
-    assert_eq!(panel.notice(), Some(RESEND_UNSETTLED));
+    assert!(panel.notice().unwrap().contains("Connect couldn't read"));
     assert!(panel.step2_resend_review().is_none());
+    assert!(panel.coord.is_some());
 
     // A refused send: its reason, back to Reconcile, the review used up.
     // The review granted first takes the refusal above off the screen
@@ -2055,11 +2060,19 @@ async fn panel_offers_a_resend_only_where_a_restart_reopened_the_coordinator() {
     panel.set_step2_port(Some(Arc::new(PanelPort::new(&shared, &journal, 1))));
     assert!(panel.recon.is_none());
     assert_eq!(panel.stage, Stage::NeedsSession);
+    // A dead end read before does not outlive a restart into a resend: a
+    // journal that allows one is in no dead end.
+    panel.dead_end = Some(DeadEnd {
+        step1: Txid::from_byte_array([1; 32]),
+        step2: Txid::from_byte_array([5; 32]),
+        claimed: Vec::new(),
+    });
     let task = panel.begin();
     drive(&mut panel, task).await;
     assert_eq!(panel.stage, Stage::Step2(Step2Stage::Reconcile));
     assert!(panel.coord.is_some() && panel.recon.is_none());
     assert_eq!(panel.notice(), None);
+    assert!(panel.dead_end().is_none());
     assert!(panel.can_review_resend());
     assert_eq!(shared.lock().unwrap().reopened, 1);
     // A reconcile on it that sees step 2 on BTCB2: no resend is offered any
@@ -2154,6 +2167,80 @@ async fn panel_drops_a_resend_result_that_lands_after_a_revocation() {
         Some(Outcome::Uncertain { .. })
     ));
     assert_eq!(shared.lock().unwrap().reopened, 2);
+}
+
+/// Withdraw the latest step-2 attempt's recorded return on disk, as an
+/// interrupted or timed-out resend leaves it.
+fn withdraw_return(journal: &Journal) {
+    let path = journal.temp.0.join("intent.json");
+    let mut intent: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    intent["split"]["step2_returned"] = serde_json::Value::Bool(false);
+    std::fs::write(&path, serde_json::to_vec(&intent).unwrap()).unwrap();
+}
+
+/// #648 X1: when the coordinator refuses a resend review or send because no
+/// resend can follow (the last attempt unsettled, or the attempt limit),
+/// the panel reads the journal again. Its dead end then comes with the
+/// reconciler, and the close follows a new reconcile; the refusal stays on
+/// screen. No other refusal restarts.
+#[tokio::test(flavor = "multi_thread")]
+async fn panel_reopens_the_dead_end_when_no_resend_can_follow() {
+    for refused_send in [false, true] {
+        let journal = Journal::returned(false);
+        let (mut panel, shared) = restarted(&journal, true).await;
+        assert!(panel.coord.is_some() && panel.dead_end().is_none());
+        // A reconcile saw step 2 absent before the resend: once the journal
+        // is read again, the close waits for a new one.
+        let task = panel.update(SplitMessage::Step2Reconcile);
+        drive(&mut panel, task).await;
+        assert_eq!(panel.step2_seen(), Some(TransactionObservation::Absent));
+        withdraw_return(&journal);
+        let expected = if refused_send {
+            let task = panel.update(SplitMessage::Step2ReviewResend);
+            drive(&mut panel, task).await;
+            assert!(panel.step2_resend_review().is_some());
+            let refusal = describe_resend(ResendError::AttemptsExhausted);
+            shared
+                .lock()
+                .unwrap()
+                .resend_results
+                .push_back(Err(refusal.clone()));
+            let task = panel.update(SplitMessage::Step2ConfirmResend);
+            drive(&mut panel, task).await;
+            assert_eq!(shared.lock().unwrap().resends, 1);
+            refusal.reason
+        } else {
+            let refusal = describe_resend(ResendError::Unsettled);
+            shared.lock().unwrap().refuse_resend_review = Some(refusal.clone());
+            let task = panel.update(SplitMessage::Step2ReviewResend);
+            drive(&mut panel, task).await;
+            refusal.reason
+        };
+        assert_eq!(
+            panel.stage,
+            Stage::Step2(Step2Stage::Reconcile),
+            "{}",
+            refused_send
+        );
+        assert!(panel.recon.is_some() && panel.coord.is_none());
+        assert!(panel.dead_end().is_some(), "{}", refused_send);
+        assert_eq!(panel.notice(), Some(expected.as_str()));
+        assert!(!panel.can_review_resend() && !panel.can_check_close());
+        assert_eq!(shared.lock().unwrap().reopened, 1);
+    }
+
+    // Any other refusal keeps the coordinator.
+    let journal = Journal::returned(false);
+    let (mut panel, shared) = restarted(&journal, true).await;
+    shared.lock().unwrap().refuse_resend_review = Some(describe_resend(ResendError::Unavailable(
+        OutPoint::new(Txid::from_byte_array([1; 32]), 0),
+        FailureKind::Http(503),
+    )));
+    let task = panel.update(SplitMessage::Step2ReviewResend);
+    drive(&mut panel, task).await;
+    assert!(panel.coord.is_some() && panel.recon.is_none());
+    assert!(panel.can_review_resend());
 }
 
 /// Consuming the preparation does not make a transient failure terminal.

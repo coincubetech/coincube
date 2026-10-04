@@ -702,6 +702,20 @@ impl SplitPanel {
         self.resume_journal(connect)
     }
 
+    /// #648 X1: the coordinator found that no resend can follow (its last
+    /// attempt unsettled, or the attempt limit reached). Release it and read
+    /// the journal again through the restart decision, keeping `notice`, so
+    /// a dead end comes with its reconciler and its close. A reconcile from
+    /// before no longer counts for the close: it waits for a new one.
+    fn restart_step2(&mut self, notice: String) -> Task<Message> {
+        self.revoke_step2();
+        self.step2_seen_here = None;
+        self.stage = Stage::NeedsSession;
+        let task = self.begin();
+        self.notice = Some(notice);
+        task
+    }
+
     /// Resume the journal's step 1 (the step-1 driver).
     fn resume_journal(&mut self, connect: Arc<dyn SplitConnect>) -> Task<Message> {
         if let Some((digest, directory)) = self.journal.clone() {

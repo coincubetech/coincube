@@ -770,7 +770,11 @@ impl SplitPanel {
                 self.bind_recon(recon);
                 self.dead_end = dead_end;
                 // Why a resend the journal allows was not opened (P3-3).
-                self.notice = unavailable;
+                // Otherwise the notice stays: `begin` cleared it, unless the
+                // coordinator's refusal asked for this restart (#648 X1).
+                if unavailable.is_some() {
+                    self.notice = unavailable;
+                }
                 // The last reconcile's step-1 evidence is kept through the
                 // revocation along with its BTCB2 observation, so its
                 // warning stays until a new reconcile replaces it
@@ -781,9 +785,11 @@ impl SplitPanel {
             SplitEvent::Restarted(_, Ok(Restarted::Resend(Coord(coord)))) => {
                 // P3-3: the coordinator, for a resend the journal allows. It
                 // reconciles like the reconciler; a resend needs a review.
+                // A journal that allows a resend is in no dead end.
                 self.outcome = None;
                 self.step2_outcome = coord.recorded_outcome();
                 self.bind_coord(coord);
+                self.dead_end = None;
                 self.stage = Stage::Step2(Step2Stage::Reconcile);
                 Task::none()
             }
@@ -1024,6 +1030,9 @@ impl SplitPanel {
                     }
                     Err(reason) => {
                         self.step2_resend = None;
+                        if reason.recovery == step2::Step2Recovery::Restart {
+                            return self.restart_step2(reason.reason);
+                        }
                         self.notice = Some(reason.reason);
                     }
                 }
@@ -1040,6 +1049,9 @@ impl SplitPanel {
                     Ok(outcome) => {
                         self.notice = None;
                         self.step2_outcome = Some(outcome);
+                    }
+                    Err(reason) if reason.recovery == step2::Step2Recovery::Restart => {
+                        return self.restart_step2(reason.reason);
                     }
                     Err(reason) => self.notice = Some(reason.reason),
                 }
