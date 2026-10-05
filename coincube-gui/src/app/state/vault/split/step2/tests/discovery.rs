@@ -17,7 +17,7 @@ pub(crate) enum Placed {
     InFlight,
     /// A recorded step 2 never seen and never returned: #625's dead end
     /// (the descriptors deleted, to show they do not decide it).
-    DeadEnd,
+    Step2DeadEnd,
     /// [`Self::Completed`] with a terminal step-1 conflict recorded (O4).
     Conflict,
 }
@@ -53,7 +53,7 @@ pub(crate) fn place_journal(
     let journal = match placed {
         Placed::Completed | Placed::Conflict => Journal::returned(true),
         Placed::InFlight => Journal::new(false),
-        Placed::DeadEnd => Journal::new(true),
+        Placed::Step2DeadEnd => Journal::new(true),
     };
     if placed != Placed::InFlight {
         forget(&journal);
@@ -62,7 +62,10 @@ pub(crate) fn place_journal(
         super::close::record_conflict(&journal, true);
     }
     let controller = journal.lock();
-    assert_eq!(controller.split_step2_dead_end(), placed == Placed::DeadEnd);
+    assert_eq!(
+        controller.split_step2_dead_end(),
+        placed == Placed::Step2DeadEnd
+    );
     let step2_txid = controller
         .recorded_split_step2()
         .map(Transaction::compute_txid)
@@ -153,7 +156,7 @@ fn discovery_passes_over_a_completed_split_this_cube_records() {
 /// descriptors.
 #[test]
 fn discovery_resumes_every_split_that_is_not_a_recorded_completion() {
-    for placed in [Placed::InFlight, Placed::DeadEnd, Placed::Conflict] {
+    for placed in [Placed::InFlight, Placed::Step2DeadEnd, Placed::Conflict] {
         let (_temp, root) = journal_root();
         let (target, digest, directory, record) = place_journal(&root, placed);
         assert!(

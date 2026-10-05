@@ -10036,7 +10036,7 @@ mod tests {
         assert!(SPLIT_START_PANEL_OPEN.contains("in progress in this Vault"));
         assert!(SPLIT_START_PANEL_OPEN.contains("must finish, or be closed"));
         assert!(!SPLIT_START_PANEL_OPEN.to_lowercase().contains("reopen"));
-        for placed in [Placed::InFlight, Placed::DeadEnd, Placed::Conflict] {
+        for placed in [Placed::InFlight, Placed::Step2DeadEnd, Placed::Conflict] {
             let root = std::env::temp_dir().join(format!("split-live-{}", uuid::Uuid::new_v4()));
             let mut app = start_split_app(&root, Some(true));
             split_reopen_with_journal(&mut app, placed, true);
