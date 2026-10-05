@@ -609,7 +609,12 @@ fn split_unified_holds_seeds_only_zeroized() {
         .find("\n#[cfg(all(test, unix))]\nmod tests;")
         .unwrap()];
     let view = read("app/view/vault/split.rs");
-    for (file, text) in [("unified.rs", unified), ("view", view.as_str())] {
+    let seed_text = read("app/state/vault/split/unified/seed_text.rs");
+    for (file, text) in [
+        ("unified.rs", unified),
+        ("seed_text.rs", seed_text.as_str()),
+        ("view", view.as_str()),
+    ] {
         for token in [
             "fs::",
             "serde",
@@ -621,13 +626,28 @@ fn split_unified_holds_seeds_only_zeroized() {
             assert!(!text.contains(token), "{} names {}", file, token);
         }
     }
+    // Reviewer-660661e D2 (structural): `SeedText` lives in a private module
+    // of `unified`, with a private field, so nothing outside its impl can
+    // read the buffer (`.0`): the compiler refuses it. Its module exports
+    // only the type, through `unified`.
+    assert!(unified.contains("\nmod seed_text;\npub use seed_text::SeedText;\n"));
+    assert!(!unified.contains("pub mod seed_text"));
+    assert!(
+        !unified.contains("pub(crate) mod seed_text")
+            && !unified.contains("pub(super) mod seed_text")
+    );
+    assert!(!unified.contains("struct SeedText"));
+    assert!(seed_text.contains("pub struct SeedText(Zeroizing<String>);"));
+    // The field is not public, and `SeedText` is the module's only type.
+    assert_eq!(seed_text.matches("struct ").count(), 1);
+    assert_eq!(seed_text.matches("pub struct SeedText(pub").count(), 0);
     // No derived Debug on the seed newtype; its own redacts.
-    let at = unified
+    let at = seed_text
         .find("pub struct SeedText(Zeroizing<String>);")
         .unwrap();
-    let attributes = &unified[unified[..at].rfind("\n\n").unwrap()..at];
+    let attributes = &seed_text[seed_text[..at].rfind("\n\n").unwrap()..at];
     assert!(!attributes.contains("Debug"), "{}", attributes);
-    assert!(unified.contains("impl fmt::Debug for SeedText"));
+    assert!(seed_text.contains("impl fmt::Debug for SeedText"));
     let secret = SeedText::from(mnemonic(1).to_string());
     let printed = format!(
         "{:?} {:?}",
@@ -676,7 +696,7 @@ fn split_unified_holds_seeds_only_zeroized() {
         (
             "expose_for_secure_input(",
             [
-                ("app/state/vault/split/unified.rs", 1),
+                ("app/state/vault/split/unified/seed_text.rs", 1),
                 ("app/view/vault/split.rs", 1),
             ],
         ),
@@ -706,10 +726,21 @@ fn split_unified_holds_seeds_only_zeroized() {
         found.sort();
         assert_eq!(found, expected, "{}", token);
     }
-    // No other read of the text: `SeedText` has no `as_str`.
+    // No other read of the text: `SeedText` has no `as_str`, `Deref` or
+    // `AsRef`, and its module reads `.0` only in its own methods.
     assert_eq!(unified.matches("as_str()").count(), 0);
-    // In `unified.rs`: the definitions only.
-    assert!(unified.contains("pub(in crate::app) fn expose_for_secure_input(&self) -> &str {"));
+    assert_eq!(seed_text.matches("as_str").count(), 0);
+    for token in [
+        "impl Deref",
+        "impl std::ops::Deref",
+        "impl AsRef",
+        "impl Borrow",
+        "impl fmt::Display",
+    ] {
+        assert!(!seed_text.contains(token), "seed_text.rs has {}", token);
+    }
+    // In `seed_text.rs`: the definition only.
+    assert!(seed_text.contains("pub(in crate::app) fn expose_for_secure_input(&self) -> &str {"));
     // In the view: inside `seed_input`, as the secure input's value; and the
     // two buffers handed to it in the seed stage.
     let input = &view[view.find("fn seed_input<").unwrap()..];
