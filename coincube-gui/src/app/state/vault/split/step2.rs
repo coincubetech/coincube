@@ -41,6 +41,16 @@
 //!   ([`route_copy`]) and the "Split — cannot replay" label, which only a
 //!   live six-confirmation check can produce ([`CannotReplay`]).
 //!
+//! - **Completion** (#568 B5b). After a reconcile that saw step 2 confirmed
+//!   with step 1 eligible, [`Step2Recon::complete`] checks both chains once
+//!   more, records the digest-only completion on the target Cube
+//!   ([`CompletionSite`]), then deletes the source's descriptors (D18). The
+//!   submission coordinator has no completion check:
+//!   [`complete_from_coordinator`] drops it, then completes through the
+//!   reconciler. A refused completion is "check again", never terminal
+//!   (#645 P3-1); [`Step2Recon::completion_stands`] clears the record after
+//!   a reorg (D17).
+//!
 //! - **Closing a dead end** (#625 F2, A1 = A). A recorded step 2 that no
 //!   resend can follow and no read ever saw ([`DeadEnd`]) may be closed after
 //!   [`check_close`]: [`close`] leaves the journal, recorded bytes included,
@@ -69,16 +79,21 @@ use coincube_core::{
 
 use super::step1::{self, OpenRequest, Refusal, RevokeHandle, SplitConnect, Step1Driver};
 use crate::{
-    app::state::vault::claim::{ConnectSession, CHECK_POLICY},
+    app::{
+        settings::{CubeSettings, SettingsError, SplitFromRecord},
+        state::vault::claim::{ConnectSession, CHECK_POLICY},
+    },
     daemon::Daemon,
+    dir::CoincubeDirectory,
     services::{
         claim_coordinator::{
             self,
             fork::split::{
                 step2::{
-                    ResendError, SplitStep2Coordinator, SplitStep2Production, SplitStep2Reconciler,
-                    Step1AfterStep2, Step2Error, Step2ResubmissionReview, SweepReconcile,
-                    TargetError, RESERVATION_BOUND,
+                    CompletionTarget, ResendError, SplitCompletionEvidence,
+                    SplitCompletionReconciliation, SplitStep2Coordinator, SplitStep2Production,
+                    SplitStep2Reconciler, Step1AfterStep2, Step2Error, Step2ResubmissionReview,
+                    SweepReconcile, TargetError, RESERVATION_BOUND,
                 },
                 ForeignStep2Authorization, SplitCheckError, SplitForkProduction, SplitPreparation,
                 Step2Liveness,
@@ -151,6 +166,135 @@ pub const RESEND_COIN_SPENT: &str = "Step 2 can't be sent again: a coin this spl
 /// attempt came back unaccepted, so it may have left (P3-3). Only the #625
 /// F2 abandon or reset path gets out of this.
 pub const RESEND_UNSETTLED: &str = "This version can't send step 2 again. Its last send, or a check of it, ended without a clear answer (it may have been accepted, or it was cancelled, timed out or interrupted), so step 2 may have reached the network. Nothing was sent; check its status. If step 2 never appears on Bitcoin Blake2b, the way out is to abandon or reset this split.";
+
+/// #568 B5b: the Completed stage's copy.
+pub const SPLIT_COMPLETED: &str = "This split is complete. Step 2 has at least 6 confirmations on Bitcoin Blake2b and step 1 at least 6 on Bitcoin. This Cube records the split by the source wallet's fingerprint only, and the source wallet's descriptors were deleted from this device.";
+/// The completion check found the split not complete (yet).
+pub const COMPLETION_NOT_YET: &str = "This split isn't complete yet: step 2 needs 6 confirmations on Bitcoin Blake2b while step 1 stays 6 deep in its block on Bitcoin. Nothing was recorded or deleted. Check status again later.";
+/// #645 P3-1: the completion's evidence lapsed while it was being saved.
+/// Never terminal: a fresh check completes it.
+pub const COMPLETION_EXPIRED: &str = "The completion check expired before it was saved, so nothing was recorded or deleted. Check status again, then complete the split.";
+/// The target Cube's settings refused the record while its evidence was
+/// still live. The settings layer's own messages name a "Claim Cube"
+/// (`matching_completion_cube`); this copy is Split's.
+pub const COMPLETION_NOT_RECORDED: &str = "This Cube's settings couldn't record the completion: the Cube, or the Vault it names, no longer matches this split, or its settings file couldn't be written. Nothing was deleted. Check status again.";
+/// The record was written but its evidence lapsed before the descriptors
+/// were deleted: a fresh check finishes it (the record is not written
+/// twice).
+pub const COMPLETION_NOT_FORGOTTEN: &str = "The completion is recorded in this Cube, but the check expired before the source wallet's descriptors were deleted from this device. Check status again, then complete the split to finish.";
+/// The target Cube's settings name no Vault: there is nothing to record a
+/// completion into.
+pub const COMPLETION_NO_VAULT: &str = "This Cube's settings don't name its Vault, so this split's completion can't be recorded here. Nothing was recorded or deleted.";
+/// The completion task ended without returning its reconciler.
+pub const COMPLETION_INTERRUPTED: &str =
+    "Completing the split was interrupted. Its status can still be checked.";
+/// D17: after completion, a check found step 2 out of the block the record
+/// names, or step 1 below its depth.
+pub const COMPLETION_LOST: &str = "A reorganization undid this split's completion: step 2 left the Bitcoin Blake2b block its completion was recorded at, or step 1 lost its Bitcoin confirmations. The completion record was removed from this Cube; the source wallet's descriptors stay deleted. Check status again.";
+
+/// #568 B5b: what a completion recorded on the target Cube, the panel's
+/// history row (D16: panel only). Digest only, as the settings record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SplitCompletion {
+    pub source_digest: sha256::Hash,
+    pub completed_height: u64,
+    pub step2_txid: Txid,
+}
+impl From<SplitFromRecord> for SplitCompletion {
+    fn from(record: SplitFromRecord) -> Self {
+        Self {
+            source_digest: record.descriptor_digest,
+            completed_height: record.completed_height,
+            step2_txid: record.step2_txid,
+        }
+    }
+}
+impl SplitCompletion {
+    /// The source digest's short form: its first 16 hex digits.
+    pub fn short_digest(&self) -> String {
+        self.source_digest.to_string().chars().take(16).collect()
+    }
+    /// The history row: short source digest, BTCB2 height, step-2 txid.
+    pub fn history_row(&self) -> String {
+        format!(
+            "Split from source {}… · Bitcoin Blake2b height {} · step 2 {}",
+            self.short_digest(),
+            self.completed_height,
+            self.step2_txid
+        )
+    }
+}
+
+/// #568 B5b: where a completion is recorded. The datadir whose Bitcoin
+/// Blake2b network directory holds the target Cube's settings, and the
+/// target Cube with the Vault its settings name.
+#[derive(Debug, Clone)]
+pub struct CompletionSite {
+    root: CoincubeDirectory,
+    target: CompletionTarget,
+}
+impl CompletionSite {
+    /// The completion site of `cube` under `root`; `None` while the Cube's
+    /// settings name no Vault.
+    pub fn of(root: CoincubeDirectory, cube: &CubeSettings) -> Option<Self> {
+        Some(Self {
+            root,
+            target: CompletionTarget::of(cube)?,
+        })
+    }
+}
+
+/// D17: what a check of a completed split found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompletionStanding {
+    /// Step 2 is still in the recorded block and step 1 still deep.
+    Standing {
+        status: Status,
+        seen: TransactionObservation,
+    },
+    /// The completion was undone; its record was removed when `cleared`.
+    Lost {
+        status: Status,
+        seen: TransactionObservation,
+        cleared: bool,
+    },
+}
+
+/// A revoke handle bound after the fact (#568 B5b): the panel holds
+/// [`Self::handle`] while a task opens the handle it stands for. A
+/// revocation before the binding revokes the bound handle at once.
+#[derive(Clone, Default)]
+pub struct RevokeSlot(Arc<std::sync::Mutex<(bool, Option<RevokeHandle>)>>);
+impl RevokeSlot {
+    pub fn handle(&self) -> RevokeHandle {
+        let slot = self.0.clone();
+        Arc::new(move || {
+            let bound = {
+                let mut slot = slot.lock().unwrap_or_else(|e| e.into_inner());
+                slot.0 = true;
+                slot.1.take()
+            };
+            if let Some(revoke) = bound {
+                revoke();
+            }
+        })
+    }
+    /// Bind `revoke`; `false`, with `revoke` called, when the slot was
+    /// revoked first.
+    fn bind(&self, revoke: RevokeHandle) -> bool {
+        let revoked = {
+            let mut slot = self.0.lock().unwrap_or_else(|e| e.into_inner());
+            if !slot.0 {
+                slot.1 = Some(revoke.clone());
+            }
+            slot.0
+        };
+        if revoked {
+            revoke();
+        }
+        !revoked
+    }
+}
 
 /// What a reconcile after the step-2 submission found of step 1 on Bitcoin
 /// means (#637 r4172242637; #568 S4): nothing while it is still eligible
@@ -548,7 +692,7 @@ pub trait Step2Coord: Send {
     async fn confirm_resend(&mut self, context: &Context) -> Result<Outcome, Step2Refusal>;
 }
 
-/// After a recorded step-2 submission: reconcile only.
+/// After a recorded step-2 submission: reconcile, and complete (#568 B5b).
 #[async_trait]
 pub trait Step2Recon: Send {
     fn revoke_handle(&self) -> RevokeHandle;
@@ -557,6 +701,17 @@ pub trait Step2Recon: Send {
         &mut self,
         context: &Context,
     ) -> Result<(Status, TransactionObservation, Step1AfterStep2), Step2Refusal>;
+    /// #568 B5b: a fresh completion check; with its evidence, the record on
+    /// the target Cube, then (D18) the descriptors deleted from the journal
+    /// (a blocking write, off the async executor). Every refusal is "check
+    /// again" (#645 P3-1) except a Cube with no Vault to record into.
+    async fn complete(&mut self, context: &Context) -> Result<SplitCompletion, Step2Refusal>;
+    /// D17: whether the recorded completion still stands; a loss removes the
+    /// record (the descriptors stay deleted).
+    async fn completion_stands(
+        &mut self,
+        context: &Context,
+    ) -> Result<CompletionStanding, Step2Refusal>;
 }
 
 /// Everything the preparation is opened with: the step 1 rebuilt at restore.
@@ -647,6 +802,43 @@ pub async fn leave_for_step1(
         .await
         .map_err(|_| Refusal::retry("Reopening step 1 was interrupted. Try again."))?
         .map_err(|error| Refusal::retry(step1::describe(error)))
+}
+
+/// #568 B5b, the plan's `Step2Coord::complete`. The submission coordinator
+/// has no completion check (only the reconciler mints completion evidence),
+/// so completing from it drops the coordinator first, releasing its journal
+/// lock, then opens the reconciler off the UI thread and completes through
+/// it. `bound` is the panel's revoke handle for the task: a revocation
+/// before the reconciler opens revokes it as soon as it does, and nothing
+/// is completed. The reconciler comes back whatever the completion's
+/// result, so the panel keeps reconciling; `None` when it could not be
+/// opened or was revoked (the panel then reads the journal again).
+pub async fn complete_from_coordinator(
+    coord: Box<dyn Step2Coord>,
+    port: Arc<dyn ReconPort>,
+    directory: PathBuf,
+    target_cube: String,
+    digest: sha256::Hash,
+    context: Context,
+    bound: RevokeSlot,
+) -> (
+    Option<Box<dyn Step2Recon>>,
+    Result<SplitCompletion, Step2Refusal>,
+) {
+    drop(coord);
+    let opened =
+        tokio::task::spawn_blocking(move || port.open_reconciler(directory, target_cube, digest))
+            .await;
+    let mut recon = match opened {
+        Ok(Ok(recon)) => recon,
+        Ok(Err(refusal)) => return (None, Err(refusal)),
+        Err(_) => return (None, Err(Step2Refusal::retry(COMPLETION_INTERRUPTED))),
+    };
+    if !bound.bind(recon.revoke_handle()) {
+        return (None, Err(Step2Refusal::retry(COMPLETION_INTERRUPTED)));
+    }
+    let result = recon.complete(&context).await;
+    (Some(recon), result)
 }
 
 /// Which side of the journal a restart reopens.
@@ -1141,6 +1333,9 @@ pub struct ProductionRecon {
     generation: watch::Receiver<u64>,
     expected: u64,
     context: Context,
+    /// Where a completion is recorded (#568 B5b); `None` while the Cube's
+    /// settings name no Vault.
+    site: Option<CompletionSite>,
 }
 impl ProductionRecon {
     /// Refused without an account, for an unusable origin, or after the
@@ -1148,6 +1343,7 @@ impl ProductionRecon {
     pub fn new(
         session: ConnectSession,
         generation: watch::Receiver<u64>,
+        site: Option<CompletionSite>,
     ) -> Result<Self, claim_coordinator::Error> {
         let expected = *generation.borrow();
         let context = SplitForkProduction::new(
@@ -1163,6 +1359,7 @@ impl ProductionRecon {
             generation,
             expected,
             context,
+            site,
         })
     }
 }
@@ -1184,7 +1381,10 @@ impl ReconPort for ProductionRecon {
             CHECK_POLICY,
         )
         .map_err(describe_check)?;
-        Ok(Box::new(ReconcilerDriver(reconciler)))
+        Ok(Box::new(ReconcilerDriver::new(
+            reconciler,
+            self.site.clone(),
+        )))
     }
 }
 
@@ -1539,25 +1739,185 @@ impl Step2Coord for CoordinatorDriver {
     }
 }
 
-struct ReconcilerDriver(SplitStep2Reconciler);
+/// What the reconciler driver completes with (#568 B5b): the production one
+/// is the [`SplitStep2Reconciler`] and its [`SplitCompletionEvidence`];
+/// tests substitute a fake to pin the driver's own order (check, record,
+/// then forget, D18) and its copy.
+#[async_trait]
+trait CompletionCore: Send + 'static {
+    type Evidence: Send + 'static;
+    async fn check(
+        &mut self,
+        context: &Context,
+    ) -> Result<Option<Self::Evidence>, claim_coordinator::Error>;
+    fn record(evidence: &Self::Evidence) -> SplitFromRecord;
+    fn live(evidence: &Self::Evidence) -> bool;
+    async fn persist(
+        &self,
+        evidence: &Self::Evidence,
+        site: &CompletionSite,
+    ) -> Result<(), SettingsError>;
+    /// Blocking: the journal write.
+    fn forget(
+        &mut self,
+        evidence: Self::Evidence,
+        context: &Context,
+    ) -> Result<(), claim_coordinator::Error>;
+}
+#[async_trait]
+impl CompletionCore for SplitStep2Reconciler {
+    type Evidence = SplitCompletionEvidence;
+    async fn check(
+        &mut self,
+        context: &Context,
+    ) -> Result<Option<SplitCompletionEvidence>, claim_coordinator::Error> {
+        self.check_completion(context).await
+    }
+    fn record(evidence: &SplitCompletionEvidence) -> SplitFromRecord {
+        evidence.record()
+    }
+    fn live(evidence: &SplitCompletionEvidence) -> bool {
+        evidence.is_live()
+    }
+    async fn persist(
+        &self,
+        evidence: &SplitCompletionEvidence,
+        site: &CompletionSite,
+    ) -> Result<(), SettingsError> {
+        evidence.persist(&site.root, &site.target).await
+    }
+    fn forget(
+        &mut self,
+        evidence: SplitCompletionEvidence,
+        context: &Context,
+    ) -> Result<(), claim_coordinator::Error> {
+        evidence.forget(self, context)
+    }
+}
+
+/// The production reconciler and, for a completion, where it is recorded.
+/// The reconciler is out of the driver only while its descriptor deletion
+/// runs off the executor; a task that does not return it leaves the driver
+/// refusing with [`COMPLETION_INTERRUPTED`] and a restart.
+struct ReconcilerDriver<C = SplitStep2Reconciler> {
+    core: Option<C>,
+    site: Option<CompletionSite>,
+    revoke: RevokeHandle,
+}
+impl ReconcilerDriver {
+    fn new(reconciler: SplitStep2Reconciler, site: Option<CompletionSite>) -> Self {
+        let revoker = reconciler.revoker();
+        Self {
+            core: Some(reconciler),
+            site,
+            revoke: Arc::new(move || revoker.revoke()),
+        }
+    }
+}
+/// The driver lost its reconciler: read the journal again.
+fn interrupted() -> Step2Refusal {
+    Step2Refusal {
+        recovery: Step2Recovery::Restart,
+        ..Step2Refusal::retry(COMPLETION_INTERRUPTED)
+    }
+}
+impl<C: CompletionCore> ReconcilerDriver<C> {
+    /// Check, record on the target Cube, then forget the descriptors, in
+    /// that order under one evidence (D18). A refused record or deletion is
+    /// "check again" (#645 P3-1): expired evidence never ends the split.
+    async fn complete_inner(&mut self, context: &Context) -> Result<SplitCompletion, Step2Refusal> {
+        let site = self
+            .site
+            .clone()
+            .ok_or_else(|| Step2Refusal::final_(COMPLETION_NO_VAULT))?;
+        let core = self.core.as_mut().ok_or_else(interrupted)?;
+        let evidence = core
+            .check(context)
+            .await
+            .map_err(describe_check)?
+            .ok_or_else(|| Step2Refusal::retry(COMPLETION_NOT_YET))?;
+        let record = C::record(&evidence);
+        if core.persist(&evidence, &site).await.is_err() {
+            return Err(Step2Refusal::retry(if C::live(&evidence) {
+                COMPLETION_NOT_RECORDED
+            } else {
+                COMPLETION_EXPIRED
+            }));
+        }
+        let mut core = self.core.take().ok_or_else(interrupted)?;
+        let context = context.clone();
+        let (core, forgotten) = tokio::task::spawn_blocking(move || {
+            let forgotten = core.forget(evidence, &context);
+            (core, forgotten)
+        })
+        .await
+        .map_err(|_| interrupted())?;
+        self.core = Some(core);
+        forgotten.map_err(|error| match error {
+            claim_coordinator::Error::ExpiredEvidence => {
+                Step2Refusal::retry(COMPLETION_NOT_FORGOTTEN)
+            }
+            error => describe_check(error),
+        })?;
+        Ok(record.into())
+    }
+}
 #[async_trait]
 impl Step2Recon for ReconcilerDriver {
     fn revoke_handle(&self) -> RevokeHandle {
-        let revoker = self.0.revoker();
-        Arc::new(move || revoker.revoke())
+        self.revoke.clone()
     }
     fn recorded_outcome(&self) -> Option<Outcome> {
-        self.0.recorded_outcome()
+        self.core.as_ref()?.recorded_outcome()
     }
     async fn reconcile(
         &mut self,
         context: &Context,
     ) -> Result<(Status, TransactionObservation, Step1AfterStep2), Step2Refusal> {
-        self.0
+        self.core
+            .as_mut()
+            .ok_or_else(interrupted)?
             .reconcile_sweep(context)
             .await
             .map(reconciled)
             .map_err(describe_check)
+    }
+    async fn complete(&mut self, context: &Context) -> Result<SplitCompletion, Step2Refusal> {
+        self.complete_inner(context).await
+    }
+    async fn completion_stands(
+        &mut self,
+        context: &Context,
+    ) -> Result<CompletionStanding, Step2Refusal> {
+        let site = self
+            .site
+            .clone()
+            .ok_or_else(|| Step2Refusal::final_(COMPLETION_NO_VAULT))?;
+        let standing = self
+            .core
+            .as_mut()
+            .ok_or_else(interrupted)?
+            .reconcile_split_completion(context, &site.root, &site.target)
+            .await
+            .map_err(describe_check)?;
+        Ok(match standing {
+            SplitCompletionReconciliation::Standing {
+                status,
+                transaction,
+            } => CompletionStanding::Standing {
+                status,
+                seen: transaction,
+            },
+            SplitCompletionReconciliation::Lost {
+                status,
+                transaction,
+                cleared,
+            } => CompletionStanding::Lost {
+                status,
+                seen: transaction,
+                cleared,
+            },
+        })
     }
 }
 

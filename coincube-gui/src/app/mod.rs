@@ -1023,11 +1023,13 @@ impl std::fmt::Debug for SplitPorts {
     }
 }
 /// Blocking (#625 F3c): each port builds clients (`reqwest` among them), so
-/// the App calls it only inside `spawn_blocking`.
+/// the App calls it only inside `spawn_blocking`. `site` is where the
+/// reconcile-only port records a completion (#568 B5b).
 fn split_ports(
     session: Option<state::vault::claim::ConnectSession>,
     generation: tokio::sync::watch::Receiver<u64>,
     daemon: Option<Arc<dyn Daemon + Sync + Send>>,
+    site: Option<state::vault::split::step2::CompletionSite>,
 ) -> SplitPorts {
     use state::vault::split::{step1, step2};
     let (step2, step2_missing) = match (session.clone(), daemon) {
@@ -1044,7 +1046,7 @@ fn split_ports(
         }
     };
     let recon = session.clone().and_then(|session| {
-        step2::ProductionRecon::new(session, generation.clone())
+        step2::ProductionRecon::new(session, generation.clone(), site)
             .ok()
             .map(|port| Arc::new(port) as Arc<dyn step2::ReconPort>)
     });
@@ -3903,11 +3905,18 @@ impl App {
             self.panels.claim_generation.subscribe(),
             self.split_daemon(),
         );
+        // #568 B5b: a completion is recorded on this Cube, in its datadir.
+        let site = state::vault::split::step2::CompletionSite::of(
+            self.datadir.clone(),
+            &self.cube_settings,
+        );
         Task::perform(
             async move {
-                tokio::task::spawn_blocking(move || split_ports(Some(session), generation, daemon))
-                    .await
-                    .ok()
+                tokio::task::spawn_blocking(move || {
+                    split_ports(Some(session), generation, daemon, site)
+                })
+                .await
+                .ok()
             },
             move |ports| Message::SplitPortsBuilt(seq, ports.map(Box::new)),
         )
@@ -3922,9 +3931,11 @@ impl App {
         let Some(panel) = self.split_panel.as_mut() else {
             return Task::none();
         };
-        // A build that did not finish installs nothing: the next refresh
-        // builds again.
+        // A build that did not finish (its task panicked) installs nothing
+        // and reads as refused (S3-G3): a panel it left without a session
+        // offers a retry that builds again.
         let Some(ports) = ports else {
+            panel.note_ports_failed();
             return Task::none();
         };
         let SplitPorts {
@@ -5440,6 +5451,16 @@ impl App {
                 });
             }
             Message::View(view::Message::Split(message)) => {
+                // S3-G3: Try again after a port build that ended without
+                // ports builds them again.
+                if matches!(message, state::vault::split::SplitMessage::Retry)
+                    && self
+                        .split_panel
+                        .as_mut()
+                        .is_some_and(|panel| panel.take_ports_retry())
+                {
+                    return self.refresh_split_session();
+                }
                 return self.split_panel.as_mut().map_or_else(Task::none, |panel| {
                     let task = panel.update(message);
                     Task::batch([task, panel.arm_deadline()])
@@ -9100,14 +9121,15 @@ mod tests {
         use state::vault::split::step2::Step2Unavailable;
         // (Connect, step 2, reconcile-only, why no step 2: S3-D4)
         assert_eq!(
-            shape(split_ports(session(), generation.subscribe(), None)),
+            shape(split_ports(session(), generation.subscribe(), None, None)),
             (true, false, true, Some(Step2Unavailable::NoDaemon))
         );
         assert_eq!(
             shape(split_ports(
                 session(),
                 generation.subscribe(),
-                Some(electrum)
+                Some(electrum),
+                None
             )),
             (true, false, true, Some(Step2Unavailable::UnsupportedRoute))
         );
@@ -9115,12 +9137,18 @@ mod tests {
             shape(split_ports(
                 session(),
                 generation.subscribe(),
-                Some(connect.clone())
+                Some(connect.clone()),
+                None
             )),
             (true, true, true, None)
         );
         assert_eq!(
-            shape(split_ports(None, generation.subscribe(), Some(connect))),
+            shape(split_ports(
+                None,
+                generation.subscribe(),
+                Some(connect),
+                None
+            )),
             (false, false, false, None)
         );
     }
@@ -9470,6 +9498,151 @@ mod tests {
             .unwrap()
             .step2_unavailable_copy()
             .is_some_and(|copy| copy.contains("needs this Vault's wallet engine running")));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// S3-G1 (Gimli's probe P1 on #651): a Split port build in flight when
+    /// the fork session is invalidated (logout, account or provider change)
+    /// lands on nothing: `invalidate_fork_session` drops the builds.
+    #[test]
+    fn split_invalidated_session_drops_a_port_build_in_flight() {
+        let _guard = crate::app::session::test_guard();
+        let root = std::env::temp_dir().join(format!("split-g1-{}", uuid::Uuid::new_v4()));
+        let mut app = split_app(&root, true, true);
+        assert_eq!(split_ports_held(&app), (true, true));
+        let task = app.refresh_split_session();
+        app.invalidate_fork_session();
+        // The ports the panel holds are not cleared here; they are inert
+        // without a Connect port, and the next session replaces them.
+        let needs = state::vault::split::Stage::NeedsSession;
+        assert_eq!(app.split_panel.as_ref().unwrap().stage(), &needs);
+        for message in task_messages(task) {
+            assert!(matches!(message, Message::SplitPortsBuilt(..)));
+            drop(app.update(message));
+        }
+        // Installed, it would give the panel the old session's Connect port
+        // and start its restart.
+        assert_eq!(
+            app.split_panel.as_ref().unwrap().stage(),
+            &needs,
+            "a build from the invalidated session was installed"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// S3-G1 (Gimli's probe P2 on #651): a panel the discovery task installs
+    /// is given its session by the same message, without waiting for
+    /// another refresh.
+    #[test]
+    fn split_discovered_panel_gets_its_ports_without_another_refresh() {
+        let _guard = crate::app::session::test_guard();
+        let root = std::env::temp_dir().join(format!("split-g1-{}", uuid::Uuid::new_v4()));
+        let mut app = split_app(&root, true, true);
+        app.split_panel = None;
+        let mut built = 0;
+        for message in task_messages(app.split_discovery_task()) {
+            let follow = app.update(message);
+            for message in task_messages(follow) {
+                assert!(matches!(message, Message::SplitPortsBuilt(..)));
+                built += 1;
+                drop(app.update(message));
+            }
+        }
+        assert_eq!(built, 1, "the discovered panel was not refreshed");
+        assert_eq!(split_ports_held(&app), (true, true));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// S3-G2: a step-2 port refused for a reason other than its route (here
+    /// a Connect origin with a path, which no Split production admits) reads
+    /// as `Refused`, and the panel says so in its own words.
+    #[test]
+    fn split_refused_port_build_shows_refused() {
+        let _guard = crate::app::session::test_guard();
+        use state::vault::split::step2::Step2Unavailable;
+        let root = std::env::temp_dir().join(format!("split-g2-{}", uuid::Uuid::new_v4()));
+        let mut client =
+            crate::services::coincube::CoincubeClient::for_test("https://connect.example/sub/");
+        client.set_token("synthetic-test-token");
+        let session = Some(state::vault::claim::ConnectSession {
+            client,
+            account: "synthetic-account".into(),
+        });
+        let generation = tokio::sync::watch::channel(1).0;
+        let build = || {
+            split_ports(
+                session.clone(),
+                generation.subscribe(),
+                Some(split_backend_daemon(&root, true)),
+                None,
+            )
+        };
+        let ports = build();
+        assert!(ports.step2.is_none());
+        assert_eq!(ports.step2_missing, Some(Step2Unavailable::Refused));
+        // Installed by the App as a build lands: the panel shows the
+        // refused copy.
+        let mut app = split_app(&root, true, true);
+        drop(app.update(Message::SplitPortsBuilt(
+            app.split_port_seq,
+            Some(Box::new(build())),
+        )));
+        let panel = app.split_panel.as_ref().unwrap();
+        assert!(!panel.step2_available());
+        // The refused copy, not the missing daemon's.
+        assert!(panel
+            .step2_unavailable_copy()
+            .is_some_and(|copy| copy.contains("can't be opened under this session")));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// S3-G3 (CodeRabbit r4179804722): a port build whose blocking task
+    /// panicked (`SplitPortsBuilt(seq, None)`) after a session change left
+    /// the panel revoked and waiting for an unrelated refresh. It now reads
+    /// as `Refused` and offers Try again, which builds the ports again.
+    #[test]
+    fn split_port_build_that_panics_is_refused_with_a_retry() {
+        let _guard = crate::app::session::test_guard();
+        use state::vault::split::{SplitMessage, Stage, PORTS_INTERRUPTED};
+        let root = std::env::temp_dir().join(format!("split-g3-{}", uuid::Uuid::new_v4()));
+        let mut app = split_app(&root, true, true);
+        assert_eq!(split_ports_held(&app), (true, true));
+        // The session lost, then back: revoked, and a build is in flight.
+        let client = app.fork_connect_client.take();
+        drop(app.refresh_split_session());
+        app.fork_connect_client = client;
+        let task = app.refresh_split_session();
+        assert_eq!(split_ports_held(&app), (false, false));
+        // Its task panicked: the App receives no ports.
+        drop(task);
+        drop(app.update(Message::SplitPortsBuilt(app.split_port_seq, None)));
+        let panel = app.split_panel.as_ref().unwrap();
+        assert!(matches!(
+            panel.stage(),
+            Stage::Refused(refusal) if refusal.retry && refusal.reason == PORTS_INTERRUPTED
+        ));
+        // The refused copy, not the missing daemon's.
+        assert!(panel
+            .step2_unavailable_copy()
+            .is_some_and(|copy| copy.contains("can't be opened under this session")));
+        // Try again builds the ports again, and they are installed.
+        let retry = app.update(Message::View(view::Message::Split(SplitMessage::Retry)));
+        let mut built = 0;
+        for message in task_messages(retry) {
+            assert!(matches!(message, Message::SplitPortsBuilt(..)));
+            built += 1;
+            drop(app.update(message));
+        }
+        assert_eq!(built, 1);
+        assert_eq!(split_ports_held(&app), (true, true));
+        let panel = app.split_panel.as_ref().unwrap();
+        assert!(!matches!(panel.stage(), Stage::Refused(_)));
+        // A second Try again is the panel's own, with nothing to rebuild.
+        assert!(task_messages(
+            app.update(Message::View(view::Message::Split(SplitMessage::Retry)))
+        )
+        .iter()
+        .all(|message| !matches!(message, Message::SplitPortsBuilt(..))));
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -772,3 +772,107 @@ async fn split_completion_marker_is_cleared_when_step2_leaves_its_block() {
     // The unrelated Cube is untouched throughout.
     assert!(btcb2_settings(&root).cubes[1].split_from.is_empty());
 }
+
+/// #645 P3-2: the cleared record is keyed by the source digest *and* step
+/// 2's txid. A record of the same source with another step 2 stays when
+/// this one's completion is lost (and is not taken for this one's height).
+#[tokio::test(flavor = "multi_thread")]
+async fn split_completion_loss_clears_only_its_own_step2_record() {
+    let (h, txid) = submitted().await;
+    let (root, target) = settings_root(&h).await;
+    let same_source = SplitFromRecord {
+        descriptor_digest: h.step1.source().digest(),
+        completed_height: 7,
+        step2_txid: Txid::from_byte_array([7; 32]),
+    };
+    update_settings_file(&root.network_directory(ChainId::BitcoinBlake2b), |mut s| {
+        s.cubes[0].split_from.push(same_source.clone());
+        Some(s)
+    })
+    .await
+    .unwrap();
+    h.chains
+        .edit(|view| view.on_btcb2 = vec![(txid, confirmed(txid, STEP2_HEIGHT))]);
+    let mut reconciler = reopen(&h, Box::new(h.chains.clone()));
+    minted(&mut reconciler)
+        .await
+        .persist(&root, &target)
+        .await
+        .unwrap();
+    assert_eq!(
+        split_from(&root),
+        vec![same_source.clone(), record(&h, txid, STEP2_HEIGHT)]
+    );
+    // Standing: the other record's height is not this one's.
+    assert!(matches!(
+        reconciler
+            .reconcile_split_completion(&context(), &root, &target)
+            .await,
+        Ok(SplitCompletionReconciliation::Standing { .. })
+    ));
+    // Step 2 gone: only its own record is cleared.
+    h.chains.edit(|view| view.on_btcb2.clear());
+    assert!(matches!(
+        reconciler
+            .reconcile_split_completion(&context(), &root, &target)
+            .await,
+        Ok(SplitCompletionReconciliation::Lost { cleared: true, .. })
+    ));
+    assert_eq!(split_from(&root), vec![same_source]);
+}
+
+/// #645 P3-3: a target naming another Cube whose settings hold the very
+/// same Vault (fingerprint and checksum) is refused by the journal's own
+/// Cube check, before and under the writer lock, with the file unchanged;
+/// the Vault match alone would have admitted it.
+#[tokio::test(flavor = "multi_thread")]
+async fn split_completion_persist_refuses_the_same_vault_in_another_cube() {
+    let (h, txid) = submitted().await;
+    let (root, target) = settings_root(&h).await;
+    let twin = CubeSettings::new_with_raw_id(
+        "twin-cube".into(),
+        "twin-cube".into(),
+        ChainId::BitcoinBlake2b,
+    )
+    .with_vault(VaultIdentity::generate(&vault()));
+    let twin_target = CompletionTarget::of(&twin).unwrap();
+    assert_eq!(
+        (
+            &twin_target.vault_fingerprint,
+            &twin_target.vault_wallet_id.descriptor_checksum
+        ),
+        (
+            &target.vault_fingerprint,
+            &target.vault_wallet_id.descriptor_checksum
+        ),
+        "the same Vault"
+    );
+    update_settings_file(&root.network_directory(ChainId::BitcoinBlake2b), |mut s| {
+        s.cubes.push(twin);
+        Some(s)
+    })
+    .await
+    .unwrap();
+    let before = std::fs::read(settings_path(&root)).unwrap();
+    h.chains
+        .edit(|view| view.on_btcb2 = vec![(txid, confirmed(txid, STEP2_HEIGHT))]);
+    let mut reconciler = reopen(&h, Box::new(h.chains.clone()));
+    let evidence = minted(&mut reconciler).await;
+    let refused = evidence.persist(&root, &twin_target).await.unwrap_err();
+    assert!(
+        refused.to_string().contains("not the journal's"),
+        "{}",
+        refused
+    );
+    assert_eq!(std::fs::read(settings_path(&root)).unwrap(), before);
+    // The journal's own Cube is recorded by the same evidence.
+    evidence.persist(&root, &target).await.unwrap();
+    assert_eq!(split_from(&root), vec![record(&h, txid, STEP2_HEIGHT)]);
+    assert!(btcb2_settings(&root)
+        .cubes
+        .iter()
+        .find(|cube| cube.id == "twin-cube")
+        .unwrap()
+        .split_from
+        .is_empty());
+}

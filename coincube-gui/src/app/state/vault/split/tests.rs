@@ -1511,6 +1511,43 @@ fn split_panel_has_no_gui_entry_point() {
     assert!(!intents.to_lowercase().contains("start"));
 }
 
+/// S3-G1 (#651 lead gate): both Split App handlers, the task results
+/// (`Message::Split`) and the user intents (`view::Message::Split`), batch
+/// the panel's deadline timer after every apply and update, so the "cannot
+/// replay" label and a resend review lapse at their deadline without input
+/// (S3 item 5).
+#[test]
+fn split_app_handlers_batch_the_deadline_timer() {
+    let app = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/app/mod.rs"),
+    )
+    .unwrap();
+    let production = &app[..app.find("\n#[cfg(test)]\n").unwrap()];
+    for (arm, call) in [
+        (
+            "            Message::Split(event) => {\n",
+            "panel.apply(*event)",
+        ),
+        (
+            "            Message::View(view::Message::Split(message)) => {\n",
+            "panel.update(message)",
+        ),
+    ] {
+        assert_eq!(production.matches(arm).count(), 1, "{}", arm);
+        let body = &production[production.find(arm).unwrap() + arm.len()..];
+        let body = &body[..body.find("\n            }\n").unwrap()];
+        let applied = body
+            .find(call)
+            .unwrap_or_else(|| panic!("{} in {}", call, arm));
+        let batched = body
+            .find("Task::batch([task, panel.arm_deadline()])")
+            .unwrap_or_else(|| panic!("no deadline batch in {}", arm));
+        assert!(applied < batched, "{}", arm);
+        assert_eq!(body.matches(call).count(), 1, "{}", arm);
+        assert_eq!(body.matches("arm_deadline()").count(), 1, "{}", arm);
+    }
+}
+
 /// #625 F3: the App's construction, its Connect refresh and the panel's
 /// result handling do no blocking work on the UI thread. Split journal
 /// discovery (`step1::discover`: a directory read and `symlink_metadata`
@@ -1610,7 +1647,7 @@ fn split_ui_paths_do_no_blocking_work() {
     // The UI paths call the blocking helpers only through a task.
     let refresh = body(&app, "    fn refresh_split_session(", "    ");
     let blocking = refresh.find("spawn_blocking(move ||").unwrap();
-    assert!(refresh[blocking..].contains("split_ports(Some(session), generation, daemon)"));
+    assert!(refresh[blocking..].contains("split_ports(Some(session), generation, daemon, site)"));
     assert!(!refresh[..blocking].contains("split_ports("));
     for (name, text) in [
         ("new_inner", body(&app, "    fn new_inner(", "    ")),
