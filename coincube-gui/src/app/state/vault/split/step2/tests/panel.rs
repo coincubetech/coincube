@@ -3688,12 +3688,20 @@ async fn restarted_recorded(
 }
 
 /// The journal's source descriptors deleted, as a finished completion
-/// leaves them (D18).
+/// leaves them (D18): written as the journal stores it, since the journal's
+/// deletion API has no GUI caller (`split_b0_journal_api_has_no_gui_callers`).
 fn forget_descriptors(journal: &Journal) {
-    journal
-        .lock()
-        .forget_split_descriptors(&context())
-        .expect("descriptors forgotten");
+    let path = journal.temp.0.join("intent.json");
+    let mut intent: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert!(intent["split"]
+        .as_object_mut()
+        .unwrap()
+        .remove("descriptors")
+        .is_some());
+    std::fs::write(&path, serde_json::to_vec(&intent).unwrap()).unwrap();
+    let record = journal.lock().recorded_split().unwrap().unwrap();
+    assert!(record.source.is_none(), "descriptors forgotten");
 }
 
 /// #568 B5c-1 (#656 inputs): a restart whose reconciler reopens the step 2
