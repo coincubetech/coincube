@@ -410,6 +410,9 @@ impl Step2Transport for Sending {
 
 /// Step 2 checked, built, signed, reviewed and submitted through the
 /// coordinator, every read through a [`Step1View`]; the coordinator is kept.
+/// Every test binds `_server` (the transport's Connect mock) for as long as
+/// it may send or preflight: a `..` pattern drops it at once, and the pooled
+/// mock server then serves another test's mocks to this transport.
 struct Submitted {
     h: Harness,
     view: Step1View,
@@ -516,6 +519,7 @@ async fn split_step1_reconfirmation_after_step2_grows_inclusion_history_and_send
             view,
             mut coordinator,
             sends,
+            _server,
             ..
         } = submitted_over(true).await;
         let before = h.temp.journal();
@@ -608,6 +612,7 @@ async fn split_step1_reconfirmation_review_is_one_use_expires_and_refuses_a_chan
         view,
         coordinator,
         txid,
+        _server,
         ..
     } = submitted_over(true).await;
     drop(coordinator);
@@ -731,6 +736,7 @@ async fn split_reconcile_reports_step1_absent_versus_in_mempool() {
         h,
         view,
         mut coordinator,
+        _server,
         ..
     } = submitted_over(false).await;
     let step1 = h.signed.compute_txid();
@@ -821,6 +827,7 @@ async fn split_step1_conflict_is_provisional_then_terminal_and_never_from_a_fail
         h,
         view,
         coordinator,
+        _server,
         ..
     } = submitted_over(false).await;
     drop(coordinator);
@@ -975,6 +982,7 @@ async fn split_step1_provisional_conflict_is_cleared_when_step1_or_its_coin_reap
         h,
         view,
         coordinator,
+        _server,
         ..
     } = submitted_over(false).await;
     drop(coordinator);
@@ -1049,6 +1057,7 @@ async fn split_step1_conflict_is_not_recorded_after_the_session_ends() {
         h,
         view,
         coordinator,
+        _server,
         ..
     } = submitted_over(false).await;
     drop(coordinator);
@@ -1162,6 +1171,7 @@ async fn split_resend_completion_and_forget_are_refused_in_o1_to_o4() {
         view,
         mut coordinator,
         sends,
+        _server,
         ..
     } = submitted_over(true).await;
     let spent = h.prevouts()[0];
@@ -1218,6 +1228,7 @@ async fn split_resend_completion_and_forget_are_refused_in_o1_to_o4() {
         view,
         coordinator,
         txid,
+        _server,
         ..
     } = submitted_over(false).await;
     drop(coordinator);
@@ -1310,6 +1321,7 @@ async fn split_journal_without_step1_conflict_serializes_unchanged() {
         h,
         view,
         coordinator,
+        _server,
         ..
     } = submitted_over(false).await;
     drop(coordinator);
