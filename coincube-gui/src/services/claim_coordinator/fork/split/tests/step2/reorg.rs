@@ -10,19 +10,6 @@ use crate::services::{
     claim_workflow::{Reconfirmation, Step1Conflict},
 };
 
-/// The harness policy with the widest collection budget. Every review
-/// here is bounded by an evidence deadline (`evidence_deadline`): the
-/// budget, capped at 30 s, measured on the real monotonic clock. The
-/// harness's 2 s left a heavily loaded run (four test binaries of 16
-/// threads beside a cargo build) expiring reviews before their
-/// confirmation (`ExpiredEvidence`); 30 s outlasts any such run, and the
-/// expiry itself is tested with `expire_for_test`, not by waiting.
-fn wide_policy() -> CheckPolicy {
-    CheckPolicy {
-        collection_budget: claim_observation::MAX_COLLECTION_TIME,
-        ..policy()
-    }
-}
 /// Step 2 reviewed and submitted through the coordinator, which is then
 /// dropped: a journal with a recorded step-2 submission, and its txid.
 async fn submitted() -> (Harness, Txid) {
