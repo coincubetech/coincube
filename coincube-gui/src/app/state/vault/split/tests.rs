@@ -482,7 +482,7 @@ impl Scan {
         let coins = fixture::shared_coins(&wallet);
         Self { wallet, coins }
     }
-    fn intent_with(&self, edit: impl Fn(ScanReport) -> ScanReport) -> SplitIntent {
+    pub(super) fn intent_with(&self, edit: impl Fn(ScanReport) -> ScanReport) -> SplitIntent {
         let btcb2 = edit(fixture::report(ChainId::BitcoinBlake2b, self.coins.clone()));
         let bitcoin = edit(fixture::report(ChainId::Bitcoin, self.coins.clone()));
         let inventory = SplitInventory::join(&btcb2, &bitcoin, fixture::GENERATION, true).unwrap();
