@@ -460,6 +460,176 @@ pub async fn collect_sweep(
     result
 }
 
+/// The fork chain's checked network anchor as one fork-only read (#568
+/// B4b-3a): its tip, the fork's activation height, the deployment and the
+/// stamp of the read. Freshness, an active fork at or below the tip and a
+/// well-formed RDTS window are checked as for every collection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ForkAnchorView {
+    pub tip: BlockRef,
+    pub median_time_past: i64,
+    /// The fork's activation height the anchor names (owner decision D10:
+    /// the coins of a fork-only sweep must precede it).
+    pub fork_height: u64,
+    pub deployment: DeploymentState,
+    pub observed_at: i64,
+}
+
+/// One fresh read of `fork`'s network anchor, checked; see
+/// [`ForkAnchorView`]. Reads nothing on Bitcoin.
+pub async fn fork_anchor(
+    source: &dyn ObservationSource,
+    fork: ChainId,
+    policy: Policy,
+) -> Result<ForkAnchorView, Failure> {
+    let anchor = checked_anchor(
+        source
+            .anchor(fork)
+            .await
+            .map_err(|e| failure(Stage::ForkAnchor, e))?,
+        fork,
+        policy,
+        source.now(),
+    )?;
+    let RdtsStatus::Flagday { flagday } = anchor.observation.rdts else {
+        return Err(failure(Stage::ForkAnchor, FailureKind::Malformed));
+    };
+    let fork_height = anchor
+        .observation
+        .fork
+        .as_ref()
+        .map(|f| f.height)
+        .ok_or_else(|| failure(Stage::ForkAnchor, FailureKind::Malformed))?;
+    Ok(ForkAnchorView {
+        tip: BlockRef {
+            height: anchor.tip_height,
+            hash: anchor.tip_hash,
+        },
+        median_time_past: anchor.tip_median_time_past,
+        fork_height,
+        deployment: DeploymentState::Flagday {
+            height: flagday.height,
+            expiry_time: flagday.expiry_time,
+            active: flagday.active,
+        },
+        observed_at: anchor.observed_at,
+    })
+}
+
+/// A fresh fork-only view of one sweep: the fork anchor read before and
+/// after, unchanged, and the sweep read twice in between. Not completion,
+/// and no permission to submit again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ForkSweepObservation {
+    anchor: ForkAnchorView,
+    transaction: TransactionObservation,
+    observed_at: i64,
+}
+impl ForkSweepObservation {
+    /// The fork anchor both reads agreed on; its stamp is the later read's.
+    pub fn anchor(&self) -> ForkAnchorView {
+        self.anchor
+    }
+    pub fn transaction(&self) -> TransactionObservation {
+        self.transaction
+    }
+    /// The oldest stamp of every read the view rests on.
+    pub fn observed_at(&self) -> i64 {
+        self.observed_at
+    }
+}
+
+/// #568 B4b-3a (owner decision U1): the explicitly fork-only observation path
+/// of a sweep with no step 1, the unified fallback (`kind: Unified`). It reads
+/// only `fork`: the checked anchor, the indexer's hash at its tip, the sweep
+/// `sweep` twice (a confirmation's block hash checked at its height), then the
+/// anchor again, which must be unchanged. Every read must be fresh. Nothing is
+/// read on Bitcoin and no `ClaimPlan` is involved: [`collect`] and
+/// [`collect_sweep`], with their step-1 plan checks, and core's
+/// `claim::assess` are unchanged and still refuse a fork-only plan.
+pub async fn collect_fork_sweep(
+    source: &dyn ObservationSource,
+    fork: ChainId,
+    sweep: Txid,
+    policy: Policy,
+    budget: Duration,
+    mut context: CollectionContext,
+) -> Result<ForkSweepObservation, Failure> {
+    if !fork.is_blake2b() {
+        return Err(failure(Stage::Plan, FailureKind::WrongChain));
+    }
+    if policy.max_observation_age_seconds <= 0
+        || policy.expiry_margin_seconds <= 0
+        || budget.is_zero()
+        || budget > MAX_COLLECTION_TIME
+    {
+        return Err(failure(Stage::Plan, FailureKind::InvalidPlan));
+    }
+    let expected = context.expected_generation;
+    if *context.generation.borrow() != expected || context.generation.has_changed().is_err() {
+        return Err(failure(Stage::Context, FailureKind::Cancelled));
+    }
+    let cancelled = async {
+        loop {
+            if context.generation.changed().await.is_err()
+                || *context.generation.borrow_and_update() != expected
+            {
+                break;
+            }
+        }
+    };
+    let work = async {
+        let first = fork_anchor(source, fork, policy).await?;
+        let (hash, indexed_at) = read(
+            source
+                .hash_at_height(fork, first.tip.height)
+                .await
+                .map_err(|e| failure(Stage::ForkIndexer, e))?,
+            fork,
+            source,
+            policy,
+            Stage::ForkIndexer,
+        )?;
+        if hash != first.tip.hash {
+            return Err(failure(Stage::ForkIndexer, FailureKind::Changed));
+        }
+        let (transaction, stamps) =
+            read_sweep_transactions(source, fork, sweep, first.tip.height, policy).await?;
+        let last = fork_anchor(source, fork, policy).await?;
+        if first.tip != last.tip
+            || first.median_time_past != last.median_time_past
+            || first.fork_height != last.fork_height
+            || first.deployment != last.deployment
+        {
+            return Err(failure(Stage::ForkTransaction, FailureKind::Changed));
+        }
+        let now = source.now();
+        let observed_at = stamps
+            .iter()
+            .copied()
+            .chain([first.observed_at, indexed_at, last.observed_at])
+            .min()
+            .ok_or_else(|| failure(Stage::ForkTransaction, FailureKind::Unavailable))?;
+        if !fresh(observed_at, now, policy.max_observation_age_seconds) {
+            return Err(failure(Stage::ForkTransaction, FailureKind::Stale));
+        }
+        Ok(ForkSweepObservation {
+            anchor: last,
+            transaction,
+            observed_at,
+        })
+    };
+    let result = tokio::select! {
+        biased;
+        _ = cancelled => Err(failure(Stage::Context, FailureKind::Cancelled)),
+        result = tokio::time::timeout(budget, work) => result.map_err(|_| failure(Stage::Context, FailureKind::Deadline))?,
+    };
+    if *context.generation.borrow() != expected || context.generation.has_changed().is_err() {
+        return Err(failure(Stage::Context, FailureKind::Cancelled));
+    }
+    result
+}
+
 async fn read_sweep_transactions(
     source: &dyn ObservationSource,
     fork: ChainId,

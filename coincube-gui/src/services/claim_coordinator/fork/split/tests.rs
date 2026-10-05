@@ -1047,7 +1047,9 @@ pub(super) fn production_text<'a>(file: &str, text: &'a str) -> &'a str {
 /// the completion evidence and `split_from` writer (B5a) are named only in
 /// `fork::split` itself; nothing else in the crate reaches them (B3b-2 adds
 /// the panel, reachable only by resuming a journal; B5b adds its completion
-/// stage).
+/// stage). B4b-3a adds the unified fallback's coordinator and reconciler,
+/// and the fork-only observation path they run, which only its own module
+/// (`claim_observation`) defines.
 #[test]
 fn split_step2_gate_has_no_gui_caller() {
     fn walk(dir: &std::path::Path, files: &mut Vec<(String, String)>) {
@@ -1117,6 +1119,19 @@ fn split_step2_gate_has_no_gui_caller() {
             "Step1ReconfirmationReview",
             "prepare_step1_reconfirmation",
             "confirm_step1_reconfirmation",
+            // B4b-3a: the unified fallback (fork-only route).
+            "UnifiedCoordinator",
+            "UnifiedError",
+            "UnifiedReconciler",
+            "UnifiedReconcile",
+            "UnifiedReview",
+            "UnifiedTransport",
+            "submit_unified_connect",
+            "submit_unified_node",
+            "collect_fork_sweep",
+            "ForkSweepObservation",
+            "ForkAnchorView",
+            "fork_anchor",
         ] {
             // The Daemon trait declares the step-2 transport and the
             // embedded daemon forwards it; neither is a caller.
@@ -1164,11 +1179,27 @@ fn split_step2_gate_has_no_gui_caller() {
             // S4b's: no panel file names the reconfirmation.
             let warning = file.starts_with("src/app/state/vault/split/")
                 && ["Step1AfterStep2", "SweepReconcile"].contains(&ident);
+            // The fork-only observation path is defined in its own module.
+            let observation = file == "src/services/claim_observation/mod.rs"
+                && [
+                    "collect_fork_sweep",
+                    "ForkSweepObservation",
+                    "ForkAnchorView",
+                    "fork_anchor",
+                ]
+                .contains(&ident);
             let claim = ident == "check_completion"
                 && (file == "src/services/claim_coordinator/fork.rs"
                     || file.starts_with("src/services/claim_coordinator/fork/tests")
                     || file.starts_with("src/app/state/vault/claim/"));
-            if text.contains(ident) && !transport && !panel && !warning && !claim {
+            // Core's `ForeignUnifiedError` (the seed signer's) is not the
+            // coordinator's `UnifiedError`.
+            let named = if ident == "UnifiedError" {
+                text.replace("ForeignUnifiedError", "").contains(ident)
+            } else {
+                text.contains(ident)
+            };
+            if named && !transport && !panel && !warning && !claim && !observation {
                 unexpected.push((file.clone(), ident));
             }
         }

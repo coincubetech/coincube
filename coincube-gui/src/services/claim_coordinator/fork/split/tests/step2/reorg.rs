@@ -1471,35 +1471,21 @@ async fn split_resend_completion_and_forget_are_refused_in_o1_to_o4() {
     assert!(h.temp.journal()["split"]["descriptors"].is_object());
 }
 
-/// A fork-only record (#650) has no step 1: the step-1 reconfirmation
-/// entry points refuse it with `InvalidBinding` before any read (its
-/// services panic on any), and record nothing.
+/// A fork-only record (#650) has no step 1, so the step-1 reconfirmation
+/// entry points never reach it: since B4b-3a (U2) the step-2 reconciler
+/// that carries them refuses to open the record at all, with
+/// `InvalidBinding` and before any read (its services panic on any), and
+/// records nothing. (The entry points' own kind check stays, unreachable for
+/// a fork-only record.)
 #[tokio::test]
 async fn split_unified_record_refuses_reorg_entry_points_before_any_read() {
     let (sender, _) = watch::channel(7);
     let (temp, digest, _) = super::unified_journal::fork_only_journal(true);
     let journal = temp.journal();
-    let mut reconciler = super::unified_journal::reconciler(&temp, digest, &sender).unwrap();
     assert!(matches!(
-        reconciler.prepare_step1_reconfirmation(&context()).await,
+        super::unified_journal::reconciler(&temp, digest, &sender),
         Err(Error::InvalidBinding)
     ));
-    // A review from a two-step journal: refused for the record first.
-    let other = submitted_over(true).await;
-    other.view.step1_in(moved(), 6);
-    drop(other.coordinator);
-    let mut two_step = reopen(&other.h, Box::new(other.view.clone()));
-    let review = two_step
-        .prepare_step1_reconfirmation(&context())
-        .await
-        .unwrap();
-    assert!(matches!(
-        reconciler
-            .confirm_step1_reconfirmation(review, &context())
-            .await,
-        Err(Error::InvalidBinding)
-    ));
-    drop(reconciler);
     assert_eq!(temp.journal(), journal);
 }
 
