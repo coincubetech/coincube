@@ -42,6 +42,7 @@
 //! change, Cube close) revokes the coordinator synchronously; a recorded
 //! split survives on disk and continues under the next session.
 
+pub mod device;
 mod panel2;
 pub mod step1;
 pub mod step2;
@@ -168,6 +169,10 @@ pub enum Work {
     /// P3-3: fresh evidence for a resend review.
     Step2ResendReviewing,
     Step2Resending,
+    /// B4b-3b: the session-only device listing is being built.
+    ListingDevices,
+    /// B4b-3b: a connected device is asked to sign.
+    SigningOnDevice,
 }
 
 /// The coordinator in transit between the panel and a task.
@@ -308,6 +313,30 @@ pub enum SplitEvent {
     /// S3 item 5: the deadline armed under this epoch (not a request
     /// sequence number) passed. See [`SplitPanel::arm_deadline`].
     DeadlinePassed(u64),
+    /// B4b-3b: the device listing for this step's policy, built off the UI
+    /// thread, or why not.
+    DeviceListed(u64, Result<Box<device::Listing>, String>),
+    /// B4b-3b: one device's signatures, unverified until imported.
+    DeviceSigned(u64, Result<Box<Psbt>, String>),
+}
+
+/// A signed PSBT on its way into a verified import (step 1's
+/// `step1::import`, step 2's `combine`/`verify_signed`): a file to load, or a
+/// connected device's output already in memory (#568 B4b-3b).
+#[derive(Debug)]
+pub(crate) enum Incoming {
+    Path(PathBuf),
+    Psbt(Psbt),
+}
+
+impl Incoming {
+    /// Blocking for a file.
+    fn load(self) -> Result<Psbt, split_psbt_file::FileError> {
+        match self {
+            Self::Path(path) => split_psbt_file::load(&path),
+            Self::Psbt(psbt) => Ok(psbt),
+        }
+    }
 }
 
 /// What a reorg check concluded.
@@ -360,6 +389,8 @@ pub enum SplitMessage {
     Step2ReviewResend,
     /// P3-3: send the recorded step 2 again, as that review showed.
     Step2ConfirmResend,
+    /// B4b-3b: sign with a connected device.
+    Device(device::DeviceMessage),
 }
 
 pub struct SplitPanel {
@@ -441,6 +472,8 @@ pub struct SplitPanel {
     /// superseded timer lands on nothing.
     armed: Option<Instant>,
     deadline_epoch: u64,
+    /// B4b-3b: the session-only device listing and its signing.
+    device: device::DeviceSigner,
 }
 
 impl fmt::Debug for SplitPanel {
@@ -504,6 +537,7 @@ impl SplitPanel {
             coins: Vec::new(),
             armed: None,
             deadline_epoch: 0,
+            device: device::DeviceSigner::default(),
         }
     }
 
@@ -659,6 +693,7 @@ impl SplitPanel {
             revoke();
         }
         self.revoke_step2();
+        self.device.close();
         self.driver = None;
         self.review = None;
         self.abandon_checked = false;
@@ -810,6 +845,17 @@ impl SplitPanel {
     /// Load the signed files at `paths`, combine them with those already
     /// loaded and finalize when every input is satisfied.
     pub fn import_from(&mut self, paths: Vec<PathBuf>) -> Task<Message> {
+        self.import(paths.into_iter().map(Incoming::Path).collect())
+    }
+
+    /// The same verified import for signed PSBTs already in memory: a
+    /// connected device's output (#568 B4b-3b) enters exactly where a signed
+    /// file does, through `step1::import`, and is never finalized directly.
+    pub fn import_psbts(&mut self, psbts: Vec<Psbt>) -> Task<Message> {
+        self.import(psbts.into_iter().map(Incoming::Psbt).collect())
+    }
+
+    fn import(&mut self, incoming: Vec<Incoming>) -> Task<Message> {
         let Some(construction) = self.construction.clone() else {
             return Task::none();
         };
@@ -818,8 +864,8 @@ impl SplitPanel {
         self.spawn(
             async move {
                 tokio::task::spawn_blocking(move || {
-                    for path in &paths {
-                        files.push(split_psbt_file::load(path).map_err(|error| error.to_string())?);
+                    for item in incoming {
+                        files.push(item.load().map_err(|error| error.to_string())?);
                     }
                     let imported =
                         step1::import(&construction, &files).map_err(|error| error.to_string())?;
@@ -1163,6 +1209,7 @@ impl SplitPanel {
                 self.hidden = true;
                 Task::none()
             }
+            SplitMessage::Device(message) => self.update_device(message),
             other => self.update_step2(other),
         }
     }
@@ -1228,6 +1275,7 @@ impl SplitPanel {
                 match imported {
                     Imported::Complete(verified, _) => {
                         self.signed = Some(verified.transaction().clone());
+                        self.device.close();
                         self.maybe_record()
                     }
                     Imported::Partial => {
@@ -1423,6 +1471,9 @@ impl SplitPanel {
                 self.stage = Stage::Refused(Refusal::retry(reason));
                 Task::none()
             }
+            event @ (SplitEvent::DeviceListed(..) | SplitEvent::DeviceSigned(..)) => {
+                self.apply_device(event)
+            }
             SplitEvent::SignedExported(_, result) => {
                 self.notice = Some(match result {
                     Ok(Some(path)) => format!("Signed step 1 saved to {}.", path.display()),
@@ -1545,6 +1596,8 @@ impl SplitEvent {
             | Self::ReconReconciled(seq, ..)
             | Self::Step2ResendReviewed(seq, ..)
             | Self::Step2Resent(seq, ..)
+            | Self::DeviceListed(seq, _)
+            | Self::DeviceSigned(seq, _)
             | Self::DeadlinePassed(seq) => *seq,
         }
     }

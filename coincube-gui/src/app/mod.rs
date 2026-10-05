@@ -988,12 +988,16 @@ fn discover_split_panel(
     }
     let root = step1::journal_root(data_dir, &wallet.id());
     let (digest, directory) = step1::discover(&root).into_iter().next()?;
-    Some(Box::new(SplitPanel::resume(
+    let mut panel = Box::new(SplitPanel::resume(
         cube_settings.id.clone(),
         root,
         digest,
         directory,
-    )))
+    ));
+    // B4b-3b: the session-only device listing is rooted here; it writes
+    // nothing under it.
+    panel.set_device_datadir(data_dir.clone());
+    Some(panel)
 }
 
 /// The Split panel's ports for one Connect session (#568 B3b-2b-2): the
@@ -4752,6 +4756,16 @@ impl App {
         {
             subscriptions
                 .push(time::every(BITCOIND_SYNC_POLL_INTERVAL).map(|_| Message::PollBitcoindSync));
+        }
+
+        // #568 B4b-3b: the Split panel's session-only device listing, while
+        // it is open in a sign stage.
+        if let Some(panel) = &self.split_panel {
+            subscriptions.push(
+                panel
+                    .subscription()
+                    .map(|message| Message::View(view::Message::Split(message))),
+            );
         }
 
         // Current panel's subscription
@@ -9005,6 +9019,11 @@ mod tests {
         std::fs::write(directory.join("intent.json"), b"{}").unwrap();
         let panel = discover_split_panel(&datadir, &settings, &wallet).unwrap();
         assert_eq!(panel.journal_directory(), Some(&directory));
+        // B4b-3b: the device listing's datadir comes with the panel.
+        assert_eq!(
+            panel.device_datadir().map(|dir| dir.path().to_path_buf()),
+            Some(datadir.path().to_path_buf())
+        );
         assert_eq!(panel.stage(), &state::vault::split::Stage::NeedsSession);
         assert!(!panel.is_bound());
 

@@ -1533,7 +1533,9 @@ fn split_ui_paths_do_no_blocking_work() {
     }
     // Split's own discovery only: the Claim's `ForkHandoff::discover` in
     // `new_inner` is another panel's (not #625 F3).
-    const BLOCKING: [&str; 9] = [
+    // B4b-3b: the device listing (its policy, its `HardwareWallets`) is
+    // built in a blocking task too; hidapi is `split_hardware::bind`'s.
+    const BLOCKING: [&str; 12] = [
         "step1::discover(",
         "discover_split_panel(",
         "read_dir",
@@ -1543,10 +1545,14 @@ fn split_ui_paths_do_no_blocking_work() {
         "ProductionStep2::new(",
         "ProductionRecon::new(",
         "find_journal(",
+        "build_listing(",
+        "HardwareWallets::new(",
+        "HidApi",
     ];
     let app = read("app/mod.rs");
     let panel = read("app/state/vault/split/mod.rs");
     let panel2 = read("app/state/vault/split/panel2.rs");
+    let device = read("app/state/vault/split/device.rs");
     let ui = [
         ("new_inner", body(&app, "    fn new_inner(", "    ")),
         (
@@ -1561,6 +1567,22 @@ fn split_ui_paths_do_no_blocking_work() {
         (
             "apply_step2",
             body(&panel2, "    pub(super) fn apply_step2(", "    "),
+        ),
+        (
+            "update_device",
+            body(&device, "    pub(super) fn update_device(", "    "),
+        ),
+        (
+            "apply_device",
+            body(&device, "    pub(super) fn apply_device(", "    "),
+        ),
+        (
+            "subscription",
+            body(&device, "    pub fn subscription(", "    "),
+        ),
+        (
+            "set_device_datadir",
+            body(&device, "    pub fn set_device_datadir(", "    "),
         ),
     ];
     for (name, text) in ui {
@@ -1601,6 +1623,43 @@ fn split_ui_paths_do_no_blocking_work() {
         assert!(!text.contains("split_ports("), "{}", name);
         assert!(!text.contains("discover_split_panel("), "{}", name);
     }
+    // B4b-3b: the listing is built only in its task, and the device runs
+    // only in a task (the device flow's `run` is async; its Ledger enumeration
+    // is on the blocking pool).
+    let open = body(&device, "    pub(super) fn update_device(", "    ");
+    let build = open.find("build_listing(").unwrap();
+    assert!(open[..build]
+        .ends_with("tokio::task::spawn_blocking(move || {\n                            "));
+    // #653 F1: scoped to the signing arm, the run is the spawned task's own
+    // future (nothing between the spawn and the run), and nothing in the
+    // device module blocks on a future.
+    let sign = &open[open
+        .find("            DeviceMessage::Sign(id) => {")
+        .unwrap()..];
+    let sign = &sign[..sign.find("            DeviceMessage::Cancel").unwrap()];
+    assert_eq!(sign.matches(".run()").count(), 1);
+    let run = sign.find(".run()").unwrap();
+    let spawned = sign[..run]
+        .rfind("self.spawn(")
+        .expect("the signing run is spawned");
+    assert_eq!(
+        sign[spawned..run].split_whitespace().collect::<String>(),
+        "self.spawn(asyncmove{signing"
+    );
+    let production = &device[..device.find("\n#[cfg(all(test, unix))]\n").unwrap()];
+    assert!(!production.contains("block_on"));
+    // The App hands the datadir over with the discovered panel, and maps
+    // the panel's listing subscription back to the panel.
+    let discovery = body(&app, "fn discover_split_panel(", "");
+    assert!(discovery.contains("panel.set_device_datadir(data_dir.clone());"));
+    let subscription = body(
+        &app,
+        "    pub fn subscription(&self) -> Subscription<Message> {",
+        "    ",
+    );
+    assert!(subscription.contains(
+        ".subscription()\n                    .map(|message| Message::View(view::Message::Split(message)))"
+    ));
     // The recorded refusal's journal lookup runs in the recording task.
     let record = body(&panel, "    fn maybe_record(", "    ");
     let lookup = record.find("find_journal(").unwrap();

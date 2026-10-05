@@ -304,7 +304,9 @@ mod tests {
 
     /// D1: the device flow, the binder, the policy builders and the listing
     /// binding are named only under `split_hardware/` (the binding also in
-    /// `hw.rs`, which owns it). No panel, view or App reaches them yet.
+    /// `hw.rs`, which owns it) and in the Split panel's device module
+    /// (B4b-3b), which is itself reachable only from a resumed or started
+    /// panel. No other panel, view or the App reaches them.
     #[test]
     fn split_device_flow_has_no_gui_caller() {
         fn walk(dir: &Path, files: &mut Vec<(String, String)>) {
@@ -332,9 +334,17 @@ mod tests {
         assert!(files
             .iter()
             .any(|(file, _)| file == "src/split_hardware/flow.rs"));
+        // The Split panel's device module and its tests (B4b-3b).
+        const DEVICE: [&str; 2] = [
+            "src/app/state/vault/split/device.rs",
+            "src/app/state/vault/split/device/tests.rs",
+        ];
+        for file in DEVICE {
+            assert!(files.iter().any(|(f, _)| f == file), "{}", file);
+        }
         let mut unexpected = Vec::new();
         for (file, text) in &files {
-            if file.starts_with("src/split_hardware/") {
+            if file.starts_with("src/split_hardware/") || DEVICE.contains(&file.as_str()) {
                 continue;
             }
             for ident in [
