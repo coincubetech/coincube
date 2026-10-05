@@ -13,6 +13,9 @@ pub mod sandbox;
 #[cfg(test)]
 pub mod mock;
 
+#[cfg(test)]
+pub mod source_text;
+
 /// Returns the current time as a [`Duration`] since the UNIX epoch.
 pub fn now() -> Duration {
     now_fallible().expect("cannot fail")

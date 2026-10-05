@@ -10,19 +10,6 @@ use crate::services::{
     claim_workflow::{Reconfirmation, Step1Conflict},
 };
 
-/// The harness policy with the widest collection budget. Every review
-/// here is bounded by an evidence deadline (`evidence_deadline`): the
-/// budget, capped at 30 s, measured on the real monotonic clock. The
-/// harness's 2 s left a heavily loaded run (four test binaries of 16
-/// threads beside a cargo build) expiring reviews before their
-/// confirmation (`ExpiredEvidence`); 30 s outlasts any such run, and the
-/// expiry itself is tested with `expire_for_test`, not by waiting.
-fn wide_policy() -> CheckPolicy {
-    CheckPolicy {
-        collection_budget: claim_observation::MAX_COLLECTION_TIME,
-        ..policy()
-    }
-}
 /// Step 2 reviewed and submitted through the coordinator, which is then
 /// dropped: a journal with a recorded step-2 submission, and its txid.
 async fn submitted() -> (Harness, Txid) {
@@ -615,7 +602,12 @@ async fn split_step1_reconfirmation_review_is_one_use_expires_and_refuses_a_chan
         _server,
         ..
     } = submitted_over(true).await;
+    // Nothing sends or preflights on this journal again: release the
+    // transport's pooled mock server before the next `submitted_over` takes
+    // one (a test waiting for a server must hold none; see
+    // `BitcoinPreflight`).
     drop(coordinator);
+    drop(_server);
     let mut reconciler = reopen(&h, Box::new(view.clone()));
     // Revision 1: still in its recorded block.
     assert!(matches!(
@@ -1416,6 +1408,10 @@ async fn split_resend_completion_and_forget_are_refused_in_o1_to_o4() {
         .get("step2_resubmissions")
         .is_none());
     assert_eq!(sends.load(Ordering::SeqCst), 1);
+    // Done with this coordinator: release its transport's pooled mock server
+    // before the next `submitted_over` takes one (see `BitcoinPreflight`).
+    drop(coordinator);
+    drop(_server);
 
     // Completion and forget, on a restart's reconciler.
     let Submitted {
@@ -1516,35 +1512,21 @@ async fn split_forget_is_refused_while_a_provisional_step1_conflict_is_recorded(
     assert!(h.temp.journal()["split"]["descriptors"].is_object());
 }
 
-/// A fork-only record (#650) has no step 1: the step-1 reconfirmation
-/// entry points refuse it with `InvalidBinding` before any read (its
-/// services panic on any), and record nothing.
+/// A fork-only record (#650) has no step 1, so the step-1 reconfirmation
+/// entry points never reach it: since B4b-3a (U2) the step-2 reconciler
+/// that carries them refuses to open the record at all, with
+/// `InvalidBinding` and before any read (its services panic on any), and
+/// records nothing. (The entry points' own kind check stays, unreachable for
+/// a fork-only record.)
 #[tokio::test]
 async fn split_unified_record_refuses_reorg_entry_points_before_any_read() {
     let (sender, _) = watch::channel(7);
     let (temp, digest, _) = super::unified_journal::fork_only_journal(true);
     let journal = temp.journal();
-    let mut reconciler = super::unified_journal::reconciler(&temp, digest, &sender).unwrap();
     assert!(matches!(
-        reconciler.prepare_step1_reconfirmation(&context()).await,
+        super::unified_journal::reconciler(&temp, digest, &sender),
         Err(Error::InvalidBinding)
     ));
-    // A review from a two-step journal: refused for the record first.
-    let other = submitted_over(true).await;
-    other.view.step1_in(moved(), 6);
-    drop(other.coordinator);
-    let mut two_step = reopen(&other.h, Box::new(other.view.clone()));
-    let review = two_step
-        .prepare_step1_reconfirmation(&context())
-        .await
-        .unwrap();
-    assert!(matches!(
-        reconciler
-            .confirm_step1_reconfirmation(review, &context())
-            .await,
-        Err(Error::InvalidBinding)
-    ));
-    drop(reconciler);
     assert_eq!(temp.journal(), journal);
 }
 

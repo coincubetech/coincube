@@ -57,6 +57,11 @@
 //! binding captured at review. The daemon transport itself checks that the
 //! one output is its Vault's receive address at the recorded index.
 //!
+//! The unified fallback (#568 B4b-3a, `unified`) is the fork-only route:
+//! one `ALL|UNIFIED` BTCB2 sweep with no step 1, reviewed and sent through
+//! these same routes by [`UnifiedCoordinator`] and reconciled by
+//! [`UnifiedReconciler`]; [`SplitStep2Reconciler`] refuses its record (U2).
+//!
 //! Nothing here is reachable from the GUI yet (D1).
 use super::*;
 use crate::{
@@ -83,6 +88,11 @@ mod completion;
 pub use completion::{CompletionTarget, SplitCompletionEvidence, SplitCompletionReconciliation};
 mod reorg;
 pub use reorg::{Step1AfterStep2, Step1ReconfirmationReview, SweepReconcile};
+pub(super) mod unified;
+pub use unified::{
+    UnifiedCoordinator, UnifiedError, UnifiedReconcile, UnifiedReconciler, UnifiedReview,
+    UnifiedReviewSnapshot,
+};
 
 /// The wall-clock bound on a target reservation (#592 N2). The daemon call
 /// runs on its own task, so a reservation stuck behind the daemon's locks
@@ -568,6 +578,28 @@ pub(super) trait Step2Daemon: Send + Sync + 'static {
         binding: Self::Binding,
         gate: Arc<SubmissionGate>,
     ) -> Result<SubmissionOutcome, DaemonError>;
+    /// #568 B4b-3a: the unified sweep through the daemon's own backend, on
+    /// the Connect route. Refused unless a daemon serves it.
+    async fn submit_unified_connect(
+        &self,
+        _verified: Arc<coincube_core::foreign_split::VerifiedUnifiedSweep>,
+        _target: ChildNumber,
+        _binding: Self::Binding,
+        _gate: Arc<SubmissionGate>,
+    ) -> Result<SubmissionOutcome, DaemonError> {
+        Err(DaemonError::ClientNotSupported)
+    }
+    /// #568 B4b-3a: the unified sweep to the daemon's bound node (P4).
+    /// Refused unless a daemon serves it.
+    async fn submit_unified_node(
+        &self,
+        _verified: Arc<coincube_core::foreign_split::VerifiedUnifiedSweep>,
+        _target: ChildNumber,
+        _binding: Self::Binding,
+        _gate: Arc<SubmissionGate>,
+    ) -> Result<SubmissionOutcome, DaemonError> {
+        Err(DaemonError::ClientNotSupported)
+    }
 }
 #[async_trait]
 impl Step2Daemon for Arc<dyn Daemon + Send + Sync> {
@@ -599,6 +631,26 @@ impl Step2Daemon for Arc<dyn Daemon + Send + Sync> {
         gate: Arc<SubmissionGate>,
     ) -> Result<SubmissionOutcome, DaemonError> {
         self.submit_verified_split_step2_to_node(verified, target, binding, gate)
+            .await
+    }
+    async fn submit_unified_connect(
+        &self,
+        verified: Arc<coincube_core::foreign_split::VerifiedUnifiedSweep>,
+        target: ChildNumber,
+        binding: Self::Binding,
+        gate: Arc<SubmissionGate>,
+    ) -> Result<SubmissionOutcome, DaemonError> {
+        self.submit_verified_unified_sweep(verified, target, binding, gate)
+            .await
+    }
+    async fn submit_unified_node(
+        &self,
+        verified: Arc<coincube_core::foreign_split::VerifiedUnifiedSweep>,
+        target: ChildNumber,
+        binding: Self::Binding,
+        gate: Arc<SubmissionGate>,
+    ) -> Result<SubmissionOutcome, DaemonError> {
+        self.submit_verified_unified_sweep_to_node(verified, target, binding, gate)
             .await
     }
 }
@@ -1310,7 +1362,9 @@ pub struct SplitStep2Reconciler {
 }
 impl SplitStep2Reconciler {
     /// Reopen the Split journal of `source_digest` under `target_cube`.
-    /// Refused unless step 2's signed bytes and submission are recorded.
+    /// Refused unless step 2's signed bytes and submission are recorded, and
+    /// for a fork-only (`kind: Unified`) record, whatever it holds: that is
+    /// [`UnifiedReconciler`]'s (U2).
     pub fn resume(
         directory: &Path,
         target_cube: String,
@@ -1351,7 +1405,9 @@ impl SplitStep2Reconciler {
         let submission = controller
             .recorded_fork_submission()
             .ok_or(Error::InvalidBinding)?;
-        if controller.recorded_split()?.is_none()
+        if controller
+            .recorded_split()?
+            .is_none_or(|record| record.kind != claim_workflow::SplitKind::Split)
             || controller.plan().bitcoin_chain != ChainId::Bitcoin
             || controller
                 .recorded_split_step2()

@@ -1,55 +1,86 @@
-//! Split (#568 B4b-1b) fork-only (`kind: Unified`) journal under the step-2
-//! reconciler. The reconciler's reopen admits a fork-only record once its
-//! submission is recorded, as it does a two-step one: the record reuses the
-//! step-2 fields. Its reconcile, though, runs the step-1-centric observation
-//! path, which refuses the fork-only plan before any read; the fork-only
-//! observation path is B4b-3's. Both are pinned here so lifting either is a
-//! deliberate change.
+//! Split (#568 B4b-1b, B4b-3a) fork-only (`kind: Unified`) journals and the
+//! step-2 reconciler. The fork-only record reuses the step-2 fields, but its
+//! reconcile is the fork-only path's (`UnifiedReconciler`, U1/U2): the
+//! step-2 reconciler refuses to reopen it at all, whatever it holds, and so
+//! never runs its step-1-centric observation on it. Also the shared
+//! unified-sweep fixtures of the `unified_flow` tests.
 use super::*;
 use crate::services::{
-    claim_coordinator::fork::split::step2::SplitStep2Reconciler,
-    claim_observation::{Failure, FailureKind, Stage},
-    claim_workflow::UnifiedConstruction,
+    claim_coordinator::fork::split::step2::SplitStep2Reconciler, claim_observation::FailureKind,
 };
 use coincube_core::{
-    foreign_split::{create_split_step2, SplitStep2, SplitStep2Inputs},
+    bip39::Mnemonic,
+    foreign_split::{create_unified_sweep, finalize_unified_sweep, UnifiedInputs, UnifiedSweep},
     miniscript::bitcoin::{hashes::sha256, Script},
+    psbt_unified::UnifiedPsbt,
+    signer::SessionSigner,
 };
 
-/// The unified sweep of the harness wallet's coins into `target` (B4b-1a's
-/// shape: one output, no change), built with core's step-2 construction over
-/// the same coins, and its signed transaction. It is signed `ALL` here: the
-/// journal records bytes, and the `ALL|UNIFIED` request is core's finalizer's
-/// (B4b-1a).
-fn unified_sweep(wallet: &Wallet, target: &Script) -> (SplitStep2, Transaction) {
-    let coins = coins(wallet);
-    let claimed: Vec<OutPoint> = coins.iter().map(|c| c.outpoint).collect();
-    let construction = create_split_step2(
-        &SplitStep2Inputs {
+/// A P2PKH foreign wallet whose key comes from a mnemonic, so a session
+/// signer can sign `ALL|UNIFIED` for it; its scriptSigs change the txid.
+pub(super) struct UnifiedWallet {
+    pub(super) source: SplitSource,
+    mnemonic: Mnemonic,
+}
+pub(super) fn unified_wallet() -> UnifiedWallet {
+    let secp = Secp256k1::new();
+    let mnemonic = Mnemonic::from_entropy(&[4; 16]).unwrap();
+    let master = Xpriv::new_master(Network::Bitcoin, &mnemonic.to_seed("")).unwrap();
+    let path = "m/44'/0'/0'";
+    let child = master
+        .derive_priv(&secp, &DerivationPath::from_str(path).unwrap())
+        .unwrap();
+    let key = format!(
+        "[{}/{}]{}",
+        master.fingerprint(&secp),
+        path.trim_start_matches("m/"),
+        Xpub::from_priv(&secp, &child)
+    );
+    let branch = |b: u32| Descriptor::from_str(&format!("pkh({key}/{b}/*)")).unwrap();
+    UnifiedWallet {
+        source: SplitSource::new(branch(0), Some(branch(1))).unwrap(),
+        mnemonic,
+    }
+}
+/// The wallet's two splittable coins, freshly authenticated (pre-fork on
+/// both chains).
+pub(super) fn unified_coins(wallet: &UnifiedWallet) -> Vec<SplitCoin> {
+    vec![
+        coin(&wallet.source, SplitBranch::External, 0, 150_000),
+        coin(&wallet.source, SplitBranch::Internal, 1, 70_000),
+    ]
+}
+/// Core's unified sweep of those coins into `target` at BTCB2 tip `tip`.
+pub(super) fn unified_sweep(wallet: &UnifiedWallet, target: &Script, tip: u32) -> UnifiedSweep {
+    create_unified_sweep(
+        &UnifiedInputs {
             chain: ChainId::BitcoinBlake2b,
             source: &wallet.source,
-            coins: &coins,
+            coins: &unified_coins(wallet),
             fork_height: FORK,
-            claimed: &claimed,
             target,
         },
         2,
-        LockTime::from_height(100).unwrap(),
-        100,
+        LockTime::from_height(tip).unwrap(),
+        tip,
     )
-    .unwrap();
-    let secp = Secp256k1::new();
-    let mut psbt = construction.psbt().clone();
-    psbt.sign(&wallet.signer, &secp).unwrap();
-    let signed = finalize_split_step2(&construction, &coins, &wallet.source, &psbt, &secp)
+    .unwrap()
+}
+/// `psbt` signed `ALL|UNIFIED` by the wallet's seed.
+pub(super) fn sign_unified(wallet: &UnifiedWallet, psbt: &Psbt) -> UnifiedPsbt {
+    let signer =
+        SessionSigner::from_mnemonic(Network::Bitcoin, wallet.mnemonic.clone(), "").unwrap();
+    signer
+        .sign_unified(
+            &UnifiedPsbt::from_psbt(psbt.clone()).unwrap(),
+            ChainId::BitcoinBlake2b,
+            &Secp256k1::new(),
+        )
         .unwrap()
-        .transaction()
-        .clone();
-    (construction, signed)
 }
 
 /// Services nothing here may reach: every read panics.
-struct Unreachable;
+pub(super) struct Unreachable;
 #[async_trait]
 impl ObservationSource for Unreachable {
     fn now(&self) -> i64 {
@@ -92,35 +123,27 @@ impl SplitForkServices for Unreachable {
     }
 }
 
-/// A fork-only journal of the harness wallet, its source digest, and its
-/// signed sweep; the submission is recorded when `submitted`.
+/// A fork-only journal of the unified wallet into the Vault's receive
+/// address at index 5, its source digest, and its signed sweep, which core
+/// verified Protected; the submission is recorded when `submitted`.
 pub(super) fn fork_only_journal(submitted: bool) -> (Temp, sha256::Hash, Transaction) {
-    let wallet = wallet();
+    let wallet = unified_wallet();
     let target = address(&vault(), 5).script_pubkey();
-    let (construction, signed) = unified_sweep(&wallet, &target);
-    let temp = Temp::new();
-    let mut controller = Controller::create_unified_split(
-        &temp.0,
-        TARGET.into(),
-        UnifiedConstruction {
-            chain: ChainId::BitcoinBlake2b,
-            source: &wallet.source,
-            fork_height: FORK,
-            target_index: 5,
-            target_script: &target,
-            unsigned: &construction.psbt().unsigned_tx,
-        },
-        context(),
+    let sweep = unified_sweep(&wallet, &target, 100);
+    let verified = finalize_unified_sweep(
+        &sweep,
+        &sign_unified(&wallet, sweep.psbt()),
+        &Secp256k1::verification_only(),
     )
     .unwrap();
-    assert_ne!(
-        signed.compute_txid(),
-        construction.txid(),
-        "pkh: the txids differ"
-    );
+    let signed = verified.transaction().clone();
+    let temp = Temp::new();
+    let mut controller =
+        Controller::create_unified_split(&temp.0, TARGET.into(), &sweep, 5, context()).unwrap();
+    assert_ne!(signed.compute_txid(), sweep.txid(), "pkh: the txids differ");
     if submitted {
         controller
-            .record_unified_broadcast_intent(&context(), ChainId::BitcoinBlake2b, &signed)
+            .record_unified_broadcast_intent(&context(), &verified)
             .unwrap();
     }
     (temp, wallet.source.digest(), signed)
@@ -141,72 +164,42 @@ pub(super) fn reconciler(
     )
 }
 
-/// B4b-1b: the reconciler's reopen admits a fork-only journal whose
-/// submission is recorded, identifies that submission (the signed sweep's
-/// own txid and wtxid) and holds the journal; one without a submission is
-/// refused, as a two-step one is. No read is made.
+/// B4b-3a (U2, replacing #650's admission pins): the step-2 reconciler
+/// refuses a fork-only journal with `InvalidBinding`, with or without a
+/// recorded submission, before any read (its services panic on any), and
+/// releases it: the record, its submission and its signed sweep are kept
+/// and nothing is observed. The fork-only reconcile is `UnifiedReconciler`'s
+/// (`unified_flow`).
 #[test]
-fn split_step2_reconciler_reopens_a_fork_only_journal() {
+fn step2_reconciler_refuses_a_fork_only_journal() {
     let (sender, _) = watch::channel(7);
-    let (unsubmitted, digest, _) = fork_only_journal(false);
-    assert!(matches!(
-        reconciler(&unsubmitted, digest, &sender),
-        Err(Error::InvalidBinding)
-    ));
-    let (temp, digest, signed) = fork_only_journal(true);
-    let reconciler = reconciler(&temp, digest, &sender).unwrap();
-    assert_eq!(
-        reconciler.recorded_outcome(),
-        Some(Outcome::Uncertain {
-            txid: signed.compute_txid(),
-            wtxid: signed.compute_wtxid(),
-        })
-    );
-    assert!(matches!(
-        Controller::reopen(
+    for submitted in [false, true] {
+        let (temp, digest, signed) = fork_only_journal(submitted);
+        let journal = temp.journal();
+        assert!(
+            matches!(
+                reconciler(&temp, digest, &sender),
+                Err(Error::InvalidBinding)
+            ),
+            "submitted: {}",
+            submitted
+        );
+        assert_eq!(temp.journal(), journal);
+        let controller = Controller::reopen(
             &temp.0,
             &claim_workflow::split_identity(TARGET.into(), digest),
-            context()
-        ),
-        Err(claim_workflow::Error::Busy)
-    ));
-    drop(reconciler);
-    let controller = Controller::reopen(
-        &temp.0,
-        &claim_workflow::split_identity(TARGET.into(), digest),
-        context(),
-    )
-    .unwrap();
-    assert_eq!(controller.recorded_split_step2(), Some(&signed));
-}
-
-/// B4b-1b limitation, pinned on the reconciler: `reconcile_sweep` on a
-/// fork-only journal is refused by the step-2 observation path's plan check
-/// (`claim_observation::collect_sweep`, step-1-centric) before any read is
-/// made, and records nothing. B4b-3's fork-only observation path lifts this.
-#[tokio::test]
-async fn split_step2_reconcile_refuses_a_fork_only_journal_before_any_read() {
-    let (sender, _) = watch::channel(7);
-    let (temp, digest, signed) = fork_only_journal(true);
-    let mut reconciler = reconciler(&temp, digest, &sender).unwrap();
-    assert!(matches!(
-        reconciler.reconcile_sweep(&context()).await,
-        Err(Error::Observation(Failure {
-            stage: Stage::Plan,
-            kind: FailureKind::InvalidPlan,
-        }))
-    ));
-    drop(reconciler);
-    let controller = Controller::reopen(
-        &temp.0,
-        &claim_workflow::split_identity(TARGET.into(), digest),
-        context(),
-    )
-    .unwrap();
-    assert!(!controller.split_step2_observed());
-    assert_eq!(
-        controller.recorded_fork_submission().map(|s| s.txid()),
-        Some(signed.compute_txid())
-    );
-    assert_eq!(controller.recorded_split_step2(), Some(&signed));
+            context(),
+        )
+        .unwrap();
+        assert!(!controller.split_step2_observed());
+        if submitted {
+            assert_eq!(
+                controller.recorded_fork_submission().map(|s| s.txid()),
+                Some(signed.compute_txid())
+            );
+            assert_eq!(controller.recorded_split_step2(), Some(&signed));
+        } else {
+            assert_eq!(controller.recorded_fork_submission(), None);
+        }
+    }
 }

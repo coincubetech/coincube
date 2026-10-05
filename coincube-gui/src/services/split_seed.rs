@@ -590,6 +590,16 @@ mod tests {
             "src/services/foreign_wallet_source.rs",
         ];
         let transport = ["src/daemon/mod.rs", "src/daemon/embedded.rs"];
+        // B4b-3a: the dormant Split services take the unified sweep API (not
+        // the seed set): the fork-only journal's writers and their tests, and
+        // the fork-only route under `fork::split`, which its own D1 guard
+        // keeps from every GUI caller
+        // (`fork::split::tests::split_step2_gate_has_no_gui_caller`).
+        let services = |file: &str| {
+            file == "src/services/claim_workflow/split.rs"
+                || file == "src/services/claim_workflow/split/tests.rs"
+                || file.starts_with("src/services/claim_coordinator/fork/split/")
+        };
         let mut unexpected = Vec::new();
         for (file, text) in &files {
             if own.contains(&file.as_str()) {
@@ -622,7 +632,8 @@ mod tests {
                 "submit_verified_unified_sweep",
                 "for_unified_sweep",
             ] {
-                if text.contains(ident) {
+                let seed_set = ["SeedSet", "SeedPolicy", "split_seed"].contains(&ident);
+                if text.contains(ident) && (seed_set || !services(file)) {
                     unexpected.push(format!("{} names {}", file, ident));
                 }
             }

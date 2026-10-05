@@ -92,6 +92,21 @@ fn policy() -> CheckPolicy {
         collection_budget: Duration::from_secs(2),
     }
 }
+/// The harness policy with the widest collection budget. Every review and
+/// completion evidence is bounded by an evidence deadline
+/// (`evidence_deadline`): the budget, capped at 30 s, measured on the real
+/// monotonic clock from the start of its check. The harness's 2 s left a
+/// heavily loaded run (four test binaries of 16 threads beside a cargo
+/// build) expiring reviews and evidence before their use
+/// (`ExpiredEvidence`, "expired while saving"); 30 s outlasts any such run.
+/// Expiry itself is tested with `expire_for_test` or on a reconciler that
+/// keeps the 2 s budget, not by widening it.
+fn wide_policy() -> CheckPolicy {
+    CheckPolicy {
+        collection_budget: claim_observation::MAX_COLLECTION_TIME,
+        ..policy()
+    }
+}
 fn context() -> Context {
     Context {
         generation: 7,
@@ -274,7 +289,9 @@ impl View {
 #[derive(Clone)]
 struct Chains {
     view: Arc<Mutex<View>>,
-    preflight: Arc<PreflightClient>,
+    /// Connect's Bitcoin preflight of the signed step 1, started on first
+    /// use only (see [`BitcoinPreflight`]).
+    preflight: BitcoinPreflight,
     unspent_reads: Arc<AtomicUsize>,
     address_reads: Arc<AtomicUsize>,
 }
@@ -433,6 +450,8 @@ impl Services for Chains {
         policy: FreshnessPolicy,
     ) -> Result<Evidence, claim_preflight::Error> {
         self.preflight
+            .client()
+            .await
             .observe(ChainId::Bitcoin, tx, tip, policy)
             .await
     }
@@ -445,10 +464,60 @@ impl Services for Chains {
     }
 }
 
+/// A mocked Connect Bitcoin preflight that accepts the signed step 1. Its
+/// httpmock server is taken from the pool on the first preflight only, and
+/// kept by every clone of the view until the last is dropped.
+///
+/// httpmock 0.7 serves every test of the binary from one pool of 25 servers
+/// (`HTTPMOCK_MAX_SERVERS`), and a test waiting for a server holds those it
+/// has. A harness that held a server for its whole life, while the step-2
+/// tests took their Connect or node server next, deadlocked a loaded run at
+/// the default thread count (every test thread parked in `start_server`).
+/// Only the step-1 reviews preflight on Bitcoin, and none of their tests
+/// holds another server then.
+#[derive(Clone)]
+struct BitcoinPreflight {
+    signed: Transaction,
+    generation: watch::Receiver<u64>,
+    started: Arc<tokio::sync::OnceCell<(MockServer, PreflightClient)>>,
+}
+impl BitcoinPreflight {
+    async fn client(&self) -> &PreflightClient {
+        let (_, client) = self
+            .started
+            .get_or_init(|| async {
+                // httpmock's async mock builder is not `Send`, and this runs
+                // inside the `Send` preflight future: start and mock on a
+                // blocking thread with the synchronous API instead.
+                let (signed, stamp) = (self.signed.clone(), now());
+                let server = tokio::task::spawn_blocking(move || {
+                    let server = MockServer::start();
+                    server.mock(|when, then| {
+                        when.method(POST).path("/api/v1/esplora/bitcoin/mainnet/tx/preflight");
+                        then.status(200).header("cache-control", "no-store").json_body(json!({"success":true,"data":{"network":"mainnet","state":"available","result":{"txid":signed.compute_txid(),"wtxid":signed.compute_wtxid(),"tip_hash":hash(0x40),"observed_at":stamp,"allowed":true,"reject_reason":serde_json::Value::Null}}}));
+                    });
+                    server
+                })
+                .await
+                .unwrap();
+                let client = PreflightClient::new(
+                    &server.base_url(),
+                    CollectionContext {
+                        expected_generation: 7,
+                        generation: self.generation.clone(),
+                    },
+                )
+                .unwrap();
+                (server, client)
+            })
+            .await;
+        client
+    }
+}
+
 /// A Split journal whose step 1 was submitted, and a view of both chains.
 struct Harness {
     temp: Temp,
-    _server: MockServer,
     sender: watch::Sender<u64>,
     wallet: Wallet,
     step1: SplitStep1,
@@ -471,34 +540,22 @@ impl Harness {
             intent["signed_txid"] = signed.compute_txid().to_string().into();
             intent["bitcoin_attempts"] = json!([{ "wtxid": signed.compute_wtxid().to_string() }]);
         });
-        let server = MockServer::start_async().await;
-        let stamp = now();
-        server.mock_async(|when, then| {
-            when.method(POST).path("/api/v1/esplora/bitcoin/mainnet/tx/preflight");
-            then.status(200).header("cache-control", "no-store").json_body(json!({"success":true,"data":{"network":"mainnet","state":"available","result":{"txid":signed.compute_txid(),"wtxid":signed.compute_wtxid(),"tip_hash":hash(0x40),"observed_at":stamp,"allowed":true,"reject_reason":serde_json::Value::Null}}}));
-        }).await;
         let sender = watch::channel(7).0;
         let chains = Chains {
             view: Arc::new(Mutex::new(View::confirmed(
                 depth,
                 step1.claimed_prevouts().into_iter().collect(),
             ))),
-            preflight: Arc::new(
-                PreflightClient::new(
-                    &server.base_url(),
-                    CollectionContext {
-                        expected_generation: 7,
-                        generation: sender.subscribe(),
-                    },
-                )
-                .unwrap(),
-            ),
+            preflight: BitcoinPreflight {
+                signed: signed.clone(),
+                generation: sender.subscribe(),
+                started: Arc::new(tokio::sync::OnceCell::new()),
+            },
             unspent_reads: Arc::new(AtomicUsize::new(0)),
             address_reads: Arc::new(AtomicUsize::new(0)),
         };
         Self {
             temp,
-            _server: server,
             sender,
             wallet,
             step1,
@@ -563,7 +620,8 @@ fn not_ready(result: Result<ForeignStep2Authorization, SplitCheckError>) -> Asse
 async fn split_step2_needs_six_confirmations_of_the_tracked_txid() {
     assert_eq!(MIN_CONFIRMATIONS, 6);
     let h = Harness::new(5).await;
-    let mut preparation = h.prepare().unwrap();
+    // The token's liveness is asserted below: a deadline that outlasts load.
+    let mut preparation = h.prepare_with(wide_policy()).unwrap();
     assert_eq!(preparation.tracked_txid(), h.signed.compute_txid());
     assert_eq!(
         not_ready(preparation.check_signing(&context()).await),
@@ -798,7 +856,9 @@ async fn split_step2_refuses_rdts_margin_and_step1_on_the_fork() {
 #[tokio::test(flavor = "multi_thread")]
 async fn split_step2_token_expires_is_one_use_and_revoked() {
     let h = Harness::new(6).await;
-    let mut preparation = h.prepare().unwrap();
+    // Bindings, redemption and supersession under a deadline that outlasts
+    // load (`wide_policy`); the expiry below keeps the 2 s budget.
+    let mut preparation = h.prepare_with(wide_policy()).unwrap();
     let prevouts = h.prevouts();
     let tracked = h.signed.compute_txid();
 
@@ -852,7 +912,10 @@ async fn split_step2_token_expires_is_one_use_and_revoked() {
         Err(RedeemError::Stale)
     );
 
-    // Expiry: the deadline is the collection budget (2 s here) at most.
+    // Expiry: the deadline is the collection budget (the harness's 2 s
+    // here) at most, on a preparation of its own (one holds the journal).
+    drop(preparation);
+    let mut preparation = h.prepare().unwrap();
     let token = preparation.check_signing(&context()).await.unwrap();
     assert!(token.is_live());
     let deadline = token.not_after;
@@ -1047,7 +1110,9 @@ pub(super) fn production_text<'a>(file: &str, text: &'a str) -> &'a str {
 /// the completion evidence and `split_from` writer (B5a) are named only in
 /// `fork::split` itself; nothing else in the crate reaches them (B3b-2 adds
 /// the panel, reachable only by resuming a journal; B5b adds its completion
-/// stage).
+/// stage). B4b-3a adds the unified fallback's coordinator and reconciler,
+/// and the fork-only observation path they run, which only its own module
+/// (`claim_observation`) defines.
 #[test]
 fn split_step2_gate_has_no_gui_caller() {
     fn walk(dir: &std::path::Path, files: &mut Vec<(String, String)>) {
@@ -1117,6 +1182,19 @@ fn split_step2_gate_has_no_gui_caller() {
             "Step1ReconfirmationReview",
             "prepare_step1_reconfirmation",
             "confirm_step1_reconfirmation",
+            // B4b-3a: the unified fallback (fork-only route).
+            "UnifiedCoordinator",
+            "UnifiedError",
+            "UnifiedReconciler",
+            "UnifiedReconcile",
+            "UnifiedReview",
+            "UnifiedTransport",
+            "submit_unified_connect",
+            "submit_unified_node",
+            "collect_fork_sweep",
+            "ForkSweepObservation",
+            "ForkAnchorView",
+            "fork_anchor",
         ] {
             // The Daemon trait declares the step-2 transport and the
             // embedded daemon forwards it; neither is a caller.
@@ -1170,11 +1248,27 @@ fn split_step2_gate_has_no_gui_caller() {
             // (S4b) is named only in the panel's step-2 layer, above.
             let warning = file.starts_with("src/app/state/vault/split/")
                 && ["Step1AfterStep2", "SweepReconcile"].contains(&ident);
+            // The fork-only observation path is defined in its own module.
+            let observation = file == "src/services/claim_observation/mod.rs"
+                && [
+                    "collect_fork_sweep",
+                    "ForkSweepObservation",
+                    "ForkAnchorView",
+                    "fork_anchor",
+                ]
+                .contains(&ident);
             let claim = ident == "check_completion"
                 && (file == "src/services/claim_coordinator/fork.rs"
                     || file.starts_with("src/services/claim_coordinator/fork/tests")
                     || file.starts_with("src/app/state/vault/claim/"));
-            if text.contains(ident) && !transport && !panel && !warning && !claim {
+            // Core's `ForeignUnifiedError` (the seed signer's) is not the
+            // coordinator's `UnifiedError`.
+            let named = if ident == "UnifiedError" {
+                text.replace("ForeignUnifiedError", "").contains(ident)
+            } else {
+                text.contains(ident)
+            };
+            if named && !transport && !panel && !warning && !claim && !observation {
                 unexpected.push((file.clone(), ident));
             }
         }
