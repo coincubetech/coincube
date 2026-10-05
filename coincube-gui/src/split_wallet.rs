@@ -1371,6 +1371,13 @@ mod tests {
             ),
             (format!("tr({first}/0/*)"), false),
             (format!("tr([d34db33f/86h/0h/0h]{first}/0/*)"), true),
+            // #653 F2: a fixed (non-ranged) xpub keeps no in-app route even
+            // with its origin (P7).
+            (format!("wpkh({a}{first}/0/5)"), false),
+            (
+                format!("wsh(multi(2,{m}{first}/0/5,{n}{second}/0/*))"),
+                false,
+            ),
         ] {
             let parsed =
                 ScanDescriptor::parse(Branch::External, &descriptor).unwrap_or_else(|_| {

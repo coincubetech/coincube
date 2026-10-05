@@ -1630,8 +1630,24 @@ fn split_ui_paths_do_no_blocking_work() {
     let build = open.find("build_listing(").unwrap();
     assert!(open[..build]
         .ends_with("tokio::task::spawn_blocking(move || {\n                            "));
-    let run = open.find(".run()").unwrap();
-    assert!(open[..run].contains("self.spawn(\n                    async move {"));
+    // #653 F1: scoped to the signing arm, the run is the spawned task's own
+    // future (nothing between the spawn and the run), and nothing in the
+    // device module blocks on a future.
+    let sign = &open[open
+        .find("            DeviceMessage::Sign(id) => {")
+        .unwrap()..];
+    let sign = &sign[..sign.find("            DeviceMessage::Cancel").unwrap()];
+    assert_eq!(sign.matches(".run()").count(), 1);
+    let run = sign.find(".run()").unwrap();
+    let spawned = sign[..run]
+        .rfind("self.spawn(")
+        .expect("the signing run is spawned");
+    assert_eq!(
+        sign[spawned..run].split_whitespace().collect::<String>(),
+        "self.spawn(asyncmove{signing"
+    );
+    let production = &device[..device.find("\n#[cfg(all(test, unix))]\n").unwrap()];
+    assert!(!production.contains("block_on"));
     // The App hands the datadir over with the discovered panel, and maps
     // the panel's listing subscription back to the panel.
     let discovery = body(&app, "fn discover_split_panel(", "");

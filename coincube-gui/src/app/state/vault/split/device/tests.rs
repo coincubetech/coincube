@@ -577,6 +577,55 @@ async fn stale_device_result_is_dropped() {
     std::fs::remove_dir(&root).unwrap();
 }
 
+/// #653 F3: Cancel is refused while a device signs. The listing stays, and
+/// the device's result still lands in the import.
+#[tokio::test(flavor = "multi_thread")]
+async fn cancel_is_refused_while_a_device_signs() {
+    let root = temp_root();
+    let (devices, opener) = signers(Shape::Wpkh);
+    let mut panel = step1_panel(Shape::Wpkh, &root, opener);
+    open(&mut panel, &devices).await;
+    let task = panel.update(SplitMessage::Device(DeviceMessage::Sign(
+        "coldcard-1".into(),
+    )));
+    assert_eq!(panel.stage, Stage::Working(Work::SigningOnDevice));
+    let cancelled = panel.update(SplitMessage::Device(DeviceMessage::Cancel));
+    assert!(events(cancelled).await.is_empty());
+    assert!(panel.device().is_open());
+    assert_eq!(panel.device().step(), Some(DeviceStep::Step1));
+    assert_eq!(panel.stage, Stage::Working(Work::SigningOnDevice));
+    drive(&mut panel, task).await;
+    assert_eq!(panel.files(), 1);
+    assert!(panel.signed().is_some(), "{:?}", panel.notice());
+    // Once nothing works, Cancel closes the listing.
+    let mut panel = step1_panel(Shape::Wpkh, &root, signers(Shape::Wpkh).1);
+    open(&mut panel, &devices).await;
+    let _ = panel.update(SplitMessage::Device(DeviceMessage::Cancel));
+    assert!(!panel.device().is_open());
+    assert_eq!(panel.stage, Stage::Sign);
+    assert_empty(&root);
+    std::fs::remove_dir(&root).unwrap();
+}
+
+/// #653 F3: a device that fails (here a Ledger the opener can no longer
+/// reach) shows why, back in the sign stage, with nothing imported.
+#[tokio::test(flavor = "multi_thread")]
+async fn device_refusal_shows_its_reason() {
+    let root = temp_root();
+    let ledger = fake(DeviceKind::Ledger, 1);
+    let mut panel = step1_panel(Shape::Wpkh, &root, FakeOpener::new(Vec::new()));
+    open(&mut panel, &[("ledger-1", ledger)]).await;
+    sign(&mut panel, "ledger-1").await;
+    assert_eq!(panel.stage, Stage::Sign);
+    assert_eq!(panel.files(), 0);
+    assert!(panel.signed().is_none());
+    let notice = panel.notice().expect("the device's refusal is shown");
+    assert!(notice.starts_with("Device error"), "{}", notice);
+    assert!(panel.device().is_open(), "another device may still sign");
+    assert_empty(&root);
+    std::fs::remove_dir(&root).unwrap();
+}
+
 /// The step-1 sign stage's view, as rendered.
 async fn rendered_labels(panel: &SplitPanel) -> Vec<String> {
     use iced::advanced::{
