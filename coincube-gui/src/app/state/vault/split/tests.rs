@@ -271,6 +271,8 @@ struct FakeConnect {
     chains: Chains,
     calls: Arc<Calls>,
     submit: Mutex<SubmitPlan>,
+    /// A fresh `open` refuses, before or after writing the journal.
+    refuse_open: Mutex<Option<bool>>,
 }
 
 use crate::app::state::vault::claim::ForkWindow;
@@ -301,6 +303,7 @@ impl FakeConnect {
             chains: Chains::of(coins),
             calls: Arc::default(),
             submit: Mutex::new(SubmitPlan::Accept),
+            refuse_open: Mutex::new(None),
         })
     }
 }
@@ -342,15 +345,23 @@ impl SplitConnect for FakeConnect {
             );
             Controller::reopen(&request.directory, &identity, context.clone())?
         } else {
+            let refuse = *self.refuse_open.lock().unwrap();
+            if refuse == Some(false) {
+                return Err(claim_coordinator::Error::InvalidBinding);
+            }
             crate::services::claim_workflow::prepare_directory(&request.directory)?;
-            Controller::create_split(
+            let controller = Controller::create_split(
                 &request.directory,
                 request.target_cube.clone(),
                 &request.construction,
                 &request.verified,
                 request.fork_height,
                 context.clone(),
-            )?
+            )?;
+            if refuse == Some(true) {
+                return Err(claim_coordinator::Error::InvalidBinding);
+            }
+            controller
         };
         controller.revalidate_split_construction(
             &context,
@@ -581,6 +592,53 @@ async fn recorded(scan: &Scan, connect: &Arc<FakeConnect>, temp: &Temp) -> Split
     assert_eq!(panel.phase(), Some(Phase::Intent));
     assert!(panel.is_bound());
     panel
+}
+
+/// #625 F3b: a recording the coordinator refused after writing the journal
+/// continues from that journal, never from a second record; the task finds
+/// it, off the UI thread, and the event carries it. With nothing written
+/// (and no journal root on disk) the event carries none.
+#[tokio::test(flavor = "multi_thread")]
+async fn recorded_refusal_carries_the_discovered_journal() {
+    for written in [true, false] {
+        let scan = Scan::new(Shape::Wpkh);
+        let connect = FakeConnect::new(&scan.coins);
+        *connect.refuse_open.lock().unwrap() = Some(written);
+        let temp = Temp::new();
+        let root = temp.root().join("absent-split-root");
+        let mut panel = SplitPanel::start(TARGET.into(), root.clone(), scan.intent());
+        panel.set_connect(Some(connect.clone() as Arc<dyn SplitConnect>));
+        let task = panel.begin();
+        drive(&mut panel, task).await;
+        assert_eq!(panel.stage(), &Stage::Sign);
+        assert!(!root.exists());
+        let file = sign_to_file(&panel, &scan.wallet.signers, &temp.0, "signed.txt");
+        let task = panel.import_from(vec![file]);
+        let mut recorded = None;
+        for event in events(task).await {
+            match event {
+                SplitEvent::Imported(..) => {
+                    for event in events(panel.apply(event)).await {
+                        recorded = Some(event);
+                    }
+                }
+                other => panic!("{:?}", other),
+            }
+        }
+        let digest = panel.construction().unwrap().source().digest();
+        let expected = step1::journal_directory(&root, digest);
+        let recorded = recorded.expect("a recording result");
+        match &recorded {
+            SplitEvent::Recorded(_, Err((_, found))) => {
+                assert_eq!(found, &written.then(|| (digest, expected.clone())))
+            }
+            other => panic!("{:?}", other),
+        }
+        assert_eq!(panel.journal_directory(), None);
+        drop(panel.apply(recorded));
+        assert!(matches!(panel.stage(), Stage::Refused(refusal) if refusal.retry));
+        assert_eq!(panel.journal_directory(), written.then_some(&expected));
+    }
 }
 
 /// build → export → import → finalize → record → review → submit, for a
@@ -1418,6 +1476,24 @@ fn split_panel_has_no_gui_entry_point() {
     assert!(discovery.contains("step1::discover(&root)"));
     assert!(discovery.contains("SplitPanel::resume("));
     assert!(!app.contains("SplitPanel::start"));
+    // #625 F3a: that discovery is called from production only in the App's
+    // discovery task, off the UI thread; its result is installed by
+    // `Message::SplitDiscovered`.
+    let production = &app[..app.find("\n#[cfg(test)]\n").unwrap()];
+    let calls: Vec<_> = production
+        .match_indices("discover_split_panel(")
+        .filter(|(at, _)| !production[..*at].ends_with("fn "))
+        .collect();
+    assert_eq!(calls.len(), 1, "{:?}", calls);
+    let task = &production[production.find("fn split_discovery_task(").unwrap()..];
+    let task = &task[..task.find("\n    }\n").unwrap()];
+    let blocking = task.find("spawn_blocking(move ||").unwrap();
+    assert!(task[blocking..].contains("discover_split_panel(&datadir, &settings, &wallet)"));
+    assert_eq!(
+        production.matches("self.split_panel = Some(").count(),
+        1,
+        "the panel is installed only from the discovery result"
+    );
     // The review overlay's only action is its close.
     let overlay = &app[app.find("fn split_review_overlay<").unwrap()..];
     let overlay = &overlay[..overlay.find("\n}\n").unwrap()];
@@ -1433,6 +1509,102 @@ fn split_panel_has_no_gui_entry_point() {
     let intents = &state[state.find("pub enum SplitMessage {").unwrap()..];
     let intents = &intents[..intents.find("\n}\n").unwrap()];
     assert!(!intents.to_lowercase().contains("start"));
+}
+
+/// #625 F3: the App's construction, its Connect refresh and the panel's
+/// result handling do no blocking work on the UI thread. Split journal
+/// discovery (`step1::discover`: a directory read and `symlink_metadata`
+/// per entry) and the
+/// port builds (`Production*::new`, `reqwest` clients) appear in them only
+/// through a `spawn_blocking` task.
+#[test]
+fn split_ui_paths_do_no_blocking_work() {
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let read = |path: &str| std::fs::read_to_string(src.join(path)).unwrap();
+    // The body of `signature` in `text`, up to its closing line at `indent`.
+    fn body<'a>(text: &'a str, signature: &str, indent: &str) -> &'a str {
+        let start = text
+            .find(signature)
+            .unwrap_or_else(|| panic!("{} not found", signature));
+        let end = text[start..].find(&format!("\n{}}}\n", indent)).unwrap();
+        // From after the signature line: the body only.
+        let body = &text[start..start + end];
+        &body[body.find('\n').unwrap()..]
+    }
+    // Split's own discovery only: the Claim's `ForkHandoff::discover` in
+    // `new_inner` is another panel's (not #625 F3).
+    const BLOCKING: [&str; 9] = [
+        "step1::discover(",
+        "discover_split_panel(",
+        "read_dir",
+        "symlink_metadata",
+        "std::fs::",
+        "ProductionConnect::new(",
+        "ProductionStep2::new(",
+        "ProductionRecon::new(",
+        "find_journal(",
+    ];
+    let app = read("app/mod.rs");
+    let panel = read("app/state/vault/split/mod.rs");
+    let panel2 = read("app/state/vault/split/panel2.rs");
+    let ui = [
+        ("new_inner", body(&app, "    fn new_inner(", "    ")),
+        (
+            "refresh_split_session",
+            body(&app, "    fn refresh_split_session(", "    "),
+        ),
+        (
+            "install_split_ports",
+            body(&app, "    fn install_split_ports(", "    "),
+        ),
+        ("apply", body(&panel, "    pub fn apply(", "    ")),
+        (
+            "apply_step2",
+            body(&panel2, "    pub(super) fn apply_step2(", "    "),
+        ),
+    ];
+    for (name, text) in ui {
+        for token in BLOCKING {
+            // Every occurrence must sit inside a `spawn_blocking(...)`
+            // argument: after one, with its parentheses still open.
+            for (at, _) in text.match_indices(token) {
+                let inside = text[..at].rfind("spawn_blocking(").is_some_and(|open| {
+                    let start = open + "spawn_blocking(".len();
+                    // Closed once its depth reaches zero, for good.
+                    let mut depth = 1i32;
+                    text[start..at].chars().all(|c| {
+                        match c {
+                            '(' => depth += 1,
+                            ')' => depth -= 1,
+                            _ => {}
+                        }
+                        depth > 0
+                    })
+                });
+                assert!(inside, "{} calls {} on the UI thread", name, token);
+            }
+        }
+    }
+    // The UI paths call the blocking helpers only through a task.
+    let refresh = body(&app, "    fn refresh_split_session(", "    ");
+    let blocking = refresh.find("spawn_blocking(move ||").unwrap();
+    assert!(refresh[blocking..].contains("split_ports(Some(session), generation, daemon)"));
+    assert!(!refresh[..blocking].contains("split_ports("));
+    for (name, text) in [
+        ("new_inner", body(&app, "    fn new_inner(", "    ")),
+        ("apply", body(&panel, "    pub fn apply(", "    ")),
+        (
+            "install_split_ports",
+            body(&app, "    fn install_split_ports(", "    "),
+        ),
+    ] {
+        assert!(!text.contains("split_ports("), "{}", name);
+        assert!(!text.contains("discover_split_panel("), "{}", name);
+    }
+    // The recorded refusal's journal lookup runs in the recording task.
+    let record = body(&panel, "    fn maybe_record(", "    ");
+    let lookup = record.find("find_journal(").unwrap();
+    assert!(record[..lookup].ends_with("tokio::task::spawn_blocking(move || "));
 }
 
 /// The production Connect side: address freshness is a fresh, anonymous

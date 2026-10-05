@@ -108,6 +108,32 @@ pub const RECONCILE_UNAVAILABLE: &str = "Step 2 of this split was already sent o
 /// transport (`Outcome::Uncertain`), so the copy doesn't say step 2 was
 /// sent (#637 Copilot review 5401909718).
 pub const STEP1_REORGED_AFTER_STEP2: &str = "Bitcoin reorganized after a submission of step 2 was recorded; it was sent or may have been sent. Step 1 is no longer in the Bitcoin block it was confirmed in, so Bitcoin replay protection for step 2 is no longer established. This version has no recovery for this. Nothing was rebuilt, and step 2 is not sent automatically. Check status again later.";
+/// Why the panel has no step-2 port under a session (S3-D4): the App says,
+/// from the port build, and the copy names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Step2Unavailable {
+    /// No Vault daemon to send step 2 through: none loaded, a backend
+    /// switch in flight, or one that failed or panicked.
+    NoDaemon,
+    /// The daemon's route can't carry step 2 (`Unsupported`): neither
+    /// Connect's Bitcoin Blake2b Esplora nor a bound Bitcoin Blake2b node.
+    UnsupportedRoute,
+    /// The port was refused otherwise (the session or its generation).
+    Refused,
+}
+pub const STEP2_NEEDS_VAULT: &str = "Step 1 has the confirmations step 2 needs. Step 2 needs this Vault's wallet engine running; the split stays recorded on this device.";
+pub const STEP2_UNSUPPORTED_ROUTE: &str = "Step 1 has the confirmations step 2 needs. Step 2 can be sent only through Connect's Bitcoin Blake2b server or this Vault's own Bitcoin Blake2b node, and this Vault's wallet engine uses neither. Switch its backend to one of them to continue; the split stays recorded on this device.";
+pub const STEP2_REFUSED: &str = "Step 1 has the confirmations step 2 needs. Step 2 can't be opened under this session; close and reopen the Cube to try again. The split stays recorded on this device.";
+
+/// The copy for a missing step-2 port.
+pub fn unavailable_copy(reason: Step2Unavailable) -> &'static str {
+    match reason {
+        Step2Unavailable::NoDaemon => STEP2_NEEDS_VAULT,
+        Step2Unavailable::UnsupportedRoute => STEP2_UNSUPPORTED_ROUTE,
+        Step2Unavailable::Refused => STEP2_REFUSED,
+    }
+}
+
 /// A restart found a resend the journal allows, but no step-2 port to send
 /// it through (P3-3): only the reconciler was opened.
 pub const RESEND_NEEDS_VAULT: &str = "Sending step 2 again needs this Vault's wallet engine running on a route step 2 can be sent through. Its status can still be checked.";
@@ -351,6 +377,11 @@ impl CannotReplay {
     pub fn tracked_txid(&self) -> Txid {
         self.tracked
     }
+    /// When the label lapses at the latest (S3 item 5): the panel redraws
+    /// then, without waiting for input.
+    pub fn not_after(&self) -> Instant {
+        self.live.not_after()
+    }
 }
 
 /// The label a token's check supports. The token itself never leaves the
@@ -443,6 +474,9 @@ pub struct Step2ResendView {
     pub max_attempts: usize,
     /// When the review's evidence lapses, for display.
     pub expires_at: chrono::DateTime<chrono::Local>,
+    /// The same deadline on the monotonic clock: the panel drops the review
+    /// then, without waiting for input (S3 item 5).
+    not_after: Instant,
     live: ResendLiveness,
 }
 impl std::fmt::Debug for Step2ResendView {
@@ -459,6 +493,10 @@ impl Step2ResendView {
     /// drops the review; a confirmation would refuse anyway.
     pub fn is_live(&self) -> bool {
         (self.live)()
+    }
+    /// When the review lapses at the latest.
+    pub fn not_after(&self) -> Instant {
+        self.not_after
     }
 }
 
@@ -1450,6 +1488,7 @@ impl Step2Coord for CoordinatorDriver {
             max_attempts: claim_workflow::MAX_SPLIT_STEP2_RESUBMISSIONS,
             expires_at: chrono::Local::now()
                 + chrono::Duration::from_std(left).unwrap_or_else(|_| chrono::Duration::zero()),
+            not_after,
             live: resend_liveness(
                 move || revoker.is_revoked(),
                 self.generation.clone(),

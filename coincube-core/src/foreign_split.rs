@@ -107,7 +107,8 @@ pub enum Error {
     Locktime,
     /// A recorded transaction is not an owned step-1 construction.
     Recorded(&'static str),
-    /// Step 2 runs on Bitcoin Blake2b mainnet or testnet4 only.
+    /// Step 2, or a unified sweep (#647), runs on Bitcoin Blake2b mainnet or
+    /// testnet4 only.
     NotBitcoinBlake2b(ChainId),
     /// Step 2's coins are not exactly step 1's claimed prevouts.
     ClaimedMismatch,
@@ -150,7 +151,7 @@ impl fmt::Display for Error {
             Self::NotBitcoinBlake2b(chain) => {
                 write!(
                     f,
-                    "Split step 2 runs on Bitcoin Blake2b only, not {chain:?}"
+                    "This sweep is built for Bitcoin Blake2b only, not {chain:?}"
                 )
             }
             Self::ClaimedMismatch => {

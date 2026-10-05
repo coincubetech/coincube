@@ -53,6 +53,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
+    time::Instant,
 };
 
 use iced::Task;
@@ -224,6 +225,10 @@ pub type FinishResult = Result<Coord, (step2::Step2Refusal, Option<Prep>)>;
 /// A step-2 reconcile's result.
 pub type Seen = Result<(Status, TransactionObservation), step2::Step2Refusal>;
 
+/// A refused recording: why, and the journal (source digest, directory)
+/// already on disk for this split, if any.
+pub type Recording = (String, Option<(sha256::Hash, PathBuf)>);
+
 /// Why a restart did not resume, with what it still has.
 #[derive(Debug)]
 pub struct Unresumed {
@@ -247,7 +252,10 @@ pub enum SplitEvent {
     Built(u64, Result<Box<SplitStep1>, String>),
     Exported(u64, Result<Option<PathBuf>, String>),
     Imported(u64, Result<(Vec<Psbt>, Imported), String>),
-    Recorded(u64, Result<Driver, String>),
+    /// A refusal carries the journal found for this split, if the record
+    /// was written before the coordinator refused (#625 F3b: looked for in
+    /// the task, off the UI thread).
+    Recorded(u64, Result<Driver, Recording>),
     Resumed(u64, ResumeResult),
     Reviewed(u64, Driver, Result<ReviewView, String>),
     Submitted(u64, Driver, Result<Outcome, String>),
@@ -297,6 +305,9 @@ pub enum SplitEvent {
         Result<step2::Step2ResendView, step2::Step2Refusal>,
     ),
     Step2Resent(u64, Coord, Result<Outcome, step2::Step2Refusal>),
+    /// S3 item 5: the deadline armed under this epoch (not a request
+    /// sequence number) passed. See [`SplitPanel::arm_deadline`].
+    DeadlinePassed(u64),
 }
 
 /// What a reorg check concluded.
@@ -398,6 +409,8 @@ pub struct SplitPanel {
     step2_port: Option<Arc<dyn step2::Step2Port>>,
     /// The session's reconcile-only port, whatever the daemon (#637 R1).
     recon_port: Option<Arc<dyn step2::ReconPort>>,
+    /// Why there is no step-2 port, as the App's port build said (S3-D4).
+    step2_missing: Option<step2::Step2Unavailable>,
     prep: Option<Box<dyn step2::Step2Prep>>,
     coord: Option<Box<dyn step2::Step2Coord>>,
     recon: Option<Box<dyn step2::Step2Recon>>,
@@ -422,6 +435,12 @@ pub struct SplitPanel {
     step2_status: Option<Status>,
     /// The authenticated claimed coins from the restore.
     coins: Vec<SplitCoin>,
+    /// S3 item 5: the deadline a timer is armed for, and its epoch. The
+    /// epoch moves whenever the armed deadline changes (the label or the
+    /// resend review set, replaced or cleared) and on every revocation, so a
+    /// superseded timer lands on nothing.
+    armed: Option<Instant>,
+    deadline_epoch: u64,
 }
 
 impl fmt::Debug for SplitPanel {
@@ -465,6 +484,7 @@ impl SplitPanel {
             resume_stage: None,
             step2_port: None,
             recon_port: None,
+            step2_missing: None,
             prep: None,
             coord: None,
             recon: None,
@@ -482,6 +502,8 @@ impl SplitPanel {
             step2_seen_here: None,
             step2_status: None,
             coins: Vec::new(),
+            armed: None,
+            deadline_epoch: 0,
         }
     }
 
@@ -648,6 +670,7 @@ impl SplitPanel {
             ending.store(true, Ordering::SeqCst);
         }
         self.seq = self.seq.wrapping_add(1);
+        self.disarm_deadline();
         if self.journal.is_some() && !matches!(self.stage, Stage::Abandoned | Stage::Closed) {
             self.stage = Stage::NeedsSession;
             self.notice = Some(
@@ -703,16 +726,19 @@ impl SplitPanel {
     }
 
     /// #648 X1: the coordinator found that no resend can follow (its last
-    /// attempt unsettled, or the attempt limit reached). Release it and read
-    /// the journal again through the restart decision, keeping `notice`, so
-    /// a dead end comes with its reconciler and its close. A reconcile from
+    /// attempt unsettled, or the attempt limit reached), or a resend came
+    /// back anything but accepted (#648 X1b), which may have withdrawn the
+    /// journal's permission for another. Release it and read the journal
+    /// again through the restart decision, showing `notice` (or none), so a
+    /// dead end comes with its reconciler and its close, and a journal that
+    /// still allows a resend reopens the coordinator. A reconcile from
     /// before no longer counts for the close: it waits for a new one.
-    fn restart_step2(&mut self, notice: String) -> Task<Message> {
+    fn restart_step2(&mut self, notice: Option<String>) -> Task<Message> {
         self.revoke_step2();
         self.step2_seen_here = None;
         self.stage = Stage::NeedsSession;
         let task = self.begin();
-        self.notice = Some(notice);
+        self.notice = notice;
         task
     }
 
@@ -840,10 +866,12 @@ impl SplitPanel {
         let digest = construction.source().digest();
         let directory = step1::journal_directory(&self.journal_root, digest);
         let target_cube = self.target_cube.clone();
+        let root = self.journal_root.clone();
         self.stage = Stage::Working(Work::Recording);
         self.spawn(
             async move {
-                tokio::task::spawn_blocking(move || {
+                let again = root.clone();
+                let recorded = tokio::task::spawn_blocking(move || {
                     // Re-finalized from the kept files: the verified value is
                     // consumed by the coordinator and has no Clone.
                     let verified = match step1::import(&construction, &files) {
@@ -862,8 +890,19 @@ impl SplitPanel {
                         .map(Driver)
                         .map_err(step1::describe)
                 })
-                .await
-                .map_err(|_| "Recording the split was interrupted.".to_string())?
+                .await;
+                // The journal may have been written before the coordinator
+                // refused: look for it here, off the UI thread (#625 F3b).
+                let reason = match recorded {
+                    Ok(Ok(driver)) => return Ok(driver),
+                    Ok(Err(reason)) => reason,
+                    Err(_) => "Recording the split was interrupted.".to_string(),
+                };
+                let found = tokio::task::spawn_blocking(move || find_journal(&again, digest))
+                    .await
+                    .ok()
+                    .flatten();
+                Err((reason, found))
             },
             SplitEvent::Recorded,
         )
@@ -1131,6 +1170,10 @@ impl SplitPanel {
     /// Apply a task's result. A result from an older request is dropped; a
     /// coordinator it carries is released (it was revoked with that request).
     pub fn apply(&mut self, event: SplitEvent) -> Task<Message> {
+        if let SplitEvent::DeadlinePassed(epoch) = event {
+            self.deadline_passed(epoch);
+            return Task::none();
+        }
         if event.seq() != self.seq {
             return Task::none();
         }
@@ -1214,17 +1257,11 @@ impl SplitPanel {
                 self.settle();
                 Task::none()
             }
-            SplitEvent::Recorded(_, Err(reason)) => {
+            SplitEvent::Recorded(_, Err((reason, found))) => {
                 // The journal may have been written before the coordinator
                 // refused: continue from it, never from a second record.
-                if let Some(construction) = &self.construction {
-                    let digest = construction.source().digest();
-                    if let Some(found) = step1::discover(&self.journal_root)
-                        .into_iter()
-                        .find(|(found, _)| *found == digest)
-                    {
-                        self.journal = Some(found);
-                    }
+                if let Some(found) = found {
+                    self.journal = Some(found);
                 }
                 self.stage = Stage::Refused(Refusal::retry(reason));
                 Task::none()
@@ -1398,6 +1435,68 @@ impl SplitPanel {
         }
     }
 
+    /// The earliest deadline of what is on screen: the "cannot replay"
+    /// label's and the resend review's.
+    fn deadline(&self) -> Option<Instant> {
+        let replay = self.replay.as_ref().map(step2::CannotReplay::not_after);
+        let resend = self
+            .step2_resend
+            .as_ref()
+            .map(step2::Step2ResendView::not_after);
+        replay.into_iter().chain(resend).min()
+    }
+
+    fn disarm_deadline(&mut self) {
+        self.armed = None;
+        self.deadline_epoch = self.deadline_epoch.wrapping_add(1);
+    }
+
+    /// S3 item 5: a timer for the earliest deadline on screen, so the label
+    /// and the resend review lapse at their deadline without input. The App
+    /// calls it after every [`Self::update`] and [`Self::apply`]. Nothing
+    /// new when that deadline is the armed one; a changed one moves the
+    /// epoch first, so the old timer lands on nothing. Liveness at action
+    /// time is checked as before: the timer only redraws.
+    pub fn arm_deadline(&mut self) -> Task<Message> {
+        let deadline = self.deadline();
+        if deadline == self.armed {
+            return Task::none();
+        }
+        self.disarm_deadline();
+        self.armed = deadline;
+        let Some(at) = deadline else {
+            return Task::none();
+        };
+        let epoch = self.deadline_epoch;
+        // The timer is made when the task first runs, on the runtime: it
+        // can't be made on the UI thread.
+        Task::perform(
+            async move { tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await },
+            move |()| Message::Split(Box::new(SplitEvent::DeadlinePassed(epoch))),
+        )
+    }
+
+    /// The armed deadline passed: drop what has lapsed (by the runtime's
+    /// clock, which the timer used). A stale epoch changes nothing. The
+    /// next [`Self::arm_deadline`] arms what is left.
+    fn deadline_passed(&mut self, epoch: u64) {
+        if epoch != self.deadline_epoch {
+            return;
+        }
+        let now = tokio::time::Instant::now().into_std();
+        if self.replay.as_ref().is_some_and(|r| r.not_after() <= now) {
+            self.replay = None;
+        }
+        if self
+            .step2_resend
+            .as_ref()
+            .is_some_and(|r| r.not_after() <= now)
+        {
+            self.step2_resend = None;
+        }
+        self.armed = None;
+    }
+
     fn install(&mut self, resumed: Resumed) {
         self.construction = Some(Box::new(resumed.construction));
         self.signed = Some(resumed.signed);
@@ -1445,9 +1544,17 @@ impl SplitEvent {
             | Self::Step2Reconciled(seq, ..)
             | Self::ReconReconciled(seq, ..)
             | Self::Step2ResendReviewed(seq, ..)
-            | Self::Step2Resent(seq, ..) => *seq,
+            | Self::Step2Resent(seq, ..)
+            | Self::DeadlinePassed(seq) => *seq,
         }
     }
+}
+
+/// This split's journal under `root`, if one is on disk. Blocking.
+fn find_journal(root: &std::path::Path, digest: sha256::Hash) -> Option<(sha256::Hash, PathBuf)> {
+    step1::discover(root)
+        .into_iter()
+        .find(|(found, _)| *found == digest)
 }
 
 /// Restore the journal and resume its coordinator with the recorded bytes.

@@ -1016,9 +1016,21 @@ fn split_fork_production_admits_only_a_connect_origin() {
 /// `#[cfg(test)]\nmod tests {` module, which must then be the file's last
 /// item (#626 re-review N1: a caller placed after the module is production
 /// code too). rustfmt indents every line inside a module, so any other
-/// column-0 line after the module's opening line is a later item.
+/// column-0 line after the module's opening line is a later item. CRLF line
+/// ends are accepted. A file that names `mod tests` in any other form is
+/// refused rather than read whole: a miss would count the tests as
+/// production (S3 item 7d).
 pub(super) fn production_text<'a>(file: &str, text: &'a str) -> &'a str {
-    let Some(cut) = text.find("#[cfg(test)]\nmod tests {") else {
+    let cut = ["#[cfg(test)]\nmod tests {", "#[cfg(test)]\r\nmod tests {"]
+        .iter()
+        .filter_map(|marker| text.find(marker))
+        .min();
+    let Some(cut) = cut else {
+        assert!(
+            !text.contains("mod tests"),
+            "{}: `mod tests` is not an inline `#[cfg(test)]` module",
+            file
+        );
         return text;
     };
     let after: Vec<&str> = text[cut..]
@@ -1184,6 +1196,28 @@ fn production_text_refuses_an_item_after_the_tests_module() {
     let after = "fn a() {}\n#[cfg(test)]\nmod tests {\n    fn b() {}\n}\nfn caller() {}\n";
     assert!(std::panic::catch_unwind(|| production_text("after", after)).is_err());
     assert_eq!(production_text("none", "fn a() {}\n"), "fn a() {}\n");
+}
+
+/// S3 item 7d: the cut finds a CRLF tests module (and still refuses an item
+/// after it), and a file that names `mod tests` in a form it does not cut at
+/// is refused instead of being read whole.
+#[test]
+fn production_text_handles_crlf_and_refuses_a_missing_marker() {
+    let crlf = "fn a() {}\r\n#[cfg(test)]\r\nmod tests {\r\n    fn b() {}\r\n}\r\n";
+    assert_eq!(production_text("crlf", crlf), "fn a() {}\r\n");
+    let after = "fn a() {}\r\n#[cfg(test)]\r\nmod tests {\r\n    fn b() {}\r\n}\r\nfn c() {}\r\n";
+    assert!(std::panic::catch_unwind(|| production_text("crlf after", after)).is_err());
+    for missed in [
+        "fn a() {}\n#[cfg(test)]\n#[allow(unused)]\nmod tests {\n    fn b() {}\n}\n",
+        "fn a() {}\n#[cfg(all(test, unix))]\nmod tests {\n    fn b() {}\n}\n",
+        "fn a() {}\n#[cfg(test)]\nmod tests;\n",
+    ] {
+        assert!(
+            std::panic::catch_unwind(|| production_text("missed", missed)).is_err(),
+            "{:?}",
+            missed
+        );
+    }
 }
 
 mod step2;

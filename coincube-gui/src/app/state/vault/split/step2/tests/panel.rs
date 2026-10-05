@@ -48,6 +48,9 @@ struct Counts {
     resend_expired: bool,
     /// What the coordinator's reconciles see on BTCB2. `None`: absent.
     coord_seen: Option<TransactionObservation>,
+    /// How long the next resend reviews stay live, by the runtime's clock.
+    /// `None`: 60 s.
+    resend_lifetime: Option<std::time::Duration>,
 }
 fn next_reconcile(
     shared: &Shared,
@@ -329,6 +332,9 @@ impl Step2Coord for PanelCoord {
             return Err(refusal);
         }
         let attempt = counts.resends + 1;
+        let lifetime = counts
+            .resend_lifetime
+            .unwrap_or(std::time::Duration::from_secs(60));
         drop(counts);
         self.resend_reviewed = true;
         let (route_label, privacy_note) = route_copy(node_route());
@@ -341,6 +347,7 @@ impl Step2Coord for PanelCoord {
             attempt,
             max_attempts: claim_workflow::MAX_SPLIT_STEP2_RESUBMISSIONS,
             expires_at: chrono::Local::now(),
+            not_after: tokio::time::Instant::now().into_std() + lifetime,
             live: Arc::new(move || !shared.lock().unwrap().resend_expired),
         })
     }
@@ -1945,6 +1952,10 @@ async fn panel_resends_step2_only_from_an_explicit_review_after_a_restart() {
         Some(Outcome::Uncertain { .. })
     ));
     assert_eq!(panel.notice(), None);
+    // The uncertain send read the journal again (#648 X1b): it still allows
+    // a resend, so the coordinator was reopened.
+    assert_eq!(shared.lock().unwrap().reopened, 2);
+    assert!(panel.coord.is_some() && panel.recon.is_none());
     // Another resend needs another review.
     send(&mut panel).await;
     assert_eq!(resends(&shared), 1);
@@ -2033,7 +2044,9 @@ async fn panel_resends_step2_only_from_an_explicit_review_after_a_restart() {
         (counts.step1_opened, counts.submits, counts.builds),
         (0, 0, 0)
     );
-    assert_eq!(counts.reopened, 2);
+    // The first restart, the uncertain send's (#648 X1b) and the next
+    // session's; the accepted send restarts nothing.
+    assert_eq!(counts.reopened, 3);
 }
 
 /// P3-3: a resend is offered only where a restart reopened the coordinator.
@@ -2241,6 +2254,267 @@ async fn panel_reopens_the_dead_end_when_no_resend_can_follow() {
     drive(&mut panel, task).await;
     assert!(panel.coord.is_some() && panel.recon.is_none());
     assert!(panel.can_review_resend());
+}
+
+/// #648 X1b (Legolas's probe, review 5985131761): a resend that comes back
+/// uncertain and leaves the journal with no resend (its return withdrawn, as
+/// a timed-out send leaves it) reads the journal again, as a refusal that
+/// says so does. The dead end follows without another Review resend, and no
+/// notice is added. A journal that still allows a resend reopens the
+/// coordinator through the same restart.
+#[tokio::test(flavor = "multi_thread")]
+async fn panel_reads_the_journal_again_after_an_uncertain_resend() {
+    let journal = Journal::returned(false);
+    let (mut panel, shared) = restarted(&journal, true).await;
+    let task = panel.update(SplitMessage::Step2ReviewResend);
+    drive(&mut panel, task).await;
+    assert!(panel.step2_resend_review().is_some());
+    withdraw_return(&journal);
+    // The fake's default send result: Uncertain.
+    let task = panel.update(SplitMessage::Step2ConfirmResend);
+    drive(&mut panel, task).await;
+    assert!(matches!(
+        panel.step2_outcome(),
+        Some(Outcome::Uncertain { .. })
+    ));
+    assert!(
+        panel.dead_end().is_some() && panel.coord.is_none(),
+        "after an uncertain resend with no resend left: coordinator kept = {}, Review resend offered = {}",
+        panel.coord.is_some(),
+        panel.can_review_resend()
+    );
+    assert!(panel.recon.is_some());
+    assert_eq!(panel.stage, Stage::Step2(Step2Stage::Reconcile));
+    assert!(!panel.can_review_resend());
+    assert_eq!(panel.notice(), None);
+    assert_eq!(shared.lock().unwrap().reopened, 1);
+
+    // The journal still allows a resend: the restart reopens the
+    // coordinator, and a resend needs a new review.
+    let journal = Journal::returned(false);
+    let (mut panel, shared) = restarted(&journal, true).await;
+    let task = panel.update(SplitMessage::Step2ReviewResend);
+    drive(&mut panel, task).await;
+    let task = panel.update(SplitMessage::Step2ConfirmResend);
+    drive(&mut panel, task).await;
+    assert_eq!(shared.lock().unwrap().resends, 1);
+    assert_eq!(shared.lock().unwrap().reopened, 2);
+    assert!(panel.coord.is_some() && panel.dead_end().is_none());
+    assert!(panel.can_review_resend() && panel.step2_resend_review().is_none());
+    assert_eq!(panel.notice(), None);
+}
+
+/// S3-D1 (PortIdentity hardening): a step-2 handle moved into a task is not
+/// held by the panel, yet a port change while the task runs still revokes
+/// it, and the task's result lands on nothing. Covered: a check with the
+/// preparation taken (its revoke handle still bound), an entry still opening
+/// the preparation (nothing bound yet) and a restart still deciding.
+#[tokio::test(flavor = "multi_thread")]
+async fn port_change_during_an_in_flight_step2_task_revokes_it() {
+    // A check in flight.
+    let journal = Journal::new(false);
+    let (mut panel, shared) = tracked_panel(&journal);
+    let task = panel.update(SplitMessage::EnterStep2);
+    drive(&mut panel, task).await;
+    assert_eq!(panel.stage, Stage::Step2(Step2Stage::Ready));
+    let task = panel.update(SplitMessage::Step2Check);
+    assert_eq!(panel.stage, Stage::Working(Work::Step2Checking));
+    assert!(panel.prep.is_none() && panel.coord.is_none() && panel.recon.is_none());
+    let revoked = shared.lock().unwrap().revoked;
+    panel.set_step2_port(Some(Arc::new(PanelPort::new(&shared, &journal, 2))));
+    assert_eq!(shared.lock().unwrap().revoked, revoked + 1);
+    assert_eq!(panel.stage, Stage::NeedsSession);
+    drive(&mut panel, task).await;
+    assert!(panel.prep.is_none() && panel.replay_label().is_none());
+    assert_eq!(panel.stage, Stage::NeedsSession);
+
+    // An entry still opening the preparation.
+    let journal = Journal::new(false);
+    let (mut panel, shared) = tracked_panel(&journal);
+    let task = panel.update(SplitMessage::EnterStep2);
+    assert_eq!(panel.stage, Stage::Working(Work::Entering));
+    assert!(panel.step2_revoke.is_none());
+    panel.set_step2_port(Some(Arc::new(PanelPort::new(&shared, &journal, 2))));
+    assert_eq!(panel.stage, Stage::NeedsSession);
+    drive(&mut panel, task).await;
+    assert!(panel.prep.is_none() && panel.step2_revoke.is_none());
+    assert_eq!(panel.stage, Stage::NeedsSession);
+
+    // A restart still deciding, when the Vault's port goes away.
+    let journal = Journal::returned(false);
+    let shared: Shared = Arc::default();
+    let mut panel = SplitPanel::resume(
+        TARGET.into(),
+        journal.temp.0.parent().unwrap().to_path_buf(),
+        journal.digest(),
+        journal.temp.0.clone(),
+    );
+    panel.set_connect(Some(Arc::new(PanelConnect(shared.clone()))));
+    panel.set_step2_port(Some(Arc::new(PanelPort::new(&shared, &journal, 1))));
+    panel.set_recon_port(Some(Arc::new(PanelReconPort(shared.clone()))));
+    let task = panel.begin();
+    assert_eq!(panel.stage, Stage::Working(Work::Restarting));
+    panel.set_step2_port(None);
+    assert_eq!(panel.stage, Stage::NeedsSession);
+    drive(&mut panel, task).await;
+    assert!(panel.coord.is_none() && panel.recon.is_none());
+    assert_eq!(panel.stage, Stage::NeedsSession);
+    // The restart under the remaining ports opens only the reconciler.
+    let task = panel.begin();
+    drive(&mut panel, task).await;
+    assert_eq!(panel.stage, Stage::Step2(Step2Stage::Reconcile));
+    assert!(panel.recon.is_some() && panel.coord.is_none());
+
+    // A reconcile in flight on the reconciler, when the session's
+    // reconcile-only port goes away.
+    let task = panel.update(SplitMessage::Step2Reconcile);
+    assert_eq!(panel.stage, Stage::Working(Work::Step2Reconciling));
+    assert!(panel.recon.is_none());
+    panel.set_recon_port(None);
+    assert_eq!(panel.stage, Stage::NeedsSession);
+    drive(&mut panel, task).await;
+    assert!(panel.recon.is_none() && panel.step2_revoke.is_none());
+    assert_eq!(panel.stage, Stage::NeedsSession);
+}
+
+/// S3 item 5: the "cannot replay" label lapses at its deadline on screen
+/// with no input: the armed timer fires, the panel drops it, and Build is
+/// gated off. No real waiting: the runtime's clock is paused and jumps to
+/// the timer.
+#[tokio::test(start_paused = true)]
+async fn replay_label_and_build_lapse_at_the_deadline_without_input() {
+    let journal = Journal::new(false);
+    let (mut panel, shared) = tracked_panel(&journal);
+    for message in [
+        SplitMessage::EnterStep2,
+        SplitMessage::Step2Reserve,
+        SplitMessage::Step2Check,
+    ] {
+        let task = panel.update(message);
+        drive(&mut panel, task).await;
+    }
+    assert_eq!(panel.replay_label(), Some(CANNOT_REPLAY));
+    let timer = panel.arm_deadline();
+    // Armed once: the same deadline arms nothing more.
+    assert!(iced_runtime::task::into_stream(panel.arm_deadline()).is_none());
+    let start = tokio::time::Instant::now();
+    drive(&mut panel, timer).await;
+    assert!(tokio::time::Instant::now() - start >= std::time::Duration::from_secs(59));
+    assert!(panel.replay.is_none());
+    assert_eq!(panel.replay_label(), None);
+    assert_eq!(panel.stage, Stage::Step2(Step2Stage::Ready));
+    let task = panel.update(SplitMessage::Step2Build);
+    drive(&mut panel, task).await;
+    assert_eq!(shared.lock().unwrap().builds, 0);
+    assert!(iced_runtime::task::into_stream(panel.arm_deadline()).is_none());
+}
+
+/// S3 item 5: a timer whose deadline was replaced (a new review) or
+/// revoked with the session lands on nothing: what is on screen stays, and
+/// no second timer is armed for it.
+#[tokio::test(start_paused = true)]
+async fn deadline_timer_is_dropped_by_replacement_and_revocation() {
+    let lifetime = |shared: &Shared, secs: u64| {
+        shared.lock().unwrap().resend_lifetime = Some(std::time::Duration::from_secs(secs));
+    };
+    let journal = Journal::returned(false);
+    let (mut panel, shared) = restarted(&journal, true).await;
+
+    // Replaced: a 60 s review, then a 120 s one.
+    lifetime(&shared, 60);
+    let task = panel.update(SplitMessage::Step2ReviewResend);
+    drive(&mut panel, task).await;
+    let first = panel.arm_deadline();
+    lifetime(&shared, 120);
+    let task = panel.update(SplitMessage::Step2ReviewResend);
+    drive(&mut panel, task).await;
+    let second = panel.arm_deadline();
+    drive(&mut panel, first).await;
+    assert!(panel.step2_resend.is_some());
+    assert!(
+        iced_runtime::task::into_stream(panel.arm_deadline()).is_none(),
+        "a replaced timer re-armed the review's"
+    );
+
+    // Revoked: the session ends, and the next one's review outlives the
+    // old timer.
+    panel.revoke();
+    assert!(panel.step2_resend.is_none());
+    assert!(iced_runtime::task::into_stream(panel.arm_deadline()).is_none());
+    let task = panel.begin();
+    drive(&mut panel, task).await;
+    lifetime(&shared, 600);
+    let task = panel.update(SplitMessage::Step2ReviewResend);
+    drive(&mut panel, task).await;
+    let third = panel.arm_deadline();
+    drive(&mut panel, second).await;
+    assert!(panel.step2_resend_review().is_some());
+    assert!(
+        iced_runtime::task::into_stream(panel.arm_deadline()).is_none(),
+        "a revoked timer re-armed the next review's"
+    );
+    // Its own timer still drops it.
+    drive(&mut panel, third).await;
+    assert!(panel.step2_resend.is_none());
+}
+
+/// S3 item 5: the resend review lapses at its deadline on screen with no
+/// input; Send again then does nothing, and a new review may be asked for.
+#[tokio::test(start_paused = true)]
+async fn resend_review_lapses_at_its_deadline() {
+    let journal = Journal::returned(false);
+    let (mut panel, shared) = restarted(&journal, true).await;
+    let task = panel.update(SplitMessage::Step2ReviewResend);
+    drive(&mut panel, task).await;
+    assert!(panel.step2_resend_review().is_some());
+    let timer = panel.arm_deadline();
+    drive(&mut panel, timer).await;
+    assert!(panel.step2_resend.is_none());
+    assert!(panel.can_review_resend());
+    let task = panel.update(SplitMessage::Step2ConfirmResend);
+    drive(&mut panel, task).await;
+    assert_eq!(shared.lock().unwrap().resends, 0);
+    assert_eq!(panel.stage, Stage::Step2(Step2Stage::Reconcile));
+}
+
+/// S3-D4: with step 1 six deep but no step-2 port, the panel says why: no
+/// Vault daemon, a daemon on a route step 2 can't be sent through (naming
+/// the two that can), or a port refused otherwise. With no reason recorded,
+/// the daemon is missing; with a port, step 2 is offered instead.
+#[tokio::test(flavor = "multi_thread")]
+async fn step2_unavailable_copy_names_the_reason() {
+    let journal = Journal::new(false);
+    let (mut panel, _) = tracked_panel(&journal);
+    assert!(panel.can_enter_step2());
+    assert_eq!(panel.step2_unavailable_copy(), None);
+    let labels = rendered_labels(&panel).await;
+    assert!(labels.iter().any(|s| s.contains("Continue to step 2")));
+
+    panel.step2_port = None;
+    assert!(!panel.can_enter_step2());
+    for (reason, copy) in [
+        (None, STEP2_NEEDS_VAULT),
+        (Some(Step2Unavailable::NoDaemon), STEP2_NEEDS_VAULT),
+        (
+            Some(Step2Unavailable::UnsupportedRoute),
+            STEP2_UNSUPPORTED_ROUTE,
+        ),
+        (Some(Step2Unavailable::Refused), STEP2_REFUSED),
+    ] {
+        panel.note_step2_unavailable(reason);
+        assert_eq!(panel.step2_unavailable_copy(), Some(copy));
+        let labels = rendered_labels(&panel).await;
+        assert_eq!(
+            labels.iter().filter(|s| *s == copy).count(),
+            1,
+            "{:?}: {:?}",
+            reason,
+            labels
+        );
+    }
+    assert!(STEP2_UNSUPPORTED_ROUTE.contains("Connect's Bitcoin Blake2b server"));
+    assert!(STEP2_UNSUPPORTED_ROUTE.contains("this Vault's own Bitcoin Blake2b node"));
+    assert!(!STEP2_UNSUPPORTED_ROUTE.contains("running"));
 }
 
 /// Consuming the preparation does not make a transient failure terminal.

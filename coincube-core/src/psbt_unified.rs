@@ -647,7 +647,9 @@ fn raw_reserved_signature(
     Ok(Some((public_key, pair.value.clone())))
 }
 
-fn is_reserved_key(key: &ProprietaryKey) -> bool {
+/// A record in this crate's own `coincube`/0 proprietary namespace: the only
+/// proprietary records a unified signature request may add to a PSBT.
+pub(crate) fn is_reserved_key(key: &ProprietaryKey) -> bool {
     key.prefix == PROPRIETARY_PREFIX && key.subtype == PROPRIETARY_SUBTYPE
 }
 
