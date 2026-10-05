@@ -50,7 +50,6 @@ use std::{
 use async_trait::async_trait;
 use iced::Task;
 use tokio::sync::watch;
-use zeroize::Zeroizing;
 
 use coincube_core::{
     chain::ChainId,
@@ -131,38 +130,12 @@ pub const SWEEP_SEEN: &str = "Bitcoin Blake2b shows this sweep, so it left and t
 /// The close check found a coin spent.
 pub const COIN_SPENT_ON_BTCB2: &str = "A coin of this split is no longer unspent on Bitcoin Blake2b, possibly spent by this sweep. This split can't be closed; it stays tracked here.";
 
-/// Text typed into a `.secure(true)` seed input: zeroized when replaced or
-/// dropped, never printed.
-#[derive(Clone, Default)]
-pub struct SeedText(Zeroizing<String>);
-impl SeedText {
-    /// The typed text, lent to the view's one `.secure(true)` input and to
-    /// nothing else (`split_unified_holds_seeds_only_zeroized`).
-    pub(in crate::app) fn expose_for_secure_input(&self) -> &str {
-        &self.0
-    }
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-    /// Move the text out, leaving the buffer empty.
-    fn take(&mut self) -> Zeroizing<String> {
-        std::mem::take(&mut self.0)
-    }
-    /// Empty the buffer; the old bytes are zeroized as they drop.
-    fn clear(&mut self) {
-        self.0 = Zeroizing::default();
-    }
-}
-impl From<String> for SeedText {
-    fn from(text: String) -> Self {
-        Self(Zeroizing::new(text))
-    }
-}
-impl fmt::Debug for SeedText {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("SeedText(<redacted>)")
-    }
-}
+// #568 B4b-3c (Robert, on #660, Reviewer-660661e D2): the typed seed text
+// lives in its own private module, so its `Zeroizing` field is private to
+// that module's impl and nothing here can read or copy it except through
+// its methods.
+mod seed_text;
+pub use seed_text::SeedText;
 
 /// The routes a started panel offers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
