@@ -1019,11 +1019,13 @@ impl std::fmt::Debug for SplitPorts {
     }
 }
 /// Blocking (#625 F3c): each port builds clients (`reqwest` among them), so
-/// the App calls it only inside `spawn_blocking`.
+/// the App calls it only inside `spawn_blocking`. `site` is where the
+/// reconcile-only port records a completion (#568 B5b).
 fn split_ports(
     session: Option<state::vault::claim::ConnectSession>,
     generation: tokio::sync::watch::Receiver<u64>,
     daemon: Option<Arc<dyn Daemon + Sync + Send>>,
+    site: Option<state::vault::split::step2::CompletionSite>,
 ) -> SplitPorts {
     use state::vault::split::{step1, step2};
     let (step2, step2_missing) = match (session.clone(), daemon) {
@@ -1040,7 +1042,7 @@ fn split_ports(
         }
     };
     let recon = session.clone().and_then(|session| {
-        step2::ProductionRecon::new(session, generation.clone())
+        step2::ProductionRecon::new(session, generation.clone(), site)
             .ok()
             .map(|port| Arc::new(port) as Arc<dyn step2::ReconPort>)
     });
@@ -3899,11 +3901,18 @@ impl App {
             self.panels.claim_generation.subscribe(),
             self.split_daemon(),
         );
+        // #568 B5b: a completion is recorded on this Cube, in its datadir.
+        let site = state::vault::split::step2::CompletionSite::of(
+            self.datadir.clone(),
+            &self.cube_settings,
+        );
         Task::perform(
             async move {
-                tokio::task::spawn_blocking(move || split_ports(Some(session), generation, daemon))
-                    .await
-                    .ok()
+                tokio::task::spawn_blocking(move || {
+                    split_ports(Some(session), generation, daemon, site)
+                })
+                .await
+                .ok()
             },
             move |ports| Message::SplitPortsBuilt(seq, ports.map(Box::new)),
         )
@@ -9081,14 +9090,15 @@ mod tests {
         use state::vault::split::step2::Step2Unavailable;
         // (Connect, step 2, reconcile-only, why no step 2: S3-D4)
         assert_eq!(
-            shape(split_ports(session(), generation.subscribe(), None)),
+            shape(split_ports(session(), generation.subscribe(), None, None)),
             (true, false, true, Some(Step2Unavailable::NoDaemon))
         );
         assert_eq!(
             shape(split_ports(
                 session(),
                 generation.subscribe(),
-                Some(electrum)
+                Some(electrum),
+                None
             )),
             (true, false, true, Some(Step2Unavailable::UnsupportedRoute))
         );
@@ -9096,12 +9106,18 @@ mod tests {
             shape(split_ports(
                 session(),
                 generation.subscribe(),
-                Some(connect.clone())
+                Some(connect.clone()),
+                None
             )),
             (true, true, true, None)
         );
         assert_eq!(
-            shape(split_ports(None, generation.subscribe(), Some(connect))),
+            shape(split_ports(
+                None,
+                generation.subscribe(),
+                Some(connect),
+                None
+            )),
             (false, false, false, None)
         );
     }

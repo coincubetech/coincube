@@ -1588,7 +1588,7 @@ fn split_ui_paths_do_no_blocking_work() {
     // The UI paths call the blocking helpers only through a task.
     let refresh = body(&app, "    fn refresh_split_session(", "    ");
     let blocking = refresh.find("spawn_blocking(move ||").unwrap();
-    assert!(refresh[blocking..].contains("split_ports(Some(session), generation, daemon)"));
+    assert!(refresh[blocking..].contains("split_ports(Some(session), generation, daemon, site)"));
     assert!(!refresh[..blocking].contains("split_ports("));
     for (name, text) in [
         ("new_inner", body(&app, "    fn new_inner(", "    ")),

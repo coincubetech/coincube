@@ -463,6 +463,12 @@ impl Step2Recon for HeldRecon {
     ) -> Result<(Status, TransactionObservation, Step1AfterStep2), Step2Refusal> {
         unreachable!()
     }
+    async fn complete(&mut self, _: &Context) -> Result<SplitCompletion, Step2Refusal> {
+        unreachable!()
+    }
+    async fn completion_stands(&mut self, _: &Context) -> Result<CompletionStanding, Step2Refusal> {
+        unreachable!()
+    }
 }
 
 /// A reopened coordinator holding the real journal lock (P3-3).
@@ -1073,7 +1079,7 @@ fn step2_port_admits_only_a_route_step2_can_be_sent_through() {
     assert!(port("https://other.example/", daemon).is_err());
 
     // The reconcile-only port: the session alone.
-    let recon = ProductionRecon::new(session(ORIGIN), generation.clone()).unwrap();
+    let recon = ProductionRecon::new(session(ORIGIN), generation.clone(), None).unwrap();
     assert_eq!(recon.context().account, "synthetic-account");
     assert_eq!(recon.context().generation, 7);
 }
@@ -1356,13 +1362,28 @@ fn step2_panel_layer_is_reached_only_through_the_split_panel() {
             "STEP2_NEEDS_VAULT",
             "STEP2_UNSUPPORTED_ROUTE",
             "STEP2_REFUSED",
+            // #568 B5b: the completion stage.
+            "SplitCompletion",
+            "CompletionSite",
+            "CompletionStanding",
+            "complete_from_coordinator",
+            "completion_stands",
+            "RevokeSlot",
+            "SPLIT_COMPLETED",
+            "COMPLETION_NOT_YET",
+            "COMPLETION_EXPIRED",
+            "COMPLETION_NOT_RECORDED",
+            "COMPLETION_NOT_FORGOTTEN",
+            "COMPLETION_NO_VAULT",
+            "COMPLETION_INTERRUPTED",
+            "COMPLETION_LOST",
         ] {
             let named = text
                 .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
                 .any(|word| word == ident);
             // The App hands the panel the port of its Vault daemon and the
-            // session's reconcile-only port; the view shows the N4 waiting
-            // text.
+            // session's reconcile-only port with its completion site; the
+            // view shows the N4 waiting text and the completion copy.
             let allowed = (file == "src/app/mod.rs"
                 && [
                     "ProductionStep2",
@@ -1373,9 +1394,13 @@ fn step2_panel_layer_is_reached_only_through_the_split_panel() {
                     "set_recon_port",
                     // S3-D4: the port build says why there is no step 2.
                     "Step2Unavailable",
+                    // B5b: where the reconcile-only port records a
+                    // completion.
+                    "CompletionSite",
                 ]
                 .contains(&ident))
-                || (file == "src/app/view/vault/split.rs" && ident == "RESERVING");
+                || (file == "src/app/view/vault/split.rs"
+                    && ["RESERVING", "SPLIT_COMPLETED"].contains(&ident));
             // `restart`/`Restart` are common words elsewhere: only a path
             // into the step-2 module counts for them.
             let generic = ["restart", "Restart"].contains(&ident)

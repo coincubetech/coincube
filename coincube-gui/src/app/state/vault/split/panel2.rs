@@ -28,7 +28,7 @@ use super::{
 use crate::{
     app::message::Message,
     services::{
-        claim_coordinator::Outcome,
+        claim_coordinator::{fork::split::step2::Step1AfterStep2, Outcome},
         claim_observation::TransactionObservation,
         split_psbt_file::{self, Encoding},
     },
@@ -88,7 +88,12 @@ impl SplitPanel {
         self.recon.is_some()
             || matches!(
                 self.stage,
-                Stage::Working(Work::Restarting | Work::Step2Reconciling)
+                Stage::Working(
+                    Work::Restarting
+                        | Work::Step2Reconciling
+                        | Work::Step2Completing
+                        | Work::Step2CompletionChecking
+                )
             )
     }
 
@@ -127,6 +132,8 @@ impl SplitPanel {
         self.step2_resend = None;
         self.target_index = None;
         self.step2_handoff_ready = false;
+        self.completable = false;
+        self.completion = None;
     }
 
     pub fn step2_available(&self) -> bool {
@@ -202,6 +209,40 @@ impl SplitPanel {
     }
     pub fn step2_outcome(&self) -> Option<crate::services::claim_coordinator::Outcome> {
         self.step2_outcome
+    }
+    /// #568 B5b: the completion this panel recorded, for the history row.
+    pub fn completion(&self) -> Option<&step2::SplitCompletion> {
+        self.completion.as_ref()
+    }
+    /// #568 B5b: completion is offered only from the reconcile-only stages,
+    /// after a reconcile under this session saw step 2 confirmed on BTCB2
+    /// with step 1 eligible and nothing to warn about: never during a
+    /// provisional or terminal step-1 conflict, a re-mined, unconfirmed or
+    /// missing step 1, a shallow one or an unknown one (#568 S4), nor beside
+    /// a live resend review. A coordinator completes through the session's
+    /// reconcile-only port, which must be there.
+    pub fn can_complete(&self) -> bool {
+        let handle = match self.stage {
+            Stage::Step2(Step2Stage::Submitted) => {
+                self.coord.is_some() && self.recon_port.is_some()
+            }
+            Stage::Step2(Step2Stage::Reconcile) => {
+                self.recon.is_some() || (self.coord.is_some() && self.recon_port.is_some())
+            }
+            _ => false,
+        };
+        handle
+            && self.completable
+            && self.completion.is_none()
+            && self.connect.is_some()
+            && self.journal.is_some()
+            && matches!(
+                self.step2_seen_here,
+                Some(TransactionObservation::Confirmed { .. })
+            )
+            && self.step2_after == Some(Step1AfterStep2::Eligible)
+            && self.step2_warning().is_none()
+            && self.step2_resend_review().is_none()
     }
     pub fn step2_seen(&self) -> Option<crate::services::claim_observation::TransactionObservation> {
         self.step2_seen
@@ -595,6 +636,63 @@ impl SplitPanel {
                     |seq, (recon, result)| SplitEvent::ReconReconciled(seq, recon, result),
                 )
             }
+            SplitMessage::Step2Complete if self.can_complete() => {
+                let Some(connect) = self.connect.clone() else {
+                    return Task::none();
+                };
+                let context = connect.context();
+                if let Some(mut recon) = self.recon.take() {
+                    self.stage = Stage::Working(Work::Step2Completing);
+                    return self.spawn(
+                        async move {
+                            let result = recon.complete(&context).await;
+                            (Some(Recon(recon)), result)
+                        },
+                        |seq, (recon, result)| SplitEvent::Step2Completed(seq, recon, result),
+                    );
+                }
+                // The coordinator has no completion check: it is dropped,
+                // releasing the journal, and the reconciler completes.
+                let (Some(port), Some((digest, directory))) =
+                    (self.recon_port.clone(), self.journal.clone())
+                else {
+                    return Task::none();
+                };
+                let Some(coord) = self.coord.take() else {
+                    return Task::none();
+                };
+                self.step2_resend = None;
+                let slot = step2::RevokeSlot::default();
+                self.step2_revoke = Some(slot.handle());
+                let target = self.target_cube.clone();
+                self.stage = Stage::Working(Work::Step2Completing);
+                self.spawn(
+                    async move {
+                        let (recon, result) = step2::complete_from_coordinator(
+                            coord, port, directory, target, digest, context, slot,
+                        )
+                        .await;
+                        (recon.map(Recon), result)
+                    },
+                    |seq, (recon, result)| SplitEvent::Step2Completed(seq, recon, result),
+                )
+            }
+            // D17: a completed split's Refresh asks whether the completion
+            // still stands.
+            SplitMessage::Step2Reconcile if self.stage == Stage::Step2(Step2Stage::Completed) => {
+                let (Some(connect), Some(mut recon)) = (self.connect.clone(), self.recon.take())
+                else {
+                    return Task::none();
+                };
+                self.stage = Stage::Working(Work::Step2CompletionChecking);
+                self.spawn(
+                    async move {
+                        let result = recon.completion_stands(&connect.context()).await;
+                        (Recon(recon), result)
+                    },
+                    |seq, (recon, result)| SplitEvent::Step2CompletionRechecked(seq, recon, result),
+                )
+            }
             SplitMessage::CheckAbandon if self.can_check_close() => {
                 let (Some(connect), Some(dead_end)) = (self.connect.clone(), self.dead_end.clone())
                 else {
@@ -791,12 +889,19 @@ impl SplitPanel {
                 self.step2_seen = Some(seen);
                 self.step2_seen_here = Some(seen);
                 self.notice = None;
+                // #568 B5b: only this reconcile's own evidence offers
+                // completion.
+                self.completable = matches!(seen, TransactionObservation::Confirmed { .. })
+                    && after == Step1AfterStep2::Eligible;
                 // Seen on BTCB2: it left, so it is no dead end (#625 F2).
                 if seen != TransactionObservation::Absent {
                     self.dead_end = None;
                 }
             }
-            Err(reason) => self.notice = Some(reason.reason),
+            Err(reason) => {
+                self.completable = false;
+                self.notice = Some(reason.reason);
+            }
         }
         if self.step2_warning().is_some() || self.notice.is_some() {
             self.replay = None;
@@ -1116,6 +1221,65 @@ impl SplitPanel {
                     Err(reason) => self.notice = Some(reason.reason),
                 }
                 self.stage = Stage::Step2(Step2Stage::Reconcile);
+                Task::none()
+            }
+            SplitEvent::Step2Completed(_, Some(Recon(recon)), result) => {
+                // The coordinator, if completion started from it, is gone:
+                // the reconciler holds the journal now.
+                self.bind_recon(recon);
+                self.completable = false;
+                match result {
+                    Ok(completion) => {
+                        self.notice = None;
+                        self.replay = None;
+                        self.completion = Some(completion);
+                        self.stage = Stage::Step2(Step2Stage::Completed);
+                    }
+                    Err(reason) if reason.recovery == step2::Step2Recovery::Restart => {
+                        return self.restart_step2(Some(reason.reason));
+                    }
+                    // #645 P3-1: check again; nothing ends here.
+                    Err(reason) => {
+                        self.notice = Some(reason.reason);
+                        self.stage = Stage::Step2(Step2Stage::Reconcile);
+                    }
+                }
+                Task::none()
+            }
+            SplitEvent::Step2Completed(_, None, result) => {
+                // No reconciler came back: read the journal again.
+                let reason = match result {
+                    Ok(_) => step2::COMPLETION_INTERRUPTED.to_string(),
+                    Err(reason) => reason.reason,
+                };
+                self.restart_step2(Some(reason))
+            }
+            SplitEvent::Step2CompletionRechecked(_, Recon(recon), result) => {
+                self.bind_recon(recon);
+                match result {
+                    Ok(step2::CompletionStanding::Standing { status, seen }) => {
+                        self.step2_status = Some(status);
+                        self.step2_seen = Some(seen);
+                        self.step2_seen_here = Some(seen);
+                        self.notice = None;
+                        self.stage = Stage::Step2(Step2Stage::Completed);
+                    }
+                    // D17: the record is gone (or was never written); back
+                    // to reconciling, the descriptors still deleted.
+                    Ok(step2::CompletionStanding::Lost { status, seen, .. }) => {
+                        self.step2_status = Some(status);
+                        self.step2_seen = Some(seen);
+                        self.step2_seen_here = Some(seen);
+                        self.completion = None;
+                        self.completable = false;
+                        self.notice = Some(step2::COMPLETION_LOST.to_string());
+                        self.stage = Stage::Step2(Step2Stage::Reconcile);
+                    }
+                    Err(reason) => {
+                        self.notice = Some(reason.reason);
+                        self.stage = Stage::Step2(Step2Stage::Completed);
+                    }
+                }
                 Task::none()
             }
             _ => Task::none(),

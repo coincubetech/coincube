@@ -33,7 +33,11 @@
 //! through. When the journal allows a resend of that submission (P3-3) and
 //! the daemon is on such a route, the restart reopens the submission
 //! coordinator instead: still reconcile first, and exactly the recorded
-//! step 2 sent again only from an explicit one-use resend review. It is
+//! step 2 sent again only from an explicit one-use resend review. Once a
+//! reconcile under the session sees step 2 confirmed on Bitcoin Blake2b with
+//! step 1 still six deep (#568 B5b), the split may be completed: recorded on
+//! this Cube by its source digest, its descriptors deleted, and shown with
+//! its history row; a completed split offers only Refresh and Close. It is
 //! still reachable only by resuming a journal (D1).
 //!
 //! The panel owns no keys and never signs: signatures come back in PSBT
@@ -130,6 +134,10 @@ pub enum Step2Stage {
     /// Restarted after a recorded step-2 submission: reconcile, and, when
     /// the restart reopened the coordinator (P3-3), review a resend.
     Reconcile,
+    /// #568 B5b: the completion is recorded on this Cube and the source's
+    /// descriptors are deleted. Check it again (D17) or close; nothing is
+    /// sent, resent or abandoned from here.
+    Completed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -168,6 +176,10 @@ pub enum Work {
     /// P3-3: fresh evidence for a resend review.
     Step2ResendReviewing,
     Step2Resending,
+    /// #568 B5b: the completion check, its record and the deletion.
+    Step2Completing,
+    /// D17: whether a recorded completion still stands.
+    Step2CompletionChecking,
 }
 
 /// The coordinator in transit between the panel and a task.
@@ -305,6 +317,19 @@ pub enum SplitEvent {
         Result<step2::Step2ResendView, step2::Step2Refusal>,
     ),
     Step2Resent(u64, Coord, Result<Outcome, step2::Step2Refusal>),
+    /// #568 B5b: a completion, with the reconciler it ran on (`None`: none
+    /// came back, so the journal is read again).
+    Step2Completed(
+        u64,
+        Option<Recon>,
+        Result<step2::SplitCompletion, step2::Step2Refusal>,
+    ),
+    /// D17: a recheck of the completion.
+    Step2CompletionRechecked(
+        u64,
+        Recon,
+        Result<step2::CompletionStanding, step2::Step2Refusal>,
+    ),
     /// S3 item 5: the deadline armed under this epoch (not a request
     /// sequence number) passed. See [`SplitPanel::arm_deadline`].
     DeadlinePassed(u64),
@@ -360,6 +385,10 @@ pub enum SplitMessage {
     Step2ReviewResend,
     /// P3-3: send the recorded step 2 again, as that review showed.
     Step2ConfirmResend,
+    /// #568 B5b: record the completion, then delete the source's
+    /// descriptors; offered only after a reconcile under this session saw
+    /// step 2 confirmed with step 1 eligible.
+    Step2Complete,
 }
 
 pub struct SplitPanel {
@@ -436,6 +465,13 @@ pub struct SplitPanel {
     /// What that reconcile found of step 1 after the step-2 submission
     /// (#568 S4); the warning is derived from it.
     step2_after: Option<Step1AfterStep2>,
+    /// #568 B5b: the last reconcile under this session saw step 2 confirmed
+    /// on BTCB2 and step 1 eligible (six deep in its recorded block). Any
+    /// other result, a failed reconcile, a refused completion and a
+    /// revocation clear it.
+    completable: bool,
+    /// #568 B5b: the completion this panel recorded (the history row).
+    completion: Option<step2::SplitCompletion>,
     /// The authenticated claimed coins from the restore.
     coins: Vec<SplitCoin>,
     /// S3 item 5: the deadline a timer is armed for, and its epoch. The
@@ -505,6 +541,8 @@ impl SplitPanel {
             step2_seen_here: None,
             step2_status: None,
             step2_after: None,
+            completable: false,
+            completion: None,
             coins: Vec::new(),
             armed: None,
             deadline_epoch: 0,
@@ -1549,6 +1587,8 @@ impl SplitEvent {
             | Self::ReconReconciled(seq, ..)
             | Self::Step2ResendReviewed(seq, ..)
             | Self::Step2Resent(seq, ..)
+            | Self::Step2Completed(seq, ..)
+            | Self::Step2CompletionRechecked(seq, ..)
             | Self::DeadlinePassed(seq) => *seq,
         }
     }

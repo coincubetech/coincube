@@ -232,6 +232,12 @@ impl Step2Recon for LockedRecon {
             Step1AfterStep2::Eligible,
         ))
     }
+    async fn complete(&mut self, _: &Context) -> Result<SplitCompletion, Step2Refusal> {
+        unreachable!()
+    }
+    async fn completion_stands(&mut self, _: &Context) -> Result<CompletionStanding, Step2Refusal> {
+        unreachable!()
+    }
 }
 struct LockedPort {
     directory: PathBuf,

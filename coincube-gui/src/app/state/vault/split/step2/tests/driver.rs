@@ -230,3 +230,161 @@ fn verify_signed_distinguishes_partial_from_wrong() {
     d.core.signed = Some(FinalizeError::ConstructionChanged);
     assert!(d.verify_inner(&psbt, &[]).is_err());
 }
+
+/// #568 B5b: the reconciler driver's completion over a fake
+/// [`CompletionCore`]: what it was asked, in order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Call {
+    Check,
+    Persist,
+    Forget,
+}
+struct FakeEvidence {
+    live: bool,
+}
+struct FakeCompletion {
+    calls: Arc<Mutex<Vec<Call>>>,
+    /// The check: `None` mints nothing; `Some(live)` mints evidence that is
+    /// live (or not) when its record is refused.
+    minted: Option<bool>,
+    persist_fails: bool,
+    forget_fails: Option<CoordinatorError>,
+}
+impl FakeCompletion {
+    fn new() -> Self {
+        Self {
+            calls: Arc::default(),
+            minted: Some(true),
+            persist_fails: false,
+            forget_fails: None,
+        }
+    }
+}
+#[async_trait]
+impl CompletionCore for FakeCompletion {
+    type Evidence = FakeEvidence;
+    async fn check(&mut self, _: &Context) -> Result<Option<FakeEvidence>, CoordinatorError> {
+        self.calls.lock().unwrap().push(Call::Check);
+        Ok(self.minted.map(|live| FakeEvidence { live }))
+    }
+    fn record(_: &FakeEvidence) -> SplitFromRecord {
+        SplitFromRecord {
+            descriptor_digest: sha256::Hash::hash(b"split source"),
+            completed_height: 1_000,
+            step2_txid: Txid::from_byte_array([5; 32]),
+        }
+    }
+    fn live(evidence: &FakeEvidence) -> bool {
+        evidence.live
+    }
+    async fn persist(&self, _: &FakeEvidence, _: &CompletionSite) -> Result<(), SettingsError> {
+        self.calls.lock().unwrap().push(Call::Persist);
+        if self.persist_fails {
+            return Err(SettingsError::Unexpected(
+                "Claim Cube no longer matches its Vault".into(),
+            ));
+        }
+        Ok(())
+    }
+    fn forget(&mut self, _: FakeEvidence, _: &Context) -> Result<(), CoordinatorError> {
+        self.calls.lock().unwrap().push(Call::Forget);
+        match self.forget_fails.take() {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+}
+fn site() -> CompletionSite {
+    CompletionSite {
+        root: crate::dir::CoincubeDirectory::new(std::env::temp_dir().join("split-b5b-unused")),
+        target: CompletionTarget {
+            cube_id: TARGET.into(),
+            vault_wallet_id: crate::app::settings::WalletId {
+                timestamp: None,
+                descriptor_checksum: "abcdefgh".into(),
+            },
+            vault_fingerprint: "f5acc2fd".into(),
+        },
+    }
+}
+fn recon_driver(core: FakeCompletion) -> ReconcilerDriver<FakeCompletion> {
+    ReconcilerDriver {
+        core: Some(core),
+        site: Some(site()),
+        revoke: Arc::new(|| {}),
+    }
+}
+
+/// D18 through the driver: check, then the record, then the deletion, and
+/// the history row from the evidence. Nothing is recorded without evidence;
+/// a refused record deletes nothing and reads "check again" whether the
+/// evidence lapsed (#645 P3-1) or the Cube's settings refused it (never the
+/// settings layer's "Claim Cube" message); a lapsed deletion after the
+/// record is "check again" too. Without a Vault in the Cube's settings
+/// nothing is checked. Every refusal but that one is retryable.
+#[tokio::test(flavor = "multi_thread")]
+async fn recon_driver_persists_before_forgetting() {
+    let core = FakeCompletion::new();
+    let calls = core.calls.clone();
+    let mut d = recon_driver(core);
+    let completion = d.complete_inner(&context()).await.unwrap();
+    assert_eq!(
+        *calls.lock().unwrap(),
+        [Call::Check, Call::Persist, Call::Forget]
+    );
+    assert_eq!(completion.completed_height, 1_000);
+    assert_eq!(completion.step2_txid, Txid::from_byte_array([5; 32]));
+    assert!(
+        d.core.is_some(),
+        "the reconciler is back after the deletion"
+    );
+
+    let refused = |copy: &str, expected: &[Call], core: FakeCompletion| {
+        let calls = core.calls.clone();
+        let copy = copy.to_string();
+        let expected = expected.to_vec();
+        async move {
+            let mut d = recon_driver(core);
+            let refusal = d.complete_inner(&context()).await.unwrap_err();
+            assert_eq!(refusal.reason, copy);
+            assert!(refusal.retry, "{}", copy);
+            assert!(!refusal.reason.contains("Claim"));
+            assert_eq!(*calls.lock().unwrap(), expected, "{}", copy);
+            assert!(d.core.is_some());
+        }
+    };
+    let mut core = FakeCompletion::new();
+    core.minted = None;
+    refused(COMPLETION_NOT_YET, &[Call::Check], core).await;
+    let mut core = FakeCompletion::new();
+    core.persist_fails = true;
+    refused(COMPLETION_NOT_RECORDED, &[Call::Check, Call::Persist], core).await;
+    let mut core = FakeCompletion::new();
+    core.persist_fails = true;
+    core.minted = Some(false);
+    refused(COMPLETION_EXPIRED, &[Call::Check, Call::Persist], core).await;
+    let mut core = FakeCompletion::new();
+    core.forget_fails = Some(CoordinatorError::ExpiredEvidence);
+    refused(
+        COMPLETION_NOT_FORGOTTEN,
+        &[Call::Check, Call::Persist, Call::Forget],
+        core,
+    )
+    .await;
+
+    // No Vault named in the Cube's settings: final, nothing checked.
+    let core = FakeCompletion::new();
+    let calls = core.calls.clone();
+    let mut d = recon_driver(core);
+    d.site = None;
+    let refusal = d.complete_inner(&context()).await.unwrap_err();
+    assert_eq!(refusal.reason, COMPLETION_NO_VAULT);
+    assert!(!refusal.retry);
+    assert!(calls.lock().unwrap().is_empty());
+    // A driver that lost its reconciler asks for a restart.
+    let mut d = recon_driver(FakeCompletion::new());
+    d.core = None;
+    let refusal = d.complete_inner(&context()).await.unwrap_err();
+    assert_eq!(refusal.recovery, Step2Recovery::Restart);
+    assert_eq!(refusal.reason, COMPLETION_INTERRUPTED);
+}
