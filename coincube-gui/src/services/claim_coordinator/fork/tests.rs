@@ -156,6 +156,18 @@ fn policy() -> CheckPolicy {
         collection_budget: Duration::from_secs(2),
     }
 }
+/// The harness policy with the widest collection budget, for the signing
+/// checks of [`PreparingHarness`]: a check's deadline is the budget, capped
+/// at 30 s, on the real monotonic clock from the end of its collections. The
+/// harness's 2 s left a heavily loaded run (four test binaries of 16 threads
+/// beside a cargo build) expiring checks before their dispatch
+/// (`ExpiredEvidence`). Expiry stays tested by setting a check's `not_after`.
+fn wide_policy() -> CheckPolicy {
+    CheckPolicy {
+        collection_budget: claim_observation::MAX_COLLECTION_TIME,
+        ..policy()
+    }
+}
 fn context() -> Context {
     Context {
         generation: 7,
@@ -676,7 +688,7 @@ impl PreparingHarness {
             context(),
             sender.subscribe(),
             Box::new(fixture),
-            policy(),
+            wide_policy(),
         )
         .unwrap();
         Self {
@@ -945,7 +957,12 @@ async fn cached_split_review_expires_without_psbt_change_or_acknowledgement_esca
     use crate::app::state::vault::replay::{ReplayReview, ReplayStatus};
     let mut h = PreparingHarness::new().await;
     let signed = sign_sweep(h.psbt().psbt().clone(), 2);
-    let check = h.preparation.check_signing(&context()).await.unwrap();
+    let mut check = h.preparation.check_signing(&context()).await.unwrap();
+    // The harness's checks outlast load (`wide_policy`); this one gets the
+    // 2 s deadline of the harness's own budget only now, after its
+    // collections, so the dispatch and the review below (synchronous, no
+    // reads) run well inside it and the wait to its expiry stays short.
+    check.not_after = check.not_after.min(Instant::now() + Duration::from_secs(2));
     let dispatch = h
         .preparation
         .signing_dispatch(check, &signed, &context())
