@@ -1,7 +1,8 @@
 //! The single-step (fork-only) route in the Split panel (#568 B4b-3c; owner
 //! decisions U1-U7, C2-C6, P1, P7, P8). Like the rest of the panel it is
 //! dormant (D1): the route is chosen only in a started panel, which nothing
-//! in the GUI creates before B5c.
+//! in the GUI creates before B5c, and a fork-only journal is reopened only
+//! by restart.
 //!
 //! - **Route choice.** A started panel offers the two-step split and, when
 //!   the wallet's descriptors give it (`SigningRoutes::seed_unified`, U6:
@@ -21,22 +22,29 @@
 //!   opens the services of #654 for one Connect session: a
 //!   `UnifiedCoordinator` (the C2 gate; the journal created only at
 //!   confirmation, U3; one send, never a resend, U4) through the target
-//!   Vault's daemon.
+//!   Vault's daemon, and a `UnifiedReconciler` with the session alone.
 //! - **Review.** The Protected pill with `PROTECTED_LIMITATION`, the route
 //!   label and, on the node route, a privacy note. #654 F2 (lead decision):
 //!   the D4 fee is read again at the review, and a signed rate below it is
 //!   refused before anything is journaled; the sweep is then built and
 //!   signed again.
-//! - **Not here (B4b-3c part 2):** restart by kind (reopening a fork-only
-//!   record to reconcile it or back to seed entry) and the fork-only close
-//!   (C6).
+//! - **Restart by kind.** `step2::restart` hands a fork-only record here:
+//!   with a recorded submission it opens the reconciler; without one it is
+//!   revalidated (coins authenticated afresh, the recorded sweep rebuilt
+//!   exactly) and goes back to seed entry, or it is closed.
+//! - **Fork-only close** (C6, U4). It writes the tombstone and keeps the
+//!   journal. An unsubmitted record needs no chain check (no signed bytes
+//!   were ever recorded); a submitted one only after a reconcile under this
+//!   session saw the sweep absent, then a fresh check: the sweep absent,
+//!   every coin unspent on BTCB2, the sweep absent again ([`check_close`]).
 //!
 //! Every Connect read, journal call and signature runs in a task.
 
 use std::{
+    convert::TryFrom,
     fmt,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{atomic::AtomicBool, Arc},
 };
 
 use async_trait::async_trait;
@@ -46,7 +54,9 @@ use tokio::sync::watch;
 use coincube_core::{
     chain::ChainId,
     foreign_split::{SplitCoin, SplitSource, UnifiedReplayStatus},
-    miniscript::bitcoin::{hashes::sha256, psbt::Psbt, secp256k1, Txid},
+    miniscript::bitcoin::{
+        hashes::sha256, psbt::Psbt, secp256k1, Address, Network, OutPoint, Txid,
+    },
     psbt_unified::UnifiedPsbt,
     unified_foreign::ForeignUnifiedError,
 };
@@ -72,18 +82,20 @@ use crate::{
             fork::split::{
                 step2::{
                     SplitStep2Production, TargetError, UnifiedCoordinator, UnifiedError,
-                    UnifiedReview, RESERVATION_BOUND,
+                    UnifiedReconciler, UnifiedReview, RESERVATION_BOUND,
                 },
                 SplitForkProduction,
             },
             Outcome, SubmissionRoute,
         },
-        claim_observation::TransactionObservation,
-        claim_workflow::{self, Context},
+        claim_observation::{FailureKind, TransactionObservation},
+        claim_workflow::{self, Context, Controller},
         foreign_psbt::{btcb2_sweep_feerate, SweepFeeSource},
         foreign_scan::SigningRoutes,
         foreign_split_inventory::FreshIndex,
-        split_evidence::{authenticate_outpoints, RecordedOutpoint, MAX_EVIDENCE_AGE_SECONDS},
+        split_evidence::{
+            authenticate_outpoints, RecordedOutpoint, SplitEvidenceSource, MAX_EVIDENCE_AGE_SECONDS,
+        },
         split_fees,
         split_seed::{SeedSet, SeedSetError},
         split_source::split_source,
@@ -99,12 +111,25 @@ pub const P1_HARDWARE: &str = "A hardware wallet can't sign the single-step swee
 pub const SEEDS_NOT_OFFERED: &str = "This wallet's recovery phrases can't be matched to its keys: every key needs its origin, and Taproot wallets can't be signed here. Use the two-step split.";
 /// No unified port, or one without a usable Vault daemon.
 pub const UNIFIED_NEEDS_VAULT: &str = "The single-step sweep needs this Vault's wallet engine running on a route the sweep can be sent through: Connect's Bitcoin Blake2b server or this Vault's own Bitcoin Blake2b node. Nothing was built.";
+/// A recorded fork-only submission with no reconciler under the session.
+pub const UNIFIED_RECONCILE_UNAVAILABLE: &str = "This split's single-step sweep was already sent or may have been. Its status can't be checked with Connect right now, so nothing was rebuilt or sent. Try again.";
 /// #654 F2: no D4 fee at the review.
 pub const FEE_UNAVAILABLE_AT_REVIEW: &str = "Connect has no Bitcoin Blake2b fee estimate right now, so the signed sweep's fee can't be checked. Nothing was recorded or sent; review it again shortly.";
 /// #654 F2: the signed rate is below the fresh D4 estimate.
 pub const FEE_BELOW_ESTIMATE: &str = "The signed sweep pays less than Connect's current Bitcoin Blake2b fee estimate, so it might not confirm. Nothing was recorded or sent. Enter the recovery phrases again to build and sign it at the current fee.";
 /// The node route's privacy note on the review.
 pub const UNIFIED_NODE_PRIVACY: &str = "The sweep will be sent through this Vault's own Bitcoin node. That node, which may be a remote one you configured, learns the transaction and this computer's network address before it relays it.";
+/// An abandon of a fork-only record refused with `Conflict`.
+pub const FORK_ONLY_ABANDON: &str = "This is a single-step Bitcoin Blake2b split, which can't be abandoned like a two-step split. Open it again to continue it or close it from its own screen.";
+/// The close of an unsubmitted record.
+pub const CLOSE_UNSUBMITTED: &str = "No sweep of this split was ever sent, so it can be closed without a check. Closing keeps its record on this device, and a new split of this wallet stays refused until that record is reset.";
+/// The close of a submitted record, after its check.
+pub const CLOSE_CHECKED: &str = "Bitcoin Blake2b shows neither this sweep nor any spend of its coins. Closing keeps its record, with the signed sweep, on this device, and a new split of this wallet stays refused until that record is reset.";
+/// The close check found the sweep.
+pub const SWEEP_SEEN: &str = "Bitcoin Blake2b shows this sweep, so it left and this split can't be closed. It stays tracked here.";
+/// The close check found a coin spent.
+pub const COIN_SPENT_ON_BTCB2: &str = "A coin of this split is no longer unspent on Bitcoin Blake2b, possibly spent by this sweep. This split can't be closed; it stays tracked here.";
+
 // #568 B4b-3c (Robert, on #660, Reviewer-660661e D2): the typed seed text
 // lives in its own private module, so its `Zeroizing` field is private to
 // that module's impl and nothing here can read or copy it except through
@@ -132,6 +157,8 @@ pub enum UnifiedStage {
     Review,
     /// A submission may exist: reconcile only.
     Submitted,
+    /// Restarted after a recorded submission: reconcile, or close.
+    Reconcile,
 }
 
 /// Single-step intents, inside [`super::SplitMessage::Unified`].
@@ -146,8 +173,28 @@ pub enum UnifiedMessage {
     Review,
     Confirm,
     Reconcile,
+    CheckClose,
+    ConfirmClose,
     /// Leave the single step: clear the seeds and drop the route.
     Cancel,
+}
+
+/// What a fork-only journal recorded, as a restart read it: what the close
+/// rests on. It grants nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnifiedRecord {
+    /// The recorded sweep's own txid, once its submission was recorded.
+    pub sweep: Option<Txid>,
+    /// The coins the sweep spends.
+    pub claimed: Vec<OutPoint>,
+}
+impl UnifiedRecord {
+    pub(super) fn of(controller: &Controller) -> Self {
+        Self {
+            sweep: controller.recorded_fork_submission().map(|s| s.txid()),
+            claimed: controller.plan().claimed_prevouts,
+        }
+    }
 }
 
 /// What the review screen shows. A display copy only.
@@ -182,6 +229,17 @@ pub trait UnifiedFlow: Send {
     ) -> Result<TransactionObservation, Step2Refusal>;
 }
 
+/// After a recorded fork-only submission: reconcile only.
+#[async_trait]
+pub trait UnifiedRecon: Send {
+    fn revoke_handle(&self) -> RevokeHandle;
+    fn recorded_outcome(&self) -> Option<Outcome>;
+    async fn reconcile(
+        &mut self,
+        context: &Context,
+    ) -> Result<TransactionObservation, Step2Refusal>;
+}
+
 /// Everything a single-step coordinator is opened with.
 pub struct UnifiedOpen {
     pub directory: PathBuf,
@@ -198,8 +256,16 @@ pub trait UnifiedPort: Send + Sync {
     fn context(&self) -> Context;
     /// As [`step2::Step2Port::identity`]; no daemon reads as 0.
     fn identity(&self) -> PortIdentity;
-    /// A new coordinator. Blocking: callers use `spawn_blocking`.
-    fn open(&self, open: UnifiedOpen) -> Result<Box<dyn UnifiedFlow>, Step2Refusal>;
+    /// A new coordinator, or (`resume`) an unsubmitted record's. Blocking:
+    /// callers use `spawn_blocking`.
+    fn open(&self, open: UnifiedOpen, resume: bool) -> Result<Box<dyn UnifiedFlow>, Step2Refusal>;
+    /// The reconciler of a recorded submission. Blocking.
+    fn open_reconciler(
+        &self,
+        directory: PathBuf,
+        target_cube: String,
+        digest: sha256::Hash,
+    ) -> Result<Box<dyn UnifiedRecon>, Step2Refusal>;
 }
 
 /// Copy for a seed refusal. None names a fingerprint, and none repeats what
@@ -335,6 +401,157 @@ pub async fn preconditions(
         coins: authenticated.coins,
         fork_height: window.fork_height,
     })
+}
+
+fn journal_refusal(error: claim_workflow::Error) -> Refusal {
+    Refusal::retry(step1::describe(claim_coordinator::Error::Journal(error)))
+}
+
+/// Restart of an unsubmitted fork-only record: read it, authenticate its
+/// coins afresh and hand back what the coordinator is reopened with; it
+/// rebuilds the recorded sweep exactly and revalidates it.
+pub async fn restore(
+    connect: &dyn SplitConnect,
+    directory: PathBuf,
+    target_cube: String,
+    digest: sha256::Hash,
+) -> Result<UnifiedOpen, Refusal> {
+    let identity = claim_workflow::split_identity(target_cube.clone(), digest);
+    let (record, claimed) = {
+        let controller = Controller::reopen_settling(&directory, &identity, connect.context())
+            .await
+            .map_err(journal_refusal)?;
+        let record = controller
+            .recorded_split()
+            .map_err(journal_refusal)?
+            .filter(|record| record.kind == claim_workflow::SplitKind::Unified)
+            .ok_or_else(|| Refusal::final_("The journal here is not a single-step split."))?;
+        if controller.recorded_fork_submission().is_some() {
+            return Err(Refusal::final_(UNIFIED_RECONCILE_UNAVAILABLE));
+        }
+        (record, controller.plan().claimed_prevouts)
+        // The controller, and the journal lock, end here.
+    };
+    let source = record
+        .source
+        .ok_or_else(|| Refusal::final_(step1::COMPLETED))?;
+    if source.digest() != digest || record.source_digest != digest {
+        return Err(Refusal::final_(
+            "The split journal is in the wrong directory.",
+        ));
+    }
+    let window = connect.window().await.map_err(|reason| {
+        Refusal::retry(format!(
+            "Couldn't read Bitcoin Blake2b's status from Connect ({reason})."
+        ))
+    })?;
+    if window.fork_height != record.fork_height {
+        return Err(Refusal::final_(step1::STALE_ANCHOR));
+    }
+    let (recorded, _) = step1::resolve_outpoints(connect.evidence(), &source, &claimed).await?;
+    let authenticated = authenticate_outpoints(
+        connect.evidence(),
+        &recorded,
+        record.fork_height,
+        MAX_EVIDENCE_AGE_SECONDS,
+    )
+    .await
+    .map_err(step1::evidence_refusal)?;
+    Ok(UnifiedOpen {
+        directory,
+        target_cube,
+        source,
+        coins: authenticated.coins,
+        fork_height: record.fork_height,
+    })
+}
+
+fn fresh(evidence: &dyn SplitEvidenceSource, observed_at: i64) -> bool {
+    evidence
+        .now()
+        .checked_sub(observed_at)
+        .is_some_and(|age| (0..=MAX_EVIDENCE_AGE_SECONDS).contains(&age))
+}
+fn unavailable(kind: FailureKind) -> Refusal {
+    Refusal::retry(format!(
+        "Connect couldn't check Bitcoin Blake2b for this split ({kind:?}), so it can't be closed yet. This is not a sign that the sweep left or that a coin was spent. Try again later."
+    ))
+}
+async fn sweep_absent(evidence: &dyn SplitEvidenceSource, sweep: Txid) -> Result<(), Refusal> {
+    let seen = evidence
+        .transaction(ChainId::BitcoinBlake2b, sweep)
+        .await
+        .map_err(unavailable)?;
+    if !fresh(evidence, seen.observed_at()) {
+        return Err(unavailable(FailureKind::Stale));
+    }
+    if *seen.value() != TransactionObservation::Absent {
+        return Err(Refusal::final_(SWEEP_SEEN));
+    }
+    Ok(())
+}
+
+/// C6: before a submitted fork-only record may be closed, fresh reads must
+/// show, in this order: the recorded sweep absent from BTCB2 (a read keyed
+/// by its own txid); every claimed coin among its address's BTCB2 unspent
+/// outputs (the address from its previous transaction, checked against its
+/// txid); and the sweep absent again. Anything else refuses and the
+/// journal is kept. There is no step 1 to check.
+pub async fn check_close(
+    connect: &dyn SplitConnect,
+    record: &UnifiedRecord,
+) -> Result<(), Refusal> {
+    let sweep = record
+        .sweep
+        .ok_or_else(|| Refusal::final_(CLOSE_UNSUBMITTED))?;
+    let evidence = connect.evidence();
+    sweep_absent(evidence, sweep).await?;
+    for outpoint in &record.claimed {
+        let previous = evidence
+            .previous_transaction(ChainId::Bitcoin, outpoint.txid)
+            .await
+            .map_err(unavailable)?;
+        let address = (previous.compute_txid() == outpoint.txid)
+            .then(|| usize::try_from(outpoint.vout).ok())
+            .flatten()
+            .and_then(|vout| previous.output.get(vout))
+            .and_then(|output| Address::from_script(&output.script_pubkey, Network::Bitcoin).ok())
+            .ok_or_else(|| Refusal::final_(step1::UNIDENTIFIED))?;
+        let unspent = evidence
+            .unspent_outputs(ChainId::BitcoinBlake2b, &address.to_string())
+            .await
+            .map_err(unavailable)?;
+        if !fresh(evidence, unspent.observed_at()) {
+            return Err(unavailable(FailureKind::Stale));
+        }
+        if !unspent.value().contains(outpoint) {
+            return Err(Refusal::final_(COIN_SPENT_ON_BTCB2));
+        }
+    }
+    sweep_absent(evidence, sweep).await
+}
+
+/// The abandon path's copy for a journal refusal: a `Conflict` on a
+/// fork-only record names the single-step route. Blocking (it reads the
+/// journal again).
+pub(super) fn abandon_refusal(
+    directory: &Path,
+    target_cube: &str,
+    digest: sha256::Hash,
+    context: Context,
+    error: claim_workflow::Error,
+) -> String {
+    if matches!(error, claim_workflow::Error::Conflict) {
+        let identity = claim_workflow::split_identity(target_cube.to_owned(), digest);
+        let unified = Controller::reopen_settling_blocking(directory, &identity, context)
+            .ok()
+            .and_then(|controller| controller.recorded_split().ok().flatten())
+            .is_some_and(|record| record.kind == claim_workflow::SplitKind::Unified);
+        if unified {
+            return FORK_ONLY_ABANDON.to_string();
+        }
+    }
+    format!("The split could not be abandoned ({error:?}).")
 }
 
 /// What the driver needs from a single-step coordinator: the production
@@ -566,9 +783,31 @@ impl<C: UnifiedCore + 'static> UnifiedFlow for UnifiedDriver<C> {
     }
 }
 
-/// The production unified port: one Connect session and the target
-/// Vault's daemon on a route the sweep can be sent through (admitted again
-/// at every open, as for step 2).
+struct ReconDriver(UnifiedReconciler);
+#[async_trait]
+impl UnifiedRecon for ReconDriver {
+    fn revoke_handle(&self) -> RevokeHandle {
+        let revoker = self.0.revoker();
+        Arc::new(move || revoker.revoke())
+    }
+    fn recorded_outcome(&self) -> Option<Outcome> {
+        self.0.recorded_outcome()
+    }
+    async fn reconcile(
+        &mut self,
+        context: &Context,
+    ) -> Result<TransactionObservation, Step2Refusal> {
+        self.0
+            .reconcile_sweep(context)
+            .await
+            .map(|reconciled| reconciled.sweep)
+            .map_err(describe_check)
+    }
+}
+
+/// The production unified port: one Connect session and, for a
+/// coordinator, the target Vault's daemon on a route the sweep can be sent
+/// through (admitted again at every open, as for step 2).
 pub struct ProductionUnified {
     session: ConnectSession,
     generation: watch::Receiver<u64>,
@@ -578,7 +817,7 @@ pub struct ProductionUnified {
 }
 impl ProductionUnified {
     /// Refused without an account, for an unusable origin, or after the
-    /// generation moved. Without a daemon every open refuses.
+    /// generation moved. Without a daemon it reconciles only.
     pub fn new(
         session: ConnectSession,
         generation: watch::Receiver<u64>,
@@ -615,7 +854,7 @@ impl UnifiedPort for ProductionUnified {
                 .map_or(0, |daemon| Arc::as_ptr(daemon) as *const () as usize),
         }
     }
-    fn open(&self, open: UnifiedOpen) -> Result<Box<dyn UnifiedFlow>, Step2Refusal> {
+    fn open(&self, open: UnifiedOpen, resume: bool) -> Result<Box<dyn UnifiedFlow>, Step2Refusal> {
         let daemon = self
             .daemon
             .clone()
@@ -638,20 +877,33 @@ impl UnifiedPort for ProductionUnified {
             coins,
             fork_height,
         } = open;
-        // The journal is created only at confirmation (U3); its private
-        // directory may be made now.
-        claim_workflow::prepare_directory(&directory)
-            .map_err(|error| describe_check(claim_coordinator::Error::Journal(error)))?;
-        let coordinator = UnifiedCoordinator::new(
-            &directory,
-            target_cube,
-            source,
-            coins,
-            fork_height,
-            production,
-            transport,
-            CHECK_POLICY,
-        )
+        let coordinator = if resume {
+            UnifiedCoordinator::resume(
+                &directory,
+                target_cube,
+                source,
+                coins,
+                fork_height,
+                production,
+                transport,
+                CHECK_POLICY,
+            )
+        } else {
+            // The journal is created only at confirmation (U3); its private
+            // directory may be made now.
+            claim_workflow::prepare_directory(&directory)
+                .map_err(|error| describe_check(claim_coordinator::Error::Journal(error)))?;
+            UnifiedCoordinator::new(
+                &directory,
+                target_cube,
+                source,
+                coins,
+                fork_height,
+                production,
+                transport,
+                CHECK_POLICY,
+            )
+        }
         .map_err(describe_check)?;
         Ok(Box::new(UnifiedDriver::new(LiveCore {
             coordinator,
@@ -659,6 +911,22 @@ impl UnifiedPort for ProductionUnified {
             fees: split_fees::btcb2_fee_source(Some(self.session.client.clone())),
             review: None,
         })))
+    }
+    fn open_reconciler(
+        &self,
+        directory: PathBuf,
+        target_cube: String,
+        digest: sha256::Hash,
+    ) -> Result<Box<dyn UnifiedRecon>, Step2Refusal> {
+        let reconciler = UnifiedReconciler::resume(
+            &directory,
+            target_cube,
+            digest,
+            step2::fork_production(&self.session, self.expected, &self.generation)?,
+            CHECK_POLICY,
+        )
+        .map_err(describe_check)?;
+        Ok(Box::new(ReconDriver(reconciler)))
     }
 }
 
@@ -669,6 +937,14 @@ impl fmt::Debug for Flow {
         f.write_str("UnifiedFlow")
     }
 }
+/// A reconciler in transit.
+pub struct Recon(pub Box<dyn UnifiedRecon>);
+impl fmt::Debug for Recon {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("UnifiedRecon")
+    }
+}
+
 /// Results of the single-step tasks, inside [`SplitEvent::Unified`].
 #[derive(Debug)]
 pub enum UnifiedEvent {
@@ -685,6 +961,9 @@ pub enum UnifiedEvent {
     Reviewed(Flow, Result<SweepReviewView, Step2Refusal>),
     Submitted(Flow, Result<Outcome, Step2Refusal>),
     Reconciled(Flow, Result<TransactionObservation, Step2Refusal>),
+    ReconOpened(Result<Recon, Step2Refusal>),
+    ReconReconciled(Recon, Result<TransactionObservation, Step2Refusal>),
+    CloseChecked(Result<(), Refusal>),
 }
 
 /// The panel's single-step state.
@@ -694,6 +973,7 @@ pub struct UnifiedState {
     /// The route a started panel took.
     route: Option<Route>,
     flow: Option<Box<dyn UnifiedFlow>>,
+    recon: Option<Box<dyn UnifiedRecon>>,
     revoke: Option<RevokeHandle>,
     /// The seeds entered so far; `None` while a task holds them.
     seeds: Option<SeedSet>,
@@ -705,8 +985,13 @@ pub struct UnifiedState {
     review: Option<SweepReviewView>,
     outcome: Option<Outcome>,
     seen: Option<TransactionObservation>,
+    /// What this session's last reconcile saw; the close rests on it.
+    seen_here: Option<TransactionObservation>,
+    /// The fork-only record a restart read (the close's data).
+    record: Option<UnifiedRecord>,
     /// The wallet signed for (public descriptors).
     source: Option<SplitSource>,
+    close_checked: bool,
     /// The source digest and directory this route's journal is created in.
     journal: Option<(sha256::Hash, PathBuf)>,
 }
@@ -752,12 +1037,21 @@ impl UnifiedState {
     pub fn seen(&self) -> Option<TransactionObservation> {
         self.seen
     }
+    pub fn record(&self) -> Option<&UnifiedRecord> {
+        self.record.as_ref()
+    }
     pub fn has_port(&self) -> bool {
         self.port.is_some()
     }
     fn engaged(&self) -> bool {
-        self.flow.is_some() || self.revoke.is_some()
+        self.flow.is_some() || self.recon.is_some() || self.revoke.is_some()
     }
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs() as i64)
 }
 
 impl SplitPanel {
@@ -803,6 +1097,36 @@ impl SplitPanel {
                 .is_some_and(SeedSet::is_complete)
     }
 
+    /// C6, submitted: from the reconcile-only stage, once a reconcile under
+    /// this session saw the sweep absent.
+    pub fn can_check_unified_close(&self) -> bool {
+        self.stage == Stage::Unified(UnifiedStage::Reconcile)
+            && self.connect.is_some()
+            && self
+                .unified
+                .record
+                .as_ref()
+                .is_some_and(|r| r.sweep.is_some())
+            && self.unified.seen_here == Some(TransactionObservation::Absent)
+    }
+
+    /// C6: an unsubmitted record closes without a check; a submitted one
+    /// only after [`Self::can_check_unified_close`] and its check passed.
+    pub fn can_confirm_unified_close(&self) -> bool {
+        let Some(record) = self.unified.record.as_ref() else {
+            return false;
+        };
+        self.connect.is_some()
+            && self.journal.is_some()
+            && match record.sweep {
+                None => matches!(
+                    self.stage,
+                    Stage::Unified(UnifiedStage::EnterSeeds) | Stage::Refused(_)
+                ),
+                Some(_) => self.can_check_unified_close() && self.unified.close_checked,
+            }
+    }
+
     /// Revoke and drop every single-step handle and scrub the seeds; called
     /// from [`SplitPanel::revoke`].
     pub(super) fn revoke_unified(&mut self) {
@@ -810,13 +1134,20 @@ impl SplitPanel {
             revoke();
         }
         self.unified.flow = None;
+        self.unified.recon = None;
         self.unified.review = None;
+        self.unified.seen_here = None;
+        self.unified.close_checked = false;
         self.unified.scrub();
     }
 
     fn bind_flow(&mut self, flow: Box<dyn UnifiedFlow>) {
         self.unified.revoke = Some(flow.revoke_handle());
         self.unified.flow = Some(flow);
+    }
+    fn bind_unified_recon(&mut self, recon: Box<dyn UnifiedRecon>) {
+        self.unified.revoke = Some(recon.revoke_handle());
+        self.unified.recon = Some(recon);
     }
     fn take_flow(&mut self, work: Work) -> Option<(Box<dyn UnifiedFlow>, Context)> {
         let context = self.connect.as_ref()?.context();
@@ -826,6 +1157,56 @@ impl SplitPanel {
     }
     fn unified_event(seq: u64, event: UnifiedEvent) -> SplitEvent {
         SplitEvent::Unified(seq, event)
+    }
+
+    /// Restart found a fork-only record (`step2::Restart::Unified`).
+    pub(super) fn restart_unified(&mut self, record: UnifiedRecord) -> Task<Message> {
+        let (Some((digest, directory)), Some(connect)) =
+            (self.journal.clone(), self.connect.clone())
+        else {
+            self.stage = Stage::NeedsSession;
+            return Task::none();
+        };
+        let submitted = record.sweep.is_some();
+        self.unified.record = Some(record);
+        let Some(port) = self.unified.port.clone() else {
+            self.stage = Stage::Refused(Refusal::retry(if submitted {
+                UNIFIED_RECONCILE_UNAVAILABLE
+            } else {
+                UNIFIED_NEEDS_VAULT
+            }));
+            return Task::none();
+        };
+        let target = self.target_cube.clone();
+        if submitted {
+            self.stage = Stage::Working(Work::SweepOpening);
+            return self.spawn(
+                async move {
+                    tokio::task::spawn_blocking(move || {
+                        port.open_reconciler(directory, target, digest).map(Recon)
+                    })
+                    .await
+                    .map_err(|_| {
+                        Step2Refusal::retry("Reopening the split was interrupted. Try again.")
+                    })?
+                },
+                |seq, result| Self::unified_event(seq, UnifiedEvent::ReconOpened(result)),
+            );
+        }
+        self.stage = Stage::Working(Work::SweepOpening);
+        self.spawn(
+            async move {
+                let open = restore(&*connect, directory, target, digest)
+                    .await
+                    .map_err(|refusal| Step2Refusal {
+                        reason: refusal.reason,
+                        retry: refusal.retry,
+                        recovery: Step2Recovery::None,
+                    })?;
+                open_flow(port, open, true).await
+            },
+            |seq, result| Self::unified_event(seq, UnifiedEvent::Opened(result)),
+        )
     }
 
     pub(super) fn update_unified(&mut self, message: UnifiedMessage) -> Task<Message> {
@@ -1002,6 +1383,78 @@ impl SplitPanel {
                     },
                 )
             }
+            UnifiedMessage::Reconcile if self.stage == Stage::Unified(UnifiedStage::Reconcile) => {
+                let (Some(context), Some(mut recon)) = (
+                    self.connect.as_ref().map(|c| c.context()),
+                    self.unified.recon.take(),
+                ) else {
+                    return Task::none();
+                };
+                self.unified.close_checked = false;
+                self.stage = Stage::Working(Work::SweepReconciling);
+                self.spawn(
+                    async move {
+                        let result = recon.reconcile(&context).await;
+                        (Recon(recon), result)
+                    },
+                    |seq, (recon, result)| {
+                        Self::unified_event(seq, UnifiedEvent::ReconReconciled(recon, result))
+                    },
+                )
+            }
+            UnifiedMessage::CheckClose if self.can_check_unified_close() => {
+                let (Some(connect), Some(record)) =
+                    (self.connect.clone(), self.unified.record.clone())
+                else {
+                    return Task::none();
+                };
+                self.unified.close_checked = false;
+                let back = std::mem::replace(&mut self.stage, Stage::Working(Work::CheckingClose));
+                self.resume_stage = Some(back);
+                self.spawn(
+                    async move { check_close(&*connect, &record).await },
+                    |seq, result| Self::unified_event(seq, UnifiedEvent::CloseChecked(result)),
+                )
+            }
+            UnifiedMessage::ConfirmClose if self.can_confirm_unified_close() => {
+                let (Some(connect), Some(record), Some((digest, directory))) = (
+                    self.connect.clone(),
+                    self.unified.record.clone(),
+                    self.journal.clone(),
+                ) else {
+                    return Task::none();
+                };
+                // Release every handle on the journal, and the seeds, first.
+                self.revoke_unified();
+                let target = self.target_cube.clone();
+                let ended = Arc::new(AtomicBool::new(false));
+                self.ending = Some(ended.clone());
+                self.stage = Stage::Working(Work::Closing);
+                self.spawn(
+                    async move {
+                        if record.sweep.is_some() {
+                            check_close(&*connect, &record)
+                                .await
+                                .map_err(|refusal| refusal.reason)?;
+                        }
+                        let context = connect.context();
+                        tokio::task::spawn_blocking(move || {
+                            step2::close_unified(
+                                &directory,
+                                &target,
+                                digest,
+                                context,
+                                &record,
+                                now_secs(),
+                                &ended,
+                            )
+                        })
+                        .await
+                        .map_err(|_| "Closing was interrupted.".to_string())?
+                    },
+                    SplitEvent::Closed,
+                )
+            }
             UnifiedMessage::Cancel
                 if matches!(
                     self.stage,
@@ -1056,7 +1509,7 @@ impl SplitPanel {
                         retry: refusal.retry,
                         recovery: Step2Recovery::None,
                     })?;
-                open_flow(port, open).await
+                open_flow(port, open, false).await
             },
             |seq, result| Self::unified_event(seq, UnifiedEvent::Opened(result)),
         )
@@ -1131,8 +1584,7 @@ impl SplitPanel {
                 let recorded = flow.recorded_outcome();
                 self.bind_flow(flow);
                 if recorded.is_some() || result.is_ok() {
-                    // The journal exists now: the panel's next session reads
-                    // it (reopening it by kind is B4b-3c part 2).
+                    // The journal exists now: a restart reconciles it.
                     self.journal = self.journal.clone().or(self.unified.journal.clone());
                 }
                 match result {
@@ -1159,6 +1611,33 @@ impl SplitPanel {
                 self.stage = Stage::Unified(UnifiedStage::Submitted);
                 Task::none()
             }
+            UnifiedEvent::ReconOpened(Ok(Recon(recon))) => {
+                self.unified.outcome = recon.recorded_outcome();
+                self.bind_unified_recon(recon);
+                self.stage = Stage::Unified(UnifiedStage::Reconcile);
+                Task::none()
+            }
+            UnifiedEvent::ReconOpened(Err(refusal)) => {
+                self.stage = Stage::Refused(to_refusal(refusal));
+                Task::none()
+            }
+            UnifiedEvent::ReconReconciled(Recon(recon), result) => {
+                self.bind_unified_recon(recon);
+                self.reconciled_unified(result);
+                self.stage = Stage::Unified(UnifiedStage::Reconcile);
+                Task::none()
+            }
+            UnifiedEvent::CloseChecked(result) => {
+                match result {
+                    Ok(()) => self.unified.close_checked = true,
+                    Err(refusal) => self.notice = Some(refusal.reason),
+                }
+                self.stage = self
+                    .resume_stage
+                    .take()
+                    .unwrap_or(Stage::Unified(UnifiedStage::Reconcile));
+                Task::none()
+            }
         }
     }
 
@@ -1167,8 +1646,12 @@ impl SplitPanel {
             Ok(seen) => {
                 self.notice = None;
                 self.unified.seen = Some(seen);
+                self.unified.seen_here = Some(seen);
             }
-            Err(refusal) => self.notice = Some(refusal.reason),
+            Err(refusal) => {
+                self.unified.seen_here = None;
+                self.notice = Some(refusal.reason);
+            }
         }
     }
 
@@ -1188,7 +1671,8 @@ impl SplitPanel {
         self.stage = Stage::Unified(UnifiedStage::EnterSeeds);
     }
 
-    /// The wallet the route signs for: the started panel's scan.
+    /// The wallet the route signs for: the started panel's scan, or the
+    /// record a restart reopened.
     fn unified_source(&self) -> Option<SplitSource> {
         self.unified.source.clone()
     }
@@ -1210,12 +1694,13 @@ fn to_refusal(refusal: Step2Refusal) -> Refusal {
 async fn open_flow(
     port: Arc<dyn UnifiedPort>,
     open: UnifiedOpen,
+    resume: bool,
 ) -> Result<(Flow, SeedSet, SplitSource), Step2Refusal> {
     tokio::task::spawn_blocking(move || {
         let seeds = SeedSet::new(&open.source)
             .map_err(|error| Step2Refusal::final_(describe_seed(&error)))?;
         let source = open.source.clone();
-        let flow = port.open(open)?;
+        let flow = port.open(open, resume)?;
         Ok((Flow(flow), seeds, source))
     })
     .await

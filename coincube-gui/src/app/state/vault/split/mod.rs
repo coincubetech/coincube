@@ -44,9 +44,9 @@
 //! two steps above, or, for a wallet whose descriptors allow it, one
 //! fork-only sweep on Bitcoin Blake2b signed with the wallet's seeds
 //! (Protected, never replayable on Bitcoin). The seeds live only in
-//! zeroizing memory for that sweep, which is sent once and never resent. A
-//! hardware wallet can't sign the single step (P1). Reopening a fork-only
-//! journal by its kind, and closing it, are B4b-3c part 2.
+//! zeroizing memory for that sweep; a fork-only journal is reopened by its
+//! kind and reconciled or closed, never resent. A hardware wallet can't
+//! sign the single step (P1).
 //!
 //! Apart from that route, the panel owns no keys and never signs:
 //! signatures come back in PSBT files (D6) or from a connected device.
@@ -276,6 +276,8 @@ pub enum Restarted {
     Resend(Coord),
     /// #625 F2: closed in its step-2 dead end.
     Closed,
+    /// #568 B4b-3c: a fork-only record, opened by kind.
+    Unified(unified::UnifiedRecord),
 }
 /// A step-2 handoff refused, with the preparation when still usable.
 pub type FinishResult = Result<Coord, (step2::Step2Refusal, Option<Prep>)>;
@@ -883,6 +885,7 @@ impl SplitPanel {
                             }
                             step2::Restart::Resend(coord) => Restarted::Resend(Coord(coord)),
                             step2::Restart::Closed => Restarted::Closed,
+                            step2::Restart::Unified(record) => Restarted::Unified(record),
                         })
                 },
                 SplitEvent::Restarted,
@@ -1321,16 +1324,16 @@ impl SplitPanel {
                             .map_err(|refusal| refusal.reason)?;
                         let context = connect.context();
                         tokio::task::spawn_blocking(move || {
-                            step1::abandon(&directory, &target, digest, context, &ended).map_err(
-                                |error| match error {
+                            step1::abandon(&directory, &target, digest, context.clone(), &ended)
+                                .map_err(|error| match error {
                                     crate::services::claim_workflow::Error::Revoked => {
                                         step1::ENDED_BEFORE_ABANDON.to_string()
                                     }
-                                    error => {
-                                        format!("The split could not be abandoned ({error:?}).")
-                                    }
-                                },
-                            )
+                                    // B4b-3c: a fork-only record names its route.
+                                    error => unified::abandon_refusal(
+                                        &directory, &target, digest, context, error,
+                                    ),
+                                })
                         })
                         .await
                         .map_err(|_| "Abandoning was interrupted.".to_string())?

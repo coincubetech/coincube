@@ -754,7 +754,7 @@ pub fn evidence_refusal(error: EvidenceError) -> Refusal {
 /// Where each claimed prevout pays in `source`: the previous transaction is
 /// fetched (txid-checked) and its script matched against both branches up to
 /// the scanner's address bound. CPU-bound search (#614 G1): off the UI thread.
-async fn resolve_outpoints(
+pub(super) async fn resolve_outpoints(
     evidence: &dyn SplitEvidenceSource,
     source: &SplitSource,
     claimed: &[OutPoint],

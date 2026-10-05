@@ -113,6 +113,10 @@ pub(super) struct Chains {
     /// Faults on Bitcoin transaction-status and unspent-output reads.
     pub(super) status_fault: Mutex<Option<Fault>>,
     pub(super) utxo_fault: Mutex<Option<Fault>>,
+    pub(super) b2_tx_fault: Mutex<Option<Fault>>,
+    pub(super) b2_utxo_fault: Mutex<Option<Fault>>,
+    pub(super) b2_reads: AtomicUsize,
+    pub(super) b2_appear_after: Mutex<Option<usize>>,
 }
 
 impl Chains {
@@ -124,6 +128,10 @@ impl Chains {
             utxos: Mutex::new(HashMap::new()),
             status_fault: Mutex::new(None),
             utxo_fault: Mutex::new(None),
+            b2_tx_fault: Mutex::new(None),
+            b2_utxo_fault: Mutex::new(None),
+            b2_reads: AtomicUsize::new(0),
+            b2_appear_after: Mutex::new(None),
         };
         for coin in coins {
             let block = BlockRef {
@@ -188,16 +196,29 @@ impl SplitEvidenceSource for Chains {
         chain: ChainId,
         txid: Txid,
     ) -> Result<FreshRead<TransactionObservation>, FailureKind> {
-        let value = self
+        let mut value = self
             .status
             .lock()
             .unwrap()
             .get(&(chain, txid))
             .copied()
             .unwrap_or(TransactionObservation::Absent);
-        let fault = (chain == ChainId::Bitcoin)
-            .then(|| *self.status_fault.lock().unwrap())
-            .flatten();
+        if chain == ChainId::BitcoinBlake2b {
+            let n = self.b2_reads.fetch_add(1, Ordering::SeqCst) + 1;
+            if self
+                .b2_appear_after
+                .lock()
+                .unwrap()
+                .is_some_and(|after| n > after)
+            {
+                value = TransactionObservation::Unconfirmed { txid };
+            }
+        }
+        let fault = if chain == ChainId::Bitcoin {
+            *self.status_fault.lock().unwrap()
+        } else {
+            *self.b2_tx_fault.lock().unwrap()
+        };
         faulted(fault, chain, value)
     }
     async fn hash_at_height(
@@ -232,9 +253,11 @@ impl SplitEvidenceSource for Chains {
             .get(&(chain, address.to_owned()))
             .cloned()
             .unwrap_or_default();
-        let fault = (chain == ChainId::Bitcoin)
-            .then(|| *self.utxo_fault.lock().unwrap())
-            .flatten();
+        let fault = if chain == ChainId::Bitcoin {
+            *self.utxo_fault.lock().unwrap()
+        } else {
+            *self.b2_utxo_fault.lock().unwrap()
+        };
         faulted(fault, chain, set.into_iter().collect())
     }
 }
@@ -477,7 +500,7 @@ pub(super) struct Scan {
 }
 
 impl Scan {
-    fn new(shape: Shape) -> Self {
+    pub(super) fn new(shape: Shape) -> Self {
         let wallet = fixture::wallet(shape);
         let coins = fixture::shared_coins(&wallet);
         Self { wallet, coins }
@@ -563,7 +586,7 @@ async fn begin_two_step(panel: &mut SplitPanel) {
 }
 
 /// Fresh flow up to a recorded, unsubmitted step 1.
-async fn recorded(scan: &Scan, connect: &Arc<FakeConnect>, temp: &Temp) -> SplitPanel {
+pub(super) async fn recorded(scan: &Scan, connect: &Arc<FakeConnect>, temp: &Temp) -> SplitPanel {
     let mut panel = SplitPanel::start(TARGET.into(), temp.root(), scan.intent());
     panel.set_connect(Some(connect.clone() as Arc<dyn SplitConnect>));
     begin_two_step(&mut panel).await;
@@ -1713,14 +1736,30 @@ fn assert_split_ui_paths_do_no_blocking_work(checkout: fn(&str) -> String) {
             body(&unified, "    pub(super) fn apply_unified(", "    "),
         ),
         (
+            "restart_unified",
+            body(&unified, "    pub(super) fn restart_unified(", "    "),
+        ),
+        (
             "choose_seeds",
             body(&unified, "    fn choose_seeds(", "    "),
         ),
         ("open_flow", body(&unified, "async fn open_flow(", "")),
+        // Reviewer-661 F3: the abandon task's journal reopen (its fork-only
+        // copy reads the journal again).
+        ("update", body(&panel, "    pub fn update(", "    ")),
     ];
-    // B4b-3c: the seed set's derivation and signing, and the coordinator's
-    // open (its port admission and journal directory).
-    const UNIFIED_BLOCKING: [&str; 3] = ["seeds.add(", "flow.sign(", "port.open("];
+    // B4b-3c: the seed set's derivation and signing, the coordinator's and
+    // reconciler's opens (journal reads) and the close's write.
+    const UNIFIED_BLOCKING: [&str; 7] = [
+        "seeds.add(",
+        "flow.sign(",
+        "port.open(",
+        "open_reconciler(",
+        "close_unified(",
+        "abandon_refusal(",
+        "reopen_settling_blocking(",
+    ];
+    assert!(body(&panel, "    pub fn update(", "    ").contains("unified::abandon_refusal("));
     for (name, text) in ui {
         for token in BLOCKING.iter().chain(UNIFIED_BLOCKING.iter()) {
             // Every occurrence must sit inside a `spawn_blocking(...)`
