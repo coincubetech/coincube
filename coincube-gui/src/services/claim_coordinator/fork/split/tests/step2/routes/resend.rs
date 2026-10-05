@@ -140,13 +140,15 @@ struct Uncertain {
     preflight: usize,
 }
 /// Step 2 checked, built, signed, reviewed and confirmed over `daemon`; its
-/// intent is recorded, then the daemon refuses before any byte leaves.
+/// intent is recorded, then the daemon refuses before any byte leaves. The
+/// coordinator keeps [`wide_policy`], so load cannot expire its reviews (the
+/// resend review's expiry is tested with `expire_for_test`).
 async fn uncertain(
     daemon: &Refusing,
     node: Option<BitcoindConfig>,
     connect: &MockServer,
 ) -> Uncertain {
-    let s = Step2::new().await;
+    let s = Step2::with_policy(wide_policy()).await;
     let signed = s.signed_tx();
     let fee = s.preparation.step2.as_ref().unwrap().fee().to_sat();
     let preflight = mock_preflight(connect, &signed, true).await;
@@ -190,7 +192,8 @@ async fn uncertain(
 }
 
 /// Restart: step 1 rebuilt and its signed bytes verified, the claimed coins,
-/// and a transport for the target Vault at the Split's origin.
+/// and a transport for the target Vault at the Split's origin, under
+/// [`wide_policy`] as [`uncertain`]'s coordinator.
 async fn reopen(
     h: &Harness,
     coins: Vec<SplitCoin>,
@@ -207,7 +210,7 @@ async fn reopen(
         h.sender.subscribe(),
         Box::new(h.chains.clone()),
         transport,
-        policy(),
+        wide_policy(),
     )
     .await
 }
@@ -1058,8 +1061,11 @@ async fn split_step2_resend_records_each_attempt_before_its_one_send() {
 /// never asked.
 #[tokio::test(flavor = "multi_thread")]
 async fn split_step2_resend_on_the_node_route_stays_on_the_node() {
+    // One pooled httpmock server is both the node (JSON-RPC at `/`) and
+    // Connect (its Esplora paths): a test never waits for a second server
+    // while holding one (the pool deadlock under load; see `BitcoinPreflight`).
     let node = MockServer::start_async().await;
-    let connect = MockServer::start_async().await;
+    let connect = &node;
     let daemon = Refusing::new(Some(node_config(&node)), 1);
     // Construction and RFC 6979 signing are deterministic: this is the
     // step 2 the coordinator will hold.
@@ -1073,7 +1079,7 @@ async fn split_step2_resend_on_the_node_route_stays_on_the_node() {
         signed,
         preflight,
         ..
-    } = uncertain(&daemon, Some(node_config(&node)), &connect).await;
+    } = uncertain(&daemon, Some(node_config(&node)), connect).await;
     assert_eq!(signed, expected);
     let (txid, wtxid) = (signed.compute_txid(), signed.compute_wtxid());
     let review = coordinator
@@ -1101,7 +1107,7 @@ async fn split_step2_resend_on_the_node_route_stays_on_the_node() {
         )]
     );
     assert_eq!(
-        httpmock::Mock::new(preflight, &connect).hits_async().await,
+        httpmock::Mock::new(preflight, connect).hits_async().await,
         0,
         "Connect's preflight is never asked on the node route"
     );

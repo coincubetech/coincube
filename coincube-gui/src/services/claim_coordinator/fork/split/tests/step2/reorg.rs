@@ -10,19 +10,6 @@ use crate::services::{
     claim_workflow::{Reconfirmation, Step1Conflict},
 };
 
-/// The harness policy with the widest collection budget. Every review
-/// here is bounded by an evidence deadline (`evidence_deadline`): the
-/// budget, capped at 30 s, measured on the real monotonic clock. The
-/// harness's 2 s left a heavily loaded run (four test binaries of 16
-/// threads beside a cargo build) expiring reviews before their
-/// confirmation (`ExpiredEvidence`); 30 s outlasts any such run, and the
-/// expiry itself is tested with `expire_for_test`, not by waiting.
-fn wide_policy() -> CheckPolicy {
-    CheckPolicy {
-        collection_budget: claim_observation::MAX_COLLECTION_TIME,
-        ..policy()
-    }
-}
 /// Step 2 reviewed and submitted through the coordinator, which is then
 /// dropped: a journal with a recorded step-2 submission, and its txid.
 async fn submitted() -> (Harness, Txid) {
@@ -615,7 +602,12 @@ async fn split_step1_reconfirmation_review_is_one_use_expires_and_refuses_a_chan
         _server,
         ..
     } = submitted_over(true).await;
+    // Nothing sends or preflights on this journal again: release the
+    // transport's pooled mock server before the next `submitted_over` takes
+    // one (a test waiting for a server must hold none; see
+    // `BitcoinPreflight`).
     drop(coordinator);
+    drop(_server);
     let mut reconciler = reopen(&h, Box::new(view.clone()));
     // Revision 1: still in its recorded block.
     assert!(matches!(
@@ -1413,6 +1405,10 @@ async fn split_resend_completion_and_forget_are_refused_in_o1_to_o4() {
         .get("step2_resubmissions")
         .is_none());
     assert_eq!(sends.load(Ordering::SeqCst), 1);
+    // Done with this coordinator: release its transport's pooled mock server
+    // before the next `submitted_over` takes one (see `BitcoinPreflight`).
+    drop(coordinator);
+    drop(_server);
 
     // Completion and forget, on a restart's reconciler.
     let Submitted {

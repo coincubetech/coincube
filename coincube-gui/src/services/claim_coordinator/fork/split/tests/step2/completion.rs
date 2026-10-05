@@ -33,9 +33,10 @@ fn confirmed(txid: Txid, height: u64) -> TransactionObservation {
 }
 
 /// Step 2 reviewed and submitted through the coordinator, which is then
-/// dropped: a journal with a recorded step-2 submission, and its txid.
+/// dropped: a journal with a recorded step-2 submission, and its txid. The
+/// review's deadline comes from [`wide_policy`], so load cannot expire it.
 async fn submitted() -> (Harness, Txid) {
-    let s = Step2::new().await;
+    let s = Step2::with_policy(wide_policy()).await;
     let signed_tx = s.signed_tx();
     let (transport, _server, _, _) = transport(&s.h, &signed_tx, true).await;
     let (h, mut coordinator) = finish(s, transport);
@@ -47,8 +48,19 @@ async fn submitted() -> (Harness, Txid) {
     drop(coordinator);
     (h, signed_tx.compute_txid())
 }
-/// The journal reopened by the reconciler over `services`.
+/// The journal reopened by the reconciler over `services`, under
+/// [`wide_policy`]: its evidence and its reconcile's clearing deadline
+/// outlast a loaded run, so persisting, forgetting and clearing within one
+/// check never lapse.
 fn reopen(h: &Harness, services: Box<dyn SplitForkServices>) -> SplitStep2Reconciler {
+    reopen_with(h, services, wide_policy())
+}
+/// [`reopen`] under `policy`.
+fn reopen_with(
+    h: &Harness,
+    services: Box<dyn SplitForkServices>,
+    policy: CheckPolicy,
+) -> SplitStep2Reconciler {
     SplitStep2Reconciler::open(
         &h.temp.0,
         TARGET.into(),
@@ -56,7 +68,7 @@ fn reopen(h: &Harness, services: Box<dyn SplitForkServices>) -> SplitStep2Reconc
         context(),
         h.sender.subscribe(),
         services,
-        policy(),
+        policy,
     )
     .unwrap()
 }
@@ -422,22 +434,26 @@ async fn split_completion_evidence_dies_with_the_session() {
     let (root, target) = settings_root(&h).await;
     h.chains
         .edit(|view| view.on_btcb2 = vec![(txid, confirmed(txid, STEP2_HEIGHT))]);
-    let mut reconciler = reopen(&h, Box::new(h.chains.clone()));
     let before = std::fs::read(settings_path(&root)).unwrap();
 
-    // The deadline is the collection budget (2 s here) at most.
-    let evidence = minted(&mut reconciler).await;
+    // The deadline is the collection budget (the harness's 2 s here) at
+    // most. Only this reconciler keeps the short budget: every assertion on
+    // its evidence is a lapse, which load can only hasten.
+    let mut short = reopen_with(&h, Box::new(h.chains.clone()), policy());
+    let evidence = minted(&mut short).await;
     let deadline = evidence.not_after();
     assert!(deadline <= Instant::now() + Duration::from_secs(2));
     tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
     assert!(!evidence.is_live());
     assert!(evidence.persist(&root, &target).await.is_err());
     assert!(matches!(
-        evidence.forget(&mut reconciler, &context()),
+        evidence.forget(&mut short, &context()),
         Err(Error::ExpiredEvidence)
     ));
+    drop(short);
 
     // Superseded by a later check, a reconcile or a completion check.
+    let mut reconciler = reopen(&h, Box::new(h.chains.clone()));
     let earlier = minted(&mut reconciler).await;
     reconciler.reconcile_sweep(&context()).await.unwrap();
     assert!(!earlier.is_live());
