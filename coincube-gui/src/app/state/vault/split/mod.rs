@@ -548,6 +548,16 @@ pub struct SplitPanel {
     step2_resend: Option<step2::Step2ResendView>,
     /// #568 S4b, O1: the review of step 1's new block on screen.
     reconfirmation: Option<step2::ReconfirmationView>,
+    /// #658 P3-3: a review or acknowledgement of step 1's new block was
+    /// refused finally (S4-D4, past the RDTS margin): "Review step 1's new
+    /// block" is no longer offered under these handles.
+    reconfirmation_final: bool,
+    /// #568 B5c-1: the completion the target Cube's settings record for
+    /// this split (`split_from`), as the App read it when it found the
+    /// journal, or as this panel recorded or lost it since. A restart that
+    /// reopens the reconciler for the step 2 it names opens in Completed and
+    /// checks it (D17).
+    recorded_completion: Vec<step2::SplitCompletion>,
     step2_outcome: Option<Outcome>,
     step2_seen: Option<TransactionObservation>,
     /// What this session's last reconcile saw of step 2 on BTCB2. A
@@ -638,6 +648,8 @@ impl SplitPanel {
             step2_review: None,
             step2_resend: None,
             reconfirmation: None,
+            reconfirmation_final: false,
+            recorded_completion: Vec::new(),
             step2_outcome: None,
             step2_seen: None,
             step2_seen_here: None,

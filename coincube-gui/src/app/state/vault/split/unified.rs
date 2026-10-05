@@ -1686,6 +1686,18 @@ impl SplitPanel {
                         });
                     }
                 }
+                // #661 F4: the restart's record said no sweep was sent; one
+                // is recorded now, so no close offer may read it as
+                // unsubmitted.
+                if let (Some(record), Some(outcome)) =
+                    (self.unified.record.as_mut(), self.unified.outcome)
+                {
+                    record.sweep = Some(match outcome {
+                        Outcome::Recorded { txid }
+                        | Outcome::UpstreamAccepted { txid, .. }
+                        | Outcome::Uncertain { txid, .. } => txid,
+                    });
+                }
                 Task::none()
             }
             UnifiedEvent::Reconciled(Flow(flow), result) => {

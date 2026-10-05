@@ -77,6 +77,9 @@ struct Counts {
     reconfirmation_lifetime: Option<std::time::Duration>,
     reconfirmation_expired: bool,
     reconfirmation_held: bool,
+    /// #658 P3-3: the next acknowledgement's refusal (the review is used up
+    /// whatever the result).
+    refuse_acknowledgement: Option<Step2Refusal>,
 }
 /// O1 in the fakes: step 1 recorded at height 100, now three deep in 101.
 fn reconfirmation_blocks() -> (
@@ -125,6 +128,9 @@ fn confirm_reconfirmation(shared: &Shared) -> Result<(), Step2Refusal> {
         std::mem::take(&mut counts.reconfirmation_held),
         "an acknowledgement without its review"
     );
+    if let Some(refusal) = counts.refuse_acknowledgement.take() {
+        return Err(refusal);
+    }
     counts.reconfirmations += 1;
     Ok(())
 }
@@ -3589,6 +3595,15 @@ async fn reconfirmation_review_lapses_and_is_refused_past_the_rdts_margin() {
     assert!(panel.reconfirmation.is_none());
     assert_eq!(panel.notice(), Some(refusal.reason.as_str()));
     assert!(panel.step2_warning().is_some());
+    // #658 P3-3: the final refusal withdraws the offer; reading the journal
+    // again (new handles) offers it after a reconcile.
+    assert!(!panel.can_review_reconfirmation());
+    let task = panel.restart_step2(None);
+    drive(&mut panel, task).await;
+    shared.lock().unwrap().afters.push_back(remined);
+    let task = panel.update(SplitMessage::Step2Reconcile);
+    drive(&mut panel, task).await;
+    assert!(panel.can_review_reconfirmation());
 
     // A revocation drops a live review.
     let task = panel.update(SplitMessage::Step2ReviewReconfirmation);
@@ -3639,4 +3654,257 @@ async fn recon_port_change_during_an_o1_review_revokes_it() {
         assert!(panel.recon.is_none() && panel.reconfirmation.is_none());
         assert_eq!(panel.stage, Stage::NeedsSession);
     }
+}
+
+/// #568 B5c-1: what the target Cube's settings record of this split.
+fn split_from(digest: sha256::Hash, txid: Txid) -> SplitFromRecord {
+    SplitFromRecord {
+        descriptor_digest: digest,
+        completed_height: COMPLETED_HEIGHT,
+        step2_txid: txid,
+    }
+}
+/// A restart under the session's reconcile-only port, with the Cube's
+/// `split_from` records and the next D17 rechecks queued.
+async fn restarted_recorded(
+    journal: &Journal,
+    records: &[SplitFromRecord],
+    rechecks: Vec<Result<CompletionStanding, Step2Refusal>>,
+) -> (SplitPanel, Shared) {
+    let shared: Shared = Arc::default();
+    shared.lock().unwrap().recheck_results = rechecks.into();
+    let mut panel = SplitPanel::resume(
+        TARGET.into(),
+        journal.temp.0.parent().unwrap().to_path_buf(),
+        journal.digest(),
+        journal.temp.0.clone(),
+    );
+    panel.set_split_from(records);
+    panel.set_connect(Some(Arc::new(PanelConnect(shared.clone()))));
+    panel.set_recon_port(Some(Arc::new(PanelReconPort(shared.clone()))));
+    let task = panel.begin();
+    drive(&mut panel, task).await;
+    (panel, shared)
+}
+
+/// #568 B5c-1 (#656 inputs): a restart whose reconciler reopens the step 2
+/// the Cube's `split_from` records as completed opens in Completed with its
+/// history row, and checks it at once (D17): a standing completion stays,
+/// a lost one goes back to reconciling with its copy and is not reopened as
+/// completed by a later restart. A record of another step 2 or another
+/// source opens in Reconcile with no check, as before. A completion this
+/// panel recorded reopens in Completed after a restart in the same session.
+/// CF: the restart ignores `split_from` (always Reconcile).
+#[tokio::test(flavor = "multi_thread")]
+async fn restart_opens_a_recorded_completion_in_completed_and_checks_it() {
+    // A completed split's step 2 was seen on BTCB2: no dead end.
+    let journal = Journal::returned(true);
+    let step2_txid = Txid::from_byte_array([5; 32]);
+    let ours = split_from(journal.digest(), step2_txid);
+
+    let (panel, shared) =
+        restarted_recorded(&journal, std::slice::from_ref(&ours), Vec::new()).await;
+    assert_eq!(panel.stage, Stage::Step2(Step2Stage::Completed));
+    assert_eq!(
+        panel.completion(),
+        Some(&SplitCompletion::from(ours.clone()))
+    );
+    assert_eq!(shared.lock().unwrap().rechecks, 1, "checked at once (D17)");
+    assert!(panel.recon.is_some() && !panel.can_complete());
+    let labels = rendered_labels(&panel).await;
+    assert!(labels.iter().any(|l| l == SPLIT_COMPLETED), "{:?}", labels);
+    assert!(
+        labels
+            .iter()
+            .any(|l| *l == SplitCompletion::from(ours.clone()).history_row()),
+        "{:?}",
+        labels
+    );
+
+    for (case, records) in [
+        ("no record", Vec::new()),
+        (
+            "another step 2",
+            vec![split_from(journal.digest(), Txid::from_byte_array([9; 32]))],
+        ),
+        (
+            "another source",
+            vec![split_from(
+                sha256::Hash::hash(b"another source"),
+                step2_txid,
+            )],
+        ),
+    ] {
+        let (panel, shared) = restarted_recorded(&journal, &records, Vec::new()).await;
+        assert_eq!(panel.stage, Stage::Step2(Step2Stage::Reconcile), "{}", case);
+        assert_eq!(panel.completion(), None, "{}", case);
+        assert_eq!(shared.lock().unwrap().rechecks, 0, "{}", case);
+    }
+
+    // A dead end is never shown as completed.
+    let dead_end = Journal::new(true);
+    let (panel, shared) = restarted_recorded(
+        &dead_end,
+        &[split_from(dead_end.digest(), step2_txid)],
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(panel.stage, Stage::Step2(Step2Stage::Reconcile));
+    assert!(panel.dead_end().is_some());
+    assert_eq!(shared.lock().unwrap().rechecks, 0);
+
+    // D17 on restart: the completion was undone since.
+    let lost = CompletionStanding::Lost {
+        status: Status::Observation(Assessment::Reorged),
+        seen: TransactionObservation::Absent,
+        cleared: true,
+    };
+    let (mut panel, shared) =
+        restarted_recorded(&journal, std::slice::from_ref(&ours), vec![Ok(lost)]).await;
+    assert_eq!(panel.stage, Stage::Step2(Step2Stage::Reconcile));
+    assert_eq!(panel.notice(), Some(COMPLETION_LOST));
+    assert_eq!(panel.completion(), None);
+    assert_eq!(shared.lock().unwrap().rechecks, 1);
+    let task = panel.restart_step2(None);
+    drive(&mut panel, task).await;
+    assert_eq!(panel.stage, Stage::Step2(Step2Stage::Reconcile));
+    assert_eq!(
+        shared.lock().unwrap().rechecks,
+        1,
+        "a lost record is not reopened"
+    );
+
+    // Completed in this session, then a restart.
+    let (mut panel, shared) = restarted_recorded(&journal, &[], Vec::new()).await;
+    reconcile_seeing(
+        &mut panel,
+        &shared,
+        confirmed_step2(),
+        Step1AfterStep2::Eligible,
+    )
+    .await;
+    let task = panel.update(SplitMessage::Step2Complete);
+    drive(&mut panel, task).await;
+    assert_eq!(panel.stage, Stage::Step2(Step2Stage::Completed));
+    let task = panel.restart_step2(None);
+    drive(&mut panel, task).await;
+    assert_eq!(panel.stage, Stage::Step2(Step2Stage::Completed));
+    assert_eq!(shared.lock().unwrap().rechecks, 1);
+}
+
+/// #656 F3 and T2: a port build that ended without ports leaves an
+/// abandoned or closed split as it is (nothing is left to build ports for,
+/// and no retry is armed), and leaves a panel that holds a Connect session
+/// working; only a panel without a session is refused with a retry.
+/// CF: drop the terminal-stage or the session condition from
+/// `note_ports_failed`.
+#[tokio::test(flavor = "multi_thread")]
+async fn port_build_failure_leaves_terminal_stages_and_a_held_session() {
+    let journal = Journal::new(true);
+    let resumed = || {
+        SplitPanel::resume(
+            TARGET.into(),
+            journal.temp.0.parent().unwrap().to_path_buf(),
+            journal.digest(),
+            journal.temp.0.clone(),
+        )
+    };
+    for terminal in [Stage::Abandoned, Stage::Closed] {
+        let mut panel = resumed();
+        panel.stage = terminal.clone();
+        panel.note_ports_failed();
+        assert_eq!(panel.stage, terminal);
+        assert!(!panel.take_ports_retry());
+        assert_eq!(panel.stage, terminal);
+    }
+    let mut panel = resumed();
+    panel.note_ports_failed();
+    assert!(
+        matches!(&panel.stage, Stage::Refused(refusal) if refusal.retry
+            && refusal.reason == crate::app::state::vault::split::PORTS_INTERRUPTED),
+        "{:?}",
+        panel.stage
+    );
+    assert!(panel.take_ports_retry());
+    assert_eq!(panel.stage, Stage::NeedsSession);
+
+    // T2: a session is held, so the working panel stays as it is.
+    let (mut panel, _shared) = restarted(&journal, false).await;
+    panel.note_ports_failed();
+    assert_eq!(panel.stage, Stage::Step2(Step2Stage::Reconcile));
+    assert!(!panel.take_ports_retry());
+}
+
+/// #658 P3-3: a refused review or acknowledgement of step 1's new block
+/// keeps "Review step 1's new block" offered while the refusal is
+/// retryable; a final one (S4-D4, past the RDTS margin) withdraws it, and a
+/// later reconcile that still finds step 1 re-mined does not bring it
+/// back. A refusal asking for a restart (the handle lost its core) reads
+/// the journal again, as the resend handler does. CF: ignore `retry`, or
+/// ignore `Step2Recovery::Restart`, in the O1 handlers.
+#[tokio::test(flavor = "multi_thread")]
+async fn reconfirmation_final_refusal_withdraws_the_offer() {
+    let (previous, confirmed) = reconfirmation_blocks();
+    let remined = Step1AfterStep2::Remined {
+        previous,
+        confirmed,
+    };
+    async fn remined_reconcile(panel: &mut SplitPanel, shared: &Shared, after: Step1AfterStep2) {
+        shared.lock().unwrap().afters.push_back(after);
+        let task = panel.update(SplitMessage::Step2Reconcile);
+        drive(panel, task).await;
+    }
+    // The review is refused, or the acknowledgement of a shown one.
+    async fn refused(panel: &mut SplitPanel, shared: &Shared, acknowledge: bool, r: Step2Refusal) {
+        if acknowledge {
+            let task = panel.update(SplitMessage::Step2ReviewReconfirmation);
+            drive(panel, task).await;
+            assert!(panel.reconfirmation_review().is_some());
+            shared.lock().unwrap().refuse_acknowledgement = Some(r.clone());
+            let task = panel.update(SplitMessage::Step2ConfirmReconfirmation);
+            drive(panel, task).await;
+        } else {
+            shared.lock().unwrap().refuse_reconfirmation = Some(r.clone());
+            let task = panel.update(SplitMessage::Step2ReviewReconfirmation);
+            drive(panel, task).await;
+        }
+        assert_eq!(panel.notice(), Some(r.reason.as_str()));
+        assert_eq!(panel.stage, Stage::Step2(Step2Stage::Reconcile));
+    }
+    let past_margin = describe_reconfirmation(CoordinatorError::NotReady(Assessment::RdtsExpired));
+    assert!(!past_margin.retry);
+    for acknowledge in [false, true] {
+        let journal = Journal::new(true);
+        let (mut panel, shared) = restarted(&journal, false).await;
+        remined_reconcile(&mut panel, &shared, remined).await;
+        assert!(panel.can_review_reconfirmation());
+        refused(
+            &mut panel,
+            &shared,
+            acknowledge,
+            Step2Refusal::retry(RECONFIRMATION_AGAIN),
+        )
+        .await;
+        assert!(panel.can_review_reconfirmation(), "{}", acknowledge);
+        refused(&mut panel, &shared, acknowledge, past_margin.clone()).await;
+        assert!(!panel.can_review_reconfirmation(), "{}", acknowledge);
+        remined_reconcile(&mut panel, &shared, remined).await;
+        assert!(!panel.can_review_reconfirmation(), "{}", acknowledge);
+        let reviews = shared.lock().unwrap().reconfirmation_reviews;
+        let task = panel.update(SplitMessage::Step2ReviewReconfirmation);
+        drive(&mut panel, task).await;
+        assert_eq!(shared.lock().unwrap().reconfirmation_reviews, reviews);
+        assert_eq!(shared.lock().unwrap().reconfirmations, 0);
+    }
+    // A refusal asking for a restart reads the journal again.
+    let journal = Journal::new(true);
+    let (mut panel, shared) = restarted(&journal, false).await;
+    remined_reconcile(&mut panel, &shared, remined).await;
+    assert_eq!(shared.lock().unwrap().recon_opened, 1);
+    let lost = Step2Refusal {
+        recovery: Step2Recovery::Restart,
+        ..Step2Refusal::retry(COMPLETION_INTERRUPTED)
+    };
+    refused(&mut panel, &shared, false, lost).await;
+    assert_eq!(shared.lock().unwrap().recon_opened, 2);
 }

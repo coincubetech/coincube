@@ -997,6 +997,9 @@ fn discover_split_panel(
     // B4b-3b: the session-only device listing is rooted here; it writes
     // nothing under it.
     panel.set_device_datadir(data_dir.clone());
+    // #568 B5c-1: a completion this Cube records for the split reopens in
+    // Completed, and is checked again at once (D17).
+    panel.set_split_from(&cube_settings.split_from);
     Some(panel)
 }
 

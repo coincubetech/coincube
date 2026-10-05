@@ -1426,3 +1426,42 @@ async fn close_unified_refuses_a_two_step_journal_and_an_ended_session() {
     .unwrap();
     assert!(step1::is_closed(&directory));
 }
+
+/// #661 F4: a restart read the record before any sweep was sent; a sweep
+/// submitted later in the same session updates it, so no stage can show
+/// the unsubmitted close ("No sweep of this split was ever sent") or close
+/// without the check. CF: leave the restart's record as read.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sweep_submitted_after_restart_is_not_closed_as_unsubmitted() {
+    let scan = seed_scan();
+    let connect = FakeConnect::new(&scan.coins);
+    let temp = Temp::new();
+    let (digest, directory, _) = fork_only_journal(&scan, &connect, &temp, false);
+    let mut panel = resumed(digest, directory, &temp);
+    panel.set_connect(Some(connect.clone() as Arc<dyn SplitConnect>));
+    let port = FakePort::new(connect.context(), 1);
+    panel.set_unified_port(Some(port.clone() as Arc<dyn UnifiedPort>));
+    let task = panel.begin();
+    drive(&mut panel, task).await;
+    assert_eq!(panel.stage(), &Stage::Unified(UnifiedStage::EnterSeeds));
+    assert_eq!(panel.unified().record().map(|r| r.sweep), Some(None));
+    assert!(panel.can_confirm_unified_close());
+
+    add_seed(&mut panel, 1, "").await;
+    add_seed(&mut panel, 2, "second passphrase").await;
+    send(&mut panel, UnifiedMessage::BuildAndSign).await;
+    assert_eq!(
+        panel.stage(),
+        &Stage::Unified(UnifiedStage::Signed),
+        "{:?}",
+        panel.notice()
+    );
+    send(&mut panel, UnifiedMessage::Review).await;
+    let txid = panel.unified().review().unwrap().txid;
+    send(&mut panel, UnifiedMessage::Confirm).await;
+    assert_eq!(panel.stage(), &Stage::Unified(UnifiedStage::Submitted));
+    assert_eq!(panel.unified().record().map(|r| r.sweep), Some(Some(txid)));
+    // Whatever stage a later refusal leaves, the unsubmitted close is gone.
+    panel.stage = Stage::Refused(Refusal::retry("refused"));
+    assert!(!panel.can_confirm_unified_close());
+}

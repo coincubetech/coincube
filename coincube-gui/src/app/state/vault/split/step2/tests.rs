@@ -1408,6 +1408,7 @@ fn step2_panel_layer_is_reached_only_through_the_split_panel() {
             "COMPLETION_RECORD_UNAVAILABLE",
             "describe_completion",
             "conflict_coin_unspent_copy",
+            "set_split_from",
         ] {
             let named = text
                 .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
@@ -1428,6 +1429,9 @@ fn step2_panel_layer_is_reached_only_through_the_split_panel() {
                     // B5b: where the reconcile-only port records a
                     // completion.
                     "CompletionSite",
+                    // B5c-1: the Cube's completion records, for a restart
+                    // into Completed.
+                    "set_split_from",
                 ]
                 .contains(&ident))
                 || (file == "src/app/view/vault/split.rs"
