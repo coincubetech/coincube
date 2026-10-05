@@ -108,7 +108,7 @@ fn seed_input<'a>(
     value: &'a SeedText,
     message: fn(SeedText) -> UnifiedMessage,
 ) -> Element<'a, Message> {
-    iced::widget::text_input(placeholder, value.as_str())
+    iced::widget::text_input(placeholder, value.expose_for_secure_input())
         .secure(true)
         .on_input(move |typed| {
             Message::Split(SplitMessage::Unified(message(SeedText::from(typed))))
@@ -136,10 +136,10 @@ fn unified_body<'a>(
                     state.held(),
                     state.threshold()
                 )))
-                .push(seed_input("Recovery phrase", state.words(), UnifiedMessage::Words))
+                .push(seed_input("Recovery phrase", state.typed_words(), UnifiedMessage::Words))
                 .push(seed_input(
                     "Passphrase (leave empty if none)",
-                    state.passphrase(),
+                    state.typed_passphrase(),
                     UnifiedMessage::Passphrase,
                 ));
             actions = actions

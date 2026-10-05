@@ -136,7 +136,9 @@ pub const COIN_SPENT_ON_BTCB2: &str = "A coin of this split is no longer unspent
 #[derive(Clone, Default)]
 pub struct SeedText(Zeroizing<String>);
 impl SeedText {
-    pub fn as_str(&self) -> &str {
+    /// The typed text, lent to the view's one `.secure(true)` input and to
+    /// nothing else (`split_unified_holds_seeds_only_zeroized`).
+    pub(in crate::app) fn expose_for_secure_input(&self) -> &str {
         &self.0
     }
     pub fn is_empty(&self) -> bool {
@@ -1046,10 +1048,11 @@ impl UnifiedState {
     pub fn holds_seeds(&self) -> bool {
         self.seeds.is_some()
     }
-    pub fn words(&self) -> &SeedText {
+    /// The typed buffers, lent to the view's seed inputs only.
+    pub(in crate::app) fn typed_words(&self) -> &SeedText {
         &self.words
     }
-    pub fn passphrase(&self) -> &SeedText {
+    pub(in crate::app) fn typed_passphrase(&self) -> &SeedText {
         &self.passphrase
     }
     pub fn review(&self) -> Option<&SweepReviewView> {
