@@ -45,7 +45,7 @@
 //!   is Tracking from creation with its target reserved from creation, and
 //!   the sweep reuses the step-2 fields (`fork_sweep`, `step2_transaction`,
 //!   `fork_submission`). A recorded submission reopens through the
-//!   fork-only reconciler (B4b-3a, `UnifiedReconciler`); the step-2
+//!   fork-only reconciler (B4b-3a, in `fork::split`); the step-2
 //!   reconciler refuses the record (U2). Its only writers are
 //!   [`Controller::create_unified_split`] and
 //!   [`Controller::record_unified_broadcast_intent`], which take core's

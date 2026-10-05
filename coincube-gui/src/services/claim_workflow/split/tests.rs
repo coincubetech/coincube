@@ -2482,8 +2482,8 @@ fn unified_record_validate_refuses_split_shape_and_vice_versa() {
 /// step-2 fields a reconcile reads: the identity, a journal that validates,
 /// a recorded fork submission, a Split record, the Bitcoin chain, and a
 /// recorded signed sweep whose txid is the submission's. (Since B4b-3a the
-/// step-2 reconciler refuses the record and the fork-only
-/// `UnifiedReconciler` opens it; both are named only in `fork::split`, by
+/// step-2 reconciler refuses the record and the fork-only reconciler
+/// opens it; both are named only in `fork::split`, by
 /// that module's D1 guard, so the tests that open them live there:
 /// `fork::split::tests::step2::{unified_journal, unified_flow}`.)
 /// The journal then takes
@@ -2576,7 +2576,7 @@ fn unified_record_reconciles_through_the_step2_path() {
 /// which the step-2 reconciler's `reconcile_sweep` runs) refuses a fork-only
 /// plan before any read, since it is step-1-centric (the claimed prevouts
 /// must be the step 1's inputs and the step 1 must carry the poison). The
-/// fork-only reconcile is B4b-3a's separate path (`collect_fork_sweep`, U1),
+/// fork-only reconcile is B4b-3a's separate fork-only observation (U1),
 /// which leaves this refusal in place. Lifting it is a deliberate change.
 #[tokio::test]
 async fn step2_observation_path_refuses_a_fork_only_plan() {
