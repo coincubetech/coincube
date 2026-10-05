@@ -1196,7 +1196,22 @@ async fn panel_keeps_a_conflicted_split_open_without_clean_fresh_bitcoin_evidenc
             false,
         ),
     ];
+    let connect = panel.connect.clone().unwrap();
+    let dead_end = panel.dead_end().cloned().unwrap();
     for (case, setup, undo, retry) in cases {
+        // #658 P3-2: the refusal's own retry flag, which the panel's close
+        // offer never reads, is pinned per row.
+        setup(&fixture.chains, coin, seen);
+        let refusal = check_close(&*connect, &dead_end).await.unwrap_err();
+        assert_eq!(refusal.retry, retry, "{}: {}", case, refusal.reason);
+        if case == "coin unspent again" {
+            // #658 P3-4 (S4b-D1): it names the way out.
+            assert_eq!(refusal.reason, conflict_coin_unspent_copy(&coin));
+        }
+        undo(&fixture.chains, coin);
+        fixture.chains.step1_reads.lock().unwrap().clear();
+        let _ = fixture.chains.take_reads();
+
         setup(&fixture.chains, coin, seen);
         check(&mut panel).await;
         assert!(!panel.can_confirm_close(), "{}", case);

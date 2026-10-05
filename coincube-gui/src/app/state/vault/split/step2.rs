@@ -2207,6 +2207,20 @@ impl ReconcilerDriver {
         }
     }
 }
+/// #568 B5c-1 (#658): the panel's production reconciler driver over a real
+/// `reconciler`, for the service's O1 test (the panel layer guard admits
+/// that test file alone). No completion site.
+#[cfg(test)]
+pub(crate) fn reconciler_driver(
+    reconciler: SplitStep2Reconciler,
+    generation: watch::Receiver<u64>,
+    expected: u64,
+) -> Box<dyn Step2Recon> {
+    Box::new(ReconcilerDriver::new(
+        reconciler, None, generation, expected,
+    ))
+}
+
 /// The driver lost its reconciler: read the journal again.
 fn interrupted() -> Step2Refusal {
     Step2Refusal {

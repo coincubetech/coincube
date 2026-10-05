@@ -1409,6 +1409,7 @@ fn step2_panel_layer_is_reached_only_through_the_split_panel() {
             "describe_completion",
             "conflict_coin_unspent_copy",
             "set_split_from",
+            "reconciler_driver",
         ] {
             let named = text
                 .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
@@ -1443,6 +1444,11 @@ fn step2_panel_layer_is_reached_only_through_the_split_panel() {
                         "conflict_closable_copy",
                     ]
                     .contains(&ident));
+            // #568 B5c-1 (#658): the service's O1 test drives the
+            // production reconciler driver over a real reconciler.
+            let allowed = allowed
+                || (file == "src/services/claim_coordinator/fork/split/tests/step2/reorg.rs"
+                    && ["reconciler_driver", "RECONFIRMATION_AGAIN"].contains(&ident));
             // `restart`/`Restart` are common words elsewhere: only a path
             // into the step-2 module counts for them.
             let generic = ["restart", "Restart"].contains(&ident)

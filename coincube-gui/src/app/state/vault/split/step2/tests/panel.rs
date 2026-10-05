@@ -3908,3 +3908,109 @@ async fn reconfirmation_final_refusal_withdraws_the_offer() {
     refused(&mut panel, &shared, false, lost).await;
     assert_eq!(shared.lock().unwrap().recon_opened, 2);
 }
+
+/// #656 T1 (R8): completion is not offered beside a live resend review,
+/// whatever else holds. Defence in depth: a live resend review means a
+/// fresh check saw step 2 absent. CF: drop the resend-review term from
+/// `can_complete`.
+#[tokio::test(flavor = "multi_thread")]
+async fn completion_is_not_offered_beside_a_live_resend_review() {
+    let journal = Journal::returned(false);
+    let (mut panel, _shared) = restarted(&journal, true).await;
+    assert!(panel.coord.is_some());
+    let task = panel.update(SplitMessage::Step2ReviewResend);
+    drive(&mut panel, task).await;
+    assert!(panel.step2_resend_review().is_some());
+    // Everything else completion needs, as a confirmed reconcile leaves it.
+    panel.step2_seen_here = Some(confirmed_step2());
+    panel.step2_after = Some(Step1AfterStep2::Eligible);
+    panel.completable = true;
+    assert!(!panel.can_complete());
+    panel.step2_resend = None;
+    assert!(panel.can_complete());
+}
+
+/// #656 T3 (R11): the Completed stage never offers "Save signed
+/// transaction", even with step 1's signed transaction held; the same
+/// panel in Reconcile does. CF: drop the Completed exclusion in the view.
+#[tokio::test(flavor = "multi_thread")]
+async fn completed_stage_hides_save_signed_transaction() {
+    let journal = Journal::returned(true);
+    let step2_txid = Txid::from_byte_array([5; 32]);
+    let (mut panel, _shared) = restarted_recorded(
+        &journal,
+        &[split_from(journal.digest(), step2_txid)],
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(panel.stage, Stage::Step2(Step2Stage::Completed));
+    panel.signed = Some(journal.step1.psbt().unsigned_tx.clone());
+    assert!(panel.signed().is_some());
+    let labels = rendered_labels(&panel).await;
+    assert!(
+        !labels.iter().any(|l| l == "Save signed transaction"),
+        "{:?}",
+        labels
+    );
+    panel.stage = Stage::Step2(Step2Stage::Reconcile);
+    let labels = rendered_labels(&panel).await;
+    assert!(
+        labels.iter().any(|l| l == "Save signed transaction"),
+        "{:?}",
+        labels
+    );
+}
+
+/// #658 P3-1 (R16): O1 on the live coordinator in the Submitted stage, the
+/// session that submitted step 2: "Review step 1's new block" is offered
+/// after a reconcile finds step 1 re-mined, the review and acknowledgement
+/// go through the coordinator and come back to Submitted, nothing is sent,
+/// and the reconcile that follows reads through the coordinator. CF: the
+/// Submitted arm of `can_review_reconfirmation` gives `false`.
+#[tokio::test(flavor = "multi_thread")]
+async fn live_coordinator_acknowledges_step1s_new_block_in_submitted() {
+    let journal = Journal::new(false);
+    let (mut panel, shared) = tracked_panel(&journal);
+    panel.driver = None;
+    panel.coord = Some(Box::new(PanelCoord::new(&shared, Some(uncertain()))));
+    panel.step2_outcome = Some(uncertain());
+    panel.stage = Stage::Step2(Step2Stage::Submitted);
+    let (previous, confirmed) = reconfirmation_blocks();
+    shared
+        .lock()
+        .unwrap()
+        .afters
+        .push_back(Step1AfterStep2::Remined {
+            previous,
+            confirmed,
+        });
+    let task = panel.update(SplitMessage::Step2Reconcile);
+    drive(&mut panel, task).await;
+    assert_eq!(panel.stage, Stage::Step2(Step2Stage::Submitted));
+    assert!(panel.can_review_reconfirmation());
+    let task = panel.update(SplitMessage::Step2ReviewReconfirmation);
+    drive(&mut panel, task).await;
+    assert_eq!(panel.stage, Stage::Step2(Step2Stage::Submitted));
+    let view = panel.reconfirmation_review().expect("a live review");
+    assert_eq!((view.previous, view.confirmed), (previous, confirmed));
+    let reconciles = shared.lock().unwrap().reconciles;
+    shared
+        .lock()
+        .unwrap()
+        .afters
+        .push_back(Step1AfterStep2::Shallow { confirmations: 3 });
+    let task = panel.update(SplitMessage::Step2ConfirmReconfirmation);
+    drive(&mut panel, task).await;
+    let counts = shared.lock().unwrap();
+    assert_eq!(counts.reconfirmations, 1);
+    assert_eq!(counts.reconciles, reconciles + 1);
+    assert_eq!((counts.submits, counts.resends), (0, 0));
+    drop(counts);
+    assert_eq!(panel.stage, Stage::Step2(Step2Stage::Submitted));
+    assert!(panel.coord.is_some() && panel.recon.is_none());
+    assert_eq!(
+        panel.step2_after(),
+        Some(Step1AfterStep2::Shallow { confirmations: 3 })
+    );
+    assert!(!panel.can_review_reconfirmation());
+}
