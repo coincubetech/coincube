@@ -1027,7 +1027,7 @@ async fn split_step1_terminal_conflict_is_disproved_only_by_step1_eligible() {
     view.edit(|extra| extra.spent.clear());
 
     type Setup = fn(&Step1View);
-    let kept: [(&str, Setup); 4] = [
+    let kept: [(&str, Setup); 5] = [
         ("shallow", |view| view.step1_in(recorded_block(), 4)),
         ("re-mined", |view| view.step1_in(moved(), 6)),
         ("in the mempool", |view| {
@@ -1038,6 +1038,9 @@ async fn split_step1_terminal_conflict_is_disproved_only_by_step1_eligible() {
             view.step1_in(recorded_block(), 6);
             view.inner.edit(|view| view.on_fork = true);
         }),
+        // R652E-1: step 1 in no block and not in the mempool, the coin
+        // unspent again. Only an eligible step 1 disproves the conflict.
+        ("missing, coin unspent", |view| view.step1_gone()),
     ];
     for (case, setup) in kept {
         setup(&view);
@@ -1460,6 +1463,48 @@ async fn split_resend_completion_and_forget_are_refused_in_o1_to_o4() {
     let identity = claim_workflow::split_identity(TARGET.into(), h.step1.source().digest());
     let mut controller =
         Controller::reopen_settling_blocking(&h.temp.0, &identity, context()).unwrap();
+    assert!(matches!(
+        controller.forget_split_descriptors(&context()),
+        Err(claim_workflow::Error::Conflict)
+    ));
+    assert!(h.temp.journal()["split"]["descriptors"].is_object());
+}
+
+/// R652D-3: `forget_split_descriptors` refuses while a *provisional*
+/// step-1 conflict is recorded (S4-D5), not only a terminal one: the coin
+/// may yet stay spent, and then the split never completes. The descriptors
+/// stay in the journal.
+#[tokio::test(flavor = "multi_thread")]
+async fn split_forget_is_refused_while_a_provisional_step1_conflict_is_recorded() {
+    let Submitted {
+        h,
+        view,
+        coordinator,
+        _server,
+        ..
+    } = submitted_over(false).await;
+    drop(coordinator);
+    let mut reconciler = reopen(&h, Box::new(view.clone()));
+    let spent = h.prevouts()[0];
+    view.step1_gone();
+    view.edit(|extra| {
+        extra.spent.insert(spent);
+    });
+    let provisional = Step1Conflict::new(spent, gone_tip());
+    assert_eq!(
+        reconciler
+            .reconcile_sweep(&context())
+            .await
+            .unwrap()
+            .after_step2,
+        Step1AfterStep2::Conflict(provisional)
+    );
+    assert!(!provisional.is_terminal());
+    drop(reconciler);
+    let identity = claim_workflow::split_identity(TARGET.into(), h.step1.source().digest());
+    let mut controller =
+        Controller::reopen_settling_blocking(&h.temp.0, &identity, context()).unwrap();
+    assert_eq!(controller.split_step1_conflict(), Some(provisional));
     assert!(matches!(
         controller.forget_split_descriptors(&context()),
         Err(claim_workflow::Error::Conflict)

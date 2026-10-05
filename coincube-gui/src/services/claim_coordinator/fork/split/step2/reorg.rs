@@ -360,6 +360,22 @@ impl Step1ReconfirmationReview {
     pub fn inclusion(&self) -> Reconfirmation {
         self.inclusion
     }
+    /// Step 1's confirmations in its new block at the review's Bitcoin tip
+    /// (#568 S4b: shown with the review). Read-only.
+    pub fn confirmations(&self) -> u64 {
+        self.observations
+            .bitcoin
+            .tip
+            .height
+            .checked_sub(self.inclusion.confirmed.height)
+            .map_or(0, |depth| depth.saturating_add(1))
+    }
+    /// When the review lapses at the latest (#568 S4b: the panel drops it
+    /// then, without waiting for input). Read-only; a confirmation checks
+    /// it again.
+    pub fn not_after(&self) -> Instant {
+        self.not_after
+    }
     #[cfg(test)]
     pub(crate) fn expire_for_test(&mut self) {
         self.not_after = Instant::now();

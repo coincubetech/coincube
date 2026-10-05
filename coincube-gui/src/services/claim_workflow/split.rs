@@ -894,12 +894,16 @@ impl Controller {
     /// the caller, which is the only intended one. Dropping the descriptors
     /// removes restart data and grants nothing. A fork-only record refuses
     /// it: its completion is B4b-3's decision. A recorded step-1 conflict
-    /// (O4, #568 S4) refuses it too: that split never completes.
+    /// (O4, #568 S4) refuses it too, provisional or terminal: a terminal one
+    /// means that split never completes, until an Eligible reconcile
+    /// disproves it (S4-D6).
     pub fn forget_split_descriptors(&mut self, current: &Context) -> Result<(), Error> {
         self.ensure_context(current)?;
         self.clear_check();
-        // O4 (#568 S4): a split whose step 1 can never confirm never
-        // completes, so its descriptors are never forgotten.
+        // O4 (#568 S4): while a step-1 conflict is recorded the split can't
+        // complete, so its descriptors are not forgotten. A terminal
+        // conflict holds until an Eligible reconcile disproves it (S4-D6); a
+        // provisional one until a reconcile clears it (S4-D5).
         if self.record_of(SplitKind::Split)?.step1_conflict.is_some() {
             return Err(Error::Conflict);
         }

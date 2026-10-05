@@ -1232,14 +1232,20 @@ fn split_step2_gate_has_no_gui_caller() {
                     "SplitCompletionReconciliation",
                     "check_completion",
                     "reconcile_split_completion",
+                    // #568 S4b: the panel's O1 acknowledgement (S4-D3),
+                    // reached only from a reconcile that found step 1
+                    // re-mined, itself only after resuming a journal.
+                    "Step1ReconfirmationReview",
+                    "prepare_step1_reconfirmation",
+                    "confirm_step1_reconfirmation",
                 ]
                 .contains(&ident);
             // Claim's own completion check (`fork.rs`), its tests and its
             // panel caller name `check_completion` too; Split's is a method
             // of the reconciler, which is guarded by its own name.
             // #568 S4: the panel's reconcile warning reads what became of
-            // step 1 after the step-2 submission. Its O1 acknowledgement is
-            // S4b's: no panel file names the reconfirmation.
+            // step 1 after the step-2 submission. Its O1 acknowledgement
+            // (S4b) is named only in the panel's step-2 layer, above.
             let warning = file.starts_with("src/app/state/vault/split/")
                 && ["Step1AfterStep2", "SweepReconcile"].contains(&ident);
             // The fork-only observation path is defined in its own module.

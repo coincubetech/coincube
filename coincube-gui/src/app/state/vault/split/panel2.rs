@@ -22,8 +22,8 @@ use coincube_core::{
 use super::{
     step1::{OpenRequest, Refusal, RefusalRecovery, SplitConnect},
     step2::{self, ReconPort, Step2Open, Step2Port, Step2Refusal},
-    Coord, Driver, Incoming, Prep, Recon, Restarted, Seen, SplitEvent, SplitMessage, SplitPanel,
-    Stage, Step2Stage, Work,
+    Coord, Driver, Held, Incoming, Prep, Recon, Restarted, Seen, SplitEvent, SplitMessage,
+    SplitPanel, Stage, Step2Stage, Work,
 };
 use crate::{
     app::message::Message,
@@ -93,6 +93,8 @@ impl SplitPanel {
                         | Work::Step2Reconciling
                         | Work::Step2Completing
                         | Work::Step2CompletionChecking
+                        | Work::Step2ReconfirmationReviewing
+                        | Work::Step2Reconfirming
                 )
             )
     }
@@ -130,6 +132,7 @@ impl SplitPanel {
         self.replay = None;
         self.step2_review = None;
         self.step2_resend = None;
+        self.reconfirmation = None;
         self.target_index = None;
         self.step2_handoff_ready = false;
         self.completable = false;
@@ -217,8 +220,12 @@ impl SplitPanel {
     /// when the restart reopened the coordinator for a resend the journal
     /// allows (the reconciler can't send), not once a resend was accepted,
     /// and not once a reconcile under this session saw step 2 on BTCB2,
-    /// which the review could only refuse (#648 R2). The coordinator checks
-    /// everything again with fresh evidence.
+    /// which the review could only refuse (#648 R2). Nor while the last
+    /// reconcile found step 1 anything but eligible (#568 S4b, Legolas F4):
+    /// shallow, re-mined, unconfirmed, missing, in conflict or unknown, the
+    /// service refuses every resend. Before any reconcile the review's own
+    /// fresh reads decide. The coordinator checks everything again with
+    /// fresh evidence.
     pub fn can_review_resend(&self) -> bool {
         self.stage == Stage::Step2(Step2Stage::Reconcile)
             && self.coord.is_some()
@@ -231,6 +238,32 @@ impl SplitPanel {
                 self.step2_seen_here,
                 None | Some(crate::services::claim_observation::TransactionObservation::Absent)
             )
+            && self
+                .step2_after
+                .is_none_or(|after| after == Step1AfterStep2::Eligible)
+    }
+    /// #568 S4b, O1: the review of step 1's new block on screen while it is
+    /// live (its deadline, its handle's revocation or a generation change
+    /// drops it).
+    pub fn reconfirmation_review(&self) -> Option<&step2::ReconfirmationView> {
+        self.reconfirmation.as_ref().filter(|view| view.is_live())
+    }
+    /// #568 S4b, O1 (S4-D3): step 1's new block may be reviewed when the
+    /// last reconcile found step 1 re-mined in another Bitcoin block, from
+    /// whichever handle the panel holds after the step-2 submission (the
+    /// coordinator, or the reconciler), and not beside a live resend review.
+    /// The service checks everything again, refuses past the RDTS margin
+    /// (S4-D4) and sends nothing.
+    pub fn can_review_reconfirmation(&self) -> bool {
+        let handle = match self.stage {
+            Stage::Step2(Step2Stage::Submitted) => self.coord.is_some(),
+            Stage::Step2(Step2Stage::Reconcile) => self.coord.is_some() || self.recon.is_some(),
+            _ => false,
+        };
+        handle
+            && self.connect.is_some()
+            && matches!(self.step2_after, Some(Step1AfterStep2::Remined { .. }))
+            && self.step2_resend_review().is_none()
     }
     pub fn step2_outcome(&self) -> Option<crate::services::claim_coordinator::Outcome> {
         self.step2_outcome
@@ -363,6 +396,30 @@ impl SplitPanel {
         let coord = self.coord.take()?;
         self.stage = Stage::Working(work);
         Some((coord, connect))
+    }
+    /// #568 S4b: the step-2 handle the panel holds after the submission
+    /// (the coordinator first), with the stage to return to.
+    fn take_held(&mut self, work: Work) -> Option<(Held, Arc<dyn SplitConnect>, Step2Stage)> {
+        let Stage::Step2(back) = self.stage else {
+            return None;
+        };
+        let connect = self.connect.clone()?;
+        let held = match (self.coord.take(), self.recon.take()) {
+            (Some(coord), recon) => {
+                self.recon = recon;
+                Held::Coord(Coord(coord))
+            }
+            (None, Some(recon)) => Held::Recon(Recon(recon)),
+            (None, None) => return None,
+        };
+        self.stage = Stage::Working(work);
+        Some((held, connect, back))
+    }
+    fn bind_held(&mut self, held: Held) {
+        match held {
+            Held::Coord(Coord(coord)) => self.bind_coord(coord),
+            Held::Recon(Recon(recon)) => self.bind_recon(recon),
+        }
     }
 
     pub(super) fn update_step2(&mut self, message: SplitMessage) -> Task<Message> {
@@ -604,6 +661,7 @@ impl SplitPanel {
                     return Task::none();
                 };
                 self.step2_resend = None;
+                self.reconfirmation = None;
                 let Some((mut coord, connect)) = self.take_coord(Work::Step2Reconciling) else {
                     return Task::none();
                 };
@@ -619,6 +677,7 @@ impl SplitPanel {
             }
             SplitMessage::Step2ReviewResend if self.can_review_resend() => {
                 self.step2_resend = None;
+                self.reconfirmation = None;
                 let Some((mut coord, connect)) = self.take_coord(Work::Step2ResendReviewing) else {
                     return Task::none();
                 };
@@ -647,11 +706,67 @@ impl SplitPanel {
                     |seq, (coord, result)| SplitEvent::Step2Resent(seq, coord, result),
                 )
             }
+            // #568 S4b, O1: a review of step 1's new block, then exactly
+            // that review acknowledged (used up here whatever the result),
+            // on whichever handle the panel holds.
+            SplitMessage::Step2ReviewReconfirmation if self.can_review_reconfirmation() => {
+                self.reconfirmation = None;
+                let Some((held, connect, back)) =
+                    self.take_held(Work::Step2ReconfirmationReviewing)
+                else {
+                    return Task::none();
+                };
+                self.spawn(
+                    async move {
+                        let (held, result) = match held {
+                            Held::Coord(Coord(mut coord)) => {
+                                let result = coord.review_reconfirmation(&connect.context()).await;
+                                (Held::Coord(Coord(coord)), result)
+                            }
+                            Held::Recon(Recon(mut recon)) => {
+                                let result = recon.review_reconfirmation(&connect.context()).await;
+                                (Held::Recon(Recon(recon)), result)
+                            }
+                        };
+                        (held, result, back)
+                    },
+                    |seq, (held, result, back)| {
+                        SplitEvent::Step2ReconfirmationReviewed(seq, held, result, back)
+                    },
+                )
+            }
+            SplitMessage::Step2ConfirmReconfirmation
+                if self.can_review_reconfirmation() && self.reconfirmation_review().is_some() =>
+            {
+                self.reconfirmation = None;
+                let Some((held, connect, back)) = self.take_held(Work::Step2Reconfirming) else {
+                    return Task::none();
+                };
+                self.spawn(
+                    async move {
+                        let (held, result) = match held {
+                            Held::Coord(Coord(mut coord)) => {
+                                let result = coord.confirm_reconfirmation(&connect.context()).await;
+                                (Held::Coord(Coord(coord)), result)
+                            }
+                            Held::Recon(Recon(mut recon)) => {
+                                let result = recon.confirm_reconfirmation(&connect.context()).await;
+                                (Held::Recon(Recon(recon)), result)
+                            }
+                        };
+                        (held, result, back)
+                    },
+                    |seq, (held, result, back)| {
+                        SplitEvent::Step2Reconfirmed(seq, held, result, back)
+                    },
+                )
+            }
             SplitMessage::Step2Reconcile if self.stage == Stage::Step2(Step2Stage::Reconcile) => {
                 let (Some(connect), Some(mut recon)) = (self.connect.clone(), self.recon.take())
                 else {
                     return Task::none();
                 };
+                self.reconfirmation = None;
                 self.stage = Stage::Working(Work::Step2Reconciling);
                 self.spawn(
                     async move {
@@ -724,7 +839,12 @@ impl SplitPanel {
                     return Task::none();
                 };
                 self.abandon_checked = false;
-                let back = std::mem::replace(&mut self.stage, Stage::Working(Work::CheckingClose));
+                let work = if dead_end.conflict.is_some() {
+                    Work::CheckingConflictClose
+                } else {
+                    Work::CheckingClose
+                };
+                let back = std::mem::replace(&mut self.stage, Stage::Working(work));
                 self.resume_stage = Some(back);
                 self.spawn(
                     async move { step2::check_close(&*connect, &dead_end).await },
@@ -744,11 +864,16 @@ impl SplitPanel {
                     revoke();
                 }
                 self.recon = None;
+                self.coord = None;
                 self.abandon_checked = false;
                 let target = self.target_cube.clone();
                 let ended = Arc::new(std::sync::atomic::AtomicBool::new(false));
                 self.ending = Some(ended.clone());
-                self.stage = Stage::Working(Work::Closing);
+                self.stage = Stage::Working(if dead_end.conflict.is_some() {
+                    Work::ClosingConflict
+                } else {
+                    Work::Closing
+                });
                 self.spawn(
                     async move {
                         step2::check_close(&*connect, &dead_end)
@@ -931,10 +1056,17 @@ impl SplitPanel {
                 // completion.
                 self.completable = matches!(seen, TransactionObservation::Confirmed { .. })
                     && after == Step1AfterStep2::Eligible;
-                // Seen on BTCB2: it left, so it is no dead end (#625 F2).
-                if seen != TransactionObservation::Absent {
-                    self.dead_end = None;
-                }
+                self.dead_end = self
+                    .dead_end
+                    .take()
+                    .filter(|dead_end| match dead_end.conflict {
+                        // Seen on BTCB2: it left, so it is no dead end (#625 F2).
+                        None => seen == TransactionObservation::Absent,
+                        // O4 (#568 S4b): step 2's bytes stand wherever they are;
+                        // the dead end lasts while the reconcile reports its
+                        // conflict (an eligible step 1 disproved it, S4-D6).
+                        Some(conflict) => after == Step1AfterStep2::Conflict(conflict),
+                    });
             }
             Err(reason) => {
                 self.completable = false;
@@ -943,6 +1075,22 @@ impl SplitPanel {
         }
         if self.step2_warning().is_some() || self.notice.is_some() {
             self.replay = None;
+        }
+    }
+
+    /// #568 S4b, O4: the last reconcile reported a terminal step-1 conflict
+    /// that the panel holds no dead end for (it became terminal under this
+    /// session, or was read before): the journal is read again, as a
+    /// restart, so its dead end comes with the reconciler.
+    fn conflict_unread(&self) -> bool {
+        match self.step2_after {
+            Some(Step1AfterStep2::Conflict(conflict)) if conflict.is_terminal() => {
+                self.dead_end
+                    .as_ref()
+                    .and_then(|dead_end| dead_end.conflict)
+                    != Some(conflict)
+            }
+            _ => false,
         }
     }
 
@@ -1206,14 +1354,22 @@ impl SplitPanel {
             }
             SplitEvent::Step2Reconciled(_, Coord(coord), result, back) => {
                 self.bind_coord(coord);
+                let succeeded = result.is_ok();
                 self.reconciled(result);
                 self.stage = Stage::Step2(back);
+                if succeeded && self.conflict_unread() {
+                    return self.restart_step2(None);
+                }
                 Task::none()
             }
             SplitEvent::ReconReconciled(_, Recon(recon), result) => {
                 self.bind_recon(recon);
+                let succeeded = result.is_ok();
                 self.reconciled(result);
                 self.stage = Stage::Step2(Step2Stage::Reconcile);
+                if succeeded && self.conflict_unread() {
+                    return self.restart_step2(None);
+                }
                 Task::none()
             }
             SplitEvent::Step2ResendReviewed(_, Coord(coord), result) => {
@@ -1261,6 +1417,41 @@ impl SplitPanel {
                 }
                 self.stage = Stage::Step2(Step2Stage::Reconcile);
                 Task::none()
+            }
+            SplitEvent::Step2ReconfirmationReviewed(_, held, result, back) => {
+                self.bind_held(held);
+                match result {
+                    Ok(view) => {
+                        self.notice = None;
+                        // The new review moved the handle's revision.
+                        self.step2_resend = None;
+                        self.reconfirmation = Some(view);
+                    }
+                    Err(reason) => {
+                        self.reconfirmation = None;
+                        self.notice = Some(reason.reason);
+                    }
+                }
+                self.stage = Stage::Step2(back);
+                Task::none()
+            }
+            SplitEvent::Step2Reconfirmed(_, held, result, back) => {
+                self.bind_held(held);
+                self.reconfirmation = None;
+                self.stage = Stage::Step2(back);
+                match result {
+                    // The new block is step 1's recorded one now: reconcile
+                    // at once, so what the panel shows of step 1 is read
+                    // against it.
+                    Ok(()) => {
+                        self.notice = None;
+                        self.update_step2(SplitMessage::Step2Reconcile)
+                    }
+                    Err(reason) => {
+                        self.notice = Some(reason.reason);
+                        Task::none()
+                    }
+                }
             }
             SplitEvent::Step2Completed(_, Some(Recon(recon)), result) => {
                 // The coordinator, if completion started from it, is gone:
