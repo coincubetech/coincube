@@ -297,6 +297,10 @@ pub struct UnifiedCoordinator {
     target: Target,
     sweep: Option<Arc<UnifiedSweep>>,
     verified: Option<Arc<VerifiedUnifiedSweep>>,
+    /// Test-only: how far confirmation's expiry check sees the monotonic
+    /// clock ahead of now (`skew_clock_for_test`), to expire a review.
+    #[cfg(test)]
+    clock_skew: Duration,
 }
 
 impl UnifiedCoordinator {
@@ -443,7 +447,22 @@ impl UnifiedCoordinator {
             target,
             sweep: None,
             verified: None,
+            #[cfg(test)]
+            clock_skew: Duration::ZERO,
         })
+    }
+    #[cfg(not(test))]
+    fn clock_skew(&self) -> Duration {
+        Duration::ZERO
+    }
+    #[cfg(test)]
+    fn clock_skew(&self) -> Duration {
+        self.clock_skew
+    }
+    /// Test-only: move the clock confirmation's expiry check reads ahead.
+    #[cfg(test)]
+    pub(in super::super) fn skew_clock_for_test(&mut self, by: Duration) {
+        self.clock_skew = by;
     }
     pub fn context(&self) -> &Context {
         &self.context
@@ -834,7 +853,7 @@ impl UnifiedCoordinator {
             return Err(Error::ChangedReview.into());
         }
         self.current(context)?;
-        if Instant::now() >= refreshed.not_after {
+        if Instant::now() + self.clock_skew() >= refreshed.not_after {
             return Err(Error::ExpiredEvidence.into());
         }
         let sweep = self.sweep.clone().ok_or(UnifiedError::NotBuilt)?;

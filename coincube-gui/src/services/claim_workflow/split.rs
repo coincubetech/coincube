@@ -55,8 +55,9 @@
 //!   journaled as a submission. Every two-step writer refuses it, and the
 //!   reverse. A two-step record stays version 8 and serializes exactly as
 //!   before; a binary that predates the fork-only record refuses one by
-//!   version (and by its `kind` field). Its abandonment, and the close of its dead end, are B4b-3's decisions, so
-//!   both are refused here and the journal is kept.
+//!   version (and by its `kind` field). Its abandonment, and the close of
+//!   its dead end, are B4b-3's decisions, so both are refused here and the
+//!   journal is kept.
 //!
 //! Nothing here signs, broadcasts, or grants step-2 authority. A reopened
 //! Split intent is Unchecked like a Claim one, and a recorded uncertain
@@ -631,10 +632,10 @@ impl Controller {
     /// its shape, and reserves the target from creation. Creates a version-9
     /// intent with the public descriptors (P2) that is Tracking from
     /// creation, since nothing is ever tracked on Bitcoin, and refuses an
-    /// existing intent or a tombstone in `directory`. The result is not submission authority: the caller's
-    /// gate (C2) holds the fresh evidence, and the signed bytes are recorded
-    /// only with their submission intent
-    /// ([`Self::record_unified_broadcast_intent`]).
+    /// existing intent or a tombstone in `directory`. The result is not
+    /// submission authority: the caller's gate (C2) holds the fresh
+    /// evidence, and the signed bytes are recorded only with their
+    /// submission intent ([`Self::record_unified_broadcast_intent`]).
     pub fn create_unified_split(
         directory: &Path,
         target_cube: String,

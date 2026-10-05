@@ -46,6 +46,12 @@ struct Fork {
     /// collection, between its two anchor reads.
     inside: Option<Hook>,
     anchor_reads: usize,
+    /// The indexer's hash at the anchor's tip height, if not the tip's.
+    tip_index_hash: Option<BlockHash>,
+    /// Seconds subtracted from the stamp of every address-history read.
+    address_age: i64,
+    /// Seconds added to the services' clock (`ObservationSource::now`).
+    clock_offset: i64,
 }
 #[derive(Clone)]
 struct ForkChains(Arc<Mutex<Fork>>);
@@ -65,6 +71,9 @@ impl ForkChains {
             between: None,
             inside: None,
             anchor_reads: 0,
+            tip_index_hash: None,
+            address_age: 0,
+            clock_offset: 0,
         })))
     }
     fn edit(&self, edit: impl FnOnce(&mut Fork)) {
@@ -74,7 +83,7 @@ impl ForkChains {
 #[async_trait]
 impl ObservationSource for ForkChains {
     fn now(&self) -> i64 {
-        now()
+        now() + self.0.lock().unwrap().clock_offset
     }
     async fn anchor(&self, chain: ChainId) -> Result<NetworkAnchorStatus, FailureKind> {
         assert_eq!(chain, ChainId::BitcoinBlake2b, "a fork-only anchor read");
@@ -155,7 +164,7 @@ impl ObservationSource for ForkChains {
             chain,
             match block {
                 Some(hash) => hash,
-                None if height == view.tip.height => view.tip.hash,
+                None if height == view.tip.height => view.tip_index_hash.unwrap_or(view.tip.hash),
                 None => hash(0x44),
             },
         )
@@ -185,7 +194,11 @@ impl SplitForkServices for ForkChains {
         address: &str,
     ) -> Result<FreshRead<bool>, FailureKind> {
         let view = self.0.lock().unwrap();
-        Chains::read(chain, view.used.contains(&(chain, address.to_owned())))
+        Chains::read_aged(
+            chain,
+            view.used.contains(&(chain, address.to_owned())),
+            view.address_age,
+        )
     }
 }
 
@@ -203,6 +216,8 @@ struct UnifiedVault {
     sends: Arc<Mutex<Vec<Sent>>>,
     journal: PathBuf,
     accept: Arc<std::sync::atomic::AtomicBool>,
+    /// The daemon answers `UpstreamAccepted` naming another transaction.
+    other_txid: Arc<std::sync::atomic::AtomicBool>,
 }
 impl UnifiedVault {
     fn new(node: Option<BitcoindConfig>, journal: PathBuf) -> Self {
@@ -212,6 +227,7 @@ impl UnifiedVault {
             sends: Arc::new(Mutex::new(Vec::new())),
             journal,
             accept: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            other_txid: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
     fn send(
@@ -241,6 +257,12 @@ impl UnifiedVault {
             return Err(DaemonError::PoisonSubmission(
                 coincubed::poison_broadcast::SubmissionError::BackendUnavailable,
             ));
+        }
+        if self.other_txid.load(Ordering::SeqCst) {
+            return Ok(SubmissionOutcome::UpstreamAccepted {
+                txid: Txid::from_byte_array([0xee; 32]),
+                wtxid: tx.compute_wtxid(),
+            });
         }
         Ok(SubmissionOutcome::UpstreamAccepted {
             txid: tx.compute_txid(),
@@ -352,6 +374,15 @@ impl Flow {
         Self::open(use_node, Temp::new(), false).await.unwrap()
     }
     async fn open(use_node: bool, temp: Temp, resume: bool) -> Result<Self, Error> {
+        Self::open_on(use_node, temp, resume, vault()).await
+    }
+    /// The coordinator on a transport whose Vault is `descriptor`.
+    async fn open_on(
+        use_node: bool,
+        temp: Temp,
+        resume: bool,
+        descriptor: CoincubeDescriptor,
+    ) -> Result<Self, Error> {
         let wallet = unified_wallet();
         let coins = unified_coins(&wallet);
         let sender = watch::channel(7).0;
@@ -371,7 +402,7 @@ impl Flow {
             )
             .unwrap(),
             ORIGIN.to_owned(),
-            vault(),
+            descriptor,
             configured,
             7,
             sender.subscribe(),
@@ -1073,4 +1104,157 @@ async fn unified_reconciler_records_sightings_and_sends_nothing() {
         }))
     ));
     assert!(observed(&temp));
+}
+
+/// Reviewer-654 R10: an absence is only evidence on the anchor's chain. The
+/// indexer's hash at the anchor's tip height must be the anchor's tip hash;
+/// an indexer on another view of the chain is `Changed`, before the sweep is
+/// read.
+#[tokio::test(flavor = "multi_thread")]
+async fn fork_only_observation_ties_absence_to_the_anchor_chain() {
+    let chains = ForkChains::new(BTreeSet::new());
+    let (_sender, generation) = watch::channel(7u64);
+    chains.edit(|v| v.tip_index_hash = Some(hash(0x45)));
+    assert_eq!(
+        collect_fork_sweep(
+            &chains,
+            ChainId::BitcoinBlake2b,
+            Txid::from_byte_array([9; 32]),
+            policy().observations,
+            Duration::from_secs(2),
+            CollectionContext {
+                expected_generation: 7,
+                generation,
+            },
+        )
+        .await
+        .err(),
+        Some(Failure {
+            stage: Stage::ForkIndexer,
+            kind: FailureKind::Changed
+        })
+    );
+}
+
+/// Reviewer-654 R03: only the route's acceptance of exactly the reviewed
+/// transaction is acceptance. An `UpstreamAccepted` naming another txid is
+/// `Uncertain` after the recorded intent, and never sent again.
+#[tokio::test(flavor = "multi_thread")]
+async fn unified_acceptance_of_another_txid_is_uncertain() {
+    let mut f = Flow::new(false).await;
+    let tx = f.signed(true).await;
+    f.vault.other_txid.store(true, Ordering::SeqCst);
+    let review = f.coordinator.prepare_review(&context()).await.unwrap();
+    assert_eq!(
+        f.coordinator
+            .confirm_and_submit(review, &context())
+            .await
+            .unwrap(),
+        Outcome::Uncertain {
+            txid: tx.compute_txid(),
+            wtxid: tx.compute_wtxid(),
+        }
+    );
+    assert_eq!(f.vault.sends().len(), 1);
+    assert_eq!(
+        f.temp.journal()["fork_submission"]["txid"],
+        tx.compute_txid().to_string()
+    );
+    assert!(matches!(
+        f.coordinator.prepare_review(&context()).await,
+        Err(UnifiedError::Coordinator(Error::SubmissionAlreadyRecorded))
+    ));
+    assert_eq!(f.vault.sends().len(), 1);
+}
+
+/// Reviewer-654 R01: a review whose evidence lapsed by confirmation is
+/// refused as `ExpiredEvidence` before the journal exists; nothing is sent.
+#[tokio::test(flavor = "multi_thread")]
+async fn unified_expired_review_is_refused_at_confirm() {
+    let mut f = Flow::new(false).await;
+    f.signed(true).await;
+    let review = f.coordinator.prepare_review(&context()).await.unwrap();
+    f.coordinator
+        .skew_clock_for_test(Duration::from_secs(3_600));
+    assert!(matches!(
+        f.coordinator.confirm_and_submit(review, &context()).await,
+        Err(UnifiedError::Coordinator(Error::ExpiredEvidence))
+    ));
+    assert!(!f.journal_exists());
+    assert!(f.vault.sends().is_empty());
+}
+
+/// Reviewer-654 R06/R07: the target proof rests on fresh reads. A stale
+/// address-history read refuses the proof; a proof that has aged past the
+/// observation age by build time refuses the build.
+#[tokio::test(flavor = "multi_thread")]
+async fn unified_target_proof_must_be_fresh() {
+    let mut f = Flow::new(false).await;
+    f.reserve(INDEX).await.unwrap();
+    f.chains.edit(|v| v.address_age = 3_600);
+    assert!(matches!(
+        f.coordinator.prove_target(&context()).await,
+        Err(TargetError::Unavailable(
+            ChainId::BitcoinBlake2b,
+            FailureKind::Stale
+        ))
+    ));
+    assert!(matches!(
+        f.coordinator.build(&context(), &Fees(Some(2))).await,
+        Err(UnifiedError::TargetNotProven)
+    ));
+    f.chains.edit(|v| v.address_age = 0);
+    f.coordinator.prove_target(&context()).await.unwrap();
+    f.chains.edit(|v| v.clock_offset = 120);
+    assert!(matches!(
+        f.coordinator.build(&context(), &Fees(Some(2))).await,
+        Err(UnifiedError::TargetNotProven)
+    ));
+}
+
+/// Reviewer-654 R08: a reopened record's target must be the receive script
+/// the transport's Vault derives at the recorded index; on another Vault's
+/// transport the resume is refused before anything is read.
+#[tokio::test(flavor = "multi_thread")]
+async fn unified_resume_refuses_another_vaults_transport() {
+    let wallet = unified_wallet();
+    let target = address(&vault(), INDEX).script_pubkey();
+    let sweep = unified_sweep(&wallet, &target, BTCB2_TIP as u32);
+    let temp = Temp::new();
+    drop(
+        Controller::create_unified_split(&temp.0, TARGET.into(), &sweep, INDEX, context()).unwrap(),
+    );
+    assert!(matches!(
+        Flow::open_on(false, temp, true, other_vault()).await.err(),
+        Some(Error::InvalidBinding)
+    ));
+}
+
+/// Reviewer-654 R09: the fork-only reconciler never opens a two-step record,
+/// even one whose step-2 submission is recorded.
+#[tokio::test(flavor = "multi_thread")]
+async fn unified_reconciler_refuses_a_submitted_two_step_record() {
+    let s = Step2::new().await;
+    let signed_tx = s.signed_tx();
+    let (transport, _server, _submits, _) = transport(&s.h, &signed_tx, true).await;
+    let (h, mut coordinator) = finish(s, transport);
+    let review = coordinator.prepare_review(&context()).await.unwrap();
+    coordinator
+        .confirm_and_submit(review, &context())
+        .await
+        .unwrap();
+    drop(coordinator);
+    assert!(h.temp.journal().get("fork_submission").is_some());
+    assert!(matches!(
+        UnifiedReconciler::open(
+            &h.temp.0,
+            TARGET.into(),
+            h.step1.source().digest(),
+            context(),
+            h.sender.subscribe(),
+            Box::new(h.chains.clone()),
+            policy(),
+        ),
+        Err(Error::InvalidBinding)
+    ));
 }

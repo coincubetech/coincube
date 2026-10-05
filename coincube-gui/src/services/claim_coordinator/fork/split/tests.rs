@@ -1121,6 +1121,7 @@ fn split_step2_gate_has_no_gui_caller() {
             "confirm_step1_reconfirmation",
             // B4b-3a: the unified fallback (fork-only route).
             "UnifiedCoordinator",
+            "UnifiedError",
             "UnifiedReconciler",
             "UnifiedReconcile",
             "UnifiedReview",
@@ -1191,7 +1192,14 @@ fn split_step2_gate_has_no_gui_caller() {
                 && (file == "src/services/claim_coordinator/fork.rs"
                     || file.starts_with("src/services/claim_coordinator/fork/tests")
                     || file.starts_with("src/app/state/vault/claim/"));
-            if text.contains(ident) && !transport && !panel && !warning && !claim && !observation {
+            // Core's `ForeignUnifiedError` (the seed signer's) is not the
+            // coordinator's `UnifiedError`.
+            let named = if ident == "UnifiedError" {
+                text.replace("ForeignUnifiedError", "").contains(ident)
+            } else {
+                text.contains(ident)
+            };
+            if named && !transport && !panel && !warning && !claim && !observation {
                 unexpected.push((file.clone(), ident));
             }
         }
