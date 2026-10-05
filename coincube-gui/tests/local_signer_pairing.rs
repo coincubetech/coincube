@@ -843,6 +843,8 @@ async fn run_pairing_rejects_fingerprint_of_a_different_vault_key() {
 /// pairing handler hasn't seen the QR scan yet), then serves a
 /// real `PairingComplete` on the second connection. Used to
 /// exercise the redial loop in [`pairing_listener::run_pairing`].
+/// `redialed` fires as soon as the second connection is accepted,
+/// so the caller can time the redial apart from durable completion.
 async fn fake_phone_close_then_serve(
     listener: TcpListener,
     phone_cert: CertificateDer<'static>,
@@ -850,6 +852,7 @@ async fn fake_phone_close_then_serve(
     device_name: String,
     phone_cert_fp_hex: String,
     pairing_proof: String,
+    redialed: tokio::sync::oneshot::Sender<()>,
 ) {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let cfg = ServerConfig::builder_with_provider(provider)
@@ -867,6 +870,7 @@ async fn fake_phone_close_then_serve(
 
     // Connection #2: real pairing serve.
     let (tcp, _peer) = listener.accept().await.expect("accept #2");
+    let _ = redialed.send(());
     let mut tls = acceptor.accept(tcp).await.expect("tls handshake #2");
     let envelope = LocalEnvelope {
         payload: Some(local_v1::local_envelope::Payload::PairingComplete(
@@ -973,6 +977,7 @@ async fn run_pairing_redials_after_phone_closes_early() {
     let offer = fresh_offer(wallet_fp, identity.cert_fp(), 30);
     let proof = proof_for(&offer, &phone_cert_fp_hex);
 
+    let (redialed_tx, mut redialed) = tokio::sync::oneshot::channel();
     let phone_handle = tokio::spawn(fake_phone_close_then_serve(
         listener,
         phone_cert,
@@ -980,6 +985,7 @@ async fn run_pairing_redials_after_phone_closes_early() {
         "Pixel".into(),
         phone_cert_fp_hex.clone(),
         proof,
+        redialed_tx,
     ));
 
     let phone = DiscoveredPhone {
@@ -988,30 +994,50 @@ async fn run_pairing_redials_after_phone_closes_early() {
         instance_name: "keychain-test".into(),
     };
 
-    // Outer cap so a regression fails CI fast instead of hanging.
-    // 5s is plenty: one failed dial + REDIAL_BACKOFF (750ms) + one
-    // successful dial should land inside a second or two.
-    let paired = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        pairing_listener::run_pairing(
-            identity,
-            offer,
-            phone,
-            wallet_fp,
-            vec![wallet_fp],
-            wallet_fp,
-            &durable_pairing_test_dir(),
-            &Default::default(),
-        ),
-    )
+    let dir = durable_pairing_test_dir();
+    let run = Default::default();
+    let pairing = pairing_listener::run_pairing(
+        identity,
+        offer,
+        phone,
+        wallet_fp,
+        vec![wallet_fp],
+        wallet_fp,
+        &dir,
+        &run,
+    );
+    tokio::pin!(pairing);
+
+    // The redial itself is capped: 5s is plenty for one failed dial
+    // + REDIAL_BACKOFF (750ms) + one successful dial, and this window
+    // does no disk I/O. Wait for the phone to see the redial rather
+    // than for `run_pairing` to return, so the cap doesn't also time
+    // the durable completion below.
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::select! {
+            accepted = &mut redialed => accepted.expect("fake phone ended before the redial"),
+            early = &mut pairing => panic!("run_pairing returned before redialing: {:?}", early),
+        }
+    })
     .await
-    .expect("run_pairing must complete within cap")
-    .expect("run_pairing ok after redial");
+    .expect("desktop must redial within cap");
+
+    // Completion fsyncs the journal and store at each PairingStep
+    // under a lock shared by every test in this binary, so its wall
+    // time tracks disk flush latency: seconds when the machine is
+    // busy writing. `run_pairing` already bounds this phase itself:
+    // the PairingComplete read by the 30s offer TTL, and each of the
+    // three steps' send and reply by 10s. This cap (30s + 3 x 20s) is
+    // only a hang guard, not a latency budget.
+    let paired = tokio::time::timeout(std::time::Duration::from_secs(90), pairing)
+        .await
+        .expect("run_pairing must complete within hang guard")
+        .expect("run_pairing ok after redial");
 
     assert_eq!(paired.cert_pin, phone_pin);
     assert_eq!(paired.name, "Pixel");
 
-    let _ = phone_handle.await;
+    phone_handle.await.expect("fake phone task");
 }
 
 /// Pairing fails closed when the phone reports no usable ECIES transport key.
