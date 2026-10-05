@@ -124,8 +124,15 @@ pub enum Message {
     /// Close the read-only foreign-wallet sweep review and destroy its
     /// session-only evidence.
     DismissSplitReview,
-    /// A Split step-1 panel intent (#568 B1b). Reachable only while a resumed
-    /// Split journal's panel is shown; it has no "start" intent.
+    /// #568 B5c-2: start a split from the foreign-wallet sweep review. The
+    /// review overlay is its only sender, and it renders only under the
+    /// Review handoff; the App re-checks the server grant, the review's
+    /// context, that no Split panel is open and that this source was not
+    /// split into this Vault before (D15), in `App::start_split_from_review`.
+    StartSplit,
+    /// A Split panel intent (#568 B1b). Reachable only while a Split panel is
+    /// shown: one resumed from its journal, or one started from the review
+    /// (`StartSplit`). The panel's own intents have no "start".
     Split(crate::app::state::vault::split::SplitMessage),
     /// Open the Branta identity at `(output_index, identity_index)` in the reviewed PSBT.
     OpenVaultRecipientIdentity(usize, usize),

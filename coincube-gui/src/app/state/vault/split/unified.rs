@@ -1,8 +1,7 @@
 //! The single-step (fork-only) route in the Split panel (#568 B4b-3c; owner
-//! decisions U1-U7, C2-C6, P1, P7, P8). Like the rest of the panel it is
-//! dormant (D1): the route is chosen only in a started panel, which nothing
-//! in the GUI creates before B5c, and a fork-only journal is reopened only
-//! by restart.
+//! decisions U1-U7, C2-C6, P1, P7, P8). The route is chosen only in a
+//! started panel, which only the sweep review's "Start split" creates
+//! (#568 B5c-2), and a fork-only journal is reopened only by restart.
 //!
 //! - **Route choice.** A started panel offers the two-step split and, when
 //!   the wallet's descriptors give it (`SigningRoutes::seed_unified`, U6:

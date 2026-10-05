@@ -4,15 +4,16 @@
 //! - [`SplitPanel::start`], a fresh split from Home's two-chain scan:
 //!   preconditions → build → export the unsigned PSBT file → import and
 //!   combine the signed files → finalize → record (journal) → review →
-//!   submit (Connect only, D5) → track. Nothing in production calls it yet
-//!   (D1): the review overlay stays read-only until B5 adds "Start split".
-//! - [`SplitPanel::resume`], the only constructor production uses: a Split
-//!   journal already exists in this Vault's `split/` directory (which no one
-//!   can have before go-live). It rebuilds the recorded step 1 from freshly
-//!   authenticated coins and resumes with the recorded signed bytes. A
-//!   recorded submission is only reconciled, never retried; an unsubmitted
-//!   one is reviewed again only on an explicit request, and may be abandoned
-//!   after a chain check.
+//!   submit (Connect only, D5) → track. Its one production caller is the
+//!   App's "Start split" on the sweep review (#568 B5c-2, the go-live),
+//!   under the account's Bitcoin Blake2b grant, with no panel already open
+//!   and a source not split into this Vault before (D15).
+//! - [`SplitPanel::resume`]: a Split journal already exists in this Vault's
+//!   `split/` directory (one a started panel recorded). It rebuilds the
+//!   recorded step 1 from freshly authenticated coins and resumes with the
+//!   recorded signed bytes. A recorded submission is only reconciled, never
+//!   retried; an unsubmitted one is reviewed again only on an explicit
+//!   request, and may be abandoned after a chain check.
 //!
 //! Once step 1 is submitted the panel tracks it (#568 B2): each check shows
 //! its Bitcoin confirmations as N of 6, the depth step 2 needs. A step 1 that
@@ -37,8 +38,8 @@
 //! reconcile under the session sees step 2 confirmed on Bitcoin Blake2b with
 //! step 1 still six deep (#568 B5b), the split may be completed: recorded on
 //! this Cube by its source digest, its descriptors deleted, and shown with
-//! its history row; a completed split offers only Refresh and Close. It is
-//! still reachable only by resuming a journal (D1).
+//! its history row; a completed split offers only Refresh and Close. Step 2
+//! is reached only from a journal whose step 1 has six confirmations.
 //!
 //! A started panel first chooses its route (#568 B4b-3c, [`unified`]): the
 //! two steps above, or, for a wallet whose descriptors allow it, one
@@ -429,7 +430,8 @@ pub enum Recovered {
 }
 
 /// User intents. There is deliberately no "start" message: a fresh split is
-/// not reachable from the GUI before B5.
+/// started only by the App, from the sweep review's "Start split" (#568
+/// B5c-2), never from inside a panel.
 #[derive(Debug, Clone)]
 pub enum SplitMessage {
     Retry,
@@ -667,17 +669,17 @@ impl SplitPanel {
         }
     }
 
-    /// A fresh split of the scanned wallet into `target_cube`'s Vault. No
-    /// production caller before B5 (D1).
-    #[allow(dead_code)] // B5 adds the one "Start split" caller.
+    /// A fresh split of the scanned wallet into `target_cube`'s Vault. The
+    /// one production caller is the App's "Start split" on the sweep review
+    /// (#568 B5c-2).
     pub(crate) fn start(target_cube: String, journal_root: PathBuf, intent: SplitIntent) -> Self {
         let mut panel = Self::empty(target_cube, journal_root);
         panel.intent = Some(Arc::new(intent));
         panel
     }
 
-    /// Resume the existing journal `directory` (source `digest`). The only
-    /// constructor reachable in production, from journal discovery.
+    /// Resume the existing journal `directory` (source `digest`), from the
+    /// App's journal discovery.
     pub fn resume(
         target_cube: String,
         journal_root: PathBuf,

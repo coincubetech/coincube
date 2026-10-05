@@ -200,6 +200,56 @@ pub fn discover(root: &Path) -> Vec<(sha256::Hash, PathBuf)> {
     found
 }
 
+/// #568 D15: this source was already split into this Cube's Vault (its
+/// `split_from` records it).
+pub const SOURCE_ALREADY_SPLIT: &str = "This wallet was already split into this Vault, so it can't be split again. Nothing was started.";
+/// #568 D15: a split of this source is already recorded in this Vault.
+pub const SOURCE_SPLIT_RECORDED: &str = "A split of this wallet is already recorded in this Vault on this device; it continues from there. Nothing new was started.";
+/// #568 D15 with #625 F2 (A1): a split of this source was closed in this
+/// Vault; its record is kept, so a new split of it is refused.
+pub const SOURCE_SPLIT_CLOSED: &str = "A split of this wallet was closed in this Vault on this device, and its record is kept, so it can't be split again here. Nothing was started.";
+
+/// The source identity (D9) of the scanned wallet: what its journal and the
+/// target Cube's `split_from` are keyed by. CPU only.
+pub fn source_digest(intent: &SplitIntent) -> Result<sha256::Hash, String> {
+    split_source(&intent.external, intent.internal.as_ref())
+        .map(|source| source.digest())
+        .map_err(|error| error.to_string())
+}
+
+/// #568 D15, one predicate with A1's tombstone: why the source `digest` may
+/// not be split into the Vault whose Split journals are under `root`, or
+/// `None`. Refused when the target Cube's `split_from` records it, when a
+/// tombstone is in its journal directory (a closed split, whose record is
+/// kept), or when that directory holds a journal. Any entry by either name
+/// refuses, as the journal's own create does under its lock
+/// (`Controller::create_split`), which stays the final check. Two
+/// `symlink_metadata` calls, nothing read inside the journal.
+pub fn second_split_refusal(
+    root: &Path,
+    split_from: &[crate::app::settings::SplitFromRecord],
+    digest: sha256::Hash,
+) -> Option<&'static str> {
+    if split_from
+        .iter()
+        .any(|record| record.descriptor_digest == digest)
+    {
+        return Some(SOURCE_ALREADY_SPLIT);
+    }
+    let directory = journal_directory(root, digest);
+    if std::fs::symlink_metadata(directory.join(CLOSED)).is_ok() {
+        return Some(SOURCE_SPLIT_CLOSED);
+    }
+    if std::fs::symlink_metadata(directory.join(JOURNAL_FILE)).is_ok() {
+        return Some(SOURCE_SPLIT_RECORDED);
+    }
+    None
+}
+
+/// The journal's intent file in a journal directory (`claim_workflow`'s
+/// journal writes it).
+const JOURNAL_FILE: &str = "intent.json";
+
 /// What the review shows. A display copy only: the review token stays with
 /// the driver.
 #[derive(Debug, Clone, PartialEq, Eq)]

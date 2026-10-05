@@ -1,7 +1,8 @@
 //! Split panel view (#568 B1b, step 2 in B3b-2b-2). Pure rendering of
 //! [`SplitPanel`]; every action is a [`SplitMessage`]. There is no "start"
-//! action: a fresh split is not reachable before B5 (D1), and step 2 is
-//! reachable only from a resumed journal whose step 1 has six confirmations.
+//! action here: a fresh split starts only from the sweep review's "Start
+//! split" (#568 B5c-2), and step 2 is reachable only from a journal whose
+//! step 1 has six confirmations.
 
 use coincube_core::claim::MIN_CONFIRMATIONS;
 use coincube_ui::{

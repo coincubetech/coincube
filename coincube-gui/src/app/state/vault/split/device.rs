@@ -20,8 +20,8 @@
 //! A result from a request the panel moved on from (a revocation, a close,
 //! another request) carries an old sequence number and is dropped by
 //! [`SplitPanel::apply`]. Like the rest of the panel, this is reachable only
-//! from a resumed journal or a started panel, which nothing in the GUI
-//! creates before B5 (D1).
+//! from a resumed journal or a started panel, which only the sweep review's
+//! "Start split" creates (#568 B5c-2).
 
 use std::sync::Arc;
 

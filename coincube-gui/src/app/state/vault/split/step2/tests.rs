@@ -1297,10 +1297,10 @@ fn cannot_replay_label_comes_only_from_live_check_evidence() {
     assert_eq!(label.label(), None);
 }
 
-/// D1: the step-2 panel layer is reached only through the Split panel
-/// (itself constructed in production only to resume an existing journal,
-/// `split_panel_has_no_gui_entry_point`), and the App only hands the panel
-/// its port. Whole identifiers.
+/// Layering: the step-2 panel layer is reached only through the Split panel
+/// (itself started only from the sweep review, or resumed from its journal,
+/// `split_panel_start_is_reached_only_from_the_review_overlay_under_the_flag`),
+/// and the App only hands the panel its port. Whole identifiers.
 #[test]
 fn step2_panel_layer_is_reached_only_through_the_split_panel() {
     fn walk(dir: &Path, files: &mut Vec<(String, String)>) {

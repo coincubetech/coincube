@@ -818,9 +818,11 @@ pub struct App {
     /// Invalidates an in-flight address/feerate completion on session, feature,
     /// account, or Cube changes.
     split_handoff_generation: u64,
-    /// #568 B1b: the Split step-1 panel, only when this BTCB2 Cube's Vault
-    /// already has a Split journal (see [`discover_split_panel`]). Shown as an
-    /// overlay; nothing in the GUI starts a new split before B5 (D1).
+    /// #568 B1b: the Split panel, shown as an overlay. Present when this
+    /// BTCB2 Cube's Vault already has a Split journal (see
+    /// [`discover_split_panel`]) or, since B5c-2, when "Start split" on the
+    /// sweep review started one ([`Self::start_split_from_review`]), the only
+    /// way into a new split.
     split_panel: Option<Box<state::vault::split::SplitPanel>>,
     /// #625 F3c: the Split ports are built in a task. Each refresh, and each
     /// revocation, moves this; a build that lands under an older value is
@@ -960,6 +962,14 @@ enum SplitHandoff {
     },
 }
 
+/// #568 B5c-2: "Start split" refused because the review's Cube, Vault, scan,
+/// session or the account's Bitcoin Blake2b grant changed.
+const SPLIT_START_CANCELLED: &str = "Split was cancelled because its Cube, Vault, account session, or feature grant changed. Nothing was started. Scan again.";
+/// #568 B5c-2: "Start split" refused because this Cube already has a Split
+/// panel in this session (a resumed journal, or a split started or closed
+/// since the Cube was unlocked).
+const SPLIT_START_PANEL_OPEN: &str = "A split is already open for this Vault in this session, so nothing new was started. Reopen this Cube to continue it or to start another.";
+
 /// The fee source for a BTCB2 Split review: Connect's BTCB2 Esplora estimate
 /// for the bound account session (#568 D4), unavailable without one. It fails
 /// closed; the Bitcoin mainnet `FeeEstimator` must never price a BTCB2 sweep.
@@ -972,9 +982,10 @@ fn split_fee_source(
 /// #568 B1b: the only production construction of the Split panel. A Bitcoin
 /// Blake2b (mainnet) Cube whose Vault already holds a Split journal under
 /// `<btcb2>/data/<wallet>/split/<digest>/` resumes it; with none there is no
-/// panel and nothing Split-related is reachable. No one can have a journal
-/// before B5 adds "Start split" (D1). Discovery reads directory names only;
-/// the panel authenticates the journal when it opens it under a session.
+/// panel. A journal is created only by a panel that "Start split" on the
+/// sweep review started (#568 B5c-2), under the account's Bitcoin Blake2b
+/// grant. Discovery reads directory names only; the panel authenticates the
+/// journal when it opens it under a session.
 fn discover_split_panel(
     data_dir: &CoincubeDirectory,
     cube_settings: &settings::CubeSettings,
@@ -4038,6 +4049,67 @@ impl App {
         )
     }
 
+    /// #568 B5c-2 (P5, the go-live): "Start split" on the sweep review, the
+    /// one way a new split begins. It requires the Review handoff, the
+    /// account's Bitcoin Blake2b server grant, the review's context (Cube,
+    /// Vault, scan, bound session) still valid, no Split panel already in
+    /// this Cube, and (D15) a source this Cube's `split_from` does not record
+    /// and this Vault holds no journal or tombstone of. Then it constructs
+    /// the panel once, consumes the handoff and hands the panel the session;
+    /// the panel offers its route next and checks both chains before it
+    /// builds anything. Any refusal shows why and consumes the handoff.
+    ///
+    /// The D15 journal check is two `symlink_metadata` calls on a button
+    /// press; nothing inside a journal is read here. The journal's own create
+    /// refuses an existing journal or tombstone under its lock again.
+    fn start_split_from_review(&mut self) -> Task<Message> {
+        let Some(SplitHandoff::Review { intent, .. }) = self.split_handoff.as_ref() else {
+            return Task::none();
+        };
+        let refusal = if !self.panels.connect.account.bitcoin_blake2b_server_enabled()
+            || !self.split_context_valid(intent)
+        {
+            Some(SPLIT_START_CANCELLED.to_string())
+        } else if self.split_panel.is_some() {
+            Some(SPLIT_START_PANEL_OPEN.to_string())
+        } else {
+            let root = self.wallet.as_ref().map(|wallet| {
+                state::vault::split::step1::journal_root(&self.datadir, &wallet.id())
+            });
+            match (root, state::vault::split::step1::source_digest(intent)) {
+                (Some(root), Ok(digest)) => state::vault::split::step1::second_split_refusal(
+                    &root,
+                    &self.cube_settings.split_from,
+                    digest,
+                )
+                .map(str::to_string),
+                (None, _) => Some(SPLIT_START_CANCELLED.to_string()),
+                (_, Err(error)) => Some(format!("Split can't start for this wallet: {error}")),
+            }
+        };
+        if let Some(reason) = refusal {
+            self.revoke_split_handoff();
+            return Task::done(Message::View(view::Message::ShowError(reason)));
+        }
+        let (Some(SplitHandoff::Review { intent, .. }), Some(wallet)) =
+            (self.split_handoff.take(), self.wallet.as_ref())
+        else {
+            return Task::none();
+        };
+        let root = state::vault::split::step1::journal_root(&self.datadir, &wallet.id());
+        self.revoke_split_handoff();
+        let mut panel = Box::new(state::vault::split::SplitPanel::start(
+            self.cube_settings.id.clone(),
+            root,
+            intent,
+        ));
+        // B4b-3b: the session-only device listing is rooted here, as for a
+        // resumed panel; it writes nothing under it.
+        panel.set_device_datadir(self.datadir.clone());
+        self.split_panel = Some(panel);
+        self.refresh_split_session()
+    }
+
     /// Start a claim the Home card asked for, if this Cube is still a valid
     /// source. A card press is a request, not a permission: the gate is
     /// re-checked here, and `Installer::try_new_for_chain` re-checks the
@@ -5438,6 +5510,9 @@ impl App {
             Message::View(view::Message::DismissSplitReview) => {
                 self.revoke_split_handoff();
                 return Task::none();
+            }
+            Message::View(view::Message::StartSplit) => {
+                return self.start_split_from_review();
             }
             Message::SplitDiscovered {
                 cube,
@@ -8355,12 +8430,20 @@ fn split_review_overlay<'a>(
             .style(theme::text::secondary),
         )
         .push(
+            caption(
+                "Start split opens the split in this Vault. You choose how it is signed next; both chains are checked again before anything is built, and nothing is sent without its own review.",
+            )
+            .style(theme::text::secondary),
+        )
+        .push(
             Row::new()
+                .spacing(10)
                 .align_y(Alignment::Center)
                 .push(
-                    button::primary(None, "Close review")
+                    button::secondary(None, "Close review")
                         .on_press(view::Message::DismissSplitReview),
-                ),
+                )
+                .push(button::primary(None, "Start split").on_press(view::Message::StartSplit)),
         );
 
     Container::new(card::simple(review.padding(24)))
@@ -9502,6 +9585,371 @@ mod tests {
             panel: found(&app),
         }));
         assert!(app.split_panel.is_some());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// #568 B5c-2: a Bitcoin Blake2b Cube App with no Split journal
+    /// (`split_app`) whose Vault is recorded on the Cube, signed in to an
+    /// account whose `/connect/features` grant is `grant` (`None`: the field
+    /// is absent from a loaded response).
+    fn start_split_app(root: &std::path::Path, grant: Option<bool>) -> App {
+        use std::str::FromStr;
+        let mut app = split_app(root, false, true);
+        let descriptor =
+            coincube_core::descriptors::CoincubeDescriptor::from_str(SPLIT_DESC).unwrap();
+        let wallet = app.wallet.clone().unwrap();
+        app.cube_settings = app
+            .cube_settings
+            .clone()
+            .with_vault(settings::VaultIdentity::new(wallet.id(), Some(&descriptor)));
+        app.panels.connect.account.step = state::connect::account::ConnectFlowStep::Dashboard;
+        let features = match grant {
+            Some(grant) => format!("{{\"plans\":[],\"bitcoin_blake2b_enabled\":{}}}", grant),
+            None => "{\"plans\":[]}".to_string(),
+        };
+        app.panels.connect.account.features = Some(serde_json::from_str(&features).unwrap());
+        assert!(app.panels.connect.account.is_authenticated());
+        assert_eq!(
+            app.panels.connect.account.bitcoin_blake2b_server_enabled(),
+            grant == Some(true)
+        );
+        app
+    }
+
+    /// A fresh scan intent for `app`'s Cube under its bound session, of the
+    /// single-key wallet `external` (a receive descriptor).
+    fn start_split_intent(app: &App, external: &str) -> split_intent::SplitIntent {
+        split_intent::SplitIntent::new(
+            app.cube_settings.id.clone(),
+            crate::chain::ChainId::BitcoinBlake2b,
+            0,
+            app.fork_connect_client.as_ref().unwrap(),
+            split_intent::empty_scan_for_test(1),
+            crate::services::foreign_scan::ScanDescriptor::parse(
+                crate::services::foreign_scan::Branch::External,
+                external,
+            )
+            .unwrap(),
+            None,
+        )
+        .unwrap()
+    }
+
+    const START_SOURCE: &str =
+        "wpkh(02c6047f9441ed7d6d3045406e95c07cd85aeb5c6b7a3c2e21b73cdb1e24ff3a64)";
+
+    /// The App's Vault reserving a fresh receive address on a fake daemon,
+    /// as `start_pending_split` does.
+    fn start_split_reservation(app: &App) -> crate::services::foreign_psbt::TargetReservation {
+        use std::str::FromStr;
+        let daemon = Arc::new(split_target::SplitTargetDaemon {
+            descriptor: coincube_core::descriptors::CoincubeDescriptor::from_str(SPLIT_DESC)
+                .unwrap(),
+            index: 3,
+            coins: Vec::new(),
+            polls: split_target::Polls::OnRequest,
+            calls: Default::default(),
+        });
+        let reservation = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(reserve_split_target(daemon, Duration::from_millis(50)))
+            .unwrap();
+        // It authenticates for this Cube's Vault, so a review can form.
+        crate::services::foreign_psbt::TargetAddressEvidence::authenticate(
+            &app.cube_settings,
+            app.wallet.as_ref().unwrap(),
+            &reservation,
+            1,
+        )
+        .unwrap();
+        reservation
+    }
+
+    /// Put `app` in the sweep review of `intent`, as a `SplitTargetPrepared`
+    /// under the grant leaves it.
+    fn start_split_review(app: &mut App, intent: split_intent::SplitIntent) {
+        let reservation = start_split_reservation(app);
+        let target = crate::services::foreign_psbt::TargetAddressEvidence::authenticate(
+            &app.cube_settings,
+            app.wallet.as_ref().unwrap(),
+            &reservation,
+            intent.scan_generation(),
+        )
+        .unwrap();
+        app.split_handoff = Some(SplitHandoff::Review {
+            intent,
+            target,
+            address: reservation.reserved.address.to_string(),
+            sweep: crate::services::foreign_psbt::SweepInputs {
+                inputs: 1,
+                total: coincube_core::miniscript::bitcoin::Amount::from_sat(10_000),
+                maximum_signed_vbytes: 200,
+                excluded_post_fork: 0,
+                excluded_unknown: 0,
+            },
+            economics: None,
+        });
+    }
+
+    /// The errors a task shows, run to completion.
+    fn shown_errors(task: Task<Message>) -> Vec<String> {
+        task_messages(task)
+            .into_iter()
+            .filter_map(|message| match message {
+                Message::View(view::Message::ShowError(error)) => Some(error),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn handoff_stage(app: &App) -> Option<&'static str> {
+        app.split_handoff.as_ref().map(|handoff| match handoff {
+            SplitHandoff::Waiting(_) => "waiting",
+            SplitHandoff::Reserving(_) => "reserving",
+            SplitHandoff::Review { .. } => "review",
+        })
+    }
+
+    /// #568 B5c-2 (the go-live, P5): "Start split" on the review constructs
+    /// the panel once, for this Cube's Vault's journal root and the
+    /// reviewed scan, consumes the handoff, and hands the panel the
+    /// session; the panel then offers its route. Pressed again (no review
+    /// left) it does nothing.
+    #[test]
+    fn start_split_constructs_the_panel_once_and_consumes_the_handoff() {
+        let _guard = crate::app::session::test_guard();
+        let root = std::env::temp_dir().join(format!("split-start-{}", uuid::Uuid::new_v4()));
+        let mut app = start_split_app(&root, Some(true));
+        let intent = start_split_intent(&app, START_SOURCE);
+        start_split_review(&mut app, intent);
+        let generation = app.split_handoff_generation;
+        let task = app.update(Message::View(view::Message::StartSplit));
+        assert!(app.split_handoff.is_none(), "the handoff is consumed");
+        assert_ne!(app.split_handoff_generation, generation);
+        let panel = app.split_panel.as_deref().expect("the panel is started");
+        let wallet = app.wallet.as_ref().unwrap().id();
+        assert_eq!(
+            panel.journal_root(),
+            &state::vault::split::step1::journal_root(&app.datadir, &wallet)
+        );
+        assert_eq!(panel.journal_directory(), None, "nothing recorded yet");
+        assert_eq!(
+            panel.device_datadir().map(|dir| dir.path().to_path_buf()),
+            Some(app.datadir.path().to_path_buf())
+        );
+        let first = panel as *const state::vault::split::SplitPanel;
+        // The session's ports are built in a task; installed, the panel
+        // offers its route (nothing built, nothing checked yet).
+        for message in task_messages(task) {
+            assert!(
+                matches!(message, Message::SplitPortsBuilt(..)),
+                "{:?}",
+                message
+            );
+            drop(app.update(message));
+        }
+        let panel = app.split_panel.as_deref().unwrap();
+        assert_eq!(panel.stage(), &state::vault::split::Stage::ChooseRoute);
+        // Pressed again with no review: nothing happens.
+        let again = app.update(Message::View(view::Message::StartSplit));
+        assert!(task_messages(again).is_empty());
+        assert_eq!(
+            app.split_panel
+                .as_deref()
+                .map(|panel| panel as *const state::vault::split::SplitPanel),
+            Some(first)
+        );
+        // Nothing was written under the journal root.
+        assert!(
+            state::vault::split::step1::discover(&state::vault::split::step1::journal_root(
+                &app.datadir,
+                &wallet
+            ))
+            .is_empty()
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// #568 B5c-2, flag off: with the account's Bitcoin Blake2b grant false
+    /// or absent from its features, nothing in Split is reachable from a
+    /// fresh Cube. `start_pending_split` revokes the handoff,
+    /// `SplitTargetPrepared` revokes it, and "Start split" revokes it and
+    /// constructs no panel. `StartSplit` outside the review is a no-op even
+    /// under the grant; the button itself is rendered only in the review
+    /// overlay, only under the Review handoff (the entry-point guard,
+    /// `split_panel_start_is_reached_only_from_the_review_overlay_under_the_flag`).
+    #[test]
+    fn start_split_is_unreachable_with_the_server_flag_off() {
+        let _guard = crate::app::session::test_guard();
+        for grant in [Some(false), None] {
+            let root = std::env::temp_dir().join(format!("split-flag-{}", uuid::Uuid::new_v4()));
+            let mut app = start_split_app(&root, grant);
+            // `start_pending_split`.
+            app.split_handoff = Some(SplitHandoff::Waiting(start_split_intent(
+                &app,
+                START_SOURCE,
+            )));
+            let errors = shown_errors(app.start_pending_split());
+            assert_eq!(handoff_stage(&app), None, "{:?}", grant);
+            assert_eq!(errors.len(), 1, "{:?}", grant);
+            // `SplitTargetPrepared`, with a reservation that would review.
+            app.split_handoff = Some(SplitHandoff::Reserving(start_split_intent(
+                &app,
+                START_SOURCE,
+            )));
+            let reservation = start_split_reservation(&app);
+            let errors = shown_errors(app.update(Message::SplitTargetPrepared {
+                generation: app.split_handoff_generation,
+                result: Ok((Box::new(reservation), None)),
+            }));
+            assert_eq!(handoff_stage(&app), None, "{:?}", grant);
+            assert_eq!(
+                errors,
+                ["Split was cancelled because its target or authenticated session changed. Scan again."],
+                "{:?}",
+                grant
+            );
+            // "Start split" on a review.
+            let intent = start_split_intent(&app, START_SOURCE);
+            start_split_review(&mut app, intent);
+            let errors = shown_errors(app.update(Message::View(view::Message::StartSplit)));
+            assert_eq!(handoff_stage(&app), None, "{:?}", grant);
+            assert!(app.split_panel.is_none(), "{:?}", grant);
+            assert_eq!(errors, [SPLIT_START_CANCELLED], "{:?}", grant);
+            let _ = std::fs::remove_dir_all(&root);
+        }
+
+        // Under the grant, `StartSplit` before the review (or with none)
+        // leaves the handoff and starts nothing.
+        let root = std::env::temp_dir().join(format!("split-flag-{}", uuid::Uuid::new_v4()));
+        let mut app = start_split_app(&root, Some(true));
+        for stage in ["waiting", "reserving", "none"] {
+            let intent = start_split_intent(&app, START_SOURCE);
+            app.split_handoff = match stage {
+                "waiting" => Some(SplitHandoff::Waiting(intent)),
+                "reserving" => Some(SplitHandoff::Reserving(intent)),
+                _ => None,
+            };
+            let generation = app.split_handoff_generation;
+            let task = app.update(Message::View(view::Message::StartSplit));
+            assert!(task_messages(task).is_empty(), "{}", stage);
+            assert_eq!(
+                handoff_stage(&app),
+                (stage != "none").then_some(stage),
+                "{}",
+                stage
+            );
+            assert_eq!(app.split_handoff_generation, generation, "{}", stage);
+            assert!(app.split_panel.is_none(), "{}", stage);
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// #568 B5c-2: "Start split" refuses, showing why, consuming the
+    /// handoff and constructing nothing, when the review's context changed,
+    /// when a Split panel is already in this Cube, and (D15) when this
+    /// Cube's `split_from` records the source or this Vault holds its
+    /// journal or tombstone. A wallet whose source is unusable is refused
+    /// too.
+    #[test]
+    fn start_split_refuses_a_second_split_or_a_completed_source() {
+        use coincube_core::miniscript::bitcoin::{hashes::Hash, Txid};
+        let _guard = crate::app::session::test_guard();
+        let refused = |app: &mut App, expected: &str| {
+            let errors = shown_errors(app.update(Message::View(view::Message::StartSplit)));
+            assert_eq!(errors, [expected]);
+            assert_eq!(handoff_stage(app), None);
+        };
+        let root = std::env::temp_dir().join(format!("split-refuse-{}", uuid::Uuid::new_v4()));
+        let mut app = start_split_app(&root, Some(true));
+        let digest =
+            state::vault::split::step1::source_digest(&start_split_intent(&app, START_SOURCE))
+                .unwrap();
+        let wallet = app.wallet.as_ref().unwrap().id();
+        let directory = state::vault::split::step1::journal_directory(
+            &state::vault::split::step1::journal_root(&app.datadir, &wallet),
+            digest,
+        );
+
+        // The review's context changed: a scan for another Cube, or the
+        // account's session replaced since the scan.
+        let mut other = app.cube_settings.clone();
+        other.id = "another-cube".into();
+        let saved = std::mem::replace(&mut app.cube_settings, other);
+        let intent = start_split_intent(&app, START_SOURCE);
+        app.cube_settings = saved;
+        start_split_review(&mut app, intent);
+        refused(&mut app, SPLIT_START_CANCELLED);
+        let intent = start_split_intent(&app, START_SOURCE);
+        start_split_review(&mut app, intent);
+        let mut client =
+            crate::services::coincube::CoincubeClient::for_test("https://connect.example/");
+        client.set_token("another-session");
+        let bound = app.fork_connect_client.replace(client);
+        refused(&mut app, SPLIT_START_CANCELLED);
+        app.fork_connect_client = bound;
+        assert!(app.split_panel.is_none());
+
+        // D15: completed into this Cube (another source's record does not
+        // count).
+        let record = |descriptor_digest| settings::SplitFromRecord {
+            descriptor_digest,
+            completed_height: 1_000,
+            step2_txid: Txid::from_byte_array([5; 32]),
+        };
+        app.cube_settings.split_from = vec![record(Hash::hash(b"another source"))];
+        app.cube_settings.split_from.push(record(digest));
+        let intent = start_split_intent(&app, START_SOURCE);
+        start_split_review(&mut app, intent);
+        refused(&mut app, state::vault::split::step1::SOURCE_ALREADY_SPLIT);
+        app.cube_settings.split_from.truncate(1);
+        // D15: a journal of this source in this Vault, then its tombstone
+        // alone (a closed split whose record was kept).
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("intent.json"), b"{}").unwrap();
+        let intent = start_split_intent(&app, START_SOURCE);
+        start_split_review(&mut app, intent);
+        refused(&mut app, state::vault::split::step1::SOURCE_SPLIT_RECORDED);
+        std::fs::remove_file(directory.join("intent.json")).unwrap();
+        std::fs::write(directory.join(state::vault::split::step1::CLOSED), b"{}").unwrap();
+        let intent = start_split_intent(&app, START_SOURCE);
+        start_split_review(&mut app, intent);
+        refused(&mut app, state::vault::split::step1::SOURCE_SPLIT_CLOSED);
+        std::fs::remove_file(directory.join(state::vault::split::step1::CLOSED)).unwrap();
+        // An empty directory left by nothing is no journal.
+        assert!(app.split_panel.is_none());
+
+        // A source the split can't use (a Taproot wallet).
+        let intent = start_split_intent(
+            &app,
+            "tr(c6047f9441ed7d6d3045406e95c07cd85aeb5c6b7a3c2e21b73cdb1e24ff3a64)",
+        );
+        start_split_review(&mut app, intent);
+        let errors = shown_errors(app.update(Message::View(view::Message::StartSplit)));
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].starts_with("Split can't start for this wallet: "));
+        assert!(app.split_panel.is_none());
+
+        // Started once; a second review then finds the panel open.
+        let intent = start_split_intent(&app, START_SOURCE);
+        start_split_review(&mut app, intent);
+        drop(app.update(Message::View(view::Message::StartSplit)));
+        let started = app
+            .split_panel
+            .as_deref()
+            .map(|panel| panel as *const state::vault::split::SplitPanel);
+        assert!(started.is_some());
+        let intent = start_split_intent(&app, START_SOURCE);
+        start_split_review(&mut app, intent);
+        refused(&mut app, SPLIT_START_PANEL_OPEN);
+        assert_eq!(
+            app.split_panel
+                .as_deref()
+                .map(|panel| panel as *const state::vault::split::SplitPanel),
+            started
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
