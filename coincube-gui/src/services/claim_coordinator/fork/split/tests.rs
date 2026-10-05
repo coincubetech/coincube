@@ -92,6 +92,21 @@ fn policy() -> CheckPolicy {
         collection_budget: Duration::from_secs(2),
     }
 }
+/// The harness policy with the widest collection budget. Every review and
+/// completion evidence is bounded by an evidence deadline
+/// (`evidence_deadline`): the budget, capped at 30 s, measured on the real
+/// monotonic clock from the start of its check. The harness's 2 s left a
+/// heavily loaded run (four test binaries of 16 threads beside a cargo
+/// build) expiring reviews and evidence before their use
+/// (`ExpiredEvidence`, "expired while saving"); 30 s outlasts any such run.
+/// Expiry itself is tested with `expire_for_test` or on a reconciler that
+/// keeps the 2 s budget, not by widening it.
+fn wide_policy() -> CheckPolicy {
+    CheckPolicy {
+        collection_budget: claim_observation::MAX_COLLECTION_TIME,
+        ..policy()
+    }
+}
 fn context() -> Context {
     Context {
         generation: 7,
@@ -605,7 +620,8 @@ fn not_ready(result: Result<ForeignStep2Authorization, SplitCheckError>) -> Asse
 async fn split_step2_needs_six_confirmations_of_the_tracked_txid() {
     assert_eq!(MIN_CONFIRMATIONS, 6);
     let h = Harness::new(5).await;
-    let mut preparation = h.prepare().unwrap();
+    // The token's liveness is asserted below: a deadline that outlasts load.
+    let mut preparation = h.prepare_with(wide_policy()).unwrap();
     assert_eq!(preparation.tracked_txid(), h.signed.compute_txid());
     assert_eq!(
         not_ready(preparation.check_signing(&context()).await),
@@ -840,7 +856,9 @@ async fn split_step2_refuses_rdts_margin_and_step1_on_the_fork() {
 #[tokio::test(flavor = "multi_thread")]
 async fn split_step2_token_expires_is_one_use_and_revoked() {
     let h = Harness::new(6).await;
-    let mut preparation = h.prepare().unwrap();
+    // Bindings, redemption and supersession under a deadline that outlasts
+    // load (`wide_policy`); the expiry below keeps the 2 s budget.
+    let mut preparation = h.prepare_with(wide_policy()).unwrap();
     let prevouts = h.prevouts();
     let tracked = h.signed.compute_txid();
 
@@ -894,7 +912,10 @@ async fn split_step2_token_expires_is_one_use_and_revoked() {
         Err(RedeemError::Stale)
     );
 
-    // Expiry: the deadline is the collection budget (2 s here) at most.
+    // Expiry: the deadline is the collection budget (the harness's 2 s
+    // here) at most, on a preparation of its own (one holds the journal).
+    drop(preparation);
+    let mut preparation = h.prepare().unwrap();
     let token = preparation.check_signing(&context()).await.unwrap();
     assert!(token.is_live());
     let deadline = token.not_after;

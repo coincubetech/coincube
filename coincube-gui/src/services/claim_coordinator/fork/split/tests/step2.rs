@@ -127,21 +127,6 @@ impl Step2Transport for Transport {
     }
 }
 
-/// The harness policy with the widest collection budget. Every review and
-/// completion evidence is bounded by an evidence deadline
-/// (`evidence_deadline`): the budget, capped at 30 s, measured on the real
-/// monotonic clock from the start of its check. The harness's 2 s left a
-/// heavily loaded run (four test binaries of 16 threads beside a cargo
-/// build) expiring reviews and evidence before their use
-/// (`ExpiredEvidence`, "expired while saving"); 30 s outlasts any such run.
-/// Expiry itself is tested with `expire_for_test` or on a reconciler that
-/// keeps the 2 s budget, not by widening it.
-fn wide_policy() -> CheckPolicy {
-    CheckPolicy {
-        collection_budget: claim_observation::MAX_COLLECTION_TIME,
-        ..policy()
-    }
-}
 /// A preparation whose first check tracked step 1 (reservation needs it).
 async fn tracked(h: &Harness) -> SplitPreparation {
     tracked_with(h, policy()).await
