@@ -56,6 +56,14 @@
 //!   [`check_close`]: [`close`] leaves the journal, recorded bytes included,
 //!   and writes its tombstone, so discovery skips it and a new split of the
 //!   same source stays refused until the owner removes the tombstone.
+//! - **The O1 acknowledgement** (#568 S4b, S4-D3). When a reconcile finds
+//!   step 1 re-mined in another Bitcoin block (`Remined`), the handle the
+//!   panel holds (the coordinator or the reconciler) reviews it
+//!   ([`Step2Coord::review_reconfirmation`],
+//!   [`Step2Recon::review_reconfirmation`]): one-use, expiring
+//!   ([`ReconfirmationView`]), refused past the RDTS margin (S4-D4,
+//!   [`describe_reconfirmation`]). Confirming exactly it records the new
+//!   block for step 1. Nothing is sent.
 //! - **The O4 exit** (#568 S4b, Legolas F3). A recorded *terminal* step-1
 //!   conflict is a dead end too ([`DeadEnd::conflict`]): step 1 can never
 //!   confirm, so no resend can follow and the split can't complete. Its
@@ -79,7 +87,7 @@ use tokio::sync::watch;
 
 use coincube_core::{
     chain::ChainId,
-    claim::MIN_CONFIRMATIONS,
+    claim::{Assessment, BlockRef, MIN_CONFIRMATIONS},
     descriptors::CoincubeDescriptor,
     foreign_split::{SplitCoin, SplitStep1, VerifiedSplitStep1},
     miniscript::bitcoin::{hashes::sha256, psbt::Psbt, Address, Network, OutPoint, Txid},
@@ -89,7 +97,9 @@ use super::step1::{self, OpenRequest, Refusal, RevokeHandle, SplitConnect, Step1
 use crate::{
     app::{
         settings::{CubeSettings, SettingsError, SplitFromRecord},
-        state::vault::claim::{ConnectSession, CHECK_POLICY},
+        state::vault::claim::{
+            describe_duration, ConnectSession, CHECK_POLICY, EXPIRY_MARGIN_SECONDS,
+        },
     },
     daemon::Daemon,
     dir::CoincubeDirectory,
@@ -100,8 +110,8 @@ use crate::{
                 step2::{
                     CompletionTarget, ResendError, SplitCompletionEvidence,
                     SplitCompletionReconciliation, SplitStep2Coordinator, SplitStep2Production,
-                    SplitStep2Reconciler, Step1AfterStep2, Step2Error, Step2ResubmissionReview,
-                    SweepReconcile, TargetError, RESERVATION_BOUND,
+                    SplitStep2Reconciler, Step1AfterStep2, Step1ReconfirmationReview, Step2Error,
+                    Step2ResubmissionReview, SweepReconcile, TargetError, RESERVATION_BOUND,
                 },
                 ForeignStep2Authorization, SplitCheckError, SplitForkProduction, SplitPreparation,
                 Step2Liveness,
@@ -498,6 +508,39 @@ pub fn describe_resend(error: ResendError) -> Step2Refusal {
     }
 }
 
+/// S4-D4: the O1 acknowledgement is refused once Bitcoin Blake2b's replay
+/// protection is past its margin, so this split can't complete.
+pub fn rdts_reconfirmation_refusal(expired: bool) -> String {
+    if expired {
+        "Step 1's new Bitcoin block can't be recorded: Bitcoin Blake2b's replay protection has expired, so this split can't complete. Nothing was recorded or sent.".to_string()
+    } else {
+        format!(
+            "Step 1's new Bitcoin block can't be recorded: Bitcoin Blake2b's replay protection expires within {}, so this split can't complete. Nothing was recorded or sent.",
+            describe_duration(EXPIRY_MARGIN_SECONDS)
+        )
+    }
+}
+/// The O1 review's evidence lapsed or the chains changed under it.
+pub const RECONFIRMATION_AGAIN: &str = "The chains changed or the review of step 1's new block expired before it was acknowledged. Nothing was recorded or sent; review it again.";
+
+/// Copy for a refused O1 review or acknowledgement (#568 S4b). Nothing was
+/// sent; S4-D4's refusal past the RDTS margin is final.
+pub fn describe_reconfirmation(error: claim_coordinator::Error) -> Step2Refusal {
+    use claim_coordinator::Error as E;
+    match error {
+        E::NotReady(Assessment::ExpiryMargin) => {
+            Step2Refusal::final_(rdts_reconfirmation_refusal(false))
+        }
+        E::NotReady(Assessment::RdtsExpired) => {
+            Step2Refusal::final_(rdts_reconfirmation_refusal(true))
+        }
+        E::ExpiredEvidence | E::ChangedReview | E::InvalidReview => {
+            Step2Refusal::retry(RECONFIRMATION_AGAIN)
+        }
+        other => describe_check(other),
+    }
+}
+
 fn describe_check(error: claim_coordinator::Error) -> Step2Refusal {
     use claim_coordinator::Error as E;
     let recovery = match error {
@@ -678,6 +721,60 @@ impl Step2ResendView {
     }
 }
 
+/// O1 (#568 S4b): a review of step 1 re-mined in another Bitcoin block
+/// after the step-2 submission, on screen until it is used, lapses or its
+/// handle is revoked.
+#[derive(Clone)]
+pub struct ReconfirmationView {
+    /// The block recorded for step 1.
+    pub previous: BlockRef,
+    /// The block step 1 is now confirmed in.
+    pub confirmed: BlockRef,
+    /// Step 1's confirmations in it at the review.
+    pub confirmations: u64,
+    /// When the review's evidence lapses, for display.
+    pub expires_at: chrono::DateTime<chrono::Local>,
+    /// The same deadline on the monotonic clock: the panel drops the review
+    /// then (S3 item 5).
+    not_after: Instant,
+    live: ResendLiveness,
+}
+impl std::fmt::Debug for ReconfirmationView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReconfirmationView")
+            .field("previous", &self.previous)
+            .field("confirmed", &self.confirmed)
+            .finish_non_exhaustive()
+    }
+}
+impl ReconfirmationView {
+    /// The view of `review`, live while `live` says so (and before its
+    /// deadline).
+    fn of(review: &Step1ReconfirmationReview, live: ResendLiveness) -> Self {
+        let not_after = review.not_after();
+        let left = not_after.saturating_duration_since(Instant::now());
+        let inclusion = review.inclusion();
+        Self {
+            previous: inclusion.previous,
+            confirmed: inclusion.confirmed,
+            confirmations: review.confirmations(),
+            expires_at: chrono::Local::now()
+                + chrono::Duration::from_std(left).unwrap_or_else(|_| chrono::Duration::zero()),
+            not_after,
+            live,
+        }
+    }
+    /// Until its deadline, while its handle is not revoked and the
+    /// session's generation has not moved.
+    pub fn is_live(&self) -> bool {
+        (self.live)()
+    }
+    /// When the review lapses at the latest.
+    pub fn not_after(&self) -> Instant {
+        self.not_after
+    }
+}
+
 /// The step-2 submission coordinator over one Split journal.
 #[async_trait]
 pub trait Step2Coord: Send {
@@ -698,6 +795,17 @@ pub trait Step2Coord: Send {
     /// showed. That review is used up whatever the result; another resend
     /// needs another review.
     async fn confirm_resend(&mut self, context: &Context) -> Result<Outcome, Step2Refusal>;
+    /// O1 (#568 S4b): a fresh one-use review of step 1 re-mined in another
+    /// Bitcoin block, replacing any earlier one (and dropping any resend
+    /// review). Records and sends nothing.
+    async fn review_reconfirmation(
+        &mut self,
+        context: &Context,
+    ) -> Result<ReconfirmationView, Step2Refusal>;
+    /// O1: acknowledge exactly the last such review, which is used up
+    /// whatever the result: the new block becomes step 1's recorded one.
+    /// Sends nothing.
+    async fn confirm_reconfirmation(&mut self, context: &Context) -> Result<(), Step2Refusal>;
 }
 
 /// After a recorded step-2 submission: reconcile, and complete (#568 B5b).
@@ -720,6 +828,13 @@ pub trait Step2Recon: Send {
         &mut self,
         context: &Context,
     ) -> Result<CompletionStanding, Step2Refusal>;
+    /// O1 (#568 S4b): see [`Step2Coord::review_reconfirmation`].
+    async fn review_reconfirmation(
+        &mut self,
+        context: &Context,
+    ) -> Result<ReconfirmationView, Step2Refusal>;
+    /// O1: see [`Step2Coord::confirm_reconfirmation`].
+    async fn confirm_reconfirmation(&mut self, context: &Context) -> Result<(), Step2Refusal>;
 }
 
 /// Everything the preparation is opened with: the step 1 rebuilt at restore.
@@ -1493,6 +1608,8 @@ impl ReconPort for ProductionRecon {
         Ok(Box::new(ReconcilerDriver::new(
             reconciler,
             self.site.clone(),
+            self.generation.clone(),
+            self.expected,
         )))
     }
 }
@@ -1726,6 +1843,9 @@ struct CoordinatorDriver {
     review: Option<Review>,
     /// P3-3: the last resend review, used up by its confirmation.
     resend: Option<Step2ResubmissionReview>,
+    /// O1 (#568 S4b): the last step-1 reconfirmation review, used up by its
+    /// acknowledgement.
+    reconfirmation: Option<Step1ReconfirmationReview>,
     route: SubmissionRoute,
     /// The session generation the coordinator works under, for the resend
     /// review's liveness.
@@ -1743,6 +1863,7 @@ impl CoordinatorDriver {
             coordinator,
             review: None,
             resend: None,
+            reconfirmation: None,
             route,
             generation,
             expected,
@@ -1795,6 +1916,7 @@ impl Step2Coord for CoordinatorDriver {
     ) -> Result<(Status, TransactionObservation, Step1AfterStep2), Step2Refusal> {
         self.review = None;
         self.resend = None;
+        self.reconfirmation = None;
         self.coordinator
             .reconcile_sweep(context)
             .await
@@ -1845,6 +1967,44 @@ impl Step2Coord for CoordinatorDriver {
             .confirm_step2_resubmission(review, context)
             .await
             .map_err(describe_resend)
+    }
+    async fn review_reconfirmation(
+        &mut self,
+        context: &Context,
+    ) -> Result<ReconfirmationView, Step2Refusal> {
+        // A new review moves the coordinator's revision: any earlier review
+        // of either kind could only refuse.
+        self.review = None;
+        self.resend = None;
+        self.reconfirmation = None;
+        let review = self
+            .coordinator
+            .prepare_step1_reconfirmation(context)
+            .await
+            .map_err(describe_reconfirmation)?;
+        let revoker = self.coordinator.revoker();
+        let view = ReconfirmationView::of(
+            &review,
+            resend_liveness(
+                move || revoker.is_revoked(),
+                self.generation.clone(),
+                self.expected,
+                review.not_after(),
+            ),
+        );
+        self.reconfirmation = Some(review);
+        Ok(view)
+    }
+    async fn confirm_reconfirmation(&mut self, context: &Context) -> Result<(), Step2Refusal> {
+        self.review = None;
+        let review = self
+            .reconfirmation
+            .take()
+            .ok_or_else(|| Step2Refusal::retry(RECONFIRMATION_AGAIN))?;
+        self.coordinator
+            .confirm_step1_reconfirmation(review, context)
+            .await
+            .map_err(describe_reconfirmation)
     }
 }
 
@@ -1912,14 +2072,28 @@ struct ReconcilerDriver<C = SplitStep2Reconciler> {
     core: Option<C>,
     site: Option<CompletionSite>,
     revoke: RevokeHandle,
+    /// O1 (#568 S4b): the last step-1 reconfirmation review, used up by its
+    /// acknowledgement, and the session generation its view's liveness
+    /// follows.
+    reconfirmation: Option<Step1ReconfirmationReview>,
+    generation: watch::Receiver<u64>,
+    expected: u64,
 }
 impl ReconcilerDriver {
-    fn new(reconciler: SplitStep2Reconciler, site: Option<CompletionSite>) -> Self {
+    fn new(
+        reconciler: SplitStep2Reconciler,
+        site: Option<CompletionSite>,
+        generation: watch::Receiver<u64>,
+        expected: u64,
+    ) -> Self {
         let revoker = reconciler.revoker();
         Self {
             core: Some(reconciler),
             site,
             revoke: Arc::new(move || revoker.revoke()),
+            reconfirmation: None,
+            generation,
+            expected,
         }
     }
 }
@@ -1983,6 +2157,7 @@ impl Step2Recon for ReconcilerDriver {
         &mut self,
         context: &Context,
     ) -> Result<(Status, TransactionObservation, Step1AfterStep2), Step2Refusal> {
+        self.reconfirmation = None;
         self.core
             .as_mut()
             .ok_or_else(interrupted)?
@@ -2027,6 +2202,41 @@ impl Step2Recon for ReconcilerDriver {
                 cleared,
             },
         })
+    }
+    async fn review_reconfirmation(
+        &mut self,
+        context: &Context,
+    ) -> Result<ReconfirmationView, Step2Refusal> {
+        self.reconfirmation = None;
+        let core = self.core.as_mut().ok_or_else(interrupted)?;
+        let review = core
+            .prepare_step1_reconfirmation(context)
+            .await
+            .map_err(describe_reconfirmation)?;
+        let revoker = core.revoker();
+        let view = ReconfirmationView::of(
+            &review,
+            resend_liveness(
+                move || revoker.is_revoked(),
+                self.generation.clone(),
+                self.expected,
+                review.not_after(),
+            ),
+        );
+        self.reconfirmation = Some(review);
+        Ok(view)
+    }
+    async fn confirm_reconfirmation(&mut self, context: &Context) -> Result<(), Step2Refusal> {
+        let review = self
+            .reconfirmation
+            .take()
+            .ok_or_else(|| Step2Refusal::retry(RECONFIRMATION_AGAIN))?;
+        self.core
+            .as_mut()
+            .ok_or_else(interrupted)?
+            .confirm_step1_reconfirmation(review, context)
+            .await
+            .map_err(describe_reconfirmation)
     }
 }
 

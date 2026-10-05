@@ -303,6 +303,15 @@ impl Step2Recon for LockedRecon {
     async fn completion_stands(&mut self, _: &Context) -> Result<CompletionStanding, Step2Refusal> {
         unreachable!()
     }
+    async fn review_reconfirmation(
+        &mut self,
+        _: &Context,
+    ) -> Result<ReconfirmationView, Step2Refusal> {
+        unreachable!()
+    }
+    async fn confirm_reconfirmation(&mut self, _: &Context) -> Result<(), Step2Refusal> {
+        unreachable!()
+    }
 }
 struct LockedPort {
     directory: PathBuf,

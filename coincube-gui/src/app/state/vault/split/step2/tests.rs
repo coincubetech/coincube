@@ -469,6 +469,15 @@ impl Step2Recon for HeldRecon {
     async fn completion_stands(&mut self, _: &Context) -> Result<CompletionStanding, Step2Refusal> {
         unreachable!()
     }
+    async fn review_reconfirmation(
+        &mut self,
+        _: &Context,
+    ) -> Result<ReconfirmationView, Step2Refusal> {
+        unreachable!()
+    }
+    async fn confirm_reconfirmation(&mut self, _: &Context) -> Result<(), Step2Refusal> {
+        unreachable!()
+    }
 }
 
 /// A reopened coordinator holding the real journal lock (P3-3).
@@ -499,6 +508,15 @@ impl Step2Coord for HeldCoord {
         unreachable!()
     }
     async fn confirm_resend(&mut self, _: &Context) -> Result<Outcome, Step2Refusal> {
+        unreachable!()
+    }
+    async fn review_reconfirmation(
+        &mut self,
+        _: &Context,
+    ) -> Result<ReconfirmationView, Step2Refusal> {
+        unreachable!()
+    }
+    async fn confirm_reconfirmation(&mut self, _: &Context) -> Result<(), Step2Refusal> {
         unreachable!()
     }
 }
@@ -1377,6 +1395,14 @@ fn step2_panel_layer_is_reached_only_through_the_split_panel() {
             "COMPLETION_NO_VAULT",
             "COMPLETION_INTERRUPTED",
             "COMPLETION_LOST",
+            // #568 S4b: the O1 acknowledgement and the O4 exit.
+            "ReconfirmationView",
+            "describe_reconfirmation",
+            "rdts_reconfirmation_refusal",
+            "RECONFIRMATION_AGAIN",
+            "conflict_close_copy",
+            "conflict_closable_copy",
+            "CONFLICT_STEP1_SEEN",
         ] {
             let named = text
                 .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
@@ -1400,7 +1426,14 @@ fn step2_panel_layer_is_reached_only_through_the_split_panel() {
                 ]
                 .contains(&ident))
                 || (file == "src/app/view/vault/split.rs"
-                    && ["RESERVING", "SPLIT_COMPLETED"].contains(&ident));
+                    && [
+                        "RESERVING",
+                        "SPLIT_COMPLETED",
+                        // #568 S4b: O4's close copy.
+                        "conflict_close_copy",
+                        "conflict_closable_copy",
+                    ]
+                    .contains(&ident));
             // `restart`/`Restart` are common words elsewhere: only a path
             // into the step-2 module counts for them.
             let generic = ["restart", "Restart"].contains(&ident)
@@ -1446,6 +1479,40 @@ fn step2_resend_refusal_on_a_step1_conflict_names_it_and_is_final() {
         assert!(refusal.reason.contains(&spent.to_string()));
         assert!(refusal.reason.contains(wanted), "{}", refusal.reason);
         assert!(refusal.reason.contains("Nothing was sent"));
+    }
+}
+
+/// #568 S4b, O1: the refusals of a review of step 1's new block. Past the
+/// RDTS margin (S4-D4) or after RDTS expired, it is final and says the
+/// split can't complete; a lapsed, changed or stale review is "review it
+/// again"; anything else reads as for step 2. None says something was sent.
+#[test]
+fn step1_reconfirmation_refusal_copy_names_the_rdts_margin() {
+    use crate::services::claim_coordinator::Error as E;
+    let margin = describe_reconfirmation(E::NotReady(Assessment::ExpiryMargin));
+    assert!(!margin.retry, "{:?}", margin);
+    assert!(
+        margin.reason.contains("expires within"),
+        "{}",
+        margin.reason
+    );
+    assert!(
+        margin.reason.contains("can't complete"),
+        "{}",
+        margin.reason
+    );
+    let expired = describe_reconfirmation(E::NotReady(Assessment::RdtsExpired));
+    assert!(!expired.retry, "{:?}", expired);
+    assert!(expired.reason.contains("has expired"), "{}", expired.reason);
+    for error in [E::ExpiredEvidence, E::ChangedReview, E::InvalidReview] {
+        let again = describe_reconfirmation(error);
+        assert!(again.retry, "{:?}", again);
+        assert_eq!(again.reason, RECONFIRMATION_AGAIN);
+    }
+    let other = describe_reconfirmation(E::Revoked);
+    assert_eq!(other, describe_step2(Step2Error::Coordinator(E::Revoked)));
+    for refusal in [margin, expired, other] {
+        assert!(!refusal.reason.contains("was sent."), "{}", refusal.reason);
     }
 }
 

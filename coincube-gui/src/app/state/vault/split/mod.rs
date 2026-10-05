@@ -185,6 +185,10 @@ pub enum Work {
     /// P3-3: fresh evidence for a resend review.
     Step2ResendReviewing,
     Step2Resending,
+    /// #568 S4b, O1: fresh evidence for a review of step 1's new block, and
+    /// its acknowledgement.
+    Step2ReconfirmationReviewing,
+    Step2Reconfirming,
     /// #568 B5b: the completion check, its record and the deletion.
     Step2Completing,
     /// D17: whether a recorded completion still stands.
@@ -218,6 +222,12 @@ pub struct Resumed {
 pub struct Prep(pub Box<dyn step2::Step2Prep>);
 pub struct Coord(pub Box<dyn step2::Step2Coord>);
 pub struct Recon(pub Box<dyn step2::Step2Recon>);
+/// #568 S4b: whichever step-2 handle the panel held for an O1 review.
+#[derive(Debug)]
+pub enum Held {
+    Coord(Coord),
+    Recon(Recon),
+}
 impl fmt::Debug for Prep {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("Prep")
@@ -330,6 +340,16 @@ pub enum SplitEvent {
         Result<step2::Step2ResendView, step2::Step2Refusal>,
     ),
     Step2Resent(u64, Coord, Result<Outcome, step2::Step2Refusal>),
+    /// #568 S4b, O1: a review of step 1's new block, and its
+    /// acknowledgement, with the handle they ran on and the stage to return
+    /// to.
+    Step2ReconfirmationReviewed(
+        u64,
+        Held,
+        Result<step2::ReconfirmationView, step2::Step2Refusal>,
+        Step2Stage,
+    ),
+    Step2Reconfirmed(u64, Held, Result<(), step2::Step2Refusal>, Step2Stage),
     /// #568 B5b: a completion, with the reconciler it ran on (`None`: none
     /// came back, so the journal is read again).
     Step2Completed(
@@ -422,6 +442,11 @@ pub enum SplitMessage {
     Step2ReviewResend,
     /// P3-3: send the recorded step 2 again, as that review showed.
     Step2ConfirmResend,
+    /// #568 S4b, O1: a fresh one-use review of step 1 re-mined in another
+    /// Bitcoin block after the step-2 submission.
+    Step2ReviewReconfirmation,
+    /// O1: acknowledge exactly that review; nothing is sent.
+    Step2ConfirmReconfirmation,
     /// #568 B5b: record the completion, then delete the source's
     /// descriptors; offered only after a reconcile under this session saw
     /// step 2 confirmed with step 1 eligible.
@@ -493,6 +518,8 @@ pub struct SplitPanel {
     step2_review: Option<step2::Step2ReviewView>,
     /// P3-3: the resend review on screen.
     step2_resend: Option<step2::Step2ResendView>,
+    /// #568 S4b, O1: the review of step 1's new block on screen.
+    reconfirmation: Option<step2::ReconfirmationView>,
     step2_outcome: Option<Outcome>,
     step2_seen: Option<TransactionObservation>,
     /// What this session's last reconcile saw of step 2 on BTCB2. A
@@ -580,6 +607,7 @@ impl SplitPanel {
             step2_exported: None,
             step2_review: None,
             step2_resend: None,
+            reconfirmation: None,
             step2_outcome: None,
             step2_seen: None,
             step2_seen_here: None,
@@ -1559,14 +1587,18 @@ impl SplitPanel {
     }
 
     /// The earliest deadline of what is on screen: the "cannot replay"
-    /// label's and the resend review's.
+    /// label's, the resend review's and the O1 review's.
     fn deadline(&self) -> Option<Instant> {
         let replay = self.replay.as_ref().map(step2::CannotReplay::not_after);
         let resend = self
             .step2_resend
             .as_ref()
             .map(step2::Step2ResendView::not_after);
-        replay.into_iter().chain(resend).min()
+        let reconfirmation = self
+            .reconfirmation
+            .as_ref()
+            .map(step2::ReconfirmationView::not_after);
+        replay.into_iter().chain(resend).chain(reconfirmation).min()
     }
 
     fn disarm_deadline(&mut self) {
@@ -1616,6 +1648,13 @@ impl SplitPanel {
             .is_some_and(|r| r.not_after() <= now)
         {
             self.step2_resend = None;
+        }
+        if self
+            .reconfirmation
+            .as_ref()
+            .is_some_and(|r| r.not_after() <= now)
+        {
+            self.reconfirmation = None;
         }
         self.armed = None;
     }
@@ -1668,6 +1707,8 @@ impl SplitEvent {
             | Self::ReconReconciled(seq, ..)
             | Self::Step2ResendReviewed(seq, ..)
             | Self::Step2Resent(seq, ..)
+            | Self::Step2ReconfirmationReviewed(seq, ..)
+            | Self::Step2Reconfirmed(seq, ..)
             | Self::Step2Completed(seq, ..)
             | Self::Step2CompletionRechecked(seq, ..)
             | Self::DeviceListed(seq, _)

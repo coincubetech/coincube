@@ -67,6 +67,66 @@ struct Counts {
     /// coordinators had been dropped when each opened.
     recon_opened: usize,
     coord_dropped_at_recon_open: Vec<usize>,
+    /// #568 S4b, O1: reviews of step 1's new block, acknowledgements, the
+    /// next review's refusal, how long the next reviews stay live (`None`:
+    /// 60 s), whether the shown one lapsed, and whether a review is held for
+    /// the next acknowledgement.
+    reconfirmation_reviews: usize,
+    reconfirmations: usize,
+    refuse_reconfirmation: Option<Step2Refusal>,
+    reconfirmation_lifetime: Option<std::time::Duration>,
+    reconfirmation_expired: bool,
+    reconfirmation_held: bool,
+}
+/// O1 in the fakes: step 1 recorded at height 100, now three deep in 101.
+fn reconfirmation_blocks() -> (
+    coincube_core::claim::BlockRef,
+    coincube_core::claim::BlockRef,
+) {
+    (
+        coincube_core::claim::BlockRef {
+            height: 100,
+            hash: hash(0x64),
+        },
+        coincube_core::claim::BlockRef {
+            height: 101,
+            hash: hash(0x65),
+        },
+    )
+}
+fn review_reconfirmation(shared: &Shared) -> Result<ReconfirmationView, Step2Refusal> {
+    let mut counts = shared.lock().unwrap();
+    counts.reconfirmation_reviews += 1;
+    counts.reconfirmation_expired = false;
+    counts.reconfirmation_held = false;
+    if let Some(refusal) = counts.refuse_reconfirmation.take() {
+        return Err(refusal);
+    }
+    counts.reconfirmation_held = true;
+    let lifetime = counts
+        .reconfirmation_lifetime
+        .unwrap_or(std::time::Duration::from_secs(60));
+    drop(counts);
+    let (previous, confirmed) = reconfirmation_blocks();
+    let live = shared.clone();
+    Ok(ReconfirmationView {
+        previous,
+        confirmed,
+        confirmations: 3,
+        expires_at: chrono::Local::now(),
+        not_after: tokio::time::Instant::now().into_std() + lifetime,
+        live: Arc::new(move || !live.lock().unwrap().reconfirmation_expired),
+    })
+}
+fn confirm_reconfirmation(shared: &Shared) -> Result<(), Step2Refusal> {
+    let mut counts = shared.lock().unwrap();
+    // Only the review on screen is acknowledged, once.
+    assert!(
+        std::mem::take(&mut counts.reconfirmation_held),
+        "an acknowledgement without its review"
+    );
+    counts.reconfirmations += 1;
+    Ok(())
 }
 /// The BTCB2 height the fake completions record.
 const COMPLETED_HEIGHT: u64 = 1_000;
@@ -364,8 +424,9 @@ impl Step2Coord for PanelCoord {
         &mut self,
         _: &Context,
     ) -> Result<(Status, TransactionObservation, Step1AfterStep2), Step2Refusal> {
-        // A reconcile drops any resend review, as the driver does.
+        // A reconcile drops any resend or O1 review, as the driver does.
         self.resend_reviewed = false;
+        self.shared.lock().unwrap().reconfirmation_held = false;
         let seen = self.shared.lock().unwrap().coord_seen;
         next_reconcile(&self.shared, seen.unwrap_or(TransactionObservation::Absent))
     }
@@ -407,6 +468,16 @@ impl Step2Coord for PanelCoord {
         counts.resends += 1;
         counts.resend_results.pop_front().unwrap_or(Ok(uncertain()))
     }
+    async fn review_reconfirmation(
+        &mut self,
+        _: &Context,
+    ) -> Result<ReconfirmationView, Step2Refusal> {
+        self.resend_reviewed = false;
+        review_reconfirmation(&self.shared)
+    }
+    async fn confirm_reconfirmation(&mut self, _: &Context) -> Result<(), Step2Refusal> {
+        confirm_reconfirmation(&self.shared)
+    }
 }
 
 struct PanelRecon(Shared);
@@ -426,6 +497,8 @@ impl Step2Recon for PanelRecon {
         &mut self,
         _: &Context,
     ) -> Result<(Status, TransactionObservation, Step1AfterStep2), Step2Refusal> {
+        // A reconcile drops any O1 review, as the driver does.
+        self.0.lock().unwrap().reconfirmation_held = false;
         let seen = self.0.lock().unwrap().recon_seen;
         next_reconcile(
             &self.0,
@@ -452,6 +525,15 @@ impl Step2Recon for PanelRecon {
                 status: Status::Observation(Assessment::ObservationsEligibleForPreflight),
                 seen: confirmed_step2(),
             }))
+    }
+    async fn review_reconfirmation(
+        &mut self,
+        _: &Context,
+    ) -> Result<ReconfirmationView, Step2Refusal> {
+        review_reconfirmation(&self.0)
+    }
+    async fn confirm_reconfirmation(&mut self, _: &Context) -> Result<(), Step2Refusal> {
+        confirm_reconfirmation(&self.0)
     }
 }
 /// Step 2 confirmed on BTCB2, as the fakes report it.
@@ -3351,4 +3433,203 @@ async fn panel_coordinator_reads_the_journal_again_when_a_conflict_becomes_termi
     assert_eq!(panel.dead_end().and_then(|d| d.conflict), Some(terminal));
     assert_eq!(shared.lock().unwrap().reopened, 1);
     assert!(panel.can_check_close() && !panel.can_review_resend());
+}
+
+/// #568 S4b, O1 (S4-D3): when a reconcile finds step 1 re-mined in another
+/// Bitcoin block, the panel offers a review of the new block on whichever
+/// handle it holds (the resend coordinator after a restart, or the
+/// reconciler); never for another outcome. The review shows the recorded
+/// and the new block and the new one's depth; acknowledging exactly it
+/// records the new block, sends nothing and reconciles at once, so the
+/// warning follows the new evidence. An acknowledgement without a live
+/// review does nothing; a reconcile drops the review.
+#[tokio::test(flavor = "multi_thread")]
+async fn panel_acknowledges_step1s_new_block_only_from_a_live_review() {
+    for coordinator in [true, false] {
+        // A returned journal allows a resend: the restart reopens the
+        // coordinator. Otherwise the reconciler.
+        let journal = if coordinator {
+            Journal::returned(false)
+        } else {
+            Journal::new(true)
+        };
+        let (mut panel, shared) = restarted(&journal, coordinator).await;
+        assert_eq!(panel.coord.is_some(), coordinator);
+        assert_eq!(panel.recon.is_some(), !coordinator);
+        let case = if coordinator {
+            "coordinator"
+        } else {
+            "reconciler"
+        };
+        let (previous, confirmed) = reconfirmation_blocks();
+        for after in [
+            Step1AfterStep2::Eligible,
+            Step1AfterStep2::Shallow { confirmations: 3 },
+            Step1AfterStep2::Missing,
+        ] {
+            shared.lock().unwrap().afters.push_back(after);
+            let task = panel.update(SplitMessage::Step2Reconcile);
+            drive(&mut panel, task).await;
+            assert!(!panel.can_review_reconfirmation(), "{}: {:?}", case, after);
+            let task = panel.update(SplitMessage::Step2ReviewReconfirmation);
+            drive(&mut panel, task).await;
+        }
+        assert_eq!(shared.lock().unwrap().reconfirmation_reviews, 0, "{}", case);
+
+        let remined = Step1AfterStep2::Remined {
+            previous,
+            confirmed,
+        };
+        shared.lock().unwrap().afters.push_back(remined);
+        let task = panel.update(SplitMessage::Step2Reconcile);
+        drive(&mut panel, task).await;
+        assert!(panel.can_review_reconfirmation(), "{}", case);
+        // No acknowledgement without a review.
+        let task = panel.update(SplitMessage::Step2ConfirmReconfirmation);
+        drive(&mut panel, task).await;
+        assert_eq!(shared.lock().unwrap().reconfirmations, 0, "{}", case);
+
+        let task = panel.update(SplitMessage::Step2ReviewReconfirmation);
+        assert_eq!(
+            panel.stage,
+            Stage::Working(Work::Step2ReconfirmationReviewing)
+        );
+        drive(&mut panel, task).await;
+        assert_eq!(panel.stage, Stage::Step2(Step2Stage::Reconcile));
+        let view = panel.reconfirmation_review().unwrap();
+        assert_eq!((view.previous, view.confirmed), (previous, confirmed));
+        assert_eq!(view.confirmations, 3);
+        assert_eq!(panel.coord.is_some(), coordinator, "{}", case);
+        // A reconcile drops it.
+        shared.lock().unwrap().afters.push_back(remined);
+        let task = panel.update(SplitMessage::Step2Reconcile);
+        drive(&mut panel, task).await;
+        assert!(panel.reconfirmation_review().is_none(), "{}", case);
+        let task = panel.update(SplitMessage::Step2ConfirmReconfirmation);
+        drive(&mut panel, task).await;
+        assert_eq!(shared.lock().unwrap().reconfirmations, 0, "{}", case);
+
+        // Reviewed and acknowledged: recorded, then reconciled at once.
+        let task = panel.update(SplitMessage::Step2ReviewReconfirmation);
+        drive(&mut panel, task).await;
+        let reconciles = shared.lock().unwrap().reconciles;
+        shared
+            .lock()
+            .unwrap()
+            .afters
+            .push_back(Step1AfterStep2::Shallow { confirmations: 3 });
+        let task = panel.update(SplitMessage::Step2ConfirmReconfirmation);
+        assert_eq!(panel.stage, Stage::Working(Work::Step2Reconfirming));
+        drive(&mut panel, task).await;
+        let counts = shared.lock().unwrap();
+        assert_eq!(counts.reconfirmations, 1, "{}", case);
+        assert_eq!(counts.reconciles, reconciles + 1, "{}", case);
+        assert_eq!((counts.submits, counts.resends), (0, 0), "{}", case);
+        drop(counts);
+        assert_eq!(panel.stage, Stage::Step2(Step2Stage::Reconcile));
+        assert_eq!(
+            panel.step2_after(),
+            Some(Step1AfterStep2::Shallow { confirmations: 3 })
+        );
+        assert!(panel.reconfirmation_review().is_none());
+        assert!(!panel.can_review_reconfirmation(), "{}", case);
+    }
+}
+
+/// #568 S4b, O1: the review lapses at its deadline without input (S3 item
+/// 5), and with its evidence (a generation change or a revocation); then
+/// nothing is acknowledged. S4-D4: a review refused past the RDTS margin
+/// shows that copy, and none is held.
+#[tokio::test(start_paused = true)]
+async fn reconfirmation_review_lapses_and_is_refused_past_the_rdts_margin() {
+    let journal = Journal::new(true);
+    let (mut panel, shared) = restarted(&journal, false).await;
+    let (previous, confirmed) = reconfirmation_blocks();
+    let remined = Step1AfterStep2::Remined {
+        previous,
+        confirmed,
+    };
+    shared.lock().unwrap().afters.push_back(remined);
+    let task = panel.update(SplitMessage::Step2Reconcile);
+    drive(&mut panel, task).await;
+    let task = panel.update(SplitMessage::Step2ReviewReconfirmation);
+    drive(&mut panel, task).await;
+    assert!(panel.reconfirmation_review().is_some());
+    let timer = panel.arm_deadline();
+    drive(&mut panel, timer).await;
+    assert!(panel.reconfirmation.is_none());
+    assert!(panel.can_review_reconfirmation());
+    let task = panel.update(SplitMessage::Step2ConfirmReconfirmation);
+    drive(&mut panel, task).await;
+    assert_eq!(shared.lock().unwrap().reconfirmations, 0);
+
+    // Its evidence lapsed (the generation moved): not shown, not used.
+    let task = panel.update(SplitMessage::Step2ReviewReconfirmation);
+    drive(&mut panel, task).await;
+    shared.lock().unwrap().reconfirmation_expired = true;
+    assert!(panel.reconfirmation_review().is_none());
+    let task = panel.update(SplitMessage::Step2ConfirmReconfirmation);
+    drive(&mut panel, task).await;
+    assert_eq!(shared.lock().unwrap().reconfirmations, 0);
+
+    // S4-D4.
+    let refusal = describe_reconfirmation(crate::services::claim_coordinator::Error::NotReady(
+        Assessment::ExpiryMargin,
+    ));
+    shared.lock().unwrap().refuse_reconfirmation = Some(refusal.clone());
+    let task = panel.update(SplitMessage::Step2ReviewReconfirmation);
+    drive(&mut panel, task).await;
+    assert!(panel.reconfirmation.is_none());
+    assert_eq!(panel.notice(), Some(refusal.reason.as_str()));
+    assert!(panel.step2_warning().is_some());
+
+    // A revocation drops a live review.
+    let task = panel.update(SplitMessage::Step2ReviewReconfirmation);
+    drive(&mut panel, task).await;
+    assert!(panel.reconfirmation_review().is_some());
+    panel.revoke();
+    assert!(panel.reconfirmation.is_none());
+    assert_eq!(shared.lock().unwrap().reconfirmations, 0);
+}
+
+/// #568 S4b, O1 (S3-D1): an O1 review or acknowledgement in flight holds
+/// the reconciler in its task; when the session's reconcile-only port
+/// changes, it is revoked at once and its result is dropped, as for a
+/// reconcile in flight.
+#[tokio::test(flavor = "multi_thread")]
+async fn recon_port_change_during_an_o1_review_revokes_it() {
+    for confirm in [false, true] {
+        let journal = Journal::new(true);
+        let (mut panel, shared) = restarted(&journal, false).await;
+        let (previous, confirmed) = reconfirmation_blocks();
+        shared
+            .lock()
+            .unwrap()
+            .afters
+            .push_back(Step1AfterStep2::Remined {
+                previous,
+                confirmed,
+            });
+        let task = panel.update(SplitMessage::Step2Reconcile);
+        drive(&mut panel, task).await;
+        if confirm {
+            let task = panel.update(SplitMessage::Step2ReviewReconfirmation);
+            drive(&mut panel, task).await;
+            assert!(panel.reconfirmation_review().is_some());
+        }
+        let task = panel.update(if confirm {
+            SplitMessage::Step2ConfirmReconfirmation
+        } else {
+            SplitMessage::Step2ReviewReconfirmation
+        });
+        assert!(matches!(panel.stage, Stage::Working(_)), "{}", confirm);
+        assert!(panel.recon.is_none());
+        let revoked = shared.lock().unwrap().revoked;
+        panel.set_recon_port(None);
+        assert_eq!(shared.lock().unwrap().revoked, revoked + 1, "{}", confirm);
+        assert_eq!(panel.stage, Stage::NeedsSession);
+        drive(&mut panel, task).await;
+        assert!(panel.recon.is_none() && panel.reconfirmation.is_none());
+        assert_eq!(panel.stage, Stage::NeedsSession);
+    }
 }
