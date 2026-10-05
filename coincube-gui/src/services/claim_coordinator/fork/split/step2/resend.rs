@@ -331,8 +331,9 @@ impl SplitStep2Coordinator {
             return Err(ResendError::Observed);
         }
         // #568 S4, O4: no resend is reviewed or sent while a step-1 conflict
-        // is recorded: a terminal one (S4-D2) even if step 1 shows six deep
-        // again, a provisional one (S4-D5) until a reconcile clears it.
+        // is recorded: a terminal one (S4-D2) until an Eligible reconcile
+        // disproves it (S4-D6), a provisional one (S4-D5) until a reconcile
+        // clears it.
         if let Some(conflict) = self.controller.split_step1_conflict() {
             return Err(ResendError::Step1ConflictRecorded(conflict));
         }
