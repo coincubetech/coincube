@@ -1269,6 +1269,14 @@ async fn step2_reconcile_warning_has_one_case_per_outcome_and_never_the_replay_l
             Step1AfterStep2::Conflict(Step1Conflict::new(spent, block(120, 4))),
             true,
         ),
+        (
+            Step1AfterStep2::Conflict(
+                Step1Conflict::new(spent, block(120, 4))
+                    .terminal(block(126, 5))
+                    .unwrap(),
+            ),
+            true,
+        ),
         (Step1AfterStep2::Unknown, false),
     ];
     let journal = Journal::new(true);
@@ -1299,15 +1307,27 @@ async fn step2_reconcile_warning_has_one_case_per_outcome_and_never_the_replay_l
             warning
         );
         if let Step1AfterStep2::Conflict(conflict) = after {
+            assert!(warning.contains(&conflict.outpoint().to_string()));
+        }
+        if matches!(after, Step1AfterStep2::Conflict(c) if c.is_terminal()) {
             assert!(
                 warning.contains("step 1 can never confirm and this split can't complete"),
                 "{}",
                 warning
             );
-            assert!(warning.contains(&conflict.outpoint().to_string()));
         } else {
             assert!(
                 warning.contains("step 2's recorded bytes could also be mined on Bitcoin"),
+                "{}",
+                warning
+            );
+            assert!(!warning.contains("can never confirm"), "{}", warning);
+        }
+        if matches!(after, Step1AfterStep2::Conflict(c) if !c.is_terminal()) {
+            assert!(
+                warning.contains(
+                    "appears spent on Bitcoin by another transaction (it may still be unconfirmed)"
+                ),
                 "{}",
                 warning
             );
@@ -1336,7 +1356,7 @@ async fn step2_reconcile_warning_has_one_case_per_outcome_and_never_the_replay_l
         }
         assert_eq!(shared.lock().unwrap().step1_opened, 0);
     }
-    assert_eq!(seen.len(), 6);
+    assert_eq!(seen.len(), 7);
     shared
         .lock()
         .unwrap()

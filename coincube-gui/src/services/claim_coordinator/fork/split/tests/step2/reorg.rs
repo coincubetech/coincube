@@ -4,7 +4,9 @@
 //! synthetic view says where step 1 is on Bitcoin.
 use super::*;
 use crate::services::{
-    claim_coordinator::fork::split::step2::{ResendError, SplitStep2Reconciler, Step1AfterStep2},
+    claim_coordinator::fork::split::step2::{
+        ResendError, SplitStep2Reconciler, Step1AfterStep2, Step2ResubmissionReview,
+    },
     claim_workflow::{Reconfirmation, Step1Conflict},
 };
 
@@ -194,6 +196,8 @@ type ReadCase = (
 struct Extra {
     /// Step 1 in the Bitcoin mempool while it is in no block.
     mempool: bool,
+    /// Bitcoin reads of step 1 come back an hour old.
+    step1_stale: bool,
     /// Claimed coins spent on Bitcoin by another transaction.
     spent: BTreeSet<OutPoint>,
     unspent_fails: bool,
@@ -261,12 +265,15 @@ impl ObservationSource for Step1View {
         txid: Txid,
     ) -> Result<FreshRead<TransactionObservation>, FailureKind> {
         let read = self.inner.transaction(chain, txid).await?;
-        if chain == ChainId::Bitcoin
-            && txid == self.step1
-            && *read.value() == TransactionObservation::Absent
-            && self.extra.lock().unwrap().mempool
-        {
-            return Chains::read(chain, TransactionObservation::Unconfirmed { txid });
+        let extra = self.extra.lock().unwrap();
+        if chain == ChainId::Bitcoin && txid == self.step1 {
+            let value = match *read.value() {
+                TransactionObservation::Absent if extra.mempool => {
+                    TransactionObservation::Unconfirmed { txid }
+                }
+                value => value,
+            };
+            return Chains::read_aged(chain, value, if extra.step1_stale { 3_600 } else { 0 });
         }
         Ok(read)
     }
@@ -296,7 +303,13 @@ impl SplitForkServices for Step1View {
     ) -> Result<FreshRead<bool>, FailureKind> {
         self.inner.address_used(chain, address).await
     }
-    async fn bitcoin_unspent(&self, _: &str) -> Result<FreshRead<Vec<OutPoint>>, FailureKind> {
+    /// The claimed coins paying `address` (from their previous
+    /// transactions), less the spent ones: a read of another address finds
+    /// none of them.
+    async fn bitcoin_unspent(
+        &self,
+        address: &str,
+    ) -> Result<FreshRead<Vec<OutPoint>>, FailureKind> {
         let mut extra = self.extra.lock().unwrap();
         extra.unspent_reads += 1;
         if let Some(hook) = extra.on_unspent.take() {
@@ -305,10 +318,21 @@ impl SplitForkServices for Step1View {
         if extra.unspent_fails {
             return Err(FailureKind::Http(503));
         }
+        let pays = |outpoint: &OutPoint| {
+            extra
+                .previous
+                .iter()
+                .find(|tx| tx.compute_txid() == outpoint.txid)
+                .and_then(|tx| tx.output.get(outpoint.vout as usize))
+                .and_then(|output| {
+                    Address::from_script(&output.script_pubkey, Network::Bitcoin).ok()
+                })
+                .is_some_and(|paid| paid.to_string() == address)
+        };
         let unspent = extra
             .claimed
             .iter()
-            .filter(|outpoint| !extra.spent.contains(outpoint))
+            .filter(|outpoint| pays(outpoint) && !extra.spent.contains(outpoint))
             .copied()
             .collect();
         Chains::read_aged(ChainId::Bitcoin, unspent, extra.unspent_age)
@@ -753,13 +777,33 @@ async fn split_reconcile_reports_step1_absent_versus_in_mempool() {
     }
 }
 
-/// O4: a claimed coin spent on Bitcoin by another transaction while step 1
-/// is missing is a conflict, recorded and terminal. A failed, stale or
-/// tampered read never records one, nor step 1 waiting in the mempool, nor
-/// step 1 seen again between the reads (it spends the coins itself). Once
-/// recorded, the conflict stands through step 1 coming back and a restart.
+/// The Bitcoin tip at `height` (step 1 out of every block).
+fn tip_at(height: u64) -> BlockRef {
+    BlockRef {
+        height,
+        hash: hash(0x41),
+    }
+}
+/// The recorded step-1 conflict, as the journal holds it.
+fn recorded_conflict(h: &Harness) -> serde_json::Value {
+    h.temp
+        .journal()
+        .get("split")
+        .and_then(|split| split.get("step1_conflict"))
+        .cloned()
+        .unwrap_or(serde_json::Value::Null)
+}
+
+/// O4 (S4-D5): a claimed coin missing from Bitcoin's unspent outputs while
+/// step 1 is missing records a provisional conflict at the Bitcoin tip. It
+/// stays provisional below six blocks above that tip and becomes terminal at
+/// six, when the same coin is still missing and step 1 still absent; then it
+/// stands through step 1 coming back and a restart. A failed, stale or
+/// tampered read never records one and, once one is recorded, changes
+/// nothing; nor does step 1 waiting in the mempool, nor step 1 seen again
+/// between the reads (it spends the coins itself).
 #[tokio::test(flavor = "multi_thread")]
-async fn split_step1_conflict_is_terminal_and_never_recorded_from_a_failed_or_stale_read() {
+async fn split_step1_conflict_is_provisional_then_terminal_and_never_from_a_failed_or_stale_read() {
     let Submitted {
         h,
         view,
@@ -773,14 +817,7 @@ async fn split_step1_conflict_is_terminal_and_never_recorded_from_a_failed_or_st
     view.edit(|extra| {
         extra.spent.insert(spent);
     });
-    let no_conflict = |case: &str| {
-        assert!(
-            h.temp.journal()["split"].get("step1_conflict").is_none(),
-            "{}",
-            case
-        );
-    };
-    let cases: [ReadCase; 5] = [
+    let failed_reads: [ReadCase; 5] = [
         (
             "unspent read fails",
             |e| e.unspent_fails = true,
@@ -806,34 +843,90 @@ async fn split_step1_conflict_is_terminal_and_never_recorded_from_a_failed_or_st
             Step1AfterStep2::Missing,
         ),
         (
-            "step 1 in the mempool spends the coin itself",
-            |e| e.mempool = true,
-            |e| e.mempool = false,
-            Step1AfterStep2::InMempool,
+            "stale step-1 read after the coin reads",
+            |e| e.on_unspent = Some(Box::new(|e| e.step1_stale = true)),
+            |e| e.step1_stale = false,
+            Step1AfterStep2::Missing,
         ),
     ];
-    for (case, set, reset, expected) in cases {
+    for (case, set, reset, expected) in failed_reads {
         view.edit(set);
         let reconciled = reconciler.reconcile_sweep(&context()).await.unwrap();
         assert_eq!(reconciled.after_step2, expected, "{}", case);
-        no_conflict(case);
+        assert!(recorded_conflict(&h).is_null(), "{}", case);
         view.edit(reset);
     }
+    // Step 1 in the mempool spends the coin itself.
+    view.edit(|extra| extra.mempool = true);
+    let reconciled = reconciler.reconcile_sweep(&context()).await.unwrap();
+    assert_eq!(reconciled.after_step2, Step1AfterStep2::InMempool);
+    assert!(recorded_conflict(&h).is_null());
+    view.edit(|extra| extra.mempool = false);
     // Step 1 re-broadcast during the reads: the second step-1 read sees it.
     view.edit(|extra| extra.on_unspent = Some(Box::new(|extra| extra.mempool = true)));
     let reconciled = reconciler.reconcile_sweep(&context()).await.unwrap();
     assert_eq!(reconciled.after_step2, Step1AfterStep2::Missing);
-    no_conflict("step 1 seen again between the reads");
+    assert!(recorded_conflict(&h).is_null());
     view.edit(|extra| extra.mempool = false);
 
-    let conflict = Step1Conflict::new(spent, gone_tip());
+    // Provisional at the tip it was first seen at.
+    let provisional = Step1Conflict::new(spent, gone_tip());
+    assert!(!provisional.is_terminal());
     let reconciled = reconciler.reconcile_sweep(&context()).await.unwrap();
-    assert_eq!(reconciled.after_step2, Step1AfterStep2::Conflict(conflict));
+    assert_eq!(
+        reconciled.after_step2,
+        Step1AfterStep2::Conflict(provisional)
+    );
     assert_eq!(reconciled.step1, TransactionObservation::Absent);
     let journal = h.temp.journal();
     assert_eq!(
         journal["split"]["step1_conflict"],
-        serde_json::to_value(conflict).unwrap()
+        serde_json::to_value(provisional).unwrap()
+    );
+    assert!(journal["split"]["step1_conflict"]
+        .get("terminal_at")
+        .is_none());
+    assert_eq!(journal["version"], 8);
+
+    // A failed or stale read changes nothing, even six blocks higher.
+    view.inner
+        .edit(|view| view.bitcoin_tip = tip_at(gone_tip().height + MIN_CONFIRMATIONS));
+    for (case, set, reset, _) in failed_reads {
+        view.edit(set);
+        let reconciled = reconciler.reconcile_sweep(&context()).await.unwrap();
+        assert_eq!(
+            reconciled.after_step2,
+            Step1AfterStep2::Conflict(provisional),
+            "{}",
+            case
+        );
+        assert_eq!(h.temp.journal(), journal, "{}", case);
+        view.edit(reset);
+    }
+
+    // Five blocks higher: still provisional.
+    view.inner
+        .edit(|view| view.bitcoin_tip = tip_at(gone_tip().height + MIN_CONFIRMATIONS - 1));
+    let reconciled = reconciler.reconcile_sweep(&context()).await.unwrap();
+    assert_eq!(
+        reconciled.after_step2,
+        Step1AfterStep2::Conflict(provisional)
+    );
+    assert_eq!(h.temp.journal(), journal);
+
+    // Six blocks higher, the coin still missing and step 1 still absent:
+    // terminal.
+    let buried = tip_at(gone_tip().height + MIN_CONFIRMATIONS);
+    view.inner.edit(|view| view.bitcoin_tip = buried);
+    let terminal = provisional.terminal(buried).unwrap();
+    assert!(terminal.is_terminal());
+    assert_eq!(terminal.terminal_at(), Some(buried));
+    let reconciled = reconciler.reconcile_sweep(&context()).await.unwrap();
+    assert_eq!(reconciled.after_step2, Step1AfterStep2::Conflict(terminal));
+    let journal = h.temp.journal();
+    assert_eq!(
+        journal["split"]["step1_conflict"],
+        serde_json::to_value(terminal).unwrap()
     );
     assert_eq!(journal["version"], 8);
 
@@ -842,7 +935,7 @@ async fn split_step1_conflict_is_terminal_and_never_recorded_from_a_failed_or_st
     view.step1_in(recorded_block(), 6);
     view.edit(|extra| extra.spent.clear());
     let reconciled = reconciler.reconcile_sweep(&context()).await.unwrap();
-    assert_eq!(reconciled.after_step2, Step1AfterStep2::Conflict(conflict));
+    assert_eq!(reconciled.after_step2, Step1AfterStep2::Conflict(terminal));
     drop(reconciler);
     let mut reconciler = reopen(&h, Box::new(view.clone()));
     assert_eq!(
@@ -851,7 +944,7 @@ async fn split_step1_conflict_is_terminal_and_never_recorded_from_a_failed_or_st
             .await
             .unwrap()
             .after_step2,
-        Step1AfterStep2::Conflict(conflict)
+        Step1AfterStep2::Conflict(terminal)
     );
     assert_eq!(
         h.temp.journal()["split"]["step1_conflict"],
@@ -859,31 +952,189 @@ async fn split_step1_conflict_is_terminal_and_never_recorded_from_a_failed_or_st
     );
 }
 
+/// S4-D5: a provisional conflict is cleared when a fresh read shows its coin
+/// unspent again (an evicted mempool spend), step 1 in the mempool, step 1
+/// back in a block, or step 1 seen during the conflict reads. Another coin
+/// missing instead replaces it with a provisional conflict of its own.
+#[tokio::test(flavor = "multi_thread")]
+async fn split_step1_provisional_conflict_is_cleared_when_step1_or_its_coin_reappears() {
+    let Submitted {
+        h,
+        view,
+        coordinator,
+        ..
+    } = submitted_over(false).await;
+    drop(coordinator);
+    let mut reconciler = reopen(&h, Box::new(view.clone()));
+    let [first, second] = [h.prevouts()[0], h.prevouts()[1]];
+    let provisional = Step1Conflict::new(first, gone_tip());
+    let record = async |reconciler: &mut SplitStep2Reconciler| {
+        view.step1_gone();
+        view.edit(|extra| {
+            extra.mempool = false;
+            extra.spent = [first].into();
+        });
+        assert_eq!(
+            reconciler
+                .reconcile_sweep(&context())
+                .await
+                .unwrap()
+                .after_step2,
+            Step1AfterStep2::Conflict(provisional)
+        );
+        assert_eq!(
+            recorded_conflict(&h),
+            serde_json::to_value(provisional).unwrap()
+        );
+    };
+
+    // The coin unspent again, step 1 still missing.
+    record(&mut reconciler).await;
+    view.edit(|extra| extra.spent.clear());
+    let reconciled = reconciler.reconcile_sweep(&context()).await.unwrap();
+    assert_eq!(reconciled.after_step2, Step1AfterStep2::Missing);
+    assert!(recorded_conflict(&h).is_null(), "coin unspent again");
+
+    // Step 1 waiting in the mempool.
+    record(&mut reconciler).await;
+    view.edit(|extra| extra.mempool = true);
+    let reconciled = reconciler.reconcile_sweep(&context()).await.unwrap();
+    assert_eq!(reconciled.after_step2, Step1AfterStep2::InMempool);
+    assert!(recorded_conflict(&h).is_null(), "step 1 in the mempool");
+
+    // Step 1 back six deep in its recorded block.
+    record(&mut reconciler).await;
+    view.step1_in(recorded_block(), 6);
+    let reconciled = reconciler.reconcile_sweep(&context()).await.unwrap();
+    assert_eq!(reconciled.after_step2, Step1AfterStep2::Eligible);
+    assert!(recorded_conflict(&h).is_null(), "step 1 back in its block");
+
+    // Step 1 seen during the conflict reads.
+    record(&mut reconciler).await;
+    view.edit(|extra| extra.on_unspent = Some(Box::new(|extra| extra.mempool = true)));
+    let reconciled = reconciler.reconcile_sweep(&context()).await.unwrap();
+    assert_eq!(reconciled.after_step2, Step1AfterStep2::Missing);
+    assert!(recorded_conflict(&h).is_null(), "step 1 seen in the reads");
+
+    // Another coin missing instead.
+    record(&mut reconciler).await;
+    view.edit(|extra| extra.spent = [second].into());
+    let replaced = Step1Conflict::new(second, gone_tip());
+    let reconciled = reconciler.reconcile_sweep(&context()).await.unwrap();
+    assert_eq!(reconciled.after_step2, Step1AfterStep2::Conflict(replaced));
+    assert_eq!(
+        recorded_conflict(&h),
+        serde_json::to_value(replaced).unwrap()
+    );
+}
+
+/// F5 L5: a session that ends during the conflict reads records nothing;
+/// the reconcile is refused as revoked.
+#[tokio::test(flavor = "multi_thread")]
+async fn split_step1_conflict_is_not_recorded_after_the_session_ends() {
+    let Submitted {
+        h,
+        view,
+        coordinator,
+        ..
+    } = submitted_over(false).await;
+    drop(coordinator);
+    let (sender, generation) = watch::channel(7);
+    let sender = Arc::new(sender);
+    let mut reconciler = SplitStep2Reconciler::open(
+        &h.temp.0,
+        TARGET.into(),
+        h.step1.source().digest(),
+        context(),
+        generation,
+        Box::new(view.clone()),
+        policy(),
+    )
+    .unwrap();
+    view.step1_gone();
+    let ends = sender.clone();
+    view.edit(|extra| {
+        extra.spent.insert(h.prevouts()[0]);
+        extra.on_unspent = Some(Box::new(move |_| {
+            ends.send_replace(8);
+        }));
+    });
+    assert!(matches!(
+        reconciler.reconcile_sweep(&context()).await,
+        Err(Error::Revoked)
+    ));
+    assert!(recorded_conflict(&h).is_null());
+}
+
+/// F5 L2: the production services read both the Bitcoin unspent outputs and
+/// the previous transaction of a claimed prevout on Bitcoin, never on
+/// BTCB2 (where step 2 has already spent every claimed coin).
+#[tokio::test(flavor = "multi_thread")]
+async fn split_fork_production_reads_the_conflict_evidence_on_bitcoin() {
+    let server = MockServer::start_async().await;
+    let mock = |path: &'static str| {
+        server.mock_async(move |when, then| {
+            when.method(GET).path_contains(path);
+            then.status(503);
+        })
+    };
+    let utxo = mock("/api/v1/esplora/bitcoin/mainnet/address/").await;
+    let previous = mock("/api/v1/esplora/bitcoin/mainnet/tx/").await;
+    let btcb2 = mock("/api/v1/esplora/bitcoin-blake2b/").await;
+    let (_sender, generation) = watch::channel(7);
+    let mut client = CoincubeClient::new();
+    client.base_url = format!("{}/", server.base_url());
+    client.set_token("synthetic-test-token");
+    let production =
+        SplitForkProduction::new(client, "synthetic-account".into(), 7, generation).unwrap();
+    let address = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4";
+    assert!(production.bitcoin_unspent(address).await.is_err());
+    assert!(production
+        .previous_transaction(Txid::from_byte_array([3; 32]))
+        .await
+        .is_err());
+    assert!(utxo.hits_async().await >= 1);
+    assert!(previous.hits_async().await >= 1);
+    assert_eq!(btcb2.hits_async().await, 0);
+}
+
 /// Withholding in O1 to O4. A resend (after a send that came back refused)
-/// is reviewable while step 1 is eligible and refused in each outcome,
-/// including a recorded conflict with step 1 seen six deep again.
-/// Completion (step 2 six deep on BTCB2) is minted while step 1 is
-/// eligible and refused in each outcome, including a recorded conflict with
-/// step 1 seen six deep again. The descriptors are never forgotten once a
-/// conflict is recorded.
+/// is reviewable while step 1 is eligible and refused in each outcome: a
+/// provisional conflict (S4-D5) and a terminal one with their own refusal
+/// from the journal, before any read, the terminal one even with step 1
+/// seen six deep again. Completion (step 2 six deep on BTCB2) is minted
+/// while step 1 is eligible and refused in each outcome, including a
+/// terminal conflict with step 1 seen six deep again. The descriptors are
+/// never forgotten once a conflict is recorded.
 #[tokio::test(flavor = "multi_thread")]
 async fn split_resend_completion_and_forget_are_refused_in_o1_to_o4() {
     // The outcomes, each set up from step 1 eligible.
     type Setup = fn(&Step1View, OutPoint);
-    let outcomes: [(&str, Setup); 4] = [
+    let outcomes: [(&str, Setup); 5] = [
         ("O1 re-mined", |view, _| view.step1_in(moved(), 6)),
         ("O2 in the mempool", |view, _| {
             view.step1_gone();
             view.edit(|extra| extra.mempool = true);
         }),
         ("O3 missing", |view, _| view.step1_gone()),
-        ("O4 conflict", |view, spent| {
+        ("O4 provisional", |view, spent| {
             view.step1_gone();
             view.edit(|extra| {
                 extra.spent.insert(spent);
             });
         }),
+        // Six blocks higher, the coin still missing, step 1 still absent.
+        ("O4 terminal", |view, _| {
+            view.inner
+                .edit(|view| view.bitcoin_tip = tip_at(gone_tip().height + MIN_CONFIRMATIONS))
+        }),
     ];
+    let conflict = |case: &str, error: Result<Step2ResubmissionReview, ResendError>| match error {
+        Err(ResendError::Step1ConflictRecorded(conflict)) => {
+            assert_eq!(conflict.is_terminal(), case == "O4 terminal", "{}", case)
+        }
+        other => panic!("{}: {:?}", case, other.map(|_| ())),
+    };
     let eligible = |view: &Step1View| {
         view.step1_in(recorded_block(), 6);
         view.edit(|extra| {
@@ -914,15 +1165,13 @@ async fn split_resend_completion_and_forget_are_refused_in_o1_to_o4() {
             "{}",
             case
         );
-        assert!(
-            coordinator
-                .prepare_step2_resubmission(&context())
-                .await
-                .is_err(),
-            "{}",
-            case
-        );
-        if case != "O4 conflict" {
+        let reads = view.inner.unspent_reads.load(Ordering::SeqCst);
+        let refused = coordinator.prepare_step2_resubmission(&context()).await;
+        if case.starts_with("O4") {
+            conflict(case, refused);
+            assert_eq!(view.inner.unspent_reads.load(Ordering::SeqCst), reads);
+        } else {
+            assert!(refused.is_err(), "{}", case);
             eligible(&view);
         }
     }
@@ -939,12 +1188,10 @@ async fn split_resend_completion_and_forget_are_refused_in_o1_to_o4() {
         Step1AfterStep2::Conflict(_)
     ));
     let reads = view.inner.unspent_reads.load(Ordering::SeqCst);
-    assert!(matches!(
+    conflict(
+        "O4 terminal",
         coordinator.prepare_step2_resubmission(&context()).await,
-        Err(ResendError::Coordinator(Error::Journal(
-            claim_workflow::Error::Conflict
-        )))
-    ));
+    );
     assert_eq!(view.inner.unspent_reads.load(Ordering::SeqCst), reads);
     assert_eq!(h.temp.journal()["split"]["step2_returned"], true);
     assert!(h.temp.journal()["split"]
@@ -981,7 +1228,7 @@ async fn split_resend_completion_and_forget_are_refused_in_o1_to_o4() {
             "{}",
             case
         );
-        if case != "O4 conflict" {
+        if !case.starts_with("O4") {
             eligible(&view);
         }
     }
@@ -1089,6 +1336,22 @@ async fn split_journal_without_step1_conflict_serializes_unchanged() {
             serde_json::to_value(OutPoint::new(Txid::from_byte_array([9; 32]), 0)).unwrap();
     });
     assert!(open().is_err());
+    // Provisional: no `terminal_at`. A terminal one written below six
+    // blocks above where it was first seen is refused; at six it reads back.
+    assert!(recorded["split"]["step1_conflict"]
+        .get("terminal_at")
+        .is_none());
+    for (height, admitted) in [
+        (gone_tip().height + MIN_CONFIRMATIONS - 1, false),
+        (gone_tip().height + MIN_CONFIRMATIONS, true),
+    ] {
+        h.temp.rewrite(|intent| {
+            *intent = recorded.clone();
+            intent["split"]["step1_conflict"]["terminal_at"] =
+                serde_json::to_value(tip_at(height)).unwrap();
+        });
+        assert_eq!(open().is_ok(), admitted, "{}", height);
+    }
     // Restored, it reads back.
     h.temp.rewrite(|intent| *intent = recorded.clone());
     assert_eq!(open().unwrap().split_step1_conflict(), Some(conflict));
