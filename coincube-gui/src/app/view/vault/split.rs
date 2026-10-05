@@ -72,6 +72,10 @@ fn working(work: Work) -> &'static str {
             "Checking both chains and the claimed coins before a resend of step 2…"
         }
         Work::Step2Resending => "Sending step 2 again…",
+        Work::Step2Completing => {
+            "Checking both chains, then recording the completion on this Cube…"
+        }
+        Work::Step2CompletionChecking => "Checking that the completion still stands…",
         Work::ListingDevices => "Looking for connected hardware wallets…",
         Work::SigningOnDevice => {
             "Confirm on your hardware wallet. Check the amounts and the address on its screen before you approve."
@@ -273,6 +277,24 @@ fn step2_body<'a>(
                 body = body.push(p1_regular(
                     "This version can't send this step 2 again: its last attempt was accepted or may have left, or no resend is left. If Bitcoin Blake2b never shows it, you can abandon this split after a check.",
                 ));
+            }
+            // #568 B5b: only after this session's reconcile saw step 2
+            // confirmed with step 1 eligible.
+            if panel.can_complete() {
+                body = body.push(p1_regular(
+                    "Step 2 is confirmed on Bitcoin Blake2b and step 1 is six deep on Bitcoin. Completing checks both chains once more, records the split on this Cube by the source wallet's fingerprint only, then deletes the source wallet's descriptors from this device.",
+                ));
+                actions = actions.push(primary("Complete split", SplitMessage::Step2Complete));
+            }
+            actions = actions.push(action("Refresh", SplitMessage::Step2Reconcile));
+        }
+        Step2Stage::Completed => {
+            body = body.push(p1_bold(step2::SPLIT_COMPLETED).style(theme::text::success));
+            if let Some(completion) = panel.completion() {
+                body = body.push(caption(completion.history_row()));
+            }
+            if let Some(seen) = panel.step2_seen() {
+                body = body.push(caption(format!("Bitcoin Blake2b: {seen:?}")));
             }
             actions = actions.push(action("Refresh", SplitMessage::Step2Reconcile));
         }
@@ -479,7 +501,13 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
     for line in warning_lines(panel) {
         body = body.push(p1_regular(line).style(theme::text::warning));
     }
-    if panel.signed().is_some() && !matches!(panel.stage(), Stage::Working(_)) {
+    // A completed split offers only Refresh and Close.
+    if panel.signed().is_some()
+        && !matches!(
+            panel.stage(),
+            Stage::Working(_) | Stage::Step2(Step2Stage::Completed)
+        )
+    {
         actions = actions.push(action(
             "Save signed transaction",
             SplitMessage::ExportSigned,
