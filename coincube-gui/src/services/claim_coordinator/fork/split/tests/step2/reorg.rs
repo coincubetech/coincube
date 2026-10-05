@@ -602,7 +602,12 @@ async fn split_step1_reconfirmation_review_is_one_use_expires_and_refuses_a_chan
         _server,
         ..
     } = submitted_over(true).await;
+    // Nothing sends or preflights on this journal again: release the
+    // transport's pooled mock server before the next `submitted_over` takes
+    // one (a test waiting for a server must hold none; see
+    // `BitcoinPreflight`).
     drop(coordinator);
+    drop(_server);
     let mut reconciler = reopen(&h, Box::new(view.clone()));
     // Revision 1: still in its recorded block.
     assert!(matches!(
@@ -1400,6 +1405,10 @@ async fn split_resend_completion_and_forget_are_refused_in_o1_to_o4() {
         .get("step2_resubmissions")
         .is_none());
     assert_eq!(sends.load(Ordering::SeqCst), 1);
+    // Done with this coordinator: release its transport's pooled mock server
+    // before the next `submitted_over` takes one (see `BitcoinPreflight`).
+    drop(coordinator);
+    drop(_server);
 
     // Completion and forget, on a restart's reconciler.
     let Submitted {

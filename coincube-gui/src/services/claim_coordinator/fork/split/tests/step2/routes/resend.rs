@@ -1061,8 +1061,11 @@ async fn split_step2_resend_records_each_attempt_before_its_one_send() {
 /// never asked.
 #[tokio::test(flavor = "multi_thread")]
 async fn split_step2_resend_on_the_node_route_stays_on_the_node() {
+    // One pooled httpmock server is both the node (JSON-RPC at `/`) and
+    // Connect (its Esplora paths): a test never waits for a second server
+    // while holding one (the pool deadlock under load; see `BitcoinPreflight`).
     let node = MockServer::start_async().await;
-    let connect = MockServer::start_async().await;
+    let connect = &node;
     let daemon = Refusing::new(Some(node_config(&node)), 1);
     // Construction and RFC 6979 signing are deterministic: this is the
     // step 2 the coordinator will hold.
@@ -1076,7 +1079,7 @@ async fn split_step2_resend_on_the_node_route_stays_on_the_node() {
         signed,
         preflight,
         ..
-    } = uncertain(&daemon, Some(node_config(&node)), &connect).await;
+    } = uncertain(&daemon, Some(node_config(&node)), connect).await;
     assert_eq!(signed, expected);
     let (txid, wtxid) = (signed.compute_txid(), signed.compute_wtxid());
     let review = coordinator
@@ -1104,7 +1107,7 @@ async fn split_step2_resend_on_the_node_route_stays_on_the_node() {
         )]
     );
     assert_eq!(
-        httpmock::Mock::new(preflight, &connect).hits_async().await,
+        httpmock::Mock::new(preflight, connect).hits_async().await,
         0,
         "Connect's preflight is never asked on the node route"
     );

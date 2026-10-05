@@ -274,7 +274,9 @@ impl View {
 #[derive(Clone)]
 struct Chains {
     view: Arc<Mutex<View>>,
-    preflight: Arc<PreflightClient>,
+    /// Connect's Bitcoin preflight of the signed step 1, started on first
+    /// use only (see [`BitcoinPreflight`]).
+    preflight: BitcoinPreflight,
     unspent_reads: Arc<AtomicUsize>,
     address_reads: Arc<AtomicUsize>,
 }
@@ -433,6 +435,8 @@ impl Services for Chains {
         policy: FreshnessPolicy,
     ) -> Result<Evidence, claim_preflight::Error> {
         self.preflight
+            .client()
+            .await
             .observe(ChainId::Bitcoin, tx, tip, policy)
             .await
     }
@@ -445,10 +449,60 @@ impl Services for Chains {
     }
 }
 
+/// A mocked Connect Bitcoin preflight that accepts the signed step 1. Its
+/// httpmock server is taken from the pool on the first preflight only, and
+/// kept by every clone of the view until the last is dropped.
+///
+/// httpmock 0.7 serves every test of the binary from one pool of 25 servers
+/// (`HTTPMOCK_MAX_SERVERS`), and a test waiting for a server holds those it
+/// has. A harness that held a server for its whole life, while the step-2
+/// tests took their Connect or node server next, deadlocked a loaded run at
+/// the default thread count (every test thread parked in `start_server`).
+/// Only the step-1 reviews preflight on Bitcoin, and none of their tests
+/// holds another server then.
+#[derive(Clone)]
+struct BitcoinPreflight {
+    signed: Transaction,
+    generation: watch::Receiver<u64>,
+    started: Arc<tokio::sync::OnceCell<(MockServer, PreflightClient)>>,
+}
+impl BitcoinPreflight {
+    async fn client(&self) -> &PreflightClient {
+        let (_, client) = self
+            .started
+            .get_or_init(|| async {
+                // httpmock's async mock builder is not `Send`, and this runs
+                // inside the `Send` preflight future: start and mock on a
+                // blocking thread with the synchronous API instead.
+                let (signed, stamp) = (self.signed.clone(), now());
+                let server = tokio::task::spawn_blocking(move || {
+                    let server = MockServer::start();
+                    server.mock(|when, then| {
+                        when.method(POST).path("/api/v1/esplora/bitcoin/mainnet/tx/preflight");
+                        then.status(200).header("cache-control", "no-store").json_body(json!({"success":true,"data":{"network":"mainnet","state":"available","result":{"txid":signed.compute_txid(),"wtxid":signed.compute_wtxid(),"tip_hash":hash(0x40),"observed_at":stamp,"allowed":true,"reject_reason":serde_json::Value::Null}}}));
+                    });
+                    server
+                })
+                .await
+                .unwrap();
+                let client = PreflightClient::new(
+                    &server.base_url(),
+                    CollectionContext {
+                        expected_generation: 7,
+                        generation: self.generation.clone(),
+                    },
+                )
+                .unwrap();
+                (server, client)
+            })
+            .await;
+        client
+    }
+}
+
 /// A Split journal whose step 1 was submitted, and a view of both chains.
 struct Harness {
     temp: Temp,
-    _server: MockServer,
     sender: watch::Sender<u64>,
     wallet: Wallet,
     step1: SplitStep1,
@@ -471,34 +525,22 @@ impl Harness {
             intent["signed_txid"] = signed.compute_txid().to_string().into();
             intent["bitcoin_attempts"] = json!([{ "wtxid": signed.compute_wtxid().to_string() }]);
         });
-        let server = MockServer::start_async().await;
-        let stamp = now();
-        server.mock_async(|when, then| {
-            when.method(POST).path("/api/v1/esplora/bitcoin/mainnet/tx/preflight");
-            then.status(200).header("cache-control", "no-store").json_body(json!({"success":true,"data":{"network":"mainnet","state":"available","result":{"txid":signed.compute_txid(),"wtxid":signed.compute_wtxid(),"tip_hash":hash(0x40),"observed_at":stamp,"allowed":true,"reject_reason":serde_json::Value::Null}}}));
-        }).await;
         let sender = watch::channel(7).0;
         let chains = Chains {
             view: Arc::new(Mutex::new(View::confirmed(
                 depth,
                 step1.claimed_prevouts().into_iter().collect(),
             ))),
-            preflight: Arc::new(
-                PreflightClient::new(
-                    &server.base_url(),
-                    CollectionContext {
-                        expected_generation: 7,
-                        generation: sender.subscribe(),
-                    },
-                )
-                .unwrap(),
-            ),
+            preflight: BitcoinPreflight {
+                signed: signed.clone(),
+                generation: sender.subscribe(),
+                started: Arc::new(tokio::sync::OnceCell::new()),
+            },
             unspent_reads: Arc::new(AtomicUsize::new(0)),
             address_reads: Arc::new(AtomicUsize::new(0)),
         };
         Self {
             temp,
-            _server: server,
             sender,
             wallet,
             step1,
