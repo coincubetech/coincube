@@ -33,6 +33,7 @@ use crate::{
     app::{message::Message, view},
     dir::CoincubeDirectory,
     hw::{HardwareWallet, HardwareWalletMessage, HardwareWallets},
+    services::foreign_scan::{Branch, ScanDescriptor, SigningRoutes},
     split_hardware::{
         bind::{HidLedgerOpener, LedgerOpener},
         flow::DeviceSigning,
@@ -101,6 +102,30 @@ pub fn build_listing(datadir: CoincubeDirectory, source: &SplitSource) -> Result
     let devices = HardwareWallets::new(datadir, Network::Bitcoin)
         .with_split_policy(policy.name().to_string(), descriptor);
     Ok(Listing { devices, policy })
+}
+
+/// #653 F4: the routes `source`'s descriptors give, read from #653's
+/// `SigningRoutes` (U6: no `tr`, an origin on every ranged key), not
+/// recomputed. Both branches must give a route; a descriptor the scanner
+/// does not accept gives none.
+pub fn signing_routes(source: &SplitSource) -> SigningRoutes {
+    let routes = |branch, text: String| {
+        ScanDescriptor::parse(branch, &text)
+            .map(|descriptor| descriptor.capabilities().signing)
+            .unwrap_or(SigningRoutes::NONE)
+    };
+    let external = routes(Branch::External, source.external().to_string());
+    let Some(internal) = source
+        .internal()
+        .map(|d| routes(Branch::Internal, d.to_string()))
+    else {
+        return external;
+    };
+    SigningRoutes {
+        psbt_file: external.psbt_file && internal.psbt_file,
+        in_app_hardware: external.in_app_hardware && internal.in_app_hardware,
+        seed_unified: external.seed_unified && internal.seed_unified,
+    }
 }
 
 /// One listed device, as the view shows it.
@@ -244,9 +269,16 @@ impl SplitPanel {
         }
     }
 
-    /// Whether a device listing may be opened here.
+    /// Whether a device listing may be opened here: only for a wallet whose
+    /// descriptors give the in-app hardware route (#653 F4).
     pub fn can_open_device(&self) -> bool {
-        self.device_step().is_some() && self.device.datadir.is_some() && !self.device.is_open()
+        self.device_step().is_some()
+            && self.device.datadir.is_some()
+            && !self.device.is_open()
+            && self
+                .construction
+                .as_deref()
+                .is_some_and(|construction| signing_routes(construction.source()).in_app_hardware)
     }
 
     /// The listing's refresh, while it is open for the step on screen or a
@@ -390,4 +422,4 @@ impl SplitPanel {
 }
 
 #[cfg(all(test, unix))]
-mod tests;
+pub(super) mod tests;

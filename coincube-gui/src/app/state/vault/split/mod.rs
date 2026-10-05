@@ -40,9 +40,18 @@
 //! its history row; a completed split offers only Refresh and Close. It is
 //! still reachable only by resuming a journal (D1).
 //!
-//! The panel owns no keys and never signs: signatures come back in PSBT
-//! files (D6). Every Connect read, build, file operation and journal call
-//! runs in a task, off the UI thread. A session end (sign-out, account
+//! A started panel first chooses its route (#568 B4b-3c, [`unified`]): the
+//! two steps above, or, for a wallet whose descriptors allow it, one
+//! fork-only sweep on Bitcoin Blake2b signed with the wallet's seeds
+//! (Protected, never replayable on Bitcoin). The seeds live only in
+//! zeroizing memory for that sweep, which is sent once and never resent. A
+//! hardware wallet can't sign the single step (P1). Reopening a fork-only
+//! journal by its kind, and closing it, are B4b-3c part 2.
+//!
+//! Apart from that route, the panel owns no keys and never signs:
+//! signatures come back in PSBT files (D6) or from a connected device.
+//! Every Connect read, build, file operation and journal call runs in a
+//! task, off the UI thread. A session end (sign-out, account
 //! change, Cube close) revokes the coordinator synchronously; a recorded
 //! split survives on disk and continues under the next session.
 
@@ -50,6 +59,7 @@ pub mod device;
 mod panel2;
 pub mod step1;
 pub mod step2;
+pub mod unified;
 
 use std::{
     fmt,
@@ -95,6 +105,11 @@ pub const PORTS_INTERRUPTED: &str = "Opening this split under your Connect sessi
 pub enum Stage {
     /// Waiting for a Connect session to work under.
     NeedsSession,
+    /// #568 B4b-3c: a started panel chooses the two-step split or the
+    /// single step signed with seeds (`unified`).
+    ChooseRoute,
+    /// #568 B4b-3c: the single-step (fork-only) route.
+    Unified(unified::UnifiedStage),
     /// A task is running.
     Working(Work),
     /// Built: export the unsigned PSBT, then import the signed file(s).
@@ -189,6 +204,13 @@ pub enum Work {
     ListingDevices,
     /// B4b-3b: a connected device is asked to sign.
     SigningOnDevice,
+    /// B4b-3c: the single-step route.
+    SweepOpening,
+    AddingSeed,
+    SweepSigning,
+    SweepReviewing,
+    SweepSubmitting,
+    SweepReconciling,
 }
 
 /// The coordinator in transit between the panel and a task.
@@ -347,6 +369,8 @@ pub enum SplitEvent {
     DeviceListed(u64, Result<Box<device::Listing>, String>),
     /// B4b-3b: one device's signatures, unverified until imported.
     DeviceSigned(u64, Result<Box<Psbt>, String>),
+    /// B4b-3c: the single-step route.
+    Unified(u64, unified::UnifiedEvent),
 }
 
 /// A signed PSBT on its way into a verified import (step 1's
@@ -424,6 +448,8 @@ pub enum SplitMessage {
     Step2Complete,
     /// B4b-3b: sign with a connected device.
     Device(device::DeviceMessage),
+    /// B4b-3c: the route choice of a fresh panel, and the single step.
+    Unified(unified::UnifiedMessage),
 }
 
 pub struct SplitPanel {
@@ -520,6 +546,8 @@ pub struct SplitPanel {
     deadline_epoch: u64,
     /// B4b-3b: the session-only device listing and its signing.
     device: device::DeviceSigner,
+    /// B4b-3c: the single-step route, its port and its seeds.
+    unified: unified::UnifiedState,
 }
 
 impl fmt::Debug for SplitPanel {
@@ -588,6 +616,7 @@ impl SplitPanel {
             armed: None,
             deadline_epoch: 0,
             device: device::DeviceSigner::default(),
+            unified: unified::UnifiedState::default(),
         }
     }
 
@@ -746,6 +775,8 @@ impl SplitPanel {
             revoke();
         }
         self.revoke_step2();
+        // B4b-3c: the seeds are cleared, dropped and their inputs emptied.
+        self.revoke_unified();
         self.device.close();
         self.driver = None;
         self.review = None;
@@ -849,6 +880,11 @@ impl SplitPanel {
         let Some(intent) = self.intent.clone() else {
             return Task::none();
         };
+        // B4b-3c: a started panel chooses its route first.
+        if self.unified.route() != Some(unified::Route::TwoStep) {
+            self.stage = Stage::ChooseRoute;
+            return Task::none();
+        }
         self.stage = Stage::Working(Work::Checking);
         self.spawn(
             async move { step1::preconditions(&*connect, &intent).await.map(Box::new) },
@@ -1263,6 +1299,7 @@ impl SplitPanel {
                 Task::none()
             }
             SplitMessage::Device(message) => self.update_device(message),
+            SplitMessage::Unified(message) => self.update_unified(message),
             other => self.update_step2(other),
         }
     }
@@ -1527,6 +1564,7 @@ impl SplitPanel {
             event @ (SplitEvent::DeviceListed(..) | SplitEvent::DeviceSigned(..)) => {
                 self.apply_device(event)
             }
+            SplitEvent::Unified(_, event) => self.apply_unified(event),
             SplitEvent::SignedExported(_, result) => {
                 self.notice = Some(match result {
                     Ok(Some(path)) => format!("Signed step 1 saved to {}.", path.display()),
@@ -1653,6 +1691,7 @@ impl SplitEvent {
             | Self::Step2CompletionRechecked(seq, ..)
             | Self::DeviceListed(seq, _)
             | Self::DeviceSigned(seq, _)
+            | Self::Unified(seq, _)
             | Self::DeadlinePassed(seq) => *seq,
         }
     }

@@ -361,7 +361,7 @@ pub struct Step2Refusal {
     pub recovery: Step2Recovery,
 }
 impl Step2Refusal {
-    fn final_(reason: impl Into<String>) -> Self {
+    pub(super) fn final_(reason: impl Into<String>) -> Self {
         Self {
             reason: reason.into(),
             retry: false,
@@ -490,7 +490,7 @@ pub fn describe_resend(error: ResendError) -> Step2Refusal {
     }
 }
 
-fn describe_check(error: claim_coordinator::Error) -> Step2Refusal {
+pub(super) fn describe_check(error: claim_coordinator::Error) -> Step2Refusal {
     use claim_coordinator::Error as E;
     let recovery = match error {
         E::Unsupported | E::InvalidBinding | E::Journal(claim_workflow::Error::WrongIdentity) => {
@@ -1172,7 +1172,7 @@ fn write_tombstone(directory: &Path, bytes: &[u8]) -> std::io::Result<()> {
 }
 
 /// The session's Split fork production, built fresh for each open.
-fn fork_production(
+pub(super) fn fork_production(
     session: &ConnectSession,
     expected: u64,
     generation: &watch::Receiver<u64>,

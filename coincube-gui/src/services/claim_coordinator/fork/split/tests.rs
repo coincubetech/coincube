@@ -1171,6 +1171,22 @@ fn split_step2_gate_has_no_gui_caller() {
                     "reconcile_split_completion",
                 ]
                 .contains(&ident);
+            // #568 B4b-3c: the panel's single-step route wraps the
+            // fork-only services, reached only through the Split panel
+            // (`app::state::vault::split::tests::split_panel_has_no_gui_entry_point`).
+            let panel_unified = file.starts_with("src/app/state/vault/split/unified")
+                && [
+                    "SplitForkProduction",
+                    "SplitStep2Production",
+                    "TargetError",
+                    "RESERVATION_BOUND",
+                    "reserve_target",
+                    "prove_target",
+                    "UnifiedCoordinator",
+                    "UnifiedError",
+                    "UnifiedReview",
+                ]
+                .contains(&ident);
             // Claim's own completion check (`fork.rs`), its tests and its
             // panel caller name `check_completion` too; Split's is a method
             // of the reconciler, which is guarded by its own name.
@@ -1199,7 +1215,8 @@ fn split_step2_gate_has_no_gui_caller() {
             } else {
                 text.contains(ident)
             };
-            if named && !transport && !panel && !warning && !claim && !observation {
+            if named && !transport && !panel && !panel_unified && !warning && !claim && !observation
+            {
                 unexpected.push((file.clone(), ident));
             }
         }

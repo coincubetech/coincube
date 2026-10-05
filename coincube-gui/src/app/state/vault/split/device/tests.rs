@@ -627,7 +627,9 @@ async fn device_refusal_shows_its_reason() {
 }
 
 /// The step-1 sign stage's view, as rendered.
-async fn rendered_labels(panel: &SplitPanel) -> Vec<String> {
+pub(in crate::app::state::vault::split) async fn rendered_labels(
+    panel: &SplitPanel,
+) -> Vec<String> {
     use iced::advanced::{
         layout,
         renderer::Headless,
@@ -663,4 +665,177 @@ async fn rendered_labels(panel: &SplitPanel) -> Vec<String> {
         .as_widget_mut()
         .operate(&mut tree, Layout::new(&node), &renderer, &mut labels);
     labels.0
+}
+
+/// The step-1 construction of `wallet` (as `bind::tests::construction`).
+fn construction_of(wallet: &fixture::Wallet) -> coincube_core::foreign_split::SplitStep1 {
+    use crate::services::{foreign_split_inventory::FreshIndex, split_source::split_source};
+    use coincube_core::{
+        foreign_split::{create_split_step1, SplitInputs},
+        miniscript::bitcoin::BlockHash,
+    };
+    let inventory = fixture::inventory(wallet);
+    let coins = inventory.splittable_coins();
+    let source = split_source(&wallet.external, Some(&wallet.internal)).unwrap();
+    let FreshIndex::Proven(destination) = inventory.fresh_receive() else {
+        panic!("fixture has a fresh index");
+    };
+    let tip = inventory.bitcoin_tip_height();
+    create_split_step1(
+        &SplitInputs {
+            chain: ChainId::Bitcoin,
+            source: &source,
+            coins: &coins,
+            fork_height: inventory.fork_height(),
+            destination,
+        },
+        2,
+        LockTime::from_height(tip).unwrap(),
+        tip,
+        BlockHash::from_byte_array([7; 32]),
+    )
+    .unwrap()
+}
+
+/// #653 F4: "Sign with connected device" is offered only for a wallet whose
+/// descriptors give the in-app hardware route (`SigningRoutes`, U6). A
+/// wallet whose keys carry no origin gets no listing, and the view offers
+/// none; the same shape with origins does. CF: drop the route conjunct
+/// from `can_open_device`.
+#[tokio::test(flavor = "multi_thread")]
+async fn device_listing_needs_the_in_app_hardware_route() {
+    use crate::services::foreign_scan::{Branch, ScanDescriptor};
+    use coincube_core::miniscript::bitcoin::bip32::{DerivationPath, Xpub};
+    use std::str::FromStr;
+    let root = temp_root();
+    let secp = Secp256k1::new();
+    let master = fixture::master(1);
+    let account = master
+        .derive_priv(&secp, &DerivationPath::from_str("m/84'/0'/0'").unwrap())
+        .unwrap();
+    let xpub = Xpub::from_priv(&secp, &account);
+    let parse = |branch, step: u32| {
+        ScanDescriptor::parse(branch, &format!("wpkh({}/{}/*)", xpub, step)).unwrap()
+    };
+    let bare = fixture::Wallet {
+        external: parse(Branch::External, 0),
+        internal: parse(Branch::Internal, 1),
+        signers: vec![master],
+    };
+    let (_, opener) = signers(Shape::Wpkh);
+    let mut panel = step1_panel(Shape::Wpkh, &root, opener);
+    assert!(panel.can_open_device());
+    panel.construction = Some(Box::new(construction_of(&bare)));
+    let routes = signing_routes(panel.construction().unwrap().source());
+    assert!(routes.psbt_file && !routes.in_app_hardware && !routes.seed_unified);
+    assert!(!panel.can_open_device());
+    let task = panel.update(SplitMessage::Device(DeviceMessage::Open));
+    assert!(events(task).await.is_empty());
+    assert_eq!(panel.stage, Stage::Sign);
+    assert!(!panel.device().is_open());
+    let labels = rendered_labels(&panel).await;
+    assert!(!labels.iter().any(|l| l == "Sign with connected device"));
+    assert!(labels.iter().any(|l| l == "Import signed"));
+    assert_empty(&root);
+    std::fs::remove_dir(&root).unwrap();
+}
+
+/// #653 N1: the listing's refresh runs only while the panel is shown.
+/// CF: drop `!self.hidden` from `subscription`.
+#[tokio::test(flavor = "multi_thread")]
+async fn device_listing_refresh_stops_while_hidden() {
+    let root = temp_root();
+    let (devices, opener) = signers(Shape::Wpkh);
+    let mut panel = step1_panel(Shape::Wpkh, &root, opener);
+    open(&mut panel, &devices).await;
+    let recipes =
+        |panel: &SplitPanel| iced::advanced::subscription::into_recipes(panel.subscription()).len();
+    assert_eq!(recipes(&panel), 1);
+    panel.hidden = true;
+    assert_eq!(recipes(&panel), 0);
+    panel.hidden = false;
+    assert_eq!(recipes(&panel), 1);
+    assert_empty(&root);
+    std::fs::remove_dir(&root).unwrap();
+}
+
+/// #653 N2: the Sign arm signs only for the step on screen and the listing
+/// opened for it: nothing happens outside a sign stage, nor with a listing
+/// opened for the other step. CF: drop the listing's step check.
+#[tokio::test(flavor = "multi_thread")]
+async fn device_sign_needs_the_step_its_listing_was_opened_for() {
+    let root = temp_root();
+    let (devices, opener) = signers(Shape::Wpkh);
+    let mut panel = step1_panel(Shape::Wpkh, &root, opener);
+    open(&mut panel, &devices).await;
+    // A listing opened for the other step.
+    panel.device.step = Some(DeviceStep::Step2);
+    let task = panel.update(SplitMessage::Device(DeviceMessage::Sign(
+        "coldcard-1".into(),
+    )));
+    assert!(events(task).await.is_empty());
+    assert_eq!(panel.stage, Stage::Sign);
+    // No sign stage on screen.
+    panel.device.step = Some(DeviceStep::Step1);
+    panel.stage = Stage::Ready;
+    let task = panel.update(SplitMessage::Device(DeviceMessage::Sign(
+        "coldcard-1".into(),
+    )));
+    assert!(events(task).await.is_empty());
+    assert_eq!(panel.stage, Stage::Ready);
+    assert_eq!(panel.files(), 0);
+    // Back in the sign stage it signs.
+    panel.stage = Stage::Sign;
+    sign(&mut panel, "coldcard-1").await;
+    assert_eq!(panel.files(), 1);
+    assert_empty(&root);
+    std::fs::remove_dir(&root).unwrap();
+}
+
+/// #653 N3: an open listing is closed by "Close device list", which then
+/// offers "Sign with connected device" again. CF: drop that action from
+/// the view.
+#[tokio::test(flavor = "multi_thread")]
+async fn close_device_list_closes_the_listing() {
+    let root = temp_root();
+    let (devices, opener) = signers(Shape::Wpkh);
+    let mut panel = step1_panel(Shape::Wpkh, &root, opener);
+    let labels = rendered_labels(&panel).await;
+    assert!(labels.iter().any(|l| l == "Sign with connected device"));
+    assert!(!labels.iter().any(|l| l == "Close device list"));
+    open(&mut panel, &devices).await;
+    let labels = rendered_labels(&panel).await;
+    assert!(
+        labels.iter().any(|l| l == "Close device list"),
+        "{:?}",
+        labels
+    );
+    assert!(!labels.iter().any(|l| l == "Sign with connected device"));
+    let _ = panel.update(SplitMessage::Device(DeviceMessage::Cancel));
+    assert!(!panel.device().is_open());
+    let labels = rendered_labels(&panel).await;
+    assert!(labels.iter().any(|l| l == "Sign with connected device"));
+    assert_empty(&root);
+    std::fs::remove_dir(&root).unwrap();
+}
+
+/// #653 N4: Cancel while the listing is being built is refused, so the
+/// listing lands and the panel returns to its sign stage; a cancel there
+/// would drop the step and leave the panel working. CF: admit Cancel during
+/// `ListingDevices`.
+#[tokio::test(flavor = "multi_thread")]
+async fn cancel_is_refused_while_the_listing_is_built() {
+    let root = temp_root();
+    let (_, opener) = signers(Shape::Wpkh);
+    let mut panel = step1_panel(Shape::Wpkh, &root, opener);
+    let task = panel.update(SplitMessage::Device(DeviceMessage::Open));
+    assert_eq!(panel.stage, Stage::Working(Work::ListingDevices));
+    let cancelled = panel.update(SplitMessage::Device(DeviceMessage::Cancel));
+    assert!(events(cancelled).await.is_empty());
+    assert_eq!(panel.device().step(), Some(DeviceStep::Step1));
+    drive(&mut panel, task).await;
+    assert_eq!(panel.stage, Stage::Sign);
+    assert!(panel.device().is_open());
+    assert_empty(&root);
+    std::fs::remove_dir(&root).unwrap();
 }

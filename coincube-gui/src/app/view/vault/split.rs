@@ -19,7 +19,9 @@ use crate::{
         state::vault::split::{
             device::{self, DeviceMessage, DeviceStep},
             step1::{self, describe_route},
-            step2, SplitMessage, SplitPanel, Stage, Step2Stage, Work,
+            step2,
+            unified::{self, Route, SeedText, UnifiedMessage, UnifiedStage},
+            SplitMessage, SplitPanel, Stage, Step2Stage, Work,
         },
         view::Message,
     },
@@ -80,7 +82,121 @@ fn working(work: Work) -> &'static str {
         Work::SigningOnDevice => {
             "Confirm on your hardware wallet. Check the amounts and the address on its screen before you approve."
         }
+        Work::SweepOpening => "Checking the coins on both chains…",
+        Work::AddingSeed => "Checking the recovery phrase against this wallet's keys…",
+        Work::SweepSigning => {
+            "Reserving a fresh Vault address, building the sweep and signing it…"
+        }
+        Work::SweepReviewing => "Checking Bitcoin Blake2b and the fee before the review…",
+        Work::SweepSubmitting => "Submitting the sweep…",
+        Work::SweepReconciling => "Checking Bitcoin Blake2b for the sweep…",
     }
+}
+
+fn unified_action(label: &'static str, message: UnifiedMessage) -> Element<'static, Message> {
+    action(label, SplitMessage::Unified(message))
+}
+
+fn unified_primary(label: &'static str, message: UnifiedMessage) -> Element<'static, Message> {
+    primary(label, SplitMessage::Unified(message))
+}
+
+/// A seed input: `.secure(true)`, and what is typed goes straight into a
+/// zeroizing [`SeedText`].
+fn seed_input<'a>(
+    placeholder: &'static str,
+    value: &'a SeedText,
+    message: fn(SeedText) -> UnifiedMessage,
+) -> Element<'a, Message> {
+    iced::widget::text_input(placeholder, value.as_str())
+        .secure(true)
+        .on_input(move |typed| {
+            Message::Split(SplitMessage::Unified(message(SeedText::from(typed))))
+        })
+        .padding(8)
+        .into()
+}
+
+/// The single-step stages (#568 B4b-3c).
+fn unified_body<'a>(
+    panel: &'a SplitPanel,
+    stage: UnifiedStage,
+    mut body: coincube_ui::widget::Column<'a, Message>,
+    mut actions: coincube_ui::widget::Row<'a, Message>,
+) -> (
+    coincube_ui::widget::Column<'a, Message>,
+    coincube_ui::widget::Row<'a, Message>,
+) {
+    let state = panel.unified();
+    match stage {
+        UnifiedStage::EnterSeeds => {
+            body = body
+                .push(p1_regular(format!(
+                    "{} of {} recovery phrase(s) entered. Each one is checked against this wallet's keys and kept in memory only until the sweep is signed.",
+                    state.held(),
+                    state.threshold()
+                )))
+                .push(seed_input("Recovery phrase", state.words(), UnifiedMessage::Words))
+                .push(seed_input(
+                    "Passphrase (leave empty if none)",
+                    state.passphrase(),
+                    UnifiedMessage::Passphrase,
+                ));
+            actions = actions
+                .push(unified_action("Add phrase", UnifiedMessage::AddSeed))
+                .push(unified_action("Clear phrases", UnifiedMessage::ClearSeeds));
+            if panel.can_build_unified() {
+                actions = actions.push(unified_primary(
+                    "Build and sign",
+                    UnifiedMessage::BuildAndSign,
+                ));
+            }
+            actions = actions.push(unified_action("Cancel", UnifiedMessage::Cancel));
+        }
+        UnifiedStage::Signed => {
+            body = body.push(p1_regular(
+                "The sweep is signed and the recovery phrases were cleared. Nothing has been recorded or sent. Review it to submit.",
+            ));
+            actions = actions
+                .push(unified_primary("Review sweep", UnifiedMessage::Review))
+                .push(unified_action("Cancel", UnifiedMessage::Cancel));
+        }
+        UnifiedStage::Review => {
+            if let Some(review) = state.review() {
+                body = body
+                    .push(p1_bold(review.protected.clone()).style(theme::text::success))
+                    .push(caption(review.limitation).style(theme::text::secondary))
+                    .push(p1_bold(format!("Sweep txid {}", review.txid)))
+                    .push(p1_regular(format!(
+                        "Fee {} sats · {} vB · route {}",
+                        review.fee_sats, review.vsize, review.route_label
+                    )));
+                if let Some(note) = review.privacy_note {
+                    body = body.push(p1_regular(note).style(theme::text::warning));
+                }
+            }
+            actions = actions
+                .push(unified_primary("Submit sweep", UnifiedMessage::Confirm))
+                .push(unified_action("Review again", UnifiedMessage::Review))
+                .push(unified_action("Cancel", UnifiedMessage::Cancel));
+        }
+        UnifiedStage::Submitted => {
+            body = body.push(p1_regular(match state.outcome() {
+                Some(Outcome::UpstreamAccepted { txid, .. }) => {
+                    format!("The sweep {txid} was accepted for relay. Waiting for confirmation.")
+                }
+                Some(Outcome::Uncertain { txid, .. }) | Some(Outcome::Recorded { txid }) => format!(
+                    "A submission of the sweep ({txid}) is recorded. It is never sent again; check its status."
+                ),
+                None => "A submission of the sweep is recorded. Check its status.".to_string(),
+            }));
+            if let Some(seen) = state.seen() {
+                body = body.push(caption(format!("Bitcoin Blake2b: {seen:?}")));
+            }
+            actions = actions.push(unified_action("Refresh", UnifiedMessage::Reconcile));
+        }
+    }
+    (body, actions)
 }
 
 /// "Sign with connected device" (#568 B4b-3b): what the device will show,
@@ -303,19 +419,45 @@ fn step2_body<'a>(
 }
 
 pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
-    let mut body = Column::new()
-        .spacing(10)
-        .max_width(640)
-        .push(h3("Split: step 1 on Bitcoin"))
-        .push(
+    let single = matches!(panel.stage(), Stage::Unified(_) | Stage::ChooseRoute);
+    let mut body = Column::new().spacing(10).max_width(640);
+    body = if single {
+        body.push(h3("Split")).push(
+            p1_regular(
+                "Split moves the foreign wallet's pre-fork coins on Bitcoin Blake2b into this Vault so they can't be replayed on Bitcoin.",
+            )
+            .style(theme::text::secondary),
+        )
+    } else {
+        body.push(h3("Split: step 1 on Bitcoin")).push(
             p1_regular(
                 "Step 1 moves the foreign wallet's pre-fork coins to a fresh address of the same wallet on Bitcoin, with an output Bitcoin Blake2b refuses. Nothing here holds keys; signatures come back in PSBT files.",
             )
             .style(theme::text::secondary),
-        );
+        )
+    };
     let mut actions = Row::new().spacing(10).align_y(Alignment::Center);
 
     match panel.stage() {
+        Stage::ChooseRoute => {
+            body = body.push(p1_regular(unified::ROUTE_TWO_STEP));
+            actions = actions.push(primary(
+                "Two steps",
+                SplitMessage::Unified(UnifiedMessage::Choose(Route::TwoStep)),
+            ));
+            if panel.seed_route_offered() {
+                body = body.push(p1_regular(unified::ROUTE_SEEDS));
+                actions = actions.push(action(
+                    "One step with recovery phrases",
+                    SplitMessage::Unified(UnifiedMessage::Choose(Route::Seeds)),
+                ));
+            }
+            // P1: the single step is never offered for a hardware wallet.
+            body = body.push(caption(unified::P1_HARDWARE).style(theme::text::secondary));
+        }
+        Stage::Unified(stage) => {
+            (body, actions) = unified_body(panel, *stage, body, actions);
+        }
         Stage::NeedsSession => {
             body = body.push(p1_regular(
                 "Sign in to Connect in this Cube to continue the split recorded on this device.",
