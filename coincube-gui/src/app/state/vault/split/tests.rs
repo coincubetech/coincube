@@ -1551,7 +1551,10 @@ fn assert_split_start_is_gated(checkout: fn(&str) -> String) {
     // The resume is the journal discovery's.
     let discovery = &app[app.find("fn discover_split_panel(").unwrap()..];
     let discovery = &discovery[..discovery.find("\n}\n").unwrap()];
-    assert!(discovery.contains("step1::discover(&root)"));
+    // #568 D19: the resumable journal, passing over a recorded completion.
+    assert!(discovery.contains(
+        "step1::discover_resumable(&root, &cube_settings.id, &cube_settings.split_from)?"
+    ));
     assert!(discovery.contains("SplitPanel::resume("));
     assert!(!discovery.contains("SplitPanel::start"));
     // #568 B5c-2: the start is `start_split_from_review`'s, after every one
@@ -1763,9 +1766,15 @@ fn assert_split_ui_paths_do_no_blocking_work(checkout: fn(&str) -> String) {
     // B4b-3b: the device listing (its policy, its `HardwareWallets`) is
     // built in a blocking task too; hidapi is `split_hardware::bind`'s.
     // B4b-3c: the unified port too.
-    const BLOCKING: [&str; 13] = [
+    // #568 D19: discovery's journal reads. B5c-2: D15's two metadata
+    // reads (exempt in `start_split_from_review` only, below).
+    const BLOCKING: [&str; 17] = [
         "step1::discover(",
         "discover_split_panel(",
+        "discover_resumable(",
+        "is_recorded_complete(",
+        "peek_split_journal(",
+        "second_split_refusal(",
         "read_dir",
         "symlink_metadata",
         "std::fs::",
@@ -1835,7 +1844,28 @@ fn assert_split_ui_paths_do_no_blocking_work(checkout: fn(&str) -> String) {
         // Reviewer-661 F3: the abandon task's journal reopen (its fork-only
         // copy reads the journal again).
         ("update", body(&panel, "    pub fn update(", "    ")),
+        // #568 B5c-2: "Start split" (see its exemption below).
+        (
+            "start_split_from_review",
+            body(&app, "    fn start_split_from_review(", "    "),
+        ),
     ];
+    // #568 B5c-2 (Reviewer-664 item 3), the one exemption: "Start split"
+    // runs D15's `step1::second_split_refusal` on the UI thread, once per
+    // press. It is two `symlink_metadata` calls (a tombstone and an intent
+    // file, no directory listing, nothing read inside a journal), and the
+    // journal's own create checks the same under its lock. Pinned to that
+    // one call and to that helper's body.
+    let exempt = |name: &str, token: &str| {
+        name == "start_split_from_review" && token == "second_split_refusal("
+    };
+    let start = body(&app, "    fn start_split_from_review(", "    ");
+    assert_eq!(start.matches("second_split_refusal(").count(), 1);
+    let step1 = read("app/state/vault/split/step1.rs");
+    let d15 = body(&step1, "pub fn second_split_refusal(", "");
+    assert_eq!(d15.matches("std::fs::symlink_metadata(").count(), 2);
+    assert_eq!(d15.matches("std::fs::").count(), 2);
+    assert!(!d15.contains("read_dir") && !d15.contains("peek_split_journal("));
     // B4b-3c: the seed set's derivation and signing, the coordinator's and
     // reconciler's opens (journal reads) and the close's write.
     const UNIFIED_BLOCKING: [&str; 7] = [
@@ -1850,6 +1880,9 @@ fn assert_split_ui_paths_do_no_blocking_work(checkout: fn(&str) -> String) {
     assert!(body(&panel, "    pub fn update(", "    ").contains("unified::abandon_refusal("));
     for (name, text) in ui {
         for token in BLOCKING.iter().chain(UNIFIED_BLOCKING.iter()) {
+            if exempt(name, token) {
+                continue;
+            }
             // Every occurrence must sit inside a `spawn_blocking(...)`
             // argument: after one, with its parentheses still open.
             for (at, _) in text.match_indices(token) {

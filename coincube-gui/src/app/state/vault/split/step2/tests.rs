@@ -1536,5 +1536,6 @@ fn step1_reconfirmation_refusal_copy_names_the_rdts_margin() {
 
 mod close;
 mod copy;
+pub(crate) mod discovery;
 mod driver;
 mod panel;

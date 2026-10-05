@@ -1213,7 +1213,7 @@ fn v8_split_journal_is_refused_by_the_v7_reader() {
 /// so an alias or glob still has to name the item somewhere.
 #[test]
 fn split_b0_journal_api_has_no_gui_callers() {
-    const ITEMS: [&str; 38] = [
+    const ITEMS: [&str; 40] = [
         "create_split",
         // B4b-1b: the fork-only (`kind: Unified`) record.
         "create_unified_split",
@@ -1258,6 +1258,9 @@ fn split_b0_journal_api_has_no_gui_callers() {
         "confirm_split_step1_conflict",
         "clear_split_step1_conflict",
         "disprove_split_step1_conflict",
+        // #568 D19: discovery's session-free read of a journal.
+        "peek_split_journal",
+        "SplitJournalSummary",
     ];
     const OWN: [&str; 4] = [
         "src/services/claim_workflow/split.rs",
@@ -1305,6 +1308,8 @@ fn split_b0_journal_api_has_no_gui_callers() {
                             "Step2ReturnHold",
                             "SplitKind",
                             "Step1Conflict",
+                            "peek_split_journal",
+                            "SplitJournalSummary",
                         ]
                         .contains(&ident);
                     let dispatch = file == "src/services/claim_coordinator/step1.rs"
@@ -1313,18 +1318,27 @@ fn split_b0_journal_api_has_no_gui_callers() {
                     // started only from the sweep review under the server
                     // flag, or resumed from its journal (B5c-2), so no other
                     // GUI action reaches these.
-                    let panel = file.starts_with("src/app/state/vault/split/")
-                        && [
-                            "create_split",
-                            "resume_split",
-                            "SplitProduction",
-                            "split_identity",
-                            "recorded_split",
-                            "abandon_split",
-                            "revalidate_split_construction",
-                            "bind_recovered_split_transaction",
-                        ]
-                        .contains(&ident);
+                    // #568 D19: journal discovery reads whether a journal
+                    // is a recorded completion (read only, off the UI
+                    // thread), in the panel's step 1 only; the #625 F3
+                    // guard names it as blocking work.
+                    let discovery = matches!(
+                        file.as_str(),
+                        "src/app/state/vault/split/step1.rs" | "src/app/state/vault/split/tests.rs"
+                    ) && ident == "peek_split_journal";
+                    let panel = discovery
+                        || (file.starts_with("src/app/state/vault/split/")
+                            && [
+                                "create_split",
+                                "resume_split",
+                                "SplitProduction",
+                                "split_identity",
+                                "recorded_split",
+                                "abandon_split",
+                                "revalidate_split_construction",
+                                "bind_recovered_split_transaction",
+                            ]
+                            .contains(&ident));
                     // B2/B3b: the dormant step-2 gate and construction and
                     // their tests reopen a submitted Split journal; no GUI
                     // caller reaches them

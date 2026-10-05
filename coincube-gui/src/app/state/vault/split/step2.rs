@@ -2413,4 +2413,4 @@ fn reconciled(r: SweepReconcile) -> (Status, TransactionObservation, Step1AfterS
 }
 
 #[cfg(all(test, unix))]
-mod tests;
+pub(crate) mod tests;

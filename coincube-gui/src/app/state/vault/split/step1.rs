@@ -200,6 +200,51 @@ pub fn discover(root: &Path) -> Vec<(sha256::Hash, PathBuf)> {
     found
 }
 
+/// #568 D19: whether the journal in `directory` (source `digest`) is a
+/// split this Cube records as completed, so discovery passes over it and a
+/// Vault can take another source afterwards. Read as the restart into
+/// Completed reads it: a two-step journal for `target_cube` and `digest`
+/// whose descriptors were deleted, in no dead end (here: no step-1
+/// conflict at all and no #625 step-2 dead end), whose recorded step 2's
+/// txid is in a `split_from` record of this digest. Anything else, an
+/// unreadable or busy journal included, is not completed: a live split is
+/// never hidden. Blocking (a journal read): discovery runs it off the UI
+/// thread.
+pub fn is_recorded_complete(
+    directory: &Path,
+    target_cube: &str,
+    digest: sha256::Hash,
+    split_from: &[crate::app::settings::SplitFromRecord],
+) -> bool {
+    let Ok(Some(summary)) = claim_workflow::peek_split_journal(directory) else {
+        return false;
+    };
+    summary.two_step
+        && summary.source_digest == digest
+        && summary.target_cube == target_cube
+        && summary.descriptors_forgotten
+        && !summary.step1_conflict
+        && !summary.step2_dead_end
+        && summary.step2_txid.is_some_and(|txid| {
+            split_from
+                .iter()
+                .any(|record| record.descriptor_digest == digest && record.step2_txid == txid)
+        })
+}
+
+/// #568 D19: the first journal under `root` ([`discover`]) that is not a
+/// completed split this Cube records ([`is_recorded_complete`]): the one a
+/// Cube open resumes. Blocking: discovery runs it off the UI thread.
+pub fn discover_resumable(
+    root: &Path,
+    target_cube: &str,
+    split_from: &[crate::app::settings::SplitFromRecord],
+) -> Option<(sha256::Hash, PathBuf)> {
+    discover(root).into_iter().find(|(digest, directory)| {
+        !is_recorded_complete(directory, target_cube, *digest, split_from)
+    })
+}
+
 /// #568 D15: this source was already split into this Cube's Vault (its
 /// `split_from` records it).
 pub const SOURCE_ALREADY_SPLIT: &str = "This wallet was already split into this Vault, so it can't be split again. Nothing was started.";

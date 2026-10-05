@@ -966,9 +966,9 @@ enum SplitHandoff {
 /// session or the account's Bitcoin Blake2b grant changed.
 const SPLIT_START_CANCELLED: &str = "Split was cancelled because its Cube, Vault, account session, or feature grant changed. Nothing was started. Scan again.";
 /// #568 B5c-2: "Start split" refused because this Cube already has a Split
-/// panel in this session (a resumed journal, or a split started or closed
-/// since the Cube was unlocked).
-const SPLIT_START_PANEL_OPEN: &str = "A split is already open for this Vault in this session, so nothing new was started. Reopen this Cube to continue it or to start another.";
+/// panel: a resumed journal that is not a recorded completion (D19), or a
+/// split started since the Cube was unlocked.
+const SPLIT_START_PANEL_OPEN: &str = "A split is already in progress in this Vault, so nothing new was started. It must finish, or be closed, before another wallet can be split into this Vault.";
 
 /// The fee source for a BTCB2 Split review: Connect's BTCB2 Esplora estimate
 /// for the bound account session (#568 D4), unavailable without one. It fails
@@ -984,8 +984,10 @@ fn split_fee_source(
 /// `<btcb2>/data/<wallet>/split/<digest>/` resumes it; with none there is no
 /// panel. A journal is created only by a panel that "Start split" on the
 /// sweep review started (#568 B5c-2), under the account's Bitcoin Blake2b
-/// grant. Discovery reads directory names only; the panel authenticates the
-/// journal when it opens it under a session.
+/// grant. A split this Cube records as completed is passed over (D19,
+/// `step1::is_recorded_complete`, which reads the journal without a
+/// session); the panel authenticates the journal it resumes when it opens
+/// it under a session. Blocking: called only from the discovery task.
 fn discover_split_panel(
     data_dir: &CoincubeDirectory,
     cube_settings: &settings::CubeSettings,
@@ -998,7 +1000,10 @@ fn discover_split_panel(
         return None;
     }
     let root = step1::journal_root(data_dir, &wallet.id());
-    let (digest, directory) = step1::discover(&root).into_iter().next()?;
+    // #568 D19: a completed split this Cube records is passed over, so the
+    // Vault can take another source; any other journal is resumed.
+    let (digest, directory) =
+        step1::discover_resumable(&root, &cube_settings.id, &cube_settings.split_from)?;
     let mut panel = Box::new(SplitPanel::resume(
         cube_settings.id.clone(),
         root,
@@ -9953,6 +9958,106 @@ mod tests {
             started
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// #568 D19: place a real Split journal of `placed` in `app`'s Vault,
+    /// make `app`'s Cube the journal's target and, with `recorded`, record
+    /// its completion in the Cube's `split_from`. Then run journal discovery
+    /// as a Cube open does, with no panel before it.
+    #[cfg(unix)]
+    fn split_reopen_with_journal(
+        app: &mut App,
+        placed: state::vault::split::step2::tests::discovery::Placed,
+        recorded: bool,
+    ) {
+        let wallet = app.wallet.as_ref().unwrap().id();
+        let root = state::vault::split::step1::journal_root(&app.datadir, &wallet);
+        let (target, _, _, record) =
+            state::vault::split::step2::tests::discovery::place_journal(&root, placed);
+        app.cube_settings.id = target;
+        if recorded {
+            app.cube_settings.split_from.push(record);
+        }
+        split_reopen(app);
+    }
+
+    /// A Cube open's journal discovery, with no panel before it.
+    fn split_reopen(app: &mut App) {
+        app.split_panel = None;
+        for message in task_messages(app.split_discovery_task()) {
+            assert!(matches!(message, Message::SplitDiscovered { .. }));
+            drop(app.update(message));
+        }
+    }
+
+    /// #568 D19 (Reviewer-664 F1, the reviewer's probe adopted): a Vault
+    /// whose split of one source is complete, and recorded on its Cube,
+    /// takes the next source. Every reopen passes over the completed
+    /// journal, so no panel blocks "Start split", and the second source
+    /// starts. Re-splitting the completed source stays refused (D15,
+    /// `start_split_refuses_a_second_split_or_a_completed_source` and
+    /// `a_completed_source_is_never_split_again`).
+    /// CF (the probe, at 97ed89e1): discovery resumed the completed journal
+    /// on every open and Start was refused each time.
+    #[cfg(unix)]
+    #[test]
+    fn a_completed_split_in_the_vault_does_not_block_the_next_source() {
+        use state::vault::split::step2::tests::discovery::Placed;
+        let _guard = crate::app::session::test_guard();
+        let root = std::env::temp_dir().join(format!("split-next-{}", uuid::Uuid::new_v4()));
+        let mut app = start_split_app(&root, Some(true));
+        split_reopen_with_journal(&mut app, Placed::Completed, true);
+        for _ in 0..3 {
+            assert!(
+                app.split_panel.is_none(),
+                "the completed split is passed over"
+            );
+            split_reopen(&mut app);
+        }
+        let intent = start_split_intent(&app, START_SOURCE);
+        start_split_review(&mut app, intent);
+        let errors = shown_errors(app.update(Message::View(view::Message::StartSplit)));
+        assert!(errors.is_empty(), "{:?}", errors);
+        assert!(app.split_panel.is_some(), "the next source starts");
+        assert_eq!(handoff_stage(&app), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// #568 D19 never hides a live split: a journal in flight, in #625's
+    /// dead end or with a step-1 conflict is resumed on open, even when the
+    /// Cube records its source and step 2, and "Start split" for another
+    /// source is then refused with copy that says the split in progress
+    /// must finish or be closed first, and promises nothing of a reopen.
+    #[cfg(unix)]
+    #[test]
+    fn a_live_split_in_the_vault_is_resumed_and_blocks_another_start() {
+        use state::vault::split::step2::tests::discovery::Placed;
+        let _guard = crate::app::session::test_guard();
+        assert!(SPLIT_START_PANEL_OPEN.contains("in progress in this Vault"));
+        assert!(SPLIT_START_PANEL_OPEN.contains("must finish, or be closed"));
+        assert!(!SPLIT_START_PANEL_OPEN.to_lowercase().contains("reopen"));
+        for placed in [Placed::InFlight, Placed::DeadEnd, Placed::Conflict] {
+            let root = std::env::temp_dir().join(format!("split-live-{}", uuid::Uuid::new_v4()));
+            let mut app = start_split_app(&root, Some(true));
+            split_reopen_with_journal(&mut app, placed, true);
+            let resumed = app
+                .split_panel
+                .as_deref()
+                .map(|panel| panel as *const state::vault::split::SplitPanel);
+            assert!(resumed.is_some(), "{:?} is resumed", placed);
+            let intent = start_split_intent(&app, START_SOURCE);
+            start_split_review(&mut app, intent);
+            let errors = shown_errors(app.update(Message::View(view::Message::StartSplit)));
+            assert_eq!(errors, [SPLIT_START_PANEL_OPEN], "{:?}", placed);
+            assert_eq!(handoff_stage(&app), None);
+            assert_eq!(
+                app.split_panel
+                    .as_deref()
+                    .map(|panel| panel as *const state::vault::split::SplitPanel),
+                resumed
+            );
+            let _ = std::fs::remove_dir_all(&root);
+        }
     }
 
     /// #625 F3c: the Split ports are built in a task. A lost session revokes
