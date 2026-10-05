@@ -1200,6 +1200,8 @@ async fn split_step2_check_signed_tells_complete_partial_and_wrong_apart() {
 }
 
 mod completion;
+#[cfg(feature = "regtest-harness")]
+mod regtest_driver;
 mod reorg;
 mod routes;
 mod unified_flow;

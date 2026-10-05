@@ -169,6 +169,27 @@ signing remain outside this live test.
 The `regtest-harness` feature is off in normal builds. The labelled BTCB2 workflow
 builds this driver and fails if the required executable or pinned nodes are missing.
 
+The same lib-test executable holds `split_service_regtest_driver` (#568 B6c-2), the
+child for `tests/test_btcb2_split_observation.py`:
+
+```sh
+export SPLIT_SERVICE_REGTEST_TEST_PATH="$CLAIM_GUI_REGTEST_TEST_PATH"
+pytest tests/test_btcb2_split_observation.py -vvv
+```
+
+It drives the production Split services (the step-1 coordinator, the
+six-confirmation gate before step 2 and, after step 2, the journal's submission
+record and the step-2 reconciler) over the same kind of Connect stand-in, which also
+re-encodes mainnet addresses for the regtest indexer. A P2PKH foreign wallet is
+funded before the fork; only the nodes and indexers run, no daemon. Two cases
+take step 1's Bitcoin block out of the best chain: before step 2 (`Reorged`, the
+gate refusing, an explicit reconfirmation, eligible again at six) and after
+step 2 is recorded and mined on BTCB2 (`InMempool` then `Remined` with the
+journal unchanged and nothing sent, the reconciler's reconfirmation, completion
+refused until step 1 is six deep again). The wallet keys, target Vault and
+account are synthetic, and the step-2 fee is passed explicitly because Connect's
+regtest fee estimates are empty.
+
 Set the bridge path to your Cargo target directory when using `CARGO_TARGET_DIR`.
 This test spends the fixture's original coins, so it has its own module-scoped
 harness. It checks the production OP_RETURN self-transfer and legacy 2-of-3 fork
