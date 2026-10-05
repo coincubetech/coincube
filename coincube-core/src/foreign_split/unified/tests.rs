@@ -733,3 +733,38 @@ fn unified_sweep_refuses_changed_construction_target_and_source_script() {
         );
     }
 }
+
+/// #647 O4 (Reviewer-647 probe D): a signed unified PSBT may add only the
+/// reserved `coincube`/0 signature records. Any other proprietary record,
+/// another namespace or another subtype of ours, is a changed construction,
+/// as step 2 allows nothing but `partial_sigs`.
+#[test]
+fn unified_construction_refuses_foreign_proprietary_records() {
+    use bitcoin::psbt::raw::ProprietaryKey;
+    for shape in SHAPES {
+        let fixture = Fixture::new(shape);
+        let sweep = fixture.sweep();
+        let signed = sign_unified(sweep.psbt(), &fixture.signers());
+        assert!(finalize(&sweep, &signed).is_ok(), "{:?}", shape);
+        assert!(signed.psbt().inputs[0]
+            .proprietary
+            .keys()
+            .all(|key| key.prefix == b"coincube" && key.subtype == 0));
+        for (prefix, subtype) in [(&b"other"[..], 0u8), (&b"coincube"[..], 1u8)] {
+            let mut changed = signed.clone();
+            changed.psbt_mut().inputs[0].proprietary.insert(
+                ProprietaryKey {
+                    prefix: prefix.to_vec(),
+                    subtype,
+                    key: vec![1],
+                },
+                vec![2],
+            );
+            assert_eq!(
+                finalize(&sweep, &changed).err(),
+                Some(UnifiedSweepFinalizeError::ConstructionChanged),
+                "{shape:?}: {prefix:?}/{subtype}"
+            );
+        }
+    }
+}

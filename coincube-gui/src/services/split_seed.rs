@@ -10,6 +10,15 @@
 //! records for exactly the keys those seeds control and nothing else; the
 //! core finalizer decides whether that satisfies every input.
 //!
+//! The binding is by master fingerprint only (#647 O3): four bytes, which a
+//! seed can match without deriving the policy's key at that origin (a
+//! collision, or the right seed with a wrong passphrase whose fingerprint
+//! happens to match). Admission is therefore no proof of the key. The core
+//! finalizer verifies every record against the keys each input commits to,
+//! so such a seed can only end in an incomplete or refused signing, never in
+//! an accepted wrong signature. The user-facing copy for that case is
+//! B4b-3's.
+//!
 //! This module keeps nothing: no file, no configuration entry, no encrypted
 //! store and no session cache. Each seed lives in a zeroizing
 //! [`SessionSeedSource`]; a refused seed is dropped at once, and clearing or
@@ -44,7 +53,8 @@ pub enum SeedSetError {
     /// The words or passphrase do not form a BIP39 seed.
     Seed(SourceError),
     /// The seed's master fingerprint is not one of the policy's key origins
-    /// (a wrong seed, or a policy seed with the wrong passphrase).
+    /// (a wrong seed, or a policy seed with the wrong passphrase). A match is
+    /// not proof of the key at that origin: see the module note (#647 O3).
     UnknownOrigin,
     /// A seed with this fingerprint is already held.
     Duplicate,

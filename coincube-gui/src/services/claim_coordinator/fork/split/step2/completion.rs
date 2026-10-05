@@ -344,8 +344,11 @@ impl SplitStep2Reconciler {
         // #568 S4: step 1 reorged after the step-2 submission withholds
         // completion in every outcome. O1 (re-mined) also fails the recorded
         // block below until it is acknowledged; O2 and O3 (in the mempool,
-        // missing) fail the depth below too; a recorded O4 conflict is
-        // terminal (S4-D2) and refuses here even if step 1 is seen again.
+        // missing) fail the depth below too; an O4 conflict refuses here
+        // while it stands: a provisional one is cleared by a reconcile that
+        // finds step 1 on Bitcoin (S4-D5), and a terminal one only by one
+        // that finds step 1 eligible, six deep (S4-D6), so after that
+        // reconcile it stands only while step 1 is not eligible.
         if after_step2 != Step1AfterStep2::Eligible {
             return Ok(None);
         }

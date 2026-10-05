@@ -267,6 +267,13 @@ impl Step2Liveness {
             && self.generation.has_changed().is_ok()
             && Instant::now() < self.not_after
     }
+    /// When the check's evidence lapses at the latest: the deadline
+    /// [`Self::is_live`] checks. Display only, to redraw at it (S3 item 5);
+    /// the evidence may lapse earlier (a later check, a revocation or a
+    /// generation change).
+    pub fn not_after(&self) -> Instant {
+        self.not_after
+    }
 }
 impl ForeignStep2Authorization {
     pub fn is_live(&self) -> bool {

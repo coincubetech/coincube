@@ -22,12 +22,13 @@ use coincube_core::{
 use super::{
     step1::{OpenRequest, Refusal, RefusalRecovery, SplitConnect},
     step2::{self, ReconPort, Step2Open, Step2Port, Step2Refusal},
-    Coord, Driver, Prep, Recon, Restarted, Seen, SplitEvent, SplitMessage, SplitPanel, Stage,
-    Step2Stage, Work,
+    Coord, Driver, Incoming, Prep, Recon, Restarted, Seen, SplitEvent, SplitMessage, SplitPanel,
+    Stage, Step2Stage, Work,
 };
 use crate::{
     app::message::Message,
     services::{
+        claim_coordinator::Outcome,
         claim_observation::TransactionObservation,
         split_psbt_file::{self, Encoding},
     },
@@ -49,7 +50,8 @@ impl SplitPanel {
     /// new port on every Connect refresh: an equivalent one (same session
     /// context and daemon instance) is ignored, so a flow in progress keeps
     /// its handles; any other (another daemon, account, provider or
-    /// generation, or none) revokes every step-2 handle first (#637 F1).
+    /// generation, or none) revokes every step-2 handle first (#637 F1),
+    /// including one a task holds ([`Self::step2_engaged`]).
     pub fn set_step2_port(&mut self, port: Option<Arc<dyn Step2Port>>) {
         let same = match (&self.step2_port, &port) {
             (Some(a), Some(b)) => a.identity() == b.identity(),
@@ -59,16 +61,42 @@ impl SplitPanel {
         if same {
             return;
         }
-        if self.prep.is_some() || self.coord.is_some() || self.recon.is_some() {
+        if self.step2_engaged() {
             self.revoke();
         }
         self.step2_port = port;
     }
 
+    /// A step-2 handle is held, or may be in a task (S3-D1): one moved into
+    /// a task is not held (`take_prep`, `take_coord`, a restart or entry
+    /// still opening it), but its revoke handle stays bound or the stage
+    /// shows the task. A port or session change then revokes it, and the
+    /// sequence bump drops the task's result, as for a held one.
+    fn step2_engaged(&self) -> bool {
+        self.prep.is_some()
+            || self.coord.is_some()
+            || self.recon.is_some()
+            || self.step2_revoke.is_some()
+            || matches!(self.stage, Stage::Working(_))
+    }
+
+    /// The reconciler is held, or may be in a task (S3-D1): a restart still
+    /// deciding (it opens the reconciler from the old port) or a step-2
+    /// reconcile running (from the reconciler, or the coordinator, which is
+    /// revoked with it: a reconcile is never more than a read).
+    fn recon_engaged(&self) -> bool {
+        self.recon.is_some()
+            || matches!(
+                self.stage,
+                Stage::Working(Work::Restarting | Work::Step2Reconciling)
+            )
+    }
+
     /// Install (or clear) the session's reconcile-only port (#637 R1). The
     /// App builds one on every Connect refresh, whether or not the Vault's
     /// daemon gives a step-2 port: an equivalent one (same session context)
-    /// is ignored; any other revokes a reconciler opened under the old one.
+    /// is ignored; any other revokes a reconciler opened under the old one,
+    /// held or in a task ([`Self::recon_engaged`]).
     pub fn set_recon_port(&mut self, port: Option<Arc<dyn ReconPort>>) {
         let same = match (&self.recon_port, &port) {
             (Some(a), Some(b)) => a.context() == b.context(),
@@ -78,7 +106,7 @@ impl SplitPanel {
         if same {
             return;
         }
-        if self.recon.is_some() {
+        if self.recon_engaged() {
             self.revoke();
         }
         self.recon_port = port;
@@ -103,6 +131,21 @@ impl SplitPanel {
 
     pub fn step2_available(&self) -> bool {
         self.step2_port.is_some()
+    }
+    /// Record why the App's port build gave no step-2 port (S3-D4).
+    pub fn note_step2_unavailable(&mut self, reason: Option<step2::Step2Unavailable>) {
+        self.step2_missing = reason;
+    }
+    /// Why step 2 can't be entered for want of a step-2 port, in words; with
+    /// no reason recorded, the Vault daemon is missing.
+    pub fn step2_unavailable_copy(&self) -> Option<&'static str> {
+        if self.step2_port.is_some() {
+            return None;
+        }
+        Some(step2::unavailable_copy(
+            self.step2_missing
+                .unwrap_or(step2::Step2Unavailable::NoDaemon),
+        ))
     }
     /// A recorded step 2 can be reconciled under the current session.
     pub fn reconcile_available(&self) -> bool {
@@ -632,10 +675,22 @@ impl SplitPanel {
     /// or the preparation is taken, keeping the loaded files
     /// (#637 r4174164844).
     pub fn step2_import_from(&mut self, paths: Vec<PathBuf>) -> Task<Message> {
+        self.step2_import(paths.into_iter().map(Incoming::Path).collect())
+    }
+
+    /// The same verified step-2 import for signed PSBTs already in memory: a
+    /// connected device's output (#568 B4b-3b) is checked, combined and
+    /// handed over exactly as a signed file is, never finalized directly.
+    pub fn step2_import_psbts(&mut self, psbts: Vec<Psbt>) -> Task<Message> {
+        self.step2_import(psbts.into_iter().map(Incoming::Psbt).collect())
+    }
+
+    fn step2_import(&mut self, incoming: Vec<Incoming>) -> Task<Message> {
         if self.stage != Stage::Step2(Step2Stage::Sign) {
             return Task::none();
         }
-        if self.step2_files.len().saturating_add(paths.len()) > split_psbt_file::MAX_COMBINED_FILES
+        if self.step2_files.len().saturating_add(incoming.len())
+            > split_psbt_file::MAX_COMBINED_FILES
         {
             self.notice = Some(split_psbt_file::FileError::TooManyFiles.to_string());
             return Task::none();
@@ -652,8 +707,9 @@ impl SplitPanel {
                     let result =
                         (|| {
                             let mut combined = combine(&base, &files)?;
-                            for path in &paths {
-                                let file = split_psbt_file::load(path)
+                            for item in incoming {
+                                let file = item
+                                    .load()
                                     .map_err(|error| Step2Refusal::retry(error.to_string()))?;
                                 // Combining can supply missing fields or resolve conflicts.
                                 // Check the exact input first, including no-op files, so
@@ -937,6 +993,7 @@ impl SplitPanel {
                         self.step2_handoff_ready = complete;
                         if complete {
                             self.notice = None;
+                            self.device.close();
                             return self.finish(combined);
                         }
                         self.notice = Some(
@@ -1039,7 +1096,7 @@ impl SplitPanel {
                     Err(reason) => {
                         self.step2_resend = None;
                         if reason.recovery == step2::Step2Recovery::Restart {
-                            return self.restart_step2(reason.reason);
+                            return self.restart_step2(Some(reason.reason));
                         }
                         self.notice = Some(reason.reason);
                     }
@@ -1054,12 +1111,21 @@ impl SplitPanel {
                 self.bind_coord(coord);
                 self.step2_resend = None;
                 match result {
-                    Ok(outcome) => {
+                    Ok(outcome @ Outcome::UpstreamAccepted { .. }) => {
                         self.notice = None;
                         self.step2_outcome = Some(outcome);
                     }
+                    // #648 X1b: an attempt that did not come back accepted
+                    // (timed out or interrupted: no return is recorded, or
+                    // the last one allowed) may leave the journal with no
+                    // resend. Read it again, as a refusal that says so does,
+                    // so a dead end is shown without another review.
+                    Ok(outcome) => {
+                        self.step2_outcome = Some(outcome);
+                        return self.restart_step2(None);
+                    }
                     Err(reason) if reason.recovery == step2::Step2Recovery::Restart => {
-                        return self.restart_step2(reason.reason);
+                        return self.restart_step2(Some(reason.reason));
                     }
                     Err(reason) => self.notice = Some(reason.reason),
                 }
