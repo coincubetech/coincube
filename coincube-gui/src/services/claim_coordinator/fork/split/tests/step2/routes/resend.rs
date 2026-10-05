@@ -140,13 +140,15 @@ struct Uncertain {
     preflight: usize,
 }
 /// Step 2 checked, built, signed, reviewed and confirmed over `daemon`; its
-/// intent is recorded, then the daemon refuses before any byte leaves.
+/// intent is recorded, then the daemon refuses before any byte leaves. The
+/// coordinator keeps [`wide_policy`], so load cannot expire its reviews (the
+/// resend review's expiry is tested with `expire_for_test`).
 async fn uncertain(
     daemon: &Refusing,
     node: Option<BitcoindConfig>,
     connect: &MockServer,
 ) -> Uncertain {
-    let s = Step2::new().await;
+    let s = Step2::with_policy(wide_policy()).await;
     let signed = s.signed_tx();
     let fee = s.preparation.step2.as_ref().unwrap().fee().to_sat();
     let preflight = mock_preflight(connect, &signed, true).await;
@@ -190,7 +192,8 @@ async fn uncertain(
 }
 
 /// Restart: step 1 rebuilt and its signed bytes verified, the claimed coins,
-/// and a transport for the target Vault at the Split's origin.
+/// and a transport for the target Vault at the Split's origin, under
+/// [`wide_policy`] as [`uncertain`]'s coordinator.
 async fn reopen(
     h: &Harness,
     coins: Vec<SplitCoin>,
@@ -207,7 +210,7 @@ async fn reopen(
         h.sender.subscribe(),
         Box::new(h.chains.clone()),
         transport,
-        policy(),
+        wide_policy(),
     )
     .await
 }
