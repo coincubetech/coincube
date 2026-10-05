@@ -197,6 +197,9 @@ pub const COMPLETION_EXPIRED: &str = "The completion check expired while it was 
 /// #656 F1: the completion check's own evidence lapsed before anything was
 /// saved.
 pub const COMPLETION_CHECK_EXPIRED: &str = "The completion check expired before anything was saved, so nothing was recorded or deleted. Check status again, then complete the split.";
+/// #662 R10: a D17 recheck's evidence lapsed. If the check had found the
+/// completion undone, its record may already be removed.
+pub const COMPLETION_RECHECK_EXPIRED: &str = "The check of this completion expired before it finished. If a reorganization undid the completion, its record may already be removed from this Cube. Check status again.";
 /// #656 F1: the target Cube's settings could not be read or updated for
 /// this split's completion record (an unreadable settings file, or the Cube
 /// or its Vault no longer matching). The settings layer's own messages name
@@ -595,6 +598,19 @@ pub(super) fn describe_completion(error: claim_coordinator::Error) -> Step2Refus
             Step2Refusal::retry(COMPLETION_RECORD_UNAVAILABLE)
         }
         other => describe_check(other),
+    }
+}
+
+/// #662 R10: copy for a refused D17 recheck of a recorded completion. Its
+/// evidence lapsing may follow the record's removal (`clear_split_from`
+/// checks the deadline again after its write), so the copy says neither
+/// that nothing changed nor that the split should be completed again.
+pub(super) fn describe_recheck(error: claim_coordinator::Error) -> Step2Refusal {
+    match error {
+        claim_coordinator::Error::ExpiredEvidence => {
+            Step2Refusal::retry(COMPLETION_RECHECK_EXPIRED)
+        }
+        other => describe_completion(other),
     }
 }
 
@@ -1002,7 +1018,9 @@ pub enum Restart {
     /// when it is in one (#625 F2, or O4's terminal conflict, #568 S4b), or
     /// else why a resend the journal allows could not be opened (P3-3). At
     /// most one is set: a journal in a dead end allows no resend.
-    Reconcile(Box<dyn Step2Recon>, Option<DeadEnd>, Option<String>),
+    /// The last field (#662 F1): the journal's source descriptors are
+    /// deleted, which only a finished completion does (D18).
+    Reconcile(Box<dyn Step2Recon>, Option<DeadEnd>, Option<String>, bool),
     /// A step-2 submission is recorded and the journal allows a reviewed
     /// resend (P3-3): its coordinator, reopened from the recorded bytes.
     Resend(Box<dyn Step2Coord>),
@@ -1092,7 +1110,7 @@ pub async fn restart(
         return Ok(Restart::Closed);
     }
     let identity = claim_workflow::split_identity(target_cube.clone(), digest);
-    let (recorded, resendable, dead_end) = {
+    let (recorded, resendable, dead_end, forgotten) = {
         let controller = Controller::reopen_settling(&directory, &identity, context.clone())
             .await
             .map_err(|error| {
@@ -1107,12 +1125,12 @@ pub async fn restart(
         // #568 B4b-3c: restart by kind. A fork-only record has no step 1 to
         // restore and the two-step reconciler refuses it (U2), so it never
         // reaches either: what it has recorded decides how it reopens.
-        let kind = controller
-            .recorded_split()
-            .map_err(|error| {
-                Step2Refusal::retry(step1::describe(claim_coordinator::Error::Journal(error)))
-            })?
-            .map(|record| record.kind);
+        let record = controller.recorded_split().map_err(|error| {
+            Step2Refusal::retry(step1::describe(claim_coordinator::Error::Journal(error)))
+        })?;
+        let kind = record.as_ref().map(|record| record.kind);
+        // #662 F1: only a finished completion deleted the descriptors.
+        let forgotten = record.is_some_and(|record| record.source.is_none());
         if kind == Some(claim_workflow::SplitKind::Unified) {
             return Ok(Restart::Unified(super::unified::UnifiedRecord::of(
                 &controller,
@@ -1125,6 +1143,7 @@ pub async fn restart(
             controller.recorded_split_step2().is_some(),
             dead_end.is_none() && resend_allowed(&controller),
             dead_end,
+            forgotten,
         )
         // The controller, and the journal lock, end here.
     };
@@ -1150,7 +1169,7 @@ pub async fn restart(
     tokio::task::spawn_blocking(move || port.open_reconciler(directory, target_cube, digest))
         .await
         .map_err(|_| Step2Refusal::retry("Reopening the split was interrupted. Try again."))?
-        .map(|recon| Restart::Reconcile(recon, dead_end, unavailable))
+        .map(|recon| Restart::Reconcile(recon, dead_end, unavailable, forgotten))
 }
 
 /// The journal's step-2 dead end, if it is in one: a recorded terminal
@@ -2142,6 +2161,12 @@ trait CompletionCore: Send + 'static {
         evidence: Self::Evidence,
         context: &Context,
     ) -> Result<(), claim_coordinator::Error>;
+    /// D17: whether the recorded completion still stands.
+    async fn stands(
+        &mut self,
+        context: &Context,
+        site: &CompletionSite,
+    ) -> Result<SplitCompletionReconciliation, claim_coordinator::Error>;
 }
 #[async_trait]
 impl CompletionCore for SplitStep2Reconciler {
@@ -2171,6 +2196,14 @@ impl CompletionCore for SplitStep2Reconciler {
         context: &Context,
     ) -> Result<(), claim_coordinator::Error> {
         evidence.forget(self, context)
+    }
+    async fn stands(
+        &mut self,
+        context: &Context,
+        site: &CompletionSite,
+    ) -> Result<SplitCompletionReconciliation, claim_coordinator::Error> {
+        self.reconcile_split_completion(context, &site.root, &site.target)
+            .await
     }
 }
 
@@ -2268,6 +2301,43 @@ impl<C: CompletionCore> ReconcilerDriver<C> {
         })?;
         Ok(record.into())
     }
+
+    /// D17 (#662 R10): the recheck's refusals read as the completion's own
+    /// lines ([`describe_recheck`]), never Claim's.
+    async fn stands_inner(
+        &mut self,
+        context: &Context,
+    ) -> Result<CompletionStanding, Step2Refusal> {
+        let site = self
+            .site
+            .clone()
+            .ok_or_else(|| Step2Refusal::final_(COMPLETION_NO_VAULT))?;
+        let standing = self
+            .core
+            .as_mut()
+            .ok_or_else(interrupted)?
+            .stands(context, &site)
+            .await
+            .map_err(describe_recheck)?;
+        Ok(match standing {
+            SplitCompletionReconciliation::Standing {
+                status,
+                transaction,
+            } => CompletionStanding::Standing {
+                status,
+                seen: transaction,
+            },
+            SplitCompletionReconciliation::Lost {
+                status,
+                transaction,
+                cleared,
+            } => CompletionStanding::Lost {
+                status,
+                seen: transaction,
+                cleared,
+            },
+        })
+    }
 }
 #[async_trait]
 impl Step2Recon for ReconcilerDriver {
@@ -2297,35 +2367,7 @@ impl Step2Recon for ReconcilerDriver {
         &mut self,
         context: &Context,
     ) -> Result<CompletionStanding, Step2Refusal> {
-        let site = self
-            .site
-            .clone()
-            .ok_or_else(|| Step2Refusal::final_(COMPLETION_NO_VAULT))?;
-        let standing = self
-            .core
-            .as_mut()
-            .ok_or_else(interrupted)?
-            .reconcile_split_completion(context, &site.root, &site.target)
-            .await
-            .map_err(describe_completion)?;
-        Ok(match standing {
-            SplitCompletionReconciliation::Standing {
-                status,
-                transaction,
-            } => CompletionStanding::Standing {
-                status,
-                seen: transaction,
-            },
-            SplitCompletionReconciliation::Lost {
-                status,
-                transaction,
-                cleared,
-            } => CompletionStanding::Lost {
-                status,
-                seen: transaction,
-                cleared,
-            },
-        })
+        self.stands_inner(context).await
     }
     async fn review_reconfirmation(
         &mut self,

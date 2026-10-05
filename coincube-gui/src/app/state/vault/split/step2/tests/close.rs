@@ -1027,7 +1027,7 @@ async fn restart_opens_the_o4_dead_end_instead_of_a_resend() {
     }
     let ports = port(&returned);
     match run(&returned, &ports).await {
-        Ok(Restart::Reconcile(_, Some(dead_end), None)) => {
+        Ok(Restart::Reconcile(_, Some(dead_end), None, _)) => {
             assert_eq!(dead_end.conflict, Some(conflict));
             assert_eq!(dead_end.claimed, returned.step1.claimed_prevouts());
         }

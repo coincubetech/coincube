@@ -291,6 +291,18 @@ pub fn describe_seed(error: &SeedSetError) -> String {
     }
 }
 
+/// #662 F2: a coin authentication refusal on the single step. A spent coin
+/// is the sweep's; the rest reads as the two-step route's.
+pub const UNIFIED_COIN_SPENT: &str = "A coin of this split is no longer unspent on Bitcoin Blake2b, so the sweep can't spend it. Nothing was sent.";
+fn evidence_refusal(error: crate::services::split_evidence::EvidenceError) -> Refusal {
+    match error.failure {
+        crate::services::split_evidence::EvidenceFailure::Btcb2Spent => {
+            Refusal::final_(UNIFIED_COIN_SPENT)
+        }
+        _ => step1::evidence_refusal(error),
+    }
+}
+
 /// #660: the single step has no step 1 and no step 2. A coordinator
 /// refusal reads as the two-step route's ([`describe_check`]) except where
 /// that copy names step 1 or step 2.
@@ -439,7 +451,7 @@ pub async fn preconditions(
         MAX_EVIDENCE_AGE_SECONDS,
     )
     .await
-    .map_err(step1::evidence_refusal)?;
+    .map_err(evidence_refusal)?;
     Ok(UnifiedOpen {
         directory: step1::journal_directory(journal_root, source.digest()),
         target_cube,
@@ -502,7 +514,7 @@ pub async fn restore(
         MAX_EVIDENCE_AGE_SECONDS,
     )
     .await
-    .map_err(step1::evidence_refusal)?;
+    .map_err(evidence_refusal)?;
     Ok(UnifiedOpen {
         directory,
         target_cube,

@@ -3687,6 +3687,15 @@ async fn restarted_recorded(
     (panel, shared)
 }
 
+/// The journal's source descriptors deleted, as a finished completion
+/// leaves them (D18).
+fn forget_descriptors(journal: &Journal) {
+    journal
+        .lock()
+        .forget_split_descriptors(&context())
+        .expect("descriptors forgotten");
+}
+
 /// #568 B5c-1 (#656 inputs): a restart whose reconciler reopens the step 2
 /// the Cube's `split_from` records as completed opens in Completed with its
 /// history row, and checks it at once (D17): a standing completion stays,
@@ -3699,6 +3708,7 @@ async fn restarted_recorded(
 async fn restart_opens_a_recorded_completion_in_completed_and_checks_it() {
     // A completed split's step 2 was seen on BTCB2: no dead end.
     let journal = Journal::returned(true);
+    forget_descriptors(&journal);
     let step2_txid = Txid::from_byte_array([5; 32]);
     let ours = split_from(journal.digest(), step2_txid);
 
@@ -3743,6 +3753,7 @@ async fn restart_opens_a_recorded_completion_in_completed_and_checks_it() {
 
     // A dead end is never shown as completed.
     let dead_end = Journal::new(true);
+    forget_descriptors(&dead_end);
     let (panel, shared) = restarted_recorded(
         &dead_end,
         &[split_from(dead_end.digest(), step2_txid)],
@@ -3936,6 +3947,7 @@ async fn completion_is_not_offered_beside_a_live_resend_review() {
 #[tokio::test(flavor = "multi_thread")]
 async fn completed_stage_hides_save_signed_transaction() {
     let journal = Journal::returned(true);
+    forget_descriptors(&journal);
     let step2_txid = Txid::from_byte_array([5; 32]);
     let (mut panel, _shared) = restarted_recorded(
         &journal,
@@ -4013,4 +4025,140 @@ async fn live_coordinator_acknowledges_step1s_new_block_in_submitted() {
         Some(Step1AfterStep2::Shallow { confirmations: 3 })
     );
     assert!(!panel.can_review_reconfirmation());
+}
+
+/// #662 F1 (Reviewer-662's probe `r662_probe_restart_after_recorded_but_not_forgotten`):
+/// a completion recorded on the Cube whose descriptor deletion then failed
+/// (`COMPLETION_NOT_FORGOTTEN`) is finished from Reconcile, in the session
+/// and after a restart: the restart does not open Completed (whose copy
+/// says the descriptors were deleted, and which offers no completion), nor
+/// check D17, and "Complete split" is offered again after a reconcile.
+/// Once the journal's descriptors are deleted, a restart opens Completed.
+/// CF: the restart ignores whether the descriptors were deleted.
+#[tokio::test(flavor = "multi_thread")]
+async fn restart_after_recorded_but_not_forgotten_finishes_from_reconcile() {
+    let journal = Journal::returned(true);
+    let step2_txid = Txid::from_byte_array([5; 32]);
+    let record = split_from(journal.digest(), step2_txid);
+
+    // In the session: recorded, not forgotten.
+    let (mut panel, shared) = restarted_recorded(&journal, &[], Vec::new()).await;
+    reconcile_seeing(
+        &mut panel,
+        &shared,
+        confirmed_step2(),
+        Step1AfterStep2::Eligible,
+    )
+    .await;
+    shared
+        .lock()
+        .unwrap()
+        .complete_results
+        .push_back(Err(Step2Refusal::retry(COMPLETION_NOT_FORGOTTEN)));
+    let task = panel.update(SplitMessage::Step2Complete);
+    drive(&mut panel, task).await;
+    assert_eq!(panel.stage, Stage::Step2(Step2Stage::Reconcile));
+    assert_eq!(panel.notice(), Some(COMPLETION_NOT_FORGOTTEN));
+    reconcile_seeing(
+        &mut panel,
+        &shared,
+        confirmed_step2(),
+        Step1AfterStep2::Eligible,
+    )
+    .await;
+    assert!(panel.can_complete());
+    drop(panel);
+
+    // A restart with the record on the Cube and the descriptors kept.
+    let (mut panel, shared) =
+        restarted_recorded(&journal, std::slice::from_ref(&record), Vec::new()).await;
+    assert_eq!(panel.stage, Stage::Step2(Step2Stage::Reconcile), "R662-F1");
+    assert_eq!(panel.completion(), None);
+    assert_eq!(shared.lock().unwrap().rechecks, 0);
+    let labels = rendered_labels(&panel).await;
+    assert!(!labels.iter().any(|l| l == SPLIT_COMPLETED), "{:?}", labels);
+    reconcile_seeing(
+        &mut panel,
+        &shared,
+        confirmed_step2(),
+        Step1AfterStep2::Eligible,
+    )
+    .await;
+    assert!(panel.can_complete());
+    let task = panel.update(SplitMessage::Step2Complete);
+    drive(&mut panel, task).await;
+    assert_eq!(panel.stage, Stage::Step2(Step2Stage::Completed));
+    drop(panel);
+
+    // Deleted: the restart opens Completed and checks it.
+    forget_descriptors(&journal);
+    let (panel, shared) =
+        restarted_recorded(&journal, std::slice::from_ref(&record), Vec::new()).await;
+    assert_eq!(panel.stage, Stage::Step2(Step2Stage::Completed));
+    assert_eq!(shared.lock().unwrap().rechecks, 1);
+}
+
+/// #662 R1: a terminal step-1 conflict's dead end is never shown as
+/// completed, even with the Cube's record and the descriptors deleted (a
+/// conflict recorded after the completion). CF: admit Completed beside a
+/// terminal-conflict dead end.
+#[tokio::test(flavor = "multi_thread")]
+async fn restart_never_opens_a_terminal_conflict_as_completed() {
+    let journal = Journal::returned(true);
+    forget_descriptors(&journal);
+    let conflict = super::close::record_conflict(&journal, true);
+    let (panel, shared) = restarted_recorded(
+        &journal,
+        &[split_from(journal.digest(), Txid::from_byte_array([5; 32]))],
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(panel.stage, Stage::Step2(Step2Stage::Reconcile));
+    assert_eq!(
+        panel.dead_end().and_then(|dead_end| dead_end.conflict),
+        Some(conflict)
+    );
+    assert_eq!(panel.completion(), None);
+    assert_eq!(shared.lock().unwrap().rechecks, 0);
+}
+
+/// #662 F2 (CodeRabbit review 5419542610): the close's working labels and
+/// the Closed stage are route-neutral: a single-step split has no step 2,
+/// and a closed split restarts into Closed before its kind is read. CF: the
+/// two-step Closed copy.
+#[tokio::test(flavor = "multi_thread")]
+async fn close_labels_and_closed_stage_name_no_step() {
+    let journal = Journal::new(true);
+    let mut panel = SplitPanel::resume(
+        TARGET.into(),
+        journal.temp.0.parent().unwrap().to_path_buf(),
+        journal.digest(),
+        journal.temp.0.clone(),
+    );
+    for stage in [
+        Stage::Working(Work::CheckingClose),
+        Stage::Working(Work::Closing),
+        Stage::Closed,
+    ] {
+        panel.stage = stage.clone();
+        let labels = rendered_labels(&panel).await;
+        for label in &labels {
+            let lower = label.to_lowercase();
+            assert!(
+                !lower.contains("step 2") && !lower.contains("abandon"),
+                "{:?}: {}",
+                stage,
+                label
+            );
+        }
+        if stage == Stage::Closed {
+            assert!(
+                labels
+                    .iter()
+                    .any(|l| l == crate::app::view::vault::split::CLOSED_COPY),
+                "{:?}",
+                labels
+            );
+        }
+    }
 }

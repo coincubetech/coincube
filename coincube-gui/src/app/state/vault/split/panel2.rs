@@ -154,6 +154,18 @@ impl SplitPanel {
             .collect();
     }
 
+    /// Whether the Cube's `split_from`, as handed to this panel, records a
+    /// completion of this split's step 2 `step2_txid` (#662 R7: the App's
+    /// wiring is tested through it).
+    pub fn records_completion_of(
+        &self,
+        step2_txid: &coincube_core::miniscript::bitcoin::Txid,
+    ) -> bool {
+        self.recorded_completion
+            .iter()
+            .any(|completion| &completion.step2_txid == step2_txid)
+    }
+
     /// The recorded completion of the step 2 `outcome` names, if this
     /// split's `split_from` holds one.
     fn recorded_completion_of(&self, outcome: Option<Outcome>) -> Option<step2::SplitCompletion> {
@@ -1140,7 +1152,7 @@ impl SplitPanel {
             },
             SplitEvent::Restarted(
                 _,
-                Ok(Restarted::Reconcile(Recon(recon), dead_end, unavailable)),
+                Ok(Restarted::Reconcile(Recon(recon), dead_end, unavailable, forgotten)),
             ) => {
                 self.outcome = None;
                 self.step2_outcome = recon.recorded_outcome();
@@ -1155,8 +1167,12 @@ impl SplitPanel {
                 // #568 B5c-1: a completion this Cube records for this step 2
                 // opens in Completed, and is checked at once (D17), so a
                 // reorg since clears the record without a Refresh. A dead
-                // end is never shown as completed.
-                if self.dead_end.is_none() {
+                // end is never shown as completed, nor (#662 F1) a split
+                // whose descriptors are still on this device: a record
+                // written before its deletion failed is finished from
+                // Reconcile by completing again (the record is not written
+                // twice), and Completed's copy says they were deleted.
+                if self.dead_end.is_none() && forgotten {
                     if let Some(completion) = self.recorded_completion_of(self.step2_outcome) {
                         self.completion = Some(completion);
                         self.completable = false;

@@ -251,6 +251,8 @@ struct FakeCompletion {
     check_fails: Option<CoordinatorError>,
     persist_fails: bool,
     forget_fails: Option<CoordinatorError>,
+    /// #662 R10: the D17 recheck refuses with this.
+    stands_fails: Option<CoordinatorError>,
 }
 impl FakeCompletion {
     fn new() -> Self {
@@ -260,6 +262,7 @@ impl FakeCompletion {
             check_fails: None,
             persist_fails: false,
             forget_fails: None,
+            stands_fails: None,
         }
     }
 }
@@ -297,6 +300,19 @@ impl CompletionCore for FakeCompletion {
         match self.forget_fails.take() {
             Some(error) => Err(error),
             None => Ok(()),
+        }
+    }
+    async fn stands(
+        &mut self,
+        _: &Context,
+        _: &CompletionSite,
+    ) -> Result<SplitCompletionReconciliation, CoordinatorError> {
+        match self.stands_fails.take() {
+            Some(error) => Err(error),
+            None => Ok(SplitCompletionReconciliation::Standing {
+                status: Status::Unchecked,
+                transaction: TransactionObservation::Absent,
+            }),
         }
     }
 }
@@ -412,4 +428,43 @@ async fn recon_driver_persists_before_forgetting() {
     let refusal = d.complete_inner(&context()).await.unwrap_err();
     assert_eq!(refusal.recovery, Step2Recovery::Restart);
     assert_eq!(refusal.reason, COMPLETION_INTERRUPTED);
+}
+
+/// #662 R10: the D17 recheck through the driver. Its refusals read as the
+/// completion's own lines: expired evidence says the record may already be
+/// removed (never "complete the split", never Claim's submission copy), and
+/// the record's persistence is the completion record's line (never "Claim
+/// status"). Both are retryable. CF: the recheck maps through
+/// `describe_check`.
+#[tokio::test(flavor = "multi_thread")]
+async fn recon_driver_recheck_refusals_have_split_copy() {
+    let mut d = recon_driver(FakeCompletion::new());
+    assert!(matches!(
+        d.stands_inner(&context()).await,
+        Ok(CompletionStanding::Standing { .. })
+    ));
+    for (error, copy) in [
+        (
+            CoordinatorError::ExpiredEvidence,
+            COMPLETION_RECHECK_EXPIRED,
+        ),
+        (
+            CoordinatorError::CompletionPersistence("Claim Cube is missing or ambiguous".into()),
+            COMPLETION_RECORD_UNAVAILABLE,
+        ),
+    ] {
+        let mut core = FakeCompletion::new();
+        core.stands_fails = Some(error);
+        let mut d = recon_driver(core);
+        let refusal = d.stands_inner(&context()).await.unwrap_err();
+        assert_eq!(refusal.reason, copy);
+        assert!(refusal.retry);
+        assert!(!refusal.reason.contains("Claim"));
+        assert!(!refusal.reason.contains("complete the split"));
+        assert!(d.core.is_some());
+    }
+    let mut d = recon_driver(FakeCompletion::new());
+    d.site = None;
+    let refusal = d.stands_inner(&context()).await.unwrap_err();
+    assert_eq!(refusal.reason, COMPLETION_NO_VAULT);
 }

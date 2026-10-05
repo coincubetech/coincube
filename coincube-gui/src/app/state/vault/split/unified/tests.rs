@@ -1526,3 +1526,25 @@ fn unified_refusals_name_the_sweep_not_a_step() {
         );
     }
 }
+
+/// #662 F2: a claimed coin spent on BTCB2, found when the single step is
+/// opened or restored, reads as the sweep's, never step 1's or step 2's;
+/// every other authentication refusal reads as the two-step route's.
+/// CF: route it through `step1::evidence_refusal`.
+#[test]
+fn unified_spent_coin_names_the_sweep() {
+    use crate::services::split_evidence::{EvidenceError, EvidenceFailure};
+    let spent = evidence_refusal(EvidenceError {
+        outpoint: None,
+        failure: EvidenceFailure::Btcb2Spent,
+    });
+    assert_eq!(spent.reason, UNIFIED_COIN_SPENT);
+    assert!(!spent.retry);
+    let lower = spent.reason.to_lowercase();
+    assert!(!lower.contains("step 1") && !lower.contains("step 2"));
+    let changed = EvidenceError {
+        outpoint: None,
+        failure: EvidenceFailure::PostFork,
+    };
+    assert_eq!(evidence_refusal(changed), step1::evidence_refusal(changed));
+}

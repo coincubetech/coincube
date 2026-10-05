@@ -271,7 +271,8 @@ pub enum Restarted {
     Step1,
     /// The reconciler, with the journal's step-2 dead end if it is in one,
     /// or else why a resend the journal allows could not be opened.
-    Reconcile(Recon, Option<step2::DeadEnd>, Option<String>),
+    /// The last field: the journal's descriptors are deleted (#662 F1).
+    Reconcile(Recon, Option<step2::DeadEnd>, Option<String>, bool),
     /// P3-3: the coordinator, for a resend the journal allows.
     Resend(Coord),
     /// #625 F2: closed in its step-2 dead end.
@@ -892,8 +893,8 @@ impl SplitPanel {
                         .await
                         .map(|restart| match restart {
                             step2::Restart::Step1 => Restarted::Step1,
-                            step2::Restart::Reconcile(recon, dead_end, note) => {
-                                Restarted::Reconcile(Recon(recon), dead_end, note)
+                            step2::Restart::Reconcile(recon, dead_end, note, forgotten) => {
+                                Restarted::Reconcile(Recon(recon), dead_end, note, forgotten)
                             }
                             step2::Restart::Resend(coord) => Restarted::Resend(Coord(coord)),
                             step2::Restart::Closed => Restarted::Closed,
