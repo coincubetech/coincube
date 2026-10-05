@@ -4,9 +4,7 @@
 //! step names neither step 1 nor step 2.
 use super::*;
 use crate::{
-    app::state::vault::split::unified::{
-        describe_unified, describe_unified_check, describe_unified_target,
-    },
+    app::state::vault::split::unified::{describe_unified_check, describe_unified_target},
     services::{claim_preflight, claim_workflow},
 };
 
@@ -204,14 +202,6 @@ fn unified_copy_names_no_step() {
     for error in targets() {
         let debug = format!("{error:?}");
         let copy = describe_unified_target(error);
-        assert!(!steps(&copy.reason), "{}: {}", debug, copy.reason);
-    }
-    // The single step's own refusals route their target errors here.
-    for error in targets() {
-        let debug = format!("{error:?}");
-        let copy = describe_unified(
-            crate::services::claim_coordinator::fork::split::step2::UnifiedError::Target(error),
-        );
         assert!(!steps(&copy.reason), "{}: {}", debug, copy.reason);
     }
     for error in every_error() {

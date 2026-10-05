@@ -1465,3 +1465,30 @@ async fn a_sweep_submitted_after_restart_is_not_closed_as_unsubmitted() {
     panel.stage = Stage::Refused(Refusal::retry("refused"));
     assert!(!panel.can_confirm_unified_close());
 }
+
+/// #660: the single step's own refusals route their target errors to the
+/// sweep's copy, never step 1's or step 2's. CF: route them through the
+/// two-step `describe_target`.
+#[test]
+fn unified_refusals_name_the_sweep_not_a_step() {
+    use coincube_core::chain::ChainId;
+    for error in [
+        TargetError::NotTracking,
+        TargetError::NoReservation,
+        TargetError::Used(ChainId::Bitcoin),
+        TargetError::Used(ChainId::BitcoinBlake2b),
+        TargetError::AlreadyReserved,
+        TargetError::ReservationUnavailable,
+    ] {
+        let debug = format!("{error:?}");
+        let copy = describe_unified(UnifiedError::Target(error))
+            .reason
+            .to_lowercase();
+        assert!(
+            !copy.contains("step 1") && !copy.contains("step 2"),
+            "{}: {}",
+            debug,
+            copy
+        );
+    }
+}
