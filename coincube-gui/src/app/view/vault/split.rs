@@ -17,6 +17,7 @@ use iced::{
 use crate::{
     app::{
         state::vault::split::{
+            device::{self, DeviceMessage, DeviceStep},
             step1::{self, describe_route},
             step2, SplitMessage, SplitPanel, Stage, Step2Stage, Work,
         },
@@ -75,7 +76,65 @@ fn working(work: Work) -> &'static str {
             "Checking both chains, then recording the completion on this Cube…"
         }
         Work::Step2CompletionChecking => "Checking that the completion still stands…",
+        Work::ListingDevices => "Looking for connected hardware wallets…",
+        Work::SigningOnDevice => {
+            "Confirm on your hardware wallet. Check the amounts and the address on its screen before you approve."
+        }
     }
+}
+
+/// "Sign with connected device" (#568 B4b-3b): what the device will show,
+/// then each listed device. Only a supported device holding one of this
+/// wallet's keys can be asked to sign; a multisig adds what its
+/// registration means on that device.
+fn device_section<'a>(
+    panel: &'a SplitPanel,
+    step: DeviceStep,
+    mut body: coincube_ui::widget::Column<'a, Message>,
+    mut actions: coincube_ui::widget::Row<'a, Message>,
+) -> (
+    coincube_ui::widget::Column<'a, Message>,
+    coincube_ui::widget::Row<'a, Message>,
+) {
+    let signer = panel.device();
+    if signer.is_open() && signer.step() == Some(step) {
+        body = body.push(p1_bold("Sign with a connected hardware wallet"));
+        for line in device::step_copy(step) {
+            body = body.push(p1_regular(*line).style(theme::text::warning));
+        }
+        let rows = signer.rows();
+        if rows.is_empty() {
+            body = body.push(
+                p1_regular("Connect and unlock a hardware wallet, and open its Bitcoin app.")
+                    .style(theme::text::secondary),
+            );
+        }
+        for row in rows {
+            let mut line = Row::new()
+                .spacing(10)
+                .align_y(Alignment::Center)
+                .push(p1_regular(row.label).width(Length::Fill));
+            if let Some(id) = row.sign {
+                line = line.push(button::secondary(None, "Sign").on_press(Message::Split(
+                    SplitMessage::Device(DeviceMessage::Sign(id)),
+                )));
+            }
+            body = body.push(line);
+            if let Some(notice) = row.notice {
+                body = body.push(caption(notice).style(theme::text::secondary));
+            }
+        }
+        actions = actions.push(action(
+            "Close device list",
+            SplitMessage::Device(DeviceMessage::Cancel),
+        ));
+    } else if panel.can_open_device() {
+        actions = actions.push(action(
+            "Sign with connected device",
+            SplitMessage::Device(DeviceMessage::Open),
+        ));
+    }
+    (body, actions)
 }
 
 /// The warning lines under every stage: the step-1 evidence's warning after
@@ -155,6 +214,7 @@ fn step2_body<'a>(
             if panel.can_retry_step2_handoff() {
                 actions = actions.push(primary("Retry handoff", SplitMessage::Step2RetryHandoff));
             }
+            (body, actions) = device_section(panel, DeviceStep::Step2, body, actions);
         }
         Step2Stage::Signed => {
             body = body.push(p1_regular(
@@ -302,6 +362,7 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
                     SplitMessage::ExportUnsigned(Encoding::Base64),
                 ))
                 .push(primary("Import signed", SplitMessage::ImportSigned));
+            (body, actions) = device_section(panel, DeviceStep::Step1, body, actions);
         }
         Stage::Ready => {
             body = body.push(p1_regular(

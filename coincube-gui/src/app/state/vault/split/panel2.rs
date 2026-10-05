@@ -22,8 +22,8 @@ use coincube_core::{
 use super::{
     step1::{OpenRequest, Refusal, RefusalRecovery, SplitConnect},
     step2::{self, ReconPort, Step2Open, Step2Port, Step2Refusal},
-    Coord, Driver, Prep, Recon, Restarted, Seen, SplitEvent, SplitMessage, SplitPanel, Stage,
-    Step2Stage, Work,
+    Coord, Driver, Incoming, Prep, Recon, Restarted, Seen, SplitEvent, SplitMessage, SplitPanel,
+    Stage, Step2Stage, Work,
 };
 use crate::{
     app::message::Message,
@@ -798,10 +798,22 @@ impl SplitPanel {
     /// or the preparation is taken, keeping the loaded files
     /// (#637 r4174164844).
     pub fn step2_import_from(&mut self, paths: Vec<PathBuf>) -> Task<Message> {
+        self.step2_import(paths.into_iter().map(Incoming::Path).collect())
+    }
+
+    /// The same verified step-2 import for signed PSBTs already in memory: a
+    /// connected device's output (#568 B4b-3b) is checked, combined and
+    /// handed over exactly as a signed file is, never finalized directly.
+    pub fn step2_import_psbts(&mut self, psbts: Vec<Psbt>) -> Task<Message> {
+        self.step2_import(psbts.into_iter().map(Incoming::Psbt).collect())
+    }
+
+    fn step2_import(&mut self, incoming: Vec<Incoming>) -> Task<Message> {
         if self.stage != Stage::Step2(Step2Stage::Sign) {
             return Task::none();
         }
-        if self.step2_files.len().saturating_add(paths.len()) > split_psbt_file::MAX_COMBINED_FILES
+        if self.step2_files.len().saturating_add(incoming.len())
+            > split_psbt_file::MAX_COMBINED_FILES
         {
             self.notice = Some(split_psbt_file::FileError::TooManyFiles.to_string());
             return Task::none();
@@ -818,8 +830,9 @@ impl SplitPanel {
                     let result =
                         (|| {
                             let mut combined = combine(&base, &files)?;
-                            for path in &paths {
-                                let file = split_psbt_file::load(path)
+                            for item in incoming {
+                                let file = item
+                                    .load()
                                     .map_err(|error| Step2Refusal::retry(error.to_string()))?;
                                 // Combining can supply missing fields or resolve conflicts.
                                 // Check the exact input first, including no-op files, so
@@ -1110,6 +1123,7 @@ impl SplitPanel {
                         self.step2_handoff_ready = complete;
                         if complete {
                             self.notice = None;
+                            self.device.close();
                             return self.finish(combined);
                         }
                         self.notice = Some(

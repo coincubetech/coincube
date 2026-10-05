@@ -59,9 +59,11 @@ pub struct Capabilities {
 
 /// Which foreign-wallet signing routes exist for a descriptor shape.
 /// `psbt_file`: an external wallet signs the exported PSBT (ECDSA
-/// `SIGHASH_ALL` only). `in_app_hardware` and `seed_unified` are not
-/// implemented for foreign descriptors yet, so they are `false` for every
-/// shape. `tr` is scan-only: it has no signing route at all.
+/// `SIGHASH_ALL` only). `in_app_hardware` (a connected device signs) and
+/// `seed_unified` (the user's seeds sign in app) need every key matched to a
+/// signer, so they are `true` only when every key is an origin-tagged
+/// (master fingerprint and path), ranged xpub (#568 decision U6; a fixed key
+/// is refused by P7). `tr` is scan-only: it has no signing route at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SigningRoutes {
     pub psbt_file: bool,
@@ -127,9 +129,11 @@ impl ScanDescriptor {
         let signing = if self.is_taproot() {
             SigningRoutes::NONE
         } else {
+            let matched = self.keys_have_origins();
             SigningRoutes {
                 psbt_file: true,
-                ..SigningRoutes::NONE
+                in_app_hardware: matched,
+                seed_unified: matched,
             }
         };
         Capabilities {
@@ -144,6 +148,16 @@ impl ScanDescriptor {
     }
     pub fn is_taproot(&self) -> bool {
         matches!(self.descriptor, Descriptor::Tr(_))
+    }
+    /// Every key is a ranged xpub carrying its origin, so a device or a seed
+    /// can be matched to it (U6, P7).
+    fn keys_have_origins(&self) -> bool {
+        self.descriptor.for_each_key(|key| match key {
+            DescriptorPublicKey::XPub(xkey) => {
+                xkey.origin.is_some() && xkey.wildcard == Wildcard::Unhardened
+            }
+            DescriptorPublicKey::Single(_) | DescriptorPublicKey::MultiXPub(_) => false,
+        })
     }
     /// Select the only valid range for a fixed descriptor while preserving the
     /// caller's explicit bound for wildcard discovery.

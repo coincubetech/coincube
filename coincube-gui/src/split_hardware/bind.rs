@@ -87,24 +87,37 @@ pub trait LedgerOpener: Send + Sync {
 /// The production opener: a fresh HID enumeration (hidapi allows several
 /// contexts, and its default open is shared, so the listing's own handle
 /// stays open) plus the Speculos simulator.
+///
+/// hidapi's context creation, enumeration and open are blocking calls, so
+/// they run on tokio's blocking pool, never on the executor thread that
+/// polls this future (#646 F3). The simulator is a TCP connect and stays
+/// async.
 pub struct HidLedgerOpener;
+
+/// Every connected Ledger on HID, opened unbound. Blocking.
+fn hid_ledger_candidates() -> Result<Vec<Box<dyn LedgerCandidate>>, Error> {
+    let mut candidates: Vec<Box<dyn LedgerCandidate>> = Vec::new();
+    let api = ledger::HidApi::new().map_err(|error| Error::Device(error.to_string()))?;
+    for info in ledger::Ledger::<ledger::TransportHID>::enumerate(&api) {
+        match ledger::Ledger::<ledger::TransportHID>::connect(&api, info) {
+            Ok(device) => candidates.push(Box::new(device)),
+            Err(error) => debug!(
+                "split: ledger {:?} not opened for binding: {}",
+                info.path(),
+                error
+            ),
+        }
+    }
+    drop(api);
+    Ok(candidates)
+}
 
 #[async_trait::async_trait]
 impl LedgerOpener for HidLedgerOpener {
     async fn candidates(&self) -> Result<Vec<Box<dyn LedgerCandidate>>, Error> {
-        let mut candidates: Vec<Box<dyn LedgerCandidate>> = Vec::new();
-        let api = ledger::HidApi::new().map_err(|error| Error::Device(error.to_string()))?;
-        for info in ledger::Ledger::<ledger::TransportHID>::enumerate(&api) {
-            match ledger::Ledger::<ledger::TransportHID>::connect(&api, info) {
-                Ok(device) => candidates.push(Box::new(device)),
-                Err(error) => debug!(
-                    "split: ledger {:?} not opened for binding: {}",
-                    info.path(),
-                    error
-                ),
-            }
-        }
-        drop(api);
+        let mut candidates = tokio::task::spawn_blocking(hid_ledger_candidates)
+            .await
+            .map_err(|error| Error::Device(format!("ledger enumeration interrupted: {error}")))??;
         if let Ok(simulator) = ledger::LedgerSimulator::try_connect().await {
             candidates.push(Box::new(simulator));
         }
@@ -788,6 +801,49 @@ pub(crate) mod tests {
         );
         assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
         std::fs::remove_dir(root).unwrap();
+    }
+
+    /// #646 F3: the production Ledger opener does its hidapi work (context,
+    /// enumeration, open) only on tokio's blocking pool. Every blocking call
+    /// sits in `hid_ledger_candidates`, which `candidates` reaches only
+    /// through `spawn_blocking`, and nothing else calls it.
+    #[test]
+    fn ledger_enumeration_runs_in_spawn_blocking() {
+        let text = include_str!("bind.rs");
+        let production = &text[..text.find("\n#[cfg(test)]\n").unwrap()];
+        // The body of the item starting at `signature`, up to its closing
+        // line at `indent`.
+        fn body<'a>(text: &'a str, signature: &str, indent: &str) -> &'a str {
+            let start = text
+                .find(signature)
+                .unwrap_or_else(|| panic!("{} not found", signature));
+            let end = text[start..].find(&format!("\n{}}}\n", indent)).unwrap();
+            &text[start..start + end]
+        }
+        let blocking = body(production, "fn hid_ledger_candidates(", "");
+        let opener = body(production, "impl LedgerOpener for HidLedgerOpener {", "");
+        for token in [
+            "HidApi::new(",
+            "::enumerate(",
+            "::connect(&api",
+            "TransportHID",
+        ] {
+            assert_eq!(
+                production.matches(token).count(),
+                blocking.matches(token).count(),
+                "{} outside hid_ledger_candidates",
+                token
+            );
+            assert!(blocking.contains(token), "{}", token);
+            assert!(!opener.contains(token), "candidates() calls {}", token);
+        }
+        // Called once, as the blocking task itself.
+        let calls: Vec<_> = production
+            .match_indices("hid_ledger_candidates")
+            .filter(|(at, _)| !production[..*at].ends_with("fn "))
+            .collect();
+        assert_eq!(calls.len(), 1, "{:?}", calls);
+        assert!(opener.contains("tokio::task::spawn_blocking(hid_ledger_candidates)"));
     }
 
     /// B4a F5 carried forward: the device flow's output is unverified and
