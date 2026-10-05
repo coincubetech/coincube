@@ -123,6 +123,8 @@ struct PortCalls {
     review_feerate: Mutex<Option<u64>>,
     /// What a reconcile sees.
     seen: Mutex<Option<TransactionObservation>>,
+    /// The route the review reports (default Connect).
+    route: Mutex<Option<SubmissionRoute>>,
 }
 
 struct FakePort {
@@ -230,7 +232,12 @@ impl UnifiedCore for FakeCore {
             txid: verified.transaction().compute_txid(),
             fee_sats: verified.fee().to_sat(),
             vsize: verified.vsize(),
-            route: SubmissionRoute::Connect,
+            route: self
+                .calls
+                .route
+                .lock()
+                .unwrap()
+                .unwrap_or(SubmissionRoute::Connect),
             replay: verified.replay_status(),
         })
     }
@@ -435,6 +442,9 @@ async fn unified_cancel_close_and_revoke_scrub_the_seed_set() {
         assert!(panel.unified().words().is_empty(), "{}", exit);
         assert!(panel.unified().passphrase().is_empty(), "{}", exit);
         assert!(port.calls.revoked.load(Ordering::SeqCst), "{}", exit);
+        // Reviewer-660 F5: the revoked coordinator is dropped, not kept.
+        assert!(panel.unified.flow.is_none(), "{}", exit);
+        assert!(panel.unified.revoke.is_none(), "{}", exit);
         assert_eq!(port.calls.builds.load(Ordering::SeqCst), 0);
     }
 }
@@ -915,8 +925,68 @@ fn split_unified_holds_seeds_only_zeroized() {
     );
     assert!(!printed.contains(&*mnemonic(1).to_string()));
     assert!(printed.contains("<redacted>"));
+    // Reviewer-660 F2: no copy of the typed text. The seed text is read
+    // (`as_str()`) only where the view hands it to its secure input; the
+    // panel only moves the buffers out (`take`), empties them, tests them
+    // for emptiness, replaces them or lends them to the view; and nothing
+    // in the route logs or prints.
+    assert_eq!(unified.matches("as_str()").count(), 0);
+    assert_eq!(view.matches("as_str()").count(), 1);
+    for token in [
+        "tracing::",
+        "log::",
+        "println!",
+        "eprintln!",
+        "print!",
+        "dbg!",
+        "info!(",
+        "debug!(",
+        "warn!(",
+        "error!(",
+        "trace!(",
+    ] {
+        assert!(!unified.contains(token), "unified.rs names {}", token);
+    }
+    for field in ["words", "passphrase"] {
+        let needle = format!("unified.{}", field);
+        for (at, _) in unified.match_indices(&needle) {
+            let rest = &unified[at + needle.len()..];
+            assert!(
+                [".take()", ".clear()", " = text;", ".is_empty()"]
+                    .iter()
+                    .any(|use_| rest.starts_with(use_)),
+                "{} used as {:?}",
+                needle,
+                &rest[..rest.len().min(40)]
+            );
+        }
+        // The accessors lend the buffer itself, never a copy.
+        let accessor = format!(
+            "pub fn {}(&self) -> &SeedText {{\n        &self.{}\n    }}",
+            field, field
+        );
+        assert!(unified.contains(&accessor), "{}", accessor);
+        // Inside `UnifiedState`: emptied by `scrub`, or lent by the accessor.
+        let own = format!("self.{}", field);
+        for (at, _) in unified.match_indices(&own) {
+            let rest = &unified[at + own.len()..];
+            assert!(
+                rest.starts_with(".clear();") || rest.starts_with("\n    }"),
+                "{} used as {:?}",
+                own,
+                &rest[..rest.len().min(40)]
+            );
+        }
+    }
     // Every text input in the view is the seed input, `.secure(true)`, and
     // both seed fields use it.
+    let code: String = view
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(code.matches(".secure(").count(), 1);
+    assert_eq!(code.matches(".secure(true)").count(), 1);
     assert_eq!(view.matches("text_input(").count(), 1);
     let input = &view[view.find("fn seed_input<").unwrap()..];
     let input = &input[..input.find("\n}\n").unwrap()];
@@ -930,4 +1000,167 @@ fn split_unified_holds_seeds_only_zeroized() {
     let intents = &intents[..intents.find("\n}\n").unwrap()];
     assert!(intents.contains("Words(SeedText)") && intents.contains("Passphrase(SeedText)"));
     assert!(!intents.contains("String"));
+}
+
+/// An origin-less 1-key wallet: its descriptors give no seed route (U6).
+fn bare_scan() -> Scan {
+    use coincube_core::miniscript::bitcoin::bip32::Xpub;
+    let secp = Secp256k1::new();
+    let master = fixture::master(1);
+    let account = master
+        .derive_priv(&secp, &DerivationPath::from_str("m/84'/0'/0'").unwrap())
+        .unwrap();
+    let xpub = Xpub::from_priv(&secp, &account);
+    let parse = |branch, step: u32| {
+        ScanDescriptor::parse(branch, &format!("wpkh({}/{}/*)", xpub, step)).unwrap()
+    };
+    let wallet = fixture::Wallet {
+        external: parse(Branch::External, 0),
+        internal: parse(Branch::Internal, 1),
+        signers: Vec::new(),
+    };
+    let coins = fixture::shared_coins(&wallet);
+    Scan { wallet, coins }
+}
+
+/// Reviewer-660 F1: every single-step precondition refuses with its copy
+/// and opens nothing. U6: a wallet without the seed route is not offered
+/// it, and both the route choice and `preconditions` refuse it. P7 (U7): a
+/// fixed wallet and an unproven fresh index are refused. A changed fork
+/// height is a stale anchor. CF: R12a (the offer ignores the routes), R12b
+/// (`preconditions` skips U6), R13 (a fixed wallet admitted), R14 (no
+/// fork-height check).
+#[tokio::test(flavor = "multi_thread")]
+async fn unified_preconditions_refuse_with_copy_and_open_nothing() {
+    use crate::services::foreign_split_inventory::SplitInventory;
+    // U6, at the offer and at both checks.
+    let bare = bare_scan();
+    let connect = FakeConnect::new(&bare.coins);
+    let temp = Temp::new();
+    let intent = bare.intent();
+    assert!(!intent_routes(&intent).seed_unified);
+    let refused = preconditions(&*connect, &intent, &temp.root(), TARGET.into())
+        .await
+        .err()
+        .expect("no seed route");
+    assert_eq!(refused.reason, SEEDS_NOT_OFFERED);
+    let mut panel = SplitPanel::start(TARGET.into(), temp.root(), intent);
+    panel.set_connect(Some(connect.clone() as Arc<dyn SplitConnect>));
+    let port = FakePort::new(connect.context(), 1);
+    panel.set_unified_port(Some(port.clone() as Arc<dyn UnifiedPort>));
+    let task = panel.begin();
+    drive(&mut panel, task).await;
+    assert_eq!(panel.stage(), &Stage::ChooseRoute);
+    assert!(!panel.seed_route_offered());
+    send(&mut panel, UnifiedMessage::Choose(Route::Seeds)).await;
+    assert_eq!(panel.stage(), &Stage::ChooseRoute);
+    assert_eq!(panel.notice(), Some(SEEDS_NOT_OFFERED));
+    assert!(port.calls.opens.lock().unwrap().is_empty());
+
+    // P7 and the fork height, on a wallet that has the seed route.
+    let scan = seed_scan();
+    let fixed = {
+        let mut intent = scan.intent();
+        let btcb2 = fixture::report(ChainId::BitcoinBlake2b, scan.coins.clone());
+        let bitcoin = fixture::report(ChainId::Bitcoin, scan.coins.clone());
+        intent.inventory =
+            SplitInventory::join(&btcb2, &bitcoin, fixture::GENERATION, false).unwrap();
+        intent
+    };
+    let unproven = scan.intent_with(|report| report.with_coverage(fixture::walk(4, Some(3))));
+    type Case = (&'static str, SplitIntent, bool, &'static str);
+    let cases: Vec<Case> = vec![
+        ("fixed wallet (P7)", fixed, false, step1::FIXED_WALLET),
+        (
+            "unproven fresh index (P7)",
+            unproven,
+            false,
+            step1::WATCH_ONLY_DEFERRED,
+        ),
+        (
+            "changed fork height",
+            scan.intent(),
+            true,
+            step1::STALE_ANCHOR,
+        ),
+    ];
+    for (name, intent, stale, copy) in cases {
+        assert!(intent_routes(&intent).seed_unified, "{}", name);
+        let connect = FakeConnect::new(&scan.coins);
+        if stale {
+            let mut window = connect.window.lock().unwrap().clone().unwrap();
+            window.fork_height += 1;
+            *connect.window.lock().unwrap() = Ok(window);
+        }
+        let temp = Temp::new();
+        let mut panel = SplitPanel::start(TARGET.into(), temp.root(), intent);
+        panel.set_connect(Some(connect.clone() as Arc<dyn SplitConnect>));
+        let port = FakePort::new(connect.context(), 1);
+        panel.set_unified_port(Some(port.clone() as Arc<dyn UnifiedPort>));
+        let task = panel.begin();
+        drive(&mut panel, task).await;
+        assert!(panel.seed_route_offered(), "{}", name);
+        send(&mut panel, UnifiedMessage::Choose(Route::Seeds)).await;
+        match panel.stage() {
+            Stage::Refused(refusal) => assert_eq!(refusal.reason, copy, "{}", name),
+            other => panic!("{}: {:?}", name, other),
+        }
+        assert!(port.calls.opens.lock().unwrap().is_empty(), "{}", name);
+        assert!(!panel.unified().holds_seeds(), "{}", name);
+    }
+}
+
+/// Reviewer-660 F3: "Clear phrases" clears the set and empties both inputs,
+/// stays at seed entry, and the same phrase can then be added again (so the
+/// set really is empty). CF: R15 (the arm clears nothing).
+#[tokio::test(flavor = "multi_thread")]
+async fn unified_clear_phrases_scrubs_the_set_and_inputs() {
+    let scan = seed_scan();
+    let connect = FakeConnect::new(&scan.coins);
+    let temp = Temp::new();
+    let (mut panel, _) = at_seed_entry(&scan, &connect, &temp).await;
+    add_seed(&mut panel, 1, "").await;
+    assert_eq!(panel.unified().held(), 1);
+    send(&mut panel, UnifiedMessage::Words(words(3))).await;
+    send(
+        &mut panel,
+        UnifiedMessage::Passphrase(SeedText::from("typed".to_owned())),
+    )
+    .await;
+    send(&mut panel, UnifiedMessage::ClearSeeds).await;
+    assert_eq!(panel.stage(), &Stage::Unified(UnifiedStage::EnterSeeds));
+    assert_eq!(panel.unified().held(), 0);
+    assert_eq!(panel.unified.seeds.as_ref().map(SeedSet::len), Some(0));
+    assert!(panel.unified().words().is_empty());
+    assert!(panel.unified().passphrase().is_empty());
+    add_seed(&mut panel, 1, "").await;
+    assert_eq!(panel.unified().held(), 1, "{:?}", panel.notice());
+    assert_eq!(panel.notice(), None);
+}
+
+/// Reviewer-660 F4: on the node route the review shows the node's label and
+/// the single step's privacy note. CF: R16 (the note dropped).
+#[tokio::test(flavor = "multi_thread")]
+async fn unified_review_on_the_node_route_shows_the_privacy_note() {
+    let scan = seed_scan();
+    let connect = FakeConnect::new(&scan.coins);
+    let temp = Temp::new();
+    let (mut panel, port) = at_seed_entry(&scan, &connect, &temp).await;
+    let node = SubmissionRoute::BitcoinNode {
+        address: "127.0.0.1:8332".parse().unwrap(),
+        identity: crate::services::claim_coordinator::NodeIdentity::for_test(1),
+    };
+    *port.calls.route.lock().unwrap() = Some(node);
+    add_seed(&mut panel, 1, "").await;
+    add_seed(&mut panel, 3, "").await;
+    send(&mut panel, UnifiedMessage::BuildAndSign).await;
+    send(&mut panel, UnifiedMessage::Review).await;
+    assert_eq!(panel.stage(), &Stage::Unified(UnifiedStage::Review));
+    let review = panel.unified().review().unwrap();
+    assert_eq!(review.route_label, node.label());
+    assert_eq!(review.privacy_note, Some(UNIFIED_NODE_PRIVACY));
+    assert_eq!(
+        review.protected,
+        replay::pill_copy(&replay::ReplayStatus::Protected, &[]).0
+    );
 }
