@@ -2966,3 +2966,56 @@ fn unified_journal_records_only_a_protected_sweep() {
         );
     }
 }
+
+/// #654 I2 (Reviewer-654d M2, M3, M7): the workflow-level checks that keep
+/// a step-1 conflict (O4) off a fork-only record are each pinned on their
+/// own: the conflict writers refuse the kind before anything else
+/// (`WrongIdentity`, not a later validation), and a fork-only journal edited
+/// to carry a conflict is refused when it is read. Each mutation that drops
+/// one of these kind checks fails here even while the others hold.
+#[test]
+fn fork_only_record_never_carries_a_step1_conflict() {
+    let wallet = make_wallet(Shape::ShWpkh, 1);
+    let target = target_script(5);
+    let sweep = unified_sweep(&wallet, &target, 2);
+    let temp = Temp::new();
+    let mut c = create_unified(&temp, &sweep, context());
+    c.record_unified_broadcast_intent(&context(), &sign_unified(&wallet, &sweep))
+        .unwrap();
+    let outpoint = c.plan().claimed_prevouts[0];
+    let tip = coincube_core::claim::BlockRef {
+        height: 1_000,
+        hash: coincube_core::miniscript::bitcoin::BlockHash::from_byte_array([4; 32]),
+    };
+    let conflict = Step1Conflict::new(outpoint, tip);
+    // M7: the writer refuses the kind itself.
+    assert!(matches!(
+        c.record_split_step1_conflict(&context(), conflict),
+        Err(Error::WrongIdentity)
+    ));
+    // M3: so does the disproof, which would otherwise read "nothing to
+    // clear" and succeed.
+    assert!(matches!(
+        c.disprove_split_step1_conflict(&context()),
+        Err(Error::WrongIdentity)
+    ));
+    assert_eq!(c.split_step1_conflict(), None);
+    drop(c);
+    // M2: a fork-only journal edited to carry the conflict is refused. The
+    // same journal rewritten without the edit reads, so the refusal is the
+    // conflict's.
+    let mut json: serde_json::Value = serde_json::from_str(&journal_text(&temp)).unwrap();
+    fs::write(
+        temp.0.join("intent.json"),
+        serde_json::to_vec_pretty(&json).unwrap(),
+    )
+    .unwrap();
+    drop(reopen_unified(&temp, &wallet, context()).unwrap());
+    json["split"]["step1_conflict"] = serde_json::to_value(conflict).unwrap();
+    fs::write(
+        temp.0.join("intent.json"),
+        serde_json::to_vec_pretty(&json).unwrap(),
+    )
+    .unwrap();
+    assert!(reopen_unified(&temp, &wallet, context()).is_err());
+}
