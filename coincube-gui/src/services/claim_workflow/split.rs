@@ -47,8 +47,11 @@
 //!   `fork_submission`), so a recorded submission reopens through the step-2
 //!   reconciler as a step 2 does. Its only writers are
 //!   [`Controller::create_unified_split`] and
-//!   [`Controller::record_unified_broadcast_intent`]; every two-step writer
-//!   refuses it, and the reverse. A two-step record stays version 8 and
+//!   [`Controller::record_unified_broadcast_intent`], which take core's typed
+//!   unified sweep and verified unified sweep (B4b-3a, Reviewer-650 F2): only
+//!   a sweep core built is recorded, and only a sweep core's finalizer
+//!   verified `ALL|UNIFIED` (Protected) on every input is journaled as a
+//!   submission. Every two-step writer refuses it, and the reverse. A two-step record stays version 8 and
 //!   serializes exactly as before; a binary that predates the fork-only
 //!   record refuses one by version (and by its `kind` field). Its
 //!   abandonment, and the close of its dead end, are B4b-3's decisions, so
@@ -60,9 +63,12 @@
 use super::*;
 use crate::services::claim_observation::TransactionObservation;
 use coincube_core::{
-    foreign_split::{SplitSource, SplitStep1, SplitStep2, VerifiedSplitStep1, VerifiedSplitStep2},
+    foreign_split::{
+        SplitSource, SplitStep1, SplitStep2, UnifiedSweep, VerifiedSplitStep1, VerifiedSplitStep2,
+        VerifiedUnifiedSweep,
+    },
     miniscript::{
-        bitcoin::{OutPoint, Script, ScriptBuf},
+        bitcoin::{OutPoint, ScriptBuf},
         Descriptor, DescriptorPublicKey,
     },
 };
@@ -305,26 +311,6 @@ fn empty_step1() -> Transaction {
         input: Vec::new(),
         output: Vec::new(),
     }
-}
-
-/// The caller's description of the unified sweep it built (B4b-1a's
-/// unified sweep construction), for [`Controller::create_unified_split`] and
-/// [`Controller::revalidate_unified_construction`]. The journal records the
-/// unsigned sweep and checks its shape: every input one of `source`'s
-/// coins, as the caller established from freshly authenticated coins, and
-/// one output paying `target_script`, the target Vault's receive script at
-/// `target_index`.
-#[derive(Clone, Copy)]
-pub struct UnifiedConstruction<'a> {
-    /// The fork chain the sweep spends on (BTCB2, or its testnet).
-    pub chain: ChainId,
-    pub source: &'a SplitSource,
-    /// The authenticated anchor's fork height the sweep was built with.
-    pub fork_height: u64,
-    pub target_index: u32,
-    pub target_script: &'a Script,
-    /// The unsigned sweep.
-    pub unsigned: &'a Transaction,
 }
 
 /// Step 1 with every scriptSig and witness removed.
@@ -595,10 +581,12 @@ impl Controller {
 
     /// Record the unified fallback (B4b, `kind: Unified`): one BTCB2-only
     /// sweep of the splittable coins into the target Vault, with no step 1.
-    /// `construction` describes the sweep the caller built from freshly
-    /// authenticated coins (B4b-1a's unified sweep construction): the journal records
-    /// its unsigned transaction, checks its shape, and reserves the target
-    /// from creation. Creates a version-9 intent with the public descriptors
+    /// `sweep` is core's opaque unified construction, built from freshly
+    /// authenticated coins (B4b-1a), and `target_index` the target Vault's
+    /// receive index its one output pays (B4b-3a, Reviewer-650 F2: no
+    /// caller-described construction is accepted). The journal records its
+    /// unsigned transaction, chain, source, fork height and target, checks
+    /// its shape, and reserves the target from creation. Creates a version-9 intent with the public descriptors
     /// (P2) that is Tracking from creation, since nothing is ever tracked on
     /// Bitcoin, and refuses an existing intent or a tombstone in
     /// `directory`. The result is not submission authority: the caller's
@@ -608,23 +596,24 @@ impl Controller {
     pub fn create_unified_split(
         directory: &Path,
         target_cube: String,
-        construction: UnifiedConstruction<'_>,
+        sweep: &UnifiedSweep,
+        target_index: u32,
         context: Context,
     ) -> Result<Self, Error> {
-        let fork_chain = construction.chain;
+        let fork_chain = sweep.chain();
         let bitcoin_chain = bitcoin_chain(fork_chain).ok_or(Error::InvalidPlan)?;
-        let unsigned = construction.unsigned;
+        let unsigned = &sweep.psbt().unsigned_tx;
         if unsigned.input.is_empty()
             || unsigned
                 .input
                 .iter()
                 .any(|i| !i.script_sig.is_empty() || !i.witness.is_empty())
             || unsigned.output.len() != 1
-            || unsigned.output[0].script_pubkey.as_script() != construction.target_script
+            || unsigned.output[0].script_pubkey.as_script() != sweep.target()
         {
             return Err(Error::InvalidPlan);
         }
-        let source_digest = construction.source.digest();
+        let source_digest = sweep.source().digest();
         let step1 = empty_step1();
         let unsigned_digest = digest(&step1);
         let intent = Intent {
@@ -654,12 +643,12 @@ impl Controller {
             split: Some(SplitRecord {
                 kind: SplitKind::Unified,
                 source_digest,
-                descriptors: Some(StoredDescriptors::new(construction.source)),
-                fork_height: construction.fork_height,
+                descriptors: Some(StoredDescriptors::new(sweep.source())),
+                fork_height: sweep.fork_height(),
                 destination: 0,
                 target_cube,
-                target_index: Some(construction.target_index),
-                target_script: Some(construction.target_script.to_owned()),
+                target_index: Some(target_index),
+                target_script: Some(sweep.target().to_owned()),
                 step2_transaction: None,
                 step2_resubmissions: Vec::new(),
                 step2_observed: false,
@@ -1328,33 +1317,36 @@ impl Controller {
     }
 
     /// Restart never restores the construction. The caller rebuilds the
-    /// unified sweep from freshly authenticated coins and this checks it is
-    /// exactly the recorded one: same fork chain, unsigned bytes, source
-    /// digest (and stored descriptors while kept), fork height and target.
+    /// unified sweep from freshly authenticated coins (core's
+    /// `reconstruct_unified_sweep`) and this checks it is exactly the
+    /// recorded one: same fork chain, unsigned bytes, source digest (and
+    /// stored descriptors while kept), fork height, target script and
+    /// `target_index`.
     /// Anything else refuses and leaves the intent unverified. A two-step
     /// record refuses it ([`Self::revalidate_split_construction`] is its
     /// check).
     pub fn revalidate_unified_construction(
         &mut self,
         current: &Context,
-        construction: UnifiedConstruction<'_>,
+        sweep: &UnifiedSweep,
+        target_index: u32,
     ) -> Result<(), Error> {
         self.ensure_context(current)?;
         self.clear_check();
         self.record_of(SplitKind::Unified)?;
         self.construction_verified = false;
         let record = self.record_of(SplitKind::Unified)?;
-        if construction.chain != self.intent.plan.fork_chain
-            || self.intent.fork_sweep.as_ref() != Some(construction.unsigned)
-            || construction.source.digest() != record.source_digest
-            || construction.fork_height != record.fork_height
-            || record.target_index != Some(construction.target_index)
-            || record.target_script.as_deref() != Some(construction.target_script)
+        if sweep.chain() != self.intent.plan.fork_chain
+            || self.intent.fork_sweep.as_ref() != Some(&sweep.psbt().unsigned_tx)
+            || sweep.source().digest() != record.source_digest
+            || sweep.fork_height() != record.fork_height
+            || record.target_index != Some(target_index)
+            || record.target_script.as_deref() != Some(sweep.target())
         {
             return Err(Error::WrongIdentity);
         }
         if let Some(descriptors) = &record.descriptors {
-            if &descriptors.source()? != construction.source {
+            if &descriptors.source()? != sweep.source() {
                 return Err(Error::WrongIdentity);
             }
         }
@@ -1367,10 +1359,12 @@ impl Controller {
     /// signature on every input, on the record's fork chain, once the
     /// construction was verified in this session
     /// ([`Self::create_unified_split`] or
-    /// [`Self::revalidate_unified_construction`]). `chain` and `signed` come
-    /// from core's verified unified sweep (B4b-1a), whose
-    /// finalizer is the only check of the signatures and of their
-    /// `ALL|UNIFIED` type; this checks unsigned identity only, like
+    /// [`Self::revalidate_unified_construction`]). `verified` is core's
+    /// verified unified sweep (B4b-1a), whose finalizer is the only check of
+    /// the signatures and of their `ALL|UNIFIED` type: it exists only for a
+    /// sweep every input of which is Protected, so a mis-signed sweep can
+    /// never be journaled (B4b-3a, Reviewer-650 F2). This checks its chain,
+    /// construction and unsigned identity, like
     /// [`Self::record_broadcast_intent`]. As for step 2, the submission
     /// names the signed bytes' own txid, and a saved intent never permits a
     /// retry: it can only be reconciled. The journal cannot assess a
@@ -1380,9 +1374,9 @@ impl Controller {
     pub fn record_unified_broadcast_intent(
         &mut self,
         current: &Context,
-        chain: ChainId,
-        signed: &Transaction,
+        verified: &VerifiedUnifiedSweep,
     ) -> Result<(), Error> {
+        let (chain, signed) = (verified.chain(), verified.transaction());
         self.ensure_context(current)?;
         self.clear_check();
         self.record_of(SplitKind::Unified)?;
@@ -1394,6 +1388,12 @@ impl Controller {
         }
         if chain != self.intent.plan.fork_chain
             || self.intent.fork_sweep.as_ref() != Some(&unsigned(signed))
+            || self
+                .intent
+                .fork_sweep
+                .as_ref()
+                .map(Transaction::compute_txid)
+                != Some(verified.construction_txid())
             || signed
                 .input
                 .iter()

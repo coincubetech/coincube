@@ -69,8 +69,23 @@ enum Shape {
     WshMulti,
 }
 
+/// The BIP39 seed of `seed`'s mnemonic (entropy `[seed; 16]`), so that the
+/// same key can sign `ALL|UNIFIED` through a session signer (B4b-3a).
+fn mnemonic(seed: u8) -> coincube_core::bip39::Mnemonic {
+    coincube_core::bip39::Mnemonic::from_entropy(&[seed; 16]).unwrap()
+}
 fn master(seed: u8) -> Xpriv {
-    Xpriv::new_master(Network::Bitcoin, &[seed; 32]).unwrap()
+    // PBKDF2 per call is slow in a debug build; each seed is derived once.
+    static MASTERS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<u8, Xpriv>>> =
+        std::sync::OnceLock::new();
+    *MASTERS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .entry(seed)
+        .or_insert_with(|| {
+            Xpriv::new_master(Network::Bitcoin, &mnemonic(seed).to_seed("")).unwrap()
+        })
 }
 fn account(master: &Xpriv, path: &str) -> String {
     let secp = Secp256k1::new();
@@ -88,40 +103,40 @@ fn account(master: &Xpriv, path: &str) -> String {
 struct Wallet {
     source: SplitSource,
     signers: Vec<Xpriv>,
+    /// The seed byte of each signer, in order.
+    seeds: Vec<u8>,
 }
 fn make_wallet(shape: Shape, seed: u8) -> Wallet {
-    let (template, signers) = match shape {
+    let (template, seeds) = match shape {
         Shape::Wpkh => (
             format!("wpkh({}/{{b}}/*)", account(&master(seed), "m/84'/0'/0'")),
-            vec![master(seed)],
+            vec![seed],
         ),
         Shape::ShWpkh => (
             format!(
                 "sh(wpkh({}/{{b}}/*))",
                 account(&master(seed), "m/49'/0'/0'")
             ),
-            vec![master(seed)],
+            vec![seed],
         ),
         Shape::Pkh => (
             format!("pkh({}/{{b}}/*)", account(&master(seed), "m/44'/0'/0'")),
-            vec![master(seed)],
+            vec![seed],
         ),
         Shape::WshMulti => {
-            let masters = [master(seed), master(seed + 1), master(seed + 2)];
-            let keys: Vec<_> = masters
+            let seeds = vec![seed, seed + 1, seed + 2];
+            let keys: Vec<_> = seeds
                 .iter()
-                .map(|m| format!("{}/{{b}}/*", account(m, "m/48'/0'/0'/2'")))
+                .map(|s| format!("{}/{{b}}/*", account(&master(*s), "m/48'/0'/0'/2'")))
                 .collect();
-            (
-                format!("wsh(multi(2,{}))", keys.join(",")),
-                masters.to_vec(),
-            )
+            (format!("wsh(multi(2,{}))", keys.join(",")), seeds)
         }
     };
     let branch = |b: u32| Descriptor::from_str(&template.replace("{b}", &b.to_string())).unwrap();
     Wallet {
         source: SplitSource::new(branch(0), Some(branch(1))).unwrap(),
-        signers,
+        signers: seeds.iter().map(|s| master(*s)).collect(),
+        seeds,
     }
 }
 
@@ -1197,13 +1212,12 @@ fn v8_split_journal_is_refused_by_the_v7_reader() {
 /// glob still has to name the item somewhere.
 #[test]
 fn split_b0_journal_api_has_no_gui_callers() {
-    const ITEMS: [&str; 36] = [
+    const ITEMS: [&str; 35] = [
         "create_split",
         // B4b-1b: the fork-only (`kind: Unified`) record.
         "create_unified_split",
         "revalidate_unified_construction",
         "record_unified_broadcast_intent",
-        "UnifiedConstruction",
         "SplitKind",
         "revalidate_split_construction",
         "bind_recovered_split_transaction",
@@ -1286,7 +1300,6 @@ fn split_b0_journal_api_has_no_gui_callers() {
                             "RecordedSplit",
                             "Step2ReturnHold",
                             "SplitKind",
-                            "UnifiedConstruction",
                             "Step1Conflict",
                         ]
                         .contains(&ident);
@@ -1353,9 +1366,21 @@ fn split_b0_journal_api_has_no_gui_callers() {
                                     "create_split",
                                     "create_unified_split",
                                     "record_unified_broadcast_intent",
-                                    "UnifiedConstruction",
                                 ]
                                 .contains(&ident)));
+                    // B4b-3a: the fork-only route's coordinator (dormant,
+                    // guarded with the step-2 gate) is the one production
+                    // writer of a fork-only record: it creates the journal at
+                    // confirmation, revalidates a reopened one and records
+                    // the verified sweep's intent.
+                    let unified = file
+                        == "src/services/claim_coordinator/fork/split/step2/unified.rs"
+                        && [
+                            "create_unified_split",
+                            "revalidate_unified_construction",
+                            "record_unified_broadcast_intent",
+                        ]
+                        .contains(&ident);
                     // B3b-2b: the panel's (uncalled) step-2 layer reads the
                     // recorded step 2 at restart; its tests write journals.
                     // P3-3: the restart also reads whether a resend is
@@ -1398,6 +1423,7 @@ fn split_b0_journal_api_has_no_gui_callers() {
                         && !panel_step2
                         && !panel_step2_tests
                         && !gate
+                        && !unified
                     {
                         unexpected.push((file.clone(), ident.to_owned()));
                     }
@@ -2010,24 +2036,25 @@ fn split_step2_dead_end_is_a_submission_no_resend_or_sighting_can_follow() {
 // ---------------------------------------------------------------------------
 // B4b-1b: the fork-only (`kind: Unified`) record.
 
-/// The unified sweep of `wallet`'s two splittable coins into `target`
-/// (B4b-1a's unified-sweep shape: one output, no change), built
-/// with core's step-2 construction over the same coins, which has exactly
-/// that shape. It is signed `ALL` here (`sign_step2`): the journal records
-/// bytes, and the `ALL|UNIFIED` request is core's finalizer's (B4b-1a).
-fn unified_sweep(wallet: &Wallet, target: &Script, feerate: u64) -> SplitStep2 {
+/// Core's unified sweep (B4b-1a) of `wallet`'s two splittable coins into
+/// `target` on `chain` against `fork_height`: one output, no change.
+fn unified_sweep_on(
+    wallet: &Wallet,
+    target: &coincube_core::miniscript::bitcoin::Script,
+    feerate: u64,
+    chain: ChainId,
+    fork_height: u64,
+) -> UnifiedSweep {
     let coins = [
         coin(&wallet.source, SplitBranch::External, 0, 150_000),
         coin(&wallet.source, SplitBranch::Internal, 1, 70_000),
     ];
-    let claimed: Vec<OutPoint> = coins.iter().map(|c| c.outpoint).collect();
-    coincube_core::foreign_split::create_split_step2(
-        &coincube_core::foreign_split::SplitStep2Inputs {
-            chain: ChainId::BitcoinBlake2b,
+    coincube_core::foreign_split::create_unified_sweep(
+        &coincube_core::foreign_split::UnifiedInputs {
+            chain,
             source: &wallet.source,
             coins: &coins,
-            fork_height: FORK,
-            claimed: &claimed,
+            fork_height,
             target,
         },
         feerate,
@@ -2036,35 +2063,32 @@ fn unified_sweep(wallet: &Wallet, target: &Script, feerate: u64) -> SplitStep2 {
     )
     .unwrap()
 }
-fn unified_construction<'a>(
-    wallet: &'a Wallet,
-    sweep: &'a SplitStep2,
-    index: u32,
-    target: &'a Script,
-) -> UnifiedConstruction<'a> {
-    UnifiedConstruction {
-        chain: ChainId::BitcoinBlake2b,
-        source: &wallet.source,
-        fork_height: FORK,
-        target_index: index,
-        target_script: target,
-        unsigned: &sweep.psbt().unsigned_tx,
-    }
-}
-fn create_unified(
-    temp: &Temp,
+fn unified_sweep(
     wallet: &Wallet,
-    sweep: &SplitStep2,
-    target: &Script,
-    context: Context,
-) -> Controller {
-    Controller::create_unified_split(
-        &temp.0,
-        TARGET.into(),
-        unified_construction(wallet, sweep, 5, target),
-        context,
-    )
-    .unwrap()
+    target: &coincube_core::miniscript::bitcoin::Script,
+    feerate: u64,
+) -> UnifiedSweep {
+    unified_sweep_on(wallet, target, feerate, ChainId::BitcoinBlake2b, FORK)
+}
+/// `sweep` signed `ALL|UNIFIED` by the wallet's seeds (two for multisig, one
+/// otherwise) and verified by core's unified finalizer: Protected.
+fn sign_unified(wallet: &Wallet, sweep: &UnifiedSweep) -> VerifiedUnifiedSweep {
+    let secp = Secp256k1::new();
+    let mut psbt =
+        coincube_core::psbt_unified::UnifiedPsbt::from_psbt(sweep.psbt().clone()).unwrap();
+    for seed in wallet.seeds.iter().take(2) {
+        let signer = coincube_core::signer::SessionSigner::from_mnemonic(
+            Network::Bitcoin,
+            mnemonic(*seed),
+            "",
+        )
+        .unwrap();
+        psbt = signer.sign_unified(&psbt, sweep.chain(), &secp).unwrap();
+    }
+    coincube_core::foreign_split::finalize_unified_sweep(sweep, &psbt, &secp).unwrap()
+}
+fn create_unified(temp: &Temp, sweep: &UnifiedSweep, context: Context) -> Controller {
+    Controller::create_unified_split(&temp.0, TARGET.into(), sweep, 5, context).unwrap()
 }
 fn unified_identity(wallet: &Wallet) -> WalletIdentity {
     split_identity(TARGET.into(), wallet.source.digest())
@@ -2091,7 +2115,7 @@ fn fork_only_journal_round_trips_and_old_readers_refuse() {
     let sweep = unified_sweep(&wallet, &target, 2);
     let unsigned = sweep.psbt().unsigned_tx.clone();
     let temp = Temp::new();
-    let mut c = create_unified(&temp, &wallet, &sweep, &target, context());
+    let mut c = create_unified(&temp, &sweep, context());
     #[cfg(unix)]
     assert_eq!(mode(&temp), 0o600);
     let json: serde_json::Value = serde_json::from_str(&journal_text(&temp)).unwrap();
@@ -2152,22 +2176,17 @@ fn fork_only_journal_round_trips_and_old_readers_refuse() {
     assert_eq!(c.identity(), &unified_identity(&wallet));
     // The open controller holds the journal's lock.
     assert!(matches!(
-        Controller::create_unified_split(
-            &temp.0,
-            TARGET.into(),
-            unified_construction(&wallet, &sweep, 5, &target),
-            context()
-        ),
+        Controller::create_unified_split(&temp.0, TARGET.into(), &sweep, 5, context()),
         Err(Error::Busy)
     ));
     let (_, step1, signed1) = setup(Shape::Pkh);
 
     // The submission records the signed sweep and names its own txid
     // (sh(wpkh) scriptSigs change it).
-    let verified = sign_step2(&wallet, &sweep);
+    let verified = sign_unified(&wallet, &sweep);
     let signed = verified.transaction().clone();
     assert_ne!(signed.compute_txid(), unsigned.compute_txid());
-    c.record_unified_broadcast_intent(&context(), ChainId::BitcoinBlake2b, &signed)
+    c.record_unified_broadcast_intent(&context(), &verified)
         .unwrap();
     let submission = c.recorded_fork_submission().unwrap();
     assert_eq!(submission.txid(), signed.compute_txid());
@@ -2191,12 +2210,7 @@ fn fork_only_journal_round_trips_and_old_readers_refuse() {
     drop(c);
     // One intent per directory, whatever the kind.
     assert!(matches!(
-        Controller::create_unified_split(
-            &temp.0,
-            TARGET.into(),
-            unified_construction(&wallet, &sweep, 5, &target),
-            context()
-        ),
+        Controller::create_unified_split(&temp.0, TARGET.into(), &sweep, 5, context()),
         Err(Error::Conflict)
     ));
     assert!(matches!(
@@ -2320,9 +2334,7 @@ fn unified_record_validate_refuses_split_shape_and_vice_versa() {
     let target = target_script(5);
     let sweep = unified_sweep(&wallet, &target, 2);
     let temp = Temp::new();
-    let base = create_unified(&temp, &wallet, &sweep, &target, context())
-        .intent
-        .clone();
+    let base = create_unified(&temp, &sweep, context()).intent.clone();
     full_validate(&base).unwrap();
     let (_, step1, signed1) = setup(Shape::Wpkh);
     let two_step = Temp::new();
@@ -2487,17 +2499,15 @@ fn unified_record_reconciles_through_the_step2_path() {
     let target = target_script(5);
     let sweep = unified_sweep(&wallet, &target, 2);
     let temp = Temp::new();
-    drop(create_unified(&temp, &wallet, &sweep, &target, ctx.clone()));
+    drop(create_unified(&temp, &sweep, ctx.clone()));
     let mut c = reopen_unified(&temp, &wallet, ctx.clone()).unwrap();
     // Nothing to reconcile before a submission is recorded.
     assert_eq!(c.recorded_fork_submission(), None);
     assert_eq!(c.recorded_split_step2(), None);
-    c.revalidate_unified_construction(&ctx, unified_construction(&wallet, &sweep, 5, &target))
-        .unwrap();
-    let verified = sign_step2(&wallet, &sweep);
+    c.revalidate_unified_construction(&ctx, &sweep, 5).unwrap();
+    let verified = sign_unified(&wallet, &sweep);
     let signed = verified.transaction().clone();
-    c.record_unified_broadcast_intent(&ctx, ChainId::BitcoinBlake2b, &signed)
-        .unwrap();
+    c.record_unified_broadcast_intent(&ctx, &verified).unwrap();
     assert!(!c.split_step2_dead_end());
     drop(c);
     // What the reconciler's reopen reads.
@@ -2604,9 +2614,10 @@ async fn step2_observation_path_refuses_a_fork_only_plan() {
     let target = target_script(5);
     let sweep = unified_sweep(&wallet, &target, 2);
     let temp = Temp::new();
-    let mut c = create_unified(&temp, &wallet, &sweep, &target, context());
-    let signed = sign_step2(&wallet, &sweep).transaction().clone();
-    c.record_unified_broadcast_intent(&context(), ChainId::BitcoinBlake2b, &signed)
+    let mut c = create_unified(&temp, &sweep, context());
+    let verified = sign_unified(&wallet, &sweep);
+    let signed = verified.transaction().clone();
+    c.record_unified_broadcast_intent(&context(), &verified)
         .unwrap();
     let (_sender, generation) = tokio::sync::watch::channel(1u64);
     let failure = collect_sweep(
@@ -2642,20 +2653,17 @@ fn unified_record_abandon_is_refused() {
     let target = target_script(5);
     let sweep = unified_sweep(&wallet, &target, 2);
     let temp = Temp::new();
-    let c = create_unified(&temp, &wallet, &sweep, &target, context());
+    let c = create_unified(&temp, &sweep, context());
     // Fresh, nothing sent: still refused, and kept.
     assert!(matches!(c.abandon_split(&context()), Err(Error::Conflict)));
     assert!(temp.0.join("intent.json").exists());
     let c = reopen_unified(&temp, &wallet, context()).unwrap();
     assert!(matches!(c.abandon_split(&context()), Err(Error::Conflict)));
     let mut c = reopen_unified(&temp, &wallet, context()).unwrap();
-    c.revalidate_unified_construction(
-        &context(),
-        unified_construction(&wallet, &sweep, 5, &target),
-    )
-    .unwrap();
-    let verified = sign_step2(&wallet, &sweep);
-    c.record_unified_broadcast_intent(&context(), ChainId::BitcoinBlake2b, verified.transaction())
+    c.revalidate_unified_construction(&context(), &sweep, 5)
+        .unwrap();
+    let verified = sign_unified(&wallet, &sweep);
+    c.record_unified_broadcast_intent(&context(), &verified)
         .unwrap();
     assert!(!c.split_step2_dead_end());
     assert!(matches!(c.abandon_split(&context()), Err(Error::Conflict)));
@@ -2680,7 +2688,7 @@ fn unified_and_two_step_writers_refuse_each_others_record() {
     let target = target_script(5);
     let sweep = unified_sweep(&wallet, &target, 2);
     let temp = Temp::new();
-    let mut c = create_unified(&temp, &wallet, &sweep, &target, context());
+    let mut c = create_unified(&temp, &sweep, context());
     let (other_wallet, step1, signed1) = setup(Shape::ShWpkh);
     assert!(matches!(
         c.revalidate_split_construction(&context(), &step1, FORK),
@@ -2735,32 +2743,23 @@ fn unified_and_two_step_writers_refuse_each_others_record() {
     let recorded = c.recorded_split().unwrap().unwrap();
     assert_eq!(recorded.target_index, Some(5));
     assert_eq!(recorded.source.as_ref(), Some(&wallet.source));
-    c.record_unified_broadcast_intent(
-        &context(),
-        ChainId::BitcoinBlake2b,
-        sign_step2(&wallet, &sweep).transaction(),
-    )
-    .unwrap();
+    c.record_unified_broadcast_intent(&context(), &sign_unified(&wallet, &sweep))
+        .unwrap();
 
     // The reverse, at every phase of a two-step record.
     let two_step = Temp::new();
     let mut c = create(&two_step, &step1, &signed1);
     let other_sweep = unified_sweep(&other_wallet, &target, 2);
-    let other_signed = sign_step2(&other_wallet, &other_sweep)
-        .transaction()
-        .clone();
+    let other_signed = sign_unified(&other_wallet, &other_sweep);
     let tracked = signed1.transaction().compute_txid();
     for phase in [Phase::Intent, Phase::BroadcastUncertain, Phase::Tracking] {
         assert_eq!(c.phase(), phase);
         assert!(matches!(
-            c.revalidate_unified_construction(
-                &context(),
-                unified_construction(&other_wallet, &other_sweep, 5, &target)
-            ),
+            c.revalidate_unified_construction(&context(), &other_sweep, 5),
             Err(Error::WrongIdentity)
         ));
         assert!(matches!(
-            c.record_unified_broadcast_intent(&context(), ChainId::BitcoinBlake2b, &other_signed),
+            c.record_unified_broadcast_intent(&context(), &other_signed),
             Err(Error::WrongIdentity)
         ));
         match phase {
@@ -2780,132 +2779,59 @@ fn unified_and_two_step_writers_refuse_each_others_record() {
         .unwrap();
 }
 
-/// B4b-1b: creation refuses a sweep that is not the shape it records (a
-/// second output, another target, the Bitcoin chain, no fork height) and
-/// writes nothing. After a restart the construction is unverified until the
-/// exact rebuild is checked; a different sweep, chain, source, fork height
-/// or target refuses and leaves it unverified. The submission takes exactly
-/// the recorded sweep, signed on every input, on the record's fork chain,
-/// once, in the same session.
+/// B4b-1b, B4b-3a (Reviewer-650 F2): creation takes core's unified sweep
+/// itself, so a sweep of another shape (a second output, a target it does
+/// not pay, the Bitcoin chain, no fork height, a target that is neither
+/// P2WSH nor P2TR) cannot be described to it at all; a target index outside
+/// the normal range is refused and writes nothing. After a restart the
+/// construction is unverified until the exact rebuild is checked; a
+/// different sweep, chain, source, fork height, target index or target
+/// refuses and leaves it unverified. The submission takes only core's
+/// verified unified sweep, of exactly the recorded construction on the
+/// record's fork chain, once, in the same session.
 #[test]
 fn unified_submission_needs_a_revalidated_exact_construction() {
     let wallet = make_wallet(Shape::WshMulti, 1);
     let target = target_script(5);
     let sweep = unified_sweep(&wallet, &target, 2);
     let temp = Temp::new();
-    let good = unified_construction(&wallet, &sweep, 5, &target);
-    let mut two_outputs = sweep.psbt().unsigned_tx.clone();
-    two_outputs.output.push(two_outputs.output[0].clone());
-    let elsewhere = target_script(6);
-    let create = |construction: UnifiedConstruction<'_>| {
-        Controller::create_unified_split(&temp.0, TARGET.into(), construction, context()).err()
-    };
-    for (name, wrong) in [
-        (
-            "a second output",
-            UnifiedConstruction {
-                unsigned: &two_outputs,
-                ..good
-            },
-        ),
-        (
-            "another target than the sweep pays",
-            UnifiedConstruction {
-                target_script: &elsewhere,
-                ..good
-            },
-        ),
-        (
-            "the Bitcoin chain",
-            UnifiedConstruction {
-                chain: ChainId::Bitcoin,
-                ..good
-            },
-        ),
-        (
-            "no fork height",
-            UnifiedConstruction {
-                fork_height: 0,
-                ..good
-            },
-        ),
-        (
-            "a target that is not P2WSH or P2TR",
-            UnifiedConstruction {
-                target_script: sweep.psbt().inputs[0]
-                    .witness_utxo
-                    .as_ref()
-                    .map(|o| o.script_pubkey.as_script())
-                    .unwrap(),
-                ..good
-            },
-        ),
-    ] {
-        assert!(
-            matches!(create(wrong), Some(Error::InvalidPlan)),
-            "{}",
-            name
-        );
-        assert!(!temp.0.join("intent.json").exists(), "{}", name);
-    }
-    drop(create_unified(&temp, &wallet, &sweep, &target, context()));
+    assert!(matches!(
+        Controller::create_unified_split(&temp.0, TARGET.into(), &sweep, 1 << 31, context()),
+        Err(Error::InvalidPlan)
+    ));
+    assert!(!temp.0.join("intent.json").exists());
+    drop(create_unified(&temp, &sweep, context()));
 
     let mut c = reopen_unified(&temp, &wallet, context()).unwrap();
-    let verified = sign_step2(&wallet, &sweep);
+    let verified = sign_unified(&wallet, &sweep);
     let signed = verified.transaction().clone();
     assert!(matches!(
-        c.record_unified_broadcast_intent(&context(), ChainId::BitcoinBlake2b, &signed),
+        c.record_unified_broadcast_intent(&context(), &verified),
         Err(Error::Unchecked)
     ));
     let other_sweep = unified_sweep(&wallet, &target, 3);
     let other_wallet = make_wallet(Shape::WshMulti, 7);
-    for (name, wrong) in [
-        (
-            "another sweep",
-            UnifiedConstruction {
-                unsigned: &other_sweep.psbt().unsigned_tx,
-                ..good
-            },
-        ),
-        (
-            "another chain",
-            UnifiedConstruction {
-                chain: ChainId::BitcoinBlake2bTestnet4,
-                ..good
-            },
-        ),
-        (
-            "another source",
-            UnifiedConstruction {
-                source: &other_wallet.source,
-                ..good
-            },
-        ),
-        (
-            "another fork height",
-            UnifiedConstruction {
-                fork_height: FORK + 1,
-                ..good
-            },
-        ),
-        (
-            "another target index",
-            UnifiedConstruction {
-                target_index: 6,
-                ..good
-            },
-        ),
-        (
-            "another target script",
-            UnifiedConstruction {
-                target_script: &elsewhere,
-                ..good
-            },
-        ),
+    let other_source = unified_sweep(&other_wallet, &target, 2);
+    let elsewhere = target_script(6);
+    let other_target = unified_sweep(&wallet, &elsewhere, 2);
+    let other_chain = unified_sweep_on(&wallet, &target, 2, ChainId::BitcoinBlake2bTestnet4, FORK);
+    let other_height = unified_sweep_on(&wallet, &target, 2, ChainId::BitcoinBlake2b, FORK + 1);
+    assert_eq!(
+        other_height.psbt().unsigned_tx,
+        sweep.psbt().unsigned_tx,
+        "the fork height is not in the transaction"
+    );
+    for (name, wrong, index) in [
+        ("another sweep", &other_sweep, 5),
+        ("another chain", &other_chain, 5),
+        ("another source", &other_source, 5),
+        ("another fork height", &other_height, 5),
+        ("another target index", &sweep, 6),
+        ("another target script", &other_target, 5),
     ] {
         assert!(
             matches!(
-                c.revalidate_unified_construction(&context(), wrong),
+                c.revalidate_unified_construction(&context(), wrong, index),
                 Err(Error::WrongIdentity)
             ),
             "{}",
@@ -2913,31 +2839,23 @@ fn unified_submission_needs_a_revalidated_exact_construction() {
         );
         assert!(
             matches!(
-                c.record_unified_broadcast_intent(&context(), ChainId::BitcoinBlake2b, &signed),
+                c.record_unified_broadcast_intent(&context(), &verified),
                 Err(Error::Unchecked)
             ),
             "{}",
             name
         );
     }
-    c.revalidate_unified_construction(&context(), good).unwrap();
-    // Exactly the recorded sweep, signed on every input, on the fork chain.
-    let other_signed = sign_step2(&wallet, &other_sweep).transaction().clone();
-    let mut half = signed.clone();
-    half.input[1].witness.clear();
-    for (name, chain, tx) in [
-        ("another sweep", ChainId::BitcoinBlake2b, &other_signed),
-        ("an input left unsigned", ChainId::BitcoinBlake2b, &half),
-        ("the Bitcoin chain", ChainId::Bitcoin, &signed),
-        (
-            "the unsigned sweep",
-            ChainId::BitcoinBlake2b,
-            &sweep.psbt().unsigned_tx,
-        ),
+    c.revalidate_unified_construction(&context(), &sweep, 5)
+        .unwrap();
+    // Exactly the recorded construction, on the record's fork chain.
+    for (name, wrong) in [
+        ("another sweep", sign_unified(&wallet, &other_sweep)),
+        ("another chain", sign_unified(&wallet, &other_chain)),
     ] {
         assert!(
             matches!(
-                c.record_unified_broadcast_intent(&context(), chain, tx),
+                c.record_unified_broadcast_intent(&context(), &wrong),
                 Err(Error::InvalidPlan)
             ),
             "{}",
@@ -2949,18 +2867,95 @@ fn unified_submission_needs_a_revalidated_exact_construction() {
     let mut other = context();
     other.generation = 2;
     assert!(matches!(
-        c.record_unified_broadcast_intent(&other, ChainId::BitcoinBlake2b, &signed),
+        c.record_unified_broadcast_intent(&other, &verified),
         Err(Error::Revoked)
     ));
     drop(c);
     let mut c = reopen_unified(&temp, &wallet, context()).unwrap();
-    c.revalidate_unified_construction(&context(), good).unwrap();
-    c.record_unified_broadcast_intent(&context(), ChainId::BitcoinBlake2b, &signed)
+    c.revalidate_unified_construction(&context(), &sweep, 5)
+        .unwrap();
+    c.record_unified_broadcast_intent(&context(), &verified)
         .unwrap();
     // Never twice.
     assert!(matches!(
-        c.record_unified_broadcast_intent(&context(), ChainId::BitcoinBlake2b, &signed),
+        c.record_unified_broadcast_intent(&context(), &verified),
         Err(Error::Conflict)
     ));
     assert_eq!(c.recorded_split_step2(), Some(&signed));
+}
+
+/// B4b-3a (Reviewer-650 F2): what the journal records as the submitted sweep
+/// is a sweep core verified Protected: rebuilt from the journal, its recorded
+/// bytes verify as `ALL|UNIFIED` on every input. The same sweep with legacy
+/// `ALL` signatures, which the raw-transaction writer of #650 journaled,
+/// fails that verification; the typed writer cannot be handed one.
+#[test]
+fn unified_journal_records_only_a_protected_sweep() {
+    use coincube_core::foreign_split::{verify_unified_sweep_transaction, UnifiedReplayStatus};
+    for shape in [Shape::Pkh, Shape::ShWpkh, Shape::Wpkh, Shape::WshMulti] {
+        let wallet = make_wallet(shape, 1);
+        let target = target_script(5);
+        let sweep = unified_sweep(&wallet, &target, 2);
+        let temp = Temp::new();
+        let mut c = create_unified(&temp, &sweep, context());
+        let verified = sign_unified(&wallet, &sweep);
+        c.record_unified_broadcast_intent(&context(), &verified)
+            .unwrap();
+        drop(c);
+        let c = reopen_unified(&temp, &wallet, context()).unwrap();
+        let recorded = c.recorded_split_step2().unwrap().clone();
+        let secp = Secp256k1::verification_only();
+        let reverified = verify_unified_sweep_transaction(&sweep, &recorded, &secp).unwrap();
+        assert_eq!(
+            reverified.replay_status(),
+            UnifiedReplayStatus::Protected,
+            "{:?}",
+            shape
+        );
+        // The bytes #650's raw writer accepted: every input signed, ALL.
+        let mut legacy = sweep.psbt().clone();
+        for signer in wallet.signers.iter().take(2) {
+            legacy.sign(signer, &Secp256k1::new()).unwrap();
+        }
+        let legacy = coincube_core::foreign_split::finalize_split_step2(
+            &coincube_core::foreign_split::create_split_step2(
+                &coincube_core::foreign_split::SplitStep2Inputs {
+                    chain: ChainId::BitcoinBlake2b,
+                    source: &wallet.source,
+                    coins: &[
+                        coin(&wallet.source, SplitBranch::External, 0, 150_000),
+                        coin(&wallet.source, SplitBranch::Internal, 1, 70_000),
+                    ],
+                    fork_height: FORK,
+                    claimed: &sweep.spent_outpoints(),
+                    target: &target,
+                },
+                2,
+                LockTime::from_height(100).unwrap(),
+                100,
+            )
+            .unwrap(),
+            &[
+                coin(&wallet.source, SplitBranch::External, 0, 150_000),
+                coin(&wallet.source, SplitBranch::Internal, 1, 70_000),
+            ],
+            &wallet.source,
+            &legacy,
+            &secp,
+        )
+        .unwrap()
+        .transaction()
+        .clone();
+        assert_eq!(
+            unsigned(&legacy),
+            sweep.psbt().unsigned_tx,
+            "{:?}: the same sweep",
+            shape
+        );
+        assert!(
+            verify_unified_sweep_transaction(&sweep, &legacy, &secp).is_err(),
+            "{:?}",
+            shape
+        );
+    }
 }
