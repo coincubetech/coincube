@@ -1164,3 +1164,158 @@ async fn unified_review_on_the_node_route_shows_the_privacy_note() {
         replay::pill_copy(&replay::ReplayStatus::Protected, &[]).0
     );
 }
+
+/// Reviewer-661 F1 (adopted probe): a failed or stale BTCB2 read in the
+/// close check refuses with retry, for the sweep read and for the coin
+/// read. CF: R3 (a stale coin read accepted), R10 (a failed sweep read
+/// counted as absent).
+#[tokio::test(flavor = "multi_thread")]
+async fn fork_only_close_check_refuses_stale_and_failed_btcb2_reads() {
+    use crate::app::state::vault::split::tests::Fault;
+    let scan = seed_scan();
+    let connect = FakeConnect::new(&scan.coins);
+    let temp = Temp::new();
+    let (_, _, sweep) = fork_only_journal(&scan, &connect, &temp, true);
+    let record = UnifiedRecord {
+        sweep,
+        claimed: scan.coins.iter().map(|coin| coin.outpoint).collect(),
+    };
+    check_close(&*connect, &record).await.unwrap();
+    for fault in [Fault::Stale, Fault::Error] {
+        *connect.chains.b2_tx_fault.lock().unwrap() = Some(fault);
+        let refusal = check_close(&*connect, &record).await.unwrap_err();
+        assert!(refusal.retry, "tx {:?}: {}", fault, refusal.reason);
+        *connect.chains.b2_tx_fault.lock().unwrap() = None;
+        *connect.chains.b2_utxo_fault.lock().unwrap() = Some(fault);
+        let refusal = check_close(&*connect, &record).await.unwrap_err();
+        assert!(refusal.retry, "utxo {:?}: {}", fault, refusal.reason);
+        *connect.chains.b2_utxo_fault.lock().unwrap() = None;
+    }
+}
+
+/// Reviewer-661 F1 (adopted probe): a sweep that appears only after the
+/// coin reads is caught by the second absence read. CF: R4.
+#[tokio::test(flavor = "multi_thread")]
+async fn fork_only_close_check_reads_the_sweep_again() {
+    let scan = seed_scan();
+    let connect = FakeConnect::new(&scan.coins);
+    let temp = Temp::new();
+    let (_, _, sweep) = fork_only_journal(&scan, &connect, &temp, true);
+    let record = UnifiedRecord {
+        sweep,
+        claimed: scan.coins.iter().map(|coin| coin.outpoint).collect(),
+    };
+    connect.chains.b2_reads.store(0, Ordering::SeqCst);
+    *connect.chains.b2_appear_after.lock().unwrap() = Some(1);
+    assert_eq!(
+        check_close(&*connect, &record).await.unwrap_err().reason,
+        SWEEP_SEEN
+    );
+}
+
+/// Reviewer-661 F1 (adopted probe): a coin spent on BTCB2 after the check
+/// passed, before the confirmation, keeps the record open (the
+/// confirmation checks again). CF: R8.
+#[tokio::test(flavor = "multi_thread")]
+async fn fork_only_confirm_close_checks_again() {
+    let scan = seed_scan();
+    let connect = FakeConnect::new(&scan.coins);
+    let temp = Temp::new();
+    let (digest, directory, _) = fork_only_journal(&scan, &connect, &temp, true);
+    let mut panel = resumed(digest, directory.clone(), &temp);
+    panel.set_connect(Some(connect.clone() as Arc<dyn SplitConnect>));
+    let port = FakePort::new(connect.context(), 1);
+    panel.set_unified_port(Some(port.clone() as Arc<dyn UnifiedPort>));
+    let task = panel.begin();
+    drive(&mut panel, task).await;
+    *port.calls.seen.lock().unwrap() = Some(TransactionObservation::Absent);
+    send(&mut panel, UnifiedMessage::Reconcile).await;
+    send(&mut panel, UnifiedMessage::CheckClose).await;
+    assert!(panel.can_confirm_unified_close());
+    connect
+        .chains
+        .spend_on(ChainId::BitcoinBlake2b, scan.coins[0].outpoint);
+    send(&mut panel, UnifiedMessage::ConfirmClose).await;
+    assert_ne!(panel.stage(), &Stage::Closed);
+    assert!(!step1::is_closed(&directory));
+}
+
+/// Reviewer-661 F2: under the journal lock, `close_unified` refuses a
+/// two-step journal even when handed that journal's own record (the kind
+/// check, R7), and refuses once the session ended (`ended`, R9); neither
+/// writes a tombstone.
+#[tokio::test(flavor = "multi_thread")]
+async fn close_unified_refuses_a_two_step_journal_and_an_ended_session() {
+    // R7: a two-step journal with its own record.
+    let scan = crate::app::state::vault::split::tests::Scan::new(
+        crate::services::split_test_wallets::Shape::Wpkh,
+    );
+    let connect = FakeConnect::new(&scan.coins);
+    let temp = Temp::new();
+    let panel = crate::app::state::vault::split::tests::recorded(&scan, &connect, &temp).await;
+    let (digest, directory) = (
+        panel.journal.as_ref().unwrap().0,
+        panel.journal.as_ref().unwrap().1.clone(),
+    );
+    drop(panel);
+    let identity = claim_workflow::split_identity(TARGET.into(), digest);
+    let record = {
+        let controller =
+            Controller::reopen_settling_blocking(&directory, &identity, connect.context()).unwrap();
+        UnifiedRecord::of(&controller)
+    };
+    let ended = AtomicBool::new(false);
+    assert_eq!(
+        step2::close_unified(
+            &directory,
+            TARGET,
+            digest,
+            connect.context(),
+            &record,
+            1,
+            &ended
+        ),
+        Err(step2::CHANGED_SINCE_CHECK.to_string())
+    );
+    assert!(!step1::is_closed(&directory));
+
+    // R9: a fork-only journal, its own record, but the session ended.
+    let scan = seed_scan();
+    let connect = FakeConnect::new(&scan.coins);
+    let temp = Temp::new();
+    let (digest, directory, sweep) = fork_only_journal(&scan, &connect, &temp, true);
+    let identity = claim_workflow::split_identity(TARGET.into(), digest);
+    let record = {
+        let controller =
+            Controller::reopen_settling_blocking(&directory, &identity, connect.context()).unwrap();
+        UnifiedRecord::of(&controller)
+    };
+    assert_eq!(record.sweep, sweep);
+    let ended = AtomicBool::new(true);
+    assert_eq!(
+        step2::close_unified(
+            &directory,
+            TARGET,
+            digest,
+            connect.context(),
+            &record,
+            1,
+            &ended
+        ),
+        Err(step1::ENDED_BEFORE_ABANDON.to_string())
+    );
+    assert!(!step1::is_closed(&directory));
+    // The same call under a live session closes it.
+    ended.store(false, std::sync::atomic::Ordering::SeqCst);
+    step2::close_unified(
+        &directory,
+        TARGET,
+        digest,
+        connect.context(),
+        &record,
+        1,
+        &ended,
+    )
+    .unwrap();
+    assert!(step1::is_closed(&directory));
+}
