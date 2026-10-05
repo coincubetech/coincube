@@ -1460,3 +1460,91 @@ async fn close_unified_refuses_a_two_step_journal_and_an_ended_session() {
     .unwrap();
     assert!(step1::is_closed(&directory));
 }
+
+/// #661 F4: a restart read the record before any sweep was sent; a sweep
+/// submitted later in the same session updates it, so no stage can show
+/// the unsubmitted close ("No sweep of this split was ever sent") or close
+/// without the check. CF: leave the restart's record as read.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sweep_submitted_after_restart_is_not_closed_as_unsubmitted() {
+    let scan = seed_scan();
+    let connect = FakeConnect::new(&scan.coins);
+    let temp = Temp::new();
+    let (digest, directory, _) = fork_only_journal(&scan, &connect, &temp, false);
+    let mut panel = resumed(digest, directory, &temp);
+    panel.set_connect(Some(connect.clone() as Arc<dyn SplitConnect>));
+    let port = FakePort::new(connect.context(), 1);
+    panel.set_unified_port(Some(port.clone() as Arc<dyn UnifiedPort>));
+    let task = panel.begin();
+    drive(&mut panel, task).await;
+    assert_eq!(panel.stage(), &Stage::Unified(UnifiedStage::EnterSeeds));
+    assert_eq!(panel.unified().record().map(|r| r.sweep), Some(None));
+    assert!(panel.can_confirm_unified_close());
+
+    add_seed(&mut panel, 1, "").await;
+    add_seed(&mut panel, 2, "second passphrase").await;
+    send(&mut panel, UnifiedMessage::BuildAndSign).await;
+    assert_eq!(
+        panel.stage(),
+        &Stage::Unified(UnifiedStage::Signed),
+        "{:?}",
+        panel.notice()
+    );
+    send(&mut panel, UnifiedMessage::Review).await;
+    let txid = panel.unified().review().unwrap().txid;
+    send(&mut panel, UnifiedMessage::Confirm).await;
+    assert_eq!(panel.stage(), &Stage::Unified(UnifiedStage::Submitted));
+    assert_eq!(panel.unified().record().map(|r| r.sweep), Some(Some(txid)));
+    // Whatever stage a later refusal leaves, the unsubmitted close is gone.
+    panel.stage = Stage::Refused(Refusal::retry("refused"));
+    assert!(!panel.can_confirm_unified_close());
+}
+
+/// #660: the single step's own refusals route their target errors to the
+/// sweep's copy, never step 1's or step 2's. CF: route them through the
+/// two-step `describe_target`.
+#[test]
+fn unified_refusals_name_the_sweep_not_a_step() {
+    use coincube_core::chain::ChainId;
+    for error in [
+        TargetError::NotTracking,
+        TargetError::NoReservation,
+        TargetError::Used(ChainId::Bitcoin),
+        TargetError::Used(ChainId::BitcoinBlake2b),
+        TargetError::AlreadyReserved,
+        TargetError::ReservationUnavailable,
+    ] {
+        let debug = format!("{error:?}");
+        let copy = describe_unified(UnifiedError::Target(error))
+            .reason
+            .to_lowercase();
+        assert!(
+            !copy.contains("step 1") && !copy.contains("step 2"),
+            "{}: {}",
+            debug,
+            copy
+        );
+    }
+}
+
+/// #662 F2: a claimed coin spent on BTCB2, found when the single step is
+/// opened or restored, reads as the sweep's, never step 1's or step 2's;
+/// every other authentication refusal reads as the two-step route's.
+/// CF: route it through `step1::evidence_refusal`.
+#[test]
+fn unified_spent_coin_names_the_sweep() {
+    use crate::services::split_evidence::{EvidenceError, EvidenceFailure};
+    let spent = evidence_refusal(EvidenceError {
+        outpoint: None,
+        failure: EvidenceFailure::Btcb2Spent,
+    });
+    assert_eq!(spent.reason, UNIFIED_COIN_SPENT);
+    assert!(!spent.retry);
+    let lower = spent.reason.to_lowercase();
+    assert!(!lower.contains("step 1") && !lower.contains("step 2"));
+    let changed = EvidenceError {
+        outpoint: None,
+        failure: EvidenceFailure::PostFork,
+    };
+    assert_eq!(evidence_refusal(changed), step1::evidence_refusal(changed));
+}

@@ -120,15 +120,15 @@ async fn knots(server: &MockServer, tx: &Transaction, tip: BlockHash, allowed: b
 }
 /// Step 2 checked, built, signed and handed to a coordinator over `vault`
 /// on the node route (`node`) or the Connect route (`None`). The Connect
-/// preflight answers `allowed` at `connect`.
+/// preflight answers `allowed` at `connect`; its mock's id comes back last.
 async fn routed(
     vault: &Vault,
     node: Option<BitcoindConfig>,
     connect: &MockServer,
-) -> (Harness, SplitStep2Coordinator, Transaction) {
+) -> (Harness, SplitStep2Coordinator, Transaction, usize) {
     let s = Step2::new().await;
     let signed_tx = s.signed_tx();
-    mock_preflight(connect, &signed_tx, true).await;
+    let preflight = mock_preflight(connect, &signed_tx, true).await;
     let routes = Step2Routes::for_test(
         vault.clone(),
         PreflightClient::new(
@@ -151,7 +151,7 @@ async fn routed(
         .preparation
         .finish_with(&context(), &signed, &coins, Box::new(routes))
         .unwrap();
-    (s.h, coordinator, signed_tx)
+    (s.h, coordinator, signed_tx, preflight)
 }
 fn vault_descriptor() -> CoincubeDescriptor {
     super::vault()
@@ -169,7 +169,8 @@ async fn split_step2_node_route_reviews_on_the_node_and_submits_there_once() {
     let node = MockServer::start_async().await;
     let connect = &node;
     let vault = Vault::new(Some(node_config(&node)));
-    let (h, mut coordinator, signed_tx) = routed(&vault, Some(node_config(&node)), connect).await;
+    let (h, mut coordinator, signed_tx, preflight) =
+        routed(&vault, Some(node_config(&node)), connect).await;
     knots(&node, &signed_tx, hash(2), true).await;
     let review = coordinator.prepare_review(&context()).await.unwrap();
     let route = review.snapshot().route;
@@ -197,13 +198,17 @@ async fn split_step2_node_route_reviews_on_the_node_and_submits_there_once() {
             1
         )]
     );
-    // Connect's BTCB2 preflight was registered but never asked.
+    // Connect's BTCB2 preflight was registered but never asked (#659 N2).
     let journal = h.temp.journal();
     assert_eq!(
         journal["fork_submission"]["txid"],
         signed_tx.compute_txid().to_string()
     );
-    let _ = connect;
+    assert_eq!(
+        httpmock::Mock::new(preflight, connect).hits_async().await,
+        0,
+        "Connect's preflight is never asked on the node route"
+    );
 }
 
 /// P4: a node on another chain (its best block is not the BTCB2 tip) or one
@@ -218,7 +223,7 @@ async fn split_step2_node_route_refuses_another_chain_or_a_node_rejection() {
         let node = MockServer::start_async().await;
         let connect = &node;
         let vault = Vault::new(Some(node_config(&node)));
-        let (h, mut coordinator, signed_tx) =
+        let (h, mut coordinator, signed_tx, _) =
             routed(&vault, Some(node_config(&node)), connect).await;
         knots(&node, &signed_tx, tip, allowed).await;
         let result = coordinator.prepare_review(&context()).await;
@@ -260,7 +265,7 @@ async fn split_step2_backend_switch_after_review_refuses_before_any_intent() {
         let connect = &node;
         let configured = use_node.then(|| node_config(&node));
         let vault = Vault::new(configured.clone());
-        let (h, mut coordinator, signed_tx) = routed(&vault, configured, connect).await;
+        let (h, mut coordinator, signed_tx, _) = routed(&vault, configured, connect).await;
         knots(&node, &signed_tx, hash(2), true).await;
         let review = coordinator.prepare_review(&context()).await.unwrap();
         match case {
@@ -385,7 +390,7 @@ async fn split_step2_switch_during_send_is_refused_by_the_daemon_and_uncertain()
 async fn split_step2_restart_after_submission_only_reconciles() {
     let connect = MockServer::start_async().await;
     let vault = Vault::new(None);
-    let (h, mut coordinator, signed_tx) = routed(&vault, None, &connect).await;
+    let (h, mut coordinator, signed_tx, _) = routed(&vault, None, &connect).await;
     // A journal with no recorded step-2 submission is not a reconciler's.
     let unsubmitted = Harness::new(6).await;
     assert!(matches!(

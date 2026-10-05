@@ -56,8 +56,9 @@ fn working(work: Work) -> &'static str {
         Work::Resending => "Sending step 1 again through Connect…",
         Work::CheckingAbandon => "Checking Bitcoin before abandoning…",
         Work::Abandoning => "Abandoning…",
-        Work::CheckingClose => "Checking both chains before abandoning…",
-        Work::Closing => "Abandoning and closing the split…",
+        // #662 F2: the two-step and the single-step close share these.
+        Work::CheckingClose => "Checking both chains before closing the split…",
+        Work::Closing => "Closing the split…",
         Work::CheckingConflictClose => "Checking Bitcoin before closing the split…",
         Work::ClosingConflict => "Closing the split…",
         Work::Restarting => "Reading the split recorded on this device…",
@@ -440,7 +441,7 @@ fn step2_body<'a>(
             // confirmed with step 1 eligible.
             if panel.can_complete() {
                 body = body.push(p1_regular(
-                    "Step 2 is confirmed on Bitcoin Blake2b and step 1 is six deep on Bitcoin. Completing checks both chains once more, records the split on this Cube by the source wallet's fingerprint only, then deletes the source wallet's descriptors from this device.",
+                    "Step 2 is confirmed on Bitcoin Blake2b and step 1 is six deep on Bitcoin. Completing checks both chains once more, records the split on this Cube only by a digest (a hash) of the source wallet's descriptor, then deletes the source wallet's descriptors from this device.",
                 ));
                 actions = actions.push(primary("Complete split", SplitMessage::Step2Complete));
             }
@@ -459,6 +460,10 @@ fn step2_body<'a>(
     }
     (body, actions)
 }
+
+/// #662 F2: the Closed stage, for either route (a two-step split closed in
+/// its step-2 dead end, or a single-step one, sent or not).
+pub const CLOSED_COPY: &str = "This split was closed on this device. Its record, with any signed transaction, is kept, and a new split of this wallet is refused until that record is reset.";
 
 pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
     let single = matches!(panel.stage(), Stage::Unified(_) | Stage::ChooseRoute)
@@ -676,7 +681,9 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
         }
         Stage::Closed => {
             body = body.push(p1_regular(
-                "This split was abandoned and closed on this device. Its record, with the signed step 2, is kept, and a new split of this wallet is refused until that record is reset.",
+                // #662 F2: a closed split restarts here before its kind is
+                // read, so one sentence fits both routes.
+                CLOSED_COPY,
             ));
         }
     }

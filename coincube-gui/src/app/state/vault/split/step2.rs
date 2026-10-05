@@ -186,12 +186,25 @@ pub const RESEND_COIN_SPENT: &str = "Step 2 can't be sent again: a coin this spl
 pub const RESEND_UNSETTLED: &str = "This version can't send step 2 again. Its last send, or a check of it, ended without a clear answer (it may have been accepted, or it was cancelled, timed out or interrupted), so step 2 may have reached the network. Nothing was sent; check its status. If step 2 never appears on Bitcoin Blake2b, the way out is to abandon or reset this split.";
 
 /// #568 B5b: the Completed stage's copy.
-pub const SPLIT_COMPLETED: &str = "This split is complete. Step 2 has at least 6 confirmations on Bitcoin Blake2b and step 1 at least 6 on Bitcoin. This Cube records the split by the source wallet's fingerprint only, and the source wallet's descriptors were deleted from this device.";
+pub const SPLIT_COMPLETED: &str = "This split is complete. Step 2 has at least 6 confirmations on Bitcoin Blake2b and step 1 at least 6 on Bitcoin. This Cube records the split only by a digest (a hash) of the source wallet's descriptor, and the source wallet's descriptors were deleted from this device.";
 /// The completion check found the split not complete (yet).
 pub const COMPLETION_NOT_YET: &str = "This split isn't complete yet: step 2 needs 6 confirmations on Bitcoin Blake2b while step 1 stays 6 deep in its block on Bitcoin. Nothing was recorded or deleted. Check status again later.";
 /// #645 P3-1: the completion's evidence lapsed while it was being saved.
-/// Never terminal: a fresh check completes it.
-pub const COMPLETION_EXPIRED: &str = "The completion check expired before it was saved, so nothing was recorded or deleted. Check status again, then complete the split.";
+/// Never terminal: a fresh check completes it. The record may already be
+/// written (`persist` checks the evidence again after its write, #656 F2);
+/// a re-completion does not write it twice.
+pub const COMPLETION_EXPIRED: &str = "The completion check expired while it was being saved, so the completion may already be recorded in this Cube. Nothing was deleted. Check status again, then complete the split.";
+/// #656 F1: the completion check's own evidence lapsed before anything was
+/// saved.
+pub const COMPLETION_CHECK_EXPIRED: &str = "The completion check expired before anything was saved, so nothing was recorded or deleted. Check status again, then complete the split.";
+/// #662 R10: a D17 recheck's evidence lapsed. If the check had found the
+/// completion undone, its record may already be removed.
+pub const COMPLETION_RECHECK_EXPIRED: &str = "The check of this completion expired before it finished. If a reorganization undid the completion, its record may already be removed from this Cube. Check status again.";
+/// #656 F1: the target Cube's settings could not be read or updated for
+/// this split's completion record (an unreadable settings file, or the Cube
+/// or its Vault no longer matching). The settings layer's own messages name
+/// a "Claim Cube"; this copy is Split's.
+pub const COMPLETION_RECORD_UNAVAILABLE: &str = "This Cube's completion record for this split couldn't be read or updated: its settings file couldn't be read or written, or the Cube or its Vault no longer matches this split. Nothing was deleted. Check status again.";
 /// The target Cube's settings refused the record while its evidence was
 /// still live. The settings layer's own messages name a "Claim Cube"
 /// (`matching_completion_cube`); this copy is Split's.
@@ -321,14 +334,16 @@ impl RevokeSlot {
 /// confirmed, step 2's recorded bytes could be mined on Bitcoin; for a
 /// terminal conflict, step 1 can never confirm and the split can't
 /// complete; a provisional one may still be unconfirmed, S4-D5). A reorg
-/// is named only for O1 to O4. The only action each leaves is checking
-/// status again: none offers acknowledging a new block, closing the split or
-/// resending step 1 (those controls are S4b's, S4-D3), and none shows the
-/// "cannot replay" label.
+/// is named only for O1 to O4. Each leaves checking status again, except a
+/// terminal conflict, whose way out is S4b's close after a fresh check of
+/// Bitcoin (#658). None offers acknowledging a new block or resending step
+/// 1 itself (those controls are S4b's, S4-D3), and none shows the "cannot
+/// replay" label.
 pub fn reconcile_warning(after: Step1AfterStep2) -> Option<String> {
     const RECORDED: &str = "Bitcoin reorganized after a submission of step 2 was recorded; it was sent or may have been sent.";
     const UNCHANGED: &str =
         "Nothing was rebuilt, and step 2 is not sent automatically. Check status again later.";
+    const TERMINAL: &str = "Nothing was rebuilt, and step 2 is not sent automatically. You can close this split after a fresh check of Bitcoin.";
     match after {
         Step1AfterStep2::Eligible => None,
         Step1AfterStep2::Shallow { confirmations } => Some(format!(
@@ -343,8 +358,9 @@ pub fn reconcile_warning(after: Step1AfterStep2) -> Option<String> {
             "{RECORDED} Step 1 is no longer in any Bitcoin block; it is waiting to be mined again, so Bitcoin replay protection for step 2 is no longer established. {STEP2_EXPOSED} {UNCHANGED}"
         )),
         Step1AfterStep2::Missing => Some(STEP1_REORGED_AFTER_STEP2.to_string()),
+        // #658: the close beside it is the way out, not another check.
         Step1AfterStep2::Conflict(conflict) if conflict.is_terminal() => Some(format!(
-            "{RECORDED} Step 1 is no longer in any Bitcoin block, and a coin this split claims ({}) was spent on Bitcoin by another transaction, so step 1 can never confirm and this split can't complete. {UNCHANGED}",
+            "{RECORDED} Step 1 is no longer in any Bitcoin block, and a coin this split claims ({}) was spent on Bitcoin by another transaction, so step 1 can never confirm and this split can't complete. {TERMINAL}",
             conflict.outpoint()
         )),
         // S4-D5: a missing coin is a conflict only once it stays missing.
@@ -395,7 +411,7 @@ impl Step2Refusal {
     }
 }
 
-fn chain_name(chain: coincube_core::chain::ChainId) -> &'static str {
+pub(super) fn chain_name(chain: coincube_core::chain::ChainId) -> &'static str {
     match chain {
         coincube_core::chain::ChainId::Bitcoin => "Bitcoin",
         _ => "Bitcoin Blake2b",
@@ -566,6 +582,35 @@ pub(super) fn describe_check(error: claim_coordinator::Error) -> Step2Refusal {
         reason,
         retry,
         recovery,
+    }
+}
+
+/// #656 F1: copy for a refused completion check, D17 recheck or descriptor
+/// deletion. Expired evidence and the completion record's persistence are
+/// Split's own lines here, never the Claim or submission copy
+/// [`describe_check`] falls back to; everything else reads as there.
+pub(super) fn describe_completion(error: claim_coordinator::Error) -> Step2Refusal {
+    use claim_coordinator::Error as E;
+    match error {
+        E::ExpiredEvidence => Step2Refusal::retry(COMPLETION_CHECK_EXPIRED),
+        E::CompletionPersistence(error) => {
+            log::warn!("Unable to read or update the Split completion record: {error}");
+            Step2Refusal::retry(COMPLETION_RECORD_UNAVAILABLE)
+        }
+        other => describe_check(other),
+    }
+}
+
+/// #662 R10: copy for a refused D17 recheck of a recorded completion. Its
+/// evidence lapsing may follow the record's removal (`clear_split_from`
+/// checks the deadline again after its write), so the copy says neither
+/// that nothing changed nor that the split should be completed again.
+pub(super) fn describe_recheck(error: claim_coordinator::Error) -> Step2Refusal {
+    match error {
+        claim_coordinator::Error::ExpiredEvidence => {
+            Step2Refusal::retry(COMPLETION_RECHECK_EXPIRED)
+        }
+        other => describe_completion(other),
     }
 }
 
@@ -973,7 +1018,9 @@ pub enum Restart {
     /// when it is in one (#625 F2, or O4's terminal conflict, #568 S4b), or
     /// else why a resend the journal allows could not be opened (P3-3). At
     /// most one is set: a journal in a dead end allows no resend.
-    Reconcile(Box<dyn Step2Recon>, Option<DeadEnd>, Option<String>),
+    /// The last field (#662 F1): the journal's source descriptors are
+    /// deleted, which only a finished completion does (D18).
+    Reconcile(Box<dyn Step2Recon>, Option<DeadEnd>, Option<String>, bool),
     /// A step-2 submission is recorded and the journal allows a reviewed
     /// resend (P3-3): its coordinator, reopened from the recorded bytes.
     Resend(Box<dyn Step2Coord>),
@@ -1063,7 +1110,7 @@ pub async fn restart(
         return Ok(Restart::Closed);
     }
     let identity = claim_workflow::split_identity(target_cube.clone(), digest);
-    let (recorded, resendable, dead_end) = {
+    let (recorded, resendable, dead_end, forgotten) = {
         let controller = Controller::reopen_settling(&directory, &identity, context.clone())
             .await
             .map_err(|error| {
@@ -1078,12 +1125,12 @@ pub async fn restart(
         // #568 B4b-3c: restart by kind. A fork-only record has no step 1 to
         // restore and the two-step reconciler refuses it (U2), so it never
         // reaches either: what it has recorded decides how it reopens.
-        let kind = controller
-            .recorded_split()
-            .map_err(|error| {
-                Step2Refusal::retry(step1::describe(claim_coordinator::Error::Journal(error)))
-            })?
-            .map(|record| record.kind);
+        let record = controller.recorded_split().map_err(|error| {
+            Step2Refusal::retry(step1::describe(claim_coordinator::Error::Journal(error)))
+        })?;
+        let kind = record.as_ref().map(|record| record.kind);
+        // #662 F1: only a finished completion deleted the descriptors.
+        let forgotten = record.is_some_and(|record| record.source.is_none());
         if kind == Some(claim_workflow::SplitKind::Unified) {
             return Ok(Restart::Unified(super::unified::UnifiedRecord::of(
                 &controller,
@@ -1096,6 +1143,7 @@ pub async fn restart(
             controller.recorded_split_step2().is_some(),
             dead_end.is_none() && resend_allowed(&controller),
             dead_end,
+            forgotten,
         )
         // The controller, and the journal lock, end here.
     };
@@ -1121,7 +1169,7 @@ pub async fn restart(
     tokio::task::spawn_blocking(move || port.open_reconciler(directory, target_cube, digest))
         .await
         .map_err(|_| Step2Refusal::retry("Reopening the split was interrupted. Try again."))?
-        .map(|recon| Restart::Reconcile(recon, dead_end, unavailable))
+        .map(|recon| Restart::Reconcile(recon, dead_end, unavailable, forgotten))
 }
 
 /// The journal's step-2 dead end, if it is in one: a recorded terminal
@@ -1169,6 +1217,17 @@ pub fn conflict_closable_copy(conflict: &Step1Conflict) -> String {
     format!(
         "Bitcoin still shows step 1 in no block and not waiting to be mined, and the coin ({}) spent. Closing keeps this split's record and its signed step 2 on this device; a new split of this wallet stays refused until that record is reset.",
         conflict.outpoint()
+    )
+}
+
+/// O4, #658 P3-4 (S4b-D1): the close refused because the conflict's coin is
+/// unspent on Bitcoin again, so step 1 can confirm after all. It names the
+/// way out: step 1's saved signed transaction broadcast again through any
+/// Bitcoin node or service, or waiting. The wallet never sends step 1 again
+/// (D13 = A).
+pub fn conflict_coin_unspent_copy(outpoint: &OutPoint) -> String {
+    format!(
+        "The coin this split's conflict names ({outpoint}) is unspent on Bitcoin again, so this split was not closed: step 1 can still confirm. If you saved step 1's signed transaction, you can broadcast it again through any Bitcoin node or service, or wait for it to confirm. This wallet never sends step 1 again. Check status again."
     )
 }
 
@@ -1246,9 +1305,7 @@ async fn check_conflict_close(
         return Err(conflict_unavailable(FailureKind::Stale));
     }
     if unspent.value().contains(&outpoint) {
-        return Err(Refusal::retry(format!(
-            "The coin this split's conflict names ({outpoint}) is unspent on Bitcoin again, so this split was not closed. Check status again."
-        )));
+        return Err(Refusal::retry(conflict_coin_unspent_copy(&outpoint)));
     }
     step1_absent(evidence, step1).await
 }
@@ -2104,6 +2161,12 @@ trait CompletionCore: Send + 'static {
         evidence: Self::Evidence,
         context: &Context,
     ) -> Result<(), claim_coordinator::Error>;
+    /// D17: whether the recorded completion still stands.
+    async fn stands(
+        &mut self,
+        context: &Context,
+        site: &CompletionSite,
+    ) -> Result<SplitCompletionReconciliation, claim_coordinator::Error>;
 }
 #[async_trait]
 impl CompletionCore for SplitStep2Reconciler {
@@ -2133,6 +2196,14 @@ impl CompletionCore for SplitStep2Reconciler {
         context: &Context,
     ) -> Result<(), claim_coordinator::Error> {
         evidence.forget(self, context)
+    }
+    async fn stands(
+        &mut self,
+        context: &Context,
+        site: &CompletionSite,
+    ) -> Result<SplitCompletionReconciliation, claim_coordinator::Error> {
+        self.reconcile_split_completion(context, &site.root, &site.target)
+            .await
     }
 }
 
@@ -2169,6 +2240,20 @@ impl ReconcilerDriver {
         }
     }
 }
+/// #568 B5c-1 (#658): the panel's production reconciler driver over a real
+/// `reconciler`, for the service's O1 test (the panel layer guard admits
+/// that test file alone). No completion site.
+#[cfg(test)]
+pub(crate) fn reconciler_driver(
+    reconciler: SplitStep2Reconciler,
+    generation: watch::Receiver<u64>,
+    expected: u64,
+) -> Box<dyn Step2Recon> {
+    Box::new(ReconcilerDriver::new(
+        reconciler, None, generation, expected,
+    ))
+}
+
 /// The driver lost its reconciler: read the journal again.
 fn interrupted() -> Step2Refusal {
     Step2Refusal {
@@ -2189,7 +2274,7 @@ impl<C: CompletionCore> ReconcilerDriver<C> {
         let evidence = core
             .check(context)
             .await
-            .map_err(describe_check)?
+            .map_err(describe_completion)?
             .ok_or_else(|| Step2Refusal::retry(COMPLETION_NOT_YET))?;
         let record = C::record(&evidence);
         if core.persist(&evidence, &site).await.is_err() {
@@ -2212,9 +2297,46 @@ impl<C: CompletionCore> ReconcilerDriver<C> {
             claim_coordinator::Error::ExpiredEvidence => {
                 Step2Refusal::retry(COMPLETION_NOT_FORGOTTEN)
             }
-            error => describe_check(error),
+            error => describe_completion(error),
         })?;
         Ok(record.into())
+    }
+
+    /// D17 (#662 R10): the recheck's refusals read as the completion's own
+    /// lines ([`describe_recheck`]), never Claim's.
+    async fn stands_inner(
+        &mut self,
+        context: &Context,
+    ) -> Result<CompletionStanding, Step2Refusal> {
+        let site = self
+            .site
+            .clone()
+            .ok_or_else(|| Step2Refusal::final_(COMPLETION_NO_VAULT))?;
+        let standing = self
+            .core
+            .as_mut()
+            .ok_or_else(interrupted)?
+            .stands(context, &site)
+            .await
+            .map_err(describe_recheck)?;
+        Ok(match standing {
+            SplitCompletionReconciliation::Standing {
+                status,
+                transaction,
+            } => CompletionStanding::Standing {
+                status,
+                seen: transaction,
+            },
+            SplitCompletionReconciliation::Lost {
+                status,
+                transaction,
+                cleared,
+            } => CompletionStanding::Lost {
+                status,
+                seen: transaction,
+                cleared,
+            },
+        })
     }
 }
 #[async_trait]
@@ -2245,35 +2367,7 @@ impl Step2Recon for ReconcilerDriver {
         &mut self,
         context: &Context,
     ) -> Result<CompletionStanding, Step2Refusal> {
-        let site = self
-            .site
-            .clone()
-            .ok_or_else(|| Step2Refusal::final_(COMPLETION_NO_VAULT))?;
-        let standing = self
-            .core
-            .as_mut()
-            .ok_or_else(interrupted)?
-            .reconcile_split_completion(context, &site.root, &site.target)
-            .await
-            .map_err(describe_check)?;
-        Ok(match standing {
-            SplitCompletionReconciliation::Standing {
-                status,
-                transaction,
-            } => CompletionStanding::Standing {
-                status,
-                seen: transaction,
-            },
-            SplitCompletionReconciliation::Lost {
-                status,
-                transaction,
-                cleared,
-            } => CompletionStanding::Lost {
-                status,
-                seen: transaction,
-                cleared,
-            },
-        })
+        self.stands_inner(context).await
     }
     async fn review_reconfirmation(
         &mut self,

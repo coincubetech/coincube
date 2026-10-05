@@ -997,6 +997,9 @@ fn discover_split_panel(
     // B4b-3b: the session-only device listing is rooted here; it writes
     // nothing under it.
     panel.set_device_datadir(data_dir.clone());
+    // #568 B5c-1: a completion this Cube records for the split reopens in
+    // Completed, and is checked again at once (D17).
+    panel.set_split_from(&cube_settings.split_from);
     Some(panel)
 }
 
@@ -9060,6 +9063,29 @@ mod tests {
         );
         assert_eq!(panel.stage(), &state::vault::split::Stage::NeedsSession);
         assert!(!panel.is_bound());
+
+        // #568 B5c-1 (#662 R7): the Cube's completion records of this split
+        // (by source digest) come with the panel, for a restart into
+        // Completed; another split's do not.
+        use coincube_core::miniscript::bitcoin::Txid;
+        let (ours, theirs) = (
+            Txid::from_byte_array([5; 32]),
+            Txid::from_byte_array([6; 32]),
+        );
+        let mut recorded = settings.clone();
+        for (descriptor_digest, step2_txid) in
+            [(digest, ours), (sha256::Hash::hash(b"another"), theirs)]
+        {
+            recorded.split_from.push(settings::SplitFromRecord {
+                descriptor_digest,
+                completed_height: 1_000,
+                step2_txid,
+            });
+        }
+        assert!(!panel.records_completion_of(&ours));
+        let panel = discover_split_panel(&datadir, &recorded, &wallet).unwrap();
+        assert!(panel.records_completion_of(&ours));
+        assert!(!panel.records_completion_of(&theirs));
 
         // Never for a Bitcoin Cube or BTCB2 testnet4, even with a journal there.
         for other in [

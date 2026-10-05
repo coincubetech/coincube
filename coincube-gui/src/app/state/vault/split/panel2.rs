@@ -133,10 +133,51 @@ impl SplitPanel {
         self.step2_review = None;
         self.step2_resend = None;
         self.reconfirmation = None;
+        self.reconfirmation_final = false;
         self.target_index = None;
         self.step2_handoff_ready = false;
         self.completable = false;
         self.completion = None;
+    }
+
+    /// #568 B5c-1: the target Cube's `split_from` records, as the App read
+    /// them with its settings. Only this split's (by source digest) are
+    /// kept; a restart that reopens the reconciler for a step 2 one of them
+    /// names opens in Completed and checks it at once (D17).
+    pub fn set_split_from(&mut self, records: &[crate::app::settings::SplitFromRecord]) {
+        let digest = self.journal.as_ref().map(|(digest, _)| *digest);
+        self.recorded_completion = records
+            .iter()
+            .filter(|record| Some(record.descriptor_digest) == digest)
+            .cloned()
+            .map(step2::SplitCompletion::from)
+            .collect();
+    }
+
+    /// Whether the Cube's `split_from`, as handed to this panel, records a
+    /// completion of this split's step 2 `step2_txid` (#662 R7: the App's
+    /// wiring is tested through it).
+    pub fn records_completion_of(
+        &self,
+        step2_txid: &coincube_core::miniscript::bitcoin::Txid,
+    ) -> bool {
+        self.recorded_completion
+            .iter()
+            .any(|completion| &completion.step2_txid == step2_txid)
+    }
+
+    /// The recorded completion of the step 2 `outcome` names, if this
+    /// split's `split_from` holds one.
+    fn recorded_completion_of(&self, outcome: Option<Outcome>) -> Option<step2::SplitCompletion> {
+        let txid = match outcome? {
+            Outcome::Recorded { txid }
+            | Outcome::UpstreamAccepted { txid, .. }
+            | Outcome::Uncertain { txid, .. } => txid,
+        };
+        self.recorded_completion
+            .iter()
+            .find(|completion| completion.step2_txid == txid)
+            .cloned()
     }
 
     pub fn step2_available(&self) -> bool {
@@ -157,7 +198,12 @@ impl SplitPanel {
         if self.step2_port.is_none() {
             self.step2_missing = Some(step2::Step2Unavailable::Refused);
         }
-        if self.connect.is_none() && !self.hidden {
+        // #656 F3: an abandoned or closed split stays so; nothing is left to
+        // build ports for.
+        if self.connect.is_none()
+            && !self.hidden
+            && !matches!(self.stage, Stage::Abandoned | Stage::Closed)
+        {
             self.ports_failed = true;
             self.stage = Stage::Refused(Refusal::retry(super::PORTS_INTERRUPTED));
         }
@@ -262,6 +308,7 @@ impl SplitPanel {
         };
         handle
             && self.connect.is_some()
+            && !self.reconfirmation_final
             && matches!(self.step2_after, Some(Step1AfterStep2::Remined { .. }))
             && self.step2_resend_review().is_none()
     }
@@ -1105,7 +1152,7 @@ impl SplitPanel {
             },
             SplitEvent::Restarted(
                 _,
-                Ok(Restarted::Reconcile(Recon(recon), dead_end, unavailable)),
+                Ok(Restarted::Reconcile(Recon(recon), dead_end, unavailable, forgotten)),
             ) => {
                 self.outcome = None;
                 self.step2_outcome = recon.recorded_outcome();
@@ -1116,6 +1163,22 @@ impl SplitPanel {
                 // coordinator's refusal asked for this restart (#648 X1).
                 if unavailable.is_some() {
                     self.notice = unavailable;
+                }
+                // #568 B5c-1: a completion this Cube records for this step 2
+                // opens in Completed, and is checked at once (D17), so a
+                // reorg since clears the record without a Refresh. A dead
+                // end is never shown as completed, nor (#662 F1) a split
+                // whose descriptors are still on this device: a record
+                // written before its deletion failed is finished from
+                // Reconcile by completing again (the record is not written
+                // twice), and Completed's copy says they were deleted.
+                if self.dead_end.is_none() && forgotten {
+                    if let Some(completion) = self.recorded_completion_of(self.step2_outcome) {
+                        self.completion = Some(completion);
+                        self.completable = false;
+                        self.stage = Stage::Step2(Step2Stage::Completed);
+                        return self.update_step2(SplitMessage::Step2Reconcile);
+                    }
                 }
                 // The last reconcile's step-1 evidence is kept through the
                 // revocation along with its BTCB2 observation, so its
@@ -1431,8 +1494,15 @@ impl SplitPanel {
                         self.step2_resend = None;
                         self.reconfirmation = Some(view);
                     }
+                    // #658 P3-3: as the resend handler, a lost handle reads
+                    // the journal again; a final refusal (S4-D4) withdraws
+                    // the offer.
+                    Err(reason) if reason.recovery == step2::Step2Recovery::Restart => {
+                        return self.restart_step2(Some(reason.reason));
+                    }
                     Err(reason) => {
                         self.reconfirmation = None;
+                        self.reconfirmation_final |= !reason.retry;
                         self.notice = Some(reason.reason);
                     }
                 }
@@ -1451,7 +1521,11 @@ impl SplitPanel {
                         self.notice = None;
                         self.update_step2(SplitMessage::Step2Reconcile)
                     }
+                    Err(reason) if reason.recovery == step2::Step2Recovery::Restart => {
+                        self.restart_step2(Some(reason.reason))
+                    }
                     Err(reason) => {
+                        self.reconfirmation_final |= !reason.retry;
                         self.notice = Some(reason.reason);
                         Task::none()
                     }
@@ -1466,6 +1540,11 @@ impl SplitPanel {
                     Ok(completion) => {
                         self.notice = None;
                         self.replay = None;
+                        // A later restart under this panel opens it in
+                        // Completed (#568 B5c-1).
+                        self.recorded_completion
+                            .retain(|recorded| recorded.step2_txid != completion.step2_txid);
+                        self.recorded_completion.push(completion.clone());
                         self.completion = Some(completion);
                         self.stage = Stage::Step2(Step2Stage::Completed);
                     }
@@ -1501,6 +1580,10 @@ impl SplitPanel {
                     // D17: the record is gone (or was never written); back
                     // to reconciling, the descriptors still deleted.
                     Ok(step2::CompletionStanding::Lost { status, seen, .. }) => {
+                        if let Some(lost) = self.completion.as_ref() {
+                            self.recorded_completion
+                                .retain(|recorded| recorded.step2_txid != lost.step2_txid);
+                        }
                         self.step2_status = Some(status);
                         self.step2_seen = Some(seen);
                         self.step2_seen_here = Some(seen);

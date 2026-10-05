@@ -1475,7 +1475,21 @@ fn split_panel_has_no_gui_entry_point() {
 /// sources the same way, so its line-spanning markers are still found.
 #[test]
 fn split_entry_point_guard_reads_a_crlf_checkout() {
+    assert_reads_crlf(crate::utils::source_text::as_crlf);
     assert_split_panel_has_no_gui_entry_point(crate::utils::source_text::as_crlf);
+}
+
+/// #657 N1: a CRLF twin really reads CRLF text: `checkout` turns a source
+/// file it guards into text with CR line endings.
+fn assert_reads_crlf(checkout: fn(&str) -> String) {
+    let text = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/app/mod.rs"),
+    )
+    .unwrap();
+    assert!(
+        checkout(&text).contains("\r\n"),
+        "the CRLF twin reads text without CR"
+    );
 }
 
 /// `checkout` is the text a checkout of each source file reads as.
@@ -1649,6 +1663,7 @@ fn split_ui_paths_do_no_blocking_work() {
 /// sources the same way, so its line-spanning markers are still found.
 #[test]
 fn split_ui_blocking_guard_reads_a_crlf_checkout() {
+    assert_reads_crlf(crate::utils::source_text::as_crlf);
     assert_split_ui_paths_do_no_blocking_work(crate::utils::source_text::as_crlf);
 }
 

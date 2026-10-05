@@ -749,7 +749,7 @@ async fn restart_reconciles_only_after_a_recorded_step2_submission() {
         .await,
         // Nothing recorded its return: the dead end comes with it (#625 F2),
         // and no resend is mentioned.
-        Ok(Restart::Reconcile(_, Some(_), None))
+        Ok(Restart::Reconcile(_, Some(_), None, _))
     ));
     assert!(started.elapsed() < Duration::from_millis(1_500));
     assert_eq!(port_submitted.reconcilers.load(Ordering::SeqCst), 1);
@@ -853,13 +853,13 @@ async fn restart_reopens_the_coordinator_only_for_a_resend_the_journal_allows() 
     // No step-2 port (the Vault daemon unloaded or on a route step 2 can't
     // be sent through): the reconciler, saying why.
     match run(&returned, &ports, false).await {
-        Ok(Restart::Reconcile(_, None, Some(note))) => assert_eq!(note, RESEND_NEEDS_VAULT),
+        Ok(Restart::Reconcile(_, None, Some(note), _)) => assert_eq!(note, RESEND_NEEDS_VAULT),
         _ => panic!("no step-2 port"),
     }
     // A step-2 port of another session is not used.
     let other = port_as(&returned, "other-account");
     match run(&returned, &other, true).await {
-        Ok(Restart::Reconcile(_, None, Some(note))) => assert_eq!(note, RESEND_NEEDS_VAULT),
+        Ok(Restart::Reconcile(_, None, Some(note), _)) => assert_eq!(note, RESEND_NEEDS_VAULT),
         _ => panic!("another session's port"),
     }
     assert_eq!(other.uncertain.load(Ordering::SeqCst), 0);
@@ -869,7 +869,7 @@ async fn restart_reopens_the_coordinator_only_for_a_resend_the_journal_allows() 
         "Connect couldn't read Bitcoin Blake2b's status.",
     ));
     match run(&returned, &ports, true).await {
-        Ok(Restart::Reconcile(_, None, Some(note))) => {
+        Ok(Restart::Reconcile(_, None, Some(note), _)) => {
             assert!(note.contains("can't be sent again right now"), "{}", note);
             assert!(note.contains("Connect couldn't read"), "{}", note);
         }
@@ -888,13 +888,13 @@ async fn restart_reopens_the_coordinator_only_for_a_resend_the_journal_allows() 
     assert!(!spent.retry);
     *ports.refuse_uncertain.lock().unwrap() = Some(Step2Refusal::final_(spent.reason));
     match run(&returned, &ports, true).await {
-        Ok(Restart::Reconcile(_, None, Some(note))) => assert_eq!(note, RESEND_COIN_SPENT),
+        Ok(Restart::Reconcile(_, None, Some(note), _)) => assert_eq!(note, RESEND_COIN_SPENT),
         _ => panic!("a spent claimed coin"),
     }
     *ports.refuse_uncertain.lock().unwrap() =
         Some(Step2Refusal::final_("This split can't be resumed here."));
     match run(&returned, &ports, true).await {
-        Ok(Restart::Reconcile(_, None, Some(note))) => {
+        Ok(Restart::Reconcile(_, None, Some(note), _)) => {
             assert!(note.starts_with("Step 2 can't be sent again: "), "{}", note);
             assert!(note.contains("can't be resumed here"), "{}", note);
         }
@@ -911,7 +911,7 @@ async fn restart_reopens_the_coordinator_only_for_a_resend_the_journal_allows() 
     let ports = port(&exhausted);
     assert!(matches!(
         run(&exhausted, &ports, true).await,
-        Ok(Restart::Reconcile(_, Some(_), None))
+        Ok(Restart::Reconcile(_, Some(_), None, _))
     ));
     assert_eq!(ports.uncertain.load(Ordering::SeqCst), 0);
     assert_eq!(ports.reconcilers.load(Ordering::SeqCst), 1);
@@ -922,7 +922,7 @@ async fn restart_reopens_the_coordinator_only_for_a_resend_the_journal_allows() 
     let ports = port(&observed);
     assert!(matches!(
         run(&observed, &ports, true).await,
-        Ok(Restart::Reconcile(_, None, None))
+        Ok(Restart::Reconcile(_, None, None, _))
     ));
     assert_eq!(ports.uncertain.load(Ordering::SeqCst), 0);
     assert_eq!(ports.reconcilers.load(Ordering::SeqCst), 1);
@@ -1403,6 +1403,16 @@ fn step2_panel_layer_is_reached_only_through_the_split_panel() {
             "conflict_close_copy",
             "conflict_closable_copy",
             "CONFLICT_STEP1_SEEN",
+            // #568 B5c-1: the copy sweep.
+            "COMPLETION_CHECK_EXPIRED",
+            "COMPLETION_RECORD_UNAVAILABLE",
+            "describe_completion",
+            "conflict_coin_unspent_copy",
+            "set_split_from",
+            "reconciler_driver",
+            // #662 repair.
+            "COMPLETION_RECHECK_EXPIRED",
+            "describe_recheck",
         ] {
             let named = text
                 .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
@@ -1423,6 +1433,9 @@ fn step2_panel_layer_is_reached_only_through_the_split_panel() {
                     // B5b: where the reconcile-only port records a
                     // completion.
                     "CompletionSite",
+                    // B5c-1: the Cube's completion records, for a restart
+                    // into Completed.
+                    "set_split_from",
                 ]
                 .contains(&ident))
                 || (file == "src/app/view/vault/split.rs"
@@ -1434,6 +1447,11 @@ fn step2_panel_layer_is_reached_only_through_the_split_panel() {
                         "conflict_closable_copy",
                     ]
                     .contains(&ident));
+            // #568 B5c-1 (#658): the service's O1 test drives the
+            // production reconciler driver over a real reconciler.
+            let allowed = allowed
+                || (file == "src/services/claim_coordinator/fork/split/tests/step2/reorg.rs"
+                    && ["reconciler_driver", "RECONFIRMATION_AGAIN"].contains(&ident));
             // `restart`/`Restart` are common words elsewhere: only a path
             // into the step-2 module counts for them.
             let generic = ["restart", "Restart"].contains(&ident)
@@ -1517,5 +1535,6 @@ fn step1_reconfirmation_refusal_copy_names_the_rdts_margin() {
 }
 
 mod close;
+mod copy;
 mod driver;
 mod panel;

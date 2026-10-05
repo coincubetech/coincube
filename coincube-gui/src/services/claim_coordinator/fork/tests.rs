@@ -958,6 +958,10 @@ async fn cached_split_review_expires_without_psbt_change_or_acknowledgement_esca
     let mut h = PreparingHarness::new().await;
     let signed = sign_sweep(h.psbt().psbt().clone(), 2);
     let mut check = h.preparation.check_signing(&context()).await.unwrap();
+    // #659 N1: the check's deadline is within the collection budget (30 s
+    // here), not only the observations' age bound (about 59 s at this
+    // harness's 60 s maximum age).
+    assert!(check.not_after <= Instant::now() + wide_policy().collection_budget);
     // The harness's checks outlast load (`wide_policy`); this one gets the
     // 2 s deadline of the harness's own budget only now, after its
     // collections, so the dispatch and the review below (synchronous, no

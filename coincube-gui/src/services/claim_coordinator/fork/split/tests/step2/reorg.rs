@@ -585,6 +585,71 @@ async fn split_step1_reconfirmation_after_step2_grows_inclusion_history_and_send
     }
 }
 
+/// #568 B5c-1 (#658): O1 through the panel's production reconciler driver
+/// over a real reconciler, not the panel tests' fakes. The driver keeps
+/// the review its view was made from and takes it once: an
+/// acknowledgement without a review, or a second one of the same review,
+/// is refused with "review it again" and records nothing; a reconcile
+/// drops a held review; one acknowledgement adds one inclusion-history
+/// entry and sends nothing, and step 1 is eligible again after it.
+#[tokio::test(flavor = "multi_thread")]
+async fn split_step1_reconfirmation_through_the_panels_reconciler_driver() {
+    use crate::app::state::vault::split::step2::{reconciler_driver, RECONFIRMATION_AGAIN};
+    let Submitted {
+        h,
+        view,
+        coordinator,
+        sends,
+        _server,
+        ..
+    } = submitted_over(true).await;
+    drop(coordinator);
+    view.step1_in(moved(), 6);
+    let reconciler = reopen(&h, Box::new(view.clone()));
+    let mut driver = reconciler_driver(reconciler, h.sender.subscribe(), 7);
+    let remined = Step1AfterStep2::Remined {
+        previous: recorded_block(),
+        confirmed: moved(),
+    };
+    let (_, _, after) = driver.reconcile(&context()).await.unwrap();
+    assert_eq!(after, remined);
+
+    // Nothing to acknowledge before a review.
+    let refused = driver.confirm_reconfirmation(&context()).await.unwrap_err();
+    assert_eq!(refused.reason, RECONFIRMATION_AGAIN);
+    assert!(refused.retry);
+    // A reconcile drops a held review.
+    driver.review_reconfirmation(&context()).await.unwrap();
+    driver.reconcile(&context()).await.unwrap();
+    let refused = driver.confirm_reconfirmation(&context()).await.unwrap_err();
+    assert_eq!(refused.reason, RECONFIRMATION_AGAIN);
+    assert!(h
+        .temp
+        .journal()
+        .get("inclusion_history")
+        .is_none_or(|history| history == &json!([])));
+
+    let view = driver.review_reconfirmation(&context()).await.unwrap();
+    assert_eq!((view.previous, view.confirmed), (recorded_block(), moved()));
+    assert_eq!(view.confirmations, 6);
+    assert!(view.is_live());
+    driver.confirm_reconfirmation(&context()).await.unwrap();
+    // Taken once.
+    let refused = driver.confirm_reconfirmation(&context()).await.unwrap_err();
+    assert_eq!(refused.reason, RECONFIRMATION_AGAIN);
+    let inclusion = Reconfirmation {
+        previous: recorded_block(),
+        confirmed: moved(),
+    };
+    assert_eq!(
+        h.temp.journal()["inclusion_history"],
+        json!([serde_json::to_value(inclusion).unwrap()])
+    );
+    let (_, _, after) = driver.reconcile(&context()).await.unwrap();
+    assert_eq!(after, Step1AfterStep2::Eligible);
+    assert_eq!(sends.load(Ordering::SeqCst), 1, "only the original send");
+}
+
 /// O1's review is one use and bound: a later review supersedes it, it
 /// expires, another owner's review (same revision) is refused, and a changed
 /// view (a new block, or step 1 re-mined elsewhere again) between review and

@@ -247,16 +247,22 @@ struct FakeCompletion {
     /// The check: `None` mints nothing; `Some(live)` mints evidence that is
     /// live (or not) when its record is refused.
     minted: Option<bool>,
+    /// #656 F1: the check itself refused.
+    check_fails: Option<CoordinatorError>,
     persist_fails: bool,
     forget_fails: Option<CoordinatorError>,
+    /// #662 R10: the D17 recheck refuses with this.
+    stands_fails: Option<CoordinatorError>,
 }
 impl FakeCompletion {
     fn new() -> Self {
         Self {
             calls: Arc::default(),
             minted: Some(true),
+            check_fails: None,
             persist_fails: false,
             forget_fails: None,
+            stands_fails: None,
         }
     }
 }
@@ -265,6 +271,9 @@ impl CompletionCore for FakeCompletion {
     type Evidence = FakeEvidence;
     async fn check(&mut self, _: &Context) -> Result<Option<FakeEvidence>, CoordinatorError> {
         self.calls.lock().unwrap().push(Call::Check);
+        if let Some(error) = self.check_fails.take() {
+            return Err(error);
+        }
         Ok(self.minted.map(|live| FakeEvidence { live }))
     }
     fn record(_: &FakeEvidence) -> SplitFromRecord {
@@ -291,6 +300,19 @@ impl CompletionCore for FakeCompletion {
         match self.forget_fails.take() {
             Some(error) => Err(error),
             None => Ok(()),
+        }
+    }
+    async fn stands(
+        &mut self,
+        _: &Context,
+        _: &CompletionSite,
+    ) -> Result<SplitCompletionReconciliation, CoordinatorError> {
+        match self.stands_fails.take() {
+            Some(error) => Err(error),
+            None => Ok(SplitCompletionReconciliation::Standing {
+                status: Status::Unchecked,
+                transaction: TransactionObservation::Absent,
+            }),
         }
     }
 }
@@ -374,6 +396,22 @@ async fn recon_driver_persists_before_forgetting() {
         core,
     )
     .await;
+    // #656 F1: the check's own evidence lapsing, and the completion
+    // record's persistence failing, read as Split's lines, never the Claim
+    // or submission copy.
+    let mut core = FakeCompletion::new();
+    core.check_fails = Some(CoordinatorError::ExpiredEvidence);
+    refused(COMPLETION_CHECK_EXPIRED, &[Call::Check], core).await;
+    let mut core = FakeCompletion::new();
+    core.forget_fails = Some(CoordinatorError::CompletionPersistence(
+        "Claim Cube is missing or ambiguous".into(),
+    ));
+    refused(
+        COMPLETION_RECORD_UNAVAILABLE,
+        &[Call::Check, Call::Persist, Call::Forget],
+        core,
+    )
+    .await;
 
     // No Vault named in the Cube's settings: final, nothing checked.
     let core = FakeCompletion::new();
@@ -390,4 +428,43 @@ async fn recon_driver_persists_before_forgetting() {
     let refusal = d.complete_inner(&context()).await.unwrap_err();
     assert_eq!(refusal.recovery, Step2Recovery::Restart);
     assert_eq!(refusal.reason, COMPLETION_INTERRUPTED);
+}
+
+/// #662 R10: the D17 recheck through the driver. Its refusals read as the
+/// completion's own lines: expired evidence says the record may already be
+/// removed (never "complete the split", never Claim's submission copy), and
+/// the record's persistence is the completion record's line (never "Claim
+/// status"). Both are retryable. CF: the recheck maps through
+/// `describe_check`.
+#[tokio::test(flavor = "multi_thread")]
+async fn recon_driver_recheck_refusals_have_split_copy() {
+    let mut d = recon_driver(FakeCompletion::new());
+    assert!(matches!(
+        d.stands_inner(&context()).await,
+        Ok(CompletionStanding::Standing { .. })
+    ));
+    for (error, copy) in [
+        (
+            CoordinatorError::ExpiredEvidence,
+            COMPLETION_RECHECK_EXPIRED,
+        ),
+        (
+            CoordinatorError::CompletionPersistence("Claim Cube is missing or ambiguous".into()),
+            COMPLETION_RECORD_UNAVAILABLE,
+        ),
+    ] {
+        let mut core = FakeCompletion::new();
+        core.stands_fails = Some(error);
+        let mut d = recon_driver(core);
+        let refusal = d.stands_inner(&context()).await.unwrap_err();
+        assert_eq!(refusal.reason, copy);
+        assert!(refusal.retry);
+        assert!(!refusal.reason.contains("Claim"));
+        assert!(!refusal.reason.contains("complete the split"));
+        assert!(d.core.is_some());
+    }
+    let mut d = recon_driver(FakeCompletion::new());
+    d.site = None;
+    let refusal = d.stands_inner(&context()).await.unwrap_err();
+    assert_eq!(refusal.reason, COMPLETION_NO_VAULT);
 }
