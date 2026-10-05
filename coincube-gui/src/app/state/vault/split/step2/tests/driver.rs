@@ -247,6 +247,8 @@ struct FakeCompletion {
     /// The check: `None` mints nothing; `Some(live)` mints evidence that is
     /// live (or not) when its record is refused.
     minted: Option<bool>,
+    /// #656 F1: the check itself refused.
+    check_fails: Option<CoordinatorError>,
     persist_fails: bool,
     forget_fails: Option<CoordinatorError>,
 }
@@ -255,6 +257,7 @@ impl FakeCompletion {
         Self {
             calls: Arc::default(),
             minted: Some(true),
+            check_fails: None,
             persist_fails: false,
             forget_fails: None,
         }
@@ -265,6 +268,9 @@ impl CompletionCore for FakeCompletion {
     type Evidence = FakeEvidence;
     async fn check(&mut self, _: &Context) -> Result<Option<FakeEvidence>, CoordinatorError> {
         self.calls.lock().unwrap().push(Call::Check);
+        if let Some(error) = self.check_fails.take() {
+            return Err(error);
+        }
         Ok(self.minted.map(|live| FakeEvidence { live }))
     }
     fn record(_: &FakeEvidence) -> SplitFromRecord {
@@ -370,6 +376,22 @@ async fn recon_driver_persists_before_forgetting() {
     core.forget_fails = Some(CoordinatorError::ExpiredEvidence);
     refused(
         COMPLETION_NOT_FORGOTTEN,
+        &[Call::Check, Call::Persist, Call::Forget],
+        core,
+    )
+    .await;
+    // #656 F1: the check's own evidence lapsing, and the completion
+    // record's persistence failing, read as Split's lines, never the Claim
+    // or submission copy.
+    let mut core = FakeCompletion::new();
+    core.check_fails = Some(CoordinatorError::ExpiredEvidence);
+    refused(COMPLETION_CHECK_EXPIRED, &[Call::Check], core).await;
+    let mut core = FakeCompletion::new();
+    core.forget_fails = Some(CoordinatorError::CompletionPersistence(
+        "Claim Cube is missing or ambiguous".into(),
+    ));
+    refused(
+        COMPLETION_RECORD_UNAVAILABLE,
         &[Call::Check, Call::Persist, Call::Forget],
         core,
     )

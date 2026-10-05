@@ -1403,6 +1403,11 @@ fn step2_panel_layer_is_reached_only_through_the_split_panel() {
             "conflict_close_copy",
             "conflict_closable_copy",
             "CONFLICT_STEP1_SEEN",
+            // #568 B5c-1: the copy sweep.
+            "COMPLETION_CHECK_EXPIRED",
+            "COMPLETION_RECORD_UNAVAILABLE",
+            "describe_completion",
+            "conflict_coin_unspent_copy",
         ] {
             let named = text
                 .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
@@ -1517,5 +1522,6 @@ fn step1_reconfirmation_refusal_copy_names_the_rdts_margin() {
 }
 
 mod close;
+mod copy;
 mod driver;
 mod panel;

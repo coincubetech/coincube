@@ -1448,11 +1448,13 @@ async fn step2_reconcile_warning_has_one_case_per_outcome_and_never_the_replay_l
         let warning = panel.step2_warning().expect("a warning");
         assert_eq!(warning_lines(&panel), [warning.as_str()]);
         assert!(seen.insert(warning.clone()), "one case each: {:?}", after);
-        assert!(
-            warning.ends_with("Check status again later."),
-            "{}",
-            warning
-        );
+        // #658: a terminal conflict's way out is the close beside it.
+        let tail = if matches!(after, Step1AfterStep2::Conflict(c) if c.is_terminal()) {
+            "You can close this split after a fresh check of Bitcoin."
+        } else {
+            "Check status again later."
+        };
+        assert!(warning.ends_with(tail), "{}", warning);
         if let Step1AfterStep2::Conflict(conflict) = after {
             assert!(warning.contains(&conflict.outpoint().to_string()));
         }
@@ -1492,6 +1494,11 @@ async fn step2_reconcile_warning_has_one_case_per_outcome_and_never_the_replay_l
             "sent again",
             CANNOT_REPLAY,
         ] {
+            // #658: S4b's close is a terminal conflict's way out, and its
+            // warning names it.
+            if never == "lose" && tail != "Check status again later." {
+                continue;
+            }
             assert!(!warning.contains(never), "{}: {}", never, warning);
         }
         assert_eq!(panel.replay_label(), None);

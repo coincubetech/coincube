@@ -440,7 +440,7 @@ fn step2_body<'a>(
             // confirmed with step 1 eligible.
             if panel.can_complete() {
                 body = body.push(p1_regular(
-                    "Step 2 is confirmed on Bitcoin Blake2b and step 1 is six deep on Bitcoin. Completing checks both chains once more, records the split on this Cube by the source wallet's fingerprint only, then deletes the source wallet's descriptors from this device.",
+                    "Step 2 is confirmed on Bitcoin Blake2b and step 1 is six deep on Bitcoin. Completing checks both chains once more, records the split on this Cube only by a digest (a hash) of the source wallet's descriptor, then deletes the source wallet's descriptors from this device.",
                 ));
                 actions = actions.push(primary("Complete split", SplitMessage::Step2Complete));
             }

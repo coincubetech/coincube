@@ -1161,6 +1161,25 @@ pub fn describe(error: claim_coordinator::Error) -> String {
             "Bitcoin Blake2b's replay protection expires within {}. Nothing was sent.",
             describe_duration(EXPIRY_MARGIN_SECONDS)
         ),
+        // #568 B5c-1: Split's own copy wherever Claim's names a claim, the
+        // Claim panel or a "Claim Cube".
+        E::UnsafeLegacyAlternative => "The signed transaction retains legacy signatures that can independently spend its coins, so it was not finalized and nothing was sent. Sign again from the unsigned transaction, collecting only the signatures it needs.".to_string(),
+        E::Journal(error) => {
+            format!("Couldn't record this split on this device ({error:?}).")
+        }
+        E::Preflight(crate::services::claim_preflight::Error::BackendChanged) => {
+            "The connection changed since the review, so nothing was sent. Review it again."
+                .to_string()
+        }
+        E::SubmissionAlreadyRecorded => {
+            "A submission is already recorded for this split; it can only be tracked now."
+                .to_string()
+        }
+        E::CompletionPersistence(error) => {
+            log::warn!("Unable to update the Split completion record: {error}");
+            "Couldn't update this split's completion record in this Cube. Check status again."
+                .to_string()
+        }
         other => crate::app::state::vault::claim::describe(other),
     }
 }

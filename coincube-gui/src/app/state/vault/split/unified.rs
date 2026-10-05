@@ -318,11 +318,57 @@ pub fn describe_seed(error: &SeedSetError) -> String {
     }
 }
 
+/// #660: the single step has no step 1 and no step 2. A coordinator
+/// refusal reads as the two-step route's ([`describe_check`]) except where
+/// that copy names step 1 or step 2.
+pub fn describe_unified_check(error: claim_coordinator::Error) -> Step2Refusal {
+    use claim_coordinator::Error as E;
+    let reason = match &error {
+        E::NotReady(coincube_core::claim::Assessment::WaitingForDepth { confirmations }) => {
+            format!(
+                "The sweep isn't ready yet ({confirmations} of {} confirmations). Check status again.",
+                coincube_core::claim::MIN_CONFIRMATIONS
+            )
+        }
+        E::NotReady(coincube_core::claim::Assessment::Reorged) => {
+            "Bitcoin Blake2b reorganized since the last check, so nothing was sent. Check status again.".to_string()
+        }
+        E::Preflight(crate::services::claim_preflight::Error::BackendChanged) => {
+            "This Vault's connection changed since the review, so nothing was sent. Review the sweep again.".to_string()
+        }
+        _ => return describe_check(error),
+    };
+    Step2Refusal {
+        reason,
+        ..describe_check(error)
+    }
+}
+
+/// #660: a target reservation or proof refusal on the single step. Where
+/// the two-step copy ([`describe_target`]) names step 1 or step 2, this one
+/// names the sweep; the rest reads as there.
+pub fn describe_unified_target(error: TargetError) -> Step2Refusal {
+    match error {
+        TargetError::Coordinator(error) => describe_unified_check(error),
+        TargetError::NotTracking => Step2Refusal::retry(
+            "No address can be reserved for the sweep yet. Check status again.",
+        ),
+        TargetError::NoReservation => {
+            Step2Refusal::retry("No address is reserved for the sweep yet. Try again.")
+        }
+        TargetError::Used(chain) => Step2Refusal::retry(format!(
+            "The address reserved for the sweep already has history on {}, so it is not fresh. It won't be used; try again to reserve a new one.",
+            step2::chain_name(chain)
+        )),
+        other => describe_target(other),
+    }
+}
+
 /// Copy for a refused single-step operation.
 pub fn describe_unified(error: UnifiedError) -> Step2Refusal {
     match error {
-        UnifiedError::Coordinator(error) => describe_check(error),
-        UnifiedError::Target(error) => describe_target(error),
+        UnifiedError::Coordinator(error) => describe_unified_check(error),
+        UnifiedError::Target(error) => describe_unified_target(error),
         UnifiedError::FeeUnavailable => Step2Refusal::retry(
             "Connect has no Bitcoin Blake2b fee estimate right now, so the sweep can't be priced. Nothing was built; try again shortly.",
         ),
@@ -711,15 +757,24 @@ impl<C: UnifiedCore> UnifiedDriver<C> {
     /// exactly once; an unavailable or stale proof never replaces anything.
     async fn ensure_target(&mut self, context: &Context) -> Result<(), Step2Refusal> {
         if self.core.target_index().is_none() {
-            self.core.reserve(context).await.map_err(describe_target)?;
+            self.core
+                .reserve(context)
+                .await
+                .map_err(describe_unified_target)?;
         }
         match self.core.prove(context).await {
             Ok(()) => Ok(()),
             Err(TargetError::Used(_)) => {
-                self.core.reserve(context).await.map_err(describe_target)?;
-                self.core.prove(context).await.map_err(describe_target)
+                self.core
+                    .reserve(context)
+                    .await
+                    .map_err(describe_unified_target)?;
+                self.core
+                    .prove(context)
+                    .await
+                    .map_err(describe_unified_target)
             }
-            Err(error) => Err(describe_target(error)),
+            Err(error) => Err(describe_unified_target(error)),
         }
     }
 }
@@ -828,7 +883,7 @@ impl UnifiedRecon for ReconDriver {
             .reconcile_sweep(context)
             .await
             .map(|reconciled| reconciled.sweep)
-            .map_err(describe_check)
+            .map_err(describe_unified_check)
     }
 }
 
@@ -894,7 +949,7 @@ impl UnifiedPort for ProductionUnified {
         )
         .map_err(|error| match error {
             claim_coordinator::Error::Unsupported => Step2Refusal::final_(UNIFIED_NEEDS_VAULT),
-            error => describe_check(error),
+            error => describe_unified_check(error),
         })?;
         let production = step2::fork_production(&self.session, self.expected, &self.generation)?;
         let UnifiedOpen {
@@ -918,8 +973,9 @@ impl UnifiedPort for ProductionUnified {
         } else {
             // The journal is created only at confirmation (U3); its private
             // directory may be made now.
-            claim_workflow::prepare_directory(&directory)
-                .map_err(|error| describe_check(claim_coordinator::Error::Journal(error)))?;
+            claim_workflow::prepare_directory(&directory).map_err(|error| {
+                describe_unified_check(claim_coordinator::Error::Journal(error))
+            })?;
             UnifiedCoordinator::new(
                 &directory,
                 target_cube,
@@ -931,7 +987,7 @@ impl UnifiedPort for ProductionUnified {
                 CHECK_POLICY,
             )
         }
-        .map_err(describe_check)?;
+        .map_err(describe_unified_check)?;
         Ok(Box::new(UnifiedDriver::new(LiveCore {
             coordinator,
             daemon,
@@ -952,7 +1008,7 @@ impl UnifiedPort for ProductionUnified {
             step2::fork_production(&self.session, self.expected, &self.generation)?,
             CHECK_POLICY,
         )
-        .map_err(describe_check)?;
+        .map_err(describe_unified_check)?;
         Ok(Box::new(ReconDriver(reconciler)))
     }
 }
