@@ -301,8 +301,8 @@ async fn add_seed(panel: &mut SplitPanel, byte: u8, passphrase: &str) {
     .await;
     send(panel, UnifiedMessage::AddSeed).await;
     // The buffers are emptied by every attempt.
-    assert!(panel.unified().words().is_empty());
-    assert!(panel.unified().passphrase().is_empty());
+    assert!(panel.unified().typed_words().is_empty());
+    assert!(panel.unified().typed_passphrase().is_empty());
 }
 
 /// Two seeds of the 2-of-3 sign; the review shows only the Protected pill
@@ -393,7 +393,7 @@ async fn unified_cancel_close_and_revoke_scrub_the_seed_set() {
             UnifiedMessage::Passphrase(SeedText::from("typed".to_owned())),
         )
         .await;
-        assert!(!panel.unified().words().is_empty());
+        assert!(!panel.unified().typed_words().is_empty());
         match exit {
             "cancel" => {
                 send(&mut panel, UnifiedMessage::Cancel).await;
@@ -409,8 +409,8 @@ async fn unified_cancel_close_and_revoke_scrub_the_seed_set() {
         }
         assert!(!panel.unified().holds_seeds(), "{}", exit);
         assert_eq!(panel.unified().held(), 0, "{}", exit);
-        assert!(panel.unified().words().is_empty(), "{}", exit);
-        assert!(panel.unified().passphrase().is_empty(), "{}", exit);
+        assert!(panel.unified().typed_words().is_empty(), "{}", exit);
+        assert!(panel.unified().typed_passphrase().is_empty(), "{}", exit);
         assert!(port.calls.revoked.load(Ordering::SeqCst), "{}", exit);
         // Reviewer-660 F5: the revoked coordinator is dropped, not kept.
         assert!(panel.unified.flow.is_none(), "{}", exit);
@@ -636,13 +636,127 @@ fn split_unified_holds_seeds_only_zeroized() {
     );
     assert!(!printed.contains(&*mnemonic(1).to_string()));
     assert!(printed.contains("<redacted>"));
-    // Reviewer-660 F2: no copy of the typed text. The seed text is read
-    // (`as_str()`) only where the view hands it to its secure input; the
-    // panel only moves the buffers out (`take`), empties them, tests them
-    // for emptiness, replaces them or lends them to the view; and nothing
-    // in the route logs or prints.
+    // Reviewer-660 F2 and Reviewer-660661d D1: no copy of the typed text,
+    // anywhere in the app. The text is read only through
+    // `SeedText::expose_for_secure_input`, which the view's one secure input
+    // calls; the buffers are lent only through `typed_words` and
+    // `typed_passphrase`, which only the view's seed stage calls. Every
+    // non-test source file under `src` is scanned.
+    fn sources(dir: &std::path::Path, root: &std::path::Path, out: &mut Vec<(String, String)>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            if path.is_dir() {
+                if name != "tests" {
+                    sources(&path, root, out);
+                }
+            } else if name.ends_with(".rs") && name != "tests.rs" {
+                let text = std::fs::read_to_string(&path)
+                    .unwrap()
+                    .replace("\r\n", "\n");
+                // Production text: up to an inline test module.
+                let cut = ["\n#[cfg(test)]\nmod ", "\n#[cfg(all(test"]
+                    .iter()
+                    .filter_map(|marker| text.find(marker))
+                    .min()
+                    .unwrap_or(text.len());
+                let file = path
+                    .strip_prefix(root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                out.push((file, text[..cut].to_string()));
+            }
+        }
+    }
+    let mut all = Vec::new();
+    sources(&src, &src, &mut all);
+    assert!(all.len() > 100, "{}", all.len());
+    for (token, sites) in [
+        (
+            "expose_for_secure_input(",
+            [
+                ("app/state/vault/split/unified.rs", 1),
+                ("app/view/vault/split.rs", 1),
+            ],
+        ),
+        (
+            "typed_words(",
+            [
+                ("app/state/vault/split/unified.rs", 1),
+                ("app/view/vault/split.rs", 1),
+            ],
+        ),
+        (
+            "typed_passphrase(",
+            [
+                ("app/state/vault/split/unified.rs", 1),
+                ("app/view/vault/split.rs", 1),
+            ],
+        ),
+    ] {
+        let found: Vec<(String, usize)> = all
+            .iter()
+            .map(|(file, text)| (file.clone(), text.matches(token).count()))
+            .filter(|(_, n)| *n > 0)
+            .collect();
+        let expected: Vec<(String, usize)> =
+            sites.iter().map(|(f, n)| (f.to_string(), *n)).collect();
+        let mut found = found;
+        found.sort();
+        assert_eq!(found, expected, "{}", token);
+    }
+    // No other read of the text: `SeedText` has no `as_str`.
     assert_eq!(unified.matches("as_str()").count(), 0);
-    assert_eq!(view.matches("as_str()").count(), 1);
+    // In `unified.rs`: the definitions only.
+    assert!(unified.contains("pub(in crate::app) fn expose_for_secure_input(&self) -> &str {"));
+    // In the view: inside `seed_input`, as the secure input's value; and the
+    // two buffers handed to it in the seed stage.
+    let input = &view[view.find("fn seed_input<").unwrap()..];
+    let input = &input[..input.find("\n}\n").unwrap()];
+    assert!(input.contains(
+        "text_input(placeholder, value.expose_for_secure_input())\n        .secure(true)"
+    ));
+    let stage = &view[view.find("fn unified_body<").unwrap()..];
+    let stage = &stage[..stage.find("\n}\n").unwrap()];
+    assert!(stage
+        .contains("seed_input(\"Recovery phrase\", state.typed_words(), UnifiedMessage::Words)"));
+    assert!(stage
+        .contains("state.typed_passphrase(),\n                    UnifiedMessage::Passphrase,"));
+    // The moved-out buffers flow only into the seed set: in the AddSeed arm,
+    // `words` and `passphrase` are bound from `take()` and used only as
+    // `seeds.add(words, passphrase)`.
+    let arm = &unified[unified.find("            UnifiedMessage::AddSeed").unwrap()..];
+    let arm = &arm[..arm.find("            UnifiedMessage::ClearSeeds").unwrap()];
+    let mut rest = arm.to_string();
+    for allowed in [
+        "self.unified.words.is_empty()",
+        "let (words, passphrase) =",
+        "(self.unified.words.take(), self.unified.passphrase.take())",
+        "seeds.add(words, passphrase)",
+    ] {
+        assert_eq!(rest.matches(allowed).count(), 1, "{}", allowed);
+        rest = rest.replace(allowed, "");
+    }
+    for ident in ["words", "passphrase"] {
+        let mut at = 0;
+        while let Some(found) = rest[at..].find(ident) {
+            let start = at + found;
+            let end = start + ident.len();
+            let before = rest[..start].chars().last().unwrap_or(' ');
+            let after = rest[end..].chars().next().unwrap_or(' ');
+            let word = !(before.is_alphanumeric() || before == '_')
+                && !(after.is_alphanumeric() || after == '_');
+            assert!(
+                !word,
+                "the moved-out `{}` is used beyond `seeds.add`: {:?}",
+                ident,
+                &rest[start.saturating_sub(40)..(end + 40).min(rest.len())]
+            );
+            at = end;
+        }
+    }
+    // Nothing in the route logs or prints.
     for token in [
         "tracing::",
         "log::",
@@ -671,12 +785,6 @@ fn split_unified_holds_seeds_only_zeroized() {
                 &rest[..rest.len().min(40)]
             );
         }
-        // The accessors lend the buffer itself, never a copy.
-        let accessor = format!(
-            "pub fn {}(&self) -> &SeedText {{\n        &self.{}\n    }}",
-            field, field
-        );
-        assert!(unified.contains(&accessor), "{}", accessor);
         // Inside `UnifiedState`: emptied by `scrub`, or lent by the accessor.
         let own = format!("self.{}", field);
         for (at, _) in unified.match_indices(&own) {
@@ -701,7 +809,6 @@ fn split_unified_holds_seeds_only_zeroized() {
     assert_eq!(view.matches("text_input(").count(), 1);
     let input = &view[view.find("fn seed_input<").unwrap()..];
     let input = &input[..input.find("\n}\n").unwrap()];
-    assert!(input.contains("text_input(placeholder, value.as_str())\n        .secure(true)"));
     assert!(input.contains("SeedText::from(typed)"));
     let body = &view[view.find("fn unified_body<").unwrap()..];
     let body = &body[..body.find("\n}\n").unwrap()];
@@ -842,8 +949,8 @@ async fn unified_clear_phrases_scrubs_the_set_and_inputs() {
     assert_eq!(panel.stage(), &Stage::Unified(UnifiedStage::EnterSeeds));
     assert_eq!(panel.unified().held(), 0);
     assert_eq!(panel.unified.seeds.as_ref().map(SeedSet::len), Some(0));
-    assert!(panel.unified().words().is_empty());
-    assert!(panel.unified().passphrase().is_empty());
+    assert!(panel.unified().typed_words().is_empty());
+    assert!(panel.unified().typed_passphrase().is_empty());
     add_seed(&mut panel, 1, "").await;
     assert_eq!(panel.unified().held(), 1, "{:?}", panel.notice());
     assert_eq!(panel.notice(), None);
