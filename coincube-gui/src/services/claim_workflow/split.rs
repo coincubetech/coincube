@@ -162,40 +162,76 @@ pub(super) struct SplitRecord {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     step2_returned: bool,
     /// #568 S4, O4: after step 2 was submitted, fresh reads found step 1
-    /// absent from Bitcoin and a claimed coin spent there by another
-    /// transaction, so step 1 can never confirm and the split can't
-    /// complete. Terminal (S4-D2): never cleared or replaced. Absent until
-    /// recorded, so a journal without it serializes exactly as before and
-    /// stays at version 8; a binary without the field refuses one that has
-    /// it (`deny_unknown_fields`).
+    /// absent from Bitcoin and a claimed coin missing from Bitcoin's unspent
+    /// outputs, which may be a mempool spend (S4-D5). Provisional until a
+    /// later reconcile finds the same coin still missing and step 1 still
+    /// absent at least `MIN_CONFIRMATIONS` blocks higher; then terminal
+    /// (S4-D2): step 1 can never confirm, the split can't complete, and the
+    /// record is never cleared. A provisional one is cleared when a fresh
+    /// read shows step 1 or the coin again. Absent until recorded, so a
+    /// journal without it serializes exactly as before and stays at version
+    /// 8; a binary without the field refuses one that has it
+    /// (`deny_unknown_fields`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     step1_conflict: Option<Step1Conflict>,
 }
 
-/// #568 S4, O4: the claimed coin a fresh Bitcoin read found spent by
-/// another transaction while step 1 was absent, and the Bitcoin tip of the
-/// reconcile that found it. The spender is not named (S4-D1: Connect does
-/// not serve `/tx/{txid}/outspend`).
+/// #568 S4, O4: the claimed coin fresh Bitcoin reads found missing from
+/// its address's unspent outputs while step 1 was absent, the Bitcoin tip
+/// of the reconcile that first found it, and (S4-D5) the tip at which it
+/// became terminal. The spender is not named (S4-D1: Connect does not
+/// serve `/tx/{txid}/outspend`), so whether the spend is confirmed is
+/// inferred only from the coin staying missing as the chain grows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Step1Conflict {
     outpoint: OutPoint,
     bitcoin_tip: BlockRef,
+    /// S4-D5: the Bitcoin tip, at least `MIN_CONFIRMATIONS` above
+    /// `bitcoin_tip`, of a later reconcile that found the coin still
+    /// missing and step 1 still absent. Absent while provisional.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    terminal_at: Option<BlockRef>,
 }
 impl Step1Conflict {
+    /// A provisional conflict first seen at `bitcoin_tip`.
     pub(crate) fn new(outpoint: OutPoint, bitcoin_tip: BlockRef) -> Self {
         Self {
             outpoint,
             bitcoin_tip,
+            terminal_at: None,
         }
     }
-    /// The claimed coin spent on Bitcoin by another transaction.
+    /// This conflict made terminal at `tip`, if `tip` is at least
+    /// `MIN_CONFIRMATIONS` blocks above the tip it was first seen at.
+    pub(crate) fn terminal(self, tip: BlockRef) -> Option<Self> {
+        let buried = self
+            .bitcoin_tip
+            .height
+            .checked_add(coincube_core::claim::MIN_CONFIRMATIONS)
+            .is_some_and(|height| tip.height >= height);
+        buried.then_some(Self {
+            terminal_at: Some(tip),
+            ..self
+        })
+    }
+    /// The claimed coin missing from Bitcoin's unspent outputs.
     pub fn outpoint(&self) -> OutPoint {
         self.outpoint
     }
-    /// The Bitcoin tip of the reconcile that found it.
+    /// The Bitcoin tip of the reconcile that first found it.
     pub fn bitcoin_tip(&self) -> BlockRef {
         self.bitcoin_tip
+    }
+    /// The Bitcoin tip at which it became terminal; `None` while provisional.
+    pub fn terminal_at(&self) -> Option<BlockRef> {
+        self.terminal_at
+    }
+    /// Terminal (S4-D2): step 1 can never confirm and the split can't
+    /// complete. Otherwise provisional (S4-D5): the spend may still be
+    /// unconfirmed.
+    pub fn is_terminal(&self) -> bool {
+        self.terminal_at.is_some()
     }
 }
 
@@ -514,6 +550,10 @@ pub(super) fn validate(intent: &Intent) -> Result<(), Error> {
         record.kind != SplitKind::Split
             || intent.fork_submission.is_none()
             || !p.claimed_prevouts.contains(&conflict.outpoint)
+            || conflict.terminal_at.is_some_and(|at| {
+                Step1Conflict::new(conflict.outpoint, conflict.bitcoin_tip).terminal(at)
+                    != Some(conflict)
+            })
     }) {
         return Err(Error::InvalidPlan);
     }
@@ -1107,8 +1147,8 @@ impl Controller {
         })
     }
 
-    /// #568 S4, O4: the recorded step-1 conflict, if any. Terminal: once
-    /// recorded it is never cleared, and the split can't complete.
+    /// #568 S4, O4: the recorded step-1 conflict, if any, provisional or
+    /// terminal ([`Step1Conflict::is_terminal`]).
     pub fn split_step1_conflict(&self) -> Option<Step1Conflict> {
         self.intent
             .split
@@ -1116,13 +1156,13 @@ impl Controller {
             .and_then(|record| record.step1_conflict)
     }
 
-    /// #568 S4, O4: record that fresh Bitcoin reads after the step-2
-    /// submission found step 1 absent and `conflict`'s coin spent by another
-    /// transaction. The step-2 reconciler's fresh reads are the only caller;
-    /// a read failure never comes here. A two-step record with a recorded
-    /// step-2 submission only. Terminal (S4-D2): a recorded conflict is kept
-    /// and never replaced, so recording again is a no-op. Grants nothing
-    /// and leaves the current check alone.
+    /// #568 S4, O4: record a provisional conflict (S4-D5): fresh Bitcoin
+    /// reads after the step-2 submission found step 1 absent and the coin
+    /// missing from its address's unspent outputs. The step-2 reconciler's
+    /// fresh reads are the only caller; a read failure never comes here. A
+    /// two-step record with a recorded step-2 submission and no conflict
+    /// recorded only; recording the same one again is a no-op. Grants
+    /// nothing and leaves the current check alone.
     pub(crate) fn record_split_step1_conflict(
         &mut self,
         current: &Context,
@@ -1130,15 +1170,54 @@ impl Controller {
     ) -> Result<(), Error> {
         self.ensure_context(current)?;
         let record = self.record_of(SplitKind::Split)?;
-        if self.intent.fork_submission.is_none() {
+        if self.intent.fork_submission.is_none() || conflict.is_terminal() {
             return Err(Error::InvalidPlan);
         }
-        if record.step1_conflict.is_some() {
+        match record.step1_conflict {
+            Some(recorded) if recorded == conflict => return Ok(()),
+            Some(_) => return Err(Error::Conflict),
+            None => {}
+        }
+        self.store_step1_conflict(Some(conflict))
+    }
+
+    /// S4-D5: make the recorded provisional conflict terminal at `tip`,
+    /// once a later reconcile found the same coin still missing and step 1
+    /// still absent there. Refused (`Unchecked`) below `MIN_CONFIRMATIONS`
+    /// blocks above the tip it was first seen at. A terminal one is kept.
+    pub(crate) fn confirm_split_step1_conflict(
+        &mut self,
+        current: &Context,
+        tip: BlockRef,
+    ) -> Result<(), Error> {
+        self.ensure_context(current)?;
+        let recorded = self
+            .record_of(SplitKind::Split)?
+            .step1_conflict
+            .ok_or(Error::InvalidPlan)?;
+        if recorded.is_terminal() {
             return Ok(());
         }
+        let terminal = recorded.terminal(tip).ok_or(Error::Unchecked)?;
+        self.store_step1_conflict(Some(terminal))
+    }
+
+    /// S4-D5: clear a provisional conflict, after a fresh read showed step
+    /// 1 on Bitcoin (mempool or block) or the coin unspent again. A
+    /// terminal one is never cleared (`Conflict`).
+    pub(crate) fn clear_split_step1_conflict(&mut self, current: &Context) -> Result<(), Error> {
+        self.ensure_context(current)?;
+        match self.record_of(SplitKind::Split)?.step1_conflict {
+            None => Ok(()),
+            Some(recorded) if recorded.is_terminal() => Err(Error::Conflict),
+            Some(_) => self.store_step1_conflict(None),
+        }
+    }
+
+    fn store_step1_conflict(&mut self, conflict: Option<Step1Conflict>) -> Result<(), Error> {
         let mut next = self.intent.clone();
         if let Some(record) = next.split.as_mut() {
-            record.step1_conflict = Some(conflict);
+            record.step1_conflict = conflict;
         }
         validate(&next)?;
         self.journal.store(&next)?;

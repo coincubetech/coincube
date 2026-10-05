@@ -1197,7 +1197,7 @@ fn v8_split_journal_is_refused_by_the_v7_reader() {
 /// glob still has to name the item somewhere.
 #[test]
 fn split_b0_journal_api_has_no_gui_callers() {
-    const ITEMS: [&str; 36] = [
+    const ITEMS: [&str; 38] = [
         "create_split",
         // B4b-1b: the fork-only (`kind: Unified`) record.
         "create_unified_split",
@@ -1240,6 +1240,8 @@ fn split_b0_journal_api_has_no_gui_callers() {
         "Step1Conflict",
         "split_step1_conflict",
         "record_split_step1_conflict",
+        "confirm_split_step1_conflict",
+        "clear_split_step1_conflict",
     ];
     const OWN: [&str; 4] = [
         "src/services/claim_workflow/split.rs",
@@ -1346,6 +1348,8 @@ fn split_b0_journal_api_has_no_gui_callers() {
                             "Step1Conflict",
                             "split_step1_conflict",
                             "record_split_step1_conflict",
+                            "confirm_split_step1_conflict",
+                            "clear_split_step1_conflict",
                         ]
                         .contains(&ident)
                             || (gate_tests

@@ -16,15 +16,21 @@
 //!   ([`Step1ReconfirmationReview`]) records the new block; nothing is sent.
 //! - O2 `InMempool`: out of every block, waiting in the Bitcoin mempool.
 //! - O3 `Missing`: out of every block and absent from the mempool.
-//! - O4 `Conflict`: missing, and fresh reads found a claimed coin spent on
-//!   Bitcoin by another transaction, so step 1 can never confirm and the
-//!   split can't complete. Read in this order, each fresh within
-//!   [`MAX_EVIDENCE_AGE_SECONDS`]: step 1 absent; each claimed prevout's
-//!   address from its txid-checked previous transaction, then that address's
-//!   Bitcoin unspent outputs; step 1 absent again (its own spend in the
-//!   mempool is not a conflict). A failed or stale read never reports one.
-//!   The conflict is recorded in the journal and is terminal (S4-D2). The
-//!   spender is not named (S4-D1).
+//! - O4 `Conflict`: missing, and fresh reads found a claimed coin missing
+//!   from its address's Bitcoin unspent outputs. Read in this order, each
+//!   fresh within [`MAX_EVIDENCE_AGE_SECONDS`]: step 1 absent; each claimed
+//!   prevout's address from its txid-checked previous transaction, then
+//!   that address's Bitcoin unspent outputs; step 1 absent again (its own
+//!   spend in the mempool is not a conflict). A failed or stale read never
+//!   records, changes or clears one. Connect's unspent outputs also leave
+//!   out coins a mempool transaction spends, and no read names the spender
+//!   (S4-D1), so the conflict is recorded **provisional** at the current
+//!   Bitcoin tip (S4-D5): it is cleared when a fresh read shows step 1 on
+//!   Bitcoin again (mempool or block) or the coin unspent again, and becomes
+//!   **terminal** only when a later reconcile finds the same coin still
+//!   missing and step 1 still absent at a tip at least six blocks higher.
+//!   Then step 1 can never confirm and the split can't complete, and the
+//!   record is never cleared (S4-D2).
 //! - `Unknown`: the collection could not place step 1.
 //!
 //! While step 1 is not confirmed, step 2's recorded bytes could be mined on
@@ -57,7 +63,8 @@ pub enum Step1AfterStep2 {
     InMempool,
     /// O3: in no block and not in the Bitcoin mempool.
     Missing,
-    /// O4: a claimed coin spent on Bitcoin by another transaction; terminal.
+    /// O4: a claimed coin missing from Bitcoin's unspent outputs,
+    /// provisional or terminal ([`Step1Conflict::is_terminal`], S4-D5).
     Conflict(Step1Conflict),
     /// The collection could not place step 1.
     Unknown,
@@ -130,13 +137,28 @@ pub(super) fn classify(plan: &ClaimPlan, observations: ObservationBundle) -> Ste
     }
 }
 
-/// A fresh read of step 1 on Bitcoin that answers it absent.
-async fn step1_absent(source: &dyn ObservationSource, txid: Txid) -> bool {
+/// One read of step 1 on Bitcoin, for the conflict reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Step1Read {
+    /// A fresh read answered it absent.
+    Absent,
+    /// A fresh read answered it in the mempool or a block.
+    Seen,
+    /// The read failed or was stale: nothing follows from it.
+    Inconclusive,
+}
+async fn read_step1(source: &dyn ObservationSource, txid: Txid) -> Step1Read {
     let Ok(read) = source.transaction(ChainId::Bitcoin, txid).await else {
-        return false;
+        return Step1Read::Inconclusive;
     };
-    fresh(source, read.observed_at())
-        && *read.value() == claim_observation::TransactionObservation::Absent
+    if !fresh(source, read.observed_at()) {
+        return Step1Read::Inconclusive;
+    }
+    if *read.value() == claim_observation::TransactionObservation::Absent {
+        Step1Read::Absent
+    } else {
+        Step1Read::Seen
+    }
 }
 fn fresh(source: &dyn ObservationSource, observed_at: i64) -> bool {
     observed_at >= 0
@@ -146,56 +168,91 @@ fn fresh(source: &dyn ObservationSource, observed_at: i64) -> bool {
             .is_some_and(|age| (0..=MAX_EVIDENCE_AGE_SECONDS).contains(&age))
 }
 
-/// O4's fresh reads; see the module documentation. `None` unless they
-/// prove a conflict: any failed, stale or inconsistent read, step 1 seen,
-/// or every claimed coin unspent.
-async fn probe_conflict(
-    services: &dyn SplitForkServices,
-    plan: &ClaimPlan,
-    bitcoin_tip: BlockRef,
-) -> Option<Step1Conflict> {
+/// What O4's fresh reads show; see the module documentation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Probe {
+    /// A read failed, was stale or inconsistent: nothing follows.
+    Inconclusive,
+    /// Step 1 is on Bitcoin (mempool or block) after all.
+    Step1Seen,
+    /// Step 1 absent at both reads, every coin read: the claimed coins
+    /// missing from their addresses' unspent outputs (none: all unspent).
+    Missing(Vec<OutPoint>),
+}
+async fn probe(services: &dyn SplitForkServices, plan: &ClaimPlan) -> Probe {
     if plan.bitcoin_chain != ChainId::Bitcoin {
-        return None;
+        return Probe::Inconclusive;
     }
     let source = services.source();
     let step1 = plan.step1_txid();
-    if !step1_absent(source, step1).await {
-        return None;
+    match read_step1(source, step1).await {
+        Step1Read::Absent => {}
+        Step1Read::Seen => return Probe::Step1Seen,
+        Step1Read::Inconclusive => return Probe::Inconclusive,
     }
-    let mut spent = None;
+    let mut missing = Vec::new();
     for outpoint in &plan.claimed_prevouts {
-        let previous = services.previous_transaction(outpoint.txid).await.ok()?;
-        if previous.compute_txid() != outpoint.txid {
-            return None;
-        }
-        let output = previous.output.get(usize::try_from(outpoint.vout).ok()?)?;
-        let address = Address::from_script(&output.script_pubkey, Network::Bitcoin).ok()?;
-        let unspent = services.bitcoin_unspent(&address.to_string()).await.ok()?;
+        let Some(address) = prevout_address(services, *outpoint).await else {
+            return Probe::Inconclusive;
+        };
+        let Ok(unspent) = services.bitcoin_unspent(&address).await else {
+            return Probe::Inconclusive;
+        };
         if !fresh(source, unspent.observed_at()) {
-            return None;
+            return Probe::Inconclusive;
         }
         if !unspent.value().contains(outpoint) {
-            spent = Some(*outpoint);
-            break;
+            missing.push(*outpoint);
         }
     }
-    let outpoint = spent?;
-    // Step 1 spends the claimed coins too: seen again (re-broadcast, or
-    // re-mined) since the first read, the missing coin may be its own.
-    if !step1_absent(source, step1).await {
+    if !missing.is_empty() {
+        // Step 1 spends the claimed coins too: seen again (re-broadcast, or
+        // re-mined) since the first read, a missing coin may be its own.
+        match read_step1(source, step1).await {
+            Step1Read::Absent => {}
+            Step1Read::Seen => return Probe::Step1Seen,
+            Step1Read::Inconclusive => return Probe::Inconclusive,
+        }
+    }
+    Probe::Missing(missing)
+}
+/// The Bitcoin address `outpoint` pays, from its txid-checked previous
+/// transaction.
+async fn prevout_address(services: &dyn SplitForkServices, outpoint: OutPoint) -> Option<String> {
+    let previous = services.previous_transaction(outpoint.txid).await.ok()?;
+    if previous.compute_txid() != outpoint.txid {
         return None;
     }
-    Some(Step1Conflict::new(outpoint, bitcoin_tip))
+    let output = previous.output.get(usize::try_from(outpoint.vout).ok()?)?;
+    Address::from_script(&output.script_pubkey, Network::Bitcoin)
+        .ok()
+        .map(|address| address.to_string())
 }
 
 fn session_current(context: &Context, generation: &watch::Receiver<u64>) -> bool {
     *generation.borrow() == context.generation && generation.has_changed().is_ok()
 }
+/// Before any conflict write: the session that read is still current.
+fn still_current(
+    controller: &mut Controller,
+    context: &Context,
+    generation: &watch::Receiver<u64>,
+) -> Result<(), Error> {
+    if session_current(context, generation) {
+        return Ok(());
+    }
+    controller.invalidate();
+    Err(Error::Revoked)
+}
 
-/// What became of step 1, from a reconcile's applied collection. A recorded
-/// conflict stands whatever the chains show now (S4-D2). A newly missing
-/// step 1 gets O4's fresh reads, and a proven conflict is recorded before it
-/// is reported.
+/// What became of step 1, from a reconcile's applied collection, with the
+/// conflict record kept current (S4-D5). A terminal conflict stands
+/// whatever the chains show now (S4-D2). A provisional one is cleared when
+/// the collection or the conflict reads show step 1 on Bitcoin, or show its
+/// coin unspent again; it becomes terminal when the coin is still missing
+/// and step 1 still absent six blocks above where it was first seen; a
+/// failed, stale or inconclusive read leaves it as it is. A newly missing
+/// coin records a provisional conflict at the collection's Bitcoin tip.
 pub(super) async fn after_step2(
     controller: &mut Controller,
     services: &dyn SplitForkServices,
@@ -203,21 +260,58 @@ pub(super) async fn after_step2(
     generation: &watch::Receiver<u64>,
     observations: ObservationBundle,
 ) -> Result<Step1AfterStep2, Error> {
-    if let Some(conflict) = controller.split_step1_conflict() {
-        return Ok(Step1AfterStep2::Conflict(conflict));
+    let recorded = controller.split_step1_conflict();
+    if let Some(terminal) = recorded.filter(Step1Conflict::is_terminal) {
+        return Ok(Step1AfterStep2::Conflict(terminal));
     }
     let plan = controller.plan();
     let after = classify(&plan, observations);
-    if after != Step1AfterStep2::Missing {
-        return Ok(after);
+    match after {
+        Step1AfterStep2::Missing => {}
+        Step1AfterStep2::Unknown => {
+            return Ok(recorded.map_or(after, Step1AfterStep2::Conflict));
+        }
+        // Step 1 is on Bitcoin: a provisional conflict was not one.
+        _ => {
+            if recorded.is_some() {
+                still_current(controller, context, generation)?;
+                controller.clear_split_step1_conflict(context)?;
+            }
+            return Ok(after);
+        }
     }
-    let Some(conflict) = probe_conflict(services, &plan, observations.bitcoin.tip).await else {
+    let tip = observations.bitcoin.tip;
+    let missing = match probe(services, &plan).await {
+        Probe::Inconclusive => {
+            return Ok(recorded.map_or(Step1AfterStep2::Missing, Step1AfterStep2::Conflict));
+        }
+        Probe::Step1Seen => {
+            if recorded.is_some() {
+                still_current(controller, context, generation)?;
+                controller.clear_split_step1_conflict(context)?;
+            }
+            return Ok(Step1AfterStep2::Missing);
+        }
+        Probe::Missing(missing) => missing,
+    };
+    if let Some(provisional) = recorded {
+        if missing.contains(&provisional.outpoint()) {
+            let Some(terminal) = provisional.terminal(tip) else {
+                return Ok(Step1AfterStep2::Conflict(provisional));
+            };
+            still_current(controller, context, generation)?;
+            controller.confirm_split_step1_conflict(context, tip)?;
+            return Ok(Step1AfterStep2::Conflict(terminal));
+        }
+        // Its coin is unspent again.
+        still_current(controller, context, generation)?;
+        controller.clear_split_step1_conflict(context)?;
+    }
+    let Some(first) = missing.first() else {
         return Ok(Step1AfterStep2::Missing);
     };
-    if !session_current(context, generation) {
-        controller.invalidate();
-        return Err(Error::Revoked);
-    }
+    let conflict = Step1Conflict::new(*first, tip);
+    still_current(controller, context, generation)?;
     controller.record_split_step1_conflict(context, conflict)?;
     Ok(Step1AfterStep2::Conflict(conflict))
 }
