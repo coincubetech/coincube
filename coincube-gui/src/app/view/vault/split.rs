@@ -58,6 +58,8 @@ fn working(work: Work) -> &'static str {
         Work::Abandoning => "Abandoning…",
         Work::CheckingClose => "Checking both chains before abandoning…",
         Work::Closing => "Abandoning and closing the split…",
+        Work::CheckingConflictClose => "Checking Bitcoin before closing the split…",
+        Work::ClosingConflict => "Closing the split…",
         Work::Restarting => "Reading the split recorded on this device…",
         Work::Entering => "Opening step 2…",
         Work::Leaving => "Returning to step 1…",
@@ -74,6 +76,10 @@ fn working(work: Work) -> &'static str {
             "Checking both chains and the claimed coins before a resend of step 2…"
         }
         Work::Step2Resending => "Sending step 2 again…",
+        Work::Step2ReconfirmationReviewing => "Checking step 1's new Bitcoin block on both chains…",
+        Work::Step2Reconfirming => {
+            "Checking step 1's new Bitcoin block again before recording it…"
+        }
         Work::Step2Completing => {
             "Checking both chains, then recording the completion on this Cube…"
         }
@@ -389,9 +395,45 @@ fn step2_body<'a>(
             } else if panel.can_review_resend() {
                 actions = actions.push(action("Review resend", SplitMessage::Step2ReviewResend));
             }
+            // #568 S4b, O1: step 1 re-mined in another Bitcoin block; a live
+            // review shows both blocks and the new one's depth.
+            if let Some(review) = panel.reconfirmation_review() {
+                body = body
+                    .push(p1_bold(format!(
+                        "Step 1 is now in Bitcoin block {} ({} of {MIN_CONFIRMATIONS} confirmations)",
+                        review.confirmed.height,
+                        review.confirmations.min(MIN_CONFIRMATIONS)
+                    )))
+                    .push(caption(format!(
+                        "New block {} · recorded block {} at height {}",
+                        review.confirmed.hash, review.previous.hash, review.previous.height
+                    )))
+                    .push(p1_regular(format!(
+                        "Acknowledging records the new block for step 1. Nothing is sent. Step 2's Bitcoin replay protection is established once step 1 has {MIN_CONFIRMATIONS} confirmations in it. This review expires at {}; after that, review it again.",
+                        review.expires_at.format("%H:%M:%S")
+                    )));
+                actions = actions
+                    .push(primary(
+                        "Acknowledge new block",
+                        SplitMessage::Step2ConfirmReconfirmation,
+                    ))
+                    .push(action(
+                        "Review again",
+                        SplitMessage::Step2ReviewReconfirmation,
+                    ));
+            } else if panel.can_review_reconfirmation() {
+                actions = actions.push(action(
+                    "Review step 1's new block",
+                    SplitMessage::Step2ReviewReconfirmation,
+                ));
+            }
             if panel.can_check_close() {
                 body = body.push(p1_regular(
-                    "This version can't send this step 2 again: its last attempt was accepted or may have left, or no resend is left. If Bitcoin Blake2b never shows it, you can abandon this split after a check.",
+                    match panel.dead_end().and_then(|dead_end| dead_end.conflict) {
+                        // #568 S4b, O4: a terminal step-1 conflict.
+                        Some(conflict) => step2::conflict_close_copy(&conflict),
+                        None => "This version can't send this step 2 again: its last attempt was accepted or may have left, or no resend is left. If Bitcoin Blake2b never shows it, you can abandon this split after a check.".to_string(),
+                    },
                 ));
             }
             // #568 B5b: only after this session's reconcile saw step 2
@@ -666,6 +708,18 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
             "Check before abandoning",
             SplitMessage::CheckAbandon,
         ));
+    } else if let Some(conflict) = panel
+        .dead_end()
+        .and_then(|dead_end| dead_end.conflict)
+        .filter(|_| panel.can_check_close())
+    {
+        // #568 S4b, O4: the exit of a terminal step-1 conflict.
+        if panel.can_confirm_close() {
+            body = body.push(caption(step2::conflict_closable_copy(&conflict)));
+            actions = actions.push(action("Close split", SplitMessage::ConfirmAbandon));
+        } else {
+            actions = actions.push(action("Check before closing", SplitMessage::CheckAbandon));
+        }
     } else if panel.can_confirm_close() {
         body = body.push(caption(
             "Bitcoin Blake2b shows neither this step 2 nor any spend of its coins, and step 1 is six deep on Bitcoin. Abandoning closes this split on this device: its record and the signed step 2 are kept, and a new split of this wallet stays refused until that record is reset.",

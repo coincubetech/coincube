@@ -129,7 +129,11 @@ impl Step2Transport for Transport {
 
 /// A preparation whose first check tracked step 1 (reservation needs it).
 async fn tracked(h: &Harness) -> SplitPreparation {
-    let mut preparation = h.prepare().unwrap();
+    tracked_with(h, policy()).await
+}
+/// [`tracked`] under `policy`, which the coordinator it finishes into keeps.
+async fn tracked_with(h: &Harness, policy: CheckPolicy) -> SplitPreparation {
+    let mut preparation = h.prepare_with(policy).unwrap();
     let polls = Arc::new(AtomicUsize::new(0));
     assert!(matches!(
         preparation
@@ -156,8 +160,13 @@ struct Step2 {
 const INDEX: u32 = 3;
 impl Step2 {
     async fn new() -> Self {
+        Self::with_policy(policy()).await
+    }
+    /// [`Self::new`] under `policy`, which the preparation and the
+    /// coordinator it finishes into keep.
+    async fn with_policy(policy: CheckPolicy) -> Self {
         let h = Harness::new(6).await;
-        let mut preparation = tracked(&h).await;
+        let mut preparation = tracked_with(&h, policy).await;
         let polls = Arc::new(AtomicUsize::new(0));
         assert_eq!(
             preparation
@@ -1200,6 +1209,8 @@ async fn split_step2_check_signed_tells_complete_partial_and_wrong_apart() {
 }
 
 mod completion;
+#[cfg(feature = "regtest-harness")]
+mod regtest_driver;
 mod reorg;
 mod routes;
 mod unified_flow;

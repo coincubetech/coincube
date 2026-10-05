@@ -1468,6 +1468,18 @@ fn split_journal_discovery_finds_only_split_journals() {
 /// only its close action.
 #[test]
 fn split_panel_has_no_gui_entry_point() {
+    assert_split_panel_has_no_gui_entry_point(|text| text.to_string());
+}
+
+/// #568 W1: the D1 guard reads a CRLF checkout (Git for Windows) of the
+/// sources the same way, so its line-spanning markers are still found.
+#[test]
+fn split_entry_point_guard_reads_a_crlf_checkout() {
+    assert_split_panel_has_no_gui_entry_point(crate::utils::source_text::as_crlf);
+}
+
+/// `checkout` is the text a checkout of each source file reads as.
+fn assert_split_panel_has_no_gui_entry_point(checkout: fn(&str) -> String) {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     fn walk(dir: &Path, files: &mut Vec<(String, String)>, root: &Path) {
         for entry in std::fs::read_dir(dir).unwrap() {
@@ -1487,6 +1499,10 @@ fn split_panel_has_no_gui_entry_point() {
     }
     let mut files = Vec::new();
     walk(&root, &mut files, &root);
+    let files: Vec<(String, String)> = files
+        .into_iter()
+        .map(|(file, text)| (file, crate::utils::source_text::lf_only(&checkout(&text))))
+        .collect();
     for (file, text) in &files {
         let starts = text.matches("SplitPanel::start").count();
         if !file.starts_with("app/state/vault/split/") {
@@ -1626,8 +1642,24 @@ fn split_app_handlers_batch_the_deadline_timer() {
 /// through a `spawn_blocking` task.
 #[test]
 fn split_ui_paths_do_no_blocking_work() {
+    assert_split_ui_paths_do_no_blocking_work(|text| text.to_string());
+}
+
+/// #568 W1: the #625 F3 guard reads a CRLF checkout (Git for Windows) of the
+/// sources the same way, so its line-spanning markers are still found.
+#[test]
+fn split_ui_blocking_guard_reads_a_crlf_checkout() {
+    assert_split_ui_paths_do_no_blocking_work(crate::utils::source_text::as_crlf);
+}
+
+/// `checkout` is the text a checkout of each source file reads as.
+fn assert_split_ui_paths_do_no_blocking_work(checkout: fn(&str) -> String) {
     let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let read = |path: &str| std::fs::read_to_string(src.join(path)).unwrap();
+    let read = |path: &str| {
+        crate::utils::source_text::lf_only(&checkout(
+            &std::fs::read_to_string(src.join(path)).unwrap(),
+        ))
+    };
     // The body of `signature` in `text`, up to its closing line at `indent`.
     fn body<'a>(text: &'a str, signature: &str, indent: &str) -> &'a str {
         let start = text

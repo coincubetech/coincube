@@ -163,10 +163,13 @@ fn vault_descriptor() -> CoincubeDescriptor {
 /// review. Connect's preflight is never asked.
 #[tokio::test(flavor = "multi_thread")]
 async fn split_step2_node_route_reviews_on_the_node_and_submits_there_once() {
+    // One pooled httpmock server is both the node (JSON-RPC at `/`) and
+    // Connect (its Esplora paths): a test never waits for a second server
+    // while holding one (the pool deadlock under load; see `BitcoinPreflight`).
     let node = MockServer::start_async().await;
-    let connect = MockServer::start_async().await;
+    let connect = &node;
     let vault = Vault::new(Some(node_config(&node)));
-    let (h, mut coordinator, signed_tx) = routed(&vault, Some(node_config(&node)), &connect).await;
+    let (h, mut coordinator, signed_tx) = routed(&vault, Some(node_config(&node)), connect).await;
     knots(&node, &signed_tx, hash(2), true).await;
     let review = coordinator.prepare_review(&context()).await.unwrap();
     let route = review.snapshot().route;
@@ -209,11 +212,14 @@ async fn split_step2_node_route_reviews_on_the_node_and_submits_there_once() {
 #[tokio::test(flavor = "multi_thread")]
 async fn split_step2_node_route_refuses_another_chain_or_a_node_rejection() {
     for (tip, allowed) in [(hash(0x77), true), (hash(2), false)] {
+        // One pooled httpmock server is both the node (JSON-RPC at `/`) and
+        // Connect (its Esplora paths): a test never waits for a second server
+        // while holding one (the pool deadlock under load; see `BitcoinPreflight`).
         let node = MockServer::start_async().await;
-        let connect = MockServer::start_async().await;
+        let connect = &node;
         let vault = Vault::new(Some(node_config(&node)));
         let (h, mut coordinator, signed_tx) =
-            routed(&vault, Some(node_config(&node)), &connect).await;
+            routed(&vault, Some(node_config(&node)), connect).await;
         knots(&node, &signed_tx, tip, allowed).await;
         let result = coordinator.prepare_review(&context()).await;
         if allowed {
@@ -247,11 +253,14 @@ async fn split_step2_backend_switch_after_review_refuses_before_any_intent() {
         ("node config", true),
         ("connect becomes node", false),
     ] {
+        // One pooled httpmock server is both the node (JSON-RPC at `/`) and
+        // Connect (its Esplora paths): a test never waits for a second server
+        // while holding one (the pool deadlock under load; see `BitcoinPreflight`).
         let node = MockServer::start_async().await;
-        let connect = MockServer::start_async().await;
+        let connect = &node;
         let configured = use_node.then(|| node_config(&node));
         let vault = Vault::new(configured.clone());
-        let (h, mut coordinator, signed_tx) = routed(&vault, configured, &connect).await;
+        let (h, mut coordinator, signed_tx) = routed(&vault, configured, connect).await;
         knots(&node, &signed_tx, hash(2), true).await;
         let review = coordinator.prepare_review(&context()).await.unwrap();
         match case {

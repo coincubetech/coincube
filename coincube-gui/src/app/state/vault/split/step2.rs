@@ -56,6 +56,22 @@
 //!   [`check_close`]: [`close`] leaves the journal, recorded bytes included,
 //!   and writes its tombstone, so discovery skips it and a new split of the
 //!   same source stays refused until the owner removes the tombstone.
+//! - **The O1 acknowledgement** (#568 S4b, S4-D3). When a reconcile finds
+//!   step 1 re-mined in another Bitcoin block (`Remined`), the handle the
+//!   panel holds (the coordinator or the reconciler) reviews it
+//!   ([`Step2Coord::review_reconfirmation`],
+//!   [`Step2Recon::review_reconfirmation`]): one-use, expiring
+//!   ([`ReconfirmationView`]), refused past the RDTS margin (S4-D4,
+//!   [`describe_reconfirmation`]). Confirming exactly it records the new
+//!   block for step 1. Nothing is sent.
+//! - **The O4 exit** (#568 S4b, Legolas F3). A recorded *terminal* step-1
+//!   conflict is a dead end too ([`DeadEnd::conflict`]): step 1 can never
+//!   confirm, so no resend can follow and the split can't complete. Its
+//!   close does not rest on step 1's depth: [`check_close`] reads Bitcoin
+//!   fresh (step 1 absent, the conflicting coin still missing from its
+//!   address's unspent outputs, step 1 absent again) and the same tombstone
+//!   is written. Step 2's bytes on BTCB2 stand; nothing is sent. A
+//!   provisional conflict is no dead end (S4-D5).
 //!
 //! Every blocking call here runs off the UI thread.
 
@@ -71,7 +87,7 @@ use tokio::sync::watch;
 
 use coincube_core::{
     chain::ChainId,
-    claim::MIN_CONFIRMATIONS,
+    claim::{Assessment, BlockRef, MIN_CONFIRMATIONS},
     descriptors::CoincubeDescriptor,
     foreign_split::{SplitCoin, SplitStep1, VerifiedSplitStep1},
     miniscript::bitcoin::{hashes::sha256, psbt::Psbt, Address, Network, OutPoint, Txid},
@@ -81,7 +97,9 @@ use super::step1::{self, OpenRequest, Refusal, RevokeHandle, SplitConnect, Step1
 use crate::{
     app::{
         settings::{CubeSettings, SettingsError, SplitFromRecord},
-        state::vault::claim::{ConnectSession, CHECK_POLICY},
+        state::vault::claim::{
+            describe_duration, ConnectSession, CHECK_POLICY, EXPIRY_MARGIN_SECONDS,
+        },
     },
     daemon::Daemon,
     dir::CoincubeDirectory,
@@ -92,8 +110,8 @@ use crate::{
                 step2::{
                     CompletionTarget, ResendError, SplitCompletionEvidence,
                     SplitCompletionReconciliation, SplitStep2Coordinator, SplitStep2Production,
-                    SplitStep2Reconciler, Step1AfterStep2, Step2Error, Step2ResubmissionReview,
-                    SweepReconcile, TargetError, RESERVATION_BOUND,
+                    SplitStep2Reconciler, Step1AfterStep2, Step1ReconfirmationReview, Step2Error,
+                    Step2ResubmissionReview, SweepReconcile, TargetError, RESERVATION_BOUND,
                 },
                 ForeignStep2Authorization, SplitCheckError, SplitForkProduction, SplitPreparation,
                 Step2Liveness,
@@ -101,7 +119,7 @@ use crate::{
             Outcome, Review, SubmissionRoute,
         },
         claim_observation::{FailureKind, TransactionObservation},
-        claim_workflow::{self, Context, Controller, Status},
+        claim_workflow::{self, Context, Controller, Status, Step1Conflict},
         foreign_psbt::SweepFeeSource,
         split_evidence::{SplitEvidenceSource, MAX_EVIDENCE_AGE_SECONDS},
         split_fees,
@@ -490,6 +508,39 @@ pub fn describe_resend(error: ResendError) -> Step2Refusal {
     }
 }
 
+/// S4-D4: the O1 acknowledgement is refused once Bitcoin Blake2b's replay
+/// protection is past its margin, so this split can't complete.
+pub fn rdts_reconfirmation_refusal(expired: bool) -> String {
+    if expired {
+        "Step 1's new Bitcoin block can't be recorded: Bitcoin Blake2b's replay protection has expired, so this split can't complete. Nothing was recorded or sent.".to_string()
+    } else {
+        format!(
+            "Step 1's new Bitcoin block can't be recorded: Bitcoin Blake2b's replay protection expires within {}, so this split can't complete. Nothing was recorded or sent.",
+            describe_duration(EXPIRY_MARGIN_SECONDS)
+        )
+    }
+}
+/// The O1 review's evidence lapsed or the chains changed under it.
+pub const RECONFIRMATION_AGAIN: &str = "The chains changed or the review of step 1's new block expired before it was acknowledged. Nothing was recorded or sent; review it again.";
+
+/// Copy for a refused O1 review or acknowledgement (#568 S4b). Nothing was
+/// sent; S4-D4's refusal past the RDTS margin is final.
+pub fn describe_reconfirmation(error: claim_coordinator::Error) -> Step2Refusal {
+    use claim_coordinator::Error as E;
+    match error {
+        E::NotReady(Assessment::ExpiryMargin) => {
+            Step2Refusal::final_(rdts_reconfirmation_refusal(false))
+        }
+        E::NotReady(Assessment::RdtsExpired) => {
+            Step2Refusal::final_(rdts_reconfirmation_refusal(true))
+        }
+        E::ExpiredEvidence | E::ChangedReview | E::InvalidReview => {
+            Step2Refusal::retry(RECONFIRMATION_AGAIN)
+        }
+        other => describe_check(other),
+    }
+}
+
 pub(super) fn describe_check(error: claim_coordinator::Error) -> Step2Refusal {
     use claim_coordinator::Error as E;
     let recovery = match error {
@@ -670,6 +721,60 @@ impl Step2ResendView {
     }
 }
 
+/// O1 (#568 S4b): a review of step 1 re-mined in another Bitcoin block
+/// after the step-2 submission, on screen until it is used, lapses or its
+/// handle is revoked.
+#[derive(Clone)]
+pub struct ReconfirmationView {
+    /// The block recorded for step 1.
+    pub previous: BlockRef,
+    /// The block step 1 is now confirmed in.
+    pub confirmed: BlockRef,
+    /// Step 1's confirmations in it at the review.
+    pub confirmations: u64,
+    /// When the review's evidence lapses, for display.
+    pub expires_at: chrono::DateTime<chrono::Local>,
+    /// The same deadline on the monotonic clock: the panel drops the review
+    /// then (S3 item 5).
+    not_after: Instant,
+    live: ResendLiveness,
+}
+impl std::fmt::Debug for ReconfirmationView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReconfirmationView")
+            .field("previous", &self.previous)
+            .field("confirmed", &self.confirmed)
+            .finish_non_exhaustive()
+    }
+}
+impl ReconfirmationView {
+    /// The view of `review`, live while `live` says so (and before its
+    /// deadline).
+    fn of(review: &Step1ReconfirmationReview, live: ResendLiveness) -> Self {
+        let not_after = review.not_after();
+        let left = not_after.saturating_duration_since(Instant::now());
+        let inclusion = review.inclusion();
+        Self {
+            previous: inclusion.previous,
+            confirmed: inclusion.confirmed,
+            confirmations: review.confirmations(),
+            expires_at: chrono::Local::now()
+                + chrono::Duration::from_std(left).unwrap_or_else(|_| chrono::Duration::zero()),
+            not_after,
+            live,
+        }
+    }
+    /// Until its deadline, while its handle is not revoked and the
+    /// session's generation has not moved.
+    pub fn is_live(&self) -> bool {
+        (self.live)()
+    }
+    /// When the review lapses at the latest.
+    pub fn not_after(&self) -> Instant {
+        self.not_after
+    }
+}
+
 /// The step-2 submission coordinator over one Split journal.
 #[async_trait]
 pub trait Step2Coord: Send {
@@ -690,6 +795,17 @@ pub trait Step2Coord: Send {
     /// showed. That review is used up whatever the result; another resend
     /// needs another review.
     async fn confirm_resend(&mut self, context: &Context) -> Result<Outcome, Step2Refusal>;
+    /// O1 (#568 S4b): a fresh one-use review of step 1 re-mined in another
+    /// Bitcoin block, replacing any earlier one (and dropping any resend
+    /// review). Records and sends nothing.
+    async fn review_reconfirmation(
+        &mut self,
+        context: &Context,
+    ) -> Result<ReconfirmationView, Step2Refusal>;
+    /// O1: acknowledge exactly the last such review, which is used up
+    /// whatever the result: the new block becomes step 1's recorded one.
+    /// Sends nothing.
+    async fn confirm_reconfirmation(&mut self, context: &Context) -> Result<(), Step2Refusal>;
 }
 
 /// After a recorded step-2 submission: reconcile, and complete (#568 B5b).
@@ -712,6 +828,13 @@ pub trait Step2Recon: Send {
         &mut self,
         context: &Context,
     ) -> Result<CompletionStanding, Step2Refusal>;
+    /// O1 (#568 S4b): see [`Step2Coord::review_reconfirmation`].
+    async fn review_reconfirmation(
+        &mut self,
+        context: &Context,
+    ) -> Result<ReconfirmationView, Step2Refusal>;
+    /// O1: see [`Step2Coord::confirm_reconfirmation`].
+    async fn confirm_reconfirmation(&mut self, context: &Context) -> Result<(), Step2Refusal>;
 }
 
 /// Everything the preparation is opened with: the step 1 rebuilt at restore.
@@ -847,9 +970,9 @@ pub enum Restart {
     /// (`SplitPanel::resume`).
     Step1,
     /// A step-2 submission is recorded: reconcile only, with its dead end
-    /// when it is in one (#625 F2), or else why a resend the journal allows
-    /// could not be opened (P3-3). At most one is set: a journal in a dead
-    /// end allows no resend.
+    /// when it is in one (#625 F2, or O4's terminal conflict, #568 S4b), or
+    /// else why a resend the journal allows could not be opened (P3-3). At
+    /// most one is set: a journal in a dead end allows no resend.
     Reconcile(Box<dyn Step2Recon>, Option<DeadEnd>, Option<String>),
     /// A step-2 submission is recorded and the journal allows a reviewed
     /// resend (P3-3): its coordinator, reopened from the recorded bytes.
@@ -864,7 +987,9 @@ pub enum Restart {
 
 /// #625 F2: a recorded step 2 that no resend can follow and no read ever
 /// saw on BTCB2 ([`Controller::split_step2_dead_end`]), as the restart read
-/// it. What [`check_close`] looks for on both chains; it grants nothing.
+/// it; or (#568 S4b, O4) a recorded step 2 whose step 1 has a recorded
+/// terminal conflict, whatever became of step 2. What [`check_close`] looks
+/// for; it grants nothing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeadEnd {
     /// The recorded signed step 1's own txid.
@@ -873,6 +998,9 @@ pub struct DeadEnd {
     pub step2: Txid,
     /// Step 1's claimed inputs: the coins step 2 spends on BTCB2.
     pub claimed: Vec<OutPoint>,
+    /// O4: the recorded terminal step-1 conflict this dead end is for.
+    /// `None`: #625's dead end of a step 2 no read ever saw.
+    pub conflict: Option<Step1Conflict>,
 }
 
 /// Why a resend the journal allows was not reopened (P3-3). Restoring step 1
@@ -961,10 +1089,13 @@ pub async fn restart(
                 &controller,
             )));
         }
+        // A dead end allows no resend: a recorded terminal step-1 conflict
+        // refuses every one (#568 S4b), whatever the journal's permission.
+        let dead_end = dead_end(&controller);
         (
             controller.recorded_split_step2().is_some(),
-            resend_allowed(&controller),
-            dead_end(&controller),
+            dead_end.is_none() && resend_allowed(&controller),
+            dead_end,
         )
         // The controller, and the journal lock, end here.
     };
@@ -993,9 +1124,14 @@ pub async fn restart(
         .map(|recon| Restart::Reconcile(recon, dead_end, unavailable))
 }
 
-/// The journal's step-2 dead end, if it is in one.
+/// The journal's step-2 dead end, if it is in one: a recorded terminal
+/// step-1 conflict (O4, #568 S4b) first, else #625's. A provisional
+/// conflict is none (S4-D5).
 fn dead_end(controller: &Controller) -> Option<DeadEnd> {
-    if !controller.split_step2_dead_end() {
+    let conflict = controller
+        .split_step1_conflict()
+        .filter(Step1Conflict::is_terminal);
+    if conflict.is_none() && !controller.split_step2_dead_end() {
         return None;
     }
     let plan = controller.plan();
@@ -1003,6 +1139,7 @@ fn dead_end(controller: &Controller) -> Option<DeadEnd> {
         step1: plan.step1_txid(),
         step2: controller.recorded_split_step2()?.compute_txid(),
         claimed: plan.claimed_prevouts,
+        conflict,
     })
 }
 
@@ -1015,6 +1152,25 @@ pub const COIN_SPENT_ON_BTCB2: &str = "A coin of this split is no longer unspent
 /// #625 F2: the journal changed between the check and the close.
 pub const CHANGED_SINCE_CHECK: &str =
     "This split changed since it was checked, so it was not abandoned. Check again.";
+/// O4 (#568 S4b): Bitcoin shows step 1 again, so the conflict may not hold.
+pub const CONFLICT_STEP1_SEEN: &str = "Bitcoin shows step 1 again, so this split was not closed: the conflict recorded for it may not hold. Check status again; a check that finds step 1 six deep in its block clears the conflict.";
+
+/// O4: the copy beside the close of a split with a terminal step-1
+/// conflict. It names the coin and says the split can't complete, and that
+/// step 2's bytes on BTCB2 stand.
+pub fn conflict_close_copy(conflict: &Step1Conflict) -> String {
+    format!(
+        "A coin this split claims ({}) was spent on Bitcoin by another transaction, so step 1 can never confirm and this split can't complete. Step 2's recorded bytes on Bitcoin Blake2b stand as they are: nothing is sent, resent or undone. You can close this split after a fresh check of Bitcoin.",
+        conflict.outpoint()
+    )
+}
+/// O4: shown once that check passed, beside the close.
+pub fn conflict_closable_copy(conflict: &Step1Conflict) -> String {
+    format!(
+        "Bitcoin still shows step 1 in no block and not waiting to be mined, and the coin ({}) spent. Closing keeps this split's record and its signed step 2 on this device; a new split of this wallet stays refused until that record is reset.",
+        conflict.outpoint()
+    )
+}
 
 fn fresh(evidence: &dyn SplitEvidenceSource, observed_at: i64) -> bool {
     evidence
@@ -1026,6 +1182,75 @@ fn unavailable(kind: FailureKind) -> Refusal {
     Refusal::retry(format!(
         "Connect couldn't check the chains for this split ({kind:?}), so it can't be abandoned yet. This is not a sign that step 2 left or that a coin was spent. Try again later."
     ))
+}
+fn conflict_unavailable(kind: FailureKind) -> Refusal {
+    Refusal::retry(format!(
+        "Connect couldn't check Bitcoin for this split ({kind:?}), so it was not closed. This is not a sign that the conflict changed. Try again later."
+    ))
+}
+/// The Bitcoin address `outpoint` pays, from its Bitcoin previous
+/// transaction checked against its txid.
+async fn prevout_address(
+    evidence: &dyn SplitEvidenceSource,
+    outpoint: &OutPoint,
+    unavailable: fn(FailureKind) -> Refusal,
+) -> Result<Address, Refusal> {
+    let previous = evidence
+        .previous_transaction(ChainId::Bitcoin, outpoint.txid)
+        .await
+        .map_err(unavailable)?;
+    (previous.compute_txid() == outpoint.txid)
+        .then(|| usize::try_from(outpoint.vout).ok())
+        .flatten()
+        .and_then(|vout| previous.output.get(vout))
+        .and_then(|output| Address::from_script(&output.script_pubkey, Network::Bitcoin).ok())
+        .ok_or_else(|| Refusal::final_(step1::UNIDENTIFIED))
+}
+/// O4: one fresh Bitcoin read keyed by step 1's own txid: absent (in no
+/// block and not waiting to be mined).
+async fn step1_absent(evidence: &dyn SplitEvidenceSource, step1: Txid) -> Result<(), Refusal> {
+    let seen = evidence
+        .transaction(ChainId::Bitcoin, step1)
+        .await
+        .map_err(conflict_unavailable)?;
+    if !fresh(evidence, seen.observed_at()) {
+        return Err(conflict_unavailable(FailureKind::Stale));
+    }
+    if *seen.value() != TransactionObservation::Absent {
+        return Err(Refusal::retry(CONFLICT_STEP1_SEEN));
+    }
+    Ok(())
+}
+
+/// O4 (#568 S4b): before a split with a recorded terminal step-1 conflict
+/// may be closed, fresh Bitcoin reads must show, in this order: step 1
+/// absent; the conflicting coin still missing from its address's Bitcoin
+/// unspent outputs (the address from its previous transaction, checked
+/// against its txid); step 1 absent again. Step 1's depth is not read, and
+/// step 2's BTCB2 state does not matter. Step 1 seen again or the coin
+/// unspent again refuses (a reconcile then decides: S4-D6 clears a conflict
+/// step 1 disproves), as does a failed or stale read; nothing is recorded.
+async fn check_conflict_close(
+    evidence: &dyn SplitEvidenceSource,
+    step1: Txid,
+    conflict: &Step1Conflict,
+) -> Result<(), Refusal> {
+    step1_absent(evidence, step1).await?;
+    let outpoint = conflict.outpoint();
+    let address = prevout_address(evidence, &outpoint, conflict_unavailable).await?;
+    let unspent = evidence
+        .unspent_outputs(ChainId::Bitcoin, &address.to_string())
+        .await
+        .map_err(conflict_unavailable)?;
+    if !fresh(evidence, unspent.observed_at()) {
+        return Err(conflict_unavailable(FailureKind::Stale));
+    }
+    if unspent.value().contains(&outpoint) {
+        return Err(Refusal::retry(format!(
+            "The coin this split's conflict names ({outpoint}) is unspent on Bitcoin again, so this split was not closed. Check status again."
+        )));
+    }
+    step1_absent(evidence, step1).await
 }
 /// One fresh BTCB2 read keyed by the recorded step 2's own txid: absent.
 async fn step2_absent(evidence: &dyn SplitEvidenceSource, step2: Txid) -> Result<(), Refusal> {
@@ -1051,9 +1276,13 @@ async fn step2_absent(evidence: &dyn SplitEvidenceSource, step2: Txid) -> Result
 /// txid); and the recorded step 2 absent again. A sighting, a spend, a
 /// shallow or reorged step 1, or a failed or stale read refuses, and the
 /// journal is kept. A sighting here is not recorded in the journal: the dead
-/// end has no resend for it to end.
+/// end has no resend for it to end. O4's dead end is checked on Bitcoin
+/// only ([`check_conflict_close`]).
 pub async fn check_close(connect: &dyn SplitConnect, dead_end: &DeadEnd) -> Result<(), Refusal> {
     let evidence = connect.evidence();
+    if let Some(conflict) = &dead_end.conflict {
+        return check_conflict_close(evidence, dead_end.step1, conflict).await;
+    }
     step2_absent(evidence, dead_end.step2).await?;
 
     let status = evidence
@@ -1084,16 +1313,7 @@ pub async fn check_close(connect: &dyn SplitConnect, dead_end: &DeadEnd) -> Resu
     }
 
     for outpoint in &dead_end.claimed {
-        let previous = evidence
-            .previous_transaction(ChainId::Bitcoin, outpoint.txid)
-            .await
-            .map_err(unavailable)?;
-        let address = (previous.compute_txid() == outpoint.txid)
-            .then(|| usize::try_from(outpoint.vout).ok())
-            .flatten()
-            .and_then(|vout| previous.output.get(vout))
-            .and_then(|output| Address::from_script(&output.script_pubkey, Network::Bitcoin).ok())
-            .ok_or_else(|| Refusal::final_(step1::UNIDENTIFIED))?;
+        let address = prevout_address(evidence, outpoint, unavailable).await?;
         let unspent = evidence
             .unspent_outputs(ChainId::BitcoinBlake2b, &address.to_string())
             .await
@@ -1111,9 +1331,10 @@ pub async fn check_close(connect: &dyn SplitConnect, dead_end: &DeadEnd) -> Resu
 
 /// #625 F2 (A1 = A): close a split in its step-2 dead end, after
 /// [`check_close`] passed again. Under the journal's lock it must still be
-/// in exactly that dead end; then its tombstone ([`step1::CLOSED`]) is
-/// written atomically next to the journal, naming the source, the target
-/// Cube, both recorded txids and the claimed inputs. The journal itself,
+/// in exactly that dead end (for O4, with the same terminal conflict); then
+/// its tombstone ([`step1::CLOSED`]) is written atomically next to the
+/// journal, naming the source, the target Cube, both recorded txids and the
+/// claimed inputs, and for O4 the conflicting coin. The journal itself,
 /// with the recorded signed step 2, is not changed or deleted. A failed
 /// write closes nothing. `ended` is the panel's session flag: set by a
 /// revocation after the close was confirmed, it refuses under the journal's
@@ -1137,7 +1358,7 @@ pub fn close(
     if ended.load(std::sync::atomic::Ordering::SeqCst) {
         return Err(step1::ENDED_BEFORE_ABANDON.to_string());
     }
-    let tombstone = serde_json::json!({
+    let mut tombstone = serde_json::json!({
         "version": 1,
         "source_digest": digest.to_string(),
         "target_cube": target_cube,
@@ -1150,6 +1371,9 @@ pub fn close(
             .collect::<Vec<_>>(),
         "closed_at": closed_at,
     });
+    if let Some(conflict) = &dead_end.conflict {
+        tombstone["step1_conflict"] = serde_json::json!(conflict.outpoint().to_string());
+    }
     let bytes = serde_json::to_vec_pretty(&tombstone).map_err(|error| error.to_string())?;
     write_tombstone(directory, &bytes)
         .map_err(|error| format!("The split could not be abandoned ({error})."))
@@ -1456,6 +1680,8 @@ impl ReconPort for ProductionRecon {
         Ok(Box::new(ReconcilerDriver::new(
             reconciler,
             self.site.clone(),
+            self.generation.clone(),
+            self.expected,
         )))
     }
 }
@@ -1689,6 +1915,9 @@ struct CoordinatorDriver {
     review: Option<Review>,
     /// P3-3: the last resend review, used up by its confirmation.
     resend: Option<Step2ResubmissionReview>,
+    /// O1 (#568 S4b): the last step-1 reconfirmation review, used up by its
+    /// acknowledgement.
+    reconfirmation: Option<Step1ReconfirmationReview>,
     route: SubmissionRoute,
     /// The session generation the coordinator works under, for the resend
     /// review's liveness.
@@ -1706,6 +1935,7 @@ impl CoordinatorDriver {
             coordinator,
             review: None,
             resend: None,
+            reconfirmation: None,
             route,
             generation,
             expected,
@@ -1758,6 +1988,7 @@ impl Step2Coord for CoordinatorDriver {
     ) -> Result<(Status, TransactionObservation, Step1AfterStep2), Step2Refusal> {
         self.review = None;
         self.resend = None;
+        self.reconfirmation = None;
         self.coordinator
             .reconcile_sweep(context)
             .await
@@ -1808,6 +2039,44 @@ impl Step2Coord for CoordinatorDriver {
             .confirm_step2_resubmission(review, context)
             .await
             .map_err(describe_resend)
+    }
+    async fn review_reconfirmation(
+        &mut self,
+        context: &Context,
+    ) -> Result<ReconfirmationView, Step2Refusal> {
+        // A new review moves the coordinator's revision: any earlier review
+        // of either kind could only refuse.
+        self.review = None;
+        self.resend = None;
+        self.reconfirmation = None;
+        let review = self
+            .coordinator
+            .prepare_step1_reconfirmation(context)
+            .await
+            .map_err(describe_reconfirmation)?;
+        let revoker = self.coordinator.revoker();
+        let view = ReconfirmationView::of(
+            &review,
+            resend_liveness(
+                move || revoker.is_revoked(),
+                self.generation.clone(),
+                self.expected,
+                review.not_after(),
+            ),
+        );
+        self.reconfirmation = Some(review);
+        Ok(view)
+    }
+    async fn confirm_reconfirmation(&mut self, context: &Context) -> Result<(), Step2Refusal> {
+        self.review = None;
+        let review = self
+            .reconfirmation
+            .take()
+            .ok_or_else(|| Step2Refusal::retry(RECONFIRMATION_AGAIN))?;
+        self.coordinator
+            .confirm_step1_reconfirmation(review, context)
+            .await
+            .map_err(describe_reconfirmation)
     }
 }
 
@@ -1875,14 +2144,28 @@ struct ReconcilerDriver<C = SplitStep2Reconciler> {
     core: Option<C>,
     site: Option<CompletionSite>,
     revoke: RevokeHandle,
+    /// O1 (#568 S4b): the last step-1 reconfirmation review, used up by its
+    /// acknowledgement, and the session generation its view's liveness
+    /// follows.
+    reconfirmation: Option<Step1ReconfirmationReview>,
+    generation: watch::Receiver<u64>,
+    expected: u64,
 }
 impl ReconcilerDriver {
-    fn new(reconciler: SplitStep2Reconciler, site: Option<CompletionSite>) -> Self {
+    fn new(
+        reconciler: SplitStep2Reconciler,
+        site: Option<CompletionSite>,
+        generation: watch::Receiver<u64>,
+        expected: u64,
+    ) -> Self {
         let revoker = reconciler.revoker();
         Self {
             core: Some(reconciler),
             site,
             revoke: Arc::new(move || revoker.revoke()),
+            reconfirmation: None,
+            generation,
+            expected,
         }
     }
 }
@@ -1946,6 +2229,7 @@ impl Step2Recon for ReconcilerDriver {
         &mut self,
         context: &Context,
     ) -> Result<(Status, TransactionObservation, Step1AfterStep2), Step2Refusal> {
+        self.reconfirmation = None;
         self.core
             .as_mut()
             .ok_or_else(interrupted)?
@@ -1990,6 +2274,41 @@ impl Step2Recon for ReconcilerDriver {
                 cleared,
             },
         })
+    }
+    async fn review_reconfirmation(
+        &mut self,
+        context: &Context,
+    ) -> Result<ReconfirmationView, Step2Refusal> {
+        self.reconfirmation = None;
+        let core = self.core.as_mut().ok_or_else(interrupted)?;
+        let review = core
+            .prepare_step1_reconfirmation(context)
+            .await
+            .map_err(describe_reconfirmation)?;
+        let revoker = core.revoker();
+        let view = ReconfirmationView::of(
+            &review,
+            resend_liveness(
+                move || revoker.is_revoked(),
+                self.generation.clone(),
+                self.expected,
+                review.not_after(),
+            ),
+        );
+        self.reconfirmation = Some(review);
+        Ok(view)
+    }
+    async fn confirm_reconfirmation(&mut self, context: &Context) -> Result<(), Step2Refusal> {
+        let review = self
+            .reconfirmation
+            .take()
+            .ok_or_else(|| Step2Refusal::retry(RECONFIRMATION_AGAIN))?;
+        self.core
+            .as_mut()
+            .ok_or_else(interrupted)?
+            .confirm_step1_reconfirmation(review, context)
+            .await
+            .map_err(describe_reconfirmation)
     }
 }
 
