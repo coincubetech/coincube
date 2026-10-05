@@ -73,6 +73,16 @@ pub enum Message {
     /// Results of the Split step-1 panel's own tasks (#568 B1b). Carries the
     /// panel's coordinator back and forth, so no other handler sees it.
     Split(Box<super::state::vault::split::SplitEvent>),
+    /// #625 F3a: the Split journal discovery, run off the UI thread, for
+    /// this Cube and Vault.
+    SplitDiscovered {
+        cube: String,
+        wallet: crate::app::settings::WalletId,
+        panel: Option<Box<super::state::vault::split::SplitPanel>>,
+    },
+    /// #625 F3c: the Split ports a refresh built off the UI thread, under
+    /// its sequence number (`None`: the build did not finish).
+    SplitPortsBuilt(u64, Option<Box<super::SplitPorts>>),
     /// Completion of the read-only Split destination reservation (with the
     /// daemon's post-reservation sync state and coin history, to prove the
     /// address fresh) and bounded BTCB2 fee-rate lookup (`None` =

@@ -29,8 +29,10 @@
 //!   Bitcoin again (mempool or block) or the coin unspent again, and becomes
 //!   **terminal** only when a later reconcile finds the same coin still
 //!   missing and step 1 still absent at a tip at least six blocks higher.
-//!   Then step 1 can never confirm and the split can't complete, and the
-//!   record is never cleared (S4-D2).
+//!   Then step 1 can never confirm and the split can't complete (S4-D2),
+//!   unless a later collection finds step 1 eligible after all (six deep in
+//!   its recorded block), which disproves the conflict and clears it
+//!   (S4-D6).
 //! - `Unknown`: the collection could not place step 1.
 //!
 //! While step 1 is not confirmed, step 2's recorded bytes could be mined on
@@ -246,8 +248,9 @@ fn still_current(
 }
 
 /// What became of step 1, from a reconcile's applied collection, with the
-/// conflict record kept current (S4-D5). A terminal conflict stands
-/// whatever the chains show now (S4-D2). A provisional one is cleared when
+/// conflict record kept current (S4-D5). A terminal conflict stands until a
+/// collection finds step 1 eligible (six deep in its recorded block), which
+/// disproves it and clears it (S4-D6). A provisional one is cleared when
 /// the collection or the conflict reads show step 1 on Bitcoin, or show its
 /// coin unspent again; it becomes terminal when the coin is still missing
 /// and step 1 still absent six blocks above where it was first seen; a
@@ -261,11 +264,19 @@ pub(super) async fn after_step2(
     observations: ObservationBundle,
 ) -> Result<Step1AfterStep2, Error> {
     let recorded = controller.split_step1_conflict();
-    if let Some(terminal) = recorded.filter(Step1Conflict::is_terminal) {
-        return Ok(Step1AfterStep2::Conflict(terminal));
-    }
     let plan = controller.plan();
     let after = classify(&plan, observations);
+    if let Some(terminal) = recorded.filter(Step1Conflict::is_terminal) {
+        // S4-D6: step 1 six deep on Bitcoin disproves "step 1 can never
+        // confirm" (the terminal conflict may rest on a mempool spend that
+        // stayed unconfirmed for six blocks). Every other outcome keeps it.
+        if after != Step1AfterStep2::Eligible {
+            return Ok(Step1AfterStep2::Conflict(terminal));
+        }
+        still_current(controller, context, generation)?;
+        controller.disprove_split_step1_conflict(context)?;
+        return Ok(after);
+    }
     match after {
         Step1AfterStep2::Missing => {}
         Step1AfterStep2::Unknown => {

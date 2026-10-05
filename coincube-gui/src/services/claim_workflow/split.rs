@@ -166,9 +166,10 @@ pub(super) struct SplitRecord {
     /// outputs, which may be a mempool spend (S4-D5). Provisional until a
     /// later reconcile finds the same coin still missing and step 1 still
     /// absent at least `MIN_CONFIRMATIONS` blocks higher; then terminal
-    /// (S4-D2): step 1 can never confirm, the split can't complete, and the
-    /// record is never cleared. A provisional one is cleared when a fresh
-    /// read shows step 1 or the coin again. Absent until recorded, so a
+    /// (S4-D2): step 1 can never confirm and the split can't complete,
+    /// until a fresh collection finds step 1 six deep after all (S4-D6). A
+    /// provisional one is cleared when a fresh read shows step 1 or the
+    /// coin again. Absent until recorded, so a
     /// journal without it serializes exactly as before and stays at version
     /// 8; a binary without the field refuses one that has it
     /// (`deny_unknown_fields`).
@@ -1204,7 +1205,8 @@ impl Controller {
 
     /// S4-D5: clear a provisional conflict, after a fresh read showed step
     /// 1 on Bitcoin (mempool or block) or the coin unspent again. A
-    /// terminal one is never cleared (`Conflict`).
+    /// terminal one is never cleared here (`Conflict`; S4-D6 disproves one
+    /// through [`Self::disprove_split_step1_conflict`]).
     pub(crate) fn clear_split_step1_conflict(&mut self, current: &Context) -> Result<(), Error> {
         self.ensure_context(current)?;
         match self.record_of(SplitKind::Split)?.step1_conflict {
@@ -1212,6 +1214,18 @@ impl Controller {
             Some(recorded) if recorded.is_terminal() => Err(Error::Conflict),
             Some(_) => self.store_step1_conflict(None),
         }
+    }
+
+    /// S4-D6: clear a recorded conflict, terminal or provisional, after a
+    /// fresh collection found step 1 eligible on Bitcoin (six deep in its
+    /// recorded block): a confirmed step 1 disproves "step 1 can never
+    /// confirm". The step-2 reconciler's classification is the only caller.
+    pub(crate) fn disprove_split_step1_conflict(&mut self, current: &Context) -> Result<(), Error> {
+        self.ensure_context(current)?;
+        if self.record_of(SplitKind::Split)?.step1_conflict.is_none() {
+            return Ok(());
+        }
+        self.store_step1_conflict(None)
     }
 
     fn store_step1_conflict(&mut self, conflict: Option<Step1Conflict>) -> Result<(), Error> {

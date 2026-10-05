@@ -1333,3 +1333,13 @@ fn with_signatures_of(recorded: &Transaction, from: &Psbt, to: &Psbt) -> Transac
     }
     tx
 }
+
+/// #647 nit: `NotBitcoinBlake2b` is returned by step 2 and by the unified
+/// sweep plan alike, so its message names neither (S3 item 7e).
+#[test]
+fn not_bitcoin_blake2b_message_is_chain_neutral() {
+    let message = Error::NotBitcoinBlake2b(ChainId::Bitcoin).to_string();
+    assert!(message.contains("Bitcoin Blake2b only"), "{}", message);
+    assert!(!message.contains("Split"), "{}", message);
+    assert!(!message.contains("step 2"), "{}", message);
+}
