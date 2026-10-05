@@ -708,12 +708,15 @@ impl SplitPanel {
     }
     /// #625 F2: a step-2 dead end may be closed from the reconcile-only
     /// stage, once a reconcile under this session saw step 2 absent from
-    /// BTCB2 (an accepted send may still be in a mempool; #644 G1), and only
-    /// after a check on both chains passed.
+    /// BTCB2 (an accepted send may still be in a mempool; #644 G1) and step
+    /// 1 eligible (#568 S4b: the close's own check needs step 1 six deep in
+    /// its block, so any other outcome could only refuse), and only after a
+    /// check on both chains passed.
     pub fn can_check_close(&self) -> bool {
         self.dead_end.is_some()
             && self.connect.is_some()
             && self.step2_seen_here == Some(TransactionObservation::Absent)
+            && self.step2_after == Some(Step1AfterStep2::Eligible)
             && self.stage == Stage::Step2(Step2Stage::Reconcile)
     }
     pub fn can_confirm_close(&self) -> bool {

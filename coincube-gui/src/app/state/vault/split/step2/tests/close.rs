@@ -213,6 +213,7 @@ impl SplitConnect for Evidence {
 struct LockedRecon {
     _controller: Controller,
     seen: Arc<Mutex<TransactionObservation>>,
+    after: Arc<Mutex<Step1AfterStep2>>,
 }
 #[async_trait]
 impl Step2Recon for LockedRecon {
@@ -229,7 +230,7 @@ impl Step2Recon for LockedRecon {
         Ok((
             Status::Observation(Assessment::ObservationsEligibleForPreflight),
             *self.seen.lock().unwrap(),
-            Step1AfterStep2::Eligible,
+            *self.after.lock().unwrap(),
         ))
     }
     async fn complete(&mut self, _: &Context) -> Result<SplitCompletion, Step2Refusal> {
@@ -244,6 +245,8 @@ struct LockedPort {
     digest: sha256::Hash,
     opened: AtomicUsize,
     seen: Arc<Mutex<TransactionObservation>>,
+    /// What the reconciles report of step 1 (eligible unless a test says).
+    after: Arc<Mutex<Step1AfterStep2>>,
 }
 impl ReconPort for LockedPort {
     fn context(&self) -> Context {
@@ -264,6 +267,7 @@ impl ReconPort for LockedPort {
             )
             .map_err(|error| Step2Refusal::retry(format!("{error:?}")))?,
             seen: self.seen.clone(),
+            after: self.after.clone(),
         }))
     }
 }
@@ -296,6 +300,7 @@ impl Fixture {
             digest: journal.digest(),
             opened: AtomicUsize::new(0),
             seen: Arc::new(Mutex::new(TransactionObservation::Absent)),
+            after: Arc::new(Mutex::new(Step1AfterStep2::Eligible)),
         });
         Self {
             journal,
@@ -841,4 +846,38 @@ async fn check_close_refuses_a_stale_unspent_read_and_an_unauthenticated_previou
         "{:?}",
         refused
     );
+}
+
+/// #568 S4b (Legolas F4, applied to the #625 close): the step-2 dead end is
+/// offered for closing only while this session's last reconcile found step
+/// 1 eligible. The close's own check needs step 1 six deep in its block, so
+/// beside any other outcome it could only refuse; a check asked for then
+/// does nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn panel_offers_the_dead_end_close_only_while_step1_is_eligible() {
+    let fixture = Fixture::new();
+    let mut panel = fixture.panel().await;
+    assert!(panel.can_check_close());
+    for after in [
+        Step1AfterStep2::Shallow { confirmations: 4 },
+        Step1AfterStep2::InMempool,
+        Step1AfterStep2::Missing,
+        Step1AfterStep2::Unknown,
+    ] {
+        *fixture.port.after.lock().unwrap() = after;
+        let task = panel.update(SplitMessage::Step2Reconcile);
+        drive(&mut panel, task).await;
+        assert!(panel.dead_end().is_some(), "{:?}", after);
+        assert!(!panel.can_check_close(), "{:?}", after);
+        check(&mut panel).await;
+        assert!(!panel.can_confirm_close(), "{:?}", after);
+        assert_eq!(panel.stage(), &Stage::Step2(Step2Stage::Reconcile));
+    }
+    *fixture.port.after.lock().unwrap() = Step1AfterStep2::Eligible;
+    let task = panel.update(SplitMessage::Step2Reconcile);
+    drive(&mut panel, task).await;
+    assert!(panel.can_check_close());
+    check(&mut panel).await;
+    assert!(panel.can_confirm_close(), "{:?}", panel.notice());
+    assert!(!fixture.tombstone().exists());
 }

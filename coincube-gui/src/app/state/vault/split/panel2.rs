@@ -217,8 +217,12 @@ impl SplitPanel {
     /// when the restart reopened the coordinator for a resend the journal
     /// allows (the reconciler can't send), not once a resend was accepted,
     /// and not once a reconcile under this session saw step 2 on BTCB2,
-    /// which the review could only refuse (#648 R2). The coordinator checks
-    /// everything again with fresh evidence.
+    /// which the review could only refuse (#648 R2). Nor while the last
+    /// reconcile found step 1 anything but eligible (#568 S4b, Legolas F4):
+    /// shallow, re-mined, unconfirmed, missing, in conflict or unknown, the
+    /// service refuses every resend. Before any reconcile the review's own
+    /// fresh reads decide. The coordinator checks everything again with
+    /// fresh evidence.
     pub fn can_review_resend(&self) -> bool {
         self.stage == Stage::Step2(Step2Stage::Reconcile)
             && self.coord.is_some()
@@ -231,6 +235,9 @@ impl SplitPanel {
                 self.step2_seen_here,
                 None | Some(crate::services::claim_observation::TransactionObservation::Absent)
             )
+            && self
+                .step2_after
+                .is_none_or(|after| after == Step1AfterStep2::Eligible)
     }
     pub fn step2_outcome(&self) -> Option<crate::services::claim_coordinator::Outcome> {
         self.step2_outcome

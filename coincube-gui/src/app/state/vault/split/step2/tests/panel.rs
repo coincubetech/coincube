@@ -2172,9 +2172,15 @@ async fn panel_resends_step2_only_from_an_explicit_review_after_a_restart() {
     send(&mut panel).await;
     assert_eq!(resends(&shared), 1);
 
-    // A reconcile drops the review, on the reopened coordinator.
+    // A reconcile drops the review, on the reopened coordinator. It finds
+    // step 1 eligible, so a resend may be reviewed again (#568 S4b).
     review(&mut panel).await;
     assert_eq!(panel.step2_resend_review().unwrap().attempt, 2);
+    shared
+        .lock()
+        .unwrap()
+        .afters
+        .push_back(Step1AfterStep2::Eligible);
     let task = panel.update(SplitMessage::Step2Reconcile);
     drive(&mut panel, task).await;
     assert_eq!(panel.stage, Stage::Step2(Step2Stage::Reconcile));
@@ -2415,8 +2421,14 @@ async fn panel_reopens_the_dead_end_when_no_resend_can_follow() {
         let journal = Journal::returned(false);
         let (mut panel, shared) = restarted(&journal, true).await;
         assert!(panel.coord.is_some() && panel.dead_end().is_none());
-        // A reconcile saw step 2 absent before the resend: once the journal
-        // is read again, the close waits for a new one.
+        // A reconcile saw step 2 absent (and step 1 eligible) before the
+        // resend: once the journal is read again, the close waits for a new
+        // one.
+        shared
+            .lock()
+            .unwrap()
+            .afters
+            .push_back(Step1AfterStep2::Eligible);
         let task = panel.update(SplitMessage::Step2Reconcile);
         drive(&mut panel, task).await;
         assert_eq!(panel.step2_seen(), Some(TransactionObservation::Absent));
@@ -3250,4 +3262,68 @@ fn revoke_slot_reaches_a_handle_bound_before_or_after() {
     slot.handle()();
     assert!(!slot.bind(handle()));
     assert_eq!(count.load(Ordering::SeqCst), 2);
+}
+
+/// #568 S4b (Legolas F4, probe P-C): after a restart into a resend, Review
+/// resend is offered only while the last reconcile found step 1 eligible
+/// (before any reconcile, the review's own reads decide). A reconcile that
+/// finds step 1 shallow, re-mined, unconfirmed, missing, in a provisional
+/// or terminal conflict, or can't place it hides it beside its warning; an
+/// eligible one offers it again. Nothing is reviewed or sent meanwhile.
+#[tokio::test(flavor = "multi_thread")]
+async fn panel_offers_review_resend_only_while_step1_is_eligible() {
+    use crate::services::claim_workflow::Step1Conflict;
+    let journal = Journal::returned(false);
+    let (mut panel, shared) = restarted(&journal, true).await;
+    assert!(panel.coord.is_some());
+    assert!(panel.can_review_resend(), "before any reconcile");
+    let coin = OutPoint::new(Txid::from_byte_array([1; 32]), 0);
+    let tip = coincube_core::claim::BlockRef {
+        height: 106,
+        hash: hash(0x40),
+    };
+    let provisional = Step1Conflict::new(coin, tip);
+    let terminal = provisional
+        .terminal(coincube_core::claim::BlockRef {
+            height: 112,
+            hash: hash(0x41),
+        })
+        .unwrap();
+    let block = |height| coincube_core::claim::BlockRef {
+        height,
+        hash: hash(height as u8),
+    };
+    for after in [
+        Step1AfterStep2::Shallow { confirmations: 4 },
+        Step1AfterStep2::Remined {
+            previous: block(100),
+            confirmed: block(101),
+        },
+        Step1AfterStep2::InMempool,
+        Step1AfterStep2::Missing,
+        Step1AfterStep2::Conflict(provisional),
+        Step1AfterStep2::Conflict(terminal),
+        Step1AfterStep2::Unknown,
+        Step1AfterStep2::Eligible,
+    ] {
+        shared.lock().unwrap().afters.push_back(after);
+        let task = panel.update(SplitMessage::Step2Reconcile);
+        drive(&mut panel, task).await;
+        assert_eq!(panel.step2_after(), Some(after));
+        let eligible = after == Step1AfterStep2::Eligible;
+        assert_eq!(panel.step2_warning().is_none(), eligible, "{after:?}");
+        assert_eq!(
+            panel.can_review_resend(),
+            eligible,
+            "Review resend beside {after:?}"
+        );
+        let task = panel.update(SplitMessage::Step2ReviewResend);
+        drive(&mut panel, task).await;
+        assert_eq!(
+            shared.lock().unwrap().resend_reviews,
+            usize::from(eligible),
+            "{after:?}"
+        );
+    }
+    assert_eq!(shared.lock().unwrap().resends, 0);
 }
