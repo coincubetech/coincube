@@ -856,6 +856,10 @@ pub enum Restart {
     Resend(Box<dyn Step2Coord>),
     /// #625 F2: the split was closed in its step-2 dead end. Nothing opens.
     Closed,
+    /// #568 B4b-3c: a fork-only (`kind: Unified`) record. Neither step 1's
+    /// restore nor the two-step reconciler can open it (U2): the panel opens
+    /// it through its unified port, by whether a submission is recorded.
+    Unified(super::unified::UnifiedRecord),
 }
 
 /// #625 F2: a recorded step 2 that no resend can follow and no read ever
@@ -942,6 +946,20 @@ pub async fn restart(
         // stays: it keeps a closed split from waiting for the lock at all.
         if step1::is_closed(&directory) {
             return Ok(Restart::Closed);
+        }
+        // #568 B4b-3c: restart by kind. A fork-only record has no step 1 to
+        // restore and the two-step reconciler refuses it (U2), so it never
+        // reaches either: what it has recorded decides how it reopens.
+        let kind = controller
+            .recorded_split()
+            .map_err(|error| {
+                Step2Refusal::retry(step1::describe(claim_coordinator::Error::Journal(error)))
+            })?
+            .map(|record| record.kind);
+        if kind == Some(claim_workflow::SplitKind::Unified) {
+            return Ok(Restart::Unified(super::unified::UnifiedRecord::of(
+                &controller,
+            )));
         }
         (
             controller.recorded_split_step2().is_some(),
@@ -1135,6 +1153,60 @@ pub fn close(
     let bytes = serde_json::to_vec_pretty(&tombstone).map_err(|error| error.to_string())?;
     write_tombstone(directory, &bytes)
         .map_err(|error| format!("The split could not be abandoned ({error})."))
+    // The controller, and the journal lock, end here.
+}
+
+/// #568 B4b-3c (C6, U4): close a fork-only split. Under the journal's lock
+/// it must still be the fork-only record `record` was read from: no
+/// submission for an unsubmitted one (no signed bytes were ever recorded,
+/// so nothing needs a chain check), and for a submitted one exactly the
+/// recorded sweep the caller's fresh check found absent with every coin
+/// unspent on BTCB2 ([`super::unified::check_close`]). Then its tombstone
+/// is written as for a two-step dead end; the journal itself is kept.
+/// `ended` refuses under the lock, right before the write, as for
+/// [`close`]. Blocking: off the UI thread, with every handle on the journal
+/// dropped first.
+pub(super) fn close_unified(
+    directory: &Path,
+    target_cube: &str,
+    digest: sha256::Hash,
+    context: Context,
+    record: &super::unified::UnifiedRecord,
+    closed_at: i64,
+    ended: &std::sync::atomic::AtomicBool,
+) -> Result<(), String> {
+    let identity = claim_workflow::split_identity(target_cube.to_owned(), digest);
+    let controller = Controller::reopen_settling_blocking(directory, &identity, context)
+        .map_err(|error| step1::describe(claim_coordinator::Error::Journal(error)))?;
+    if controller
+        .recorded_split()
+        .ok()
+        .flatten()
+        .map(|split| split.kind)
+        != Some(claim_workflow::SplitKind::Unified)
+        || super::unified::UnifiedRecord::of(&controller) != *record
+    {
+        return Err(CHANGED_SINCE_CHECK.to_string());
+    }
+    if ended.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err(step1::ENDED_BEFORE_ABANDON.to_string());
+    }
+    let tombstone = serde_json::json!({
+        "version": 1,
+        "kind": "unified",
+        "source_digest": digest.to_string(),
+        "target_cube": target_cube,
+        "sweep_txid": record.sweep.map(|txid| txid.to_string()),
+        "claimed_prevouts": record
+            .claimed
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        "closed_at": closed_at,
+    });
+    let bytes = serde_json::to_vec_pretty(&tombstone).map_err(|error| error.to_string())?;
+    write_tombstone(directory, &bytes)
+        .map_err(|error| format!("The split could not be closed ({error})."))
     // The controller, and the journal lock, end here.
 }
 

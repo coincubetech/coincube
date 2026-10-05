@@ -1416,6 +1416,15 @@ fn split_b0_journal_api_has_no_gui_callers() {
                                 "Step1Conflict",
                             ]
                             .contains(&ident));
+                    // #568 B4b-3c: restart and the fork-only close read the
+                    // record's kind; the single-step panel's tests write
+                    // fork-only journals.
+                    let panel_unified = ((file.starts_with("src/app/state/vault/split/step2")
+                        || file.starts_with("src/app/state/vault/split/unified"))
+                        && ["SplitKind", "split_identity"].contains(&ident))
+                        || (file.starts_with("src/app/state/vault/split/unified/tests")
+                            && ["create_unified_split", "record_unified_broadcast_intent"]
+                                .contains(&ident));
                     // #625 F2: the close tests make a journal whose resend is
                     // reviewable, which is no dead end. Tests only.
                     let panel_step2_tests = file
@@ -1428,6 +1437,7 @@ fn split_b0_journal_api_has_no_gui_callers() {
                         && !panel
                         && !panel_step2
                         && !panel_step2_tests
+                        && !panel_unified
                         && !gate
                         && !unified
                     {

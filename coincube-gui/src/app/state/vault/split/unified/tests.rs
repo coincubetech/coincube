@@ -24,8 +24,8 @@ use coincube_core::{
         VerifiedUnifiedSweep,
     },
     miniscript::bitcoin::{
-        absolute::LockTime, bip32::DerivationPath, hashes::Hash, secp256k1::Secp256k1, Network,
-        ScriptBuf, WScriptHash,
+        absolute::LockTime, bip32::DerivationPath, hashes::Hash, secp256k1::Secp256k1, ScriptBuf,
+        WScriptHash,
     },
     signer::SessionSigner,
 };
@@ -113,6 +113,7 @@ fn build_sweep(open: &UnifiedOpen, feerate: u64) -> UnifiedSweep {
 #[derive(Default)]
 struct PortCalls {
     opens: Mutex<Vec<bool>>,
+    recon_opens: AtomicUsize,
     reserves: AtomicUsize,
     builds: AtomicUsize,
     reviews: AtomicUsize,
@@ -150,8 +151,8 @@ impl UnifiedPort for FakePort {
             daemon: self.daemon,
         }
     }
-    fn open(&self, open: UnifiedOpen) -> Result<Box<dyn UnifiedFlow>, Step2Refusal> {
-        self.calls.opens.lock().unwrap().push(false);
+    fn open(&self, open: UnifiedOpen, resume: bool) -> Result<Box<dyn UnifiedFlow>, Step2Refusal> {
+        self.calls.opens.lock().unwrap().push(resume);
         Ok(Box::new(UnifiedDriver::new(FakeCore {
             open,
             calls: self.calls.clone(),
@@ -160,6 +161,15 @@ impl UnifiedPort for FakePort {
             verified: None,
             reviewed: false,
         })))
+    }
+    fn open_reconciler(
+        &self,
+        _: PathBuf,
+        _: String,
+        _: sha256::Hash,
+    ) -> Result<Box<dyn UnifiedRecon>, Step2Refusal> {
+        self.calls.recon_opens.fetch_add(1, Ordering::SeqCst);
+        Ok(Box::new(FakeRecon(self.calls.clone())))
     }
 }
 
@@ -248,6 +258,26 @@ impl UnifiedCore for FakeCore {
     }
     async fn feerate(&self) -> Option<u64> {
         *self.calls.review_feerate.lock().unwrap()
+    }
+}
+
+struct FakeRecon(Arc<PortCalls>);
+#[async_trait]
+impl UnifiedRecon for FakeRecon {
+    fn revoke_handle(&self) -> RevokeHandle {
+        let calls = self.0.clone();
+        Arc::new(move || calls.revoked.store(true, Ordering::SeqCst))
+    }
+    fn recorded_outcome(&self) -> Option<Outcome> {
+        None
+    }
+    async fn reconcile(&mut self, _: &Context) -> Result<TransactionObservation, Step2Refusal> {
+        Ok(self
+            .0
+            .seen
+            .lock()
+            .unwrap()
+            .unwrap_or(TransactionObservation::Absent))
     }
 }
 
@@ -551,6 +581,265 @@ async fn unified_review_rereads_the_d4_fee_before_any_journal_write() {
         assert_eq!(port.calls.confirms.load(Ordering::SeqCst), 0);
         assert!(step1::discover(&temp.root()).is_empty());
     }
+}
+
+/// A real fork-only journal of `scan`'s coins under `temp`: created, and
+/// with its submission recorded when `submitted` (signed by seeds 1 and 3).
+fn fork_only_journal(
+    scan: &Scan,
+    connect: &FakeConnect,
+    temp: &Temp,
+    submitted: bool,
+) -> (sha256::Hash, PathBuf, Option<Txid>) {
+    let source = split_source(&scan.wallet.external, Some(&scan.wallet.internal)).unwrap();
+    let digest = source.digest();
+    let directory = step1::journal_directory(&temp.root(), digest);
+    let inventory = scan.intent().inventory;
+    let open = UnifiedOpen {
+        directory: directory.clone(),
+        target_cube: TARGET.into(),
+        source,
+        coins: inventory.splittable_coins(),
+        fork_height: fixture::FORK,
+    };
+    let sweep = build_sweep(&open, 2);
+    claim_workflow::prepare_directory(&directory).unwrap();
+    let mut controller =
+        Controller::create_unified_split(&directory, TARGET.into(), &sweep, 7, connect.context())
+            .unwrap();
+    if !submitted {
+        return (digest, directory, None);
+    }
+    let mut seeds = SeedSet::new(&open.source).unwrap();
+    seeds
+        .add(
+            Zeroizing::new(mnemonic(1).to_string()),
+            Zeroizing::default(),
+        )
+        .unwrap();
+    seeds
+        .add(
+            Zeroizing::new(mnemonic(3).to_string()),
+            Zeroizing::default(),
+        )
+        .unwrap();
+    let unsigned = UnifiedPsbt::from_psbt(sweep.psbt().clone()).unwrap();
+    let signed = seeds
+        .sign_unified(&unsigned, ChainId::BitcoinBlake2b, &Secp256k1::new())
+        .unwrap();
+    seeds.clear();
+    let verified =
+        finalize_unified_sweep(&sweep, &signed, &Secp256k1::verification_only()).unwrap();
+    controller
+        .record_unified_broadcast_intent(&connect.context(), &verified)
+        .unwrap();
+    (
+        digest,
+        directory,
+        Some(verified.transaction().compute_txid()),
+    )
+}
+
+fn resumed(digest: sha256::Hash, directory: PathBuf, temp: &Temp) -> SplitPanel {
+    SplitPanel::resume(TARGET.into(), temp.root(), digest, directory)
+}
+
+/// Restart by kind: a fork-only record never reaches step 1's restore or
+/// the two-step reconciler. With a recorded submission it opens the unified
+/// reconciler (Reconcile); without one it is revalidated (coins
+/// authenticated afresh, the coordinator resumed) and goes back to seed
+/// entry. CF: decide only on whether a step 2 is recorded.
+#[tokio::test(flavor = "multi_thread")]
+async fn restart_routes_by_kind() {
+    let scan = seed_scan();
+    for submitted in [true, false] {
+        let connect = FakeConnect::new(&scan.coins);
+        let temp = Temp::new();
+        let (digest, directory, sweep) = fork_only_journal(&scan, &connect, &temp, submitted);
+        let restarted = step2::restart(
+            connect.context(),
+            None,
+            None,
+            directory.clone(),
+            TARGET.into(),
+            digest,
+        )
+        .await;
+        match restarted {
+            Ok(step2::Restart::Unified(record)) => {
+                assert_eq!(record.sweep, sweep);
+                assert_eq!(record.claimed.len(), scan.coins.len());
+            }
+            Ok(_) => panic!("submitted={}: not opened by kind", submitted),
+            Err(refusal) => panic!("submitted={}: {:?}", submitted, refusal),
+        }
+
+        let mut panel = resumed(digest, directory.clone(), &temp);
+        panel.set_connect(Some(connect.clone() as Arc<dyn SplitConnect>));
+        let port = FakePort::new(connect.context(), 1);
+        panel.set_unified_port(Some(port.clone() as Arc<dyn UnifiedPort>));
+        let task = panel.begin();
+        drive(&mut panel, task).await;
+        if submitted {
+            assert_eq!(panel.stage(), &Stage::Unified(UnifiedStage::Reconcile));
+            assert_eq!(port.calls.recon_opens.load(Ordering::SeqCst), 1);
+            assert!(port.calls.opens.lock().unwrap().is_empty());
+        } else {
+            assert_eq!(
+                panel.stage(),
+                &Stage::Unified(UnifiedStage::EnterSeeds),
+                "{:?}",
+                panel.stage()
+            );
+            assert_eq!(*port.calls.opens.lock().unwrap(), vec![true]);
+            assert_eq!(panel.unified().threshold(), 2);
+        }
+        // Step 1's coordinator was never opened for it.
+        assert!(connect.calls.opened.lock().unwrap().is_empty());
+        // Without the unified port, nothing else opens it either.
+        let mut panel = resumed(digest, directory, &temp);
+        panel.set_connect(Some(connect.clone() as Arc<dyn SplitConnect>));
+        let task = panel.begin();
+        drive(&mut panel, task).await;
+        assert!(
+            matches!(panel.stage(), Stage::Refused(refusal) if refusal.retry),
+            "{:?}",
+            panel.stage()
+        );
+        assert!(connect.calls.opened.lock().unwrap().is_empty());
+    }
+}
+
+/// C6, U4: the fork-only close. A submitted record closes only after a
+/// reconcile under this session saw the sweep absent and a fresh check
+/// found it absent with every coin unspent on BTCB2; a sighting or a spent
+/// coin refuses and keeps it. An unsubmitted record closes with no check.
+/// The close writes the tombstone and keeps the journal. CF: drop the
+/// coin check from `check_close`.
+#[tokio::test(flavor = "multi_thread")]
+async fn fork_only_close_needs_absence_and_unspent_coins() {
+    let scan = seed_scan();
+    let connect = FakeConnect::new(&scan.coins);
+    let temp = Temp::new();
+    let (digest, directory, sweep) = fork_only_journal(&scan, &connect, &temp, true);
+    let sweep = sweep.unwrap();
+    let record = UnifiedRecord {
+        sweep: Some(sweep),
+        claimed: scan.coins.iter().map(|coin| coin.outpoint).collect(),
+    };
+    check_close(&*connect, &record).await.unwrap();
+    // A sighting refuses.
+    connect.chains.status.lock().unwrap().insert(
+        (ChainId::BitcoinBlake2b, sweep),
+        TransactionObservation::Unconfirmed { txid: sweep },
+    );
+    assert_eq!(
+        check_close(&*connect, &record).await.unwrap_err().reason,
+        SWEEP_SEEN
+    );
+    connect
+        .chains
+        .status
+        .lock()
+        .unwrap()
+        .remove(&(ChainId::BitcoinBlake2b, sweep));
+    // A coin spent on BTCB2 refuses.
+    let spent = FakeConnect::new(&scan.coins);
+    spent
+        .chains
+        .spend_on(ChainId::BitcoinBlake2b, scan.coins[1].outpoint);
+    assert_eq!(
+        check_close(&*spent, &record).await.unwrap_err().reason,
+        COIN_SPENT_ON_BTCB2
+    );
+
+    // The panel: no close before a reconcile saw the sweep absent.
+    let mut panel = resumed(digest, directory.clone(), &temp);
+    panel.set_connect(Some(connect.clone() as Arc<dyn SplitConnect>));
+    let port = FakePort::new(connect.context(), 1);
+    panel.set_unified_port(Some(port.clone() as Arc<dyn UnifiedPort>));
+    let task = panel.begin();
+    drive(&mut panel, task).await;
+    assert_eq!(panel.stage(), &Stage::Unified(UnifiedStage::Reconcile));
+    assert!(!panel.can_check_unified_close());
+    assert!(!panel.can_confirm_unified_close());
+    *port.calls.seen.lock().unwrap() = Some(TransactionObservation::Unconfirmed { txid: sweep });
+    send(&mut panel, UnifiedMessage::Reconcile).await;
+    assert!(!panel.can_check_unified_close());
+    *port.calls.seen.lock().unwrap() = Some(TransactionObservation::Absent);
+    send(&mut panel, UnifiedMessage::Reconcile).await;
+    assert!(panel.can_check_unified_close());
+    assert!(!panel.can_confirm_unified_close());
+    send(&mut panel, UnifiedMessage::CheckClose).await;
+    assert!(panel.can_confirm_unified_close(), "{:?}", panel.notice());
+    send(&mut panel, UnifiedMessage::ConfirmClose).await;
+    assert_eq!(panel.stage(), &Stage::Closed, "{:?}", panel.stage());
+    assert!(port.calls.revoked.load(Ordering::SeqCst));
+    assert!(step1::is_closed(&directory));
+    assert!(directory.join("intent.json").exists());
+    assert!(step1::discover(&temp.root()).is_empty());
+
+    // A record that no longer matches what was checked is not closed.
+    let temp = Temp::new();
+    let (digest, directory, _) = fork_only_journal(&scan, &connect, &temp, true);
+    let ended = AtomicBool::new(false);
+    let other = UnifiedRecord {
+        sweep: Some(Txid::all_zeros()),
+        claimed: record.claimed.clone(),
+    };
+    assert_eq!(
+        step2::close_unified(
+            &directory,
+            TARGET,
+            digest,
+            connect.context(),
+            &other,
+            1,
+            &ended
+        ),
+        Err(step2::CHANGED_SINCE_CHECK.to_string())
+    );
+    assert!(!step1::is_closed(&directory));
+
+    // Unsubmitted: closed from seed entry with no chain check.
+    let temp = Temp::new();
+    let (digest, directory, _) = fork_only_journal(&scan, &connect, &temp, false);
+    let mut panel = resumed(digest, directory.clone(), &temp);
+    panel.set_connect(Some(connect.clone() as Arc<dyn SplitConnect>));
+    let port = FakePort::new(connect.context(), 1);
+    panel.set_unified_port(Some(port.clone() as Arc<dyn UnifiedPort>));
+    let task = panel.begin();
+    drive(&mut panel, task).await;
+    assert_eq!(panel.stage(), &Stage::Unified(UnifiedStage::EnterSeeds));
+    assert!(!panel.can_check_unified_close());
+    assert!(panel.can_confirm_unified_close());
+    add_seed(&mut panel, 1, "").await;
+    send(&mut panel, UnifiedMessage::ConfirmClose).await;
+    assert_eq!(panel.stage(), &Stage::Closed);
+    assert!(!panel.unified().holds_seeds());
+    assert!(step1::is_closed(&directory));
+}
+
+/// The abandon path names the single-step route for a fork-only record,
+/// whose abandon the journal refuses with `Conflict`.
+#[tokio::test(flavor = "multi_thread")]
+async fn fork_only_abandon_conflict_gets_fork_only_copy() {
+    let scan = seed_scan();
+    let connect = FakeConnect::new(&scan.coins);
+    let temp = Temp::new();
+    let (digest, directory, _) = fork_only_journal(&scan, &connect, &temp, false);
+    let ended = AtomicBool::new(false);
+    let error = step1::abandon(&directory, TARGET, digest, connect.context(), &ended).unwrap_err();
+    assert!(
+        matches!(error, claim_workflow::Error::Conflict),
+        "{:?}",
+        error
+    );
+    assert_eq!(
+        abandon_refusal(&directory, TARGET, digest, connect.context(), error),
+        FORK_ONLY_ABANDON
+    );
+    assert!(directory.join("intent.json").exists());
 }
 
 /// The unified port is the session's: an equivalent one keeps the route;

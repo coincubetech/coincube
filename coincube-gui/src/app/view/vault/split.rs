@@ -180,7 +180,7 @@ fn unified_body<'a>(
                 .push(unified_action("Review again", UnifiedMessage::Review))
                 .push(unified_action("Cancel", UnifiedMessage::Cancel));
         }
-        UnifiedStage::Submitted => {
+        UnifiedStage::Submitted | UnifiedStage::Reconcile => {
             body = body.push(p1_regular(match state.outcome() {
                 Some(Outcome::UpstreamAccepted { txid, .. }) => {
                     format!("The sweep {txid} was accepted for relay. Waiting for confirmation.")
@@ -419,7 +419,8 @@ fn step2_body<'a>(
 }
 
 pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
-    let single = matches!(panel.stage(), Stage::Unified(_) | Stage::ChooseRoute);
+    let single = matches!(panel.stage(), Stage::Unified(_) | Stage::ChooseRoute)
+        || panel.unified().record().is_some();
     let mut body = Column::new().spacing(10).max_width(640);
     body = if single {
         body.push(h3("Split")).push(
@@ -674,6 +675,24 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
         actions = actions.push(action(
             "Check before abandoning",
             SplitMessage::CheckAbandon,
+        ));
+    }
+    // B4b-3c (C6): the fork-only close.
+    if panel.can_confirm_unified_close() {
+        let submitted = panel.unified().record().is_some_and(|r| r.sweep.is_some());
+        body = body.push(caption(if submitted {
+            unified::CLOSE_CHECKED
+        } else {
+            unified::CLOSE_UNSUBMITTED
+        }));
+        actions = actions.push(action(
+            "Close this split",
+            SplitMessage::Unified(UnifiedMessage::ConfirmClose),
+        ));
+    } else if panel.can_check_unified_close() {
+        actions = actions.push(action(
+            "Check before closing",
+            SplitMessage::Unified(UnifiedMessage::CheckClose),
         ));
     }
     actions = actions.push(action("Close", SplitMessage::Close));

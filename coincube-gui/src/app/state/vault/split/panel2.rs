@@ -987,6 +987,10 @@ impl SplitPanel {
                 self.stage = Stage::Step2(Step2Stage::Reconcile);
                 Task::none()
             }
+            // B4b-3c: a fork-only record opens by kind.
+            SplitEvent::Restarted(_, Ok(Restarted::Unified(record))) => {
+                self.restart_unified(record)
+            }
             SplitEvent::Restarted(_, Ok(Restarted::Closed)) => {
                 self.notice = None;
                 self.stage = Stage::Closed;

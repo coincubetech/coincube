@@ -1681,14 +1681,24 @@ fn split_ui_paths_do_no_blocking_work() {
             body(&unified, "    pub(super) fn apply_unified(", "    "),
         ),
         (
+            "restart_unified",
+            body(&unified, "    pub(super) fn restart_unified(", "    "),
+        ),
+        (
             "choose_seeds",
             body(&unified, "    fn choose_seeds(", "    "),
         ),
         ("open_flow", body(&unified, "async fn open_flow(", "")),
     ];
-    // B4b-3c: the seed set's derivation and signing, and the coordinator's
-    // open (its port admission and journal directory).
-    const UNIFIED_BLOCKING: [&str; 3] = ["seeds.add(", "flow.sign(", "port.open("];
+    // B4b-3c: the seed set's derivation and signing, the coordinator's and
+    // reconciler's opens (journal reads) and the close's write.
+    const UNIFIED_BLOCKING: [&str; 5] = [
+        "seeds.add(",
+        "flow.sign(",
+        "port.open(",
+        "open_reconciler(",
+        "close_unified(",
+    ];
     for (name, text) in ui {
         for token in BLOCKING.iter().chain(UNIFIED_BLOCKING.iter()) {
             // Every occurrence must sit inside a `spawn_blocking(...)`

@@ -1184,6 +1184,8 @@ fn split_step2_gate_has_no_gui_caller() {
                     "prove_target",
                     "UnifiedCoordinator",
                     "UnifiedError",
+                    "UnifiedReconciler",
+                    "UnifiedReconcile",
                     "UnifiedReview",
                 ]
                 .contains(&ident);
