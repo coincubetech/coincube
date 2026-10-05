@@ -10,6 +10,19 @@ use crate::services::{
     claim_workflow::{Reconfirmation, Step1Conflict},
 };
 
+/// The harness policy with the widest collection budget. Every review
+/// here is bounded by an evidence deadline (`evidence_deadline`): the
+/// budget, capped at 30 s, measured on the real monotonic clock. The
+/// harness's 2 s left a heavily loaded run (four test binaries of 16
+/// threads beside a cargo build) expiring reviews before their
+/// confirmation (`ExpiredEvidence`); 30 s outlasts any such run, and the
+/// expiry itself is tested with `expire_for_test`, not by waiting.
+fn wide_policy() -> CheckPolicy {
+    CheckPolicy {
+        collection_budget: claim_observation::MAX_COLLECTION_TIME,
+        ..policy()
+    }
+}
 /// Step 2 reviewed and submitted through the coordinator, which is then
 /// dropped: a journal with a recorded step-2 submission, and its txid.
 async fn submitted() -> (Harness, Txid) {
@@ -34,7 +47,7 @@ fn reopen(h: &Harness, services: Box<dyn SplitForkServices>) -> SplitStep2Reconc
         context(),
         h.sender.subscribe(),
         services,
-        policy(),
+        wide_policy(),
     )
     .unwrap()
 }
@@ -50,7 +63,7 @@ fn resume_step1(h: &Harness) -> Result<Step1Coordinator, Error> {
         context(),
         h.sender.subscribe(),
         Box::new(h.chains.clone()),
-        policy(),
+        wide_policy(),
         true,
     )
 }
@@ -417,7 +430,7 @@ async fn submitted_over(refuse: bool) -> Submitted {
         context(),
         h.sender.subscribe(),
         Box::new(view.clone()),
-        policy(),
+        wide_policy(),
     )
     .unwrap();
     preparation.check_signing(&context()).await.unwrap();
@@ -1048,7 +1061,7 @@ async fn split_step1_conflict_is_not_recorded_after_the_session_ends() {
         context(),
         generation,
         Box::new(view.clone()),
-        policy(),
+        wide_policy(),
     )
     .unwrap();
     view.step1_gone();
