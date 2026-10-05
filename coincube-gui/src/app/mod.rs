@@ -1005,12 +1005,15 @@ fn discover_split_panel(
 /// step-2 side. Only submission needs the Vault daemon, and only on a route
 /// step 2 can be sent through (#637 R2). Reconciliation and the restart
 /// decision need the session alone (#637 R1). With a session but no step-2
-/// port, why not (S3-D4).
+/// port, why not (S3-D4). The fourth port (#568 B4b-3c) is the single-step
+/// route's: built with the session whatever the daemon, it opens a
+/// coordinator only through a daemon it admits, and reconciles without one.
 pub struct SplitPorts {
     connect: Option<Arc<dyn state::vault::split::step1::SplitConnect>>,
     step2: Option<Arc<dyn state::vault::split::step2::Step2Port>>,
     recon: Option<Arc<dyn state::vault::split::step2::ReconPort>>,
     step2_missing: Option<state::vault::split::step2::Step2Unavailable>,
+    unified: Option<Arc<dyn state::vault::split::unified::UnifiedPort>>,
 }
 impl std::fmt::Debug for SplitPorts {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1019,6 +1022,7 @@ impl std::fmt::Debug for SplitPorts {
             .field("step2", &self.step2.is_some())
             .field("recon", &self.recon.is_some())
             .field("step2_missing", &self.step2_missing)
+            .field("unified", &self.unified.is_some())
             .finish()
     }
 }
@@ -1031,7 +1035,12 @@ fn split_ports(
     daemon: Option<Arc<dyn Daemon + Sync + Send>>,
     site: Option<state::vault::split::step2::CompletionSite>,
 ) -> SplitPorts {
-    use state::vault::split::{step1, step2};
+    use state::vault::split::{step1, step2, unified};
+    let unified = session.clone().and_then(|session| {
+        unified::ProductionUnified::new(session, generation.clone(), daemon.clone())
+            .ok()
+            .map(|port| Arc::new(port) as Arc<dyn unified::UnifiedPort>)
+    });
     let (step2, step2_missing) = match (session.clone(), daemon) {
         (None, _) => (None, None),
         (Some(_), None) => (None, Some(step2::Step2Unavailable::NoDaemon)),
@@ -1060,6 +1069,7 @@ fn split_ports(
         step2,
         recon,
         step2_missing,
+        unified,
     }
 }
 
@@ -3891,6 +3901,7 @@ impl App {
             panel.set_connect(None);
             panel.set_step2_port(None);
             panel.set_recon_port(None);
+            panel.set_unified_port(None);
             panel.note_step2_unavailable(None);
         }
         self.split_port_session = key;
@@ -3943,10 +3954,12 @@ impl App {
             step2,
             recon,
             step2_missing,
+            unified,
         } = *ports;
         panel.set_connect(connect);
         panel.set_step2_port(step2);
         panel.set_recon_port(recon);
+        panel.set_unified_port(unified);
         panel.note_step2_unavailable(step2_missing);
         panel.begin()
     }
@@ -9116,13 +9129,25 @@ mod tests {
                 ports.step2.is_some(),
                 ports.recon.is_some(),
                 ports.step2_missing,
+                // #568 B4b-3c: the unified port, and whether it holds the
+                // daemon a coordinator would open through.
+                ports
+                    .unified
+                    .as_ref()
+                    .map(|port| port.identity().daemon != 0),
             )
         };
         use state::vault::split::step2::Step2Unavailable;
-        // (Connect, step 2, reconcile-only, why no step 2: S3-D4)
+        // (Connect, step 2, reconcile-only, why no step 2: S3-D4, unified)
         assert_eq!(
             shape(split_ports(session(), generation.subscribe(), None, None)),
-            (true, false, true, Some(Step2Unavailable::NoDaemon))
+            (
+                true,
+                false,
+                true,
+                Some(Step2Unavailable::NoDaemon),
+                Some(false)
+            )
         );
         assert_eq!(
             shape(split_ports(
@@ -9131,7 +9156,13 @@ mod tests {
                 Some(electrum),
                 None
             )),
-            (true, false, true, Some(Step2Unavailable::UnsupportedRoute))
+            (
+                true,
+                false,
+                true,
+                Some(Step2Unavailable::UnsupportedRoute),
+                Some(true)
+            )
         );
         assert_eq!(
             shape(split_ports(
@@ -9140,7 +9171,7 @@ mod tests {
                 Some(connect.clone()),
                 None
             )),
-            (true, true, true, None)
+            (true, true, true, None, Some(true))
         );
         assert_eq!(
             shape(split_ports(
@@ -9149,7 +9180,7 @@ mod tests {
                 Some(connect),
                 None
             )),
-            (false, false, false, None)
+            (false, false, false, None, None)
         );
     }
 

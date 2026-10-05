@@ -43,16 +43,16 @@ use std::{
 };
 use step1::{Recovery, ReviewView, SplitConnect};
 
-const TARGET: &str = "btcb2-target-cube";
+pub(super) const TARGET: &str = "btcb2-target-cube";
 
-fn now() -> i64 {
+pub(super) fn now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64
 }
 
-fn fresh<T>(chain: ChainId, value: T) -> FreshRead<T> {
+pub(super) fn fresh<T>(chain: ChainId, value: T) -> FreshRead<T> {
     read_at(chain, value, now())
 }
 
@@ -66,7 +66,7 @@ fn read_at<T>(chain: ChainId, value: T, observed_at: i64) -> FreshRead<T> {
 /// An injected Bitcoin read fault (#626 F1): the read fails, or answers with
 /// a stamp older than any freshness bound.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Fault {
+pub(super) enum Fault {
     Error,
     Stale,
 }
@@ -79,9 +79,9 @@ fn faulted<T>(fault: Option<Fault>, chain: ChainId, value: T) -> Result<FreshRea
     }
 }
 
-struct Temp(PathBuf);
+pub(super) struct Temp(pub(super) PathBuf);
 impl Temp {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let path = std::env::temp_dir().join(format!(
             "split-panel-{}-{}",
@@ -93,7 +93,7 @@ impl Temp {
         Self(path)
     }
     /// `<datadir>/…/split` stand-in.
-    fn root(&self) -> PathBuf {
+    pub(super) fn root(&self) -> PathBuf {
         self.0.join("split")
     }
 }
@@ -105,14 +105,14 @@ impl Drop for Temp {
 
 /// Both chains as Connect would show them: every fixture coin confirmed in
 /// the same pre-fork block on both, unspent on both.
-struct Chains {
-    previous: HashMap<Txid, Transaction>,
-    status: Mutex<HashMap<(ChainId, Txid), TransactionObservation>>,
-    canonical: HashMap<(ChainId, u64), BlockHash>,
-    utxos: Mutex<HashMap<(ChainId, String), BTreeSet<OutPoint>>>,
+pub(super) struct Chains {
+    pub(super) previous: HashMap<Txid, Transaction>,
+    pub(super) status: Mutex<HashMap<(ChainId, Txid), TransactionObservation>>,
+    pub(super) canonical: HashMap<(ChainId, u64), BlockHash>,
+    pub(super) utxos: Mutex<HashMap<(ChainId, String), BTreeSet<OutPoint>>>,
     /// Faults on Bitcoin transaction-status and unspent-output reads.
-    status_fault: Mutex<Option<Fault>>,
-    utxo_fault: Mutex<Option<Fault>>,
+    pub(super) status_fault: Mutex<Option<Fault>>,
+    pub(super) utxo_fault: Mutex<Option<Fault>>,
 }
 
 impl Chains {
@@ -156,7 +156,7 @@ impl Chains {
         }
         chains
     }
-    fn spend_on(&self, chain: ChainId, outpoint: OutPoint) {
+    pub(super) fn spend_on(&self, chain: ChainId, outpoint: OutPoint) {
         for (key, set) in self.utxos.lock().unwrap().iter_mut() {
             if key.0 == chain {
                 set.remove(&outpoint);
@@ -241,38 +241,38 @@ impl SplitEvidenceSource for Chains {
 
 /// What the panel asked of the coordinator.
 #[derive(Default)]
-struct Calls {
-    opened: Mutex<Vec<bool>>,
-    reviews: AtomicUsize,
-    submits: AtomicUsize,
-    reconciles: AtomicUsize,
-    revoked: AtomicBool,
-    address_reads: Mutex<Vec<(ChainId, String)>>,
+pub(super) struct Calls {
+    pub(super) opened: Mutex<Vec<bool>>,
+    pub(super) reviews: AtomicUsize,
+    pub(super) submits: AtomicUsize,
+    pub(super) reconciles: AtomicUsize,
+    pub(super) revoked: AtomicBool,
+    pub(super) address_reads: Mutex<Vec<(ChainId, String)>>,
     /// What the next reconcile reports (default Unchecked).
-    status: Mutex<Option<Status>>,
+    pub(super) status: Mutex<Option<Status>>,
     /// What the next reorg review finds (default: nothing to review).
-    recovery: Mutex<Option<Recovery>>,
-    recovers: AtomicUsize,
-    acknowledges: AtomicUsize,
-    resends: AtomicUsize,
+    pub(super) recovery: Mutex<Option<Recovery>>,
+    pub(super) recovers: AtomicUsize,
+    pub(super) acknowledges: AtomicUsize,
+    pub(super) resends: AtomicUsize,
 }
 
 #[derive(Clone)]
-enum SubmitPlan {
+pub(super) enum SubmitPlan {
     Accept,
     Refuse(String),
 }
 
-struct FakeConnect {
-    context: Context,
-    window: Mutex<Result<ForkWindow, String>>,
-    feerate: Option<u64>,
-    used: Mutex<HashMap<ChainId, Result<bool, FailureKind>>>,
-    chains: Chains,
-    calls: Arc<Calls>,
-    submit: Mutex<SubmitPlan>,
+pub(super) struct FakeConnect {
+    pub(super) context: Context,
+    pub(super) window: Mutex<Result<ForkWindow, String>>,
+    pub(super) feerate: Option<u64>,
+    pub(super) used: Mutex<HashMap<ChainId, Result<bool, FailureKind>>>,
+    pub(super) chains: Chains,
+    pub(super) calls: Arc<Calls>,
+    pub(super) submit: Mutex<SubmitPlan>,
     /// A fresh `open` refuses, before or after writing the journal.
-    refuse_open: Mutex<Option<bool>>,
+    pub(super) refuse_open: Mutex<Option<bool>>,
 }
 
 use crate::app::state::vault::claim::ForkWindow;
@@ -290,7 +290,7 @@ fn window() -> ForkWindow {
 }
 
 impl FakeConnect {
-    fn new(coins: &[crate::services::foreign_scan::DiscoveredCoin]) -> Arc<Self> {
+    pub(super) fn new(coins: &[crate::services::foreign_scan::DiscoveredCoin]) -> Arc<Self> {
         Arc::new(Self {
             context: Context {
                 generation: 0,
@@ -471,9 +471,9 @@ impl Step1Driver for FakeDriver {
 }
 
 /// A scanned foreign wallet handed over from Home.
-struct Scan {
-    wallet: fixture::Wallet,
-    coins: Vec<crate::services::foreign_scan::DiscoveredCoin>,
+pub(super) struct Scan {
+    pub(super) wallet: fixture::Wallet,
+    pub(super) coins: Vec<crate::services::foreign_scan::DiscoveredCoin>,
 }
 
 impl Scan {
@@ -482,7 +482,7 @@ impl Scan {
         let coins = fixture::shared_coins(&wallet);
         Self { wallet, coins }
     }
-    fn intent_with(&self, edit: impl Fn(ScanReport) -> ScanReport) -> SplitIntent {
+    pub(super) fn intent_with(&self, edit: impl Fn(ScanReport) -> ScanReport) -> SplitIntent {
         let btcb2 = edit(fixture::report(ChainId::BitcoinBlake2b, self.coins.clone()));
         let bitcoin = edit(fixture::report(ChainId::Bitcoin, self.coins.clone()));
         let inventory = SplitInventory::join(&btcb2, &bitcoin, fixture::GENERATION, true).unwrap();
@@ -503,13 +503,13 @@ impl Scan {
         )
         .unwrap()
     }
-    fn intent(&self) -> SplitIntent {
+    pub(super) fn intent(&self) -> SplitIntent {
         self.intent_with(|report| report)
     }
 }
 
 /// Run a task the panel returned; collect the Split events it produced.
-async fn events(task: Task<Message>) -> Vec<SplitEvent> {
+pub(super) async fn events(task: Task<Message>) -> Vec<SplitEvent> {
     let mut out = Vec::new();
     let Some(mut stream) = iced_runtime::task::into_stream(task) else {
         return out;
@@ -523,7 +523,7 @@ async fn events(task: Task<Message>) -> Vec<SplitEvent> {
 }
 
 /// Apply every event and the tasks they start until the panel settles.
-async fn drive(panel: &mut SplitPanel, task: Task<Message>) {
+pub(super) async fn drive(panel: &mut SplitPanel, task: Task<Message>) {
     let mut pending = vec![task];
     while let Some(task) = pending.pop() {
         for event in events(task).await {
@@ -550,12 +550,23 @@ fn sign_to_file(
 
 use std::path::Path;
 
+/// A started panel's begin, choosing the two-step route (#568 B4b-3c: a
+/// started panel chooses its route first).
+async fn begin_two_step(panel: &mut SplitPanel) {
+    let task = panel.begin();
+    drive(panel, task).await;
+    assert_eq!(panel.stage(), &Stage::ChooseRoute);
+    let task = panel.update(SplitMessage::Unified(unified::UnifiedMessage::Choose(
+        unified::Route::TwoStep,
+    )));
+    drive(panel, task).await;
+}
+
 /// Fresh flow up to a recorded, unsubmitted step 1.
 async fn recorded(scan: &Scan, connect: &Arc<FakeConnect>, temp: &Temp) -> SplitPanel {
     let mut panel = SplitPanel::start(TARGET.into(), temp.root(), scan.intent());
     panel.set_connect(Some(connect.clone() as Arc<dyn SplitConnect>));
-    let task = panel.begin();
-    drive(&mut panel, task).await;
+    begin_two_step(&mut panel).await;
     assert_eq!(panel.stage(), &Stage::Sign, "{:?}", panel.stage());
 
     // Export the unsigned PSBT file; it is exactly the construction.
@@ -608,8 +619,7 @@ async fn recorded_refusal_carries_the_discovered_journal() {
         let root = temp.root().join("absent-split-root");
         let mut panel = SplitPanel::start(TARGET.into(), root.clone(), scan.intent());
         panel.set_connect(Some(connect.clone() as Arc<dyn SplitConnect>));
-        let task = panel.begin();
-        drive(&mut panel, task).await;
+        begin_two_step(&mut panel).await;
         assert_eq!(panel.stage(), &Stage::Sign);
         assert!(!root.exists());
         let file = sign_to_file(&panel, &scan.wallet.signers, &temp.0, "signed.txt");
@@ -839,8 +849,7 @@ async fn split_preconditions_refuse_before_building() {
             intent.unwrap_or_else(|| scan.intent()),
         );
         panel.set_connect(Some(connect.clone() as Arc<dyn SplitConnect>));
-        let task = panel.begin();
-        drive(&mut panel, task).await;
+        begin_two_step(&mut panel).await;
         match panel.stage() {
             Stage::Refused(refusal) => {
                 assert!(refusal.reason.contains(copy), "{}: {:?}", name, refusal)
@@ -1525,6 +1534,44 @@ fn assert_split_panel_has_no_gui_entry_point(checkout: fn(&str) -> String) {
     let intents = &state[state.find("pub enum SplitMessage {").unwrap()..];
     let intents = &intents[..intents.find("\n}\n").unwrap()];
     assert!(!intents.to_lowercase().contains("start"));
+    // B4b-3c: nor does a single-step intent, and the route choice is
+    // reached only in a fresh panel (one with a scan and no journal) at
+    // its route stage, which only the fresh path sets.
+    let unified = &files
+        .iter()
+        .find(|(f, _)| f == "app/state/vault/split/unified.rs")
+        .unwrap()
+        .1;
+    let intents = &unified[unified.find("pub enum UnifiedMessage {").unwrap()..];
+    let intents = &intents[..intents.find("\n}\n").unwrap()];
+    assert!(!intents.to_lowercase().contains("start"));
+    assert!(unified.contains(
+        "UnifiedMessage::Choose(route)\n                if self.stage == Stage::ChooseRoute\n                    && self.intent.is_some()\n                    && self.journal.is_none() =>"
+    ));
+    let mut sets: Vec<_> = files
+        .iter()
+        .filter(|(f, _)| f.starts_with("app/state/vault/split/") && !f.contains("tests"))
+        .flat_map(|(f, text)| {
+            text.match_indices("self.stage = Stage::ChooseRoute")
+                .map(move |_| f.clone())
+        })
+        .collect();
+    sets.sort();
+    assert_eq!(
+        sets,
+        vec![
+            "app/state/vault/split/mod.rs".to_string(),
+            "app/state/vault/split/unified.rs".to_string()
+        ],
+        "{:?}",
+        sets
+    );
+    let fresh = &state[state.find("    fn resume_journal(").unwrap()..];
+    let fresh = &fresh[..fresh.find("\n    }\n").unwrap()];
+    let intent = fresh
+        .find("let Some(intent) = self.intent.clone() else")
+        .unwrap();
+    assert!(fresh[intent..].contains("self.stage = Stage::ChooseRoute;"));
 }
 
 /// S3-G1 (#651 lead gate): both Split App handlers, the task results
@@ -1604,7 +1651,8 @@ fn assert_split_ui_paths_do_no_blocking_work(checkout: fn(&str) -> String) {
     // `new_inner` is another panel's (not #625 F3).
     // B4b-3b: the device listing (its policy, its `HardwareWallets`) is
     // built in a blocking task too; hidapi is `split_hardware::bind`'s.
-    const BLOCKING: [&str; 12] = [
+    // B4b-3c: the unified port too.
+    const BLOCKING: [&str; 13] = [
         "step1::discover(",
         "discover_split_panel(",
         "read_dir",
@@ -1613,6 +1661,7 @@ fn assert_split_ui_paths_do_no_blocking_work(checkout: fn(&str) -> String) {
         "ProductionConnect::new(",
         "ProductionStep2::new(",
         "ProductionRecon::new(",
+        "ProductionUnified::new(",
         "find_journal(",
         "build_listing(",
         "HardwareWallets::new(",
@@ -1622,6 +1671,7 @@ fn assert_split_ui_paths_do_no_blocking_work(checkout: fn(&str) -> String) {
     let panel = read("app/state/vault/split/mod.rs");
     let panel2 = read("app/state/vault/split/panel2.rs");
     let device = read("app/state/vault/split/device.rs");
+    let unified = read("app/state/vault/split/unified.rs");
     let ui = [
         ("new_inner", body(&app, "    fn new_inner(", "    ")),
         (
@@ -1653,9 +1703,26 @@ fn assert_split_ui_paths_do_no_blocking_work(checkout: fn(&str) -> String) {
             "set_device_datadir",
             body(&device, "    pub fn set_device_datadir(", "    "),
         ),
+        // B4b-3c: the single-step route's handlers.
+        (
+            "update_unified",
+            body(&unified, "    pub(super) fn update_unified(", "    "),
+        ),
+        (
+            "apply_unified",
+            body(&unified, "    pub(super) fn apply_unified(", "    "),
+        ),
+        (
+            "choose_seeds",
+            body(&unified, "    fn choose_seeds(", "    "),
+        ),
+        ("open_flow", body(&unified, "async fn open_flow(", "")),
     ];
+    // B4b-3c: the seed set's derivation and signing, and the coordinator's
+    // open (its port admission and journal directory).
+    const UNIFIED_BLOCKING: [&str; 3] = ["seeds.add(", "flow.sign(", "port.open("];
     for (name, text) in ui {
-        for token in BLOCKING {
+        for token in BLOCKING.iter().chain(UNIFIED_BLOCKING.iter()) {
             // Every occurrence must sit inside a `spawn_blocking(...)`
             // argument: after one, with its parentheses still open.
             for (at, _) in text.match_indices(token) {

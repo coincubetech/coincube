@@ -600,6 +600,16 @@ mod tests {
                 || file == "src/services/claim_workflow/split/tests.rs"
                 || file.starts_with("src/services/claim_coordinator/fork/split/")
         };
+        // #568 B4b-3c: the Split panel's single-step route holds the seed
+        // set (its tests build and finalize real sweeps). The panel is
+        // reached only through the dormant Split panel (D1), and its own
+        // guard keeps the seeds zeroized and unpersisted
+        // (`app::state::vault::split::unified::tests::split_unified_holds_seeds_only_zeroized`).
+        let panel = |file: &str, ident: &str| {
+            (file == "src/app/state/vault/split/unified.rs"
+                && ["SeedSet", "split_seed"].contains(&ident))
+                || file.starts_with("src/app/state/vault/split/unified/tests")
+        };
         let mut unexpected = Vec::new();
         for (file, text) in &files {
             if own.contains(&file.as_str()) {
@@ -633,7 +643,7 @@ mod tests {
                 "for_unified_sweep",
             ] {
                 let seed_set = ["SeedSet", "SeedPolicy", "split_seed"].contains(&ident);
-                if text.contains(ident) && (seed_set || !services(file)) {
+                if text.contains(ident) && (seed_set || !services(file)) && !panel(file, ident) {
                     unexpected.push(format!("{} names {}", file, ident));
                 }
             }
