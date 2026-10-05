@@ -156,6 +156,8 @@ jobs:
           driver="$(jq -ser '[.[] | select(.reason == "compiler-artifact" and .target.name == "coincube_gui" and .profile.test == true and .executable != null) | .executable] | unique | if length == 1 then .[0] else error("expected one GUI test executable") end' claim-gui-build.json)"
           test -x "$driver"
           echo "CLAIM_GUI_REGTEST_TEST_PATH=$driver" >> "$GITHUB_ENV"
+          # The same executable holds the Split service driver (#568 B6c-2).
+          echo "SPLIT_SERVICE_REGTEST_TEST_PATH=$driver" >> "$GITHUB_ENV"
 
       - name: Test and build knots_verify
         # The verifier decides which node binaries the harness may execute, so
@@ -217,12 +219,14 @@ jobs:
           # B4.1 proves the harness; B4.2 runs the QA matrices on it; the three
           # test_btcb2_claim_* modules run Claim end to end on both chains;
           # test_btcb2_split_consensus.py runs Split steps 1 and 2 and the
-          # single-step unified fallback on both (#568);
+          # single-step unified fallback on both (#568), and
+          # test_btcb2_split_observation.py a step-1 reorg through the Split
+          # services and their journal (#568 B6c-2);
           # test_btcb2_blockfile.py drives concurrent getblock batches at one
           # node to reproduce the block-file fault in #394. The modules are
           # named explicitly: a bare `pytest tests/` here would also pull in
           # the functional suite, which this job does not set up.
-          modules="tests/test_btcb2_harness.py tests/test_btcb2_b42_matrices.py tests/test_btcb2_blockfile.py tests/test_btcb2_claim_consensus.py tests/test_btcb2_claim_ancestry_consensus.py tests/test_btcb2_claim_gui.py tests/test_btcb2_split_consensus.py"
+          modules="tests/test_btcb2_harness.py tests/test_btcb2_b42_matrices.py tests/test_btcb2_blockfile.py tests/test_btcb2_claim_consensus.py tests/test_btcb2_claim_ancestry_consensus.py tests/test_btcb2_claim_gui.py tests/test_btcb2_split_consensus.py tests/test_btcb2_split_observation.py"
           # The stress reproduction itself runs only when it is asked for: it
           # reproduces a node defect nothing here can fix, about one attempt in
           # eight, and a pull request is not the place to discover that. Its

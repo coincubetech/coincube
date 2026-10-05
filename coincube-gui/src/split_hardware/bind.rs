@@ -809,7 +809,20 @@ pub(crate) mod tests {
     /// through `spawn_blocking`, and nothing else calls it.
     #[test]
     fn ledger_enumeration_runs_in_spawn_blocking() {
-        let text = include_str!("bind.rs");
+        assert_ledger_enumeration_runs_in_spawn_blocking(include_str!("bind.rs"));
+    }
+
+    /// #568 W1: the guard reads a CRLF checkout (Git for Windows) of this
+    /// file the same way, so its line-spanning markers are still found.
+    #[test]
+    fn ledger_enumeration_guard_reads_a_crlf_checkout() {
+        let crlf = crate::utils::source_text::as_crlf(include_str!("bind.rs"));
+        assert!(crlf.contains("\r\n#[cfg(test)]\r\n"));
+        assert_ledger_enumeration_runs_in_spawn_blocking(&crlf);
+    }
+
+    fn assert_ledger_enumeration_runs_in_spawn_blocking(text: &str) {
+        let text = crate::utils::source_text::lf_only(text);
         let production = &text[..text.find("\n#[cfg(test)]\n").unwrap()];
         // The body of the item starting at `signature`, up to its closing
         // line at `indent`.

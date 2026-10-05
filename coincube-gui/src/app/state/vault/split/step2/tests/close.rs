@@ -60,6 +60,18 @@ struct Chains {
     bitcoin_tip: Mutex<u64>,
     canonical: Mutex<BlockHash>,
     btcb2_utxos: Mutex<HashMap<String, BTreeSet<OutPoint>>>,
+    /// #568 S4b, O4: Bitcoin's unspent outputs by address (initially the
+    /// claimed coins); successive Bitcoin reads of step 1 that override
+    /// `step1_status`; a fault on the Bitcoin unspent reads only; a
+    /// previous transaction served for another txid; and every read, in
+    /// order, as `(chain, what)`.
+    bitcoin_utxos: Mutex<HashMap<String, BTreeSet<OutPoint>>>,
+    step1_reads: Mutex<VecDeque<TransactionObservation>>,
+    bitcoin_unspent_fault: Mutex<Option<Fault>>,
+    /// A fault on the Bitcoin reads of step 1 only.
+    step1_fault: Mutex<Option<Fault>>,
+    tampered_previous: Mutex<bool>,
+    reads: Mutex<Vec<(ChainId, &'static str)>>,
     /// A fault on every BTCB2 read, and on every Bitcoin read.
     btcb2_fault: Mutex<Option<Fault>>,
     bitcoin_fault: Mutex<Option<Fault>>,
@@ -93,6 +105,12 @@ impl Chains {
             }),
             bitcoin_tip: Mutex::new(STEP1_HEIGHT + MIN_CONFIRMATIONS - 1),
             canonical: Mutex::new(step1_block().hash),
+            bitcoin_utxos: Mutex::new(utxos.clone()),
+            step1_reads: Mutex::default(),
+            bitcoin_unspent_fault: Mutex::default(),
+            step1_fault: Mutex::default(),
+            tampered_previous: Mutex::default(),
+            reads: Mutex::default(),
             btcb2_utxos: Mutex::new(utxos),
             btcb2_fault: Mutex::default(),
             bitcoin_fault: Mutex::default(),
@@ -103,6 +121,32 @@ impl Chains {
         for set in self.btcb2_utxos.lock().unwrap().values_mut() {
             set.remove(&outpoint);
         }
+    }
+    /// O4's chain state: step 1 in no Bitcoin block and not waiting to be
+    /// mined, `outpoint` spent on Bitcoin by another transaction.
+    fn conflict_on_bitcoin(&self, outpoint: OutPoint) {
+        *self.step1_status.lock().unwrap() = TransactionObservation::Absent;
+        for set in self.bitcoin_utxos.lock().unwrap().values_mut() {
+            set.remove(&outpoint);
+        }
+    }
+    fn unspend_on_bitcoin(&self, outpoint: OutPoint) {
+        let previous = &self.previous[&outpoint.txid];
+        let address = Address::from_script(
+            &previous.output[outpoint.vout as usize].script_pubkey,
+            Network::Bitcoin,
+        )
+        .unwrap()
+        .to_string();
+        self.bitcoin_utxos
+            .lock()
+            .unwrap()
+            .entry(address)
+            .or_default()
+            .insert(outpoint);
+    }
+    fn take_reads(&self) -> Vec<(ChainId, &'static str)> {
+        std::mem::take(&mut *self.reads.lock().unwrap())
     }
     fn fault(&self, chain: ChainId) -> Option<Fault> {
         match chain {
@@ -133,10 +177,15 @@ impl SplitEvidenceSource for Chains {
         chain: ChainId,
         txid: Txid,
     ) -> Result<FreshRead<TransactionObservation>, FailureKind> {
+        self.reads.lock().unwrap().push((chain, "transaction"));
         let (value, fault) = match chain {
             ChainId::Bitcoin => {
                 assert_eq!(txid, self.step1);
-                (*self.step1_status.lock().unwrap(), self.fault(chain))
+                let queued = self.step1_reads.lock().unwrap().pop_front();
+                (
+                    queued.unwrap_or(*self.step1_status.lock().unwrap()),
+                    self.step1_fault.lock().unwrap().or(self.fault(chain)),
+                )
             }
             _ => (
                 self.step2_reads
@@ -159,28 +208,43 @@ impl SplitEvidenceSource for Chains {
     }
     async fn previous_transaction(
         &self,
-        _chain: ChainId,
+        chain: ChainId,
         txid: Txid,
     ) -> Result<Transaction, FailureKind> {
-        self.previous
+        self.reads.lock().unwrap().push((chain, "previous"));
+        let mut previous = self
+            .previous
             .get(&txid)
             .cloned()
-            .ok_or(FailureKind::Http(404))
+            .ok_or(FailureKind::Http(404))?;
+        if *self.tampered_previous.lock().unwrap() {
+            previous.output[0].value = coincube_core::miniscript::bitcoin::Amount::from_sat(1);
+        }
+        Ok(previous)
     }
     async fn unspent_outputs(
         &self,
         chain: ChainId,
         address: &str,
     ) -> Result<FreshRead<Vec<OutPoint>>, FailureKind> {
-        assert_eq!(chain, ChainId::BitcoinBlake2b);
-        let set = self
-            .btcb2_utxos
+        self.reads.lock().unwrap().push((chain, "unspent"));
+        let (utxos, fault) = match chain {
+            ChainId::Bitcoin => (
+                &self.bitcoin_utxos,
+                self.bitcoin_unspent_fault
+                    .lock()
+                    .unwrap()
+                    .or(self.fault(chain)),
+            ),
+            _ => (&self.btcb2_utxos, self.fault(chain)),
+        };
+        let set = utxos
             .lock()
             .unwrap()
             .get(address)
             .cloned()
             .unwrap_or_default();
-        read(chain, set.into_iter().collect(), self.fault(chain))
+        read(chain, set.into_iter().collect(), fault)
     }
 }
 
@@ -213,6 +277,7 @@ impl SplitConnect for Evidence {
 struct LockedRecon {
     _controller: Controller,
     seen: Arc<Mutex<TransactionObservation>>,
+    after: Arc<Mutex<Step1AfterStep2>>,
 }
 #[async_trait]
 impl Step2Recon for LockedRecon {
@@ -229,7 +294,7 @@ impl Step2Recon for LockedRecon {
         Ok((
             Status::Observation(Assessment::ObservationsEligibleForPreflight),
             *self.seen.lock().unwrap(),
-            Step1AfterStep2::Eligible,
+            *self.after.lock().unwrap(),
         ))
     }
     async fn complete(&mut self, _: &Context) -> Result<SplitCompletion, Step2Refusal> {
@@ -238,12 +303,23 @@ impl Step2Recon for LockedRecon {
     async fn completion_stands(&mut self, _: &Context) -> Result<CompletionStanding, Step2Refusal> {
         unreachable!()
     }
+    async fn review_reconfirmation(
+        &mut self,
+        _: &Context,
+    ) -> Result<ReconfirmationView, Step2Refusal> {
+        unreachable!()
+    }
+    async fn confirm_reconfirmation(&mut self, _: &Context) -> Result<(), Step2Refusal> {
+        unreachable!()
+    }
 }
 struct LockedPort {
     directory: PathBuf,
     digest: sha256::Hash,
     opened: AtomicUsize,
     seen: Arc<Mutex<TransactionObservation>>,
+    /// What the reconciles report of step 1 (eligible unless a test says).
+    after: Arc<Mutex<Step1AfterStep2>>,
 }
 impl ReconPort for LockedPort {
     fn context(&self) -> Context {
@@ -264,6 +340,7 @@ impl ReconPort for LockedPort {
             )
             .map_err(|error| Step2Refusal::retry(format!("{error:?}")))?,
             seen: self.seen.clone(),
+            after: self.after.clone(),
         }))
     }
 }
@@ -296,6 +373,7 @@ impl Fixture {
             digest: journal.digest(),
             opened: AtomicUsize::new(0),
             seen: Arc::new(Mutex::new(TransactionObservation::Absent)),
+            after: Arc::new(Mutex::new(Step1AfterStep2::Eligible)),
         });
         Self {
             journal,
@@ -841,4 +919,393 @@ async fn check_close_refuses_a_stale_unspent_read_and_an_unauthenticated_previou
         "{:?}",
         refused
     );
+}
+
+/// #568 S4b (Legolas F4, applied to the #625 close): the step-2 dead end is
+/// offered for closing only while this session's last reconcile found step
+/// 1 eligible. The close's own check needs step 1 six deep in its block, so
+/// beside any other outcome it could only refuse; a check asked for then
+/// does nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn panel_offers_the_dead_end_close_only_while_step1_is_eligible() {
+    let fixture = Fixture::new();
+    let mut panel = fixture.panel().await;
+    assert!(panel.can_check_close());
+    for after in [
+        Step1AfterStep2::Shallow { confirmations: 4 },
+        Step1AfterStep2::InMempool,
+        Step1AfterStep2::Missing,
+        Step1AfterStep2::Unknown,
+    ] {
+        *fixture.port.after.lock().unwrap() = after;
+        let task = panel.update(SplitMessage::Step2Reconcile);
+        drive(&mut panel, task).await;
+        assert!(panel.dead_end().is_some(), "{:?}", after);
+        assert!(!panel.can_check_close(), "{:?}", after);
+        check(&mut panel).await;
+        assert!(!panel.can_confirm_close(), "{:?}", after);
+        assert_eq!(panel.stage(), &Stage::Step2(Step2Stage::Reconcile));
+    }
+    *fixture.port.after.lock().unwrap() = Step1AfterStep2::Eligible;
+    let task = panel.update(SplitMessage::Step2Reconcile);
+    drive(&mut panel, task).await;
+    assert!(panel.can_check_close());
+    check(&mut panel).await;
+    assert!(panel.can_confirm_close(), "{:?}", panel.notice());
+    assert!(!fixture.tombstone().exists());
+}
+
+/// #568 S4b, O4: record a step-1 conflict on the first claimed coin in
+/// `journal`, provisional or terminal (six blocks above where it was first
+/// seen), as the step-2 reconciler leaves it.
+pub(super) fn record_conflict(journal: &Journal, terminal: bool) -> Step1Conflict {
+    let first = BlockRef {
+        height: 106,
+        hash: hash(0x40),
+    };
+    let mut conflict = Step1Conflict::new(journal.step1.claimed_prevouts()[0], first);
+    if terminal {
+        conflict = conflict
+            .terminal(BlockRef {
+                height: first.height + MIN_CONFIRMATIONS,
+                hash: hash(0x41),
+            })
+            .unwrap();
+    }
+    let path = journal.temp.0.join("intent.json");
+    let mut intent: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    intent["split"]["step1_conflict"] = serde_json::to_value(conflict).unwrap();
+    std::fs::write(&path, serde_json::to_vec(&intent).unwrap()).unwrap();
+    assert_eq!(journal.lock().split_step1_conflict(), Some(conflict));
+    conflict
+}
+impl Fixture {
+    /// O4: [`Self::new`] with a terminal (or provisional) step-1 conflict
+    /// recorded and Bitcoin showing it: step 1 in no block, the coin spent.
+    /// Step 2 is confirmed on BTCB2: its bytes stand.
+    fn conflicted(terminal: bool) -> (Self, Step1Conflict) {
+        let fixture = Self::new();
+        let conflict = record_conflict(&fixture.journal, terminal);
+        fixture.chains.conflict_on_bitcoin(conflict.outpoint());
+        *fixture.port.seen.lock().unwrap() = TransactionObservation::Confirmed {
+            txid: Txid::from_byte_array([5; 32]),
+            block: BlockRef {
+                height: 1_000,
+                hash: hash(0x66),
+            },
+        };
+        *fixture.port.after.lock().unwrap() = Step1AfterStep2::Conflict(conflict);
+        (fixture, conflict)
+    }
+}
+
+/// #568 S4b (Legolas F3, probe P-A): a recorded *terminal* step-1 conflict
+/// is a dead end. A restart opens the reconciler in it, never the resend
+/// coordinator, even when the journal still records a resend permission
+/// (its last send came back refused): the service refuses every resend
+/// while the conflict stands. A provisional conflict is no dead end: that
+/// journal reopens the coordinator as before.
+#[tokio::test(flavor = "multi_thread")]
+async fn restart_opens_the_o4_dead_end_instead_of_a_resend() {
+    async fn run(journal: &Journal, port: &Arc<Port>) -> Result<Restart, Step2Refusal> {
+        restart(
+            context(),
+            Some(port.clone()),
+            Some(resend_ports(journal, port)),
+            journal.temp.0.clone(),
+            TARGET.into(),
+            journal.digest(),
+        )
+        .await
+    }
+    let returned = Journal::returned(false);
+    let conflict = record_conflict(&returned, true);
+    {
+        let controller = returned.lock();
+        assert!(controller.split_step2_returned() && !controller.split_step2_dead_end());
+    }
+    let ports = port(&returned);
+    match run(&returned, &ports).await {
+        Ok(Restart::Reconcile(_, Some(dead_end), None)) => {
+            assert_eq!(dead_end.conflict, Some(conflict));
+            assert_eq!(dead_end.claimed, returned.step1.claimed_prevouts());
+        }
+        _ => panic!("a terminal conflict is a dead end"),
+    }
+    assert_eq!(ports.uncertain.load(Ordering::SeqCst), 0);
+    assert_eq!(ports.reconcilers.load(Ordering::SeqCst), 1);
+
+    let provisional = Journal::returned(false);
+    record_conflict(&provisional, false);
+    let ports = port(&provisional);
+    assert!(matches!(
+        run(&provisional, &ports).await,
+        Ok(Restart::Resend(_))
+    ));
+    assert_eq!(ports.uncertain.load(Ordering::SeqCst), 1);
+}
+
+/// #568 S4b, O4: the close of a terminal step-1 conflict, through the
+/// panel. It is offered once a reconcile reports that conflict, whatever
+/// step 2 shows on BTCB2, and its check reads Bitcoin only, in order: step
+/// 1 absent, the coin's previous transaction, the coin's address's unspent
+/// outputs, step 1 absent again; never step 1's depth. The close writes the
+/// tombstone naming the coin and leaves the journal, recorded step 2 and
+/// conflict included. A restart then opens nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn panel_closes_a_split_with_a_terminal_step1_conflict_after_a_bitcoin_check() {
+    let (fixture, conflict) = Fixture::conflicted(true);
+    let mut panel = fixture.restarted().await;
+    assert_eq!(panel.stage(), &Stage::Step2(Step2Stage::Reconcile));
+    assert_eq!(panel.dead_end().and_then(|d| d.conflict), Some(conflict));
+    // Not before a reconcile reported the conflict.
+    assert!(!panel.can_check_close());
+    let task = panel.update(SplitMessage::Step2Reconcile);
+    drive(&mut panel, task).await;
+    assert!(matches!(
+        panel.step2_seen(),
+        Some(TransactionObservation::Confirmed { .. })
+    ));
+    assert!(panel.dead_end().is_some());
+    assert!(panel.can_check_close() && !panel.can_confirm_close());
+    assert!(!panel.can_review_resend() && !panel.can_complete());
+    let copy = conflict_close_copy(&conflict);
+    assert!(copy.contains(&conflict.outpoint().to_string()), "{}", copy);
+    assert!(
+        copy.contains("can't complete") && copy.contains("stand"),
+        "{}",
+        copy
+    );
+    assert!(!copy.contains("fingerprint"), "{}", copy);
+
+    fixture.chains.take_reads();
+    let before = fixture.intent();
+    check(&mut panel).await;
+    assert!(panel.can_confirm_close(), "{:?}", panel.notice());
+    assert_eq!(
+        fixture.chains.take_reads(),
+        [
+            (ChainId::Bitcoin, "transaction"),
+            (ChainId::Bitcoin, "previous"),
+            (ChainId::Bitcoin, "unspent"),
+            (ChainId::Bitcoin, "transaction"),
+        ]
+    );
+    let task = panel.update(SplitMessage::ConfirmAbandon);
+    drive(&mut panel, task).await;
+    assert_eq!(panel.stage(), &Stage::Closed, "{:?}", panel.notice());
+    let tombstone: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(fixture.tombstone()).unwrap()).unwrap();
+    assert_eq!(tombstone["step1_conflict"], conflict.outpoint().to_string());
+    assert_eq!(tombstone["step1_txid"], fixture.chains.step1.to_string());
+    assert_eq!(fixture.intent(), before);
+    assert_eq!(
+        fixture.journal.lock().split_step1_conflict(),
+        Some(conflict)
+    );
+
+    let opened = fixture.port.opened.load(Ordering::SeqCst);
+    let panel = fixture.panel().await;
+    assert_eq!(panel.stage(), &Stage::Closed);
+    assert_eq!(fixture.port.opened.load(Ordering::SeqCst), opened);
+}
+
+/// #568 S4b, O4: nothing is closed, and the check may be retried, when
+/// Bitcoin shows step 1 at either read (in a block or waiting to be mined),
+/// the conflicting coin is unspent again, a read fails or is stale, or the
+/// previous transaction isn't the coin's (final). A provisional conflict is
+/// no dead end and offers no close. A reconcile that finds step 1 eligible
+/// (S4-D6 cleared the conflict) drops the dead end.
+#[tokio::test(flavor = "multi_thread")]
+async fn panel_keeps_a_conflicted_split_open_without_clean_fresh_bitcoin_evidence() {
+    let (fixture, conflict) = Fixture::conflicted(true);
+    let mut panel = fixture.panel().await;
+    assert!(panel.can_check_close());
+    let coin = conflict.outpoint();
+    let seen = TransactionObservation::Unconfirmed {
+        txid: fixture.chains.step1,
+    };
+    type Setup = fn(&Chains, OutPoint, TransactionObservation);
+    type Undo = fn(&Chains, OutPoint);
+    let cases: [(&str, Setup, Undo, bool); 9] = [
+        (
+            "step 1 waiting at the first read",
+            |c, _, seen| c.step1_reads.lock().unwrap().push_back(seen),
+            |_, _| {},
+            true,
+        ),
+        (
+            "step 1 in a block at the first read",
+            |c, _, _| {
+                c.step1_reads
+                    .lock()
+                    .unwrap()
+                    .push_back(TransactionObservation::Confirmed {
+                        txid: c.step1,
+                        block: step1_block(),
+                    })
+            },
+            |_, _| {},
+            true,
+        ),
+        (
+            "step 1 seen at the second read",
+            |c, _, seen| {
+                let mut reads = c.step1_reads.lock().unwrap();
+                reads.push_back(TransactionObservation::Absent);
+                reads.push_back(seen);
+            },
+            |_, _| {},
+            true,
+        ),
+        (
+            "coin unspent again",
+            |c, coin, _| c.unspend_on_bitcoin(coin),
+            |c, coin| c.conflict_on_bitcoin(coin),
+            true,
+        ),
+        (
+            "bitcoin read fails",
+            |c, _, _| *c.bitcoin_fault.lock().unwrap() = Some(Fault::Error),
+            |c, _| *c.bitcoin_fault.lock().unwrap() = None,
+            true,
+        ),
+        (
+            "bitcoin read stale",
+            |c, _, _| *c.bitcoin_fault.lock().unwrap() = Some(Fault::Stale),
+            |c, _| *c.bitcoin_fault.lock().unwrap() = None,
+            true,
+        ),
+        (
+            "step-1 read stale",
+            |c, _, _| *c.step1_fault.lock().unwrap() = Some(Fault::Stale),
+            |c, _| *c.step1_fault.lock().unwrap() = None,
+            true,
+        ),
+        (
+            "unspent read stale",
+            |c, _, _| *c.bitcoin_unspent_fault.lock().unwrap() = Some(Fault::Stale),
+            |c, _| *c.bitcoin_unspent_fault.lock().unwrap() = None,
+            true,
+        ),
+        (
+            "previous transaction tampered",
+            |c, _, _| *c.tampered_previous.lock().unwrap() = true,
+            |c, _| *c.tampered_previous.lock().unwrap() = false,
+            false,
+        ),
+    ];
+    for (case, setup, undo, retry) in cases {
+        setup(&fixture.chains, coin, seen);
+        check(&mut panel).await;
+        assert!(!panel.can_confirm_close(), "{}", case);
+        let notice = panel.notice().unwrap_or_default().to_string();
+        assert!(!notice.is_empty(), "{}", case);
+        if retry {
+            assert!(panel.can_check_close(), "{}: {}", case, notice);
+        }
+        undo(&fixture.chains, coin);
+        fixture.chains.step1_reads.lock().unwrap().clear();
+        assert!(!fixture.tombstone().exists(), "{}", case);
+    }
+    // Clean again: the check passes.
+    check(&mut panel).await;
+    assert!(panel.can_confirm_close(), "{:?}", panel.notice());
+
+    // S4-D6: a reconcile that finds step 1 eligible drops the dead end.
+    *fixture.port.after.lock().unwrap() = Step1AfterStep2::Eligible;
+    let task = panel.update(SplitMessage::Step2Reconcile);
+    drive(&mut panel, task).await;
+    assert!(panel.dead_end().is_none());
+    assert!(!panel.can_check_close() && !panel.can_confirm_close());
+    assert!(!fixture.tombstone().exists());
+
+    // A provisional conflict is no dead end.
+    let (fixture, provisional) = Fixture::conflicted(false);
+    let panel = fixture.panel().await;
+    assert_eq!(
+        panel.step2_after(),
+        Some(Step1AfterStep2::Conflict(provisional))
+    );
+    assert!(panel.dead_end().is_none_or(|d| d.conflict.is_none()));
+    assert!(!panel.can_check_close());
+}
+
+/// #568 S4b, O4: a reconcile that reports a terminal conflict the panel
+/// holds no dead end for (it became terminal under this session) reads the
+/// journal again, as a restart: the dead end comes with the reconciler and
+/// the close is offered without another reconcile.
+#[tokio::test(flavor = "multi_thread")]
+async fn panel_reads_the_journal_again_when_a_conflict_becomes_terminal() {
+    let (fixture, provisional) = Fixture::conflicted(false);
+    let mut panel = fixture.panel().await;
+    assert!(!panel.can_check_close());
+    assert_eq!(fixture.port.opened.load(Ordering::SeqCst), 1);
+    // The reconciler holds the journal's lock; the fake's reconcile reports
+    // what the real one would have written.
+    let path = fixture.journal.temp.0.join("intent.json");
+    let terminal = provisional
+        .terminal(BlockRef {
+            height: provisional.bitcoin_tip().height + MIN_CONFIRMATIONS,
+            hash: hash(0x41),
+        })
+        .unwrap();
+    let mut intent: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    intent["split"]["step1_conflict"] = serde_json::to_value(terminal).unwrap();
+    std::fs::write(&path, serde_json::to_vec(&intent).unwrap()).unwrap();
+    *fixture.port.after.lock().unwrap() = Step1AfterStep2::Conflict(terminal);
+    let task = panel.update(SplitMessage::Step2Reconcile);
+    drive(&mut panel, task).await;
+    assert_eq!(fixture.port.opened.load(Ordering::SeqCst), 2);
+    assert_eq!(panel.stage(), &Stage::Step2(Step2Stage::Reconcile));
+    assert_eq!(panel.dead_end().and_then(|d| d.conflict), Some(terminal));
+    assert!(panel.can_check_close());
+    // Read once: the next reconcile reports the same conflict and reads
+    // nothing again.
+    let task = panel.update(SplitMessage::Step2Reconcile);
+    drive(&mut panel, task).await;
+    assert_eq!(fixture.port.opened.load(Ordering::SeqCst), 2);
+    assert!(panel.can_check_close());
+}
+
+/// #568 S4b, O4: the close re-reads the journal under its lock. A conflict
+/// cleared (or changed) after the check closes nothing.
+#[test]
+fn close_refuses_a_conflict_cleared_since_the_check() {
+    let (fixture, conflict) = Fixture::conflicted(true);
+    let dead_end = DeadEnd {
+        step1: fixture.chains.step1,
+        step2: fixture
+            .journal
+            .lock()
+            .recorded_split_step2()
+            .unwrap()
+            .compute_txid(),
+        claimed: fixture.journal.step1.claimed_prevouts(),
+        conflict: Some(conflict),
+    };
+    let path = fixture.journal.temp.0.join("intent.json");
+    let mut intent: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    intent["split"]
+        .as_object_mut()
+        .unwrap()
+        .remove("step1_conflict");
+    std::fs::write(&path, serde_json::to_vec(&intent).unwrap()).unwrap();
+    let ended = std::sync::atomic::AtomicBool::new(false);
+    assert_eq!(
+        close(
+            &fixture.journal.temp.0,
+            TARGET,
+            fixture.journal.digest(),
+            context(),
+            &dead_end,
+            now(),
+            &ended,
+        ),
+        Err(CHANGED_SINCE_CHECK.to_string())
+    );
+    assert!(!fixture.tombstone().exists());
 }

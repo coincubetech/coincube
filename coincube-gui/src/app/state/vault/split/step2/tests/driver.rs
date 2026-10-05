@@ -312,6 +312,9 @@ fn recon_driver(core: FakeCompletion) -> ReconcilerDriver<FakeCompletion> {
         core: Some(core),
         site: Some(site()),
         revoke: Arc::new(|| {}),
+        reconfirmation: None,
+        generation: watch::channel(0).1,
+        expected: 0,
     }
 }
 

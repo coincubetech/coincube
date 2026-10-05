@@ -1406,6 +1406,10 @@ fn split_b0_journal_api_has_no_gui_callers() {
                             "split_step2_resubmissions",
                             // #625 F2: the restart reads the dead end.
                             "split_step2_dead_end",
+                            // #568 S4b: and O4's, a recorded terminal
+                            // step-1 conflict (read only).
+                            "Step1Conflict",
+                            "split_step1_conflict",
                         ]
                         .contains(&ident))
                         || (file.starts_with("src/app/state/vault/split/step2/tests")

@@ -489,15 +489,7 @@ async fn device_signing_copy_per_step_and_registration_notice() {
 /// datadir.
 #[tokio::test(flavor = "multi_thread")]
 async fn split_listing_is_built_from_with_split_policy_only() {
-    let text = include_str!("../device.rs");
-    let production = &text[..text.find("\n#[cfg(all(test, unix))]\n").unwrap()];
-    assert!(!production.contains("with_wallet("));
-    assert!(!production.contains("ephemeral("));
-    assert_eq!(production.matches("HardwareWallets::new(").count(), 1);
-    let build = &production[production.find("pub fn build_listing(").unwrap()..];
-    let build = &build[..build.find("\n}\n").unwrap()];
-    assert!(build.contains("HardwareWallets::new(datadir, Network::Bitcoin)"));
-    assert!(build.contains(".with_split_policy(policy.name().to_string(), descriptor)"));
+    assert_listing_source_uses_split_policy_only(include_str!("../device.rs"));
 
     let root = temp_root();
     for shape in [Shape::Wpkh, Shape::WshSortedMulti] {
@@ -522,6 +514,29 @@ async fn split_listing_is_built_from_with_split_policy_only() {
     }
     assert_empty(&root);
     std::fs::remove_dir(&root).unwrap();
+}
+
+/// The source half of F3 above: `device.rs`'s production text builds its
+/// listing only through `with_split_policy`.
+fn assert_listing_source_uses_split_policy_only(text: &str) {
+    let text = crate::utils::source_text::lf_only(text);
+    let production = &text[..text.find("\n#[cfg(all(test, unix))]\n").unwrap()];
+    assert!(!production.contains("with_wallet("));
+    assert!(!production.contains("ephemeral("));
+    assert_eq!(production.matches("HardwareWallets::new(").count(), 1);
+    let build = &production[production.find("pub fn build_listing(").unwrap()..];
+    let build = &build[..build.find("\n}\n").unwrap()];
+    assert!(build.contains("HardwareWallets::new(datadir, Network::Bitcoin)"));
+    assert!(build.contains(".with_split_policy(policy.name().to_string(), descriptor)"));
+}
+
+/// #568 W1: the F3 source guard reads a CRLF checkout (Git for Windows) of
+/// `device.rs` the same way, so its line-spanning markers are still found.
+#[test]
+fn listing_source_guard_reads_a_crlf_checkout() {
+    let crlf = crate::utils::source_text::as_crlf(include_str!("../device.rs"));
+    assert!(crlf.contains("\r\n#[cfg(all(test, unix))]\r\n"));
+    assert_listing_source_uses_split_policy_only(&crlf);
 }
 
 /// A device result from a request the panel moved on from is dropped: a
