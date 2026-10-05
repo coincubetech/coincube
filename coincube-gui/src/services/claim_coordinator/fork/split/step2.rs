@@ -81,6 +81,8 @@ mod resend;
 pub use resend::{ResendError, Step2ResubmissionReview};
 mod completion;
 pub use completion::{CompletionTarget, SplitCompletionEvidence, SplitCompletionReconciliation};
+mod reorg;
+pub use reorg::{Step1AfterStep2, Step1ReconfirmationReview, SweepReconcile};
 
 /// The wall-clock bound on a target reservation (#592 N2). The daemon call
 /// runs on its own task, so a reservation stuck behind the daemon's locks
@@ -1169,21 +1171,9 @@ impl ObservationSource for SightingProbe<'_> {
     }
 }
 
-/// Check the recorded step 2's chain inclusion together with step 1's on
-/// Bitcoin, keyed by the recorded *signed* step-2 txid. A recorded submission
-/// only identifies what to look up; this never resends or authorizes one. A
-/// step 2 seen on BTCB2 is recorded as observed, which ends any resend
-/// (P3-3). The read runs with the resend permission durably withdrawn and
-/// gives it back only when no read of the collection saw the step 2 (even
-/// one the collection then failed past) in the still-current session, so a
-/// sighting that fails to record still ends the resend.
-async fn reconcile_recorded(
-    controller: &mut Controller,
-    services: &dyn SplitForkServices,
-    policy: CheckPolicy,
-    context: &Context,
-    generation: &watch::Receiver<u64>,
-) -> Result<(Status, claim_observation::TransactionObservation), Error> {
+/// The recorded step-2 submission's txid, once its signed bytes are
+/// recorded with it.
+fn recorded_submission(controller: &Controller) -> Result<Txid, Error> {
     let submission = controller
         .recorded_fork_submission()
         .ok_or(Error::InvalidBinding)?;
@@ -1193,16 +1183,30 @@ async fn reconcile_recorded(
     {
         return Err(Error::InvalidBinding);
     }
-    // The hold is taken once the check has started, so a check that cannot
-    // start withdraws nothing (CodeRabbit r4174926591).
-    let ticket = controller.begin_check(context)?;
+    Ok(submission.txid())
+}
+
+/// One fresh collection of the recorded step 2 (`txid`) on BTCB2 with step 1
+/// on Bitcoin. It runs with the resend permission durably withdrawn and
+/// gives it back only when no read of the collection saw the step 2 (even
+/// one the collection then failed past) in the still-current session, so a
+/// sighting that fails to record still ends the resend (P3-3). Recording
+/// the sighting is the caller's.
+async fn collect_recorded(
+    controller: &mut Controller,
+    services: &dyn SplitForkServices,
+    policy: CheckPolicy,
+    context: &Context,
+    generation: &watch::Receiver<u64>,
+    txid: Txid,
+) -> Result<claim_observation::SweepObservation, Error> {
     let hold = controller.hold_split_step2_return(context)?;
     let plan = controller.plan();
-    let probe = SightingProbe::new(services.source(), plan.fork_chain, submission.txid());
+    let probe = SightingProbe::new(services.source(), plan.fork_chain, txid);
     let collected = claim_observation::collect_sweep(
         &probe,
         &plan,
-        submission.txid(),
+        txid,
         policy.observations,
         policy.collection_budget,
         CollectionContext {
@@ -1224,6 +1228,30 @@ async fn reconcile_recorded(
         controller.invalidate();
         return Err(Error::Revoked);
     }
+    Ok(collected)
+}
+
+/// Check the recorded step 2's chain inclusion together with step 1's on
+/// Bitcoin, keyed by the recorded *signed* step-2 txid. A recorded submission
+/// only identifies what to look up; this never resends or authorizes one. A
+/// step 2 seen on BTCB2 is recorded as observed, which ends any resend
+/// (P3-3); see [`collect_recorded`] for the resend permission during the
+/// read. What became of step 1 after the step-2 submission is reported
+/// beside it (#568 S4, [`Step1AfterStep2`]), and a proven step-1 conflict
+/// (O4) is recorded.
+async fn reconcile_recorded(
+    controller: &mut Controller,
+    services: &dyn SplitForkServices,
+    policy: CheckPolicy,
+    context: &Context,
+    generation: &watch::Receiver<u64>,
+) -> Result<SweepReconcile, Error> {
+    let txid = recorded_submission(controller)?;
+    // The hold is taken once the check has started, so a check that cannot
+    // start withdraws nothing (CodeRabbit r4174926591).
+    let ticket = controller.begin_check(context)?;
+    let collected =
+        collect_recorded(controller, services, policy, context, generation, txid).await?;
     let status = controller.apply_observation(
         ticket,
         context,
@@ -1232,16 +1260,21 @@ async fn reconcile_recorded(
         services.source().now(),
     )?;
     controller.record_split_step2_observed(context, collected.transaction())?;
-    Ok((status, collected.transaction()))
+    let observations = collected.assessment().observations;
+    let after_step2 =
+        reorg::after_step2(controller, services, context, generation, observations).await?;
+    Ok(SweepReconcile {
+        status,
+        step2: collected.transaction(),
+        step1: observations.bitcoin_transaction,
+        after_step2,
+    })
 }
 
 impl SplitStep2Coordinator {
     /// After a submission: the recorded step 2's inclusion on BTCB2 and step
     /// 1's on Bitcoin. Never resends.
-    pub async fn reconcile_sweep(
-        &mut self,
-        context: &Context,
-    ) -> Result<(Status, claim_observation::TransactionObservation), Error> {
+    pub async fn reconcile_sweep(&mut self, context: &Context) -> Result<SweepReconcile, Error> {
         self.current(context)?;
         reconcile_recorded(
             &mut self.controller,
@@ -1259,6 +1292,9 @@ impl SplitStep2Coordinator {
 /// signatures (the claimed coins may already be spent on BTCB2 by step 2),
 /// holds no transport, and so cannot send anything again.
 pub struct SplitStep2Reconciler {
+    /// Binds its step-1 reconfirmation reviews (#568 S4, O1).
+    id: u64,
+    revision: u64,
     context: Context,
     generation: watch::Receiver<u64>,
     controller: Controller,
@@ -1324,6 +1360,10 @@ impl SplitStep2Reconciler {
             return Err(Error::InvalidBinding);
         }
         Ok(Self {
+            id: NEXT
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
+                .map_err(|_| Error::Revoked)?,
+            revision: 0,
             context,
             generation,
             controller,
@@ -1346,10 +1386,7 @@ impl SplitStep2Reconciler {
                 wtxid: s.wtxid(),
             })
     }
-    pub async fn reconcile_sweep(
-        &mut self,
-        context: &Context,
-    ) -> Result<(Status, claim_observation::TransactionObservation), Error> {
+    pub async fn reconcile_sweep(&mut self, context: &Context) -> Result<SweepReconcile, Error> {
         self.completion_revoker.revoke();
         if self.revoker.is_revoked()
             || context != &self.context

@@ -20,8 +20,8 @@ pub use recovery::BitcoinSubmissionAttempt;
 pub use reorg::Reconfirmation;
 pub(crate) use split::Step2ReturnHold;
 pub use split::{
-    split_identity, RecordedSplit, SplitKind, UnifiedConstruction, MAX_SPLIT_STEP2_RESUBMISSIONS,
-    SPLIT_TOMBSTONE,
+    split_identity, RecordedSplit, SplitKind, Step1Conflict, UnifiedConstruction,
+    MAX_SPLIT_STEP2_RESUBMISSIONS, SPLIT_TOMBSTONE,
 };
 
 /// Upper bound on how long [`Controller::reopen_settling`] waits out `Busy`.

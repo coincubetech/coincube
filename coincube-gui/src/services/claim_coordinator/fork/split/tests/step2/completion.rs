@@ -399,7 +399,7 @@ async fn split_completion_persists_digest_only_then_forgets() {
         }
     }
     // The forgotten journal still reconciles, and reopens with no source.
-    let (_, seen) = reconciler.reconcile_sweep(&context()).await.unwrap();
+    let seen = reconciler.reconcile_sweep(&context()).await.unwrap().step2;
     assert_eq!(seen, confirmed(txid, STEP2_HEIGHT));
     drop(reconciler);
     let controller = Controller::reopen_settling_blocking(

@@ -1197,7 +1197,7 @@ fn v8_split_journal_is_refused_by_the_v7_reader() {
 /// glob still has to name the item somewhere.
 #[test]
 fn split_b0_journal_api_has_no_gui_callers() {
-    const ITEMS: [&str; 33] = [
+    const ITEMS: [&str; 39] = [
         "create_split",
         // B4b-1b: the fork-only (`kind: Unified`) record.
         "create_unified_split",
@@ -1236,6 +1236,13 @@ fn split_b0_journal_api_has_no_gui_callers() {
         "Step2ReturnHold",
         // #625 F2: the step-2 dead end a split may be closed in.
         "split_step2_dead_end",
+        // #568 S4: the step-1 conflict (O4) after the step-2 submission.
+        "Step1Conflict",
+        "split_step1_conflict",
+        "record_split_step1_conflict",
+        "confirm_split_step1_conflict",
+        "clear_split_step1_conflict",
+        "disprove_split_step1_conflict",
     ];
     const OWN: [&str; 4] = [
         "src/services/claim_workflow/split.rs",
@@ -1283,6 +1290,7 @@ fn split_b0_journal_api_has_no_gui_callers() {
                             "Step2ReturnHold",
                             "SplitKind",
                             "UnifiedConstruction",
+                            "Step1Conflict",
                         ]
                         .contains(&ident);
                     let dispatch = file == "src/services/claim_coordinator/step1.rs"
@@ -1334,6 +1342,16 @@ fn split_b0_journal_api_has_no_gui_callers() {
                             "hold_split_step2_return",
                             "release_split_step2_return",
                             "Step2ReturnHold",
+                            // #568 S4: the step-2 reconciler's step-1 reorg
+                            // outcomes refuse a fork-only record and record
+                            // a step-1 conflict (O4).
+                            "SplitKind",
+                            "Step1Conflict",
+                            "split_step1_conflict",
+                            "record_split_step1_conflict",
+                            "confirm_split_step1_conflict",
+                            "clear_split_step1_conflict",
+                            "disprove_split_step1_conflict",
                         ]
                         .contains(&ident)
                             || (gate_tests
@@ -1366,8 +1384,13 @@ fn split_b0_journal_api_has_no_gui_callers() {
                         ]
                         .contains(&ident))
                         || (file.starts_with("src/app/state/vault/split/step2/tests")
-                            && ["record_split_step2_returned", "record_split_step2_observed"]
-                                .contains(&ident));
+                            && [
+                                "record_split_step2_returned",
+                                "record_split_step2_observed",
+                                // #568 S4: the warning test builds an O4 outcome.
+                                "Step1Conflict",
+                            ]
+                            .contains(&ident));
                     // #625 F2: the close tests make a journal whose resend is
                     // reviewable, which is no dead end. Tests only.
                     let panel_step2_tests = file

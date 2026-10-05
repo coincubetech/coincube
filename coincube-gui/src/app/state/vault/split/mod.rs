@@ -70,7 +70,7 @@ use coincube_core::{
 use crate::{
     app::{message::Message, split_intent::SplitIntent},
     services::{
-        claim_coordinator::Outcome,
+        claim_coordinator::{fork::split::step2::Step1AfterStep2, Outcome},
         claim_observation::TransactionObservation,
         claim_workflow::{Phase, Status},
         split_psbt_file::{self, Encoding},
@@ -228,7 +228,7 @@ pub enum Restarted {
 /// A step-2 handoff refused, with the preparation when still usable.
 pub type FinishResult = Result<Coord, (step2::Step2Refusal, Option<Prep>)>;
 /// A step-2 reconcile's result.
-pub type Seen = Result<(Status, TransactionObservation), step2::Step2Refusal>;
+pub type Seen = Result<(Status, TransactionObservation, Step1AfterStep2), step2::Step2Refusal>;
 
 /// A refused recording: why, and the journal (source digest, directory)
 /// already on disk for this split, if any.
@@ -431,7 +431,7 @@ pub struct SplitPanel {
     ending: Option<Arc<AtomicBool>>,
     /// The last refusal while the flow keeps its state. Never the step-1
     /// evidence's warning after the step-2 submission: that is derived from
-    /// `step2_status` ([`Self::step2_warning`]) so no notice replaces it.
+    /// `step2_after` ([`Self::step2_warning`]) so no notice replaces it.
     notice: Option<String>,
     /// The stage to return to after a check.
     resume_stage: Option<Stage>,
@@ -464,6 +464,9 @@ pub struct SplitPanel {
     step2_seen_here: Option<TransactionObservation>,
     /// The step-1 evidence of the last step-2 reconcile (#637 r4172242637).
     step2_status: Option<Status>,
+    /// What that reconcile found of step 1 after the step-2 submission
+    /// (#568 S4); the warning is derived from it.
+    step2_after: Option<Step1AfterStep2>,
     /// The authenticated claimed coins from the restore.
     coins: Vec<SplitCoin>,
     /// S3 item 5: the deadline a timer is armed for, and its epoch. The
@@ -534,6 +537,7 @@ impl SplitPanel {
             step2_seen: None,
             step2_seen_here: None,
             step2_status: None,
+            step2_after: None,
             coins: Vec::new(),
             armed: None,
             deadline_epoch: 0,

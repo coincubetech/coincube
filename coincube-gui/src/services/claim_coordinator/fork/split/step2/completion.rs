@@ -316,7 +316,9 @@ impl SplitStep2Reconciler {
     /// Obtain short-lived evidence for recording the Split's completion; see
     /// the module documentation. `None` when the recorded step 2 is not
     /// confirmed at [`MIN_CONFIRMATIONS`] on BTCB2, or step 1 is not six
-    /// deep in its recorded Bitcoin block, or step 1 is seen on BTCB2.
+    /// deep in its recorded Bitcoin block, or step 1 is seen on BTCB2, or
+    /// the reconcile found step 1 anything but [`Step1AfterStep2::Eligible`]
+    /// (#568 S4: re-mined, in the mempool, missing, or a recorded conflict).
     /// Supersedes any earlier evidence of this reconciler, whatever the
     /// result.
     pub async fn check_completion(
@@ -327,7 +329,11 @@ impl SplitStep2Reconciler {
         self.completion_revoker.revoke();
         self.completion_revoker = Revoker::new();
         self.current(context)?;
-        let (_, seen) = reconcile_recorded(
+        let SweepReconcile {
+            step2: seen,
+            after_step2,
+            ..
+        } = reconcile_recorded(
             &mut self.controller,
             self.services.as_ref(),
             self.policy,
@@ -335,6 +341,17 @@ impl SplitStep2Reconciler {
             &self.generation,
         )
         .await?;
+        // #568 S4: step 1 reorged after the step-2 submission withholds
+        // completion in every outcome. O1 (re-mined) also fails the recorded
+        // block below until it is acknowledged; O2 and O3 (in the mempool,
+        // missing) fail the depth below too; an O4 conflict refuses here
+        // while it stands: a provisional one is cleared by a reconcile that
+        // finds step 1 on Bitcoin (S4-D5), and a terminal one only by one
+        // that finds step 1 eligible, six deep (S4-D6), so after that
+        // reconcile it stands only while step 1 is not eligible.
+        if after_step2 != Step1AfterStep2::Eligible {
+            return Ok(None);
+        }
         let claim_observation::TransactionObservation::Confirmed { txid, block } = seen else {
             return Ok(None);
         };
@@ -400,7 +417,11 @@ impl SplitStep2Reconciler {
         if target.cube_id != self.controller.identity().fork_cube {
             return Err(Error::InvalidBinding);
         }
-        let (status, seen) = reconcile_recorded(
+        let SweepReconcile {
+            status,
+            step2: seen,
+            ..
+        } = reconcile_recorded(
             &mut self.controller,
             self.services.as_ref(),
             self.policy,

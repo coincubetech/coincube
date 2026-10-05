@@ -94,7 +94,7 @@ impl SplitForkServices for Unreachable {
 
 /// A fork-only journal of the harness wallet, its source digest, and its
 /// signed sweep; the submission is recorded when `submitted`.
-fn fork_only_journal(submitted: bool) -> (Temp, sha256::Hash, Transaction) {
+pub(super) fn fork_only_journal(submitted: bool) -> (Temp, sha256::Hash, Transaction) {
     let wallet = wallet();
     let target = address(&vault(), 5).script_pubkey();
     let (construction, signed) = unified_sweep(&wallet, &target);
@@ -125,7 +125,7 @@ fn fork_only_journal(submitted: bool) -> (Temp, sha256::Hash, Transaction) {
     }
     (temp, wallet.source.digest(), signed)
 }
-fn reconciler(
+pub(super) fn reconciler(
     temp: &Temp,
     digest: sha256::Hash,
     sender: &watch::Sender<u64>,

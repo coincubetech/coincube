@@ -225,10 +225,11 @@ impl Step2Recon for LockedRecon {
     async fn reconcile(
         &mut self,
         _: &Context,
-    ) -> Result<(Status, TransactionObservation), Step2Refusal> {
+    ) -> Result<(Status, TransactionObservation, Step1AfterStep2), Step2Refusal> {
         Ok((
             Status::Observation(Assessment::ObservationsEligibleForPreflight),
             *self.seen.lock().unwrap(),
+            Step1AfterStep2::Eligible,
         ))
     }
 }

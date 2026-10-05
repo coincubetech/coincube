@@ -77,7 +77,8 @@ use crate::{
             fork::split::{
                 step2::{
                     ResendError, SplitStep2Coordinator, SplitStep2Production, SplitStep2Reconciler,
-                    Step2Error, Step2ResubmissionReview, TargetError, RESERVATION_BOUND,
+                    Step1AfterStep2, Step2Error, Step2ResubmissionReview, SweepReconcile,
+                    TargetError, RESERVATION_BOUND,
                 },
                 ForeignStep2Authorization, SplitCheckError, SplitForkProduction, SplitPreparation,
                 Step2Liveness,
@@ -103,11 +104,15 @@ pub const NODE_PRIVACY: &str = "Step 2 will be sent through this Vault's own Bit
 /// this session (#637 R1): nothing else is opened.
 pub const RECONCILE_UNAVAILABLE: &str = "Step 2 of this split was already sent or may have been. Its status can't be checked with Connect right now, so nothing was rebuilt or sent. Try again.";
 /// A reconcile after the step-2 submission found step 1 reorged out of its
-/// Bitcoin block (#637 r4172242637). No recovery is offered: none exists
-/// yet for this case. A recorded submission may not have reached the
-/// transport (`Outcome::Uncertain`), so the copy doesn't say step 2 was
-/// sent (#637 Copilot review 5401909718).
-pub const STEP1_REORGED_AFTER_STEP2: &str = "Bitcoin reorganized after a submission of step 2 was recorded; it was sent or may have been sent. Step 1 is no longer in the Bitcoin block it was confirmed in, so Bitcoin replay protection for step 2 is no longer established. This version has no recovery for this. Nothing was rebuilt, and step 2 is not sent automatically. Check status again later.";
+/// Bitcoin block and out of the mempool (#637 r4172242637; #568 S4, O3). No
+/// recovery is offered: D13 = A never resends step 1. A recorded
+/// submission may not have reached the transport (`Outcome::Uncertain`), so
+/// the copy doesn't say step 2 was sent (#637 Copilot review 5401909718).
+pub const STEP1_REORGED_AFTER_STEP2: &str = "Bitcoin reorganized after a submission of step 2 was recorded; it was sent or may have been sent. Step 1 is no longer in any Bitcoin block, and Connect doesn't see it waiting to be mined, so Bitcoin replay protection for step 2 is no longer established. Until step 1 has 6 Bitcoin confirmations again, step 2's recorded bytes could also be mined on Bitcoin. This version has no recovery for this. Nothing was rebuilt, and step 2 is not sent automatically. Check status again later.";
+/// What every reorg warning after the step-2 submission adds while step 1
+/// isn't confirmed (#568 S4).
+const STEP2_EXPOSED: &str =
+    "Until step 1 has 6 Bitcoin confirmations again, step 2's recorded bytes could also be mined on Bitcoin.";
 /// Why the panel has no step-2 port under a session (S3-D4): the App says,
 /// from the port build, and the copy names it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -147,36 +152,47 @@ pub const RESEND_COIN_SPENT: &str = "Step 2 can't be sent again: a coin this spl
 /// F2 abandon or reset path gets out of this.
 pub const RESEND_UNSETTLED: &str = "This version can't send step 2 again. Its last send, or a check of it, ended without a clear answer (it may have been accepted, or it was cancelled, timed out or interrupted), so step 2 may have reached the network. Nothing was sent; check its status. If step 2 never appears on Bitcoin Blake2b, the way out is to abandon or reset this split.";
 
-/// What the step-1 evidence of a reconcile after the step-2 submission
-/// means (#637 r4172242637): nothing while step 1 is still eligible (six
-/// deep on Bitcoin, absent from BTCB2, inside the RDTS margin); otherwise a
-/// warning that Bitcoin replay protection for step 2 is not established. A
-/// reorg is named only for `Reorged`. No warning offers a recovery.
-pub fn reconcile_warning(status: Status) -> Option<String> {
-    use coincube_core::claim::{Assessment as A, MIN_CONFIRMATIONS};
-    let unconfirmed = |seen: String| {
-        format!(
-            "{seen} Until it has all {MIN_CONFIRMATIONS} again, Bitcoin replay protection for step 2 is not established. Check status again later."
-        )
-    };
-    match status {
-        Status::Observation(A::ObservationsEligibleForPreflight) => None,
-        Status::Observation(A::Reorged) => Some(STEP1_REORGED_AFTER_STEP2.to_string()),
-        Status::Observation(A::WaitingForConfirmation) => Some(unconfirmed(
-            "At the last check step 1 was not confirmed on Bitcoin.".to_string(),
-        )),
-        Status::Observation(A::WaitingForDepth { confirmations }) => Some(unconfirmed(format!(
-            "At the last check step 1 had {} of {MIN_CONFIRMATIONS} Bitcoin confirmations.",
+/// What a reconcile after the step-2 submission found of step 1 on Bitcoin
+/// means (#637 r4172242637; #568 S4): nothing while it is still eligible
+/// (six deep in its recorded block, absent from BTCB2); otherwise one
+/// warning per outcome, each naming the exposure (while step 1 isn't
+/// confirmed, step 2's recorded bytes could be mined on Bitcoin; for a
+/// terminal conflict, step 1 can never confirm and the split can't
+/// complete; a provisional one may still be unconfirmed, S4-D5). A reorg
+/// is named only for O1 to O4. The only action each leaves is checking
+/// status again: none offers acknowledging a new block, closing the split or
+/// resending step 1 (those controls are S4b's, S4-D3), and none shows the
+/// "cannot replay" label.
+pub fn reconcile_warning(after: Step1AfterStep2) -> Option<String> {
+    const RECORDED: &str = "Bitcoin reorganized after a submission of step 2 was recorded; it was sent or may have been sent.";
+    const UNCHANGED: &str =
+        "Nothing was rebuilt, and step 2 is not sent automatically. Check status again later.";
+    match after {
+        Step1AfterStep2::Eligible => None,
+        Step1AfterStep2::Shallow { confirmations } => Some(format!(
+            "At the last check step 1 had {} of {MIN_CONFIRMATIONS} Bitcoin confirmations. Until it has all {MIN_CONFIRMATIONS} again, Bitcoin replay protection for step 2 is not established, and step 2's recorded bytes could also be mined on Bitcoin. Check status again later.",
             confirmations.min(MIN_CONFIRMATIONS)
-        ))),
-        Status::Unchecked
-        | Status::Unavailable
-        | Status::Observation(A::Unknown | A::StaleObservation | A::NeedsPreflightRecheck) => Some(
-            "The last check couldn't confirm step 1 on Bitcoin with fresh evidence. That is not a sign of a reorg, but Bitcoin replay protection for step 2 isn't confirmed until a check sees step 1 at full depth again. Check status again later.".to_string(),
-        ),
-        Status::Observation(_) => Some(
-            "The last check didn't find step 1 eligible on Bitcoin, so Bitcoin replay protection for step 2 isn't confirmed. Check status again later.".to_string(),
-        ),
+        )),
+        Step1AfterStep2::Remined { previous, confirmed } => Some(format!(
+            "{RECORDED} Step 1 is now confirmed in a different Bitcoin block (height {}) from the one recorded for it (height {}), so Bitcoin replay protection for step 2 is not established until this split records the new block. Until then, step 2's recorded bytes could also be mined on Bitcoin if step 1 leaves that block too. {UNCHANGED}",
+            confirmed.height, previous.height
+        )),
+        Step1AfterStep2::InMempool => Some(format!(
+            "{RECORDED} Step 1 is no longer in any Bitcoin block; it is waiting to be mined again, so Bitcoin replay protection for step 2 is no longer established. {STEP2_EXPOSED} {UNCHANGED}"
+        )),
+        Step1AfterStep2::Missing => Some(STEP1_REORGED_AFTER_STEP2.to_string()),
+        Step1AfterStep2::Conflict(conflict) if conflict.is_terminal() => Some(format!(
+            "{RECORDED} Step 1 is no longer in any Bitcoin block, and a coin this split claims ({}) was spent on Bitcoin by another transaction, so step 1 can never confirm and this split can't complete. {UNCHANGED}",
+            conflict.outpoint()
+        )),
+        // S4-D5: a missing coin is a conflict only once it stays missing.
+        Step1AfterStep2::Conflict(conflict) => Some(format!(
+            "{RECORDED} Step 1 is no longer in any Bitcoin block, and a coin this split claims ({}) appears spent on Bitcoin by another transaction (it may still be unconfirmed). If that spend confirms, step 1 can't. {STEP2_EXPOSED} {UNCHANGED}",
+            conflict.outpoint()
+        )),
+        Step1AfterStep2::Unknown => Some(format!(
+            "The last check couldn't confirm step 1 on Bitcoin with fresh evidence. That is not a sign of a reorg, but Bitcoin replay protection for step 2 isn't confirmed until a check sees step 1 at full depth again. {STEP2_EXPOSED} Check status again later."
+        )),
     }
 }
 
@@ -316,6 +332,16 @@ pub fn describe_resend(error: ResendError) -> Step2Refusal {
         )),
         ResendError::Unavailable(_, kind) => Step2Refusal::retry(format!(
             "Connect couldn't read Bitcoin Blake2b's unspent coins for this split ({kind:?}). This is a Connect or indexer limit, not a sign a coin was spent. Nothing was sent; try again later."
+        )),
+        ResendError::Step1ConflictRecorded(conflict) if conflict.is_terminal() => {
+            Step2Refusal::final_(format!(
+                "Step 2 can't be sent again: a coin this split claims ({}) was spent on Bitcoin by another transaction, so step 1 can never confirm and this split can't complete. Nothing was sent.",
+                conflict.outpoint()
+            ))
+        }
+        ResendError::Step1ConflictRecorded(conflict) => Step2Refusal::final_(format!(
+            "Step 2 isn't sent again while a coin this split claims ({}) appears spent on Bitcoin by another transaction (it may still be unconfirmed). Nothing was sent; check its status.",
+            conflict.outpoint()
         )),
     }
 }
@@ -512,7 +538,7 @@ pub trait Step2Coord: Send {
     async fn reconcile(
         &mut self,
         context: &Context,
-    ) -> Result<(Status, TransactionObservation), Step2Refusal>;
+    ) -> Result<(Status, TransactionObservation, Step1AfterStep2), Step2Refusal>;
     /// P3-3: a fresh resend review of exactly the recorded signed step 2,
     /// replacing any earlier one. Records nothing and sends nothing.
     async fn review_resend(&mut self, context: &Context) -> Result<Step2ResendView, Step2Refusal>;
@@ -530,7 +556,7 @@ pub trait Step2Recon: Send {
     async fn reconcile(
         &mut self,
         context: &Context,
-    ) -> Result<(Status, TransactionObservation), Step2Refusal>;
+    ) -> Result<(Status, TransactionObservation, Step1AfterStep2), Step2Refusal>;
 }
 
 /// Everything the preparation is opened with: the step 1 rebuilt at restore.
@@ -1457,12 +1483,13 @@ impl Step2Coord for CoordinatorDriver {
     async fn reconcile(
         &mut self,
         context: &Context,
-    ) -> Result<(Status, TransactionObservation), Step2Refusal> {
+    ) -> Result<(Status, TransactionObservation, Step1AfterStep2), Step2Refusal> {
         self.review = None;
         self.resend = None;
         self.coordinator
             .reconcile_sweep(context)
             .await
+            .map(reconciled)
             .map_err(describe_check)
     }
     async fn review_resend(&mut self, context: &Context) -> Result<Step2ResendView, Step2Refusal> {
@@ -1525,12 +1552,19 @@ impl Step2Recon for ReconcilerDriver {
     async fn reconcile(
         &mut self,
         context: &Context,
-    ) -> Result<(Status, TransactionObservation), Step2Refusal> {
+    ) -> Result<(Status, TransactionObservation, Step1AfterStep2), Step2Refusal> {
         self.0
             .reconcile_sweep(context)
             .await
+            .map(reconciled)
             .map_err(describe_check)
     }
+}
+
+/// What the panel keeps of a reconcile: the journal's status, step 2 on
+/// BTCB2, and what became of step 1 after the step-2 submission.
+fn reconciled(r: SweepReconcile) -> (Status, TransactionObservation, Step1AfterStep2) {
+    (r.status, r.step2, r.after_step2)
 }
 
 #[cfg(all(test, unix))]

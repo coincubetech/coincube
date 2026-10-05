@@ -104,6 +104,10 @@ pub enum ResendError {
     /// Connect could not serve a fresh BTCB2 unspent read. Not evidence of a
     /// spend.
     Unavailable(OutPoint, FailureKind),
+    /// #568 S4, O4: a step-1 conflict is recorded, provisional or terminal
+    /// (S4-D5). Read from the journal before any read; only a reconcile
+    /// that clears a provisional one lifts it.
+    Step1ConflictRecorded(claim_workflow::Step1Conflict),
 }
 impl From<Error> for ResendError {
     fn from(error: Error) -> Self {
@@ -309,8 +313,9 @@ impl SplitStep2Coordinator {
     }
 
     /// The journal's side of a resend: a recorded submission of exactly this
-    /// coordinator's verified step 2, never seen on BTCB2, whose latest
-    /// attempt is recorded as returned without acceptance, under the limit.
+    /// coordinator's verified step 2, never seen on BTCB2, with no recorded
+    /// step-1 conflict (#568 S4), whose latest attempt is recorded as
+    /// returned without acceptance, under the limit.
     fn resendable(&self) -> Result<(), ResendError> {
         let Some(submission) = self.controller.recorded_fork_submission() else {
             return Err(ResendError::NotRecorded);
@@ -324,6 +329,12 @@ impl SplitStep2Coordinator {
         }
         if self.controller.split_step2_observed() {
             return Err(ResendError::Observed);
+        }
+        // #568 S4, O4: no resend is reviewed or sent while a step-1 conflict
+        // is recorded: a terminal one (S4-D2) even if step 1 shows six deep
+        // again, a provisional one (S4-D5) until a reconcile clears it.
+        if let Some(conflict) = self.controller.split_step1_conflict() {
+            return Err(ResendError::Step1ConflictRecorded(conflict));
         }
         if !self.controller.split_step2_returned() {
             return Err(ResendError::Unsettled);

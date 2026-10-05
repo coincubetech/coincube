@@ -189,7 +189,10 @@ impl Coordinator {
     }
     /// Resume is Unchecked: the rebuilt construction and signed bytes must
     /// match the journal exactly, and a recorded uncertain submission can
-    /// only be reconciled, never retried through prepare_review.
+    /// only be reconciled, never retried through prepare_review. A journal
+    /// with a recorded step-2 submission refuses (`SubmissionAlreadyRecorded`):
+    /// step 1 is then closed for good (#568 D13 = A), and only the step-2
+    /// reconciler opens it.
     #[allow(clippy::too_many_arguments)]
     pub fn resume_split(
         directory: &Path,
@@ -244,7 +247,17 @@ impl Coordinator {
             // (or none) refuses here.
             let identity =
                 claim_workflow::split_identity(target_cube, construction.source().digest());
-            Controller::reopen_settling_blocking(directory, &identity, context.clone())?
+            let controller =
+                Controller::reopen_settling_blocking(directory, &identity, context.clone())?;
+            // After step 2 was submitted, step 1 is never reviewed, resent or
+            // reconfirmed here again (#568 S4): the claimed coins may already
+            // be spent on BTCB2, and its reorg recovery is the step-2
+            // reconciler's. The step-2 preparation's open refuses the same
+            // way.
+            if controller.recorded_fork_submission().is_some() {
+                return Err(Error::SubmissionAlreadyRecorded);
+            }
+            controller
         } else {
             Controller::create_split(
                 directory,

@@ -48,19 +48,43 @@ struct Counts {
     resend_expired: bool,
     /// What the coordinator's reconciles see on BTCB2. `None`: absent.
     coord_seen: Option<TransactionObservation>,
+    /// #568 S4: what the next reconciles report of step 1 after the step-2
+    /// submission, in order. Empty: derived from the status.
+    afters: std::collections::VecDeque<Step1AfterStep2>,
     /// How long the next resend reviews stay live, by the runtime's clock.
     /// `None`: 60 s.
     resend_lifetime: Option<std::time::Duration>,
 }
+/// What the fakes report of step 1 after the step-2 submission, from the
+/// status a test queued (#568 S4): the service classifies it from the
+/// collection itself; these tests drive the panel only.
+fn after_of(status: Status) -> Step1AfterStep2 {
+    match status {
+        Status::Observation(Assessment::ObservationsEligibleForPreflight) => {
+            Step1AfterStep2::Eligible
+        }
+        Status::Observation(Assessment::Reorged) => Step1AfterStep2::Missing,
+        Status::Observation(Assessment::WaitingForDepth { confirmations }) => {
+            Step1AfterStep2::Shallow { confirmations }
+        }
+        Status::Observation(Assessment::WaitingForConfirmation) => Step1AfterStep2::InMempool,
+        _ => Step1AfterStep2::Unknown,
+    }
+}
 fn next_reconcile(
     shared: &Shared,
     seen: TransactionObservation,
-) -> Result<(Status, TransactionObservation), Step2Refusal> {
+) -> Result<(Status, TransactionObservation, Step1AfterStep2), Step2Refusal> {
     let mut counts = shared.lock().unwrap();
     counts.reconciles += 1;
+    let after = counts.afters.pop_front();
     match counts.statuses.pop_front() {
-        None => Ok((Status::Unchecked, seen)),
-        Some(Some(status)) => Ok((status, seen)),
+        None => Ok((
+            Status::Unchecked,
+            seen,
+            after.unwrap_or(after_of(Status::Unchecked)),
+        )),
+        Some(Some(status)) => Ok((status, seen, after.unwrap_or(after_of(status)))),
         Some(None) => Err(Step2Refusal {
             reason: "Connect couldn't be reached.".to_string(),
             retry: true,
@@ -317,7 +341,7 @@ impl Step2Coord for PanelCoord {
     async fn reconcile(
         &mut self,
         _: &Context,
-    ) -> Result<(Status, TransactionObservation), Step2Refusal> {
+    ) -> Result<(Status, TransactionObservation, Step1AfterStep2), Step2Refusal> {
         // A reconcile drops any resend review, as the driver does.
         self.resend_reviewed = false;
         let seen = self.shared.lock().unwrap().coord_seen;
@@ -379,7 +403,7 @@ impl Step2Recon for PanelRecon {
     async fn reconcile(
         &mut self,
         _: &Context,
-    ) -> Result<(Status, TransactionObservation), Step2Refusal> {
+    ) -> Result<(Status, TransactionObservation, Step1AfterStep2), Step2Refusal> {
         next_reconcile(
             &self.0,
             TransactionObservation::Unconfirmed {
@@ -1219,6 +1243,136 @@ async fn panel_warns_when_step1_loses_bitcoin_confirmation_after_step2() {
     );
     assert_eq!(panel.step2_seen(), Some(TransactionObservation::Absent));
     assert_eq!(panel.stage, Stage::Step2(Step2Stage::Submitted));
+}
+
+/// #568 S4: the reconciler's warning has one case per outcome of step 1
+/// after the step-2 submission. Each names the exposure (step 2's recorded
+/// bytes could be mined on Bitcoin; for a conflict, step 1 can never confirm
+/// and the split can't complete), names a reorg only for O1 to O4, and
+/// leaves checking status again as the only action: no acknowledgement,
+/// close or step-1 resend is offered or named, nor the "cannot replay"
+/// label. Eligible evidence clears it.
+#[tokio::test(flavor = "multi_thread")]
+async fn step2_reconcile_warning_has_one_case_per_outcome_and_never_the_replay_label() {
+    use crate::services::claim_workflow::Step1Conflict;
+    use coincube_core::claim::BlockRef;
+    let block = |height: u64, n: u8| BlockRef {
+        height,
+        hash: coincube_core::miniscript::bitcoin::BlockHash::from_byte_array([n; 32]),
+    };
+    let spent = OutPoint::new(Txid::from_byte_array([7; 32]), 1);
+    let outcomes = [
+        (Step1AfterStep2::Shallow { confirmations: 3 }, false),
+        (
+            Step1AfterStep2::Remined {
+                previous: block(100, 6),
+                confirmed: block(101, 9),
+            },
+            true,
+        ),
+        (Step1AfterStep2::InMempool, true),
+        (Step1AfterStep2::Missing, true),
+        (
+            Step1AfterStep2::Conflict(Step1Conflict::new(spent, block(120, 4))),
+            true,
+        ),
+        (
+            Step1AfterStep2::Conflict(
+                Step1Conflict::new(spent, block(120, 4))
+                    .terminal(block(126, 5))
+                    .unwrap(),
+            ),
+            true,
+        ),
+        (Step1AfterStep2::Unknown, false),
+    ];
+    let journal = Journal::new(true);
+    let shared: Shared = Arc::default();
+    let mut panel = SplitPanel::resume(
+        TARGET.into(),
+        journal.temp.0.parent().unwrap().to_path_buf(),
+        journal.digest(),
+        journal.temp.0.clone(),
+    );
+    panel.set_connect(Some(Arc::new(PanelConnect(shared.clone()))));
+    panel.set_recon_port(Some(Arc::new(PanelReconPort(shared.clone()))));
+    let task = panel.begin();
+    drive(&mut panel, task).await;
+    assert_eq!(panel.stage, Stage::Step2(Step2Stage::Reconcile));
+    let mut seen = std::collections::BTreeSet::new();
+    for (after, reorg) in outcomes {
+        shared.lock().unwrap().afters.push_back(after);
+        let task = panel.update(SplitMessage::Step2Reconcile);
+        drive(&mut panel, task).await;
+        assert_eq!(panel.step2_after(), Some(after));
+        let warning = panel.step2_warning().expect("a warning");
+        assert_eq!(warning_lines(&panel), [warning.as_str()]);
+        assert!(seen.insert(warning.clone()), "one case each: {:?}", after);
+        assert!(
+            warning.ends_with("Check status again later."),
+            "{}",
+            warning
+        );
+        if let Step1AfterStep2::Conflict(conflict) = after {
+            assert!(warning.contains(&conflict.outpoint().to_string()));
+        }
+        if matches!(after, Step1AfterStep2::Conflict(c) if c.is_terminal()) {
+            assert!(
+                warning.contains("step 1 can never confirm and this split can't complete"),
+                "{}",
+                warning
+            );
+        } else {
+            assert!(
+                warning.contains("step 2's recorded bytes could also be mined on Bitcoin"),
+                "{}",
+                warning
+            );
+            assert!(!warning.contains("can never confirm"), "{}", warning);
+        }
+        if matches!(after, Step1AfterStep2::Conflict(c) if !c.is_terminal()) {
+            assert!(
+                warning.contains(
+                    "appears spent on Bitcoin by another transaction (it may still be unconfirmed)"
+                ),
+                "{}",
+                warning
+            );
+        }
+        assert_eq!(warning.contains("reorganized"), reorg, "{}", warning);
+        if let Step1AfterStep2::Remined { .. } = after {
+            assert!(warning.contains("(height 101)") && warning.contains("(height 100)"));
+        }
+        for never in [
+            "cknowledg",
+            "lose",
+            "bandon",
+            "resend",
+            "send step 1",
+            "sent again",
+            CANNOT_REPLAY,
+        ] {
+            assert!(!warning.contains(never), "{}: {}", never, warning);
+        }
+        assert_eq!(panel.replay_label(), None);
+        assert!(!panel.can_check_close() && !panel.can_review_resend());
+        for message in AFTER_SUBMISSION {
+            let task = panel.update(message);
+            drive(&mut panel, task).await;
+            assert_eq!(panel.stage, Stage::Step2(Step2Stage::Reconcile));
+        }
+        assert_eq!(shared.lock().unwrap().step1_opened, 0);
+    }
+    assert_eq!(seen.len(), 7);
+    shared
+        .lock()
+        .unwrap()
+        .afters
+        .push_back(Step1AfterStep2::Eligible);
+    let task = panel.update(SplitMessage::Step2Reconcile);
+    drive(&mut panel, task).await;
+    assert_eq!(panel.step2_warning(), None);
+    assert!(warning_lines(&panel).is_empty());
 }
 
 /// #637 r4172242637, reopened reconciler: the same after a restart with a

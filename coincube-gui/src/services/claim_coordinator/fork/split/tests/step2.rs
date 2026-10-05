@@ -1200,5 +1200,6 @@ async fn split_step2_check_signed_tells_complete_partial_and_wrong_apart() {
 }
 
 mod completion;
+mod reorg;
 mod routes;
 mod unified_journal;

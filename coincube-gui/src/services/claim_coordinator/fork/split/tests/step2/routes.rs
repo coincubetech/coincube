@@ -397,7 +397,7 @@ async fn split_step2_restart_after_submission_only_reconciles() {
         .await
         .unwrap();
     // The coordinator itself reconciles after the send.
-    let (_, seen) = coordinator.reconcile_sweep(&context()).await.unwrap();
+    let seen = coordinator.reconcile_sweep(&context()).await.unwrap().step2;
     assert_eq!(seen, TransactionObservation::Absent);
     drop(coordinator);
 
@@ -435,7 +435,7 @@ async fn split_step2_restart_after_submission_only_reconciles() {
         if seen == TransactionObservation::Absent {
             h.chains.edit(|view| view.on_btcb2.clear());
         }
-        let (_, observed) = reconciler.reconcile_sweep(&context()).await.unwrap();
+        let observed = reconciler.reconcile_sweep(&context()).await.unwrap().step2;
         assert_eq!(observed, seen);
     }
     assert!(

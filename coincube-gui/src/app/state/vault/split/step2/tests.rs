@@ -460,7 +460,7 @@ impl Step2Recon for HeldRecon {
     async fn reconcile(
         &mut self,
         _: &Context,
-    ) -> Result<(Status, TransactionObservation), Step2Refusal> {
+    ) -> Result<(Status, TransactionObservation, Step1AfterStep2), Step2Refusal> {
         unreachable!()
     }
 }
@@ -486,7 +486,7 @@ impl Step2Coord for HeldCoord {
     async fn reconcile(
         &mut self,
         _: &Context,
-    ) -> Result<(Status, TransactionObservation), Step2Refusal> {
+    ) -> Result<(Status, TransactionObservation, Step1AfterStep2), Step2Refusal> {
         unreachable!()
     }
     async fn review_resend(&mut self, _: &Context) -> Result<Step2ResendView, Step2Refusal> {
@@ -1122,7 +1122,7 @@ fn step2_copy_names_the_cause_and_the_node_route_privacy() {
     // (`Outcome::Uncertain`): the reorg warning doesn't claim step 2 was
     // sent, and keeps the replay-protection and no-recovery guidance
     // (#637 Copilot review 5401909718).
-    let reorged = reconcile_warning(Status::Observation(Assessment::Reorged)).unwrap();
+    let reorged = reconcile_warning(Step1AfterStep2::Missing).unwrap();
     assert_eq!(reorged, STEP1_REORGED_AFTER_STEP2);
     for wanted in [
         "a submission of step 2 was recorded; it was sent or may have been sent",
@@ -1386,6 +1386,42 @@ fn step2_panel_layer_is_reached_only_through_the_split_panel() {
         }
     }
     assert!(unexpected.is_empty(), "{:?}", unexpected);
+}
+
+/// Legolas #652 P-B: the resend refusal on a recorded step-1 conflict has
+/// its own copy naming the conflict, final either way: a terminal one says
+/// step 1 can never confirm; a provisional one that the spend may still be
+/// unconfirmed (S4-D5). Neither is another state's message.
+#[test]
+fn step2_resend_refusal_on_a_step1_conflict_names_it_and_is_final() {
+    use crate::services::claim_workflow::Step1Conflict;
+    use coincube_core::claim::BlockRef;
+    let block = |height: u64, n: u8| BlockRef {
+        height,
+        hash: coincube_core::miniscript::bitcoin::BlockHash::from_byte_array([n; 32]),
+    };
+    let spent = OutPoint::new(Txid::from_byte_array([7; 32]), 1);
+    let provisional = Step1Conflict::new(spent, block(120, 4));
+    let terminal = provisional.terminal(block(126, 5)).unwrap();
+    for (conflict, wanted) in [
+        (
+            terminal,
+            "so step 1 can never confirm and this split can't complete",
+        ),
+        (provisional, "(it may still be unconfirmed)"),
+    ] {
+        let refusal = describe_resend(ResendError::Step1ConflictRecorded(conflict));
+        assert!(!refusal.retry, "{}", refusal.reason);
+        assert_eq!(refusal.recovery, Step2Recovery::None);
+        assert!(
+            !refusal.reason.contains("already recorded on this device"),
+            "{}",
+            refusal.reason
+        );
+        assert!(refusal.reason.contains(&spent.to_string()));
+        assert!(refusal.reason.contains(wanted), "{}", refusal.reason);
+        assert!(refusal.reason.contains("Nothing was sent"));
+    }
 }
 
 mod close;

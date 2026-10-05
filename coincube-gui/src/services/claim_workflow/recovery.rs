@@ -115,6 +115,10 @@ impl Controller {
             || self.intent.bitcoin_transaction.as_ref() != Some(signed)
             || self.intent.bitcoin_attempts.len() >= MAX_BITCOIN_ATTEMPTS
             || data.observations.bitcoin_transaction != TransactionObservation::Absent
+            // A Split whose step 2 was submitted never resends step 1
+            // (#568 D13 = A): the step-2 submission is the journal's own
+            // record, whatever coordinator holds it.
+            || (self.intent.split.is_some() && self.intent.fork_submission.is_some())
         {
             return Err(Error::Unchecked);
         }
