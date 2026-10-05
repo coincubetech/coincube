@@ -9104,9 +9104,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    /// #568 B1b (D1): the Split panel exists only for a Bitcoin Blake2b
-    /// mainnet Cube whose Vault already holds a Split journal, and then only
-    /// to resume it. No journal, a Claim journal, or another chain: no panel.
+    /// #568 B1b: journal discovery gives a Split panel only for a Bitcoin
+    /// Blake2b mainnet Cube whose Vault already holds a Split journal, and
+    /// then only to resume it (a new split starts only from the sweep
+    /// review, B5c-2). No journal, a Claim journal, or another chain: no
+    /// panel.
     #[test]
     fn the_split_panel_exists_only_to_resume_an_existing_journal() {
         use coincube_core::miniscript::bitcoin::hashes::{sha256, Hash};
