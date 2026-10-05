@@ -56,6 +56,8 @@ fn working(work: Work) -> &'static str {
         Work::Abandoning => "Abandoning…",
         Work::CheckingClose => "Checking both chains before abandoning…",
         Work::Closing => "Abandoning and closing the split…",
+        Work::CheckingConflictClose => "Checking Bitcoin before closing the split…",
+        Work::ClosingConflict => "Closing the split…",
         Work::Restarting => "Reading the split recorded on this device…",
         Work::Entering => "Opening step 2…",
         Work::Leaving => "Returning to step 1…",
@@ -275,7 +277,11 @@ fn step2_body<'a>(
             }
             if panel.can_check_close() {
                 body = body.push(p1_regular(
-                    "This version can't send this step 2 again: its last attempt was accepted or may have left, or no resend is left. If Bitcoin Blake2b never shows it, you can abandon this split after a check.",
+                    match panel.dead_end().and_then(|dead_end| dead_end.conflict) {
+                        // #568 S4b, O4: a terminal step-1 conflict.
+                        Some(conflict) => step2::conflict_close_copy(&conflict),
+                        None => "This version can't send this step 2 again: its last attempt was accepted or may have left, or no resend is left. If Bitcoin Blake2b never shows it, you can abandon this split after a check.".to_string(),
+                    },
                 ));
             }
             // #568 B5b: only after this session's reconcile saw step 2
@@ -523,6 +529,18 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
             "Check before abandoning",
             SplitMessage::CheckAbandon,
         ));
+    } else if let Some(conflict) = panel
+        .dead_end()
+        .and_then(|dead_end| dead_end.conflict)
+        .filter(|_| panel.can_check_close())
+    {
+        // #568 S4b, O4: the exit of a terminal step-1 conflict.
+        if panel.can_confirm_close() {
+            body = body.push(caption(step2::conflict_closable_copy(&conflict)));
+            actions = actions.push(action("Close split", SplitMessage::ConfirmAbandon));
+        } else {
+            actions = actions.push(action("Check before closing", SplitMessage::CheckAbandon));
+        }
     } else if panel.can_confirm_close() {
         body = body.push(caption(
             "Bitcoin Blake2b shows neither this step 2 nor any spend of its coins, and step 1 is six deep on Bitcoin. Abandoning closes this split on this device: its record and the signed step 2 are kept, and a new split of this wallet stays refused until that record is reset.",

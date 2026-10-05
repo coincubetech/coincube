@@ -731,7 +731,12 @@ impl SplitPanel {
                     return Task::none();
                 };
                 self.abandon_checked = false;
-                let back = std::mem::replace(&mut self.stage, Stage::Working(Work::CheckingClose));
+                let work = if dead_end.conflict.is_some() {
+                    Work::CheckingConflictClose
+                } else {
+                    Work::CheckingClose
+                };
+                let back = std::mem::replace(&mut self.stage, Stage::Working(work));
                 self.resume_stage = Some(back);
                 self.spawn(
                     async move { step2::check_close(&*connect, &dead_end).await },
@@ -751,11 +756,16 @@ impl SplitPanel {
                     revoke();
                 }
                 self.recon = None;
+                self.coord = None;
                 self.abandon_checked = false;
                 let target = self.target_cube.clone();
                 let ended = Arc::new(std::sync::atomic::AtomicBool::new(false));
                 self.ending = Some(ended.clone());
-                self.stage = Stage::Working(Work::Closing);
+                self.stage = Stage::Working(if dead_end.conflict.is_some() {
+                    Work::ClosingConflict
+                } else {
+                    Work::Closing
+                });
                 self.spawn(
                     async move {
                         step2::check_close(&*connect, &dead_end)
@@ -938,10 +948,17 @@ impl SplitPanel {
                 // completion.
                 self.completable = matches!(seen, TransactionObservation::Confirmed { .. })
                     && after == Step1AfterStep2::Eligible;
-                // Seen on BTCB2: it left, so it is no dead end (#625 F2).
-                if seen != TransactionObservation::Absent {
-                    self.dead_end = None;
-                }
+                self.dead_end = self
+                    .dead_end
+                    .take()
+                    .filter(|dead_end| match dead_end.conflict {
+                        // Seen on BTCB2: it left, so it is no dead end (#625 F2).
+                        None => seen == TransactionObservation::Absent,
+                        // O4 (#568 S4b): step 2's bytes stand wherever they are;
+                        // the dead end lasts while the reconcile reports its
+                        // conflict (an eligible step 1 disproved it, S4-D6).
+                        Some(conflict) => after == Step1AfterStep2::Conflict(conflict),
+                    });
             }
             Err(reason) => {
                 self.completable = false;
@@ -950,6 +967,22 @@ impl SplitPanel {
         }
         if self.step2_warning().is_some() || self.notice.is_some() {
             self.replay = None;
+        }
+    }
+
+    /// #568 S4b, O4: the last reconcile reported a terminal step-1 conflict
+    /// that the panel holds no dead end for (it became terminal under this
+    /// session, or was read before): the journal is read again, as a
+    /// restart, so its dead end comes with the reconciler.
+    fn conflict_unread(&self) -> bool {
+        match self.step2_after {
+            Some(Step1AfterStep2::Conflict(conflict)) if conflict.is_terminal() => {
+                self.dead_end
+                    .as_ref()
+                    .and_then(|dead_end| dead_end.conflict)
+                    != Some(conflict)
+            }
+            _ => false,
         }
     }
 
@@ -1213,14 +1246,22 @@ impl SplitPanel {
             }
             SplitEvent::Step2Reconciled(_, Coord(coord), result, back) => {
                 self.bind_coord(coord);
+                let succeeded = result.is_ok();
                 self.reconciled(result);
                 self.stage = Stage::Step2(back);
+                if succeeded && self.conflict_unread() {
+                    return self.restart_step2(None);
+                }
                 Task::none()
             }
             SplitEvent::ReconReconciled(_, Recon(recon), result) => {
                 self.bind_recon(recon);
+                let succeeded = result.is_ok();
                 self.reconciled(result);
                 self.stage = Stage::Step2(Step2Stage::Reconcile);
+                if succeeded && self.conflict_unread() {
+                    return self.restart_step2(None);
+                }
                 Task::none()
             }
             SplitEvent::Step2ResendReviewed(_, Coord(coord), result) => {

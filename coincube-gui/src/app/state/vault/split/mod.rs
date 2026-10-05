@@ -164,6 +164,10 @@ pub enum Work {
     /// #625 F2: a step-2 dead end checked on both chains, then closed.
     CheckingClose,
     Closing,
+    /// #568 S4b, O4: a terminal step-1 conflict checked on Bitcoin, then
+    /// the split closed.
+    CheckingConflictClose,
+    ClosingConflict,
     /// Step 2.
     Restarting,
     Entering,
@@ -712,12 +716,24 @@ impl SplitPanel {
     /// 1 eligible (#568 S4b: the close's own check needs step 1 six deep in
     /// its block, so any other outcome could only refuse), and only after a
     /// check on both chains passed.
+    ///
+    /// #568 S4b, O4: the dead end of a recorded terminal step-1 conflict,
+    /// read from the journal under this session, is offered once the last
+    /// reconcile reported exactly that conflict (an Eligible one disproves
+    /// it, S4-D6). Step 2's BTCB2 state does not matter: its bytes stand.
+    /// Its own check reads Bitcoin fresh before the close.
     pub fn can_check_close(&self) -> bool {
-        self.dead_end.is_some()
-            && self.connect.is_some()
-            && self.step2_seen_here == Some(TransactionObservation::Absent)
-            && self.step2_after == Some(Step1AfterStep2::Eligible)
-            && self.stage == Stage::Step2(Step2Stage::Reconcile)
+        let Some(dead_end) = &self.dead_end else {
+            return false;
+        };
+        let evidence = match dead_end.conflict {
+            None => {
+                self.step2_seen_here == Some(TransactionObservation::Absent)
+                    && self.step2_after == Some(Step1AfterStep2::Eligible)
+            }
+            Some(conflict) => self.step2_after == Some(Step1AfterStep2::Conflict(conflict)),
+        };
+        evidence && self.connect.is_some() && self.stage == Stage::Step2(Step2Stage::Reconcile)
     }
     pub fn can_confirm_close(&self) -> bool {
         self.can_check_close() && self.abandon_checked

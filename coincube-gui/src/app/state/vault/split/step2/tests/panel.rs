@@ -2297,6 +2297,7 @@ async fn panel_offers_a_resend_only_where_a_restart_reopened_the_coordinator() {
         step1: Txid::from_byte_array([1; 32]),
         step2: Txid::from_byte_array([5; 32]),
         claimed: Vec::new(),
+        conflict: None,
     });
     let task = panel.begin();
     drive(&mut panel, task).await;
@@ -3326,4 +3327,28 @@ async fn panel_offers_review_resend_only_while_step1_is_eligible() {
         );
     }
     assert_eq!(shared.lock().unwrap().resends, 0);
+}
+
+/// #568 S4b, O4: a reconcile on the resend coordinator that reports a
+/// terminal step-1 conflict reads the journal again (the coordinator held
+/// no dead end): the restart opens the reconciler in O4's dead end instead
+/// of the coordinator, and offers its close, never Review resend.
+#[tokio::test(flavor = "multi_thread")]
+async fn panel_coordinator_reads_the_journal_again_when_a_conflict_becomes_terminal() {
+    let journal = Journal::returned(false);
+    let (mut panel, shared) = restarted(&journal, true).await;
+    assert!(panel.coord.is_some() && panel.dead_end().is_none());
+    let terminal = super::close::record_conflict(&journal, true);
+    shared
+        .lock()
+        .unwrap()
+        .afters
+        .push_back(Step1AfterStep2::Conflict(terminal));
+    let task = panel.update(SplitMessage::Step2Reconcile);
+    drive(&mut panel, task).await;
+    assert_eq!(panel.stage, Stage::Step2(Step2Stage::Reconcile));
+    assert!(panel.coord.is_none() && panel.recon.is_some());
+    assert_eq!(panel.dead_end().and_then(|d| d.conflict), Some(terminal));
+    assert_eq!(shared.lock().unwrap().reopened, 1);
+    assert!(panel.can_check_close() && !panel.can_review_resend());
 }
