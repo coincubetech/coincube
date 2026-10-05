@@ -44,17 +44,18 @@
 //!   is the canonical empty transaction, it has no `bitcoin_transaction`, it
 //!   is Tracking from creation with its target reserved from creation, and
 //!   the sweep reuses the step-2 fields (`fork_sweep`, `step2_transaction`,
-//!   `fork_submission`), so a recorded submission reopens through the step-2
-//!   reconciler as a step 2 does. Its only writers are
+//!   `fork_submission`). A recorded submission reopens through the
+//!   fork-only reconciler (B4b-3a, `UnifiedReconciler`); the step-2
+//!   reconciler refuses the record (U2). Its only writers are
 //!   [`Controller::create_unified_split`] and
-//!   [`Controller::record_unified_broadcast_intent`], which take core's typed
-//!   unified sweep and verified unified sweep (B4b-3a, Reviewer-650 F2): only
-//!   a sweep core built is recorded, and only a sweep core's finalizer
-//!   verified `ALL|UNIFIED` (Protected) on every input is journaled as a
-//!   submission. Every two-step writer refuses it, and the reverse. A two-step record stays version 8 and
-//!   serializes exactly as before; a binary that predates the fork-only
-//!   record refuses one by version (and by its `kind` field). Its
-//!   abandonment, and the close of its dead end, are B4b-3's decisions, so
+//!   [`Controller::record_unified_broadcast_intent`], which take core's
+//!   typed unified sweep and verified unified sweep (B4b-3a, Reviewer-650
+//!   F2): only a sweep core built is recorded, and only a sweep core's
+//!   finalizer verified `ALL|UNIFIED` (Protected) on every input is
+//!   journaled as a submission. Every two-step writer refuses it, and the
+//!   reverse. A two-step record stays version 8 and serializes exactly as
+//!   before; a binary that predates the fork-only record refuses one by
+//!   version (and by its `kind` field). Its abandonment, and the close of its dead end, are B4b-3's decisions, so
 //!   both are refused here and the journal is kept.
 //!
 //! Nothing here signs, broadcasts, or grants step-2 authority. A reopened
@@ -586,10 +587,10 @@ impl Controller {
     /// receive index its one output pays (B4b-3a, Reviewer-650 F2: no
     /// caller-described construction is accepted). The journal records its
     /// unsigned transaction, chain, source, fork height and target, checks
-    /// its shape, and reserves the target from creation. Creates a version-9 intent with the public descriptors
-    /// (P2) that is Tracking from creation, since nothing is ever tracked on
-    /// Bitcoin, and refuses an existing intent or a tombstone in
-    /// `directory`. The result is not submission authority: the caller's
+    /// its shape, and reserves the target from creation. Creates a version-9
+    /// intent with the public descriptors (P2) that is Tracking from
+    /// creation, since nothing is ever tracked on Bitcoin, and refuses an
+    /// existing intent or a tombstone in `directory`. The result is not submission authority: the caller's
     /// gate (C2) holds the fresh evidence, and the signed bytes are recorded
     /// only with their submission intent
     /// ([`Self::record_unified_broadcast_intent`]).

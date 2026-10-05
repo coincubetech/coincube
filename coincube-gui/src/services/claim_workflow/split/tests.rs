@@ -2478,13 +2478,14 @@ fn unified_record_validate_refuses_split_shape_and_vice_versa() {
     }
 }
 
-/// B4b-1b: a fork-only record whose submission is recorded reconciles
-/// through the step-2 path. The step-2 reconciler's reopen reads exactly
-/// these: the identity, a journal that validates, a recorded fork
-/// submission, a Split record, the Bitcoin chain, and a recorded signed
-/// step 2 whose txid is the submission's. (Its own `open` is named only in
-/// `fork::split`, by that module's D1 guard, so the test that calls it on
-/// this record lives there: `fork::split::tests::step2::unified_journal`.)
+/// B4b-1b: a fork-only record whose submission is recorded keeps the
+/// step-2 fields a reconcile reads: the identity, a journal that validates,
+/// a recorded fork submission, a Split record, the Bitcoin chain, and a
+/// recorded signed sweep whose txid is the submission's. (Since B4b-3a the
+/// step-2 reconciler refuses the record and the fork-only
+/// `UnifiedReconciler` opens it; both are named only in `fork::split`, by
+/// that module's D1 guard, so the tests that open them live there:
+/// `fork::split::tests::step2::{unified_journal, unified_flow}`.)
 /// The journal then takes
 /// the reconcile's writes in their order: no return hold (no attempt
 /// returned), a check whose step-1-centric assessment is inert (there is no
@@ -2574,9 +2575,9 @@ fn unified_record_reconciles_through_the_step2_path() {
 /// B4b-1b limitation, pinned: the step-2 observation path (`collect_sweep`,
 /// which the step-2 reconciler's `reconcile_sweep` runs) refuses a fork-only
 /// plan before any read, since it is step-1-centric (the claimed prevouts
-/// must be the step 1's inputs and the step 1 must carry the poison). So the
-/// reconciler reopens a fork-only record but cannot yet reconcile it; the
-/// fork-only reconcile is B4b-3's. Lifting this is a deliberate change.
+/// must be the step 1's inputs and the step 1 must carry the poison). The
+/// fork-only reconcile is B4b-3a's separate path (`collect_fork_sweep`, U1),
+/// which leaves this refusal in place. Lifting it is a deliberate change.
 #[tokio::test]
 async fn step2_observation_path_refuses_a_fork_only_plan() {
     use crate::services::claim_observation::{
