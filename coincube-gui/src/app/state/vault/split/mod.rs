@@ -85,6 +85,10 @@ use step1::{
     Step1Driver,
 };
 
+/// S3-G3: the App's port build ended without ports and the panel has no
+/// Connect session; Try again builds them again.
+pub const PORTS_INTERRUPTED: &str = "Opening this split under your Connect session was interrupted, so nothing was checked or sent. Try again.";
+
 /// What the panel is doing or waiting for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stage {
@@ -472,6 +476,9 @@ pub struct SplitPanel {
     completable: bool,
     /// #568 B5b: the completion this panel recorded (the history row).
     completion: Option<step2::SplitCompletion>,
+    /// S3-G3: the last port build ended without ports (its task panicked)
+    /// while the panel had no Connect session; `Retry` builds them again.
+    ports_failed: bool,
     /// The authenticated claimed coins from the restore.
     coins: Vec<SplitCoin>,
     /// S3 item 5: the deadline a timer is armed for, and its epoch. The
@@ -543,6 +550,7 @@ impl SplitPanel {
             step2_after: None,
             completable: false,
             completion: None,
+            ports_failed: false,
             coins: Vec::new(),
             armed: None,
             deadline_epoch: 0,
@@ -689,6 +697,9 @@ impl SplitPanel {
         };
         if !same {
             self.revoke();
+        }
+        if connect.is_some() {
+            self.ports_failed = false;
         }
         self.connect = connect;
     }

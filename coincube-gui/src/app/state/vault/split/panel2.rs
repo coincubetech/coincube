@@ -143,6 +143,31 @@ impl SplitPanel {
     pub fn note_step2_unavailable(&mut self, reason: Option<step2::Step2Unavailable>) {
         self.step2_missing = reason;
     }
+    /// S3-G3 (CodeRabbit r4179804722): the App's port build ended without
+    /// ports (its blocking task panicked). The step-2 port reads as
+    /// [`step2::Step2Unavailable::Refused`]. Ports the panel still holds
+    /// (an unchanged session keeps them) stay; a panel left without a
+    /// Connect session is refused with a retry, which the App answers by
+    /// building the ports again ([`Self::take_ports_retry`]), so it never
+    /// waits for an unrelated refresh.
+    pub fn note_ports_failed(&mut self) {
+        if self.step2_port.is_none() {
+            self.step2_missing = Some(step2::Step2Unavailable::Refused);
+        }
+        if self.connect.is_none() && !self.hidden {
+            self.ports_failed = true;
+            self.stage = Stage::Refused(Refusal::retry(super::PORTS_INTERRUPTED));
+        }
+    }
+    /// The retry of a failed port build was asked for: `true` (once) when
+    /// the App should build the ports again; the panel then waits for them.
+    pub fn take_ports_retry(&mut self) -> bool {
+        if !std::mem::take(&mut self.ports_failed) || self.connect.is_some() {
+            return false;
+        }
+        self.stage = Stage::NeedsSession;
+        true
+    }
     /// Why step 2 can't be entered for want of a step-2 port, in words; with
     /// no reason recorded, the Vault daemon is missing.
     pub fn step2_unavailable_copy(&self) -> Option<&'static str> {
