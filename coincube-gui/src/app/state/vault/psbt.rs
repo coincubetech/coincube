@@ -2345,6 +2345,25 @@ impl SignModal {
     ///
     /// `pub(super)` so `keychain_sign`'s tests can pin this surface to the
     /// same copy as the modal's own view.
+    /// Notices shown above the signing paths. On a Bitcoin Blake2b Vault
+    /// whose picker lists a connected hardware device for one of its keys,
+    /// the device copy from the Split flow comes first: the device calls the
+    /// spend a Bitcoin transaction, so the user checks the amounts and the
+    /// address before approving. Bitcoin-family Vaults are unchanged.
+    fn sign_notices(&self, paths: &[view::vault::psbt::SigningPath]) -> Vec<String> {
+        let device_listed = paths.iter().any(|path| {
+            path.keys
+                .iter()
+                .any(|row| matches!(row.kind, view::vault::psbt::SigningKeyKind::Hardware))
+        });
+        let mut notices = Vec::new();
+        if self.wallet.chain.is_blake2b() && device_listed {
+            notices.push(crate::split_hardware::sign::DEVICE_SHOWS_BITCOIN_WARNING.to_string());
+        }
+        notices.extend(self.keychain_notices());
+        notices
+    }
+
     pub(super) fn keychain_notices(&self) -> Vec<String> {
         let Some(k) = self.keychain.as_ref() else {
             return Vec::new();
@@ -2685,13 +2704,10 @@ impl Modal for SignModal {
                     .into()
             } else {
                 let paths = self.signing_paths();
-                let keychain_notices = self.keychain_notices();
-                modal::Modal::new(
-                    content,
-                    view::vault::psbt::sign_action(paths, keychain_notices),
-                )
-                .on_blur(Some(view::Message::Spend(view::SpendTxMessage::Cancel)))
-                .into()
+                let notices = self.sign_notices(&paths);
+                modal::Modal::new(content, view::vault::psbt::sign_action(paths, notices))
+                    .on_blur(Some(view::Message::Spend(view::SpendTxMessage::Cancel)))
+                    .into()
             }
         } else {
             content
@@ -3711,6 +3727,58 @@ mod tests {
             device("ledger-usb-1", fingerprint(USB_FP)),
         ];
         modal
+    }
+
+    /// HW-1 item 7: on a Bitcoin Blake2b Vault, the picker shows the Split
+    /// flow's device copy before a listed hardware device signs. A Bitcoin
+    /// Vault, a fork Vault with no device listed, and a Keychain phone on
+    /// the local network get no such copy.
+    #[test]
+    fn device_copy_shows_only_when_a_device_can_sign_a_bitcoin_blake2b_spend() {
+        use crate::split_hardware::sign::DEVICE_SHOWS_BITCOIN_WARNING;
+        let picker = |chain: ChainId, devices: Vec<HardwareWallet>| {
+            let wallet = Wallet::new(CoincubeDescriptor::from_str(DESC).unwrap()).with_chain(chain);
+            let mut modal = sign_modal_for(wallet);
+            modal.hws.list = devices;
+            modal
+        };
+        let notices = |modal: &SignModal| modal.sign_notices(&modal.signing_paths());
+        let usb = || device("ledger-usb-1", fingerprint(USB_FP));
+        let phone = || {
+            device(
+                &format!("{}0a0b0c0d", crate::hw::LAN_PHONE_ID_PREFIX),
+                fingerprint(PHONE_FP),
+            )
+        };
+
+        for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
+            let with_device = picker(chain, vec![usb()]);
+            assert_eq!(
+                notices(&with_device),
+                vec![DEVICE_SHOWS_BITCOIN_WARNING.to_string()],
+                "{:?}",
+                chain
+            );
+            assert!(
+                notices(&picker(chain, Vec::new())).is_empty(),
+                "{:?}",
+                chain
+            );
+            assert!(
+                notices(&picker(chain, vec![phone()])).is_empty(),
+                "{:?}",
+                chain
+            );
+        }
+        for chain in [ChainId::Bitcoin, ChainId::Testnet4, ChainId::Signet] {
+            assert!(
+                notices(&picker(chain, vec![usb()])).is_empty(),
+                "{:?}",
+                chain
+            );
+        }
+        assert!(DEVICE_SHOWS_BITCOIN_WARNING
+            .starts_with("Your hardware wallet will call this a Bitcoin transaction."));
     }
 
     fn primary_row(
