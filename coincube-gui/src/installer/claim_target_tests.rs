@@ -398,8 +398,8 @@ async fn the_claim_flow_never_asks_for_a_pin_a_descriptor_or_the_mnemonic_again(
     // target inherits the source Cube's.
     assert_eq!(
         installer.steps.len(),
-        5,
-        "descriptor → Connect → node → alias → done"
+        6,
+        "descriptor → Connect → node → optional local node → alias → done"
     );
     assert!(installer.context.descriptor.is_some());
     assert!(installer.context.restore_pin.is_none());
