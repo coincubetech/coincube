@@ -24,7 +24,10 @@ their own decision.
   installer shows the non-blocking `NoReplayCapableSigner` advice for a path
   with only devices and xpubs, and a loaded Vault classifies an unmarked
   device as `UserMarked(false)`. The card's tip says so and recommends the
-  Cube Key on the same path. Before a device signs a BTCB2 Vault spend, the
+  Cube Key on the same path. Vault Settings' "Register wallet" also works on
+  BTCB2 (Amendment B): it sends the device the same Vault name and descriptor
+  string as on Bitcoin and stores the HMAC in that chain's settings only.
+  Before a device signs a BTCB2 Vault spend, the
   signing picker shows the Split flow's device copy ("Your hardware wallet
   will call this a Bitcoin transaction...").
 - **Border Wallet.** The card and the wizard work as on Bitcoin, with the
