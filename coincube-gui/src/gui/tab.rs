@@ -3994,6 +3994,7 @@ pub fn create_app_with_remote_backend(
             .map(|s| s.display_mode)
             .unwrap_or_default(),
             node_bitcoind_sync_progress: None,
+            node_bitcoind_sync_heights: None,
             node_bitcoind_ibd: None,
             node_bitcoind_subversion: None,
             daemon_switch_in_progress: false,

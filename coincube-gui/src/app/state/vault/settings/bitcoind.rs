@@ -1190,12 +1190,16 @@ impl State for BitcoindSettingsState {
                         active_backend,
                         active_icon,
                         cache.node_bitcoind_sync_progress,
+                        cache.node_bitcoind_sync_heights,
                         cache.node_bitcoind_ibd,
                         cache.node_bitcoind_subversion.as_deref(),
                         cache.node_bitcoind_last_log.as_deref(),
                         can_switch_to_connect,
                         can_switch_to_bitcoind,
                         can_setup_local_node,
+                        self.full_config
+                            .as_ref()
+                            .is_some_and(|cfg| cfg.auto_switch_to_pending != Some(false)),
                         self.node_switch_processing,
                         cache.daemon_switch_in_progress,
                         warning_str,

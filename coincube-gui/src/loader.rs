@@ -892,6 +892,7 @@ pub async fn load_application(
         bitcoin_unit,
         display_mode,
         node_bitcoind_sync_progress: None,
+        node_bitcoind_sync_heights: None,
         node_bitcoind_ibd: None,
         node_bitcoind_subversion: None,
         daemon_switch_in_progress: false,

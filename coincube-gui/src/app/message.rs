@@ -243,11 +243,11 @@ pub enum Message {
     SetInternalBitcoind(Bitcoind),
     /// Fired by the bitcoind-sync subscription to trigger a progress probe.
     PollBitcoindSync,
-    /// Result of polling the pending local bitcoind's IBD sync progress.
-    /// Carries `(verificationprogress, initialblockdownload, subversion)`, the
-    /// subversion read from the node itself so the syncing copy can name the
-    /// build that is actually running.
-    BitcoindSyncProgress(Result<(f64, bool, Option<String>), String>),
+    /// A direct local-node observation, scoped to the RPC configuration probed.
+    BitcoindSyncProgress {
+        config: coincubed::config::BitcoindConfig,
+        result: Result<super::LocalNodeSync, String>,
+    },
     /// Result of polling the *active* managed node's network stats (connection
     /// counts, upload used vs. cap, onion address) for the Node settings.
     BitcoindNetStats(Result<crate::app::cache::NodeNetStats, String>),

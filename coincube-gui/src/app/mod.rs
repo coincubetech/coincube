@@ -2177,12 +2177,30 @@ pub(crate) async fn reconcile_duress_orphan(datadir: CoincubeDirectory) -> Resul
     Ok(true)
 }
 
-/// Poll the local bitcoind's IBD progress via its JSON-RPC interface.
-/// Returns `(verificationprogress, initialblockdownload, subversion)` or an error
-/// string. The subversion is `None` when the node would not say what it is.
+/// Chain progress from the local node, independent of Connect or wallet scans.
+#[derive(Debug, Clone)]
+pub struct LocalNodeSync {
+    progress: f64,
+    ibd: bool,
+    blocks: u64,
+    headers: u64,
+    subversion: Option<String>,
+}
+
+/// Prefer the pending node; keep observing the active local node after promotion.
+fn local_node_sync_config(cfg: &DaemonConfig) -> Option<&coincubed::config::BitcoindConfig> {
+    cfg.pending_bitcoind
+        .as_ref()
+        .or(match &cfg.bitcoin_backend {
+            Some(coincubed::config::BitcoinBackend::Bitcoind(local)) => Some(local),
+            _ => None,
+        })
+}
+
+/// Poll the local bitcoind directly, including while the old wallet daemon stops.
 async fn check_bitcoind_sync_progress(
     cfg: coincubed::config::BitcoindConfig,
-) -> Result<(f64, bool, Option<String>), String> {
+) -> Result<LocalNodeSync, String> {
     use coincubed::config::BitcoindRpcAuth;
 
     let (user, pass) = match &cfg.rpc_auth {
@@ -2234,7 +2252,19 @@ async fn check_bitcoind_sync_progress(
     // other flavour decision uses — and best-effort: an unreadable answer costs a
     // less specific sentence, not the progress report the user is waiting on.
     let subversion = subversion(&client, &url, &user, &pass).await;
-    Ok((progress, ibd, subversion))
+    let blocks = result["blocks"]
+        .as_u64()
+        .ok_or_else(|| "Missing blocks in bitcoind response".to_string())?;
+    let headers = result["headers"]
+        .as_u64()
+        .ok_or_else(|| "Missing headers in bitcoind response".to_string())?;
+    Ok(LocalNodeSync {
+        progress,
+        ibd,
+        blocks,
+        headers,
+        subversion,
+    })
 }
 
 /// A node's `getnetworkinfo.subversion`, or `None` if it cannot be read.
@@ -4849,13 +4879,13 @@ impl App {
             );
         }
 
-        // Poll pending local Bitcoind IBD progress on a fixed interval,
+        // Poll pending or active local Bitcoind progress on a fixed interval,
         // independent of the variable-rate tick subscription.
         if self
             .daemon
             .as_ref()
             .and_then(|d| d.config())
-            .and_then(|c| c.pending_bitcoind.as_ref())
+            .and_then(local_node_sync_config)
             .is_some()
         {
             subscriptions
@@ -6034,12 +6064,20 @@ impl App {
                         .daemon
                         .as_ref()
                         .and_then(|d| d.config())
-                        .and_then(|c| c.pending_bitcoind.clone())
+                        .and_then(local_node_sync_config)
+                        .cloned()
                     {
                         self.bitcoind_sync_probe_in_progress = true;
                         return Task::perform(
-                            check_bitcoind_sync_progress(pending_cfg),
-                            Message::BitcoindSyncProgress,
+                            async move {
+                                let result =
+                                    check_bitcoind_sync_progress(pending_cfg.clone()).await;
+                                Message::BitcoindSyncProgress {
+                                    config: pending_cfg,
+                                    result,
+                                }
+                            },
+                            |message| message,
                         );
                     }
                 }
@@ -6143,12 +6181,29 @@ impl App {
                     Err(e) => tracing::debug!("node net-stats poll failed: {e}"),
                 }
             }
-            Message::BitcoindSyncProgress(res) => {
+            Message::BitcoindSyncProgress { config, result } => {
                 self.bitcoind_sync_probe_in_progress = false;
-                match res {
+                // A result from the previous node must not update or promote a new one.
+                if self
+                    .daemon
+                    .as_ref()
+                    .and_then(|d| d.config())
+                    .and_then(local_node_sync_config)
+                    != Some(&config)
+                {
+                    return Task::none();
+                }
+                match result {
                     Err(e) => tracing::warn!("Bitcoind sync check failed: {}", e),
-                    Ok((progress, ibd, subversion)) => {
+                    Ok(LocalNodeSync {
+                        progress,
+                        ibd,
+                        blocks,
+                        headers,
+                        subversion,
+                    }) => {
                         self.cache.node_bitcoind_sync_progress = Some(progress);
+                        self.cache.node_bitcoind_sync_heights = Some((blocks, headers));
                         self.cache.node_bitcoind_ibd = Some(ibd);
                         // Keep the last good answer if this poll couldn't read it.
                         if subversion.is_some() {
@@ -6742,6 +6797,7 @@ impl App {
                 // A successful switch clears the pending local-node sync card.
                 if result.is_ok() {
                     self.cache.node_bitcoind_sync_progress = None;
+                    self.cache.node_bitcoind_sync_heights = None;
                     self.cache.node_bitcoind_ibd = None;
                     self.cache.node_bitcoind_subversion = None;
                     self.cache.node_bitcoind_last_log = None;
@@ -6753,6 +6809,7 @@ impl App {
                     Task::done(Message::CacheUpdated),
                     claim_task,
                     split_task,
+                    Task::done(Message::PollBitcoindSync),
                 ]);
             }
             Message::WalletUpdated(Ok(wallet)) => {
@@ -12466,5 +12523,102 @@ pub(crate) mod claim_step1_tests {
         assert_eq!(*generation.borrow(), before, "the refusal revokes nothing");
         assert!(!app.daemon_switch_in_progress);
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod local_node_sync_tests {
+    use super::*;
+    use coincubed::config::{BitcoinBackend, BitcoindConfig, BitcoindRpcAuth};
+
+    fn node(port: u16) -> BitcoindConfig {
+        BitcoindConfig {
+            addr: std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+            rpc_auth: BitcoindRpcAuth::UserPass("fixture".into(), "fixture".into()),
+        }
+    }
+
+    #[tokio::test]
+    async fn local_node_sync_reads_pruned_node_without_connect() {
+        use httpmock::prelude::*;
+        let server = MockServer::start_async().await;
+        let chain = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/")
+                    .json_body_partial(r#"{"method":"getblockchaininfo"}"#);
+                then.status(200).json_body(serde_json::json!({"result": {
+                    "verificationprogress": 0.975, "initialblockdownload": true,
+                    "blocks": 890000, "headers": 900000, "pruned": true
+                }}));
+            })
+            .await;
+        let build = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/")
+                    .json_body_partial(r#"{"method":"getnetworkinfo"}"#);
+                then.status(200)
+                    .json_body(serde_json::json!({"result":{"subversion":"/Satoshi:29.3.0/"}}));
+            })
+            .await;
+        let observed = check_bitcoind_sync_progress(node(server.address().port()))
+            .await
+            .unwrap();
+        assert_eq!(observed.progress, 0.975);
+        assert!(observed.ibd);
+        assert_eq!((observed.blocks, observed.headers), (890000, 900000));
+        assert_eq!(observed.subversion.as_deref(), Some("/Satoshi:29.3.0/"));
+        chain.assert_async().await;
+        build.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn local_node_sync_survives_switch_and_rejects_previous_node() {
+        let root = std::env::temp_dir().join(format!("local-node-sync-{}", uuid::Uuid::new_v4()));
+        let (mut app, _) = super::claim_step1_tests::bitcoin_app(&root);
+        let mut cfg = app.daemon.as_ref().unwrap().config().unwrap().clone();
+        let active = node(8332);
+        let pending = node(8333);
+        cfg.bitcoin_backend = Some(BitcoinBackend::Bitcoind(active.clone()));
+        assert_eq!(local_node_sync_config(&cfg), Some(&active));
+        cfg.pending_bitcoind = Some(pending.clone());
+        cfg.auto_switch_to_pending = Some(false);
+        assert_eq!(local_node_sync_config(&cfg), Some(&pending));
+        app.daemon = Some(Arc::new(EmbeddedDaemon::unstarted_for_test(
+            cfg.clone(),
+            None,
+        )));
+        app.daemon_switch_in_progress = true;
+        app.cache.daemon_switch_in_progress = true;
+        let observation = || LocalNodeSync {
+            progress: 0.999,
+            ibd: false,
+            blocks: 900000,
+            headers: 900000,
+            subversion: None,
+        };
+        drop(app.update(Message::BitcoindSyncProgress {
+            config: pending.clone(),
+            result: Ok(observation()),
+        }));
+        assert_eq!(app.cache.node_bitcoind_sync_heights, Some((900000, 900000)));
+        assert_eq!(app.cache.node_bitcoind_ibd, Some(false));
+        // Promotion removes pending, but the same RPC remains the active observer.
+        cfg.pending_bitcoind = None;
+        cfg.bitcoin_backend = Some(BitcoinBackend::Bitcoind(pending.clone()));
+        assert_eq!(local_node_sync_config(&cfg), Some(&pending));
+        app.daemon = Some(Arc::new(EmbeddedDaemon::unstarted_for_test(cfg, None)));
+        app.cache.node_bitcoind_sync_heights = None;
+        drop(app.update(Message::BitcoindSyncProgress {
+            config: active,
+            result: Ok(observation()),
+        }));
+        assert_eq!(app.cache.node_bitcoind_sync_heights, None);
+        drop(app.update(Message::BitcoindSyncProgress {
+            config: pending,
+            result: Ok(observation()),
+        }));
+        assert_eq!(app.cache.node_bitcoind_sync_heights, Some((900000, 900000)));
     }
 }
