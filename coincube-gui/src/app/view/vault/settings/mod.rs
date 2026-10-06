@@ -1391,7 +1391,12 @@ pub fn node_backend_status<'a>(
     // Once the node reports it has left initial block download, treat it as
     // ready even if `verificationprogress` still pins at 1.0 — otherwise the
     // syncing copy/button label keep saying "syncing" at 100%.
-    let still_syncing = pending_ibd != Some(false);
+    let initial_syncing = pending_ibd != Some(false);
+    // Leaving IBD does not mean a previously synced node has caught up after
+    // an outage. Keep its known header gap visible without changing admission.
+    let catching_up =
+        !initial_syncing && local_heights.is_some_and(|(blocks, headers)| blocks < headers);
+    let still_syncing = initial_syncing || catching_up;
     let mut col = Column::new().spacing(15);
 
     col = col.push(
@@ -1466,7 +1471,9 @@ pub fn node_backend_status<'a>(
             })
             .unwrap_or_else(|| "Your local node".to_string());
         let pending = can_switch_to_bitcoind;
-        let desc = if still_syncing {
+        let desc = if catching_up {
+            format!("{name} has finished initial blockchain sync and is catching up with known headers.")
+        } else if initial_syncing {
             let next = if pending && auto_switch_to_pending {
                 "Tenshu will automatically switch to this node once syncing is complete. "
             } else {
@@ -1483,10 +1490,12 @@ pub fn node_backend_status<'a>(
 
         let mut sync_col = Column::new()
             .spacing(8)
-            .push(caption(if still_syncing {
+            .push(caption(if catching_up {
+                "Local node catching up"
+            } else if initial_syncing {
                 "Local node syncing"
             } else {
-                "Local blockchain synced"
+                "Local blockchain status"
             }))
             .push(text(if still_syncing {
                 format!("Progress {:.1}%", 100.0 * progress)
@@ -2642,6 +2651,14 @@ mod tests {
                 "Progress 97.5%",
             ),
             (
+                Some(0.999),
+                Some(false),
+                false,
+                false,
+                899990,
+                "Local node catching up",
+            ),
+            (
                 None,
                 None,
                 true,
@@ -2691,6 +2708,12 @@ mod tests {
                     900000 - blocks
                 );
                 assert!(labels.0.iter().any(|text| text == &expected_blocks));
+            }
+            if ibd == Some(false) && blocks < 900000 && progress.is_some() {
+                assert!(!labels
+                    .0
+                    .iter()
+                    .any(|text| text == "Initial blockchain sync complete"));
             }
             if switching {
                 assert!(labels
