@@ -1,8 +1,8 @@
 //! Split step 2 (#568 B3b-2b): what the panel does for step 2 that is not
 //! iced state. The panel's step-2 stages (`panel2`), its view and the App's
-//! port handoff drive it, and like the panel it is reached only by resuming
-//! an existing Split journal: nothing in the GUI starts a split before B5
-//! (D1).
+//! port handoff drive it, and like the panel it is reached only through a
+//! Split panel (one the sweep review's "Start split" started, #568 B5c-2, or
+//! one resumed from its journal), once step 1 has six confirmations.
 //!
 //! - **Ports.** [`Step2Port`] opens the step-2 submission side of a Split
 //!   journal through the target Vault's daemon: a [`Step2Prep`] (target
@@ -2413,4 +2413,4 @@ fn reconciled(r: SweepReconcile) -> (Status, TransactionObservation, Step1AfterS
 }
 
 #[cfg(all(test, unix))]
-mod tests;
+pub(crate) mod tests;

@@ -98,15 +98,17 @@ impl std::fmt::Debug for SplitCompletionEvidence {
 /// What [`SplitStep2Reconciler::reconcile_split_completion`] found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SplitCompletionReconciliation {
-    /// Step 2 is still in the block the record names and step 1 still has
-    /// its depth: the record, if any, stands.
+    /// Step 2 is still in the block this Cube's record of it names and step
+    /// 1 still has its depth: the record stands. Never without a record.
     Standing {
         status: Status,
         transaction: claim_observation::TransactionObservation,
     },
-    /// Step 2 left its block (absent, unconfirmed or re-mined elsewhere) or
-    /// step 1 lost its depth. The matching record was cleared when `cleared`;
-    /// otherwise there was none to clear. The descriptors stay forgotten.
+    /// Step 2 left its block (absent, unconfirmed or re-mined elsewhere),
+    /// step 1 lost its depth, or this Cube holds no record of this split's
+    /// step 2 (#662 Reviewer-662d: an earlier recheck cleared it and then
+    /// expired). The matching record was cleared when `cleared`; otherwise
+    /// there was none to clear. The descriptors stay forgotten.
     Lost {
         status: Status,
         transaction: claim_observation::TransactionObservation,
@@ -401,9 +403,10 @@ impl SplitStep2Reconciler {
     /// clears the Cube's matching `split_from` record. Inclusion is inspected
     /// from the recheck's own observations, independently of the journal's
     /// assessment, since an expired RDTS window would otherwise mask a
-    /// Bitcoin reorg. Transport failures and a changing view leave the record
-    /// alone and return an error; another Split's record is never cleared;
-    /// the forgotten descriptors are never restored.
+    /// Bitcoin reorg. No record of this split's step 2 on the Cube is a loss
+    /// too, with nothing to clear. Transport failures and a changing view
+    /// leave the record alone and return an error; another Split's record is
+    /// never cleared; the forgotten descriptors are never restored.
     pub async fn reconcile_split_completion(
         &mut self,
         context: &Context,
@@ -438,9 +441,11 @@ impl SplitStep2Reconciler {
         let digest = self.controller.identity().descriptor_digest;
         let txid = self.recorded_txid()?;
         let recorded = recorded_height(root, target, digest, txid)?;
+        // A completion stands only on this Cube's record of it: with none
+        // (an earlier recheck removed it, then expired), it is lost.
         let left_block = match seen {
             claim_observation::TransactionObservation::Confirmed { block, .. } => {
-                recorded.is_some_and(|height| height != block.height)
+                recorded.is_none_or(|height| height != block.height)
             }
             _ => true,
         };

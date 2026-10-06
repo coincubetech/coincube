@@ -789,6 +789,70 @@ async fn split_completion_marker_is_cleared_when_step2_leaves_its_block() {
     assert!(btcb2_settings(&root).cubes[1].split_from.is_empty());
 }
 
+/// #662 Reviewer-662d (B5c-2): a completion stands only on the Cube's record
+/// of it. An earlier recheck cleared the record (and then expired, leaving
+/// the panel in Completed); step 2 is back in its block and step 1 six deep,
+/// yet with no record a later recheck is a loss with nothing to clear, never
+/// Standing, so "complete" is never shown for a split this Cube no longer
+/// records. Nothing is written; a fresh completion records it again.
+#[tokio::test(flavor = "multi_thread")]
+async fn split_completion_without_its_record_is_lost_not_standing() {
+    let (h, txid) = submitted().await;
+    let (root, target) = settings_root(&h).await;
+    h.chains
+        .edit(|view| view.on_btcb2 = vec![(txid, confirmed(txid, STEP2_HEIGHT))]);
+    let mut reconciler = reopen(&h, Box::new(h.chains.clone()));
+    let evidence = minted(&mut reconciler).await;
+    evidence.persist(&root, &target).await.unwrap();
+    evidence.forget(&mut reconciler, &context()).unwrap();
+    assert_eq!(split_from(&root), vec![record(&h, txid, STEP2_HEIGHT)]);
+    // The earlier recheck: step 2 left its block, the record is cleared.
+    h.chains.edit(|view| view.on_btcb2.clear());
+    assert!(matches!(
+        reconciler
+            .reconcile_split_completion(&context(), &root, &target)
+            .await,
+        Ok(SplitCompletionReconciliation::Lost { cleared: true, .. })
+    ));
+    assert!(split_from(&root).is_empty());
+    // Step 2 back in the very block, step 1 still six deep: no record, so
+    // lost, and the settings file is not written.
+    h.chains
+        .edit(|view| view.on_btcb2 = vec![(txid, confirmed(txid, STEP2_HEIGHT))]);
+    let before = std::fs::read(settings_path(&root)).unwrap();
+    let result = reconciler
+        .reconcile_split_completion(&context(), &root, &target)
+        .await;
+    assert!(
+        matches!(
+            result,
+            Ok(SplitCompletionReconciliation::Lost {
+                status: Status::Observation(Assessment::ObservationsEligibleForPreflight),
+                cleared: false,
+                ..
+            })
+        ),
+        "{:?}",
+        result
+    );
+    assert_eq!(std::fs::read(settings_path(&root)).unwrap(), before);
+    // Recorded again from fresh evidence, it stands again.
+    minted(&mut reconciler)
+        .await
+        .persist(&root, &target)
+        .await
+        .unwrap();
+    assert_eq!(split_from(&root), vec![record(&h, txid, STEP2_HEIGHT)]);
+    assert!(matches!(
+        reconciler
+            .reconcile_split_completion(&context(), &root, &target)
+            .await,
+        Ok(SplitCompletionReconciliation::Standing { .. })
+    ));
+    // The descriptors were never restored.
+    assert!(h.temp.journal()["split"].get("descriptors").is_none());
+}
+
 /// #645 P3-2: the cleared record is keyed by the source digest *and* step
 /// 2's txid. A record of the same source with another step 2 stays when
 /// this one's completion is lost (and is not taken for this one's height).

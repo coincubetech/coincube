@@ -1105,14 +1105,15 @@ pub(super) fn production_text<'a>(file: &str, text: &'a str) -> &'a str {
     &text[..cut]
 }
 
-/// D1: step 2 is dormant. The gate, the step-2 construction, its handoff,
-/// coordinator and transport (`fork::split` and `fork::split::step2`), and
-/// the completion evidence and `split_from` writer (B5a) are named only in
-/// `fork::split` itself; nothing else in the crate reaches them (B3b-2 adds
-/// the panel, reachable only by resuming a journal; B5b adds its completion
-/// stage). B4b-3a adds the unified fallback's coordinator and reconciler,
-/// and the fork-only observation path they run, which only its own module
-/// (`claim_observation`) defines.
+/// Layering: step 2 stays behind `fork::split`. The gate, the step-2
+/// construction, its handoff, coordinator and transport (`fork::split` and
+/// `fork::split::step2`), and the completion evidence and `split_from`
+/// writer (B5a) are named only in `fork::split` itself; nothing else in the
+/// crate reaches them (B3b-2 adds the panel, which reaches them through its
+/// own ports; B5b adds its completion stage; B5c-2 lets the sweep review
+/// start the panel). B4b-3a adds the unified fallback's coordinator and
+/// reconciler, and the fork-only observation path they run, which only its
+/// own module (`claim_observation`) defines.
 #[test]
 fn split_step2_gate_has_no_gui_caller() {
     fn walk(dir: &std::path::Path, files: &mut Vec<(String, String)>) {

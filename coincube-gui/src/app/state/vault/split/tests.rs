@@ -1461,22 +1461,27 @@ fn split_journal_discovery_finds_only_split_journals() {
     assert!(step1::discover(&root).is_empty());
 }
 
-/// D1: nothing in the GUI starts a split. `SplitPanel::start` is reached only
-/// from this module's tests; production constructs the panel only through
-/// `SplitPanel::resume` in `app/mod.rs`'s journal discovery; the panel's
-/// intents have no start; and the Home scan's review overlay still offers
-/// only its close action.
+/// #568 B5c-2 (the go-live, P5): the one way into a new split is the sweep
+/// review's "Start split". `SplitPanel::start` is named outside this module
+/// only once, in `App::start_split_from_review`, after its checks of the
+/// account's Bitcoin Blake2b grant, the review's context, an open panel and
+/// D15, which it reaches only from the `StartSplit` intent; that intent is
+/// pressed only in the review overlay, rendered only under the Review
+/// handoff. Otherwise production constructs the panel only through
+/// `SplitPanel::resume` in the journal discovery, and neither the panel's
+/// intents nor the single step's have a start.
 #[test]
-fn split_panel_has_no_gui_entry_point() {
-    assert_split_panel_has_no_gui_entry_point(|text| text.to_string());
+fn split_panel_start_is_reached_only_from_the_review_overlay_under_the_flag() {
+    assert_split_start_is_gated(|text| text.to_string());
 }
 
-/// #568 W1: the D1 guard reads a CRLF checkout (Git for Windows) of the
-/// sources the same way, so its line-spanning markers are still found.
+/// #568 W1: the entry-point guard reads a CRLF checkout (Git for Windows)
+/// of the sources the same way, so its line-spanning markers are still
+/// found.
 #[test]
 fn split_entry_point_guard_reads_a_crlf_checkout() {
     assert_reads_crlf(crate::utils::source_text::as_crlf);
-    assert_split_panel_has_no_gui_entry_point(crate::utils::source_text::as_crlf);
+    assert_split_start_is_gated(crate::utils::source_text::as_crlf);
 }
 
 /// #657 N1: a CRLF twin really reads CRLF text: `checkout` turns a source
@@ -1493,7 +1498,7 @@ fn assert_reads_crlf(checkout: fn(&str) -> String) {
 }
 
 /// `checkout` is the text a checkout of each source file reads as.
-fn assert_split_panel_has_no_gui_entry_point(checkout: fn(&str) -> String) {
+fn assert_split_start_is_gated(checkout: fn(&str) -> String) {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     fn walk(dir: &Path, files: &mut Vec<(String, String)>, root: &Path) {
         for entry in std::fs::read_dir(dir).unwrap() {
@@ -1520,7 +1525,18 @@ fn assert_split_panel_has_no_gui_entry_point(checkout: fn(&str) -> String) {
     for (file, text) in &files {
         let starts = text.matches("SplitPanel::start").count();
         if !file.starts_with("app/state/vault/split/") {
-            assert_eq!(starts, 0, "{} starts a split", file);
+            match file.as_str() {
+                "app/mod.rs" => assert_eq!(starts, 1, "{}", file),
+                _ => assert_eq!(starts, 0, "{} starts a split", file),
+            }
+        }
+        // The start intent is defined in the view's messages and named
+        // only by the App (and this guard).
+        if !matches!(
+            file.as_str(),
+            "app/mod.rs" | "app/view/message.rs" | "app/state/vault/split/tests.rs"
+        ) {
+            assert!(!text.contains("StartSplit"), "{} names StartSplit", file);
         }
         let resumes =
             text.matches("SplitPanel::resume").count() + text.matches("SplitPanel::{").count();
@@ -1532,16 +1548,62 @@ fn assert_split_panel_has_no_gui_entry_point(checkout: fn(&str) -> String) {
         }
     }
     let app = &files.iter().find(|(f, _)| f == "app/mod.rs").unwrap().1;
-    // The one construction is the journal discovery's resume.
+    // The resume is the journal discovery's.
     let discovery = &app[app.find("fn discover_split_panel(").unwrap()..];
     let discovery = &discovery[..discovery.find("\n}\n").unwrap()];
-    assert!(discovery.contains("step1::discover(&root)"));
+    // #568 D19: the resumable journal, passing over a recorded completion.
+    assert!(discovery.contains(
+        "step1::discover_resumable(&root, &cube_settings.id, &cube_settings.split_from)?"
+    ));
     assert!(discovery.contains("SplitPanel::resume("));
-    assert!(!app.contains("SplitPanel::start"));
+    assert!(!discovery.contains("SplitPanel::start"));
+    // #568 B5c-2: the start is `start_split_from_review`'s, after every one
+    // of its checks, each of which refuses (consuming the handoff) before
+    // the panel is constructed; the handoff is consumed and the session
+    // handed over after it.
+    let production = &app[..app.find("\n#[cfg(test)]\n").unwrap()];
+    assert_eq!(production.matches("SplitPanel::start").count(), 1);
+    let start = &production[production.find("    fn start_split_from_review(").unwrap()..];
+    let start = &start[..start.find("\n    }\n").unwrap()];
+    let at = |marker: &str| {
+        start
+            .find(marker)
+            .unwrap_or_else(|| panic!("start_split_from_review lacks {}", marker))
+    };
+    let constructed = at("SplitPanel::start(");
+    let checks = [
+        "let Some(SplitHandoff::Review { intent, .. }) = self.split_handoff.as_ref() else {\n            return Task::none();\n        };",
+        "if !self.panels.connect.account.bitcoin_blake2b_server_enabled()\n            || !self.split_context_valid(intent)\n        {\n            Some(SPLIT_START_CANCELLED.to_string())",
+        "} else if self.split_panel.is_some() {\n            Some(SPLIT_START_PANEL_OPEN.to_string())",
+        "step1::source_digest(intent)",
+        "step1::second_split_refusal(",
+        "&self.cube_settings.split_from,",
+        "if let Some(reason) = refusal {\n            self.revoke_split_handoff();\n            return Task::done(",
+        "self.split_handoff.take()",
+        "self.revoke_split_handoff();\n        let mut panel",
+    ];
+    let mut last = 0;
+    for check in checks {
+        let found = at(check);
+        assert!(found >= last, "{} is out of order", check);
+        assert!(found < constructed, "{} comes after the start", check);
+        last = found;
+    }
+    assert!(start[constructed..].contains("self.split_panel = Some(panel);"));
+    assert!(start[constructed..].contains("self.refresh_split_session()"));
+    // It is reached only from the `StartSplit` intent's arm.
+    let calls: Vec<_> = production
+        .match_indices("start_split_from_review(")
+        .filter(|(at, _)| !production[..*at].ends_with("fn "))
+        .collect();
+    assert_eq!(calls.len(), 1, "{:?}", calls);
+    assert!(production.contains(
+        "            Message::View(view::Message::StartSplit) => {\n                return self.start_split_from_review();\n            }\n"
+    ));
+    assert_eq!(production.matches("view::Message::StartSplit").count(), 2);
     // #625 F3a: that discovery is called from production only in the App's
     // discovery task, off the UI thread; its result is installed by
     // `Message::SplitDiscovered`.
-    let production = &app[..app.find("\n#[cfg(test)]\n").unwrap()];
     let calls: Vec<_> = production
         .match_indices("discover_split_panel(")
         .filter(|(at, _)| !production[..*at].ends_with("fn "))
@@ -1553,15 +1615,29 @@ fn assert_split_panel_has_no_gui_entry_point(checkout: fn(&str) -> String) {
     assert!(task[blocking..].contains("discover_split_panel(&datadir, &settings, &wallet)"));
     assert_eq!(
         production.matches("self.split_panel = Some(").count(),
-        1,
-        "the panel is installed only from the discovery result"
+        2,
+        "the panel is installed only from the discovery result and the start"
     );
-    // The review overlay's only action is its close.
+    assert!(production.contains("                self.split_panel = Some(panel);\n                return self.refresh_split_session();\n"));
+    // The review overlay has two actions, its close and the start, and is
+    // rendered only under the Review handoff.
     let overlay = &app[app.find("fn split_review_overlay<").unwrap()..];
     let overlay = &overlay[..overlay.find("\n}\n").unwrap()];
     let presses: Vec<_> = overlay.match_indices(".on_press(").collect();
-    assert_eq!(presses.len(), 1);
+    assert_eq!(presses.len(), 2);
     assert!(overlay.contains(".on_press(view::Message::DismissSplitReview)"));
+    assert!(overlay.contains(".on_press(view::Message::StartSplit)"));
+    let renders: Vec<_> = production
+        .match_indices("split_review_overlay(")
+        .filter(|(at, _)| !production[..*at].ends_with("fn "))
+        .collect();
+    assert_eq!(renders.len(), 1, "{:?}", renders);
+    let review = production
+        .find("let content = if let Some(SplitHandoff::Review {")
+        .unwrap();
+    let render = renders[0].0;
+    assert!(review < render);
+    assert!(!production[review..render].contains("} else"));
     // No panel intent starts a split.
     let state = &files
         .iter()
@@ -1690,9 +1766,15 @@ fn assert_split_ui_paths_do_no_blocking_work(checkout: fn(&str) -> String) {
     // B4b-3b: the device listing (its policy, its `HardwareWallets`) is
     // built in a blocking task too; hidapi is `split_hardware::bind`'s.
     // B4b-3c: the unified port too.
-    const BLOCKING: [&str; 13] = [
+    // #568 D19: discovery's journal reads. B5c-2: D15's two metadata
+    // reads (exempt in `start_split_from_review` only, below).
+    const BLOCKING: [&str; 17] = [
         "step1::discover(",
         "discover_split_panel(",
+        "discover_resumable(",
+        "is_recorded_complete(",
+        "peek_split_journal(",
+        "second_split_refusal(",
         "read_dir",
         "symlink_metadata",
         "std::fs::",
@@ -1762,7 +1844,28 @@ fn assert_split_ui_paths_do_no_blocking_work(checkout: fn(&str) -> String) {
         // Reviewer-661 F3: the abandon task's journal reopen (its fork-only
         // copy reads the journal again).
         ("update", body(&panel, "    pub fn update(", "    ")),
+        // #568 B5c-2: "Start split" (see its exemption below).
+        (
+            "start_split_from_review",
+            body(&app, "    fn start_split_from_review(", "    "),
+        ),
     ];
+    // #568 B5c-2 (Reviewer-664 item 3), the one exemption: "Start split"
+    // runs D15's `step1::second_split_refusal` on the UI thread, once per
+    // press. It is two `symlink_metadata` calls (a tombstone and an intent
+    // file, no directory listing, nothing read inside a journal), and the
+    // journal's own create checks the same under its lock. Pinned to that
+    // one call and to that helper's body.
+    let exempt = |name: &str, token: &str| {
+        name == "start_split_from_review" && token == "second_split_refusal("
+    };
+    let start = body(&app, "    fn start_split_from_review(", "    ");
+    assert_eq!(start.matches("second_split_refusal(").count(), 1);
+    let step1 = read("app/state/vault/split/step1.rs");
+    let d15 = body(&step1, "pub fn second_split_refusal(", "");
+    assert_eq!(d15.matches("std::fs::symlink_metadata(").count(), 2);
+    assert_eq!(d15.matches("std::fs::").count(), 2);
+    assert!(!d15.contains("read_dir") && !d15.contains("peek_split_journal("));
     // B4b-3c: the seed set's derivation and signing, the coordinator's and
     // reconciler's opens (journal reads) and the close's write.
     const UNIFIED_BLOCKING: [&str; 7] = [
@@ -1777,6 +1880,9 @@ fn assert_split_ui_paths_do_no_blocking_work(checkout: fn(&str) -> String) {
     assert!(body(&panel, "    pub fn update(", "    ").contains("unified::abandon_refusal("));
     for (name, text) in ui {
         for token in BLOCKING.iter().chain(UNIFIED_BLOCKING.iter()) {
+            if exempt(name, token) {
+                continue;
+            }
             // Every occurrence must sit inside a `spawn_blocking(...)`
             // argument: after one, with its parentheses still open.
             for (at, _) in text.match_indices(token) {

@@ -315,6 +315,67 @@ pub struct RecordedSplit {
     pub target_script: Option<ScriptBuf>,
 }
 
+/// #568 D19: what journal discovery reads of a Split journal to tell a
+/// completed split from a live one ([`peek_split_journal`]). Untrusted, like
+/// [`RecordedSplit`]: it only lets discovery pass over a journal; opening one
+/// still authenticates it under a session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SplitJournalSummary {
+    /// A two-step split (`kind: Split`), not a fork-only one.
+    pub two_step: bool,
+    pub source_digest: sha256::Hash,
+    pub target_cube: String,
+    /// The descriptors were deleted (only a finished completion does that).
+    pub descriptors_forgotten: bool,
+    /// The recorded signed step 2's own txid, if one is recorded.
+    pub step2_txid: Option<Txid>,
+    /// A step-1 conflict is recorded, provisional or terminal (O4).
+    pub step1_conflict: bool,
+    /// The #625 F2 step-2 dead end ([`Controller::split_step2_dead_end`]).
+    pub step2_dead_end: bool,
+}
+
+/// #568 D19: read the Split journal in `directory` without a session, for
+/// journal discovery (which runs before one exists, off the UI thread). The
+/// journal's lock is taken for the read and released at once; a held lock
+/// is `Busy`. The intent is validated as a reopen does, but its session
+/// binding is not checked and nothing is written. `None` for no intent or a
+/// Claim intent.
+pub fn peek_split_journal(directory: &Path) -> Result<Option<SplitJournalSummary>, Error> {
+    let journal = journal::Journal::open(directory)?;
+    let Some(intent) = journal.load()? else {
+        return Ok(None);
+    };
+    super::validate(&intent)?;
+    let Some(record) = &intent.split else {
+        return Ok(None);
+    };
+    Ok(Some(SplitJournalSummary {
+        two_step: record.kind == SplitKind::Split,
+        source_digest: record.source_digest,
+        target_cube: record.target_cube.clone(),
+        descriptors_forgotten: record.descriptors.is_none(),
+        step2_txid: record
+            .step2_transaction
+            .as_ref()
+            .map(Transaction::compute_txid),
+        step1_conflict: record.step1_conflict.is_some(),
+        step2_dead_end: step2_dead_end(&intent),
+    }))
+}
+
+/// See [`Controller::split_step2_dead_end`].
+fn step2_dead_end(intent: &Intent) -> bool {
+    intent.split.as_ref().is_some_and(|record| {
+        record.kind == SplitKind::Split
+            && intent.fork_submission.is_some()
+            && record.step2_transaction.is_some()
+            && !record.step2_observed
+            && (!record.step2_returned
+                || record.step2_resubmissions.len() >= MAX_SPLIT_STEP2_RESUBMISSIONS)
+    })
+}
+
 /// The identity a Split intent is opened with: no Bitcoin Cube, the target
 /// BTCB2 Cube, and the source digest (D9).
 pub fn split_identity(target_cube: String, source_digest: sha256::Hash) -> WalletIdentity {
@@ -1133,14 +1194,7 @@ impl Controller {
     /// 1 on Bitcoin, which it does not have, and its close is B4b-3's
     /// decision.
     pub fn split_step2_dead_end(&self) -> bool {
-        self.intent.split.as_ref().is_some_and(|record| {
-            record.kind == SplitKind::Split
-                && self.intent.fork_submission.is_some()
-                && record.step2_transaction.is_some()
-                && !record.step2_observed
-                && (!record.step2_returned
-                    || record.step2_resubmissions.len() >= MAX_SPLIT_STEP2_RESUBMISSIONS)
-        })
+        step2_dead_end(&self.intent)
     }
 
     /// #568 S4, O4: the recorded step-1 conflict, if any, provisional or
