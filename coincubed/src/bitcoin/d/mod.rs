@@ -87,6 +87,9 @@ fn is_supported_bitcoind_version(version: u64, is_taproot: bool) -> bool {
 #[derive(Debug)]
 pub enum BitcoindError {
     PollAborted,
+    /// A block arrived during exact-chain local admission; retry the snapshot,
+    /// never use the incoherent observations to admit a wallet.
+    LocalForkTipChanged,
     CookieFile(io::Error),
     /// Bitcoind server error.
     Server(jsonrpc::error::Error),
@@ -196,6 +199,10 @@ impl std::fmt::Display for BitcoindError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
             BitcoindError::PollAborted => write!(f, "Node polling was cancelled"),
+            BitcoindError::LocalForkTipChanged => write!(
+                f,
+                "Local Bitcoin Blake2b tip changed during admission; try again"
+            ),
             BitcoindError::CookieFile(e) => write!(f, "Reading bitcoind cookie file: {}", e),
             BitcoindError::Server(ref e) => write!(f, "Bitcoind RPC server error: {}", e),
             BitcoindError::BatchMissingResponse => write!(

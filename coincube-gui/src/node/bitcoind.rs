@@ -5046,29 +5046,24 @@ mod local_fork_smoke {
         );
         assert!(!crate::node::revalidate::ManagedNodeState::path(&root).exists());
         node.stop();
-        // Wait for the disposable process to release its node lock/cookie.
-        for _ in 0..100 {
-            if !internal_bitcoind_cookie_path(&datadir, &Network::Testnet4).exists() {
+        // The cookie disappears before chainstate is flushed. Wait for Knots'
+        // final shutdown message before deleting any files from its datadir.
+        let log = datadir
+            .join(bitcoind_network_dir(&Network::Testnet4).unwrap())
+            .join("debug.log");
+        let mut stopped = false;
+        for _ in 0..200 {
+            if std::fs::read_to_string(&log)
+                .unwrap_or_default()
+                .contains("Shutdown: done")
+            {
+                stopped = true;
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
+        assert!(stopped, "disposable node did not finish shutdown");
         assert!(!internal_bitcoind_cookie_path(&datadir, &Network::Testnet4).exists());
-        // Cookie removal precedes final log/database close on macOS.
-        let mut removed = false;
-        for _ in 0..100 {
-            match std::fs::remove_dir_all(&base) {
-                Ok(()) => {
-                    removed = true;
-                    break;
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    removed = true;
-                    break;
-                }
-                Err(_) => std::thread::sleep(std::time::Duration::from_millis(50)),
-            }
-        }
-        assert!(removed, "disposable node did not finish shutdown");
+        std::fs::remove_dir_all(base).unwrap();
     }
 }

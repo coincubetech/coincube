@@ -41,6 +41,18 @@ impl BitcoinD {
         chain: ChainId,
         wallet_ready: bool,
     ) -> Result<(), BitcoindError> {
+        // A block arriving during startup is temporary, unlike a wrong chain.
+        // Repeat the complete snapshot at most three times before failing.
+        for attempt in 0..3 {
+            match self.local_fork_snapshot(chain, wallet_ready) {
+                Err(BitcoindError::LocalForkTipChanged) if attempt < 2 => continue,
+                result => return result,
+            }
+        }
+        unreachable!("bounded admission returns on its final attempt")
+    }
+
+    fn local_fork_snapshot(&self, chain: ChainId, wallet_ready: bool) -> Result<(), BitcoindError> {
         let height = activation_height(chain).ok_or_else(refused)?;
         // Re-read cookie credentials after a managed restart. These bounded
         // requests bypass the guarded wallet clients, avoiding recursive admission.
@@ -105,7 +117,7 @@ impl BitcoinD {
             }
         }
         if call("getbestblockhash", None)?.as_str() != Some(hash) {
-            return Err(refused());
+            return Err(BitcoindError::LocalForkTipChanged);
         }
         Ok(())
     }

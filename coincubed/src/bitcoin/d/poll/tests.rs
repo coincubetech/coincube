@@ -1226,3 +1226,23 @@ fn local_fork_start_rejects_bitcoin_before_creating_wallet_files() {
     );
     assert!(!dir.exists(), "refused node created wallet data");
 }
+
+#[test]
+fn local_fork_tip_movement_retries_a_complete_snapshot_with_a_fixed_bound() {
+    use coincube_core::chain::ChainId;
+    let chain = ChainId::BitcoinBlake2b;
+    let mut moving = local_fork_snapshot(chain);
+    moving[3].1 = Json::String("02".repeat(32));
+    let mut recovering = moving.clone();
+    recovering.extend(local_fork_snapshot(chain));
+    responses(recovering, |bit| {
+        bit.check_local_fork_chain(chain, true).unwrap()
+    });
+    let repeated = (0..3).flat_map(|_| moving.clone()).collect();
+    responses(repeated, |bit| {
+        assert!(matches!(
+            bit.check_local_fork_chain(chain, true),
+            Err(BitcoindError::LocalForkTipChanged)
+        ))
+    });
+}

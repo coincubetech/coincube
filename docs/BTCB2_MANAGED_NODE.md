@@ -18,7 +18,8 @@ database writes, and again before wallet RPCs, the daemon reads a bounded,
 coherent snapshot: the selected network, exact activation height (961640 mainnet,
 150308 testnet4), active top-level `blake2b` deployment, completed IBD and a
 version-2 block header at the same tip. A final best-hash read rejects a moving
-snapshot. Schedule-only checks admit a syncing companion, never a wallet.
+snapshot; a moving tip retries the complete snapshot at most three times,
+while wrong-chain admission fails immediately. Schedule-only checks admit a syncing companion, never a wallet.
 Ordinary Bitcoin, absent or different schedules, pre-fork headers, inactive forks
 and inconsistent tips are refused. This is local-node trust, not an independent
 header proof or Connect anchor. RDTS expiry is not an admission requirement.
