@@ -103,6 +103,16 @@ impl WalletSettingsState {
     }
 }
 
+impl WalletSettingsState {
+    /// Whether Settings offers "Register on hardware device". It does on
+    /// every chain, Bitcoin Blake2b included (HW-1 Amendment B): devices may
+    /// build a BTCB2 Vault, and the signing picker sends an unregistered
+    /// device here.
+    fn hardware_registration_allowed(&self) -> bool {
+        true
+    }
+}
+
 impl State for WalletSettingsState {
     fn view<'a>(&'a self, menu: &'a Menu, cache: &'a Cache) -> Element<'a, view::Message> {
         let content = view::vault::settings::wallet_settings(
@@ -115,7 +125,7 @@ impl State for WalletSettingsState {
             &self.wallet.provider_keys,
             self.processing,
             self.updated,
-            !self.wallet.chain.is_blake2b(),
+            self.hardware_registration_allowed(),
         );
 
         match &self.modal {
@@ -755,6 +765,29 @@ mod chain_tests {
                 chain
             );
             let _ = std::fs::remove_dir_all(dir.path());
+        }
+    }
+
+    /// HW-1 Amendment B: the Settings view offers "Register on hardware
+    /// device" on both Bitcoin Blake2b chains, as on Bitcoin.
+    #[test]
+    fn hardware_registration_is_offered_on_every_chain() {
+        for chain in [
+            ChainId::BitcoinBlake2b,
+            ChainId::BitcoinBlake2bTestnet4,
+            ChainId::Bitcoin,
+            ChainId::Testnet4,
+        ] {
+            let wallet = Arc::new(
+                Wallet::new(crate::app::state::vault::test_support::unified::fixture().descriptor)
+                    .with_chain(chain),
+            );
+            let state = WalletSettingsState::new(
+                CoincubeDirectory::new(std::path::PathBuf::new()),
+                wallet,
+                Arc::new(Config::new(false)),
+            );
+            assert!(state.hardware_registration_allowed(), "{:?}", chain);
         }
     }
 
